@@ -312,6 +312,8 @@ Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key�
 
 ## 2026-09-29 Claude Code Opus 5.5 코디네이터 인수 (내장 workflow)
 
+현재 코디네이터 실행 근거는 이 절이며, 위 2026-09-28 Fable 절들은 당시 기록이다.
+
 사용자 지시로 코디네이터는 Claude Code 주 세션 Opus 5.5이며 조사·구현·독립 검토는 내장 subagent/workflow를
 우선 사용한다(AGENTS.md 역할표). 이전 Fable 코디네이터·자동 체인은 재가동하지 않았고 Orca Run은 사용하지 않았다.
 
@@ -319,11 +321,14 @@ Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key�
   API key 없음). 계정·결제·전역 설정 변경 없음, 새 MCP 없음.
 - 주 세션: 시스템 보고 모델 ID `claude-opus-5-5`, `/effort ultracode`(세션 한정 xhigh + Dynamic Workflows),
   `CLAUDE_EFFORT=xhigh`. 세션 JSONL의 assistant 턴 `model`/`effort` 필드가 모두 `claude-opus-5-5`/`xhigh`다.
-- 전역 `~/.claude/settings.json`은 `model: opus`, `modelSettings.claude-opus-5-5.effortLevel: medium`(새 세션 기본값)이며
-  이 세션에는 적용되지 않았다. 변경하지 않았다.
+- 전역 `~/.claude/settings.json`: 사용자가 세션 시작 직후 `/model`로 Opus 5.5를 새 세션 기본값으로 저장했다
+  (2026-09-28 15:10Z, `model: opus`; 09-28 기록의 `claude-fable-5-1`에서 변경). `modelSettings.claude-opus-5-5.effortLevel: medium`은
+  ultracode 세션 설정 때문에 이 세션에 적용되지 않았다. 코디네이터는 전역 설정을 변경하지 않았다.
 - workflow agent: 기본값·명시 effort·`Plan` agent 유형 모두 transcript의 `model`/`effort`가 `claude-opus-5-5`/`xhigh`다
-  (probe `wf_c35a1d05-296`, 점검 `wf_2cd8e0c9-9cc`, 검토 `wf_17862adc-bd6`). 읽기 전용 검토·조사는 편집 도구가 없는
-  `Plan` 유형을 쓴다. Bash는 남아 있으므로 쓰기 금지는 프롬프트로도 명시한다.
+  (probe `wf_c35a1d05-296`, 점검 `wf_2cd8e0c9-9cc`, 검토 `wf_17862adc-bd6`·`wf_53ddd0bf-91b`). agent 유형: 점검
+  `wf_2cd8e0c9-9cc`와 #227/#228 검토 `wf_53ddd0bf-91b`는 편집 도구 없는 `Plan`, 인수 초기 `wf_17862adc-bd6`(#225 1차 검토·PG16
+  원인·#223 범위)은 편집 도구가 있는 기본 `workflow-subagent`에 읽기 전용 prompt만 준 것이다(이 한계로 #225 수락 검토는
+  `Plan`으로 다시 한다). 이후 읽기 전용 검토·조사는 `Plan`을 쓴다. Bash는 남아 있으므로 쓰기 금지는 프롬프트로도 명시한다.
 - 주입된 지침 대조: 주 세션과 기본 workflow agent는 `/home/kinesis/orca/workspaces/fvoci/daggertooth/AGENTS.md`와 사용자
   memory `MEMORY.md`를 세션 시작 시점 스냅샷으로 받았다. 세션 시작 때 이 worktree는 구 브랜치 `fvoci/rust-node-free-runtime`
   (`6acccea0`, 2026-09-27)에 있었으므로 주입본은 그 시점의 Astra/sol 역할표다(transcript 대조; 요약 오류가 아니라 구버전

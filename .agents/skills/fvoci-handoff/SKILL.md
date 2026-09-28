@@ -5,28 +5,28 @@ description: FVOCI 작업을 제출·검토·통합하거나 세션을 재개하
 
 # 제출, 통합, 재개
 
-소유권과 승인 규칙은 AGENTS.md를 따른다. 현재 Orca의 공식 orchestration live guide를 읽고 실제 task/dispatch를 사용한다.
+소유권과 승인 규칙은 AGENTS.md를 따른다. 조정 경로(내장 subagent/workflow 또는 Orca)는 AGENTS.md 역할표를 따르고, Orca를 쓸 때는 공식 orchestration live guide와 실제 task/dispatch를 사용한다.
 
 ## 작업 제출
 
 다음 최소 정보를 한 번에 전달한다.
 
-- task/dispatch, 실제 도구·모델·추론 설정, base/head SHA와 worktree.
+- task/dispatch 또는 workflow run·agent ID, 실제 도구·모델·추론 설정·agent 유형, base/head SHA와 worktree.
 - 변경 파일/커밋, 미커밋·미추적 파일과 보존 필요 여부.
 - 검사 명령·실행 범위·성공/실패/미실행 및 관련 증거 위치.
 - 남은 위험, 띄운 프로세스·DB/volume 등 소유 자원, 소유권 반납 여부.
 
-Orca가 지원하는 완료 전송·ack·release 절차를 따른다. idle이나 종료된 터미널은 기능 완료의 증거가 아니다. 전체 대화·시크릿은 저장하지 않는다.
+사용하는 경로의 완료 전달 절차(workflow 결과·journal, Orca의 완료 전송·ack·release)를 따른다. idle이나 종료된 터미널은 기능 완료의 증거가 아니다. 전체 대화·시크릿은 저장하지 않는다.
 
 ## 검토와 통합
 
-코디네이터가 고정된 제출 SHA의 diff/계약/검사 결과를 확인한다. AGENTS.md에 지정된 자문은 필요한 설계·보안·협업 위험을 독립 검토하며 차단 결함·근거·최소 수정안을 반환한다. 검토 문구가 실제 검사 결과를 대신하지 않는다.
+코디네이터가 고정된 제출 SHA의 diff/계약/검사 결과를 확인한다. AGENTS.md 역할표의 독립 검토자는 필요한 설계·보안·협업 위험을 검토하며 차단 결함·근거·최소 수정안을 반환한다. 검토 문구가 실제 검사 결과를 대신하지 않는다.
 
 코디네이터가 자기 통합 worktree에서 한 작업씩 반영한다. 검토 중 제출 SHA가 바뀌면 변경된 범위를 다시 본다. 통합 후 필요한 검사를 새 통합 SHA에서 실행한다. 미수락 코드나 예전 SHA의 성공을 완료로 기록하지 않는다.
 
 ## 세션 재개
 
-AGENTS.md, 환경 기록, Orca의 현재 task/dispatch, docs/rewrite.md의 최신 수락 SHA와 다음 작업을 확인한다. 실제 git status/worktree와 프로세스를 대조한다. 이전 실행이 남아 있으면 상태부터 확인하며 같은 작업을 다시 시작하지 않는다.
+AGENTS.md, 환경 기록, 진행 중인 workflow·agent(Orca를 쓰면 현재 task/dispatch), docs/rewrite.md의 최신 수락 SHA와 다음 작업을 확인한다. 실제 git status/worktree와 프로세스를 대조한다. 이전 실행이 남아 있으면 상태부터 확인하며 같은 작업을 다시 시작하지 않는다.
 
 ### Pending·한도 종료 후 인수
 

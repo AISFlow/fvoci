@@ -5,11 +5,12 @@
 | 역할 | 실행 경로와 모델 | 책임 |
 | --- | --- | --- |
 | 코디네이터 | Claude Code 주 세션 / Opus 5.5 (`claude-opus-5-5`) / 세션 effort(2026-09-29: ultracode = xhigh + 내장 Dynamic Workflows) | 인계, 우선순위·설계, 소유권, 공통 파일, 통합·수락, 원격 push·PR·머지·0.x 릴리스, 다음 작업 |
-| 조사·구현 | Claude Code 내장 subagent/workflow agent / 기본 Opus 5.5(주 세션 모델·effort 상속, 실제 기록으로 확인) | 계약 조사, 배정된 Rust·프론트엔드 구현과 구조 정리, 관련 회귀 |
+| 조사·구현 | Claude Code 내장 subagent/workflow agent / 기본 Opus 5.5(주 세션 모델·effort 상속; 확인한 유형은 workflow 기본·`Plan`, 다른 유형은 사용 전 transcript의 model/effort 확인) | 계약 조사, 배정된 Rust·프론트엔드 구현과 구조 정리, 관련 회귀 |
 | 독립 검토 | 구현과 다른 컨텍스트의 Claude Code subagent/workflow agent / 기본 Opus 5.5 / 편집 도구 없는 agent 유형 | 고정 SHA의 계약·보안·데이터·동시성·복구·복잡성 검토, 반박 검증 |
 
-**현재 배정 (2026-09-29 사용자 지시):** 코디네이터는 Claude Code 주 세션 Opus 5.5이고, 조사·구현·독립 검토는
-Claude Code 내장 subagent/workflow를 우선 사용한다. 2026-09-28 Fable 코디네이터 배정, 모든 작업의 medium 고정,
+**현재 배정 (2026-09-29 사용자 지시):** 코디네이터는 Claude Code 주 세션 Opus 5.5 하나이며, 두 코디네이터가 동시에
+dispatch·소유권·머지·릴리스를 관리하지 않는다. 조사·구현·독립 검토는 Claude Code 내장 subagent/workflow를 우선 사용한다.
+Claude Code 외 경로(sol·Composer·Grok)는 현재 역할이 아니며 새 사용자 승인 없이 필수 독립 검토를 대신하지 않는다. 2026-09-28 Fable 코디네이터 배정, 모든 작업의 medium 고정,
 독립 검토의 별도 Orca 세션 필수, Grok 조사 워커·외부 오케스트레이터 필수, 백엔드 국소 리팩터링 제한을 대체한다.
 이전 코디네이터·자동 체인을 재가동하지 않는다. 요청·유효 모델/effort와 실제 실행 경로는 `.agents/environment.md`에
 근거를 남긴다. 요청한 설정을 쓸 수 없으면 실제 상태를 보고하고 다른 모델로 조용히 대체하지 않는다.
@@ -29,7 +30,7 @@ Claude Code 내장 subagent/workflow를 우선 사용한다. 2026-09-28 Fable �
 
 ## 시작과 재개
 
-먼저 이 파일, 환경 기록, 현재 Orca task와 `docs/rewrite.md`의 최신 수락 지점, 실제 git status/worktree를 읽는다. 세션 기억이나 완료 주장만으로 상태를 판단하지 않는다. 원본과 대상의 고정 SHA를 구분한다. 기존 데이터·미커밋 변경을 보존한다.
+먼저 이 파일, 환경 기록, 진행 중인 workflow·agent(Orca를 쓰면 현재 task)와 `docs/rewrite.md`의 최신 수락 지점, 실제 git status/worktree를 읽는다. 세션 기억이나 완료 주장만으로 상태를 판단하지 않는다. 원본과 대상의 고정 SHA를 구분한다. 기존 데이터·미커밋 변경을 보존한다.
 
 Orca는 필수 경로가 아니다(과거 Run `run_b01d432a9dee`은 추적 자료). 사용할 때는 공식 orca-cli/orchestration 스킬과 설치 버전의 live guide를 따른다. 외부 오케스트레이터·상주 scheduler·daemon·에이전트 MCP를 만들지 않는다. 기존 다른 Run을 reset하지 않는다.
 
@@ -88,8 +89,9 @@ worktree의 인덱스를 복사·링크하거나 현재 변경의 근거로 쓰�
 ## 대상 원격 반영 승인 범위
 
 사용자의 2026-09-24 명시적 승인에 따라 코디네이터는 AISFlow/fvoci 작업 브랜치 일반 push, 기존/후속 PR 생성·갱신·Ready 전환 및 수락 후 머지를 반복 승인 없이 수행한다. 최신 HEAD의 필요한 로컬·실제 외부 시스템 검사, 실제 실행된 원격 CI, 필요한 독립 검토(위 역할표의 구현과 다른 컨텍스트)와 저장소 보호 조건을 모두 확인하고 기대 HEAD를 지정해 머지한다. 머지 후 기본 브랜치와 CI를 확인한 뒤 후속 기능 브랜치를 만든다.
-2026-09-29 사용자 지시로 기존 릴리스 workflow를 통한 0.x 시험 배포도 반복 승인 없이 포함한다. 게시된 태그·버전 이미지·배포 파일은
-덮어쓰지 않고, 1.0.0 이상 발행과 사용자 운영 환경 자동 배포는 포함하지 않는다.
+2026-09-29 사용자 지시로 기존 릴리스 workflow를 통한 0.x 시험 배포도 반복 승인 없이 포함한다(green main first-parent 커밋의
+annotated `v0.y.z` tag push와 release workflow_dispatch). 게시된 git 태그·불변 `:0.y.z` 이미지·Release 파일은 이동·덮어쓰기·삭제하지
+않는다(기존 workflow가 하는 floating `:0.y` 이동은 포함). 1.0.0 이상 발행과 사용자 운영 환경 자동 배포는 포함하지 않는다.
 
 원본 원격 쓰기, 기본 브랜치 직접 push, force push, 보호 조건 우회·약화, 운영 배포·DB 변경, 시크릿·권한·공개 범위 변경은 포함하지 않는다. 워커에게 원격 쓰기를 위임하지 않는다. 과거 미실행 이력은 그대로 보존한다.
 
