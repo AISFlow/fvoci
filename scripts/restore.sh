@@ -79,6 +79,22 @@ env_file_value() {
 }
 # --- end env-file values ---
 
+# --- app role ---
+# The dump grants to the app role, so it must exist before pg_restore.
+# shellcheck disable=SC2016 # the sh -c body expands in the postgres container
+create_app_role() {
+  "${COMPOSE[@]}" exec -T \
+    -e app_role="$APP_ROLE" \
+    -e app_password="$APP_PASSWORD" \
+    postgres \
+    sh -c 'exec psql -X -v ON_ERROR_STOP=1 -v app_role="$app_role" -v app_password="$app_password" -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS', :'app_role', :'app_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_role')
+\gexec
+SQL
+}
+# --- end app role ---
+
 read_env() {
   local key="$1" default="${2-}" status=0
   env_file_value "$key" "$ENV_FILE" || status=$?
@@ -287,15 +303,7 @@ if [[ "$RELATIONS" != "0" ]]; then
 fi
 
 echo "creating application role ${APP_ROLE}"
-"${COMPOSE[@]}" exec -T \
-  -e app_role="$APP_ROLE" \
-  -e app_password="$APP_PASSWORD" \
-  postgres \
-  sh -c 'exec psql -X -v ON_ERROR_STOP=1 -v app_role="$app_role" -v app_password="$app_password" -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS', :'app_role', :'app_password')
-WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_role')
-\gexec
-SQL
+create_app_role
 
 echo "restoring PostgreSQL dump"
 docker cp "$DUMP" "${PG_CID}:/tmp/fvoci-restore.dump"
