@@ -13,11 +13,11 @@
     "@fvoci/editor": "file:../../packages/editor",
     "@fvoci/i18n": "file:../../packages/i18n",
     "@hocuspocus/provider": "4.6.0",
-    "@hocuspocus/provider-react": "4.6.0",
+    "@hocuspocus/provider-react": "4.7.0",
     "@hookform/resolvers": "^5.9.1",
     "@office-kit/pptx": "0.21.0",
     "@office-kit/pptx-preview": "0.11.0",
-    "@office-kit/xlsx": "0.21.1",
+    "@office-kit/xlsx": "0.22.0",
     "@rhwp/core": "0.8.6",
     "@tanstack/react-query": "^5.103.2",
     "clsx": "^2.1.1",
@@ -46,7 +46,7 @@
     "openapi-typescript": "7.13.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.2",
-    "vite": "^8.3.0",
+    "vite": "^8.3.1",
     "y-protocols": "1.0.7"
   }
 }
