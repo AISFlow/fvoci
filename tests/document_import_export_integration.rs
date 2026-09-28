@@ -205,15 +205,54 @@ async fn daily_sweep_fails_markdown_zip_rows_pending_for_over_a_day() {
     harness.cleanup().await;
 }
 
+/// Test-only advisory gate (per test database) that parks a markdown-zip
+/// page's INSERT until the test releases it.
+const IMPORT_PAGE_GATE_NS: i32 = 0x6676636f; // "fvoc"
+const IMPORT_PAGE_GATE_KEY: i32 = 0x235;
+
 #[tokio::test]
 async fn cancelled_markdown_zip_request_is_failed_by_the_stale_sweep() {
     let harness = TestDb::bootstrap().await;
     let fx = fixture(&harness).await;
     let before = fx.document_count().await;
-    let pages: Vec<(String, Vec<u8>)> = (0..400)
+    // Deterministic cut: `page-1`'s INSERT waits on a lock the test holds,
+    // so the abort always lands with `page-0` committed, `page-1` in flight
+    // and `page-2` never reached, however fast the import runs.
+    sqlx::query(&format!(
+        r#"CREATE FUNCTION fvoci.test_gate_import_page() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+               IF NEW.title = 'page-1' THEN
+                   PERFORM pg_advisory_xact_lock({IMPORT_PAGE_GATE_NS}, {IMPORT_PAGE_GATE_KEY});
+               END IF;
+               RETURN NEW;
+           END $$"#
+    ))
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_gate_import_page BEFORE INSERT ON fvoci.documents \
+         FOR EACH ROW EXECUTE FUNCTION fvoci.test_gate_import_page()",
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    let mut gate = fx.admin.begin().await.unwrap();
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(IMPORT_PAGE_GATE_NS)
+        .bind(IMPORT_PAGE_GATE_KEY)
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+
+    let pages: Vec<(String, Vec<u8>)> = (0..3)
         .map(|n| {
             (
-                format!("page-{n:03}.md"),
+                format!("page-{n}.md"),
                 format!("# Page {n}\n\nbody").into_bytes(),
             )
         })
@@ -232,17 +271,34 @@ async fn cancelled_markdown_zip_request_is_failed_by_the_stale_sweep() {
         let cookie = fx.cookie.clone();
         async move { json_request(app, "POST", "/api/v1/import", Some(body), Some(&cookie)).await }
     });
-    // Drop the handler future once the import is under way, as hyper does
-    // when the client disconnects or the shutdown drain deadline passes.
+    // The only lock the gate transaction holds is the gate, so a backend it
+    // blocks is the import parked in `page-1`'s INSERT.
     tokio::time::timeout(Duration::from_secs(120), async {
-        while fx.document_count().await == before {
+        loop {
+            let parked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(gate_pid)
+            .fetch_one(&fx.admin)
+            .await
+            .unwrap();
+            if parked {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the import creates its first document");
+    .expect("the import parks its second page in the gate");
+    assert_eq!(fx.document_count().await - before, 1);
+    // Drop the handler future mid-import, as hyper does when the client
+    // disconnects or the shutdown drain deadline passes. It is waiting on
+    // the gated INSERT, so it cannot have finished.
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
+    // The dropped request never commits the page it had in flight.
+    gate.commit().await.unwrap();
 
     let job_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM fvoci.import_jobs WHERE workspace_id = $1 AND source = 'markdown-zip'",
@@ -252,8 +308,6 @@ async fn cancelled_markdown_zip_request_is_failed_by_the_stale_sweep() {
     .await
     .unwrap();
     assert_eq!(import_job_status(&fx, job_id).await, "pending");
-    let created = fx.document_count().await - before;
-    assert!((1..400).contains(&created), "{created}");
     assert_eq!(
         sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
             .await
@@ -271,8 +325,8 @@ async fn cancelled_markdown_zip_request_is_failed_by_the_stale_sweep() {
         1
     );
     assert_eq!(import_job_status(&fx, job_id).await, "failed");
-    // markdown-zip does not compensate: the documents created stay.
-    assert!(fx.document_count().await - before >= created);
+    // markdown-zip does not compensate: the committed page stays.
+    assert_eq!(fx.document_count().await - before, 1);
     harness.cleanup().await;
 }
 
