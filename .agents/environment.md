@@ -324,8 +324,12 @@ Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key�
 - workflow agent: 기본값·명시 effort·`Plan` agent 유형 모두 transcript의 `model`/`effort`가 `claude-opus-5-5`/`xhigh`다
   (probe `wf_c35a1d05-296`, 점검 `wf_2cd8e0c9-9cc`, 검토 `wf_17862adc-bd6`). 읽기 전용 검토·조사는 편집 도구가 없는
   `Plan` 유형을 쓴다. Bash는 남아 있으므로 쓰기 금지는 프롬프트로도 명시한다.
-- 하위 agent에 주입되는 프로젝트 지침은 세션 시작 시점의 스냅샷이다(probe가 이전 브랜치의 AGENTS.md 역할표를 보고함).
-  세션 중 AGENTS.md를 바꾸면 하위 agent가 즉시 보지 못하므로 코디네이터가 필요한 규칙을 prompt에 명시한다.
+- 주입된 지침 대조: 주 세션과 기본 workflow agent는 `/home/kinesis/orca/workspaces/fvoci/daggertooth/AGENTS.md`와 사용자
+  memory `MEMORY.md`를 세션 시작 시점 스냅샷으로 받았다. 세션 시작 때 이 worktree는 구 브랜치 `fvoci/rust-node-free-runtime`
+  (`6acccea0`, 2026-09-27)에 있었으므로 주입본은 그 시점의 Astra/sol 역할표다(transcript 대조; 요약 오류가 아니라 구버전
+  worktree 스냅샷). 원격 `a53074f7`의 활성 역할표는 Fable 코디네이터·Opus 구현/검토·Grok 조사였고, 이번 정정은
+  `a53074f7` 파일을 기준으로 했다. `Plan` 유형 agent에는 프로젝트 지침이 주입되지 않는다. 상위 디렉터리·사용자 전역
+  CLAUDE.md/AGENTS.md는 없다. 세션 중 바뀐 지침은 하위 agent에 반영되지 않으므로 코디네이터가 필요한 규칙을 prompt에 명시한다.
 - CodeGraph 1.6.0(`/home/kinesis/.local/bin/codegraph`), MCP `codegraph serve --mcp`(env `CODEGRAPH_TELEMETRY=0`,
   `DO_NOT_TRACK=1`, `~/.claude.json`의 프로젝트 설정). worktree별 `.codegraph/` 인덱스를 쓰고, 통합 worktree 인덱스에서
   #220의 `src/db/outbox_reset.rs` 최신 소스가 반환됨을 확인했다. 인덱스는 `.gitignore` 대상이며 제품 산출물에 들어가지 않는다.
