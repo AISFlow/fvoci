@@ -4459,3 +4459,123 @@ async fn mfa_verify_survives_a_concurrent_reseal() {
     assert_eq!(attempts, 1);
     h.finish().await;
 }
+
+/// Changing the email cuts off the previous mailbox: reset, login and other
+/// pending email-change links mailed before the change stop working.
+#[tokio::test]
+async fn email_change_invalidates_links_mailed_before_it() {
+    use fvoci_server::db::account::{issue_email_change_token, issue_login_token, LoginLinkUser};
+    use fvoci_server::db::magic::{issue_password_reset_token, magic_expires_at};
+
+    let h = Harness::start().await;
+    let (user_id, _email, cookie) = h.member("mover").await;
+    let generation: i32 =
+        sqlx::query_scalar("SELECT auth_generation FROM fvoci.users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    let expires = magic_expires_at(chrono::Utc::now());
+    let pool = &h.app_pool;
+    let reset = new_token();
+    issue_password_reset_token(pool, user_id, generation, &reset.hash, expires)
+        .await
+        .unwrap();
+    let login = new_token();
+    issue_login_token(
+        pool,
+        &LoginLinkUser {
+            user_id,
+            generation,
+        },
+        &login.hash,
+        expires,
+    )
+    .await
+    .unwrap();
+    let typo = new_token();
+    issue_email_change_token(
+        pool,
+        user_id,
+        generation,
+        "typo@example.com",
+        &typo.hash,
+        expires,
+    )
+    .await
+    .unwrap();
+    let change = new_token();
+    issue_email_change_token(
+        pool,
+        user_id,
+        generation,
+        "moved@example.com",
+        &change.hash,
+        expires,
+    )
+    .await
+    .unwrap();
+
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/email/confirm",
+        Some(json!({ "token": change.token })),
+        None,
+        peer(200),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/password-reset/confirm",
+        Some(json!({ "token": reset.token, "newPassword": "takeover-secret1" })),
+        None,
+        peer(200),
+    )
+    .await;
+    assert_eq!(res.code(), "magic_invalid", "reset: {:?}", res.json);
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/magic-link/consume",
+        Some(json!({ "token": login.token })),
+        None,
+        peer(200),
+    )
+    .await;
+    assert_eq!(res.code(), "magic_invalid", "login: {:?}", res.json);
+    assert!(res.cookie().is_none());
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/email/confirm",
+        Some(json!({ "token": typo.token })),
+        None,
+        peer(200),
+    )
+    .await;
+    assert_eq!(res.code(), "magic_invalid", "email: {:?}", res.json);
+
+    // The change itself stands; the password and live sessions are kept.
+    let email: String = sqlx::query_scalar("SELECT email FROM fvoci.users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&h.admin)
+        .await
+        .unwrap();
+    assert_eq!(email, "moved@example.com");
+    let me = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/me",
+        None,
+        Some(&cookie),
+        peer(200),
+    )
+    .await;
+    assert_eq!(me.status, StatusCode::OK);
+    let res = h.login("moved@example.com", PASSWORD, peer(201)).await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    h.finish().await;
+}
