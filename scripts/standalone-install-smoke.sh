@@ -179,7 +179,10 @@ APP_PW="$(env_value FVOCI_APP_PASSWORD)"
 has_secret() { grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" -e "$APP_PW"; }
 CID="$(docker compose ps -q fvoci)"
 [[ "$(docker exec "$CID" id -u)" == 0 ]] || fail "docker exec in fvoci does not default to root"
-[[ "$(docker exec "$CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] || fail "pid 1 is not fvoci-server"
+# Root in the container lacks CAP_SYS_PTRACE, so the server's /proc entries
+# (exe, environ, fd) are read as its own uid.
+[[ "$(docker exec --user 1000:1000 "$CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] || fail "pid 1 is not fvoci-server"
+if docker exec "$CID" cat /proc/1/environ >/dev/null 2>&1; then fail "expected root in the container to be unable to read the server environ"; fi
 PID1="$(docker exec "$CID" sh -c 'grep -E "^(Uid|Gid|Groups|CapPrm|CapEff|CapAmb):" /proc/1/status')"
 printf '%s\n' "$PID1"
 grep -Eq '^Uid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server uids are not all 1000"
@@ -196,10 +199,10 @@ for f in postgres_password fvoci_app_password meili_master_key; do
   fi
 done
 echo "uid 1000 cannot read /run/secrets/*: ok"
-# The server's own tree (read as root): environ, argv, fds, files under /run
-# other than the root-only secrets.
+# The server's own tree (read as uid 1000): environ, argv, fds, files under
+# /run other than the root-only secrets.
 # shellcheck disable=SC2016 # expanded in the app container
-VIEW="$(docker exec "$CID" sh -c '
+VIEW="$(docker exec --user 1000:1000 "$CID" sh -c '
   for p in /proc/[0-9]*; do
     a=${p#/proc/}
     while [ "$a" != 1 ] && [ "$a" != 0 ] && [ -n "$a" ]; do a=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$a/status" 2>/dev/null); done
@@ -219,7 +222,7 @@ echo "server tree: DATABASE_APP_URL only; no owner password, master key or _FILE
 # environ; then everything uid 1000 can read under /proc.
 docker exec -d "$CID" sh -c 'exec sleep 30'
 sleep 1
-EXEC_ENV="$(docker exec "$CID" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = sleep ] && tr "\0" "\n" <"$p/environ"; done')"
+EXEC_ENV="$(docker exec "$CID" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = sleep ] && tr "\0" "\n" <"$p/environ"; done; true')"
 [[ -n "$EXEC_ENV" ]] || fail "no docker exec process found"
 has_secret <<<"$EXEC_ENV" && fail "a docker exec (healthcheck) process environ holds a secret"
 grep -Eq '^(POSTGRES_PASSWORD|MEILI_MASTER_KEY|FVOCI_APP_PASSWORD)=' <<<"$EXEC_ENV" && fail "docker exec environ has a prep variable"

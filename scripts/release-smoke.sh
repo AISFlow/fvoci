@@ -288,7 +288,7 @@ fi
 python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["ok"] is True, r' <<<"$DOCTOR_REPORT"
 log_assert "installed doctor: ok"
 
-[[ "$(docker exec "$SERVER_CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] \
+[[ "$(docker exec --user 1000:1000 "$SERVER_CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] \
   || fail "pid 1 of $APP is not fvoci-server"
 # uid boundary: the app container starts as root, reads the root-only secret
 # files, prepares, and runs the server as uid/gid 1000 without capabilities.
@@ -310,11 +310,12 @@ for f in postgres_password fvoci_app_password meili_master_key; do
   fi
 done
 # The server process tree (pid 1 and its descriptors, children, argv and files
-# under /run other than the secrets) holds neither the owner password nor the
+# under /run other than the secrets; read as uid 1000, since root in the
+# container lacks CAP_SYS_PTRACE) holds neither the owner password nor the
 # master key; the container configuration, and so every docker exec and
 # healthcheck process, holds none of the three.
 # shellcheck disable=SC2016 # expanded by the app container's shell
-SERVER_VIEW="$(docker exec "$SERVER_CID" sh -c '
+SERVER_VIEW="$(docker exec --user 1000:1000 "$SERVER_CID" sh -c '
   for p in /proc/[0-9]*; do
     a=${p#/proc/}
     while [ "$a" != 1 ] && [ "$a" != 0 ] && [ -n "$a" ]; do a=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$a/status" 2>/dev/null); done

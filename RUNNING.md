@@ -699,7 +699,10 @@ install. What the server does hold: the app role password (in
 key; that is what it needs to run. What is **not** separated:
 
 - It is one container, not two: root in it (`docker compose exec fvoci …`,
-  which defaults to root, and the healthcheck) can read the secret files. A
+  which defaults to root, and the healthcheck) can read the secret files.
+  Under Docker's default capabilities (no `CAP_SYS_PTRACE`) that root cannot
+  read the server's `/proc/1/environ` either; inspect the server as uid 1000
+  (`docker compose exec -u 1000:1000 fvoci …`). A
   kernel or container escape from uid 1000 is outside this boundary.
 - Anyone who can run Docker commands on the host can read the secrets
   (`docker compose exec`, the containers' filesystems, `.env` itself).
