@@ -61,7 +61,8 @@ pub struct SkippedEvent {
 }
 
 /// Source `ResetCursorSkip`: unprocessed events older than the window that
-/// the move passes. Coordinates are the (xact, seq) lexical min and max.
+/// the move passes. Coordinates are the min and max (xact, seq), ordered by
+/// xid8 then seq.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetSkip {

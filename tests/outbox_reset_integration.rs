@@ -371,7 +371,7 @@ async fn delivered(admin: &PgPool, name: &str, want: usize) -> Result<(), String
     .await
     .map_err(|err| err.to_string())?;
     let events: Vec<(String, i64)> =
-        sqlx::query_as("SELECT xact::text, seq FROM fvoci.events ORDER BY xact, seq")
+        sqlx::query_as("SELECT e.xact::text, e.seq FROM fvoci.events AS e ORDER BY e.xact, e.seq")
             .fetch_all(admin)
             .await
             .map_err(|err| err.to_string())?;
@@ -722,16 +722,19 @@ async fn forward_skip_needs_override_and_live_lease_blocks_apply() {
 }
 
 /// Positions compare as xid8 numbers. The "event before" and "newest event"
-/// lookups once sorted by the text alias of `xact`, so "9" came after "10"
-/// and a cluster whose xids crossed a digit boundary got the wrong target.
+/// lookups once sorted by the text alias of `xact`, so "9" came after "10":
+/// the rule target and an external consumer's replay floor were wrong on any
+/// history whose xids span a change in digit count.
 #[tokio::test]
 async fn rule_targets_order_xids_numerically_across_a_digit_boundary() {
     let harness = TestDb::bootstrap().await;
     let admin = admin(&harness).await;
     let app = app(&harness).await;
-    ensure_consumer(&app, "notifications").await.unwrap();
+    for name in ["notifications", "push"] {
+        ensure_consumer(&app, name).await.unwrap();
+    }
     let mut ids = Vec::new();
-    for xact in ["9", "10", "11"] {
+    for xact in ["8", "9", "10", "11", "12"] {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO fvoci.events (id, xact, verb, channel) VALUES ($1, $2::xid8, 'test.reset', 'system')",
@@ -747,26 +750,44 @@ async fn rule_targets_order_xids_numerically_across_a_digit_boundary() {
     for id in &ids {
         pos.push(event_pos(&admin, *id).await);
     }
-    for id in &ids[..2] {
+    let origin = ("0".to_string(), 0_i64);
+    for id in &ids[..4] {
         mark_processed(&app, "notifications", *id).await.unwrap();
     }
-    set_cursor(&admin, "notifications", &pos[2]).await;
+    // push holds a single mark at xact 11: its replay floor is xact 10.
+    mark_processed(&app, "push", ids[3]).await.unwrap();
+    set_cursor(&admin, "notifications", &pos[4]).await;
+    set_cursor(&admin, "push", &pos[4]).await;
 
-    // xact 11 is the first unmarked event: the target is xact 10 just before it.
-    let diag = run(&harness, &["--consumer", "notifications"]).await;
+    let diag = run(
+        &harness,
+        &["--consumer", "notifications", "--consumer", "push"],
+    )
+    .await;
     assert!(diag.ok, "{}", diag.output);
+    // xact 12 is the first unmarked event: the target is xact 11 before it.
     let n = consumer(&diag.report, "notifications");
-    assert_eq!(pos_of(&n["target"]), pos[1], "{n}");
+    assert_eq!(pos_of(&n["target"]), pos[3], "{n}");
     assert_eq!(n["direction"], "backward");
     assert_eq!(n["redelivered"], 1);
+    // The rule would replay push from the origin; without the ack it stops
+    // at the floor (xact 10) and moves to xact 11, the event before the
+    // first unmarked event above the floor.
+    let push = consumer(&diag.report, "push");
+    assert_eq!(pos_of(&push["externalReplay"]["floor"]), pos[2], "{push}");
+    assert_eq!(pos_of(&push["externalReplay"]["target"]), origin);
+    assert_eq!(push["externalReplay"]["redelivered"], 4);
+    assert_eq!(pos_of(&push["target"]), pos[3], "{push}");
+    assert_eq!(push["direction"], "backward");
+    assert_eq!(push["redelivered"], 1);
 
-    // Every event marked: the target is the newest event, xact 11.
-    mark_processed(&app, "notifications", ids[2]).await.unwrap();
+    // Every event marked: the target is the newest event, xact 12.
+    mark_processed(&app, "notifications", ids[4]).await.unwrap();
     set_cursor(&admin, "notifications", &pos[0]).await;
     let diag = run(&harness, &["--consumer", "notifications"]).await;
     assert!(diag.ok, "{}", diag.output);
     let n = consumer(&diag.report, "notifications");
-    assert_eq!(pos_of(&n["target"]), pos[2], "{n}");
+    assert_eq!(pos_of(&n["target"]), pos[4], "{n}");
     assert_eq!(n["direction"], "forward");
 
     close_pool(app).await;
