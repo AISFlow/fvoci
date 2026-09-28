@@ -23,8 +23,8 @@ CONTAINER="fvoci-rust-test-meili-${RUN_ID}"
 MASTER_KEY="$(openssl rand -hex 16)"
 
 cleanup() {
-  # -v: the image declares a VOLUME; without it every run leaves an anonymous
-  # volume behind (the --rm auto-removal does not run after an explicit rm).
+  # -v is defensive: the pinned image declares no VOLUME today (its data stays
+  # in the container layer), but an image that did would leak one per run.
   docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
