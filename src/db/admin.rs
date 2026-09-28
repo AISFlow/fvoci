@@ -3,15 +3,18 @@
 //!
 //! Every operation rechecks the actor's instance-admin status inside its own
 //! transaction; the HTTP layer never decides authorization from the session
-//! alone. Reads of cross-tenant tables switch to the system context only after
-//! that check.
+//! alone. Writes also recheck the actor's session after their lock waits
+//! (`require_admin_session`). Reads of cross-tenant tables switch to the
+//! system context only after that check.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_membership_users, set_self_user, set_system, set_tenant};
+use crate::db::context::{
+    lock_membership_users, recheck_session, set_self_user, set_system, set_tenant,
+};
 use crate::db::identity::{
     append_audit, append_event, lock_sign_in, revoke_all_sessions_for_user, AuditAppend,
     EventAppend, INSTANCE_ADMIN_LOCK_KEY,
@@ -37,6 +40,23 @@ pub(crate) async fn require_live_instance_admin(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.is_some())
+}
+
+/// The gate of every instance-admin write: the actor's session, rechecked
+/// `FOR UPDATE` as workspace writes do, then the admin flag. Callers run it
+/// after their advisory locks, so a logout, password change or session
+/// revocation that commits while the write waits on them is seen here and
+/// the write answers 404. Locking the users row `FOR UPDATE` first also
+/// makes the flag's `FOR SHARE` a no-op rather than a lock upgrade.
+pub(crate) async fn require_admin_session(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    if !recheck_session(tx, user_id, session_id).await? {
+        return Ok(false);
+    }
+    require_live_instance_admin(tx, user_id).await
 }
 
 pub(crate) struct InstanceChange<'a> {
@@ -441,13 +461,15 @@ async fn count_live_instance_admins(
 
 /// Source `patchInstanceUser`. Lock order matches the source and the account
 /// lifecycle: admission lock -> instance-admin set lock -> membership locks
-/// -> the target's sign-in row. The admin check, the last-admin rule and both
-/// flag writes happen under those locks; suspension revokes every session and
-/// API token of the target in the same transaction as its audit rows.
+/// -> the target's sign-in row -> the actor's session and users row. The
+/// session and admin check, the last-admin rule and both flag writes happen
+/// under those locks; suspension revokes every session and API token of the
+/// target in the same transaction as its audit rows.
 pub async fn patch_instance_user(
     pool: &PgPool,
     license: &crate::license::Entitlements,
     actor: Uuid,
+    session_id: Uuid,
     target: Uuid,
     patch: InstanceUserPatch,
     ip: Option<&str>,
@@ -466,7 +488,7 @@ pub async fn patch_instance_user(
     .bind(target)
     .fetch_optional(&mut *tx)
     .await?;
-    if !require_live_instance_admin(&mut tx, actor).await? {
+    if !require_admin_session(&mut tx, actor, session_id).await? {
         tx.rollback().await?;
         return Ok(None);
     }

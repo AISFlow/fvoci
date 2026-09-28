@@ -5,7 +5,7 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::admin::{record_instance_change, require_live_instance_admin, InstanceChange};
+use crate::db::admin::{record_instance_change, require_admin_session, InstanceChange};
 use crate::db::context::{clear_self_user, set_self_user, set_system, set_tenant};
 use crate::db::identity::lock_sign_in;
 use crate::db::workspace::{membership_role, WorkspaceRole};
@@ -147,18 +147,18 @@ pub struct LegalPublishInput {
     pub effective_at: DateTime<Utc>,
 }
 
-/// Source `publishLegalDocument`: the next version of `kind`, with the admin
-/// check under the actor's sign-in row lock and the `legal.published` event
-/// and audit rows in the same transaction.
+/// Source `publishLegalDocument`: the next version of `kind`, with the
+/// session and admin check under the actor's users row lock and the
+/// `legal.published` event and audit rows in the same transaction.
 pub async fn publish_legal(
     pool: &PgPool,
     actor: Uuid,
+    session_id: Uuid,
     input: LegalPublishInput,
     ip: Option<&str>,
 ) -> Result<Option<LegalDocument>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    lock_sign_in(&mut tx, actor).await?;
-    if !require_live_instance_admin(&mut tx, actor).await? {
+    if !require_admin_session(&mut tx, actor, session_id).await? {
         tx.rollback().await?;
         return Ok(None);
     }
