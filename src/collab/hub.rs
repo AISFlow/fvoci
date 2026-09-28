@@ -34,6 +34,9 @@ pub const HUB_JOIN_BARRIER_AFTER_SLOT_READY: u8 = 2;
 /// One pre-enqueue retry after a proven undelivered join or a Closing race.
 const MAX_PRE_ENQUEUE_RETRIES: u8 = 1;
 
+/// Rooms a single admission may reclaim at the room cap before it reports `RoomFull`.
+const MAX_ADMISSION_RECLAIMS: u8 = 2;
+
 #[cfg(feature = "db-tests")]
 struct HubJoinBarrier {
     reached_tx: oneshot::Sender<()>,
@@ -184,7 +187,8 @@ struct LiveRoom {
     finished: tokio::sync::oneshot::Receiver<()>,
     last_activity: Instant,
     live_conns: Arc<AtomicUsize>,
-    /// In-flight hub joins that have not yet finished actor admission.
+    /// In-flight hub joins that have not yet finished actor admission, plus
+    /// HTTP operations (body write, projection, revision) borrowing the actor.
     joining: Arc<AtomicUsize>,
     permit: OwnedSemaphorePermit,
 }
@@ -426,11 +430,16 @@ impl CollabHub {
         Duration::from_millis(self.config.rpc_timeout_ms.max(1))
     }
 
-    async fn live_handle(&self, key: RoomKey) -> Option<RoomHandle> {
+    /// Borrow a live actor for one operation. The lease defers idle and
+    /// admission reclaim until the operation has finished.
+    async fn live_handle(&self, key: RoomKey) -> Option<(RoomHandle, JoiningLease)> {
         let slot = self.room_slot(key).await?;
-        let phase = slot.phase.lock().await;
-        match &*phase {
-            RoomPhase::Live(live) if !live.handle.is_closed() => Some(live.handle.clone()),
+        let mut phase = slot.phase.lock().await;
+        match &mut *phase {
+            RoomPhase::Live(live) if !live.handle.is_closed() => {
+                live.last_activity = Instant::now();
+                Some((live.handle.clone(), JoiningLease::register(&live.joining)))
+            }
             _ => None,
         }
     }
@@ -442,11 +451,21 @@ impl CollabHub {
         session_id: Uuid,
     ) -> Option<Result<CapturedRevision, RevisionCaptureError>> {
         let key: RoomKey = key.into();
-        let handle = self.live_handle(key).await?;
+        let (handle, _lease) = self.live_handle(key).await?;
         Some(handle.capture_revision(actor_user_id, session_id).await)
     }
 
     pub async fn ensure_live_room(&self, key: impl Into<RoomKey>) -> Result<RoomHandle, JoinError> {
+        self.borrow_live_room(key)
+            .await
+            .map(|(handle, _lease)| handle)
+    }
+
+    /// Start or reuse the room and borrow its actor for one operation.
+    async fn borrow_live_room(
+        &self,
+        key: impl Into<RoomKey>,
+    ) -> Result<(RoomHandle, JoiningLease), JoinError> {
         let key: RoomKey = key.into();
         let mut retries = 0u8;
         loop {
@@ -454,8 +473,8 @@ impl CollabHub {
                 return Err(JoinError::EngineUnavailable);
             }
             let slot = self.get_or_create_room(key).await?;
-            if let Some(handle) = self.live_handle(key).await {
-                return Ok(handle);
+            if let Some(borrowed) = self.live_handle(key).await {
+                return Ok(borrowed);
             }
             let _ = self.wait_for_live_or_retry(key, slot).await?;
             if !Self::allow_pre_enqueue_retry(&mut retries) {
@@ -472,8 +491,8 @@ impl CollabHub {
         snap: Vec<u8>,
     ) -> Result<(), RevisionRestoreError> {
         let key: RoomKey = key.into();
-        let handle = self
-            .ensure_live_room(key)
+        let (handle, _lease) = self
+            .borrow_live_room(key)
             .await
             .map_err(|_| RevisionRestoreError::Unavailable)?;
         handle
@@ -491,8 +510,8 @@ impl CollabHub {
         expected_tail_seq: Option<i64>,
     ) -> Result<(), BodyWriteError> {
         let key: RoomKey = key.into();
-        let handle = self
-            .ensure_live_room(key)
+        let (handle, _lease) = self
+            .borrow_live_room(key)
             .await
             .map_err(join_to_body_write_error)?;
         handle
@@ -508,8 +527,8 @@ impl CollabHub {
         session_id: Uuid,
     ) -> Result<LiveProjection, BodyWriteError> {
         let key: RoomKey = key.into();
-        let handle = self
-            .ensure_live_room(key)
+        let (handle, _lease) = self
+            .borrow_live_room(key)
             .await
             .map_err(join_to_body_write_error)?;
         handle.project_live(actor_user_id, session_id).await
@@ -983,6 +1002,7 @@ impl CollabHub {
     }
 
     async fn get_or_create_room(&self, key: RoomKey) -> Result<Arc<RoomSlot>, JoinError> {
+        let mut reclaims = 0u8;
         loop {
             if self.shutting_down.load(Ordering::Acquire) {
                 return Err(JoinError::EngineUnavailable);
@@ -994,7 +1014,17 @@ impl CollabHub {
                 }
             }
 
-            match self.try_reserve_starting(key).await? {
+            let reserved = match self.try_reserve_starting(key).await {
+                Err(JoinError::RoomFull) if reclaims < MAX_ADMISSION_RECLAIMS => {
+                    reclaims += 1;
+                    if self.reclaim_empty_room_for_admission().await {
+                        continue;
+                    }
+                    return Err(JoinError::RoomFull);
+                }
+                other => other?,
+            };
+            match reserved {
                 ReserveOutcome::Existing(slot) => {
                     if let Some(live_slot) = self.wait_for_live_or_retry(key, slot).await? {
                         return Ok(live_slot);
@@ -1040,6 +1070,88 @@ impl CollabHub {
                 }
             }
         }
+    }
+
+    /// At the room cap, close the least recently active live room that has no
+    /// members, no join in flight and no borrowed operation, instead of making
+    /// the new room wait for the idle timer. Rooms with members are never
+    /// reclaimed, so a cap reached by active rooms still reports `RoomFull`.
+    /// Returns whether a room was closed (the caller retries its reservation).
+    async fn reclaim_empty_room_for_admission(&self) -> bool {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
+        let entries = self
+            .rooms
+            .read()
+            .await
+            .iter()
+            .map(|(key, slot)| (*key, slot.clone()))
+            .collect::<Vec<_>>();
+        let mut oldest: Option<(Instant, RoomKey, Arc<RoomSlot>)> = None;
+        for (key, slot) in entries {
+            // A busy phase lock means the room is changing state; skip it.
+            let Ok(phase) = slot.phase.try_lock() else {
+                continue;
+            };
+            let RoomPhase::Live(live) = &*phase else {
+                continue;
+            };
+            if !Self::reclaimable_without_members(live) {
+                continue;
+            }
+            if oldest
+                .as_ref()
+                .is_none_or(|(at, _, _)| live.last_activity < *at)
+            {
+                let at = live.last_activity;
+                drop(phase);
+                oldest = Some((at, key, slot));
+            }
+        }
+        let Some((_, key, slot)) = oldest else {
+            return false;
+        };
+        let live = {
+            let mut phase = slot.phase.lock().await;
+            let still_reclaimable = matches!(
+                &*phase,
+                RoomPhase::Live(live) if Self::reclaimable_without_members(live)
+            );
+            if !still_reclaimable || self.shutting_down.load(Ordering::Acquire) {
+                return false;
+            }
+            let RoomPhase::Live(live) = std::mem::replace(&mut *phase, RoomPhase::Closing) else {
+                unreachable!()
+            };
+            live
+        };
+        tracing::info!(
+            workspace_id = %key.0,
+            document_id = %key.1,
+            "collab room reclaimed at room cap"
+        );
+        // The hub owns the Closing room from here; a cancelled caller must not
+        // leave it Closing with its permit held.
+        let rooms = self.rooms.clone();
+        let abnormal_actor_completions = self.abnormal_actor_completions.clone();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        {
+            let mut starts = self.starts.lock().expect("room start task list");
+            starts.retain(|task| !task.is_finished());
+            starts.push(tokio::spawn(async move {
+                live.handle.shutdown_after_queued().await;
+                finish_owned_room_cleanup(rooms, key, slot, live, abnormal_actor_completions).await;
+                let _ = done_tx.send(());
+            }));
+        }
+        done_rx.await.is_ok()
+    }
+
+    fn reclaimable_without_members(live: &LiveRoom) -> bool {
+        live.handle.is_closed()
+            || (live.joining.load(Ordering::Acquire) == 0
+                && live.live_conns.load(Ordering::Acquire) == 0)
     }
 
     async fn wait_for_live_or_retry(
@@ -1468,6 +1580,17 @@ async fn complete_owned_room_cleanup(
     abnormal_actor_completions: Arc<AtomicUsize>,
 ) {
     live.handle.shutdown().await;
+    finish_owned_room_cleanup(rooms, key, slot, live, abnormal_actor_completions).await;
+}
+
+/// After the actor was asked to stop: wait for it, free its slot and permit.
+async fn finish_owned_room_cleanup(
+    rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
+    key: RoomKey,
+    slot: Arc<RoomSlot>,
+    live: LiveRoom,
+    abnormal_actor_completions: Arc<AtomicUsize>,
+) {
     note_abnormal_actor_completion(&abnormal_actor_completions, key.1, live.finished.await);
     drop(live.permit);
     *slot.phase.lock().await = RoomPhase::Failed;

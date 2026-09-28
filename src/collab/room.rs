@@ -982,6 +982,12 @@ impl RoomHandle {
         let _ = self.tx.send(RoomCommand::Shutdown).await;
     }
 
+    /// Close an empty room after the work already queued before it, including
+    /// the last-disconnect session revision (no cancel signal).
+    pub async fn shutdown_after_queued(&self) {
+        let _ = self.tx.send(RoomCommand::Shutdown).await;
+    }
+
     pub async fn capture_revision(
         &self,
         actor_user_id: Uuid,
@@ -1331,6 +1337,9 @@ impl RoomActor {
                                         admission.conn_generation,
                                         admission.drop_rx,
                                     );
+                                    // Publish the member before the hub drops its joining
+                                    // lease, so reclaim never sees an empty admitted room.
+                                    self.publish_live_conns();
                                     let _ = reply.send(Ok(admission.lease));
                                 }
                                 Err(err) => {

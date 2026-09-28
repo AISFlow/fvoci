@@ -85,7 +85,7 @@ async fn fixture_password_hash() -> &'static str {
 }
 
 /// Parallel tests in one binary must not storm past the process-wide live-helper cap.
-/// Reserve one slot per hub/server (four for `collab_lifecycle_max_rooms_then_reuse_after_leave`).
+/// Reserve one slot per hub/server (four for the 4-room cap tests).
 static HELPER_CHILD_CAPACITY: LazyLock<Mutex<(usize, Arc<Semaphore>)>> =
     LazyLock::new(|| Mutex::new((0, Arc::new(Semaphore::new(1)))));
 
@@ -109,17 +109,15 @@ impl HelperChildCapacityHold {
     async fn reserve(room_slots: usize, config: &CollabConfig) -> Self {
         let semaphore = helper_capacity_semaphore(config);
         let room_slots = room_slots.min(config.max_rooms);
-        let mut permits = Vec::with_capacity(room_slots);
-        for _ in 0..room_slots {
-            permits.push(
-                semaphore
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .expect("helper child capacity"),
-            );
+        // All at once: two tests taking permits one by one could each hold part
+        // of the cap and wait for the other forever.
+        let permits = semaphore
+            .acquire_many_owned(u32::try_from(room_slots).expect("room slots"))
+            .await
+            .expect("helper child capacity");
+        Self {
+            permits: vec![permits],
         }
-        Self { permits }
     }
 }
 
@@ -1939,6 +1937,92 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
         hub.shutdown().await;
         harness.cleanup().await;
     })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_room_cap_reclaims_empty_room_before_refusing() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaims_empty_room_before_refusing",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 5).await;
+            // Same cap as the other 4-room tests (the helper cap is process-wide). The idle
+            // timer is far away: only admission reclaim can free a slot here.
+            let (hub, _helper_capacity) = new_test_collab_hub(
+                test_collab_config(4, 600_000),
+                docs[0].session.pool.clone(),
+                4,
+            )
+            .await;
+            let mut leases = DirectHubLeases::new();
+            let keys = docs
+                .iter()
+                .map(|doc| (doc.session.workspace_id, doc.document_id))
+                .collect::<Vec<_>>();
+
+            let mut conn_ids = Vec::new();
+            for doc in docs.iter().take(4) {
+                conn_ids.push(
+                    hub_join(&mut leases, &hub, doc, 1)
+                        .await
+                        .expect("join room"),
+                );
+            }
+            let refused = hub_join(&mut leases, &hub, &docs[4], 1).await;
+            assert!(
+                matches!(refused, Err(JoinError::RoomFull)),
+                "rooms with members are never reclaimed, got {refused:?}"
+            );
+            for key in &keys[..4] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(*key).await,
+                    RoomLifecyclePhase::Live
+                );
+            }
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[4]).await,
+                RoomLifecyclePhase::Absent
+            );
+
+            hub.leave_room(keys[1], conn_ids[1]).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while hub.room_member_count(keys[1]).await != 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("room 1 empty");
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[1]).await,
+                RoomLifecyclePhase::Live
+            );
+
+            hub_join(&mut leases, &hub, &docs[4], 2)
+                .await
+                .expect("empty room 1 is reclaimed for room 4");
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[1]).await,
+                RoomLifecyclePhase::Absent
+            );
+            for index in [0, 2, 3, 4] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(keys[index]).await,
+                    RoomLifecyclePhase::Live
+                );
+                assert_eq!(hub.room_member_count(keys[index]).await, 1);
+            }
+            assert_eq!(hub.available_room_slots(), 0);
+
+            let again = hub_join(&mut leases, &hub, &docs[1], 3).await;
+            assert!(
+                matches!(again, Err(JoinError::RoomFull)),
+                "every live room has a member, got {again:?}"
+            );
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
     .await;
 }
 
