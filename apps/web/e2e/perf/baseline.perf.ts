@@ -806,6 +806,9 @@ test("e: save ack and remote reflection", async ({ browser }) => {
     await aEditor.click();
     await a.keyboard.press("Control+End");
     await a.keyboard.press("Enter");
+    // Let the provider's 200 ms flushDelay window (started by Enter/cursor
+    // awareness) drain so the measured insert starts from an idle provider.
+    await a.waitForTimeout(400);
     const idB = `rb-${i}`;
     await watch(b, idB, { selector: '[data-testid="task-body"] .ProseMirror p', text: token });
     const calA = await calibrate(a, 5);
