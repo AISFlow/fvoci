@@ -60,18 +60,27 @@ pub(super) fn is_unclassified_refusal(code: &str) -> bool {
 /// Whether a 5xx reply refuses the recipient's mailbox rather than the whole
 /// relay. lettre reports every 5xx as permanent whatever command it answers
 /// (greeting, EHLO, MAIL FROM, RCPT TO, DATA) and does not say which one, so
-/// the RFC 3463 enhanced status code that starts the server text decides:
-/// X.1.x (addressing) and X.2.x (mailbox status) are about the recipient;
+/// the RFC 3463 enhanced status code that starts the server text decides.
 /// X.3 to X.7 (system, network, protocol, content, policy, including quota
-/// such as 5.4.5) are not. Excluded as not certain to be about the recipient:
-/// X.1.7 and X.1.8 (the sender), X.1.0 (other address status, which Postfix
-/// and Exchange also send for a refused sender), X.2.0 (other mailbox status,
-/// which Exchange also sends for sender quotas and blocks) and X.2.3 (message
-/// length over an administrative limit, which some relays apply to every
-/// recipient). Without an enhanced status code only 551 (user not local)
-/// counts: a bare 550 or 553 is also sent for policy refusals and sending
-/// limits (for example cPanel's hourly limit, qmail's rcpthosts), so those
-/// stay unclassified and need a later accepted send to prove them.
+/// such as 5.4.5) are not about the recipient. Of X.1 (addressing) only the
+/// registered destination address details count: X.1.1 to X.1.4, X.1.6
+/// (mailbox moved) and X.1.10 (null MX). That leaves out X.1.7 and X.1.8
+/// (the sender), X.1.0 (other address status, which Postfix and Exchange
+/// also send for a refused sender) and vendor details such as Exchange's
+/// 5.1.90 (the sender's daily recipient limit). Of X.2 (mailbox status)
+/// every detail counts except X.2.0 (other mailbox status, which Exchange
+/// also sends for sender quotas and blocks) and X.2.3 (message length over
+/// an administrative limit, which some relays apply to every recipient).
+///
+/// Known limitation: X.2.2 is final for the recipient, since it is how a
+/// full mailbox is refused, but Exchange Online also sends 5.2.2 for its
+/// sender-wide "submission quota exceeded". Only the text tells them apart.
+///
+/// Without an enhanced status code only 551 (user not local) counts: a bare
+/// 550 or 553 is also sent for policy refusals and sending limits (for
+/// example cPanel's hourly limit, qmail's rcpthosts), so those stay
+/// unclassified and need a later accepted send to prove them. An enhanced
+/// code later in the text (qmail's `(#5.1.1)`) is not read.
 fn is_mailbox_refusal(reply: u16, text: &str) -> bool {
     let enhanced = text.split_whitespace().next().and_then(|word| {
         let mut parts = word.split('.');
@@ -82,7 +91,7 @@ fn is_mailbox_refusal(reply: u16, text: &str) -> bool {
             .then_some((subject, detail))
     });
     match enhanced {
-        Some(("1", detail)) => !matches!(detail, "0" | "7" | "8"),
+        Some(("1", detail)) => matches!(detail, "1" | "2" | "3" | "4" | "6" | "10"),
         Some(("2", detail)) => !matches!(detail, "0" | "3"),
         Some(_) => false,
         None => reply == 551,
@@ -192,6 +201,15 @@ mod tests {
             556,
             "5.1.10 recipient address has null MX"
         ));
+        assert!(is_mailbox_refusal(
+            550,
+            "5.1.2 bad destination system address"
+        ));
+        assert!(is_mailbox_refusal(
+            550,
+            "5.1.4 destination mailbox ambiguous"
+        ));
+        assert!(is_mailbox_refusal(551, "5.1.6 mailbox has moved"));
         assert!(is_mailbox_refusal(550, "5.2.1 mailbox disabled"));
         assert!(is_mailbox_refusal(552, "5.2.2 mailbox full"));
         // The sender, codes also sent for the sender or the whole relay, and
@@ -203,6 +221,18 @@ mod tests {
             "5.1.0 <from@example.com>: Sender address rejected: User unknown in virtual alias table"
         ));
         assert!(!is_mailbox_refusal(554, "5.1.0 Sender denied"));
+        // X.1 details outside the registered destination address codes,
+        // such as Exchange's sender limit, are not about the recipient.
+        assert!(!is_mailbox_refusal(
+            550,
+            "5.1.90 Your message can't be sent because you've reached your daily limit for message recipients"
+        ));
+        assert!(!is_mailbox_refusal(550, "5.1.5 destination address valid"));
+        assert!(!is_mailbox_refusal(550, "5.1.9 non-compliant mailer"));
+        assert!(!is_mailbox_refusal(
+            550,
+            "5.1.11 sender address has null MX"
+        ));
         assert!(!is_mailbox_refusal(
             552,
             "5.2.3 Your message exceeded the size limit"
@@ -216,9 +246,16 @@ mod tests {
         assert!(!is_mailbox_refusal(552, "5.3.4 message too big for system"));
         assert!(!is_mailbox_refusal(530, "5.7.0 authentication required"));
         assert!(!is_mailbox_refusal(500, "5.5.2 syntax error"));
-        // Without an enhanced status code only the mailbox replies count.
+        // Without an enhanced status code only 551 counts.
         assert!(!is_mailbox_refusal(550, "no such user here"));
         assert!(is_mailbox_refusal(551, "user not local"));
+        // An enhanced status code decides over the reply code, and only one
+        // that starts the text is read.
+        assert!(!is_mailbox_refusal(551, "5.7.1 relaying denied"));
+        assert!(!is_mailbox_refusal(
+            550,
+            "sorry, no mailbox here by that name. (#5.1.1)"
+        ));
         assert!(!is_mailbox_refusal(553, "mailbox name not allowed"));
         assert!(!is_mailbox_refusal(550, ""));
         assert!(!is_mailbox_refusal(
