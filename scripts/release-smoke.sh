@@ -234,6 +234,7 @@ log_assert "server is uid 1000 without owner/master credentials: ok"
 
 ORIGIN="$BASE_URL"
 COOKIE_JAR="$WORK/cookies"
+: >"$COOKIE_JAR"
 FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
 DOCUMENT_STATE="$WORK/documents.json"
 EMAIL="owner@release.test"
@@ -251,7 +252,7 @@ SECOND_SETUP="$(curl -sS -o /dev/null -w '%{http_code}' -H "content-type: applic
 log_assert "first-admin setup, second setup refused (HTTP ${SECOND_SETUP}): ok"
 
 login() {
-  rm -f "$COOKIE_JAR"
+  : >"$COOKIE_JAR"
   api -H "content-type: application/json" -X POST "$BASE_URL/api/v1/auth/login" \
     -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" >/dev/null
   SESSION="$(awk '$6 == "fvoci_session" { print $7; exit }' "$COOKIE_JAR")"
