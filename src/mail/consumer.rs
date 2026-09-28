@@ -18,9 +18,17 @@ const MAIL_VERBS: &[&str] = &["comment.created", "identity.linked", "identity.un
 
 /// Sends the mail of `comment.created` and `identity.*` events. The unit of
 /// delivery is the recipient: a permanent refusal of the recipient's mailbox
-/// is final for that recipient only, and a retry after any other failure
-/// (including a relay-wide 5xx) skips the recipients SMTP already accepted
-/// (see `AcceptedRecipients`).
+/// is final for that recipient only. Any other 5xx may refuse one recipient
+/// (a policy refusal at `RCPT`) or every recipient (a relay limit, a refused
+/// sender), so the send goes on to the next recipient and the refusal
+/// becomes final for its recipient only once a later send in the same
+/// attempt is accepted, which shows the relay still serves. The event fails
+/// when such refusals are left with no acceptance after them, or at once on
+/// a 4xx, timeout or connection failure; the retry skips the recipients SMTP
+/// already accepted (see `AcceptedRecipients`). A skipped recipient proves
+/// nothing about the relay now, so a policy refusal of the last recipient
+/// still to send looks like a relay-wide one: that event retries and
+/// dead-letters, after the recipients before it got their mail.
 pub struct MailConsumer {
     mailer: Arc<Mailer>,
     accepted: Mutex<AcceptedRecipients>,
@@ -169,8 +177,13 @@ async fn deliver_mail(
     let mails = collect_mails(pool, event).await?;
     let mut any_accepted = false;
     let mut rejected = 0usize;
+    // 5xx refusals not known to be about their recipient that no send
+    // accepted in this attempt has followed yet.
+    let mut unproven = 0usize;
     for mail in &mails {
         if lock(accepted).contains(event.id, &mail.to) {
+            // Accepted by an earlier attempt. That says nothing about the
+            // relay now, so it does not prove the refusals before it.
             any_accepted = true;
             continue;
         }
@@ -178,6 +191,10 @@ async fn deliver_mail(
             Ok(()) => {
                 lock(accepted).insert(event.id, &mail.to);
                 any_accepted = true;
+                // The relay accepts after those refusals, so it is not
+                // refusing everyone: they were final for their recipients.
+                rejected += unproven;
+                unproven = 0;
             }
             Err(err) if smtp::is_final_for_recipient(&err.code) => {
                 // Final for this recipient only. The error carries no address.
@@ -188,11 +205,30 @@ async fn deliver_mail(
                     "mail.recipient_rejected"
                 );
             }
-            // May pass later, or refuses the whole relay: retry the event
-            // (and dead-letter it where it is visible). The recipients
+            Err(err) if smtp::is_unclassified_refusal(&err.code) => {
+                // One recipient or the whole relay: a later accepted send
+                // decides. The error carries no address or server text.
+                unproven += 1;
+                tracing::warn!(
+                    event_id = %event.id,
+                    code = %err.code,
+                    "mail.recipient_refused_unclassified"
+                );
+            }
+            // May pass later: retry the event (and dead-letter it where it
+            // is visible). Stopping here bounds the attempt; the recipients
             // accepted so far are remembered and skipped on the retry.
             Err(err) => return Err(OutboxProcessError::Delivery(err.to_string())),
         }
+    }
+    if unproven > 0 {
+        // No send was accepted after these refusals, which is what a
+        // relay-wide refusal (such as a daily limit that starts partway
+        // through) looks like: fail so the event is retried and then
+        // dead-lettered where it is visible.
+        return Err(OutboxProcessError::Delivery(format!(
+            "mailer: {unproven} recipients refused with no accepted send after them"
+        )));
     }
     if rejected > 0 && !any_accepted {
         // Nobody accepted, which is what a relay-wide refusal looks like: fail

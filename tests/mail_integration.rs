@@ -1627,6 +1627,104 @@ async fn relay_limit_after_an_accepted_recipient_dead_letters_the_event() {
     harness.cleanup().await;
 }
 
+/// What happened to a three-recipient comment event sent through
+/// `ScriptedSmtp`.
+struct ScriptedOutcome {
+    /// Mails per recipient, in send order.
+    counts: Vec<usize>,
+    processed: bool,
+    dead: bool,
+    failure_rows: i64,
+}
+
+/// Send a three-recipient comment event through a scripted SMTP server that
+/// answers `RCPT TO` for recipient `i` with `replies[i]` every time (`None`
+/// accepts it), and wait until the event is processed or dead-lettered.
+async fn deliver_three_recipient_comment(replies: [Option<&'static str>; 3]) -> ScriptedOutcome {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let rules = to
+        .iter()
+        .zip(replies)
+        .filter_map(|(address, reply)| {
+            let reply = reply?;
+            Some((address.clone(), RcptRule { reply, times: None }))
+        })
+        .collect();
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, rules).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let processed = is_processed(&app_pool, "mail", event_id).await.unwrap();
+    let dead = fvoci_server::db::outbox::fetch_failure_state(&app_pool, "mail", event_id)
+        .await
+        .unwrap()
+        .is_some_and(|row| row.dead_at.is_some());
+    let admin = harness.admin().await;
+    let failure_rows = mail_failure_rows(&admin).await;
+    admin.close().await;
+    app_pool.close().await;
+    let counts = to.iter().map(|address| sink.count_to(address)).collect();
+    harness.cleanup().await;
+    ScriptedOutcome {
+        counts,
+        processed,
+        dead,
+        failure_rows,
+    }
+}
+
+const POLICY_REFUSAL: &str = "554 5.7.1 Recipient address rejected: Access denied";
+const RELAY_LIMIT: &str = "550 5.4.5 Daily SMTP relay limit exceeded";
+
+/// A 5xx outside the mailbox codes that refuses one recipient (a Postfix
+/// `check_recipient_access` REJECT) does not hold back the recipients after
+/// it: the next recipient is accepted, which shows the relay still serves,
+/// so the refusal is final for that recipient and the event is processed.
+#[tokio::test]
+async fn policy_refusal_of_one_recipient_does_not_hold_back_the_later_ones() {
+    let outcome = deliver_three_recipient_comment([None, Some(POLICY_REFUSAL), None]).await;
+    assert_eq!(outcome.counts, vec![1, 0, 1], "mails per recipient");
+    assert!(outcome.processed);
+    assert!(!outcome.dead);
+    assert_eq!(outcome.failure_rows, 0);
+}
+
+/// A policy refusal that no accepted recipient follows is not shown to be
+/// about that recipient: here a relay limit refuses the last recipient too,
+/// so the event dead-letters where it can be requeued, and the recipient
+/// accepted first is not sent the mail again on the retries.
+#[tokio::test]
+async fn relay_limit_after_a_policy_refusal_dead_letters_the_event() {
+    let outcome =
+        deliver_three_recipient_comment([None, Some(POLICY_REFUSAL), Some(RELAY_LIMIT)]).await;
+    assert_eq!(outcome.counts, vec![1, 0, 0], "mails per recipient");
+    assert!(!outcome.processed);
+    assert!(outcome.dead);
+}
+
+/// Only an acceptance after the last refusal shows the relay still serves:
+/// a recipient accepted between a policy refusal and a relay limit proves
+/// the policy refusal but not the relay limit, so the event dead-letters.
+#[tokio::test]
+async fn acceptance_before_a_relay_limit_does_not_clear_it() {
+    let outcome =
+        deliver_three_recipient_comment([Some(POLICY_REFUSAL), None, Some(RELAY_LIMIT)]).await;
+    assert_eq!(outcome.counts, vec![0, 1, 0], "mails per recipient");
+    assert!(!outcome.processed);
+    assert!(outcome.dead);
+}
+
 /// Marking the event fails once with a database error after its mail was
 /// accepted: the event is delivered again, and the recipient SMTP already
 /// accepted is skipped, not sent the mail a second time.

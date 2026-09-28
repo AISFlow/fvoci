@@ -31,8 +31,10 @@ const CODE_TIMEOUT: &str = "timeout";
 /// (see `is_mailbox_refusal`).
 const CODE_RECIPIENT_REJECTED: &str = "recipient_rejected";
 /// Any other permanent (5xx) reply: a policy, quota, system, protocol or
-/// content refusal, or a refusal of the sender. It covers the relay, not
-/// one recipient.
+/// content refusal, or a refusal of the sender. It is not known to be about
+/// one recipient: relays send these codes both for one recipient (`554 5.7.1
+/// Relay access denied` at `RCPT`) and for every recipient (`550 5.4.5` daily
+/// limit, a refused sender).
 const CODE_PERMANENT: &str = "permanent";
 /// The server answered with a transient (4xx) reply.
 const CODE_TRANSIENT: &str = "transient";
@@ -42,10 +44,17 @@ const CODE_CONNECTION: &str = "connection";
 /// Whether a send failure is final for this one recipient: the server refused
 /// the recipient's mailbox permanently, or the address cannot be sent to.
 /// Other failures (4xx, other 5xx, timeouts, connection or local
-/// configuration) may pass on a later attempt, or would fail for every
-/// recipient alike.
+/// configuration) may pass on a later attempt, may fail for every recipient
+/// alike, or (other 5xx, see `is_unclassified_refusal`) may be either.
 pub(super) fn is_final_for_recipient(code: &str) -> bool {
     code == CODE_RECIPIENT_REJECTED || code == CODE_INVALID_RECIPIENT
+}
+
+/// Whether a send failure is a permanent (5xx) refusal that does not say
+/// whether it is about the recipient or about every recipient (see
+/// `CODE_PERMANENT`).
+pub(super) fn is_unclassified_refusal(code: &str) -> bool {
+    code == CODE_PERMANENT
 }
 
 /// Whether a 5xx reply refuses the recipient's mailbox rather than the whole
@@ -214,5 +223,15 @@ mod tests {
         assert!(!is_final_for_recipient(CODE_TRANSIENT));
         assert!(!is_final_for_recipient(CODE_TIMEOUT));
         assert!(!is_final_for_recipient(CODE_CONNECTION));
+        assert!(is_unclassified_refusal(CODE_PERMANENT));
+        for code in [
+            CODE_RECIPIENT_REJECTED,
+            CODE_INVALID_RECIPIENT,
+            CODE_TRANSIENT,
+            CODE_TIMEOUT,
+            CODE_CONNECTION,
+        ] {
+            assert!(!is_unclassified_refusal(code), "{code}");
+        }
     }
 }
