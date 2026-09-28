@@ -469,11 +469,51 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 
 ## 6. 재개
 
-1. `AGENTS.md` → `.agents/environment.md` → 이 문서 → Orca `worker-list --run run_b01d432a9dee` →
-   `git worktree list`·각 worktree `git status` → 열린 PR·main CI 순으로 실제 상태를 확인한다.
+### 6.1 인계 체크포인트 (2026-09-29 00:10 KST / 2026-09-28 15:10 UTC, Fable 코디네이터 세션 종료)
+
+다음 세션(Claude Code 앱)은 이 절과 실제 `origin/main`·열린 PR·브랜치를 대조한 뒤 인수한다. 로컬 evidence
+(`/home/kinesis/orca/fvoci-evidence/*.md`, Orca Run `run_b01d432a9dee`)는 보조자료이며 재개에 필수는 아니다.
+
+- **확인한 origin/main**: `feeee159701cd568d07bc48e985228b3eb2d99b0` (= #222 머지). 이 커밋의 main push CI는
+  `postgres-pg16`이 실패해 `rust-ci-gate`가 빨간 상태다: `tests/outbox_reset_integration.rs`
+  `apply_rewinds_and_redelivers_exactly_once_then_is_idempotent`가 "no other session in the test database" 대기 15 s 초과
+  (관측된 잔여 세션: `postgres` idle 1개; run 36436625732). PG17/PG18/ARM64는 통과. #220의 xmin-settle 수정(2ada34bd) 이후에도
+  PG16에서 재발했으므로 다음 세션의 첫 수정 대상이다(테스트 harness의 admin idle 세션이 apply의 "다른 세션" 거부에 걸리는지 확인).
+  나머지 gate(web/documents/collab-engine/install)는 성공.
+- **게시된 버전**: `v0.1.0` = `57497e2fce9efd9e953592f539003c1e0c52d7e2`, pre-release
+  https://github.com/AISFlow/fvoci/releases/tag/v0.1.0 (compose.yml·env.example·INSTALL.md·RELEASE-NOTES.md·release.json·SHA256SUMS),
+  이미지 `ghcr.io/aisflow/fvoci:0.1.0@sha256:02380fef1b906eb0be6de6bdbd94f338595ba62ae26b7ef301319d57fad07cfe` (`:0.1` 동일; 익명 pull 확인),
+  release run 36433264742 성공(제품 SHA 57497e2f, smoke 도구 SHA main 06b039e4; `release.json` 참조). 태그·이미지·Release는 이동/덮어쓰기하지 않는다.
+- **v0.1.0 이후 main에 반영된 제품 변경**(다음 patch 0.1.1 후보): #220 `fvoci-migrate --outbox-reset`, #221 첨부 viewer 첫 표시 ~300 ms 단축·페이지 지연 로드,
+  #222 Prometheus 1단계(NaN-on-failure 게이지, RSS/예산 지표, scrape 문서, `compose.metrics.yml`). 그 외는 CI·문서·테스트 변경(#216 #217 #218 #219 #224).
+- **열린 PR**: #223 `fvoci/release-0-1-1-prep`(6320891e, draft): 0.1.1 버전 bump·계약 재생성·노트. 게시 전 main 기준으로 작성됐으므로
+  #220/#221/#222 반영 후 노트를 갱신하고 다시 검토한다. 그 외 열린 비봇 PR은 아래 #225와 이 인계 PR #226뿐이다(나머지는 dependabot).
+- **원격 보존 브랜치(머지됨, 참조용)**: 위 PR들의 브랜치는 모두 push 상태. 삭제하지 않았다.
+- **수락 대기 PR(검토·CI 미완료)**: #225 `fvoci/collab-room-capacity` (base main 57497e2f, head
+  `4a68ee709f423ad9546558d4e9d3e28d4041e9fc`, push됨): 협업 room 상한에서 빈 room 즉시 회수(`src/collab/hub.rs`·`room.rs`·`transport.rs`),
+  클라이언트 재접속 폭주 제거(bounded jitter backoff, 소유 소켓), 거부된 room을 '로드되지 않음+이유'로 표시, opt-in perf flow h.
+  작성자 전후 측정(같은 호스트·조용한 창·n=10/모드): idle 포화 새 문서 본문 39.5 s→0.44 s(cap 30), 36.7 s→0.45 s(cap 64); open당 소켓 886–944→1;
+  용량 거부 시 open당 소켓 중앙값 1,513–1,808(최대 1,968)→7; holder 해제→본문 34–45 s→3.4–5.4 s. collab suites 146·clippy·fmt·web unit 396 통과(작성자).
+  독립 검토 없음. 남은 것: 첫 거부의 busy/unavailable 라벨 오류 가능성(미검증), 게시 이미지·다중 사용자 미측정.
+  보고서 `/home/kinesis/orca/fvoci-evidence/opus-collab-room-capacity.md`, 원시 결과 `fvoci-evidence/perf-baseline/4a68ee70…-collab/`(로컬 보조자료).
+- **로컬에만 남은 자료**: `/home/kinesis/orca/fvoci-evidence/`의 작성자·검토 보고서와 원시 측정 결과, 세션 진행 기록
+  `coordinator-progress-2026-09-28-fable.md`. 미푸시 커밋·추적 파일 변경은 없다. 미추적 파일만 있다: 22개 worktree의 `scripts/__pycache__/`, `rust-dev-no-python`의 `examples/dev-tools.rs`·`examples/dev_tools/`(이전 인계에서 보존된 미채택 대안), `rust-license-policy`의 `target-license/`, `rust-scheduled-revisions`의 `logs/`(모두 무시·삭제하지 않음).
+- **측정 근거 구분**: 성능 기준선(#214 도구, 측정 SHA `1101e21b` 소스 빌드)과 hotspot 검증은 로컬 보고서
+  `opus-perf-baseline.md`·`grok-editor-hotspots.md`. 게시 이미지(v0.1.0)에 대한 성능 측정은 없다. 보류 항목: `flushDelay` 50/100 실험,
+  DocumentView 구독 분리, Prometheus 2단계(room 점유·거부·회수 지표; 협업 hub accessor 필요), SSE 750 ms 폴링 설계 결정.
+- **사용자 결정·외부 검증(변경 없음)**: #149 S3 전송 정책은 확인된 사람의 결정 근거 대기, 수락된 API 프록시 유지. 실제 IdP·인증 앱·푸시 제공자 witness는
+  사용자 환경 필요. Mac Docker Desktop·rootless·Podman 미검증(Linux Docker Engine만). Svelte·Astro·Valkey·대규모 room 재설계는 보류.
+- **설치 방향(확정)**: 사용자가 짧은 `.env`를 작성하고 `docker compose up -d`; 기본 서비스 fvoci·postgres·meilisearch; 앱 시작 절차가 준비(검증·migrate·grant·검색 키) 담당,
+  정상 서버는 uid 1000·제한 앱 역할. 무설정 bootstrap 서비스·미배포 초안 호환 계층을 다시 만들지 않는다.
+- **자동 연결 해제**: 이 세션이 만든 자동 머지/릴리스 체인·CI 모니터는 모두 종료됐다. 진행 중 릴리스 없음. 원격 변경을 일으키는 예약 없음.
+- **다음 세션 예정 목표**: 백엔드 통합 점검과 선별적 정리(이 인계에서는 착수하지 않음). 그 전에 위 PG16 gate 실패를 닫고 협업 room 브랜치를 검토·통합한다.
+
+### 6.2 재개 절차
+
+1. `AGENTS.md` → `.agents/environment.md` → 이 문서 → 열린 PR·`origin/main` CI → `git worktree list`·각 worktree `git status` 순으로 실제 상태를 확인한다.
+   Orca가 있으면 `worker-list --run run_b01d432a9dee`도 대조하되, 재개를 그것에만 의존하지 않는다.
 2. 진행 중 worktree의 미수락 커밋을 보존하고 같은 작업을 중복 배정하지 않는다.
 3. 로컬 DB 검사: `scripts/start-test-postgres.sh cargo test --locked --offline --no-fail-fast
    --features db-tests --test <suite>`. 서버 실행 전 `fvoci-migrate` → `fvoci-migrate --grant-app-role <role>`.
-4. 설치 확인: 개발 stack `scripts/install-smoke.sh`, 사용자 설치 `scripts/standalone-install-smoke.sh`(RUNNING.md "Container install").
-   최신 인계: `/home/kinesis/orca/fvoci-evidence/coordinator-progress-2026-09-28-fable.md`.
-5. 다음 기능은 위 대응표의 미착수·부분 행에서 의존성이 준비된 사용자 흐름을 먼저 고른다.
+4. 설치 확인: 개발 stack `scripts/install-smoke.sh`, 사용자 설치 `scripts/standalone-install-smoke.sh`(RUNNING.md "Install"); 릴리스 절차 `docs/RELEASING.md`.
+5. 다음 기능은 위 대응표의 잔여 행에서 의존성이 준비된 사용자 흐름을 먼저 고른다.
