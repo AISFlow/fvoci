@@ -32,10 +32,10 @@ use crate::db::attachments::{create_import_attachment, mark_import_attachment_st
 use crate::db::context::defer_import_events;
 use crate::db::documents::ImportFence;
 use crate::db::import_jobs::{
-    claim_expired_import_job, claim_next_import_job, extend_import_lease, finish_import_job,
-    finish_sync_import_job, load_import_payload, purge_imported_document, purge_imported_task,
-    release_import_job_for_retry, reset_import_refs, ImportClaim, ImportJobRefs, ImportSource,
-    ImportStatus, IMPORT_MAX_ATTEMPTS, IMPORT_SWEEP_MAX,
+    claim_expired_import_job, claim_next_import_job, extend_import_lease,
+    fail_stale_sync_import_jobs, finish_import_job, finish_sync_import_job, load_import_payload,
+    purge_imported_document, purge_imported_task, release_import_job_for_retry, reset_import_refs,
+    ImportClaim, ImportJobRefs, ImportSource, ImportStatus, IMPORT_MAX_ATTEMPTS, IMPORT_SWEEP_MAX,
 };
 use crate::db::quota::StorageQuota;
 use crate::db::tasks::{create_import_task, project_status_names, CreateTaskInput};
@@ -1046,13 +1046,28 @@ pub async fn compensate_import(
     out
 }
 
-/// Source `sweepOrphanImports`, run by the daily maintenance sweep.
+/// Source `sweepOrphanImports`, run by the daily maintenance sweep, plus
+/// the markdown-zip rows a cancelled request or a crash left `pending`
+/// (see [`fail_stale_sync_import_jobs`]). Returns the rows it failed. The
+/// two parts are independent: a failed stale-row pass is logged and retried
+/// by the next sweep, and never skips the lease-expired compensation.
 pub async fn sweep_orphan_imports(
     pool: &PgPool,
     storage: &ObjectStorage,
     cancel: &CancellationToken,
 ) -> Result<u32, sqlx::Error> {
     let mut swept = 0;
+    if !cancel.is_cancelled() {
+        match fail_stale_sync_import_jobs(pool).await {
+            Ok(stale) => {
+                if stale > 0 {
+                    warn!(jobs = stale, "import.sync_stale_failed");
+                }
+                swept += u32::try_from(stale).unwrap_or(u32::MAX);
+            }
+            Err(err) => warn!(error = %err, "import.sync_stale_sweep_failed"),
+        }
+    }
     for _ in 0..IMPORT_SWEEP_MAX {
         if cancel.is_cancelled() {
             break;
@@ -1091,8 +1106,12 @@ pub enum SyncImportError {
 }
 
 /// Source `importMarkdownZip` after the job row exists: every `.md` entry
-/// becomes a root document. On failure the row is marked failed; documents
-/// already created stay (the source does not compensate this path).
+/// becomes a root document. When the run returns an error the row is marked
+/// failed; documents already created stay (the source does not compensate
+/// this path). The run is the request future: if it is dropped (client
+/// disconnect, shutdown deadline) or the process dies, the row stays
+/// `pending` until the daily sweep fails it after
+/// [`SYNC_IMPORT_STALE_SECS`](crate::db::import_jobs::SYNC_IMPORT_STALE_SECS).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_markdown_zip_import(
     pool: &PgPool,

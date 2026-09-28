@@ -29,6 +29,11 @@ pub const IMPORT_MAX_ATTEMPTS: i16 = 2;
 pub const IMPORT_RETRY_BACKOFF_SECS: i64 = 30;
 /// Source `IMPORT_SWEEP_MAX`.
 pub const IMPORT_SWEEP_MAX: usize = 100;
+/// A request-driven (markdown-zip) row still `pending` this long after its
+/// last update belongs to a request that was cancelled or a process that
+/// died. A live run never refreshes `updated_at`, so this is set far above
+/// any request instead of at [`IMPORT_LEASE_SECS`].
+pub const SYNC_IMPORT_STALE_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportSource {
@@ -738,6 +743,42 @@ pub async fn claim_expired_import_job(pool: &PgPool) -> Result<Option<ExpiredImp
             created_refs: parse_refs(refs),
         }),
     )
+}
+
+/// Fails request-driven markdown-zip rows left `pending` for longer than
+/// [`SYNC_IMPORT_STALE_SECS`] (the handler future was dropped on a client
+/// disconnect or the shutdown deadline, or the process died before the
+/// terminal update). Documents the run created stay: this path never
+/// compensates. Cross-tenant, so it runs in the system context; at most
+/// [`IMPORT_SWEEP_MAX`] rows per call. Returns how many rows it failed.
+pub async fn fail_stale_sync_import_jobs(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let previous = set_system(&mut tx).await?;
+    let result = sqlx::query(
+        r#"
+        UPDATE fvoci.import_jobs AS j
+        SET status = 'failed', payload = NULL, updated_at = now()
+        FROM (
+            SELECT workspace_id, id
+            FROM fvoci.import_jobs
+            WHERE source = 'markdown-zip'
+              AND status = 'pending'
+              AND lease_token IS NULL
+              AND updated_at < now() - make_interval(secs => $1)
+            ORDER BY updated_at, id
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+        ) AS stale
+        WHERE j.workspace_id = stale.workspace_id AND j.id = stale.id
+        "#,
+    )
+    .bind(SYNC_IMPORT_STALE_SECS as f64)
+    .bind(IMPORT_SWEEP_MAX as i64)
+    .execute(&mut *tx)
+    .await?;
+    restore_system(&mut tx, &previous).await?;
+    tx.commit().await?;
+    Ok(result.rows_affected())
 }
 
 /// Compensation of one imported document (source `compensateImport`):
