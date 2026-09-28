@@ -486,14 +486,15 @@ async fn deliver_external_chunk(
     };
     let done = done.min(chunk.len());
 
-    // The batch may have used up most of the lease: renew it before recording
-    // anything. Marks need no lease, so every event whose effect is confirmed
-    // is marked before the cursor moves; when the lease is lost here, the
-    // next owner finds the marks and does not deliver these events again.
-    let leased = lease_consumer(pool, consumer.name(), owner, ttl_secs).await?;
+    // Marks need no lease: mark every event whose effect is confirmed first,
+    // so neither a lost lease nor a failed renewal leaves one unmarked; the
+    // next owner (or cycle) finds the marks and does not deliver these events
+    // again. The batch may have used up most of the lease: renew it before
+    // the cursor moves or a failure is recorded.
     for event in chunk.iter().take(done) {
         let _ = mark_processed(pool, consumer.name(), event.id).await?;
     }
+    let leased = lease_consumer(pool, consumer.name(), owner, ttl_secs).await?;
     if !leased {
         warn!(
             consumer = consumer.name(),

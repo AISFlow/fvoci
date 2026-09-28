@@ -3134,3 +3134,159 @@ async fn recover_keeps_old_window_marks_through_processed_gc() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// Delivers every event of a batch, then arms a fault that fails the next
+/// update of this consumer's row with a database error once: the lease
+/// renewal after the batch.
+struct RenewalFaultExternal {
+    name: String,
+    admin: PgPool,
+    fired: AtomicBool,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+}
+
+impl OutboxConsumer for RenewalFaultExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            *self
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .entry(event.id)
+                .or_default() += 1;
+            Ok(())
+        })
+    }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        events: &'a [fvoci_server::db::outbox::OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            {
+                let mut deliveries = self.deliveries.lock().expect("deliveries");
+                for event in events {
+                    *deliveries.entry(event.id).or_default() += 1;
+                }
+            }
+            if events.len() > 1 && !self.fired.swap(true, Ordering::SeqCst) {
+                sqlx::query("SELECT setval('public.outbox_renewal_fault', 1, false)")
+                    .execute(&self.admin)
+                    .await
+                    .expect("arm the renewal fault");
+            }
+            (events.len(), None)
+        })
+    }
+}
+
+/// The lease renewal after a batch fails with a database error (not a lost
+/// lease): the delivered events are already marked, so the next cycle does
+/// not deliver them again.
+#[tokio::test]
+async fn renewal_error_after_the_batch_still_marks_every_event() {
+    let consumer_name = "renewfault";
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    // nextval is not rolled back with the failed statement, so an armed
+    // fault (setval to 1) fires once. Unarmed, the sequence never returns 1.
+    for sql in [
+        "CREATE SEQUENCE public.outbox_renewal_fault START WITH 100".to_string(),
+        r#"
+        CREATE FUNCTION public.outbox_renewal_fault() RETURNS trigger
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        BEGIN
+            IF NEW.consumer = TG_ARGV[0] THEN
+                IF nextval('public.outbox_renewal_fault') = 1 THEN
+                    RAISE EXCEPTION 'injected lease renewal failure';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#
+        .to_string(),
+        format!(
+            "CREATE TRIGGER outbox_renewal_fault BEFORE UPDATE ON fvoci.outbox_consumers \
+             FOR EACH ROW EXECUTE FUNCTION public.outbox_renewal_fault('{consumer_name}')"
+        ),
+    ] {
+        sqlx::query(&sql)
+            .execute(&admin)
+            .await
+            .expect("install fault");
+    }
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let ids = insert_test_events(&app, "test.renewfault", 5).await;
+    ensure_consumer(&app, consumer_name).await.expect("ensure");
+    wait_until_readable(&app, consumer_name, ids[4]).await;
+    let consumer = Arc::new(RenewalFaultExternal {
+        name: consumer_name.to_string(),
+        admin: admin.clone(),
+        fired: AtomicBool::new(false),
+        deliveries: Mutex::new(HashMap::new()),
+    });
+
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    let last = fetch_event_by_id(&app, ids[4])
+        .await
+        .expect("last")
+        .expect("row");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let admin = admin.clone();
+        let ids = ids.clone();
+        let last = (last.xact.clone(), last.seq);
+        Box::pin(async move {
+            all_processed(&pool, consumer_name, &ids).await
+                && fetch_cursor(&admin, consumer_name).await.ok().flatten() == Some(last)
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(
+        consumer.fired.load(Ordering::SeqCst),
+        "renewal fault not armed"
+    );
+    let fault_fired: bool = sqlx::query_scalar(
+        "SELECT is_called AND last_value < 100 FROM public.outbox_renewal_fault",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("fault sequence");
+    assert!(fault_fired, "the armed fault must have fired");
+    let deliveries = consumer.deliveries.lock().expect("deliveries").clone();
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            deliveries.get(id).copied().unwrap_or(0),
+            1,
+            "event {i} delivered {:?} times after the renewal failed",
+            deliveries.get(id)
+        );
+    }
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
