@@ -9,6 +9,7 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -17,10 +18,11 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::{DateTime, Utc};
-use fvoci_server::attachments::{LocalStorage, ObjectStorage};
+use fvoci_server::attachments::{LocalStorage, ObjectStorage, S3Storage};
 use fvoci_server::auth::password::{hash_password, Keyring};
 use fvoci_server::auth::token::hash_token;
 use fvoci_server::auth::AuthService;
+use fvoci_server::config::S3Settings;
 use fvoci_server::db::{pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
@@ -2378,6 +2380,200 @@ async fn export_streams_profile_comments_and_attachments() {
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[1].data, b"[]\n");
     assert_eq!(entries[2].data, b"[]\n");
+    h.finish().await;
+}
+
+/// A scripted S3 stand-in. Each request for a key takes the next status from
+/// that key's script (500 once it runs out); a HEAD 200 carries
+/// `content-length: <size>`. Every request is logged as `METHOD key status`.
+struct ScriptedS3 {
+    endpoint: String,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl ScriptedS3 {
+    async fn start(size: u64, scripts: Vec<(String, Vec<u16>)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind s3");
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let scripts: HashMap<String, VecDeque<u16>> = scripts
+            .into_iter()
+            .map(|(key, statuses)| (key, statuses.into()))
+            .collect();
+        let scripts = Arc::new(Mutex::new(scripts));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let task_log = log.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let scripts = scripts.clone();
+                let log = task_log.clone();
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(socket);
+                    loop {
+                        let mut request_line = String::new();
+                        if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        loop {
+                            let mut header = String::new();
+                            if reader.read_line(&mut header).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if header == "\r\n" {
+                                break;
+                            }
+                        }
+                        let mut fields = request_line.split(' ');
+                        let method = fields.next().unwrap_or_default().to_string();
+                        let target = fields.next().unwrap_or_default();
+                        let path = target.split('?').next().unwrap_or_default();
+                        let key = path.rsplit('/').next().unwrap_or_default().to_string();
+                        let status = scripts
+                            .lock()
+                            .unwrap()
+                            .get_mut(&key)
+                            .and_then(VecDeque::pop_front)
+                            .unwrap_or(500);
+                        log.lock().unwrap().push(format!("{method} {key} {status}"));
+                        let length = if method == "HEAD" && status == 200 {
+                            size
+                        } else {
+                            0
+                        };
+                        let reply = format!(
+                            "HTTP/1.1 {status} Scripted\r\ncontent-length: {length}\r\n\r\n"
+                        );
+                        if reader.get_mut().write_all(reply.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self { endpoint, log }
+    }
+
+    fn storage(&self) -> ObjectStorage {
+        ObjectStorage::from(
+            S3Storage::new(S3Settings {
+                endpoint: self.endpoint.clone(),
+                public_endpoint: None,
+                region: "us-east-1".into(),
+                bucket: "fvoci".into(),
+                access_key_id: "scripted".into(),
+                secret_access_key: "scripted-secret".into(),
+                force_path_style: true,
+            })
+            .expect("s3 settings"),
+        )
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.log.lock().unwrap().clone()
+    }
+}
+
+/// GET /me/export; the body is `Err` when the server aborted the stream.
+async fn export_body(h: &Harness, cookie: &str) -> (StatusCode, Result<Vec<u8>, String>) {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri("/api/v1/me/export")
+        .header("origin", "http://localhost")
+        .header("cookie", format!("fvoci_session={cookie}"))
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer(72)));
+    let response = h.app.clone().oneshot(request).await.expect("response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|err| err.to_string());
+    (status, body)
+}
+
+#[tokio::test]
+async fn export_skips_only_objects_the_recheck_proves_missing() {
+    // Each attachment: the first HEAD finds it, the ranged GET fails with
+    // 503, then the recheck HEAD answers 404 (really gone: skip), 503
+    // (unknown: abort) or 200 (present but unreadable: abort).
+    let gone = Uuid::now_v7().to_string();
+    let flaky = Uuid::now_v7().to_string();
+    let unreadable = Uuid::now_v7().to_string();
+    let s3 = ScriptedS3::start(
+        5,
+        vec![
+            (gone.clone(), vec![200, 503, 404]),
+            (flaky.clone(), vec![200, 503, 503]),
+            (unreadable.clone(), vec![200, 503, 200]),
+        ],
+    )
+    .await;
+    let h = Harness::start_with_storage(Some(s3.storage())).await;
+    let document_id = h.wiki_document().await;
+    for (label, key, skipped) in [
+        ("gone", &gone, true),
+        ("flaky", &flaky, false),
+        ("unreadable", &unreadable, false),
+    ] {
+        let (user_id, _, cookie) = h.member(label, "member").await;
+        let attachment_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.attachments (
+                id, workspace_id, document_id, uploader_id, status, name, mime,
+                reserved_size_bytes, size_bytes, storage_key, scan_status, completed_at
+            ) VALUES ($1, $2, $3, $4, 'stored', 'a.pdf', 'application/pdf', 5, 5, $5, 'clean', now())
+            "#,
+        )
+        .bind(attachment_id)
+        .bind(h.workspace_id)
+        .bind(document_id)
+        .bind(user_id)
+        .bind(key)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+        let (status, body) = export_body(&h, &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{label}");
+        match body {
+            Ok(bytes) if skipped => {
+                external_zip_check(&bytes);
+                let entries = read_zip(&bytes);
+                let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+                assert_eq!(
+                    names,
+                    vec!["profile.json", "comments.json", "attachments.json"],
+                    "{label}"
+                );
+                let listed: Value = serde_json::from_slice(&entries[2].data).unwrap();
+                assert_eq!(listed[0]["id"], attachment_id.to_string(), "{label}");
+            }
+            Err(_) if !skipped => {}
+            Ok(bytes) => panic!(
+                "{label}: a storage error on the recheck must abort the archive, \
+                 not finish a {}-byte export without the attachment",
+                bytes.len()
+            ),
+            Err(err) => panic!("{label}: a missing object must be skipped: {err}"),
+        }
+    }
+    let expected: Vec<String> = [
+        (&gone, [200, 503, 404]),
+        (&flaky, [200, 503, 503]),
+        (&unreadable, [200, 503, 200]),
+    ]
+    .iter()
+    .flat_map(|(key, [head, get, recheck])| {
+        [
+            format!("HEAD {key} {head}"),
+            format!("GET {key} {get}"),
+            format!("HEAD {key} {recheck}"),
+        ]
+    })
+    .collect();
+    assert_eq!(s3.requests(), expected);
     h.finish().await;
 }
 
