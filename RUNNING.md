@@ -20,6 +20,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `PASSWORD_PEPPER_KEYS` | JSON map of pepper key id → 64-char hex. |
 | `PASSWORD_PEPPER_ACTIVE_KEY_ID` | Active pepper id. |
 | `FVOCI_BIND` | Listen address (default `127.0.0.1:0`). |
+| `METRICS_ALLOW_IPS` | `/metrics` allowlist (source contract): comma-separated IPv4 addresses or CIDRs with a required `/1`–`/32` prefix; IPv4-mapped IPv6 peers compare as IPv4, IPv6 entries are refused. Unset or empty denies every peer (404). Only the direct socket peer counts; `X-Forwarded-For` is ignored. List the scraper's direct address; a reverse proxy must not forward `/metrics` (or must restrict it itself), because listing the proxy's address makes `/metrics` public to everyone the proxy forwards. One malformed entry refuses startup. `/health` and `/ready` are not affected. |
 | `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). Trailing slashes are normalized. An explicit port `0` follows the actual bound port. |
 | `FVOCI_COOKIE_SECURE` | `true`/`1` to set `Secure` on session cookies; defaults from `FVOCI_PUBLIC_ORIGIN` scheme. |
 | `FVOCI_LICENSE_KEY` | Optional secret FVOCI2 enterprise entitlement. Absent, malformed, untrusted, or expired tokens do not block startup: audit, branding, and workspace SSO remain disabled; seats default to 10 and storage/upload limits to unlimited. The server verifies offline using only the public keys compiled into `src/license-trust.json`, which is currently empty, matching the fixed source. No issued token can activate enterprise features until issuer public keys are supplied in a reviewed release build; there is no environment trust-key override. Rotate the token by restarting the server; its validity window is rechecked during use. Keep the token out of logs and backups shared outside the operator boundary. Instance OIDC remains available without an enterprise license. |
@@ -220,6 +221,24 @@ Integration tests always create and drop their own UUID database and app role; t
 | POST | `/api/v1/auth/logout` | Revoke current session and clear cookie |
 
 PATCH requires `givenName`; `familyName` omitted preserves the value, null or an empty string clears it. Other optional fields are `locale` (`ko`), `timezone`, `weekStartsOn` (0/1), and `textScale` (16/18/20). Unknown fields are rejected. Use the bound address printed at startup; default port 0 is selected by the listening socket.
+
+### Probes
+
+Outside `/api/v1`, not in `apps/web/openapi.json`, and never behind the session,
+consent or bearer checks (source `INFRA_PATHS`):
+
+| URL | Result |
+| --- | --- |
+| `GET /health` | Liveness: always `200 {"ok":true}`. |
+| `GET /ready` | `200 {"ok":true}`, or `503 {"ok":false,"checks":{"pg":false,...}}`. Checks the app-role PostgreSQL pool (`SELECT 1`) and, when collaboration is enabled, that the hub is not shutting down (`collab`). Each check is bounded by 2 s. There is no Redis to check. |
+| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers get the generic `404 not_found` problem. `fvoci_http_request_duration_seconds{method,route,status}` (route is the router template or `unmatched`), `fvoci_outbox_lag_seconds` (age of the oldest event still deliverable under the current snapshot xmin that some outbox consumer cursor has not yet passed; refreshed at most every 15 s, the last value is kept when the query fails. Backlog held behind a long-running or idle-in-transaction session (xmin stall) is **not** visible to this metric; the source also exported `fvoci_outbox_xmin_stall_total`, which is not ported yet — a follow-up needs a read-only DB function without the xmin filter), `fvoci_task_stream_subscribers` (open SSE streams), `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections`. No label holds a workspace, user, token or concrete path. |
+
+`fvoci-server healthcheck` requests `GET /ready` from the address in `FVOCI_BIND`
+(a wildcard bind is probed on loopback) and exits 0 on a 2xx answer within 4 s,
+otherwise 1. It reads no other configuration or secrets. The source modes
+`worker`, `compact` and `thumbnail` exit 1 with a message because those roles
+run inside the server here. The Compose server healthcheck still requests
+`/api/v1/setup` with curl.
 
 ### Response security headers
 
@@ -1083,9 +1102,12 @@ job, backup and restore (the server binary stays single-purpose):
 | — (restore check) | `fvoci-migrate --verify-storage` | the server's |
 | `fvoci secrets rotate-vapid` | `fvoci-migrate --rotate-vapid` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
 
-Not ported: `secrets audit/rotate`, `reindex` (extract re-enqueue), `healthcheck`
-and the split worker roles (`worker`, `compact`, `thumbnail`, `collab`); the Rust
-server runs those jobs in-process.
+`fvoci healthcheck` is `fvoci-server healthcheck` (see "Probes"; it probes the
+server, not a `fvoci-migrate` mode).
+
+Not ported: `secrets audit/rotate`, `reindex` (extract re-enqueue) and the split
+worker roles (`worker`, `compact`, `thumbnail`, `collab`) with their
+`healthcheck <role>` heartbeat checks; the Rust server runs those jobs in-process.
 
 **`--init-env`** writes the Compose env file from `infra/rust/.env.example` with
 fresh secrets: `POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`

@@ -13,6 +13,7 @@ pub mod documents;
 pub mod error;
 pub mod export_zip;
 pub mod gantt;
+pub mod healthcheck;
 pub mod http;
 pub mod ics;
 pub mod identity;
