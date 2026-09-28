@@ -25,7 +25,9 @@ RUN cargo fetch --locked \
  && cd crates/document-extract && bash fetch-rhwp.sh && cargo fetch --locked
 
 FROM rust-deps AS rust-build
-ENV CARGO_TARGET_DIR=/src/target
+# Release builds pass the tagged commit so `fvoci-server --version` can report it.
+ARG FVOCI_BUILD_SHA=
+ENV CARGO_TARGET_DIR=/src/target FVOCI_BUILD_SHA=${FVOCI_BUILD_SHA}
 RUN cargo build --locked --release --bin fvoci-server --bin fvoci-migrate \
  && cargo build --locked --release --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine \
  && cargo build --locked --release --manifest-path crates/document-extract/Cargo.toml --bin document-extract
