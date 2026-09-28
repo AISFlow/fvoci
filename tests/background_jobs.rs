@@ -3017,3 +3017,88 @@ async fn digest_sweep_stops_after_a_streak_of_relay_failures() {
     pool.close().await;
     harness.cleanup().await;
 }
+
+/// A relay without enhanced status codes (Exim by default, cPanel, qmail)
+/// refuses an unknown user with a bare 550. The relay answered, so a run of
+/// such bounces is not taken as SMTP down: the sweep goes on past five of
+/// them, and a sent digest starts the refusal count again.
+#[tokio::test]
+async fn digest_sweep_goes_on_past_a_run_of_bare_550_bounces() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 45).await;
+    let bounce = RcptReply::Reply("550 No such user here");
+    let mut replies = vec![bounce; 19];
+    replies.push(RcptReply::Reply("250 ok"));
+    replies.extend([bounce; 19]);
+    let sink = SmtpSink::spawn_in_order(replies).await;
+
+    let now = Utc::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sink.rcpt_log().len(), 45, "every due row is tried");
+    assert_eq!(sent, 7, "the accepted sends between and after the bounces");
+    assert_eq!(sink.count(), 7);
+    assert_eq!(
+        digest_rows_due(&admin, now).await,
+        38,
+        "the bounced claims are handed back"
+    );
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A relay that refuses every recipient with a 5xx that is not a mailbox
+/// code (here cPanel's hourly limit, a bare 550) is refusing everyone: the
+/// sweep stops after a longer streak of such refusals, and every claim is
+/// handed back.
+#[tokio::test]
+async fn digest_sweep_stops_after_a_streak_of_unclassified_refusals() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+    let limit = RcptReply::Reply(
+        "550 Domain example.com has exceeded the max emails per hour (100/100 (100%)) allowed.",
+    );
+    let sink = SmtpSink::spawn_in_order(vec![limit; 150]).await;
+
+    let now = Utc::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sent, 0);
+    assert_eq!(
+        sink.rcpt_log().len(),
+        20,
+        "the sweep stops after the streak"
+    );
+    let claimed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.notification_prefs WHERE mail_digest AND last_digest_at IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(claimed, 0, "every claim is handed back");
+    assert_eq!(digest_rows_due(&admin, now).await, 150);
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}

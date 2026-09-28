@@ -12,16 +12,36 @@ const DIGEST_BATCH: i64 = 100;
 /// maintenance task, which also runs the upload GC and revision sweeps; the
 /// rows a sweep does not reach stay due for the next daily sweep.
 const DIGEST_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-/// Failed sends in a row, across batches, after which the sweep takes SMTP
-/// to be down and stops. A sent digest or a refusal of one recipient's
-/// mailbox resets the count: both show the relay is up and serving.
+/// Sends that failed with a 4xx, a timeout, a connection failure or a local
+/// error, counted across batches, after which the sweep takes SMTP to be
+/// down and stops. A 5xx does not count here: the relay answered (see
+/// `DIGEST_REFUSAL_STREAK`). A sent digest or a refusal final for one
+/// recipient (`smtp::is_final_for_recipient`: an enhanced X.1/X.2 mailbox
+/// code, a bare 551, an address that does not parse) resets the count, as
+/// both show the relay is up and serving. A row with nothing to send and a
+/// 5xx leave it as it is.
 ///
-/// Known limitation: a row with nothing to send does not reset the count.
-/// Five recipients whose sends fail every day (a lasting 4xx such as
-/// `452 4.2.2` over quota, or a 5xx policy refusal), with only such rows
-/// between them, still end the walk. It ends at the same row every day, so
-/// the rows after it are not served while those recipients keep failing.
+/// Known limitation: five recipients whose sends fail every day with a
+/// lasting 4xx (such as `452 4.2.2` over quota), with only rows that send
+/// nothing or get a 5xx between them, still end the walk. It ends at the
+/// same row every day, so the rows after it are not served while those
+/// recipients keep failing.
 const DIGEST_DOWN_STREAK: u32 = 5;
+/// Sends refused with a 5xx not known to be about the recipient
+/// (`smtp::is_unclassified_refusal`), counted across batches, after which
+/// the sweep takes the relay to refuse every recipient (a daily sending
+/// limit, a refused sender) and stops. It is larger than
+/// `DIGEST_DOWN_STREAK` because relays that send no enhanced status codes
+/// (Exim by default, cPanel, qmail) refuse an unknown user with a bare 550,
+/// which the classifier cannot tell from a relay-wide refusal. The same
+/// events reset it as `DIGEST_DOWN_STREAK`; a 4xx, timeout or connection
+/// failure leaves it as it is.
+///
+/// Known limitation: twenty such refusals every day (for example unknown
+/// users on such a relay), with only rows that send nothing or fail without
+/// a 5xx between them, end the walk at the same row every day, like
+/// `DIGEST_DOWN_STREAK`.
+const DIGEST_REFUSAL_STREAK: u32 = 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DigestError {
@@ -44,10 +64,13 @@ type DigestClaim = (Uuid, Uuid, Option<DateTime<Utc>>);
 /// batch after another, so every due row is served, not only the first
 /// batch. A failed claim is handed back right after its send; it lies behind
 /// the walk, so this sweep does not claim it again. The walk stops after a short
-/// batch, on cancel, after `DIGEST_TIME_BUDGET`, or after
-/// `DIGEST_DOWN_STREAK` failed sends in a row (SMTP is most likely down); the
-/// claims not tried are handed back. One recipient's 4xx counts towards the
-/// streak but cannot end the walk on its own.
+/// batch, on cancel, after `DIGEST_TIME_BUDGET`, after `DIGEST_DOWN_STREAK`
+/// sends that failed without a reply or with a 4xx (SMTP is most likely
+/// down), or after `DIGEST_REFUSAL_STREAK` unclassified 5xx refusals (the
+/// relay most likely refuses everyone), in both cases without a sent digest
+/// or a final refusal between them; the claims not tried are handed back.
+/// One recipient's failure counts towards a streak but cannot end the walk
+/// on its own.
 pub async fn send_due_digests(
     pool: &PgPool,
     mailer: &Mailer,
@@ -57,15 +80,13 @@ pub async fn send_due_digests(
     let before =
         now - chrono::Duration::from_std(DIGEST_INTERVAL).unwrap_or(chrono::Duration::days(1));
     let deadline = std::time::Instant::now() + DIGEST_TIME_BUDGET;
-    let stop = |down_streak: u32| {
-        down_streak >= DIGEST_DOWN_STREAK
-            || cancel.is_cancelled()
-            || std::time::Instant::now() >= deadline
+    let mut streaks = SendStreaks::default();
+    let stop = |streaks: &SendStreaks| {
+        streaks.ended() || cancel.is_cancelled() || std::time::Instant::now() >= deadline
     };
     let mut after: Option<(Uuid, Uuid)> = None;
     let mut sent = 0u32;
-    let mut down_streak = 0u32;
-    while !stop(down_streak) {
+    while !stop(&streaks) {
         let due = claim_digest_due(pool, before, now, after).await?;
         // UPDATE .. RETURNING has no order: the walk resumes after the largest key.
         let Some(last) = due.iter().map(|(ws, user, _)| (*ws, *user)).max() else {
@@ -76,7 +97,7 @@ pub async fn send_due_digests(
 
         let mut pending = due.into_iter();
         while let Some(claim) = pending.next() {
-            if stop(down_streak) {
+            if stop(&streaks) {
                 // Hand the claims not tried back so the next sweep sends them.
                 for (workspace_id, user_id, prev_last) in std::iter::once(claim).chain(pending) {
                     restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
@@ -87,7 +108,7 @@ pub async fn send_due_digests(
             match send_claimed(pool, mailer, workspace_id, user_id, prev_last).await {
                 Ok(true) => {
                     sent += 1;
-                    down_streak = 0;
+                    streaks = SendStreaks::default();
                 }
                 Ok(false) => {}
                 Err(err) => {
@@ -96,12 +117,7 @@ pub async fn send_due_digests(
                     // the walk, so this sweep does not claim it again, and a
                     // sweep dropped later in the batch still leaves it due.
                     restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
-                    if matches!(&err, DigestError::Mail(mail) if smtp::is_final_for_recipient(&mail.code))
-                    {
-                        down_streak = 0;
-                    } else {
-                        down_streak += 1;
-                    }
+                    streaks.failed(&err);
                     tracing::warn!(
                         message = %format!("digest: recipient deferred to the next sweep ({err})"),
                         "mail.send_failed"
@@ -114,6 +130,32 @@ pub async fn send_due_digests(
         }
     }
     Ok(sent)
+}
+
+/// Failed sends counted towards `DIGEST_DOWN_STREAK` and
+/// `DIGEST_REFUSAL_STREAK` since the last sent digest or final refusal.
+#[derive(Default)]
+struct SendStreaks {
+    down: u32,
+    refused: u32,
+}
+
+impl SendStreaks {
+    fn failed(&mut self, err: &DigestError) {
+        match err {
+            DigestError::Mail(mail) if smtp::is_final_for_recipient(&mail.code) => {
+                *self = Self::default();
+            }
+            DigestError::Mail(mail) if smtp::is_unclassified_refusal(&mail.code) => {
+                self.refused += 1;
+            }
+            _ => self.down += 1,
+        }
+    }
+
+    fn ended(&self) -> bool {
+        self.down >= DIGEST_DOWN_STREAK || self.refused >= DIGEST_REFUSAL_STREAK
+    }
 }
 
 /// Undo a claim that did not send: put back the previous `last_digest_at`
@@ -231,4 +273,58 @@ async fn send_claimed(
         .await
         .map_err(DigestError::Mail)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mail::MailSendError;
+
+    fn mail(code: &str) -> DigestError {
+        DigestError::Mail(MailSendError {
+            op: "send",
+            code: code.to_string(),
+        })
+    }
+
+    #[test]
+    fn a_5xx_counts_only_towards_the_refusal_streak() {
+        let mut streaks = SendStreaks::default();
+        for _ in 1..DIGEST_REFUSAL_STREAK {
+            streaks.failed(&mail("permanent"));
+        }
+        assert!(!streaks.ended(), "a run of 5xx is not SMTP down");
+        streaks.failed(&mail("permanent"));
+        assert!(streaks.ended());
+    }
+
+    #[test]
+    fn transport_failures_count_towards_the_down_streak() {
+        let mut streaks = SendStreaks::default();
+        for code in ["transient", "timeout", "connection", "tls_config"] {
+            streaks.failed(&mail(code));
+        }
+        streaks.failed(&mail("permanent"));
+        assert!(!streaks.ended(), "a 5xx neither adds to nor resets it");
+        streaks.failed(&mail("transient"));
+        assert!(streaks.ended());
+    }
+
+    #[test]
+    fn a_final_refusal_resets_both_streaks() {
+        let mut streaks = SendStreaks::default();
+        for final_code in ["recipient_rejected", "invalid_recipient"] {
+            for _ in 1..DIGEST_DOWN_STREAK {
+                streaks.failed(&mail("transient"));
+            }
+            for _ in 1..DIGEST_REFUSAL_STREAK {
+                streaks.failed(&mail("permanent"));
+            }
+            streaks.failed(&mail(final_code));
+            streaks.failed(&mail("transient"));
+            streaks.failed(&mail("permanent"));
+            assert!(!streaks.ended(), "{final_code}");
+            streaks = SendStreaks::default();
+        }
+    }
 }
