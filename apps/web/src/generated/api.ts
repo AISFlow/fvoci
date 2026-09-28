@@ -2038,6 +2038,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_workspace_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/export": {
         parameters: {
             query?: never;
@@ -5702,6 +5718,23 @@ export interface components {
         };
         WorkspaceConsentsResponse: {
             members: components["schemas"]["WorkspaceMemberConsentsOutput"][];
+        };
+        WorkspaceEventListResponse: {
+            items: components["schemas"]["WorkspaceEventOutput"][];
+            nextCursor?: string | null;
+        };
+        /** @description Source `eventOutput` (packages/contracts/src/events.ts). */
+        WorkspaceEventOutput: {
+            actorUserId?: string | null;
+            channel: string;
+            /** Format: date-time */
+            createdAt: string;
+            id: string;
+            payload: Record<string, never>;
+            targetId?: string | null;
+            targetType?: string | null;
+            verb: string;
+            workspaceId?: string | null;
         };
         WorkspaceListItemResponse: {
             /** Format: int32 */
@@ -14051,6 +14084,61 @@ export interface operations {
                 };
             };
             /** @description Not found or no edit permission */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_workspace_events: {
+        parameters: {
+            query?: {
+                /** @description Page size 1-100 (default 50) */
+                limit?: number;
+                /** @description Relay-order cursor from nextCursor */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace event log, oldest first (owners and admins) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceEventListResponse"];
+                };
+            };
+            /** @description Invalid query or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
             404: {
                 headers: {
                     [name: string]: unknown;

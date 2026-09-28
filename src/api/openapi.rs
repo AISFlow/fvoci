@@ -76,7 +76,7 @@ use crate::api::dto::{
     DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, EmailChangeBody,
     ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse,
     MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, TokenBody, WithdrawBody,
-    WorkspaceStatusOutput,
+    WorkspaceEventListResponse, WorkspaceEventOutput, WorkspaceStatusOutput,
 };
 #[cfg(feature = "api-schema")]
 use crate::gantt::{
@@ -151,6 +151,7 @@ impl Modify for CookieSecurityAddon {
         patch_workspace,
         delete_workspace,
         workspace_export,
+        list_workspace_events,
         list_members,
         patch_member,
         remove_member,
@@ -395,6 +396,8 @@ impl Modify for CookieSecurityAddon {
             WorkspaceListResponse,
             WorkspaceListItemResponse,
             WorkspaceMetaResponse,
+            WorkspaceEventOutput,
+            WorkspaceEventListResponse,
             CreateHolidayBody,
             HolidaysListResponse,
             IcsTokenResponse,
@@ -1349,6 +1352,26 @@ fn delete_workspace() {}
     )
 )]
 fn workspace_export() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/events",
+    tag = "workspaces",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("limit" = Option<i32>, Query, description = "Page size 1-100 (default 50)"),
+        ("cursor" = Option<String>, Query, description = "Relay-order cursor from nextCursor"),
+    ),
+    responses(
+        (status = 200, description = "Workspace event log, oldest first (owners and admins)", body = WorkspaceEventListResponse),
+        (status = 400, description = "Invalid query or cursor", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_workspace_events() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

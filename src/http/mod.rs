@@ -2,6 +2,7 @@ pub mod authz;
 pub mod cookie;
 pub mod guard;
 pub mod json_input;
+pub mod probes;
 pub mod rate_limit;
 pub mod request_trace;
 pub mod routes;
@@ -29,7 +30,7 @@ use crate::http::state::AppState;
 
 /// API paths a signed-in user without the latest required consents may still
 /// use (source `CONSENT_ALLOWLIST`, `http-runtime.ts`; its health/ready/metrics
-/// entries have no counterpart on this server's API router).
+/// entries are the `probes` routes, merged outside this gate).
 const CONSENT_ALLOWLIST: &[&str] = &[
     "/setup",
     "/branding",
@@ -128,12 +129,29 @@ pub fn router_with_identity(
     )
 }
 
-/// The full router: integration and identity settings.
+/// Integration and identity settings; `/metrics` denies every peer.
 pub fn router_with_settings(
     state: AppState,
     static_dir: Option<PathBuf>,
     integrations: std::sync::Arc<crate::integrations::Integrations>,
     identity: std::sync::Arc<crate::identity::Identity>,
+) -> Router {
+    router_with_observability(
+        state,
+        static_dir,
+        integrations,
+        identity,
+        std::sync::Arc::new(probes::Observability::new(Default::default())),
+    )
+}
+
+/// The full router: integration, identity and probe/metrics settings.
+pub fn router_with_observability(
+    state: AppState,
+    static_dir: Option<PathBuf>,
+    integrations: std::sync::Arc<crate::integrations::Integrations>,
+    identity: std::sync::Arc<crate::identity::Identity>,
+    observability: std::sync::Arc<probes::Observability>,
 ) -> Router {
     let public_origin = state.public_origin.clone();
     let share_state = state.clone();
@@ -181,7 +199,8 @@ pub fn router_with_settings(
         .merge(collab)
         .layer(middleware::from_fn_with_state(state.clone(), consent_gate))
         .layer(middleware::from_fn(canonicalize_bearer_path))
-        .with_state(state);
+        .with_state(state.clone())
+        .merge(probes::router(state, observability.clone()));
 
     let security = std::sync::Arc::new(security_headers::SecurityHeaders::new(
         &public_origin,
@@ -201,6 +220,10 @@ pub fn router_with_settings(
             response
         }
     }))
+    .layer(middleware::from_fn_with_state(
+        observability,
+        probes::record_http,
+    ))
     .layer(request_trace::layer())
 }
 

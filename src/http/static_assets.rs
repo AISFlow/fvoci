@@ -130,6 +130,11 @@ async fn serve_static_file(req: Request<Body>, root: PathBuf, index: PathBuf) ->
     if path.starts_with(crate::error::API_PREFIX) {
         return unknown_api_fallback(req).await;
     }
+    // Probe paths never fall through to the SPA shell (source
+    // `SHELL_EXCLUDED_PREFIXES`): a 200 HTML page would pass a health check.
+    if crate::http::probes::is_probe_path(path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !is_safe_static_path(path) {
         return StatusCode::NOT_FOUND.into_response();
     }
