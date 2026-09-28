@@ -537,7 +537,10 @@ async fn default_backlog_status(
     Ok(fallback.map(|(id,)| id))
 }
 
-const TASK_STATUS_LOCK_NAMESPACE: i32 = 1_907_002;
+/// Serializes WIP-limit checks per target status (transaction-scoped). It
+/// used to share 1_907_002 with attachment storage; during a rolling upgrade a
+/// server still on that value does not serialize its checks with this one.
+pub(crate) const TASK_STATUS_LOCK_NAMESPACE: i32 = 1_907_003;
 
 fn violates_task_hierarchy(child_type: &str, parent_type: &str) -> bool {
     if child_type == "subtask" {

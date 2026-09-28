@@ -2215,3 +2215,65 @@ async fn batch_cancelled_while_holding_the_lock_releases_it() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// An open collab room holds its session fence on
+/// `(COLLAB_ROOM_SESSION_LOCK_NAMESPACE, low32(document id))` for the room's
+/// lifetime. When that key equals a workspace's search lock key the batch
+/// must still run: the two locks live in different namespaces.
+#[tokio::test]
+async fn open_room_fence_with_the_workspace_key_does_not_block_indexing() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxfence").await;
+    let event = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.created",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+
+    // Stand-in for a room whose document id shares the workspace's low 32 bits.
+    let fence_ns = fvoci_server::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
+    let key = fvoci_server::db::context::lock_key_from_uuid(fixture.workspace_id);
+    let mut room = admin.acquire().await.expect("room fence session");
+    sqlx::query("SELECT pg_advisory_lock($1, $2)")
+        .bind(fence_ns)
+        .bind(key)
+        .execute(&mut *room)
+        .await
+        .expect("hold room fence");
+
+    let indexed = tokio::time::timeout(
+        Duration::from_secs(5),
+        process_search_index_event(&app, &meili, &event),
+    )
+    .await;
+
+    sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+        .bind(fence_ns)
+        .bind(key)
+        .execute(&mut *room)
+        .await
+        .expect("release room fence");
+    drop(room);
+    assert!(
+        matches!(indexed, Ok(Ok(()))),
+        "search batch blocked or failed behind the room fence: {:?}",
+        indexed
+            .as_ref()
+            .map(|result| result.as_ref().err().map(ToString::to_string))
+    );
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}

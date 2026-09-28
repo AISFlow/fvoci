@@ -3,7 +3,11 @@ use uuid::Uuid;
 
 pub const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
 pub const TREE_LOCK_NAMESPACE: i32 = 1_907_005;
-pub const SEARCH_INDEX_LOCK_NAMESPACE: i32 = 1_907_007;
+/// Per-workspace search index lock (transaction-scoped). Not 1_907_007: that is
+/// the collab room fence, a session lock held for a room's lifetime, which
+/// stalled a workspace's indexing whenever a document id and the workspace id
+/// shared their low 32 bits.
+pub const SEARCH_INDEX_LOCK_NAMESPACE: i32 = 1_907_009;
 pub const SEARCH_REBUILD_LOCK_KEY: i64 = 1_907_008;
 
 tokio::task_local! {
@@ -228,4 +232,68 @@ pub async fn lock_tree(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_unique<T: Copy + Eq + std::fmt::Debug>(space: &str, locks: &[(&str, T)]) {
+        let mut shared = Vec::new();
+        for (i, (name, value)) in locks.iter().enumerate() {
+            for (other, other_value) in &locks[i + 1..] {
+                if value == other_value {
+                    shared.push(format!("{name} and {other} share {value:?}"));
+                }
+            }
+        }
+        assert!(shared.is_empty(), "{space} advisory locks: {shared:?}");
+    }
+
+    /// Two users of one `(namespace, key)` advisory lock namespace contend
+    /// whenever their 32-bit keys match: a session lock (room fence, job
+    /// claim, attachment upload) then stalls every transaction lock of the
+    /// other user on that key. Each namespace needs its own value. The
+    /// one-bigint key space is separate from the two-int space.
+    #[test]
+    fn advisory_lock_namespaces_are_unique() {
+        assert_unique(
+            "two-int",
+            &[
+                ("attachment", crate::attachments::ATTACHMENT_LOCK_NAMESPACE),
+                ("storage", crate::attachments::STORAGE_LOCK_NAMESPACE),
+                ("task status", crate::db::tasks::TASK_STATUS_LOCK_NAMESPACE),
+                ("collab init", crate::db::collab::COLLAB_INIT_LOCK_NAMESPACE),
+                ("tree", TREE_LOCK_NAMESPACE),
+                ("membership", MEMBERSHIP_LOCK_NAMESPACE),
+                (
+                    "collab room fence",
+                    crate::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE,
+                ),
+                ("search index", SEARCH_INDEX_LOCK_NAMESPACE),
+                ("job claim", crate::jobs::JOB_LOCK_NAMESPACE),
+                (
+                    "task origin",
+                    crate::db::task_origins::TASK_ORIGIN_LOCK_NAMESPACE,
+                ),
+                (
+                    "github issue",
+                    crate::integrations::github::ISSUE_LOCK_NAMESPACE,
+                ),
+            ],
+        );
+        // MIGRATION_LOCK_KEY (db::migrate) and PREPARE_LOCK_KEY (prepare) are
+        // private to their modules and not listed here.
+        assert_unique(
+            "one-bigint",
+            &[
+                ("search rebuild", SEARCH_REBUILD_LOCK_KEY),
+                ("admission", crate::db::quota::ADMISSION_LOCK_KEY),
+                (
+                    "instance admin",
+                    crate::db::identity::INSTANCE_ADMIN_LOCK_KEY,
+                ),
+            ],
+        );
+    }
 }
