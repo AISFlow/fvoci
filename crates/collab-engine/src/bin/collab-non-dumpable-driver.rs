@@ -12,8 +12,8 @@
 //!    readable, and the OOM backstop is not reported missing.
 //!
 //! It refuses to run as root: root with `CAP_SYS_PTRACE` still reads the
-//! environ, and root without it gets EPERM, not EACCES. The test that runs it
-//! skips as root.
+//! environ, and as root the ownership check proves nothing. The test that
+//! runs it skips as root.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

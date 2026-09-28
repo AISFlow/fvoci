@@ -1051,7 +1051,7 @@ fn spawning_thread_exit_kills_collab_helper() {
 /// own write would show up as a helper below 1000.
 ///
 /// Needs a non-root runner and skips as root: root with `CAP_SYS_PTRACE`
-/// still reads the environ, and root without it gets EPERM, not EACCES.
+/// still reads the environ, and as root the ownership check proves nothing.
 #[cfg(feature = "test-hang")]
 #[test]
 fn non_dumpable_parent_hides_environ_and_helpers_keep_oom_score_adj() {
