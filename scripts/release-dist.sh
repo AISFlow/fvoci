@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Render the release files for one published image index (docs/RELEASING.md):
-#   compose.yml    the user compose with every ${FVOCI_IMAGE...} reference
-#                  replaced by the digest-pinned image; never committed back
+# Render the release files for one image index pushed by digest
+# (docs/RELEASING.md):
+#   compose.yml    the user compose with its x-fvoci-image anchor
+#                  ${FVOCI_IMAGE:-...} replaced by the digest-pinned image;
+#                  never committed back
 #   release.json   the release record (version, source SHA, digests)
 #   RELEASE-NOTES.md
 #   SHA256SUMS     over the three files above
@@ -29,8 +31,8 @@ while (($#)); do
   shift 2
 done
 
-# Worker contract: the standalone user compose lives at the first existing path
-# and names the FVOCI image only through ${FVOCI_IMAGE...}.
+# The standalone user compose lives at the first existing path and names the
+# FVOCI image only through the x-fvoci-image anchor (checked below).
 COMPOSE_SOURCE=""
 for candidate in infra/rust/compose.user.yml infra/rust/compose.yml; do
   if [[ -f "$ROOT/$candidate" ]]; then
@@ -72,20 +74,31 @@ out = Path(env["OUT"])
 image_ref = f"{env['IMAGE']}:{env['VERSION']}@{env['INDEX_DIGEST']}"
 
 compose_text = (root / env["COMPOSE_SOURCE"]).read_text(encoding="utf-8")
-pattern = re.compile(r"\$\{FVOCI_IMAGE(?:[:]?[-?][^}]*)?\}")
-rendered, count = pattern.subn(image_ref, compose_text)
-if count == 0:
-    sys.exit(f"{env['COMPOSE_SOURCE']}: no ${{FVOCI_IMAGE...}} image reference to pin")
-if "FVOCI_IMAGE" in rendered:
-    sys.exit(f"{env['COMPOSE_SOURCE']}: FVOCI_IMAGE left after rendering")
-image_lines = [
-    line.split(":", 1)[1].strip().strip("'\"")
-    for line in rendered.splitlines()
-    if re.match(r"\s+image:", line)
-]
-fvoci = [ref for ref in image_lines if ref.startswith(env["IMAGE"] + ":") or ref.startswith(env["IMAGE"] + "@")]
-if not fvoci or any(ref != image_ref for ref in fvoci):
-    sys.exit(f"rendered FVOCI image references {fvoci} are not all {image_ref}")
+# The user compose names the product image once, as the YAML anchor the
+# bootstrap, init and server services share:
+#   x-fvoci-image: &fvoci-image ${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:<version>}
+anchor = re.compile(
+    r"^(x-fvoci-image:[ \t]+&fvoci-image[ \t]+)\$\{FVOCI_IMAGE:-" + re.escape(env["IMAGE"]) + r":[^}\s$]+\}[ \t]*$",
+    re.MULTILINE,
+)
+anchors = anchor.findall(compose_text)
+if len(anchors) != 1:
+    sys.exit(f"{env['COMPOSE_SOURCE']}: expected exactly one "
+             f"'x-fvoci-image: &fvoci-image ${{FVOCI_IMAGE:-{env['IMAGE']}:...}}' line, found {len(anchors)}")
+if compose_text.count("FVOCI_IMAGE") != 1:
+    sys.exit(f"{env['COMPOSE_SOURCE']}: FVOCI_IMAGE may appear only in the x-fvoci-image anchor")
+rendered = anchor.sub(lambda m: m.group(1) + image_ref, compose_text)
+if rendered.count(env["IMAGE"]) != 1:
+    sys.exit(f"{env['COMPOSE_SOURCE']}: {env['IMAGE']} must be named only through the x-fvoci-image anchor")
+if not re.search(r"^\s+image:[ \t]+\*fvoci-image[ \t]*$", rendered, re.MULTILINE):
+    sys.exit(f"{env['COMPOSE_SOURCE']}: no service uses 'image: *fvoci-image'")
+# Zero-env install: nothing left for Compose to interpolate ($$ is a literal $)
+# and no env_file for a user to create.
+interpolations = re.findall(r"(?<!\$)\$(?!\$)[{A-Za-z_][^\s]*", rendered)
+if interpolations:
+    sys.exit(f"{env['COMPOSE_SOURCE']}: the release compose must need no environment; found {interpolations}")
+if re.search(r"^\s+env_file:", rendered, re.MULTILINE):
+    sys.exit(f"{env['COMPOSE_SOURCE']}: the release compose must not need an env_file")
 header = (
     f"# FVOCI {env['VERSION']} ({env['SHA']}), rendered from {env['COMPOSE_SOURCE']}\n"
     f"# by the release workflow. The image is pinned by manifest digest.\n"
@@ -100,6 +113,14 @@ record = {
     "indexDigest": env["INDEX_DIGEST"],
     "platforms": {"linux/amd64": env["AMD64_DIGEST"], "linux/arm64": env["ARM64_DIGEST"]},
     "composeSource": env["COMPOSE_SOURCE"],
+    # Publish order: the index is pushed by digest only; both smoke jobs pull
+    # that digest anonymously; then the publish job applies the immutable
+    # version tag and, when this is the newest 0.y release, moves the minor tag;
+    # the GitHub release comes last.
+    "tags": {"immutable": env["VERSION"], "floating": env["VERSION"].rsplit(".", 1)[0]},
+    "publishOrder": ["index-by-digest", "smoke-linux/amd64", "smoke-linux/arm64",
+                     f"tag:{env['VERSION']}", f"tag:{env['VERSION'].rsplit('.', 1)[0]} (if newest)",
+                     "github-release"],
 }
 (out / "release.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 

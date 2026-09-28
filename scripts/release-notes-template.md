@@ -1,5 +1,7 @@
 # FVOCI @VERSION@ (trial pre-release)
 
+<!-- notes-for: TODO(release) replace with the 0.y.z version these notes describe -->
+
 This is a 0.x trial release. It is not covered by any compatibility promise:
 a later 0.y release may change configuration, data layout or behaviour.
 Installs are never updated automatically.
