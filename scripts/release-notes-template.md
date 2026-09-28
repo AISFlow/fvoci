@@ -11,7 +11,8 @@ Installs are never updated automatically.
   - linux/amd64: `@AMD64_DIGEST@`
   - linux/arm64: `@ARM64_DIGEST@`
 - Release smoke (pulled the digest above anonymously on native amd64 and arm64
-  runners, fresh install, first admin, core flows, restart, bootstrap failure):
+  runners, fresh install from env.example, first admin, core flows, restart,
+  rejected settings, preparation failure):
   @RUN_URL@
 
 ## Accepted in this release
@@ -28,42 +29,46 @@ Installs are never updated automatically.
 
 ## Install
 
-Requires Docker Engine with the Compose plugin (v2.20+), on linux/amd64 or
-linux/arm64. From an empty directory:
+Requires Docker Engine with the Compose plugin (v2.24+) and `openssl`, on
+linux/amd64 or linux/arm64. From an empty directory:
 
 ```sh
-curl -fsSLO https://github.com/@REPOSITORY@/releases/download/v@VERSION@/compose.yml
-curl -fsSLO https://github.com/@REPOSITORY@/releases/download/v@VERSION@/SHA256SUMS
+for f in compose.yml env.example INSTALL.md SHA256SUMS; do
+  curl -fsSLO https://github.com/@REPOSITORY@/releases/download/v@VERSION@/$f
+done
 sha256sum --ignore-missing -c SHA256SUMS
+cp env.example .env   # fill in each empty value with the command shown above it
 docker compose up -d --wait
 ```
 
 `compose.yml` pins the image by digest, so the tag cannot be moved under an
-existing install. The first start generates the instance secrets into a Docker
-volume; no `.env` file is needed. Open the published address and create the
-first administrator on the setup page.
+existing install. Compose refuses to start while a value in `.env` is empty,
+and the `fvoci` container checks the values before it prepares the database
+and starts the server. Open the published address and create the first
+administrator on the setup page. Keep `.env` private and with your backups.
 
 ## Start, stop, restart
 
 ```sh
 docker compose stop            # stop, keep everything
 docker compose up -d --wait    # start again
-docker compose restart server  # restart the application only
+docker compose restart fvoci   # restart the application only
 docker compose down            # remove containers, keep volumes (data and keys)
 ```
 
 `docker compose down -v` deletes every volume: the database, uploaded files,
-the search index and the generated keys. Without the keys, encrypted data
+and the search index. The keys stay in `.env`; without them, encrypted data
 from a backup cannot be read. Only use it to throw an install away.
 
 ## Data, keys and upgrades
 
 - Back up before any upgrade (see `RUNNING.md` at `@SHA@` for backup and
-  restore). Keep the backup of the key volume separate from the database backup.
+  restore). Keep the copy of `.env` separate from the database backup.
 - To upgrade, stop the stack, replace `compose.yml` with the one from the new
-  release (check its `SHA256SUMS`), and run `docker compose up -d --wait`. The
-  one-shot init service applies database migrations before the server starts;
-  if it fails the server does not start.
+  release (check its `SHA256SUMS`), keep `.env`, and run
+  `docker compose up -d --wait`. The `fvoci` container applies database
+  migrations before the server starts; if that fails the server does not
+  start, and it refuses to migrate while another server is still connected.
 - Migrations only move forward. Going back to an older 0.y release means
   restoring the backup taken before the upgrade.
 - Keep the same Compose project name (the directory name by default), or the

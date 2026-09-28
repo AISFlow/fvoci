@@ -598,7 +598,8 @@ The install artifact is a multi-stage Docker image plus a small Compose stack un
 helper (same rhwp pin as `scripts/prepare-extract-helper.sh` / `rust.yml`, without
 `test-hang`), and the `apps/web` production bundle (same steps as
 `scripts/prepare-web-e2e.sh` + `npm run build`). Runtime images pin base digests,
-run as uid/gid `1000` (`fvoci`), and set:
+run as uid/gid `1000` (`fvoci`) by default (the user install below starts the
+container as root and runs the server as `1000`), and set:
 
 | Variable | Installed path / note |
 | --- | --- |
@@ -609,6 +610,167 @@ run as uid/gid `1000` (`fvoci`), and set:
 
 Unset any helper env to disable that feature (API-only). The published image ships
 all three helpers and enables them via the defaults above.
+
+### Install (compose.yml and .env)
+
+The user install is `infra/rust/compose.user.yml` with
+`infra/rust/compose.user.env.example`; a release ships them as `compose.yml`
+(image pinned by digest) and `env.example`, with a short `INSTALL.md`. In an
+empty folder:
+
+```sh
+cp env.example .env      # fill in each empty value with the command shown above it
+docker compose up -d --wait
+```
+
+Open `FVOCI_PUBLIC_ORIGIN` (<http://localhost:8080>) and create the first
+administrator (no administrator is created automatically). Services: `fvoci`,
+`postgres`, `meilisearch`; there is no separate init service.
+
+`.env` holds nine values: `FVOCI_PUBLIC_ORIGIN` and `FVOCI_PUBLISH_PORT`
+(filled in: change both together; the server never derives the origin from
+`Host` or `Forwarded`), `PASSWORD_PEPPER_ACTIVE_KEY_ID` and
+`ENCRYPTION_ACTIVE_KEY_ID` (filled in: `install`), and five values to generate:
+`POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
+(`openssl rand -hex 32` each) and the keyrings `PASSWORD_PEPPER_KEYS` and
+`ENCRYPTION_KEYS` (`{"install":"<openssl rand -hex 32>"}`, the same format as
+`fvoci-migrate --init-env`). Compose requires each value, so an unfilled `.env`
+stops before any container is created. Keep `.env` private and with your
+backups; PostgreSQL keeps the owner and app passwords from the first start, and
+the pepper and encryption keys open existing accounts and sealed secrets.
+Compose passes each service only the values it names (no `env_file`).
+
+The three passwords (`POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`,
+`MEILI_MASTER_KEY`) and the two keyrings (`PASSWORD_PEPPER_KEYS`,
+`ENCRYPTION_KEYS`) are not container environment: Compose passes them as file
+secrets read from `.env` (top-level `secrets:` with `environment:`, which needs
+Docker Compose v2.23; `INSTALL.md` asks for v2.24 or newer), copied into each container that needs them as
+`/run/secrets/<name>`, owner root, mode `0400`. `fvoci` gets all five and
+names them with `POSTGRES_PASSWORD_FILE`, `FVOCI_APP_PASSWORD_FILE`,
+`MEILI_MASTER_KEY_FILE`, `PASSWORD_PEPPER_KEYS_FILE` and `ENCRYPTION_KEYS_FILE`
+(the two active key ids stay plain settings); `postgres` reads
+`POSTGRES_PASSWORD_FILE` (its image's entrypoint, as root); `meilisearch`
+exports its key from the file in its start command, so it is not on a command
+line. `fvoci-migrate` reads `<VAR>_FILE` for these five, as root; setting both
+`<VAR>` and `<VAR>_FILE` is an error. Compose copies the files when it creates
+a container: after changing one of these values, run
+`docker compose up -d --force-recreate` (PostgreSQL still keeps the passwords
+from its first start).
+
+The image entrypoint is `fvoci-migrate --start`. The `fvoci` service starts it
+as root (`user: "0:0"`). Given the owner password (`POSTGRES_PASSWORD_FILE`, or
+`POSTGRES_PASSWORD`), it runs, on every start of `fvoci`:
+
+1. **Settings check.** Every required value is set, not empty and not an
+   example placeholder (`<…>`, `change-me`, …); passwords and the master key
+   are at least 16 characters and the app password differs from the owner's;
+   the keyrings parse with their active ids; the origin is valid. Errors name
+   the variable, never the value, and exit 2.
+2. **Readiness.** It waits for PostgreSQL (as the owner) and Meilisearch
+   (`/health`) until `FVOCI_PREPARE_TIMEOUT_SECS` (default 120) and exits 1
+   after it; SIGTERM/SIGINT end the wait at once (exit 143/130). A wrong owner
+   password is reported as such, without waiting.
+3. **Preparation**, under a PostgreSQL advisory lock (concurrent starts run one
+   after another). If migrations are pending while sessions of the app role are
+   open (another server is still running), it refuses and points to "Upgrade".
+   Otherwise it creates the `NOBYPASSRLS` app role if missing, migrates (the
+   same locked, transactional path as `fvoci-migrate`), applies the grants,
+   checks that `FVOCI_APP_PASSWORD` opens the app role, and ensures the scoped
+   search key in `/run/fvoci/meili/api_key` (the `meili_key` volume). Root
+   first makes that directory `root:root` `0755` (through the open directory;
+   one owned by any other user than uid 1000, or writable by others, is
+   refused), then writes the key to a new, unpredictably named file, sets it to
+   `root:1000` `0640` on the open descriptor and renames it into place, so the
+   server can read the key but not replace, redirect or change it; a symlink
+   left in the directory is replaced, never followed. Key files are read
+   without following a symlink.
+4. **Server.** It closes every preparation connection and `exec`s
+   `fvoci-server` in the same process (pid 1, so signals, graceful shutdown and
+   child reaping are the server's, as before), as uid/gid `1000` with no
+   supplementary groups and so no capabilities. Its environment is the
+   container's (the non-secret settings) without `POSTGRES_PASSWORD`,
+   `DATABASE_URL`, `FVOCI_MIGRATION_URL`, `MEILI_MASTER_KEY`,
+   `FVOCI_MEILI_MASTER_KEY`, `FVOCI_APP_PASSWORD` or any secret's `_FILE`
+   name, plus the two keyrings read from their files, `DATABASE_APP_URL` (the
+   app role; it contains the app password, which the server needs) and
+   `HOME=/nonexistent`. The service has `no-new-privileges`, and the image has
+   no setuid or setgid file. Descriptors the preparation opened are
+   close-on-exec.
+
+If any step fails the server does not start; the container restarts and tries
+again (`docker compose logs fvoci` names the problem).
+
+**The boundary is the uid, inside one container.** The server and everything it
+starts run as uid 1000; the secret files and the preparation are root's. So a
+compromised server cannot read `/run/secrets/*` (mode `0400`, root), the
+preparation's memory or environment (another uid, and root's processes are not
+traceable by it), or any secret in a `docker exec` or healthcheck process: those
+start from the container configuration, which holds only file paths, and run as
+root. Nor can it redirect root's search key write (above).
+`scripts/standalone-install-smoke.sh` checks each of these on a running
+install. What the server does hold: the app role password (in
+`DATABASE_APP_URL`), the pepper and encryption keyrings, and the scoped search
+key; that is what it needs to run. What is **not** separated:
+
+- It is one container, not two: root in it (`docker compose exec fvoci …`,
+  which defaults to root, and the healthcheck) can read the secret files.
+  Under Docker's default capabilities (no `CAP_SYS_PTRACE`) that root cannot
+  read the server's `/proc/1/environ` either; inspect the server as uid 1000
+  (`docker compose exec -u 1000:1000 fvoci …`). A
+  kernel or container escape from uid 1000 is outside this boundary.
+- Anyone who can run Docker commands on the host can read the secrets
+  (`docker compose exec`, the containers' filesystems, `.env` itself).
+  `docker inspect` shows the file paths of all five secrets, not the values;
+  `docker compose config` prints the `.env` values.
+- `postgres` and `meilisearch` hold their own secret in their own process
+  environment, readable by root in those containers.
+
+The owner never reaches the network beyond the Compose network: PostgreSQL and
+Meilisearch publish no port.
+
+Without the owner password the entrypoint only execs `fvoci-server` (the
+env-file stack below keeps its separate `init` service); started as root, it
+still runs the server as uid 1000.
+
+Other defaults come from the image and the Rust loader: helper paths, static
+and storage directories, bind address, shutdown deadline (30 s), collaboration
+memory budget (2 GiB), extraction poll interval (30 s), secure cookies for an
+`https` origin, and the database names `fvoci`, `fvoci_owner`, `fvoci_app`
+(PostgreSQL service `postgres:5432`, Meilisearch `http://meilisearch:7700`).
+The file keeps one capacity setting: `FVOCI_COLLAB_MAX_ROOMS: "64"` with
+PostgreSQL `max_connections=150`, the verified pair (64 room fences + app pool
+64 + reserve 10 = 138). The image default is 30 rooms, which fits a stock
+PostgreSQL; change both together.
+
+#### Optional settings
+
+Put optional settings in a `compose.override.yml` next to `compose.yml`;
+`docker compose` merges it automatically. List only what you use, then
+`docker compose up -d`:
+
+```yaml
+services:
+  fvoci:
+    environment:
+      SMTP_HOST: smtp.example.com
+      SMTP_PORT: "587"
+      SMTP_FROM: fvoci@example.com
+```
+
+| Topic | Variables (details in this file) |
+| --- | --- |
+| Domain, HTTPS, proxy | `FVOCI_PUBLIC_ORIGIN=https://…` in `.env` (also turns on secure cookies) and the published address; see "Bootstrap" below for the proxy rules |
+| S3 storage | `STORAGE_DRIVER=s3`, `S3_*` ("S3 storage backup") |
+| Mail | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` |
+| OIDC sign-in | providers are set up in the app, sealed with `ENCRYPTION_KEYS`; `OIDC_ALLOW_INSECURE=1` only for a local http provider |
+| GitHub integration | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_STATE_SECRET` |
+| AI | `FVOCI_AI_ENABLED`, `FVOCI_AI_SECRET`, `FVOCI_AI_EMBEDDINGS_*` |
+| Tuning | `FVOCI_COLLAB_*`, `FVOCI_EXTRACT_POLL_SECS`, `FVOCI_SHUTDOWN_DEADLINE_MS`, `FVOCI_UPLOAD_*`, `FVOCI_PREPARE_TIMEOUT_SECS`, `RUST_LOG` |
+
+Unset variables keep the product default; an empty value is a value, so do not
+add empty entries. `docker compose down` and `up -d` keep data; `down -v`
+deletes the database, files and search index. Back up with `scripts/backup.sh`
+(see "Backup and restore").
 
 ### Bootstrap
 
@@ -833,18 +995,24 @@ architecture and logs of a run with the change it supports; this guide does not.
 
 Trial releases are published by `.github/workflows/release.yml` as
 `ghcr.io/aisflow/fvoci:0.y.z` (linux/amd64 and linux/arm64) with a GitHub
-pre-release holding `compose.yml` pinned to the image digest, `release.json`
-and `SHA256SUMS`; maintainer steps are in `docs/RELEASING.md`. Nothing updates
-an install on its own. To move a release install to a newer 0.y.z, back it up,
-check the new release's `SHA256SUMS`, replace `compose.yml` in the same
-directory (same Compose project name, so the same volumes) and run
-`docker compose up -d --wait`; the one-shot services migrate before the
-server starts, and a failure leaves the server stopped as described above.
-0.x releases make no compatibility promise between minor versions and there is
-no downgrade: going back means restoring the pre-upgrade backup.
-`docker compose down -v` deletes the data and the generated keys.
+pre-release holding `compose.yml` pinned to the image digest, `env.example`,
+`INSTALL.md`, `release.json` and `SHA256SUMS`; maintainer steps are in
+`docs/RELEASING.md`. Nothing updates an install on its own. To move a release
+install to a newer 0.y.z, back it up, check the new release's `SHA256SUMS`,
+replace `compose.yml` in the same directory (same Compose project name, so the
+same volumes; keep `.env`) and run `docker compose up -d --wait --wait-timeout 900`
+(a long migration such as 043 can outlast the healthcheck's two minutes; if
+`--wait` still gives up, the preparation keeps going: follow
+`docker compose logs -f fvoci` until `prepared; starting the server`). Compose
+recreates `fvoci`, so the old server has stopped before the new container
+migrates. Stopping it during a migration is safe (that migration rolls back),
+but the next start waits until PostgreSQL has ended the interrupted statement; the preparation refuses to migrate while any other server still has
+app-role sessions open, and a failure leaves the server stopped as described
+above. 0.x releases make no compatibility promise between minor versions and
+there is no downgrade: going back means restoring the pre-upgrade backup.
+`docker compose down -v` deletes the data; the keys stay in `.env`.
 `fvoci-server --version` (for example
-`docker compose exec server /opt/fvoci/bin/fvoci-server --version`) prints the
+`docker compose exec fvoci /opt/fvoci/bin/fvoci-server --version`) prints the
 version and source commit.
 
 ## Backup and restore
@@ -852,6 +1020,23 @@ version and source commit.
 This is the logical backup for the Compose install above (the source advanced
 install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
 of every volume, and it is not PITR.
+
+### Install from compose.yml and .env
+
+`scripts/backup.sh` and `scripts/restore.sh` take the user install like the
+env-file stack: its `.env` is the env file, and the app service is found as the
+one publishing port 8080. Run them from a checkout of the same release:
+
+```sh
+scripts/backup.sh --project fvoci --env-file /path/to/.env --compose-file /path/to/compose.yml --output /backups/fvoci-1
+scripts/restore.sh --project fvoci-restored --env-file /path/to/.env --compose-file /path/to/compose.yml --input /backups/fvoci-1
+```
+
+The keys stay in `.env` and are not copied into the backup; keep a copy of
+`.env` with it. Without an init service, restore runs the preparation with
+`fvoci-migrate --prepare` and the owner commands in the `fvoci` service. As
+with every restore the target is a new project name; run it with
+`docker compose -p fvoci-restored …` (or change `name:`).
 
 Run `scripts/backup.sh` and `scripts/restore.sh` on the operator's Linux host
 with Bash, Docker Compose, jq, GNU coreutils and tar. The scripts check their

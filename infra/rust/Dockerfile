@@ -27,7 +27,9 @@ RUN cargo fetch --locked \
  && cd crates/document-extract && bash fetch-rhwp.sh && cargo fetch --locked
 
 FROM rust-deps AS rust-build
-ENV CARGO_TARGET_DIR=/src/target
+# Release builds pass the tagged commit so `fvoci-server --version` can report it.
+ARG FVOCI_BUILD_SHA=
+ENV CARGO_TARGET_DIR=/src/target FVOCI_BUILD_SHA=${FVOCI_BUILD_SHA}
 RUN cargo build --locked --release --bin fvoci-server --bin fvoci-migrate \
  && cargo build --locked --release --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine \
  && cargo build --locked --release --manifest-path crates/document-extract/Cargo.toml --bin document-extract
@@ -51,11 +53,15 @@ COPY apps/web ./
 RUN npm run build
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+# No setuid/setgid files (su, passwd, mount, ...): nothing in the image
+# changes user through one, and the server's uid must not reach root by one.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl postgresql-client \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 1000 fvoci \
- && useradd --uid 1000 --gid fvoci --no-create-home --home-dir /nonexistent fvoci
+ && useradd --uid 1000 --gid fvoci --no-create-home --home-dir /nonexistent fvoci \
+ && find / -xdev -perm /6000 -type f -exec chmod ug-s {} + \
+ && test -z "$(find / -xdev -perm /6000 -type f)"
 WORKDIR /opt/fvoci
 COPY --from=rust-build --chown=root:root /src/target/release/fvoci-server /src/target/release/fvoci-migrate ./bin/
 COPY --from=rust-build --chown=root:root /src/target/release/collab-engine ./bin/
@@ -67,6 +73,9 @@ COPY --chown=root:root packages/editor/src/fonts/*-OFL.txt ./share/licenses/font
 COPY --chown=root:root src/http/api_docs_assets/LICENSE src/http/api_docs_assets/NOTICE src/http/api_docs_assets/swagger-ui-bundle.js.LICENSE.txt ./share/licenses/swagger-ui-dist-5.33.0/
 COPY --from=web-build --chown=root:root /src/apps/web/dist ./static/
 COPY --chown=root:root infra/rust/init-db.sh ./sbin/init-db.sh
+# /run/fvoci/meili is the service user's for the env-file stack's `init`; the
+# Compose install's root preparation takes it over (root:root 0755) before
+# writing the key there (src/search/meili.rs `prepare_key_dir`).
 RUN chmod 755 ./sbin/init-db.sh ./bin/* \
  && mkdir -p /data/storage /run/fvoci/meili \
  && chown fvoci:fvoci /data/storage /run/fvoci/meili
@@ -76,6 +85,15 @@ ENV FVOCI_EXPORT_FONT_DIR=/opt/fvoci/share/fonts \
     FVOCI_EXTRACTOR_BIN=/opt/fvoci/bin/document-extract \
     FVOCI_STORAGE_DIR=/data/storage \
     FVOCI_BIND=0.0.0.0:8080
+# The image runs as fvoci (uid 1000) by default. The Compose install
+# (compose.user.yml) starts it as root instead so the entrypoint can read the
+# root-only secret files; it then runs the server as this uid/gid.
 USER fvoci
 EXPOSE 8080
-ENTRYPOINT ["/opt/fvoci/bin/fvoci-server"]
+# `fvoci-migrate --start` execs fvoci-server (same pid, arguments passed on).
+# Given the database owner password (the Compose install: POSTGRES_PASSWORD_FILE)
+# it first validates the settings, waits for PostgreSQL and Meilisearch, creates
+# the app role, migrates, grants and writes the scoped search key; the server
+# starts without the owner password or master key and, if this ran as root, as
+# uid/gid 1000 with no supplementary groups (src/prepare.rs).
+ENTRYPOINT ["/opt/fvoci/bin/fvoci-migrate", "--start"]

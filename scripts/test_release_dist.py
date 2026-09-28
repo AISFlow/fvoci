@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Dry runs of scripts/release-dist.sh and scripts/release-preflight.sh.
 
-Each case copies the scripts into a scratch root with a user compose (the
-testdata copy of infra/rust/compose.user.yml, and the real file when the tree
-has one) and runs them as the release workflow does. No registry, no network;
+Each case copies the scripts into a scratch root with a user compose, its
+env example and start guide (the testdata copies of infra/rust/compose.user.*,
+and the real files when the tree has them) and runs them as the release
+workflow does. No registry, no network;
 the preflight cases need the docker CLI with the compose plugin (no daemon).
 
   python3 scripts/test_release_dist.py
@@ -21,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "scripts/testdata/release/compose.user.yml"
 REAL = ROOT / "infra/rust/compose.user.yml"
+SIDECARS = (".env.example", ".INSTALL.md")
 IMAGE = "ghcr.io/aisflow/fvoci"
 VERSION = "0.1.0"
 INDEX = "sha256:" + "1" * 64
@@ -40,8 +42,12 @@ def compose_sources() -> list[Path]:
     return [FIXTURE] + ([REAL] if REAL.is_file() else [])
 
 
+def sidecar(source: Path, suffix: str) -> Path:
+    return source.with_name(source.name.removesuffix(".yml") + suffix)
+
+
 class Scratch:
-    def __init__(self, compose: str) -> None:
+    def __init__(self, compose: str, source: Path = FIXTURE) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "scripts").mkdir()
@@ -49,6 +55,8 @@ class Scratch:
         for name in ("release-dist.sh", "release-preflight.sh", "release-notes-template.md"):
             shutil.copy(ROOT / "scripts" / name, self.root / "scripts" / name)
         (self.root / "infra/rust/compose.user.yml").write_text(compose, encoding="utf-8")
+        for suffix in SIDECARS:
+            shutil.copy(sidecar(source, suffix), self.root / "infra/rust" / f"compose.user{suffix}")
         (self.root / "infra/rust/Dockerfile").write_text(DOCKERFILE, encoding="utf-8")
 
     def write(self, rel: str, text: str) -> None:
@@ -79,36 +87,44 @@ class Scratch:
 
 
 class ReleaseDistTest(unittest.TestCase):
-    def scratch(self, compose: str) -> Scratch:
-        s = Scratch(compose)
+    def scratch(self, compose: str, source: Path = FIXTURE) -> Scratch:
+        s = Scratch(compose, source)
         self.addCleanup(s.tmp.cleanup)
         return s
 
-    def assert_rejected(self, compose: str, needle: str) -> None:
-        proc = self.scratch(compose).dist()
+    def assert_rejected(self, compose: str, needle: str, env_extra: str = "") -> None:
+        s = self.scratch(compose)
+        if env_extra:
+            s.write("infra/rust/compose.user.env.example", s.read("infra/rust/compose.user.env.example") + env_extra)
+        proc = s.dist()
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn(needle, proc.stderr)
 
     def test_renders_the_user_compose_anchor(self) -> None:
         for source in compose_sources():
             with self.subTest(source=str(source)):
-                s = self.scratch(source.read_text(encoding="utf-8"))
+                s = self.scratch(source.read_text(encoding="utf-8"), source)
                 proc = s.dist()
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 rendered = s.read("dist/compose.yml")
                 self.assertIn(f"x-fvoci-image: &fvoci-image {PINNED}\n", rendered)
                 self.assertEqual(rendered.count(IMAGE), 1)
                 self.assertNotIn("FVOCI_IMAGE", rendered)
-                self.assertGreaterEqual(rendered.count("image: *fvoci-image"), 3)
+                self.assertEqual(rendered.count("image: *fvoci-image"), 1)
+                self.assertEqual(s.read("dist/env.example"), sidecar(source, ".env.example").read_text(encoding="utf-8"))
+                self.assertIn("cp env.example .env", s.read("dist/INSTALL.md"))
+                self.assertIn("POSTGRES_PASSWORD=\n", s.read("dist/env.example"))
                 record = json.loads(s.read("dist/release.json"))
                 self.assertEqual(record["image"], PINNED)
                 self.assertEqual(record["platforms"], {"linux/amd64": AMD64, "linux/arm64": ARM64})
                 self.assertEqual(record["composeSource"], "infra/rust/compose.user.yml")
+                self.assertEqual(record["files"], ["compose.yml", "env.example", "INSTALL.md"])
                 self.assertEqual(record["tags"], {"immutable": "0.1.0", "floating": "0.1"})
                 self.assertEqual(record["publishOrder"][:3], ["index-by-digest", "smoke-linux/amd64", "smoke-linux/arm64"])
                 self.assertEqual(record["publishOrder"][-1], "github-release")
                 sums = dict(reversed(line.split("  ")) for line in s.read("dist/SHA256SUMS").splitlines())
-                for name in ("compose.yml", "release.json", "RELEASE-NOTES.md"):
+                self.assertEqual(len(sums), 5)
+                for name in ("compose.yml", "env.example", "INSTALL.md", "release.json", "RELEASE-NOTES.md"):
                     self.assertEqual(sums[name], hashlib.sha256((s.root / "dist" / name).read_bytes()).hexdigest())
 
     def test_rejects_other_image_forms(self) -> None:
@@ -121,14 +137,18 @@ class ReleaseDistTest(unittest.TestCase):
             "no anchor": (base.replace(anchor, "x-other: &fvoci-image ${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:0.1.0}"), "expected exactly one"),
             "second anchor": (base + "\n" + anchor + "\n", "expected exactly one"),
             "variable elsewhere": (base.replace("    mem_limit: 4g", "    mem_limit: 4g\n    labels: [\"${FVOCI_IMAGE}\"]"), "only in the x-fvoci-image anchor"),
-            "hard-coded image": (base.replace("  server:\n    image: *fvoci-image", "  server:\n    image: ghcr.io/aisflow/fvoci:latest"), "only through the x-fvoci-image anchor"),
+            "hard-coded image": (base.replace("  fvoci:\n    image: *fvoci-image", "  fvoci:\n    image: ghcr.io/aisflow/fvoci:latest"), "only through the x-fvoci-image anchor"),
             "no alias": (base.replace("image: *fvoci-image", "image: busybox"), "no service uses"),
-            "environment needed": (base.replace('FVOCI_COOKIE_SECURE: "false"', 'FVOCI_COOKIE_SECURE: "${COOKIE_SECURE}"'), "must need no environment"),
+            "optional variable": (base.replace("${FVOCI_PUBLIC_ORIGIN:?set FVOCI_PUBLIC_ORIGIN in .env}", "${FVOCI_PUBLIC_ORIGIN:-http://localhost:8080}"), "every interpolation must be ${VAR:?message}"),
+            "variable not in env.example": (base.replace('FVOCI_COLLAB_MAX_ROOMS: "64"', 'FVOCI_COLLAB_MAX_ROOMS: "${ROOMS:?set ROOMS}"'), "missing ['ROOMS']"),
+            "unguarded secret": (base.replace("  - ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}\n", ""), "secrets read ['MEILI_MASTER_KEY'] without"),
             "env file": (base.replace("    mem_limit: 4g", "    mem_limit: 4g\n    env_file: .env"), "env_file"),
         }
         for name, (compose, needle) in cases.items():
             with self.subTest(name):
                 self.assert_rejected(compose, needle)
+        with self.subTest("unused env.example variable"):
+            self.assert_rejected(base, "unused ['SMTP_HOST']", "SMTP_HOST=\n")
 
 
 class ReleasePreflightTest(unittest.TestCase):
@@ -140,12 +160,13 @@ class ReleasePreflightTest(unittest.TestCase):
     def test_passes_when_ready(self) -> None:
         for source in compose_sources():
             with self.subTest(source=str(source)):
-                s = self.scratch()
-                s.write("infra/rust/compose.user.yml", source.read_text(encoding="utf-8"))
+                s = Scratch(source.read_text(encoding="utf-8"), source)
+                self.addCleanup(s.tmp.cleanup)
                 s.ready_notes()
                 proc = s.preflight()
                 self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertIn("one-shot: ['bootstrap', 'init']", proc.stdout)
+                self.assertIn("app: ['fvoci']", proc.stdout)
+                self.assertIn("unfilled env.example refused", proc.stdout)
 
     def test_refuses_unwritten_notes(self) -> None:
         proc = self.scratch().preflight()
@@ -172,15 +193,36 @@ class ReleasePreflightTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, 1)
                 self.assertIn("ARG FVOCI_BUILD_SHA", proc.stderr)
 
-    def test_refuses_compose_without_one_shot_bootstrap(self) -> None:
+    def test_refuses_compose_without_one_published_app(self) -> None:
         s = self.scratch()
         s.ready_notes()
-        compose = s.read("infra/rust/compose.user.yml").replace("condition: service_completed_successfully",
-                                                                  "condition: service_started")
-        s.write("infra/rust/compose.user.yml", compose)
+        compose = s.read("infra/rust/compose.user.yml")
+        published = ':?set FVOCI_PUBLISH_PORT in .env}:8080"'
+        self.assertIn(published, compose)
+        s.write("infra/rust/compose.user.yml", compose.replace(published, published.replace(":8080", ":9090")))
         proc = s.preflight()
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("one-shot services []", proc.stderr)
+        self.assertIn("expected one service publishing container port 8080, found []", proc.stderr)
+
+    def test_refuses_secret_values_in_environment_or_readable_secret_files(self) -> None:
+        cases = {
+            "environment": (lambda c: c.replace(
+                "      FVOCI_APP_PASSWORD_FILE: /run/secrets/fvoci_app_password\n",
+                "      FVOCI_APP_PASSWORD: ${FVOCI_APP_PASSWORD:?set FVOCI_APP_PASSWORD in .env}\n"),
+                "fvoci gets secret values as environment: ['FVOCI_APP_PASSWORD']"),
+            "readable file": (lambda c: c.replace("  mode: 0400", "  mode: 0444"),
+                              "fvoci secret postgres_password is not root-only"),
+        }
+        for name, (edit, needle) in cases.items():
+            with self.subTest(name):
+                s = self.scratch()
+                s.ready_notes()
+                compose = s.read("infra/rust/compose.user.yml")
+                self.assertNotEqual(edit(compose), compose)
+                s.write("infra/rust/compose.user.yml", edit(compose))
+                proc = s.preflight()
+                self.assertEqual(proc.returncode, 1, proc.stdout)
+                self.assertIn(needle, proc.stderr)
 
 
 if __name__ == "__main__":

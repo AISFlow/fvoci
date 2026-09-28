@@ -4,13 +4,19 @@
 # pushed BY DIGEST: no :0.y.z or :0.y tag exists until both smokes passed.
 #   - anonymous registry access (empty DOCKER_CONFIG, no login) and a pull by
 #     digest onto a daemon that did not hold the image before;
-#   - the rendered compose.yml (the user compose's x-fvoci-image anchor pinned
-#     to the digest) from an empty directory with a scrubbed environment: no
-#     .env, no secrets; the one-shot bootstrap service generates them;
-#   - health/ready, one-shot init, doctor, first admin setup and login, the
-#     install-smoke API flows (collab, documents, attachment + extraction),
-#     search, restart persistence across down/up, a forced bootstrap failure
-#     that must keep the server down, and a browser subset against fresh stacks.
+#   - the user procedure with the rendered files: compose.yml (the user
+#     compose's x-fvoci-image anchor pinned to the digest) and env.example
+#     copied to .env with a fresh value generated for every empty entry, as its
+#     comments show, in an empty directory with a scrubbed environment;
+#   - health/ready, doctor, the server process running as uid 1000 and holding
+#     neither the database owner password nor the Meilisearch master key, the
+#     secret files root-only, no secret in docker exec environ or inspect, first admin setup and
+#     login, the install-smoke API flows (collab, documents, attachment +
+#     extraction), search, keys kept across a second up and down/up, a failing
+#     preparation keeping the server down, an unfilled .env refused before any
+#     container starts, a placeholder value refused by the app, and a browser
+#     subset against fresh stacks.
+# Service names are not assumed: the app is the service publishing port 8080.
 #
 #   scripts/release-smoke.sh --dist DIR [--no-browser]
 # The browser subset needs apps/web dependencies and Playwright Chromium.
@@ -160,24 +166,53 @@ log_assert "product executables present, no JavaScript runtime in the image: ok"
 
 # --- stacks -----------------------------------------------------------------
 
-new_stack() { # name -> sets STACK_DIR STACK_PROJECT
+# fill_env EXAMPLE OUT: every empty entry gets a fresh value in the format its
+# comment shows (openssl rand -hex 32; a *_KEYS keyring under its
+# *_ACTIVE_KEY_ID). Filled entries are kept.
+fill_env() {
+  python3 - "$1" "$2" <<'PY'
+import re, secrets, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+values = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", text, re.MULTILINE))
+out = []
+for line in text.splitlines():
+    empty = re.fullmatch(r"([A-Z][A-Z0-9_]*)=", line)
+    if empty:
+        key = empty.group(1)
+        if key.endswith("_KEYS"):
+            active = values.get(key[: -len("_KEYS")] + "_ACTIVE_KEY_ID") or sys.exit(f"no active key id for {key}")
+            line = f'{key}={{"{active}":"{secrets.token_hex(32)}"}}'
+        else:
+            line = f"{key}={secrets.token_hex(32)}"
+    out.append(line)
+open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+  chmod 600 "$2"
+}
+
+new_stack() { # name [unfilled] -> sets STACK_DIR STACK_PROJECT
   STACK_DIR="$WORK/$1"
   STACK_PROJECT="fvoci-release-$1-${RUN_ID}"
   mkdir -p "$STACK_DIR"
   cp "$DIST/compose.yml" "$STACK_DIR/compose.yml"
+  if [[ "${2:-}" == unfilled ]]; then
+    cp "$DIST/env.example" "$STACK_DIR/.env"
+  else
+    fill_env "$DIST/env.example" "$STACK_DIR/.env"
+  fi
   PROJECTS+=("$STACK_DIR|$STACK_PROJECT")
 }
-dc() { compose_in "$STACK_DIR" "$STACK_PROJECT" "$@"; }
-
-# Services others wait for with service_completed_successfully (bootstrap, init).
-one_shot_services() {
-  dc config --format json | python3 -c '
-import json, sys
-services = json.load(sys.stdin)["services"]
-print(" ".join(sorted({dep for spec in services.values()
-                       for dep, cond in (spec.get("depends_on") or {}).items()
-                       if cond.get("condition") == "service_completed_successfully"})))'
+set_env() { # KEY VALUE in the current stack's .env
+  python3 - "$STACK_DIR/.env" "$1" "$2" <<'PY'
+import re, sys
+path, key, value = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+text, n = re.subn(rf"^{key}=.*$", lambda _: f"{key}={value}", text, flags=re.MULTILINE)
+assert n == 1, key
+open(path, "w", encoding="utf-8").write(text)
+PY
 }
+dc() { compose_in "$STACK_DIR" "$STACK_PROJECT" "$@"; }
 
 wait_http() {
   local url="$1" deadline=$((SECONDS + 90))
@@ -188,15 +223,26 @@ wait_http() {
   fail "timed out waiting for $url"
 }
 
+# The app service: the one publishing container port 8080.
+app_service() {
+  dc config --format json | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+apps = [n for n, s in services.items() if any(p.get("target") == 8080 for p in s.get("ports") or [])]
+if len(apps) != 1:
+    sys.exit(f"expected one service publishing 8080, found {apps}")
+print(apps[0])'
+}
+
 # The address a user opens: the server's configured public origin when set,
 # else the published port.
 resolve_base_url() {
   local cid published origin
-  cid="$(dc ps -q server)"
-  [[ -n "$cid" ]] || fail "server container missing"
+  cid="$(dc ps -q "$APP")"
+  [[ -n "$cid" ]] || fail "$APP container missing"
   origin="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/^FVOCI_PUBLIC_ORIGIN=//p')"
-  published="$(dc port server 8080 | head -1)"
-  [[ -n "$published" ]] || fail "server port 8080 is not published"
+  published="$(dc port "$APP" 8080 | head -1)"
+  [[ -n "$published" ]] || fail "$APP port 8080 is not published"
   BASE_URL="${origin:-http://127.0.0.1:${published##*:}}"
   BASE_URL="${BASE_URL%/}"
   SERVER_CID="$cid"
@@ -216,17 +262,16 @@ db_query() {
 # --- install from the rendered compose --------------------------------------
 
 new_stack install
-[[ "$(ls -A "$STACK_DIR")" == compose.yml ]] || fail "the install directory holds more than compose.yml"
+[[ "$(find "$STACK_DIR" -mindepth 1 -printf '%f\n' | sort | tr '\n' ' ')" == ".env compose.yml " ]] || fail "the install directory holds more than compose.yml and .env"
+APP="$(app_service)" || fail "no single app service"
 dc config --format json | python3 -c '
 import json, sys
 services = json.load(sys.stdin)["services"]
 product = sorted(n for n, s in services.items() if s.get("image") == sys.argv[1])
-assert "server" in product and "bootstrap" in product, product
+assert sys.argv[2] in product, (sys.argv[2], product)
 assert not any(s.get("env_file") for s in services.values())
-print("product image services:", " ".join(product))' "$IMAGE_REF" | tee -a "$ASSERT_LOG"
-read -ra ONE_SHOT <<<"$(one_shot_services)"
-(( ${#ONE_SHOT[@]} )) || fail "no one-shot bootstrap/init service"
-log_assert "== docker compose up -d --wait from an empty directory, no env file"
+print("product image services:", " ".join(product), "app:", sys.argv[2])' "$IMAGE_REF" "$APP" | tee -a "$ASSERT_LOG"
+log_assert "== docker compose up -d --wait with compose.yml and the filled env.example"
 UP_START=$SECONDS
 start_stack
 log_assert "compose up: ok ($((SECONDS - UP_START))s) base=${BASE_URL}"
@@ -236,32 +281,68 @@ for probe in /health /ready; do
 done
 log_assert "/health and /ready 200: ok"
 
-# Every one-shot service (bootstrap, init) ran and finished with exit code 0.
-EXITED="$(dc ps -a --status exited --format json | python3 -c '
-import json, sys
-text = sys.stdin.read().strip()
-# Compose prints one JSON object per line (older releases: one array).
-rows = json.loads(text) if text.startswith("[") else [json.loads(line) for line in text.splitlines() if line.strip()]
-codes = {row["Service"]: row["ExitCode"] for row in rows}
-missing = [s for s in sys.argv[1:] if codes.get(s) != 0]
-if missing:
-    sys.exit(f"one-shot services not exited 0: {missing} ({codes})")
-print(" ".join(f"{s}=0" for s in sys.argv[1:]))' "${ONE_SHOT[@]}")" || fail "one-shot services did not all succeed"
-log_assert "one-shot services exited 0: $EXITED"
-
-if ! DOCTOR_REPORT="$(dc exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)"; then
+if ! DOCTOR_REPORT="$(dc exec -T "$APP" /opt/fvoci/bin/fvoci-migrate --doctor)"; then
   printf '%s\n' "$DOCTOR_REPORT" >&2
   fail "doctor failed"
 fi
 python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["ok"] is True, r' <<<"$DOCTOR_REPORT"
 log_assert "installed doctor: ok"
 
-SERVER_ENV="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$SERVER_CID")"
-if grep -Eq '^(DATABASE_URL|FVOCI_MIGRATION_URL|MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY)=' <<<"$SERVER_ENV"; then
-  fail "server container holds the migration owner URL or the Meilisearch master key"
+[[ "$(docker exec --user 1000:1000 "$SERVER_CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] \
+  || fail "pid 1 of $APP is not fvoci-server"
+# uid boundary: the app container starts as root, reads the root-only secret
+# files, prepares, and runs the server as uid/gid 1000 without capabilities.
+PID1="$(docker exec "$SERVER_CID" sh -c 'grep -E "^(Uid|Gid|Groups|CapPrm|CapEff|NoNewPrivs):" /proc/1/status')"
+grep -Eq '^Uid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server uids are not all 1000"
+grep -Eq '^Gid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server gids are not all 1000"
+grep -Eq '^Groups:[[:space:]]*$' <<<"$PID1" || fail "server keeps supplementary groups"
+grep -Eq '^CapEff:[[:space:]]+0+$' <<<"$PID1" || fail "server keeps effective capabilities"
+grep -Eq '^CapPrm:[[:space:]]+0+$' <<<"$PID1" || fail "server keeps permitted capabilities"
+grep -Eq '^NoNewPrivs:[[:space:]]+1$' <<<"$PID1" || fail "server runs without no-new-privileges"
+[[ -z "$(docker exec "$SERVER_CID" find / -xdev -perm /6000 -type f)" ]] || fail "the image has setuid/setgid files"
+env_value() { sed -n "s/^$1=//p" "$STACK_DIR/.env"; }
+OWNER_PW="$(env_value POSTGRES_PASSWORD)"
+MASTER_KEY="$(env_value MEILI_MASTER_KEY)"
+APP_PW="$(env_value FVOCI_APP_PASSWORD)"
+PEPPER_KEYS="$(env_value PASSWORD_PEPPER_KEYS)"
+ENC_KEYS="$(env_value ENCRYPTION_KEYS)"
+(( ${#OWNER_PW} >= 16 && ${#MASTER_KEY} >= 16 && ${#APP_PW} >= 16 && ${#PEPPER_KEYS} >= 16 && ${#ENC_KEYS} >= 16 )) \
+  || fail "could not read the generated secrets from .env"
+for f in postgres_password fvoci_app_password meili_master_key password_pepper_keys encryption_keys; do
+  [[ "$(docker exec "$SERVER_CID" stat -c '%u %g %a' "/run/secrets/$f")" == "0 0 400" ]] || fail "/run/secrets/$f is not root-only 0400"
+  if docker exec --user 1000:1000 "$SERVER_CID" cat "/run/secrets/$f" >/dev/null 2>&1; then
+    fail "uid 1000 can read /run/secrets/$f"
+  fi
+done
+# The server process tree (pid 1 and its descriptors, children, argv and files
+# under /run other than the secrets; read as uid 1000, since root in the
+# container lacks CAP_SYS_PTRACE) holds neither the owner password nor the
+# master key; the container configuration, and so every docker exec and
+# healthcheck process, holds none of the three.
+# shellcheck disable=SC2016 # expanded by the app container's shell
+SERVER_VIEW="$(docker exec --user 1000:1000 "$SERVER_CID" sh -c '
+  for p in /proc/[0-9]*; do
+    a=${p#/proc/}
+    while [ "$a" != 1 ] && [ "$a" != 0 ] && [ -n "$a" ]; do a=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$a/status" 2>/dev/null); done
+    [ "$a" = 1 ] || continue
+    tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; ls -l "$p/fd"
+  done 2>/dev/null
+  find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
+if grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$SERVER_VIEW"; then
+  fail "the server process tree holds the database owner password or the Meilisearch master key"
 fi
-[[ "$(docker exec "$SERVER_CID" id -u)" == 1000 ]] || fail "server does not run as uid 1000"
-log_assert "server is uid 1000 without owner/master credentials: ok"
+if grep -Eq '^((POSTGRES_PASSWORD|DATABASE_URL|FVOCI_MIGRATION_URL|MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY|FVOCI_APP_PASSWORD)(_FILE)?|(PASSWORD_PEPPER|ENCRYPTION)_KEYS_FILE)=' <<<"$SERVER_VIEW"; then
+  fail "a preparation-only variable reached the server process tree"
+fi
+# shellcheck disable=SC2016 # expanded by the app container's shell
+EXEC_ENV="$(docker exec "$SERVER_CID" sh -c 'tr "\0" "\n" </proc/self/environ')"
+if ! grep -qxF "PASSWORD_PEPPER_KEYS=$PEPPER_KEYS" <<<"$SERVER_VIEW" || ! grep -qxF "ENCRYPTION_KEYS=$ENC_KEYS" <<<"$SERVER_VIEW"; then
+  fail "the server lacks its keyrings"
+fi
+if grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" -e "$APP_PW" -e "$PEPPER_KEYS" -e "$ENC_KEYS" <<<"$EXEC_ENV$(docker inspect "$SERVER_CID")"; then
+  fail "docker exec / healthcheck environment or docker inspect holds a secret"
+fi
+log_assert "server is pid 1 fvoci-server as uid/gid 1000 without capabilities, with no-new-privileges and no setuid file; /run/secrets root-only; owner password and master key absent from its process tree and /run; no secret in docker exec environ or docker inspect: ok"
 
 ORIGIN="$BASE_URL"
 COOKIE_JAR="$WORK/cookies"
@@ -349,36 +430,71 @@ log_assert "workspace search finds the document: ok"
 
 # --- restart persistence ------------------------------------------------------
 
-log_assert "== docker compose down (volumes kept), then up again"
+key_check() { # the session and password login use the pepper; sealed secrets open
+  [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "cookie: fvoci_session=$OLD_SESSION" "$BASE_URL/api/v1/auth/me")" == 200 ]] \
+    || fail "session did not survive $1"
+  login
+  dc exec -T "$APP" /opt/fvoci/bin/fvoci-migrate --verify-secrets >/dev/null || fail "sealed secrets do not open after $1"
+}
 OLD_SESSION="$SESSION"
+log_assert "== docker compose up -d again (running install)"
+start_stack
+key_check "a second up"
+log_assert "second up: keys kept (session, password login, sealed secrets): ok"
+
+log_assert "== docker compose down (volumes kept), then up again"
 dc down
 start_stack
-[[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "cookie: fvoci_session=$OLD_SESSION" "$BASE_URL/api/v1/auth/me")" == 200 ]] \
-  || fail "session did not survive down/up"
-login
+key_check "down/up"
 curl -fsS -b "$COOKIE_JAR" "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/body" \
   | python3 -c 'import json,sys; b=json.load(sys.stdin); assert b["contentJson"]==json.loads(sys.argv[1])["contentJson"], b' "$BODY_JSON"
 check_attachment
 check_search
 python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" "$COOKIE_JAR" "$DOCUMENT_STATE" restart
-log_assert "after down/up: generated secrets kept (session + password login), body, attachment, extraction, search, imports: ok"
+log_assert "after down/up: generated secrets kept (session, password login, sealed secrets), body, attachment, extraction, search, imports: ok"
 dc down -v --remove-orphans >/dev/null
 
-# --- bootstrap failure blocks the server --------------------------------------
+# --- settings and preparation failures keep the server down ------------------
 
-new_stack bootstrap-failure
-for service in "${ONE_SHOT[@]}"; do
-  printf 'services:\n  %s:\n    entrypoint: ["sh", "-c", "echo release-smoke forced failure >&2; exit 3"]\n' "$service" \
-    >"$STACK_DIR/compose.fail.yml"
-  if dc -f compose.yml -f compose.fail.yml up -d --wait >"$WORK/fail-up.log" 2>&1; then
-    fail "up succeeded although $service failed"
+server_down() { # reason
+  if dc ps --status running --format '{{.Service}}' | grep -qx "$APP" \
+    && [[ "$(docker inspect -f '{{.State.Health.Status}}' "$(dc ps -q "$APP")")" == healthy ]]; then
+    fail "$APP is healthy although $1"
   fi
-  RUNNING="$(dc -f compose.yml -f compose.fail.yml ps --status running --format '{{.Service}}')"
-  if grep -qx server <<<"$RUNNING"; then fail "server runs although $service failed"; fi
-  if curl -fsS "$BASE_URL/health" >/dev/null 2>&1; then fail "a server answers although $service failed"; fi
-  dc -f compose.yml -f compose.fail.yml down -v --remove-orphans >/dev/null
-  log_assert "forced failure of one-shot '$service' keeps the server down: ok"
-done
+  if curl -fsS "$BASE_URL/ready" >/dev/null 2>&1; then fail "a server answers although $1"; fi
+}
+
+new_stack unfilled unfilled
+if dc up -d >"$WORK/unfilled.log" 2>&1; then fail "up succeeded with the unfilled env.example"; fi
+grep -q 'required variable .* is missing a value' "$WORK/unfilled.log" || fail "compose did not name the missing value"
+[[ -z "$(dc ps -a -q)" ]] || fail "containers were created from the unfilled env.example"
+log_assert "unfilled env.example as .env: compose refuses before any container exists: ok"
+
+new_stack placeholder
+set_env PASSWORD_PEPPER_KEYS '{"install":"<openssl rand -hex 32>"}'
+if dc up -d --wait --wait-timeout 60 >"$WORK/placeholder.log" 2>&1; then fail "up succeeded with a placeholder value"; fi
+dc logs --no-color "$APP" >"$WORK/placeholder-app.log" 2>&1
+grep -q 'PASSWORD_PEPPER_KEYS still holds an example placeholder' "$WORK/placeholder-app.log" \
+  || fail "the app did not name the placeholder setting"
+server_down "PASSWORD_PEPPER_KEYS is a placeholder"
+dc down -v --remove-orphans >/dev/null
+log_assert "placeholder PASSWORD_PEPPER_KEYS: the app names it and does not start: ok"
+
+new_stack prepare-failure
+start_stack
+# shellcheck disable=SC2016 # expanded by the postgres container's shell
+DB_NAME="$(dc exec -T postgres sh -c 'printf %s "${POSTGRES_DB:-$POSTGRES_USER}"')"
+# shellcheck disable=SC2016 # expanded by the postgres container's shell
+dc exec -T postgres sh -c 'psql -X -q -U "$POSTGRES_USER" -d postgres -c "ALTER DATABASE \"$1\" SET default_transaction_read_only = on"' sh "$DB_NAME"
+dc stop "$APP" >/dev/null
+if dc up -d --wait --wait-timeout 60 "$APP" >"$WORK/prepare-failure.log" 2>&1; then fail "up succeeded although preparation fails"; fi
+dc logs --no-color "$APP" 2>&1 | grep 'preparation failed' | tail -1 | cut -c1-200 | tee -a "$ASSERT_LOG"
+server_down "preparation failed"
+# shellcheck disable=SC2016 # expanded by the postgres container's shell
+dc exec -T postgres sh -c 'psql -X -q -U "$POSTGRES_USER" -d postgres -c "ALTER DATABASE \"$1\" RESET default_transaction_read_only"' sh "$DB_NAME"
+start_stack
+dc down -v --remove-orphans >/dev/null
+log_assert "failing preparation (read-only database): the server stays down, then recovers: ok"
 
 # --- browser subset against fresh stacks --------------------------------------
 

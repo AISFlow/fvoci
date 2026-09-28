@@ -63,7 +63,7 @@ verify-workflows` rejects other triggers or write scopes outside the jobs below.
 | verify | ubuntu-24.04 | contents, checks, packages: read | tag format, first-parent `main`, CI gates, version policy, preflight, existing release/image |
 | build-amd64 / build-arm64 | ubuntu-24.04 / ubuntu-24.04-arm | contents: read, packages: write | native build of the tagged SHA, OCI labels, push by digest; skipped when the version already has a tagged image |
 | index | ubuntu-24.04 | contents: read, packages: write | pushes the two-platform index **by digest, without a tag** (`scripts/release-api.py push-index`), records the index and per-arch digests |
-| dist | ubuntu-24.04 | contents: read | `scripts/release-dist.sh`: `compose.yml`, `release.json`, `RELEASE-NOTES.md`, `SHA256SUMS` |
+| dist | ubuntu-24.04 | contents: read | `scripts/release-dist.sh`: `compose.yml`, `env.example`, `INSTALL.md`, `release.json`, `RELEASE-NOTES.md`, and `SHA256SUMS` over those five |
 | smoke-amd64 / smoke-arm64 | ubuntu-24.04 / ubuntu-24.04-arm | contents: read | `scripts/release-smoke.sh` against the digest, no registry login |
 | publish | ubuntu-24.04 | contents: read, packages: write | tags the smoked index `:0.y.z` (never moved), then `:0.y` when this is the newest `v0.y.*` tag |
 | release | ubuntu-24.04 | contents: write | `scripts/release-publish.sh`: pre-release for the existing git tag |
@@ -115,13 +115,15 @@ again with its write token before tagging.
 ## User compose contract
 
 `release-dist.sh` reads the first existing file of `infra/rust/compose.user.yml`
-and `infra/rust/compose.yml` at the tag. It names the FVOCI image exactly once,
-as the anchor the product services share:
+and `infra/rust/compose.yml` at the tag, with `<compose>.env.example` and
+`<compose>.INSTALL.md` next to it (published as `env.example` and
+`INSTALL.md`). It names the FVOCI image exactly once, as the anchor the product
+services share:
 
 ```yaml
 x-fvoci-image: &fvoci-image ${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:0.1.0}
 services:
-  bootstrap:
+  fvoci:
     image: *fvoci-image
 ```
 
@@ -130,18 +132,37 @@ release asset, which is never committed back. Rendering fails if:
 
 - `FVOCI_IMAGE` or `ghcr.io/aisflow/fvoci` appears anywhere else;
 - no service uses `*fvoci-image`;
-- any other `${...}` or `$VAR` interpolation is left (`$$` is a literal);
+- any other interpolation is not `${VAR:?message}` (`$$` is a literal), so an
+  unfilled `.env` stops Compose before any container exists;
+- a top-level secret reads a variable (`secrets: <name>: environment: VAR`)
+  that no `${VAR:?message}` requires;
+- `<compose>.env.example` does not assign exactly the variables the compose
+  reads, or assigns one twice;
 - any service has an `env_file`.
 
-The smoke expects the stack to start with `docker compose up -d --wait` from an
-empty directory without any environment or `.env`, with:
+The preflight renders the files and, in an empty directory with an empty
+environment, requires `docker compose config` to refuse the unfilled
+`env.example` as `.env` and to accept a filled one. In the filled config,
+exactly one service publishes container port 8080 and uses the product image,
+a `postgres` service exists, no service environment holds a value Compose
+passes as a secret, and every secret the app mounts is uid 0, mode `0400`.
 
-- the one-shot `bootstrap` service generating the install secrets;
-- `server` and `bootstrap` on the product image;
-- a `server` service publishing container port 8080;
-- one-shot services other services wait on with
-  `service_completed_successfully`: all of them must exit 0, and a forced
-  failure of each must keep the server down;
+The smoke fills `env.example` as a user would (a fresh value for each empty
+entry) in an empty directory, finds the app as the service publishing 8080 (no
+service names are assumed), and expects:
+
+- `docker compose up -d --wait` to start it; an unfilled `.env` to be refused
+  before any container exists; a placeholder value to be refused by the app;
+- the app's pid 1 to be `fvoci-server` with uid and gid 1000, no supplementary
+  groups, no capabilities and `NoNewPrivs: 1`, and no setuid/setgid file in the
+  image; `/run/secrets/*` (the three passwords and the two keyrings) root-only
+  and unreadable to uid 1000; neither the database owner password nor the
+  Meilisearch master key in the server's process tree or `/run`; the keyrings
+  in the server's environment only; no secret or keyring in a `docker exec`
+  (and so healthcheck) environment or in `docker inspect`;
+- a failed preparation (a read-only database) to keep the server down, and a
+  restart after the fix to recover;
+- the keys and data to survive a second `up` and `down`/`up`;
 - a `postgres` service whose `POSTGRES_USER` can query the `fvoci` schema.
 
 The image build passes `--build-arg FVOCI_BUILD_SHA=<sha>`. The Rust build stage
@@ -153,14 +174,14 @@ without it, and the smoke fails while `--version` reports `unknown`.
 
 Each architecture pulls the index by digest, anonymously, onto a clean daemon, checks the
 per-arch digests, OCI labels and `--version`, and then, against the rendered
-compose: health and readiness, one-shot services, `fvoci-migrate --doctor`,
+compose: health and readiness, the uid and secret boundary above, `fvoci-migrate --doctor`,
 first-admin setup (a second setup is refused) and login, document create and
 collaborative save (`scripts/install-smoke-collab.mjs`), document
 import/export and public PDF (`scripts/install-smoke-documents.py`), HWPX
 upload, extraction and byte-exact download, workspace search, `down`/`up` with
 the same volumes (existing session, password login, body, attachment,
-extraction, imports and search survive), and a forced failure of each one-shot
-service that must keep the server down.
+extraction, imports and search survive), and a failed preparation that must
+keep the server down.
 
 Browser coverage is a subset. Most Playwright specs seed users through the
 owner database and the debug `fvoci-e2e-fixture` binary, which a release stack

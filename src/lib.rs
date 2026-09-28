@@ -26,6 +26,7 @@ pub mod mail;
 pub mod notifications;
 pub mod oidc;
 pub mod outbox;
+pub mod prepare;
 pub mod projects;
 pub mod push;
 pub mod search;

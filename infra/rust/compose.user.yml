@@ -1,5 +1,3 @@
-# Test copy of infra/rust/compose.user.yml as landed by the compose-bootstrap-secrets
-# branch (.env install); scripts/test_release_dist.py also checks the real file when present.
 # FVOCI install. In an empty folder with this file and env.example (the
 # release asset; infra/rust/compose.user.env.example in the source):
 #

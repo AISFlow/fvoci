@@ -21,7 +21,7 @@ done
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { echo "release-publish: $*" >&2; exit 1; }
-ASSETS=(compose.yml SHA256SUMS release.json RELEASE-NOTES.md)
+ASSETS=(compose.yml env.example INSTALL.md SHA256SUMS release.json RELEASE-NOTES.md)
 
 (cd "$DIST" && sha256sum --strict -c SHA256SUMS >/dev/null) || fail "SHA256SUMS does not match $DIST"
 VERSION="$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert "v"+r["version"]==sys.argv[2], r; print(r["version"])' "$DIST/release.json" "$TAG")"
