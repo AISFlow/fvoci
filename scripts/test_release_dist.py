@@ -169,7 +169,11 @@ class ReleasePreflightTest(unittest.TestCase):
                 self.assertIn("unfilled env.example refused", proc.stdout)
 
     def test_refuses_unwritten_notes(self) -> None:
-        proc = self.scratch().preflight()
+        s = self.scratch()
+        s.ready_notes()
+        s.write("scripts/release-notes-template.md",
+                s.read("scripts/release-notes-template.md") + "<!-- TODO(release): known limitations -->\n")
+        proc = s.preflight()
         self.assertEqual(proc.returncode, 1)
         self.assertIn("TODO(release) markers", proc.stderr)
 
