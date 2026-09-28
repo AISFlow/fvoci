@@ -2,46 +2,10 @@
 # One-shot database bootstrap for compose: create the non-superuser app role, migrate,
 # then apply grant-app-role.sql through fvoci-migrate. Requires owner DATABASE_URL.
 #
-# Secrets come from the environment (infra/rust/compose.yml with an env file) or
-# from files: POSTGRES_PASSWORD_FILE (with POSTGRES_USER, POSTGRES_DB and
-# FVOCI_DB_HOST) replaces DATABASE_URL, FVOCI_APP_PASSWORD_FILE and
-# MEILI_MASTER_KEY_FILE replace their variables. Setting both forms is an error.
-# The user install (compose.user.yml) does not use this script: its fvoci
-# container prepares at startup (`fvoci-migrate --start`, src/prepare.rs).
+# Used by infra/rust/compose.yml's init service. The user install
+# (compose.user.yml) does not use this script: its fvoci container prepares at
+# startup (`fvoci-migrate --start`, src/prepare.rs).
 set -eu
-
-# from_file VAR: VAR_FILE's contents become VAR.
-from_file() {
-  eval "file=\${${1}_FILE:-}"
-  [ -n "$file" ] || return 0
-  eval "set_too=\${${1}+x}"
-  if [ -n "$set_too" ]; then
-    echo "init-db: $1 and ${1}_FILE are both set; set only one" >&2
-    exit 1
-  fi
-  [ -s "$file" ] || { echo "init-db: ${1}_FILE ($file) is missing or empty" >&2; exit 1; }
-  value="$(cat "$file")"
-  export "$1=$value"
-}
-
-if [ -n "${POSTGRES_PASSWORD_FILE:-}" ]; then
-  if [ -n "${DATABASE_URL+x}" ]; then
-    echo "init-db: DATABASE_URL and POSTGRES_PASSWORD_FILE are both set; set only one" >&2
-    exit 1
-  fi
-  : "${POSTGRES_USER:?POSTGRES_USER is required with POSTGRES_PASSWORD_FILE}"
-  : "${POSTGRES_DB:?POSTGRES_DB is required with POSTGRES_PASSWORD_FILE}"
-  : "${FVOCI_DB_HOST:?FVOCI_DB_HOST is required with POSTGRES_PASSWORD_FILE}"
-  [ -s "$POSTGRES_PASSWORD_FILE" ] || {
-    echo "init-db: POSTGRES_PASSWORD_FILE ($POSTGRES_PASSWORD_FILE) is missing or empty" >&2
-    exit 1
-  }
-  # The bootstrap writes hex passwords, so no URL escaping is needed.
-  DATABASE_URL="postgres://${POSTGRES_USER}:$(cat "$POSTGRES_PASSWORD_FILE")@${FVOCI_DB_HOST}/${POSTGRES_DB}"
-  export DATABASE_URL
-fi
-from_file FVOCI_APP_PASSWORD
-from_file MEILI_MASTER_KEY
 
 : "${DATABASE_URL:?DATABASE_URL is required}"
 : "${FVOCI_APP_ROLE:?FVOCI_APP_ROLE is required}"
