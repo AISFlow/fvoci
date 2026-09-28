@@ -30,6 +30,10 @@ pub const HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN: u8 = 0;
 pub const HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY: u8 = 1;
 #[cfg(feature = "db-tests")]
 pub const HUB_JOIN_BARRIER_AFTER_SLOT_READY: u8 = 2;
+/// HTTP borrow (`project_live`, `replace_body`, `restore_revision`) after its
+/// room was returned Live, before the borrowed handle is taken.
+#[cfg(feature = "db-tests")]
+pub const HUB_BORROW_BARRIER_AFTER_SLOT_READY: u8 = 3;
 
 /// One pre-enqueue retry after a proven undelivered join or a Closing race.
 const MAX_PRE_ENQUEUE_RETRIES: u8 = 1;
@@ -187,8 +191,9 @@ struct LiveRoom {
     finished: tokio::sync::oneshot::Receiver<()>,
     last_activity: Instant,
     live_conns: Arc<AtomicUsize>,
-    /// In-flight hub joins that have not yet finished actor admission, plus
-    /// HTTP operations (body write, projection, revision) borrowing the actor.
+    /// Callers that got this room back Live and have not finished actor
+    /// admission yet (see [`LiveSlot`]), plus HTTP operations (body write,
+    /// projection, revision) borrowing the actor.
     joining: Arc<AtomicUsize>,
     permit: OwnedSemaphorePermit,
 }
@@ -210,6 +215,16 @@ impl Drop for JoiningLease {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// A room returned Live by [`CollabHub::get_or_create_room`], with a joining
+/// lease registered under the same phase lock that published or observed Live.
+/// Admission reclaim and idle eviction therefore cannot close the room between
+/// the return and the caller's own join or borrowed operation. A slot is Live at
+/// most once, so while its phase is still Live the lease counts on that room.
+struct LiveSlot {
+    slot: Arc<RoomSlot>,
+    lease: JoiningLease,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,10 +487,24 @@ impl CollabHub {
             if self.shutting_down.load(Ordering::Acquire) {
                 return Err(JoinError::EngineUnavailable);
             }
-            let slot = self.get_or_create_room(key).await?;
-            if let Some(borrowed) = self.live_handle(key).await {
-                return Ok(borrowed);
+            let LiveSlot { slot, lease } = self.get_or_create_room(key).await?;
+            #[cfg(feature = "db-tests")]
+            pause_for_hub_join_barrier(key.1, HUB_BORROW_BARRIER_AFTER_SLOT_READY).await;
+            let handle = {
+                let mut phase = slot.phase.lock().await;
+                match &mut *phase {
+                    RoomPhase::Live(live) if !live.handle.is_closed() => {
+                        live.last_activity = Instant::now();
+                        Some(live.handle.clone())
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(handle) = handle {
+                // The admission lease stays with the operation until it finishes.
+                return Ok((handle, lease));
             }
+            drop(lease);
             let _ = self.wait_for_live_or_retry(key, slot).await?;
             if !Self::allow_pre_enqueue_retry(&mut retries) {
                 return Err(JoinError::EngineUnavailable);
@@ -740,7 +769,10 @@ impl CollabHub {
             if self.shutting_down.load(Ordering::Acquire) {
                 return Err(JoinError::EngineUnavailable);
             }
-            let slot = self.get_or_create_room(key).await?;
+            let LiveSlot {
+                slot,
+                lease: joining_lease,
+            } = self.get_or_create_room(key).await?;
             #[cfg(feature = "db-tests")]
             pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
 
@@ -752,17 +784,14 @@ impl CollabHub {
                     Self::take_dead_live(&mut phase).map(Err)
                 } else if let RoomPhase::Live(live) = &mut *phase {
                     live.last_activity = Instant::now();
-                    Some(Ok((
-                        live.handle.clone(),
-                        JoiningLease::register(&live.joining),
-                    )))
+                    Some(Ok(live.handle.clone()))
                 } else {
                     None
                 }
             };
 
             match deliver {
-                Some(Ok((handle, joining_lease))) => {
+                Some(Ok(handle)) => {
                     #[cfg(feature = "db-tests")]
                     pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN).await;
                     let delivery = handle.deliver_join(join).await;
@@ -785,12 +814,14 @@ impl CollabHub {
                     }
                 }
                 Some(Err(live)) => {
+                    drop(joining_lease);
                     self.spawn_reclaim(key, slot, live);
                     if !Self::allow_pre_enqueue_retry(&mut retries) {
                         return Err(JoinError::EngineUnavailable);
                     }
                 }
                 None => {
+                    drop(joining_lease);
                     let _ = self.wait_for_live_or_retry(key, slot).await?;
                     if !Self::allow_pre_enqueue_retry(&mut retries) {
                         return Err(JoinError::EngineUnavailable);
@@ -1001,7 +1032,7 @@ impl CollabHub {
         self.rooms.read().await.get(&key).cloned()
     }
 
-    async fn get_or_create_room(&self, key: RoomKey) -> Result<Arc<RoomSlot>, JoinError> {
+    async fn get_or_create_room(&self, key: RoomKey) -> Result<LiveSlot, JoinError> {
         let mut reclaims = 0u8;
         loop {
             if self.shutting_down.load(Ordering::Acquire) {
@@ -1034,6 +1065,8 @@ impl CollabHub {
                     // The hub, not a cancellable HTTP/socket caller, owns startup.
                     // An abandoned caller leaves a normal zero-client room which
                     // idle eviction reclaims; another caller can join it meanwhile.
+                    // Its lease travels in the reply and is released when the
+                    // reply is dropped undelivered.
                     let (reply, result) = tokio::sync::oneshot::channel();
                     let hub = self.clone();
                     let registered = {
@@ -1158,7 +1191,7 @@ impl CollabHub {
         &self,
         key: RoomKey,
         slot: Arc<RoomSlot>,
-    ) -> Result<Option<Arc<RoomSlot>>, JoinError> {
+    ) -> Result<Option<LiveSlot>, JoinError> {
         #[cfg(feature = "db-tests")]
         let _waiting = {
             struct Waiting(Arc<RoomSlot>);
@@ -1179,7 +1212,13 @@ impl CollabHub {
             {
                 let phase = slot.phase.lock().await;
                 match &*phase {
-                    RoomPhase::Live(_) => return Ok(Some(slot.clone())),
+                    RoomPhase::Live(live) => {
+                        let lease = JoiningLease::register(&live.joining);
+                        return Ok(Some(LiveSlot {
+                            slot: slot.clone(),
+                            lease,
+                        }));
+                    }
                     RoomPhase::Failed => return Ok(None),
                     RoomPhase::Starting | RoomPhase::Booting(_) | RoomPhase::Closing => {}
                 }
@@ -1261,11 +1300,7 @@ impl CollabHub {
         }
     }
 
-    async fn start_room(
-        &self,
-        key: RoomKey,
-        slot: Arc<RoomSlot>,
-    ) -> Result<Arc<RoomSlot>, JoinError> {
+    async fn start_room(&self, key: RoomKey, slot: Arc<RoomSlot>) -> Result<LiveSlot, JoinError> {
         #[cfg(feature = "db-tests")]
         increment_room_start_count(key.1).await;
         if self.shutting_down.load(Ordering::Acquire) {
@@ -1387,16 +1422,22 @@ impl CollabHub {
                     slot.ready.notify_waiters();
                     return Err(JoinError::EngineUnavailable);
                 };
+                // The creator's lease exists before any other task can see Live.
+                let joining = Arc::new(AtomicUsize::new(0));
+                let lease = JoiningLease::register(&joining);
                 *phase = RoomPhase::Live(LiveRoom {
                     handle,
                     finished,
                     last_activity: Instant::now(),
                     live_conns,
-                    joining: Arc::new(AtomicUsize::new(0)),
+                    joining,
                     permit,
                 });
                 slot.ready.notify_waiters();
-                Ok(slot.clone())
+                Ok(LiveSlot {
+                    slot: slot.clone(),
+                    lease,
+                })
             }
             Err(err) => {
                 self.fail_starting(key, &slot).await;
