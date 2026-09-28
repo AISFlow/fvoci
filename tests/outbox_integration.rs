@@ -4,9 +4,10 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -2445,6 +2446,238 @@ async fn metrics_see_outbox_lag_and_xmin_stall_behind_an_xid_holder() {
     server.abort();
     let _ = server.await;
     app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// External consumer that takes `delay` per event, asks for `cap` events per
+/// `deliver_batch` and counts each completed delivery per event.
+struct SlowExternal {
+    name: String,
+    cap: usize,
+    delay_ms: AtomicU64,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+}
+
+impl SlowExternal {
+    fn new(name: &str, cap: usize, delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            cap,
+            delay_ms: AtomicU64::new(delay.as_millis() as u64),
+            deliveries: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn count(&self, id: Uuid) -> u32 {
+        self.deliveries
+            .lock()
+            .expect("deliveries")
+            .get(&id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn total(&self) -> u32 {
+        self.deliveries.lock().expect("deliveries").values().sum()
+    }
+}
+
+impl OutboxConsumer for SlowExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn batch_event_cap(&self) -> usize {
+        self.cap
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            let delay = self.delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            *self
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .entry(event.id)
+                .or_default() += 1;
+            Ok(())
+        })
+    }
+}
+
+async fn insert_test_events(app: &PgPool, verb: &str, n: usize) -> Vec<Uuid> {
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        ids.push(
+            insert_test_event(app, verb, json!({ "n": i }))
+                .await
+                .expect("insert event"),
+        );
+    }
+    ids
+}
+
+async fn all_processed(pool: &PgPool, consumer: &str, ids: &[Uuid]) -> bool {
+    for id in ids {
+        if !is_processed(pool, consumer, *id).await.unwrap_or(false) {
+            return false;
+        }
+    }
+    true
+}
+
+async fn processed_count(pool: &PgPool, consumer: &str, ids: &[Uuid]) -> usize {
+    let mut n = 0;
+    for id in ids {
+        if is_processed(pool, consumer, *id)
+            .await
+            .expect("is_processed")
+        {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Shutdown stops External delivery between events: the event in flight
+/// finishes, nothing else is delivered after the cancel, the lease is
+/// released, and a restarted dispatcher delivers the rest exactly once.
+#[tokio::test]
+async fn external_shutdown_stops_between_events_and_releases_the_lease() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let consumer = SlowExternal::new("slowshut", 1, Duration::from_secs(1));
+    let ids = insert_test_events(&app, "test.slowshut", 20).await;
+    ensure_consumer(&app, "slowshut").await.expect("ensure");
+    wait_until_readable(&app, "slowshut", ids[19]).await;
+
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    let probe = consumer.clone();
+    wait_until(DISPATCHER_WAIT, || {
+        let probe = probe.clone();
+        Box::pin(async move { probe.total() >= 1 })
+    })
+    .await;
+    let started = std::time::Instant::now();
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    let elapsed = started.elapsed();
+    let delivered_at_shutdown = consumer.total();
+    assert!(
+        elapsed < Duration::from_millis(2_500),
+        "join took {elapsed:?}; {delivered_at_shutdown} events delivered by then"
+    );
+    assert!(
+        delivered_at_shutdown <= 2,
+        "only the event in flight may finish after the cancel, got {delivered_at_shutdown}"
+    );
+    assert!(processed_count(&app, "slowshut", &ids).await <= 2);
+    let released: bool = sqlx::query_scalar(
+        "SELECT lease_owner IS NULL AND lease_until IS NULL FROM fvoci.outbox_consumers WHERE consumer = 'slowshut'",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("lease row");
+    assert!(released, "shutdown must release the lease");
+
+    consumer.delay_ms.store(0, Ordering::SeqCst);
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let ids = ids.clone();
+        Box::pin(async move { all_processed(&pool, "slowshut", &ids).await })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join 2");
+    for id in &ids {
+        assert_eq!(
+            consumer.count(*id),
+            1,
+            "event {id} delivered more than once"
+        );
+    }
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// One dispatcher task serves every consumer in turn: a slow External
+/// consumer stops starting new chunks once its lease budget is spent, so the
+/// next consumer is not held for the slow consumer's whole backlog.
+#[tokio::test]
+async fn external_lease_budget_hands_the_dispatcher_to_the_next_consumer() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    install_delivery_table(&admin, &harness.role_name).await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let slow = SlowExternal::new("slowfair", 1, Duration::from_millis(500));
+    let fast = Arc::new(PgOnlyTestConsumer::new("fastfair"));
+    let ids = insert_test_events(&app, "test.fair", 20).await;
+    ensure_consumer(&app, "slowfair")
+        .await
+        .expect("ensure slow");
+    ensure_consumer(&app, "fastfair")
+        .await
+        .expect("ensure fast");
+    wait_until_readable(&app, "slowfair", ids[19]).await;
+
+    let dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(2),
+            batch_limit: 50,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app.clone(),
+        vec![
+            slow.clone() as Arc<dyn OutboxConsumer>,
+            fast as Arc<dyn OutboxConsumer>,
+        ],
+    )
+    .expect("dispatcher");
+    let started = std::time::Instant::now();
+    wait_until(Duration::from_secs(30), || {
+        let pool = app.clone();
+        Box::pin(async move { delivery_count(&pool, "fastfair").await >= 20 })
+    })
+    .await;
+    let elapsed = started.elapsed();
+    let slow_done = slow.total();
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "PgOnly consumer waited {elapsed:?} behind the slow External consumer ({slow_done} slow events done)"
+    );
+    for id in &ids {
+        assert!(slow.count(*id) <= 1, "event {id} delivered more than once");
+    }
+
+    app.close().await;
     admin.close().await;
     harness.cleanup().await;
 }

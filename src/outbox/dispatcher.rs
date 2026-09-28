@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use sqlx::PgPool;
@@ -313,10 +313,8 @@ async fn process_external_events(
 
     for event in events {
         if cancel.is_cancelled() {
-            if !pending.is_empty() {
-                deliver_external_pending(settings, pool, consumer, owner, ttl_secs, &pending)
-                    .await?;
-            }
+            // Nothing in `pending` is delivered or marked yet, and the cursor
+            // has not passed it: the next dispatcher delivers it.
             let _ = release_consumer(pool, consumer.name(), owner).await?;
             return Ok(true);
         }
@@ -366,7 +364,8 @@ async fn process_external_events(
 
     if !pending.is_empty() {
         worked |=
-            deliver_external_pending(settings, pool, consumer, owner, ttl_secs, &pending).await?;
+            deliver_external_pending(settings, pool, consumer, owner, cancel, ttl_secs, &pending)
+                .await?;
     }
 
     Ok(worked)
@@ -391,17 +390,28 @@ fn lease_batch_timeout(lease: Duration) -> Duration {
     lease.saturating_sub(margin).max(Duration::from_millis(1))
 }
 
+/// Deliver `pending` in chunks. Before each chunk, stop on shutdown, and stop
+/// once this consumer has used its lease budget, so the one dispatcher task
+/// also serves the other consumers. Events left over stay above the cursor
+/// and are delivered by a later cycle. A chunk in flight is never cut short:
+/// the default `deliver_batch` would lose the progress it made.
 async fn deliver_external_pending(
     settings: &OutboxDispatcherSettings,
     pool: &PgPool,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
+    cancel: &CancellationToken,
     ttl_secs: i64,
     pending: &[OutboxEvent],
 ) -> Result<bool, sqlx::Error> {
+    let started = Instant::now();
+    let budget = lease_batch_timeout(settings.lease_ttl);
     let mut offset = 0usize;
     let mut worked = false;
     while offset < pending.len() {
+        if cancel.is_cancelled() || (offset > 0 && started.elapsed() >= budget) {
+            break;
+        }
         if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
             return Ok(worked);
         }
