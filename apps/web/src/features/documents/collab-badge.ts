@@ -9,7 +9,9 @@ export interface CollabBadge {
     | "doc.collab.pending"
     | "doc.collab.connecting"
     | "doc.collab.reconnecting"
-    | "doc.collab.unauthorized";
+    | "doc.collab.unauthorized"
+    | "doc.collab.busy"
+    | "doc.collab.unavailable";
   tone: CollabBadgeTone;
 }
 
@@ -30,7 +32,27 @@ const COLLAB_BADGE: Record<CollabStatus, CollabBadge> = {
     label: "doc.collab.unauthorized",
     tone: "danger",
   },
+  busy: {
+    label: "doc.collab.busy",
+    tone: "danger",
+  },
+  unavailable: {
+    label: "doc.collab.unavailable",
+    tone: "danger",
+  },
 };
+
+/** Body note for a room the server refused before its body loaded: not loaded, not empty.
+ * Once the body is loaded (`ready`) the editor stays and only the badge reports the refusal. */
+export function collabRefusalNote(
+  status: CollabStatus | undefined,
+  ready: boolean,
+): "doc.collab.busyNote" | "doc.collab.unavailableNote" | null {
+  if (ready) return null;
+  if (status === "busy") return "doc.collab.busyNote";
+  if (status === "unavailable") return "doc.collab.unavailableNote";
+  return null;
+}
 
 /** WHY: 소켓 동기화와 DB persist ack 는 다르다. 「저장됨」은 일치하는 persist 성공만. */
 export function collabBadge(

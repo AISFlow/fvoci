@@ -407,7 +407,7 @@ Optional tuning:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `FVOCI_COLLAB_MAX_ROOMS` | 30 (clamp 1–512) | Hub room slots; immediate refusal when full. Default fits stock PostgreSQL `max_connections=100`; the 64-room capacity probe sets `64` and needs a higher Postgres limit. |
+| `FVOCI_COLLAB_MAX_ROOMS` | 30 (clamp 1–512) | Hub room slots. When full, a new room first reclaims the least recently active room that has no members, no join in flight and no HTTP body operation, and whose last activity is older than `max(COLLAB_RPC_TIMEOUT_MS, 3 s)` (5 s by default, at most the idle timer); it waits for that room to close. With no such room the join is refused (WebSocket close 1013, the editor retries with bounded backoff). Default fits stock PostgreSQL `max_connections=100`; the 64-room capacity probe sets `64` and needs a higher Postgres limit. |
 | `FVOCI_COLLAB_MAX_CHILDREN` | primary + validator headroom | Bounds the validator helper pool only. Primary cap is `max_rooms + 4` for offline revision capture headroom. |
 | `FVOCI_COLLAB_MEMORY_BUDGET` | 2 GiB | Aggregate admission: sum live helper VmRSS plus `max(16 MiB, 14× persisted bytes)` per room start |
 | `FVOCI_COLLAB_MAX_CONNECTIONS` | 32 | Per-room WebSocket members |

@@ -982,6 +982,14 @@ impl RoomHandle {
         let _ = self.tx.send(RoomCommand::Shutdown).await;
     }
 
+    /// Close an empty room after the work already queued before it (no cancel
+    /// signal). The last-disconnect session revision, with its bounded head
+    /// retries, runs in the actor iteration that emptied the room, so this
+    /// Shutdown is handled only after it.
+    pub async fn shutdown_after_queued(&self) {
+        let _ = self.tx.send(RoomCommand::Shutdown).await;
+    }
+
     pub async fn capture_revision(
         &self,
         actor_user_id: Uuid,
@@ -1410,8 +1418,16 @@ impl RoomActor {
                 }
             }
             self.publish_live_conns();
-            if self.session_revision.is_some() && !self.shutting_down {
-                let _ = self.advance_session_revision().await;
+            // Finish the bounded `StaleRevisionHead` retries in this iteration: a
+            // Shutdown queued behind it (admission reclaim) must not drop a
+            // revision that only waits for its head retry.
+            for _ in 0..SYSTEM_REVISION_HEAD_RETRIES {
+                if self.session_revision.is_none() || self.shutting_down {
+                    break;
+                }
+                if self.advance_session_revision().await {
+                    break;
+                }
             }
             if self.fence_lost && self.connections.is_empty() {
                 break;
@@ -2060,6 +2076,8 @@ impl RoomActor {
                 revoked: false,
             },
         );
+        // Published before the join reply lets the hub drop its joining lease,
+        // so reclaim never sees an empty admitted room.
         self.publish_live_conns();
         let encoded = self.awareness.encode_all();
         if !encoded.is_empty() {

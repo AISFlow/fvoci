@@ -3,7 +3,7 @@ import { t } from "@fvoci/i18n";
 import { useState } from "react";
 import { QueryLoading } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
-import { collabBadge } from "@/features/documents/collab-badge";
+import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
 import { CollabPresence } from "@/features/documents/collab-presence";
 import type { CollabSession, CollabUser } from "@/features/documents/collab-session";
 import { RevisionPanel } from "@/features/documents/revision-panel";
@@ -32,6 +32,7 @@ export function TaskBodyEditor({
 
   const readOnly = pageReadOnly || (session?.readOnly ?? false);
   const ready = Boolean(session?.synced && collabUser);
+  const refusalNote = collabRefusalNote(session?.status, ready);
   const badge = session
     ? collabBadge(session.status, session.pending || persisting, session.durableSaved)
     : null;
@@ -99,7 +100,12 @@ export function TaskBodyEditor({
           {t("task.collab.unauthorized")}
         </p>
       ) : null}
-      {!ready && session?.status !== "unauthorized" ? <QueryLoading /> : null}
+      {refusalNote ? (
+        <p className="document-page__body-note" role="status">
+          {t(refusalNote)}
+        </p>
+      ) : null}
+      {!ready && session?.status !== "unauthorized" && !refusalNote ? <QueryLoading /> : null}
       {ready && session && collabUser ? (
         <div className="document-page__body document-page__body--editor">
           <UrlEmbedProvider workspaceId={workspaceId}>

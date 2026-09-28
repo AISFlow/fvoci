@@ -34,7 +34,7 @@ import {
   createProjectDocumentAttachmentBridge,
 } from "@/features/workspace/attachment-upload";
 import { bindBlockPresence, isBlockPresenceAwareness } from "./block-presence";
-import { collabBadge } from "./collab-badge";
+import { collabBadge, collabRefusalNote } from "./collab-badge";
 import { CollabPresence } from "./collab-presence";
 import { collabUserOf, setTitleEditing, useCollabSession } from "./collab-session";
 import { RevisionPanel } from "./revision-panel";
@@ -304,6 +304,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
   const projectReadOnly = project ? !project.canEdit || project.archived : false;
   const readOnly = archived || projectReadOnly || (collabSession?.readOnly ?? false);
   const ready = Boolean(collabSession?.synced && collabUser);
+  const refusalNote = collabRefusalNote(collabSession?.status, ready);
   const badge = collabSession
     ? collabBadge(
         collabSession.status,
@@ -583,7 +584,14 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
             {t("doc.collab.unauthorized")}
           </p>
         ) : null}
-        {!ready && collabSession?.status !== "unauthorized" ? <QueryLoading /> : null}
+        {refusalNote ? (
+          <p className="document-page__body-note" role="status">
+            {t(refusalNote)}
+          </p>
+        ) : null}
+        {!ready && collabSession?.status !== "unauthorized" && !refusalNote ? (
+          <QueryLoading />
+        ) : null}
         {ready && collabSession && collabUser ? (
           <AttachmentBlockContext.Provider value={attachmentBridge}>
             <UrlEmbedProvider workspaceId={workspaceId}>
