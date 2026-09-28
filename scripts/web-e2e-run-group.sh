@@ -20,6 +20,48 @@ fi
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-web-e2e.XXXXXX")"
 SERVER_LOG="$RUN_DIR/server.log"
 PEPPER='{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+# Host netlink address/link events (only `ip monitor` writes this file, so its
+# mtime is the last event; web-e2e-inner.sh relies on that) and the group's
+# own markers, kept apart and merged by timestamp when retained.
+NET_MONITOR_LOG="$RUN_DIR/net-monitor.log"
+NET_MARKS_LOG="$RUN_DIR/net-marks.log"
+NET_MONITOR_PID=""
+
+# "[UTC time] # fvoci: msg", the `ip -tshort` prefix under TZ=UTC, so both
+# files sort into one timeline. Bash's own clock is used because not every
+# date(1) implementation zero-pads %6N.
+net_mark() {
+  # EPOCHREALTIME is bash 5.0+; without it the markers are skipped, never
+  # an unbound-variable error under set -u (the cleanup trap calls this).
+  local now="${EPOCHREALTIME:-}"
+  [[ -n "$now" ]] || return 0
+  TZ=UTC printf '[%(%Y-%m-%dT%H:%M:%S)T.%s] # fvoci: %s\n' \
+    "${now%[.,]*}" "${now#*[.,]}" "$*" >>"$NET_MARKS_LOG"
+}
+
+# Chromium's network change notifier aborts in-flight requests with
+# net::ERR_NETWORK_CHANGED on host address/link changes, and each group starts
+# its containers just before the browser. Record the same netlink groups
+# (address, link) from before the containers start until the group ends.
+start_net_monitor() {
+  : >"$NET_MONITOR_LOG"
+  if ! command -v ip >/dev/null 2>&1; then
+    net_mark "ip (iproute2) not found; no netlink event log"
+    echo "warning: ip (iproute2) not found; no netlink event log for group ${GROUP_LABEL}" >&2
+    return 0
+  fi
+  TZ=UTC ip -o -tshort monitor address link >>"$NET_MONITOR_LOG" 2>&1 </dev/null &
+  NET_MONITOR_PID=$!
+  net_mark "netlink monitor started (ip monitor address link, pid ${NET_MONITOR_PID})"
+}
+
+stop_net_monitor() {
+  if [[ -n "$NET_MONITOR_PID" ]]; then
+    kill "$NET_MONITOR_PID" 2>/dev/null || true
+    wait "$NET_MONITOR_PID" 2>/dev/null || true
+    NET_MONITOR_PID=""
+  fi
+}
 
 redact_server_log() {
   sed -E \
@@ -49,6 +91,17 @@ retain_failure_artifacts() {
     dest="$retain_dir/owned-server/$(basename "$(dirname "$log")").log"
     redact_server_log "$log" >"$dest"
   done < <(find "$RUN_DIR" -mindepth 2 -name server.log -type f -print0 2>/dev/null || true)
+  # Interface names, link flags and addresses only; redacted like the rest.
+  local -a net_logs=()
+  for log in "$NET_MONITOR_LOG" "$NET_MARKS_LOG"; do
+    [[ -f "$log" ]] && net_logs+=("$log")
+  done
+  if ((${#net_logs[@]} > 0)); then
+    redact_server_log <(
+      echo "# host netlink address/link events (ip -o -tshort monitor address link, UTC) and group markers"
+      LC_ALL=C sort -s -k1,1 "${net_logs[@]}" || true
+    ) >"$retain_dir/net-events.log"
+  fi
   while IFS= read -r -d '' trace; do
     dest="$(dirname "$trace")/browser-summary.txt"
     # Python's own error text is not redacted, so it never reaches the file.
@@ -66,6 +119,8 @@ retain_failure_artifacts() {
 
 cleanup() {
   local status=$?
+  stop_net_monitor
+  net_mark "group exiting with status ${status}" 2>/dev/null || true
   if (( status != 0 )); then
     retain_failure_artifacts || true
   fi
@@ -81,8 +136,12 @@ fi
 cp -a "$ROOT/apps/web/dist" "$RUN_DIR/static"
 
 echo "=== web e2e group: ${GROUP_LABEL} ===" >&2
+start_net_monitor
+net_mark "starting test containers (postgres, meilisearch)"
 bash "$ROOT/scripts/start-test-postgres.sh" \
   bash "$ROOT/scripts/start-test-meili.sh" \
   env RUN_DIR="$RUN_DIR" SERVER_LOG="$SERVER_LOG" PEPPER="$PEPPER" ROOT="$ROOT" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" FVOCI_STATIC_DIR="$RUN_DIR/static" \
+    NET_MONITOR_LOG="$NET_MONITOR_LOG" NET_MARKS_LOG="$NET_MARKS_LOG" \
+    NET_MONITOR_PID="$NET_MONITOR_PID" \
   bash "$ROOT/scripts/web-e2e-inner.sh" "$@"

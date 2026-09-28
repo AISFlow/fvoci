@@ -157,12 +157,14 @@ jobs:
         with:
           name: web-browser-shard-${{ matrix.shard }}-browser-failure-${{ github.run_attempt }}
           # Raw traces carry headers, cookies and bodies and stay on the runner;
-          # upload the rendered DOM, the redacted trace digest and server logs.
+          # upload the rendered DOM, the redacted trace digest, server logs and
+          # the host netlink address/link event log.
           path: |
             ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
             ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/browser-summary.txt
             ${{ steps.browser.outputs.failure-artifacts }}/server.log
             ${{ steps.browser.outputs.failure-artifacts }}/owned-server/*.log
+            ${{ steps.browser.outputs.failure-artifacts }}/net-events.log
           retention-days: 3
           if-no-files-found: warn
 
@@ -230,6 +232,7 @@ jobs:
             ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/browser-summary.txt
             ${{ steps.browser.outputs.failure-artifacts }}/server.log
             ${{ steps.browser.outputs.failure-artifacts }}/owned-server/*.log
+            ${{ steps.browser.outputs.failure-artifacts }}/net-events.log
           retention-days: 3
           if-no-files-found: warn
 

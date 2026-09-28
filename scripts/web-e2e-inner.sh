@@ -24,6 +24,129 @@ cleanup_server() {
 }
 trap cleanup_server EXIT
 
+# Markers for the group's netlink event log (see web-e2e-run-group.sh).
+net_mark() {
+  [[ -n "${NET_MARKS_LOG:-}" ]] || return 0
+  # EPOCHREALTIME is bash 5.0+; without it the markers are skipped, never
+  # an unbound-variable error under set -u (the cleanup trap calls this).
+  local now="${EPOCHREALTIME:-}"
+  [[ -n "$now" ]] || return 0
+  TZ=UTC printf '[%(%Y-%m-%dT%H:%M:%S)T.%s] # fvoci: %s\n' \
+    "${now%[.,]*}" "${now#*[.,]}" "$*" >>"$NET_MARKS_LOG"
+}
+
+net_event_count() {
+  local count=0
+  if [[ -n "${NET_MONITOR_LOG:-}" && -f "$NET_MONITOR_LOG" ]]; then
+    count="$(wc -l <"$NET_MONITOR_LOG")"
+  fi
+  echo "$((count))"
+}
+
+# Chromium aborts in-flight requests with net::ERR_NETWORK_CHANGED when its
+# netlink address tracker sees a host address or link change. The group's
+# containers add veth links just before this point, and IPv6 duplicate address
+# detection moves addresses from tentative to preferred a second or two later,
+# which can land inside the first page load. Before the browser starts, wait
+# until no IPv6 address is tentative and no address/link event arrived for
+# QUIET_S. This is a bounded precondition, not a test timeout: after LIMIT_S
+# it warns and continues. It returns at once when the host is already quiet.
+settle_network_before_browser() {
+  if ! python3 - <<'PY'
+import datetime, os, subprocess, sys, time
+
+LIMIT_S = 10.0
+QUIET_S = 1.0
+POLL_S = 0.1
+monitor_log = os.environ.get("NET_MONITOR_LOG", "")
+marks_log = os.environ.get("NET_MARKS_LOG", "")
+monitor_pid = os.environ.get("NET_MONITOR_PID", "")
+
+
+def say(message):
+    print(f"network settle: {message}", file=sys.stderr, flush=True)
+    if marks_log:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        with open(marks_log, "a", encoding="utf-8") as marks:
+            marks.write(f"[{now:%Y-%m-%dT%H:%M:%S.%f}] # fvoci: network settle: {message}\n")
+
+
+def monitor_running():
+    if not (monitor_pid and monitor_log and os.path.isfile(monitor_log)):
+        return False
+    try:
+        os.kill(int(monitor_pid), 0)
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def tentative_interfaces():
+    # dadfailed addresses stay tentative forever; they never settle.
+    out = subprocess.run(
+        ["ip", "-6", "-o", "addr", "show", "tentative", "-dadfailed"],
+        check=True, capture_output=True, text=True, timeout=5,
+    ).stdout
+    return sorted({line.split()[1].rstrip(":") for line in out.splitlines() if len(line.split()) > 1})
+
+
+def event_count():
+    with open(monitor_log, "rb") as log:
+        return sum(1 for _ in log)
+
+
+start = time.monotonic()
+try:
+    tentative_interfaces()
+    check_tentative = True
+except (OSError, subprocess.SubprocessError) as error:
+    check_tentative = False
+    say(f"cannot list tentative addresses ({type(error).__name__})")
+watch_events = monitor_running()
+if not watch_events:
+    say("netlink monitor not running; not checking for recent events")
+if not (check_tentative or watch_events):
+    say("skipped")
+    sys.exit(0)
+
+while True:
+    elapsed = time.monotonic() - start
+    tentative = tentative_interfaces() if check_tentative else []
+    quiet = time.time() - os.stat(monitor_log).st_mtime if watch_events else None
+    events = f"; netlink events since the group started: {event_count()}" if watch_events else ""
+    if not tentative and (quiet is None or quiet >= QUIET_S):
+        say(f"settled after {elapsed:.2f} s{events}")
+        break
+    if elapsed >= LIMIT_S:
+        detail = f"tentative: {', '.join(tentative) or 'none'}"
+        if quiet is not None:
+            detail += f"; last netlink event {quiet:.2f} s ago"
+        say(f"warning: host network still changing after {LIMIT_S:.0f} s ({detail}{events}); continuing")
+        break
+    time.sleep(POLL_S)
+PY
+  then
+    echo "warning: network settle check failed; continuing" >&2
+  fi
+}
+
+# run_playwright <args...>: mark the browser's lifetime in the netlink log and
+# report how many address/link events arrived while it ran.
+run_playwright() {
+  local before status=0
+  settle_network_before_browser
+  before="$(net_event_count)"
+  net_mark "playwright start"
+  "$ROOT/apps/web/node_modules/.bin/playwright" test "$@" || status=$?
+  net_mark "playwright exited with status ${status}"
+  if [[ -n "${NET_MONITOR_PID:-}" ]] && kill -0 "$NET_MONITOR_PID" 2>/dev/null; then
+    echo "network: netlink address/link events while Playwright ran: $(($(net_event_count) - before))" >&2
+  fi
+  return "$status"
+}
+
+net_mark "containers ready; preparing database"
+
 PG_CONTAINER="${FVOCI_TEST_PG_CONTAINER:?missing test postgres container}"
 psql_admin() {
   docker exec -i "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 "$@"
@@ -108,7 +231,7 @@ export FVOCI_E2E_SMTP_CAPTURE="$SMTP_CAPTURE"
 
 if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]]; then
   cd "$ROOT/apps/web"
-  "$ROOT/apps/web/node_modules/.bin/playwright" test \
+  run_playwright \
     --config=e2e-pending/collab-playwright.config.ts \
     --output="$PLAYWRIGHT_OUTPUT_DIR" "$@"
   exit 0
@@ -136,7 +259,7 @@ if [[ -z "$BASE_URL" ]]; then
   exit 1
 fi
 
+net_mark "server ready"
 cd "$ROOT/apps/web"
 export PLAYWRIGHT_BASE_URL="$BASE_URL"
-"$ROOT/apps/web/node_modules/.bin/playwright" test \
-  --output="$PLAYWRIGHT_OUTPUT_DIR" "$@"
+run_playwright --output="$PLAYWRIGHT_OUTPUT_DIR" "$@"
