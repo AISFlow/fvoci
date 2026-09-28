@@ -80,6 +80,11 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/041_outbox_consumer_seed_repair.sql"),
         41,
     ),
+    // 042 is reserved by an open branch.
+    (
+        include_str!("../../migrations/043_events_index_outbox_lag.sql"),
+        43,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -708,6 +713,10 @@ mod tests {
         (
             41,
             "1d86261505a7065283f7a27b53399e2628602464c576ed36fe7a6a2ff2ff6137",
+        ),
+        (
+            43,
+            "a513c4f1c24e1c0c65c49e78e12131cc82931036c59c377956b5348fe8ce22c8",
         ),
     ];
 

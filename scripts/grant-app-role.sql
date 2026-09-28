@@ -252,3 +252,8 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_set_vapid(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_set_vapid(text, text) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_init_vapid(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_init_vapid(text, text) TO :"app_role";
+
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_lag_seconds(text[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_lag_seconds(text[]) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_oldest_write_xact_age_seconds() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_oldest_write_xact_age_seconds() TO :"app_role";

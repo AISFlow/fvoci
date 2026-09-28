@@ -720,8 +720,15 @@ PostgreSQL cluster (any database, or a prepared transaction) is older than the
 newest event. Let it end or roll it back (`pg_stat_activity`,
 `pg_prepared_xacts`), then repeat step 3. Migration 041 adds the outbox cursors
 an earlier upgrade left missing, so notifications and mail do not replay past
-events. To go back to the old build, stop the
-upgraded server first; do not start the old image on the migrated database.
+events. Migration 043 builds the index `events_workspace_relay_idx` on
+`fvoci.events (workspace_id, xact, seq)` inside the migrate transaction, so it
+cannot use `CONCURRENTLY`. While it builds, it holds a SHARE lock on
+`fvoci.events`: reads continue, but every write that records an event waits.
+The server is stopped during migrate, so this only affects other clients of the
+same database. The build is one scan and sort of the table, so its time grows with the
+number of rows in `fvoci.events`; check `SELECT count(*) FROM fvoci.events` and
+plan the maintenance window accordingly. To go back
+to the old build, stop the upgraded server first; do not start the old image on the migrated database.
 Restore the pre-upgrade backup into a new project with the old image (local
 storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback
 loses writes made after that backup; preserve the failed install for diagnosis,
