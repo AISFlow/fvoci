@@ -2043,6 +2043,90 @@ async fn collab_lifecycle_cold_room_http_projection_and_body_write() {
     .await;
 }
 
+/// Spawn Primary helpers until the process-wide pool refuses one.
+fn fill_primary_pool() -> Vec<collab_engine::process::EngineSession> {
+    use collab_engine::outcome::{EngineStatus, LimitKind};
+    use collab_engine::process::{ChildSlotKind, EngineSession, SpawnRequest};
+    let mut held = Vec::new();
+    loop {
+        match EngineSession::spawn(SpawnRequest {
+            engine_bin: fvoci_server::collab::config::require_collab_engine_for_tests(),
+            limits: collab_engine::Limits::for_tests(),
+            slot_kind: ChildSlotKind::Primary,
+            slot_wait: None,
+            test_hang_ms: None,
+            test_exit_after_read: None,
+            test_close_stdout_hang_ms: None,
+            test_exit_after_write: None,
+        }) {
+            Ok(session) => held.push(session),
+            Err(report) => {
+                assert!(
+                    matches!(
+                        report.outcome,
+                        EngineStatus::ResourceLimit {
+                            kind: LimitKind::Ops,
+                            ..
+                        }
+                    ),
+                    "the pool must refuse at its cap: {:?}",
+                    report.outcome
+                );
+                return held;
+            }
+        }
+        assert!(held.len() <= 64, "the primary pool never filled");
+    }
+}
+
+/// A join whose room helper cannot spawn because every primary slot is taken
+/// is refused as capacity (1013, retry later) rather than as an engine failure,
+/// and the same room admits the next join once a slot frees.
+#[tokio::test]
+async fn collab_lifecycle_full_primary_pool_join_is_capacity_retry() {
+    // Primary slots are process-wide. With the hub's own slot these two hold
+    // every test-server slot, so no other test here spawns while the pool is
+    // full. Taken before the timed case: waiting for them is not the test.
+    let exclusive = (
+        support::acquire_test_server_slot().await,
+        support::acquire_test_server_slot().await,
+    );
+    run_lifecycle_test(
+        "collab_lifecycle_full_primary_pool_join_is_capacity_retry",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 30_000),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
+                let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
+
+                let held = fill_primary_pool();
+                assert!(!held.is_empty());
+                let refused = hub_join_with_events(&hub, &wiki, 1).await;
+                assert_eq!(refused.err(), Some(JoinError::CapacityRetry));
+                assert_eq!(
+                    room_start_count(wiki.document_id).await,
+                    1,
+                    "the actor started; only its helper spawn met the cap"
+                );
+
+                drop(held);
+                let (_, lease, _events) = hub_join_with_events(&hub, &wiki, 2)
+                    .await
+                    .expect("join once a primary slot is free");
+                run.retain_lease(lease);
+                assert_eq!(room_start_count(wiki.document_id).await, 1);
+            })
+        },
+    )
+    .await;
+    drop(exclusive);
+}
+
 fn proc_effective_uid(pid: u32) -> u32 {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("status");
     status

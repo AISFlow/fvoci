@@ -26,7 +26,9 @@ use crate::collab::admission::warn_join_db_error;
 use crate::collab::awareness::{decode_awareness, AwarenessRegistry};
 use crate::collab::config::CollabConfig;
 use crate::collab::derived_body::prepare_derived_body;
-use crate::collab::engine_bridge::{warn_engine_not_applied, BridgeError, EngineBridge};
+use crate::collab::engine_bridge::{
+    warn_engine_not_applied, BridgeError, EngineBridge, RecycleError,
+};
 use crate::collab::guard::RoomGuard;
 use crate::collab::revision::prepare_revision_text;
 use crate::collab::validation::{
@@ -3298,15 +3300,33 @@ impl RoomActor {
     }
 
     async fn reload_primary_from_committed(&mut self) -> Result<(), JoinError> {
-        if self.engine.recycle().await.is_err() {
+        if let Err(err) = self.engine.recycle().await {
+            // Every primary slot taken is transient: ask the client to retry
+            // (1013). The next reload spawns again.
+            let at_capacity = matches!(
+                &err,
+                RecycleError::Spawn(report) if matches!(
+                    report.outcome,
+                    EngineStatus::ResourceLimit {
+                        kind: LimitKind::Ops,
+                        ..
+                    }
+                )
+            );
             tracing::warn!(
                 workspace_id = %self.workspace_id,
                 document_id = %self.document_id,
-                "collab primary recycle failed: engine bridge dead"
+                bridge_dead = matches!(err, RecycleError::Dead),
+                at_capacity,
+                "collab primary recycle failed"
             );
             self.primary_loaded = false;
             self.primary_dirty = true;
-            return Err(JoinError::EngineUnavailable);
+            return Err(if at_capacity {
+                JoinError::CapacityRetry
+            } else {
+                JoinError::EngineUnavailable
+            });
         }
         match self.load_engine_primary().await {
             Ok(()) => {
