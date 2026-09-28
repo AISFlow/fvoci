@@ -692,12 +692,13 @@ test("c: typing, menu and gantt interactions", async ({ browser }) => {
     const hit = await waitHit(page, id, HIT_TIMEOUT);
     const paint = hit ? await elementPaint(page, id) : null;
     await page.waitForTimeout(100);
-    const key = (await inputsSince(page, since)).find((x) => x.t === "keydown");
+    // Start at the `k` keydown, not the preceding Control keydown.
+    const key = (await inputsSince(page, since)).find((x) => x.t === "keydown" && x.key !== "Control");
     const ints = interactions(await eventsSince(page, since));
     menu.push({
       keyToDom: hit && key ? round(hit.dom - key.ts) : null,
       keyToPaint: paint && key ? round(paint - key.ts) : null,
-      interaction: ints[0]?.duration ?? "<16",
+      interaction: ints.length ? Math.max(...ints.map((x) => x.duration)) : "<16",
     });
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden({ timeout: HIT_TIMEOUT });
