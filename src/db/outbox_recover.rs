@@ -232,6 +232,24 @@ async fn recover_outbox_on(
         .execute(&mut *tx)
         .await?;
 
+        // The rewound cursors replay the window, and a window event's mark is
+        // what keeps an External consumer (mail) from sending it again. The
+        // processed_events GC deletes marks older than 30 days, so a restore
+        // from an older snapshot would lose them before the replay reaches
+        // them. Date the window's marks from this recovery.
+        sqlx::query(
+            r#"
+            UPDATE fvoci.processed_events AS p
+            SET processed_at = now()
+            FROM fvoci.events AS e
+            WHERE e.id = p.event_id
+              AND e.created_at >= $1::timestamptz
+            "#,
+        )
+        .bind(since)
+        .execute(&mut *tx)
+        .await?;
+
         let updated = sqlx::query(
             r#"
             UPDATE fvoci.outbox_consumers

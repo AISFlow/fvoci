@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use sqlx::PgPool;
@@ -56,6 +56,11 @@ pub trait OutboxConsumer: Send + Sync {
 
     /// Deliver a read batch in order. Returns how many leading events are durably
     /// done (all their external effects confirmed), plus the first error if any.
+    /// The dispatcher drops the call when it runs past the lease timeout, and
+    /// then counts none of the chunk as done. An error without an exact index
+    /// (`done == 0`) is charged to the first event, which is then delivered on
+    /// its own. A call may also end early without an error (`0 < done <
+    /// events.len()`); the dispatcher then passes the rest in the next call.
     fn deliver_batch<'a>(
         &'a self,
         pool: &'a PgPool,
@@ -83,7 +88,11 @@ pub trait OutboxConsumer: Send + Sync {
     }
 
     /// Max events this consumer wants in one `deliver_batch`. The dispatcher
-    /// also applies [`OutboxDispatcherSettings::batch_limit`].
+    /// also applies [`OutboxDispatcherSettings::batch_limit`]. A consumer that
+    /// keeps the default `deliver_batch` and whose effect is not idempotent
+    /// returns 1 (GitHub): a lease timeout then drops one event's work, not
+    /// the progress of a whole chunk. The mail consumer instead ends its own
+    /// calls after one mail event.
     fn batch_event_cap(&self) -> usize {
         usize::MAX
     }
@@ -313,10 +322,8 @@ async fn process_external_events(
 
     for event in events {
         if cancel.is_cancelled() {
-            if !pending.is_empty() {
-                deliver_external_pending(settings, pool, consumer, owner, ttl_secs, &pending)
-                    .await?;
-            }
+            // Nothing in `pending` is delivered or marked yet, and the cursor
+            // has not passed it: the next dispatcher delivers it.
             let _ = release_consumer(pool, consumer.name(), owner).await?;
             return Ok(true);
         }
@@ -361,12 +368,24 @@ async fn process_external_events(
             continue;
         }
 
+        if failure.is_some() {
+            // An event that already failed is delivered on its own. A batch
+            // failure without an exact index is charged to the chunk head, so
+            // an innocent head gets one failure at most: it then either
+            // succeeds alone (clearing the row) or is the real failure.
+            if pending.is_empty() {
+                pending.push(event);
+            }
+            break;
+        }
+
         pending.push(event);
     }
 
     if !pending.is_empty() {
         worked |=
-            deliver_external_pending(settings, pool, consumer, owner, ttl_secs, &pending).await?;
+            deliver_external_pending(settings, pool, consumer, owner, cancel, ttl_secs, &pending)
+                .await?;
     }
 
     Ok(worked)
@@ -391,17 +410,28 @@ fn lease_batch_timeout(lease: Duration) -> Duration {
     lease.saturating_sub(margin).max(Duration::from_millis(1))
 }
 
+/// Deliver `pending` in chunks. Before each chunk, stop on shutdown, and stop
+/// once this consumer has used its lease budget, so the one dispatcher task
+/// also serves the other consumers. Events left over stay above the cursor
+/// and are delivered by a later cycle. A chunk in flight is never cut short:
+/// the default `deliver_batch` would lose the progress it made.
 async fn deliver_external_pending(
     settings: &OutboxDispatcherSettings,
     pool: &PgPool,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
+    cancel: &CancellationToken,
     ttl_secs: i64,
     pending: &[OutboxEvent],
 ) -> Result<bool, sqlx::Error> {
+    let started = Instant::now();
+    let budget = lease_batch_timeout(settings.lease_ttl);
     let mut offset = 0usize;
     let mut worked = false;
     while offset < pending.len() {
+        if cancel.is_cancelled() || (offset > 0 && started.elapsed() >= budget) {
+            break;
+        }
         if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
             return Ok(worked);
         }
@@ -411,7 +441,8 @@ async fn deliver_external_pending(
             break;
         }
         let chunk = &remaining[..chunk_len];
-        let outcome = deliver_external_chunk(settings, pool, consumer, owner, chunk).await?;
+        let outcome =
+            deliver_external_chunk(settings, pool, consumer, owner, ttl_secs, chunk).await?;
         worked = true;
         offset += outcome.done;
         if outcome.stop {
@@ -431,6 +462,7 @@ async fn deliver_external_chunk(
     pool: &PgPool,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
+    ttl_secs: i64,
     chunk: &[OutboxEvent],
 ) -> Result<ExternalChunkOutcome, sqlx::Error> {
     if chunk.is_empty() {
@@ -456,24 +488,45 @@ async fn deliver_external_chunk(
     };
     let done = done.min(chunk.len());
 
+    // Marks need no lease: mark every event whose effect is confirmed first,
+    // so neither a lost lease nor a failed renewal leaves one unmarked; the
+    // next owner (or cycle) finds the marks and does not deliver these events
+    // again. The batch may have used up most of the lease: renew it before
+    // the cursor moves or a failure is recorded.
     for event in chunk.iter().take(done) {
         let _ = mark_processed(pool, consumer.name(), event.id).await?;
-        if !advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await? {
+    }
+    let leased = lease_consumer(pool, consumer.name(), owner, ttl_secs).await?;
+    if !leased {
+        warn!(
+            consumer = consumer.name(),
+            done,
+            chunk = chunk.len(),
+            error = err.as_ref().map(ToString::to_string),
+            "outbox lease lost during external delivery; delivered events are marked"
+        );
+        return Ok(ExternalChunkOutcome { done, stop: true });
+    }
+    if let Some(last) = done.checked_sub(1).and_then(|last| chunk.get(last)) {
+        // The whole delivered prefix is marked, so one advance covers it.
+        if !advance_cursor(pool, consumer.name(), owner, &last.xact, last.seq).await? {
             warn!(
                 consumer = consumer.name(),
-                event_id = %event.id,
+                event_id = %last.id,
                 "cursor advance rejected after external delivery"
             );
             return Ok(ExternalChunkOutcome { done, stop: true });
         }
-        let _ = clear_failure(pool, consumer.name(), event.id).await?;
-        debug!(
-            consumer = consumer.name(),
-            event_id = %event.id,
-            xact = %event.xact,
-            seq = event.seq,
-            "outbox event delivered"
-        );
+        for event in chunk.iter().take(done) {
+            let _ = clear_failure(pool, consumer.name(), event.id).await?;
+            debug!(
+                consumer = consumer.name(),
+                event_id = %event.id,
+                xact = %event.xact,
+                seq = event.seq,
+                "outbox event delivered"
+            );
+        }
     }
 
     if let Some(err) = err {
@@ -497,9 +550,11 @@ async fn deliver_external_chunk(
         return Ok(ExternalChunkOutcome { done, stop: true });
     }
 
+    // A call that ended early without an error goes on with the rest in the
+    // next chunk of this cycle; one that did nothing ends the cycle.
     Ok(ExternalChunkOutcome {
         done,
-        stop: done < chunk.len(),
+        stop: done == 0,
     })
 }
 
