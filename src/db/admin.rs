@@ -3,9 +3,9 @@
 //!
 //! Every operation rechecks the actor's instance-admin status inside its own
 //! transaction; the HTTP layer never decides authorization from the session
-//! alone. Writes also recheck the actor's session after their lock waits
-//! (`require_admin_session`). Reads of cross-tenant tables switch to the
-//! system context only after that check.
+//! alone. Writes also recheck the actor's session and keep its rows locked
+//! until commit (`require_admin_session`). Reads of cross-tenant tables
+//! switch to the system context only after that check.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
@@ -44,10 +44,15 @@ pub(crate) async fn require_live_instance_admin(
 
 /// The gate of every instance-admin write: the actor's session, rechecked
 /// `FOR UPDATE` as workspace writes do, then the admin flag. Callers run it
-/// after their advisory locks, so a logout, password change or session
-/// revocation that commits while the write waits on them is seen here and
-/// the write answers 404. Locking the users row `FOR UPDATE` first also
-/// makes the flag's `FOR SHARE` a no-op rather than a lock upgrade.
+/// after the admission, instance-admin and membership advisory locks they
+/// take (and, when the write targets another user, after that user's row
+/// lock), and before any resource lock of their own, such as legal's
+/// per-kind advisory lock or the settings revision row. The actor's users
+/// and session row locks taken here are held until commit, so a logout,
+/// password change or session revocation that commits before the check is
+/// seen and the write answers 404, and one that comes later waits for the
+/// write to commit. Locking the users row `FOR UPDATE` first also makes the
+/// flag's `FOR SHARE` a no-op rather than a lock upgrade.
 pub(crate) async fn require_admin_session(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
