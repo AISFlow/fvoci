@@ -26,7 +26,7 @@ use fvoci_server::jobs::{
     run_revision_maintenance_sweep, run_stale_upload_gc, run_stale_upload_sweep,
     run_workspace_purge, spawn_maintenance, DocumentPurgeLimits, JobClaim, MaintenanceSettings,
     RevisionMaintenanceEngine, RevisionMaintenanceParams, RevisionMaintenanceResume, JOB_KEY_DAILY,
-    JOB_KEY_REVISIONS, JOB_KEY_UPLOADS, REVISION_GC_ROUNDS,
+    JOB_KEY_REVISIONS, JOB_KEY_UPLOADS, JOB_LOCK_NAMESPACE, REVISION_GC_ROUNDS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
 use project_harness::{
@@ -600,6 +600,54 @@ async fn two_runners_only_one_claims_daily_sweep() {
     harness.cleanup().await;
 }
 
+/// Maintenance-claim advisory locks (key, holder pid) granted in this database.
+async fn granted_job_locks(admin: &PgPool) -> Vec<(i64, i32)> {
+    sqlx::query_as(
+        r#"
+        SELECT objid::int8, pid FROM pg_locks
+        WHERE locktype = 'advisory' AND granted AND objsubid = 2
+          AND classid::int8 = $1::int8
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        ORDER BY objid
+        "#,
+    )
+    .bind(JOB_LOCK_NAMESPACE)
+    .fetch_all(admin)
+    .await
+    .expect("job locks")
+}
+
+/// `release` must leave the key free when it returns, not when the closed
+/// backend exits later: callers reclaim right away (the next sweep, a check
+/// after scheduler shutdown). Repeated because a close-only release loses
+/// that race only sometimes.
+#[tokio::test]
+async fn job_claim_is_free_when_release_returns() {
+    let harness = TestDb::bootstrap().await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    for round in 0..200 {
+        let Some(claim) = JobClaim::try_claim(&pool, JOB_KEY_UPLOADS)
+            .await
+            .expect("claim")
+        else {
+            panic!(
+                "round {round}: key held before claim: {:?}",
+                granted_job_locks(&admin).await
+            );
+        };
+        claim.release().await;
+        let held = granted_job_locks(&admin).await;
+        assert!(
+            held.is_empty(),
+            "round {round}: advisory lock still granted after release: {held:?}"
+        );
+    }
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn shutdown_drains_the_scheduler_loop() {
     let harness = TestDb::bootstrap().await;
@@ -886,8 +934,13 @@ async fn scheduler_runs_stale_upload_gc_under_its_own_claim() {
     // Idempotent once drained.
     let again = run_stale_upload_sweep(&pool, &storage, ttl, None, &CancellationToken::new())
         .await
-        .unwrap()
-        .expect("claim free after shutdown");
+        .unwrap();
+    let Some(again) = again else {
+        panic!(
+            "claim free after shutdown; granted job locks: {:?}",
+            granted_job_locks(&admin).await
+        );
+    };
     assert_eq!(again.purged, 0);
 
     let _ = std::fs::remove_dir_all(&root);
