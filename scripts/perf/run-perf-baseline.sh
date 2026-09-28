@@ -5,6 +5,10 @@
 #   CARGO_TARGET_DIR=... FVOCI_PERF_OUT=/abs/evidence/dir \
 #     bash scripts/perf/run-perf-baseline.sh [minimal] [scaled]
 #
+# Optional: FVOCI_PERF_SAMPLES (default 30), FVOCI_PERF_QUIET_MAX_MS (contention
+# wait per window, default 300000), FVOCI_PERF_GREP + FVOCI_PERF_TAG to re-run
+# selected flows (the setup test must match too) into suffixed result files.
+#
 # Prerequisites (not built here, so build time never mixes with results):
 #   cargo build --release --locked --bin fvoci-server --bin fvoci-migrate
 #   cargo build --release --locked --bin fvoci-e2e-fixture --features db-tests
@@ -39,7 +43,8 @@ for ds in "${DATASETS[@]}"; do
 done
 
 mkdir -p "$FVOCI_PERF_OUT"
-bash "$ROOT/scripts/perf/capture-env.sh" "$RELEASE/fvoci-server" "$COLLAB_ENGINE" >"$FVOCI_PERF_OUT/environment.json"
+bash "$ROOT/scripts/perf/capture-env.sh" "$RELEASE/fvoci-server" "$COLLAB_ENGINE" \
+  >"$FVOCI_PERF_OUT/environment$(printf '%s' "${FVOCI_PERF_TAG:-}" | tr -cd 'A-Za-z0-9-').json"
 
 for ds in "${DATASETS[@]}"; do
   RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-perf.XXXXXX")"

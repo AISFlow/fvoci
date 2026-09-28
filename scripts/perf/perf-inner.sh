@@ -57,7 +57,13 @@ for _ in $(seq 1 120); do
 done
 [[ -n "$BASE_URL" ]] || { echo "server did not become ready" >&2; exit 1; }
 
-python3 - "$FVOCI_PERF_OUT/run-$FVOCI_PERF_DATASET.json" "$PG_VERSION" <<'PY'
+TAG="$(printf '%s' "${FVOCI_PERF_TAG:-}" | tr -cd 'A-Za-z0-9-')"
+GREP_ARGS=()
+if [[ -n "${FVOCI_PERF_GREP:-}" ]]; then
+  GREP_ARGS=(--grep "$FVOCI_PERF_GREP")
+  [[ -n "$TAG" ]] || { echo "FVOCI_PERF_GREP requires FVOCI_PERF_TAG" >&2; exit 1; }
+fi
+python3 - "$FVOCI_PERF_OUT/run-$FVOCI_PERF_DATASET$TAG.json" "$PG_VERSION" <<'PY'
 import json, sys, datetime
 json.dump({"dataset_run_started": datetime.datetime.now(datetime.timezone.utc).isoformat(),
            "postgres_server_version": sys.argv[2], "network": "loopback 127.0.0.1",
@@ -67,9 +73,9 @@ PY
 cd "$ROOT/apps/web"
 set +e
 PLAYWRIGHT_BASE_URL="$BASE_URL" FVOCI_PERF_RUN_DIR="$RUN_DIR" CARGO_TARGET_DIR="$RUN_DIR/fixture-target" \
-  "$ROOT/apps/web/node_modules/.bin/playwright" test --config=e2e/perf/perf.config.ts
+  "$ROOT/apps/web/node_modules/.bin/playwright" test --config=e2e/perf/perf.config.ts "${GREP_ARGS[@]}"
 status=$?
 set -e
 # Keep only the count of server warnings/errors; the log itself stays in the run dir.
-grep -cE ' (WARN|ERROR) ' "$SERVER_LOG" >"$FVOCI_PERF_OUT/server-warn-error-count-$FVOCI_PERF_DATASET.txt" || true
+grep -cE ' (WARN|ERROR) ' "$SERVER_LOG" >"$FVOCI_PERF_OUT/server-warn-error-count-$FVOCI_PERF_DATASET$TAG.txt" || true
 exit "$status"

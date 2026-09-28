@@ -33,6 +33,8 @@ test.describe.configure({ mode: "serial" });
 
 const DATASET = process.env.FVOCI_PERF_DATASET === "scaled" ? "scaled" : "minimal";
 const N = Number(process.env.FVOCI_PERF_SAMPLES ?? 30);
+// Suffix for partial re-runs (FVOCI_PERF_GREP) so they never overwrite a full run.
+const TAG = (process.env.FVOCI_PERF_TAG ?? "").replace(/[^a-z0-9-]/gi, "");
 const HIT_TIMEOUT = 20_000;
 const REPO = path.resolve(import.meta.dirname, "../../../..");
 
@@ -92,13 +94,13 @@ function record(flow: string, metric: string, boundary: string, values: (number 
 }
 
 function flush(): void {
-  writeJson(`results-${DATASET}.json`, { dataset: DATASET, samplesTarget: N, loadWindows: loadLog, results });
-  writeJson(`summary-${DATASET}.json`, summary);
+  writeJson(`results-${DATASET}${TAG}.json`, { dataset: DATASET, samplesTarget: N, loadWindows: loadLog, results });
+  writeJson(`summary-${DATASET}${TAG}.json`, summary);
   const rows = ["key,boundary,n,failures,median,p95,max"];
   for (const [key, s] of Object.entries(summary)) {
     rows.push([key, s.boundary, s.n, s.failures, s.median ?? "", s.p95 ?? "", s.max ?? ""].join(","));
   }
-  fs.writeFileSync(path.join(process.env.FVOCI_PERF_OUT!, `summary-${DATASET}.csv`), `${rows.join("\n")}\n`);
+  fs.writeFileSync(path.join(process.env.FVOCI_PERF_OUT!, `summary-${DATASET}${TAG}.csv`), `${rows.join("\n")}\n`);
 }
 
 const round = (v: number | null | undefined) => (typeof v === "number" ? Math.round(v * 10) / 10 : null);
@@ -924,6 +926,11 @@ test("e: save ack and remote reflection", async ({ browser }) => {
     const idB = `meta-${i}`;
     await watch(b, idB, { selector: ".task-row__title", text: title });
     await titleInput.fill(title);
+    // The task stream polls on a free-running 750 ms ticker; a fixed sample
+    // cadence would phase-lock to it. Low-discrepancy start offsets spread the
+    // samples over the whole poll period (pacing, recorded, not a result).
+    const jitterMs = Math.round(((i * 0.6180339887) % 1) * 750);
+    await a.waitForTimeout(jitterMs);
     const calA = await calibrate(a, 5);
     const calB = await calibrate(b, 5);
     const sinceA = await pageNow(a);
@@ -951,6 +958,7 @@ test("e: save ack and remote reflection", async ({ browser }) => {
       tabToRemotePaint: paintB && tabNode ? round(toNode(bOrigin + paintB, calB) - tabNode) : null,
       tabToRemoteFrame: hitB?.raf && tabNode ? round(toNode(bOrigin + hitB.raf, calB) - tabNode) : null,
       refetchCount: refetch.length,
+      jitterMs,
     });
     // Next sample starts after this change settled on both sides.
     await expect(titleInput).toHaveValue(title);

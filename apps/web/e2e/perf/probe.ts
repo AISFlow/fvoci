@@ -79,6 +79,12 @@ function installProbe(): void {
     watch: (_id: string, _spec: WatchSpec) => {},
   };
   window.__fp = st;
+  // The default 250-entry Resource Timing buffer drops entries on long-lived pages.
+  try {
+    performance.setResourceTimingBufferSize(20_000);
+  } catch {
+    /* unsupported */
+  }
   const observe = (type: string, opts: Record<string, unknown>, fn: (e: PerformanceEntry) => void) => {
     try {
       new PerformanceObserver((list) => list.getEntries().forEach(fn)).observe({
