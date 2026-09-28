@@ -12,7 +12,7 @@ pub const REVISION_WRITE_LIMIT: u32 = 30;
 
 #[derive(Clone, Default)]
 pub struct RateLimiter {
-    inner: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    inner: Arc<Mutex<Counters>>,
 }
 
 impl RateLimiter {
@@ -26,11 +26,30 @@ impl RateLimiter {
 
     pub async fn allow_window(&self, key: &str, limit: u32, window: Duration) -> Result<(), u32> {
         let now = Instant::now();
-        let mut map = self.inner.lock().await;
+        let mut counters = self.inner.lock().await;
+        counters.allow_at(key, limit, window, now)
+    }
+}
+
+/// Every key's recent hits. The clock is a parameter so tests can move it.
+#[derive(Default)]
+struct Counters {
+    map: HashMap<String, Vec<Instant>>,
+}
+
+impl Counters {
+    fn allow_at(
+        &mut self,
+        key: &str,
+        limit: u32,
+        window: Duration,
+        now: Instant,
+    ) -> Result<(), u32> {
+        let map = &mut self.map;
         if !map.contains_key(key) && map.len() >= MAX_KEYS {
-            evict_stale(&mut map, now, window);
+            evict_stale(map, now, window);
             if map.len() >= MAX_KEYS {
-                evict_one(&mut map);
+                evict_one(map);
             }
         }
         let entries = map.entry(key.to_string()).or_default();
