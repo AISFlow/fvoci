@@ -55,8 +55,18 @@ impl LifecycleRun {
     /// like a `spawn_server` server does, so take the same slot and hold it
     /// until `finish` has shut the hub down.
     async fn register_hub(&mut self, hub: Arc<CollabHub>) -> Arc<CollabHub> {
-        self.hub_slots
-            .push(support::acquire_test_server_slot().await);
+        let slot = support::acquire_test_server_slot().await;
+        self.register_hub_with_slot(hub, slot)
+    }
+
+    /// `register_hub` with a slot the test took before its timed case, for a
+    /// case that must not wait for one inside `TEST_TIMEOUT`.
+    fn register_hub_with_slot(
+        &mut self,
+        hub: Arc<CollabHub>,
+        slot: tokio::sync::OwnedSemaphorePermit,
+    ) -> Arc<CollabHub> {
+        self.hub_slots.push(slot);
         self.hubs.push(hub.clone());
         hub
     }
@@ -2093,24 +2103,27 @@ fn fill_primary_pool() -> Vec<collab_engine::process::EngineSession> {
 /// and the same room admits the next join once a slot frees.
 #[tokio::test]
 async fn collab_lifecycle_full_primary_pool_join_is_capacity_retry() {
-    // Primary slots are process-wide. With the hub's own slot these two hold
-    // every test-server slot, so no other test here spawns while the pool is
-    // full. Taken before the timed case: waiting for them is not the test.
+    // Primary slots are process-wide. These three hold every test-server slot
+    // (the hub takes one of them), so no other test here spawns while the pool
+    // is full. All are taken before the timed case: waiting for them is not
+    // the test.
     let exclusive = (
         support::acquire_test_server_slot().await,
         support::acquire_test_server_slot().await,
     );
+    let hub_slot = support::acquire_test_server_slot().await;
     run_lifecycle_test(
         "collab_lifecycle_full_primary_pool_join_is_capacity_retry",
-        |run| {
-            Box::pin(async {
+        move |run| {
+            Box::pin(async move {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run
-                    .register_hub(Arc::new(CollabHub::new(
+                let hub = run.register_hub_with_slot(
+                    Arc::new(CollabHub::new(
                         test_collab_config(4, 30_000),
                         wiki.session.pool.clone(),
-                    )))
-                    .await;
+                    )),
+                    hub_slot,
+                );
                 let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
                 let held = fill_primary_pool();
