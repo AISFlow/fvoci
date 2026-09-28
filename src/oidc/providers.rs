@@ -118,7 +118,9 @@ pub struct OidcSettings {
     /// (local development and tests). Everything else must be https to a
     /// public address.
     pub allow_insecure_loopback: bool,
-    /// `PUBLIC_URL`; the redirect URI is `<origin>/api/v1/auth/oidc/<p>/callback`.
+    /// `PUBLIC_URL`; the redirect URI is `<origin>/api/v1/auth/oidc/<p>/callback`
+    /// for an instance provider and `<origin>/api/v1/auth/sso/<workspace>/callback`
+    /// for a workspace SSO provider.
     pub public_origin: String,
     /// Discovery / JWKS cache shared by every request of this server.
     pub cache: std::sync::Arc<crate::oidc::client::OidcCache>,
@@ -228,6 +230,17 @@ impl OidcSettings {
         )
     }
 
+    /// Each workspace SSO configuration has its own redirect URI, apart from
+    /// the instance providers and from every other workspace: any workspace
+    /// admin chooses that authorization server, so a shared URI would let a
+    /// response from one server complete another's flow (RFC 9700 §4.4).
+    pub fn workspace_redirect_uri(&self, workspace_id: uuid::Uuid) -> String {
+        format!(
+            "{}/api/v1/auth/sso/{workspace_id}/callback",
+            self.public_origin
+        )
+    }
+
     /// Builds one provider the way `from_env` would (tests and tooling).
     pub fn provider(
         key: ProviderKey,
@@ -259,6 +272,23 @@ mod tests {
             assert_eq!(ProviderKey::parse(key.as_str()), Some(key));
         }
         assert_eq!(ProviderKey::parse("github"), None);
+    }
+
+    #[test]
+    fn redirect_uris_are_per_provider_and_per_workspace() {
+        let settings = OidcSettings {
+            public_origin: "https://fvoci.example".into(),
+            ..OidcSettings::default()
+        };
+        assert_eq!(
+            settings.redirect_uri(ProviderKey::Generic),
+            "https://fvoci.example/api/v1/auth/oidc/generic/callback"
+        );
+        let ws = uuid::Uuid::nil();
+        assert_eq!(
+            settings.workspace_redirect_uri(ws),
+            format!("https://fvoci.example/api/v1/auth/sso/{ws}/callback")
+        );
     }
 
     #[test]

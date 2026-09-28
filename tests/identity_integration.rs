@@ -418,13 +418,17 @@ pub async fn call_with(
     for (name, value) in extra {
         builder = builder.header(*name, *value);
     }
-    let mut request = match body {
+    let request = match body {
         Some(body) => builder
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap(),
         None => builder.body(Body::empty()).unwrap(),
     };
+    respond(app, request, from).await
+}
+
+pub async fn respond(app: &axum::Router, mut request: Request<Body>, from: SocketAddr) -> Response {
     request
         .extensions_mut()
         .insert(axum::extract::ConnectInfo(from));
@@ -440,6 +444,27 @@ pub async fn call_with(
         json,
         headers,
     }
+}
+
+/// A browser form submission (`application/x-www-form-urlencoded`).
+pub async fn form_post(
+    app: &axum::Router,
+    path: &str,
+    fields: &[(&str, &str)],
+    origin: Option<&str>,
+    from: SocketAddr,
+) -> Response {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(fields)
+        .finish();
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/x-www-form-urlencoded");
+    if let Some(origin) = origin {
+        builder = builder.header("origin", origin);
+    }
+    respond(app, builder.body(Body::from(body)).unwrap(), from).await
 }
 
 pub async fn call(
@@ -1315,6 +1340,25 @@ async fn callback_on(
     session: Option<&str>,
     from: SocketAddr,
 ) -> Response {
+    callback_at(
+        app,
+        &format!("/api/v1/auth/oidc/{provider}/callback"),
+        query,
+        state_cookie,
+        session,
+        from,
+    )
+    .await
+}
+
+async fn callback_at(
+    app: &axum::Router,
+    path: &str,
+    query: &str,
+    state_cookie: Option<&str>,
+    session: Option<&str>,
+    from: SocketAddr,
+) -> Response {
     let mut cookies = Vec::new();
     if let Some(c) = state_cookie {
         cookies.push(("fvoci_oidc_state", c));
@@ -1325,7 +1369,7 @@ async fn callback_on(
     call_with(
         app,
         "GET",
-        &format!("/api/v1/auth/oidc/{provider}/callback?{query}"),
+        &format!("{path}?{query}"),
         None,
         &cookies,
         from,
@@ -1334,7 +1378,24 @@ async fn callback_on(
     .await
 }
 
-/// start → provider authorize → callback, all for `profile`.
+/// Path of the `redirect_uri` the server put in an authorization URL: where
+/// the provider sends the browser back.
+fn redirect_path(authorization_url: &str) -> String {
+    let url = url::Url::parse(authorization_url).expect("authorization url");
+    let redirect = url
+        .query_pairs()
+        .find(|(k, _)| k == "redirect_uri")
+        .expect("redirect_uri")
+        .1
+        .into_owned();
+    let redirect = url::Url::parse(&redirect).expect("redirect uri");
+    assert_eq!(redirect.origin().ascii_serialization(), "http://localhost");
+    assert!(redirect.query().is_none(), "{redirect}");
+    redirect.path().to_string()
+}
+
+/// start → provider authorize → callback, all for `profile`. Like a real
+/// provider, the fake sends the browser to the `redirect_uri` of the request.
 async fn oidc_round_on(
     app: &axum::Router,
     fake: &FakeOidc,
@@ -1345,10 +1406,16 @@ async fn oidc_round_on(
     from: SocketAddr,
 ) -> Response {
     let started = begin_on(app, start_path, session, from).await;
+    let path = redirect_path(&started.location);
+    assert!(
+        path == format!("/api/v1/auth/oidc/{provider}/callback")
+            || (provider == "generic" && path.starts_with("/api/v1/auth/sso/")),
+        "{provider}: {path}"
+    );
     let query = fake.authorize(&started.location, profile);
-    callback_on(
+    callback_at(
         app,
-        provider,
+        &path,
         &query,
         Some(&started.state_cookie),
         session,
@@ -3687,6 +3754,202 @@ async fn verify_secrets_opens_every_sealed_value_and_fails_on_a_bad_one() {
     assert!(
         output.contains("1 sealed secret(s) do not open"),
         "{output}"
+    );
+    h.finish().await;
+}
+
+// ---------------------------------------------------------------------------
+// Identity hardening (WP7)
+
+fn query_param(url: &str, key: &str) -> String {
+    url::Url::parse(url)
+        .expect("url")
+        .query_pairs()
+        .find(|(k, _)| k == key)
+        .unwrap_or_else(|| panic!("{key} in {url}"))
+        .1
+        .into_owned()
+}
+
+fn with_query_param(url: &str, key: &str, value: &str) -> String {
+    let mut parsed = url::Url::parse(url).expect("url");
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(k, v)| {
+            let v = if k == key {
+                value.to_string()
+            } else {
+                v.into_owned()
+            };
+            (k.into_owned(), v)
+        })
+        .collect();
+    parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    parsed.to_string()
+}
+
+fn token_hits(fake: &FakeOidc) -> usize {
+    fake.token_hits.load(Ordering::SeqCst)
+}
+
+/// Any workspace admin can register a workspace SSO provider, so its flows
+/// must not share a redirect URI with the instance provider or with another
+/// workspace (RFC 9700 §4.4 mix-up). Neither fake sends RFC 9207 `iss`.
+#[tokio::test]
+async fn workspace_sso_callback_is_bound_to_its_workspace() {
+    let honest = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-h")).await;
+    let evil = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::ec("ec-e")).await;
+    let h = oidc_harness(&honest, &[ProviderKey::Generic]).await;
+    let ws = h.workspace_id;
+    let res = call(
+        &h.app,
+        "PUT",
+        &format!("/api/v1/workspaces/{ws}/oidc"),
+        Some(json!({"issuer": &evil.base, "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET})),
+        Some(&h.owner_cookie),
+        peer(160),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    // The victim signs in through the instance generic provider.
+    let (victim_id, _email, victim_cookie) = h.member("victim").await;
+    let res = h
+        .oidc_round(
+            &honest,
+            "/api/v1/auth/oidc/generic/link",
+            "generic",
+            Profile::new("victim-sub", "victim@example.com", true),
+            Some(&victim_cookie),
+            peer(161),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
+    let mismatch = "http://localhost/login?error=oidc_state_mismatch";
+    let (honest_hits, evil_hits) = (token_hits(&honest), token_hits(&evil));
+
+    // 1. The victim's browser is sent into a flow bound to the workspace IdP.
+    let victim = h
+        .begin(
+            &format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
+            None,
+            peer(162),
+        )
+        .await;
+    // 2. That IdP forwards the browser to the honest IdP with a request copied
+    //    from its own instance-generic flow, keeping the victim's state.
+    let attacker = h
+        .begin("/api/v1/auth/oidc/generic/start", None, peer(163))
+        .await;
+    let forwarded = with_query_param(
+        &attacker.location,
+        "state",
+        &query_param(&victim.location, "state"),
+    );
+    // 3. The honest IdP answers on the redirect URI of that request.
+    let query = honest.authorize(
+        &forwarded,
+        Profile::new("victim-sub", "victim@example.com", true),
+    );
+    let res = callback_at(
+        &h.app,
+        &redirect_path(&forwarded),
+        &query,
+        Some(&victim.state_cookie),
+        None,
+        peer(162),
+    )
+    .await;
+    // The honest code never reaches the workspace IdP's token endpoint.
+    assert_eq!(
+        token_hits(&evil),
+        evil_hits,
+        "code sent to the workspace IdP"
+    );
+    assert_eq!(token_hits(&honest), honest_hits);
+    assert_eq!(res.location(), mismatch);
+    assert!(res.cookie().is_none());
+
+    // An instance flow answered on a workspace callback is refused too.
+    let started = h
+        .begin("/api/v1/auth/oidc/generic/start", None, peer(164))
+        .await;
+    let query = honest.authorize(
+        &started.location,
+        Profile::new("victim-sub", "victim@example.com", true),
+    );
+    let res = callback_at(
+        &h.app,
+        &format!("/api/v1/auth/sso/{ws}/callback"),
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(164),
+    )
+    .await;
+    assert_eq!(res.location(), mismatch);
+    // So is a workspace flow answered on another workspace's callback.
+    let started = h
+        .begin(
+            &format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
+            None,
+            peer(165),
+        )
+        .await;
+    let query = evil.authorize(
+        &started.location,
+        Profile::new("ws-sub", "ws@example.com", true),
+    );
+    let res = callback_at(
+        &h.app,
+        &format!("/api/v1/auth/sso/{}/callback", Uuid::now_v7()),
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(165),
+    )
+    .await;
+    assert_eq!(res.location(), mismatch);
+    assert_eq!(token_hits(&evil), evil_hits);
+    assert_eq!(token_hits(&honest), honest_hits);
+    let res = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/sso/not-a-uuid/callback?code=c&state=s",
+        None,
+        None,
+        peer(165),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    // No session was issued for the victim through any of these.
+    assert_eq!(h.login_methods(victim_id).await, vec!["password"]);
+
+    // Redirect URIs: the instance provider keeps its path; every workspace
+    // flow (slug SSO, workspace start, link) uses the workspace's own path.
+    assert_eq!(
+        redirect_path(&attacker.location),
+        "/api/v1/auth/oidc/generic/callback"
+    );
+    let workspace_path = format!("/api/v1/auth/sso/{ws}/callback");
+    assert_eq!(redirect_path(&victim.location), workspace_path);
+    let sso = h.begin("/api/v1/auth/sso?slug=acme", None, peer(166)).await;
+    assert_eq!(redirect_path(&sso.location), workspace_path);
+    // A workspace link (another account: one link per provider) completes
+    // on the workspace path.
+    let res = h
+        .oidc_round(
+            &evil,
+            &format!("/api/v1/auth/oidc/generic/link?workspaceId={ws}"),
+            "generic",
+            Profile::new("ws-sub", OWNER_EMAIL, true),
+            Some(&h.owner_cookie),
+            peer(167),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
+    assert_eq!(
+        link_row(&h, "generic", &format!("{ws}:ws-sub")).await,
+        Some((h.owner_id, Some(evil.base.clone())))
     );
     h.finish().await;
 }

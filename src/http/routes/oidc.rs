@@ -52,6 +52,10 @@ pub fn router(identity: Arc<Identity>) -> Router<AppState> {
         .route("/api/v1/auth/sso", get(sso))
         .route("/api/v1/auth/oidc/{provider}/start", get(start))
         .route("/api/v1/auth/oidc/{provider}/callback", get(callback))
+        .route(
+            "/api/v1/auth/sso/{workspace_id}/callback",
+            get(sso_callback),
+        )
         .route("/api/v1/auth/oidc/{provider}/link", post(link))
         .route("/api/v1/auth/oidc/{provider}/unlink", post(unlink))
         .route(
@@ -308,7 +312,30 @@ async fn callback(
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     let provider = provider_param(&provider)?;
-    finish_callback(&state, &identity, peer, provider, &jar, raw).await
+    finish_callback(&state, &identity, peer, provider, None, &jar, raw).await
+}
+
+/// Workspace SSO callback: the redirect URI registered for this workspace's
+/// provider only completes flows started for this workspace.
+async fn sso_callback(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Arc<Identity>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(workspace_id): Path<String>,
+    jar: CookieJar,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, AppError> {
+    let workspace_id = workspace_path(&workspace_id)?;
+    finish_callback(
+        &state,
+        &identity,
+        peer,
+        ProviderKey::Generic,
+        Some(workspace_id),
+        &jar,
+        raw,
+    )
+    .await
 }
 
 /// Shared tail of the callback routes: completes the flow and answers with
@@ -318,6 +345,7 @@ async fn finish_callback(
     identity: &Identity,
     peer: SocketAddr,
     provider: ProviderKey,
+    workspace_id: Option<Uuid>,
     jar: &CookieJar,
     raw: Option<String>,
 ) -> Result<Response, AppError> {
@@ -357,6 +385,7 @@ async fn finish_callback(
         &state.auth.db.license,
         CompleteParams {
             provider,
+            workspace_id,
             query: &query,
             signed_state: signed_state.as_deref(),
             session,
