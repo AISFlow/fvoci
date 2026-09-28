@@ -8,8 +8,8 @@ use axum::http::StatusCode;
 use fvoci_server::db::outbox::{ensure_consumer, lease_consumer, read_events, release_consumer};
 use fvoci_server::notifications::{process_notification_event, NOTIFICATIONS_CONSUMER};
 use project_harness::{
-    add_workspace_user, admin_pool, app_pool, create_project, http_request, json_request,
-    setup_session, TestDb,
+    add_workspace_user, admin_pool, app_pool, close_pool, create_project, http_request,
+    json_request, setup_session, TestDb,
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -936,7 +936,7 @@ async fn restored_epoch_seeds_cursors_that_recovery_rebases_within_its_window() 
         .fetch_one(&admin)
         .await
         .expect("db name");
-    admin.close().await;
+    close_pool(admin).await;
     wait_for_no_client_backends(&harness, &db_name).await;
     let report = recover_outbox(
         &harness.admin_url,
@@ -978,6 +978,18 @@ async fn restored_epoch_seeds_cursors_that_recovery_rebases_within_its_window() 
     harness.cleanup().await;
 }
 
+/// `pg_stat_activity` row reported when client backends outlive the wait:
+/// (pid, state, application_name, client, backend_start, state_change, query).
+type RemainingBackend = (
+    i32,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 async fn wait_for_no_client_backends(harness: &TestDb, db_name: &str) {
     let mut server = url::Url::parse(&harness.admin_url).expect("admin url");
     server.set_path("/postgres");
@@ -998,11 +1010,42 @@ async fn wait_for_no_client_backends(harness: &TestDb, db_name: &str) {
         if n == 0 {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{n} client backends remain"
-        );
+        if std::time::Instant::now() >= deadline {
+            let rows: Vec<RemainingBackend> = sqlx::query_as(
+                "SELECT pid, state, application_name, client_addr::text || ':' || client_port::text, \
+                        backend_start::text, state_change::text, left(query, 200) \
+                 FROM pg_stat_activity WHERE datname = $1 AND backend_type = 'client backend'",
+            )
+            .bind(db_name)
+            .fetch_all(&observer)
+            .await
+            .expect("backend rows");
+            panic!("{n} client backends remain: {rows:?}");
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     observer.close().await;
+}
+
+/// sqlx 0.8.6 `Pool::close` returns before a connection whose return to the
+/// pool is under way; that connection then goes idle and stays open while the
+/// pool lives. `close_pool` waits it out, so recovery's no-other-sessions
+/// precondition holds without depending on when the pool is dropped.
+#[tokio::test]
+async fn close_pool_closes_a_connection_returned_during_close() {
+    let harness = TestDb::bootstrap_through(1).await;
+    let admin = admin_pool(&harness).await;
+    let db_name: String = sqlx::query_scalar("SELECT current_database()::text")
+        .fetch_one(&admin)
+        .await
+        .expect("db name");
+    drop(admin.acquire().await.expect("acquire"));
+    // Let the return task pass its closed check and start the on-release ping.
+    tokio::task::yield_now().await;
+    let lingering = admin.clone();
+    close_pool(admin).await;
+    assert_eq!(lingering.size(), 0);
+    wait_for_no_client_backends(&harness, &db_name).await;
+    drop(lingering);
+    harness.cleanup().await;
 }
