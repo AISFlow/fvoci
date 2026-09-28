@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Release smoke for one architecture (docs/RELEASING.md). Runs only against the
-# PUBLISHED image index recorded in a rendered release directory:
+# image index recorded in a rendered release directory, which the workflow
+# pushed BY DIGEST: no :0.y.z or :0.y tag exists until both smokes passed.
 #   - anonymous registry access (empty DOCKER_CONFIG, no login) and a pull by
 #     digest onto a daemon that did not hold the image before;
-#   - the rendered compose.yml from an empty directory with a scrubbed
-#     environment (no .env, no secrets; the stack bootstraps its own);
+#   - the rendered compose.yml (the user compose's x-fvoci-image anchor pinned
+#     to the digest) from an empty directory with a scrubbed environment: no
+#     .env, no secrets; the one-shot bootstrap service generates them;
 #   - health/ready, one-shot init, doctor, first admin setup and login, the
 #     install-smoke API flows (collab, documents, attachment + extraction),
 #     search, restart persistence across down/up, a forced bootstrap failure
@@ -129,9 +131,11 @@ assert found == record["platforms"], (found, record["platforms"])
 PY
 log_assert "anonymous manifest inspect of the published index; per-arch digests match the release record: ok"
 
-docker pull --quiet "$IMAGE_REF" >/dev/null
-LABELS="$(docker image inspect -f '{{json .Config.Labels}}' "$IMAGE_REF")"
-PULLED="$(docker image inspect -f '{{json .RepoDigests}} {{.Os}}/{{.Architecture}}' "$IMAGE_REF")"
+# By digest only: the version tag is applied after this smoke passes.
+DIGEST_REF="$REPO@$INDEX_DIGEST"
+docker pull --quiet "$DIGEST_REF" >/dev/null
+LABELS="$(docker image inspect -f '{{json .Config.Labels}}' "$DIGEST_REF")"
+PULLED="$(docker image inspect -f '{{json .RepoDigests}} {{.Os}}/{{.Architecture}}' "$DIGEST_REF")"
 python3 - "$LABELS" "$VERSION" "$SOURCE_SHA" <<'PY'
 import json, sys
 labels, version, sha = json.loads(sys.argv[1]) or {}, sys.argv[2], sys.argv[3]
@@ -142,11 +146,11 @@ PY
 log_assert "pulled by digest; OCI version/revision labels match ${VERSION}/${SOURCE_SHA}: ok"
 # The release build passes FVOCI_BUILD_SHA; the Dockerfile must forward it
 # (ARG in the Rust build stage) or this reports "unknown".
-BUILD_ID="$(docker run --rm "$IMAGE_REF" --version)"
+BUILD_ID="$(docker run --rm "$DIGEST_REF" --version)"
 [[ "$BUILD_ID" == "fvoci-server ${VERSION} (${SOURCE_SHA})" ]] || fail "fvoci-server --version reports '$BUILD_ID'"
 log_assert "fvoci-server --version: ${BUILD_ID}: ok"
 
-docker run --rm --entrypoint sh "$IMAGE_REF" -ec '
+docker run --rm --entrypoint sh "$DIGEST_REF" -ec '
   for runtime in node nodejs bun deno qjs quickjs js d8 jsc; do
     if command -v "$runtime" >/dev/null 2>&1; then echo "unexpected script runtime: $runtime" >&2; exit 1; fi
   done
@@ -164,6 +168,16 @@ new_stack() { # name -> sets STACK_DIR STACK_PROJECT
   PROJECTS+=("$STACK_DIR|$STACK_PROJECT")
 }
 dc() { compose_in "$STACK_DIR" "$STACK_PROJECT" "$@"; }
+
+# Services others wait for with service_completed_successfully (bootstrap, init).
+one_shot_services() {
+  dc config --format json | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+print(" ".join(sorted({dep for spec in services.values()
+                       for dep, cond in (spec.get("depends_on") or {}).items()
+                       if cond.get("condition") == "service_completed_successfully"})))'
+}
 
 wait_http() {
   local url="$1" deadline=$((SECONDS + 90))
@@ -202,6 +216,16 @@ db_query() {
 # --- install from the rendered compose --------------------------------------
 
 new_stack install
+[[ "$(ls -A "$STACK_DIR")" == compose.yml ]] || fail "the install directory holds more than compose.yml"
+dc config --format json | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+product = sorted(n for n, s in services.items() if s.get("image") == sys.argv[1])
+assert "server" in product and "bootstrap" in product, product
+assert not any(s.get("env_file") for s in services.values())
+print("product image services:", " ".join(product))' "$IMAGE_REF" | tee -a "$ASSERT_LOG"
+read -ra ONE_SHOT <<<"$(one_shot_services)"
+(( ${#ONE_SHOT[@]} )) || fail "no one-shot bootstrap/init service"
 log_assert "== docker compose up -d --wait from an empty directory, no env file"
 UP_START=$SECONDS
 start_stack
@@ -212,11 +236,18 @@ for probe in /health /ready; do
 done
 log_assert "/health and /ready 200: ok"
 
-# Every one-shot service the stack ran (bootstrap, init) finished with 0.
-EXITED="$(dc ps -a --status exited --format '{{.Service}} {{.ExitCode}}')"
-[[ -n "$EXITED" ]] || fail "no one-shot bootstrap/init service ran"
-if grep -v ' 0$' <<<"$EXITED"; then fail "one-shot service failed: $EXITED"; fi
-log_assert "one-shot services exited 0: $(tr '\n' ' ' <<<"$EXITED")"
+# Every one-shot service (bootstrap, init) ran and finished with exit code 0.
+EXITED="$(dc ps -a --status exited --format json | python3 -c '
+import json, sys
+text = sys.stdin.read().strip()
+# Compose prints one JSON object per line (older releases: one array).
+rows = json.loads(text) if text.startswith("[") else [json.loads(line) for line in text.splitlines() if line.strip()]
+codes = {row["Service"]: row["ExitCode"] for row in rows}
+missing = [s for s in sys.argv[1:] if codes.get(s) != 0]
+if missing:
+    sys.exit(f"one-shot services not exited 0: {missing} ({codes})")
+print(" ".join(f"{s}=0" for s in sys.argv[1:]))' "${ONE_SHOT[@]}")" || fail "one-shot services did not all succeed"
+log_assert "one-shot services exited 0: $EXITED"
 
 if ! DOCTOR_REPORT="$(dc exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)"; then
   printf '%s\n' "$DOCTOR_REPORT" >&2
@@ -336,13 +367,7 @@ dc down -v --remove-orphans >/dev/null
 # --- bootstrap failure blocks the server --------------------------------------
 
 new_stack bootstrap-failure
-ONE_SHOT="$(dc config --format json | python3 -c '
-import json, sys
-services = json.load(sys.stdin)["services"]
-deps = services["server"].get("depends_on", {})
-print(" ".join(sorted(n for n, d in deps.items() if d.get("condition") == "service_completed_successfully")))')"
-[[ -n "$ONE_SHOT" ]] || fail "server does not wait for a one-shot bootstrap/init service"
-for service in $ONE_SHOT; do
+for service in "${ONE_SHOT[@]}"; do
   printf 'services:\n  %s:\n    entrypoint: ["sh", "-c", "echo release-smoke forced failure >&2; exit 3"]\n' "$service" \
     >"$STACK_DIR/compose.fail.yml"
   if dc -f compose.yml -f compose.fail.yml up -d --wait >"$WORK/fail-up.log" 2>&1; then
