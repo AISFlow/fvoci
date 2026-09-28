@@ -1293,6 +1293,24 @@ class RegistryMutationCliTest(unittest.TestCase):
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "unregistered job id sneaky-ci-gate")
 
+    def test_release_workflow_must_stay_tag_only(self) -> None:
+        root = self._mutated_root()
+        release = root / ".github" / "workflows" / "release.yml"
+        text = release.read_text(encoding="utf-8")
+        release.write_text(text.replace("  workflow_dispatch:", "  pull_request:\n  workflow_dispatch:", 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "release.yml: triggers must be exactly push (tags) and workflow_dispatch")
+
+    def test_release_workflow_write_scope_outside_listed_job_rejected(self) -> None:
+        root = self._mutated_root()
+        release = root / ".github" / "workflows" / "release.yml"
+        text = release.read_text(encoding="utf-8")
+        marker = "      contents: read\n      checks: read\n"
+        self.assertIn(marker, text)
+        release.write_text(text.replace(marker, "      contents: write\n      checks: read\n", 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "release.yml: verify may not write ['contents']")
+
     def test_new_workflow_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         extra = root / ".github" / "workflows" / "extra.yml"
