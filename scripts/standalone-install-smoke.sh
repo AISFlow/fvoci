@@ -224,7 +224,7 @@ PROC_VIEW="$(docker exec --privileged --user 0:0 "$CID" sh -c '
     [ "$a" = 1 ] || continue
     echo "pid ${p#/proc/}: $(tr "\0" " " <"$p/cmdline")"
     tr "\0" "\n" <"$p/environ"; ls -l "$p/fd"
-  done 2>/dev/null')"
+  done 2>/dev/null; true')"
 RUN_VIEW="$(docker exec --user 1000:1000 "$CID" sh -c 'find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
 VIEW="${PROC_VIEW}"$'\n'"${RUN_VIEW}"
 grep '^pid ' <<<"$VIEW"

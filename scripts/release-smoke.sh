@@ -346,7 +346,7 @@ SERVER_PROC_VIEW="$(docker exec --privileged --user 0:0 "$SERVER_CID" sh -c '
     while [ "$a" != 1 ] && [ "$a" != 0 ] && [ -n "$a" ]; do a=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$a/status" 2>/dev/null); done
     [ "$a" = 1 ] || continue
     tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; ls -l "$p/fd"
-  done 2>/dev/null')"
+  done 2>/dev/null; true')"
 SERVER_RUN_VIEW="$(docker exec --user 1000:1000 "$SERVER_CID" sh -c 'find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
 SERVER_VIEW="${SERVER_PROC_VIEW}"$'\n'"${SERVER_RUN_VIEW}"
 # The view must hold the server's environ, or the negative checks below pass
