@@ -1456,12 +1456,15 @@ instead; `--outbox-reset` refuses an epoch mismatch.
   that are unmarked are still redelivered). `--apply --ack-external-replay`
   (the same flag as `--recover-outbox`) moves them to the rule's target and
   accepts that at-least-once external replay; the top-level `ackExternalReplay`
-  records it. `notifications` and `search-index` only write this database and
-  follow the rule without a floor.
+  records it. `notifications` writes only this database and `search-index`
+  only re-indexes Meilisearch, which is idempotent, so both follow the rule
+  without a floor.
 - `--apply --reason <text>` moves the cursors in one transaction. It refuses
-  unless the `DATABASE_URL` role is a superuser or a member of
-  `pg_read_all_stats` (a plain schema owner cannot see other roles' sessions in
-  `pg_stat_activity`, so the next check would pass blindly); while any other
+  unless the `DATABASE_URL` role is a superuser or has the privileges of
+  `pg_read_all_stats` (membership through a `NOINHERIT` role or an
+  `INHERIT FALSE` grant does not count; a plain schema owner cannot see other
+  roles' sessions in `pg_stat_activity`, so the next check would pass
+  blindly); while any other
   session is connected to the database (stop the server and every other client
   first); while a selected consumer holds a live lease; when a forward target is
   at or above the cluster snapshot xmin (a transaction in any database that may

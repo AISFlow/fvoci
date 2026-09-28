@@ -10,10 +10,12 @@
 mod project_harness;
 
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use fvoci_server::db::outbox::{
     advance_cursor_tx, ensure_consumer, fetch_cursor, insert_test_event, lease_consumer,
     mark_processed, mark_processed_tx, OutboxEvent,
@@ -727,20 +729,58 @@ async fn tail_seeded_external_consumers_need_ack_to_replay_history() {
 async fn apply_refuses_blind_owner_and_in_flight_xmin() {
     let harness = TestDb::bootstrap().await;
     let admin = admin(&harness).await;
-    let app = app(&harness).await;
-    ensure_consumer(&app, "notifications").await.unwrap();
-
-    let role = format!("fvoci_reset_blind_{}", Uuid::now_v7().simple());
+    let suffix = Uuid::now_v7().simple().to_string();
+    // Cluster-level roles: dropped below even when an assertion fails.
+    let roles = [
+        format!("fvoci_reset_blind_{suffix}"),
+        format!("fvoci_reset_noinherit_{suffix}"),
+        format!("fvoci_reset_inheritfalse_{suffix}"),
+    ];
     let password = Uuid::now_v7().simple().to_string();
+    for (role, inherit) in roles.iter().zip(["INHERIT", "NOINHERIT", "INHERIT"]) {
+        sqlx::query(&format!(
+            "CREATE ROLE {role} LOGIN NOSUPERUSER {inherit} PASSWORD '{password}'"
+        ))
+        .execute(&admin)
+        .await
+        .unwrap();
+    }
+    // Members of pg_read_all_stats without its privileges stay blind.
+    sqlx::query(&format!("GRANT pg_read_all_stats TO {}", roles[1]))
+        .execute(&admin)
+        .await
+        .unwrap();
     sqlx::query(&format!(
-        "CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{password}'"
+        "GRANT pg_read_all_stats TO {} WITH INHERIT FALSE",
+        roles[2]
     ))
     .execute(&admin)
     .await
     .unwrap();
-    let mut blind_url = url::Url::parse(&harness.admin_url).unwrap();
-    blind_url.set_username(&role).unwrap();
-    blind_url.set_password(Some(&password)).unwrap();
+    admin.close().await;
+
+    let result = AssertUnwindSafe(blind_and_xmin_case(&harness, &roles, &password))
+        .catch_unwind()
+        .await;
+
+    let admin = self::admin(&harness).await;
+    for role in &roles {
+        sqlx::query(&format!("DROP ROLE IF EXISTS {role}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    admin.close().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    harness.cleanup().await;
+}
+
+async fn blind_and_xmin_case(harness: &TestDb, roles: &[String], password: &str) {
+    let admin = admin(harness).await;
+    let app = app(harness).await;
+    ensure_consumer(&app, "notifications").await.unwrap();
 
     let first = insert_test_event(&app, "test.reset", json!({ "n": 0 }))
         .await
@@ -748,15 +788,21 @@ async fn apply_refuses_blind_owner_and_in_flight_xmin() {
     mark_processed(&app, "notifications", first).await.unwrap();
     let before = cursors(&admin).await;
 
-    // Session blocked from pg_stat_activity: refused even with the app connected.
-    let blind = run_as(blind_url.as_str(), &["--apply", "--reason", "r"]).await;
-    assert!(!blind.ok);
-    assert!(
-        blind.output.contains("pg_read_all_stats"),
-        "{}",
-        blind.output
-    );
-    assert_eq!(cursors(&admin).await, before);
+    // Sessions blocked from pg_stat_activity: refused even with the app
+    // connected, including members that do not inherit pg_read_all_stats.
+    for role in roles {
+        let mut blind_url = url::Url::parse(&harness.admin_url).unwrap();
+        blind_url.set_username(role).unwrap();
+        blind_url.set_password(Some(password)).unwrap();
+        let blind = run_as(blind_url.as_str(), &["--apply", "--reason", "r"]).await;
+        assert!(!blind.ok, "{role}: {}", blind.output);
+        assert!(
+            blind.output.contains("pg_read_all_stats"),
+            "{role}: {}",
+            blind.output
+        );
+        assert_eq!(cursors(&admin).await, before);
+    }
 
     // A transaction with an xid, older than the next event, stays open.
     let mut server = url::Url::parse(&harness.admin_url).unwrap();
@@ -775,8 +821,8 @@ async fn apply_refuses_blind_owner_and_in_flight_xmin() {
 
     app.close().await;
     admin.close().await;
-    wait_for_no_sessions(&harness).await;
-    let in_flight = run(&harness, &["--apply", "--reason", "r"]).await;
+    wait_for_no_sessions(harness).await;
+    let in_flight = run(harness, &["--apply", "--reason", "r"]).await;
     assert!(!in_flight.ok);
     assert!(
         in_flight.output.contains("snapshot xmin"),
@@ -786,17 +832,12 @@ async fn apply_refuses_blind_owner_and_in_flight_xmin() {
 
     sqlx::query("ROLLBACK").execute(&mut blocker).await.unwrap();
     blocker.close().await.unwrap();
-    wait_for_no_sessions(&harness).await;
-    let applied = run(&harness, &["--apply", "--reason", "r"]).await;
+    wait_for_no_sessions(harness).await;
+    let applied = run(harness, &["--apply", "--reason", "r"]).await;
     assert!(applied.ok, "{}", applied.output);
-    let admin = self::admin(&harness).await;
+    let admin = self::admin(harness).await;
     assert!(cursors(&admin)
         .await
         .contains(&("notifications".into(), x2, s2)));
-    sqlx::query(&format!("DROP ROLE {role}"))
-        .execute(&admin)
-        .await
-        .unwrap();
     admin.close().await;
-    harness.cleanup().await;
 }

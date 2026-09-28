@@ -257,18 +257,20 @@ async fn outbox_reset_on(
 
     if opts.apply {
         // Without these, pg_stat_activity hides other roles' sessions and the
-        // count below would pass while the server is still connected.
+        // count below would pass while the server is still connected. USAGE,
+        // not MEMBER: a NOINHERIT role or an INHERIT FALSE grant is a member
+        // without the privileges pg_stat_activity checks.
         let sees_all_sessions: bool = sqlx::query_scalar(
             r#"
             SELECT current_setting('is_superuser') = 'on'
-                OR pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')
+                OR pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')
             "#,
         )
         .fetch_one(&mut *tx)
         .await?;
         if !sees_all_sessions {
             return Err(rejected(
-                "outbox-reset --apply requires a superuser or a member of pg_read_all_stats, so that it can see every other database session",
+                "outbox-reset --apply requires a superuser or a role with the privileges of pg_read_all_stats, so that it can see every other database session",
             ));
         }
         let other_sessions: i64 = sqlx::query_scalar(
