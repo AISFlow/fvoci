@@ -35,17 +35,20 @@ impl MailConsumer {
     }
 }
 
-/// Events whose accepted recipients are kept at most. The dispatcher sends
-/// one mail event at a time and retries it until it succeeds or is
-/// dead-lettered, so only dead-lettered events linger until pushed out.
+/// Events whose accepted recipients are kept at most, oldest pushed out
+/// first. The dispatcher sends one mail event at a time, so an event is
+/// redelivered long before 64 newer mail events push it out.
 const ACCEPTED_EVENTS_KEPT: usize = 64;
 
-/// Recipients SMTP accepted for events that have not completed yet. An
-/// event's entry is dropped once all its recipients are settled; then the
-/// dispatcher marks the event processed. This lives in memory only: a
-/// restart, or another replica taking over the lease, starts empty and
-/// may send an accepted recipient's mail again (the documented at-least-once
-/// edge, like a crash between SMTP and the processed mark).
+/// Recipients SMTP accepted, per event. An entry is kept after its event
+/// completes too: the dispatcher marks the event processed only after
+/// `deliver` returns, and when that mark (or the lease renewal next to it)
+/// fails, the event is delivered again and must skip these recipients. An
+/// entry is only ever a recipient SMTP really accepted, so keeping it can
+/// never suppress a send that failed. This lives in memory only: a restart,
+/// or another replica taking over the lease, starts empty and may send an
+/// accepted recipient's mail again (the documented at-least-once edge, like
+/// a crash between SMTP and the processed mark).
 #[derive(Default)]
 struct AcceptedRecipients {
     events: VecDeque<(Uuid, HashSet<String>)>,
@@ -68,10 +71,6 @@ impl AcceptedRecipients {
         }
         self.events
             .push_back((event_id, HashSet::from([to.to_string()])));
-    }
-
-    fn forget(&mut self, event_id: Uuid) {
-        self.events.retain(|(id, _)| *id != event_id);
     }
 }
 
@@ -180,7 +179,6 @@ async fn deliver_mail(
             "mailer: every recipient rejected ({rejected})"
         )));
     }
-    lock(accepted).forget(event.id);
     Ok(())
 }
 
@@ -200,17 +198,14 @@ mod tests {
         assert!(accepted.contains(first, "b@example.com"));
         assert!(!accepted.contains(second, "b@example.com"));
 
-        accepted.forget(first);
-        assert!(!accepted.contains(first, "a@example.com"));
-        assert!(accepted.contains(second, "a@example.com"));
-
-        for _ in 0..ACCEPTED_EVENTS_KEPT {
+        for _ in 0..ACCEPTED_EVENTS_KEPT - 1 {
             accepted.insert(Uuid::now_v7(), "c@example.com");
         }
         assert_eq!(accepted.events.len(), ACCEPTED_EVENTS_KEPT);
         assert!(
-            !accepted.contains(second, "a@example.com"),
+            !accepted.contains(first, "a@example.com"),
             "the oldest event is pushed out"
         );
+        assert!(accepted.contains(second, "a@example.com"));
     }
 }

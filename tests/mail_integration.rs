@@ -775,7 +775,7 @@ async fn mail_consumer_is_at_least_once_and_skips_after_processed_events() {
         .iter()
         .find(|event| event.id == event_id)
         .expect("mail consumer can read identity.linked");
-    let consumer = fvoci_server::mail::mail_consumer(mailer);
+    let consumer = fvoci_server::mail::mail_consumer(mailer.clone());
     consumer
         .deliver(&app_pool, Uuid::now_v7(), event)
         .await
@@ -784,7 +784,17 @@ async fn mail_consumer_is_at_least_once_and_skips_after_processed_events() {
         .await;
     assert_eq!(sink.snapshot().len(), 1);
 
+    // The same process remembers the recipient SMTP accepted: a replay
+    // before the mark (a failed mark or lease renewal) does not send again.
     consumer
+        .deliver(&app_pool, Uuid::now_v7(), event)
+        .await
+        .expect("replay in the same process");
+    assert_eq!(sink.snapshot().len(), 1);
+
+    // A new process (restart, or another replica taking the lease) starts
+    // without that memory: a replay before the mark sends again.
+    fvoci_server::mail::mail_consumer(mailer)
         .deliver(&app_pool, Uuid::now_v7(), event)
         .await
         .expect("replay before mark");
@@ -1613,6 +1623,85 @@ async fn relay_limit_after_an_accepted_recipient_dead_letters_the_event() {
     assert!(dead.dead_at.is_some(), "{dead:?}");
     let counts: Vec<usize> = to.iter().map(|address| sink.count_to(address)).collect();
     assert_eq!(counts, vec![1, 0, 0], "mails per recipient");
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// Marking the event fails once with a database error after its mail was
+/// accepted: the event is delivered again, and the recipient SMTP already
+/// accepted is skipped, not sent the mail a second time.
+#[tokio::test]
+async fn failed_mark_after_the_sends_does_not_resend_the_mail() {
+    let harness = TestDb::bootstrap().await;
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, Vec::new()).await;
+    let mailer = mailer_for(sink.port);
+    let (app, _cookie, user_id) = setup_session(&harness, mailer.clone()).await;
+    drop(app);
+    let admin = harness.admin().await;
+    // nextval is not rolled back with the failed insert, so the fault fires
+    // on the first mark of the mail consumer only.
+    for sql in [
+        "CREATE SEQUENCE public.mail_mark_fault",
+        r#"
+        CREATE FUNCTION public.mail_mark_fault() RETURNS trigger
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        BEGIN
+            IF NEW.consumer = 'mail' THEN
+                IF nextval('public.mail_mark_fault') = 1 THEN
+                    RAISE EXCEPTION 'injected mark failure';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#,
+        "CREATE TRIGGER mail_mark_fault BEFORE INSERT ON fvoci.processed_events \
+         FOR EACH ROW EXECUTE FUNCTION public.mail_mark_fault()",
+    ] {
+        sqlx::query(sql)
+            .execute(&admin)
+            .await
+            .expect("install fault");
+    }
+    start_mail_cursor_at_latest_event(&admin).await;
+    let event_id = Uuid::now_v7();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, actor_user_id, verb, payload, channel)
+        VALUES ($1, $2, 'identity.linked', $3, 'web')
+        "#,
+    )
+    .bind(event_id)
+    .bind(user_id)
+    .bind(json!({ "provider": "mark-fault" }))
+    .execute(&mut *tx)
+    .await
+    .expect("identity event");
+    tx.commit().await.expect("commit event");
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(app_pool.clone(), mailer, Duration::from_secs(5));
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let fired: bool = sqlx::query_scalar("SELECT last_value > 1 FROM public.mail_mark_fault")
+        .fetch_one(&admin)
+        .await
+        .expect("fault sequence");
+    assert!(
+        fired,
+        "the mark fault must have fired and the event been marked after it"
+    );
+    assert!(is_processed(&app_pool, "mail", event_id).await.unwrap());
+    assert_eq!(sink.count_text("mark-fault"), 1, "mails for the event");
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
     app_pool.close().await;
     harness.cleanup().await;
 }
