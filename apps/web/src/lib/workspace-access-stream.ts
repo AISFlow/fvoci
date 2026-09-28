@@ -16,7 +16,9 @@ export type WorkspaceAccessSubscription = {
  * proxy's 5xx during a restart) is reopened by the pool with capped backoff.
  * Each refusal first asks the server whether this session still has the
  * workspace: on 401 or 404 the watcher stops reopening and the caller
- * reconciles once; otherwise it waits for the reopen without a list refetch.
+ * reconciles once. Otherwise no list is fetched while refused; the caller
+ * reconciles once when the reopened stream opens, because the server starts
+ * it at the current event horizon, past any access event of the refused gap.
  */
 export function watchWorkspaceAccess(
   workspaceId: string,
@@ -26,10 +28,23 @@ export function watchWorkspaceAccess(
   },
 ): WorkspaceAccessSubscription {
   const url = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/access-stream`;
+  let stopped = false;
+  // Set on the refusal itself, not when the probe answers: the first reopen can
+  // open before a slow probe does.
+  let refused = false;
+
+  const onOpen = () => {
+    if (!refused || stopped) return;
+    refused = false;
+    handlers.onAccessChange();
+  };
+
+  // Handlers given here are removed by `close()`, so a closed lease leaves no
+  // listener on a pooled source that other leases keep reopening.
   const source = openSharedEventSource(url, {
+    onOpen,
     onError: handlers.onError,
   });
-  let stopped = false;
 
   const stop = () => {
     if (stopped) return;
@@ -43,6 +58,7 @@ export function watchWorkspaceAccess(
       handlers.onAccessChange();
       return;
     }
+    refused = true;
     void workspaceAccessGone(workspaceId).then((gone) => {
       if (!gone || stopped) return;
       stop();

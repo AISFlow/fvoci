@@ -3,6 +3,7 @@ import test, { mock } from "node:test";
 import { installMockEventSource, MockEventSource } from "../../test/mock-event-source.ts";
 import { installNodeRelativeRequestShim } from "../../test/node-api-fetch.ts";
 import {
+  openSharedEventSource,
   resetSharedEventSourcePoolForTests,
   sharedEventSourceRefCount,
 } from "./shared-event-source.ts";
@@ -93,20 +94,45 @@ for (const status of [401, 404]) {
   });
 }
 
-test("a refused stream of a current member reopens without refetching the list", async () => {
+test("a refused stream of a current member reconciles once when its reopen opens", async () => {
   serveWorkspace(200);
   let changes = 0;
   const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
+  MockEventSource.latest().open();
+  assert.equal(changes, 0, "the first open is not a reconnect");
   // e.g. 429 at the stream cap, or a proxy's 502 while the server restarts.
   MockEventSource.latest().fail(MockEventSource.CLOSED);
   await settle();
   assert.deepEqual(probes, [`GET /api/v1/workspaces/${WS}`]);
-  assert.equal(changes, 0);
+  assert.equal(changes, 0, "no list refetch while refused");
   mock.timers.tick(1_000);
   assert.equal(MockEventSource.instances.length, 2, "reopened after the backoff");
   assert.equal(MockEventSource.latest().url, STREAM);
+  // The new stream starts at the current horizon: an access event committed
+  // while refused is behind it, so the list is fetched once.
+  MockEventSource.latest().open();
+  assert.equal(changes, 1);
+  // A browser reconnect of that stream (no refusal) reconciles on its error only.
+  MockEventSource.latest().fail(MockEventSource.CONNECTING);
+  MockEventSource.latest().open();
+  assert.equal(changes, 2);
   sub.close();
   assert.equal(MockEventSource.latest().closed, true);
+});
+
+test("a reopen that opens before the probe answers still reconciles once", async () => {
+  globalThis.fetch = () => new Promise<Response>(() => {});
+  let changes = 0;
+  const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
+  MockEventSource.latest().fail(MockEventSource.CLOSED);
+  await settle();
+  mock.timers.tick(1_000);
+  assert.equal(MockEventSource.instances.length, 2);
+  MockEventSource.latest().open();
+  assert.equal(changes, 1);
+  MockEventSource.latest().open();
+  assert.equal(changes, 1, "one reconcile per refusal");
+  sub.close();
 });
 
 test("a probe that fails on the network keeps reopening", async () => {
@@ -120,6 +146,29 @@ test("a probe that fails on the network keeps reopening", async () => {
   assert.equal(changes, 0);
   mock.timers.tick(1_000);
   assert.equal(MockEventSource.instances.length, 2);
+  MockEventSource.latest().open();
+  assert.equal(changes, 1);
+});
+
+test("a closed watcher does not reconcile when a shared reopen opens", async () => {
+  serveWorkspace(200);
+  let changes = 0;
+  const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
+  // Another lease keeps the pooled stream (and its reopen) alive.
+  const other = openSharedEventSource(STREAM, {});
+  MockEventSource.latest().fail(MockEventSource.CLOSED);
+  sub.close();
+  await settle();
+  mock.timers.tick(1_000);
+  assert.equal(MockEventSource.instances.length, 2);
+  assert.equal(
+    MockEventSource.latest().listeners.get("open")?.size,
+    1,
+    "only the pool's own open listener moved to the reopened source",
+  );
+  MockEventSource.latest().open();
+  assert.equal(changes, 0);
+  other.close();
 });
 
 test("closing the watcher before the probe answers skips the reconcile", async () => {
