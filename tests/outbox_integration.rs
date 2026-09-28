@@ -1402,8 +1402,8 @@ async fn xid_epoch_mismatch_refuses_advance_and_recover_rebases() {
         .1
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
 
-    app.close().await;
-    admin.close().await;
+    project_harness::close_pool(app).await;
+    project_harness::close_pool(admin).await;
     wait_for_client_backends_gone(&harness.admin_url, &harness.db_name).await;
     let report = recover_outbox(
         &harness.admin_url,
@@ -2245,8 +2245,8 @@ async fn probes_report_real_database_and_outbox_lag() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{out:?}");
 
-    // The event becomes readable once no older transaction in the cluster
-    // (parallel tests pin xmin) is still running, like for the dispatcher.
+    // The lag has no snapshot-xmin filter, so this is normally the first
+    // scrape; the bounded poll only guards the refresh.
     let deadline = std::time::Instant::now() + DISPATCHER_WAIT;
     let (body, lag) = loop {
         let (status, content_type, body) = get("/metrics").await;
@@ -2297,6 +2297,123 @@ async fn probes_report_real_database_and_outbox_lag() {
 
     server.abort();
     let _ = server.await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// A transaction holding an xid pins the snapshot xmin, so an event committed
+/// after it is not yet deliverable (`app_outbox_read` returns nothing). The
+/// lag metric still counts it, as the source `lagSeconds()` did, and the
+/// xmin-stall gauge reports the holder's age. Neither exposes the event's
+/// workspace, actor or target, the consumer name, the database or the role.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_see_outbox_lag_and_xmin_stall_behind_an_xid_holder() {
+    use fvoci_server::http::probes::{MetricsAllowList, Observability, ObservabilitySettings};
+
+    const HOLD: Duration = Duration::from_secs(6);
+
+    let harness = TestDb::bootstrap().await;
+    let state = project_harness::app_state(&harness.app_url).await;
+    let app_pool = state.auth.db.pool.clone();
+    let consumer = "stall-lag";
+    ensure_consumer(&app_pool, consumer).await.expect("ensure");
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    install_pin_table(&admin).await;
+
+    let holder = begin_xmin_pin(&admin).await;
+    let held_since = std::time::Instant::now();
+    let (workspace_id, actor_id, target_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    sqlx::query(
+        "INSERT INTO fvoci.events \
+         (id, workspace_id, actor_user_id, verb, target_type, target_id, payload, channel, created_at) \
+         VALUES ($1, $2, $3, 'probe', 'document', $4, '{}', 'system', now() - interval '1 hour')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(actor_id)
+    .bind(target_id)
+    .execute(&admin)
+    .await
+    .expect("event behind the holder");
+    let deliverable: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.app_outbox_read($1, 10)")
+        .bind(consumer)
+        .fetch_one(&app_pool)
+        .await
+        .expect("read");
+    assert_eq!(
+        deliverable, 0,
+        "the holder must keep the event undeliverable"
+    );
+
+    let router = fvoci_server::http::router_with_observability(
+        state,
+        None,
+        Arc::new(fvoci_server::integrations::Integrations::disabled()),
+        Arc::new(fvoci_server::identity::Identity::disabled(
+            "http://localhost",
+        )),
+        Arc::new(Observability::new(ObservabilitySettings {
+            allow: MetricsAllowList::parse(Some("127.0.0.1/32")).unwrap(),
+            outbox_consumers: vec![consumer.to_string()],
+            refresh_interval: Duration::ZERO,
+        })),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let scrape = || {
+        let client = client.clone();
+        async move {
+            let response = client
+                .get(format!("http://{addr}/metrics"))
+                .send()
+                .await
+                .expect("scrape");
+            assert_eq!(response.status().as_u16(), 200);
+            response.text().await.unwrap()
+        }
+    };
+
+    let body = scrape().await;
+    let lag = metric_value(&body, "fvoci_outbox_lag_seconds");
+    assert!((3_590..3_700).contains(&lag), "lag {lag}\n{body}");
+
+    tokio::time::sleep(HOLD.saturating_sub(held_since.elapsed())).await;
+    let body = scrape().await;
+    let stall = metric_value(&body, "fvoci_outbox_xmin_stall_seconds");
+    // Other tests on the shared cluster can only hold older xids, never
+    // lower the maximum below this holder's age.
+    assert!(stall >= 5, "stall {stall}\n{body}");
+    let lag = metric_value(&body, "fvoci_outbox_lag_seconds");
+    assert!((3_590..3_700).contains(&lag), "lag {lag}\n{body}");
+    for secret in [
+        workspace_id.to_string(),
+        workspace_id.simple().to_string(),
+        actor_id.to_string(),
+        target_id.to_string(),
+        consumer.to_string(),
+        harness.db_name.clone(),
+        harness.role_name.clone(),
+    ] {
+        assert!(!body.contains(&secret), "{secret} leaked:\n{body}");
+    }
+
+    holder.commit().await.expect("release holder");
+    server.abort();
+    let _ = server.await;
+    app_pool.close().await;
     admin.close().await;
     harness.cleanup().await;
 }

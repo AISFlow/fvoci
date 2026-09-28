@@ -468,6 +468,101 @@ async fn share_shell_head_on_the_wire_has_no_body_or_length() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Source `server.ts` `ROBOTS_TXT` / `publicText`: exact body, public text
+/// headers, the global security headers, served ahead of the static fallback
+/// (a stray `robots.txt` in the web build cannot replace it). `/s/` stays
+/// crawlable for share-card unfurl bots.
+#[tokio::test]
+async fn robots_txt_is_the_source_policy_with_public_text_headers() {
+    let dir = std::env::temp_dir().join(format!("fvoci-static-robots-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::write(dir.join("index.html"), "<html></html>").unwrap();
+    std::fs::write(dir.join("robots.txt"), "User-agent: *\nDisallow: /\n").unwrap();
+    for static_dir in [None, Some(dir.clone())] {
+        let app: Router = router(app_state().await, static_dir.clone());
+        for method in ["GET", "HEAD"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/robots.txt")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let ctx = format!("{method} static={}", static_dir.is_some());
+            assert_eq!(response.status(), StatusCode::OK, "{ctx}");
+            let h = response.headers().clone();
+            assert_eq!(h["content-type"], "text/plain; charset=utf-8", "{ctx}");
+            assert_eq!(h["cache-control"], "public, max-age=3600", "{ctx}");
+            assert_eq!(h["x-content-type-options"], "nosniff", "{ctx}");
+            assert_eq!(h["referrer-policy"], "no-referrer", "{ctx}");
+            assert!(h.contains_key("content-security-policy"), "{ctx}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            if method == "HEAD" {
+                assert!(bytes.is_empty(), "{ctx}");
+                continue;
+            }
+            assert_eq!(
+                &bytes[..],
+                b"User-agent: *\nDisallow: /api/\nDisallow: /w/\nAllow: /legal/\n",
+                "{ctx}"
+            );
+            assert!(!std::str::from_utf8(&bytes).unwrap().contains("/s/"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Source `apiDocs` guard `access: { auth: "session" }`: no cookie and no
+/// bearer is 401 `authentication_required` as problem JSON on every docs path
+/// (page, JSON, every asset) with the global CSP, and nothing of the page or
+/// spec leaks, also when the SPA fallback is mounted.
+#[tokio::test]
+async fn api_docs_require_a_session() {
+    let dir = std::env::temp_dir().join(format!("fvoci-static-docs-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::write(dir.join("index.html"), "<html></html>").unwrap();
+    for static_dir in [None, Some(dir.clone())] {
+        let app: Router = router(app_state().await, static_dir.clone());
+        for uri in [
+            "/api/docs",
+            "/api/docs/json",
+            "/api/docs/static/fvoci-swagger-initializer.js",
+            "/api/docs/static/fvoci-swagger-theme.css",
+            "/api/docs/static/swagger-ui-bundle.js",
+            "/api/docs/static/swagger-ui.css",
+            "/api/docs/static/swagger-ui-bundle.js.LICENSE.txt",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            let h = response.headers().clone();
+            assert!(h["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("application/problem+json"));
+            assert!(h["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .starts_with("default-src 'self';"));
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json["code"], "authentication_required", "{uri}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 async fn probe_body(
     app: &Router,
     request: Request<Body>,
@@ -630,6 +725,7 @@ async fn metrics_probe_exports_text_format_for_allowed_peer() {
     for name in [
         "# TYPE fvoci_http_request_duration_seconds histogram",
         "# TYPE fvoci_outbox_lag_seconds gauge",
+        "# TYPE fvoci_outbox_xmin_stall_seconds gauge",
         "# TYPE fvoci_task_stream_subscribers gauge",
         "# TYPE fvoci_db_pool_connections gauge",
         "fvoci_db_pool_max_connections 1",

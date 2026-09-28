@@ -65,6 +65,32 @@ async function openedIn(worker: ThreadPort, bytes: Uint8Array, options = {}): Pr
   return (opened as { deck: RemotePptxDeck }).deck;
 }
 
+/**
+ * Opens `bytes` and lays out slide 1 in the booted worker straight through the
+ * port, with no client and no bound, so the layout code is loaded and warm
+ * before a client arms a short timer. The client's own `open` then replaces
+ * this deck.
+ */
+async function warmedUp(worker: ThreadPort, bytes: Uint8Array): Promise<void> {
+  await worker.booted;
+  const reply = (message: PptxWorkerRequest, transfer: Transferable[] = []) =>
+    new Promise<PptxWorkerResponse>((resolve) => {
+      worker.onmessage = ({ data }) => resolve(data);
+      worker.postMessage(message, transfer);
+    });
+  const copy = bytes.slice();
+  assert.deepEqual(await reply({ type: "open", bytes: copy }, [copy.buffer]), {
+    type: "opened",
+    status: "ok",
+    width: 960,
+    height: 540,
+    slideCount: 2,
+  });
+  const warm = await reply({ type: "render", id: 0, index: 0 });
+  assert.ok(warm.type === "rendered" && warm.slide.status === "ok");
+  worker.onmessage = null;
+}
+
 /** Slide 2 with this many filler paragraphs lays out in about 0.5 s in Node (review B3: 1,394 → 0.48 s). */
 const SLOW_PARAGRAPHS = 1_394;
 
@@ -136,10 +162,10 @@ test("negative control: left to finish, a slow slide lays out in the worker whil
 
 test("the render timeout terminates the worker in the middle of that layout", async () => {
   const worker = threadWorker();
-  const deck = await openedIn(worker, buildFixturePptx(DEFAULT_PPTX_TEXT, { slide2Paragraphs: SLOW_PARAGRAPHS }), {
-    renderTimeoutMs: 50,
-  });
-  assert.equal((await deck.render(0)).status, "ok");
+  const bytes = buildFixturePptx(DEFAULT_PPTX_TEXT, { slide2Paragraphs: SLOW_PARAGRAPHS });
+  // Warm-up outside the client: the 50 ms bound is for the slow slide only (a cold first render can exceed it).
+  await warmedUp(worker, bytes);
+  const deck = await openedIn(worker, bytes, { renderTimeoutMs: 50 });
   const started = performance.now();
   await assert.rejects(deck.render(1), (error) => error instanceof PptxWorkerError && error.reason === "timeout");
   assert.ok(performance.now() - started < 150);

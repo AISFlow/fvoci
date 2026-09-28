@@ -45,6 +45,17 @@ WORKFLOW_YAML: dict[str, str] = {
     "install": "install.yml",
 }
 
+# Tag-driven release workflow (docs/RELEASING.md). It is not a PR/merge
+# selection workflow, so it has no ci-plan/gate; it is allowed only while it
+# cannot run for untrusted refs and write scopes stay in the listed jobs.
+RELEASE_WORKFLOW_FILE = "release.yml"
+RELEASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
+    "build": frozenset({"packages"}),
+    "index": frozenset({"packages"}),
+    "publish": frozenset({"packages"}),
+    "release": frozenset({"contents"}),
+}
+
 PLAN_JOB_ID = "ci-plan"
 PLAN_OUTPUT_KEYS = ("mode", "reason_code", "plan_ok", "plan_json")
 PYYAML_PIN = "PyYAML==6.0.3"
@@ -1214,7 +1225,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
-    allowed_files = set(WORKFLOW_YAML.values())
+    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE}
     discovered_files = list_workflow_files(repo_root)
     if not workflows_dir.is_dir():
         errors.append("missing .github/workflows directory")
@@ -1366,7 +1377,65 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
 
         errors.extend(_verify_opt_in_wiring(workflow, data, jobs))
 
+    release_path = workflows_dir / RELEASE_WORKFLOW_FILE
+    if release_path.is_file():
+        errors.extend(verify_release_workflow(release_path))
+
     errors.extend(verify_rust_suite_registry(repo_root))
+    return errors
+
+
+def verify_release_workflow(path: Path) -> list[str]:
+    """Only tag pushes and manual dispatch; read-only default token; scoped writes."""
+    name = path.name
+    data, parse_err = _load_yaml_mapping(path)
+    if parse_err:
+        return [f"{name}: {parse_err}"]
+    errors: list[str] = []
+    triggers = data.get("on", data.get(True))
+    if not isinstance(triggers, dict) or set(triggers) != {"push", "workflow_dispatch"}:
+        errors.append(f"{name}: triggers must be exactly push (tags) and workflow_dispatch")
+    else:
+        push = triggers["push"]
+        tags = push.get("tags") if isinstance(push, dict) else None
+        if (
+            not isinstance(push, dict)
+            or set(push) != {"tags"}
+            or not isinstance(tags, list)
+            or not tags
+            or not all(isinstance(tag, str) and tag.startswith("v0.") for tag in tags)
+        ):
+            errors.append(f"{name}: push must list only v0.* tags")
+    if data.get("permissions") != {"contents": "read"}:
+        errors.append(f"{name}: top-level permissions must be exactly contents: read")
+    # One queue for every tag: runs for two patch tags must not race on :0.y.
+    concurrency = data.get("concurrency")
+    if (
+        not isinstance(concurrency, dict)
+        or not isinstance(concurrency.get("group"), str)
+        or "${{" in concurrency["group"]
+        or concurrency.get("cancel-in-progress") is not False
+    ):
+        errors.append(
+            f"{name}: concurrency must be one fixed group with cancel-in-progress: false"
+        )
+    jobs = data.get("jobs")
+    if not isinstance(jobs, dict) or not jobs:
+        return [*errors, f"{name}: jobs mapping missing"]
+    for job_id, spec in jobs.items():
+        if not isinstance(spec, dict):
+            errors.append(f"{name}: {job_id} must be a mapping")
+            continue
+        permissions = spec.get("permissions", {})
+        if not isinstance(permissions, dict):
+            errors.append(f"{name}: {job_id} permissions must be a scope mapping")
+            continue
+        writes = {scope for scope, level in permissions.items() if level == "write"}
+        allowed = RELEASE_WRITE_SCOPES.get(job_id, frozenset())
+        if not writes <= allowed:
+            errors.append(
+                f"{name}: {job_id} may not write {sorted(writes - allowed)}"
+            )
     return errors
 
 

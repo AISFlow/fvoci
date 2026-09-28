@@ -47,7 +47,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. |
 | `FVOCI_MEILI_INDEX` | Index uid (default `fvoci`). Tests may set a per-run uid. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | Outgoing mail (invitations, password reset). All three or none; unset disables mail and invitation links are shown instead. No AUTH (same as the source). STARTTLS is used whenever the relay offers it, with certificate verification against public roots, so an internal relay needs a publicly trusted certificate or must not offer STARTTLS. |
-| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --verify-secrets` lists the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
+| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --secrets-rotate` re-seals them under the active key; `--secrets-audit` and `--verify-secrets` list the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
 | `FVOCI_WEBHOOK_ALLOW_TARGETS` | Comma list of host names / IP addresses that webhook URLs may use despite the outbound rules (default empty). A listed URL host skips the port (80/443) and host-name rules; a listed IP is accepted as a literal or resolved private address. Meant for local receivers (tests, e2e); leave empty in production. `0.0.0.0` / `::` are refused. |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET` | Optional GitHub App (all three or none; the PEM may use literal `\n`). Enables `/github/install`, `/api/v1/github/callback`, the signed `/api/v1/github/webhook` endpoint and the `github` outbox consumer that closes/reopens linked issues. The install `state` is single use and bound to the admin session that started it (the callback needs that session cookie); the callback confirms the installation with `GET /app/installations/{id}` and never replaces an existing link to another installation (uninstall first). While the app is not configured the `github` cursor still advances, so enabling it later does not replay older status changes. |
 | `GITHUB_STATE_SECRET` | Server-only key (at least 32 bytes) for the install `state` MAC. If unset it is derived (HKDF-SHA256) from the active `ENCRYPTION_KEYS` key; with neither, a configured GitHub App fails at boot. The webhook secret is not used because GitHub App managers also hold it. |
@@ -231,14 +231,17 @@ consent or bearer checks (source `INFRA_PATHS`):
 | --- | --- |
 | `GET /health` | Liveness: always `200 {"ok":true}`. |
 | `GET /ready` | `200 {"ok":true}`, or `503 {"ok":false,"checks":{"pg":false,...}}`. Checks the app-role PostgreSQL pool (`SELECT 1`) and, when collaboration is enabled, that the hub is not shutting down (`collab`). Each check is bounded by 2 s. There is no Redis to check. |
-| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers get the generic `404 not_found` problem. `fvoci_http_request_duration_seconds{method,route,status}` (route is the router template or `unmatched`), `fvoci_outbox_lag_seconds` (age of the oldest event still deliverable under the current snapshot xmin that some outbox consumer cursor has not yet passed; refreshed at most every 15 s, the last value is kept when the query fails. Backlog held behind a long-running or idle-in-transaction session (xmin stall) is **not** visible to this metric; the source also exported `fvoci_outbox_xmin_stall_total`, which is not ported yet — a follow-up needs a read-only DB function without the xmin filter), `fvoci_task_stream_subscribers` (open SSE streams), `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections`. No label holds a workspace, user, token or concrete path. |
+| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers get the generic `404 not_found` problem. `fvoci_http_request_duration_seconds{method,route,status}` (route is the router template or `unmatched`), `fvoci_outbox_lag_seconds` (age of the oldest event some outbox consumer cursor has not yet passed, as in the source, including events committed behind a long-running or idle-in-transaction session), `fvoci_outbox_xmin_stall_seconds` (age of the oldest transaction holding an xid anywhere in the PostgreSQL cluster, prepared transactions included; outbox delivery waits for it to end. The source instead counted relay warnings above `OUTBOX_XMIN_AGE_WARN_MS` in `fvoci_outbox_xmin_stall_total`; alert on this gauge with the threshold in the rule). Both are refreshed at most every 15 s and keep their last value when the query fails. `fvoci_task_stream_subscribers` (open SSE streams), `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections`. No label holds a workspace, user, token or concrete path. |
 
 `fvoci-server healthcheck` requests `GET /ready` from the address in `FVOCI_BIND`
 (a wildcard bind is probed on loopback) and exits 0 on a 2xx answer within 4 s,
 otherwise 1. It reads no other configuration or secrets. The source modes
 `worker`, `compact` and `thumbnail` exit 1 with a message because those roles
-run inside the server here. The Compose server healthcheck still requests
-`/api/v1/setup` with curl.
+run inside the server here. The Compose server healthcheck runs
+`/opt/fvoci/bin/fvoci-server healthcheck` every 2 s with a 5 s timeout (the
+source Compose used its binary's `healthcheck` with the same timeout), so the
+container is healthy only once `/ready` reports PostgreSQL (and collab, when
+enabled) ready.
 
 ### Response security headers
 
@@ -776,8 +779,15 @@ PostgreSQL cluster (any database, or a prepared transaction) is older than the
 newest event. Let it end or roll it back (`pg_stat_activity`,
 `pg_prepared_xacts`), then repeat step 3. Migration 041 adds the outbox cursors
 an earlier upgrade left missing, so notifications and mail do not replay past
-events. To go back to the old build, stop the
-upgraded server first; do not start the old image on the migrated database.
+events. Migration 043 builds the index `events_workspace_relay_idx` on
+`fvoci.events (workspace_id, xact, seq)` inside the migrate transaction, so it
+cannot use `CONCURRENTLY`. While it builds, it holds a SHARE lock on
+`fvoci.events`: reads continue, but every write that records an event waits.
+The server is stopped during migrate, so this only affects other clients of the
+same database. The build is one scan and sort of the table, so its time grows with the
+number of rows in `fvoci.events`; check `SELECT count(*) FROM fvoci.events` and
+plan the maintenance window accordingly. To go back
+to the old build, stop the upgraded server first; do not start the old image on the migrated database.
 Restore the pre-upgrade backup into a new project with the old image (local
 storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback
 loses writes made after that backup; preserve the failed install for diagnosis,
@@ -874,6 +884,24 @@ Container install workflow with `run_upgrade_smoke_arm=true`
 `ubuntu-24.04-arm` with local storage, for the fixed pair in the `upgrade-smoke-arm64` job and the
 tested commit as `--main-ref`. The job being registered is not a result. Record the pair, image IDs,
 architecture and logs of a run with the change it supports; this guide does not.
+
+### Release images (0.x)
+
+Trial releases are published by `.github/workflows/release.yml` as
+`ghcr.io/aisflow/fvoci:0.y.z` (linux/amd64 and linux/arm64) with a GitHub
+pre-release holding `compose.yml` pinned to the image digest, `release.json`
+and `SHA256SUMS`; maintainer steps are in `docs/RELEASING.md`. Nothing updates
+an install on its own. To move a release install to a newer 0.y.z, back it up,
+check the new release's `SHA256SUMS`, replace `compose.yml` in the same
+directory (same Compose project name, so the same volumes) and run
+`docker compose up -d --wait`; the one-shot services migrate before the
+server starts, and a failure leaves the server stopped as described above.
+0.x releases make no compatibility promise between minor versions and there is
+no downgrade: going back means restoring the pre-upgrade backup.
+`docker compose down -v` deletes the data and the generated keys.
+`fvoci-server --version` (for example
+`docker compose exec server /opt/fvoci/bin/fvoci-server --version`) prints the
+version and source commit.
 
 ## Backup and restore
 
@@ -1185,13 +1213,48 @@ job, backup and restore (the server binary stays single-purpose):
 | `fvoci backup <collect\|restore\|...>` | `scripts/backup.sh`, `scripts/restore.sh` (below) | Compose project |
 | — (restore check) | `fvoci-migrate --verify-storage` | the server's |
 | `fvoci secrets rotate-vapid` | `fvoci-migrate --rotate-vapid` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
+| `fvoci secrets audit` | `fvoci-migrate --secrets-audit` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`, `PASSWORD_PEPPER_KEYS`) |
+| `fvoci secrets rotate` | `fvoci-migrate --secrets-rotate` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
 
 `fvoci healthcheck` is `fvoci-server healthcheck` (see "Probes"; it probes the
 server, not a `fvoci-migrate` mode).
 
-Not ported: `secrets audit/rotate`, `reindex` (extract re-enqueue) and the split
-worker roles (`worker`, `compact`, `thumbnail`, `collab`) with their
-`healthcheck <role>` heartbeat checks; the Rust server runs those jobs in-process.
+Not ported: `reindex` (extract re-enqueue) and the split worker roles (`worker`,
+`compact`, `thumbnail`, `collab`) with their `healthcheck <role>` heartbeat
+checks; the Rust server runs those jobs in-process.
+
+**`--secrets-audit` / `--secrets-rotate`** (source `fvoci secrets audit|rotate`)
+run as the app role in the system context, like the server; they refuse a
+superuser, `BYPASSRLS` or schema-owner URL and a schema that is not current.
+Both walk the webhook signing secrets, workspace SSO client secrets, TOTP
+secrets and the VAPID private key, 100 rows per transaction, with each value's
+row-bound AAD. Output is one JSON line of key ids and counts; secret values,
+password hashes and key material are never printed.
+
+- `--secrets-audit` prints `secrets` (`<class>:<key id>` → count, `invalid` for
+  a malformed value), `passwords` (pepper key id → count, `unknown` for a hash
+  in no known format), `problems`, `activeKeyId`, `notActive` (values that
+  open but are not under the active key), `missingKeyIds` and
+  `missingPasswordKeyIds`. It exits 1 when `problems` is nonzero: a value that
+  does not open (missing key id, wrong key, corrupted or moved value) or a
+  password hash whose pepper key is missing or whose format is invalid.
+- `--secrets-rotate` re-seals every value not under `ENCRYPTION_ACTIVE_KEY_ID`
+  and prints `{"changed":n,"unchanged":m}`. It first opens every value and
+  refuses before writing anything if one does not open (the source re-seals
+  earlier batches and then stops). Each write is a compare-and-set on the value
+  it read (the VAPID key through `app_replace_vapid_private`), so a concurrent
+  change fails the command with a conflict instead of being overwritten;
+  committed batches are valid, and re-running finishes the rest. A second run
+  reports `changed: 0`. Password hashes are re-peppered at sign-in, not here.
+
+Key rotation: add the new key to `ENCRYPTION_KEYS`, switch
+`ENCRYPTION_ACTIVE_KEY_ID`, restart the server, run `--secrets-rotate`, then
+`--secrets-audit`; drop the old key only once `secrets` no longer names it.
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --secrets-audit
+```
 
 **`--init-env`** writes the Compose env file from `infra/rust/.env.example` with
 fresh secrets: `POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
