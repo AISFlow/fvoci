@@ -607,6 +607,62 @@ run as uid/gid `1000` (`fvoci`), and set:
 Unset any helper env to disable that feature (API-only). The published image ships
 all three helpers and enables them via the defaults above.
 
+### Standalone install (one compose file)
+
+For a trial install, save `infra/rust/compose.user.yml` (or the release's
+`compose.yml` built from it) as `compose.yml` in an empty folder and run:
+
+```sh
+docker compose up -d
+```
+
+Open <http://localhost:8080> and create the first administrator (the setup
+flow is the same as below; no administrator is created automatically). No
+`.env`, local build, SQL or key generation is needed. The file is the only
+input; the product image is `${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:<version>}`,
+which release files replace with a digest-pinned reference.
+
+Order of the first `up`:
+
+1. `bootstrap` (product image, no network, read-only root, `CHOWN` only) runs
+   `fvoci-migrate --bootstrap-secrets` and writes fresh random secrets, in the
+   same formats as `--init-env`, into one volume per audience:
+
+   | Volume | Mounted read-only by | Files (mode 0600, owner) |
+   | --- | --- | --- |
+   | `fvoci_secrets_postgres` | `postgres` | `postgres_password` (uid 999) |
+   | `fvoci_secrets_meilisearch` | `meilisearch` | `master_key` (uid 0) |
+   | `fvoci_secrets_init` | `init` | `postgres_password`, `app_password`, `meili_master_key` (uid 1000) |
+   | `fvoci_secrets_server` | `server` | `database_app_url`, `password_pepper_keys`, `password_pepper_active_key_id`, `encryption_keys`, `encryption_active_key_id` (uid 1000) |
+
+   Each volume also holds a `.fvoci-bootstrap-complete` marker with the same
+   install id, written after all files. Later runs with every marker and file
+   present change nothing. With anything missing, bootstrap regenerates only if
+   `pgdata`, `storage` and `searchdata` are all empty; otherwise it exits
+   nonzero naming the missing files, and nothing else starts. Values are never
+   logged.
+2. `postgres` reads `POSTGRES_PASSWORD_FILE`; `meilisearch` loads its master key
+   from its file into the environment of the `exec`'d process.
+3. `init` builds the owner URL from its files, creates the app role, migrates,
+   grants and writes the scoped search key (as in "Bootstrap" below).
+4. `server` reads `DATABASE_APP_URL`, `PASSWORD_PEPPER_KEYS`,
+   `PASSWORD_PEPPER_ACTIVE_KEY_ID`, `ENCRYPTION_KEYS` and
+   `ENCRYPTION_ACTIVE_KEY_ID` through the matching `*_FILE` variables
+   (`fvoci-server` and `fvoci-migrate` accept `<VAR>_FILE` for exactly these;
+   setting both `<VAR>` and `<VAR>_FILE` is a startup error). It does not mount
+   the owner password or the Meilisearch master key.
+
+It publishes `127.0.0.1:8080` only, with `FVOCI_PUBLIC_ORIGIN=http://localhost:8080`
+and `FVOCI_COOKIE_SECURE=false`; open it as `localhost`, not `127.0.0.1`. A
+domain name, HTTPS or a reverse proxy is a separate configuration. PostgreSQL
+and Meilisearch ports are not published. Database and role names
+(`fvoci`, `fvoci_owner`, `fvoci_app`) are fixed at the first start: the
+server's `database_app_url` file contains them.
+
+`docker compose down` and `up -d` keep data and keys. `docker compose down -v`
+deletes all volumes, including the keys. Back up the secret volumes together
+with the data: see "Standalone install secrets" under "Backup and restore".
+
 ### Bootstrap
 
 1. Generate `infra/rust/.env` with `fvoci-migrate --init-env` (above), or copy
@@ -824,6 +880,34 @@ architecture and logs of a run with the change it supports; this guide does not.
 This is the logical backup for the Compose install above (the source advanced
 install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
 of every volume, and it is not PITR.
+
+### Standalone install secrets
+
+In the standalone install (`compose.user.yml`) the keys that the env file holds
+in the section below live in the `fvoci_secrets_*` volumes instead.
+`scripts/backup.sh` and `scripts/restore.sh` take the keys from an env file and
+the server's environment, so they do not apply to that install yet. Back it up
+as a stopped copy of every volume; the archive contains the password pepper,
+`ENCRYPTION_KEYS` and database passwords, so store it like a secret:
+
+```sh
+docker compose stop
+mkdir -m 700 backup
+docker run --rm --network none \
+  $(for v in pgdata storage searchdata meili_key secrets_postgres secrets_meilisearch secrets_init secrets_server; do
+      printf -- '-v fvoci_%s:/v/%s:ro ' "$v" "$v"; done) \
+  -v "$PWD/backup:/backup" --entrypoint tar \
+  postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db \
+  --numeric-owner -C /v -czf /backup/fvoci-volumes.tar.gz .
+docker compose up -d
+```
+
+Restore into a folder with the same `compose.yml` and no `fvoci_*` volumes:
+`docker compose create` (creates the empty volumes without starting anything),
+extract the archive into them with the same `docker run`, writable mounts and
+`tar --numeric-owner -C /v -xzf /backup/fvoci-volumes.tar.gz`, then
+`docker compose up -d`. Restoring data without its `fvoci_secrets_*` volumes
+is refused by `bootstrap`: pepper and encryption keys cannot be regenerated.
 
 Run `scripts/backup.sh` and `scripts/restore.sh` on the operator's Linux host
 with Bash, Docker Compose, jq, GNU coreutils and tar. The scripts check their
