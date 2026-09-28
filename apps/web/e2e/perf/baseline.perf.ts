@@ -81,6 +81,7 @@ type Ctx = {
   projectKey: string;
   targets: { id: string; number: number; title: string; token: string; month: number }[];
   smallDoc: { displayId: string; marker: string };
+  freshDocs: { displayId: string; marker: string }[];
   bigDoc: { displayId: string; marker: string; bytes: number } | null;
   attachments: Record<string, { id: string; bytes: number; source: string }>;
   sizes: Record<string, number>;
@@ -249,7 +250,18 @@ test("setup dataset", async ({ browser }) => {
   });
   expect(put.ok(), await put.text()).toBeTruthy();
 
-  const sizes: Record<string, number> = { targetTasks: targetCount, fillerTasks: 0, fillerDocuments: 0 };
+  // Seeded now, while no collab room is open: a body PUT needs a free collab slot.
+  const freshDocs: Ctx["freshDocs"] = [];
+  for (let i = 0; i < N; i += 1) {
+    const marker = `새 문서 ${i} 첫 문단 marker`;
+    const doc = await docsRes(`첫 열기 측정 ${i}`);
+    const res = await page.request.put(`/api/v1/workspaces/${wsId}/documents/${doc.id}/body`, {
+      data: { contentMd: `${marker}\n\n두 번째 문단입니다.\n` },
+    });
+    expect(res.ok(), await res.text()).toBeTruthy();
+    freshDocs.push({ displayId: doc.displayId, marker });
+  }
+  const sizes: Record<string, number> = { targetTasks: targetCount, fillerTasks: 0, fillerDocuments: 0, firstOpenDocuments: N };
   let bigDoc: Ctx["bigDoc"] = null;
   if (DATASET === "scaled") {
     const fillerCount = Number(process.env.FVOCI_PERF_FILLER_TASKS ?? 2000);
@@ -346,6 +358,7 @@ test("setup dataset", async ({ browser }) => {
     projectKey: project.key,
     targets,
     smallDoc: { displayId: small.displayId, marker: smallMarker },
+    freshDocs,
     bigDoc,
     attachments,
     sizes,
@@ -1076,22 +1089,7 @@ test("f: attachment viewers", async ({ browser }) => {
 // the first text on the first open of the seeded small document in (b).
 test("g: first open of freshly seeded documents", async ({ browser }) => {
   test.setTimeout(1_800_000);
-  const setup = await browser.newContext({ storageState: ctx.ownerState });
-  const docs: { id: string; displayId: string; marker: string }[] = [];
-  for (let i = 0; i < N; i += 1) {
-    const marker = `새 문서 ${i} 첫 문단 marker`;
-    const res = await setup.request.post(`/api/v1/workspaces/${ctx.wsId}/documents`, {
-      data: { parentId: null, title: `첫 열기 측정 ${i}` },
-    });
-    expect(res.ok(), await res.text()).toBeTruthy();
-    const doc = (await res.json()) as { id: string; displayId: string };
-    const put = await setup.request.put(`/api/v1/workspaces/${ctx.wsId}/documents/${doc.id}/body`, {
-      data: { contentMd: `${marker}\n\n두 번째 문단입니다.\n` },
-    });
-    expect(put.ok(), await put.text()).toBeTruthy();
-    docs.push({ ...doc, marker });
-  }
-  await setup.close();
+  const docs = ctx.freshDocs;
   await quietWindow("g-first-open", loadLog);
   const samples: Record<string, unknown>[] = [];
   for (const [i, doc] of docs.entries()) {
