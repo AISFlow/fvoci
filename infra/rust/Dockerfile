@@ -12,6 +12,8 @@ COPY migrations ./migrations
 COPY src ./src
 # `fvoci-migrate --init-env` renders this template (include_str!).
 COPY infra/rust/.env.example ./infra/rust/.env.example
+# `/api/docs/json` embeds the committed OpenAPI export (include_str!).
+COPY apps/web/openapi.json ./apps/web/openapi.json
 COPY scripts ./scripts
 COPY crates/collab-engine ./crates/collab-engine
 COPY crates/document-extract ./crates/document-extract
@@ -61,6 +63,8 @@ COPY --from=rust-build --chown=root:root /src/target/release/document-extract ./
 # PDF export fonts (SIL OFL 1.1), read by the export child at run time (FVOCI_EXPORT_FONT_DIR).
 COPY --chown=root:root packages/editor/src/fonts/*.ttf ./share/fonts/
 COPY --chown=root:root packages/editor/src/fonts/*-OFL.txt ./share/licenses/fonts/
+# Swagger UI served at /api/docs (Apache-2.0): license, notice and bundled third-party notices.
+COPY --chown=root:root src/http/api_docs_assets/LICENSE src/http/api_docs_assets/NOTICE src/http/api_docs_assets/swagger-ui-bundle.js.LICENSE.txt ./share/licenses/swagger-ui-dist-5.33.0/
 COPY --from=web-build --chown=root:root /src/apps/web/dist ./static/
 COPY --chown=root:root infra/rust/init-db.sh ./sbin/init-db.sh
 RUN chmod 755 ./sbin/init-db.sh ./bin/* \

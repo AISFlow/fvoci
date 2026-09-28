@@ -184,6 +184,7 @@ pub fn router_with_observability(
         .merge(routes::attachments::router())
         .merge(routes::comments::router())
         .merge(routes::api_tokens::router())
+        .merge(routes::api_docs::router())
         .merge(routes::ics::router())
         .merge(routes::integrations::router(integrations))
         .merge(routes::stars::router())
