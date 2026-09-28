@@ -6,8 +6,8 @@
 # from files: POSTGRES_PASSWORD_FILE (with POSTGRES_USER, POSTGRES_DB and
 # FVOCI_DB_HOST) replaces DATABASE_URL, FVOCI_APP_PASSWORD_FILE and
 # MEILI_MASTER_KEY_FILE replace their variables. Setting both forms is an error.
-# The standalone install (compose.user.yml) does not use this script: its init
-# service runs `fvoci-migrate --install`.
+# The user install (compose.user.yml) does not use this script: its fvoci
+# container prepares at startup (`fvoci-migrate --start`, src/prepare.rs).
 set -eu
 
 # from_file VAR: VAR_FILE's contents become VAR.
