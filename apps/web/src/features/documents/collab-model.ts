@@ -16,7 +16,11 @@ export type CollabStatus =
 	| "connecting"
 	| "connected"
 	| "disconnected"
-	| "unauthorized";
+	| "unauthorized"
+	/** Server refused the room at capacity (close 1013); retrying with backoff. */
+	| "busy"
+	/** Server refused the room before auth for another reason; retrying with backoff. */
+	| "unavailable";
 
 export interface CollabUser {
 	[key: string]: string;

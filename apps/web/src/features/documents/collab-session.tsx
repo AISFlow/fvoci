@@ -8,7 +8,9 @@ import {
 	useHocuspocusProvider,
 } from "@hocuspocus/provider-react";
 import {
+	createContext,
 	type ReactNode,
+	useContext,
 	useEffect,
 	useLayoutEffect,
 	useMemo,
@@ -57,6 +59,9 @@ export {
 } from "./collab-model";
 export { isDurablySaved } from "./collab-persist-ack";
 
+/** Latest pre-auth refusal of this room's socket, cleared once the room authenticates. */
+const CollabRefusalContext = createContext<CollabRefusal | null>(null);
+
 function roomNameOf(provider: { configuration?: { name?: string } }): string {
 	const name = provider.configuration?.name;
 	return typeof name === "string" ? name : "";
@@ -97,6 +102,7 @@ function ClaimedRoom({
 	const proto = window.location.protocol === "https:" ? "wss" : "ws";
 	const [doc] = useState(() => new Y.Doc({ gc: false }));
 	const [claim, setClaim] = useState(0);
+	const [refusal, setRefusal] = useState<CollabRefusal | null>(null);
 	const attempts = useRef(0);
 	const refusals = useRef(0);
 	const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -108,7 +114,8 @@ function ClaimedRoom({
 		doc.clientID = new Y.Doc().clientID;
 		setClaim((n) => n + 1);
 	};
-	const retryAfterRefusal = (_refusal: CollabRefusal) => {
+	const retryAfterRefusal = (next: CollabRefusal) => {
+		setRefusal(next);
 		if (retryTimer.current !== null) clearTimeout(retryTimer.current);
 		const delay = reconnectDelayMs(refusals.current);
 		refusals.current += 1;
@@ -141,10 +148,11 @@ function ClaimedRoom({
 				onAuthenticated={() => {
 					attempts.current = 0;
 					refusals.current = 0;
+					setRefusal(null);
 				}}
 				onAuthenticationFailed={reclaim}
 			>
-				{children}
+				<CollabRefusalContext.Provider value={refusal}>{children}</CollabRefusalContext.Provider>
 			</HocuspocusRoom>
 		</RoomSocket>
 	);
@@ -186,6 +194,7 @@ export function useCollabSession(
 ): CollabSession | null {
 	const provider = useHocuspocusProvider();
 	const connectionStatus = useHocuspocusConnectionStatus();
+	const refusal = useContext(CollabRefusalContext);
 	const documentId = roomNameOf(provider);
 	// WHY: #653 — provider 가 살아있는 채 리마운트되면 synced 를 다시 미동기화로 접으면 안 된다.
 	const [synced, setSynced] = useState(() => provider.synced);
@@ -303,7 +312,15 @@ export function useCollabSession(
 			provider,
 			doc: provider.document,
 			fragment: provider.document.getXmlFragment(FVOCI_YDOC_FRAGMENT),
-			status: unauthorized ? "unauthorized" : connectionStatus,
+			/* WHY: 소켓이 열리기만 해도 provider 는 connected 다. 방이 거절된 동안은 인증될 때까지
+			 * 거절 상태를 보여 준다 — 본문은 비어 있는 게 아니라 아직 불러오지 못한 것이다. */
+			status: unauthorized
+				? "unauthorized"
+				: refusal === "capacity"
+					? "busy"
+					: refusal === "unavailable"
+						? "unavailable"
+						: connectionStatus,
 			synced,
 			// WHY: #517 — readOnly 연결은 서버가 update 에 ack 를 주지 않아 카운터가 내려가지 않는다.
 			pending: unsent && !readOnly,
@@ -329,7 +346,7 @@ export function useCollabSession(
 				});
 			},
 		}),
-		[provider, unauthorized, connectionStatus, synced, unsent, readOnly, peers, ack],
+		[provider, unauthorized, refusal, connectionStatus, synced, unsent, readOnly, peers, ack],
 	);
 
 	if (!user) return null;
