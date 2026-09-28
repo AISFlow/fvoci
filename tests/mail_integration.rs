@@ -1570,3 +1570,49 @@ async fn every_recipient_rejected_still_dead_letters_the_event() {
     app_pool.close().await;
     harness.cleanup().await;
 }
+
+/// A relay-wide 5xx that starts after the first recipient was accepted (a
+/// daily relay limit) is not a refusal of the later recipients' mailboxes:
+/// the event fails and dead-letters where it can be requeued, and the
+/// accepted recipient is not sent the mail again on the retries.
+#[tokio::test]
+async fn relay_limit_after_an_accepted_recipient_dead_letters_the_event() {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let rules = to[1..]
+        .iter()
+        .map(|address| {
+            (
+                address.clone(),
+                RcptRule {
+                    reply: "550 5.4.5 Daily SMTP relay limit exceeded",
+                    times: None,
+                },
+            )
+        })
+        .collect();
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, rules).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(!is_processed(&app_pool, "mail", event_id).await.unwrap());
+    let dead = fvoci_server::db::outbox::fetch_failure_state(&app_pool, "mail", event_id)
+        .await
+        .unwrap()
+        .expect("failure row");
+    assert!(dead.dead_at.is_some(), "{dead:?}");
+    let counts: Vec<usize> = to.iter().map(|address| sink.count_to(address)).collect();
+    assert_eq!(counts, vec![1, 0, 0], "mails per recipient");
+    app_pool.close().await;
+    harness.cleanup().await;
+}

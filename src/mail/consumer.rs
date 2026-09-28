@@ -17,9 +17,10 @@ pub const MAIL_CONSUMER: &str = "mail";
 const MAIL_VERBS: &[&str] = &["comment.created", "identity.linked", "identity.unlinked"];
 
 /// Sends the mail of `comment.created` and `identity.*` events. The unit of
-/// delivery is the recipient: a permanent refusal is final for that recipient
-/// only, and a retry after a transient failure skips the recipients SMTP
-/// already accepted (see `AcceptedRecipients`).
+/// delivery is the recipient: a permanent refusal of the recipient's mailbox
+/// is final for that recipient only, and a retry after any other failure
+/// (including a relay-wide 5xx) skips the recipients SMTP already accepted
+/// (see `AcceptedRecipients`).
 pub struct MailConsumer {
     mailer: Arc<Mailer>,
     accepted: Mutex<AcceptedRecipients>,
@@ -166,8 +167,9 @@ async fn deliver_mail(
                     "mail.recipient_rejected"
                 );
             }
-            // May pass later: retry the event. The recipients accepted so far
-            // are remembered and skipped on the retry.
+            // May pass later, or refuses the whole relay: retry the event
+            // (and dead-letter it where it is visible). The recipients
+            // accepted so far are remembered and skipped on the retry.
             Err(err) => return Err(OutboxProcessError::Delivery(err.to_string())),
         }
     }

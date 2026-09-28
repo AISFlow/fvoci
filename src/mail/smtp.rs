@@ -27,7 +27,12 @@ const CODE_INVALID_MESSAGE: &str = "invalid_message";
 const CODE_TLS_CONFIG: &str = "tls_config";
 /// The session, or one command in it, timed out.
 const CODE_TIMEOUT: &str = "timeout";
-/// The server answered with a permanent (5xx) reply.
+/// The server refused the recipient's mailbox with a permanent (5xx) reply
+/// (see `is_mailbox_refusal`).
+const CODE_RECIPIENT_REJECTED: &str = "recipient_rejected";
+/// Any other permanent (5xx) reply: a policy, quota, system, protocol or
+/// content refusal, or a refusal of the sender. It covers the relay, not
+/// one recipient.
 const CODE_PERMANENT: &str = "permanent";
 /// The server answered with a transient (4xx) reply.
 const CODE_TRANSIENT: &str = "transient";
@@ -35,11 +40,38 @@ const CODE_TRANSIENT: &str = "transient";
 const CODE_CONNECTION: &str = "connection";
 
 /// Whether a send failure is final for this one recipient: the server refused
-/// it permanently, or the address cannot be sent to. Other failures (4xx,
-/// timeouts, connection or local configuration) may pass on a later attempt,
-/// or would fail for every recipient alike.
+/// the recipient's mailbox permanently, or the address cannot be sent to.
+/// Other failures (4xx, other 5xx, timeouts, connection or local
+/// configuration) may pass on a later attempt, or would fail for every
+/// recipient alike.
 pub(super) fn is_final_for_recipient(code: &str) -> bool {
-    code == CODE_PERMANENT || code == CODE_INVALID_RECIPIENT
+    code == CODE_RECIPIENT_REJECTED || code == CODE_INVALID_RECIPIENT
+}
+
+/// Whether a 5xx reply refuses the recipient's mailbox rather than the whole
+/// relay. lettre reports every 5xx as permanent whatever command it answers
+/// (greeting, EHLO, MAIL FROM, RCPT TO, DATA) and does not say which one, so
+/// the RFC 3463 enhanced status code that starts the server text decides:
+/// X.1.x (addressing, except X.1.7 and X.1.8, which are about the sender)
+/// and X.2.x (mailbox status) are about the recipient; X.3 to X.7 (system,
+/// network, protocol, content, policy, including quota such as 5.4.5) are
+/// not. Without an enhanced status code only 550, 551 and 553 count, the
+/// replies RFC 5321 gives for an unavailable or not allowed mailbox.
+fn is_mailbox_refusal(reply: u16, text: &str) -> bool {
+    let enhanced = text.split_whitespace().next().and_then(|word| {
+        let mut parts = word.split('.');
+        let (class, subject, detail) = (parts.next()?, parts.next()?, parts.next()?);
+        let number =
+            |part: &str| (1..=3).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit());
+        (parts.next().is_none() && class == "5" && number(subject) && number(detail))
+            .then_some((subject, detail))
+    });
+    match enhanced {
+        Some(("1", detail)) => detail != "7" && detail != "8",
+        Some(("2", _)) => true,
+        Some(_) => false,
+        None => matches!(reply, 550 | 551 | 553),
+    }
 }
 
 pub async fn send_mail_op(
@@ -89,7 +121,17 @@ async fn send_mail_inner(
         .map_err(|_| CODE_TIMEOUT.to_string())?;
     sent.map(|_| ()).map_err(|err| {
         if err.is_permanent() {
-            CODE_PERMANENT.to_string()
+            // lettre keeps the server text as the error source. It is read
+            // here to classify the reply and never logged.
+            let reply = err.status().map_or(0, u16::from);
+            let text = std::error::Error::source(&err)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            if is_mailbox_refusal(reply, &text) {
+                CODE_RECIPIENT_REJECTED.to_string()
+            } else {
+                CODE_PERMANENT.to_string()
+            }
         } else if err.is_transient() {
             CODE_TRANSIENT.to_string()
         } else if err.is_timeout() {
@@ -116,5 +158,61 @@ pub async fn probe_smtp(smtp: &SmtpConfig) -> Result<(), String> {
         Ok(Ok(false)) => Err("smtp_not_ready".into()),
         Ok(Err(_)) => Err("smtp_connect_failed".into()),
         Err(_) => Err("smtp_timeout".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_mailbox_refusals_are_final_for_one_recipient() {
+        // Enhanced status codes about the recipient's address or mailbox.
+        assert!(is_mailbox_refusal(550, "5.1.1 no such user"));
+        assert!(is_mailbox_refusal(
+            553,
+            "5.1.3 bad destination mailbox syntax"
+        ));
+        assert!(is_mailbox_refusal(
+            556,
+            "5.1.10 recipient address has null MX"
+        ));
+        assert!(is_mailbox_refusal(550, "5.2.1 mailbox disabled"));
+        assert!(is_mailbox_refusal(552, "5.2.2 mailbox full"));
+        // The sender, and every other subject, covers the relay.
+        assert!(!is_mailbox_refusal(553, "5.1.7 bad sender mailbox syntax"));
+        assert!(!is_mailbox_refusal(550, "5.1.8 bad sender system address"));
+        assert!(!is_mailbox_refusal(
+            550,
+            "5.4.5 Daily SMTP relay limit exceeded"
+        ));
+        assert!(!is_mailbox_refusal(550, "5.7.1 relaying denied"));
+        assert!(!is_mailbox_refusal(554, "5.6.0 message content rejected"));
+        assert!(!is_mailbox_refusal(552, "5.3.4 message too big for system"));
+        assert!(!is_mailbox_refusal(530, "5.7.0 authentication required"));
+        assert!(!is_mailbox_refusal(500, "5.5.2 syntax error"));
+        // Without an enhanced status code only the mailbox replies count.
+        assert!(is_mailbox_refusal(550, "no such user here"));
+        assert!(is_mailbox_refusal(551, "user not local"));
+        assert!(is_mailbox_refusal(553, "mailbox name not allowed"));
+        assert!(is_mailbox_refusal(550, ""));
+        assert!(!is_mailbox_refusal(554, "transaction failed"));
+        assert!(!is_mailbox_refusal(552, "storage allocation exceeded"));
+        assert!(!is_mailbox_refusal(530, "authentication required"));
+        // Not an enhanced status code: the reply code decides.
+        assert!(!is_mailbox_refusal(554, "5.1 rejected"));
+        assert!(!is_mailbox_refusal(554, "5.1.1.1 rejected"));
+        assert!(!is_mailbox_refusal(554, "4.1.1 wrong class"));
+        assert!(is_mailbox_refusal(550, "5.x.1 rejected"));
+    }
+
+    #[test]
+    fn final_for_recipient_codes() {
+        assert!(is_final_for_recipient(CODE_RECIPIENT_REJECTED));
+        assert!(is_final_for_recipient(CODE_INVALID_RECIPIENT));
+        assert!(!is_final_for_recipient(CODE_PERMANENT));
+        assert!(!is_final_for_recipient(CODE_TRANSIENT));
+        assert!(!is_final_for_recipient(CODE_TIMEOUT));
+        assert!(!is_final_for_recipient(CODE_CONNECTION));
     }
 }
