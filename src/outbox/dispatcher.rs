@@ -359,6 +359,17 @@ async fn process_external_events(
             continue;
         }
 
+        if failure.is_some() {
+            // An event that already failed is delivered on its own. A batch
+            // failure without an exact index is charged to the chunk head, so
+            // an innocent head gets one failure at most: it then either
+            // succeeds alone (clearing the row) or is the real failure.
+            if pending.is_empty() {
+                pending.push(event);
+            }
+            break;
+        }
+
         pending.push(event);
     }
 

@@ -2681,3 +2681,168 @@ async fn external_lease_budget_hands_the_dispatcher_to_the_next_consumer() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// Native all-or-nothing batch (like search): any chunk that contains the
+/// poison event fails with `done == 0`. The failure must end up on the poison
+/// event only; the innocent events before it are delivered, not dead-lettered.
+struct AllOrNothingExternal {
+    name: String,
+    poison: Uuid,
+    max_attempts: i32,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+    batch_sizes: Mutex<Vec<usize>>,
+}
+
+impl OutboxConsumer for AllOrNothingExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn max_attempts(&self) -> i32 {
+        self.max_attempts
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            let (done, err) = self
+                .deliver_batch(pool, lease_owner, std::slice::from_ref(event))
+                .await;
+            match err {
+                Some(err) => Err(err),
+                None if done == 1 => Ok(()),
+                None => Err(OutboxProcessError::Delivery("nothing delivered".into())),
+            }
+        })
+    }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        events: &'a [fvoci_server::db::outbox::OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        self.batch_sizes
+            .lock()
+            .expect("batch sizes")
+            .push(events.len());
+        Box::pin(async move {
+            if events.iter().any(|event| event.id == self.poison) {
+                return (
+                    0,
+                    Some(OutboxProcessError::Delivery(
+                        "batch rejected: poison event in chunk".into(),
+                    )),
+                );
+            }
+            let mut deliveries = self.deliveries.lock().expect("deliveries");
+            for event in events {
+                *deliveries.entry(event.id).or_default() += 1;
+            }
+            (events.len(), None)
+        })
+    }
+}
+
+#[tokio::test]
+async fn all_or_nothing_batch_failure_dead_letters_only_the_poison_event() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let ids = insert_test_events(&app, "test.poison", 6).await;
+    let poison = ids[3];
+    let consumer = Arc::new(AllOrNothingExternal {
+        name: "aonpoison".into(),
+        poison,
+        max_attempts: 3,
+        deliveries: Mutex::new(HashMap::new()),
+        batch_sizes: Mutex::new(Vec::new()),
+    });
+    ensure_consumer(&app, "aonpoison").await.expect("ensure");
+    wait_until_readable(&app, "aonpoison", ids[5]).await;
+
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let tail = [ids[4], ids[5]];
+        Box::pin(async move {
+            all_processed(&pool, "aonpoison", &tail).await
+                && fetch_failure_state(&pool, "aonpoison", poison)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|row| row.dead_at.is_some())
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    for (i, id) in ids.iter().enumerate().take(3) {
+        let failure = fetch_failure_state(&app, "aonpoison", *id)
+            .await
+            .expect("failure state");
+        assert!(
+            is_processed(&app, "aonpoison", *id).await.expect("p") && failure.is_none(),
+            "innocent event {i} must be delivered with no failure row, got {failure:?}"
+        );
+    }
+    assert!(!is_processed(&app, "aonpoison", poison)
+        .await
+        .expect("poison"));
+    let dead = fetch_failure_state(&app, "aonpoison", poison)
+        .await
+        .expect("poison state")
+        .expect("poison row");
+    assert!(dead.dead_at.is_some());
+    assert_eq!(dead.attempts, 3);
+    let dead_letters: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.outbox_failures WHERE consumer = 'aonpoison' AND dead_at IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("dead letters");
+    assert_eq!(dead_letters, 1, "only the poison event is dead-lettered");
+    let last = fetch_event_by_id(&app, ids[5])
+        .await
+        .expect("last")
+        .expect("row");
+    assert_eq!(
+        fetch_cursor(&admin, "aonpoison").await.expect("cursor"),
+        Some((last.xact, last.seq))
+    );
+    for id in &ids {
+        assert!(
+            consumer
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .get(id)
+                .copied()
+                .unwrap_or(0)
+                <= 1,
+            "event {id} delivered more than once"
+        );
+    }
+    let sizes = consumer.batch_sizes.lock().expect("sizes").clone();
+    assert!(
+        sizes.iter().any(|&n| n > 1),
+        "the poison must first be seen inside a chunk larger than 1, got {sizes:?}"
+    );
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
