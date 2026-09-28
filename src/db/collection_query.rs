@@ -20,7 +20,7 @@ use crate::db::collections::{
     begin_member, load_fields, require_collection, validate_query_config, Actor, CollectionDbError,
     DbResult, Need,
 };
-use crate::db::documents::document_permission;
+use crate::db::documents::document_permissions;
 use crate::db::view_query::{
     after_sort_tuple, compile_view_query, due_date_sql, scalar_value_sql, sort_tuple_hash_sql,
     CompileOptions, SqlArgs, ViewScope,
@@ -620,13 +620,17 @@ async fn run(
         .collect();
     if collection.project_id.is_none() && writable {
         let base = workspace_base_permission(role);
-        for doc in docs {
-            let level = if base.at_least(ProjectPermission::Edit) {
-                base
-            } else {
-                document_permission(tx, ws, actor.user_id, doc, true).await?
-            };
-            row_edit.insert(doc, level.at_least(ProjectPermission::Edit));
+        if base.at_least(ProjectPermission::Edit) {
+            row_edit.extend(docs.into_iter().map(|doc| (doc, true)));
+        } else {
+            // One set-based lookup for every wiki row, not one per document.
+            let docs: Vec<Uuid> = docs.into_iter().collect();
+            let levels = document_permissions(tx, ws, actor.user_id, &docs, true).await?;
+            row_edit.extend(
+                levels
+                    .into_iter()
+                    .map(|(doc, level)| (doc, level.at_least(ProjectPermission::Edit))),
+            );
         }
     }
     let edit_of = |row: &QueryRow| -> bool {

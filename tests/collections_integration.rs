@@ -2193,3 +2193,361 @@ async fn due_before_uses_each_actor_time_zone_on_every_task_query_path() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// Records statements the sqlx client finishes (`sqlx::query` events, one per
+/// executed statement) on the thread where it is active. A thread-local
+/// `set_default` dispatcher can miss events when other test threads cache the
+/// callsite's interest first, so one global router feeds per-thread counters.
+#[derive(Clone, Default)]
+struct StatementCounter(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+thread_local! {
+    static ACTIVE_COUNTER: std::cell::RefCell<Option<StatementCounter>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct ActiveCounterGuard;
+
+impl Drop for ActiveCounterGuard {
+    fn drop(&mut self) {
+        ACTIVE_COUNTER.with(|active| active.borrow_mut().take());
+    }
+}
+
+impl StatementCounter {
+    /// Installs the global router once and makes this counter the sink for
+    /// statements finished on the current (`#[tokio::test]` runtime) thread.
+    fn activate(&self) -> ActiveCounterGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        static ROUTER: std::sync::Once = std::sync::Once::new();
+        ROUTER.call_once(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(StatementRouter),
+            )
+            .expect("statement router is the only global subscriber");
+        });
+        ACTIVE_COUNTER.with(|active| *active.borrow_mut() = Some(self.clone()));
+        ActiveCounterGuard
+    }
+
+    fn take_statements(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.borrow_mut())
+    }
+
+    fn take(&self) -> usize {
+        self.take_statements().len()
+    }
+}
+
+struct SummaryVisitor(String);
+
+impl tracing::field::Visit for SummaryVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if matches!(field.name(), "summary" | "db.statement") {
+            self.0.push_str(&format!("{value:?} "));
+        }
+    }
+}
+
+struct StatementRouter;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StatementRouter {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() != "sqlx::query" {
+            return;
+        }
+        ACTIVE_COUNTER.with(|active| {
+            if let Some(counter) = active.borrow().as_ref() {
+                let mut visitor = SummaryVisitor(String::new());
+                event.record(&mut visitor);
+                counter.0.borrow_mut().push(visitor.0);
+            }
+        });
+    }
+}
+
+/// Runs the guest's wiki collection query, checks every row's canEdit against
+/// the single-document lookup and returns (rows, statements the query issued).
+async fn guest_query_checked(
+    app: &axum::Router,
+    app_db: &PgPool,
+    guest: &project_harness::TestUser,
+    ws: Uuid,
+    cid: &str,
+    counter: &StatementCounter,
+) -> (usize, Vec<String>) {
+    use fvoci_server::db::context::set_tenant;
+    use fvoci_server::db::documents::document_permission;
+    use fvoci_server::projects::ProjectPermission;
+
+    counter.take();
+    let (status, result) = query(
+        app,
+        &guest.cookie,
+        ws,
+        cid,
+        json!({"config": {"query": {"sort": [{"field": "title", "direction": "asc"}]}}, "limit": 100}),
+    )
+    .await;
+    // The process-wide time zone name cache (db::dashboard) fills once, on
+    // whichever query comes first; it is not part of the query's own work.
+    let statements: Vec<String> = counter
+        .take_statements()
+        .into_iter()
+        .filter(|sql| !sql.contains("pg_catalog.pg_timezone_names"))
+        .collect();
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["nextCursor"], Value::Null, "{result}");
+    let rows = result["items"].as_array().unwrap();
+    let mut tx = app_db.begin().await.unwrap();
+    set_tenant(&mut tx, ws).await.unwrap();
+    for row in rows {
+        let doc: Uuid = row["documentId"].as_str().unwrap().parse().unwrap();
+        let single = document_permission(&mut tx, ws, guest.user_id, doc, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            row["canEdit"],
+            single >= ProjectPermission::Edit,
+            "{doc} {}",
+            row["title"]
+        );
+    }
+    tx.rollback().await.unwrap();
+    (rows.len(), statements)
+}
+
+#[tokio::test]
+async fn wiki_collection_can_edit_uses_one_set_based_permission_lookup() {
+    use fvoci_server::db::context::set_tenant;
+    use fvoci_server::db::documents::{document_permission, document_permissions};
+    use fvoci_server::projects::ProjectPermission;
+
+    let harness = TestDb::bootstrap().await;
+    let (app, owner, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let app_db = app_pool(&harness).await;
+    let member = add_workspace_user(&admin, ws, "member", "bulk-member").await;
+    let guest = add_workspace_user(&admin, ws, "guest", "bulk-guest").await;
+    let (status, group) = call(
+        &app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/groups"),
+        Some(json!({"name": "bulk-grants"})),
+        &owner,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group}");
+    let group_id = group["id"].as_str().unwrap().to_string();
+    let (status, _) = call(
+        &app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/groups/{group_id}/members"),
+        Some(json!({"userId": guest.user_id.to_string()})),
+        &owner,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, collection) = call(
+        &app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/collections"),
+        Some(json!({"name": "bulk", "kind": "document", "projectId": null})),
+        &owner,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{collection}");
+    let cid = collection["id"].as_str().unwrap().to_string();
+    let items = format!("/api/v1/workspaces/{ws}/collections/{cid}/items");
+
+    let project_id = Uuid::now_v7();
+    project_harness::insert_minimal_project(&admin, ws, project_id, "BULK", owner_id, "workspace")
+        .await;
+    let project_doc = Uuid::now_v7();
+    project_harness::insert_project_document(&admin, ws, project_id, project_doc, owner_id, 1)
+        .await;
+    // Warm-up: the guest's first request slides the session expiry (one
+    // UPDATE) so the counted queries below differ only by row count.
+    let (status, _) = call(
+        &app,
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/collections"),
+        None,
+        &guest.cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let counter = StatementCounter::default();
+    let _guard = counter.activate();
+    let mut small = None;
+
+    // 28 wiki rows: i % 4 == 0 workspace base only, 1 group member (edit),
+    // 2 group viewer, 3 archived with an alternating member/lead/viewer grant.
+    let mut docs: Vec<Uuid> = Vec::new();
+    let mut archived: Vec<Uuid> = Vec::new();
+    for i in 0..28 {
+        let doc = create_wiki_doc(&app, &owner, ws, &format!("bulk {i:02}")).await;
+        let grant = match i % 4 {
+            0 => None,
+            1 => Some("member"),
+            2 => Some("viewer"),
+            _ => Some(["member", "lead", "viewer"][(i / 4) % 3]),
+        };
+        if let Some(role) = grant {
+            let (status, body) = call(
+                &app,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/documents/{doc}/groups"),
+                Some(json!({"groupId": group_id, "role": role})),
+                &owner,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        }
+        let (status, body) = call(
+            &app,
+            "POST",
+            &items,
+            Some(json!({"documentId": doc})),
+            &owner,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let doc: Uuid = doc.parse().unwrap();
+        if i % 4 == 3 {
+            archived.push(doc);
+        }
+        docs.push(doc);
+        if i == 3 {
+            // Baseline: the guest sees 3 rows (i = 1, 2, 3) before the rest.
+            small = Some(guest_query_checked(&app, &app_db, &guest, ws, &cid, &counter).await);
+        }
+    }
+    sqlx::query("UPDATE fvoci.documents SET status = 'archived' WHERE id = ANY($1)")
+        .bind(&archived)
+        .execute(&admin)
+        .await
+        .unwrap();
+    // Ids outside the collection that the bulk lookup must still rank as the
+    // single lookup does: a trashed granted wiki doc, a project doc, a missing id.
+    let trashed: Uuid = create_wiki_doc(&app, &owner, ws, "bulk trashed")
+        .await
+        .parse()
+        .unwrap();
+    let (status, body) = call(
+        &app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/documents/{trashed}/groups"),
+        Some(json!({"groupId": group_id, "role": "member"})),
+        &owner,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    sqlx::query("UPDATE fvoci.documents SET deleted_at = now() WHERE id = $1")
+        .bind(trashed)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mut probe = docs.clone();
+    probe.extend([trashed, project_doc, Uuid::now_v7()]);
+
+    // (a) Direct: the bulk result equals the single lookup for every id, both
+    // with and without require_live, for guest (grants) and member (base).
+    for (user_id, label) in [(guest.user_id, "guest"), (member.user_id, "member")] {
+        for require_live in [true, false] {
+            let mut tx = app_db.begin().await.unwrap();
+            set_tenant(&mut tx, ws).await.unwrap();
+            counter.take();
+            let bulk = document_permissions(&mut tx, ws, user_id, &probe, require_live)
+                .await
+                .unwrap();
+            assert_eq!(
+                counter.take(),
+                2,
+                "{label}: membership read + one set-based statement for {} ids",
+                probe.len()
+            );
+            assert_eq!(bulk.len(), probe.len());
+            for id in &probe {
+                let single = document_permission(&mut tx, ws, user_id, *id, require_live)
+                    .await
+                    .unwrap();
+                assert_eq!(bulk[id], single, "{label} {id} live={require_live}");
+            }
+            let per_doc = counter.take();
+            assert!(
+                per_doc >= 2 * probe.len(),
+                "the counter sees the per-document path ({per_doc} statements)"
+            );
+            // Statement count is independent of the id count.
+            counter.take();
+            document_permissions(&mut tx, ws, user_id, &probe[..3], require_live)
+                .await
+                .unwrap();
+            assert_eq!(counter.take(), 2, "{label}: 3 ids");
+            tx.rollback().await.unwrap();
+        }
+    }
+    let mut tx = app_db.begin().await.unwrap();
+    set_tenant(&mut tx, ws).await.unwrap();
+    let guest_levels = document_permissions(&mut tx, ws, guest.user_id, &probe, true)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    for (i, doc) in docs.iter().enumerate() {
+        let expected = match i % 4 {
+            0 => ProjectPermission::None,
+            1 => ProjectPermission::Edit,
+            2 => ProjectPermission::View,
+            _ => [
+                ProjectPermission::Edit,
+                ProjectPermission::Manage,
+                ProjectPermission::View,
+            ][(i / 4) % 3],
+        };
+        assert_eq!(guest_levels[doc], expected, "guest level of row {i}");
+    }
+    assert_eq!(guest_levels[&trashed], ProjectPermission::None);
+    assert_eq!(guest_levels[&project_doc], ProjectPermission::None);
+
+    // (b) HTTP: every visible row's canEdit equals the single-document level,
+    // and the whole guest query issues as many statements for 21 rows as for
+    // 3 (the per-row permission step no longer scales with row count).
+    let (small_rows, small_statements) = small.unwrap();
+    assert_eq!(small_rows, 3);
+    let (rows, statements) = guest_query_checked(&app, &app_db, &guest, ws, &cid, &counter).await;
+    assert_eq!(rows, 21, "guest sees the granted docs only");
+    assert_eq!(
+        statements, small_statements,
+        "guest query statements: 3 rows vs 21 rows"
+    );
+    let permission_step = statements
+        .iter()
+        .filter(|sql| sql.contains("SELECT d.id, d.project_id, d.deleted_at"))
+        .count();
+    assert_eq!(permission_step, 1, "{statements:#?}");
+    let (status, result) = query(
+        &app,
+        &member.cookie,
+        ws,
+        &cid,
+        json!({"config": {}, "limit": 100}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let rows = result["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 28);
+    assert!(
+        rows.iter().all(|row| row["canEdit"] == true),
+        "member base >= edit"
+    );
+
+    drop(_guard);
+    app_db.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}

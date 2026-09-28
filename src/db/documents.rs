@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{lock_tree, set_tenant};
-use crate::db::group_grants::group_document_grant_roles_select_sql;
+use crate::db::group_grants::{group_document_grant_roles_select_sql, group_members_join_sql};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission};
 use crate::db::workspace::WorkspaceRole;
@@ -221,7 +223,7 @@ fn permission_can_edit(permission: ProjectPermission) -> bool {
 
 /// Wiki document permission for HTTP and tree listing. Project documents return `None`.
 /// Effective level is max(workspace base, group grants on `document_members`).
-pub(crate) async fn document_permission(
+pub async fn document_permission(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,
@@ -246,15 +248,89 @@ pub(crate) async fn document_permission(
     let Some((project_id, deleted_at)) = row else {
         return Ok(ProjectPermission::None);
     };
-    if project_id.is_some() {
-        return Ok(ProjectPermission::None);
-    }
-    if require_live && deleted_at.is_some() {
+    if !wiki_document_eligible(project_id, deleted_at, require_live) {
         return Ok(ProjectPermission::None);
     }
     let base = workspace_base_permission(role);
     let granted = wiki_group_permission(tx, workspace_id, document_id, user_id).await?;
     Ok(base.max(granted))
+}
+
+/// (document id, project id, deleted_at, one group-grant role or none).
+type DocumentGrantRow = (Uuid, Option<Uuid>, Option<DateTime<Utc>>, Option<String>);
+
+/// Set-based [`document_permission`] for many documents in one statement (plus
+/// the same single membership read). Every requested id is in the result;
+/// missing, project and (with `require_live`) trashed documents are `None`.
+pub async fn document_permissions(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    document_ids: &[Uuid],
+    require_live: bool,
+) -> Result<HashMap<Uuid, ProjectPermission>, sqlx::Error> {
+    let mut levels: HashMap<Uuid, ProjectPermission> = document_ids
+        .iter()
+        .map(|id| (*id, ProjectPermission::None))
+        .collect();
+    if levels.is_empty() {
+        return Ok(levels);
+    }
+    let Some(role) = membership_role(tx, workspace_id, user_id).await? else {
+        return Ok(levels);
+    };
+    // The grant arm is `group_document_grant_roles_select_sql` with the
+    // document parameter widened to `= ANY($2)`; one row per (document, grant).
+    let join = group_members_join_sql("dm", "gm");
+    let rows: Vec<DocumentGrantRow> = sqlx::query_as(&format!(
+        r#"
+            SELECT d.id, d.project_id, d.deleted_at, g.role
+            FROM fvoci.documents d
+            LEFT JOIN (
+                SELECT dm.document_id, dm.role
+                FROM fvoci.document_members dm
+                {join}
+                WHERE dm.workspace_id = $1
+                  AND dm.document_id = ANY($2)
+                  AND gm.user_id = $3
+                  AND dm.group_id IS NOT NULL
+            ) g ON g.document_id = d.id
+            WHERE d.workspace_id = $1 AND d.id = ANY($2)
+            "#
+    ))
+    .bind(workspace_id)
+    .bind(document_ids)
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let base = workspace_base_permission(role);
+    for (document_id, project_id, deleted_at, grant) in rows {
+        if !wiki_document_eligible(project_id, deleted_at, require_live) {
+            continue;
+        }
+        let granted = grant
+            .as_deref()
+            .map(grant_role_permission)
+            .unwrap_or(ProjectPermission::None);
+        let level = levels.entry(document_id).or_insert(ProjectPermission::None);
+        *level = (*level).max(base.max(granted));
+    }
+    Ok(levels)
+}
+
+/// Wiki affiliation rule shared by the single and bulk permission lookups.
+fn wiki_document_eligible(
+    project_id: Option<Uuid>,
+    deleted_at: Option<DateTime<Utc>>,
+    require_live: bool,
+) -> bool {
+    project_id.is_none() && !(require_live && deleted_at.is_some())
+}
+
+fn grant_role_permission(role: &str) -> ProjectPermission {
+    ProjectMemberRole::parse(role)
+        .map(ProjectMemberRole::permission)
+        .unwrap_or(ProjectPermission::None)
 }
 
 async fn wiki_group_permission(
@@ -276,7 +352,7 @@ async fn wiki_group_permission(
     .await?;
     Ok(rows
         .into_iter()
-        .filter_map(|(role,)| ProjectMemberRole::parse(&role).map(ProjectMemberRole::permission))
+        .map(|(role,)| grant_role_permission(&role))
         .max()
         .unwrap_or(ProjectPermission::None))
 }
