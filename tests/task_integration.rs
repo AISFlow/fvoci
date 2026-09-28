@@ -28,6 +28,10 @@ use tower::ServiceExt;
 use url::form_urlencoded;
 use uuid::Uuid;
 
+/// `pg_stat_activity` row reported when the snapshot xmin fails to settle:
+/// (datname, pid, backend_xid, backend_xmin).
+type XidHolder = (Option<String>, i32, Option<String>, Option<String>);
+
 async fn json_request_bearer(
     app: axum::Router,
     method: &str,
@@ -4846,16 +4850,15 @@ async fn settle_committed_events(admin: &sqlx::PgPool) {
                     .fetch_one(admin)
                     .await
                     .expect("snapshot xmin");
-            let holders: Vec<(Option<String>, i32, Option<String>, Option<String>)> =
-                sqlx::query_as(
-                    "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
+            let holders: Vec<XidHolder> = sqlx::query_as(
+                "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
                      FROM pg_stat_activity \
                      WHERE backend_xid IS NOT NULL OR backend_xmin IS NOT NULL \
                      ORDER BY age(COALESCE(backend_xid, backend_xmin)) DESC LIMIT 5",
-                )
-                .fetch_all(admin)
-                .await
-                .expect("xmin holders");
+            )
+            .fetch_all(admin)
+            .await
+            .expect("xmin holders");
             panic!("events never settled: xmin {xmin} <= {horizon}; oldest holders {holders:?}");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

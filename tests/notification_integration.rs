@@ -15,6 +15,10 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// `pg_stat_activity` row reported when the snapshot xmin fails to settle:
+/// (datname, pid, backend_xid, backend_xmin).
+type XidHolder = (Option<String>, i32, Option<String>, Option<String>);
+
 /// Wait (bounded, read-only) until the cluster-wide snapshot xmin passes
 /// `horizon`, i.e. every transaction up to it has ended. A transaction in
 /// another test's database can hold xmin back; on timeout, report the holders.
@@ -36,16 +40,15 @@ async fn wait_xmin_past(pool: &PgPool, horizon: &str) {
                     .fetch_one(pool)
                     .await
                     .expect("snapshot xmin");
-            let holders: Vec<(Option<String>, i32, Option<String>, Option<String>)> =
-                sqlx::query_as(
-                    "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
+            let holders: Vec<XidHolder> = sqlx::query_as(
+                "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
                      FROM pg_stat_activity \
                      WHERE backend_xid IS NOT NULL OR backend_xmin IS NOT NULL \
                      ORDER BY age(COALESCE(backend_xid, backend_xmin)) DESC LIMIT 5",
-                )
-                .fetch_all(pool)
-                .await
-                .expect("xmin holders");
+            )
+            .fetch_all(pool)
+            .await
+            .expect("xmin holders");
             panic!("events never settled: xmin {xmin} <= {horizon}; oldest holders {holders:?}");
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
