@@ -44,7 +44,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
 | `FVOCI_MEILI_URL` | Meilisearch HTTP origin. Unset disables search (later routes return a problem). |
 | `FVOCI_MEILI_KEY` | API key used when `FVOCI_MEILI_KEY_FILE` is unset. Required (with the file form) if the URL is set. Never logged. |
-| `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. |
+| `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. The file must be a regular file of at most 4 KiB and is opened without following a symlink: a path that is a symlink (for example a Kubernetes Secret or projected volume entry, which points into `..data/`) is refused at startup. |
 | `FVOCI_MEILI_INDEX` | Index uid (default `fvoci`). Tests may set a per-run uid. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | Outgoing mail (invitations, password reset). All three or none; unset disables mail and invitation links are shown instead. No AUTH (same as the source). STARTTLS is used whenever the relay offers it, with certificate verification against public roots, so an internal relay needs a publicly trusted certificate or must not offer STARTTLS. |
 | `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --secrets-rotate` re-seals them under the active key; `--secrets-audit` and `--verify-secrets` list the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
@@ -60,6 +60,12 @@ Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. Th
 
 ## Migrate and grant before server
 
+This section and the next two are for running the binaries yourself (a source
+checkout, or your own orchestration). The user Compose install
+(`compose.user.yml`, "Container install") does the same steps on every start of
+its `fvoci` container, before the server starts, and needs none of the commands
+below; the developer Compose stack runs them in its `init` service.
+
 Run migrations and app-role grants **before** starting or upgrading `fvoci-server`. Stop old
 instances first: old binaries refuse a newer `fvoci.schema_migrations` version and cannot restart
 after migrate. Upgrade order is stop old → `fvoci-migrate` → `fvoci-migrate --grant-app-role` →
@@ -68,8 +74,9 @@ start new; mixed-version rolling restart is not supported. The server connects o
 with an operator message if the schema is missing, behind, newer than this binary, or unreadable.
 A newer database needs a matching or newer `fvoci-server`; do not run migrate from the old
 binary. The gate does not detect stale grants after a later migration; re-run `--grant-app-role`
-after every upgrade that applies new migrations. The server does not run migrations and ignores
-`DATABASE_URL` / `FVOCI_MIGRATION_URL` if set.
+after every upgrade that applies new migrations. `fvoci-server` itself does not run migrations and
+ignores `DATABASE_URL` / `FVOCI_MIGRATION_URL` if set; in the user install the image entrypoint
+(`fvoci-migrate --start`) migrates and grants before it starts the server.
 
 ## Create role, migrate, then grant
 
@@ -592,8 +599,21 @@ RSS on the same bodies.
 
 ## Container install
 
-The install artifact is a multi-stage Docker image plus a small Compose stack under
-`infra/rust/`. It builds release `fvoci-server`, `fvoci-migrate`, the production
+There are two Compose files under `infra/rust/`:
+
+- **User install:** `compose.user.yml` with `compose.user.env.example` (a release
+  ships them as `compose.yml` and `env.example`). Services `fvoci`, `postgres`,
+  `meilisearch`; the `fvoci` container prepares the database and search on every
+  start and then runs the server. This is the install for anyone running FVOCI;
+  see "Install (compose.yml and .env)", "Release images (0.x)" and "Backup and
+  restore".
+- **Developer stack:** `compose.yml` with `.env.example` (or
+  `fvoci-migrate --init-env`), built from the checkout, with a separate one-shot
+  `init` service before `server` and the optional `compose.s3.yml` overlay. It
+  is what `scripts/install-smoke.sh`, `backup-restore-smoke.sh` and
+  `upgrade-smoke.sh` exercise; see "Developer stack (compose.yml with init)".
+
+The install artifact is a multi-stage Docker image used by both. It builds release `fvoci-server`, `fvoci-migrate`, the production
 `collab-engine` helper (`--features worker`), the production `document-extract`
 helper (same rhwp pin as `scripts/prepare-extract-helper.sh` / `rust.yml`, without
 `test-hang`), and the `apps/web` production bundle (same steps as
@@ -729,8 +749,8 @@ The owner never reaches the network beyond the Compose network: PostgreSQL and
 Meilisearch publish no port.
 
 Without the owner password the entrypoint only execs `fvoci-server` (the
-env-file stack below keeps its separate `init` service); started as root, it
-still runs the server as uid 1000.
+developer stack, `infra/rust/compose.yml`, prepares in its separate `init`
+service instead); started as root, it still runs the server as uid 1000.
 
 Other defaults come from the image and the Rust loader: helper paths, static
 and storage directories, bind address, shutdown deadline (30 s), collaboration
@@ -759,7 +779,7 @@ services:
 
 | Topic | Variables (details in this file) |
 | --- | --- |
-| Domain, HTTPS, proxy | `FVOCI_PUBLIC_ORIGIN=https://…` in `.env` (also turns on secure cookies) and the published address; see "Bootstrap" below for the proxy rules |
+| Domain, HTTPS, proxy | `FVOCI_PUBLIC_ORIGIN=https://…` in `.env` (also turns on secure cookies) and the published address; see "Developer stack (compose.yml with init)" below for the proxy rules, which apply to both stacks |
 | S3 storage | `STORAGE_DRIVER=s3`, `S3_*` ("S3 storage backup") |
 | Mail | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` |
 | OIDC sign-in | providers are set up in the app, sealed with `ENCRYPTION_KEYS`; `OIDC_ALLOW_INSECURE=1` only for a local http provider |
@@ -772,7 +792,15 @@ add empty entries. `docker compose down` and `up -d` keep data; `down -v`
 deletes the database, files and search index. Back up with `scripts/backup.sh`
 (see "Backup and restore").
 
-### Bootstrap
+### Developer stack (compose.yml with init)
+
+`infra/rust/compose.yml` is the developer and source-build stack, not the user
+install: the image is built from the checkout, the settings are the longer
+`infra/rust/.env.example` (owner and app role names, `FVOCI_IMAGE`,
+`FVOCI_COOKIE_SECURE`, `FVOCI_PUBLISH_ADDR`, the optional integrations) passed as
+environment, and preparation runs in a separate one-shot `init` service. The
+steps below, "Verification" and "Upgrade" are for this stack; a user install
+upgrades as in "Release images (0.x)".
 
 1. Generate `infra/rust/.env` with `fvoci-migrate --init-env` (above), or copy
    `infra/rust/.env.example` to `infra/rust/.env` and replace placeholders.
@@ -820,7 +848,9 @@ use. Beyond local evaluation, terminate TLS in a reverse proxy, set
 Compose always passes `FVOCI_COOKIE_SECURE` (default `false`), so the server's
 https-scheme default does not apply: set `true` in `.env` yourself when you
 switch an existing file to https (`--init-env` does it for new files). Keep the
-published address reachable only by the proxy. The proxy must pass the
+published address reachable only by the proxy. The same proxy rules
+apply to the user install, where `FVOCI_PUBLIC_ORIGIN=https://…` in `.env`
+also turns on secure cookies. The proxy must pass the
 browser's `Origin` header unchanged (mutating routes and `/collab` compare it
 with `FVOCI_PUBLIC_ORIGIN`) and forward the WebSocket upgrade for `/collab`.
 An https origin also sends HSTS with `includeSubDomains`, so serve every
@@ -839,17 +869,23 @@ wiki collab body projection, HWPX upload + extraction, `/collab` availability,
 a graceful `docker compose stop server` (stopped container must report exit code 0),
 a recreated server container on the same volumes, and post-recreate reads.
 CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
-`.github/workflows/install.yml` (no secrets, no image publish).
+`.github/workflows/install.yml` (no secrets, no image publish). This is the
+developer stack. The user install is exercised by
+`scripts/standalone-install-smoke.sh` (a local, manual run: fresh `.env`,
+first admin, the uid and secret boundary, restart, backup and restore) and, for
+a published release, by `scripts/release-smoke.sh` in `release.yml`
+(`docs/RELEASING.md`).
 
 ### Upgrade
 
-This moves a Compose install to a newer build of this Rust server on the same
-volumes. Each migration commits on its own, so a failed or interrupted migrate
+This moves a developer-stack install (`infra/rust/compose.yml` with `init`) to
+a newer build of this Rust server on the same volumes. A user install from a
+release upgrades by replacing `compose.yml`; see "Release images (0.x)". Each migration commits on its own, so a failed or interrupted migrate
 can leave the database between versions, and an older image then refuses to
 start against it.
 
 Use the existing install's Compose project name (`fvoci-rust-install` for the
-Bootstrap example, or the name passed to `restore.sh --project`), env file and
+developer stack example, or the name passed to `restore.sh --project`), env file and
 all `-f` files throughout. For S3, omitting `infra/rust/compose.s3.yml` silently
 selects local storage; a storage doctor probe cannot detect that wrong choice.
 
@@ -1017,15 +1053,15 @@ version and source commit.
 
 ## Backup and restore
 
-This is the logical backup for the Compose install above (the source advanced
-install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
+This is the logical backup for both Compose stacks above (PostgreSQL +
+attachment storage). It is not a stopped-stack copy
 of every volume, and it is not PITR.
 
 ### Install from compose.yml and .env
 
 `scripts/backup.sh` and `scripts/restore.sh` take the user install like the
-env-file stack: its `.env` is the env file, and the app service is found as the
-one publishing port 8080. Run them from a checkout of the same release:
+developer stack: its `.env` is the env file, and the app service is found as
+the one publishing port 8080. Run them from a checkout of the same release:
 
 ```sh
 scripts/backup.sh --project fvoci --env-file /path/to/.env --compose-file /path/to/compose.yml --output /backups/fvoci-1
@@ -1037,6 +1073,20 @@ The keys stay in `.env` and are not copied into the backup; keep a copy of
 `fvoci-migrate --prepare` and the owner commands in the `fvoci` service. As
 with every restore the target is a new project name; run it with
 `docker compose -p fvoci-restored …` (or change `name:`).
+
+`restore.sh` reads the passwords and keyrings from the env file the way
+Compose does for these forms: `KEY=value`, `KEY='value'` and `KEY="value"`
+(the whole value in one pair of quotes, with no `\`, `$` or inner quote of the
+same kind inside double quotes). It refuses anything whose Compose meaning
+could differ from the text (escapes, `$` interpolation, an inline `#` comment,
+spaces, `export`, a key set twice) instead of guessing. The shipped
+`env.example` values are unquoted. `bash scripts/test-restore-env.sh` checks
+these cases and, when `docker compose` is available, compares the accepted
+ones with Compose's own parse.
+
+The remaining examples in this section use the developer stack
+(`infra/rust/compose.yml`, project `fvoci-rust-install`); for the user install
+add `--compose-file` as above.
 
 Run `scripts/backup.sh` and `scripts/restore.sh` on the operator's Linux host
 with Bash, Docker Compose, jq, GNU coreutils and tar. The scripts check their
@@ -1103,9 +1153,10 @@ scripts/restore.sh \
 ```
 
 Restore starts postgres and Meilisearch on empty volumes, creates the
-application role, restores the dump, restores storage, then runs the one-shot
-`init` job (`fvoci-migrate`, `--grant-app-role`, `--ensure-meili-key`; all
-idempotent on this path), rebases the outbox, rebuilds search, and runs
+application role, restores the dump, restores storage, then runs the
+preparation (`fvoci-migrate`, `--grant-app-role`, `--ensure-meili-key`; all
+idempotent on this path): the developer stack's one-shot `init` job, or
+`fvoci-migrate --prepare` in the user install's `fvoci` service, rebases the outbox, rebuilds search, and runs
 `fvoci-migrate --verify-storage` with the server's own environment: every
 `stored` attachment and its published preview in the restored database must
 exist in the configured storage with their recorded sizes (a missing preview
@@ -1225,7 +1276,10 @@ with `STORAGE_DRIVER=s3`. The supported model for S3 is:
         `--use-list` that drops the `SCHEMA - public` entry.
    2. Run `$C run --rm init`. This does migrate, `--grant-app-role` and
       `--ensure-meili-key`. Only the `init` service receives the owner
-      `DATABASE_URL`.
+      `DATABASE_URL`. (These commands name the developer stack's `init` and
+      `server` services. With the user compose, run
+      `$C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate fvoci --prepare`
+      here and use `fvoci` in place of both `init` and `server` below.)
    3. Rebase the outbox and rebuild search with the same bounds `restore.sh`
       derives from its manifest. Set `<snapshot>` = `<dump-utc>` + 1 s, and
       `<since>` = `<snapshot>` − 29 days (the widest window
@@ -1301,8 +1355,9 @@ job submission and are not yet a released support claim.
 ## Operator commands (`fvoci-migrate`)
 
 The source's `fvoci <command>` CLI maps onto `fvoci-migrate`, the one-shot
-operator binary already shipped in the image and used by the Compose `init`
-job, backup and restore (the server binary stays single-purpose):
+operator binary shipped in the image. It is the user install's entrypoint
+(`--start`: prepare, then exec the server), the developer stack's `init` job,
+and what backup and restore run (the server binary stays single-purpose):
 
 | Source | Rust | Environment |
 | --- | --- | --- |
@@ -1363,7 +1418,7 @@ fresh secrets: `POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
 `FVOCI_PUBLIC_ORIGIN`, and `FVOCI_COOKIE_SECURE=true` for an https origin (a
 loopback `http://` origin also sets `FVOCI_PUBLISH_PORT` to its port). The file
 is created mode 0600 and renamed into place; an existing file is kept unless
-`--yes`. Only the path is printed. It replaces step 1 of "Bootstrap" below:
+`--yes`. Only the path is printed. It replaces step 1 of "Developer stack (compose.yml with init)":
 
 ```sh
 cargo run --release --bin fvoci-migrate -- --init-env \

@@ -1,6 +1,6 @@
 # FVOCI @VERSION@ (trial pre-release)
 
-<!-- notes-for: TODO(release) replace with the 0.y.z version these notes describe -->
+<!-- notes-for: 0.1.0 -->
 
 This is a 0.x trial release. It is not covered by any compatibility promise:
 a later 0.y release may change configuration, data layout or behaviour.
@@ -17,20 +17,107 @@ Installs are never updated automatically.
 
 ## Accepted in this release
 
-<!-- TODO(release): list the features accepted on main at @SHA@ (docs/rewrite.md feature table). -->
+FVOCI 0.1.0 is the first build of the Rust server with the existing React web
+app. The features below were accepted on `main` with their tests, CI and an
+independent review (feature table in `docs/rewrite.md` at `@SHA@`):
+
+- **Accounts:** first-admin setup, sign-in and sessions, profile, password
+  reset, email and password change, account deletion and export, magic links,
+  personal API tokens, TOTP two-factor sign-in, OIDC sign-in and workspace SSO.
+- **Workspaces:** members, invitations with seat limits, groups and
+  permissions, projects, workspace export, trash and purge, a workspace event
+  log with an activity section in settings.
+- **Wiki documents:** create, move, sort, trash and restore; real-time
+  collaborative editing (Yrs); import (including office files and Notion
+  exports) and export to Markdown, DOCX, PDF and PPTX; templates; backlinks;
+  revisions with restore.
+- **Tasks:** lists, board, Gantt and calendar views, workflows, WIP
+  limits, recurring tasks, labels and assignees, task bodies, activity and
+  comments, live updates between browsers.
+- **Attachments:** uploads with quotas; viewers for PDF, DOCX, XLSX, PPTX and
+  HWP/HWPX; editing an HWP/HWPX attachment and saving an authorized copy; text
+  extraction for search.
+- **Search:** workspace and global search with Meilisearch, including
+  comments and attachment text; results are checked against current
+  permissions.
+- **Notifications:** in-app notifications, mail and digests, webhooks, the
+  GitHub app integration, and browser push notifications (Web Push).
+- **Sharing and organizing:** public share links and pages, favorites, recent
+  items, tags, collections and saved views, and calendar (ICS) feeds.
+- **Administration:** consent and legal documents, audit log, license and
+  quotas, admin settings and user management, branding.
+- **Operations:** API documentation at `/api/docs` (signed-in users), `/health`,
+  `/ready` and `/metrics` probes with a container healthcheck,
+  `fvoci-migrate --secrets-audit` / `--secrets-rotate` for the encryption
+  keyring, and backup and restore scripts (`scripts/backup.sh`,
+  `scripts/restore.sh`) that verify keys, stored files and sealed secrets
+  before the server starts.
 
 ## Not verified or optional
 
-<!-- TODO(release): list optional integrations (SMTP, OIDC, GitHub app, AI, S3) and anything shipped but not verified. -->
+These are shipped but off by default, or were only checked against local
+stand-ins. Treat them as untested with a real provider:
+
+- **Mail (SMTP):** tested against a local test relay only. Without SMTP,
+  invitation links are shown in the app instead of mailed.
+- **OIDC sign-in and workspace SSO:** tested with local test providers, not
+  a real external identity provider.
+- **GitHub app:** tested against a local fake of the GitHub API.
+- **AI actions and semantic search:** optional, and need an
+  OpenAI-compatible embeddings endpoint that you provide. No real provider
+  was used.
+- **S3 storage:** checked against a local S3-compatible store only, including
+  the documented upgrade and rollback steps. No cloud provider was used.
+- **Two-factor sign-in:** codes and QR enrolment are tested, but no real
+  authenticator app has scanned the QR code.
+- **Web Push:** one real delivery was observed, with Chrome for Testing on
+  Linux through Google's push service. Other browsers and push services were
+  not tried.
+- **Korean input (IME):** checked with a real Linux (IBus) input method in
+  Chromium only. Windows, macOS and mobile input methods were not tried.
 
 ## Known limitations
 
-<!-- TODO(release): list known limitations and open issues for this version. -->
+- **No compatibility promise.** 0.x releases may change settings, data
+  layout or behaviour between versions. Nothing updates an install on its own.
+- **Secret boundary is within one container.** The `fvoci` container prepares
+  the database and search as root, then runs the server as uid 1000. The
+  server cannot read the secret files, the database owner password or the
+  Meilisearch master key. Root
+  in the container (`docker compose exec fvoci …`) can read them, and anyone
+  who can run Docker commands on the host can read `.env` and the secrets.
+  `docker inspect` shows the secret file paths, not their values.
+- **Local HTTP by default.** The app is published on `127.0.0.1` over plain
+  HTTP. For other users or a domain, put a TLS reverse proxy in front and
+  set an `https://` `FVOCI_PUBLIC_ORIGIN` (see `RUNNING.md`).
+- **Task updates from other browsers take up to about 0.75 s** to appear:
+  live task changes are polled every 750 ms. Collaborative document text is
+  pushed and not affected.
+- **Collaboration room limit.** At most 64 documents or task bodies can be
+  open for editing at the same time in this compose file (30 is the image
+  default). A room is released 30 s after its last user leaves. While the
+  limit is reached, a newly opened body stays empty until a room frees up
+  (up to about 30 s), and the browser retries the connection rapidly.
+- **Search key file must not be a symlink.** A `FVOCI_MEILI_KEY_FILE` path
+  that is a symlink is refused at startup, for example a Kubernetes Secret
+  volume entry.
+- **Quoting in `.env` for restore.** `scripts/restore.sh` accepts values
+  written unquoted or wholly in single or double quotes, as Compose reads
+  them (inside single quotes `$` and backslashes are literal). It refuses
+  other forms (escapes outside quotes, `$` outside single quotes, inline
+  comments, `export`) instead of guessing. Keep the values unquoted, as `env.example` writes them.
+- **Upgrades only as documented.** Stop and back up first, then replace
+  `compose.yml` (see below). Rolling upgrades, running two servers against
+  one database, and downgrades are not supported.
+- **ARM64** (linux/arm64) is verified by the CI release smoke on native
+  runners only. No long-running ARM64 install has been exercised.
 
 ## Install
 
 Requires Docker Engine with the Compose plugin (v2.24+) and `openssl`, on
-linux/amd64 or linux/arm64. From an empty directory:
+linux/amd64 or linux/arm64. Only Linux Docker Engine was exercised for this
+release; Docker Desktop, rootless Docker and Podman were not tested. From an
+empty directory:
 
 ```sh
 for f in compose.yml env.example INSTALL.md SHA256SUMS; do
@@ -66,7 +153,9 @@ from a backup cannot be read. Only use it to throw an install away.
   restore). Keep the copy of `.env` separate from the database backup.
 - To upgrade, stop the stack, replace `compose.yml` with the one from the new
   release (check its `SHA256SUMS`), keep `.env`, and run
-  `docker compose up -d --wait`. The `fvoci` container applies database
+  `docker compose up -d --wait --wait-timeout 900` (a long migration can
+  outlast the default wait; `docker compose logs -f fvoci` shows progress).
+  The `fvoci` container applies database
   migrations before the server starts; if that fails the server does not
   start, and it refuses to migrate while another server is still connected.
 - Migrations only move forward. Going back to an older 0.y release means
