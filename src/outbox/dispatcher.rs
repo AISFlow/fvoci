@@ -59,7 +59,8 @@ pub trait OutboxConsumer: Send + Sync {
     /// The dispatcher drops the call when it runs past the lease timeout, and
     /// then counts none of the chunk as done. An error without an exact index
     /// (`done == 0`) is charged to the first event, which is then delivered on
-    /// its own.
+    /// its own. A call may also end early without an error (`0 < done <
+    /// events.len()`); the dispatcher then passes the rest in the next call.
     fn deliver_batch<'a>(
         &'a self,
         pool: &'a PgPool,
@@ -548,9 +549,11 @@ async fn deliver_external_chunk(
         return Ok(ExternalChunkOutcome { done, stop: true });
     }
 
+    // A call that ended early without an error goes on with the rest in the
+    // next chunk of this cycle; one that did nothing ends the cycle.
     Ok(ExternalChunkOutcome {
         done,
-        stop: done < chunk.len(),
+        stop: done == 0,
     })
 }
 

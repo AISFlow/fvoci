@@ -3290,3 +3290,130 @@ async fn renewal_error_after_the_batch_still_marks_every_event() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// Delivers at most `per_call` events per `deliver_batch` call and returns
+/// that count without an error; logs each call under its name.
+struct PrefixExternal {
+    name: String,
+    per_call: usize,
+    calls: Arc<Mutex<Vec<String>>>,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+}
+
+impl OutboxConsumer for PrefixExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            *self
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .entry(event.id)
+                .or_default() += 1;
+            Ok(())
+        })
+    }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        lease_owner: Uuid,
+        events: &'a [fvoci_server::db::outbox::OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        self.calls.lock().expect("calls").push(self.name.clone());
+        Box::pin(async move {
+            let take = events.len().min(self.per_call);
+            for event in &events[..take] {
+                if let Err(err) = self.deliver(pool, lease_owner, event).await {
+                    return (0, Some(err));
+                }
+            }
+            (take, None)
+        })
+    }
+}
+
+/// A `deliver_batch` that ends early without an error (done < chunk) is not
+/// a reason to end the consumer's cycle: the dispatcher passes the rest in
+/// the next call right away, before it serves the next consumer.
+#[tokio::test]
+async fn partial_batch_without_error_continues_in_the_same_cycle() {
+    let harness = TestDb::bootstrap().await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let partial = Arc::new(PrefixExternal {
+        name: "prefixone".to_string(),
+        per_call: 1,
+        calls: calls.clone(),
+        deliveries: Mutex::new(HashMap::new()),
+    });
+    let whole = Arc::new(PrefixExternal {
+        name: "prefixall".to_string(),
+        per_call: usize::MAX,
+        calls: calls.clone(),
+        deliveries: Mutex::new(HashMap::new()),
+    });
+    let ids = insert_test_events(&app, "test.prefix", 4).await;
+    for name in ["prefixone", "prefixall"] {
+        ensure_consumer(&app, name).await.expect("ensure");
+        wait_until_readable(&app, name, ids[3]).await;
+    }
+
+    let dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(2),
+            batch_limit: 50,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app.clone(),
+        vec![
+            partial.clone() as Arc<dyn OutboxConsumer>,
+            whole.clone() as Arc<dyn OutboxConsumer>,
+        ],
+    )
+    .expect("dispatcher");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let ids = ids.clone();
+        Box::pin(async move {
+            all_processed(&pool, "prefixone", &ids).await
+                && all_processed(&pool, "prefixall", &ids).await
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let calls = calls.lock().expect("calls").clone();
+    let first_whole = calls
+        .iter()
+        .position(|name| name == "prefixall")
+        .expect("the second consumer was served");
+    assert_eq!(
+        &calls[..first_whole],
+        vec!["prefixone"; 4].as_slice(),
+        "every partial call of one cycle comes before the next consumer: {calls:?}"
+    );
+    for consumer in [&partial, &whole] {
+        let deliveries = consumer.deliveries.lock().expect("deliveries").clone();
+        for id in &ids {
+            assert_eq!(deliveries.get(id).copied(), Some(1), "{}", consumer.name);
+        }
+    }
+
+    app.close().await;
+    harness.cleanup().await;
+}
