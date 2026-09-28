@@ -2846,3 +2846,156 @@ async fn all_or_nothing_batch_failure_dead_letters_only_the_poison_event() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[derive(Clone, Copy)]
+enum LeaseLoss {
+    /// The lease runs out while the batch is in flight (same owner).
+    Expire,
+    /// Another owner takes the lease while the batch is in flight.
+    Steal,
+}
+
+/// Delivers every event of a batch, then loses the lease before returning.
+struct LeaseLossExternal {
+    name: String,
+    admin: PgPool,
+    loss: LeaseLoss,
+    fired: AtomicBool,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+}
+
+impl OutboxConsumer for LeaseLossExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            *self
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .entry(event.id)
+                .or_default() += 1;
+            Ok(())
+        })
+    }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        events: &'a [fvoci_server::db::outbox::OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            {
+                let mut deliveries = self.deliveries.lock().expect("deliveries");
+                for event in events {
+                    *deliveries.entry(event.id).or_default() += 1;
+                }
+            }
+            if events.len() > 1 && !self.fired.swap(true, Ordering::SeqCst) {
+                let sql = match self.loss {
+                    LeaseLoss::Expire => {
+                        "UPDATE fvoci.outbox_consumers \
+                         SET lease_until = now() - interval '1 second' \
+                         WHERE consumer = $1 AND $2::uuid IS NOT NULL"
+                    }
+                    LeaseLoss::Steal => {
+                        "UPDATE fvoci.outbox_consumers \
+                         SET lease_owner = $2, lease_until = now() + interval '3 seconds' \
+                         WHERE consumer = $1"
+                    }
+                };
+                sqlx::query(sql)
+                    .bind(&self.name)
+                    .bind(Uuid::now_v7())
+                    .execute(&self.admin)
+                    .await
+                    .expect("lose the lease");
+            }
+            (events.len(), None)
+        })
+    }
+}
+
+async fn assert_batch_survives_lease_loss(loss: LeaseLoss, consumer_name: &str) {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let ids = insert_test_events(&app, "test.leaseloss", 5).await;
+    ensure_consumer(&app, consumer_name).await.expect("ensure");
+    wait_until_readable(&app, consumer_name, ids[4]).await;
+    let consumer = Arc::new(LeaseLossExternal {
+        name: consumer_name.to_string(),
+        admin: admin.clone(),
+        loss,
+        fired: AtomicBool::new(false),
+        deliveries: Mutex::new(HashMap::new()),
+    });
+
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    let last = fetch_event_by_id(&app, ids[4])
+        .await
+        .expect("last")
+        .expect("row");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let admin = admin.clone();
+        let ids = ids.clone();
+        let name = consumer_name.to_string();
+        let last = (last.xact.clone(), last.seq);
+        Box::pin(async move {
+            all_processed(&pool, &name, &ids).await
+                && fetch_cursor(&admin, &name).await.ok().flatten() == Some(last)
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(
+        consumer.fired.load(Ordering::SeqCst),
+        "lease loss not injected"
+    );
+    let deliveries = consumer.deliveries.lock().expect("deliveries").clone();
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            deliveries.get(id).copied().unwrap_or(0),
+            1,
+            "event {i} delivered {:?} times after the lease was lost",
+            deliveries.get(id)
+        );
+    }
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// The lease expires while a batch is in flight: every delivered event of
+/// the batch is still marked and none is delivered again.
+#[tokio::test]
+async fn expired_lease_after_the_batch_still_marks_every_event() {
+    assert_batch_survives_lease_loss(LeaseLoss::Expire, "leaseexpire").await;
+}
+
+/// Another owner takes the lease while a batch is in flight: the delivered
+/// events are marked anyway, so the new owner skips them.
+#[tokio::test]
+async fn stolen_lease_after_the_batch_still_marks_every_event() {
+    assert_batch_survives_lease_loss(LeaseLoss::Steal, "leasesteal").await;
+}

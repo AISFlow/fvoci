@@ -432,7 +432,8 @@ async fn deliver_external_pending(
             break;
         }
         let chunk = &remaining[..chunk_len];
-        let outcome = deliver_external_chunk(settings, pool, consumer, owner, chunk).await?;
+        let outcome =
+            deliver_external_chunk(settings, pool, consumer, owner, ttl_secs, chunk).await?;
         worked = true;
         offset += outcome.done;
         if outcome.stop {
@@ -452,6 +453,7 @@ async fn deliver_external_chunk(
     pool: &PgPool,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
+    ttl_secs: i64,
     chunk: &[OutboxEvent],
 ) -> Result<ExternalChunkOutcome, sqlx::Error> {
     if chunk.is_empty() {
@@ -477,24 +479,44 @@ async fn deliver_external_chunk(
     };
     let done = done.min(chunk.len());
 
+    // The batch may have used up most of the lease: renew it before recording
+    // anything. Marks need no lease, so every event whose effect is confirmed
+    // is marked before the cursor moves; when the lease is lost here, the
+    // next owner finds the marks and does not deliver these events again.
+    let leased = lease_consumer(pool, consumer.name(), owner, ttl_secs).await?;
     for event in chunk.iter().take(done) {
         let _ = mark_processed(pool, consumer.name(), event.id).await?;
-        if !advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await? {
+    }
+    if !leased {
+        warn!(
+            consumer = consumer.name(),
+            done,
+            chunk = chunk.len(),
+            error = err.as_ref().map(ToString::to_string),
+            "outbox lease lost during external delivery; delivered events are marked"
+        );
+        return Ok(ExternalChunkOutcome { done, stop: true });
+    }
+    if let Some(last) = done.checked_sub(1).and_then(|last| chunk.get(last)) {
+        // The whole delivered prefix is marked, so one advance covers it.
+        if !advance_cursor(pool, consumer.name(), owner, &last.xact, last.seq).await? {
             warn!(
                 consumer = consumer.name(),
-                event_id = %event.id,
+                event_id = %last.id,
                 "cursor advance rejected after external delivery"
             );
             return Ok(ExternalChunkOutcome { done, stop: true });
         }
-        let _ = clear_failure(pool, consumer.name(), event.id).await?;
-        debug!(
-            consumer = consumer.name(),
-            event_id = %event.id,
-            xact = %event.xact,
-            seq = event.seq,
-            "outbox event delivered"
-        );
+        for event in chunk.iter().take(done) {
+            let _ = clear_failure(pool, consumer.name(), event.id).await?;
+            debug!(
+                consumer = consumer.name(),
+                event_id = %event.id,
+                xact = %event.xact,
+                seq = event.seq,
+                "outbox event delivered"
+            );
+        }
     }
 
     if let Some(err) = err {
