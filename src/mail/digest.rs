@@ -12,6 +12,10 @@ const DIGEST_BATCH: i64 = 100;
 /// maintenance task, which also runs the upload GC and revision sweeps; the
 /// rows a sweep does not reach stay due for the next daily sweep.
 const DIGEST_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// Failed sends in a row, across batches, after which the sweep takes SMTP
+/// to be down and stops. A sent digest or a refusal of one recipient's
+/// mailbox resets the count: both show the relay is up and serving.
+const DIGEST_DOWN_STREAK: u32 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DigestError {
@@ -34,9 +38,10 @@ type DigestClaim = (Uuid, Uuid, Option<DateTime<Utc>>);
 /// batch after another, so every due row is served, not only the first
 /// batch. A failed claim is handed back right after its send; it lies behind
 /// the walk, so this sweep does not claim it again. The walk stops after a short
-/// batch, on cancel, after `DIGEST_TIME_BUDGET`, or after a batch in which
-/// every send failed (SMTP is most likely down; a refusal of one recipient
-/// does not count, it shows SMTP is up); unsent claims are handed back.
+/// batch, on cancel, after `DIGEST_TIME_BUDGET`, or after
+/// `DIGEST_DOWN_STREAK` failed sends in a row (SMTP is most likely down); the
+/// claims not tried are handed back. One recipient's 4xx counts towards the
+/// streak but cannot end the walk on its own.
 pub async fn send_due_digests(
     pool: &PgPool,
     mailer: &Mailer,
@@ -46,10 +51,15 @@ pub async fn send_due_digests(
     let before =
         now - chrono::Duration::from_std(DIGEST_INTERVAL).unwrap_or(chrono::Duration::days(1));
     let deadline = std::time::Instant::now() + DIGEST_TIME_BUDGET;
-    let stop = || cancel.is_cancelled() || std::time::Instant::now() >= deadline;
+    let stop = |down_streak: u32| {
+        down_streak >= DIGEST_DOWN_STREAK
+            || cancel.is_cancelled()
+            || std::time::Instant::now() >= deadline
+    };
     let mut after: Option<(Uuid, Uuid)> = None;
     let mut sent = 0u32;
-    while !stop() {
+    let mut down_streak = 0u32;
+    while !stop(down_streak) {
         let due = claim_digest_due(pool, before, now, after).await?;
         // UPDATE .. RETURNING has no order: the walk resumes after the largest key.
         let Some(last) = due.iter().map(|(ws, user, _)| (*ws, *user)).max() else {
@@ -58,11 +68,9 @@ pub async fn send_due_digests(
         after = Some(last);
         let short = (due.len() as i64) < DIGEST_BATCH;
 
-        let mut attempted = 0u32;
-        let mut failed = 0u32;
         let mut pending = due.into_iter();
         while let Some(claim) = pending.next() {
-            if stop() {
+            if stop(down_streak) {
                 // Hand the claims not tried back so the next sweep sends them.
                 for (workspace_id, user_id, prev_last) in std::iter::once(claim).chain(pending) {
                     restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
@@ -72,8 +80,8 @@ pub async fn send_due_digests(
             let (workspace_id, user_id, prev_last) = claim;
             match send_claimed(pool, mailer, workspace_id, user_id, prev_last).await {
                 Ok(true) => {
-                    attempted += 1;
                     sent += 1;
+                    down_streak = 0;
                 }
                 Ok(false) => {}
                 Err(err) => {
@@ -82,10 +90,11 @@ pub async fn send_due_digests(
                     // the walk, so this sweep does not claim it again, and a
                     // sweep dropped later in the batch still leaves it due.
                     restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
-                    attempted += 1;
-                    if !matches!(&err, DigestError::Mail(mail) if smtp::is_final_for_recipient(&mail.code))
+                    if matches!(&err, DigestError::Mail(mail) if smtp::is_final_for_recipient(&mail.code))
                     {
-                        failed += 1;
+                        down_streak = 0;
+                    } else {
+                        down_streak += 1;
                     }
                     tracing::warn!(
                         message = %format!("digest: recipient deferred to the next sweep ({err})"),
@@ -94,7 +103,7 @@ pub async fn send_due_digests(
                 }
             }
         }
-        if short || (attempted > 0 && failed == attempted) {
+        if short {
             break;
         }
     }

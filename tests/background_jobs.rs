@@ -2873,3 +2873,83 @@ async fn digest_failed_claim_is_handed_back_before_its_batch_ends() {
     pool.close().await;
     harness.cleanup().await;
 }
+
+/// A 4xx for one recipient says SMTP is up, like a refusal does: when that
+/// is the only send in a batch, the sweep still goes on to the next batch.
+#[tokio::test]
+async fn digest_sweep_continues_past_a_batch_whose_only_send_gets_a_4xx() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+    let users =
+        digest_users_keeping_notifications_of(&admin, workspace_id, |u| vec![u[0], u[149]]).await;
+    let (deferred, served) = (users[0], users[149]);
+    let sink = SmtpSink::spawn_scripted(
+        "220 fvoci-test",
+        vec![(
+            digest_address(&admin, deferred).await,
+            RcptReply::Reply("452 4.2.2 mailbox full"),
+        )],
+    )
+    .await;
+
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        Utc::now(),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sent, 1, "the second batch's recipient is served");
+    assert_eq!(sink.count(), 1);
+    assert_eq!(sink.count_to(&digest_address(&admin, served).await), 1);
+    assert_eq!(
+        digest_last_sent(&admin, workspace_id, deferred).await,
+        None,
+        "the deferred claim is handed back"
+    );
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A relay that answers every session with 421 is down for the sweep: it
+/// stops after a short streak of failed sends instead of trying the whole
+/// batch, and every claim is handed back.
+#[tokio::test]
+async fn digest_sweep_stops_after_a_streak_of_relay_failures() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+    let sink = SmtpSink::spawn_scripted("421 4.3.2 service not available", Vec::new()).await;
+
+    let now = Utc::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sent, 0);
+    assert_eq!(sink.sessions(), 5, "the sweep stops after the streak");
+    let claimed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.notification_prefs WHERE mail_digest AND last_digest_at IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(claimed, 0, "every claim is handed back");
+    assert_eq!(digest_rows_due(&admin, now).await, 150);
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
