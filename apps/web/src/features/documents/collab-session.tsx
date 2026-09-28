@@ -1,4 +1,5 @@
 import { FVOCI_YDOC_FRAGMENT } from "@fvoci/editor/collab";
+import type { HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import {
 	HocuspocusProviderWebsocketComponent,
 	HocuspocusRoom,
@@ -6,7 +7,14 @@ import {
 	useHocuspocusEvent,
 	useHocuspocusProvider,
 } from "@hocuspocus/provider-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+	type ReactNode,
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import * as Y from "yjs";
 import {
 	createConnectionGeneration,
@@ -30,6 +38,11 @@ import {
 	reassertPresence,
 	titleEditingOf,
 } from "./collab-model";
+import {
+	type CollabRefusal,
+	createRefusalAwareSocket,
+	reconnectDelayMs,
+} from "./collab-reconnect";
 
 export type { CollabPeer, CollabSession, CollabStatus, CollabUser };
 export {
@@ -72,7 +85,8 @@ export function CollabRoom({
 /* WHY: #664 — 서버는 연결이 접속 때 선언한 awareness clientId 하나만 받는다(선언 없으면 거절).
  * clientId 는 Y.Doc 의 것이라 provider 에 맡기면 접속 뒤에야 알 수 있다 — 우리가 만들어 넘긴다.
  * #683 — 선언이 거부되면 clientID 를 갈고 소켓 층부터 다시 세운다. Y.Doc 은 이 층에 있어 살아남고
- * (#704 미전송 편집 보존), Awareness 는 provider 가 새로 만들어 새 id 로 굳는다. */
+ * (#704 미전송 편집 보존), Awareness 는 provider 가 새로 만들어 새 id 로 굳는다.
+ * 인증 전 거절(방 한도 1013 등)도 같은 층에서 backoff 뒤 소켓을 새로 세운다(collab-reconnect.ts). */
 function ClaimedRoom({
 	name,
 	children,
@@ -84,6 +98,8 @@ function ClaimedRoom({
 	const [doc] = useState(() => new Y.Doc({ gc: false }));
 	const [claim, setClaim] = useState(0);
 	const attempts = useRef(0);
+	const refusals = useRef(0);
+	const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const reclaim = () => {
 		if (attempts.current >= CLAIM_RETRY_LIMIT) return;
 		attempts.current += 1;
@@ -92,13 +108,29 @@ function ClaimedRoom({
 		doc.clientID = new Y.Doc().clientID;
 		setClaim((n) => n + 1);
 	};
+	const retryAfterRefusal = (_refusal: CollabRefusal) => {
+		if (retryTimer.current !== null) clearTimeout(retryTimer.current);
+		const delay = reconnectDelayMs(refusals.current);
+		refusals.current += 1;
+		retryTimer.current = setTimeout(() => {
+			retryTimer.current = null;
+			setClaim((n) => n + 1);
+		}, delay);
+	};
+	useEffect(
+		() => () => {
+			if (retryTimer.current !== null) clearTimeout(retryTimer.current);
+		},
+		[],
+	);
 	return (
 		/* WHY: #683 — provider 만 갈아끼우면 업스트림 detach 가 방 이름만 보고 지워(provider 4.6.0
 		 * hocuspocus-provider.esm.js:204-208) 옛 연결의 지연 destroy 가 새 연결을 라우팅 맵에서
 		 * 밀어낸다. providerMap 은 소켓마다 따로라 소켓째 갈아끼우면 그 사고가 성립하지 않는다. */
-		<HocuspocusProviderWebsocketComponent
+		<RoomSocket
 			key={claim}
 			url={`${proto}://${window.location.host}/collab`}
+			onRefused={retryAfterRefusal}
 		>
 			<HocuspocusRoom
 				name={name}
@@ -108,11 +140,43 @@ function ClaimedRoom({
 				flushDelay={200}
 				onAuthenticated={() => {
 					attempts.current = 0;
+					refusals.current = 0;
 				}}
 				onAuthenticationFailed={reclaim}
 			>
 				{children}
 			</HocuspocusRoom>
+		</RoomSocket>
+	);
+}
+
+/** One socket generation. It never reconnects by itself after a refusal; the parent
+ * schedules the next generation. Built in a layout effect so StrictMode's double
+ * render cannot leave a connected instance behind. */
+function RoomSocket({
+	url,
+	onRefused,
+	children,
+}: {
+	url: string;
+	onRefused: (refusal: CollabRefusal) => void;
+	children: ReactNode;
+}) {
+	const [socket, setSocket] = useState<HocuspocusProviderWebsocket | null>(null);
+	const onRefusedRef = useRef(onRefused);
+	onRefusedRef.current = onRefused;
+	useLayoutEffect(() => {
+		const ws = createRefusalAwareSocket({ url }, (refusal) => onRefusedRef.current(refusal));
+		setSocket(ws);
+		return () => {
+			/* Rooms destroy their providers on a 0 ms timer; let them detach first. */
+			setTimeout(() => ws.destroy(), 0);
+		};
+	}, [url]);
+	if (socket === null) return null;
+	return (
+		<HocuspocusProviderWebsocketComponent websocketProvider={socket}>
+			{children}
 		</HocuspocusProviderWebsocketComponent>
 	);
 }
