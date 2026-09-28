@@ -935,7 +935,9 @@ async fn try_authenticate(
             AuthAttempt::Restarting
         }
         Err(err @ (JoinError::RoomFull | JoinError::CapacityRetry)) => {
-            tracing::warn!(
+            // Debug, not warn: a refused client retries every few seconds, so at
+            // a saturated cap one line per refusal grows with the waiting clients.
+            tracing::debug!(
                 workspace_id = %room.workspace_id,
                 document_id = %room.resource_id,
                 error = ?err,

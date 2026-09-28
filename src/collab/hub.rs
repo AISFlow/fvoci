@@ -34,6 +34,10 @@ pub const HUB_JOIN_BARRIER_AFTER_SLOT_READY: u8 = 2;
 /// room was returned Live, before the borrowed handle is taken.
 #[cfg(feature = "db-tests")]
 pub const HUB_BORROW_BARRIER_AFTER_SLOT_READY: u8 = 3;
+/// Admission at the room cap (keyed by the admitted document) after its reclaim
+/// scan chose a candidate, before the locked re-check of that candidate.
+#[cfg(feature = "db-tests")]
+pub const HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN: u8 = 4;
 
 /// One pre-enqueue retry after a proven undelivered join or a Closing race.
 const MAX_PRE_ENQUEUE_RETRIES: u8 = 1;
@@ -1067,7 +1071,7 @@ impl CollabHub {
             let reserved = match self.try_reserve_starting(key).await {
                 Err(JoinError::RoomFull) if reclaims < MAX_ADMISSION_RECLAIMS => {
                     reclaims += 1;
-                    if self.reclaim_empty_room_for_admission().await {
+                    if self.reclaim_empty_room_for_admission(key).await {
                         continue;
                     }
                     return Err(JoinError::RoomFull);
@@ -1130,59 +1134,54 @@ impl CollabHub {
     /// wait for the idle timer. Rooms with members are never reclaimed, so a cap
     /// reached by active rooms still reports `RoomFull`.
     /// Returns whether a room was closed (the caller retries its reservation).
-    async fn reclaim_empty_room_for_admission(&self) -> bool {
-        if self.shutting_down.load(Ordering::Acquire) {
-            return false;
-        }
+    async fn reclaim_empty_room_for_admission(&self, admitted: RoomKey) -> bool {
         let grace = self.reclaim_grace();
-        let entries = self
-            .rooms
-            .read()
-            .await
-            .iter()
-            .map(|(key, slot)| (*key, slot.clone()))
-            .collect::<Vec<_>>();
-        let mut oldest: Option<(Instant, RoomKey, Arc<RoomSlot>)> = None;
-        for (key, slot) in entries {
-            // A busy phase lock means the room is changing state; skip it.
-            let Ok(phase) = slot.phase.try_lock() else {
-                continue;
-            };
-            let RoomPhase::Live(live) = &*phase else {
-                continue;
-            };
-            if !Self::reclaimable_at_cap(live, grace) {
-                continue;
-            }
-            if oldest
-                .as_ref()
-                .is_none_or(|(at, _, _)| live.last_activity < *at)
-            {
-                let at = live.last_activity;
-                drop(phase);
-                oldest = Some((at, key, slot));
-            }
-        }
-        let Some((_, key, slot)) = oldest else {
-            return false;
-        };
-        let live = {
-            let mut phase = slot.phase.lock().await;
-            let still_reclaimable = matches!(
-                &*phase,
-                RoomPhase::Live(live) if Self::reclaimable_at_cap(live, grace)
-            );
-            if !still_reclaimable || self.shutting_down.load(Ordering::Acquire) {
+        let mut claimed = None;
+        // A candidate lost between the scan and the locked re-check (to another
+        // admission, idle eviction or a returning member) makes this admission
+        // scan again instead of reporting `RoomFull`, so concurrent admissions at
+        // the cap each take a different empty room. A lost candidate normally
+        // stays out of later passes (Closing never returns to Live; a join or
+        // borrow refreshes its activity), so each pass has one candidate fewer.
+        // The bound, one pass more than the map can hold rooms, keeps a room
+        // whose joins keep being cancelled from spinning the admission.
+        for _ in 0..=self.config.max_rooms {
+            if self.shutting_down.load(Ordering::Acquire) {
                 return false;
             }
-            let RoomPhase::Live(live) = std::mem::replace(&mut *phase, RoomPhase::Closing) else {
-                unreachable!()
+            let Some((key, slot)) = self.oldest_reclaimable_room(grace).await else {
+                return false;
             };
-            live
+            #[cfg(feature = "db-tests")]
+            pause_for_hub_join_barrier(admitted.1, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN).await;
+            let live = {
+                let mut phase = slot.phase.lock().await;
+                if self.shutting_down.load(Ordering::Acquire) {
+                    return false;
+                }
+                let still_reclaimable = matches!(
+                    &*phase,
+                    RoomPhase::Live(live) if Self::reclaimable_at_cap(live, grace)
+                );
+                if !still_reclaimable {
+                    continue;
+                }
+                let RoomPhase::Live(live) = std::mem::replace(&mut *phase, RoomPhase::Closing)
+                else {
+                    unreachable!()
+                };
+                live
+            };
+            claimed = Some((key, slot, live));
+            break;
+        }
+        let Some((key, slot, live)) = claimed else {
+            return false;
         };
         tracing::info!(
             workspace_id = %key.0,
             document_id = %key.1,
+            admitted_document_id = %admitted.1,
             "collab room reclaimed at room cap"
         );
         // The hub owns the Closing room from here; a cancelled caller must not
@@ -1206,6 +1205,39 @@ impl CollabHub {
         // rpc_timeout, and a WebSocket join would turn a near success into
         // RoomFull and a client backoff.
         done_rx.await.is_ok()
+    }
+
+    /// The least recently active room that [`Self::reclaimable_at_cap`] accepts.
+    async fn oldest_reclaimable_room(&self, grace: Duration) -> Option<(RoomKey, Arc<RoomSlot>)> {
+        let entries = self
+            .rooms
+            .read()
+            .await
+            .iter()
+            .map(|(key, slot)| (*key, slot.clone()))
+            .collect::<Vec<_>>();
+        let mut oldest: Option<(Instant, RoomKey, Arc<RoomSlot>)> = None;
+        for (key, slot) in entries {
+            // Wait out a busy phase lock (held only for a state change) rather
+            // than skip the room: another admission's re-check, a join or idle
+            // eviction holding it must not hide the only reclaimable room.
+            let at = {
+                let phase = slot.phase.lock().await;
+                match &*phase {
+                    RoomPhase::Live(live) if Self::reclaimable_at_cap(live, grace) => {
+                        live.last_activity
+                    }
+                    _ => continue,
+                }
+            };
+            if oldest
+                .as_ref()
+                .is_none_or(|(oldest_at, _, _)| at < *oldest_at)
+            {
+                oldest = Some((at, key, slot));
+            }
+        }
+        oldest.map(|(_, key, slot)| (key, slot))
     }
 
     /// How long an emptied room stays out of admission reclaim, so a reload or

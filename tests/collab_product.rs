@@ -22,7 +22,8 @@ use fvoci_server::collab::config::CollabConfig;
 use fvoci_server::collab::guard::RoomGuard;
 use fvoci_server::collab::hub::{
     arm_hub_join_barrier, disarm_hub_join_barrier, room_start_count, RoomLifecyclePhase,
-    HUB_BORROW_BARRIER_AFTER_SLOT_READY, HUB_JOIN_BARRIER_AFTER_SLOT_READY,
+    HUB_BORROW_BARRIER_AFTER_SLOT_READY, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN,
+    HUB_JOIN_BARRIER_AFTER_SLOT_READY,
 };
 use fvoci_server::collab::room::{
     arm_append_in_tx_reject_barrier, arm_append_revoke_barrier, arm_force_primary_apply_fail,
@@ -1953,8 +1954,15 @@ async fn collab_room_cap_reclaims_empty_room_before_refusing() {
             let docs = setup_wiki_doc_batch(&harness, 5).await;
             // Same cap as the other 4-room tests (the helper cap is process-wide). The idle
             // timer is far away: only admission reclaim can free a slot here.
+            // The reclaim grace follows rpc_timeout_ms, which nothing else on the hub join
+            // path reads. At 120 s it is four times this test's whole time budget, so the
+            // within-grace refusal below cannot become a reclaim on a stalled runner; the
+            // past-grace case ages the room explicitly.
             let (hub, _helper_capacity) = new_test_collab_hub(
-                test_collab_config(4, 600_000),
+                CollabConfig {
+                    rpc_timeout_ms: 120_000,
+                    ..test_collab_config(4, 600_000)
+                },
                 docs[0].session.pool.clone(),
                 4,
             )
@@ -2584,6 +2592,111 @@ async fn collab_room_cap_cancelled_reclaim_restores_capacity() {
                 );
             }
             disarm_teardown_barrier(docs[0].document_id).await;
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// Two new-document admissions at the cap scan at the same time and choose the
+/// same oldest empty room. The one that loses the locked re-check must reclaim
+/// the other empty room past the grace instead of reporting `RoomFull`.
+#[tokio::test]
+async fn collab_room_cap_concurrent_admissions_reclaim_distinct_rooms() {
+    run_lifecycle_test(
+        "collab_room_cap_concurrent_admissions_reclaim_distinct_rooms",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 6).await;
+            let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+            let keys = hub_keys(&docs);
+            let mut leases = DirectHubLeases::new();
+            let mut conn_ids = Vec::new();
+            for doc in docs.iter().take(4) {
+                conn_ids.push(
+                    hub_join(&mut leases, &hub, doc, 1)
+                        .await
+                        .expect("join room"),
+                );
+            }
+            for index in [0, 1] {
+                hub.leave_room(keys[index], conn_ids[index]).await;
+                wait_for_member_count(&hub, keys[index], 0).await;
+                hub.age_room_past_reclaim_grace(keys[index]).await;
+            }
+
+            let (first_scanned, first_release) =
+                arm_hub_join_barrier(docs[4].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN)
+                    .await;
+            let (second_scanned, second_release) =
+                arm_hub_join_barrier(docs[5].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN)
+                    .await;
+            let first = tokio::spawn({
+                let hub = hub.clone();
+                let doc = docs[4].clone_fixture();
+                async move { hub_join_document(&hub, &doc, doc.document_id, 1).await }
+            });
+            await_barrier(first_scanned, "first admission reclaim scan").await;
+            let second = tokio::spawn({
+                let hub = hub.clone();
+                let doc = docs[5].clone_fixture();
+                async move { hub_join_document(&hub, &doc, doc.document_id, 1).await }
+            });
+            // Nothing changed between the two scans, so both chose the same room.
+            await_barrier(second_scanned, "second admission reclaim scan").await;
+            for key in &keys[..4] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(*key).await,
+                    RoomLifecyclePhase::Live
+                );
+            }
+
+            first_release
+                .send(())
+                .expect("release first admission reclaim scan");
+            let (_, lease) = tokio::time::timeout(Duration::from_secs(10), first)
+                .await
+                .expect("first admission finishes")
+                .expect("first admission task")
+                .expect("first admission reclaims an empty room");
+            leases.retain(lease);
+            let mut absent = 0;
+            for key in &keys[..2] {
+                if hub.room_lifecycle_phase(*key).await == RoomLifecyclePhase::Absent {
+                    absent += 1;
+                }
+            }
+            assert_eq!(absent, 1, "the first admission reclaimed one empty room");
+
+            // The second admission's candidate is gone; it must take the other one.
+            second_release
+                .send(())
+                .expect("release second admission reclaim scan");
+            let (_, lease) = tokio::time::timeout(Duration::from_secs(10), second)
+                .await
+                .expect("second admission finishes")
+                .expect("second admission task")
+                .expect("the admission that lost its candidate reclaims the other empty room");
+            leases.retain(lease);
+            for key in &keys[..2] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(*key).await,
+                    RoomLifecyclePhase::Absent
+                );
+            }
+            for key in &keys[2..] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(*key).await,
+                    RoomLifecyclePhase::Live
+                );
+                assert_eq!(hub.room_member_count(*key).await, 1);
+            }
+            assert_eq!(room_start_count(docs[4].document_id).await, 1);
+            assert_eq!(room_start_count(docs[5].document_id).await, 1);
+            assert_eq!(hub.available_room_slots(), 0);
+            disarm_hub_join_barrier(docs[4].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN).await;
+            disarm_hub_join_barrier(docs[5].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN).await;
             assert!(hub.shutdown().await.is_clean());
             harness.cleanup().await;
         },
