@@ -26,7 +26,8 @@ RUN_TMP="$WORK/tmp"
 mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/apps/web/e2e" \
   "$FIXTURE_ROOT/apps/web/e2e-pending" "$FIXTURE_ROOT/apps/web/dist" \
   "$FIXTURE_ROOT/target/debug" "$FAKE_BIN" "$RUN_TMP"
-cp "$ROOT/scripts/web-e2e-run-group.sh" "$ROOT/scripts/web-e2e-inner.sh" "$FIXTURE_ROOT/scripts/"
+cp "$ROOT/scripts/web-e2e-run-group.sh" "$ROOT/scripts/web-e2e-inner.sh" \
+  "$ROOT/scripts/web-e2e-trace-summary.py" "$FIXTURE_ROOT/scripts/"
 cp "$ROOT/apps/web/playwright.config.ts" "$FIXTURE_ROOT/apps/web/"
 cp "$ROOT/apps/web/e2e-pending/collab-playwright.config.ts" "$FIXTURE_ROOT/apps/web/e2e-pending/"
 ln -s "$PLAYWRIGHT_MODULES" "$FIXTURE_ROOT/apps/web/node_modules"
@@ -152,7 +153,8 @@ for pending in 0 1; do
   [[ "$(head -n1 "${summaries[0]}")" == "browser summary: "* ]] || fail "$label: browser-summary.txt is not a summary" "$log"
   if [[ "$pending" == "0" ]]; then
     [[ -f "$retained/server.log" ]] || fail "$label: the group server.log was not retained" "$log"
-    grep -q 'probe DATABASE_APP_URL' "$retained/server.log" || fail "$label: redaction probe missing from server.log" "$log"
+    grep -qx 'probe DATABASE_APP_URL=redacted admin postgres://redacted' "$retained/server.log" \
+      || fail "$label: redaction probe missing from server.log" "$log"
     ! grep -q -e 'fixture-secret' -e '://[^/[:space:]]*:[^@[:space:]]*@' "$retained/server.log" || fail "$label: credentials in retained server.log" "$log"
   fi
   for shared in test-results test-results-collab e2e-pending/test-results-collab; do
