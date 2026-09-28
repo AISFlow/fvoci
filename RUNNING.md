@@ -286,6 +286,10 @@ bridge address. Scraping through the
 published `127.0.0.1` port instead arrives from the default network's gateway,
 so allowing that address lets every local process read `/metrics`.
 
+The override targets the `fvoci` service of the user install (`compose.user.yml`
+rendered as `compose.yml`); it is not a release asset and does not apply to the
+developer `infra/rust/compose.yml`, where `docker compose config` fails closed.
+
 **Scrape config** (Prometheus 2.49 or newer for `scrape_protocols`):
 
 ```yaml
@@ -313,7 +317,7 @@ bounded (2 s) query; everything else is read on each scrape.
 | `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections` | gauge | This server's application-role connection pool and its limit. Not total PostgreSQL connections: collab room locks (one per live room, detached from the pool), the preparation, other servers and tools are outside it; use `pg_stat_activity` for totals | In-process, cannot fail |
 | `fvoci_task_stream_subscribers` | gauge | Open project task SSE streams | In-process |
 | `fvoci_process_resident_memory_bytes` | gauge | Observed RSS (`VmRSS`) of the server process, helpers excluded | `NaN` when `/proc/self/status` is unreadable |
-| `fvoci_collab_helper_resident_memory_bytes` | gauge | Observed RSS summed over live collaboration helper processes, the same sum collab admission reads | A helper exiting mid-read is skipped |
+| `fvoci_collab_helper_resident_memory_bytes` | gauge | Observed RSS summed over live collaboration helper processes, the same sum collab admission reads | A helper exiting mid-read is skipped; a helper whose `/proc/<pid>/status` cannot be read contributes 0, so the sum can under-report |
 | `fvoci_collab_helper_memory_budget_bytes` | gauge | Configured helper budget `FVOCI_COLLAB_MEMORY_BUDGET` (not an observation) | `NaN` when collaboration is off |
 
 Collab admission refuses a room start when helper RSS plus the start's own
