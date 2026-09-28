@@ -27,7 +27,10 @@ trap cleanup_server EXIT
 # Markers for the group's netlink event log (see web-e2e-run-group.sh).
 net_mark() {
   [[ -n "${NET_MARKS_LOG:-}" ]] || return 0
-  local now="$EPOCHREALTIME"
+  # EPOCHREALTIME is bash 5.0+; without it the markers are skipped, never
+  # an unbound-variable error under set -u (the cleanup trap calls this).
+  local now="${EPOCHREALTIME:-}"
+  [[ -n "$now" ]] || return 0
   TZ=UTC printf '[%(%Y-%m-%dT%H:%M:%S)T.%s] # fvoci: %s\n' \
     "${now%[.,]*}" "${now#*[.,]}" "$*" >>"$NET_MARKS_LOG"
 }

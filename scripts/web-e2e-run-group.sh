@@ -31,7 +31,10 @@ NET_MONITOR_PID=""
 # files sort into one timeline. Bash's own clock is used because not every
 # date(1) implementation zero-pads %6N.
 net_mark() {
-  local now="$EPOCHREALTIME"
+  # EPOCHREALTIME is bash 5.0+; without it the markers are skipped, never
+  # an unbound-variable error under set -u (the cleanup trap calls this).
+  local now="${EPOCHREALTIME:-}"
+  [[ -n "$now" ]] || return 0
   TZ=UTC printf '[%(%Y-%m-%dT%H:%M:%S)T.%s] # fvoci: %s\n' \
     "${now%[.,]*}" "${now#*[.,]}" "$*" >>"$NET_MARKS_LOG"
 }
@@ -116,8 +119,8 @@ retain_failure_artifacts() {
 
 cleanup() {
   local status=$?
-  net_mark "group exiting with status ${status}" 2>/dev/null || true
   stop_net_monitor
+  net_mark "group exiting with status ${status}" 2>/dev/null || true
   if (( status != 0 )); then
     retain_failure_artifacts || true
   fi
