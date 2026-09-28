@@ -19,8 +19,8 @@ use fvoci_server::streams::{initial_cursor, poll_task_events, StreamHub};
 use project_harness::{
     add_workspace_user, admin_pool, app_state, count_rows, create_project,
     drop_insert_fail_trigger, insert_minimal_project, insert_project_document,
-    install_insert_fail_trigger, json_request, setup_session, test_peer, wait_for_query_blocked_by,
-    wait_for_user_for_update_blocked, TestDb,
+    install_insert_fail_trigger, json_request, session_id_for_user, setup_session, test_peer,
+    wait_for_query_blocked_by, wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::json;
 use tokio::time::timeout;
@@ -4323,6 +4323,43 @@ async fn task_stream_notifies_other_viewer_on_task_meta_date_and_status_patch() 
     harness.cleanup().await;
 }
 
+/// The credential a direct poll checks, as the stream producer does.
+#[derive(Clone, Copy)]
+struct StreamCredential {
+    user_id: Uuid,
+    session_id: Uuid,
+}
+
+async fn stream_credential(admin: &sqlx::PgPool, user_id: Uuid) -> StreamCredential {
+    StreamCredential {
+        user_id,
+        session_id: session_id_for_user(admin, user_id).await,
+    }
+}
+
+/// One producer poll with a live credential.
+async fn poll_task_rows(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    credential: StreamCredential,
+    cursor: &fvoci_server::streams::EventCursor,
+    limit: i32,
+) -> Vec<fvoci_server::streams::StreamEventRow> {
+    poll_task_events(
+        pool,
+        workspace_id,
+        project_id,
+        credential.user_id,
+        credential.session_id,
+        cursor,
+        limit,
+    )
+    .await
+    .expect("poll")
+    .expect("live credential")
+}
+
 /// Poll until at least `min_updates` `task.updated` rows are visible. The cursor
 /// is itself xmin-bounded, so an earlier `task.created` may still land in the
 /// window; counting every row would stop before a later update settles.
@@ -4330,14 +4367,13 @@ async fn poll_task_updates_until(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     project_id: Uuid,
+    credential: StreamCredential,
     cursor: &fvoci_server::streams::EventCursor,
     min_updates: usize,
 ) -> Vec<fvoci_server::streams::StreamEventRow> {
     let mut rows = Vec::new();
     for _ in 0..30 {
-        rows = poll_task_events(pool, workspace_id, project_id, cursor, 100)
-            .await
-            .expect("poll");
+        rows = poll_task_rows(pool, workspace_id, project_id, credential, cursor, 100).await;
         if rows.iter().filter(|r| r.verb == "task.updated").count() >= min_updates {
             break;
         }
@@ -4450,7 +4486,16 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let rows = poll_task_updates_until(&app_pool, workspace_id, project_a_id, &cursor, 4).await;
+    let credential = stream_credential(&admin, owner_id).await;
+    let rows = poll_task_updates_until(
+        &app_pool,
+        workspace_id,
+        project_a_id,
+        credential,
+        &cursor,
+        4,
+    )
+    .await;
     let updates: Vec<&serde_json::Value> = rows
         .iter()
         .filter(|r| r.verb == "task.updated")
@@ -4468,9 +4513,8 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
     assert_eq!(updates[3]["from"], next_status);
     assert_eq!(updates[3]["to"], current_status);
 
-    let foreign = poll_task_events(&app_pool, workspace_id, project_b, &cursor, 100)
-        .await
-        .expect("poll other project");
+    let foreign =
+        poll_task_rows(&app_pool, workspace_id, project_b, credential, &cursor, 100).await;
     assert!(foreign.is_empty(), "{foreign:?}");
 
     app_pool.close().await;
@@ -4550,9 +4594,16 @@ async fn task_update_poll_waits_for_update_held_behind_xmin() {
 
     let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
     let cursor = fvoci_server::streams::EventCursor::default();
-    let pending = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 100)
-        .await
-        .expect("poll");
+    let credential = stream_credential(&admin, owner_id).await;
+    let pending = poll_task_rows(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &cursor,
+        100,
+    )
+    .await;
     let verbs: Vec<&str> = pending.iter().map(|r| r.verb.as_str()).collect();
     assert_eq!(
         verbs,
@@ -4570,7 +4621,7 @@ async fn task_update_poll_waits_for_update_held_behind_xmin() {
         hold.commit().await.expect("release hold");
     };
     let (rows, ()) = tokio::join!(
-        poll_task_updates_until(&app_pool, workspace_id, project_id, &cursor, 4),
+        poll_task_updates_until(&app_pool, workspace_id, project_id, credential, &cursor, 4),
         release
     );
     let updates: Vec<&serde_json::Value> = rows
@@ -4911,9 +4962,9 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     .execute(&mut *tx)
     .await
     .expect("insert uncommitted");
-    let pending = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 10)
-        .await
-        .expect("poll");
+    let credential = stream_credential(&admin, owner_id).await;
+    let pending =
+        poll_task_rows(&app_pool, workspace_id, project_id, credential, &cursor, 10).await;
     assert!(
         pending.is_empty(),
         "uncommitted event must not appear in poll snapshot \
@@ -4924,9 +4975,8 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     let mut seen = false;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let rows = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 10)
-            .await
-            .expect("poll");
+        let rows =
+            poll_task_rows(&app_pool, workspace_id, project_id, credential, &cursor, 10).await;
         if rows.iter().any(|r| r.verb == "task.updated") {
             seen = true;
             break;
@@ -5020,6 +5070,187 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
         "enqueue-before-revoke hints must not reach the response body after authorization loss"
     );
     let _ = owner_id;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Opens an SSE stream with one credential header and returns once the server
+/// answered: `Some(reader)` for an admitted stream, where `reader` finishes when
+/// the server ends the body; `None` for any other status.
+async fn sse_admit(
+    app: axum::Router,
+    path: &str,
+    credential: (&str, String),
+) -> Option<tokio::task::JoinHandle<()>> {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(credential.0, credential.1)
+        .header("origin", "http://localhost")
+        .body(Body::empty())
+        .expect("request");
+    request.extensions_mut().insert(ConnectInfo(test_peer()));
+    let response = app.oneshot(request).await.expect("sse response");
+    if response.status() != StatusCode::OK {
+        return None;
+    }
+    let mut body = response.into_body().into_data_stream();
+    Some(tokio::spawn(
+        async move { while body.next().await.is_some() {} },
+    ))
+}
+
+fn session_cookie_header(cookie: &str) -> (&'static str, String) {
+    ("cookie", format!("fvoci_session={cookie}"))
+}
+
+/// Inserts a committed `task.created` event for `project_id` as the admin
+/// (no project lock), the shape `record_task_event_and_audit` writes.
+async fn insert_task_created_event(
+    admin: &sqlx::PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+) -> Uuid {
+    let task_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        VALUES ($1, $2, 'task.created', 'task', $3, $4, $5::jsonb, 'web')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(actor_user_id)
+    .bind(json!({"taskId": task_id.to_string(), "projectId": project_id.to_string()}))
+    .execute(admin)
+    .await
+    .expect("insert task event");
+    task_id
+}
+
+/// Stream admission and per-hint delivery read the project without a row
+/// lock, so a writer holding the project row (here: every row, since any row
+/// lock needs ROW SHARE and EXCLUSIVE refuses it) cannot stall them. The table
+/// lock takes no xid, so the inserted event still settles past the xmin gate.
+#[tokio::test]
+async fn task_stream_admits_and_delivers_while_project_rows_are_locked() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "NRL", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    let mut hold = admin.begin().await.expect("hold tx");
+    sqlx::query("LOCK TABLE fvoci.projects IN EXCLUSIVE MODE")
+        .execute(&mut *hold)
+        .await
+        .expect("lock projects");
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let (open_tx, open_rx) = tokio::sync::oneshot::channel();
+    let listener = tokio::spawn(sse_listen(
+        app.clone(),
+        path,
+        cookie.clone(),
+        Some(b"event: open".to_vec()),
+        Some(open_tx),
+        Some(b"event: task".to_vec()),
+        Duration::from_secs(20),
+    ));
+    assert!(
+        timeout(Duration::from_secs(5), open_rx)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .is_some(),
+        "stream admission and the open frame must not wait for a project row lock"
+    );
+    let task_id = insert_task_created_event(&admin, workspace_id, project_id, owner_id).await;
+    assert!(
+        listener.await.expect("listener"),
+        "hint for {task_id} must be delivered while the project rows are locked"
+    );
+    hold.rollback().await.expect("release");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_access_stream_closes_when_user_suspended() {
+    let harness = TestDb::bootstrap().await;
+    let (app, admin_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "suspend-member").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let reader = sse_admit(app.clone(), &path, session_cookie_header(&member.cookie))
+        .await
+        .expect("member admitted to the access stream");
+    let (status, body) = json_request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/admin/users",
+        Some(json!({"userId": member.user_id, "suspended": true})),
+        Some(&admin_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "a suspended user's access stream must end"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// api_tokens has RLS: the per-tick credential check must run under the
+/// workspace tenant or a live token reads as dead (and a dead one as live).
+#[tokio::test]
+async fn task_stream_with_bearer_token_closes_when_token_deleted() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "BTK", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "stream", "scopes": ["tasks.read"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{token}");
+    let secret = token["token"].as_str().expect("secret").to_string();
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let reader = sse_admit(
+        app.clone(),
+        &path,
+        ("authorization", format!("Bearer {secret}")),
+    )
+    .await
+    .expect("bearer admitted to the task stream");
+    // A live token keeps the stream open across several ticks.
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    assert!(
+        !reader.is_finished(),
+        "a live token's stream must stay open"
+    );
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/api-tokens/{}",
+            token["id"].as_str().unwrap()
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "the stream must end once its bearer token is deleted"
+    );
     admin.close().await;
     harness.cleanup().await;
 }

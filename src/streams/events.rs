@@ -2,7 +2,10 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::set_tenant;
+use crate::db::context::{session_is_live, set_tenant};
+use crate::db::projects::project_permission_by_id;
+use crate::db::workspace::membership_role;
+use crate::projects::ProjectPermission;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventCursor {
@@ -39,6 +42,72 @@ const ACCESS_VERBS: &[&str] = &[
     "user.withdraw_cancelled",
 ];
 
+/// Result of one stream access check. Every check runs in one transaction
+/// under the workspace tenant (api_tokens has RLS) and takes no row lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamAccess {
+    Allowed,
+    /// The session or API token is revoked or expired, or its user is
+    /// suspended or deleted.
+    CredentialDead,
+    /// The credential is live but no longer grants the project or workspace.
+    Denied,
+}
+
+/// Project stream access: a live credential with at least View on a live
+/// project. Used for admission and for every delivered item.
+pub async fn project_stream_access(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> Result<StreamAccess, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let access = if !session_is_live(&mut tx, user_id, session_id).await? {
+        StreamAccess::CredentialDead
+    } else if project_permission_by_id(&mut tx, workspace_id, user_id, project_id)
+        .await?
+        .is_some_and(|permission| permission.at_least(ProjectPermission::View))
+    {
+        StreamAccess::Allowed
+    } else {
+        StreamAccess::Denied
+    };
+    tx.commit().await?;
+    Ok(access)
+}
+
+/// Workspace stream access: a live credential of a current member.
+pub async fn workspace_stream_access(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> Result<StreamAccess, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let access = workspace_access_in(&mut tx, workspace_id, user_id, session_id).await?;
+    tx.commit().await?;
+    Ok(access)
+}
+
+async fn workspace_access_in(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> Result<StreamAccess, sqlx::Error> {
+    if !session_is_live(tx, user_id, session_id).await? {
+        return Ok(StreamAccess::CredentialDead);
+    }
+    Ok(match membership_role(tx, workspace_id, user_id).await? {
+        Some(_) => StreamAccess::Allowed,
+        None => StreamAccess::Denied,
+    })
+}
+
 pub async fn initial_cursor(pool: &PgPool, workspace_id: Uuid) -> Result<EventCursor, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
@@ -62,32 +131,47 @@ pub async fn initial_cursor(pool: &PgPool, workspace_id: Uuid) -> Result<EventCu
     })
 }
 
+/// One task stream tick in one transaction: the credential check, then the
+/// project's events after `cursor`. `None` once the credential is dead.
 pub async fn poll_task_events(
     pool: &PgPool,
     workspace_id: Uuid,
     project_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
     cursor: &EventCursor,
     limit: i32,
-) -> Result<Vec<StreamEventRow>, sqlx::Error> {
+) -> Result<Option<Vec<StreamEventRow>>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, user_id, session_id).await? {
+        tx.commit().await?;
+        return Ok(None);
+    }
     let rows = query_task_project_events(&mut tx, workspace_id, project_id, cursor, limit).await?;
     tx.commit().await?;
-    Ok(rows)
+    Ok(Some(rows))
 }
 
+/// One access stream tick in one transaction: the credential check, then
+/// the access events after `cursor`. `None` once the credential is dead.
 pub async fn poll_access_events(
     pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
+    session_id: Uuid,
     cursor: &EventCursor,
     limit: i32,
-) -> Result<Vec<StreamEventRow>, sqlx::Error> {
+) -> Result<Option<Vec<StreamEventRow>>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, user_id, session_id).await? {
+        tx.commit().await?;
+        return Ok(None);
+    }
     let rows = query_access_events(&mut tx, workspace_id, user_id, cursor, limit).await?;
     tx.commit().await?;
-    Ok(rows)
+    Ok(Some(rows))
 }
 
 /// Map a polled row to the wire `event: task` hint (`verb`, `taskId`), if any.

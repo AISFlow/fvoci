@@ -21,18 +21,15 @@ use futures_util::Stream;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::db::context::{session_is_live, set_tenant};
-use crate::db::projects::{lock_project, project_permission};
-use crate::db::workspace::membership_role;
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
 use crate::http::routes::tasks::{internal, require_session};
 use crate::http::state::AppState;
-use crate::projects::ProjectPermission;
 use crate::streams::{
     access_event_targets_user, initial_cursor, poll_access_events, poll_task_events,
-    task_stream_wire_hint, EventCursor, StreamAcquireError, StreamGuard, StreamHub,
-    STREAM_CHANNEL_CAPACITY, STREAM_HIGH_WATER_MARK, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
+    project_stream_access, task_stream_wire_hint, workspace_stream_access, EventCursor,
+    StreamAccess, StreamAcquireError, StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY,
+    STREAM_HIGH_WATER_MARK, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
 };
 
 #[cfg(feature = "db-tests")]
@@ -115,7 +112,16 @@ async fn project_task_stream(
         Some(workspace_id),
     )
     .await?;
-    admit_project_view(&state, workspace_id, project_id, user_id, session_id).await?;
+    admit(
+        project_stream_access(
+            &state.auth.db.pool,
+            workspace_id,
+            project_id,
+            user_id,
+            session_id,
+        )
+        .await,
+    )?;
 
     let pool = state.auth.db.pool.clone();
     let hub = state.streams.clone();
@@ -157,7 +163,7 @@ async fn workspace_access_stream(
         Some(workspace_id),
     )
     .await?;
-    admit_workspace_member(&state, workspace_id, user_id, session_id).await?;
+    admit(workspace_stream_access(&state.auth.db.pool, workspace_id, user_id, session_id).await)?;
 
     let pool = state.auth.db.pool.clone();
     let hub = state.streams.clone();
@@ -168,64 +174,15 @@ async fn workspace_access_stream(
     Ok(sse_response(stream))
 }
 
-async fn admit_project_view(
-    state: &AppState,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> Result<(), AppError> {
-    let pool = &state.auth.db.pool;
-    let mut tx = pool.begin().await.map_err(internal)?;
-    set_tenant(&mut tx, workspace_id).await.map_err(internal)?;
-    if !session_is_live(&mut tx, user_id, session_id)
-        .await
-        .map_err(internal)?
-    {
-        tx.rollback().await.ok();
-        return Err(AppError::from_code(ProblemCode::AuthenticationRequired));
+/// Admission keeps the 401 (credential gone) / 404 (no access) distinction.
+fn admit(access: Result<StreamAccess, sqlx::Error>) -> Result<(), AppError> {
+    match access.map_err(internal)? {
+        StreamAccess::Allowed => Ok(()),
+        StreamAccess::CredentialDead => {
+            Err(AppError::from_code(ProblemCode::AuthenticationRequired))
+        }
+        StreamAccess::Denied => Err(AppError::from_code(ProblemCode::NotFound)),
     }
-    let Some(locked) = lock_project(&mut tx, workspace_id, project_id)
-        .await
-        .map_err(internal)?
-    else {
-        tx.rollback().await.ok();
-        return Err(AppError::from_code(ProblemCode::NotFound));
-    };
-    let permission = project_permission(&mut tx, workspace_id, user_id, &locked)
-        .await
-        .map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
-    if !permission.at_least(ProjectPermission::View) {
-        return Err(AppError::from_code(ProblemCode::NotFound));
-    }
-    Ok(())
-}
-
-async fn admit_workspace_member(
-    state: &AppState,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> Result<(), AppError> {
-    let pool = &state.auth.db.pool;
-    let mut tx = pool.begin().await.map_err(internal)?;
-    set_tenant(&mut tx, workspace_id).await.map_err(internal)?;
-    if !session_is_live(&mut tx, user_id, session_id)
-        .await
-        .map_err(internal)?
-    {
-        tx.rollback().await.ok();
-        return Err(AppError::from_code(ProblemCode::AuthenticationRequired));
-    }
-    let role = membership_role(&mut tx, workspace_id, user_id)
-        .await
-        .map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
-    if role.is_none() {
-        return Err(AppError::from_code(ProblemCode::NotFound));
-    }
-    Ok(())
 }
 
 fn stream_stopped() -> Response {
@@ -335,8 +292,11 @@ fn authorize_queue_item(
     let session_id = auth.session_id;
     match item {
         TaskStreamQueueItem::Open | TaskStreamQueueItem::TaskHint { .. } => Box::pin(async move {
-            task_hint_delivery_authorized(&pool, workspace_id, project_id, user_id, session_id)
-                .await
+            // Fail closed: a DB error withholds the item like a denial.
+            matches!(
+                project_stream_access(&pool, workspace_id, project_id, user_id, session_id).await,
+                Ok(StreamAccess::Allowed)
+            )
         }),
     }
 }
@@ -419,17 +379,6 @@ fn drain_task_queue(
     }
 }
 
-async fn task_hint_delivery_authorized(
-    pool: &sqlx::PgPool,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> bool {
-    session_still_valid(pool, workspace_id, user_id, session_id).await
-        && project_still_viewable(pool, workspace_id, project_id, user_id).await
-}
-
 #[allow(clippy::too_many_arguments)]
 fn task_sse_stream(
     hub: Arc<StreamHub>,
@@ -472,15 +421,25 @@ fn task_sse_stream(
             if !hub.accepting() {
                 return;
             }
-            if !session_still_valid(&pool, workspace_id, user_id, session_id).await {
-                return;
-            }
             tokio::select! {
                 _ = queue_tx.closed() => return,
                 _ = tokio::time::sleep(STREAM_POLL_INTERVAL) => {}
             }
-            match poll_task_events(&pool, workspace_id, project_id, &cursor, 50).await {
-                Ok(rows) => {
+            // The credential check shares the poll transaction, so a revoked
+            // session or token ends the stream within one tick.
+            match poll_task_events(
+                &pool,
+                workspace_id,
+                project_id,
+                user_id,
+                session_id,
+                &cursor,
+                50,
+            )
+            .await
+            {
+                Ok(None) => return,
+                Ok(Some(rows)) => {
                     for row in rows {
                         let Some((wire_verb, task_id)) = task_stream_wire_hint(&row) else {
                             cursor = EventCursor {
@@ -507,7 +466,9 @@ fn task_sse_stream(
                     }
                 }
                 Err(err) => {
+                    // Fail closed: the credential could not be checked.
                     tracing::warn!("task stream poll failed: {}", err);
+                    return;
                 }
             }
         }
@@ -557,25 +518,22 @@ fn access_sse_stream(
             if !hub.accepting() {
                 break;
             }
-            if !session_still_valid(&pool, workspace_id, user_id, session_id).await {
-                break;
-            }
             tokio::select! {
                 _ = disconnect_tx.closed() => break,
                 _ = tokio::time::sleep(STREAM_POLL_INTERVAL) => {}
             }
-            match poll_access_events(&pool, workspace_id, user_id, &cursor, 50).await {
-                Ok(rows) => {
+            match poll_access_events(&pool, workspace_id, user_id, session_id, &cursor, 50).await {
+                Ok(None) => break,
+                Ok(Some(rows)) => {
                     for row in rows {
                         cursor = EventCursor {
                             xact: row.xact.clone(),
                             seq: row.seq,
                         };
-                        if !session_still_valid(&pool, workspace_id, user_id, session_id).await {
-                            finished = true;
-                            break;
-                        }
-                        if !membership_role_only(&pool, workspace_id, user_id).await {
+                        if !matches!(
+                            workspace_stream_access(&pool, workspace_id, user_id, session_id).await,
+                            Ok(StreamAccess::Allowed)
+                        ) {
                             finished = true;
                             break;
                         }
@@ -586,7 +544,9 @@ fn access_sse_stream(
                     }
                 }
                 Err(err) => {
+                    // Fail closed: the credential could not be checked.
                     tracing::warn!("access stream poll failed: {}", err);
+                    break;
                 }
             }
         }
@@ -597,70 +557,6 @@ fn access_sse_stream(
         _disconnect_rx: disconnect_rx,
         _guard: guard,
     }
-}
-
-async fn session_still_valid(
-    pool: &sqlx::PgPool,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> bool {
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return false,
-    };
-    if set_tenant(&mut tx, workspace_id).await.is_err() {
-        return false;
-    }
-    let live = session_is_live(&mut tx, user_id, session_id)
-        .await
-        .unwrap_or(false);
-    let _ = tx.commit().await;
-    live
-}
-
-async fn project_still_viewable(
-    pool: &sqlx::PgPool,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    user_id: Uuid,
-) -> bool {
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return false,
-    };
-    if set_tenant(&mut tx, workspace_id).await.is_err() {
-        return false;
-    }
-    let Some(locked) = lock_project(&mut tx, workspace_id, project_id)
-        .await
-        .ok()
-        .flatten()
-    else {
-        return false;
-    };
-    let ok = project_permission(&mut tx, workspace_id, user_id, &locked)
-        .await
-        .ok()
-        .is_some_and(|p| p.at_least(ProjectPermission::View));
-    let _ = tx.commit().await;
-    ok
-}
-
-async fn membership_role_only(pool: &sqlx::PgPool, workspace_id: Uuid, user_id: Uuid) -> bool {
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return false,
-    };
-    if set_tenant(&mut tx, workspace_id).await.is_err() {
-        return false;
-    }
-    let role = membership_role(&mut tx, workspace_id, user_id)
-        .await
-        .ok()
-        .flatten();
-    let _ = tx.commit().await;
-    role.is_some()
 }
 
 #[cfg(all(feature = "db-tests", test))]
