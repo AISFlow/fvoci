@@ -45,19 +45,52 @@ EOF
   exit 2
 }
 
+# --- env-file values (checked by scripts/test-restore-env.sh) ---
+# Read KEY from the env file the way docker compose does for the values an
+# install uses: KEY=value, KEY='value' or KEY="value". Anything whose Compose
+# meaning could differ from the literal text (escapes, $ interpolation, inline
+# comments, whitespace, export, a repeated key) is refused, not guessed.
+env_file_value() {
+  local key="$1" file="$2" line value
+  local -a lines=()
+  mapfile -t lines < <(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$file" || true)
+  if ((${#lines[@]} == 0)); then
+    return 1
+  fi
+  if ((${#lines[@]} > 1)); then
+    echo "${key} is set more than once in the env file" >&2
+    return 2
+  fi
+  line="${lines[0]%$'\r'}"
+  if [[ "$line" != "${key}="* ]]; then
+    echo "${key} in the env file must be written as ${key}=value (no export or spaces)" >&2
+    return 2
+  fi
+  value="${line#*=}"
+  if [[ "$value" =~ ^\'([^\']*)\'$ ]]; then
+    value="${BASH_REMATCH[1]}"
+  elif [[ "$value" =~ ^\"([^\"\\\$]*)\"$ ]]; then
+    value="${BASH_REMATCH[1]}"
+  elif [[ "$value" =~ ^[\'\"] || "$value" =~ [[:space:]#\$\\] ]]; then
+    echo "${key} in the env file must be unquoted, or fully in single or double quotes without \\, \$ or inner quotes" >&2
+    return 2
+  fi
+  printf '%s\n' "$value"
+}
+# --- end env-file values ---
+
 read_env() {
-  local key="$1" default="${2-}"
-  local line
-  line="$(grep -E "^${key}=" "$ENV_FILE" || true)"
-  if [[ -z "$line" && -n "$default" ]]; then
+  local key="$1" default="${2-}" status=0
+  env_file_value "$key" "$ENV_FILE" || status=$?
+  if ((status == 1)) && [[ -n "$default" ]]; then
     printf '%s\n' "$default"
     return
   fi
-  if [[ -z "$line" ]]; then
+  if ((status == 1)); then
     echo "missing ${key} in env file" >&2
     exit 1
   fi
-  printf '%s\n' "${line#*=}"
+  ((status == 0)) || exit 1
 }
 
 while [[ $# -gt 0 ]]; do
