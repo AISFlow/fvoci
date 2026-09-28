@@ -171,22 +171,11 @@ fn worker_loop(
                 if let Some(mut old) = session.take() {
                     old.kill_and_reap();
                 }
-                let spawned = match spawn_session(&engine_bin, limits) {
-                    Ok(fresh) => {
-                        session = Some(fresh);
-                        ops_used.store(0, Ordering::Relaxed);
-                        Ok(())
-                    }
-                    Err(report) => {
-                        warn_engine_not_applied(
-                            "bridge.recycle_spawn",
-                            None,
-                            None,
-                            &report.outcome,
-                        );
-                        Err(report)
-                    }
-                };
+                // The caller logs a spawn failure, with the room's ids.
+                let spawned = spawn_session(&engine_bin, limits).map(|fresh| {
+                    session = Some(fresh);
+                    ops_used.store(0, Ordering::Relaxed);
+                });
                 let _ = reply.send(spawned);
             }
             BridgeJob::Stop { reply } => {

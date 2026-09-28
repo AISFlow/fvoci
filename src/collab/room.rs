@@ -3301,31 +3301,46 @@ impl RoomActor {
 
     async fn reload_primary_from_committed(&mut self) -> Result<(), JoinError> {
         if let Err(err) = self.engine.recycle().await {
-            // Every primary slot taken is transient: ask the client to retry
-            // (1013). The next reload spawns again.
-            let at_capacity = matches!(
-                &err,
-                RecycleError::Spawn(report) if matches!(
-                    report.outcome,
-                    EngineStatus::ResourceLimit {
-                        kind: LimitKind::Ops,
-                        ..
-                    }
-                )
-            );
-            tracing::warn!(
-                workspace_id = %self.workspace_id,
-                document_id = %self.document_id,
-                bridge_dead = matches!(err, RecycleError::Dead),
-                at_capacity,
-                "collab primary recycle failed"
-            );
             self.primary_loaded = false;
             self.primary_dirty = true;
-            return Err(if at_capacity {
-                JoinError::CapacityRetry
-            } else {
-                JoinError::EngineUnavailable
+            return Err(match err {
+                // Every primary slot taken is transient: the client retries
+                // (1013) and the next reload spawns again. Debug, like the
+                // transport's capacity refusals: a line per retry would grow
+                // with the waiting clients.
+                RecycleError::Spawn(report)
+                    if matches!(
+                        report.outcome,
+                        EngineStatus::ResourceLimit {
+                            kind: LimitKind::Ops,
+                            ..
+                        }
+                    ) =>
+                {
+                    tracing::debug!(
+                        workspace_id = %self.workspace_id,
+                        document_id = %self.document_id,
+                        "collab primary helper spawn refused at capacity"
+                    );
+                    JoinError::CapacityRetry
+                }
+                RecycleError::Spawn(report) => {
+                    warn_engine_not_applied(
+                        "room.reload_primary_spawn",
+                        Some(self.workspace_id),
+                        Some(self.document_id),
+                        &report.outcome,
+                    );
+                    JoinError::EngineUnavailable
+                }
+                RecycleError::Dead => {
+                    tracing::warn!(
+                        workspace_id = %self.workspace_id,
+                        document_id = %self.document_id,
+                        "collab primary recycle failed: engine bridge dead"
+                    );
+                    JoinError::EngineUnavailable
+                }
             });
         }
         match self.load_engine_primary().await {
