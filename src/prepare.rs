@@ -750,6 +750,10 @@ mod tests {
             "ENCRYPTION_KEYS",
             "DATABASE_APP_URL",
             "FVOCI_BIND",
+            // Operator settings from compose `environment:` (e.g. the
+            // metrics override) must reach the server unchanged.
+            "METRICS_ALLOW_IPS",
+            "FVOCI_COLLAB_MEMORY_BUDGET",
         ] {
             assert!(passed_to_server(kept), "{kept}");
         }

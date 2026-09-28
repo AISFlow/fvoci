@@ -728,12 +728,33 @@ async fn metrics_probe_exports_text_format_for_allowed_peer() {
         "# TYPE fvoci_outbox_xmin_stall_seconds gauge",
         "# TYPE fvoci_task_stream_subscribers gauge",
         "# TYPE fvoci_db_pool_connections gauge",
+        "# TYPE fvoci_db_metrics_refresh_failures counter",
+        "# TYPE fvoci_db_metrics_last_success_timestamp_seconds gauge",
+        "# TYPE fvoci_process_resident_memory_bytes gauge",
+        "# TYPE fvoci_collab_helper_resident_memory_bytes gauge",
+        "# TYPE fvoci_collab_helper_memory_budget_bytes gauge",
         "fvoci_db_pool_max_connections 1",
-        "fvoci_outbox_lag_seconds 0",
         "fvoci_task_stream_subscribers 0",
+        "fvoci_collab_helper_resident_memory_bytes 0",
     ] {
         assert!(body.contains(name), "{name} missing:\n{body}");
     }
+    // PostgreSQL is unreachable: the outbox gauges are unknown, not a
+    // healthy 0, and the failed refresh is counted.
+    for (name, value) in [
+        ("fvoci_outbox_lag_seconds", "NaN"),
+        ("fvoci_outbox_xmin_stall_seconds", "NaN"),
+        ("fvoci_db_metrics_refresh_failures_total", "1"),
+        ("fvoci_db_metrics_last_success_timestamp_seconds", "0.0"),
+        // No collaboration hub in this router.
+        ("fvoci_collab_helper_memory_budget_bytes", "NaN"),
+    ] {
+        assert_eq!(metric_sample(&body, name), value, "{name}\n{body}");
+    }
+    let rss: f64 = metric_sample(&body, "fvoci_process_resident_memory_bytes")
+        .parse()
+        .unwrap();
+    assert!(rss > 1_000_000.0, "{rss}");
     assert!(
         body.contains(
             r#"fvoci_http_request_duration_seconds_count{method="GET",route="/health",status="200"} 1"#
@@ -752,6 +773,42 @@ async fn metrics_probe_exports_text_format_for_allowed_peer() {
     ));
     let (status, _, _) = probe_body(&app, request).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+fn metric_sample<'a>(body: &'a str, name: &str) -> &'a str {
+    body.lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("{name} missing:\n{body}"))
+}
+
+/// Over real TCP the allowlist sees the socket peer (127.0.0.1): listed it
+/// scrapes, unlisted it gets the 404 even when `X-Forwarded-For` names an
+/// allowed address, and a listed peer is not refused by a foreign XFF.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_allow_list_uses_tcp_peer_not_forwarded_for() {
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for (allow, forwarded, expected) in [
+        ("127.0.0.1/32", None, 200),
+        ("127.0.0.1/32", Some("203.0.113.9"), 200),
+        ("10.0.0.0/8", Some("10.1.1.1"), 404),
+        ("10.0.0.0/8", Some("10.1.1.1, 127.0.0.1"), 404),
+        ("", Some("127.0.0.1"), 404),
+    ] {
+        let (addr, task) = serve_on_loopback(probe_router(allow).await).await;
+        let mut request = client.get(format!("http://{addr}/metrics"));
+        if let Some(xff) = forwarded {
+            request = request
+                .header("x-forwarded-for", xff)
+                .header("x-real-ip", xff)
+                .header("forwarded", format!("for={xff}"));
+        }
+        let response = request.send().await.unwrap();
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, expected, "{allow} {forwarded:?}: {body}");
+        assert_eq!(body.contains("fvoci_"), expected == 200, "{body}");
+        task.abort();
+    }
 }
 
 /// Source `SHELL_EXCLUDED_PREFIXES`: probe sub-paths never get the SPA shell.
