@@ -425,16 +425,24 @@ async fn storage_check() -> Result<Option<String>, String> {
 }
 
 async fn collab_engine_check(collab: &CollabConfig) -> Result<Option<String>, String> {
+    use crate::collab::engine_bridge::{EngineBridge, RecycleError};
     use collab_engine::outcome::EngineStatus;
-    let bridge = crate::collab::engine_bridge::EngineBridge::spawn(
+    let bridge = EngineBridge::spawn(
         collab.engine_bin.clone(),
         collab_engine::limits::Limits::default(),
     )
     .map_err(|report| format!("spawn failed: {:?}", report.outcome))?;
-    let reply = tokio::time::timeout(
-        HELPER_TIMEOUT,
-        bridge.call(collab_engine::protocol::Request::Ping),
-    )
+    // The bridge starts without a helper: recycle spawns it, as for a room.
+    let reply = tokio::time::timeout(HELPER_TIMEOUT, async {
+        match bridge.recycle().await {
+            Ok(()) => bridge
+                .call(collab_engine::protocol::Request::Ping)
+                .await
+                .map_err(|_| "engine bridge stopped".to_string()),
+            Err(RecycleError::Spawn(report)) => Err(format!("spawn failed: {:?}", report.outcome)),
+            Err(RecycleError::Dead) => Err("engine bridge stopped".into()),
+        }
+    })
     .await;
     let _ = bridge.stop().await;
     match reply {
@@ -442,7 +450,7 @@ async fn collab_engine_check(collab: &CollabConfig) -> Result<Option<String>, St
             EngineStatus::Ok { .. } => Ok(None),
             other => Err(format!("ping failed: {other:?}")),
         },
-        Ok(Err(_)) => Err("engine bridge stopped".into()),
+        Ok(Err(message)) => Err(message),
         Err(_) => Err("ping timed out".into()),
     }
 }

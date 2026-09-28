@@ -1827,6 +1827,222 @@ async fn collab_lifecycle_idle_timer_reclaims_dead_slot_after_hold_release() {
     .await;
 }
 
+/// A fresh temp path for a helper that does not exist yet. `link_helper`
+/// makes it the real helper through a symlink (never a copied file, which a
+/// concurrent fork could hold open for writing and exec would refuse).
+fn missing_helper_path() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("fvoci-missing-helper-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("helper dir");
+    dir.join("collab-engine")
+}
+
+fn link_helper(path: &std::path::Path) {
+    std::os::unix::fs::symlink(
+        fvoci_server::collab::config::require_collab_engine_for_tests(),
+        path,
+    )
+    .expect("link the real helper into place");
+}
+
+fn remove_helper_dir(path: &std::path::Path) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// The bridge spawns no helper until the first recycle, a call never spawns
+/// one, and a failed spawn leaves the bridge usable: the next recycle after
+/// the helper appears succeeds and stop stays clean.
+#[tokio::test]
+async fn collab_lifecycle_engine_bridge_is_lazy_and_survives_spawn_failure() {
+    use collab_engine::outcome::{EngineStatus, WorkerFailureReason};
+    use collab_engine::protocol::Request;
+    use fvoci_server::collab::engine_bridge::EngineBridge;
+
+    // Live helpers count against the process-wide cap like a hub's do.
+    let _slot = support::acquire_test_server_slot().await;
+    let limits = collab_engine::Limits::for_tests();
+    let is_session_dead = |status: &EngineStatus| {
+        matches!(
+            status,
+            EngineStatus::WorkerFailure {
+                reason: WorkerFailureReason::SessionDead,
+                ..
+            }
+        )
+    };
+
+    let real = fvoci_server::collab::config::require_collab_engine_for_tests();
+    let bridge = EngineBridge::spawn(real, limits).expect("bridge thread");
+    let before = bridge
+        .call(Request::Ping)
+        .await
+        .expect("bridge thread alive");
+    assert!(
+        is_session_dead(&before.outcome),
+        "no helper may answer before the first recycle: {:?}",
+        before.outcome
+    );
+    bridge.recycle().await.expect("recycle spawns the helper");
+    let ping = bridge.call(Request::Ping).await.expect("bridge alive");
+    assert!(
+        matches!(ping.outcome, EngineStatus::Ok { .. }),
+        "{:?}",
+        ping.outcome
+    );
+    bridge.stop().await.expect("stop");
+
+    let path = missing_helper_path();
+    let bridge = EngineBridge::spawn(path.clone(), limits).expect("bridge thread");
+    let failed = bridge.recycle().await.expect_err("helper is missing");
+    assert!(
+        format!("{failed:?}").contains("MissingExecutable"),
+        "recycle must report the spawn failure, got {failed:?}"
+    );
+    let after_failure = bridge
+        .call(Request::Ping)
+        .await
+        .expect("a failed spawn must not kill the bridge thread");
+    assert!(
+        is_session_dead(&after_failure.outcome),
+        "{:?}",
+        after_failure.outcome
+    );
+    link_helper(&path);
+    bridge
+        .recycle()
+        .await
+        .expect("recycle once the helper exists");
+    let ping = bridge.call(Request::Ping).await.expect("bridge alive");
+    assert!(
+        matches!(ping.outcome, EngineStatus::Ok { .. }),
+        "{:?}",
+        ping.outcome
+    );
+    bridge.stop().await.expect("stop after recovery is clean");
+    remove_helper_dir(&path);
+}
+
+/// A join that fails because the helper cannot spawn (1011 on the socket)
+/// must not wedge the room: the same actor on the same hub admits the next
+/// join once the helper is back, persists its edit, and shuts down clean.
+#[tokio::test]
+async fn collab_lifecycle_missing_helper_join_recovers_in_same_room() {
+    run_lifecycle_test(
+        "collab_lifecycle_missing_helper_join_recovers_in_same_room",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let engine = missing_helper_path();
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        support::test_collab_config_with_engine(4, 30_000, &engine),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let admin = admin_pool(&run.inner.harness.admin_url).await;
+                let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
+
+                let failed = hub_join_with_events(&hub, &wiki, 1).await;
+                assert_eq!(failed.err(), Some(JoinError::EngineUnavailable));
+                assert_eq!(
+                    hub.room_lifecycle_phase(key).await,
+                    RoomLifecyclePhase::Live
+                );
+                assert_eq!(room_start_count(wiki.document_id).await, 1);
+
+                link_helper(&engine);
+                let (conn_id, lease, mut events_rx) = hub_join_with_events(&hub, &wiki, 2)
+                    .await
+                    .expect("rejoin the same room once the helper exists");
+                run.retain_lease(lease);
+                assert_eq!(
+                    room_start_count(wiki.document_id).await,
+                    1,
+                    "the same actor must recover; no successor room"
+                );
+                let before = tail_seq(&admin, wiki.document_id).await;
+                hub.send_frame(
+                    key,
+                    conn_id,
+                    sync_update_frame(
+                        &routing_key(wiki.session.workspace_id, wiki.document_id),
+                        &sample_hi_update(),
+                    ),
+                )
+                .await;
+                wait_for_sync_status_applied(&mut events_rx).await;
+                assert!(
+                    tail_seq(&admin, wiki.document_id).await > before,
+                    "the recovered room must persist the edit"
+                );
+                let status = hub.shutdown().await;
+                assert!(
+                    status.is_clean(),
+                    "a room whose helper once failed to spawn must shut down clean: {status:?}"
+                );
+                remove_helper_dir(&engine);
+            })
+        },
+    )
+    .await;
+}
+
+/// A cold room reached first by HTTP (projection, then a body write) gets its
+/// helper through the room's reload path: the bridge spawns nothing eagerly.
+#[tokio::test]
+async fn collab_lifecycle_cold_room_http_projection_and_body_write() {
+    run_lifecycle_test(
+        "collab_lifecycle_cold_room_http_projection_and_body_write",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 30_000),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let admin = admin_pool(&run.inner.harness.admin_url).await;
+                let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
+                assert_eq!(
+                    hub.room_lifecycle_phase(key).await,
+                    RoomLifecyclePhase::Absent
+                );
+
+                let (user_id, session_id) = (wiki.session.user_id, wiki.session.session_id);
+                let live = hub
+                    .project_live(key, user_id, session_id)
+                    .await
+                    .expect("cold-room projection");
+                assert_eq!(room_start_count(wiki.document_id).await, 1);
+                let seed = fvoci_server::collab::seed::SeedEngine::from_hub(&hub)
+                    .tiptap_to_yjs_update(&serde_json::json!({"type": "doc", "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "cold write"}]}
+                    ]}))
+                    .await
+                    .expect("seed");
+                hub.replace_body(key, user_id, session_id, seed, Some(live.tail_seq))
+                    .await
+                    .expect("cold-room body write");
+                assert!(tail_seq(&admin, wiki.document_id).await > live.tail_seq);
+                let after = hub
+                    .project_live(key, user_id, session_id)
+                    .await
+                    .expect("projection after the write");
+                assert!(
+                    after.content_json.to_string().contains("cold write"),
+                    "{}",
+                    after.content_json
+                );
+            })
+        },
+    )
+    .await;
+}
+
 fn proc_effective_uid(pid: u32) -> u32 {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("status");
     status

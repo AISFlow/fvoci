@@ -4,13 +4,18 @@ use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 
 use collab_engine::limits::Limits;
-use collab_engine::outcome::{EngineReport, EngineStatus};
+use collab_engine::outcome::{EngineReport, EngineStatus, WorkerFailureReason};
 use collab_engine::process::{EngineSession, SpawnRequest};
 use collab_engine::protocol::Request;
 use tokio::sync::oneshot;
 
 /// Parent-side bridge to one owned native child on a dedicated std thread.
 /// Async callers await oneshot responses; native work never blocks the Tokio reactor.
+///
+/// The thread starts with no child. Only [`EngineBridge::recycle`] spawns one,
+/// so a room's child is always fresh and loaded by the caller right after; a
+/// call with no child fails instead of spawning an unloaded one. A failed
+/// spawn is reported and the thread keeps serving: the next recycle retries.
 pub struct EngineBridge {
     tx: Option<mpsc::Sender<BridgeJob>>,
     engine_bin: PathBuf,
@@ -24,8 +29,11 @@ enum BridgeJob {
         request: Request,
         reply: oneshot::Sender<EngineReport>,
     },
-    /// Kill the current child and spawn a fresh one (room reload after rejection).
-    Recycle { reply: oneshot::Sender<()> },
+    /// Kill the current child, if any, and spawn a fresh one (room load or
+    /// reload after rejection). Replies with the spawn failure, if any.
+    Recycle {
+        reply: oneshot::Sender<Result<(), EngineReport>>,
+    },
     /// Kill the current child and terminate the worker thread (room shutdown).
     Stop { reply: oneshot::Sender<()> },
 }
@@ -42,7 +50,7 @@ impl EngineBridge {
             .spawn(move || worker_loop(rx, engine_bin, limits, ops_tracker))
             .map_err(|e| {
                 EngineReport::new(EngineStatus::WorkerFailure {
-                    reason: collab_engine::outcome::WorkerFailureReason::Spawn,
+                    reason: WorkerFailureReason::Spawn,
                     detail: e.to_string(),
                 })
             })?;
@@ -66,12 +74,15 @@ impl EngineBridge {
         reply_rx.await.map_err(|_| BridgeError::Dead)
     }
 
-    pub async fn recycle(&self) -> Result<(), BridgeError> {
-        let tx = self.tx.as_ref().ok_or(BridgeError::Dead)?;
+    pub async fn recycle(&self) -> Result<(), RecycleError> {
+        let tx = self.tx.as_ref().ok_or(RecycleError::Dead)?;
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(BridgeJob::Recycle { reply: reply_tx })
-            .map_err(|_| BridgeError::Dead)?;
-        reply_rx.await.map_err(|_| BridgeError::Dead)
+            .map_err(|_| RecycleError::Dead)?;
+        reply_rx
+            .await
+            .map_err(|_| RecycleError::Dead)?
+            .map_err(|report| RecycleError::Spawn(Box::new(report)))
     }
 
     pub async fn stop(mut self) -> Result<(), BridgeError> {
@@ -120,31 +131,52 @@ pub enum BridgeError {
     Dead,
 }
 
+/// Why [`EngineBridge::recycle`] left the bridge without a child.
+#[derive(Debug, Clone)]
+pub enum RecycleError {
+    /// The worker thread is gone (it panicked or the bridge was stopped).
+    Dead,
+    /// The helper did not spawn (slot cap, fork/exec, missing binary). The
+    /// bridge has no child until a later recycle succeeds.
+    Spawn(Box<EngineReport>),
+}
+
 fn worker_loop(
     rx: mpsc::Receiver<BridgeJob>,
     engine_bin: PathBuf,
     limits: Limits,
     ops_used: Arc<AtomicU32>,
 ) {
-    let mut session = match spawn_session(&engine_bin, limits) {
-        Ok(session) => session,
-        Err(report) => {
-            warn_engine_not_applied("bridge.initial_spawn", None, None, &report.outcome);
-            return;
-        }
-    };
-    ops_used.store(0, Ordering::Relaxed);
+    // Spawned and reaped only on this thread: the helper's PDEATHSIG is tied
+    // to it, and it outlives every session it holds.
+    let mut session: Option<EngineSession> = None;
     while let Ok(job) = rx.recv() {
         match job {
             BridgeJob::Call { request, reply } => {
-                let report = session.call(&request);
-                ops_used.fetch_add(1, Ordering::Relaxed);
+                let report = match session.as_mut() {
+                    Some(session) => {
+                        let report = session.call(&request);
+                        ops_used.fetch_add(1, Ordering::Relaxed);
+                        report
+                    }
+                    None => EngineReport::new(EngineStatus::WorkerFailure {
+                        reason: WorkerFailureReason::SessionDead,
+                        detail: "no helper; recycle required".into(),
+                    }),
+                };
+                warn_once_if_oom_backstop_missing();
                 let _ = reply.send(report);
             }
             BridgeJob::Recycle { reply } => {
-                session.kill_and_reap();
-                session = match spawn_session(&engine_bin, limits) {
-                    Ok(s) => s,
+                if let Some(mut old) = session.take() {
+                    old.kill_and_reap();
+                }
+                let spawned = match spawn_session(&engine_bin, limits) {
+                    Ok(fresh) => {
+                        session = Some(fresh);
+                        ops_used.store(0, Ordering::Relaxed);
+                        Ok(())
+                    }
                     Err(report) => {
                         warn_engine_not_applied(
                             "bridge.recycle_spawn",
@@ -152,38 +184,40 @@ fn worker_loop(
                             None,
                             &report.outcome,
                         );
-                        break;
+                        Err(report)
                     }
                 };
-                ops_used.store(0, Ordering::Relaxed);
-                let _ = reply.send(());
+                let _ = reply.send(spawned);
             }
             BridgeJob::Stop { reply } => {
-                session.kill_and_reap();
+                if let Some(mut old) = session.take() {
+                    old.kill_and_reap();
+                }
                 let _ = reply.send(());
                 break;
             }
         }
     }
-    session.kill_and_reap();
+    if let Some(mut old) = session.take() {
+        old.kill_and_reap();
+    }
+}
+
+/// The helper reports a denied `oom_score_adj` only after its first reply, so
+/// check after calls; warn once per process.
+fn warn_once_if_oom_backstop_missing() {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if collab_engine::process::oom_backstop_missing()
+        && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        tracing::warn!(
+            "collab helper OOM backstop unavailable: oom_score_adj was not applied (container profile); container mem_limit and per-helper limits remain the bound"
+        );
+    }
 }
 
 #[allow(clippy::result_large_err)]
 fn spawn_session(engine_bin: &Path, limits: Limits) -> Result<EngineSession, EngineReport> {
-    let session = spawn_session_inner(engine_bin, limits);
-    if session.is_ok() && collab_engine::process::oom_backstop_missing() {
-        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            tracing::warn!(
-                "collab helper OOM backstop unavailable: oom_score_adj was not applied (container profile); container mem_limit and per-helper limits remain the bound"
-            );
-        }
-    }
-    session
-}
-
-#[allow(clippy::result_large_err)]
-fn spawn_session_inner(engine_bin: &Path, limits: Limits) -> Result<EngineSession, EngineReport> {
     EngineSession::spawn(SpawnRequest {
         engine_bin: engine_bin.to_path_buf(),
         limits,
