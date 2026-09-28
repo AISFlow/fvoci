@@ -32,8 +32,8 @@ type DigestClaim = (Uuid, Uuid, Option<DateTime<Utc>>);
 ///
 /// The sweep walks the due rows in `(workspace_id, user_id)` order, one claim
 /// batch after another, so every due row is served, not only the first
-/// batch. A failed claim is handed back after its batch; it lies behind the
-/// walk, so this sweep does not claim it again. The walk stops after a short
+/// batch. A failed claim is handed back right after its send; it lies behind
+/// the walk, so this sweep does not claim it again. The walk stops after a short
 /// batch, on cancel, after `DIGEST_TIME_BUDGET`, or after a batch in which
 /// every send failed (SMTP is most likely down; a refusal of one recipient
 /// does not count, it shows SMTP is up); unsent claims are handed back.
@@ -60,13 +60,13 @@ pub async fn send_due_digests(
 
         let mut attempted = 0u32;
         let mut failed = 0u32;
-        let mut hand_back: Vec<DigestClaim> = Vec::new();
         let mut pending = due.into_iter();
         while let Some(claim) = pending.next() {
             if stop() {
-                // Hand the unsent claims back so the next sweep sends them.
-                hand_back.push(claim);
-                hand_back.extend(pending.by_ref());
+                // Hand the claims not tried back so the next sweep sends them.
+                for (workspace_id, user_id, prev_last) in std::iter::once(claim).chain(pending) {
+                    restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
+                }
                 break;
             }
             let (workspace_id, user_id, prev_last) = claim;
@@ -77,22 +77,22 @@ pub async fn send_due_digests(
                 }
                 Ok(false) => {}
                 Err(err) => {
-                    // Source keeps lastDigestAt on failure so the window is retried.
+                    // Source keeps lastDigestAt on failure so the window is
+                    // retried. Hand the claim back at once: it lies behind
+                    // the walk, so this sweep does not claim it again, and a
+                    // sweep dropped later in the batch still leaves it due.
+                    restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
                     attempted += 1;
                     if !matches!(&err, DigestError::Mail(mail) if smtp::is_final_for_recipient(&mail.code))
                     {
                         failed += 1;
                     }
-                    hand_back.push(claim);
                     tracing::warn!(
                         message = %format!("digest: recipient deferred to the next sweep ({err})"),
                         "mail.send_failed"
                     );
                 }
             }
-        }
-        for (workspace_id, user_id, prev_last) in hand_back {
-            restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
         }
         if short || (attempted > 0 && failed == attempted) {
             break;
