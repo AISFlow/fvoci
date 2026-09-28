@@ -12,6 +12,7 @@ use project_harness::{
     insert_project_document, insert_stored_attachment, json_request, setup_session, TestDb,
 };
 use serde_json::json;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 fn item_for<'a>(body: &'a serde_json::Value, slug: &str) -> &'a serde_json::Value {
@@ -1666,6 +1667,45 @@ async fn insert_marked_event(
     .expect("insert event");
 }
 
+type XidHolder = (Option<String>, i32, Option<String>, Option<String>);
+
+/// The event log only serves rows whose transaction precedes the snapshot xmin,
+/// so wait until every transaction up to now has finished before reading.
+async fn settle_committed_events(admin: &sqlx::PgPool) {
+    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(admin)
+        .await
+        .expect("current xid");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !sqlx::query_scalar::<_, bool>(
+        "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8",
+    )
+    .bind(&horizon)
+    .fetch_one(admin)
+    .await
+    .expect("snapshot xmin")
+    {
+        if Instant::now() >= deadline {
+            let xmin: String =
+                sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot())::text")
+                    .fetch_one(admin)
+                    .await
+                    .expect("snapshot xmin");
+            let holders: Vec<XidHolder> = sqlx::query_as(
+                "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
+                     FROM pg_stat_activity \
+                     WHERE backend_xid IS NOT NULL OR backend_xmin IS NOT NULL \
+                     ORDER BY age(COALESCE(backend_xid, backend_xmin)) DESC LIMIT 5",
+            )
+            .fetch_all(admin)
+            .await
+            .expect("xmin holders");
+            panic!("events never settled: xmin {xmin} <= {horizon}; oldest holders {holders:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn event_markers(body: &serde_json::Value) -> Vec<String> {
     body["items"]
         .as_array()
@@ -1807,6 +1847,7 @@ async fn workspace_events_are_manage_only_and_hide_unviewable_projects() {
         json!({"marker": "x"}),
     )
     .await;
+    settle_committed_events(&admin).await;
 
     let path = format!("/api/v1/workspaces/{workspace_id}/events?limit=100");
     let (status, body) = json_request(app.clone(), "GET", &path, None, None).await;
@@ -1906,6 +1947,7 @@ async fn workspace_events_paginate_visible_rows_in_relay_order() {
         "private",
     )
     .await;
+    settle_committed_events(&admin).await;
     let base = format!("/api/v1/workspaces/{workspace_id}/events");
     let (status, before) = json_request(
         app.clone(),
@@ -1940,6 +1982,7 @@ async fn workspace_events_paginate_visible_rows_in_relay_order() {
         .await;
         expected.push(marker);
     }
+    settle_committed_events(&admin).await;
 
     // First page skips the pre-existing rows; every later page is exactly `limit`
     // visible rows even though hidden rows sit between them.
