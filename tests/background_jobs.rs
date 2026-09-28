@@ -4,7 +4,9 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,35 +50,72 @@ struct CapturedMail {
 struct SmtpSink {
     port: u16,
     mails: Arc<Mutex<Vec<CapturedMail>>>,
+    sessions: Arc<AtomicUsize>,
     handle: tokio::task::JoinHandle<()>,
+}
+
+/// How a scripted sink answers `RCPT TO` for one address.
+#[derive(Clone, Copy)]
+enum RcptReply {
+    /// This reply line, every time.
+    Reply(&'static str),
+    /// No reply: the session hangs until the client gives up.
+    Hang,
 }
 
 impl SmtpSink {
     async fn spawn() -> Self {
+        Self::spawn_scripted("220 fvoci-test", Vec::new()).await
+    }
+
+    /// A sink that greets with `greeting` (a non-220 greeting ends the
+    /// session) and answers `RCPT TO` per address from `rcpt`; other
+    /// addresses get `250`.
+    async fn spawn_scripted(greeting: &'static str, rcpt: Vec<(String, RcptReply)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind smtp");
         let port = listener.local_addr().expect("addr").port();
         let mails = Arc::new(Mutex::new(Vec::new()));
+        let sessions = Arc::new(AtomicUsize::new(0));
+        let rcpt: Arc<HashMap<String, RcptReply>> = Arc::new(rcpt.into_iter().collect());
         let captured = mails.clone();
+        let opened = sessions.clone();
         let handle = tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else {
                     break;
                 };
+                opened.fetch_add(1, Ordering::SeqCst);
                 let captured = captured.clone();
+                let rcpt = rcpt.clone();
                 tokio::spawn(async move {
-                    let _ = serve_smtp(socket, captured).await;
+                    let _ = serve_smtp(socket, captured, greeting, &rcpt).await;
                 });
             }
         });
         Self {
             port,
             mails,
+            sessions,
             handle,
         }
     }
 
     fn count(&self) -> usize {
         self.mails.lock().expect("mails").len()
+    }
+
+    fn count_to(&self, address: &str) -> usize {
+        self.mails
+            .lock()
+            .expect("mails")
+            .iter()
+            .filter(|mail| mail.to == address)
+            .count()
+    }
+
+    /// SMTP sessions opened so far.
+    fn sessions(&self) -> usize {
+        self.sessions.load(Ordering::SeqCst)
     }
 
     /// Decoded plain body of the last captured mail.
@@ -100,10 +139,17 @@ impl Drop for SmtpSink {
 async fn serve_smtp(
     socket: tokio::net::TcpStream,
     captured: Arc<Mutex<Vec<CapturedMail>>>,
+    greeting: &str,
+    rcpt_replies: &HashMap<String, RcptReply>,
 ) -> Result<(), std::io::Error> {
     let (reader, mut writer) = socket.into_split();
     let mut reader = BufReader::new(reader);
-    writer.write_all(b"220 fvoci-test\r\n").await?;
+    writer
+        .write_all(format!("{greeting}\r\n").as_bytes())
+        .await?;
+    if !greeting.starts_with("220") {
+        return Ok(());
+    }
     let mut rcpt = String::new();
     loop {
         let mut line = String::new();
@@ -125,7 +171,15 @@ async fn serve_smtp(
                 .trim()
                 .trim_matches(|c| c == '<' || c == '>')
                 .to_string();
-            writer.write_all(b"250 ok\r\n").await?;
+            match rcpt_replies.get(&rcpt) {
+                Some(RcptReply::Reply(reply)) => {
+                    writer.write_all(format!("{reply}\r\n").as_bytes()).await?;
+                }
+                Some(RcptReply::Hang) => {
+                    std::future::pending::<()>().await;
+                }
+                None => writer.write_all(b"250 ok\r\n").await?,
+            }
         } else if upper == "DATA" {
             writer.write_all(b"354 go\r\n").await?;
             let mut data = String::new();
