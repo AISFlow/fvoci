@@ -277,6 +277,103 @@ async fn cancelled_markdown_zip_request_is_failed_by_the_stale_sweep() {
 }
 
 #[tokio::test]
+async fn stale_row_failure_does_not_skip_expired_lease_compensation() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    // A lease-expired async job with an orphan document to compensate.
+    let (_, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "office-file",
+                "fileName": "note.txt",
+                "zipBase64": B64.encode("plain")
+            }),
+        )
+        .await;
+    let expired: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    let claim = claim_next_import_job(&fx.pool)
+        .await
+        .unwrap()
+        .expect("claim");
+    let orphan = create_fenced_wiki_document(
+        &fx.pool,
+        fx.workspace_id,
+        claim.created_by,
+        claim.session_id,
+        "orphan",
+        None,
+        ImportFence {
+            job_id: expired,
+            lease_token: claim.lease_token,
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.import_jobs SET lease_until = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(expired)
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    // A stale markdown-zip row whose failing UPDATE errors.
+    let stale = create_sync_import_job(
+        &fx.pool,
+        fx.workspace_id,
+        fx.user_id,
+        owner_session_id(&fx).await,
+    )
+    .await
+    .unwrap()
+    .expect("admin may import")
+    .id;
+    age_import_job(&fx, stale, 25).await;
+    sqlx::query(
+        r#"CREATE FUNCTION fvoci.test_block_stale_sync_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+               IF OLD.source = 'markdown-zip' AND NEW.status = 'failed' THEN
+                   RAISE EXCEPTION 'injected stale sync import failure';
+               END IF;
+               RETURN NEW;
+           END $$"#,
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_block_stale_sync_fail BEFORE UPDATE ON fvoci.import_jobs \
+         FOR EACH ROW EXECUTE FUNCTION fvoci.test_block_stale_sync_fail()",
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+
+    let swept = sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+        .await
+        .expect("a failed stale-row pass does not fail the sweep");
+    assert_eq!(swept, 1);
+    assert!(!document_exists(&fx.admin, &orphan.to_string()).await);
+    assert_eq!(import_job_status(&fx, expired).await, "failed");
+    assert_eq!(import_job_status(&fx, stale).await, "pending");
+
+    // The next sweep retries the stale row.
+    sqlx::query("DROP TRIGGER test_block_stale_sync_fail ON fvoci.import_jobs")
+        .execute(&fx.admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(import_job_status(&fx, stale).await, "failed");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn async_office_import_runs_through_spawned_runner() {
     let harness = TestDb::bootstrap().await;
     let mut fx = fixture_with_runner(&harness, true).await;

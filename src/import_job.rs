@@ -1048,7 +1048,9 @@ pub async fn compensate_import(
 
 /// Source `sweepOrphanImports`, run by the daily maintenance sweep, plus
 /// the markdown-zip rows a cancelled request or a crash left `pending`
-/// (see [`fail_stale_sync_import_jobs`]). Returns the rows it failed.
+/// (see [`fail_stale_sync_import_jobs`]). Returns the rows it failed. The
+/// two parts are independent: a failed stale-row pass is logged and retried
+/// by the next sweep, and never skips the lease-expired compensation.
 pub async fn sweep_orphan_imports(
     pool: &PgPool,
     storage: &ObjectStorage,
@@ -1056,11 +1058,15 @@ pub async fn sweep_orphan_imports(
 ) -> Result<u32, sqlx::Error> {
     let mut swept = 0;
     if !cancel.is_cancelled() {
-        let stale = fail_stale_sync_import_jobs(pool).await?;
-        if stale > 0 {
-            warn!(jobs = stale, "import.sync_stale_failed");
+        match fail_stale_sync_import_jobs(pool).await {
+            Ok(stale) => {
+                if stale > 0 {
+                    warn!(jobs = stale, "import.sync_stale_failed");
+                }
+                swept += u32::try_from(stale).unwrap_or(u32::MAX);
+            }
+            Err(err) => warn!(error = %err, "import.sync_stale_sweep_failed"),
         }
-        swept += u32::try_from(stale).unwrap_or(u32::MAX);
     }
     for _ in 0..IMPORT_SWEEP_MAX {
         if cancel.is_cancelled() {
