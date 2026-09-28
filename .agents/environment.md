@@ -318,7 +318,7 @@ Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key�
 우선 사용한다(AGENTS.md 역할표). 이전 Fable 코디네이터·자동 체인은 재가동하지 않았고 Orca Run은 사용하지 않았다.
 
 - 실행 환경: 로컬 WSL2 Linux, Claude Code 2.1.283(`/home/kinesis/.local/bin/claude`), Max 구독 OAuth(세션 환경에
-  API key 없음). 계정·결제·전역 설정 변경 없음, 새 MCP 없음.
+  API key 없음). 코디네이터의 계정·결제·전역 설정 변경 없음, 새 MCP 없음.
 - 주 세션: 시스템 보고 모델 ID `claude-opus-5-5`, `/effort ultracode`(세션 한정 xhigh + Dynamic Workflows),
   `CLAUDE_EFFORT=xhigh`. 세션 JSONL의 assistant 턴 `model`/`effort` 필드가 모두 `claude-opus-5-5`/`xhigh`다.
 - 전역 `~/.claude/settings.json`: 사용자가 세션 시작 직후 `/model`로 Opus 5.5를 새 세션 기본값으로 저장했다
