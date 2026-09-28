@@ -1,43 +1,42 @@
 #!/usr/bin/env bash
-# Standalone install smoke: infra/rust/compose.user.yml alone in an empty
-# folder, `docker compose up -d`, no env file. Checks secret generation,
-# first-admin setup/login and search, idempotent re-up, down/up persistence,
-# that the server cannot read the owner password or the Meilisearch master key,
-# that a lost secret volume or a failing init keeps the server down, and a
-# concurrent double `up -d` on a fresh install.
+# Install smoke for the user procedure of infra/rust/compose.user.yml: an empty
+# folder with compose.yml and env.example, `cp env.example .env`, fill in every
+# empty value as its comments show, `docker compose up -d`. Checks that an
+# unfilled or placeholder .env is refused, the startup preparation and the
+# server's restricted process, first-admin setup/login/search, restart and
+# down/up persistence, refused changed passwords, preparation failures and
+# signals keeping the server down, upgrade refusal while a server is live,
+# backup/restore, and concurrent starts.
 #
 #   FVOCI_INSTALL_IMAGE=<built product image> scripts/standalone-install-smoke.sh
 #
 # The image stands in for the release reference exactly as release files do:
 # the `${FVOCI_IMAGE:-...}` default is replaced, nothing else changes. The file
-# publishes 127.0.0.1:8080, which must be free. Host tools: docker, curl, jq.
-# Secret values are compared in memory and never printed.
+# publishes 127.0.0.1:8080, which must be free. Host tools: docker, curl, jq,
+# python3. Secret values are compared in memory and never printed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${FVOCI_INSTALL_IMAGE:?FVOCI_INSTALL_IMAGE must name a built product image}"
 RUN_ID="$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-export COMPOSE_PROJECT_NAME="fvoci-standalone-smoke-${RUN_ID}"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-standalone.${RUN_ID}.XXXXXX")"
+export COMPOSE_PROJECT_NAME="fvoci-install-smoke-${RUN_ID}"
+MAIN="$COMPOSE_PROJECT_NAME"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-install.${RUN_ID}.XXXXXX")"
 JAR="$WORK/.cookies"
 BASE=http://localhost:8080
 ORIGIN=http://localhost:8080
-SECRET_VOLUMES=(postgres_secrets meili_secrets server_secrets)
-ALL_VOLUMES=("${SECRET_VOLUMES[@]}" pgdata storage searchdata)
-PROJECTS=("$COMPOSE_PROJECT_NAME")
+PROJECTS=("$MAIN")
 
 step() { printf '== %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-vol() { printf '%s_%s' "$COMPOSE_PROJECT_NAME" "$1"; }
 
 cleanup() {
-  local status=$? p v
+  local status=$? p
   if (( status != 0 )); then
     (cd "$WORK" && docker compose ps -a >&2; docker compose logs --no-color --tail 80 >&2) || true
   fi
   for p in "${PROJECTS[@]}"; do
     (cd "$WORK" && COMPOSE_PROJECT_NAME="$p" docker compose down -v --remove-orphans >/dev/null 2>&1) || true
-    for v in "${ALL_VOLUMES[@]}" copy; do docker volume rm -f "${p}_${v}" >/dev/null 2>&1 || true; done
   done
   rm -rf "$WORK"
   exit "$status"
@@ -46,44 +45,58 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for cmd in docker curl jq; do
+for cmd in docker curl jq python3; do
   command -v "$cmd" >/dev/null || fail "missing host command: $cmd"
 done
 docker image inspect "$IMAGE" >/dev/null || fail "image not found: $IMAGE"
 
-# Same substitution a release file makes; everything else is the template.
+# The release files: compose.yml with the image substituted, env.example.
 sed "s|\${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:[^}]*}|${IMAGE}|" \
   "$ROOT/infra/rust/compose.user.yml" >"$WORK/compose.yml"
-grep -q "image: \*fvoci-image" "$WORK/compose.yml" || fail "template lost its image anchor"
 grep -q "&fvoci-image ${IMAGE}\$" "$WORK/compose.yml" || fail "image substitution failed"
-[[ "$(ls -A "$WORK")" == compose.yml ]] || fail "work folder must hold only compose.yml"
+cp "$ROOT/infra/rust/compose.user.env.example" "$WORK/env.example"
 cd "$WORK"
 
-# Throwaway root reader over the three secret volumes (values never printed).
-read_secrets() {
-  local mounts=() v
-  for v in "${SECRET_VOLUMES[@]}"; do mounts+=(-v "$(vol "$v"):/s/${v}:ro"); done
-  docker run --rm --network none --user 0:0 --entrypoint sh "${mounts[@]}" "$IMAGE" -c "$1"
+# fill_env: .env from env.example, a fresh value for every empty entry in the
+# format its comment shows (openssl rand -hex 32; *_KEYS keyring under its
+# *_ACTIVE_KEY_ID).
+fill_env() {
+  python3 - env.example .env <<'PY'
+import re, secrets, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+values = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", text, re.MULTILINE))
+out = []
+for line in text.splitlines():
+    empty = re.fullmatch(r"([A-Z][A-Z0-9_]*)=", line)
+    if empty:
+        key = empty.group(1)
+        if key.endswith("_KEYS"):
+            line = f'{key}={{"{values[key[:-5] + "_ACTIVE_KEY_ID"]}":"{secrets.token_hex(32)}"}}'
+        else:
+            line = f"{key}={secrets.token_hex(32)}"
+    out.append(line)
+open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+  chmod 600 .env
 }
-# shellcheck disable=SC2016 # expanded in the reader container
-secret_values() { read_secrets 'for f in /s/*/*; do cat "$f"; echo; done'; }
-# Mode, owner, sha256 and name of every file, markers included.
-secret_manifest() {
-  # shellcheck disable=SC2016 # expanded in the reader container
-  read_secrets 'cd /s && for f in */* */.fvoci*; do
-    [ -e "$f" ] || continue
-    printf "%s %s %s\n" "$(stat -c "%a %u:%g" "$f")" "$(sha256sum "$f" | cut -c1-64)" "$f"; done'
+env_value() { sed -n "s/^$1=//p" .env; }
+set_env() { # KEY VALUE
+  python3 - .env "$1" "$2" <<'PY'
+import re, sys
+path, key, value = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+text, n = re.subn(rf"^{key}=.*$", lambda _: f"{key}={value}", text, flags=re.MULTILINE)
+assert n == 1, key
+open(path, "w", encoding="utf-8").write(text)
+PY
 }
-# A service's log text (captured first: grep -q closing the pipe would fail
-# `docker compose logs` under pipefail).
 logs() { docker compose logs --no-color "$1" 2>&1; }
-service_state() {
+state() {
   local cid
   cid="$(docker compose ps -a -q "$1")"
-  [[ -n "$cid" ]] || { echo "absent"; return; }
-  docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.StartedAt}}' "$cid"
+  [[ -n "$cid" ]] || { echo absent; return; }
+  docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$cid"
 }
-never_started() { [[ "$(service_state "$1")" == absent || "$(service_state "$1")" == *" 0001-01-01T00:00:00Z" ]]; }
 wait_healthy() {
   local deadline=$((SECONDS + 180)) cid
   while (( SECONDS < deadline )); do
@@ -95,290 +108,257 @@ wait_healthy() {
   done
   fail "fvoci did not become healthy"
 }
+# The app fails and does not serve; waits for the given log line first.
+wait_refused() { # log-pattern
+  local deadline=$((SECONDS + 90))
+  until grep -q "$1" <<<"$(logs fvoci)"; do
+    (( SECONDS < deadline )) || fail "fvoci never logged: $1"
+    sleep 1
+  done
+  grep "$1" <<<"$(logs fvoci)" | tail -1 | cut -c1-220
+  if curl -fsS "$BASE/ready" >/dev/null 2>&1; then fail "a server answers although: $1"; fi
+  [[ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -a -q fvoci)")" != healthy ]] \
+    || fail "fvoci is healthy although: $1"
+}
 login() {
   curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" \
-    -X POST "$BASE/api/v1/auth/login" -d '{"email":"owner@standalone.test","password":"standalonepass1"}' \
+    -X POST "$BASE/api/v1/auth/login" -d '{"email":"owner@install.test","password":"installpass1"}' \
     | jq -e '.userId' >/dev/null
 }
-# up -d that is expected to fail; prints the last lines.
-up_fails() {
-  local out status
+psql_owner() { # SQL (on the maintenance db, so a read-only fvoci db can be changed)
+  docker compose exec -T postgres psql -X -q -tA -U fvoci_owner -d "${2:-postgres}" -c "$1"
+}
+
+step "no .env, then the unfilled env.example as .env: compose refuses, nothing is created"
+[[ "$(find . -mindepth 1 -printf '%f\n' | sort | tr '\n' ' ')" == "compose.yml env.example " ]] \
+  || fail "work folder must hold compose.yml and env.example"
+for attempt in none unfilled; do
+  [[ "$attempt" == none ]] || cp env.example .env
   set +e
-  out="$(docker compose up -d 2>&1)"
-  status=$?
+  OUT="$(docker compose up -d 2>&1)"
+  STATUS=$?
   set -e
-  printf '%s\n' "$out" | tail -2
-  (( status != 0 )) || fail "up -d succeeded: $1"
-}
-copy_volume() { # from to
-  docker run --rm --network none --user 0:0 -v "$1:/from:ro" -v "$2:/to" --entrypoint sh "$IMAGE" \
-    -c 'rm -rf /to/..?* /to/.[!.]* /to/*; cp -a /from/. /to/'
-}
+  (( STATUS != 0 )) || fail "up -d succeeded with $attempt .env"
+  grep -o 'required variable [A-Z_]* is missing a value: [^"]*' <<<"$OUT" | head -1
+  [[ -z "$(docker compose ps -a -q)" && -z "$(docker volume ls -q --filter "name=${MAIN}_")" ]] \
+    || fail "containers or volumes created with $attempt .env"
+done
+echo "compose refused both before creating anything: ok"
 
-check_logs() {
-  local logs s
-  logs="$(docker compose logs --no-color 2>&1)"
-  for s in "${SECRETS[@]}"; do
-    grep -qF "$s" <<<"$logs" && fail "a secret value appears in container logs"
-  done
-  echo "checked ${#SECRETS[@]} secret values against $(wc -l <<<"$logs") log lines: none found"
-}
+step "a placeholder value: the app names it and the server does not start"
+fill_env
+PEPPER="$(env_value PASSWORD_PEPPER_KEYS)"
+set_env PASSWORD_PEPPER_KEYS '{"install":"<openssl rand -hex 32>"}'
+docker compose up -d
+wait_refused 'PASSWORD_PEPPER_KEYS still holds an example placeholder'
+set_env PASSWORD_PEPPER_KEYS "$PEPPER"
+docker compose down -v
+echo "placeholder refused by the app (nothing prepared): ok"
 
-step "first up -d (compose.yml only, no env file)"
+step "docker compose up -d with the filled .env"
 T0=$SECONDS
 docker compose up -d
 wait_healthy
 echo "healthy after $((SECONDS - T0))s"
-docker compose config --services | sort | tr '\n' ' '; echo
-[[ "$(docker compose config --services | sort | tr '\n' ' ')" == "fvoci init meilisearch postgres " ]] \
+[[ "$(docker compose config --services | sort | tr '\n' ' ')" == "fvoci meilisearch postgres " ]] \
   || fail "unexpected services"
-[[ "$(service_state init)" == "exited 0 "* ]] || fail "init: $(service_state init)"
-grep -q "generated server keys" <<<"$(logs init)" || fail "init did not generate the server keys"
-grep -q "fvoci: generated /run/fvoci/secrets/postgres_password" <<<"$(logs postgres)" || fail "postgres did not generate"
-grep -q "fvoci: generated /run/fvoci/secrets/master_key" <<<"$(logs meilisearch)" || fail "meilisearch did not generate"
-echo "postgres, meilisearch and init generated their secrets; init exited 0"
-
-step "published ports"
+PREP_LOG="$(logs fvoci | grep 'fvoci:')"
+printf '%s\n' "$PREP_LOG" | cut -c1-160
+for line in 'ready; preparing' 'created app role fvoci_app' 'migrated; granted app role privileges' \
+  'search key ready' 'prepared; starting the server'; do
+  grep -q "$line" <<<"$PREP_LOG" || fail "startup did not log: $line"
+done
 PUBLISHED="$(docker compose ps --format json | jq -rs '[.[] | .Publishers[]? | select(.PublishedPort > 0) | "\(.URL):\(.PublishedPort)->\(.TargetPort)"] | unique | join(" ")')"
 [[ "$PUBLISHED" == "127.0.0.1:8080->8080" ]] || fail "unexpected published ports: $PUBLISHED"
-echo "$PUBLISHED"
+echo "published: $PUBLISHED"
 
-step "secret files: mode and owner"
-MANIFEST1="$(secret_manifest)"
-awk '{print $1, $2, $4}' <<<"$MANIFEST1"
-# postgres_password and master_key: their service's uid, group 1001 (init),
-# 0640; the server's files and marker: uid/gid 1000, 0600.
-awk '
-  { want = "unexpected file" }
-  $4 == "postgres_secrets/postgres_password" { want = "640 999:1001" }
-  $4 == "meili_secrets/master_key"           { want = "640 0:1001" }
-  $4 ~ /^server_secrets\//                   { want = "600 1000:1000" }
-  { if ($1 " " $2 != want) bad = bad " " $4 }
-  END { if (bad != "") { print "wrong mode/owner:" bad > "/dev/stderr"; exit 1 } }
-' <<<"$MANIFEST1" || fail "secret file mode or owner"
-for f in database_app_url password_pepper_keys password_pepper_active_key_id encryption_keys \
-  encryption_active_key_id meili_url meili_api_key .fvoci-install-complete; do
-  grep -q " server_secrets/$f\$" <<<"$MANIFEST1" || fail "server_secrets/$f missing"
-done
-[[ "$(wc -l <<<"$MANIFEST1")" == 10 ]] || fail "expected 10 secret files"
-mapfile -t SECRETS < <(secret_values | awk 'length($0) >= 32')
-(( ${#SECRETS[@]} >= 6 )) || fail "expected at least 6 long secret values, got ${#SECRETS[@]}"
-OWNER_PW="$(read_secrets 'cat /s/postgres_secrets/postgres_password')"
-MASTER_KEY="$(read_secrets 'cat /s/meili_secrets/master_key')"
+step "the server process holds neither the owner password nor the master key"
+OWNER_PW="$(env_value POSTGRES_PASSWORD)"
+MASTER_KEY="$(env_value MEILI_MASTER_KEY)"
+CID="$(docker compose ps -q fvoci)"
+docker exec "$CID" id
+[[ "$(docker exec "$CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] || fail "pid 1 is not fvoci-server"
+[[ "$(docker exec "$CID" sh -c 'sed -n "s/^Uid:[[:space:]]*//p" /proc/1/status' | awk '{print $1}')" == 1000 ]] \
+  || fail "server does not run as uid 1000"
+# The pid-1 tree only: processes started by docker exec carry the container
+# configuration (see below) and are not the server.
+# shellcheck disable=SC2016 # expanded in the app container
+VIEW="$(docker exec -e POSTGRES_PASSWORD= -e MEILI_MASTER_KEY= -e FVOCI_APP_PASSWORD= "$CID" sh -c '
+  for p in /proc/[0-9]*; do
+    a=${p#/proc/}
+    while [ "$a" != 1 ] && [ "$a" != 0 ] && [ -n "$a" ]; do a=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$a/status" 2>/dev/null); done
+    [ "$a" = 1 ] || continue
+    echo "pid ${p#/proc/}: $(tr "\0" " " <"$p/cmdline")"
+    tr "\0" "\n" <"$p/environ"; ls -l "$p/fd"
+  done 2>/dev/null
+  find /run -type f -exec cat {} + 2>/dev/null; echo')"
+grep '^pid ' <<<"$VIEW"
+grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$VIEW" && fail "owner password or master key in the server process tree"
+grep -Eq '^(POSTGRES_PASSWORD|MEILI_MASTER_KEY|FVOCI_APP_PASSWORD|DATABASE_URL)=' <<<"$VIEW" \
+  && fail "a preparation-only variable reached the server"
+grep -q '^DATABASE_APP_URL=postgres://fvoci_app:' <<<"$VIEW" || fail "server lacks its app role URL"
+echo "server environ has DATABASE_APP_URL only; no owner password, master key or raw app password in environ/argv/fds/files: ok"
+CONFIG_ENV="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CID")"
+grep -q '^POSTGRES_PASSWORD=' <<<"$CONFIG_ENV" || fail "expected the container configuration to hold the preparation values"
+echo "boundary: the container configuration (docker inspect / docker exec) still holds POSTGRES_PASSWORD, MEILI_MASTER_KEY, FVOCI_APP_PASSWORD"
+docker compose exec -T fvoci /opt/fvoci/bin/fvoci-migrate --doctor | jq -e '.ok == true' >/dev/null || fail "doctor"
+echo "doctor in the fvoci container: ok"
 
-step "the server cannot read the owner password or the Meilisearch master key"
-SERVER_CID="$(docker compose ps -q fvoci)"
-docker compose exec -T fvoci id
-[[ "$(docker compose exec -T fvoci id -G)" == 1000 ]] || fail "server has supplementary groups"
-docker compose exec -T fvoci ls -A /run/fvoci/secrets
-for path in /run/fvoci/secrets/postgres_password /run/fvoci/secrets/master_key \
-  /run/fvoci/install/postgres/postgres_password /run/fvoci/install/meilisearch/master_key; do
-  if docker compose exec -T fvoci cat "$path" >/dev/null 2>&1; then fail "server can read $path"; fi
-  echo "fvoci: cat $path -> refused (absent)"
-done
-MOUNTS="$(docker inspect -f '{{range .Mounts}}{{.Name}}:{{.Destination}}:{{.RW}} {{end}}' "$SERVER_CID")"
-echo "server mounts: $MOUNTS"
-[[ "$MOUNTS" != *postgres_secrets* && "$MOUNTS" != *meili_secrets* ]] || fail "server mounts an owner secret volume"
-# environ, argv, every readable file under /run/fvoci and the targets of every
-# open file descriptor of the server process and its children.
-SERVER_VIEW="$(docker compose exec -T fvoci sh -c '
-  for p in /proc/[0-9]*; do tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; ls -l "$p/fd" 2>/dev/null; done
-  find /run/fvoci -type f -exec cat {} + 2>/dev/null; echo' 2>/dev/null)"
-grep -qF "$OWNER_PW" <<<"$SERVER_VIEW" && fail "owner password visible to the server"
-grep -qF "$MASTER_KEY" <<<"$SERVER_VIEW" && fail "master key visible to the server"
-grep -Eq 'postgres_password|master_key' <<<"$SERVER_VIEW" && fail "server holds a descriptor or path of an owner secret"
-docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$SERVER_CID" \
-  | grep -E '^(POSTGRES_PASSWORD|MEILI_MASTER_KEY|DATABASE_URL|DATABASE_APP_URL|PASSWORD_PEPPER_KEYS|ENCRYPTION_KEYS)=' \
-  && fail "secret value in server container config"
-echo "owner password and master key absent from server environ/argv/fds/files/config: ok"
-docker compose exec -T fvoci /opt/fvoci/bin/fvoci-migrate --doctor | jq -e '.ok == true' >/dev/null \
-  || fail "doctor in the server container"
-echo "doctor in the server container (install settings files): ok"
-
-step "first-admin setup, login and search over HTTP"
+step "first-admin setup, login and search"
 curl -fsS "$BASE/api/v1/setup" | jq -c .
-curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" \
-  -X POST "$BASE/api/v1/setup" \
-  -d '{"email":"owner@standalone.test","password":"standalonepass1","givenName":"Owner","workspaceSlug":"standalone","workspaceName":"Standalone"}' >/dev/null
+curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" -X POST "$BASE/api/v1/setup" \
+  -d '{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"install","workspaceName":"Install"}' >/dev/null
 login
 WS="$(curl -fsS -b "$JAR" "$BASE/api/v1/me/workspaces" | jq -er '.items[0].id')"
 DOC="$(curl -fsS -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" \
-  -X POST "$BASE/api/v1/workspaces/${WS}/documents" -d '{"parentId":null,"title":"Standalone doc"}' | jq -er .id)"
-curl -fsS "$BASE/" | grep -qi '<!doctype html' || fail "React build not served at /"
+  -X POST "$BASE/api/v1/workspaces/${WS}/documents" -d '{"parentId":null,"title":"Install doc"}' | jq -er .id)"
+curl -fsS "$BASE/" | grep -qi '<!doctype html' || fail "web root"
 deadline=$((SECONDS + 60))
-until curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/search?q=Standalone%20doc" \
+until curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/search?q=Install%20doc" \
   | jq -e --arg d "$DOC" '.items | map(.documentId // .id) | index($d) != null' >/dev/null; do
   (( SECONDS < deadline )) || fail "search did not find the document"
   sleep 1
 done
-echo "setup + login + document create + search + web root: ok"
+echo "setup, login, document, search, web root: ok"
 
-step "no secret value in any container log (first start, generation included)"
-check_logs
-
-step "second up -d leaves secrets byte-identical"
-docker compose up -d
-wait_healthy
-grep -q "server keys present in /run/fvoci/install/server; kept" <<<"$(logs init)" \
-  || fail "init did not keep the server keys"
-[[ "$(secret_manifest)" == "$MANIFEST1" ]] || fail "secret files changed on second up"
-echo "secret manifest identical after second up: ok"
-
-step "down + up -d keeps data and keys"
-docker compose down
-docker compose up -d
-wait_healthy
-[[ "$(secret_manifest)" == "$MANIFEST1" ]] || fail "secret files changed after down/up"
-rm -f "$JAR"
-login
-curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/documents/${DOC}" | jq -e '.title == "Standalone doc"' >/dev/null \
-  || fail "document lost"
-curl -fsS "$BASE/api/v1/setup" | jq -e '.needed == false' >/dev/null || fail "setup needed again"
-echo "login with the same pepper, workspace and document survive down/up: ok"
-
-step "no secret value in any container log (containers after down/up)"
-check_logs
-
-step "scripts/backup.sh + restore.sh (no env file): the restored install keeps its keys"
-bash "$ROOT/scripts/backup.sh" --project "$COMPOSE_PROJECT_NAME" --compose-file "$WORK/compose.yml" \
-  --output "$WORK/backup" | tee "$WORK/backup.json"
-tail -n1 "$WORK/backup.json" | jq -e '.serverKeysArchived == true' >/dev/null || fail "backup did not archive the server keys"
-stat -c '%A %n' "$WORK/backup"/*
-docker compose down
-RESTORED="${COMPOSE_PROJECT_NAME}-restored"
-PROJECTS+=("$RESTORED")
-bash "$ROOT/scripts/restore.sh" --project "$RESTORED" --compose-file "$WORK/compose.yml" --input "$WORK/backup"
-SOURCE_KEYS="$(awk '$4 ~ /^server_secrets\/(database_app_url|password_pepper|encryption)/ {print $3, $4}' <<<"$MANIFEST1")"
-RESTORED_KEYS="$(COMPOSE_PROJECT_NAME="$RESTORED" secret_manifest \
-  | awk '$4 ~ /^server_secrets\/(database_app_url|password_pepper|encryption)/ {print $3, $4}')"
-[[ "$RESTORED_KEYS" == "$SOURCE_KEYS" ]] || fail "restored server keys differ from the source"
-rm -f "$JAR"
-login
-curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/documents/${DOC}" | jq -e '.title == "Standalone doc"' >/dev/null \
-  || fail "document lost in restore"
-COMPOSE_PROJECT_NAME="$RESTORED" docker compose down -v
-docker compose up -d
-wait_healthy
-echo "backup archived the server keys; restore into $RESTORED: same keys, login, document: ok"
-
-step "restore without the keys is refused before any volume exists"
-mv "$WORK/backup/server-secrets.tar" "$WORK/server-secrets.tar"
-set +e
-OUT="$(bash "$ROOT/scripts/restore.sh" --project "${RESTORED}2" --compose-file "$WORK/compose.yml" --input "$WORK/backup" 2>&1)"
-STATUS=$?
-set -e
-printf '%s\n' "$OUT" | tail -1
-if (( STATUS == 0 )) || ! grep -q 'backup has no server-secrets.tar' <<<"$OUT"; then
-  fail "restore without keys was not refused"
-fi
-[[ -z "$(docker volume ls -q --filter "name=${RESTORED}2_")" ]] || fail "restore without keys created volumes"
-echo "restore without server-secrets.tar: refused, no volume created: ok"
-
-step "init failure (grants refused by a read-only database) keeps the server down"
-docker compose exec -T postgres psql -X -q -U fvoci_owner -d postgres \
-  -c 'ALTER DATABASE fvoci SET default_transaction_read_only = on'
-docker compose down
-up_fails "init failed"
-[[ "$(service_state init)" == "exited 1 "* ]] || fail "init: $(service_state init)"
-grep -E 'read-only transaction' <<<"$(logs init)" | tail -1 | cut -c1-200
-never_started fvoci || fail "fvoci started although init failed: $(service_state fvoci)"
-docker compose exec -T postgres psql -X -q -U fvoci_owner -d postgres \
-  -c 'ALTER DATABASE fvoci RESET default_transaction_read_only'
-docker compose up -d
-wait_healthy
-echo "failed init: up -d nonzero, fvoci never started; after the fix up -d recovers: ok"
-
-# Losing one secret volume while its data exists: the owning service refuses,
-# nothing downstream starts and nothing is generated. Then the saved copy is
-# put back (a volume restore) and the install starts with the same keys.
-for v in server_secrets postgres_secrets meili_secrets; do
-  step "$v removed while data exists: refused, server does not start; restored copy starts"
-  docker compose down
-  docker volume create "$(vol copy)" >/dev/null
-  copy_volume "$(vol "$v")" "$(vol copy)"
-  docker volume rm "$(vol "$v")" >/dev/null
-  up_fails "$v missing"
-  case "$v" in
-    server_secrets)
-      [[ "$(service_state init)" == "exited 1 "* ]] || fail "init: $(service_state init)"
-      grep -o 'refusing to generate new server keys: [^(]*(role [a-z_]*)' <<<"$(logs init)" | tail -1
-      ;;
-    postgres_secrets)
-      grep -q 'postgres_password is missing but /var/lib/postgresql holds data' <<<"$(logs postgres)" \
-        || fail "postgres did not refuse"
-      never_started init || fail "init started without the owner password"
-      echo "postgres refused: postgres_password missing while /var/lib/postgresql holds data"
-      ;;
-    meili_secrets)
-      grep -q 'master_key is missing but /meili_data holds data' <<<"$(logs meilisearch)" \
-        || fail "meilisearch did not refuse"
-      never_started init || fail "init started without the master key"
-      echo "meilisearch refused: master_key missing while /meili_data holds data"
-      ;;
-  esac
-  never_started fvoci || fail "fvoci started without $v: $(service_state fvoci)"
-  n="$(docker run --rm --network none -v "$(vol "$v"):/s:ro" --entrypoint sh "$IMAGE" -c 'ls -A /s | wc -l')"
-  [[ "$n" == 0 ]] || fail "a new secret was written into $v despite existing data"
-  docker compose down
-  copy_volume "$(vol copy)" "$(vol "$v")"
-  docker volume rm "$(vol copy)" >/dev/null
-  docker compose up -d
-  wait_healthy
-  [[ "$(secret_manifest)" == "$MANIFEST1" ]] || fail "secrets differ after restoring $v"
+check_same_install() { # after
   rm -f "$JAR"
   login
-  echo "$v: refused while missing (nothing generated); restored volume starts with identical keys and login: ok"
+  curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/documents/${DOC}" | jq -e '.title == "Install doc"' >/dev/null \
+    || fail "document lost after $1"
+  curl -fsS "$BASE/api/v1/setup" | jq -e '.needed == false' >/dev/null || fail "setup needed again after $1"
+  docker compose exec -T fvoci /opt/fvoci/bin/fvoci-migrate --verify-secrets >/dev/null || fail "sealed secrets after $1"
+}
+
+step "second up -d, restart (preparation runs again) and down/up keep data and keys"
+docker compose up -d
+wait_healthy
+docker compose restart fvoci
+wait_healthy
+[[ "$(logs fvoci | grep -c 'prepared; starting the server')" -ge 2 ]] || fail "restart did not prepare again"
+[[ "$(logs fvoci | grep -c 'created app role')" == 1 ]] || fail "app role not created exactly once"
+check_same_install "restart"
+docker compose down
+docker compose up -d
+wait_healthy
+check_same_install "down/up"
+echo "same-version re-runs: role created once, login (same pepper), document, sealed secrets: ok"
+
+step "no secret value in any container log"
+LOGS="$(docker compose logs --no-color 2>&1)"
+N=0
+for key in POSTGRES_PASSWORD FVOCI_APP_PASSWORD MEILI_MASTER_KEY PASSWORD_PEPPER_KEYS ENCRYPTION_KEYS; do
+  value="$(env_value "$key")"
+  secret="${value#*\":\"}"; secret="${secret%\"\}}"
+  grep -qF "$secret" <<<"$LOGS" && fail "$key appears in container logs"
+  N=$((N + 1))
 done
+echo "checked $N secret values against $(wc -l <<<"$LOGS") log lines: none found"
+
+step "a changed POSTGRES_PASSWORD is refused, the original starts again"
+set_env POSTGRES_PASSWORD "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+docker compose up -d
+wait_refused 'POSTGRES_PASSWORD is not the password of fvoci_owner'
+set_env POSTGRES_PASSWORD "$OWNER_PW"
+docker compose up -d
+wait_healthy
+check_same_install "restoring POSTGRES_PASSWORD"
+echo "changed owner password: named and refused; original value recovers: ok"
+
+step "a preparation failure (grants refused by a read-only database) keeps the server down"
+psql_owner 'ALTER DATABASE fvoci SET default_transaction_read_only = on'
+docker compose restart fvoci
+wait_refused 'cannot execute GRANT in a read-only transaction'
+psql_owner 'ALTER DATABASE fvoci RESET default_transaction_read_only'
+docker compose restart fvoci
+wait_healthy
+echo "failed preparation: not healthy, /ready refused; after the fix the restart recovers: ok"
+
+step "pending migrations while the server is live: preparation refuses"
+LATEST="$(psql_owner 'SELECT max(version) FROM fvoci.schema_migrations' fvoci)"
+psql_owner "DELETE FROM fvoci.schema_migrations WHERE version = ${LATEST}" fvoci
+set +e
+OUT="$(docker compose run --rm --no-deps -T --entrypoint /opt/fvoci/bin/fvoci-migrate fvoci --prepare 2>&1)"
+STATUS=$?
+set -e
+psql_owner "INSERT INTO fvoci.schema_migrations (version) VALUES (${LATEST})" fvoci
+grep 'migration(s) are pending' <<<"$OUT" | cut -c1-220
+if (( STATUS == 0 )) || ! grep -q 'another FVOCI server is still running' <<<"$OUT"; then
+  fail "live-writer upgrade not refused"
+fi
+echo "upgrade while a server holds app-role sessions: refused, pointing to RUNNING.md Upgrade: ok"
+
+step "SIGTERM during the readiness wait and the readiness deadline"
+docker compose stop fvoci postgres
+docker start "$(docker compose ps -a -q fvoci)" >/dev/null
+sleep 2
+T0=$SECONDS
+docker stop -t 20 "$(docker compose ps -a -q fvoci)" >/dev/null
+STOP_SECS=$((SECONDS - T0))
+[[ "$(state fvoci)" == "exited 143" ]] || fail "fvoci did not exit 143 on SIGTERM: $(state fvoci)"
+(( STOP_SECS < 10 )) || fail "SIGTERM took ${STOP_SECS}s"
+set +e
+OUT="$(docker compose run --rm --no-deps -T -e FVOCI_PREPARE_TIMEOUT_SECS=3 fvoci 2>&1)"
+STATUS=$?
+set -e
+grep 'not ready before the deadline' <<<"$OUT" | cut -c1-160
+(( STATUS == 1 )) || fail "deadline exit $STATUS"
+docker compose up -d
+wait_healthy
+echo "SIGTERM while waiting: exit 143 in ${STOP_SECS}s; 3 s deadline without PostgreSQL: exit 1: ok"
+
+step "scripts/backup.sh and restore.sh with the same .env"
+bash "$ROOT/scripts/backup.sh" --project "$MAIN" --env-file .env --compose-file compose.yml --output "$WORK/backup" | tail -1
+docker compose down
+RESTORED="${MAIN}-restored"
+PROJECTS+=("$RESTORED")
+bash "$ROOT/scripts/restore.sh" --project "$RESTORED" --env-file .env --compose-file compose.yml --input "$WORK/backup" | tail -1
+export COMPOSE_PROJECT_NAME="$RESTORED"
+check_same_install "restore"
+docker compose down -v
+export COMPOSE_PROJECT_NAME="$MAIN"
+docker compose up -d
+wait_healthy
+echo "backup + restore into $RESTORED: login, document, sealed secrets: ok"
 
 step "concurrent double up -d on a fresh install"
 docker compose down -v
-FRESH="${COMPOSE_PROJECT_NAME}-race"
-PROJECTS+=("$FRESH")
+export COMPOSE_PROJECT_NAME="${MAIN}-race"
+PROJECTS+=("$COMPOSE_PROJECT_NAME")
 set +e
-COMPOSE_PROJECT_NAME="$FRESH" docker compose up -d >"$WORK/race1.log" 2>&1 &
+docker compose up -d >"$WORK/race1.log" 2>&1 &
 P1=$!
-COMPOSE_PROJECT_NAME="$FRESH" docker compose up -d >"$WORK/race2.log" 2>&1 &
+docker compose up -d >"$WORK/race2.log" 2>&1 &
 P2=$!
 wait "$P1"; S1=$?
 wait "$P2"; S2=$?
 set -e
 echo "concurrent up -d exit codes: $S1 $S2"
-tail -n 3 "$WORK/race1.log" "$WORK/race2.log"
-export COMPOSE_PROJECT_NAME="$FRESH"
 docker compose up -d
 wait_healthy
-RACE_MANIFEST="$(secret_manifest)"
-[[ "$(wc -l <<<"$RACE_MANIFEST")" == 10 ]] || fail "race left an incomplete secret set"
-[[ "$(grep -c 'generated server keys' <<<"$(logs init)")" -le 1 ]] || fail "server keys generated twice"
-curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" \
-  -X POST "$BASE/api/v1/setup" \
-  -d '{"email":"owner@standalone.test","password":"standalonepass1","givenName":"Owner","workspaceSlug":"race","workspaceName":"Race"}' >/dev/null
-rm -f "$JAR"
-login
-docker compose up -d
-wait_healthy
-[[ "$(secret_manifest)" == "$RACE_MANIFEST" ]] || fail "secrets changed after the race install"
-echo "double up -d: one key set, setup + login, stable on re-up: ok"
+[[ "$(logs fvoci | grep -c 'created app role')" -le 1 ]] || fail "app role created twice"
+check_same_install_fresh() {
+  curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" -X POST "$BASE/api/v1/setup" \
+    -d '{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"race","workspaceName":"Race"}' >/dev/null
+  rm -f "$JAR"
+  login
+}
+check_same_install_fresh
+echo "double up -d: one preparation, setup + login: ok"
 
-step "two init runs at once on a fresh database: one generates, both succeed"
+step "two preparations at once on a fresh database"
 docker compose down -v
-INIT_RACE="${FRESH}-init"
-PROJECTS+=("$INIT_RACE")
-export COMPOSE_PROJECT_NAME="$INIT_RACE"
 docker compose up -d --wait postgres meilisearch
 set +e
-docker compose run --rm -T init >"$WORK/init1.log" 2>&1 &
+docker compose run --rm --no-deps -T --entrypoint /opt/fvoci/bin/fvoci-migrate fvoci --prepare >"$WORK/prep1.log" 2>&1 &
 P1=$!
-docker compose run --rm -T init >"$WORK/init2.log" 2>&1 &
+docker compose run --rm --no-deps -T --entrypoint /opt/fvoci/bin/fvoci-migrate fvoci --prepare >"$WORK/prep2.log" 2>&1 &
 P2=$!
 wait "$P1"; S1=$?
 wait "$P2"; S2=$?
 set -e
-grep -h 'server keys' "$WORK/init1.log" "$WORK/init2.log"
-(( S1 == 0 && S2 == 0 )) || fail "concurrent init runs exited $S1 $S2"
-[[ "$(cat "$WORK/init1.log" "$WORK/init2.log" | grep -c '^generated server keys')" == 1 ]] || fail "server keys not generated exactly once"
-[[ "$(cat "$WORK/init1.log" "$WORK/init2.log" | grep -c '^server keys present')" == 1 ]] || fail "second init did not keep the keys"
-[[ "$(secret_manifest | wc -l)" == 10 ]] || fail "concurrent init left an incomplete secret set"
-echo "concurrent init: exits $S1 $S2, keys generated once and kept by the other run: ok"
+(( S1 == 0 && S2 == 0 )) || fail "concurrent preparations exited $S1 $S2: $(cat "$WORK/prep1.log" "$WORK/prep2.log")"
+[[ "$(cat "$WORK/prep1.log" "$WORK/prep2.log" | grep -c 'created app role')" == 1 ]] || fail "app role not created exactly once"
+echo "concurrent preparations: both exit 0, app role created once: ok"
 
-step "standalone install smoke passed"
+step "install smoke passed"

@@ -1,6 +1,7 @@
-# FVOCI install. In an empty folder with this file and .env.example:
+# FVOCI install. In an empty folder with this file and env.example (the
+# release asset; infra/rust/compose.user.env.example in the source):
 #
-#   cp .env.example .env     # fill in the empty values as its comments show
+#   cp env.example .env      # fill in the empty values as its comments show
 #   docker compose up -d
 #
 # then open FVOCI_PUBLIC_ORIGIN (http://localhost:8080) and create the first

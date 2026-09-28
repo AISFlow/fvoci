@@ -7,6 +7,10 @@
 # (fvoci-migrate --verify-storage) and starts the server. Meilisearch data is not in the backup;
 # init creates a scoped key and empty index with the required settings.
 #
+# The standalone compose.user.yml has no init service: its fvoci service runs
+# the same steps with `fvoci-migrate --prepare` (and the owner commands) from
+# the owner password in its environment.
+#
 # Keep POSTGRES_USER, POSTGRES_DB, and FVOCI_APP_ROLE names the same as the
 # backed-up install. Database and Meili passwords may be new. PASSWORD_PEPPER_KEYS
 # must match the original or existing passwords will not verify. ENCRYPTION_KEYS
@@ -14,12 +18,6 @@
 # is fine); both are checked against the manifest before any volume exists.
 # After the database is restored, fvoci-migrate --verify-secrets opens every
 # sealed secret (MFA, workspace SSO, webhooks) before the server starts.
-#
-# Standalone install (infra/rust/compose.user.yml, no --env-file): the keys and
-# the app role password come from the backup's server-secrets.tar, which is
-# restored into the server's settings volume; the target's postgres and
-# meilisearch generate new owner password and master key on first start. The
-# same manifest checks apply, and init refuses to start if the keys are missing.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,11 +30,10 @@ VOLUME_KEYS=(pgdata storage searchdata meili_key)
 
 usage() {
   cat <<'EOF' >&2
-usage: scripts/restore.sh --project NAME [--env-file PATH] --input DIR [options]
+usage: scripts/restore.sh --project NAME --env-file PATH --input DIR [options]
 
   --project NAME       New Compose project (must differ from the backup source)
-  --env-file PATH      Env for the restore stack (same pepper as the original);
-                       omit for the standalone install (keys from the backup)
+  --env-file PATH      Env for the restore stack (same pepper as the original)
   --input DIR          Backup directory from scripts/backup.sh
   --compose-file PATH  default: infra/rust/compose.yml
 
@@ -49,9 +46,13 @@ EOF
 }
 
 read_env() {
-  local key="$1"
+  local key="$1" default="${2-}"
   local line
   line="$(grep -E "^${key}=" "$ENV_FILE" || true)"
+  if [[ -z "$line" && -n "$default" ]]; then
+    printf '%s\n' "$default"
+    return
+  fi
   if [[ -z "$line" ]]; then
     echo "missing ${key} in env file" >&2
     exit 1
@@ -87,9 +88,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$PROJECT" && -n "$INPUT" ]] || usage
+[[ -n "$PROJECT" && -n "$ENV_FILE" && -n "$INPUT" ]] || usage
 # Manifest/key checks run in the selected product image before any target volume exists.
-for dependency in docker jq tar; do
+for dependency in docker jq; do
   command -v "$dependency" >/dev/null 2>&1 || {
     echo "restore host requires $dependency" >&2
     exit 1
@@ -100,7 +101,7 @@ if [[ ! "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
   echo "--project must be a lowercase Compose project name" >&2
   exit 1
 fi
-if [[ -n "$ENV_FILE" && ! -f "$ENV_FILE" ]]; then
+if [[ ! -f "$ENV_FILE" ]]; then
   echo "env file not found: $ENV_FILE" >&2
   exit 1
 fi
@@ -128,35 +129,19 @@ done
 
 # Resolve the same product image as Compose will use for the target server.
 # The offline check needs no DB, migration owner, network, or writeable backup.
-COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT")
-[[ -z "$ENV_FILE" ]] || COMPOSE+=(--env-file "$ENV_FILE")
+COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT" --env-file "$ENV_FILE")
 COMPOSE_CONFIG="$("${COMPOSE[@]}" config --format json)"
-# The app service publishes container port 8080 and the one-shot init is the
-# service it waits for (`server`/`init` in compose.yml, `fvoci`/`init` in the
-# standalone compose).
+# The app service publishes container port 8080; init is the one-shot service it
+# waits for (`server`/`init` in compose.yml). compose.user.yml has no init: the
+# app service's own fvoci-migrate runs those steps.
 SERVER="$(jq -er '[.services | to_entries[] | select(any(.value.ports[]?; .target == 8080)) | .key]
   | if length == 1 then .[0] else error("expected one service publishing 8080") end' <<<"$COMPOSE_CONFIG")"
-INIT="$(jq -er '[.services[].depends_on // {} | to_entries[] | select(.value.condition == "service_completed_successfully") | .key]
-  | unique | if length == 1 then .[0] else error("expected one one-shot init service") end' <<<"$COMPOSE_CONFIG")"
+INIT="$(jq -r --arg s "$SERVER" '[.services[$s].depends_on // {} | to_entries[]
+  | select(.value.condition == "service_completed_successfully") | .key] | .[0] // ""' <<<"$COMPOSE_CONFIG")"
+PREP="${INIT:-$SERVER}"
 SELECTED_IMAGE="$(jq -er --arg s "$SERVER" '.services[$s].image' <<<"$COMPOSE_CONFIG")"
 PRODUCT_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$SELECTED_IMAGE")"
-# Standalone: the server mounts its keys at /run/fvoci/secrets and the backup
-# carries them in server-secrets.tar.
-SECRETS_KEY="$(jq -r --arg s "$SERVER" '.services[$s].volumes[]? | select(.target == "/run/fvoci/secrets") | .source' <<<"$COMPOSE_CONFIG")"
-SECRETS_TAR="$INPUT/server-secrets.tar"
-if [[ -n "$SECRETS_KEY" ]]; then
-  [[ -z "$ENV_FILE" ]] || { echo "the standalone compose takes its keys from the backup; omit --env-file" >&2; exit 1; }
-  [[ -s "$SECRETS_TAR" ]] || { echo "backup has no server-secrets.tar (taken from an env-file install?)" >&2; exit 1; }
-  grep -qx './.fvoci-install-complete' <<<"$(tar -tf "$SECRETS_TAR")" || { echo "server-secrets.tar is incomplete" >&2; exit 1; }
-elif [[ -z "$ENV_FILE" ]]; then
-  echo "--env-file is required for this compose file" >&2
-  exit 1
-fi
 compose_key() {
-  if [[ -n "$SECRETS_KEY" ]]; then
-    tar -xOf "$SECRETS_TAR" "./${1,,}"
-    return
-  fi
   jq -r --arg s "$SERVER" --arg name "$1" '.services[$s].environment[$name] // ""' <<<"$COMPOSE_CONFIG"
 }
 PEPPER_KEYS="$(compose_key PASSWORD_PEPPER_KEYS)"
@@ -168,11 +153,19 @@ ENCRYPTION_ACTIVE="$(compose_key ENCRYPTION_ACTIVE_KEY_ID)"
 export FVOCI_IMAGE="$PRODUCT_IMAGE_ID"
 export PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE"
 export ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE"
-if [[ -z "$SECRETS_KEY" ]] && ! "${COMPOSE[@]}" config --format json | jq -e --arg s "$SERVER" --arg i "$INIT" '
-  .services[$s].image == env.FVOCI_IMAGE and .services[$i].image == env.FVOCI_IMAGE and
+# A release compose pins the image instead of reading FVOCI_IMAGE: compare ids.
+PINNED_CONFIG="$("${COMPOSE[@]}" config --format json)"
+for service in "$SERVER" "$PREP"; do
+  image="$(jq -er --arg s "$service" '.services[$s].image' <<<"$PINNED_CONFIG")"
+  if [[ "$(docker image inspect -f '{{.Id}}' "$image")" != "$PRODUCT_IMAGE_ID" ]]; then
+    echo "Compose must preserve the selected product image" >&2
+    exit 1
+  fi
+done
+if ! jq -e --arg s "$SERVER" '
   (.services[$s].environment as $settings |
     all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
-      . as $key | $settings[$key] == env[$key]))' >/dev/null; then
+      . as $key | $settings[$key] == env[$key]))' <<<"$PINNED_CONFIG" >/dev/null; then
   echo "Compose must preserve the selected product image and key snapshot" >&2
   exit 1
 fi
@@ -191,7 +184,6 @@ if [[ ! "$PREFLIGHT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\
 fi
 read -r SNAPSHOT_AT SINCE <<<"$PREFLIGHT"
 
-[[ -z "$SECRETS_KEY" ]] || mapfile -t VOLUME_KEYS < <(jq -r '.volumes | keys[]' <<<"$COMPOSE_CONFIG")
 for vol in "${VOLUME_KEYS[@]}"; do
   if docker volume inspect "${PROJECT}_${vol}" >/dev/null 2>&1; then
     echo "volume ${PROJECT}_${vol} already exists; restore only into a fresh project" >&2
@@ -199,19 +191,8 @@ for vol in "${VOLUME_KEYS[@]}"; do
   fi
 done
 
-if [[ -n "$SECRETS_KEY" ]]; then
-  # postgres://<role>:<hex password>@<host>/<db>, written by fvoci-migrate --install.
-  APP_URL="$(compose_key DATABASE_APP_URL)"
-  if [[ ! "$APP_URL" =~ ^postgres://([a-z_][a-z0-9_]*):([0-9a-f]+)@[^/]+/[a-z_][a-z0-9_]*$ ]]; then
-    echo "server-secrets.tar database_app_url is not an install app role URL" >&2
-    exit 1
-  fi
-  APP_ROLE="${BASH_REMATCH[1]}"
-  APP_PASSWORD="${BASH_REMATCH[2]}"
-else
-  APP_ROLE="$(read_env FVOCI_APP_ROLE)"
-  APP_PASSWORD="$(read_env FVOCI_APP_PASSWORD)"
-fi
+APP_ROLE="$(read_env FVOCI_APP_ROLE fvoci_app)"
+APP_PASSWORD="$(read_env FVOCI_APP_PASSWORD)"
 if [[ ! "$APP_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
   echo "invalid FVOCI_APP_ROLE" >&2
   exit 1
@@ -225,7 +206,7 @@ if [[ -z "$SERVER_CID" ]]; then
   echo "restore server container was not created" >&2
   exit 1
 fi
-INIT_CID="$("${COMPOSE[@]}" ps -a -q "$INIT" | head -1)"
+INIT_CID="$("${COMPOSE[@]}" ps -a -q "$PREP" | head -1)"
 if [[ -z "$INIT_CID" ]] ||
    [[ "$(docker inspect -f '{{.Image}}' "$SERVER_CID")" != "$PRODUCT_IMAGE_ID" ]] ||
    [[ "$(docker inspect -f '{{.Image}}' "$INIT_CID")" != "$PRODUCT_IMAGE_ID" ]]; then
@@ -244,17 +225,6 @@ docker run --rm --network none --user 0:0 --entrypoint tar \
   -v "${INPUT}:/b:ro" \
   "$TAR_IMAGE" \
   --numeric-owner -xf /b/storage.tar -C /v
-
-if [[ -n "$SECRETS_KEY" ]]; then
-  SECRETS_VOL="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/fvoci/secrets"}}{{.Name}}{{end}}{{end}}' "$SERVER_CID")"
-  [[ -n "$SECRETS_VOL" ]] || { echo "restore server container has no /run/fvoci/secrets volume" >&2; exit 1; }
-  echo "restoring the server keys volume"
-  docker run --rm --network none --user 0:0 --entrypoint tar \
-    -v "${SECRETS_VOL}:/v" \
-    -v "${INPUT}:/b:ro" \
-    "$TAR_IMAGE" \
-    --numeric-owner -xf /b/server-secrets.tar -C /v
-fi
 
 echo "starting postgres and meilisearch"
 "${COMPOSE[@]}" up -d --wait postgres meilisearch
@@ -295,19 +265,23 @@ docker cp "$DUMP" "${PG_CID}:/tmp/fvoci-restore.dump"
 "${COMPOSE[@]}" exec -T postgres rm -f /tmp/fvoci-restore.dump /tmp/fvoci-restore.list
 
 echo "running migrate, grant-app-role, and ensure-meili-key"
-"${COMPOSE[@]}" run --rm "$INIT"
+if [[ -n "$INIT" ]]; then
+  "${COMPOSE[@]}" run --rm "$INIT"
+else
+  "${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate "$SERVER" --prepare
+fi
 
 # Event xids from the old cluster are not comparable with this one; rebase the
 # outbox cursors before any server starts (writers are still stopped here).
 # createdAt is taken after the quiesced dump but has whole-second precision, so
 # events from earlier in that same second sort after it; use the next second.
 echo "rebasing outbox cursors (snapshot $SNAPSHOT_AT)"
-"${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate "$INIT" \
+"${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate "$PREP" \
   --recover-outbox --since "$SINCE" --snapshot-at "$SNAPSHOT_AT" \
   --apply --reason "restore into $PROJECT" --ack-external-replay
 
 echo "rebuilding the search index from PostgreSQL"
-"${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate "$INIT" --rebuild-search
+"${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate "$PREP" --rebuild-search
 
 # Every stored attachment in the restored database must exist in the storage
 # the server will use, with its recorded size. Runs with the server's own

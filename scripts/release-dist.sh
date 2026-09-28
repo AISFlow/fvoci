@@ -4,9 +4,13 @@
 #   compose.yml    the user compose with its x-fvoci-image anchor
 #                  ${FVOCI_IMAGE:-...} replaced by the digest-pinned image;
 #                  never committed back
+#   env.example    the settings the user copies to .env and fills in; it
+#                  assigns exactly the variables compose.yml reads (no leading
+#                  dot: GitHub renames release assets that start with one)
+#   INSTALL.md     the short start guide
 #   release.json   the release record (version, source SHA, digests)
 #   RELEASE-NOTES.md
-#   SHA256SUMS     over the three files above
+#   SHA256SUMS     over the five files above
 #
 #   scripts/release-dist.sh --version 0.y.z --sha <40-hex> --repository owner/name \
 #     --image ghcr.io/aisflow/fvoci --index-digest sha256:... \
@@ -44,9 +48,14 @@ if [[ -z "$COMPOSE_SOURCE" ]]; then
   echo "no user compose file found" >&2
   exit 1
 fi
+ENV_SOURCE="${COMPOSE_SOURCE%.yml}.env.example"
+GUIDE_SOURCE="${COMPOSE_SOURCE%.yml}.INSTALL.md"
+for source in "$ENV_SOURCE" "$GUIDE_SOURCE"; do
+  [[ -f "$ROOT/$source" ]] || { echo "missing $source next to $COMPOSE_SOURCE" >&2; exit 1; }
+done
 
 mkdir -p "$OUT"
-export VERSION SHA REPOSITORY IMAGE INDEX_DIGEST AMD64_DIGEST ARM64_DIGEST RUN_URL OUT COMPOSE_SOURCE
+export VERSION SHA REPOSITORY IMAGE INDEX_DIGEST AMD64_DIGEST ARM64_DIGEST RUN_URL OUT COMPOSE_SOURCE ENV_SOURCE GUIDE_SOURCE
 python3 - "$ROOT" <<'PY'
 import json, os, re, sys
 from pathlib import Path
@@ -75,7 +84,7 @@ image_ref = f"{env['IMAGE']}:{env['VERSION']}@{env['INDEX_DIGEST']}"
 
 compose_text = (root / env["COMPOSE_SOURCE"]).read_text(encoding="utf-8")
 # The user compose names the product image once, as the YAML anchor every
-# product service (the app and its one-shot preparation) shares:
+# service on the product image shares:
 #   x-fvoci-image: &fvoci-image ${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:<version>}
 anchor = re.compile(
     r"^(x-fvoci-image:[ \t]+&fvoci-image[ \t]+)\$\{FVOCI_IMAGE:-" + re.escape(env["IMAGE"]) + r":[^}\s$]+\}[ \t]*$",
@@ -92,18 +101,34 @@ if rendered.count(env["IMAGE"]) != 1:
     sys.exit(f"{env['COMPOSE_SOURCE']}: {env['IMAGE']} must be named only through the x-fvoci-image anchor")
 if not re.search(r"^\s+image:[ \t]+\*fvoci-image[ \t]*$", rendered, re.MULTILINE):
     sys.exit(f"{env['COMPOSE_SOURCE']}: no service uses 'image: *fvoci-image'")
-# Zero-env install: nothing left for Compose to interpolate ($$ is a literal $)
-# and no env_file for a user to create.
-interpolations = re.findall(r"(?<!\$)\$(?!\$)[{A-Za-z_][^\s]*", rendered)
-if interpolations:
-    sys.exit(f"{env['COMPOSE_SOURCE']}: the release compose must need no environment; found {interpolations}")
+# Everything left for Compose to interpolate comes from the user's .env: each
+# variable is required (${VAR:?message}, so an unfilled .env stops Compose
+# before any container starts) and .env.example assigns exactly these
+# variables. No env_file: each service gets only the values it names.
+env_text = (root / env["ENV_SOURCE"]).read_text(encoding="utf-8")
+assigned = re.findall(r"^([A-Z][A-Z0-9_]*)=", env_text, re.MULTILINE)
+if len(assigned) != len(set(assigned)):
+    sys.exit(f"{env['ENV_SOURCE']}: a variable is assigned twice")
+references = re.findall(r"(?<!\$)\$(?!\$)(\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)", rendered)
+used = set()
+for ref in references:
+    match = re.fullmatch(r"\{([A-Z][A-Z0-9_]*):\?[^}]+\}", ref)
+    if not match:
+        sys.exit(f"{env['COMPOSE_SOURCE']}: every interpolation must be ${{VAR:?message}}; found ${ref}")
+    used.add(match.group(1))
+if used != set(assigned):
+    sys.exit(f"{env['ENV_SOURCE']} must assign exactly the variables {env['COMPOSE_SOURCE']} reads: "
+             f"missing {sorted(used - set(assigned))}, unused {sorted(set(assigned) - used)}")
 if re.search(r"^\s+env_file:", rendered, re.MULTILINE):
-    sys.exit(f"{env['COMPOSE_SOURCE']}: the release compose must not need an env_file")
+    sys.exit(f"{env['COMPOSE_SOURCE']}: the release compose must not use env_file")
 header = (
     f"# FVOCI {env['VERSION']} ({env['SHA']}), rendered from {env['COMPOSE_SOURCE']}\n"
     f"# by the release workflow. The image is pinned by manifest digest.\n"
 )
 (out / "compose.yml").write_text(header + rendered, encoding="utf-8")
+(out / "env.example").write_text(env_text, encoding="utf-8")
+guide = (root / env["GUIDE_SOURCE"]).read_text(encoding="utf-8")
+(out / "INSTALL.md").write_text(f"<!-- FVOCI {env['VERSION']} ({env['SHA']}) -->\n" + guide, encoding="utf-8")
 
 record = {
     "version": env["VERSION"],
@@ -113,6 +138,7 @@ record = {
     "indexDigest": env["INDEX_DIGEST"],
     "platforms": {"linux/amd64": env["AMD64_DIGEST"], "linux/arm64": env["ARM64_DIGEST"]},
     "composeSource": env["COMPOSE_SOURCE"],
+    "files": ["compose.yml", "env.example", "INSTALL.md"],
     # Publish order: the index is pushed by digest only; both smoke jobs pull
     # that digest anonymously; then the publish job applies the immutable
     # version tag and, when this is the newest 0.y release, moves the minor tag;
@@ -141,5 +167,5 @@ if left:
 (out / "RELEASE-NOTES.md").write_text(notes, encoding="utf-8")
 PY
 
-(cd "$OUT" && sha256sum compose.yml release.json RELEASE-NOTES.md >SHA256SUMS)
+(cd "$OUT" && sha256sum compose.yml env.example INSTALL.md release.json RELEASE-NOTES.md >SHA256SUMS)
 echo "rendered $OUT from $COMPOSE_SOURCE"

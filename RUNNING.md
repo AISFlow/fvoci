@@ -610,82 +610,82 @@ run as uid/gid `1000` (`fvoci`), and set:
 Unset any helper env to disable that feature (API-only). The published image ships
 all three helpers and enables them via the defaults above.
 
-### Standalone install (one compose file)
+### Install (compose.yml and .env)
 
-For a trial install, save `infra/rust/compose.user.yml` (or the release's
-`compose.yml` built from it) as `compose.yml` in an empty folder and run:
+The user install is `infra/rust/compose.user.yml` with
+`infra/rust/compose.user.env.example`; a release ships them as `compose.yml`
+(image pinned by digest) and `env.example`, with a short `INSTALL.md`. In an
+empty folder:
 
 ```sh
-docker compose up -d
+cp env.example .env      # fill in each empty value with the command shown above it
+docker compose up -d --wait
 ```
 
-Open <http://localhost:8080> and create the first administrator (the setup
-flow is the same as below; no administrator is created automatically). No
-`.env`, local build, SQL or key generation is needed. The file is the only
-input; the product image is `${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:<version>}`,
-which release files replace with a digest-pinned reference.
+Open `FVOCI_PUBLIC_ORIGIN` (<http://localhost:8080>) and create the first
+administrator (no administrator is created automatically). Services: `fvoci`,
+`postgres`, `meilisearch`; there is no separate init service.
 
-Services: `fvoci` (the server), `postgres`, `meilisearch`, and one one-shot
-`init`. `init` exists for one boundary: migrations, grants and the scoped search
-key need the database owner password and the Meilisearch master key, and the
-request-serving server must never hold either (not in its environment, argv,
-files or descriptors). Running them in the server container, or with no
-preparation service at all, would put those credentials in the server; there is
-no resident bootstrap process and no Docker socket. Order of an `up`:
+`.env` holds nine values: `FVOCI_PUBLIC_ORIGIN` and `FVOCI_PUBLISH_PORT`
+(filled in: change both together; the server never derives the origin from
+`Host` or `Forwarded`), `PASSWORD_PEPPER_ACTIVE_KEY_ID` and
+`ENCRYPTION_ACTIVE_KEY_ID` (filled in: `install`), and five values to generate:
+`POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
+(`openssl rand -hex 32` each) and the keyrings `PASSWORD_PEPPER_KEYS` and
+`ENCRYPTION_KEYS` (`{"install":"<openssl rand -hex 32>"}`, the same format as
+`fvoci-migrate --init-env`). Compose requires each value, so an unfilled `.env`
+stops before any container is created. Keep `.env` private and with your
+backups; PostgreSQL keeps the owner and app passwords from the first start, and
+the pepper and encryption keys open existing accounts and sealed secrets.
+Compose passes each service only the values it names (no `env_file`).
 
-1. `postgres` and `meilisearch` start first. On their first start a short
-   wrapper in each writes a random 256-bit hex secret (`postgres_password`,
-   `master_key`; mode 0640, owner the service's uid, group 1001) into their own
-   secret volume, then execs the official entrypoint. It never overwrites an
-   existing secret, and it exits nonzero without writing anything when the file
-   is missing but the data directory already holds data. PostgreSQL reads
-   `POSTGRES_PASSWORD_FILE`; Meilisearch gets its key in the environment of the
-   `exec`'d process, never on argv.
-2. `init` (product image, uid 1000 plus group 1001, both secret volumes
-   read-only) runs `fvoci-migrate --install` once both are healthy. Under a
-   PostgreSQL advisory lock it generates the server's keys once (app role
-   password, password pepper and `ENCRYPTION_KEYS` keyrings, same formats as
-   `--init-env`; files mode 0600 uid 1000, then an install marker), creates the
-   non-superuser `NOBYPASSRLS` app role, migrates, grants, writes the scoped
-   search key and the Meilisearch URL next to them, and exits. Later runs keep
-   every file. If the server's files are missing while the database already
-   holds the app role or the `fvoci` schema, it exits nonzero instead: new keys
-   cannot open that data. A failed `init` leaves `fvoci` stopped.
-3. `fvoci` mounts only that settings volume (at `/run/fvoci/secrets`) and the
-   storage volume. `fvoci-server` and `fvoci-migrate` read a variable from
-   `/run/fvoci/secrets/<name>` when neither the variable, its `<VAR>_FILE` form
-   nor an alias is set: `database_app_url`, `password_pepper_keys`,
-   `password_pepper_active_key_id`, `encryption_keys`,
-   `encryption_active_key_id`, `meili_url` and `meili_api_key`
-   (`FVOCI_MEILI_KEY`). Setting the variable too is a startup error, as is
-   setting both `<VAR>` and `<VAR>_FILE`; the image ships the directory empty,
-   so env-file installs are unaffected.
+The image entrypoint is `fvoci-migrate --start`. Given the owner password
+(`POSTGRES_PASSWORD`), it runs, on every start of `fvoci`:
 
-| Volume | Holds | Mounted by |
-| --- | --- | --- |
-| `fvoci_pgdata`, `fvoci_searchdata` | database, search index | `postgres`, `meilisearch` |
-| `fvoci_storage` | attachments | `fvoci` |
-| `fvoci_postgres_secrets` | `postgres_password` | `postgres`; `init` read-only |
-| `fvoci_meili_secrets` | `master_key` | `meilisearch`; `init` read-only |
-| `fvoci_server_secrets` | the server's keys and settings (above) | `init`; `fvoci` read-only |
+1. **Settings check.** Every required value is set, not empty and not an
+   example placeholder (`<…>`, `change-me`, …); passwords and the master key
+   are at least 16 characters and the app password differs from the owner's;
+   the keyrings parse with their active ids; the origin is valid. Errors name
+   the variable, never the value, and exit 2.
+2. **Readiness.** It waits for PostgreSQL (as the owner) and Meilisearch
+   (`/health`) until `FVOCI_PREPARE_TIMEOUT_SECS` (default 120) and exits 1
+   after it; SIGTERM/SIGINT end the wait at once (exit 143/130). A wrong owner
+   password is reported as such, without waiting.
+3. **Preparation**, under a PostgreSQL advisory lock (concurrent starts run one
+   after another). If migrations are pending while sessions of the app role are
+   open (another server is still running), it refuses and points to "Upgrade".
+   Otherwise it creates the `NOBYPASSRLS` app role if missing, migrates (the
+   same locked, transactional path as `fvoci-migrate`), applies the grants,
+   checks that `FVOCI_APP_PASSWORD` opens the app role, and ensures the scoped
+   search key in `/run/fvoci/meili/api_key` (the `meili_key` volume).
+4. **Server.** It closes every preparation connection and `exec`s
+   `fvoci-server` in the same process (pid 1, so signals, graceful shutdown and
+   child reaping are the server's), with `POSTGRES_PASSWORD`, `DATABASE_URL`,
+   `MEILI_MASTER_KEY` and `FVOCI_APP_PASSWORD` removed from its environment and
+   `DATABASE_APP_URL` (the app role) added. The server, its helper children
+   (which start with a cleared environment) and anything it runs never receive
+   the owner password or master key.
 
-Everything the image already knows is not in the file: helper paths, static
+If any step fails the server does not start; the container restarts and tries
+again (`docker compose logs fvoci` names the problem). What is **not**
+separated: preparation and server share the container and uid 1000, so the
+container configuration (`docker inspect`, and every `docker exec` process)
+still carries the preparation values; anyone who can run Docker commands on
+the host can read them, as they can read `.env`. The owner never reaches the
+network beyond the Compose network: PostgreSQL and Meilisearch publish no port.
+
+Without `POSTGRES_PASSWORD` the entrypoint only execs `fvoci-server` (the
+env-file stack below keeps its separate `init` service).
+
+Other defaults come from the image and the Rust loader: helper paths, static
 and storage directories, bind address, shutdown deadline (30 s), collaboration
-memory budget (2 GiB), extraction poll interval (30 s) and secure cookies (on
-for an `https` origin). Its only settings are:
-
-- the published port `127.0.0.1:8080:8080` (loopback only) and
-  `FVOCI_PUBLIC_ORIGIN: http://localhost:8080`, the exact origin browsers use;
-  the server never derives it from `Host` or `Forwarded`. Changing the port or
-  address means changing the origin to match; open it as `localhost`, not
-  `127.0.0.1`;
-- `FVOCI_COLLAB_MAX_ROOMS: "64"` with PostgreSQL `max_connections=150`, the
-  verified capacity pair (64 room fences + app pool 64 + reserve 10 = 138). The
-  image default is 30 rooms, which fits a stock PostgreSQL; change both together.
-
-PostgreSQL and Meilisearch ports are not published. Database and role names
-(`fvoci`, `fvoci_owner`, `fvoci_app`) are the `--install` defaults and are fixed
-at the first start (the server's `database_app_url` contains them).
+memory budget (2 GiB), extraction poll interval (30 s), secure cookies for an
+`https` origin, and the database names `fvoci`, `fvoci_owner`, `fvoci_app`
+(PostgreSQL service `postgres:5432`, Meilisearch `http://meilisearch:7700`).
+The file keeps one capacity setting: `FVOCI_COLLAB_MAX_ROOMS: "64"` with
+PostgreSQL `max_connections=150`, the verified pair (64 room fences + app pool
+64 + reserve 10 = 138). The image default is 30 rooms, which fits a stock
+PostgreSQL; change both together.
 
 #### Optional settings
 
@@ -696,30 +696,26 @@ Put optional settings in a `compose.override.yml` next to `compose.yml`;
 ```yaml
 services:
   fvoci:
-    ports: !override
-      - "127.0.0.1:8443:8080"       # published to a local TLS proxy
     environment:
-      FVOCI_PUBLIC_ORIGIN: https://docs.example.com
+      SMTP_HOST: smtp.example.com
+      SMTP_PORT: "587"
+      SMTP_FROM: fvoci@example.com
 ```
 
 | Topic | Variables (details in this file) |
 | --- | --- |
-| Domain, HTTPS, proxy | `FVOCI_PUBLIC_ORIGIN` (`https://…` also turns on secure cookies), published port; see "Bootstrap" below for the proxy rules |
+| Domain, HTTPS, proxy | `FVOCI_PUBLIC_ORIGIN=https://…` in `.env` (also turns on secure cookies) and the published address; see "Bootstrap" below for the proxy rules |
 | S3 storage | `STORAGE_DRIVER=s3`, `S3_*` ("S3 storage backup") |
 | Mail | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` |
-| OIDC sign-in | providers are set up in the app, sealed with `ENCRYPTION_KEYS` (see the OIDC notes under "Backup and restore"); `OIDC_ALLOW_INSECURE=1` only for a local http provider |
+| OIDC sign-in | providers are set up in the app, sealed with `ENCRYPTION_KEYS`; `OIDC_ALLOW_INSECURE=1` only for a local http provider |
 | GitHub integration | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_STATE_SECRET` |
 | AI | `FVOCI_AI_ENABLED`, `FVOCI_AI_SECRET`, `FVOCI_AI_EMBEDDINGS_*` |
-| Tuning | `FVOCI_COLLAB_*`, `FVOCI_EXTRACT_POLL_SECS`, `FVOCI_SHUTDOWN_DEADLINE_MS`, `FVOCI_UPLOAD_*`, `RUST_LOG` |
+| Tuning | `FVOCI_COLLAB_*`, `FVOCI_EXTRACT_POLL_SECS`, `FVOCI_SHUTDOWN_DEADLINE_MS`, `FVOCI_UPLOAD_*`, `FVOCI_PREPARE_TIMEOUT_SECS`, `RUST_LOG` |
 
 Unset variables keep the product default; an empty value is a value, so do not
-add empty entries. Secrets in an override are plain environment values; the
-server keys stay in `fvoci_server_secrets` and must not be set there (a
-variable next to its file is refused).
-
-`docker compose down` and `up -d` keep data and keys. `docker compose down -v`
-deletes all volumes, including the keys. Back up with `scripts/backup.sh`:
-see "Standalone install" under "Backup and restore".
+add empty entries. `docker compose down` and `up -d` keep data; `down -v`
+deletes the database, files and search index. Back up with `scripts/backup.sh`
+(see "Backup and restore").
 
 ### Bootstrap
 
@@ -944,16 +940,18 @@ architecture and logs of a run with the change it supports; this guide does not.
 
 Trial releases are published by `.github/workflows/release.yml` as
 `ghcr.io/aisflow/fvoci:0.y.z` (linux/amd64 and linux/arm64) with a GitHub
-pre-release holding `compose.yml` pinned to the image digest, `release.json`
-and `SHA256SUMS`; maintainer steps are in `docs/RELEASING.md`. Nothing updates
-an install on its own. To move a release install to a newer 0.y.z, back it up,
-check the new release's `SHA256SUMS`, replace `compose.yml` in the same
-directory (same Compose project name, so the same volumes) and run
-`docker compose up -d --wait`; the one-shot services migrate before the
-server starts, and a failure leaves the server stopped as described above.
-0.x releases make no compatibility promise between minor versions and there is
-no downgrade: going back means restoring the pre-upgrade backup.
-`docker compose down -v` deletes the data and the generated keys.
+pre-release holding `compose.yml` pinned to the image digest, `env.example`,
+`INSTALL.md`, `release.json` and `SHA256SUMS`; maintainer steps are in
+`docs/RELEASING.md`. Nothing updates an install on its own. To move a release
+install to a newer 0.y.z, back it up, check the new release's `SHA256SUMS`,
+replace `compose.yml` in the same directory (same Compose project name, so the
+same volumes; keep `.env`) and run `docker compose up -d --wait`. Compose
+recreates `fvoci`, so the old server has stopped before the new container
+migrates; the preparation refuses to migrate while any other server still has
+app-role sessions open, and a failure leaves the server stopped as described
+above. 0.x releases make no compatibility promise between minor versions and
+there is no downgrade: going back means restoring the pre-upgrade backup.
+`docker compose down -v` deletes the data; the keys stay in `.env`.
 `fvoci-server --version` (for example
 `docker compose exec fvoci /opt/fvoci/bin/fvoci-server --version`) prints the
 version and source commit.
@@ -964,29 +962,22 @@ This is the logical backup for the Compose install above (the source advanced
 install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
 of every volume, and it is not PITR.
 
-### Standalone install
+### Install from compose.yml and .env
 
-`scripts/backup.sh` and `scripts/restore.sh` also take the standalone
-`compose.yml`, without `--env-file`; run them from a checkout of the same
-release, with the install's project name (`fvoci` unless changed):
+`scripts/backup.sh` and `scripts/restore.sh` take the user install like the
+env-file stack: its `.env` is the env file, and the app service is found as the
+one publishing port 8080. Run them from a checkout of the same release:
 
 ```sh
-scripts/backup.sh --project fvoci --compose-file /path/to/compose.yml --output /backups/fvoci-1
-scripts/restore.sh --project fvoci-restored --compose-file /path/to/compose.yml --input /backups/fvoci-1
+scripts/backup.sh --project fvoci --env-file /path/to/.env --compose-file /path/to/compose.yml --output /backups/fvoci-1
+scripts/restore.sh --project fvoci-restored --env-file /path/to/.env --compose-file /path/to/compose.yml --input /backups/fvoci-1
 ```
 
-Besides the dump, storage archive and manifest, the backup holds
-`server-secrets.tar`: the `fvoci_server_secrets` volume with the password
-pepper, `ENCRYPTION_KEYS`, app role password and search settings. Store the
-backup directory like a secret. The owner password and master key are not in
-it; the restored install generates new ones. Restore checks the manifest
-fingerprints against the keys in `server-secrets.tar`, refuses a backup
-without it (or without its install marker) before any volume exists, restores
-it into the new project's `server_secrets` volume, and then continues as
-below. As with every restore the target must be a new project name; run the
-restored install with `docker compose -p fvoci-restored …` (or change `name:`).
-A data volume without its secret volume refuses to start (see above), so a
-partial volume copy cannot come up with new keys.
+The keys stay in `.env` and are not copied into the backup; keep a copy of
+`.env` with it. Without an init service, restore runs the preparation with
+`fvoci-migrate --prepare` and the owner commands in the `fvoci` service. As
+with every restore the target is a new project name; run it with
+`docker compose -p fvoci-restored …` (or change `name:`).
 
 Run `scripts/backup.sh` and `scripts/restore.sh` on the operator's Linux host
 with Bash, Docker Compose, jq, GNU coreutils and tar. The scripts check their

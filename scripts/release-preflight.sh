@@ -6,8 +6,9 @@
 #   - the rust-build stage of infra/rust/Dockerfile declares
 #     ARG FVOCI_BUILD_SHA, so fvoci-server --version reports the commit;
 #   - the user compose renders through scripts/release-dist.sh (the
-#     x-fvoci-image anchor) and `docker compose config` accepts the result from
-#     an empty directory with an empty environment.
+#     x-fvoci-image anchor and env.example); from an empty directory with an
+#     empty environment, `docker compose config` refuses the unfilled
+#     env.example as .env and accepts it once every value is filled in.
 #
 #   scripts/release-preflight.sh --version 0.y.z [--image ghcr.io/aisflow/fvoci]
 set -euo pipefail
@@ -54,16 +55,18 @@ bash "$ROOT/scripts/release-dist.sh" --version "$VERSION" --sha "$(printf 'f%.0s
   --amd64-digest "$ZERO" --arm64-digest "$ZERO" --run-url https://preflight.invalid/ --out "$WORK/dist" >/dev/null
 mkdir "$WORK/empty"
 cp "$WORK/dist/compose.yml" "$WORK/empty/compose.yml"
+cp "$WORK/dist/env.example" "$WORK/empty/.env"
+if (cd "$WORK/empty" && env -i PATH="$PATH" HOME="$WORK" docker compose -f compose.yml config -q) 2>/dev/null; then
+  fail "docker compose config accepts the unfilled env.example; every value must be required"
+fi
+sed -E 's/^([A-Z][A-Z0-9_]*)=$/\1=preflight-value/' "$WORK/dist/env.example" >"$WORK/empty/.env"
 (cd "$WORK/empty" && env -i PATH="$PATH" HOME="$WORK" docker compose -f compose.yml config --format json) >"$WORK/config.json" \
-  || fail "docker compose config rejects the rendered user compose"
+  || fail "docker compose config rejects the rendered user compose with a filled .env"
 python3 - "$WORK/config.json" "$IMAGE:$VERSION@$ZERO" <<'PY' || fail "the rendered user compose does not match the release contract (docs/RELEASING.md)"
 import json, sys
 services = json.load(open(sys.argv[1]))["services"]
 image = sys.argv[2]
 product = sorted(name for name, spec in services.items() if spec.get("image") == image)
-one_shot = sorted({dep for spec in services.values()
-                   for dep, cond in (spec.get("depends_on") or {}).items()
-                   if cond.get("condition") == "service_completed_successfully"})
 apps = sorted(name for name, spec in services.items()
               if any(p.get("target") == 8080 for p in spec.get("ports") or []))
 problems = []
@@ -71,14 +74,12 @@ if len(apps) != 1:
     problems.append(f"expected one service publishing container port 8080, found {apps}")
 elif apps[0] not in product:
     problems.append(f"{apps[0]} (publishes 8080) does not use the product image")
-if not one_shot or not set(one_shot) <= set(product):
-    problems.append(f"one-shot services {one_shot} must exist and use the product image")
 if "postgres" not in services:
     problems.append("no postgres service")
 for name, spec in services.items():
     if spec.get("env_file"):
         problems.append(f"{name} needs an env_file")
-print(f"product image services: {product}; app: {apps}; one-shot: {one_shot}")
+print(f"product image services: {product}; app: {apps}")
 sys.exit("\n".join(problems) if problems else 0)
 PY
-echo "rendered user compose passes docker compose config with an empty environment: ok"
+echo "rendered user compose: unfilled env.example refused, filled .env accepted by docker compose config: ok"
