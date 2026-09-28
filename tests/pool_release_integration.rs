@@ -28,10 +28,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 const RELEASE_EVENT: &str = "db.pool.release_in_transaction";
+const CHECK_FAILED_EVENT: &str = "db.pool.acquire_check_failed";
+/// How the fmt subscriber prints the target of `db::pool`'s own events.
+const POOL_TARGET: &str = " fvoci_server::db::pool: ";
 const WAIT: Duration = Duration::from_secs(10);
 
 /// Warn-level log lines emitted on this test's thread. `#[tokio::test]` runs a
-/// current-thread runtime, so the pool's spawned release task logs here too.
+/// current-thread runtime, so sqlx's spawned release tasks log here too.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
 
@@ -62,6 +65,15 @@ impl Captured {
             .map(str::to_owned)
             .collect()
     }
+
+    /// Only `db::pool`'s own events: other warnings on the thread, such as
+    /// sqlx's slow-statement or slow-acquire lines on a stalled runner, are
+    /// not counted.
+    fn pool_events(&self) -> Vec<String> {
+        let mut events = self.lines();
+        events.retain(|line| line.contains(POOL_TARGET));
+        events
+    }
 }
 
 fn capture_warnings() -> (Captured, tracing::subscriber::DefaultGuard) {
@@ -75,17 +87,26 @@ fn capture_warnings() -> (Captured, tracing::subscriber::DefaultGuard) {
     (captured, guard)
 }
 
-/// The release check logged once per closed connection, with its fixed event
-/// name and no SQL, and sqlx logged nothing of its own (its `after_release`
-/// error path).
+/// The pool check logged once per closed connection, with its fixed event
+/// name and no SQL. Neither the check nor sqlx's release ping failed: sqlx
+/// logged no error path of its own, so each leaked connection was closed
+/// gracefully.
 fn assert_release_warnings(logs: &Captured, states: &[&str]) {
-    let lines = logs.lines();
-    assert_eq!(lines.len(), states.len(), "warn lines: {lines:#?}");
-    for (line, state) in lines.iter().zip(states) {
+    let events = logs.pool_events();
+    assert_eq!(events.len(), states.len(), "pool events: {events:#?}");
+    for (line, state) in events.iter().zip(states) {
         assert!(line.contains(RELEASE_EVENT), "{line}");
         assert!(line.contains(&format!("state=\"{state}\"")), "{line}");
         for sql in ["BEGIN", "SELECT", "statement_timestamp"] {
             assert!(!line.contains(sql), "{line}");
+        }
+    }
+    for line in logs.lines() {
+        for failure in [
+            "error from `before_acquire`",
+            "testing the connection on-release",
+        ] {
+            assert!(!line.contains(failure), "{line}");
         }
     }
 }
@@ -343,7 +364,7 @@ async fn cancelled_begin_does_not_leak_its_transaction() {
     let harness = TestDb::bootstrap().await;
     let admin = admin_pool(&harness).await;
     let mut url = url::Url::parse(&harness.app_url).unwrap();
-    let upstream = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+    let upstream = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap_or(5432));
     let proxy = ReplyHoldingProxy::spawn(upstream).await;
     url.set_port(Some(proxy.addr.port())).unwrap();
     // The proxy reads the protocol, so keep it in clear text.
@@ -394,7 +415,8 @@ async fn ended_transactions_keep_their_connection() {
         sqlx::query("SELECT 1").execute(&mut *tx).await.unwrap();
         tx.commit().await.unwrap();
 
-        // Dropped: sqlx queues a ROLLBACK that the release check flushes first.
+        // Dropped: sqlx queues a ROLLBACK that its release ping flushes
+        // before the next checkout's check.
         let mut tx = begin_read(&pool).await.unwrap();
         sqlx::query("SELECT 1").execute(&mut *tx).await.unwrap();
         drop(tx);
@@ -423,9 +445,52 @@ async fn ended_transactions_keep_their_connection() {
     drop(conn);
 
     assert_eq!(backend_pid(&pool).await, pid);
-    let lines = logs.lines();
-    assert!(lines.is_empty(), "warn lines: {lines:#?}");
+    assert_release_warnings(&logs, &[]);
 
     close_pool(pool).await;
+    harness.cleanup().await;
+}
+
+/// Liveness: the check replaces sqlx's acquire-time ping, so an idle
+/// connection whose backend ended is replaced on checkout rather than handed
+/// out, and the one warning names the error kind and SQLSTATE, not the
+/// server's message.
+#[tokio::test]
+async fn dead_idle_connection_is_replaced() {
+    let harness = TestDb::bootstrap().await;
+    let admin = admin_pool(&harness).await;
+    let pool = pool::connect_app_with_max(&harness.app_url, 1)
+        .await
+        .expect("app pool");
+    let (logs, _guard) = capture_warnings();
+
+    let dead_pid = backend_pid(&pool).await;
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(dead_pid)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert!(terminated);
+    wait_backend_gone(&admin, dead_pid).await;
+
+    let pid = backend_pid(&pool).await;
+    assert_ne!(pid, dead_pid);
+    assert_eq!(backend_pid(&pool).await, pid);
+
+    let events = logs.pool_events();
+    assert_eq!(events.len(), 1, "pool events: {events:#?}");
+    let line = &events[0];
+    assert!(line.contains(CHECK_FAILED_EVENT), "{line}");
+    // PostgreSQL's FATAL 57P01 when its reply is read first, else the socket
+    // error from the write.
+    assert!(
+        line.contains("kind=\"database\" sqlstate=\"57P01\"")
+            || line.contains("kind=\"io\" sqlstate=\"\""),
+        "{line}"
+    );
+    assert!(!line.contains("terminating"), "{line}");
+
+    close_pool(pool).await;
+    admin.close().await;
     harness.cleanup().await;
 }
