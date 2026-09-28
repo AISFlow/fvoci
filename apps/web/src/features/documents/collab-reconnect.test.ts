@@ -3,6 +3,7 @@ import test from "node:test";
 import { HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import {
 	CLOSE_TRY_AGAIN_LATER,
+	type CollabRefusal,
 	createRefusalAwareSocket,
 	RECONNECT_BACKOFF,
 	RefusalWatch,
@@ -26,6 +27,16 @@ test("RefusalWatch: 프레임을 받은 세션의 끊김과 열리지 않은 실
 	watch.open();
 	assert.equal(watch.close(1013), "capacity");
 	assert.equal(watch.close(1013), null, "reset after close");
+});
+
+test("RefusalWatch: 거절 뒤 열리지도 못한 시도(서버 다운·오프라인)는 null 이라 기록된 거절을 지운다", () => {
+	const watch = new RefusalWatch();
+	watch.open();
+	assert.equal(watch.close(CLOSE_TRY_AGAIN_LATER), "capacity");
+	assert.equal(watch.close(1006), null, "error before open: not a refusal");
+	assert.equal(watch.close(1006), null);
+	watch.open();
+	assert.equal(watch.close(CLOSE_TRY_AGAIN_LATER), "capacity", "refused again once the server is back");
 });
 
 let opened: number[] = [];
@@ -142,7 +153,7 @@ const REFUSE_FAST = {
 };
 
 test("거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열고, 파기 뒤에는 열지 않는다", async () => {
-	const refusals: string[] = [];
+	const refusals: Array<CollabRefusal | null> = [];
 	const { live, afterDestroy } = await measure(1_500, () =>
 		createRefusalAwareSocket({ ...REFUSE_FAST, WebSocketPolyfill: RefusingSocket }, (refusal) =>
 			refusals.push(refusal),
@@ -160,7 +171,7 @@ test("거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열
 });
 
 test("서비스 중 끊긴 세션은 provider 가 다시 붙고, 파기하면 예약된 재접속도 열지 않는다", async () => {
-	const refusals: string[] = [];
+	const refusals: Array<CollabRefusal | null> = [];
 	const { live, afterDestroy } = await measure(300, () =>
 		createRefusalAwareSocket(
 			{ ...FAST, delay: 400, WebSocketPolyfill: DroppingSocket },
@@ -168,6 +179,10 @@ test("서비스 중 끊긴 세션은 provider 가 다시 붙고, 파기하면 �
 		),
 	);
 	assert.ok(live.length >= 1);
-	assert.deepEqual(refusals, [], "a dropped served session is not a refusal");
+	assert.ok(refusals.length >= 1, "the drop is reported so a stale refusal would be cleared");
+	assert.ok(
+		refusals.every((refusal) => refusal === null),
+		`a dropped served session is not a refusal: ${refusals}`,
+	);
 	assert.equal(afterDestroy, 0, "the pending 400 ms reconnect must not fire after destroy");
 });

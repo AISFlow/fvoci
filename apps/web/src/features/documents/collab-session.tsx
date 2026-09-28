@@ -61,7 +61,8 @@ export {
 } from "./collab-model";
 export { isDurablySaved } from "./collab-persist-ack";
 
-/** Latest pre-auth refusal of this room's socket, cleared once the room authenticates. */
+/** Pre-auth refusal of this room socket's latest close, cleared by a close that was not a refusal
+ * or once the room authenticates. */
 const CollabRefusalContext = createContext<CollabRefusal | null>(null);
 
 function roomNameOf(provider: { configuration?: { name?: string } }): string {
@@ -110,7 +111,7 @@ function ClaimedRoom({
 	/* Built in a layout effect so StrictMode's double run cannot leave a connected socket behind. */
 	useLayoutEffect(() => {
 		const next = new RoomConnection<HocuspocusProviderWebsocket>({
-			open: (onRefused) => createRefusalAwareSocket({ url }, onRefused),
+			open: (onClosed) => createRefusalAwareSocket({ url }, onClosed),
 			onChange: setRoom,
 			/* WHY: #704 — Yjs 도 clientID 충돌을 보면 같은 자리를 이렇게 갈아 낀다(yjs.mjs:3342).
 			 * 구조체는 옛 id 통에 그대로 남아 다음 동기화에 실린다 — 미전송 편집이 살아남는다. */

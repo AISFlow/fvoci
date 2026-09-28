@@ -5,7 +5,9 @@
  * backoff 로 계속 돈다. 거절될 때마다 루프가 하나씩 늘어 간격이 1 s → 20 ms 로 줄어드는
  * 폭주가 된다. OwnedSocket 이 취소 핸들을 첫 프레임까지 쥐고 있어 루프는 늘 하나다: 같은
  * 소켓이 상한 있는 jitter backoff(RECONNECT_BACKOFF)로 다시 열고 열 때마다 인증을 다시
- * 보낸다. 거절은 사유만 기록한다 — 소켓·provider·화면을 갈아끼우지 않는다. */
+ * 보낸다. 거절은 사유만 기록한다 — 소켓·provider·화면을 갈아끼우지 않는다. 기록은 close 마다
+ * 갱신한다: 열리지도 못한 시도(서버 다운·오프라인·업그레이드 503)는 거절이 아니므로 사유를 지워
+ * 상태가 원래 연결 상태로 돌아간다 — 장애 내내 「서버 혼잡」이 남지 않는다. */
 
 import {
 	HocuspocusProviderWebsocket,
@@ -95,10 +97,12 @@ class OwnedSocket extends HocuspocusProviderWebsocket {
 }
 
 /** The room's socket. It retries refusals itself with RECONNECT_BACKOFF (callers may
- * override the timing) and reports each one to `onRefused`, which only records it. */
+ * override the timing) and reports every close to `onClosed`, which only records it: the
+ * refusal, or null for a close that was not one (a served session that dropped, or an
+ * attempt that never opened), so a stale refusal never outlives the next close. */
 export function createRefusalAwareSocket(
 	configuration: HocuspocusProviderWebsocketConfiguration,
-	onRefused: (refusal: CollabRefusal) => void,
+	onClosed: (refusal: CollabRefusal | null) => void,
 ): HocuspocusProviderWebsocket {
 	const watch = new RefusalWatch();
 	return new OwnedSocket({
@@ -106,10 +110,7 @@ export function createRefusalAwareSocket(
 		...configuration,
 		onOpen: () => watch.open(),
 		onMessage: () => watch.frame(),
-		onClose: ({ event }) => {
-			const refusal = watch.close(event?.code);
-			if (refusal !== null) onRefused(refusal);
-		},
+		onClose: ({ event }) => onClosed(watch.close(event?.code)),
 	});
 }
 
@@ -131,12 +132,14 @@ export interface RoomConnectionState<S> {
 	readonly socket: S;
 	/** Changes only on a reclaim (#683): consumers remount on it, never on a refusal. */
 	readonly generation: number;
-	/** Latest pre-auth refusal, cleared once the room authenticates or is reclaimed. */
+	/** Pre-auth refusal of the latest close; cleared by a close that was not a refusal
+	 * (e.g. an attempt that never opened), by authenticating, or by a reclaim. */
 	readonly refusal: CollabRefusal | null;
 }
 
 export interface RoomConnectionOptions<S extends RoomSocketHandle> {
-	open(onRefused: (refusal: CollabRefusal) => void): S;
+	/** Opens a socket that reports every close: its refusal, or null for any other close. */
+	open(onClosed: (refusal: CollabRefusal | null) => void): S;
 	onChange(state: RoomConnectionState<S>): void;
 	/** Runs before a reclaim opens the next socket: swap the Y.Doc clientID here (#683/#704). */
 	beforeReclaim(): void;
@@ -146,6 +149,7 @@ export interface RoomConnectionOptions<S extends RoomSocketHandle> {
 
 /** One collab room's connection state machine, free of React.
  * - A refusal is recorded only; the socket's own loop retries (no new socket, no remount).
+ *   A later close that is not a refusal clears it, so the raw connection status shows again.
  * - authenticated() clears the refusal and refills the reclaim budget.
  * - reclaim() (authenticationFailed) swaps the clientID and opens the next socket generation,
  *   at most `reclaimLimit` times between authentications.
