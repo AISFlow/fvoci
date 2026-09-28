@@ -42,10 +42,13 @@ const COLLAB_BADGE: Record<CollabStatus, CollabBadge> = {
   },
 };
 
-/** Body note for a room the server refused: the body is not loaded, not empty. */
+/** Body note for a room the server refused before its body loaded: not loaded, not empty.
+ * Once the body is loaded (`ready`) the editor stays and only the badge reports the refusal. */
 export function collabRefusalNote(
   status: CollabStatus | undefined,
+  ready: boolean,
 ): "doc.collab.busyNote" | "doc.collab.unavailableNote" | null {
+  if (ready) return null;
   if (status === "busy") return "doc.collab.busyNote";
   if (status === "unavailable") return "doc.collab.unavailableNote";
   return null;

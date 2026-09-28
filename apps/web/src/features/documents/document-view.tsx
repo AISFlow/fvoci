@@ -304,7 +304,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
   const projectReadOnly = project ? !project.canEdit || project.archived : false;
   const readOnly = archived || projectReadOnly || (collabSession?.readOnly ?? false);
   const ready = Boolean(collabSession?.synced && collabUser);
-  const refusalNote = collabRefusalNote(collabSession?.status);
+  const refusalNote = collabRefusalNote(collabSession?.status, ready);
   const badge = collabSession
     ? collabBadge(
         collabSession.status,

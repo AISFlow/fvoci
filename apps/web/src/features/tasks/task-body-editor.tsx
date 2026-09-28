@@ -32,7 +32,7 @@ export function TaskBodyEditor({
 
   const readOnly = pageReadOnly || (session?.readOnly ?? false);
   const ready = Boolean(session?.synced && collabUser);
-  const refusalNote = collabRefusalNote(session?.status);
+  const refusalNote = collabRefusalNote(session?.status, ready);
   const badge = session
     ? collabBadge(session.status, session.pending || persisting, session.durableSaved)
     : null;
