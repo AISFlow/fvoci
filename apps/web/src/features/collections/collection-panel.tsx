@@ -11,7 +11,14 @@ import { ConfirmActionButton } from "@/components/confirm-action";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
+import {
+  api,
+  ensureOk,
+  isInvalidCursor,
+  isInvalidInput,
+  ProblemError,
+  problemMessage,
+} from "@/lib/api";
 import {
   asCollectionValue,
   formatCollectionValue,
@@ -194,7 +201,7 @@ export function CollectionContents({
   );
 
   useEffect(() => {
-    if (cursor && rows.error instanceof ProblemError && rows.error.code === "invalid_cursor") {
+    if (cursor && isInvalidCursor(rows.error)) {
       setCursor(undefined);
     }
   }, [cursor, rows.error]);
@@ -377,7 +384,8 @@ export function CollectionContents({
   const canManageViews = views.data.canManage;
   const ownsView = view === null || view.ownerId === me.data.userId;
   const shareBlocked = (visibility === "shared" || view?.visibility === "shared") && !canManageViews;
-  const invalidQuery = rows.error instanceof ProblemError && rows.error.code === "invalid_input";
+  // A stale cursor resets above; it must not disable saving the view.
+  const invalidQuery = isInvalidInput(rows.error);
 
   const sortItems = [
     { id: "created", name: t("collection.created") },
