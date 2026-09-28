@@ -1366,6 +1366,7 @@ and what backup and restore run (the server binary stays single-purpose):
 | `fvoci bootstrap` (migrate) | `fvoci-migrate`, then `--grant-app-role <role>` | owner `DATABASE_URL` |
 | `fvoci search-rebuild [workspaceId]` | `fvoci-migrate --rebuild-search [workspace-id]` | owner `DATABASE_URL`, Meili |
 | `fvoci outbox-recover` | `fvoci-migrate --recover-outbox ...` | owner `DATABASE_URL` |
+| `fvoci outbox-reset [--override-reason=...]` | `fvoci-migrate --outbox-reset [--consumer <name>]... [--apply --reason <text> [--override-reason <text>] [--ack-external-replay]]` | owner `DATABASE_URL` (see below) |
 | `fvoci backup <collect\|restore\|...>` | `scripts/backup.sh`, `scripts/restore.sh` (below) | Compose project |
 | — (restore check) | `fvoci-migrate --verify-storage` | the server's |
 | `fvoci secrets rotate-vapid` | `fvoci-migrate --rotate-vapid` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
@@ -1410,6 +1411,83 @@ Key rotation: add the new key to `ENCRYPTION_KEYS`, switch
 ```sh
 docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
   run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --secrets-audit
+```
+
+**`--outbox-reset`** (source `fvoci outbox-reset`) puts outbox consumer
+cursors back at the point their `processed_events` marks show, without
+replaying everything or deleting anything. The source had one relay cursor and
+moved it to just before the first event of the last 29 days that the
+`notifications` consumer had not marked; the Rust server keeps one cursor per
+consumer, so the same rule runs per consumer against that consumer's own marks
+(no mark in the window: the newest event of the window; no events in the
+window: unchanged). Use it when a cursor was hand-edited, lost or moved past
+events that were never delivered on the same cluster. After a restore, or when
+a consumer reports an outbox xid epoch mismatch, use `--recover-outbox`
+instead; `--outbox-reset` refuses an epoch mismatch.
+
+- Without `--apply` it only diagnoses: a read-only transaction that is safe
+  while the server runs. It prints one JSON line: `mode`, `windowDays` (29),
+  per consumer `before`, `target`, `direction` (`forward`, `backward`,
+  `unchanged`), `leaseActive`, `externalEffects`, `redelivered` (unmarked
+  events a backward move hands to the consumer again), `deadLettered` (unmarked
+  events in the same range with a dead-letter failure row: the dispatcher passes
+  them without delivery while that row stays, so they are not in `redelivered`),
+  `externalReplay` (see below) and `skip` (unmarked events older than the
+  window that a forward move passes: `skippedCount`, the `(xact, seq)` lexical
+  `min`/`max`, `oldestCreatedAt`, up to 100 `sample` ids and verbs), and
+  `excluded` with the reason for each consumer left out.
+- The default set is every consumer of this build that marks each event it
+  passes: `notifications`, `mail`, `push`, `webhooks`, and `search-index` when
+  `FVOCI_MEILI_URL` is configured in the environment. `github` is left out
+  because it does not mark events while the GitHub app is unconfigured (a reset
+  would rewind it and replay up to 29 days of status changes once configured).
+  `--consumer <name>` (repeatable) selects exactly the named cursors, `github`
+  included.
+- Consumers with external effects (`mail`, `push`, `webhooks`, `github`, and
+  any name this build does not know) are not rewound past their replay floor:
+  just before the first event they marked, and never behind their current cursor
+  when they marked nothing. Migrations 027/040/041 seed such consumers at the
+  tail on upgrade, so they hold no marks for older events; the per-consumer rule
+  alone would move them back to the start of the window and send up to 29 days
+  of pre-upgrade events to devices and external URLs again. When the rule asks
+  for more than the floor, the consumer reports `externalReplay` with the
+  `floor`, the rule's `target`, its `redelivered`/`deadLettered` counts and
+  `acknowledged`. By default the move stops at the floor (events after the floor
+  that are unmarked are still redelivered). `--apply --ack-external-replay`
+  (the same flag as `--recover-outbox`) moves them to the rule's target and
+  accepts that at-least-once external replay; the top-level `ackExternalReplay`
+  records it. `notifications` writes only this database and `search-index`
+  only re-indexes Meilisearch, which is idempotent, so both follow the rule
+  without a floor.
+- `--apply --reason <text>` moves the cursors in one transaction. It refuses
+  unless the `DATABASE_URL` role is a superuser or has the privileges of
+  `pg_read_all_stats` (membership through a `NOINHERIT` role or an
+  `INHERIT FALSE` grant does not count; a plain schema owner cannot see other
+  roles' sessions in `pg_stat_activity`, so the next check would pass
+  blindly); while any other
+  session is connected to the database (stop the server and every other client
+  first); while a selected consumer holds a live lease; when a forward target is
+  at or above the cluster snapshot xmin (a transaction in any database that may
+  still commit an earlier event is running, including prepared transactions:
+  retry after it ends); and when a move would skip unmarked events older than
+  the window unless `--override-reason <text>` acknowledges them. Both reasons
+  are echoed in the JSON report. Events, marks and failure rows are never
+  deleted; a second run reports every consumer `unchanged`.
+- `fvoci-migrate` installs no log subscriber, so the JSON line on stdout is the
+  only record of an apply: keep it with the ticket.
+- Unlike the source, which ran as the app role, this runs as the owner
+  `DATABASE_URL` like `--recover-outbox`: the app role has no access to the
+  consumer cursor tables by design (`scripts/grant-app-role.sql`), and this
+  operator path does not widen it. Consumers that moved backward redeliver only
+  events without their mark; delivery stays at-least-once for external effects.
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --outbox-reset
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env stop server
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
+  --outbox-reset --apply --reason "cursor ahead of marks, ticket 123"
 ```
 
 **`--init-env`** writes the Compose env file from `infra/rust/.env.example` with
