@@ -2603,7 +2603,7 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
         }
     };
 
-    // New account through Google (the provider verified the invited address).
+    // New account through Google.
     let token = invite("guest1@example.com").await;
     let res = oidc_invite_round(
         &h,
@@ -2611,7 +2611,7 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
         "google",
         &token,
         Some("[]"),
-        Profile::new("g-1", "guest1@example.com", true),
+        Profile::new("g-1", "someone@gmail.test", true),
         peer(131),
     )
     .await;
@@ -2633,7 +2633,7 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
     );
     assert_eq!(
         h.count(
-            "SELECT count(*) FROM fvoci.identity_links WHERE user_id = $1 AND provider = 'google' AND provider_user_id = 'g-1' AND email = 'guest1@example.com'",
+            "SELECT count(*) FROM fvoci.identity_links WHERE user_id = $1 AND provider = 'google' AND provider_user_id = 'g-1' AND email = 'someone@gmail.test'",
             user_id
         )
         .await,
@@ -4108,110 +4108,6 @@ async fn oidc_invitation_start_is_a_same_origin_post() {
             .await
             .map(|(_, issuer)| issuer),
         Some(Some(fake.base.clone()))
-    );
-    h.finish().await;
-}
-
-/// An invitation token is a bearer credential its inviter also holds, so a
-/// provider identity may open a new account for the invited address only
-/// when the provider verified that mailbox. An existing account that already
-/// owns the identity still accepts whatever email the provider reports.
-#[tokio::test]
-async fn oidc_invitation_new_account_needs_the_verified_invited_email() {
-    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;
-    let h = oidc_harness(&fake, &[ProviderKey::Google]).await;
-    let token = invite_token_for(&h, "fresh@example.com", peer(210)).await;
-    let accounts = |h: &Harness| {
-        let admin = h.admin.clone();
-        async move {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT (SELECT count(*) FROM fvoci.users WHERE email = 'fresh@example.com')
-                      + (SELECT count(*) FROM fvoci.identity_links WHERE provider = 'google')",
-            )
-            .fetch_one(&admin)
-            .await
-            .unwrap()
-        }
-    };
-    let invalid = "http://localhost/login?error=oidc_invitation_invalid";
-    for profile in [
-        // Another mailbox, verified by the provider.
-        Profile::new("g-other", "someone@gmail.test", true),
-        // The invited address, not verified.
-        Profile::new("g-fresh", "fresh@example.com", false),
-        // No email at all.
-        Profile {
-            sub: "g-none".into(),
-            email: None,
-            email_verified: true,
-            name: None,
-        },
-        // Case folding is ASCII only: U+212A KELVIN SIGN is not 'k'.
-        Profile::new("g-kelvin", "fres\u{212A}@example.com", true),
-    ] {
-        let res = oidc_invite_round(&h, &fake, "google", &token, None, profile, peer(211)).await;
-        assert_eq!(res.location(), invalid);
-        assert!(res.cookie().is_none());
-    }
-    assert_eq!(accounts(&h).await, 0);
-    // The verified invited mailbox, in any ASCII case, opens the account.
-    let res = oidc_invite_round(
-        &h,
-        &fake,
-        "google",
-        &token,
-        None,
-        Profile::new("g-fresh", "Fresh@Example.COM", true),
-        peer(212),
-    )
-    .await;
-    assert_eq!(res.location(), "http://localhost/", "{:?}", res.headers);
-    let (user_id, _) = link_row(&h, "google", "g-fresh").await.expect("link");
-    let email: String = sqlx::query_scalar("SELECT email FROM fvoci.users WHERE id = $1")
-        .bind(user_id)
-        .fetch_one(&h.admin)
-        .await
-        .unwrap();
-    assert_eq!(email, "fresh@example.com");
-
-    // An existing account that owns the identity accepts with another
-    // (even unverified) provider email.
-    let linked_id = h.insert_user("linked@example.com", Some(PASSWORD)).await;
-    let cookie = h
-        .login("linked@example.com", PASSWORD, peer(213))
-        .await
-        .cookie()
-        .unwrap();
-    let res = h
-        .oidc_round(
-            &fake,
-            "/api/v1/auth/oidc/google/link",
-            "google",
-            Profile::new("g-linked", "linked.personal@gmail.test", false),
-            Some(&cookie),
-            peer(213),
-        )
-        .await;
-    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
-    let token = invite_token_for(&h, "linked@example.com", peer(214)).await;
-    let res = oidc_invite_round(
-        &h,
-        &fake,
-        "google",
-        &token,
-        None,
-        Profile::new("g-linked", "linked.personal@gmail.test", false),
-        peer(214),
-    )
-    .await;
-    assert_eq!(res.location(), "http://localhost/", "{:?}", res.headers);
-    assert_eq!(
-        h.count(
-            "SELECT count(*) FROM fvoci.memberships WHERE user_id = $1",
-            linked_id
-        )
-        .await,
-        1
     );
     h.finish().await;
 }

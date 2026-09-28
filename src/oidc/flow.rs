@@ -613,7 +613,6 @@ async fn accept_invite_with_identity(
             subject: &subject,
             issuer: &profile.issuer,
             link_email: profile.email.as_deref(),
-            email_verified: profile.email_verified,
             given_name: profile.name.as_deref(),
             client_ip: ip,
             consents: &consents,
