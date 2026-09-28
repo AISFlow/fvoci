@@ -33,6 +33,12 @@ name = "collab-parent-death-driver"
 path = "src/bin/collab-parent-death-driver.rs"
 required-features = ["test-hang"]
 
+# Test fixture only: PR_SET_DUMPABLE is process-wide, so it runs on its own.
+[[bin]]
+name = "collab-non-dumpable-driver"
+path = "src/bin/collab-non-dumpable-driver.rs"
+required-features = ["test-hang"]
+
 [[test]]
 name = "yjs_compat"
 required-features = ["worker"]

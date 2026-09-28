@@ -418,6 +418,12 @@ fn child_sets_oom_score_adj() {
     let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let mut session = spawn(Limits::for_tests());
     let pid = session.pid().expect("pid");
+    // The helper raises its own value at startup, before it reads a frame:
+    // after the first reply it is in place.
+    assert!(matches!(
+        session.call(&Request::Ping).outcome,
+        EngineStatus::Ok { .. }
+    ));
     assert_eq!(
         collab_engine::process::child_oom_score_adj(pid),
         Some(1000),
@@ -988,6 +994,7 @@ impl Drop for ParentDeathRun {
 #[cfg(feature = "test-hang")]
 #[test]
 fn parent_sigkill_kills_hanging_collab_helper() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let mut run = ParentDeathRun::start(&[]);
     let (helper_pid, _) = run.helper;
     let driver_pid = run.driver.id();
@@ -1022,6 +1029,7 @@ fn parent_sigkill_kills_hanging_collab_helper() {
 #[cfg(feature = "test-hang")]
 #[test]
 fn spawning_thread_exit_kills_collab_helper() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let mut run = ParentDeathRun::start(&["--exit-spawning-thread"]);
     let view = run.wait_helper_terminated(std::time::Duration::from_secs(1));
     assert_ne!(
@@ -1032,5 +1040,43 @@ fn spawning_thread_exit_kills_collab_helper() {
     assert!(
         run.driver.try_wait().expect("driver status").is_none(),
         "the driver process itself must still be running"
+    );
+}
+
+/// A non-dumpable server hides its environ from same-uid children, and its
+/// helpers still end up at `oom_score_adj` 1000 with readable RSS. Runs in a
+/// dedicated driver process: `PR_SET_DUMPABLE` is process-wide and must not
+/// touch this shared test process. The driver spawns 500 helpers from four
+/// threads while every CPU spins, so a race between spawn and the helper's
+/// own write would show up as a helper below 1000.
+#[cfg(feature = "test-hang")]
+#[test]
+fn non_dumpable_parent_hides_environ_and_helpers_keep_oom_score_adj() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let marker = format!(
+        "marker-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_collab-non-dumpable-driver"))
+        .arg(bin())
+        .arg("500")
+        .env("FVOCI_NON_DUMPABLE_MARKER", &marker)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run non-dumpable driver");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "driver failed: {}\nstdout={stdout}\nstderr={stderr}",
+        out.status
+    );
+    assert!(
+        stdout.contains("control=readable after=EACCES helpers=500 oom_1000_rss_ok=500 failures=0"),
+        "stdout={stdout}"
     );
 }
