@@ -54,18 +54,27 @@ export function takeMfaFragment(): string | null {
 
 export type ConsentItem = { kind: string; version: string | number };
 
-/** Plain browser navigation target for `GET /auth/oidc/{provider}/start`. */
-export function oidcStartHref(
+/** Plain browser navigation target for `GET /auth/oidc/{provider}/start` (sign-in only). */
+export function oidcStartHref(provider: string): string {
+  return `/api/v1/auth/oidc/${encodeURIComponent(provider)}/start`;
+}
+
+/**
+ * Accepting an invitation with a provider is a same-origin form POST to the
+ * start route (the server refuses it from a GET or another origin); the
+ * token and consents travel as form fields, never in the URL.
+ */
+export function oidcInviteStartForm(
   provider: string,
-  invitation?: { token: string; consents: readonly ConsentItem[] },
-): string {
-  const base = `/api/v1/auth/oidc/${encodeURIComponent(provider)}/start`;
-  if (!invitation) return base;
-  const query = new URLSearchParams({
-    invitation: invitation.token,
-    consents: JSON.stringify(invitation.consents),
-  });
-  return `${base}?${query.toString()}`;
+  invitation: { token: string; consents: readonly ConsentItem[] },
+): { action: string; fields: { invitation: string; consents: string } } {
+  return {
+    action: oidcStartHref(provider),
+    fields: {
+      invitation: invitation.token,
+      consents: JSON.stringify(invitation.consents),
+    },
+  };
 }
 
 /** Form POST target for linking a provider to the signed-in account. */

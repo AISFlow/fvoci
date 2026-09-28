@@ -8,7 +8,7 @@ import type {
   InvitationPublicOutput,
   ProviderOutput,
 } from "@/lib/contracts";
-import { oidcStartHref } from "@/lib/oidc";
+import { oidcInviteStartForm } from "@/lib/oidc";
 import { invitationAcceptInput } from "@/lib/validators";
 import {
   AuthAlert,
@@ -16,7 +16,6 @@ import {
   AuthInput,
   AuthStatus,
   authOutlineButtonClass,
-  authOutlineLinkClass,
   authPrimaryButtonClass,
 } from "./auth-form";
 import { AuthLayout, AuthPanel } from "./auth-layout";
@@ -222,28 +221,26 @@ export function InviteAcceptForm({
             <hr className="my-1 border-border" />
             <p className="text-ui font-medium text-muted-foreground">{t("auth.invite.social")}</p>
             <div className="auth-shell__stack">
-              {providers.map((p) =>
-                allConsented ? (
-                  <a
-                    key={p.provider}
-                    href={oidcStartHref(p.provider, { token, consents: consentItems })}
-                    className={authOutlineLinkClass}
-                  >
-                    {p.label}
-                  </a>
-                ) : (
-                  <Button
-                    key={p.provider}
-                    type="button"
-                    variant="outline"
-                    size="lg"
-                    disabled
-                    className={authOutlineButtonClass}
-                  >
-                    {p.label}
-                  </Button>
-                ),
-              )}
+              {providers.map((p) => {
+                // A same-origin form POST: the server refuses an invite start
+                // from a GET or another origin.
+                const start = oidcInviteStartForm(p.provider, { token, consents: consentItems });
+                return (
+                  <form key={p.provider} method="post" action={start.action}>
+                    <input type="hidden" name="invitation" value={start.fields.invitation} />
+                    <input type="hidden" name="consents" value={start.fields.consents} />
+                    <Button
+                      type="submit"
+                      variant="outline"
+                      size="lg"
+                      disabled={!allConsented}
+                      className={authOutlineButtonClass}
+                    >
+                      {p.label}
+                    </Button>
+                  </form>
+                );
+              })}
             </div>
           </>
         ) : null}

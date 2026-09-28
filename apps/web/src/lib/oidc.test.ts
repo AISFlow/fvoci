@@ -4,6 +4,7 @@ import { t } from "@fvoci/i18n";
 import {
   OIDC_ERROR_CODES,
   oidcErrorMessage,
+  oidcInviteStartForm,
   oidcLinkAction,
   oidcStartHref,
   readMfaFragment,
@@ -39,17 +40,19 @@ test("readMfaFragment ignores empty or unrelated fragments", () => {
   assert.equal(readMfaFragment("#section-2"), null);
 });
 
-test("oidcStartHref carries the invitation token and consents", () => {
+test("oidcStartHref is the plain sign-in start", () => {
   assert.equal(oidcStartHref("google"), "/api/v1/auth/oidc/google/start");
-  const href = oidcStartHref("google", {
+  assert.equal(oidcStartHref("a/b"), "/api/v1/auth/oidc/a%2Fb/start");
+  assert.equal(oidcLinkAction("a/b"), "/api/v1/auth/oidc/a%2Fb/link");
+});
+
+test("oidcInviteStartForm posts the invitation and consents as fields", () => {
+  const form = oidcInviteStartForm("google", {
     token: "inv123",
     consents: [{ kind: "terms", version: 2 }],
   });
-  const url = new URL(href, "https://fvoci.example");
-  assert.equal(url.pathname, "/api/v1/auth/oidc/google/start");
-  assert.equal(url.searchParams.get("invitation"), "inv123");
-  assert.deepEqual(JSON.parse(url.searchParams.get("consents") ?? ""), [
-    { kind: "terms", version: 2 },
-  ]);
-  assert.equal(oidcLinkAction("a/b"), "/api/v1/auth/oidc/a%2Fb/link");
+  // The action carries no query: nothing of the invitation is in the URL.
+  assert.equal(form.action, "/api/v1/auth/oidc/google/start");
+  assert.equal(form.fields.invitation, "inv123");
+  assert.deepEqual(JSON.parse(form.fields.consents), [{ kind: "terms", version: 2 }]);
 });
