@@ -448,7 +448,7 @@ test("a: login to workspace shown", async ({ browser }) => {
   await quietWindow("a-warm", loadLog);
   const context = await newProbedContext(browser);
   const page = await context.newPage();
-  await once(page, "cold-context");
+  await guarded(samples, { mode: "warm-up" }, () => once(page, "cold-context"));
   samples.pop(); // warm-up for the warm series, not a sample
   for (let i = 0; i < N; i += 1) {
     await page.request.post("/api/v1/auth/logout", { data: {} }).catch(() => null);
@@ -536,7 +536,7 @@ test("b: task detail and document open", async ({ browser }) => {
     const listed = await page.locator("a.task-row").evaluateAll((els) => els.map((e) => e.getAttribute("href") ?? ""));
     const visible = ctx.targets.filter((t) => listed.some((h) => h.endsWith(`/${ctx.projectKey}-${t.number}`)));
     const pool = visible.length ? visible : ctx.targets;
-    await openTask(page, "warm-spa", pool[0]!);
+    await guarded(samples, { kind: "task", mode: "warm-up" }, () => openTask(page, "warm-spa", pool[0]!));
     samples.pop(); // first SPA open loads route chunks: warm-up
     for (let i = 0; i < N; i += 1) {
       await guarded(samples, { kind: "task", mode: "warm-spa" }, () => openTask(page, "warm-spa", pool[i % Math.min(pool.length, 3)]!));
@@ -604,7 +604,7 @@ test("b: task detail and document open", async ({ browser }) => {
     await quietWindow(`b-doc-${doc.label}-warm`, loadLog);
     const context = await newProbedContext(browser, ctx.ownerState);
     const page = await context.newPage();
-    await openDoc(page, "warm-reload");
+    await guarded(samples, { kind: `doc-${doc.label}`, mode: "warm-up" }, () => openDoc(page, "warm-reload"));
     samples.pop();
     for (let i = 0; i < N; i += 1) {
       await guarded(samples, { kind: `doc-${doc.label}`, mode: "warm-reload" }, () => openDoc(page, "warm-reload"));
@@ -686,23 +686,25 @@ test("c: typing, menu and gantt interactions", async ({ browser }) => {
   const menu: Record<string, unknown>[] = [];
   const palette = page.getByRole("dialog", { name: "빠른 검색" });
   for (let i = 0; i < N + 1; i += 1) {
-    const id = `menu-${i}`;
-    await watch(page, id, { selector: ".search-command__title" });
-    const since = await pageNow(page);
-    await page.keyboard.press("Control+k");
-    const hit = await waitHit(page, id, HIT_TIMEOUT);
-    const paint = hit ? await elementPaint(page, id) : null;
-    await page.waitForTimeout(100);
-    // Start at the `k` keydown, not the preceding Control keydown.
-    const key = (await inputsSince(page, since)).find((x) => x.t === "keydown" && x.key !== "Control");
-    const ints = interactions(await eventsSince(page, since));
-    menu.push({
-      keyToDom: hit && key ? round(hit.dom - key.ts) : null,
-      keyToPaint: paint && key ? round(paint - key.ts) : null,
-      interaction: ints.length ? Math.max(...ints.map((x) => x.duration)) : "<16",
+    await guarded(menu, {}, async () => {
+      const id = `menu-${i}`;
+      await watch(page, id, { selector: ".search-command__title" });
+      const since = await pageNow(page);
+      await page.keyboard.press("Control+k");
+      const hit = await waitHit(page, id, HIT_TIMEOUT);
+      const paint = hit ? await elementPaint(page, id) : null;
+      await page.waitForTimeout(100);
+      // Start at the `k` keydown, not the preceding Control keydown.
+      const key = (await inputsSince(page, since)).find((x) => x.t === "keydown" && x.key !== "Control");
+      const ints = interactions(await eventsSince(page, since));
+      menu.push({
+        keyToDom: hit && key ? round(hit.dom - key.ts) : null,
+        keyToPaint: paint && key ? round(paint - key.ts) : null,
+        interaction: ints.length ? Math.max(...ints.map((x) => x.duration)) : "<16",
+      });
+      await page.keyboard.press("Escape");
+      await expect(palette).toBeHidden({ timeout: HIT_TIMEOUT });
     });
-    await page.keyboard.press("Escape");
-    await expect(palette).toBeHidden({ timeout: HIT_TIMEOUT });
   }
   menu.shift(); // first open loads nothing extra but is kept out as warm-up
   out.menu = menu;
@@ -712,7 +714,7 @@ test("c: typing, menu and gantt interactions", async ({ browser }) => {
     "c.menu",
     "interactionDuration",
     "scripted-scenario INP-style (Event Timing, <16ms counted as 16)",
-    menu.map((m) => (typeof m.interaction === "number" ? m.interaction : 16)),
+    menu.map((m) => (m.error ? null : typeof m.interaction === "number" ? m.interaction : 16)),
   );
 
   // Gantt: month navigation; result = a known row of the new month painted.
@@ -727,30 +729,34 @@ test("c: typing, menu and gantt interactions", async ({ browser }) => {
   for (let i = 0; i < N + 3; i += 1) {
     if (month + dir < 1 || month + dir > 12) dir = -dir;
     const next = month + dir;
-    const id = `gantt-${i}`;
-    await watch(page, id, { selector: ".fvoci-gantt__row-label", text: `#${next - 1}#` });
-    const since = await pageNow(page);
-    await page.getByRole("button", { name: dir > 0 ? "다음 달" : "이전 달" }).click();
-    const hit = await waitHit(page, id, 60_000);
-    const paint = hit ? await elementPaint(page, id) : null;
-    await page.waitForTimeout(50);
-    const click = (await inputsSince(page, since)).find((x) => x.t === "pointerdown");
-    const ints = interactions(await eventsSince(page, since));
-    const res = (await resourcesSince(page, since)).filter((r) => r.name.includes("/api/v1/"));
-    gantt.push({
-      month: next,
-      firstVisit: !seen.has(next),
-      clickToDom: hit && click ? round(hit.dom - click.ts) : null,
-      clickToPaint: paint && click ? round(paint - click.ts) : null,
-      clickToFrame: hit?.raf && click ? round(hit.raf - click.ts) : null,
-      interaction: ints.length ? Math.max(...ints.map((x) => x.duration)) : "<16",
-      apiCount: res.length,
-      apiMs: res.length ? round(Math.max(...res.map((r) => r.end)) - Math.min(...res.map((r) => r.start))) : 0,
-      apiBytes: res.reduce((a, r) => a + r.bytes, 0),
-      rows: await chart.locator(".fvoci-gantt__row-label").count(),
+    const firstVisit = !seen.has(next);
+    await guarded(gantt, { month: next, firstVisit }, async () => {
+      const id = `gantt-${i}`;
+      await watch(page, id, { selector: ".fvoci-gantt__row-label", text: `#${next - 1}#` });
+      const since = await pageNow(page);
+      await page.getByRole("button", { name: dir > 0 ? "다음 달" : "이전 달" }).click();
+      // The month changed once the click landed, even if a later step throws.
+      seen.add(next);
+      month = next;
+      const hit = await waitHit(page, id, 60_000);
+      const paint = hit ? await elementPaint(page, id) : null;
+      await page.waitForTimeout(50);
+      const click = (await inputsSince(page, since)).find((x) => x.t === "pointerdown");
+      const ints = interactions(await eventsSince(page, since));
+      const res = (await resourcesSince(page, since)).filter((r) => r.name.includes("/api/v1/"));
+      gantt.push({
+        month: next,
+        firstVisit,
+        clickToDom: hit && click ? round(hit.dom - click.ts) : null,
+        clickToPaint: paint && click ? round(paint - click.ts) : null,
+        clickToFrame: hit?.raf && click ? round(hit.raf - click.ts) : null,
+        interaction: ints.length ? Math.max(...ints.map((x) => x.duration)) : "<16",
+        apiCount: res.length,
+        apiMs: res.length ? round(Math.max(...res.map((r) => r.end)) - Math.min(...res.map((r) => r.start))) : 0,
+        apiBytes: res.reduce((a, r) => a + r.bytes, 0),
+        rows: await chart.locator(".fvoci-gantt__row-label").count(),
+      });
     });
-    seen.add(next);
-    month = next;
   }
   out.gantt = gantt;
   record("c.gantt.all", "clickToPaint", "paint (Element Timing)", gantt.map((g) => g.clickToPaint as number | null));
@@ -760,7 +766,7 @@ test("c: typing, menu and gantt interactions", async ({ browser }) => {
     "c.gantt.all",
     "interactionDuration",
     "scripted-scenario INP-style (Event Timing, <16ms counted as 16)",
-    gantt.map((g) => (typeof g.interaction === "number" ? g.interaction : 16)),
+    gantt.map((g) => (g.error ? null : typeof g.interaction === "number" ? g.interaction : 16)),
   );
   record("c.gantt.firstVisit", "clickToPaint", "paint (Element Timing)", gantt.filter((g) => g.firstVisit).map((g) => g.clickToPaint as number | null));
   record("c.gantt.revisit", "clickToPaint", "paint (Element Timing)", gantt.filter((g) => !g.firstVisit).map((g) => g.clickToPaint as number | null));
@@ -1082,7 +1088,7 @@ test("f: attachment viewers", async ({ browser }) => {
     await quietWindow(`f-${kind}-warm`, loadLog);
     const context = await newProbedContext(browser, ctx.ownerState);
     const page = await context.newPage();
-    await open(page, kind, "warm-reload");
+    await guarded(samples, { kind, mode: "warm-up" }, () => open(page, kind, "warm-reload"));
     samples.pop();
     for (let i = 0; i < N; i += 1) await guarded(samples, { kind, mode: "warm-reload" }, () => open(page, kind, "warm-reload"));
     await context.close();
