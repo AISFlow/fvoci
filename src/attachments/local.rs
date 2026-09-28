@@ -429,7 +429,12 @@ impl LocalStorage {
             // The part is published either way; without a sidecar the
             // listing hashes it as before.
             if let Err(err) = write_etag_sidecar(&dir, part_number, &sidecar).await {
-                tracing::warn!(error = %err, part_number, "attachment.part_etag_cache_failed");
+                tracing::warn!(
+                    error = %err,
+                    key,
+                    part_number,
+                    "attachment.part_etag_cache_failed"
+                );
             }
         }
         Ok(PartInfo {
