@@ -51,34 +51,85 @@ struct SmtpSink {
     port: u16,
     mails: Arc<Mutex<Vec<CapturedMail>>>,
     sessions: Arc<AtomicUsize>,
+    script: Arc<SinkScript>,
     handle: tokio::task::JoinHandle<()>,
 }
 
-/// How a scripted sink answers `RCPT TO` for one address.
+/// How a scripted sink answers one `RCPT TO`.
 #[derive(Clone, Copy)]
 enum RcptReply {
-    /// This reply line, every time.
+    /// This reply line.
     Reply(&'static str),
-    /// No reply: the session hangs until the client gives up.
+    /// No reply: the session hangs until the client gives up (see
+    /// `SmtpSink::hung`).
     Hang,
+}
+
+/// What a scripted sink answers.
+struct SinkScript {
+    /// A greeting other than 220 ends the session.
+    greeting: &'static str,
+    /// Replies to the next `RCPT TO` commands, whatever the address, in
+    /// arrival order; checked before `by_address`.
+    in_order: Mutex<std::collections::VecDeque<RcptReply>>,
+    /// `RCPT TO` replies per address, every time; other addresses get 250.
+    by_address: HashMap<String, RcptReply>,
+    /// Every `RCPT TO` address, in arrival order.
+    rcpt_log: Mutex<Vec<String>>,
+    hung: tokio::sync::Notify,
+}
+
+impl SinkScript {
+    fn new(greeting: &'static str) -> Self {
+        Self {
+            greeting,
+            in_order: Mutex::new(Default::default()),
+            by_address: HashMap::new(),
+            rcpt_log: Mutex::new(Vec::new()),
+            hung: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn rcpt_reply(&self, address: &str) -> Option<RcptReply> {
+        self.rcpt_log
+            .lock()
+            .expect("rcpt log")
+            .push(address.to_string());
+        let next = self.in_order.lock().expect("in order").pop_front();
+        next.or_else(|| self.by_address.get(address).copied())
+    }
 }
 
 impl SmtpSink {
     async fn spawn() -> Self {
-        Self::spawn_scripted("220 fvoci-test", Vec::new()).await
+        Self::spawn_with(SinkScript::new("220 fvoci-test")).await
     }
 
-    /// A sink that greets with `greeting` (a non-220 greeting ends the
-    /// session) and answers `RCPT TO` per address from `rcpt`; other
-    /// addresses get `250`.
+    /// A sink that greets with `greeting` and answers `RCPT TO` per address
+    /// from `rcpt`.
     async fn spawn_scripted(greeting: &'static str, rcpt: Vec<(String, RcptReply)>) -> Self {
+        let mut script = SinkScript::new(greeting);
+        script.by_address = rcpt.into_iter().collect();
+        Self::spawn_with(script).await
+    }
+
+    /// A sink that answers the first `RCPT TO` commands with `replies` in
+    /// arrival order, whatever the address, and 250 after them.
+    async fn spawn_in_order(replies: Vec<RcptReply>) -> Self {
+        let script = SinkScript::new("220 fvoci-test");
+        *script.in_order.lock().expect("in order") = replies.into();
+        Self::spawn_with(script).await
+    }
+
+    async fn spawn_with(script: SinkScript) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind smtp");
         let port = listener.local_addr().expect("addr").port();
         let mails = Arc::new(Mutex::new(Vec::new()));
         let sessions = Arc::new(AtomicUsize::new(0));
-        let rcpt: Arc<HashMap<String, RcptReply>> = Arc::new(rcpt.into_iter().collect());
+        let script = Arc::new(script);
         let captured = mails.clone();
         let opened = sessions.clone();
+        let serving = script.clone();
         let handle = tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else {
@@ -86,9 +137,9 @@ impl SmtpSink {
                 };
                 opened.fetch_add(1, Ordering::SeqCst);
                 let captured = captured.clone();
-                let rcpt = rcpt.clone();
+                let script = serving.clone();
                 tokio::spawn(async move {
-                    let _ = serve_smtp(socket, captured, greeting, &rcpt).await;
+                    let _ = serve_smtp(socket, captured, &script).await;
                 });
             }
         });
@@ -96,6 +147,7 @@ impl SmtpSink {
             port,
             mails,
             sessions,
+            script,
             handle,
         }
     }
@@ -116,6 +168,16 @@ impl SmtpSink {
     /// SMTP sessions opened so far.
     fn sessions(&self) -> usize {
         self.sessions.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once a session has reached a `RcptReply::Hang` recipient.
+    async fn hung(&self) {
+        self.script.hung.notified().await;
+    }
+
+    /// Every `RCPT TO` address so far, in arrival order.
+    fn rcpt_log(&self) -> Vec<String> {
+        self.script.rcpt_log.lock().expect("rcpt log").clone()
     }
 
     /// Decoded plain body of the last captured mail.
@@ -139,15 +201,14 @@ impl Drop for SmtpSink {
 async fn serve_smtp(
     socket: tokio::net::TcpStream,
     captured: Arc<Mutex<Vec<CapturedMail>>>,
-    greeting: &str,
-    rcpt_replies: &HashMap<String, RcptReply>,
+    script: &SinkScript,
 ) -> Result<(), std::io::Error> {
     let (reader, mut writer) = socket.into_split();
     let mut reader = BufReader::new(reader);
     writer
-        .write_all(format!("{greeting}\r\n").as_bytes())
+        .write_all(format!("{}\r\n", script.greeting).as_bytes())
         .await?;
-    if !greeting.starts_with("220") {
+    if !script.greeting.starts_with("220") {
         return Ok(());
     }
     let mut rcpt = String::new();
@@ -171,11 +232,12 @@ async fn serve_smtp(
                 .trim()
                 .trim_matches(|c| c == '<' || c == '>')
                 .to_string();
-            match rcpt_replies.get(&rcpt) {
+            match script.rcpt_reply(&rcpt) {
                 Some(RcptReply::Reply(reply)) => {
                     writer.write_all(format!("{reply}\r\n").as_bytes()).await?;
                 }
                 Some(RcptReply::Hang) => {
+                    script.hung.notify_one();
                     std::future::pending::<()>().await;
                 }
                 None => writer.write_all(b"250 ok\r\n").await?,
@@ -2834,30 +2896,32 @@ async fn digest_failed_claim_is_handed_back_before_its_batch_ends() {
     let pool = app_pool(&harness).await;
     seed_digest_recipients(&admin, workspace_id, 2).await;
     let users = digest_users_keeping_notifications_of(&admin, workspace_id, |u| u.to_vec()).await;
-    let (failed, stuck) = (users[0], users[1]);
-    let sink = SmtpSink::spawn_scripted(
-        "220 fvoci-test",
-        vec![
-            (
-                digest_address(&admin, failed).await,
-                RcptReply::Reply("452 4.2.2 mailbox full"),
-            ),
-            (digest_address(&admin, stuck).await, RcptReply::Hang),
-        ],
-    )
+    // A batch is sent in no fixed order: the first send fails, the second
+    // hangs, whichever user each one is.
+    let sink = SmtpSink::spawn_in_order(vec![
+        RcptReply::Reply("452 4.2.2 mailbox full"),
+        RcptReply::Hang,
+    ])
     .await;
 
     // Microseconds, as stored.
     let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 6);
     let mailer = mailer_for(sink.port);
     let cancel = CancellationToken::new();
-    let dropped = tokio::time::timeout(
-        Duration::from_secs(3),
-        send_due_digests(&pool, &mailer, now, &cancel),
-    )
-    .await;
-    assert!(dropped.is_err(), "the sweep must still be in the batch");
-    assert_eq!(sink.sessions(), 2, "both sends were started");
+    // Drop the sweep while the second send hangs, as an abort would.
+    let mut sweep = Box::pin(send_due_digests(&pool, &mailer, now, &cancel));
+    tokio::select! {
+        result = &mut sweep => panic!("the sweep must still be in the batch: {result:?}"),
+        () = sink.hung() => {}
+    }
+    drop(sweep);
+    let rcpts = sink.rcpt_log();
+    assert_eq!(rcpts.len(), 2, "both sends were started: {rcpts:?}");
+    let mut by_address = HashMap::new();
+    for user in &users {
+        by_address.insert(digest_address(&admin, *user).await, *user);
+    }
+    let (failed, stuck) = (by_address[&rcpts[0]], by_address[&rcpts[1]]);
     assert_eq!(
         digest_last_sent(&admin, workspace_id, stuck).await,
         Some(now),
