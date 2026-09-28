@@ -512,6 +512,17 @@ pub async fn visible_document_ids(
     let Some(root) = share_root(tx, share).await? else {
         return Ok(Vec::new());
     };
+    live_subtree_ids(tx, share.workspace_id, root).await
+}
+
+/// The live subtree under `root` (inclusive, when `root` is live) in the root's
+/// project scope, minus documents under a trashed ancestor inside the subtree:
+/// exactly what a share rooted at `root` serves.
+async fn live_subtree_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    root: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
         r#"
         WITH root AS (
@@ -536,7 +547,7 @@ pub async fn visible_document_ids(
         ORDER BY d.sort_key COLLATE "C", d.id
         "#,
     )
-    .bind(share.workspace_id)
+    .bind(workspace_id)
     .bind(root)
     .fetch_all(&mut **tx)
     .await

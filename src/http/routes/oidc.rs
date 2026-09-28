@@ -308,7 +308,20 @@ async fn callback(
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     let provider = provider_param(&provider)?;
-    limit_ip(&state, peer).await?;
+    finish_callback(&state, &identity, peer, provider, &jar, raw).await
+}
+
+/// Shared tail of the callback routes: completes the flow and answers with
+/// the fixed redirect for its outcome.
+async fn finish_callback(
+    state: &AppState,
+    identity: &Identity,
+    peer: SocketAddr,
+    provider: ProviderKey,
+    jar: &CookieJar,
+    raw: Option<String>,
+) -> Result<Response, AppError> {
+    limit_ip(state, peer).await?;
     let mut query = HashMap::new();
     for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
         query
@@ -340,7 +353,7 @@ async fn callback(
     let ip = peer_ip(peer.ip());
     let result = flow::complete(
         &state.auth.db.pool,
-        &identity,
+        identity,
         &state.auth.db.license,
         CompleteParams {
             provider,
