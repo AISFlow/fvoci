@@ -8,7 +8,9 @@
 #   - the user compose renders through scripts/release-dist.sh (the
 #     x-fvoci-image anchor and env.example); from an empty directory with an
 #     empty environment, `docker compose config` refuses the unfilled
-#     env.example as .env and accepts it once every value is filled in.
+#     env.example as .env and accepts it once every value is filled in; the
+#     values Compose passes as secrets are in no service's environment, and
+#     the app's secret files are root-only (uid 0, mode 0400).
 #
 #   scripts/release-preflight.sh --version 0.y.z [--image ghcr.io/aisflow/fvoci]
 set -euo pipefail
@@ -59,12 +61,13 @@ cp "$WORK/dist/env.example" "$WORK/empty/.env"
 if (cd "$WORK/empty" && env -i PATH="$PATH" HOME="$WORK" docker compose -f compose.yml config -q) 2>/dev/null; then
   fail "docker compose config accepts the unfilled env.example; every value must be required"
 fi
-sed -E 's/^([A-Z][A-Z0-9_]*)=$/\1=preflight-value/' "$WORK/dist/env.example" >"$WORK/empty/.env"
+sed -E 's/^([A-Z][A-Z0-9_]*)=$/\1=preflight-\1/' "$WORK/dist/env.example" >"$WORK/empty/.env"
 (cd "$WORK/empty" && env -i PATH="$PATH" HOME="$WORK" docker compose -f compose.yml config --format json) >"$WORK/config.json" \
   || fail "docker compose config rejects the rendered user compose with a filled .env"
 python3 - "$WORK/config.json" "$IMAGE:$VERSION@$ZERO" <<'PY' || fail "the rendered user compose does not match the release contract (docs/RELEASING.md)"
 import json, sys
-services = json.load(open(sys.argv[1]))["services"]
+config = json.load(open(sys.argv[1]))
+services = config["services"]
 image = sys.argv[2]
 product = sorted(name for name, spec in services.items() if spec.get("image") == image)
 apps = sorted(name for name, spec in services.items()
@@ -79,7 +82,16 @@ if "postgres" not in services:
 for name, spec in services.items():
     if spec.get("env_file"):
         problems.append(f"{name} needs an env_file")
+secret_values = {f"preflight-{s['environment']}" for s in config.get("secrets", {}).values() if s.get("environment")}
+for name, spec in services.items():
+    leaked = sorted(k for k, v in (spec.get("environment") or {}).items() if v in secret_values)
+    if leaked:
+        problems.append(f"{name} gets secret values as environment: {leaked}")
+for app in apps:
+    for mount in services[app].get("secrets") or []:
+        if str(mount.get("uid")) != "0" or str(mount.get("mode")) not in ("256", "0400", "400"):
+            problems.append(f"{app} secret {mount.get('source')} is not root-only (uid 0, mode 0400)")
 print(f"product image services: {product}; app: {apps}")
 sys.exit("\n".join(problems) if problems else 0)
 PY
-echo "rendered user compose: unfilled env.example refused, filled .env accepted by docker compose config: ok"
+echo "rendered user compose: unfilled env.example refused, filled .env accepted by docker compose config, secrets only as root-only files: ok"

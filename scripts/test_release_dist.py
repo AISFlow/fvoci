@@ -141,6 +141,7 @@ class ReleaseDistTest(unittest.TestCase):
             "no alias": (base.replace("image: *fvoci-image", "image: busybox"), "no service uses"),
             "optional variable": (base.replace("${FVOCI_PUBLIC_ORIGIN:?set FVOCI_PUBLIC_ORIGIN in .env}", "${FVOCI_PUBLIC_ORIGIN:-http://localhost:8080}"), "every interpolation must be ${VAR:?message}"),
             "variable not in env.example": (base.replace('FVOCI_COLLAB_MAX_ROOMS: "64"', 'FVOCI_COLLAB_MAX_ROOMS: "${ROOMS:?set ROOMS}"'), "missing ['ROOMS']"),
+            "unguarded secret": (base.replace("  - ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}\n", ""), "secrets read ['MEILI_MASTER_KEY'] without"),
             "env file": (base.replace("    mem_limit: 4g", "    mem_limit: 4g\n    env_file: .env"), "env_file"),
         }
         for name, (compose, needle) in cases.items():
@@ -202,6 +203,26 @@ class ReleasePreflightTest(unittest.TestCase):
         proc = s.preflight()
         self.assertEqual(proc.returncode, 1)
         self.assertIn("expected one service publishing container port 8080, found []", proc.stderr)
+
+    def test_refuses_secret_values_in_environment_or_readable_secret_files(self) -> None:
+        cases = {
+            "environment": (lambda c: c.replace(
+                "      FVOCI_APP_PASSWORD_FILE: /run/secrets/fvoci_app_password\n",
+                "      FVOCI_APP_PASSWORD: ${FVOCI_APP_PASSWORD:?set FVOCI_APP_PASSWORD in .env}\n"),
+                "fvoci gets secret values as environment: ['FVOCI_APP_PASSWORD']"),
+            "readable file": (lambda c: c.replace("  mode: 0400", "  mode: 0444"),
+                              "fvoci secret postgres_password is not root-only"),
+        }
+        for name, (edit, needle) in cases.items():
+            with self.subTest(name):
+                s = self.scratch()
+                s.ready_notes()
+                compose = s.read("infra/rust/compose.user.yml")
+                self.assertNotEqual(edit(compose), compose)
+                s.write("infra/rust/compose.user.yml", edit(compose))
+                proc = s.preflight()
+                self.assertEqual(proc.returncode, 1, proc.stdout)
+                self.assertIn(needle, proc.stderr)
 
 
 if __name__ == "__main__":

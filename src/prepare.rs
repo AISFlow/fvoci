@@ -1,9 +1,10 @@
 //! Container startup of the Compose install (`fvoci-migrate --start`, the
 //! image entrypoint).
 //!
-//! Without the database owner password in its environment it only execs
-//! `fvoci-server` (the separate-`init` installs of `infra/rust/compose.yml`).
-//! With it (`infra/rust/compose.user.yml`, values from the operator's `.env`):
+//! Without the database owner password it only execs `fvoci-server` (the
+//! separate-`init` installs of `infra/rust/compose.yml`). With it
+//! (`infra/rust/compose.user.yml`: root-only Compose secret files under
+//! `/run/secrets`, named by `<VAR>_FILE`, see [`load_secret_files`]):
 //!
 //! 1. validate the required settings (missing, placeholder, format), naming
 //!    variables only;
@@ -12,15 +13,17 @@
 //! 3. under an advisory lock as the owner: refuse a schema upgrade while
 //!    another server holds app-role sessions, create the app role, migrate,
 //!    grant, check the app role's password, ensure the scoped search key;
-//! 4. close every prep connection and `exec` `fvoci-server` with the
+//! 4. close every prep connection and `exec` `fvoci-server`, as the image's
+//!    service uid/gid when started as root ([`exec_server`]), with the
 //!    environment minus the owner password, the Meilisearch master key and
 //!    the raw app password ([`PREP_ONLY`]); it gets `DATABASE_APP_URL`.
 //!
 //! The server keeps the process id, so signals, shutdown and child reaping
-//! are the server's own. What remains shared: the same container and uid,
-//! so the container configuration (`docker inspect`, `docker exec`) still
-//! carries the prep values; the server process, its children and anything it
-//! execs do not. Nothing here generates or stores keys.
+//! are the server's own. The boundary is the uid: the preparation and the
+//! secret files are root's, the server and its children run as uid 1000 and
+//! cannot read either. Same container, so root in it (`docker exec`, which
+//! defaults to the service's root user) can. Nothing here generates or
+//! stores keys.
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -45,7 +48,13 @@ pub const DEFAULT_MEILI_KEY_FILE: &str = "/run/fvoci/meili/api_key";
 /// Default readiness deadline; `FVOCI_PREPARE_TIMEOUT_SECS` overrides it.
 pub const DEFAULT_PREPARE_TIMEOUT_SECS: u64 = 120;
 
-/// Values only the preparation uses; never passed to `fvoci-server`.
+/// The image's service account (`infra/rust/Dockerfile` `useradd`); the server
+/// runs as it when the entrypoint starts as root.
+pub const SERVER_UID: u32 = 1000;
+pub const SERVER_GID: u32 = 1000;
+
+/// Values only the preparation uses; never passed to `fvoci-server`, nor are
+/// their `<VAR>_FILE` forms.
 pub const PREP_ONLY: &[&str] = &[
     "POSTGRES_PASSWORD",
     "DATABASE_URL",
@@ -142,7 +151,7 @@ fn pct_encode(value: &str) -> String {
 
 /// Connection settings `fvoci-migrate` derives from the Compose install's
 /// variables when their URL forms are unset: the owner `DATABASE_URL` from
-/// `POSTGRES_PASSWORD`, `DATABASE_APP_URL` from `FVOCI_APP_PASSWORD`, and
+/// `POSTGRES_PASSWORD`, with it `DATABASE_APP_URL` from `FVOCI_APP_PASSWORD`, and
 /// with `MEILI_MASTER_KEY` the Meilisearch URL and key file. Owner commands
 /// (`--recover-outbox`, `--rebuild-search`, ...) then work in the `fvoci`
 /// container as they do in `init`. Both forms set is an error.
@@ -163,7 +172,7 @@ pub fn install_env(
         let names = DbNames::from_lookup(&get)?;
         out.push(("DATABASE_URL", names.url(&names.owner, &password)));
     }
-    if let Some(password) = get("FVOCI_APP_PASSWORD") {
+    if let (true, Some(password)) = (set("POSTGRES_PASSWORD"), get("FVOCI_APP_PASSWORD")) {
         if !set("DATABASE_APP_URL") && !set("FVOCI_APP_DATABASE_URL") {
             let names = DbNames::from_lookup(&get)?;
             out.push(("DATABASE_APP_URL", names.url(&names.app_role, &password)));
@@ -180,6 +189,70 @@ pub fn install_env(
     Ok(out)
 }
 
+/// Preparation secrets that may instead be read from a file named by
+/// `<VAR>_FILE`: the Compose install mounts them as root-only secret files.
+pub const SECRET_FILE_VARS: &[&str] = &[
+    "POSTGRES_PASSWORD",
+    "FVOCI_APP_PASSWORD",
+    "MEILI_MASTER_KEY",
+];
+
+const SECRET_FILE_MAX_BYTES: u64 = 64 * 1024;
+
+/// Resolves every `<VAR>_FILE` in [`SECRET_FILE_VARS`]: the file must be
+/// UTF-8, at most 64 KiB and nonempty after one trailing newline is dropped.
+/// Setting both `<VAR>` and `<VAR>_FILE` is an error. Errors name the
+/// variable and path, never the contents.
+pub fn resolve_secret_files(
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<Vec<(&'static str, String)>, String> {
+    let mut resolved = Vec::new();
+    for &name in SECRET_FILE_VARS {
+        let file_var = format!("{name}_FILE");
+        let Some(path) = get(&file_var) else { continue };
+        if get(name).is_some() {
+            return Err(format!("{name} and {file_var} are both set; set only one"));
+        }
+        let path = PathBuf::from(path);
+        let read = || -> std::io::Result<Vec<u8>> {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)?
+                .take(SECRET_FILE_MAX_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            Ok(bytes)
+        };
+        let bytes =
+            read().map_err(|e| format!("{file_var}: cannot read {}: {e}", path.display()))?;
+        if bytes.len() as u64 > SECRET_FILE_MAX_BYTES {
+            return Err(format!(
+                "{file_var}: {} is larger than 64 KiB",
+                path.display()
+            ));
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|_| format!("{file_var}: {} is not UTF-8", path.display()))?;
+        let value = text
+            .strip_suffix('\n')
+            .map(|v| v.strip_suffix('\r').unwrap_or(v))
+            .unwrap_or(&text);
+        if value.trim().is_empty() {
+            return Err(format!("{file_var}: {} is empty", path.display()));
+        }
+        resolved.push((name, value.to_string()));
+    }
+    Ok(resolved)
+}
+
+/// [`resolve_secret_files`] applied to the process environment. Call at the
+/// start of `main`, before a runtime or any other thread exists.
+pub fn load_secret_files() -> Result<(), String> {
+    for (name, value) in resolve_secret_files(|k| std::env::var_os(k))? {
+        std::env::set_var(name, value);
+    }
+    Ok(())
+}
+
 /// [`install_env`] applied to the process environment. Call before a
 /// runtime or any other thread exists.
 pub fn load_install_env() -> Result<(), String> {
@@ -194,12 +267,12 @@ pub fn validate(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let mut problems = Vec::new();
     for name in REQUIRED {
         let Some(value) = get(name) else {
-            problems.push(format!("{name} is not set (see .env.example)"));
+            problems.push(format!("{name} is not set (see the env example)"));
             continue;
         };
         let lower = value.to_ascii_lowercase();
         if value.trim().is_empty() {
-            problems.push(format!("{name} is empty (see .env.example)"));
+            problems.push(format!("{name} is empty (see the env example)"));
         } else if value.contains('<')
             || value.contains('>')
             || [
@@ -214,7 +287,7 @@ pub fn validate(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
             .any(|w| lower.contains(w))
         {
             problems.push(format!(
-                "{name} still holds an example placeholder; generate a value as .env.example shows"
+                "{name} still holds an example placeholder; generate a value as the env example shows"
             ));
         }
     }
@@ -472,11 +545,27 @@ fn server_path() -> Result<PathBuf, String> {
     Ok(exe.with_file_name("fvoci-server"))
 }
 
+/// Whether this process runs as root (the owner of `/proc/self`).
+fn running_as_root() -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self")
+        .map(|m| m.uid() == 0)
+        .map_err(|e| format!("cannot tell the process uid from /proc/self: {e}"))
+}
+
 /// Replaces this process with `fvoci-server args`, its environment minus
-/// [`PREP_ONLY`]. Returns only on failure.
+/// [`PREP_ONLY`] and their `<VAR>_FILE` forms. Started as root (the Compose
+/// install, whose secret files only root can read), it first becomes
+/// [`SERVER_UID`]:[`SERVER_GID`] with no supplementary groups, so the server
+/// and its children hold no capability and cannot read those files. Every
+/// descriptor std opens is close-on-exec. Returns only on failure.
 pub fn exec_server(args: &[String]) -> String {
     let path = match server_path() {
         Ok(path) => path,
+        Err(e) => return e,
+    };
+    let root = match running_as_root() {
+        Ok(root) => root,
         Err(e) => return e,
     };
     let env = std::env::vars_os().filter(|(k, _)| {
@@ -485,11 +574,16 @@ pub fn exec_server(args: &[String]) -> String {
                 .is_some_and(|k| k == *p || k == format!("{p}_FILE"))
         })
     });
-    let err = std::process::Command::new(&path)
-        .args(args)
-        .env_clear()
-        .envs(env)
-        .exec();
+    let mut command = std::process::Command::new(&path);
+    command.args(args).env_clear().envs(env);
+    if root {
+        // std sets the gid, clears the supplementary groups, then the uid.
+        command
+            .gid(SERVER_GID)
+            .uid(SERVER_UID)
+            .env("HOME", "/nonexistent");
+    }
+    let err = command.exec();
     format!("exec {}: {err}", path.display())
 }
 
@@ -544,8 +638,8 @@ mod tests {
         assert_eq!(
             problems,
             vec![
-                "MEILI_MASTER_KEY is not set (see .env.example)".to_string(),
-                "ENCRYPTION_KEYS is empty (see .env.example)".to_string(),
+                "MEILI_MASTER_KEY is not set (see the env example)".to_string(),
+                "ENCRYPTION_KEYS is empty (see the env example)".to_string(),
             ]
         );
 
@@ -618,6 +712,11 @@ mod tests {
         ]))
         .unwrap()
         .is_empty());
+        // compose.yml's init has the app password but no owner password:
+        // its database names may differ, so no app URL is guessed.
+        assert!(install_env(lookup(&[("FVOCI_APP_PASSWORD", "app")]))
+            .unwrap()
+            .is_empty());
         let err =
             install_env(lookup(&[("POSTGRES_PASSWORD", "p"), ("DATABASE_URL", "")])).unwrap_err();
         assert!(
@@ -634,5 +733,60 @@ mod tests {
             ("FVOCI_DB_HOST", "h/x@y")
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn secret_files_resolve_and_refuse_ambiguity() {
+        let dir = std::env::temp_dir().join(format!("fvoci-secret-file-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, body: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            path.into_os_string()
+        };
+        let owner = file("owner", b"p@ss/w:rd-0123456789\n");
+        let key = file("key", b"k".repeat(32).as_slice());
+        let empty = file("empty", b"\n");
+        let big = file("big", &vec![b'a'; 64 * 1024 + 1]);
+        let lookup = |pairs: Vec<(&'static str, std::ffi::OsString)>| {
+            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
+        };
+
+        let got = resolve_secret_files(lookup(vec![
+            ("POSTGRES_PASSWORD_FILE", owner.clone()),
+            ("MEILI_MASTER_KEY_FILE", key.clone()),
+            // Not a preparation secret: ignored, never read.
+            ("DATABASE_URL_FILE", "/nonexistent".into()),
+        ]))
+        .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("POSTGRES_PASSWORD", "p@ss/w:rd-0123456789".to_string()),
+                ("MEILI_MASTER_KEY", "k".repeat(32)),
+            ]
+        );
+
+        let both = resolve_secret_files(lookup(vec![
+            ("FVOCI_APP_PASSWORD", "x".into()),
+            ("FVOCI_APP_PASSWORD_FILE", key.clone()),
+        ]))
+        .unwrap_err();
+        assert!(both.contains("both set"), "{both}");
+        let err =
+            resolve_secret_files(lookup(vec![("FVOCI_APP_PASSWORD_FILE", empty)])).unwrap_err();
+        assert!(err.contains("is empty"), "{err}");
+        let err = resolve_secret_files(lookup(vec![("MEILI_MASTER_KEY_FILE", big)])).unwrap_err();
+        assert!(err.contains("64 KiB"), "{err}");
+        let err = resolve_secret_files(lookup(vec![(
+            "POSTGRES_PASSWORD_FILE",
+            dir.join("missing").into_os_string(),
+        )]))
+        .unwrap_err();
+        assert!(
+            err.starts_with("POSTGRES_PASSWORD_FILE: cannot read"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

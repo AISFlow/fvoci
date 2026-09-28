@@ -13,9 +13,9 @@ use fvoci_server::secret_verify::verify_sealed_secrets;
 use uuid::Uuid;
 
 fn main() {
-    // Before the runtime starts any thread: `<VAR>_FILE` secrets become
-    // `<VAR>`, and the Compose install's variables become connection URLs.
-    if let Err(error) = fvoci_server::config::load_secret_files()
+    // Before the runtime starts any thread: the preparation secrets named by
+    // `<VAR>_FILE` become `<VAR>`, and the install variables become URLs.
+    if let Err(error) = fvoci_server::prepare::load_secret_files()
         .and_then(|()| fvoci_server::prepare::load_install_env())
     {
         eprintln!("fvoci-migrate: {error}");
