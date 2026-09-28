@@ -79,6 +79,30 @@ env_file_value() {
 }
 # --- end env-file values ---
 
+# --- app role (checked by scripts/test-restore-env.sh) ---
+# The dump grants to the app role, so it must exist before pg_restore. The
+# password stays off every argv, which any local user can read from /proc:
+# docker/compose on the host and psql in the container. It reaches compose's
+# environment for this one command, `-e app_password` (a name, no value) copies
+# it into the exec environment, and psql reads it with \getenv. If it is
+# missing there, :'app_password' stays unexpanded and ON_ERROR_STOP aborts.
+# The CREATE ROLE ... PASSWORD statement itself still reaches the server log
+# when log_statement is ddl or all.
+# shellcheck disable=SC2016 # the sh -c body expands in the postgres container
+create_app_role() {
+  app_password="$APP_PASSWORD" "${COMPOSE[@]}" exec -T \
+    -e app_role="$APP_ROLE" \
+    -e app_password \
+    postgres \
+    sh -c 'exec psql -X -v ON_ERROR_STOP=1 -v app_role="$app_role" -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+\getenv app_password app_password
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS', :'app_role', :'app_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_role')
+\gexec
+SQL
+}
+# --- end app role ---
+
 read_env() {
   local key="$1" default="${2-}" status=0
   env_file_value "$key" "$ENV_FILE" || status=$?
@@ -287,15 +311,7 @@ if [[ "$RELATIONS" != "0" ]]; then
 fi
 
 echo "creating application role ${APP_ROLE}"
-"${COMPOSE[@]}" exec -T \
-  -e app_role="$APP_ROLE" \
-  -e app_password="$APP_PASSWORD" \
-  postgres \
-  sh -c 'exec psql -X -v ON_ERROR_STOP=1 -v app_role="$app_role" -v app_password="$app_password" -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS', :'app_role', :'app_password')
-WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_role')
-\gexec
-SQL
+create_app_role
 
 echo "restoring PostgreSQL dump"
 docker cp "$DUMP" "${PG_CID}:/tmp/fvoci-restore.dump"

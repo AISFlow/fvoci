@@ -463,19 +463,20 @@ pub enum AdminEraseOutcome {
 }
 
 /// Source `scheduleUserErasure({ actorAdminId, userId })`. `None` when the
-/// actor is not a live instance admin (checked under the locks). Unlike the
-/// user's own withdraw there is no confirmation, and an already withdrawn
-/// target replays its deadline.
+/// actor is not a live instance admin with a live session (checked under the
+/// locks). Unlike the user's own withdraw there is no confirmation, and an
+/// already withdrawn target replays its deadline.
 pub async fn schedule_user_erasure(
     pool: &PgPool,
     actor: Uuid,
+    session_id: Uuid,
     user_id: Uuid,
     ip: Option<&str>,
 ) -> Result<Option<AdminEraseOutcome>, sqlx::Error> {
     let cancel = new_token();
     let mut tx = pool.begin().await?;
     lock_account_for(&mut tx, Some(actor), user_id).await?;
-    if !crate::db::admin::require_live_instance_admin(&mut tx, actor).await? {
+    if !crate::db::admin::require_admin_session(&mut tx, actor, session_id).await? {
         tx.rollback().await?;
         return Ok(None);
     }
@@ -589,20 +590,21 @@ pub async fn cancel_withdraw(
 }
 
 /// Source `cancelUserErasure({ actorAdminId, userId })`. `None` when the
-/// actor is not a live instance admin. Same locks as the user's token cancel,
-/// so the two serialize on the target's row: the second one sees a live row
-/// and answers `NotFound`. The restore goes through
+/// actor is not a live instance admin with a live session. Same locks as the
+/// user's token cancel, so the two serialize on the target's row: the second
+/// one sees a live row and answers `NotFound`. The restore goes through
 /// `app_admin_user_restore_withdrawn`, which rechecks the admin and the
 /// deadline itself; sessions and tokens revoked by the withdraw stay revoked.
 pub async fn admin_cancel_user_erasure(
     pool: &PgPool,
     actor: Uuid,
+    session_id: Uuid,
     user_id: Uuid,
     ip: Option<&str>,
 ) -> Result<Option<CancelWithdrawOutcome>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     lock_account_for(&mut tx, Some(actor), user_id).await?;
-    if !crate::db::admin::require_live_instance_admin(&mut tx, actor).await? {
+    if !crate::db::admin::require_admin_session(&mut tx, actor, session_id).await? {
         tx.rollback().await?;
         return Ok(None);
     }

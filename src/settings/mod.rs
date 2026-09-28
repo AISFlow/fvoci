@@ -22,7 +22,7 @@ pub use catalog::{
     SettingsValues, SharePolicy, BRANDING_ASSET_MIME, SETTINGS_KEYS,
 };
 
-use crate::db::admin::{record_instance_change, require_live_instance_admin, InstanceChange};
+use crate::db::admin::{record_instance_change, require_admin_session, InstanceChange};
 use crate::db::context::set_system;
 
 /// Process-local boot snapshot shared by every clone of one `Db`.
@@ -305,39 +305,22 @@ fn without_env_leaves(key: SettingsKey, mut value: Value, base: &Value, env: &[S
     value
 }
 
-/// Applies a settings change as one transaction: the actor's instance-admin
-/// status is rechecked under a row lock, writers serialize on the settings
-/// revision row, and the rows, revision and `instance_settings.updated`
-/// event + audit commit together. Audit payloads carry key paths only, never
-/// the values (source spec §10).
-pub async fn apply_change(
-    pool: &PgPool,
-    actor: Uuid,
-    ip: Option<&str>,
-    brand_default: &str,
-    change: SettingsChange,
-) -> Result<Result<SettingsWriteOutcome, SettingsWriteError>, sqlx::Error> {
-    apply_change_with_license(
-        pool,
-        actor,
-        ip,
-        brand_default,
-        change,
-        &crate::license::absent(),
-    )
-    .await
-}
-
+/// Applies a settings change as one transaction: the actor's session and
+/// instance-admin status are rechecked under row locks, writers serialize on
+/// the settings revision row, and the rows, revision and
+/// `instance_settings.updated` event + audit commit together. Audit payloads
+/// carry key paths only, never the values (source spec §10).
 pub async fn apply_change_with_license(
     pool: &PgPool,
     actor: Uuid,
+    session_id: Uuid,
     ip: Option<&str>,
     brand_default: &str,
     change: SettingsChange,
     license: &crate::license::Entitlements,
 ) -> Result<Result<SettingsWriteOutcome, SettingsWriteError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    if !require_live_instance_admin(&mut tx, actor).await? {
+    if !require_admin_session(&mut tx, actor, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(SettingsWriteError::NotAdmin));
     }

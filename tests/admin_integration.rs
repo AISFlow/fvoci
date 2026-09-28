@@ -2841,3 +2841,382 @@ async fn well_known_security_txt_follows_instance_security_contact() {
 
     h.finish().await;
 }
+
+// ---------------------------------------------------------------- session fence
+
+/// Another live session for `user_id`: its cookie token and session id.
+async fn fresh_session(h: &Harness, user_id: Uuid) -> (String, Uuid) {
+    let pool = pool::connect_app(&h.db.app_url).await.unwrap();
+    let token = fvoci_server::auth::token::new_token();
+    let session_id = Uuid::now_v7();
+    let mut tx = pool.begin().await.unwrap();
+    fvoci_server::db::identity::create_session(
+        &mut tx,
+        session_id,
+        user_id,
+        &token.hash,
+        Utc::now() + ChronoDuration::days(30),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    pool.close().await;
+    (token.token, session_id)
+}
+
+/// Runs `request` while another transaction holds the admission lock (the
+/// first lock of every admin user write). Once the request's transaction
+/// queues on it, so after HTTP authentication, `cookie` logs out through
+/// the real route; then the lock is released.
+async fn logout_while_queued_on_admission(
+    h: &Harness,
+    cookie: &str,
+    request: impl std::future::Future<Output = Reply>,
+) -> Reply {
+    let admin = h.db.admin().await;
+    let mut holder = admin.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    fvoci_server::db::quota::acquire_admission_lock(&mut holder)
+        .await
+        .unwrap();
+    let (reply, (queued, logout)) = tokio::join!(request, async {
+        let queued = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE datname = current_database() AND state = 'active' \
+                     AND wait_event_type = 'Lock' AND wait_event = 'advisory' \
+                     AND query = 'SELECT pg_advisory_xact_lock($1)' \
+                     AND $1 = ANY(pg_blocking_pids(pid))",
+                )
+                .bind(holder_pid)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+                if waiting == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let logout = if queued {
+            send(
+                &h.app,
+                "POST",
+                "/api/v1/auth/logout",
+                None,
+                Some(cookie),
+                &[],
+            )
+            .await
+            .status
+        } else {
+            StatusCode::REQUEST_TIMEOUT
+        };
+        // Always release the barrier, including on a failed precondition.
+        holder.rollback().await.unwrap();
+        (queued, logout)
+    });
+    admin.close().await;
+    assert!(queued, "the request must queue after HTTP authentication");
+    assert_eq!(logout, StatusCode::NO_CONTENT);
+    reply
+}
+
+/// Runs `request` while another transaction holds `user_id`'s users row the
+/// way logout does (`lock_sign_in`). Once the request waits on that row, so
+/// after HTTP authentication, the same transaction revokes `session_id` and
+/// commits.
+async fn revoke_while_waiting_on_user_row(
+    h: &Harness,
+    user_id: Uuid,
+    session_id: Uuid,
+    request: impl std::future::Future<Output = Reply>,
+) -> Reply {
+    let admin = h.db.admin().await;
+    let mut holder = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
+        .bind(user_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let (reply, ()) = tokio::join!(request, async {
+        wait_for_users_lock_waiter(&admin).await;
+        sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE id = $1")
+            .bind(session_id)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        holder.commit().await.unwrap();
+    });
+    admin.close().await;
+    reply
+}
+
+async fn audit_count(admin: &PgPool, verb: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM fvoci.audit_log WHERE verb = $1")
+        .bind(verb)
+        .fetch_one(admin)
+        .await
+        .unwrap()
+}
+
+/// Instance-user writes recheck the actor's session after their lock waits,
+/// like every workspace write: a logout that commits while the request
+/// queues on the admission lock turns it into 404 with nothing written.
+#[tokio::test]
+async fn admin_user_writes_refuse_a_session_revoked_while_queued() {
+    let h = harness().await;
+    let admin = h.db.admin().await;
+    let (second_id, _) = h.user("second@example.com", None).await;
+
+    let (cookie, _) = fresh_session(&h, h.admin_id).await;
+    let reply = logout_while_queued_on_admission(
+        &h,
+        &cookie,
+        with_json(
+            &h.app,
+            "PATCH",
+            "/api/v1/admin/users",
+            json!({"userId": second_id, "instanceAdmin": true}),
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.json);
+
+    let (cookie, _) = fresh_session(&h, h.admin_id).await;
+    let reply = logout_while_queued_on_admission(
+        &h,
+        &cookie,
+        with_json(
+            &h.app,
+            "PATCH",
+            "/api/v1/admin/instance-admins",
+            json!({"userId": second_id, "value": true}),
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.json);
+
+    let (cookie, _) = fresh_session(&h, h.admin_id).await;
+    let reply = logout_while_queued_on_admission(
+        &h,
+        &cookie,
+        with_json(
+            &h.app,
+            "PATCH",
+            "/api/v1/admin/users",
+            json!({"userId": second_id, "suspended": true}),
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.json);
+
+    let (is_admin, suspended): (bool, bool) = sqlx::query_as(
+        "SELECT is_instance_admin, suspended_at IS NOT NULL FROM fvoci.users WHERE id = $1",
+    )
+    .bind(second_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(!is_admin && !suspended);
+    assert_eq!(audit_count(&admin, "admin.instance_admin_set").await, 0);
+    assert_eq!(audit_count(&admin, "admin.user_suspended_set").await, 0);
+    assert_eq!(
+        count_events(&admin, "admin.instance_admin_set", second_id).await,
+        0
+    );
+    // The harness session was never revoked and still works.
+    let ok = with_json(
+        &h.app,
+        "PATCH",
+        "/api/v1/admin/users",
+        json!({"userId": second_id, "instanceAdmin": true}),
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.json);
+    admin.close().await;
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn admin_erasure_refuses_a_session_revoked_while_queued() {
+    let h = harness().await;
+    let admin = h.db.admin().await;
+    let (target_id, _) = h.user("target@example.com", None).await;
+
+    let (cookie, _) = fresh_session(&h, h.admin_id).await;
+    let reply =
+        logout_while_queued_on_admission(&h, &cookie, erase(&h, "erase", target_id, Some(&cookie)))
+            .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.json);
+    let deleted: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM fvoci.users WHERE id = $1")
+            .bind(target_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert!(!deleted);
+    assert_eq!(count_events(&admin, "user.withdrawn", target_id).await, 0);
+
+    let scheduled = erase(&h, "erase", target_id, Some(&h.admin_cookie)).await;
+    assert_eq!(scheduled.status, StatusCode::OK, "{}", scheduled.json);
+    let (cookie, _) = fresh_session(&h, h.admin_id).await;
+    let reply = logout_while_queued_on_admission(
+        &h,
+        &cookie,
+        erase(&h, "cancel-erase", target_id, Some(&cookie)),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.json);
+    let deleted: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM fvoci.users WHERE id = $1")
+            .bind(target_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert!(deleted, "the pending erasure must stay scheduled");
+    assert_eq!(
+        count_events(&admin, "user.withdraw_cancelled", target_id).await,
+        0
+    );
+    admin.close().await;
+    h.finish().await;
+}
+
+/// Legal and settings writes wait for the render or the upload before their
+/// transaction starts; a revocation in that window must also stop them.
+/// The barrier here is the actor's users row, held and then released by a
+/// transaction that revokes the request's session, as logout does.
+#[tokio::test]
+async fn legal_publish_refuses_a_session_revoked_while_waiting() {
+    let h = harness().await;
+    let admin = h.db.admin().await;
+    let (cookie, session_id) = fresh_session(&h, h.admin_id).await;
+    let reply = revoke_while_waiting_on_user_row(
+        &h,
+        h.admin_id,
+        session_id,
+        with_json(
+            &h.app,
+            "POST",
+            "/api/v1/admin/legal",
+            json!({
+                "kind": "terms",
+                "title": "약관",
+                "bodyMarkdown": "# 제1조",
+                "required": false,
+                "effectiveAt": "2026-10-01T00:00:00Z"
+            }),
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.json);
+    let docs: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.legal_documents")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(docs, 0);
+    assert_eq!(audit_count(&admin, "legal.published").await, 0);
+    admin.close().await;
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn settings_writes_refuse_a_session_revoked_while_waiting() {
+    let h = harness().await;
+    let admin = h.db.admin().await;
+
+    let (cookie, session_id) = fresh_session(&h, h.admin_id).await;
+    let reply = revoke_while_waiting_on_user_row(
+        &h,
+        h.admin_id,
+        session_id,
+        with_json(
+            &h.app,
+            "PATCH",
+            "/api/v1/admin/instance-settings",
+            json!({"share": {"enabled": false, "defaultExpiresDays": 1, "maxExpiresDays": 1}}),
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.json);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.instance_settings")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+
+    let (cookie, session_id) = fresh_session(&h, h.admin_id).await;
+    let reply = revoke_while_waiting_on_user_row(
+        &h,
+        h.admin_id,
+        session_id,
+        send(
+            &h.app,
+            "POST",
+            "/api/v1/admin/branding/assets/logo",
+            Some(("application/octet-stream", tiny_png())),
+            Some(&cookie),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.json);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.instance_settings")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+
+    let uploaded = send(
+        &h.app,
+        "POST",
+        "/api/v1/admin/branding/assets/logo",
+        Some(("application/octet-stream", tiny_png())),
+        Some(&h.admin_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(uploaded.status, StatusCode::OK, "{}", uploaded.json);
+    let (cookie, session_id) = fresh_session(&h, h.admin_id).await;
+    let reply = revoke_while_waiting_on_user_row(
+        &h,
+        h.admin_id,
+        session_id,
+        send(
+            &h.app,
+            "DELETE",
+            "/api/v1/admin/branding/assets/logo",
+            None,
+            Some(&cookie),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.json);
+    let logo: Option<Value> = sqlx::query_scalar(
+        "SELECT value -> 'logo' FROM fvoci.instance_settings WHERE key = 'branding'",
+    )
+    .fetch_optional(&admin)
+    .await
+    .unwrap();
+    assert!(
+        logo.is_some_and(|logo| !logo.is_null()),
+        "the logo must still be set"
+    );
+    assert_eq!(audit_count(&admin, "instance_settings.updated").await, 1);
+    admin.close().await;
+    h.finish().await;
+}

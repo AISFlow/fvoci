@@ -279,6 +279,7 @@ async fn patch_users(
         &state.auth.db.pool,
         &state.auth.db.license,
         auth.user_id,
+        auth.credential_id,
         body.user_id,
         InstanceUserPatch {
             instance_admin: body.instance_admin,
@@ -311,6 +312,7 @@ async fn patch_instance_admins(
         &state.auth.db.pool,
         &state.auth.db.license,
         auth.user_id,
+        auth.credential_id,
         body.user_id,
         InstanceUserPatch {
             instance_admin: Some(body.value),
@@ -338,10 +340,16 @@ async fn erase_user(
     let auth = session(&state, &headers, &jar).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let ip = peer_ip(peer.ip());
-    let outcome = schedule_user_erasure(&state.auth.db.pool, auth.user_id, body.user_id, Some(&ip))
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let outcome = schedule_user_erasure(
+        &state.auth.db.pool,
+        auth.user_id,
+        auth.credential_id,
+        body.user_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     let scheduled = match outcome {
         AdminEraseOutcome::Scheduled(scheduled) => scheduled,
         AdminEraseOutcome::NotFound => return Err(not_found()),
@@ -375,10 +383,16 @@ async fn cancel_erase_user(
     let auth = session(&state, &headers, &jar).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let ip = peer_ip(peer.ip());
-    match admin_cancel_user_erasure(&state.auth.db.pool, auth.user_id, body.user_id, Some(&ip))
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?
+    match admin_cancel_user_erasure(
+        &state.auth.db.pool,
+        auth.user_id,
+        auth.credential_id,
+        body.user_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?
     {
         CancelWithdrawOutcome::Ok => Ok(Json(OkResponse { ok: true })),
         CancelWithdrawOutcome::NotFound => Err(not_found()),
@@ -437,6 +451,7 @@ async fn post_legal(
     let doc = publish_legal(
         &state.auth.db.pool,
         auth.user_id,
+        auth.credential_id,
         LegalPublishInput {
             kind: body.kind,
             title,
@@ -571,6 +586,7 @@ async fn patch_instance_settings(
     let outcome = settings::apply_change_with_license(
         &state.auth.db.pool,
         auth.user_id,
+        auth.credential_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::Patch(items),
@@ -719,6 +735,7 @@ async fn upload_branding_asset(
     let outcome = settings::apply_change_with_license(
         &state.auth.db.pool,
         auth.user_id,
+        auth.credential_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::BrandingAsset {
@@ -763,6 +780,7 @@ async fn remove_branding_asset(
     let outcome = settings::apply_change_with_license(
         &state.auth.db.pool,
         auth.user_id,
+        auth.credential_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::BrandingAsset { kind, asset: None },
