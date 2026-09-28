@@ -10,6 +10,11 @@
 //! move. Events older than the window that the move would pass unprocessed
 //! are a forward skip and need `--override-reason`.
 //!
+//! Migrations 027/040/041 seed later consumers at the tail, so they hold no
+//! marks for older events. A consumer with external effects is therefore not
+//! rewound past its own first mark (nor behind its cursor when it has none)
+//! unless `--ack-external-replay` accepts delivering that history again.
+//!
 //! The app role has no access to the cursor tables (grant-app-role.sql), so
 //! this runs as the owner like `--recover-outbox`, in system context because
 //! `events` forces row-level security.
@@ -25,6 +30,10 @@ use super::outbox_recover::RESET_SCAN_WINDOW_DAYS;
 pub const MARKING_CONSUMERS: &[&str] =
     &["notifications", "mail", "push", "webhooks", "search-index"];
 const SEARCH_INDEX_CONSUMER: &str = "search-index";
+/// Consumers whose effects stay in this database. Every other consumer
+/// (mail, push, webhooks, github or one this build does not know) reaches
+/// devices or endpoints outside it.
+const INTERNAL_CONSUMERS: &[&str] = &["notifications", SEARCH_INDEX_CONSUMER];
 const GITHUB_CONSUMER: &str = "github";
 const SKIP_SAMPLE_LIMIT: i64 = 100;
 
@@ -34,6 +43,7 @@ pub struct OutboxResetOptions {
     pub apply: bool,
     pub reason: Option<String>,
     pub override_reason: Option<String>,
+    pub ack_external_replay: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -76,9 +86,29 @@ pub struct ConsumerReset {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub noop_reason: Option<String>,
     /// Events between the target and the current cursor without a mark: the
-    /// consumer delivers them again after a backward move.
+    /// consumer delivers them again after a backward move. Dead-lettered
+    /// events are counted in `dead_lettered` instead; the dispatcher passes
+    /// them while their failure row stays.
     pub redelivered: i64,
+    pub dead_lettered: i64,
+    pub external_effects: bool,
+    /// Set when the rule target lies behind the external replay floor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_replay: Option<ExternalReplay>,
     pub skip: Option<ResetSkip>,
+}
+
+/// The rewind the rule asks for past an external consumer's floor. Without
+/// `--ack-external-replay` the target stops at `floor`; with it the target
+/// is `target` and the consumer delivers `redelivered` events again.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalReplay {
+    pub floor: CursorPos,
+    pub target: CursorPos,
+    pub redelivered: i64,
+    pub dead_lettered: i64,
+    pub acknowledged: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +129,7 @@ pub struct OutboxResetReport {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_reason: Option<String>,
+    pub ack_external_replay: bool,
     pub consumers: Vec<ConsumerReset>,
     pub excluded: Vec<ExcludedConsumer>,
 }
@@ -130,6 +161,12 @@ pub fn parse_outbox_reset_args(args: &[String]) -> Result<OutboxResetOptions, Ou
                     return Err(rejected("--apply does not take a value"));
                 }
                 opts.apply = true;
+            }
+            "--ack-external-replay" => {
+                if inline.is_some() {
+                    return Err(rejected("--ack-external-replay does not take a value"));
+                }
+                opts.ack_external_replay = true;
             }
             "--consumer" | "--reason" | "--override-reason" => {
                 let value = match inline {
@@ -165,9 +202,11 @@ pub fn parse_outbox_reset_args(args: &[String]) -> Result<OutboxResetOptions, Ou
     if opts.apply && opts.reason.is_none() {
         return Err(rejected("--apply requires --reason"));
     }
-    if !opts.apply && (opts.reason.is_some() || opts.override_reason.is_some()) {
+    if !opts.apply
+        && (opts.reason.is_some() || opts.override_reason.is_some() || opts.ack_external_replay)
+    {
         return Err(rejected(
-            "--reason and --override-reason only apply with --apply; without it outbox-reset only diagnoses",
+            "--reason, --override-reason and --ack-external-replay only apply with --apply; without it outbox-reset only diagnoses",
         ));
     }
     Ok(opts)
@@ -217,6 +256,21 @@ async fn outbox_reset_on(
         .await?;
 
     if opts.apply {
+        // Without these, pg_stat_activity hides other roles' sessions and the
+        // count below would pass while the server is still connected.
+        let sees_all_sessions: bool = sqlx::query_scalar(
+            r#"
+            SELECT current_setting('is_superuser') = 'on'
+                OR pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')
+            "#,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !sees_all_sessions {
+            return Err(rejected(
+                "outbox-reset --apply requires a superuser or a member of pg_read_all_stats, so that it can see every other database session",
+            ));
+        }
         let other_sessions: i64 = sqlx::query_scalar(
             r#"
             SELECT count(*)
@@ -289,7 +343,7 @@ async fn outbox_reset_on(
 
     let mut plans = Vec::with_capacity(selected.len());
     for cursor in selected {
-        plans.push(plan_consumer(&mut tx, cursor).await?);
+        plans.push(plan_consumer(&mut tx, cursor, opts.ack_external_replay).await?);
     }
 
     if opts.apply {
@@ -305,6 +359,21 @@ async fn outbox_reset_on(
                 return Err(rejected(format!(
                     "forward skip of {count} unprocessed events older than {RESET_SCAN_WINDOW_DAYS} days for consumer {}; refused (--override-reason required)",
                     plan.consumer
+                )));
+            }
+        }
+        // app_outbox_advance's rule: a transaction at or above xmin may still
+        // commit an event below the target, which a forward move would pass.
+        let xmin: String =
+            sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot())::text")
+                .fetch_one(&mut *tx)
+                .await?;
+        let xmin = parse_xid(&xmin)?;
+        for plan in plans.iter().filter(|plan| plan.direction == "forward") {
+            if parse_xid(&plan.target.last_xact)? >= xmin {
+                return Err(rejected(format!(
+                    "forward target {}:{} for consumer {} is not below snapshot xmin {xmin}; a transaction that may still commit an earlier event is running (pg_stat_activity, pg_prepared_xacts); retry after it ends",
+                    plan.target.last_xact, plan.target.last_seq, plan.consumer
                 )));
             }
         }
@@ -332,6 +401,7 @@ async fn outbox_reset_on(
                 override_reason = opts.override_reason.as_deref().unwrap_or(""),
                 skipped_count = plan.skip.as_ref().map_or(0, |skip| skip.skipped_count),
                 redelivered = plan.redelivered,
+                external_replay = plan.external_replay.is_some() && opts.ack_external_replay,
                 "outbox consumer cursor reset"
             );
         }
@@ -345,6 +415,7 @@ async fn outbox_reset_on(
         window_days: RESET_SCAN_WINDOW_DAYS,
         reason: opts.reason.clone(),
         override_reason: opts.override_reason.clone(),
+        ack_external_replay: opts.ack_external_replay,
         consumers: plans,
         excluded,
     })
@@ -392,110 +463,48 @@ fn select_consumers<'a>(
 
 /// Source resetCursorToProcessed for one consumer: the target is the event
 /// just before the first unmarked event of the window, else the newest event
-/// of the window; an empty window leaves the cursor where it is.
+/// of the window; an empty window leaves the cursor where it is. For an
+/// external consumer the target stops at its replay floor unless
+/// `ack_external_replay`.
 async fn plan_consumer(
     tx: &mut Transaction<'_, Postgres>,
     cursor: &CursorRow,
+    ack_external_replay: bool,
 ) -> Result<ConsumerReset, OutboxResetError> {
     let consumer = cursor.consumer.as_str();
     let skip = collect_skip(tx, consumer, &cursor.pos).await?;
-
-    let first_unprocessed = sqlx::query(
-        r#"
-        SELECT e.xact::text AS xact, e.seq
-        FROM fvoci.events AS e
-        WHERE e.created_at >= now() - make_interval(days => $2)
-          AND NOT EXISTS (
-              SELECT 1 FROM fvoci.processed_events AS p
-              WHERE p.consumer = $1 AND p.event_id = e.id
-          )
-        ORDER BY e.xact, e.seq
-        LIMIT 1
-        "#,
-    )
-    .bind(consumer)
-    .bind(RESET_SCAN_WINDOW_DAYS)
-    .fetch_optional(&mut **tx)
-    .await?;
-
-    let mut noop_reason = None;
-    let target = match first_unprocessed {
-        Some(first) => {
-            let prev = sqlx::query(
-                r#"
-                SELECT xact::text AS xact, seq
-                FROM fvoci.events
-                WHERE (xact, seq) < ($1::xid8, $2)
-                ORDER BY xact DESC, seq DESC
-                LIMIT 1
-                "#,
-            )
-            .bind(first.get::<String, _>("xact"))
-            .bind(first.get::<i64, _>("seq"))
-            .fetch_optional(&mut **tx)
-            .await?;
-            prev.map_or(
-                CursorPos {
-                    last_xact: "0".into(),
-                    last_seq: 0,
-                },
-                |row| CursorPos {
-                    last_xact: row.get("xact"),
-                    last_seq: row.get("seq"),
-                },
-            )
-        }
-        None => {
-            let newest = sqlx::query(
-                r#"
-                SELECT xact::text AS xact, seq
-                FROM fvoci.events
-                WHERE created_at >= now() - make_interval(days => $1)
-                ORDER BY xact DESC, seq DESC
-                LIMIT 1
-                "#,
-            )
-            .bind(RESET_SCAN_WINDOW_DAYS)
-            .fetch_optional(&mut **tx)
-            .await?;
-            match newest {
-                Some(row) => CursorPos {
-                    last_xact: row.get("xact"),
-                    last_seq: row.get("seq"),
-                },
-                None => {
-                    noop_reason = Some(format!(
-                        "no events in the {RESET_SCAN_WINDOW_DAYS}-day window; cursor unchanged"
-                    ));
-                    cursor.pos.clone()
-                }
-            }
-        }
+    let origin = CursorPos {
+        last_xact: "0".into(),
+        last_seq: 0,
     };
+    let (rule_target, noop_reason) = rule_target(tx, consumer, &origin, &cursor.pos).await?;
+
+    let external_effects = !INTERNAL_CONSUMERS.contains(&consumer);
+    let mut external_replay = None;
+    let mut target = rule_target.clone();
+    if external_effects {
+        let floor = replay_floor(tx, consumer, &cursor.pos).await?;
+        if compare(&rule_target, &floor)? == "backward" {
+            let (redelivered, dead_lettered) =
+                count_redelivered(tx, consumer, &rule_target, &cursor.pos).await?;
+            if !ack_external_replay {
+                target = rule_target_above(tx, consumer, &floor, &cursor.pos).await?;
+            }
+            external_replay = Some(ExternalReplay {
+                floor,
+                target: rule_target,
+                redelivered,
+                dead_lettered,
+                acknowledged: ack_external_replay,
+            });
+        }
+    }
 
     let direction = compare(&target, &cursor.pos)?;
-    let redelivered = if direction == "backward" {
-        sqlx::query_scalar(
-            r#"
-            SELECT count(*)
-            FROM fvoci.events AS e
-            WHERE (e.xact, e.seq) > ($2::xid8, $3)
-              AND (e.xact, e.seq) <= ($4::xid8, $5)
-              AND NOT EXISTS (
-                  SELECT 1 FROM fvoci.processed_events AS p
-                  WHERE p.consumer = $1 AND p.event_id = e.id
-              )
-            "#,
-        )
-        .bind(consumer)
-        .bind(&target.last_xact)
-        .bind(target.last_seq)
-        .bind(&cursor.pos.last_xact)
-        .bind(cursor.pos.last_seq)
-        .fetch_one(&mut **tx)
-        .await?
+    let (redelivered, dead_lettered) = if direction == "backward" {
+        count_redelivered(tx, consumer, &target, &cursor.pos).await?
     } else {
-        0
+        (0, 0)
     };
 
     Ok(ConsumerReset {
@@ -506,17 +515,198 @@ async fn plan_consumer(
         direction,
         noop_reason,
         redelivered,
+        dead_lettered,
+        external_effects,
+        external_replay,
         skip,
     })
 }
 
-fn compare(target: &CursorPos, current: &CursorPos) -> Result<&'static str, OutboxResetError> {
-    let parse = |xact: &str| {
-        xact.parse::<u64>()
-            .map_err(|_| rejected(format!("invalid xid8 {xact:?}")))
+/// The rule target among events after `lower`, never behind `lower`.
+async fn rule_target_above(
+    tx: &mut Transaction<'_, Postgres>,
+    consumer: &str,
+    lower: &CursorPos,
+    cursor: &CursorPos,
+) -> Result<CursorPos, OutboxResetError> {
+    let (target, _) = rule_target(tx, consumer, lower, cursor).await?;
+    Ok(if compare(&target, lower)? == "backward" {
+        lower.clone()
+    } else {
+        target
+    })
+}
+
+async fn rule_target(
+    tx: &mut Transaction<'_, Postgres>,
+    consumer: &str,
+    lower: &CursorPos,
+    cursor: &CursorPos,
+) -> Result<(CursorPos, Option<String>), OutboxResetError> {
+    let first_unprocessed = sqlx::query(
+        r#"
+        SELECT e.xact::text AS xact, e.seq
+        FROM fvoci.events AS e
+        WHERE e.created_at >= now() - make_interval(days => $2)
+          AND (e.xact, e.seq) > ($3::xid8, $4)
+          AND NOT EXISTS (
+              SELECT 1 FROM fvoci.processed_events AS p
+              WHERE p.consumer = $1 AND p.event_id = e.id
+          )
+        ORDER BY e.xact, e.seq
+        LIMIT 1
+        "#,
+    )
+    .bind(consumer)
+    .bind(RESET_SCAN_WINDOW_DAYS)
+    .bind(&lower.last_xact)
+    .bind(lower.last_seq)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some(first) = first_unprocessed {
+        let pos = CursorPos {
+            last_xact: first.get("xact"),
+            last_seq: first.get("seq"),
+        };
+        return Ok((event_before(tx, &pos).await?, None));
+    }
+    let newest = sqlx::query(
+        r#"
+        SELECT xact::text AS xact, seq
+        FROM fvoci.events
+        WHERE created_at >= now() - make_interval(days => $1)
+        ORDER BY xact DESC, seq DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(RESET_SCAN_WINDOW_DAYS)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(match newest {
+        Some(row) => (
+            CursorPos {
+                last_xact: row.get("xact"),
+                last_seq: row.get("seq"),
+            },
+            None,
+        ),
+        None => (
+            cursor.clone(),
+            Some(format!(
+                "no events in the {RESET_SCAN_WINDOW_DAYS}-day window; cursor unchanged"
+            )),
+        ),
+    })
+}
+
+/// The newest event before `pos`, else the origin.
+async fn event_before(
+    tx: &mut Transaction<'_, Postgres>,
+    pos: &CursorPos,
+) -> Result<CursorPos, OutboxResetError> {
+    let prev = sqlx::query(
+        r#"
+        SELECT xact::text AS xact, seq
+        FROM fvoci.events
+        WHERE (xact, seq) < ($1::xid8, $2)
+        ORDER BY xact DESC, seq DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&pos.last_xact)
+    .bind(pos.last_seq)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(prev.map_or(
+        CursorPos {
+            last_xact: "0".into(),
+            last_seq: 0,
+        },
+        |row| CursorPos {
+            last_xact: row.get("xact"),
+            last_seq: row.get("seq"),
+        },
+    ))
+}
+
+/// How far back an external consumer may move without acknowledgment: just
+/// before its first marked event, and never behind its cursor. A tail seed
+/// leaves no marks below the seed, so nothing it never delivered replays.
+async fn replay_floor(
+    tx: &mut Transaction<'_, Postgres>,
+    consumer: &str,
+    cursor: &CursorPos,
+) -> Result<CursorPos, OutboxResetError> {
+    let first_mark = sqlx::query(
+        r#"
+        SELECT e.xact::text AS xact, e.seq
+        FROM fvoci.events AS e
+        JOIN fvoci.processed_events AS p ON p.event_id = e.id AND p.consumer = $1
+        ORDER BY e.xact, e.seq
+        LIMIT 1
+        "#,
+    )
+    .bind(consumer)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(first_mark) = first_mark else {
+        return Ok(cursor.clone());
     };
-    let target_key = (parse(&target.last_xact)?, target.last_seq);
-    let current_key = (parse(&current.last_xact)?, current.last_seq);
+    let before_mark = event_before(
+        tx,
+        &CursorPos {
+            last_xact: first_mark.get("xact"),
+            last_seq: first_mark.get("seq"),
+        },
+    )
+    .await?;
+    Ok(if compare(&before_mark, cursor)? == "forward" {
+        cursor.clone()
+    } else {
+        before_mark
+    })
+}
+
+/// Unmarked events in (target, cursor]: (delivered again, dead-lettered).
+async fn count_redelivered(
+    tx: &mut Transaction<'_, Postgres>,
+    consumer: &str,
+    target: &CursorPos,
+    cursor: &CursorPos,
+) -> Result<(i64, i64), OutboxResetError> {
+    let row = sqlx::query(
+        r#"
+        SELECT count(*) FILTER (WHERE f.dead_at IS NULL) AS redelivered,
+               count(*) FILTER (WHERE f.dead_at IS NOT NULL) AS dead_lettered
+        FROM fvoci.events AS e
+        LEFT JOIN fvoci.outbox_failures AS f ON f.consumer = $1 AND f.event_id = e.id
+        WHERE (e.xact, e.seq) > ($2::xid8, $3)
+          AND (e.xact, e.seq) <= ($4::xid8, $5)
+          AND NOT EXISTS (
+              SELECT 1 FROM fvoci.processed_events AS p
+              WHERE p.consumer = $1 AND p.event_id = e.id
+          )
+        "#,
+    )
+    .bind(consumer)
+    .bind(&target.last_xact)
+    .bind(target.last_seq)
+    .bind(&cursor.last_xact)
+    .bind(cursor.last_seq)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok((row.get("redelivered"), row.get("dead_lettered")))
+}
+
+fn parse_xid(xact: &str) -> Result<u64, OutboxResetError> {
+    xact.parse::<u64>()
+        .map_err(|_| rejected(format!("invalid xid8 {xact:?}")))
+}
+
+fn compare(target: &CursorPos, current: &CursorPos) -> Result<&'static str, OutboxResetError> {
+    let target_key = (parse_xid(&target.last_xact)?, target.last_seq);
+    let current_key = (parse_xid(&current.last_xact)?, current.last_seq);
     Ok(match target_key.cmp(&current_key) {
         std::cmp::Ordering::Greater => "forward",
         std::cmp::Ordering::Less => "backward",
@@ -620,6 +810,8 @@ mod tests {
             &["--apply", "--reason", "x", "--override-reason="],
             &["--reason", "x"],
             &["--override-reason=x"],
+            &["--ack-external-replay"],
+            &["--apply", "--reason", "x", "--ack-external-replay=yes"],
             &["--consumer"],
             &["--consumer", "Bad Name"],
             &["--apply=yes", "--reason", "x"],
@@ -642,6 +834,15 @@ mod tests {
         assert_eq!(opts.reason.as_deref(), Some("ops ticket 1"));
         assert_eq!(opts.override_reason.as_deref(), Some("ack skip"));
         assert_eq!(opts.consumers, vec!["github", "mail"]);
+        assert!(!opts.ack_external_replay);
+        let acked = parse_outbox_reset_args(&args(&[
+            "--apply",
+            "--reason",
+            "x",
+            "--ack-external-replay",
+        ]))
+        .unwrap();
+        assert!(acked.ack_external_replay);
     }
 
     #[test]

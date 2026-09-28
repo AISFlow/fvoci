@@ -186,7 +186,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --rotate-vapid | --secrets-audit | --secrets-rotate | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --start [server args] | --prepare | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay] | --outbox-reset [--consumer <name>]... [--apply --reason <text> [--override-reason <text>]] | --backup-manifest <manifest> <project> <created-utc> <pg-version> <dump> <storage-tar> | --restore-preflight <manifest> <dump> <storage-tar> <target-project>]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --rotate-vapid | --secrets-audit | --secrets-rotate | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --start [server args] | --prepare | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay] | --outbox-reset [--consumer <name>]... [--apply --reason <text> [--override-reason <text>] [--ack-external-replay]] | --backup-manifest <manifest> <project> <created-utc> <pg-version> <dump> <storage-tar> | --restore-preflight <manifest> <dump> <storage-tar> <target-project>]".into(),
             );
         }
     }
