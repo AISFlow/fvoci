@@ -237,6 +237,40 @@ echo "docker inspect: no owner password, master key or app password: ok"
 docker compose exec -T fvoci /opt/fvoci/bin/fvoci-migrate --doctor | jq -e '.ok == true' >/dev/null || fail "doctor"
 echo "doctor in the fvoci container: ok"
 
+step "search key directory: uid 1000 cannot redirect root's key write"
+KEYDIR=/run/fvoci/meili
+key_layout() { docker exec "$CID" stat -c '%u %g %a %F' "$KEYDIR" "$KEYDIR/api_key" | tr '\n' ';'; }
+[[ "$(key_layout)" == "0 0 755 directory;0 1000 640 regular file;" ]] \
+  || fail "key directory/file are not root:root 0755 / root:1000 0640: $(key_layout)"
+docker exec --user 1000:1000 "$CID" test -r "$KEYDIR/api_key" || fail "uid 1000 cannot read the search key"
+for attempt in "ln -s /run/secrets/postgres_password $KEYDIR/x" ": >$KEYDIR/x" "rm -f $KEYDIR/api_key" \
+  "chmod 666 $KEYDIR/api_key" ": >$KEYDIR/api_key"; do
+  if docker exec --user 1000:1000 "$CID" sh -c "$attempt" 2>/dev/null; then fail "uid 1000 could: $attempt"; fi
+done
+# An earlier release's volume (or a server that ran before root took the
+# directory over) is uid 1000's: plant symlinks where root writes, then run
+# root's key write as an operator would (docker compose exec defaults to root).
+SECRET_BEFORE="$(docker exec "$CID" sh -c 'stat -c "%u %g %a %s" /run/secrets/postgres_password; sha256sum </run/secrets/postgres_password')"
+KEY_BEFORE="$(docker exec "$CID" cat "$KEYDIR/api_key")"
+docker exec "$CID" chown 1000:1000 "$KEYDIR"
+docker exec --user 1000:1000 "$CID" sh -c "rm -f $KEYDIR/api_key \
+  && ln -s /run/secrets/postgres_password $KEYDIR/api_key \
+  && ln -s /run/secrets/postgres_password $KEYDIR/api_key.tmp \
+  && ln -s /run/secrets/postgres_password $KEYDIR/.api_key.tmp"
+docker exec "$CID" ls -ln "$KEYDIR" | sed 's/^/  planted: /'
+docker exec "$CID" /opt/fvoci/bin/fvoci-migrate --ensure-meili-key "$KEYDIR/api_key" || fail "root --ensure-meili-key over planted links"
+[[ "$(docker exec "$CID" sh -c 'stat -c "%u %g %a %s" /run/secrets/postgres_password; sha256sum </run/secrets/postgres_password')" == "$SECRET_BEFORE" ]] \
+  || fail "the planted link changed /run/secrets/postgres_password"
+if docker exec --user 1000:1000 "$CID" cat /run/secrets/postgres_password >/dev/null 2>&1; then
+  fail "uid 1000 can read postgres_password after the planted link"
+fi
+[[ "$(key_layout)" == "0 0 755 directory;0 1000 640 regular file;" ]] \
+  || fail "root did not take the directory back or replace the link: $(key_layout)"
+[[ "$(docker exec "$CID" cat "$KEYDIR/api_key")" == "$KEY_BEFORE" ]] || fail "the scoped key changed"
+grep -qF -e "$OWNER_PW" <<<"$(docker exec "$CID" cat "$KEYDIR/api_key")" && fail "the key file holds the owner password"
+docker exec "$CID" find "$KEYDIR" -type l -delete
+echo "planted symlinks replaced, not followed; secret file unchanged; directory root-owned again: ok"
+
 step "first-admin setup, login and search"
 curl -fsS "$BASE/api/v1/setup" | jq -c .
 curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" -X POST "$BASE/api/v1/setup" \
