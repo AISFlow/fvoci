@@ -997,28 +997,167 @@ async fn search_meili_vector_op(
         .collect())
 }
 
-fn write_key_file(path: &Path, key: &str) -> Result<(), MeiliError> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
+/// `O_NOFOLLOW`, which std does not re-export: the per-architecture value libc
+/// uses (Linux arm/aarch64/powerpc differ from the generic value; BSD/macOS).
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    )
+))]
+const O_NOFOLLOW: i32 = 0o100000;
+#[cfg(all(
+    target_os = "linux",
+    not(any(
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))
+))]
+const O_NOFOLLOW: i32 = 0o400000;
+#[cfg(not(target_os = "linux"))]
+const O_NOFOLLOW: i32 = 0x100;
+
+const KEY_FILE_MAX_BYTES: u64 = 4096;
+/// Root writes the key as `root:KEY_FILE_UID` mode 0640: the service group
+/// reads it, and the service uid can neither rewrite, chmod nor unlink it.
+const ROOT_KEY_FILE_MODE: u32 = 0o640;
+
+/// What root does with the key directory, from its owner and mode.
+#[derive(Debug, PartialEq)]
+enum KeyDir {
+    /// Root-owned and writable by root only.
+    Keep,
+    /// Owned by the service uid (the image's `/run/fvoci/meili` in a new
+    /// volume, or one an earlier release used): becomes `root:root` 0755.
+    TakeOver,
+    Refuse,
+}
+
+fn key_dir_action(uid: u32, mode: u32) -> KeyDir {
+    match uid {
+        0 if mode & 0o022 == 0 => KeyDir::Keep,
+        KEY_FILE_UID => KeyDir::TakeOver,
+        _ => KeyDir::Refuse,
+    }
+}
+
+/// Makes the key file's directory safe for this process to write in and
+/// returns whether it runs as root. As root, the directory must end up
+/// root-owned and not writable by others, so the service uid (which may be a
+/// live, compromised server) cannot plant, swap or remove the entries root
+/// creates and renames; ownership and mode change only through the open
+/// descriptor. As any other user nothing changes: the directory and the file
+/// belong to the process that reads the key (`infra/rust/compose.yml` `init`).
+fn prepare_key_dir(dest: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let dir = key_dir(dest);
+    fs::create_dir_all(dir)?;
+    if !crate::prepare::running_as_root().map_err(std::io::Error::other)? {
+        return Ok(false);
+    }
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(dir)?;
+    let meta = handle.metadata()?;
+    if !meta.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+    match key_dir_action(meta.uid(), meta.mode()) {
+        KeyDir::Keep => {}
+        KeyDir::TakeOver => {
+            std::os::unix::fs::fchown(&handle, Some(0), Some(0))?;
+            handle.set_permissions(fs::Permissions::from_mode(0o755))?;
+        }
+        KeyDir::Refuse => {
+            return Err(std::io::Error::other(format!(
+                "{} must belong to root (or uid {KEY_FILE_UID}) and not be writable by others",
+                dir.display()
+            )))
         }
     }
-    let tmp = path.with_extension("tmp");
-    let _ = fs::remove_file(&tmp);
+    Ok(true)
+}
+
+fn key_dir(dest: &Path) -> &Path {
+    dest.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+/// Reads a key file without following a symlink in its last component, from
+/// a regular file of at most 4 KiB; returns the key and the file's metadata.
+pub fn read_key_file(path: &Path) -> std::io::Result<(String, fs::Metadata)> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let not_regular = || std::io::Error::other(format!("{} is not a regular file", path.display()));
+    // A FIFO would block the open below; a symlink fails it (ELOOP).
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    let mut bytes = Vec::new();
+    file.take(KEY_FILE_MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > KEY_FILE_MAX_BYTES {
+        return Err(std::io::Error::other(format!(
+            "{} is larger than 4 KiB",
+            path.display()
+        )));
+    }
+    let key = String::from_utf8(bytes)
+        .map_err(|_| std::io::Error::other(format!("{} is not UTF-8", path.display())))?;
+    Ok((key, meta))
+}
+
+/// Whether an existing key file already has the owner and mode root gives it.
+fn is_root_key_file(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.uid() == 0 && meta.gid() == KEY_FILE_UID && meta.mode() & 0o7777 == ROOT_KEY_FILE_MODE
+}
+
+/// Writes the key through a new file (`O_CREAT|O_EXCL`, which never follows a
+/// symlink) with an unpredictable name next to `path`, sets its owner and mode
+/// on the open descriptor, syncs it and renames it over `path`; a symlink or
+/// anything else at `path` is replaced, never written through. `root` is
+/// [`prepare_key_dir`]'s answer: the file becomes `root:KEY_FILE_UID` 0640,
+/// otherwise it stays the writer's own with mode 0600.
+fn write_key_file(path: &Path, key: &str, root: bool) -> Result<(), MeiliError> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let name = path.file_name().ok_or(MeiliError::Io)?;
+    let tmp = key_dir(path).join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        uuid::Uuid::now_v7().simple()
+    ));
     let written = (|| -> Result<(), MeiliError> {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .custom_flags(O_NOFOLLOW)
             .mode(0o600)
             .open(&tmp)?;
+        if root {
+            std::os::unix::fs::fchown(&file, Some(0), Some(KEY_FILE_UID))?;
+            file.set_permissions(fs::Permissions::from_mode(ROOT_KEY_FILE_MODE))?;
+        }
         file.write_all(key.trim().as_bytes())?;
         file.sync_all()?;
-        // When run as root, hand the file to the image's service account; as any
-        // other user the file already belongs to the process that will read it.
-        // A wrong owner surfaces later as an unreadable FVOCI_MEILI_KEY_FILE.
-        let _ = std::os::unix::fs::chown(&tmp, Some(KEY_FILE_UID), Some(KEY_FILE_UID));
         fs::rename(&tmp, path)?;
         Ok(())
     })();
@@ -1084,12 +1223,15 @@ pub async fn ensure_scoped_meili_key(
     dest: &Path,
 ) -> Result<(), MeiliError> {
     let url = url.trim_end_matches('/');
-    if dest.is_file() {
-        if let Ok(existing) = fs::read_to_string(dest) {
-            let existing = existing.trim();
-            if existing.len() >= 16 && key_is_scoped_for_index(url, existing, index_uid).await {
-                return Ok(());
+    let root = prepare_key_dir(dest)?;
+    if let Ok((existing, meta)) = read_key_file(dest) {
+        let existing = existing.trim();
+        if existing.len() >= 16 && key_is_scoped_for_index(url, existing, index_uid).await {
+            if root && !is_root_key_file(&meta) {
+                // A file the service uid wrote (an earlier release): root's copy.
+                write_key_file(dest, existing, root)?;
             }
+            return Ok(());
         }
     }
     let master = MeiliConfig::new(
@@ -1108,7 +1250,7 @@ pub async fn ensure_scoped_meili_key(
             if name == SCOPED_KEY_NAME && matches_index {
                 if let Some(key) = row.get("key").and_then(Value::as_str) {
                     if key.len() >= 16 {
-                        write_key_file(dest, key)?;
+                        write_key_file(dest, key, root)?;
                         return Ok(());
                     }
                 }
@@ -1131,7 +1273,7 @@ pub async fn ensure_scoped_meili_key(
         .get("key")
         .and_then(Value::as_str)
         .ok_or(MeiliError::Protocol)?;
-    write_key_file(dest, key)?;
+    write_key_file(dest, key, root)?;
     Ok(())
 }
 
@@ -1166,7 +1308,7 @@ pub fn meili_config_from_values(
     let url = parse_meili_url(url)?;
     let from_file = match key_file.map(str::trim).filter(|v| !v.is_empty()) {
         Some(path) => {
-            let raw = fs::read_to_string(path)
+            let (raw, _) = read_key_file(Path::new(path))
                 .map_err(|e| format!("failed to read FVOCI_MEILI_KEY_FILE: {e}"))?;
             Some(raw.trim().to_string())
         }
@@ -1227,10 +1369,12 @@ pub async fn ensure_meili_key_file(dest: &Path) -> Result<(), String> {
     let url = parse_meili_url(&url)?;
     let master = read_meili_master_key_from_env()?;
     let index_uid = meili_index_uid_from(std::env::var("FVOCI_MEILI_INDEX").ok().as_deref())?;
+    // Its own call first, for an error that names the directory.
+    prepare_key_dir(dest).map_err(|e| format!("meili key directory: {e}"))?;
     ensure_scoped_meili_key(&url, &master, &index_uid, dest)
         .await
         .map_err(|e| e.to_string())?;
-    let key = fs::read_to_string(dest).map_err(|e| format!("meili key file: {e}"))?;
+    let (key, _) = read_key_file(dest).map_err(|e| format!("meili key file: {e}"))?;
     let config = MeiliConfig::new(url, key.trim().to_string(), index_uid.to_string());
     ensure_meili_index(&config).await.map_err(|e| e.to_string())
 }
@@ -1351,6 +1495,58 @@ pub async fn search_meili_vector(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_file_writer_replaces_a_planted_symlink_and_reader_refuses_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fvoci-key-file-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        fs::write(&victim, "victim contents").unwrap();
+        let dest = dir.join("api_key");
+        std::os::unix::fs::symlink(&victim, &dest).unwrap();
+
+        let err = read_key_file(&dest).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+
+        write_key_file(&dest, " scoped-key-0123456789\n", false).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "victim contents");
+        let meta = fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.file_type().is_file(), "the link itself is replaced");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        let (key, _) = read_key_file(&dest).unwrap();
+        assert_eq!(key, "scoped-key-0123456789");
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["api_key", "victim"], "no temp file is left");
+
+        // O_NOFOLLOW itself, past the symlink_metadata check.
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        use std::os::unix::fs::OpenOptionsExt;
+        let err = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(&link)
+            .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(40), "ELOOP: {err}");
+
+        fs::write(&dest, "k".repeat(4097)).unwrap();
+        assert!(read_key_file(&dest).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn root_takes_over_only_the_service_uid_key_dir() {
+        assert_eq!(key_dir_action(0, 0o40755), KeyDir::Keep);
+        assert_eq!(key_dir_action(0, 0o40775), KeyDir::Refuse);
+        assert_eq!(key_dir_action(0, 0o41777), KeyDir::Refuse);
+        assert_eq!(key_dir_action(KEY_FILE_UID, 0o40755), KeyDir::TakeOver);
+        assert_eq!(key_dir_action(1001, 0o40755), KeyDir::Refuse);
+    }
 
     #[test]
     fn meili_eq_rejects_filter_injection() {

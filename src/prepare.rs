@@ -546,7 +546,7 @@ fn server_path() -> Result<PathBuf, String> {
 }
 
 /// Whether this process runs as root (the owner of `/proc/self`).
-fn running_as_root() -> Result<bool, String> {
+pub fn running_as_root() -> Result<bool, String> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata("/proc/self")
         .map(|m| m.uid() == 0)
