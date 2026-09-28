@@ -310,24 +310,6 @@ fn without_env_leaves(key: SettingsKey, mut value: Value, base: &Value, env: &[S
 /// revision row, and the rows, revision and `instance_settings.updated`
 /// event + audit commit together. Audit payloads carry key paths only, never
 /// the values (source spec §10).
-pub async fn apply_change(
-    pool: &PgPool,
-    actor: Uuid,
-    ip: Option<&str>,
-    brand_default: &str,
-    change: SettingsChange,
-) -> Result<Result<SettingsWriteOutcome, SettingsWriteError>, sqlx::Error> {
-    apply_change_with_license(
-        pool,
-        actor,
-        ip,
-        brand_default,
-        change,
-        &crate::license::absent(),
-    )
-    .await
-}
-
 pub async fn apply_change_with_license(
     pool: &PgPool,
     actor: Uuid,
