@@ -51,6 +51,24 @@ const member = {
   givenName: "멤버",
 };
 
+const loginUser = (i: number) => ({ email: `perf-login-${i}@example.com`, password: `perfpass-login-${i}` });
+
+// Server budget: 30 logins per IP per 5 minutes. Keep a margin for the setup login.
+const LOGIN_BUDGET = 25;
+const LOGIN_WINDOW_MS = 5 * 60_000 + 2_000;
+const loginTimes: number[] = [];
+async function paceLogin(): Promise<number> {
+  const started = Date.now();
+  for (;;) {
+    const now = Date.now();
+    while (loginTimes.length && now - loginTimes[0]! > LOGIN_WINDOW_MS) loginTimes.shift();
+    if (loginTimes.length < LOGIN_BUDGET) break;
+    await new Promise((resolve) => setTimeout(resolve, LOGIN_WINDOW_MS - (now - loginTimes[0]!) + 50));
+  }
+  loginTimes.push(Date.now());
+  return Date.now() - started;
+}
+
 type Ctx = {
   wsId: string;
   projectId: string;
@@ -174,6 +192,15 @@ test("setup dataset", async ({ browser }) => {
     workspaceSlug: owner.workspaceSlug,
     membershipRole: "member",
   });
+  // One synthetic member per login sample: the server limits logins per
+  // IP+email (10 / 5 min), and the run respects that instead of bypassing it.
+  for (let i = 0; i < 2 * N + 2; i += 1) {
+    createE2eUser(loginUser(i).email, loginUser(i).password, `로그인${i}`, {
+      familyName: "성능",
+      workspaceSlug: owner.workspaceSlug,
+      membershipRole: "member",
+    });
+  }
 
   const wsRes = await page.request.get("/api/v1/me/workspaces");
   const wsId = ((await wsRes.json()) as { items: { id: string; slug: string }[] }).items.find(
@@ -299,6 +326,7 @@ test("setup dataset", async ({ browser }) => {
   await memberPage.goto("/login");
   await memberPage.getByLabel("이메일").fill(member.email);
   await memberPage.getByLabel("비밀번호").fill(member.password);
+  loginTimes.push(Date.now());
   await memberPage.getByRole("button", { name: "로그인", exact: true }).click();
   await memberPage.waitForURL(/\/$/);
   const memberState = path.join(process.env.FVOCI_PERF_RUN_DIR!, "member-state.json");
@@ -325,9 +353,11 @@ test("setup dataset", async ({ browser }) => {
 
 // (a) first entry + login -> workspace shown
 test("a: login to workspace shown", async ({ browser }) => {
-  test.setTimeout(900_000);
+  test.setTimeout(3_600_000);
   const samples: Record<string, unknown>[] = [];
+  let userIndex = 0;
   const once = async (page: Page, mode: string) => {
+    const user = loginUser(userIndex++);
     const t0 = await pageNow(page).catch(() => 0);
     const nav = mode !== "warm-spa";
     if (nav) await page.goto("/login");
@@ -340,9 +370,10 @@ test("a: login to workspace shown", async ({ browser }) => {
         })
       : null;
     const fcp = nav ? (await paints(page)).find((p) => p.n === "first-contentful-paint")?.s ?? null : null;
-    await page.getByLabel("이메일").fill(owner.email);
-    await page.getByLabel("비밀번호").fill(owner.password);
+    await page.getByLabel("이메일").fill(user.email);
+    await page.getByLabel("비밀번호").fill(user.password);
     const id = `ws-${samples.length}`;
+    const pacedMs = await paceLogin();
     await watch(page, id, { selector: ".workspace-list__item strong", text: owner.workspaceName });
     const before = await pageNow(page);
     await loginButton.click();
@@ -361,6 +392,8 @@ test("a: login to workspace shown", async ({ browser }) => {
       clickToShownPaint: paint && click !== null ? round(paint - click) : null,
       clickToShownFrame: hit?.raf && click !== null ? round(hit.raf - click) : null,
       requestsAfterClick: res.length,
+      loginStatusOk: loginApi ? hit !== null : null,
+      pacedMs,
       pre: hit?.pre ?? false,
       t0,
     });

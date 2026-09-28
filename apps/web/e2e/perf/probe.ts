@@ -292,7 +292,8 @@ export async function eventsSince(page: Page, since: number): Promise<EventEntry
 }
 
 export async function paints(page: Page): Promise<{ n: string; s: number }[]> {
-  return page.evaluate(() => window.__fp!.paint);
+  // Read the timeline buffer directly: observer callbacks may not have run yet.
+  return page.evaluate(() => performance.getEntriesByType("paint").map((e) => ({ n: e.name, s: e.startTime })));
 }
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
