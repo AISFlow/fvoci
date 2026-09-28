@@ -47,7 +47,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. |
 | `FVOCI_MEILI_INDEX` | Index uid (default `fvoci`). Tests may set a per-run uid. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | Outgoing mail (invitations, password reset). All three or none; unset disables mail and invitation links are shown instead. No AUTH (same as the source). STARTTLS is used whenever the relay offers it, with certificate verification against public roots, so an internal relay needs a publicly trusted certificate or must not offer STARTTLS. |
-| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --verify-secrets` lists the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
+| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --secrets-rotate` re-seals them under the active key; `--secrets-audit` and `--verify-secrets` list the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
 | `FVOCI_WEBHOOK_ALLOW_TARGETS` | Comma list of host names / IP addresses that webhook URLs may use despite the outbound rules (default empty). A listed URL host skips the port (80/443) and host-name rules; a listed IP is accepted as a literal or resolved private address. Meant for local receivers (tests, e2e); leave empty in production. `0.0.0.0` / `::` are refused. |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET` | Optional GitHub App (all three or none; the PEM may use literal `\n`). Enables `/github/install`, `/api/v1/github/callback`, the signed `/api/v1/github/webhook` endpoint and the `github` outbox consumer that closes/reopens linked issues. The install `state` is single use and bound to the admin session that started it (the callback needs that session cookie); the callback confirms the installation with `GET /app/installations/{id}` and never replaces an existing link to another installation (uninstall first). While the app is not configured the `github` cursor still advances, so enabling it later does not replay older status changes. |
 | `GITHUB_STATE_SECRET` | Server-only key (at least 32 bytes) for the install `state` MAC. If unset it is derived (HKDF-SHA256) from the active `ENCRYPTION_KEYS` key; with neither, a configured GitHub App fails at boot. The webhook secret is not used because GitHub App managers also hold it. |
@@ -1101,13 +1101,48 @@ job, backup and restore (the server binary stays single-purpose):
 | `fvoci backup <collect\|restore\|...>` | `scripts/backup.sh`, `scripts/restore.sh` (below) | Compose project |
 | — (restore check) | `fvoci-migrate --verify-storage` | the server's |
 | `fvoci secrets rotate-vapid` | `fvoci-migrate --rotate-vapid` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
+| `fvoci secrets audit` | `fvoci-migrate --secrets-audit` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`, `PASSWORD_PEPPER_KEYS`) |
+| `fvoci secrets rotate` | `fvoci-migrate --secrets-rotate` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
 
 `fvoci healthcheck` is `fvoci-server healthcheck` (see "Probes"; it probes the
 server, not a `fvoci-migrate` mode).
 
-Not ported: `secrets audit/rotate`, `reindex` (extract re-enqueue) and the split
-worker roles (`worker`, `compact`, `thumbnail`, `collab`) with their
-`healthcheck <role>` heartbeat checks; the Rust server runs those jobs in-process.
+Not ported: `reindex` (extract re-enqueue) and the split worker roles (`worker`,
+`compact`, `thumbnail`, `collab`) with their `healthcheck <role>` heartbeat
+checks; the Rust server runs those jobs in-process.
+
+**`--secrets-audit` / `--secrets-rotate`** (source `fvoci secrets audit|rotate`)
+run as the app role in the system context, like the server; they refuse a
+superuser, `BYPASSRLS` or schema-owner URL and a schema that is not current.
+Both walk the webhook signing secrets, workspace SSO client secrets, TOTP
+secrets and the VAPID private key, 100 rows per transaction, with each value's
+row-bound AAD. Output is one JSON line of key ids and counts; secret values,
+password hashes and key material are never printed.
+
+- `--secrets-audit` prints `secrets` (`<class>:<key id>` → count, `invalid` for
+  a malformed value), `passwords` (pepper key id → count, `unknown` for a hash
+  in no known format), `problems`, `activeKeyId`, `notActive` (values that
+  open but are not under the active key), `missingKeyIds` and
+  `missingPasswordKeyIds`. It exits 1 when `problems` is nonzero: a value that
+  does not open (missing key id, wrong key, corrupted or moved value) or a
+  password hash whose pepper key is missing or whose format is invalid.
+- `--secrets-rotate` re-seals every value not under `ENCRYPTION_ACTIVE_KEY_ID`
+  and prints `{"changed":n,"unchanged":m}`. It first opens every value and
+  refuses before writing anything if one does not open (the source re-seals
+  earlier batches and then stops). Each write is a compare-and-set on the value
+  it read (the VAPID key through `app_replace_vapid_private`), so a concurrent
+  change fails the command with a conflict instead of being overwritten;
+  committed batches are valid, and re-running finishes the rest. A second run
+  reports `changed: 0`. Password hashes are re-peppered at sign-in, not here.
+
+Key rotation: add the new key to `ENCRYPTION_KEYS`, switch
+`ENCRYPTION_ACTIVE_KEY_ID`, restart the server, run `--secrets-rotate`, then
+`--secrets-audit`; drop the old key only once `secrets` no longer names it.
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --secrets-audit
+```
 
 **`--init-env`** writes the Compose env file from `infra/rust/.env.example` with
 fresh secrets: `POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
