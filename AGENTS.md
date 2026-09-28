@@ -119,8 +119,11 @@ PR 수락·머지는 전체 작업 종료가 아니다. 기능 대응표에서 �
 새 Node 의존은 늘리지 않는다. 최종 제품에 Node/Bun/Deno 서버 기능·JS worker 위임·내장 JS 엔진·
 JS 런타임 번들·외부 변환 서비스로의 우회를 남기지 않는다. 기존 React/Tiptap·브라우저 JS·개발용
 Node/CodeGraph·TS 비교 oracle와 합의한 PostgreSQL·Meilisearch·S3·SMTP는 별개다.
-서버 모드에 migration 소유자 credential이나 기동 시 자동 migration을 넣지 않고, 필요한 parser·CRDT
-process 격리를 유지한다.
+기본 설치 준비(설정 검증, DB·검색 준비 확인, 앱 역할·migration·grant·검색 키)는 메인 앱 컨테이너의
+시작 절차가 자동 수행한다(2026-09-28 사용자 결정). 정상 요청 처리 단계는 제한된 앱 DB 역할과 필요한
+설정만으로 실행하며, 준비 단계의 소유자 credential·Meili master key를 정상 서버 프로세스에 남기지
+않는다. 준비 실패·키 누락·안전하지 않은 업그레이드(다른 쓰기 서버가 살아 있는 상태의 schema 변경,
+미지원 rolling upgrade, DB downgrade)는 거부한다. 필요한 parser·CRDT process 격리를 유지한다.
 같은 실행 파일을 child로 쓰면 내부 모드는 서버 초기화·credential 로딩·listen 전에 분기한다.
 전체 Node 제거 수락은 Node/Bun/Deno·내장 JS 엔진이 없는 최종 제품 환경에서 실제 경로를 실행한
 근거가 필요하다. 대체·바이너리/명령 통합·비용 비교·Node 없는 최종 검증의 절차는
