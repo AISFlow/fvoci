@@ -36,8 +36,9 @@ impl MailConsumer {
 }
 
 /// Events whose accepted recipients are kept at most, oldest pushed out
-/// first. The dispatcher sends one mail event at a time, so an event is
-/// redelivered long before 64 newer mail events push it out.
+/// first. The consumer sends one mail event per call and the dispatcher
+/// retries an event before it passes it, so an event is redelivered long
+/// before 64 newer mail events push it out.
 const ACCEPTED_EVENTS_KEPT: usize = 64;
 
 /// Recipients SMTP accepted, per event. An entry is kept after its event
@@ -87,16 +88,6 @@ impl OutboxConsumer for MailConsumer {
         DeliveryMode::External
     }
 
-    /// One event per chunk, like the GitHub consumer. Sends are sequential,
-    /// so batching gains nothing, and the default `deliver_batch` loses its
-    /// progress when a chunk hits the lease timeout: every mail of the chunk
-    /// would be sent again. With one event per chunk each event is marked
-    /// processed right after its SMTP sends, and a timeout is charged to the
-    /// event that overran.
-    fn batch_event_cap(&self) -> usize {
-        1
-    }
-
     fn deliver<'a>(
         &'a self,
         pool: &'a PgPool,
@@ -104,6 +95,37 @@ impl OutboxConsumer for MailConsumer {
         event: &'a OutboxEvent,
     ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
         Box::pin(async move { deliver_mail(pool, &self.mailer, &self.accepted, event).await })
+    }
+
+    /// A mail event alone, or the run of events without mail up to the next
+    /// mail event (no I/O: they only need their processed mark). The
+    /// dispatcher drops a call that runs past the lease timeout with all its
+    /// progress and charges the failure to the call's first event, so a call
+    /// holds at most one mail event and never one behind other events: a
+    /// timeout then drops only that event's progress (its accepted
+    /// recipients are remembered) and is charged to the event that overran.
+    fn deliver_batch<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        _lease_owner: Uuid,
+        events: &'a [OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(first) = events.first() else {
+                return (0, None);
+            };
+            if is_mail_verb(&first.verb) {
+                return match deliver_mail(pool, &self.mailer, &self.accepted, first).await {
+                    Ok(()) => (1, None),
+                    Err(err) => (0, Some(err)),
+                };
+            }
+            let run = events
+                .iter()
+                .take_while(|event| !is_mail_verb(&event.verb))
+                .count();
+            (run, None)
+        })
     }
 }
 

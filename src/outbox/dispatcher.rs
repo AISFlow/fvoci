@@ -90,8 +90,9 @@ pub trait OutboxConsumer: Send + Sync {
     /// Max events this consumer wants in one `deliver_batch`. The dispatcher
     /// also applies [`OutboxDispatcherSettings::batch_limit`]. A consumer that
     /// keeps the default `deliver_batch` and whose effect is not idempotent
-    /// (mail) returns 1: a lease timeout then drops one event's work, not the
-    /// progress of a whole chunk.
+    /// returns 1 (GitHub): a lease timeout then drops one event's work, not
+    /// the progress of a whole chunk. The mail consumer instead ends its own
+    /// calls after one mail event.
     fn batch_event_cap(&self) -> usize {
         usize::MAX
     }

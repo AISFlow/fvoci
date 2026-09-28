@@ -1705,3 +1705,118 @@ async fn failed_mark_after_the_sends_does_not_resend_the_mail() {
     app_pool.close().await;
     harness.cleanup().await;
 }
+
+/// The mail consumer passes a run of events without mail in one call and
+/// takes at most one mail event per call, so a lease timeout can only drop
+/// one mail event's progress (and is charged to that event). Through the
+/// dispatcher every event, with or without mail, is marked processed.
+#[tokio::test]
+async fn mail_consumer_batches_other_events_and_takes_one_mail_event_per_call() {
+    let harness = TestDb::bootstrap().await;
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, Vec::new()).await;
+    let mailer = mailer_for(sink.port);
+    let (app, _cookie, user_id) = setup_session(&harness, mailer.clone()).await;
+    drop(app);
+    let admin = harness.admin().await;
+    start_mail_cursor_at_latest_event(&admin).await;
+    let verbs = [
+        ("task.updated", "batch-n0"),
+        ("task.updated", "batch-n1"),
+        ("identity.linked", "batch-m2"),
+        ("identity.linked", "batch-m3"),
+        ("task.updated", "batch-n4"),
+    ];
+    let mut ids = Vec::new();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    for (verb, provider) in verbs {
+        let event_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.events (id, actor_user_id, verb, payload, channel)
+            VALUES ($1, $2, $3, $4, 'web')
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .bind(verb)
+        .bind(json!({ "provider": provider }))
+        .execute(&mut *tx)
+        .await
+        .expect("event");
+        ids.push(event_id);
+    }
+    tx.commit().await.expect("commit events");
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let events = loop {
+        let events = read_events(&app_pool, "mail", 100).await.unwrap();
+        if events.len() == ids.len() {
+            break events;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mail consumer can read the events: {}",
+            events.len()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(events.iter().map(|event| event.id).collect::<Vec<_>>(), ids);
+
+    let consumer = fvoci_server::mail::mail_consumer(mailer);
+    let owner = Uuid::now_v7();
+    let mut calls = Vec::new();
+    let mut offset = 0;
+    while offset < events.len() {
+        let (done, err) = consumer
+            .deliver_batch(&app_pool, owner, &events[offset..])
+            .await;
+        assert!(err.is_none(), "{err:?}");
+        let mails: Vec<usize> = ["batch-m2", "batch-m3"]
+            .iter()
+            .map(|p| sink.count_text(p))
+            .collect();
+        calls.push((done, mails));
+        offset += done;
+    }
+    assert_eq!(
+        calls,
+        vec![
+            (2, vec![0, 0]),
+            (1, vec![1, 0]),
+            (1, vec![1, 1]),
+            (1, vec![1, 1])
+        ],
+        "(events done, mails sent so far) per call"
+    );
+
+    // The dispatcher marks every event; the accepted recipients are not
+    // sent the mail again.
+    let dispatcher = fvoci_server::outbox::spawn_outbox_dispatcher(
+        fvoci_server::outbox::OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(5),
+            batch_limit: 100,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app_pool.clone(),
+        vec![consumer],
+    )
+    .expect("dispatcher");
+    wait_mail_settled(&app_pool, &ids, Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    for id in &ids {
+        assert!(is_processed(&app_pool, "mail", *id).await.unwrap());
+    }
+    assert_eq!(sink.count_text("batch-m2"), 1);
+    assert_eq!(sink.count_text("batch-m3"), 1);
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}
