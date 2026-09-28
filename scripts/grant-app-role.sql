@@ -258,3 +258,7 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_password_key_inventory() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_password_key_inventory() TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_replace_vapid_private(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_replace_vapid_private(text, text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_lag_seconds(text[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_lag_seconds(text[]) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_oldest_write_xact_age_seconds() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_oldest_write_xact_age_seconds() TO :"app_role";

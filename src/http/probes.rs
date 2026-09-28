@@ -182,6 +182,7 @@ pub struct Observability {
     registry: Registry,
     http_duration: Family<HttpLabels, Histogram>,
     outbox_lag: Gauge,
+    outbox_xmin_stall: Gauge,
     task_stream_subscribers: Gauge,
     db_pool_connections: Family<PoolLabels, Gauge>,
     db_pool_max_connections: Gauge,
@@ -213,10 +214,16 @@ impl Observability {
         let outbox_lag = Gauge::default();
         registry.register(
             "fvoci_outbox_lag_seconds",
-            "Age in seconds of the oldest outbox event deliverable under the current \
-             snapshot xmin that some consumer cursor has not passed; backlog held \
-             behind a long-running transaction (xmin stall) is not visible here",
+            "Age in seconds of the oldest outbox event some consumer cursor has not \
+             passed, including events held behind a long-running transaction",
             outbox_lag.clone(),
+        );
+        let outbox_xmin_stall = Gauge::default();
+        registry.register(
+            "fvoci_outbox_xmin_stall_seconds",
+            "Age in seconds of the oldest transaction holding an xid in the \
+             PostgreSQL cluster; it holds back the snapshot xmin outbox delivery waits on",
+            outbox_xmin_stall.clone(),
         );
         let task_stream_subscribers = Gauge::default();
         registry.register(
@@ -240,6 +247,7 @@ impl Observability {
             registry,
             http_duration,
             outbox_lag,
+            outbox_xmin_stall,
             task_stream_subscribers,
             db_pool_connections,
             db_pool_max_connections,
@@ -268,14 +276,10 @@ impl Observability {
         if last.is_some_and(|at| at.elapsed() < self.refresh_interval) {
             return;
         }
-        match tokio::time::timeout(
-            CHECK_TIMEOUT,
-            outbox_lag_seconds(pool, &self.outbox_consumers),
-        )
-        .await
-        {
-            Ok(Ok(lag)) => {
+        match tokio::time::timeout(CHECK_TIMEOUT, outbox_ages(pool, &self.outbox_consumers)).await {
+            Ok(Ok((lag, stall))) => {
                 self.outbox_lag.set(lag);
+                self.outbox_xmin_stall.set(stall);
             }
             Ok(Err(err)) => tracing::debug!(error = %err, "metrics: outbox lag query failed"),
             Err(_) => tracing::debug!("metrics: outbox lag query timed out"),
@@ -307,21 +311,15 @@ impl Observability {
 }
 
 /// Oldest undelivered event age across `consumers` (each has its own
-/// cursor), read through the app role's `app_outbox_read`; 0 when every
-/// consumer is caught up.
-async fn outbox_lag_seconds(pool: &PgPool, consumers: &[String]) -> Result<i64, sqlx::Error> {
-    let mut lag = 0i64;
-    for consumer in consumers {
-        let age: Option<i64> = sqlx::query_scalar(
-            "SELECT EXTRACT(EPOCH FROM (now() - created_at))::bigint \
-             FROM fvoci.app_outbox_read($1, 1)",
-        )
-        .bind(consumer)
-        .fetch_optional(pool)
-        .await?;
-        lag = lag.max(age.unwrap_or(0));
-    }
-    Ok(lag)
+/// cursor, no snapshot-xmin filter; 0 when every consumer is caught up) and
+/// the age of the oldest xid holder in the cluster, in one statement.
+async fn outbox_ages(pool: &PgPool, consumers: &[String]) -> Result<(i64, i64), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT fvoci.app_outbox_lag_seconds($1), fvoci.app_oldest_write_xact_age_seconds()",
+    )
+    .bind(consumers)
+    .fetch_one(pool)
+    .await
 }
 
 #[derive(Clone)]

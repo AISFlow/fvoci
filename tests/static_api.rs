@@ -725,6 +725,7 @@ async fn metrics_probe_exports_text_format_for_allowed_peer() {
     for name in [
         "# TYPE fvoci_http_request_duration_seconds histogram",
         "# TYPE fvoci_outbox_lag_seconds gauge",
+        "# TYPE fvoci_outbox_xmin_stall_seconds gauge",
         "# TYPE fvoci_task_stream_subscribers gauge",
         "# TYPE fvoci_db_pool_connections gauge",
         "fvoci_db_pool_max_connections 1",

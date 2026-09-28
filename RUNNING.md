@@ -231,14 +231,17 @@ consent or bearer checks (source `INFRA_PATHS`):
 | --- | --- |
 | `GET /health` | Liveness: always `200 {"ok":true}`. |
 | `GET /ready` | `200 {"ok":true}`, or `503 {"ok":false,"checks":{"pg":false,...}}`. Checks the app-role PostgreSQL pool (`SELECT 1`) and, when collaboration is enabled, that the hub is not shutting down (`collab`). Each check is bounded by 2 s. There is no Redis to check. |
-| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers get the generic `404 not_found` problem. `fvoci_http_request_duration_seconds{method,route,status}` (route is the router template or `unmatched`), `fvoci_outbox_lag_seconds` (age of the oldest event still deliverable under the current snapshot xmin that some outbox consumer cursor has not yet passed; refreshed at most every 15 s, the last value is kept when the query fails. Backlog held behind a long-running or idle-in-transaction session (xmin stall) is **not** visible to this metric; the source also exported `fvoci_outbox_xmin_stall_total`, which is not ported yet — a follow-up needs a read-only DB function without the xmin filter), `fvoci_task_stream_subscribers` (open SSE streams), `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections`. No label holds a workspace, user, token or concrete path. |
+| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers get the generic `404 not_found` problem. `fvoci_http_request_duration_seconds{method,route,status}` (route is the router template or `unmatched`), `fvoci_outbox_lag_seconds` (age of the oldest event some outbox consumer cursor has not yet passed, as in the source, including events committed behind a long-running or idle-in-transaction session), `fvoci_outbox_xmin_stall_seconds` (age of the oldest transaction holding an xid anywhere in the PostgreSQL cluster, prepared transactions included; outbox delivery waits for it to end. The source instead counted relay warnings above `OUTBOX_XMIN_AGE_WARN_MS` in `fvoci_outbox_xmin_stall_total`; alert on this gauge with the threshold in the rule). Both are refreshed at most every 15 s and keep their last value when the query fails. `fvoci_task_stream_subscribers` (open SSE streams), `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections`. No label holds a workspace, user, token or concrete path. |
 
 `fvoci-server healthcheck` requests `GET /ready` from the address in `FVOCI_BIND`
 (a wildcard bind is probed on loopback) and exits 0 on a 2xx answer within 4 s,
 otherwise 1. It reads no other configuration or secrets. The source modes
 `worker`, `compact` and `thumbnail` exit 1 with a message because those roles
-run inside the server here. The Compose server healthcheck still requests
-`/api/v1/setup` with curl.
+run inside the server here. The Compose server healthcheck runs
+`/opt/fvoci/bin/fvoci-server healthcheck` every 2 s with a 5 s timeout (the
+source Compose used its binary's `healthcheck` with the same timeout), so the
+container is healthy only once `/ready` reports PostgreSQL (and collab, when
+enabled) ready.
 
 ### Response security headers
 
@@ -720,8 +723,15 @@ PostgreSQL cluster (any database, or a prepared transaction) is older than the
 newest event. Let it end or roll it back (`pg_stat_activity`,
 `pg_prepared_xacts`), then repeat step 3. Migration 041 adds the outbox cursors
 an earlier upgrade left missing, so notifications and mail do not replay past
-events. To go back to the old build, stop the
-upgraded server first; do not start the old image on the migrated database.
+events. Migration 043 builds the index `events_workspace_relay_idx` on
+`fvoci.events (workspace_id, xact, seq)` inside the migrate transaction, so it
+cannot use `CONCURRENTLY`. While it builds, it holds a SHARE lock on
+`fvoci.events`: reads continue, but every write that records an event waits.
+The server is stopped during migrate, so this only affects other clients of the
+same database. The build is one scan and sort of the table, so its time grows with the
+number of rows in `fvoci.events`; check `SELECT count(*) FROM fvoci.events` and
+plan the maintenance window accordingly. To go back
+to the old build, stop the upgraded server first; do not start the old image on the migrated database.
 Restore the pre-upgrade backup into a new project with the old image (local
 storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback
 loses writes made after that backup; preserve the failed install for diagnosis,
