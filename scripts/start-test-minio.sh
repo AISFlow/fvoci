@@ -28,7 +28,9 @@ chmod 600 "$ENV_FILE"
 printf 'MINIO_ROOT_USER=%s\nMINIO_ROOT_PASSWORD=%s\n' "$ACCESS_KEY" "$SECRET_KEY" >"$ENV_FILE"
 
 cleanup() {
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  # -v: the image declares a VOLUME (/data, the uploaded test objects); without
+  # it every run leaves an anonymous volume behind.
+  docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
   rm -f "$ENV_FILE"
 }
 trap cleanup EXIT
