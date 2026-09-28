@@ -42,9 +42,12 @@ struct Counters {
 }
 
 struct Counter {
-    /// The longest window a caller has used for this key. Pruning a full map
-    /// uses it, so pruning never drops a hit this key's own limit still counts.
+    /// The longest window a caller has used for this key. Hits are kept that
+    /// long, both by each call and by pruning a full map, so neither pruning
+    /// nor a caller with a shorter window drops a hit a longer-window caller
+    /// of the same key still counts.
     window: Duration,
+    /// In time order, oldest first.
     hits: Vec<Instant>,
 }
 
@@ -78,10 +81,15 @@ impl Counters {
             }
         };
         counter.window = counter.window.max(window);
-        let entries = &mut counter.hits;
-        entries.retain(|t| now.duration_since(*t) < window);
-        if entries.len() >= limit as usize {
-            let retry_after = entries
+        let kept = counter.window;
+        counter.hits.retain(|t| now.duration_since(*t) < kept);
+        // Hits are in time order; this caller counts only its own window.
+        let first = counter
+            .hits
+            .partition_point(|t| now.duration_since(*t) >= window);
+        let counted = &counter.hits[first..];
+        if counted.len() >= limit as usize {
+            let retry_after = counted
                 .first()
                 .map(|oldest| {
                     let remaining = window.saturating_sub(now.duration_since(*oldest));
@@ -90,7 +98,7 @@ impl Counters {
                 .unwrap_or(1);
             return Err(retry_after);
         }
-        entries.push(now);
+        counter.hits.push(now);
         Ok(())
     }
 
@@ -270,6 +278,28 @@ mod tests {
                 .allow_at("import-user:u", 5, FIFTEEN_MIN, later)
                 .is_err(),
             "the 15-minute counter was pruned with a 60 s window"
+        );
+    }
+
+    /// A key used with two windows keeps the longer window's history: a
+    /// 60 s caller counts only its own minute and must not trim the hits a
+    /// 15-minute caller of the same key still counts.
+    #[test]
+    fn a_key_used_with_two_windows_keeps_the_longer_history() {
+        let mut counters = Counters::default();
+        let t0 = Instant::now();
+        let key = "shared:k";
+        saturate(&mut counters, key, 5, FIFTEEN_MIN, t0);
+        let later = t0 + Duration::from_secs(120);
+        assert_eq!(
+            counters.allow_at(key, 5, ONE_MIN, later),
+            Ok(()),
+            "the 60 s caller counted hits older than its window"
+        );
+        assert_eq!(
+            counters.allow_at(key, 5, FIFTEEN_MIN, later),
+            Err(780),
+            "the 60 s caller trimmed the 15-minute history"
         );
     }
 }
