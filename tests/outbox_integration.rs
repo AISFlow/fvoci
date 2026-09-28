@@ -2999,3 +2999,138 @@ async fn expired_lease_after_the_batch_still_marks_every_event() {
 async fn stolen_lease_after_the_batch_still_marks_every_event() {
     assert_batch_survives_lease_loss(LeaseLoss::Steal, "leasesteal").await;
 }
+
+/// `--recover-outbox` rewinds every cursor into the replay window. A window
+/// event's mark older than the processed_events GC window (a restore from an
+/// older snapshot) must survive the GC that runs at startup, or the replay
+/// delivers the event again.
+#[tokio::test]
+async fn recover_keeps_old_window_marks_through_processed_gc() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    // `mail` is one of the consumers the processed_events GC sweeps.
+    let consumer_name = "mail";
+    let old = insert_test_event(&app, "test.window.old", json!({}))
+        .await
+        .expect("old");
+    let new = insert_test_event(&app, "test.window.new", json!({}))
+        .await
+        .expect("new");
+    ensure_consumer(&app, consumer_name).await.expect("ensure");
+    wait_until_readable(&app, consumer_name, new).await;
+    assert!(mark_processed(&app, consumer_name, old)
+        .await
+        .expect("mark old"));
+    assert!(mark_processed(&app, consumer_name, new)
+        .await
+        .expect("mark new"));
+    let new_row = fetch_event_by_id(&app, new)
+        .await
+        .expect("new row")
+        .expect("new");
+    sqlx::query(
+        "UPDATE fvoci.outbox_consumers SET last_xact = $2::xid8, last_seq = $3 WHERE consumer = $1",
+    )
+    .bind(consumer_name)
+    .bind(&new_row.xact)
+    .bind(new_row.seq)
+    .execute(&admin)
+    .await
+    .expect("cursor past both events");
+    // A snapshot taken 5 days ago whose 29-day window starts 34 days ago: the
+    // old event was created and delivered 33 days ago, the new one 6 days ago.
+    sqlx::query(
+        "UPDATE fvoci.events SET created_at = CASE WHEN id = $1 THEN now() - interval '33 days' ELSE now() - interval '6 days' END",
+    )
+    .bind(old)
+    .execute(&admin)
+    .await
+    .expect("age events");
+    sqlx::query(
+        "UPDATE fvoci.processed_events AS p SET processed_at = e.created_at FROM fvoci.events AS e WHERE e.id = p.event_id",
+    )
+    .execute(&admin)
+    .await
+    .expect("age marks");
+    let bounds: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "SELECT now() - interval '5 days' - interval '29 days' + interval '1 hour', now() - interval '5 days'",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("recovery bounds");
+    let since = bounds
+        .0
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let snapshot_at = bounds
+        .1
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+
+    project_harness::close_pool(app).await;
+    project_harness::close_pool(admin).await;
+    wait_for_client_backends_gone(&harness.admin_url, &harness.db_name).await;
+    let report = recover_outbox(
+        &harness.admin_url,
+        RecoverOutboxOptions {
+            since,
+            snapshot_at,
+            apply: true,
+            reason: Some("test restore from an older snapshot".into()),
+            acknowledge_external_replay: true,
+        },
+    )
+    .await
+    .expect("recover");
+    assert!(report.applied);
+    assert_eq!(report.eligible, 2, "{report:?}");
+
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin after recover");
+    let app = pool::connect_app(&harness.app_url)
+        .await
+        .expect("app after recover");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let deleted = fvoci_server::jobs::run_processed_gc(&app, &cancel)
+        .await
+        .expect("processed gc");
+    assert_eq!(
+        deleted, 0,
+        "GC deleted a mark the recovery replay still needs"
+    );
+    assert!(is_processed(&app, consumer_name, old)
+        .await
+        .expect("old mark"));
+    assert!(is_processed(&app, consumer_name, new)
+        .await
+        .expect("new mark"));
+
+    // The replay then skips both events instead of delivering them again.
+    wait_until_readable(&app, consumer_name, new).await;
+    let replay = SlowExternal::new(consumer_name, 1, Duration::ZERO);
+    let dispatcher = run_dispatcher(app.clone(), replay.clone(), 20);
+    let new_row = fetch_event_by_id(&app, new)
+        .await
+        .expect("new row")
+        .expect("new");
+    wait_until(DISPATCHER_WAIT, || {
+        let admin = admin.clone();
+        let target = (new_row.xact.clone(), new_row.seq);
+        Box::pin(async move { fetch_cursor(&admin, "mail").await.ok().flatten() == Some(target) })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    assert_eq!(replay.count(old), 0, "old window event delivered again");
+    assert_eq!(replay.count(new), 0, "new window event delivered again");
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
