@@ -1,80 +1,108 @@
-# FVOCI standalone trial install.
-#
-# Save this file as compose.yml in an empty folder and run:
+# FVOCI standalone install. Save this file as compose.yml in an empty folder, run
 #
 #   docker compose up -d
 #
-# then open http://localhost:8080 and create the first administrator.
-# No .env file, build or key generation is needed: on the first start the
-# one-shot `bootstrap` service generates install-specific random secrets
-# (database passwords, Meilisearch master key, password pepper and encryption
-# keyrings) into the fvoci_secrets_* volumes. Each service mounts only the
-# volume it needs; the server never sees the database owner password or the
-# Meilisearch master key.
+# and open http://localhost:8080 to create the first administrator. No .env,
+# build or key generation is needed: postgres and meilisearch generate their
+# own owner password and master key on first start, and the one-shot `init`
+# service generates the server's keys, prepares the database and exits before
+# `fvoci` starts. The server mounts only its own keys, never the database owner
+# password or the Meilisearch master key.
 #
-# Keep the fvoci_secrets_* volumes with your data. `docker compose down` keeps
-# them; `docker compose down -v` deletes everything, including the keys. If the
-# data volumes exist without their secrets, bootstrap refuses to start rather
-# than generate keys that cannot open the data. Backup and restore: RUNNING.md
-# "Standalone install secrets".
-#
-# This file serves plain HTTP on 127.0.0.1:8080 for local evaluation. Using a
-# domain name, HTTPS or a reverse proxy needs FVOCI_PUBLIC_ORIGIN and
-# FVOCI_COOKIE_SECURE changes described in a separate guide.
+# Keep the volumes: `docker compose down` keeps them, `down -v` deletes all data
+# and keys. If data exists without its keys, the install refuses to start rather
+# than generate keys that cannot open it. Backups: RUNNING.md "Standalone install".
+# Optional settings (domain/HTTPS, S3, SMTP, SSO, AI, tuning) go in a
+# compose.override.yml next to this file: RUNNING.md "Standalone install".
 name: fvoci
 
-# One product image for bootstrap, init and server. Release files pin it to a digest.
+# One product image for init and fvoci. Release files pin it to a digest.
 x-fvoci-image: &fvoci-image ${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:0.1.0}
 
+# First start of postgres/meilisearch: write a random secret to $1 (mode 0640,
+# owner $3, group 1001 = init) unless it exists; refuse if the data directory
+# $2 already holds data without it. Export it as $4 when set, then exec the service.
+x-own-secret: &own-secret |
+  set -eu
+  file=$$1 data=$$2 owner=$$3 var=$$4
+  shift 4
+  if [ ! -s "$$file" ]; then
+    if [ -n "$$(ls -A "$$data")" ]; then
+      echo "fvoci: $$file is missing but $$data holds data; restore its volume from the backup taken with that data" >&2
+      exit 1
+    fi
+    umask 077
+    head -c 32 /dev/urandom | od -An -tx1 -v | tr -d ' \n' >"$$file.tmp"
+    chown "$$owner:1001" "$$file.tmp"
+    chmod 0640 "$$file.tmp"
+    sync
+    mv -f "$$file.tmp" "$$file"
+    sync
+    echo "fvoci: generated $$file"
+  fi
+  if [ -n "$$var" ]; then value=$$(cat "$$file"); export "$$var=$$value"; fi
+  exec "$$@"
+
 services:
-  bootstrap:
+  fvoci:
     image: *fvoci-image
-    # Root only to set each audience's file owner (postgres uid 999, meilisearch
-    # uid 0, fvoci uid 1000); no network, read-only root, CHOWN capability only.
-    user: "0:0"
-    entrypoint:
-      - /opt/fvoci/bin/fvoci-migrate
-      - --bootstrap-secrets
-      - /run/fvoci/bootstrap
-      - --data-dir
-      - /run/fvoci/data/postgres
-      - --data-dir
-      - /run/fvoci/data/storage
-      - --data-dir
-      - /run/fvoci/data/meilisearch
+    ports:
+      # Local only. Changing the host port or address needs the same change in
+      # FVOCI_PUBLIC_ORIGIN.
+      - "127.0.0.1:8080:8080"
     environment:
-      POSTGRES_DB: fvoci
-      FVOCI_APP_ROLE: fvoci_app
-    network_mode: none
-    read_only: true
-    cap_drop: [ALL]
-    cap_add: [CHOWN]
-    security_opt: ["no-new-privileges:true"]
+      # The exact origin (scheme://host[:port]) users open; the server never
+      # derives it from Host or Forwarded headers.
+      FVOCI_PUBLIC_ORIGIN: http://localhost:8080
+      # Verified capacity pair: 64 collaboration rooms need postgres
+      # max_connections=150 below (64 room fences + app pool 64 + reserve 10).
+      FVOCI_COLLAB_MAX_ROOMS: "64"
     volumes:
-      - secrets_postgres:/run/fvoci/bootstrap/postgres
-      - secrets_meilisearch:/run/fvoci/bootstrap/meilisearch
-      - secrets_init:/run/fvoci/bootstrap/init
-      - secrets_server:/run/fvoci/bootstrap/server
-      # Read-only: only checked for existing data.
-      - pgdata:/run/fvoci/data/postgres:ro
-      - storage:/run/fvoci/data/storage:ro
-      - searchdata:/run/fvoci/data/meilisearch:ro
+      - server_secrets:/run/fvoci/secrets:ro
+      - storage:/data/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    mem_limit: 4g
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "/opt/fvoci/bin/fvoci-server", "healthcheck"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # Holds the owner password and master key the server must not: creates the
+  # app role, generates the server keys, migrates, grants, writes the scoped
+  # search key, and exits. Runs on every `up`; each step is idempotent.
+  init:
+    image: *fvoci-image
+    entrypoint: ["/opt/fvoci/bin/fvoci-migrate", "--install"]
+    group_add: ["1001"]
+    volumes:
+      - postgres_secrets:/run/fvoci/install/postgres:ro
+      - meili_secrets:/run/fvoci/install/meilisearch:ro
+      - server_secrets:/run/fvoci/install/server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
     restart: "no"
 
   postgres:
     image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
-    # 64 collaboration room fences + app pool 64 + reserve 10 = 138 (see RUNNING.md).
-    command: ["postgres", "-c", "max_connections=150"]
+    entrypoint: ["/bin/sh", "-c", *own-secret, "sh", "/run/fvoci/secrets/postgres_password", "/var/lib/postgresql", "999", ""]
+    command: ["docker-entrypoint.sh", "postgres", "-c", "max_connections=150"]
     environment:
-      POSTGRES_DB: fvoci
+      # Same names as the init defaults.
       POSTGRES_USER: fvoci_owner
+      POSTGRES_DB: fvoci
       POSTGRES_PASSWORD_FILE: /run/fvoci/secrets/postgres_password
     volumes:
       - pgdata:/var/lib/postgresql
-      - secrets_postgres:/run/fvoci/secrets:ro
-    depends_on:
-      bootstrap:
-        condition: service_completed_successfully
+      - postgres_secrets:/run/fvoci/secrets
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fvoci_owner -d fvoci"]
@@ -85,21 +113,13 @@ services:
 
   meilisearch:
     image: getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9
-    # The image reads its master key only from the environment: load it from
-    # the secret file in the environment of the exec'd process (not argv).
-    command:
-      - /bin/sh
-      - -c
-      - MEILI_MASTER_KEY="$$(cat /run/fvoci/secrets/master_key)" && export MEILI_MASTER_KEY && exec /bin/meilisearch
+    command: ["/bin/sh", "-c", *own-secret, "sh", "/run/fvoci/secrets/master_key", "/meili_data", "0", "MEILI_MASTER_KEY", "/bin/meilisearch"]
     environment:
       MEILI_ENV: production
       MEILI_NO_ANALYTICS: "true"
     volumes:
       - searchdata:/meili_data
-      - secrets_meilisearch:/run/fvoci/secrets:ro
-    depends_on:
-      bootstrap:
-        condition: service_completed_successfully
+      - meili_secrets:/run/fvoci/secrets
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7700/health"]
@@ -108,77 +128,10 @@ services:
       retries: 30
       start_period: 10s
 
-  init:
-    image: *fvoci-image
-    # Creates the app role, migrates and grants as the owner, then writes the
-    # scoped search key. Runs on every `up`; each step is idempotent.
-    entrypoint: ["/opt/fvoci/sbin/init-db.sh"]
-    environment:
-      POSTGRES_USER: fvoci_owner
-      POSTGRES_DB: fvoci
-      FVOCI_DB_HOST: postgres:5432
-      POSTGRES_PASSWORD_FILE: /run/fvoci/secrets/postgres_password
-      FVOCI_APP_ROLE: fvoci_app
-      FVOCI_APP_PASSWORD_FILE: /run/fvoci/secrets/app_password
-      FVOCI_MEILI_URL: http://meilisearch:7700
-      MEILI_MASTER_KEY_FILE: /run/fvoci/secrets/meili_master_key
-      FVOCI_MEILI_KEY_FILE: /run/fvoci/meili/api_key
-    volumes:
-      - secrets_init:/run/fvoci/secrets:ro
-      - meili_key:/run/fvoci/meili
-    depends_on:
-      postgres:
-        condition: service_healthy
-      meilisearch:
-        condition: service_healthy
-    restart: "no"
-
-  server:
-    image: *fvoci-image
-    mem_limit: 4g
-    ports:
-      - "127.0.0.1:8080:8080"
-    environment:
-      DATABASE_APP_URL_FILE: /run/fvoci/secrets/database_app_url
-      PASSWORD_PEPPER_KEYS_FILE: /run/fvoci/secrets/password_pepper_keys
-      PASSWORD_PEPPER_ACTIVE_KEY_ID_FILE: /run/fvoci/secrets/password_pepper_active_key_id
-      ENCRYPTION_KEYS_FILE: /run/fvoci/secrets/encryption_keys
-      ENCRYPTION_ACTIVE_KEY_ID_FILE: /run/fvoci/secrets/encryption_active_key_id
-      # Must match the address in the browser. Other origins: separate guide.
-      FVOCI_PUBLIC_ORIGIN: http://localhost:8080
-      FVOCI_COOKIE_SECURE: "false"
-      FVOCI_COLLAB_MAX_ROOMS: "64"
-      FVOCI_COLLAB_MEMORY_BUDGET: "2147483648"
-      FVOCI_EXTRACT_POLL_SECS: "2"
-      FVOCI_SHUTDOWN_DEADLINE_MS: "30000"
-      FVOCI_MEILI_URL: http://meilisearch:7700
-      FVOCI_MEILI_KEY_FILE: /run/fvoci/meili/api_key
-    volumes:
-      - secrets_server:/run/fvoci/secrets:ro
-      - storage:/data/storage
-      - meili_key:/run/fvoci/meili:ro
-    depends_on:
-      init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      meilisearch:
-        condition: service_healthy
-    restart: unless-stopped
-    stop_grace_period: 45s
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/setup >/dev/null || exit 1"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-      start_period: 10s
-
 volumes:
   pgdata:
   storage:
   searchdata:
-  meili_key:
-  secrets_postgres:
-  secrets_meilisearch:
-  secrets_init:
-  secrets_server:
+  postgres_secrets:
+  meili_secrets:
+  server_secrets:

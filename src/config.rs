@@ -1,7 +1,7 @@
 use std::env;
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::attachments::UploadLimits;
@@ -488,8 +488,7 @@ fn parse_shutdown_deadline_ms(raw: Option<&str>) -> Result<Duration, String> {
     Ok(Duration::from_millis(millis))
 }
 
-/// Secret settings that may instead be read from a file named by `<VAR>_FILE`
-/// (the standalone Compose install mounts them from a bootstrap volume).
+/// Secret settings that may instead be read from a file named by `<VAR>_FILE`.
 pub const SECRET_FILE_VARS: &[&str] = &[
     "DATABASE_APP_URL",
     "PASSWORD_PEPPER_KEYS",
@@ -498,14 +497,75 @@ pub const SECRET_FILE_VARS: &[&str] = &[
     "ENCRYPTION_ACTIVE_KEY_ID",
 ];
 
+/// Standalone Compose install: the one-shot `init` service
+/// (`fvoci-migrate --install`) writes the server's settings into this
+/// directory, one file per variable, and the server mounts it read-only.
+/// A file here is used only when neither the variable, its `_FILE` form nor
+/// an alias is set; both present is an error (as for `<VAR>_FILE`). The image
+/// ships the directory empty, so other installs are unaffected.
+pub const INSTALL_SETTINGS_DIR: &str = "/run/fvoci/secrets";
+
+/// `(variable, file name in INSTALL_SETTINGS_DIR, other variables that also set it)`.
+pub const INSTALL_SETTING_FILES: &[(&str, &str, &[&str])] = &[
+    ("DATABASE_APP_URL", "database_app_url", &["FVOCI_APP_DATABASE_URL"]),
+    ("PASSWORD_PEPPER_KEYS", "password_pepper_keys", &[]),
+    (
+        "PASSWORD_PEPPER_ACTIVE_KEY_ID",
+        "password_pepper_active_key_id",
+        &[],
+    ),
+    ("ENCRYPTION_KEYS", "encryption_keys", &[]),
+    ("ENCRYPTION_ACTIVE_KEY_ID", "encryption_active_key_id", &[]),
+    ("FVOCI_MEILI_URL", "meili_url", &[]),
+    ("FVOCI_MEILI_KEY", "meili_api_key", &["FVOCI_MEILI_KEY_FILE"]),
+];
+
+/// File name of `var` in [`INSTALL_SETTINGS_DIR`].
+pub fn install_setting_file(var: &str) -> &'static str {
+    INSTALL_SETTING_FILES
+        .iter()
+        .find(|(name, _, _)| *name == var)
+        .map(|(_, file, _)| *file)
+        .unwrap_or_else(|| unreachable!("{var} is not an install setting"))
+}
+
 const SECRET_FILE_MAX_BYTES: u64 = 64 * 1024;
 
-/// Resolves every `<VAR>_FILE` in [`SECRET_FILE_VARS`]: the file must be
-/// UTF-8, at most 64 KiB and nonempty after one trailing newline is dropped.
-/// Setting both `<VAR>` and `<VAR>_FILE` is an error. Errors name the
-/// variable and path, never the contents.
+/// Reads one setting file: UTF-8, at most 64 KiB and nonempty after one
+/// trailing newline is dropped. Errors name `label` and the path, never the
+/// contents.
+pub fn read_setting_file(label: &str, path: &Path) -> Result<String, String> {
+    let read = || -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(SECRET_FILE_MAX_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    let bytes = read().map_err(|e| format!("{label}: cannot read {}: {e}", path.display()))?;
+    if bytes.len() as u64 > SECRET_FILE_MAX_BYTES {
+        return Err(format!("{label}: {} is larger than 64 KiB", path.display()));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("{label}: {} is not UTF-8", path.display()))?;
+    let value = text
+        .strip_suffix('\n')
+        .map(|v| v.strip_suffix('\r').unwrap_or(v))
+        .unwrap_or(&text);
+    if value.trim().is_empty() {
+        return Err(format!("{label}: {} is empty", path.display()));
+    }
+    Ok(value.to_string())
+}
+
+/// Resolves every `<VAR>_FILE` in [`SECRET_FILE_VARS`], then the files present
+/// in `install_dir` (see [`INSTALL_SETTINGS_DIR`]). Setting both `<VAR>` and
+/// `<VAR>_FILE`, or either of them while the install file exists, is an error;
+/// an explicitly empty variable counts as set.
 pub fn resolve_secret_files(
     get: impl Fn(&str) -> Option<std::ffi::OsString>,
+    install_dir: &Path,
 ) -> Result<Vec<(&'static str, String)>, String> {
     let mut resolved = Vec::new();
     for &name in SECRET_FILE_VARS {
@@ -514,42 +574,37 @@ pub fn resolve_secret_files(
         if get(name).is_some() {
             return Err(format!("{name} and {file_var} are both set; set only one"));
         }
-        let path = PathBuf::from(path);
-        let read = || -> std::io::Result<Vec<u8>> {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            std::fs::File::open(&path)?
-                .take(SECRET_FILE_MAX_BYTES + 1)
-                .read_to_end(&mut bytes)?;
-            Ok(bytes)
-        };
-        let bytes =
-            read().map_err(|e| format!("{file_var}: cannot read {}: {e}", path.display()))?;
-        if bytes.len() as u64 > SECRET_FILE_MAX_BYTES {
+        let value = read_setting_file(&file_var, &PathBuf::from(path))?;
+        resolved.push((name, value));
+    }
+    for &(name, file, aliases) in INSTALL_SETTING_FILES {
+        let path = install_dir.join(file);
+        match std::fs::metadata(&path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{name}: cannot read {}: {e}", path.display())),
+        }
+        let file_var = format!("{name}_FILE");
+        let set = std::iter::once(name)
+            .chain(std::iter::once(file_var.as_str()))
+            .chain(aliases.iter().copied())
+            .find(|var| get(var).is_some());
+        if let Some(var) = set {
             return Err(format!(
-                "{file_var}: {} is larger than 64 KiB",
+                "{var} is set and the install file {} exists; set only one",
                 path.display()
             ));
         }
-        let text = String::from_utf8(bytes)
-            .map_err(|_| format!("{file_var}: {} is not UTF-8", path.display()))?;
-        let value = text
-            .strip_suffix('\n')
-            .map(|v| v.strip_suffix('\r').unwrap_or(v))
-            .unwrap_or(&text);
-        if value.trim().is_empty() {
-            return Err(format!("{file_var}: {} is empty", path.display()));
-        }
-        resolved.push((name, value.to_string()));
+        resolved.push((name, read_setting_file(name, &path)?));
     }
     Ok(resolved)
 }
 
-/// Copies `<VAR>_FILE` contents into `<VAR>` so every existing reader sees one
-/// source. Call at the start of `main`, before a runtime or any other thread
-/// exists (the environment is process-global).
+/// Copies `<VAR>_FILE` contents and install setting files into `<VAR>` so
+/// every existing reader sees one source. Call at the start of `main`, before
+/// a runtime or any other thread exists (the environment is process-global).
 pub fn load_secret_files() -> Result<(), String> {
-    for (name, value) in resolve_secret_files(|k| env::var_os(k))? {
+    for (name, value) in resolve_secret_files(|k| env::var_os(k), Path::new(INSTALL_SETTINGS_DIR))? {
         env::set_var(name, value);
     }
     Ok(())
@@ -576,12 +631,13 @@ mod tests {
             move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
         };
 
+        let none = dir.join("no-install");
         let got = resolve_secret_files(lookup(vec![
             ("DATABASE_APP_URL_FILE", url.clone()),
             ("ENCRYPTION_KEYS_FILE", keys.clone()),
             // Not in the allowlist: ignored, never read.
             ("DATABASE_URL_FILE", "/nonexistent".into()),
-        ]))
+        ]), &none)
         .unwrap();
         assert_eq!(
             got,
@@ -594,25 +650,74 @@ mod tests {
         let both = resolve_secret_files(lookup(vec![
             ("PASSWORD_PEPPER_KEYS", "x".into()),
             ("PASSWORD_PEPPER_KEYS_FILE", keys.clone()),
-        ]))
+        ]), &none)
         .unwrap_err();
         assert!(both.contains("both set"), "{both}");
         let err =
-            resolve_secret_files(lookup(vec![("PASSWORD_PEPPER_KEYS_FILE", empty)])).unwrap_err();
+            resolve_secret_files(lookup(vec![("PASSWORD_PEPPER_KEYS_FILE", empty)]), &none).unwrap_err();
         assert!(err.contains("is empty"), "{err}");
         let err =
-            resolve_secret_files(lookup(vec![("PASSWORD_PEPPER_KEYS_FILE", big)])).unwrap_err();
+            resolve_secret_files(lookup(vec![("PASSWORD_PEPPER_KEYS_FILE", big)]), &none).unwrap_err();
         assert!(err.contains("64 KiB"), "{err}");
         let err = resolve_secret_files(lookup(vec![(
             "DATABASE_APP_URL_FILE",
             dir.join("missing").into_os_string(),
-        )]))
+        )]), &none)
         .unwrap_err();
         assert!(
             err.starts_with("DATABASE_APP_URL_FILE: cannot read"),
             "{err}"
         );
         assert!(!err.contains("postgres://"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn install_setting_files_fill_unset_variables_only() {
+        let dir = std::env::temp_dir().join(format!("fvoci-install-dir-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("database_app_url"), "postgres://a:b@postgres:5432/fvoci\n").unwrap();
+        std::fs::write(dir.join("meili_api_key"), "k".repeat(64)).unwrap();
+        let lookup = |pairs: Vec<(&'static str, &'static str)>| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            }
+        };
+
+        let got = resolve_secret_files(lookup(vec![("FVOCI_MEILI_URL", "http://m:7700")]), &dir)
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("DATABASE_APP_URL", "postgres://a:b@postgres:5432/fvoci".to_string()),
+                ("FVOCI_MEILI_KEY", "k".repeat(64)),
+            ]
+        );
+        // The variable, an alias or its _FILE form next to the install file is
+        // ambiguous, including an explicitly empty value.
+        for var in ["DATABASE_APP_URL", "FVOCI_APP_DATABASE_URL", "FVOCI_MEILI_KEY_FILE"] {
+            let err = resolve_secret_files(lookup(vec![(var, "")]), &dir).unwrap_err();
+            assert!(err.starts_with(&format!("{var} is set and the install file")), "{err}");
+            assert!(!err.contains("postgres://a:b"), "{err}");
+        }
+        let url_file = dir.join("database_app_url");
+        let err = resolve_secret_files(
+            |k: &str| (k == "DATABASE_APP_URL_FILE").then(|| url_file.clone().into_os_string()),
+            &dir,
+        )
+        .unwrap_err();
+        assert!(err.starts_with("DATABASE_APP_URL_FILE is set and the install file"), "{err}");
+        // No directory (every other install): nothing is read.
+        assert!(resolve_secret_files(lookup(vec![]), &dir.join("absent"))
+            .unwrap()
+            .is_empty());
+        std::fs::write(dir.join("encryption_keys"), "\n").unwrap();
+        let err = resolve_secret_files(lookup(vec![]), &dir).unwrap_err();
+        assert!(err.contains("is empty"), "{err}");
+        assert_eq!(install_setting_file("FVOCI_MEILI_URL"), "meili_url");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -2,11 +2,12 @@
 # One-shot database bootstrap for compose: create the non-superuser app role, migrate,
 # then apply grant-app-role.sql through fvoci-migrate. Requires owner DATABASE_URL.
 #
-# Secrets come from the environment (infra/rust/compose.yml with an env file) or,
-# in the standalone install (compose.user.yml), from files written by
-# `fvoci-migrate --bootstrap-secrets`: POSTGRES_PASSWORD_FILE (with POSTGRES_USER,
-# POSTGRES_DB and FVOCI_DB_HOST) replaces DATABASE_URL, FVOCI_APP_PASSWORD_FILE and
+# Secrets come from the environment (infra/rust/compose.yml with an env file) or
+# from files: POSTGRES_PASSWORD_FILE (with POSTGRES_USER, POSTGRES_DB and
+# FVOCI_DB_HOST) replaces DATABASE_URL, FVOCI_APP_PASSWORD_FILE and
 # MEILI_MASTER_KEY_FILE replace their variables. Setting both forms is an error.
+# The standalone install (compose.user.yml) does not use this script: its init
+# service runs `fvoci-migrate --install`.
 set -eu
 
 # from_file VAR: VAR_FILE's contents become VAR.

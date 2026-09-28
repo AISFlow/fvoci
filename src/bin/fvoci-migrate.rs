@@ -14,7 +14,11 @@ use uuid::Uuid;
 
 fn main() {
     // Before the runtime starts any thread: `<VAR>_FILE` secrets become `<VAR>`.
-    if let Err(error) = fvoci_server::config::load_secret_files() {
+    // In the standalone install's init container, also the owner URL and
+    // Meilisearch master key from the mounted install files.
+    if let Err(error) = fvoci_server::config::load_secret_files()
+        .and_then(|()| fvoci_server::secret_bootstrap::load_install_env())
+    {
         eprintln!("fvoci-migrate: {error}");
         std::process::exit(1);
     }
@@ -99,16 +103,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let path = fvoci_server::init_env::write_env(&flags)?;
             println!("{}", path.display());
         }
-        [flag, rest @ ..] if flag == "--bootstrap-secrets" => {
-            let flags = fvoci_server::secret_bootstrap::parse_flags(rest)?;
-            match fvoci_server::secret_bootstrap::run(&flags)? {
-                fvoci_server::secret_bootstrap::Outcome::AlreadyComplete => {
-                    eprintln!("install secrets already present; nothing changed")
-                }
-                fvoci_server::secret_bootstrap::Outcome::Generated => {
-                    eprintln!("generated install secrets in {}", flags.root.display())
-                }
-            }
+        [flag] if flag == "--install" => {
+            fvoci_server::secret_bootstrap::install().await?;
         }
         [flag, rest @ ..] if flag == "--recover-outbox" => {
             let url = migration_url()?;
@@ -118,7 +114,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --rotate-vapid | --secrets-audit | --secrets-rotate | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --bootstrap-secrets <root> [--data-dir <path>]... | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay] | --backup-manifest <manifest> <project> <created-utc> <pg-version> <dump> <storage-tar> | --restore-preflight <manifest> <dump> <storage-tar> <target-project>]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --rotate-vapid | --secrets-audit | --secrets-rotate | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --install | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay] | --backup-manifest <manifest> <project> <created-utc> <pg-version> <dump> <storage-tar> | --restore-preflight <manifest> <dump> <storage-tar> <target-project>]".into(),
             );
         }
     }

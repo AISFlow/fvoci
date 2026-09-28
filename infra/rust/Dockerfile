@@ -69,9 +69,15 @@ COPY --chown=root:root packages/editor/src/fonts/*-OFL.txt ./share/licenses/font
 COPY --chown=root:root src/http/api_docs_assets/LICENSE src/http/api_docs_assets/NOTICE src/http/api_docs_assets/swagger-ui-bundle.js.LICENSE.txt ./share/licenses/swagger-ui-dist-5.33.0/
 COPY --from=web-build --chown=root:root /src/apps/web/dist ./static/
 COPY --chown=root:root infra/rust/init-db.sh ./sbin/init-db.sh
+# /run/fvoci/secrets: where the server mounts its install settings
+# (config::INSTALL_SETTINGS_DIR); empty and world-searchable otherwise, so any
+# uid can see there is nothing to read. /run/fvoci/install/server: the same
+# volume as `fvoci-migrate --install` first mounts and writes it; a new named
+# volume takes over that directory's owner and mode (the service user, 0700).
 RUN chmod 755 ./sbin/init-db.sh ./bin/* \
- && mkdir -p /data/storage /run/fvoci/meili \
- && chown fvoci:fvoci /data/storage /run/fvoci/meili
+ && mkdir -p /data/storage /run/fvoci/meili /run/fvoci/secrets /run/fvoci/install/server \
+ && chown fvoci:fvoci /data/storage /run/fvoci/meili /run/fvoci/secrets /run/fvoci/install/server \
+ && chmod 700 /run/fvoci/install/server
 ENV FVOCI_EXPORT_FONT_DIR=/opt/fvoci/share/fonts \
     FVOCI_STATIC_DIR=/opt/fvoci/static \
     FVOCI_COLLAB_ENGINE=/opt/fvoci/bin/collab-engine \
