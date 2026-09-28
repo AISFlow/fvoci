@@ -205,6 +205,11 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_with_storage(None).await
+    }
+
+    /// `storage` replaces the default local driver under `storage_root`.
+    async fn start_with_storage(storage: Option<ObjectStorage>) -> Self {
         let db = TestDb::bootstrap().await;
         let sink = SmtpSink::spawn().await;
         let mailer = Arc::new(Mailer::from_smtp(Some(SmtpConfig {
@@ -216,7 +221,8 @@ impl Harness {
         let storage_root =
             std::env::temp_dir().join(format!("fvoci-account-test-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&storage_root).expect("storage root");
-        let storage = ObjectStorage::from(LocalStorage::new(storage_root.clone()));
+        let storage =
+            storage.unwrap_or_else(|| ObjectStorage::from(LocalStorage::new(storage_root.clone())));
         let state = AppState {
             auth: Arc::new(AuthService {
                 db: Db::new(app_pool.clone()),
