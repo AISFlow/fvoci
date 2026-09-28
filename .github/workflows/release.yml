@@ -64,7 +64,9 @@ jobs:
           sha="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
           test "$(git rev-parse HEAD)" = "$sha"
           git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null
-          if ! git rev-list --first-parent refs/remotes/origin/main | grep -qx "$sha"; then
+          # grep -F without -q: under pipefail, -q would close the pipe early and
+          # make rev-list exit with SIGPIPE, failing the check on a matching commit.
+          if ! git rev-list --first-parent refs/remotes/origin/main | grep -Fx -- "$sha" >/dev/null; then
             echo "::error::${RELEASE_TAG} (${sha}) is not a commit on main"
             exit 1
           fi
