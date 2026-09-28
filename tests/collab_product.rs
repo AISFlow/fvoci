@@ -91,6 +91,12 @@ async fn fixture_password_hash() -> &'static str {
 
 /// Parallel tests in one binary must not storm past the process-wide live-helper cap.
 /// Reserve one slot per hub/server (four for the 4-room cap tests).
+///
+/// A test holds at most one reservation at a time: it releases the first
+/// before it takes a second. The semaphore is fair, so a queued four-slot
+/// reservation blocks every later one. A test that still holds a slot and
+/// queues for another waits behind that four-slot reservation, which can
+/// never be granted while the held slot is out.
 static HELPER_CHILD_CAPACITY: LazyLock<Mutex<(usize, Arc<Semaphore>)>> =
     LazyLock::new(|| Mutex::new((0, Arc::new(Semaphore::new(1)))));
 
@@ -1414,13 +1420,16 @@ async fn collab_ws_missing_helper_closes_1011_then_valid_join() {
                 .await
                 .unwrap();
             wait_for_unavailable_close_without_auth_denied(&mut ws, Duration::from_secs(5)).await;
+            drop(ws);
+            // Release this server's capacity slot before the healthy server
+            // reserves its own (see HELPER_CHILD_CAPACITY).
+            server.shutdown().await;
 
             let healthy_server = start_product_test_server(&harness.app_url, true).await;
             let healthy_addr = healthy_server.addr;
             let other_key = room_key(other.session.workspace_id, other.document_id);
             let mut recovered = connect_member(healthy_addr, &other.session.session_token).await;
             auth_and_join(&mut recovered, &other_key, 42).await;
-            server.shutdown().await;
             healthy_server.shutdown().await;
             harness.cleanup().await;
         },
@@ -5180,7 +5189,7 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
         let wiki = setup_wiki_doc(&harness).await;
         let mut cfg = test_collab_config(4, 30_000);
         cfg.max_collab_sockets = 1;
-        let (hub, _hub_capacity) =
+        let (hub, hub_capacity) =
             new_test_collab_hub(cfg.clone(), wiki.session.pool.clone(), 1).await;
         assert_eq!(hub.available_collab_sockets(), 1);
         let held = hub
@@ -5190,6 +5199,10 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
         assert!(hub.try_acquire_socket(wiki.session.session_id).is_none());
         drop(held);
         assert_eq!(hub.available_collab_sockets(), 1);
+        // Release the hub's capacity slot before the server reserves its own
+        // (see HELPER_CHILD_CAPACITY).
+        hub.shutdown().await;
+        drop(hub_capacity);
 
         let server = start_configured_test_server(&harness.app_url, cfg).await;
         let addr = server.addr;
@@ -5207,7 +5220,6 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
                 .is_ok(),
             "released socket permit must allow a new upgrade"
         );
-        hub.shutdown().await;
         server.shutdown().await;
         harness.cleanup().await;
     })
