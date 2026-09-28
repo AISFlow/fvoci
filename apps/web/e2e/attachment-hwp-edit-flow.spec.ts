@@ -174,6 +174,9 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await searchLink.click();
   await expect(page).toHaveURL(/\/w\/acme\/search/);
   await expect(dialog).toHaveCount(0);
+  // The router commits a route in a React transition after the URL changes: a
+  // history step before that commit would supersede it and keep this viewer.
+  await expect(viewer).toHaveCount(0);
   await page.goBack();
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
@@ -212,6 +215,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "나가기" }).click();
   await expect(page).toHaveURL(/\/w\/acme\/search/);
+  await expect(viewer).toHaveCount(0);
   await page.goBack();
   await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
   await expect(bar).toHaveCount(0);
