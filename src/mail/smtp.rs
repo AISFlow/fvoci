@@ -34,6 +34,14 @@ const CODE_TRANSIENT: &str = "transient";
 /// Connection, TLS or protocol failure.
 const CODE_CONNECTION: &str = "connection";
 
+/// Whether a send failure is final for this one recipient: the server refused
+/// it permanently, or the address cannot be sent to. Other failures (4xx,
+/// timeouts, connection or local configuration) may pass on a later attempt,
+/// or would fail for every recipient alike.
+pub(super) fn is_final_for_recipient(code: &str) -> bool {
+    code == CODE_PERMANENT || code == CODE_INVALID_RECIPIENT
+}
+
 pub async fn send_mail_op(
     smtp: &SmtpConfig,
     op: &'static str,

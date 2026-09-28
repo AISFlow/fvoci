@@ -1,13 +1,14 @@
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::db::context::{set_system, set_tenant};
 use crate::db::outbox::OutboxEvent;
-use crate::mail::Mailer;
+use crate::mail::{smtp, Mailer};
 use crate::notifications::{identity_mail_for_event, list_immediate_comment_mails, OutboundMail};
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
 
@@ -15,14 +16,66 @@ pub const MAIL_CONSUMER: &str = "mail";
 
 const MAIL_VERBS: &[&str] = &["comment.created", "identity.linked", "identity.unlinked"];
 
+/// Sends the mail of `comment.created` and `identity.*` events. The unit of
+/// delivery is the recipient: a permanent refusal is final for that recipient
+/// only, and a retry after a transient failure skips the recipients SMTP
+/// already accepted (see `AcceptedRecipients`).
 pub struct MailConsumer {
     mailer: Arc<Mailer>,
+    accepted: Mutex<AcceptedRecipients>,
 }
 
 impl MailConsumer {
     pub fn new(mailer: Arc<Mailer>) -> Self {
-        Self { mailer }
+        Self {
+            mailer,
+            accepted: Mutex::new(AcceptedRecipients::default()),
+        }
     }
+}
+
+/// Events whose accepted recipients are kept at most. The dispatcher sends
+/// one mail event at a time and retries it until it succeeds or is
+/// dead-lettered, so only dead-lettered events linger until pushed out.
+const ACCEPTED_EVENTS_KEPT: usize = 64;
+
+/// Recipients SMTP accepted for events that have not completed yet. An
+/// event's entry is dropped once all its recipients are settled; then the
+/// dispatcher marks the event processed. This lives in memory only: a
+/// restart, or another replica taking over the lease, starts empty and
+/// may send an accepted recipient's mail again (the documented at-least-once
+/// edge, like a crash between SMTP and the processed mark).
+#[derive(Default)]
+struct AcceptedRecipients {
+    events: VecDeque<(Uuid, HashSet<String>)>,
+}
+
+impl AcceptedRecipients {
+    fn contains(&self, event_id: Uuid, to: &str) -> bool {
+        self.events
+            .iter()
+            .any(|(id, accepted)| *id == event_id && accepted.contains(to))
+    }
+
+    fn insert(&mut self, event_id: Uuid, to: &str) {
+        if let Some((_, accepted)) = self.events.iter_mut().find(|(id, _)| *id == event_id) {
+            accepted.insert(to.to_string());
+            return;
+        }
+        if self.events.len() >= ACCEPTED_EVENTS_KEPT {
+            self.events.pop_front();
+        }
+        self.events
+            .push_back((event_id, HashSet::from([to.to_string()])));
+    }
+
+    fn forget(&mut self, event_id: Uuid) {
+        self.events.retain(|(id, _)| *id != event_id);
+    }
+}
+
+fn lock(accepted: &Mutex<AcceptedRecipients>) -> MutexGuard<'_, AcceptedRecipients> {
+    accepted.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl OutboxConsumer for MailConsumer {
@@ -40,7 +93,7 @@ impl OutboxConsumer for MailConsumer {
         _lease_owner: Uuid,
         event: &'a OutboxEvent,
     ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
-        Box::pin(async move { deliver_mail(pool, &self.mailer, event).await })
+        Box::pin(async move { deliver_mail(pool, &self.mailer, &self.accepted, event).await })
     }
 }
 
@@ -75,17 +128,77 @@ async fn collect_mails(
 async fn deliver_mail(
     pool: &PgPool,
     mailer: &Mailer,
+    accepted: &Mutex<AcceptedRecipients>,
     event: &OutboxEvent,
 ) -> Result<(), OutboxProcessError> {
     if !is_mail_verb(&event.verb) {
         return Ok(());
     }
     let mails = collect_mails(pool, event).await?;
-    for mail in mails {
-        mailer
-            .send(&mail.to, &mail.subject, &mail.text)
-            .await
-            .map_err(|err| OutboxProcessError::Delivery(err.to_string()))?;
+    let mut any_accepted = false;
+    let mut rejected = 0usize;
+    for mail in &mails {
+        if lock(accepted).contains(event.id, &mail.to) {
+            any_accepted = true;
+            continue;
+        }
+        match mailer.send(&mail.to, &mail.subject, &mail.text).await {
+            Ok(()) => {
+                lock(accepted).insert(event.id, &mail.to);
+                any_accepted = true;
+            }
+            Err(err) if smtp::is_final_for_recipient(&err.code) => {
+                // Final for this recipient only. The error carries no address.
+                rejected += 1;
+                tracing::warn!(
+                    event_id = %event.id,
+                    code = %err.code,
+                    "mail.recipient_rejected"
+                );
+            }
+            // May pass later: retry the event. The recipients accepted so far
+            // are remembered and skipped on the retry.
+            Err(err) => return Err(OutboxProcessError::Delivery(err.to_string())),
+        }
     }
+    if rejected > 0 && !any_accepted {
+        // Nobody accepted, which is what a relay-wide refusal looks like: fail
+        // so the event is retried and then dead-lettered where it is visible.
+        return Err(OutboxProcessError::Delivery(format!(
+            "mailer: every recipient rejected ({rejected})"
+        )));
+    }
+    lock(accepted).forget(event.id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepted_recipients_are_per_event_and_bounded() {
+        let mut accepted = AcceptedRecipients::default();
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        accepted.insert(first, "a@example.com");
+        accepted.insert(first, "b@example.com");
+        accepted.insert(second, "a@example.com");
+        assert!(accepted.contains(first, "a@example.com"));
+        assert!(accepted.contains(first, "b@example.com"));
+        assert!(!accepted.contains(second, "b@example.com"));
+
+        accepted.forget(first);
+        assert!(!accepted.contains(first, "a@example.com"));
+        assert!(accepted.contains(second, "a@example.com"));
+
+        for _ in 0..ACCEPTED_EVENTS_KEPT {
+            accepted.insert(Uuid::now_v7(), "c@example.com");
+        }
+        assert_eq!(accepted.events.len(), ACCEPTED_EVENTS_KEPT);
+        assert!(
+            !accepted.contains(second, "a@example.com"),
+            "the oldest event is pushed out"
+        );
+    }
 }

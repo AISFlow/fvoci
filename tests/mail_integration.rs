@@ -1057,3 +1057,462 @@ async fn i18n_overrides_reach_the_next_mail_live_and_reset() {
     assert!(mail.text().contains("Subject: 워크스페이스 초대"));
     harness.cleanup().await;
 }
+
+/// How the scripted SMTP server answers `RCPT TO` for one address.
+#[derive(Clone)]
+struct RcptRule {
+    reply: &'static str,
+    /// `None`: every time; `Some(n)`: the next `n` times, then `250`.
+    times: Option<u32>,
+}
+
+/// SMTP sink with a per-session delay and per-recipient `RCPT` replies.
+struct ScriptedSmtp {
+    port: u16,
+    mails: Arc<Mutex<Vec<CapturedMail>>>,
+    handle: JoinHandle<()>,
+}
+
+impl ScriptedSmtp {
+    async fn spawn(session_delay: Duration, rules: Vec<(String, RcptRule)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind smtp");
+        let port = listener.local_addr().expect("addr").port();
+        let mails = Arc::new(Mutex::new(Vec::new()));
+        let rules = Arc::new(Mutex::new(
+            rules
+                .into_iter()
+                .collect::<std::collections::HashMap<String, RcptRule>>(),
+        ));
+        let captured = mails.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let captured = captured.clone();
+                let rules = rules.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(session_delay).await;
+                    let _ = serve_scripted_smtp(socket, captured, rules).await;
+                });
+            }
+        });
+        Self {
+            port,
+            mails,
+            handle,
+        }
+    }
+
+    fn count_to(&self, address: &str) -> usize {
+        self.mails
+            .lock()
+            .expect("mails")
+            .iter()
+            .filter(|mail| mail.to == address)
+            .count()
+    }
+
+    fn count_text(&self, needle: &str) -> usize {
+        self.mails
+            .lock()
+            .expect("mails")
+            .iter()
+            .filter(|mail| mail.text().contains(needle))
+            .count()
+    }
+}
+
+impl Drop for ScriptedSmtp {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+async fn serve_scripted_smtp(
+    socket: tokio::net::TcpStream,
+    captured: Arc<Mutex<Vec<CapturedMail>>>,
+    rules: Arc<Mutex<std::collections::HashMap<String, RcptRule>>>,
+) -> Result<(), std::io::Error> {
+    let (reader, mut writer) = socket.into_split();
+    let mut reader = BufReader::new(reader);
+    writer.write_all(b"220 fvoci-test\r\n").await?;
+    let mut rcpt = String::new();
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            break;
+        }
+        let command = line.trim_end_matches(['\r', '\n']);
+        let upper = command.to_ascii_uppercase();
+        if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+            writer.write_all(b"250 fvoci\r\n").await?;
+        } else if upper.starts_with("RCPT TO:") {
+            let address = command
+                .split(':')
+                .nth(1)
+                .unwrap_or("")
+                .trim()
+                .trim_matches(|c| c == '<' || c == '>')
+                .to_string();
+            let reply = {
+                let mut rules = rules.lock().expect("rules");
+                match rules.get_mut(&address) {
+                    Some(rule) => match rule.times {
+                        None => Some(rule.reply),
+                        Some(0) => None,
+                        Some(ref mut left) => {
+                            *left -= 1;
+                            Some(rule.reply)
+                        }
+                    },
+                    None => None,
+                }
+            };
+            match reply {
+                Some(reply) => {
+                    writer.write_all(format!("{reply}\r\n").as_bytes()).await?;
+                }
+                None => {
+                    rcpt = address;
+                    writer.write_all(b"250 ok\r\n").await?;
+                }
+            }
+        } else if upper == "DATA" {
+            writer.write_all(b"354 go\r\n").await?;
+            let mut body = String::new();
+            loop {
+                let mut data_line = String::new();
+                reader.read_line(&mut data_line).await?;
+                if data_line == ".\r\n" || data_line == ".\n" {
+                    break;
+                }
+                body.push_str(&data_line);
+            }
+            captured.lock().expect("mails").push(CapturedMail {
+                to: rcpt.clone(),
+                data: body,
+            });
+            writer.write_all(b"250 ok\r\n").await?;
+        } else if upper == "QUIT" {
+            writer.write_all(b"221 bye\r\n").await?;
+            break;
+        } else {
+            writer.write_all(b"250 ok\r\n").await?;
+        }
+    }
+    Ok(())
+}
+
+/// Move the `mail` cursor past every event recorded so far, so a test's
+/// dispatcher only sees the events the test adds next.
+async fn start_mail_cursor_at_latest_event(admin: &PgPool) {
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.outbox_consumers (consumer, last_xact, last_seq)
+        SELECT 'mail', e.xact, e.seq
+        FROM fvoci.events AS e
+        ORDER BY e.xact DESC, e.seq DESC
+        LIMIT 1
+        ON CONFLICT (consumer) DO UPDATE
+        SET last_xact = EXCLUDED.last_xact, last_seq = EXCLUDED.last_seq
+        "#,
+    )
+    .execute(admin)
+    .await
+    .expect("mail cursor");
+}
+
+fn run_mail_dispatcher(
+    app_pool: PgPool,
+    mailer: Arc<Mailer>,
+    lease_ttl: Duration,
+) -> fvoci_server::outbox::OutboxDispatcherHandle {
+    fvoci_server::outbox::spawn_outbox_dispatcher(
+        fvoci_server::outbox::OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl,
+            batch_limit: 100,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app_pool,
+        vec![fvoci_server::mail::mail_consumer(mailer)],
+    )
+    .expect("dispatcher")
+}
+
+/// Wait until every event is processed by `mail` or dead-lettered, or the
+/// deadline passes (the caller's assertions then report what happened).
+async fn wait_mail_settled(app_pool: &PgPool, ids: &[Uuid], deadline: Duration) {
+    let until = std::time::Instant::now() + deadline;
+    loop {
+        let mut settled = true;
+        for id in ids {
+            let processed = is_processed(app_pool, "mail", *id).await.unwrap_or(false);
+            let dead = fvoci_server::db::outbox::fetch_failure_state(app_pool, "mail", *id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.dead_at.is_some());
+            if !processed && !dead {
+                settled = false;
+                break;
+            }
+        }
+        if settled || std::time::Instant::now() >= until {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn mail_failure_rows(admin: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM fvoci.outbox_failures WHERE consumer = 'mail'")
+        .fetch_one(admin)
+        .await
+        .expect("mail failure rows")
+}
+
+/// A comment on a project document that mentions three members. Returns the
+/// comment.created event id and the three recipient addresses in the order
+/// the mail consumer sends them (recipient user id order).
+async fn comment_event_for_three_recipients(
+    harness: &TestDb,
+    owner_id: Uuid,
+) -> (Uuid, Vec<String>) {
+    let admin = harness.admin().await;
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .expect("workspace");
+    let mut recipients: Vec<(Uuid, String)> = Vec::new();
+    for label in ["rcpt-a", "rcpt-b", "rcpt-c"] {
+        let user_id = Uuid::now_v7();
+        let email = format!("{label}@example.com");
+        sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, $3)")
+            .bind(user_id)
+            .bind(&email)
+            .bind(label)
+            .execute(&admin)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(&admin)
+        .await
+        .expect("insert membership");
+        recipients.push((user_id, email));
+    }
+    recipients.sort();
+    let project_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.projects (
+            id, workspace_id, key, name, visibility, status, next_number, created_by
+        ) VALUES ($1, $2, 'MAIL', 'MAIL', 'workspace', 'active', 1, $3)
+        "#,
+    )
+    .bind(project_id)
+    .bind(workspace_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .expect("insert project");
+    let document_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, parent_id, sort_key, project_id, number, status,
+            schema_version, content_json, created_by
+        ) VALUES (
+            $1, $2, 'Mail doc', $3, NULL, 'V', $4, 1, 'published', 2,
+            '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, $5
+        )
+        "#,
+    )
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(document_id.simple().to_string())
+    .bind(project_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .expect("insert document");
+    let comment_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fvoci.comments (id, workspace_id, document_id, created_by, body) VALUES ($1, $2, $3, $4, 'three-recipient comment')",
+    )
+    .bind(comment_id)
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .expect("insert comment");
+    start_mail_cursor_at_latest_event(&admin).await;
+
+    let event_id = Uuid::now_v7();
+    let mentioned: Vec<String> = recipients.iter().map(|(id, _)| id.to_string()).collect();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (
+            id, workspace_id, actor_user_id, verb, target_type, target_id, payload, channel
+        ) VALUES ($1, $2, $3, 'comment.created', 'comment', $4, $5, 'web')
+        "#,
+    )
+    .bind(event_id)
+    .bind(workspace_id)
+    .bind(owner_id)
+    .bind(comment_id)
+    .bind(json!({
+        "commentId": comment_id,
+        "documentId": document_id,
+        "mentionedUserIds": mentioned,
+    }))
+    .execute(&mut *tx)
+    .await
+    .expect("insert comment event");
+    tx.commit().await.expect("commit event");
+    admin.close().await;
+    (
+        event_id,
+        recipients.into_iter().map(|(_, email)| email).collect(),
+    )
+}
+
+/// A permanent 550 for one of three recipients is final for that recipient:
+/// the other two get one mail each and the event is processed, not retried.
+#[tokio::test]
+async fn permanent_rejection_of_one_recipient_does_not_resend_to_the_others() {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let sink = ScriptedSmtp::spawn(
+        Duration::ZERO,
+        vec![(
+            to[1].clone(),
+            RcptRule {
+                reply: "550 5.1.1 no such user",
+                times: None,
+            },
+        )],
+    )
+    .await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let counts: Vec<usize> = to.iter().map(|address| sink.count_to(address)).collect();
+    assert_eq!(counts, vec![1, 0, 1], "mails per recipient");
+    assert_eq!(sink.count_text("three-recipient comment"), 2);
+    assert!(is_processed(&app_pool, "mail", event_id).await.unwrap());
+    let admin = harness.admin().await;
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A transient 451 for the second of three recipients retries the event, but
+/// the retry does not send the first recipient's mail again.
+#[tokio::test]
+async fn transient_rejection_retry_does_not_resend_to_accepted_recipients() {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let sink = ScriptedSmtp::spawn(
+        Duration::ZERO,
+        vec![(
+            to[1].clone(),
+            RcptRule {
+                reply: "451 4.7.1 try again later",
+                times: Some(1),
+            },
+        )],
+    )
+    .await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let counts: Vec<usize> = to.iter().map(|address| sink.count_to(address)).collect();
+    assert_eq!(counts, vec![1, 1, 1], "mails per recipient");
+    assert_eq!(sink.count_text("three-recipient comment"), 3);
+    assert!(is_processed(&app_pool, "mail", event_id).await.unwrap());
+    let admin = harness.admin().await;
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// When every recipient is rejected (a relay-wide refusal looks like this),
+/// the event still fails and dead-letters where an operator can see it.
+#[tokio::test]
+async fn every_recipient_rejected_still_dead_letters_the_event() {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let rules = to
+        .iter()
+        .map(|address| {
+            (
+                address.clone(),
+                RcptRule {
+                    reply: "550 5.7.1 relaying denied",
+                    times: None,
+                },
+            )
+        })
+        .collect();
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, rules).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(!is_processed(&app_pool, "mail", event_id).await.unwrap());
+    let dead = fvoci_server::db::outbox::fetch_failure_state(&app_pool, "mail", event_id)
+        .await
+        .unwrap()
+        .expect("failure row");
+    assert!(dead.dead_at.is_some(), "{dead:?}");
+    for address in &to {
+        assert_eq!(sink.count_to(address), 0);
+    }
+    app_pool.close().await;
+    harness.cleanup().await;
+}
