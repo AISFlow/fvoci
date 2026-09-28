@@ -16,9 +16,12 @@ static UUID_KEY_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 const COPY_BUF: usize = 64 * 1024;
-/// Upper bound on a well-formed `{n}.etag` sidecar
-/// (`<64 hex> <u64> <u64> <i64>.<i64>`); anything longer is not trusted.
-const ETAG_SIDECAR_MAX_BYTES: u64 = 128;
+/// Length of the longest well-formed `{n}.etag` sidecar,
+/// `<64 hex> <u64> <u64> <i64>.<i64>`: 64 hex digits, three spaces and a dot,
+/// and four numbers of at most 20 characters each (`u64::MAX` and `i64::MIN`
+/// both print as 20), so 64 + 4 + 4 × 20 = 148 bytes. Anything longer is not
+/// trusted.
+const ETAG_SIDECAR_MAX_BYTES: u64 = 64 + 4 + 4 * 20;
 
 #[derive(Debug, Clone)]
 pub struct PartInfo {
@@ -1143,6 +1146,22 @@ mod tests {
             .unwrap();
         assert_eq!(size, 9);
         assert_eq!(storage.read_range(&key, 0, 8).await.unwrap(), b"payload-b");
+    }
+
+    #[test]
+    fn widest_sidecar_fits_the_size_cap() {
+        let widest = EtagSidecar {
+            etag: "f".repeat(64),
+            size_bytes: u64::MAX,
+            identity: PartIdentity {
+                ino: u64::MAX,
+                mtime_sec: i64::MIN,
+                mtime_nsec: i64::MIN,
+            },
+        };
+        let text = widest.encode();
+        assert_eq!(text.len() as u64, ETAG_SIDECAR_MAX_BYTES, "{text:?}");
+        assert_eq!(EtagSidecar::parse(&text), Some(widest));
     }
 
     #[tokio::test]
