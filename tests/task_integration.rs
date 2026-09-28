@@ -4823,6 +4823,45 @@ async fn task_stream_slow_reader_does_not_block_fast_reader() {
     harness.cleanup().await;
 }
 
+/// Wait (bounded, read-only) until every transaction started so far has ended,
+/// so committed events pass the stream's `xact < snapshot xmin` filter. xmin is
+/// cluster-wide; on timeout, report the oldest holders.
+async fn settle_committed_events(admin: &sqlx::PgPool) {
+    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(admin)
+        .await
+        .expect("current xid");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !sqlx::query_scalar::<_, bool>(
+        "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8",
+    )
+    .bind(&horizon)
+    .fetch_one(admin)
+    .await
+    .expect("snapshot xmin")
+    {
+        if Instant::now() >= deadline {
+            let xmin: String =
+                sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot())::text")
+                    .fetch_one(admin)
+                    .await
+                    .expect("snapshot xmin");
+            let holders: Vec<(Option<String>, i32, Option<String>, Option<String>)> =
+                sqlx::query_as(
+                    "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
+                     FROM pg_stat_activity \
+                     WHERE backend_xid IS NOT NULL OR backend_xmin IS NOT NULL \
+                     ORDER BY age(COALESCE(backend_xid, backend_xmin)) DESC LIMIT 5",
+                )
+                .fetch_all(admin)
+                .await
+                .expect("xmin holders");
+            panic!("events never settled: xmin {xmin} <= {horizon}; oldest holders {holders:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     let harness = TestDb::bootstrap().await;
@@ -4840,6 +4879,10 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let task_id = task["id"].as_str().unwrap();
+    // Precondition: the baseline cursor must sit past `task.created`. Both the
+    // cursor and poll read only settled events (xact < cluster-wide xmin), so
+    // an unsettled create would reappear in the poll below as a committed row.
+    settle_committed_events(&admin).await;
     let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
     let cursor = initial_cursor(&app_pool, workspace_id)
         .await
@@ -4870,9 +4913,11 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
         .expect("poll");
     assert!(
         pending.is_empty(),
-        "uncommitted event must not appear in poll snapshot"
+        "uncommitted event must not appear in poll snapshot \
+         (uncommitted {event_id}, cursor {cursor:?}): {pending:?}"
     );
     tx.commit().await.expect("commit");
+    settle_committed_events(&admin).await;
     let mut seen = false;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;

@@ -15,29 +15,53 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn drain_notifications(pool: &PgPool) {
-    // The relay reads only settled events (xact < snapshot xmin), and xmin is
-    // cluster-wide: a transaction in another test's database can hold it below
-    // an event this test just committed. Wait (bounded, read-only) until every
-    // transaction older than now has ended, then drain.
-    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-        .fetch_one(pool)
-        .await
-        .expect("current xid");
+/// Wait (bounded, read-only) until the cluster-wide snapshot xmin passes
+/// `horizon`, i.e. every transaction up to it has ended. A transaction in
+/// another test's database can hold xmin back; on timeout, report the holders.
+async fn wait_xmin_past(pool: &PgPool, horizon: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         let settled: bool =
             sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8")
-                .bind(&horizon)
+                .bind(horizon)
                 .fetch_one(pool)
                 .await
                 .expect("snapshot xmin");
         if settled {
-            break;
+            return;
         }
-        assert!(std::time::Instant::now() < deadline, "events never settled");
+        if std::time::Instant::now() >= deadline {
+            let xmin: String =
+                sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot())::text")
+                    .fetch_one(pool)
+                    .await
+                    .expect("snapshot xmin");
+            let holders: Vec<(Option<String>, i32, Option<String>, Option<String>)> =
+                sqlx::query_as(
+                    "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
+                     FROM pg_stat_activity \
+                     WHERE backend_xid IS NOT NULL OR backend_xmin IS NOT NULL \
+                     ORDER BY age(COALESCE(backend_xid, backend_xmin)) DESC LIMIT 5",
+                )
+                .fetch_all(pool)
+                .await
+                .expect("xmin holders");
+            panic!("events never settled: xmin {xmin} <= {horizon}; oldest holders {holders:?}");
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+}
+
+async fn drain_notifications(pool: &PgPool) {
+    // The relay reads only settled events (xact < snapshot xmin), and xmin is
+    // cluster-wide: a transaction in another test's database can hold it below
+    // an event this test just committed. Wait until every transaction older
+    // than now has ended, then drain.
+    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(pool)
+        .await
+        .expect("current xid");
+    wait_xmin_past(pool, &horizon).await;
     ensure_consumer(pool, NOTIFICATIONS_CONSUMER)
         .await
         .expect("ensure notifications consumer");
@@ -581,6 +605,10 @@ async fn upgrade_starts_notifications_after_existing_events() {
     .await
     .expect("historical event");
     tx.commit().await.expect("commit");
+    // Precondition: 018 records the newest settled event (xact < xmin). xmin is
+    // cluster-wide, so another test's open transaction can keep this event
+    // unsettled; wait until it is settled before upgrading.
+    wait_xmin_past(&admin, &last.0).await;
     admin.close().await;
 
     fvoci_server::db::migrate::run_migrations(&harness.admin_url)

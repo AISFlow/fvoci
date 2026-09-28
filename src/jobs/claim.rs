@@ -15,9 +15,9 @@ pub const JOB_KEY_UPLOADS: i32 = 8;
 pub const JOB_KEY_REVISIONS: i32 = 9;
 
 /// Session-level claim on a connection detached from the pool. The lock lives
-/// exactly as long as that session: release (or drop, or a cancelled claim
-/// attempt whose reply was lost) closes the connection, so a lock-holding
-/// connection is never returned to the pool. Costs one connection outside the
+/// at most as long as that session: release unlocks and closes it, and drop (or
+/// a cancelled claim attempt whose reply was lost) closes the connection, so a
+/// lock-holding connection is never returned to the pool. Costs one connection outside the
 /// app pool while a job runs (covered by the connection reserve).
 pub struct JobClaim {
     conn: Option<PgConnection>,
@@ -42,10 +42,31 @@ impl JobClaim {
         }))
     }
 
-    /// Ends the session, which releases the lock whether or not an explicit
-    /// unlock would have succeeded.
+    /// Unlocks, then ends the session. `close()` only sends Terminate; the
+    /// backend drops session locks when it exits, after `close()` returns, so a
+    /// caller that reclaims right away could still see the key held. The
+    /// acknowledged unlock makes the key free before this returns. If the unlock
+    /// fails (or this future is dropped mid-way) the connection is still closed
+    /// or dropped, never pooled, and the lock dies with the session.
     pub async fn release(mut self) {
-        if let Some(conn) = self.conn.take() {
+        if let Some(mut conn) = self.conn.take() {
+            let unlocked = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1, $2)")
+                .bind(JOB_LOCK_NAMESPACE)
+                .bind(self.key)
+                .fetch_one(&mut conn)
+                .await;
+            match unlocked {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    job_key = self.key,
+                    "maintenance claim was not held at release; closing its session"
+                ),
+                Err(err) => tracing::warn!(
+                    job_key = self.key,
+                    error = %err,
+                    "maintenance claim unlock failed; closing its session"
+                ),
+            }
             let _ = conn.close().await;
         }
     }
