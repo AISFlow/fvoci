@@ -15,12 +15,14 @@ use fvoci_server::db::pool;
 use fvoci_server::http::routes::streams::{
     reset_task_stream_task_hint_enqueue_count, task_stream_task_hint_enqueue_count,
 };
-use fvoci_server::streams::{initial_cursor, poll_task_events, StreamHub};
+use fvoci_server::streams::{
+    initial_cursor, poll_access_events, poll_task_events, EventCursor, EventPage, StreamHub,
+};
 use project_harness::{
     add_workspace_user, admin_pool, app_state, count_rows, create_project,
     drop_insert_fail_trigger, insert_minimal_project, insert_project_document,
-    install_insert_fail_trigger, json_request, setup_session, test_peer, wait_for_query_blocked_by,
-    wait_for_user_for_update_blocked, TestDb,
+    install_insert_fail_trigger, json_request, session_id_for_user, setup_session, test_peer,
+    wait_for_query_blocked_by, wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::json;
 use tokio::time::timeout;
@@ -4323,27 +4325,54 @@ async fn task_stream_notifies_other_viewer_on_task_meta_date_and_status_patch() 
     harness.cleanup().await;
 }
 
-/// Poll until at least `min_updates` `task.updated` rows are visible. The cursor
-/// is itself xmin-bounded, so an earlier `task.created` may still land in the
-/// window; counting every row would stop before a later update settles.
-async fn poll_task_updates_until(
+/// The credential a direct poll checks, as the stream producer does.
+#[derive(Clone, Copy)]
+struct StreamCredential {
+    user_id: Uuid,
+    session_id: Uuid,
+}
+
+async fn stream_credential(admin: &sqlx::PgPool, user_id: Uuid) -> StreamCredential {
+    StreamCredential {
+        user_id,
+        session_id: session_id_for_user(admin, user_id).await,
+    }
+}
+
+/// One producer poll with a live credential.
+async fn poll_task_page(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     project_id: Uuid,
-    cursor: &fvoci_server::streams::EventCursor,
-    min_updates: usize,
+    credential: StreamCredential,
+    cursor: &EventCursor,
+    limit: i32,
+) -> EventPage {
+    poll_task_events(
+        pool,
+        workspace_id,
+        project_id,
+        credential.user_id,
+        credential.session_id,
+        cursor,
+        limit,
+    )
+    .await
+    .expect("poll")
+    .expect("live credential")
+}
+
+async fn poll_task_rows(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    credential: StreamCredential,
+    cursor: &EventCursor,
+    limit: i32,
 ) -> Vec<fvoci_server::streams::StreamEventRow> {
-    let mut rows = Vec::new();
-    for _ in 0..30 {
-        rows = poll_task_events(pool, workspace_id, project_id, cursor, 100)
-            .await
-            .expect("poll");
-        if rows.iter().filter(|r| r.verb == "task.updated").count() >= min_updates {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    rows
+    poll_task_page(pool, workspace_id, project_id, credential, cursor, limit)
+        .await
+        .rows
 }
 
 #[tokio::test]
@@ -4375,9 +4404,7 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
         .0
         .clone();
     let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
-    let cursor = initial_cursor(&app_pool, workspace_id)
-        .await
-        .expect("cursor");
+    let cursor = initial_cursor(&app_pool).await.expect("cursor");
     let events_before = count_rows(&admin, "events").await;
 
     // Denied, conflicting and no-op patches must not manufacture events.
@@ -4450,7 +4477,20 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let rows = poll_task_updates_until(&app_pool, workspace_id, project_a_id, &cursor, 4).await;
+    // Wait for the updates to pass the xmin gate, then poll once. The cursor is
+    // itself xmin-bounded, so `task.created` can land in the window when another
+    // test pinned xmin as it was taken: count updates only.
+    settle_committed_events(&admin).await;
+    let credential = stream_credential(&admin, owner_id).await;
+    let rows = poll_task_rows(
+        &app_pool,
+        workspace_id,
+        project_a_id,
+        credential,
+        &cursor,
+        100,
+    )
+    .await;
     let updates: Vec<&serde_json::Value> = rows
         .iter()
         .filter(|r| r.verb == "task.updated")
@@ -4468,9 +4508,8 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
     assert_eq!(updates[3]["from"], next_status);
     assert_eq!(updates[3]["to"], current_status);
 
-    let foreign = poll_task_events(&app_pool, workspace_id, project_b, &cursor, 100)
-        .await
-        .expect("poll other project");
+    let foreign =
+        poll_task_rows(&app_pool, workspace_id, project_b, credential, &cursor, 100).await;
     assert!(foreign.is_empty(), "{foreign:?}");
 
     app_pool.close().await;
@@ -4480,8 +4519,8 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
 
 #[tokio::test]
 async fn task_update_poll_waits_for_update_held_behind_xmin() {
-    // Regression for the CI snapshot `task.created` + three updates while the
-    // move event was still above the cluster-wide xmin.
+    // An update committed above the cluster-wide xmin stays hidden until xmin
+    // passes it (CI once saw `task.created` + three updates at that point).
     let harness = TestDb::bootstrap().await;
     let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
@@ -4515,24 +4554,9 @@ async fn task_update_poll_waits_for_update_held_behind_xmin() {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
-    // Settle everything committed so far (bounded, read-only), then hold an
-    // xid so the move commits above xmin until the hold ends.
-    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-        .fetch_one(&admin)
-        .await
-        .expect("current xid");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !sqlx::query_scalar::<_, bool>(
-        "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8",
-    )
-    .bind(&horizon)
-    .fetch_one(&admin)
-    .await
-    .expect("snapshot xmin")
-    {
-        assert!(Instant::now() < deadline, "events never settled");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // Settle everything committed so far, then hold an xid so the move
+    // commits above xmin until the hold ends.
+    settle_committed_events(&admin).await;
     let mut hold = admin.begin().await.expect("hold tx");
     sqlx::query("SELECT pg_current_xact_id()")
         .execute(&mut *hold)
@@ -4550,9 +4574,16 @@ async fn task_update_poll_waits_for_update_held_behind_xmin() {
 
     let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
     let cursor = fvoci_server::streams::EventCursor::default();
-    let pending = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 100)
-        .await
-        .expect("poll");
+    let credential = stream_credential(&admin, owner_id).await;
+    let pending = poll_task_rows(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &cursor,
+        100,
+    )
+    .await;
     let verbs: Vec<&str> = pending.iter().map(|r| r.verb.as_str()).collect();
     assert_eq!(
         verbs,
@@ -4565,14 +4596,17 @@ async fn task_update_poll_waits_for_update_held_behind_xmin() {
         "move must stay hidden while the hold is open: {pending:?}"
     );
 
-    let release = async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        hold.commit().await.expect("release hold");
-    };
-    let (rows, ()) = tokio::join!(
-        poll_task_updates_until(&app_pool, workspace_id, project_id, &cursor, 4),
-        release
-    );
+    hold.commit().await.expect("release hold");
+    settle_committed_events(&admin).await;
+    let rows = poll_task_rows(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &cursor,
+        100,
+    )
+    .await;
     let updates: Vec<&serde_json::Value> = rows
         .iter()
         .filter(|r| r.verb == "task.updated")
@@ -4887,9 +4921,7 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     // an unsettled create would reappear in the poll below as a committed row.
     settle_committed_events(&admin).await;
     let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
-    let cursor = initial_cursor(&app_pool, workspace_id)
-        .await
-        .expect("cursor");
+    let cursor = initial_cursor(&app_pool).await.expect("cursor");
     let mut tx = admin.begin().await.expect("tx");
     sqlx::query("SELECT set_config('fvoci.workspace_id', $1::text, true)")
         .bind(workspace_id)
@@ -4911,9 +4943,9 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     .execute(&mut *tx)
     .await
     .expect("insert uncommitted");
-    let pending = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 10)
-        .await
-        .expect("poll");
+    let credential = stream_credential(&admin, owner_id).await;
+    let pending =
+        poll_task_rows(&app_pool, workspace_id, project_id, credential, &cursor, 10).await;
     assert!(
         pending.is_empty(),
         "uncommitted event must not appear in poll snapshot \
@@ -4924,15 +4956,249 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     let mut seen = false;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let rows = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 10)
-            .await
-            .expect("poll");
+        let rows =
+            poll_task_rows(&app_pool, workspace_id, project_id, credential, &cursor, 10).await;
         if rows.iter().any(|r| r.verb == "task.updated") {
             seen = true;
             break;
         }
     }
     assert!(seen, "committed event should become visible to poll");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+fn cursor_of(row: &fvoci_server::streams::StreamEventRow) -> EventCursor {
+    EventCursor {
+        xact: row.xact.clone(),
+        seq: row.seq,
+    }
+}
+
+/// Workspace events after `cursor`, as the admin sees them.
+async fn events_after(admin: &sqlx::PgPool, workspace_id: Uuid, cursor: &EventCursor) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.events WHERE workspace_id = $1 AND (xact, seq) > ($2::xid8, $3)",
+    )
+    .bind(workspace_id)
+    .bind(&cursor.xact)
+    .bind(cursor.seq)
+    .fetch_one(admin)
+    .await
+    .expect("count events")
+}
+
+/// Inserts `count` events in one committed transaction: `task.created` rows
+/// of `task_project`, or, with `None`, collab updates that no stream matches.
+async fn insert_workspace_events(
+    admin: &sqlx::PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    count: i32,
+    task_project: Option<Uuid>,
+) {
+    let (verb, target_type) = match task_project {
+        Some(_) => ("task.created", "task"),
+        None => ("document.collab_update_appended", "document"),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        SELECT gen_random_uuid(), $1, $2, $3, gen_random_uuid(), $4,
+               CASE WHEN $6::uuid IS NULL THEN '{}'::jsonb
+                    ELSE jsonb_build_object('taskId', gen_random_uuid()::text, 'projectId', $6::text)
+               END,
+               'web'
+        FROM generate_series(1, $5)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(verb)
+    .bind(target_type)
+    .bind(actor_user_id)
+    .bind(count)
+    .bind(task_project)
+    .execute(admin)
+    .await
+    .expect("insert events");
+}
+
+/// `next` may jump to the settled horizon but never past an event whose
+/// transaction is still open: polling from it after the commit returns it.
+#[tokio::test]
+async fn task_stream_next_cursor_keeps_an_in_flight_event() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "SAF", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    settle_committed_events(&admin).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let credential = stream_credential(&admin, owner_id).await;
+    let start = initial_cursor(&app_pool).await.expect("cursor");
+    let task_id = Uuid::now_v7().to_string();
+    let mut tx = admin.begin().await.expect("tx");
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        VALUES ($1, $2, 'task.updated', 'task', gen_random_uuid(), $3, $4::jsonb, 'web')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(owner_id)
+    .bind(json!({"taskId": task_id, "projectId": project_id.to_string()}))
+    .execute(&mut *tx)
+    .await
+    .expect("insert uncommitted");
+    let in_flight: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("event xid");
+    // A later transaction commits while the event's is still open, so the
+    // newest completed xid is past the open one.
+    sqlx::query("SELECT pg_current_xact_id()")
+        .execute(&admin)
+        .await
+        .expect("later xid");
+    let held = poll_task_page(&app_pool, workspace_id, project_id, credential, &start, 10).await;
+    assert!(held.rows.is_empty(), "{:?}", held.rows);
+    assert!(
+        held.next.xact.parse::<u64>().expect("xid8") <= in_flight.parse::<u64>().expect("xid8"),
+        "next {:?} passed the open transaction {in_flight}",
+        held.next
+    );
+    tx.commit().await.expect("commit");
+    settle_committed_events(&admin).await;
+    let page = poll_task_page(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &held.next,
+        10,
+    )
+    .await;
+    assert!(
+        page.rows.iter().any(|row| row.payload["taskId"] == task_id),
+        "event committed after the poll must follow its next cursor {:?}: {:?}",
+        held.next,
+        page.rows
+    );
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Polls that match nothing still advance, so no poll rescans events it has
+/// already passed (the access stream matches almost nothing).
+#[tokio::test]
+async fn stream_polls_advance_past_non_matching_events() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "PRG", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    settle_committed_events(&admin).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let credential = stream_credential(&admin, owner_id).await;
+    let start = initial_cursor(&app_pool).await.expect("cursor");
+    insert_workspace_events(&admin, workspace_id, owner_id, 2_000, None).await;
+    settle_committed_events(&admin).await;
+    assert_eq!(events_after(&admin, workspace_id, &start).await, 2_000);
+
+    let page = poll_task_page(&app_pool, workspace_id, project_id, credential, &start, 50).await;
+    assert!(page.rows.is_empty(), "{:?}", page.rows);
+    assert_eq!(
+        events_after(&admin, workspace_id, &page.next).await,
+        0,
+        "task stream next cursor {:?}",
+        page.next
+    );
+    let next = poll_access_events(
+        &app_pool,
+        workspace_id,
+        credential.user_id,
+        credential.session_id,
+        &start,
+    )
+    .await
+    .expect("access poll")
+    .expect("still a member");
+    assert_eq!(
+        events_after(&admin, workspace_id, &next).await,
+        0,
+        "access stream next cursor {next:?}"
+    );
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// A full page continues from its last row, so a burst larger than the
+/// limit is read in order across polls. The limit is clamped to 100: a
+/// larger request must not jump past the rows it did not return.
+#[tokio::test]
+async fn task_stream_full_page_continues_from_its_last_row() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LIM", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    settle_committed_events(&admin).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let credential = stream_credential(&admin, owner_id).await;
+    let start = initial_cursor(&app_pool).await.expect("cursor");
+    insert_workspace_events(&admin, workspace_id, owner_id, 25, Some(project_id)).await;
+    settle_committed_events(&admin).await;
+
+    let mut cursor = start;
+    let mut seen = Vec::new();
+    for expected in [10, 10, 5] {
+        let page =
+            poll_task_page(&app_pool, workspace_id, project_id, credential, &cursor, 10).await;
+        assert_eq!(page.rows.len(), expected, "{:?}", page.rows);
+        if expected == 10 {
+            assert_eq!(
+                page.next,
+                cursor_of(&page.rows[9]),
+                "a full page ends at its 10th row"
+            );
+        }
+        seen.extend(page.rows.iter().map(cursor_of));
+        cursor = page.next;
+    }
+    assert_eq!(events_after(&admin, workspace_id, &cursor).await, 0);
+    let order: Vec<(u64, i64)> = seen
+        .iter()
+        .map(|c| (c.xact.parse().expect("xid8"), c.seq))
+        .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+
+    insert_workspace_events(&admin, workspace_id, owner_id, 105, Some(project_id)).await;
+    settle_committed_events(&admin).await;
+    let clamped = poll_task_page(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &cursor,
+        1_000,
+    )
+    .await;
+    assert_eq!(clamped.rows.len(), 100);
+    assert_eq!(clamped.next, cursor_of(&clamped.rows[99]));
+    let rest = poll_task_page(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &clamped.next,
+        1_000,
+    )
+    .await;
+    assert_eq!(rest.rows.len(), 5);
+    app_pool.close().await;
     admin.close().await;
     harness.cleanup().await;
 }
@@ -5020,6 +5286,253 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
         "enqueue-before-revoke hints must not reach the response body after authorization loss"
     );
     let _ = owner_id;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Opens an SSE stream with one credential header and returns once the server
+/// answered: `Some(reader)` for an admitted stream, where `reader` finishes when
+/// the server ends the body; `None` for any other status.
+async fn sse_admit(
+    app: axum::Router,
+    path: &str,
+    credential: (&str, String),
+) -> Option<tokio::task::JoinHandle<()>> {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(credential.0, credential.1)
+        .header("origin", "http://localhost")
+        .body(Body::empty())
+        .expect("request");
+    request.extensions_mut().insert(ConnectInfo(test_peer()));
+    let response = app.oneshot(request).await.expect("sse response");
+    if response.status() != StatusCode::OK {
+        return None;
+    }
+    let mut body = response.into_body().into_data_stream();
+    Some(tokio::spawn(
+        async move { while body.next().await.is_some() {} },
+    ))
+}
+
+fn session_cookie_header(cookie: &str) -> (&'static str, String) {
+    ("cookie", format!("fvoci_session={cookie}"))
+}
+
+/// Inserts a committed `task.created` event for `project_id` as the admin
+/// (no project lock), the shape `record_task_event_and_audit` writes.
+async fn insert_task_created_event(
+    admin: &sqlx::PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+) -> Uuid {
+    let task_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        VALUES ($1, $2, 'task.created', 'task', $3, $4, $5::jsonb, 'web')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(actor_user_id)
+    .bind(json!({"taskId": task_id.to_string(), "projectId": project_id.to_string()}))
+    .execute(admin)
+    .await
+    .expect("insert task event");
+    task_id
+}
+
+/// Stream admission and per-hint delivery read the project without a row
+/// lock, so a writer holding the project row (here: every row, since any row
+/// lock needs ROW SHARE and EXCLUSIVE refuses it) cannot stall them. The table
+/// lock takes no xid, so the inserted event still settles past the xmin gate.
+#[tokio::test]
+async fn task_stream_admits_and_delivers_while_project_rows_are_locked() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "NRL", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    let mut hold = admin.begin().await.expect("hold tx");
+    sqlx::query("LOCK TABLE fvoci.projects IN EXCLUSIVE MODE")
+        .execute(&mut *hold)
+        .await
+        .expect("lock projects");
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let (open_tx, open_rx) = tokio::sync::oneshot::channel();
+    let listener = tokio::spawn(sse_listen(
+        app.clone(),
+        path,
+        cookie.clone(),
+        Some(b"event: open".to_vec()),
+        Some(open_tx),
+        Some(b"event: task".to_vec()),
+        Duration::from_secs(20),
+    ));
+    assert!(
+        timeout(Duration::from_secs(5), open_rx)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .is_some(),
+        "stream admission and the open frame must not wait for a project row lock"
+    );
+    let task_id = insert_task_created_event(&admin, workspace_id, project_id, owner_id).await;
+    assert!(
+        listener.await.expect("listener"),
+        "hint for {task_id} must be delivered while the project rows are locked"
+    );
+    hold.rollback().await.expect("release");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_access_stream_closes_when_workspace_trashed() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "trash-member").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let reader = sse_admit(app.clone(), &path, session_cookie_header(&member.cookie))
+        .await
+        .expect("member admitted to the access stream");
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{workspace_id}"),
+        Some(json!({"confirmSlug": "acme"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "a member's access stream must end once the workspace is trashed"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_access_stream_closes_when_member_role_changed() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "role-member").await;
+    let bystander = add_workspace_user(&admin, workspace_id, "member", "role-bystander").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let reader = sse_admit(app.clone(), &path, session_cookie_header(&member.cookie))
+        .await
+        .expect("member admitted to the access stream");
+    let bystander_reader = sse_admit(app.clone(), &path, session_cookie_header(&bystander.cookie))
+        .await
+        .expect("bystander admitted to the access stream");
+    let (status, body) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/members/{}",
+            member.user_id
+        ),
+        Some(json!({"role": "admin"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "the member's access stream must end after its role changed"
+    );
+    assert!(
+        !bystander_reader.is_finished(),
+        "another member's role change must not end this member's stream"
+    );
+    bystander_reader.abort();
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_access_stream_closes_when_user_suspended() {
+    let harness = TestDb::bootstrap().await;
+    let (app, admin_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "suspend-member").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let reader = sse_admit(app.clone(), &path, session_cookie_header(&member.cookie))
+        .await
+        .expect("member admitted to the access stream");
+    let (status, body) = json_request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/admin/users",
+        Some(json!({"userId": member.user_id, "suspended": true})),
+        Some(&admin_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "a suspended user's access stream must end"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// api_tokens has RLS: the per-tick credential check must run under the
+/// workspace tenant or a live token reads as dead (and a dead one as live).
+#[tokio::test]
+async fn task_stream_with_bearer_token_closes_when_token_deleted() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "BTK", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "stream", "scopes": ["tasks.read"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{token}");
+    let secret = token["token"].as_str().expect("secret").to_string();
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let reader = sse_admit(
+        app.clone(),
+        &path,
+        ("authorization", format!("Bearer {secret}")),
+    )
+    .await
+    .expect("bearer admitted to the task stream");
+    // A live token keeps the stream open across several ticks.
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    assert!(
+        !reader.is_finished(),
+        "a live token's stream must stay open"
+    );
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/api-tokens/{}",
+            token["id"].as_str().unwrap()
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "the stream must end once its bearer token is deleted"
+    );
     admin.close().await;
     harness.cleanup().await;
 }
