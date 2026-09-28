@@ -12,6 +12,8 @@ COPY migrations ./migrations
 COPY src ./src
 # `fvoci-migrate --init-env` renders this template (include_str!).
 COPY infra/rust/.env.example ./infra/rust/.env.example
+# `/api/docs/json` embeds the committed OpenAPI export (include_str!).
+COPY apps/web/openapi.json ./apps/web/openapi.json
 COPY scripts ./scripts
 COPY crates/collab-engine ./crates/collab-engine
 COPY crates/document-extract ./crates/document-extract
