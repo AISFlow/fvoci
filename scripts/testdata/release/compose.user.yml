@@ -33,8 +33,7 @@ x-own-secret: &own-secret |
       echo "fvoci: $$file is missing but $$data holds data; restore its volume from the backup taken with that data" >&2
       exit 1
     fi
-    umask 077
-    head -c 32 /dev/urandom | od -An -tx1 -v | tr -d ' \n' >"$$file.tmp"
+    (umask 077; head -c 32 /dev/urandom | od -An -tx1 -v | tr -d ' \n' >"$$file.tmp")
     chown "$$owner:1001" "$$file.tmp"
     chmod 0640 "$$file.tmp"
     sync

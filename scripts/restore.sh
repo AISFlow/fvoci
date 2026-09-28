@@ -147,7 +147,7 @@ SECRETS_TAR="$INPUT/server-secrets.tar"
 if [[ -n "$SECRETS_KEY" ]]; then
   [[ -z "$ENV_FILE" ]] || { echo "the standalone compose takes its keys from the backup; omit --env-file" >&2; exit 1; }
   [[ -s "$SECRETS_TAR" ]] || { echo "backup has no server-secrets.tar (taken from an env-file install?)" >&2; exit 1; }
-  tar -tf "$SECRETS_TAR" | grep -qx './.fvoci-install-complete' || { echo "server-secrets.tar is incomplete" >&2; exit 1; }
+  grep -qx './.fvoci-install-complete' <<<"$(tar -tf "$SECRETS_TAR")" || { echo "server-secrets.tar is incomplete" >&2; exit 1; }
 elif [[ -z "$ENV_FILE" ]]; then
   echo "--env-file is required for this compose file" >&2
   exit 1

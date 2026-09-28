@@ -264,7 +264,7 @@ if [[ -n "$SECRETS_VOL" ]]; then
     "$TAR_IMAGE" \
     --numeric-owner -cf - -C /v . >"$STAGING/server-secrets.tar"
   chmod 600 "$STAGING/server-secrets.tar"
-  tar -tf "$STAGING/server-secrets.tar" | grep -qx './.fvoci-install-complete' || {
+  grep -qx './.fvoci-install-complete' <<<"$(tar -tf "$STAGING/server-secrets.tar")" || {
     echo "server keys volume $SECRETS_VOL is incomplete (no install marker)" >&2
     exit 1
   }

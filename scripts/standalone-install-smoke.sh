@@ -74,6 +74,9 @@ secret_manifest() {
     [ -e "$f" ] || continue
     printf "%s %s %s\n" "$(stat -c "%a %u:%g" "$f")" "$(sha256sum "$f" | cut -c1-64)" "$f"; done'
 }
+# A service's log text (captured first: grep -q closing the pipe would fail
+# `docker compose logs` under pipefail).
+logs() { docker compose logs --no-color "$1" 2>&1; }
 service_state() {
   local cid
   cid="$(docker compose ps -a -q "$1")"
@@ -121,9 +124,9 @@ docker compose config --services | sort | tr '\n' ' '; echo
 [[ "$(docker compose config --services | sort | tr '\n' ' ')" == "fvoci init meilisearch postgres " ]] \
   || fail "unexpected services"
 [[ "$(service_state init)" == "exited 0 "* ]] || fail "init: $(service_state init)"
-docker compose logs --no-color init | grep -q "generated server keys" || fail "init did not generate the server keys"
-docker compose logs --no-color postgres | grep -q "fvoci: generated /run/fvoci/secrets/postgres_password" || fail "postgres did not generate"
-docker compose logs --no-color meilisearch | grep -q "fvoci: generated /run/fvoci/secrets/master_key" || fail "meilisearch did not generate"
+grep -q "generated server keys" <<<"$(logs init)" || fail "init did not generate the server keys"
+grep -q "fvoci: generated /run/fvoci/secrets/postgres_password" <<<"$(logs postgres)" || fail "postgres did not generate"
+grep -q "fvoci: generated /run/fvoci/secrets/master_key" <<<"$(logs meilisearch)" || fail "meilisearch did not generate"
 echo "postgres, meilisearch and init generated their secrets; init exited 0"
 
 step "published ports"
@@ -204,7 +207,7 @@ echo "setup + login + document create + search + web root: ok"
 step "second up -d leaves secrets byte-identical"
 docker compose up -d
 wait_healthy
-docker compose logs --no-color init | grep -q "server keys present in /run/fvoci/install/server; kept" \
+grep -q "server keys present in /run/fvoci/install/server; kept" <<<"$(logs init)" \
   || fail "init did not keep the server keys"
 [[ "$(secret_manifest)" == "$MANIFEST1" ]] || fail "secret files changed on second up"
 echo "secret manifest identical after second up: ok"
@@ -231,7 +234,7 @@ echo "checked ${#SECRETS[@]} secret values against $(wc -l <<<"$LOGS") log lines
 step "scripts/backup.sh + restore.sh (no env file): the restored install keeps its keys"
 bash "$ROOT/scripts/backup.sh" --project "$COMPOSE_PROJECT_NAME" --compose-file "$WORK/compose.yml" \
   --output "$WORK/backup" | tee "$WORK/backup.json"
-jq -e '.serverKeysArchived == true' "$WORK/backup.json" >/dev/null || fail "backup did not archive the server keys"
+tail -n1 "$WORK/backup.json" | jq -e '.serverKeysArchived == true' >/dev/null || fail "backup did not archive the server keys"
 stat -c '%A %n' "$WORK/backup"/*
 docker compose down
 RESTORED="${COMPOSE_PROJECT_NAME}-restored"
@@ -269,7 +272,7 @@ docker compose exec -T postgres psql -X -q -U fvoci_owner -d postgres \
 docker compose down
 up_fails "init failed"
 [[ "$(service_state init)" == "exited 1 "* ]] || fail "init: $(service_state init)"
-docker compose logs --no-color init | grep -E 'read-only transaction' | tail -1 | cut -c1-200
+grep -E 'read-only transaction' <<<"$(logs init)" | tail -1 | cut -c1-200
 never_started fvoci || fail "fvoci started although init failed: $(service_state fvoci)"
 docker compose exec -T postgres psql -X -q -U fvoci_owner -d postgres \
   -c 'ALTER DATABASE fvoci RESET default_transaction_read_only'
@@ -290,16 +293,16 @@ for v in server_secrets postgres_secrets meili_secrets; do
   case "$v" in
     server_secrets)
       [[ "$(service_state init)" == "exited 1 "* ]] || fail "init: $(service_state init)"
-      docker compose logs --no-color init | grep -o 'refusing to generate new server keys: [^(]*(role [a-z_]*)' | tail -1
+      grep -o 'refusing to generate new server keys: [^(]*(role [a-z_]*)' <<<"$(logs init)" | tail -1
       ;;
     postgres_secrets)
-      docker compose logs --no-color postgres | grep -q 'postgres_password is missing but /var/lib/postgresql holds data' \
+      grep -q 'postgres_password is missing but /var/lib/postgresql holds data' <<<"$(logs postgres)" \
         || fail "postgres did not refuse"
       never_started init || fail "init started without the owner password"
       echo "postgres refused: postgres_password missing while /var/lib/postgresql holds data"
       ;;
     meili_secrets)
-      docker compose logs --no-color meilisearch | grep -q 'master_key is missing but /meili_data holds data' \
+      grep -q 'master_key is missing but /meili_data holds data' <<<"$(logs meilisearch)" \
         || fail "meilisearch did not refuse"
       never_started init || fail "init started without the master key"
       echo "meilisearch refused: master_key missing while /meili_data holds data"
@@ -332,13 +335,13 @@ wait "$P1"; S1=$?
 wait "$P2"; S2=$?
 set -e
 echo "concurrent up -d exit codes: $S1 $S2"
-tail -2 "$WORK/race1.log" "$WORK/race2.log"
+tail -n 3 "$WORK/race1.log" "$WORK/race2.log"
 export COMPOSE_PROJECT_NAME="$FRESH"
 docker compose up -d
 wait_healthy
 RACE_MANIFEST="$(secret_manifest)"
 [[ "$(wc -l <<<"$RACE_MANIFEST")" == 10 ]] || fail "race left an incomplete secret set"
-[[ "$(docker compose logs --no-color init | grep -c 'generated server keys')" -le 1 ]] || fail "server keys generated twice"
+[[ "$(grep -c 'generated server keys' <<<"$(logs init)")" -le 1 ]] || fail "server keys generated twice"
 curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" \
   -X POST "$BASE/api/v1/setup" \
   -d '{"email":"owner@standalone.test","password":"standalonepass1","givenName":"Owner","workspaceSlug":"race","workspaceName":"Race"}' >/dev/null
@@ -348,5 +351,26 @@ docker compose up -d
 wait_healthy
 [[ "$(secret_manifest)" == "$RACE_MANIFEST" ]] || fail "secrets changed after the race install"
 echo "double up -d: one key set, setup + login, stable on re-up: ok"
+
+step "two init runs at once on a fresh database: one generates, both succeed"
+docker compose down -v
+INIT_RACE="${FRESH}-init"
+PROJECTS+=("$INIT_RACE")
+export COMPOSE_PROJECT_NAME="$INIT_RACE"
+docker compose up -d --wait postgres meilisearch
+set +e
+docker compose run --rm -T init >"$WORK/init1.log" 2>&1 &
+P1=$!
+docker compose run --rm -T init >"$WORK/init2.log" 2>&1 &
+P2=$!
+wait "$P1"; S1=$?
+wait "$P2"; S2=$?
+set -e
+grep -h 'server keys' "$WORK/init1.log" "$WORK/init2.log"
+(( S1 == 0 && S2 == 0 )) || fail "concurrent init runs exited $S1 $S2"
+[[ "$(cat "$WORK/init1.log" "$WORK/init2.log" | grep -c '^generated server keys')" == 1 ]] || fail "server keys not generated exactly once"
+[[ "$(cat "$WORK/init1.log" "$WORK/init2.log" | grep -c '^server keys present')" == 1 ]] || fail "second init did not keep the keys"
+[[ "$(secret_manifest | wc -l)" == 10 ]] || fail "concurrent init left an incomplete secret set"
+echo "concurrent init: exits $S1 $S2, keys generated once and kept by the other run: ok"
 
 step "standalone install smoke passed"
