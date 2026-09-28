@@ -32,6 +32,10 @@ pub const OPENAPI_JSON: &str = include_str!(concat!(
 pub const SWAGGER_UI_VERSION: &str = "5.33.0";
 pub const SWAGGER_UI_BUNDLE: &[u8] = include_bytes!("../api_docs_assets/swagger-ui-bundle.js");
 pub const SWAGGER_UI_CSS: &[u8] = include_bytes!("../api_docs_assets/swagger-ui.css");
+/// Third-party notices the bundle's `/*! For license information … */` banner
+/// points at (relative to the bundle URL).
+pub const SWAGGER_UI_BUNDLE_LICENSE: &[u8] =
+    include_bytes!("../api_docs_assets/swagger-ui-bundle.js.LICENSE.txt");
 
 /// The asset URLs carry the vendored version, so a year-long private cache
 /// never pins an old bundle after an upgrade.
@@ -43,6 +47,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/docs/json", get(get_json))
         .route("/api/docs/static/swagger-ui-bundle.js", get(get_bundle))
         .route("/api/docs/static/swagger-ui.css", get(get_css))
+        .route(
+            "/api/docs/static/swagger-ui-bundle.js.LICENSE.txt",
+            get(get_bundle_license),
+        )
 }
 
 async fn require_session(
@@ -151,6 +159,18 @@ async fn get_css(
     Ok(asset("text/css; charset=utf-8", SWAGGER_UI_CSS))
 }
 
+async fn get_bundle_license(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Response, AppError> {
+    require_session(&state, &headers, &jar).await?;
+    Ok(asset(
+        "text/plain; charset=utf-8",
+        SWAGGER_UI_BUNDLE_LICENSE,
+    ))
+}
+
 fn asset(content_type: &'static str, body: &'static [u8]) -> Response {
     (
         [
@@ -177,6 +197,10 @@ mod tests {
         assert_eq!(
             hex::encode(Sha256::digest(SWAGGER_UI_CSS)),
             "1ac324f7dcd27e4b9386b4bd6421271ec147e922a22c05ba24b11515e9aa6321"
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(SWAGGER_UI_BUNDLE_LICENSE)),
+            "63818894e4b04cd0e3180d9cb20761e227a939121e7484f8e1d528227c756f89"
         );
     }
 

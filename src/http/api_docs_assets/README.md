@@ -21,6 +21,6 @@ reports installs.
 | `LICENSE` | 11358 | `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30` |
 | `NOTICE` | 55 | `0d20d1adef18aee3f40dd258172155521ce702ac445cb5f7b7d60ed32dad2fb2` |
 
-The two served files are pinned by a unit test (`api_docs::tests`). To upgrade,
+The three served files are pinned by a unit test (`api_docs::tests`). To upgrade,
 replace every file from the new tarball, verify its integrity against the
 registry, and update this table, the test hashes and `SWAGGER_UI_VERSION`.

@@ -42,7 +42,7 @@ const PUBLIC_CACHE_CONTROL: &str = "public, max-age=60";
 /// Source `SECURITY_TXT_EXPIRES_MS` / RFC 9116 §2.5.5: regenerated per request.
 const SECURITY_TXT_EXPIRES_DAYS: i64 = 365;
 /// Source `publicText` helper (`server.ts`), shared by `/robots.txt`.
-const SECURITY_TXT_CACHE_CONTROL: &str = "public, max-age=3600";
+const PUBLIC_TEXT_CACHE_CONTROL: &str = "public, max-age=3600";
 
 /// Source `ROBOTS_TXT` (`server.ts`); `humanPaths.legalDir` is `/legal/`
 /// (`packages/contracts/src/human-paths.ts`). `/s/` is deliberately absent:
@@ -93,7 +93,7 @@ async fn get_robots_txt() -> Response {
     (
         [
             (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
-            (header::CACHE_CONTROL, SECURITY_TXT_CACHE_CONTROL),
+            (header::CACHE_CONTROL, PUBLIC_TEXT_CACHE_CONTROL),
         ],
         ROBOTS_TXT,
     )
@@ -118,7 +118,7 @@ async fn get_security_txt(State(state): State<AppState>) -> Result<Response, App
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
-            (header::CACHE_CONTROL, SECURITY_TXT_CACHE_CONTROL),
+            (header::CACHE_CONTROL, PUBLIC_TEXT_CACHE_CONTROL),
         ],
         body,
     )

@@ -520,7 +520,7 @@ async fn robots_txt_is_the_source_policy_with_public_text_headers() {
 
 /// Source `apiDocs` guard `access: { auth: "session" }`: no cookie and no
 /// bearer is 401 `authentication_required` as problem JSON on every docs path
-/// (page, JSON, both assets), with the global CSP rather than the page's
+/// (page, JSON, every asset), with the global CSP rather than the page's
 /// nonce policy, and nothing of the page or spec leaks.
 #[tokio::test]
 async fn api_docs_require_a_session() {
@@ -534,6 +534,7 @@ async fn api_docs_require_a_session() {
             "/api/docs/json",
             "/api/docs/static/swagger-ui-bundle.js",
             "/api/docs/static/swagger-ui.css",
+            "/api/docs/static/swagger-ui-bundle.js.LICENSE.txt",
         ] {
             let response = app
                 .clone()

@@ -1120,7 +1120,9 @@ async fn raw_get(
 /// never `'unsafe-inline'`.
 #[tokio::test]
 async fn api_docs_are_session_only_and_serve_the_live_export() {
-    use fvoci_server::http::routes::api_docs::{OPENAPI_JSON, SWAGGER_UI_BUNDLE, SWAGGER_UI_CSS};
+    use fvoci_server::http::routes::api_docs::{
+        OPENAPI_JSON, SWAGGER_UI_BUNDLE, SWAGGER_UI_BUNDLE_LICENSE, SWAGGER_UI_CSS,
+    };
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _) = setup_session(&harness).await;
     let admin = harness.admin().await;
@@ -1152,6 +1154,11 @@ async fn api_docs_are_session_only_and_serve_the_live_export() {
             "/api/docs/static/swagger-ui.css",
             "text/css; charset=utf-8",
             SWAGGER_UI_CSS,
+        ),
+        (
+            "/api/docs/static/swagger-ui-bundle.js.LICENSE.txt",
+            "text/plain; charset=utf-8",
+            SWAGGER_UI_BUNDLE_LICENSE,
         ),
     ] {
         let (status, headers, body) = raw_get(app.clone(), path, Some(&cookie), None).await;
@@ -1214,6 +1221,7 @@ async fn api_docs_are_session_only_and_serve_the_live_export() {
         "/api/docs/json",
         "/api/docs/static/swagger-ui-bundle.js",
         "/api/docs/static/swagger-ui.css",
+        "/api/docs/static/swagger-ui-bundle.js.LICENSE.txt",
     ] {
         let (status, body) = bearer_get(app.clone(), path, &secret).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
