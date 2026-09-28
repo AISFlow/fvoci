@@ -1827,26 +1827,37 @@ async fn collab_lifecycle_idle_timer_reclaims_dead_slot_after_hold_release() {
     .await;
 }
 
-/// A fresh temp path for a helper that does not exist yet. `link_helper`
-/// makes it the real helper through a symlink (never a copied file, which a
-/// concurrent fork could hold open for writing and exec would refuse).
-fn missing_helper_path() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("fvoci-missing-helper-{}", Uuid::now_v7()));
-    std::fs::create_dir_all(&dir).expect("helper dir");
-    dir.join("collab-engine")
+/// A helper path in a fresh temp directory that holds no helper yet, removed
+/// on drop (also when the test fails). `link` makes it the real helper through
+/// a symlink, never a copied file, which a concurrent fork could hold open for
+/// writing so that exec would refuse it.
+struct MissingHelper {
+    dir: std::path::PathBuf,
 }
 
-fn link_helper(path: &std::path::Path) {
-    std::os::unix::fs::symlink(
-        fvoci_server::collab::config::require_collab_engine_for_tests(),
-        path,
-    )
-    .expect("link the real helper into place");
+impl MissingHelper {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("fvoci-missing-helper-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("helper dir");
+        Self { dir }
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self.dir.join("collab-engine")
+    }
+
+    fn link(&self) {
+        std::os::unix::fs::symlink(
+            fvoci_server::collab::config::require_collab_engine_for_tests(),
+            self.path(),
+        )
+        .expect("link the real helper into place");
+    }
 }
 
-fn remove_helper_dir(path: &std::path::Path) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::remove_dir_all(dir);
+impl Drop for MissingHelper {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -1892,8 +1903,8 @@ async fn collab_lifecycle_engine_bridge_is_lazy_and_survives_spawn_failure() {
     );
     bridge.stop().await.expect("stop");
 
-    let path = missing_helper_path();
-    let bridge = EngineBridge::spawn(path.clone(), limits).expect("bridge thread");
+    let helper = MissingHelper::new();
+    let bridge = EngineBridge::spawn(helper.path(), limits).expect("bridge thread");
     let failed = bridge.recycle().await.expect_err("helper is missing");
     assert!(
         format!("{failed:?}").contains("MissingExecutable"),
@@ -1908,7 +1919,7 @@ async fn collab_lifecycle_engine_bridge_is_lazy_and_survives_spawn_failure() {
         "{:?}",
         after_failure.outcome
     );
-    link_helper(&path);
+    helper.link();
     bridge
         .recycle()
         .await
@@ -1920,7 +1931,6 @@ async fn collab_lifecycle_engine_bridge_is_lazy_and_survives_spawn_failure() {
         ping.outcome
     );
     bridge.stop().await.expect("stop after recovery is clean");
-    remove_helper_dir(&path);
 }
 
 /// A join that fails because the helper cannot spawn (1011 on the socket)
@@ -1933,10 +1943,10 @@ async fn collab_lifecycle_missing_helper_join_recovers_in_same_room() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let engine = missing_helper_path();
+                let helper = MissingHelper::new();
                 let hub = run
                     .register_hub(Arc::new(CollabHub::new(
-                        support::test_collab_config_with_engine(4, 30_000, &engine),
+                        support::test_collab_config_with_engine(4, 30_000, helper.path()),
                         wiki.session.pool.clone(),
                     )))
                     .await;
@@ -1952,7 +1962,7 @@ async fn collab_lifecycle_missing_helper_join_recovers_in_same_room() {
                 );
                 assert_eq!(room_start_count(wiki.document_id).await, 1);
 
-                link_helper(&engine);
+                helper.link();
                 let (conn_id, lease, mut events_rx) = hub_join_with_events(&hub, &wiki, 2)
                     .await
                     .expect("rejoin the same room once the helper exists");
@@ -1982,7 +1992,6 @@ async fn collab_lifecycle_missing_helper_join_recovers_in_same_room() {
                     status.is_clean(),
                     "a room whose helper once failed to spawn must shut down clean: {status:?}"
                 );
-                remove_helper_dir(&engine);
             })
         },
     )
