@@ -17,8 +17,9 @@ use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
 use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
+use fvoci_server::http::probes::{MetricsAllowList, Observability, ObservabilitySettings};
 use fvoci_server::http::rate_limit::RateLimiter;
-use fvoci_server::http::{router_with_settings, state::AppState};
+use fvoci_server::http::{router_with_observability, state::AppState};
 use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings};
 use fvoci_server::integrations::webhooks::WebhookSenderHandle;
 use fvoci_server::jobs::{
@@ -116,6 +117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(code) = fvoci_server::documents::markdown_helper::maybe_run_helper() {
         std::process::exit(code);
     }
+    // `fvoci-server healthcheck`: an HTTP client of the running server, so it
+    // branches before any config, credential or listener exists.
+    if let Some(code) = fvoci_server::healthcheck::maybe_run() {
+        std::process::exit(code);
+    }
     server_main()
 }
 
@@ -127,6 +133,9 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = Config::from_env()?;
+    // A typo must not silently open or close the scrape surface: refuse to
+    // start (source `MetricsAllowListError`).
+    let metrics_allow = MetricsAllowList::from_env()?;
     let app_pool_max = CollabConfig::from_env()
         .map(|cfg| fvoci_server::collab::config::derive_app_pool_max_connections(cfg.max_rooms))
         .unwrap_or(fvoci_server::collab::config::APP_POOL_MAX_CONNECTIONS);
@@ -160,7 +169,7 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!("meilisearch disabled (FVOCI_MEILI_URL unset)");
     }
-    run_server(config, pool).await
+    run_server(config, metrics_allow, pool).await
 }
 
 struct InstalledShutdownSignals {
@@ -233,7 +242,11 @@ where
     .await
 }
 
-async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_server(
+    config: Config,
+    metrics_allow: MetricsAllowList,
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let license = Arc::new(fvoci_server::license::from_env());
     // Replace the default SIGTERM/SIGINT handlers before bind or any readiness
     // advertisement. Tokio buffers signals received between install and recv.
@@ -371,6 +384,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     consumers.push(fvoci_server::integrations::github::github_sync_consumer(
         integrations.github.clone(),
     ));
+    let outbox_consumer_names: Vec<String> = consumers
+        .iter()
+        .map(|consumer| consumer.name().to_string())
+        .collect();
     let outbox_dispatcher = spawn_outbox_dispatcher(
         OutboxDispatcherSettings::from_env(),
         pool.clone(),
@@ -488,8 +505,18 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let serve = announce_after_first_pending_poll(
         axum::serve(
             listener,
-            router_with_settings(state, config.static_dir.clone(), integrations, identity)
-                .into_make_service_with_connect_info::<SocketAddr>(),
+            router_with_observability(
+                state,
+                config.static_dir.clone(),
+                integrations,
+                identity,
+                Arc::new(Observability::new(ObservabilitySettings {
+                    allow: metrics_allow,
+                    outbox_consumers: outbox_consumer_names,
+                    refresh_interval: fvoci_server::http::probes::METRICS_REFRESH_INTERVAL,
+                })),
+            )
+            .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
             wait_installed_shutdown_signals(shutdown_signals).await;

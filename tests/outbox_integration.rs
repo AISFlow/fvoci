@@ -1,5 +1,9 @@
 #![cfg(feature = "db-tests")]
 
+#[allow(dead_code)]
+#[path = "support/project_harness.rs"]
+mod project_harness;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -2143,6 +2147,156 @@ async fn cursor_never_passes_an_undelivered_event_ahead_of_processed_ones() {
         Some((c_row.xact, c_row.seq))
     );
     app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// `fvoci-server healthcheck` with only `FVOCI_BIND` set.
+fn run_healthcheck(bind: std::net::SocketAddr) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_fvoci-server"))
+        .env_clear()
+        .env("FVOCI_BIND", bind.to_string())
+        .arg("healthcheck")
+        .output()
+        .expect("run healthcheck")
+}
+
+fn metric_value(body: &str, name: &str) -> i64 {
+    body.lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("{name} missing:\n{body}"))
+        .parse()
+        .expect("integer sample")
+}
+
+/// Probes on the real app role over TCP: `/ready` 200 and healthcheck exit
+/// 0; `/metrics` reports the oldest undelivered event age of a registered
+/// consumer; once PostgreSQL is unreachable `/ready` answers 503, the CLI
+/// exits 1 and `/metrics` keeps answering with the last lag value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probes_report_real_database_and_outbox_lag() {
+    use fvoci_server::http::probes::{MetricsAllowList, Observability, ObservabilitySettings};
+
+    let harness = TestDb::bootstrap().await;
+    let state = project_harness::app_state(&harness.app_url).await;
+    let app_pool = state.auth.db.pool.clone();
+    let consumer = "probe-lag";
+    ensure_consumer(&app_pool, consumer).await.expect("ensure");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    sqlx::query(
+        "INSERT INTO fvoci.events (id, verb, payload, channel, created_at) \
+         VALUES ($1, 'probe', '{}', 'system', now() - interval '2 hours')",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&admin)
+    .await
+    .expect("old event");
+
+    let router = fvoci_server::http::router_with_observability(
+        state,
+        None,
+        Arc::new(fvoci_server::integrations::Integrations::disabled()),
+        Arc::new(fvoci_server::identity::Identity::disabled(
+            "http://localhost",
+        )),
+        Arc::new(Observability::new(ObservabilitySettings {
+            allow: MetricsAllowList::parse(Some("127.0.0.1/32")).unwrap(),
+            outbox_consumers: vec![consumer.to_string(), "probe-absent".to_string()],
+            refresh_interval: Duration::ZERO,
+        })),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let get = |path: &'static str| {
+        let client = client.clone();
+        async move {
+            let response = client
+                .get(format!("http://{addr}{path}"))
+                .send()
+                .await
+                .expect("request");
+            let status = response.status().as_u16();
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap().to_string())
+                .unwrap_or_default();
+            (status, content_type, response.text().await.unwrap())
+        }
+    };
+
+    assert_eq!(get("/ready").await.0, 200);
+    assert_eq!(get("/ready").await.2, r#"{"ok":true}"#);
+    let out = tokio::task::spawn_blocking(move || run_healthcheck(addr))
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+
+    // The event becomes readable once no older transaction in the cluster
+    // (parallel tests pin xmin) is still running, like for the dispatcher.
+    let deadline = std::time::Instant::now() + DISPATCHER_WAIT;
+    let (body, lag) = loop {
+        let (status, content_type, body) = get("/metrics").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            content_type.starts_with("application/openmetrics-text"),
+            "{content_type}"
+        );
+        let lag = metric_value(&body, "fvoci_outbox_lag_seconds");
+        if lag > 0 || std::time::Instant::now() > deadline {
+            break (body, lag);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!((7_190..7_400).contains(&lag), "lag {lag}\n{body}");
+    // Two direct calls and the healthcheck's.
+    assert!(
+        body.contains(r#"fvoci_http_request_duration_seconds_count{method="GET",route="/ready",status="200"} 3"#),
+        "{body}"
+    );
+    assert!(
+        metric_value(&body, "fvoci_db_pool_max_connections") > 0,
+        "{body}"
+    );
+    assert!(
+        !body.contains(consumer),
+        "consumer names stay out of labels:\n{body}"
+    );
+
+    app_pool.close().await;
+    let (status, _, body) = get("/ready").await;
+    assert_eq!(status, 503);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        json!({"ok": false, "checks": {"pg": false}})
+    );
+    let out = tokio::task::spawn_blocking(move || run_healthcheck(addr))
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let (status, _, body) = get("/metrics").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        metric_value(&body, "fvoci_outbox_lag_seconds"),
+        lag,
+        "{body}"
+    );
+
+    server.abort();
+    let _ = server.await;
     admin.close().await;
     harness.cleanup().await;
 }

@@ -43,7 +43,7 @@ impl<B> MakeSpan<B> for SafeMakeSpan {
 }
 
 /// Standard methods by name; extension methods are client-chosen tokens.
-fn method_label(method: &Method) -> &'static str {
+pub(crate) fn method_label(method: &Method) -> &'static str {
     match *method {
         Method::GET => "GET",
         Method::HEAD => "HEAD",
