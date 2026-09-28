@@ -9,8 +9,8 @@
 | 주 구현 워커 | Claude Code / Opus 5.5 (`claude-opus-5-5`) / medium | 배정된 Rust·프론트엔드 구현, 국소 리팩터링, 관련 회귀 |
 | 조사·실패 재현·교차 검증 워커 | cursor-agent / Grok 4.6 High (`cursor-grok-4.6-high`, 별도 effort 없음) | 계약·표준 조사, 반례, 좁은 실패 재현·교차 검증 |
 
-**현재 배정 (2026-09-28 사용자 인계 지시):** 다음 세션부터 Fable 5.1 medium이 코디네이터를 맡는다.
-현재 코디네이터는 인계 체크포인트 이후 조정을 멈추며 동시에 dispatch·소유권·머지를 관리하지 않는다.
+**현재 배정 (2026-09-28 사용자 인계 지시):** 코디네이터는 Claude Code Fable 5.1 medium이다.
+이전 Astra 코디네이터는 인계 체크포인트 이후 조정을 멈추며, 두 코디네이터가 동시에 dispatch·소유권·머지를 관리하지 않는다.
 Fable은 구현·독립 검토로 확대하지 않는다. 새 핵심 제품 구현과
 독립 수락 검토는 서로 다른 Claude Code Opus 5.5 medium 세션에 맡긴다. sol 라우팅 문제로
 신규 sol 호출·하위 위임·복구 재시도는 중단한다. Composer 신규 구현 배정과 Grok의 조건부

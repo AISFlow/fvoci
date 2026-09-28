@@ -286,7 +286,7 @@ Opus 5.5 medium, 조사는 `cursor-grok-4.6-high`(별도 effort 없음)를 유�
 
 ## 2026-09-28 Fable 코디네이터 인수 확인
 
-2026-09-28 02:xx UTC Linux, Claude Code 2.1.283 세션에서 인수했다. 확인 근거: `~/.claude/settings.json`의
+2026-09-28 01:52 UTC(첫 인수 커밋 시각) Linux, Claude Code 2.1.283 세션에서 인수했다. 확인 근거: `~/.claude/settings.json`의
 `model: claude-fable-5-1`과 `modelSettings.effortLevel: medium`, 세션 환경 `CLAUDE_EFFORT=medium`,
 세션 자체 보고 모델 ID `claude-fable-5-1`. 실제 turn이 시작되어 이 기록을 작성했다. 별도 `/model`
 TUI 출력은 이 세션 안에서 캡처하지 않았다. Orca 1.4.207 `/home/kinesis/.local/bin/orca-ide`로
@@ -294,3 +294,6 @@ Run `run_b01d432a9dee`에 `run-use` 성공, coordinator terminal
 `term_77972376-fa56-44ae-a334-0c95413c4fab`, 인박스 0, 활성 워커 0, reclaimable 0.
 인계 문서 `coordinator-handoff-2026-09-28-0145-utc-linux.md`와 실제 상태(main `9e15d50e`,
 후보 `b09114df` clean/7 paths, Draft #198 `7f2433f8`) 일치를 확인했다. 전역 설정·MCP 변경 없음.
+세션 JSONL `~/.claude/projects/-home-kinesis-orca-workspaces-fvoci-daggertooth/5b3ea42d-2ae1-4abb-9973-8761b6952f92.jsonl`의
+모든 assistant 턴 `model` 필드가 `claude-fable-5-1`, `effort` 필드가 `medium`이다(요청값이 아닌 실제 응답 기록).
+상단 "실제 실행 확인" 표의 코디네이터 행과 2026-09-27 "현재 실행 설정" 절은 당시 기록이며, 현재 코디네이터 실행 근거는 이 절이다.

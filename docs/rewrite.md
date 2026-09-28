@@ -243,7 +243,7 @@ provenance: 실행 source `0e3e95dd`의 frontend(`apps/web`·`packages`)는 수�
 최신 실행·소유권·검증 SHA·인계 포인터는 `/home/kinesis/orca/fvoci-evidence/coordinator-handoff-2026-09-28-0145-utc-linux.md`에 둔다.
 2026-09-28 인계 관측: #197 문서·#196 Push·#189 HWP가 수락되어 main은
 `9e15d50e44a74c9230fa10f7a6083527e1543fcb`다. 각 PR의 수락 근거와 최신 main push CI는
-구분한다. 이후 DB claim·outbox migration 수정은 로컬 후보이며 아직 독립 검토·원격 CI 미수락이다.
+구분한다. 이후 DB claim·outbox migration 수정은 후보 PR #199(`b09114df`)이며 아직 독립 검토·원격 CI 미수락이다.
 아래 이전 상태표는 작성 시점의 관측이며 새 인계에서 완료된 PR을 중복 배정하지 않는다.
 
 현재 작업·잔여 범위:
