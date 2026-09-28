@@ -53,7 +53,7 @@ pub fn parse_init_env_flags(args: &[String]) -> Result<InitEnvFlags, String> {
     })
 }
 
-fn hex_secret() -> String {
+pub(crate) fn hex_secret() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     hex::encode(bytes)

@@ -122,6 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(code) = fvoci_server::healthcheck::maybe_run() {
         std::process::exit(code);
     }
+    // Before the runtime starts any thread: `<VAR>_FILE` secrets become `<VAR>`.
+    fvoci_server::config::load_secret_files()?;
     server_main()
 }
 
