@@ -1164,10 +1164,12 @@ test("g: first open of freshly seeded documents", async ({ browser }) => {
   flush();
 });
 
-// (h) collab room saturation. Opt-in (FVOCI_PERF_GREP="setup dataset|h: "); the server's
-// FVOCI_COLLAB_MAX_ROOMS is read from the same environment (default 30), so each cap is a
-// separate run. Before every sample the runner waits past the idle eviction window
-// (30 s + one 15 s tick) so all rooms are gone; that pacing is recorded, never measured.
+// (h) collab room saturation. Opt-in: skipped unless FVOCI_PERF_ROOM_SATURATION=1, and run on
+// its own (FVOCI_PERF_GREP="setup dataset|h: " FVOCI_PERF_TAG=...) so its probes are documents
+// no earlier flow opened (g opens the same ctx.freshDocs). The server's FVOCI_COLLAB_MAX_ROOMS is
+// read from the same environment (default 30), so each cap is a separate run. Before every sample
+// the runner waits past the idle eviction window (30 s + one 15 s tick) so all rooms are gone;
+// that pacing is recorded, never measured.
 // Occupiers are opened in 4 parallel pages per session (the per-session socket cap is 4).
 //   idle:   `cap` occupier documents opened and left again (rooms live, no clients),
 //           then a fresh seeded document is opened.
@@ -1244,6 +1246,10 @@ function socketSummary(sockets: SocketRec[], t0: number, until: number) {
 }
 
 test("h: collab room saturation", async ({ browser }) => {
+  test.skip(
+    process.env.FVOCI_PERF_ROOM_SATURATION !== "1",
+    'opt-in: FVOCI_PERF_ROOM_SATURATION=1 FVOCI_PERF_GREP="setup dataset|h: " FVOCI_PERF_TAG=...',
+  );
   test.setTimeout(7_200_000);
   const setup = await browser.newContext({ storageState: ctx.ownerState });
   const api = await setup.newPage();
