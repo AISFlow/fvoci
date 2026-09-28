@@ -1049,9 +1049,19 @@ fn spawning_thread_exit_kills_collab_helper() {
 /// touch this shared test process. The driver spawns 500 helpers from four
 /// threads while every CPU spins, so a race between spawn and the helper's
 /// own write would show up as a helper below 1000.
+///
+/// Needs a non-root runner and skips as root: root with `CAP_SYS_PTRACE`
+/// still reads the environ, and root without it gets EPERM, not EACCES.
 #[cfg(feature = "test-hang")]
 #[test]
 fn non_dumpable_parent_hides_environ_and_helpers_keep_oom_score_adj() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!(
+            "skipping non_dumpable_parent_hides_environ_and_helpers_keep_oom_score_adj: \
+             the same-uid environ check needs a non-root runner"
+        );
+        return;
+    }
     let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let marker = format!(
         "marker-{}-{}",

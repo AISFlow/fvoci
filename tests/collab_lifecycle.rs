@@ -2151,6 +2151,7 @@ fn proc_effective_uid(pid: u32) -> u32 {
 /// helper, a uid-1000 `docker exec`, this non-root runner) cannot read its
 /// environ (keyrings, DATABASE_APP_URL). The room helper it spawns still
 /// raises its own oom_score_adj to 1000, and dies with a SIGKILLed server.
+/// Skips as root; on a non-root runner a missing protection fails.
 #[tokio::test]
 async fn collab_lifecycle_server_process_is_non_dumpable() {
     use std::os::unix::fs::MetadataExt;
@@ -2158,13 +2159,18 @@ async fn collab_lifecycle_server_process_is_non_dumpable() {
         collab_engine_descendants, spawn_server_process, wait_for_exit, wait_pids_exit,
     };
 
+    // Root with CAP_SYS_PTRACE still reads the environ, so the same-uid check
+    // only holds for a non-root runner.
+    if proc_effective_uid(std::process::id()) == 0 {
+        eprintln!(
+            "skipping collab_lifecycle_server_process_is_non_dumpable: \
+             the same-uid environ check needs a non-root runner"
+        );
+        return;
+    }
     run_lifecycle_test("collab_lifecycle_server_process_is_non_dumpable", |run| {
         Box::pin(async {
             let runner_euid = proc_effective_uid(std::process::id());
-            assert_ne!(
-                runner_euid, 0,
-                "the environ check needs a non-root runner (root may hold CAP_SYS_PTRACE)"
-            );
             let wiki = setup_wiki_doc(&run.inner.harness).await;
             let (mut child, addr, logs) = spawn_server_process(&run.inner.harness, 30_000);
             let server_pid = child.pid().expect("server pid");

@@ -10,6 +10,10 @@
 //! 3. `<helpers>` product helpers spawned from several threads under CPU load
 //!    each answer Ping and then show `oom_score_adj` 1000, their RSS stays
 //!    readable, and the OOM backstop is not reported missing.
+//!
+//! It refuses to run as root: root with `CAP_SYS_PTRACE` still reads the
+//! environ, and root without it gets EPERM, not EACCES. The test that runs it
+//! skips as root.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +46,9 @@ fn main() {
         .expect("helper count");
     if std::env::var(MARKER_ENV).map_or(true, |marker| marker.is_empty()) {
         fail(&format!("{MARKER_ENV} must name a non-empty marker"));
+    }
+    if unsafe { libc::geteuid() } == 0 {
+        fail("needs a non-root user: the same-uid environ check does not hold for root");
     }
 
     let control = run_probe();
