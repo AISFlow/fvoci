@@ -26,7 +26,7 @@ use fvoci_server::outbox::{
 use project_harness::TestDb;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::{Connection, PgPool, Row};
 use uuid::Uuid;
 
 const WAIT: Duration = Duration::from_secs(15);
@@ -38,11 +38,15 @@ struct Run {
 }
 
 async fn run(harness: &TestDb, args: &[&str]) -> Run {
+    run_as(&harness.admin_url, args).await
+}
+
+async fn run_as(url: &str, args: &[&str]) -> Run {
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_fvoci-migrate"))
         .arg("--outbox-reset")
         .args(args)
         .env_clear()
-        .env("DATABASE_URL", &harness.admin_url)
+        .env("DATABASE_URL", url)
         .output()
         .await
         .expect("run fvoci-migrate");
@@ -584,6 +588,215 @@ async fn forward_skip_needs_override_and_live_lease_blocks_apply() {
     let admin = self::admin(&harness).await;
     assert!(cursors(&admin).await.contains(&("push".into(), xr, sr)));
     assert_eq!(counts(&admin).await, totals, "the skipped event is kept");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+async fn set_cursor(admin: &PgPool, name: &str, pos: &(String, i64)) {
+    sqlx::query(
+        "UPDATE fvoci.outbox_consumers SET last_xact = $2::xid8, last_seq = $3 WHERE consumer = $1",
+    )
+    .bind(name)
+    .bind(&pos.0)
+    .bind(pos.1)
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+fn pos_of(value: &Value) -> (String, i64) {
+    (
+        value["lastXact"].as_str().unwrap().to_string(),
+        value["lastSeq"].as_i64().unwrap(),
+    )
+}
+
+/// Review F1: push and webhooks seeded at the tail by 040/027 hold no marks
+/// for older events. The default apply must not replay that history to
+/// external endpoints; `--ack-external-replay` does and reports it.
+#[tokio::test]
+async fn tail_seeded_external_consumers_need_ack_to_replay_history() {
+    let harness = TestDb::bootstrap().await;
+    let admin = admin(&harness).await;
+    let app = app(&harness).await;
+    for name in ["notifications", "push", "webhooks"] {
+        ensure_consumer(&app, name).await.unwrap();
+    }
+    let mut ids = Vec::new();
+    for n in 0..5 {
+        ids.push(
+            insert_test_event(&app, "test.reset", json!({ "n": n }))
+                .await
+                .unwrap(),
+        );
+    }
+    let mut pos = Vec::new();
+    for id in &ids {
+        pos.push(event_pos(&admin, *id).await);
+    }
+    let origin = ("0".to_string(), 0_i64);
+    // Seeded at e3 (the tail when 040/027 ran). webhooks then marked e4 and
+    // e5; push marked e4 and lost e5, a post-seed gap it may replay.
+    for id in &ids {
+        mark_processed(&app, "notifications", *id).await.unwrap();
+    }
+    mark_processed(&app, "webhooks", ids[3]).await.unwrap();
+    mark_processed(&app, "webhooks", ids[4]).await.unwrap();
+    mark_processed(&app, "push", ids[3]).await.unwrap();
+    set_cursor(&admin, "notifications", &pos[2]).await;
+    set_cursor(&admin, "webhooks", &pos[4]).await;
+    set_cursor(&admin, "push", &pos[4]).await;
+    // e1 dead-lettered for push: the dispatcher passes it, so it is counted apart.
+    sqlx::query(
+        "INSERT INTO fvoci.outbox_failures (consumer, event_id, attempts, last_error, next_attempt_at, dead_at) VALUES ('push', $1, 5, 'gone', now(), now())",
+    )
+    .bind(ids[0])
+    .execute(&admin)
+    .await
+    .unwrap();
+    let totals = counts(&admin).await;
+
+    let diag = run(&harness, &[]).await;
+    assert!(diag.ok, "{}", diag.output);
+    assert_eq!(diag.report["ackExternalReplay"], false);
+    let n = consumer(&diag.report, "notifications");
+    assert_eq!(n["externalEffects"], false);
+    assert_eq!(n["direction"], "forward");
+    assert_eq!(pos_of(&n["target"]), pos[4]);
+    assert!(n.get("externalReplay").is_none(), "{n}");
+    let push = consumer(&diag.report, "push");
+    assert_eq!(push["externalEffects"], true);
+    assert_eq!(push["direction"], "backward");
+    assert_eq!(pos_of(&push["target"]), pos[3]);
+    assert_eq!(push["redelivered"], 1);
+    let replay = &push["externalReplay"];
+    assert_eq!(pos_of(&replay["floor"]), pos[2]);
+    assert_eq!(pos_of(&replay["target"]), origin);
+    assert_eq!(replay["redelivered"], 3);
+    assert_eq!(replay["deadLettered"], 1);
+    assert_eq!(replay["acknowledged"], false);
+    let webhooks = consumer(&diag.report, "webhooks");
+    assert_eq!(webhooks["direction"], "unchanged");
+    assert_eq!(pos_of(&webhooks["externalReplay"]["floor"]), pos[2]);
+    assert_eq!(webhooks["externalReplay"]["redelivered"], 3);
+
+    app.close().await;
+    admin.close().await;
+    wait_for_no_sessions(&harness).await;
+    let applied = run(&harness, &["--apply", "--reason", "routine"]).await;
+    assert!(applied.ok, "{}", applied.output);
+    let admin = self::admin(&harness).await;
+    let after = cursors(&admin).await;
+    assert!(after.contains(&("notifications".into(), pos[4].0.clone(), pos[4].1)));
+    assert!(after.contains(&("push".into(), pos[3].0.clone(), pos[3].1)));
+    assert!(after.contains(&("webhooks".into(), pos[4].0.clone(), pos[4].1)));
+    set_cursor(&admin, "push", &pos[4]).await;
+    admin.close().await;
+
+    wait_for_no_sessions(&harness).await;
+    let acked = run(
+        &harness,
+        &["--apply", "--reason", "replay", "--ack-external-replay"],
+    )
+    .await;
+    assert!(acked.ok, "{}", acked.output);
+    assert_eq!(acked.report["ackExternalReplay"], true);
+    for name in ["push", "webhooks"] {
+        let c = consumer(&acked.report, name);
+        assert_eq!(c["direction"], "backward", "{name}");
+        assert_eq!(pos_of(&c["target"]), origin, "{name}");
+        assert_eq!(c["externalReplay"]["acknowledged"], true, "{name}");
+    }
+    assert_eq!(consumer(&acked.report, "push")["redelivered"], 3);
+    assert_eq!(consumer(&acked.report, "push")["deadLettered"], 1);
+    assert_eq!(consumer(&acked.report, "webhooks")["redelivered"], 3);
+    let admin = self::admin(&harness).await;
+    let after = cursors(&admin).await;
+    assert!(after.contains(&("push".into(), "0".into(), 0)));
+    assert!(after.contains(&("webhooks".into(), "0".into(), 0)));
+    assert_eq!(counts(&admin).await, totals);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Review F2: a role that cannot see other roles' sessions is refused, and a
+/// forward target at or above snapshot xmin is refused while the older
+/// transaction runs (here in another database, which the session count does
+/// not see but xmin does).
+#[tokio::test]
+async fn apply_refuses_blind_owner_and_in_flight_xmin() {
+    let harness = TestDb::bootstrap().await;
+    let admin = admin(&harness).await;
+    let app = app(&harness).await;
+    ensure_consumer(&app, "notifications").await.unwrap();
+
+    let role = format!("fvoci_reset_blind_{}", Uuid::now_v7().simple());
+    let password = Uuid::now_v7().simple().to_string();
+    sqlx::query(&format!(
+        "CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{password}'"
+    ))
+    .execute(&admin)
+    .await
+    .unwrap();
+    let mut blind_url = url::Url::parse(&harness.admin_url).unwrap();
+    blind_url.set_username(&role).unwrap();
+    blind_url.set_password(Some(&password)).unwrap();
+
+    let first = insert_test_event(&app, "test.reset", json!({ "n": 0 }))
+        .await
+        .unwrap();
+    mark_processed(&app, "notifications", first).await.unwrap();
+    let before = cursors(&admin).await;
+
+    // Session blocked from pg_stat_activity: refused even with the app connected.
+    let blind = run_as(blind_url.as_str(), &["--apply", "--reason", "r"]).await;
+    assert!(!blind.ok);
+    assert!(
+        blind.output.contains("pg_read_all_stats"),
+        "{}",
+        blind.output
+    );
+    assert_eq!(cursors(&admin).await, before);
+
+    // A transaction with an xid, older than the next event, stays open.
+    let mut server = url::Url::parse(&harness.admin_url).unwrap();
+    server.set_path("/postgres");
+    let mut blocker = sqlx::PgConnection::connect(server.as_str()).await.unwrap();
+    sqlx::query("BEGIN").execute(&mut blocker).await.unwrap();
+    let _: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(&mut blocker)
+        .await
+        .unwrap();
+    let second = insert_test_event(&app, "test.reset", json!({ "n": 1 }))
+        .await
+        .unwrap();
+    mark_processed(&app, "notifications", second).await.unwrap();
+    let (x2, s2) = event_pos(&admin, second).await;
+
+    app.close().await;
+    admin.close().await;
+    wait_for_no_sessions(&harness).await;
+    let in_flight = run(&harness, &["--apply", "--reason", "r"]).await;
+    assert!(!in_flight.ok);
+    assert!(
+        in_flight.output.contains("snapshot xmin"),
+        "{}",
+        in_flight.output
+    );
+
+    sqlx::query("ROLLBACK").execute(&mut blocker).await.unwrap();
+    blocker.close().await.unwrap();
+    wait_for_no_sessions(&harness).await;
+    let applied = run(&harness, &["--apply", "--reason", "r"]).await;
+    assert!(applied.ok, "{}", applied.output);
+    let admin = self::admin(&harness).await;
+    assert!(cursors(&admin)
+        .await
+        .contains(&("notifications".into(), x2, s2)));
+    sqlx::query(&format!("DROP ROLE {role}"))
+        .execute(&admin)
+        .await
+        .unwrap();
     admin.close().await;
     harness.cleanup().await;
 }
