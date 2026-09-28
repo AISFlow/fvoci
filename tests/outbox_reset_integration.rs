@@ -88,47 +88,128 @@ async fn app(harness: &TestDb) -> PgPool {
     pool::connect_app(&harness.app_url).await.expect("app")
 }
 
-async fn wait_until<F>(mut predicate: F)
+/// Polls `probe` until it reports `Ok`; on timeout the panic names the wait
+/// and the last state the probe observed.
+async fn wait_until<F>(what: &str, mut probe: F)
 where
-    F: FnMut() -> Pin<Box<dyn Future<Output = bool> + Send>>,
+    F: FnMut() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>,
 {
     let deadline = std::time::Instant::now() + WAIT;
-    while std::time::Instant::now() < deadline {
-        if predicate().await {
-            return;
+    loop {
+        let last = match probe().await {
+            Ok(()) => return,
+            Err(state) => state,
+        };
+        if std::time::Instant::now() >= deadline {
+            panic!("{what}: not met within {WAIT:?}; last observed: {last}");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("condition not met within {WAIT:?}");
+}
+
+/// (datname, pid, backend_xid, backend_xmin) from `pg_stat_activity`.
+type XidHolder = (Option<String>, i32, Option<String>, Option<String>);
+
+/// Cluster snapshot xmin and its oldest holders, for timeout reports.
+async fn xmin_state(pool: &PgPool) -> String {
+    let xmin: String = sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot())::text")
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|err| err.to_string());
+    let holders: Vec<XidHolder> = sqlx::query_as(
+        "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
+         FROM pg_stat_activity \
+         WHERE backend_xid IS NOT NULL OR backend_xmin IS NOT NULL \
+         ORDER BY age(COALESCE(backend_xid, backend_xmin)) DESC LIMIT 5",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    format!("snapshot xmin {xmin}, oldest (datname, pid, xid, xmin) {holders:?}")
+}
+
+/// xmin is cluster-wide: a transaction in any database (another test's, a
+/// parallel binary's) holds it below events this test already committed.
+/// The relay reads only events below xmin and a forward `--apply` refuses a
+/// target at or above it, so wait until every transaction older than now has
+/// ended. The horizon is the current xmax, so the wait assigns no xid.
+async fn wait_events_settled(pool: &PgPool) {
+    let horizon: String =
+        sqlx::query_scalar("SELECT pg_snapshot_xmax(pg_current_snapshot())::text")
+            .fetch_one(pool)
+            .await
+            .expect("snapshot xmax");
+    let what = format!("cluster snapshot xmin at or past {horizon}");
+    wait_until(&what, || {
+        let pool = pool.clone();
+        let horizon = horizon.clone();
+        Box::pin(async move {
+            let settled: bool =
+                sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot()) >= $1::xid8")
+                    .bind(horizon)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            if settled {
+                Ok(())
+            } else {
+                Err(xmin_state(&pool).await)
+            }
+        })
+    })
+    .await;
 }
 
 /// `--apply` refuses while any other session is connected, so the test
 /// closes its pools and waits until the server has let the backends go.
 async fn wait_for_no_sessions(harness: &TestDb) {
+    let observer = server_observer(harness).await;
+    no_sessions(harness, &observer).await;
+    observer.close().await;
+}
+
+/// As `wait_for_no_sessions`, and the test's committed events are settled, so
+/// a forward `--apply` is not refused for a transaction elsewhere in the
+/// cluster.
+async fn wait_for_settled_apply(harness: &TestDb) {
+    let observer = server_observer(harness).await;
+    wait_events_settled(&observer).await;
+    no_sessions(harness, &observer).await;
+    observer.close().await;
+}
+
+/// A session in the `postgres` database: it is not one the apply counts.
+async fn server_observer(harness: &TestDb) -> PgPool {
     let mut server = url::Url::parse(&harness.admin_url).unwrap();
     server.set_path("/postgres");
-    let observer = PgPoolOptions::new()
+    PgPoolOptions::new()
         .max_connections(1)
         .connect(server.as_str())
         .await
-        .expect("observer");
+        .expect("observer")
+}
+
+async fn no_sessions(harness: &TestDb, observer: &PgPool) {
     let name = db_name(harness);
-    wait_until(|| {
+    wait_until("no other session in the test database", || {
         let pool = observer.clone();
         let name = name.clone();
         Box::pin(async move {
-            let n: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND backend_type = 'client backend'",
+            let sessions: Vec<(i32, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT pid, usename::text, state FROM pg_stat_activity WHERE datname = $1 AND backend_type = 'client backend'",
             )
             .bind(name)
-            .fetch_one(&pool)
+            .fetch_all(&pool)
             .await
-            .unwrap_or(1);
-            n == 0
+            .map_err(|err| err.to_string())?;
+            if sessions.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("sessions (pid, user, state) {sessions:?}"))
+            }
         })
     })
     .await;
-    observer.close().await;
 }
 
 async fn cursors(admin: &PgPool) -> Vec<(String, String, i64)> {
@@ -268,6 +349,38 @@ async fn deliveries(pool: &PgPool, name: &str) -> Vec<Uuid> {
     .unwrap()
 }
 
+/// `Ok` once `name` has recorded `want` deliveries; otherwise the state that
+/// explains why not: cursor, lease, failures and the cluster xmin.
+async fn delivered(admin: &PgPool, name: &str, want: usize) -> Result<(), String> {
+    let got = deliveries(admin, name).await.len();
+    if got == want {
+        return Ok(());
+    }
+    let cursor: Option<(String, i64, Option<Uuid>, Option<String>)> = sqlx::query_as(
+        "SELECT last_xact::text, last_seq, lease_owner, lease_until::text FROM fvoci.outbox_consumers WHERE consumer = $1",
+    )
+    .bind(name)
+    .fetch_optional(admin)
+    .await
+    .map_err(|err| err.to_string())?;
+    let failures: Vec<(Uuid, i32, bool, bool, String)> = sqlx::query_as(
+        "SELECT event_id, attempts, dead_at IS NOT NULL, skipped_at IS NOT NULL, last_error FROM fvoci.outbox_failures WHERE consumer = $1",
+    )
+    .bind(name)
+    .fetch_all(admin)
+    .await
+    .map_err(|err| err.to_string())?;
+    let events: Vec<(String, i64)> =
+        sqlx::query_as("SELECT xact::text, seq FROM fvoci.events ORDER BY xact, seq")
+            .fetch_all(admin)
+            .await
+            .map_err(|err| err.to_string())?;
+    Err(format!(
+        "{got}/{want} deliveries; cursor (xact, seq, lease owner, until) {cursor:?}; failures (event, attempts, dead, skipped, error) {failures:?}; events {events:?}; {}",
+        xmin_state(admin).await
+    ))
+}
+
 async fn stop(handle: OutboxDispatcherHandle) {
     handle.request_shutdown();
     handle.join().await.expect("dispatcher join");
@@ -354,7 +467,7 @@ async fn diagnose_is_read_only_while_live_and_github_is_opt_in() {
     // With the pools gone the default set moves; github stays excluded.
     app.close().await;
     admin.close().await;
-    wait_for_no_sessions(&harness).await;
+    wait_for_settled_apply(&harness).await;
     let applied = run(&harness, &["--apply", "--reason", "ticket-1"]).await;
     assert!(applied.ok, "{}", applied.output);
     assert_eq!(applied.report["reason"], "ticket-1");
@@ -369,7 +482,7 @@ async fn diagnose_is_read_only_while_live_and_github_is_opt_in() {
     assert_eq!(counts(&admin).await, totals);
     admin.close().await;
 
-    wait_for_no_sessions(&harness).await;
+    wait_for_settled_apply(&harness).await;
     let github = run(
         &harness,
         &["--consumer", "github", "--apply", "--reason", "ticket-2"],
@@ -398,10 +511,13 @@ async fn apply_rewinds_and_redelivers_exactly_once_then_is_idempotent() {
                 .unwrap(),
         );
     }
+    // The relay reads only settled events; wait out older transactions
+    // elsewhere in the cluster before counting deliveries.
+    wait_events_settled(&admin).await;
     let handle = dispatcher(app.clone(), "notifications");
-    wait_until(|| {
-        let pool = app.clone();
-        Box::pin(async move { deliveries(&pool, "notifications").await.len() == 4 })
+    wait_until("4 notifications deliveries", || {
+        let pool = admin.clone();
+        Box::pin(async move { delivered(&pool, "notifications", 4).await })
     })
     .await;
     stop(handle).await;
@@ -456,20 +572,31 @@ async fn apply_rewinds_and_redelivers_exactly_once_then_is_idempotent() {
         "no event, mark or failure removed"
     );
     let app = self::app(&harness).await;
+    wait_events_settled(&admin).await;
     let handle = dispatcher(app.clone(), "notifications");
-    wait_until(|| {
-        let pool = app.clone();
-        Box::pin(async move { deliveries(&pool, "notifications").await.len() == 6 })
+    wait_until("6 notifications deliveries", || {
+        let pool = admin.clone();
+        Box::pin(async move { delivered(&pool, "notifications", 6).await })
     })
     .await;
     // The cursor tables are the owner's; the app role reaches them only
     // through the outbox functions.
-    wait_until(|| {
+    wait_until("notifications cursor at the newest event", || {
         let pool = admin.clone();
-        let x6 = x6.clone();
-        Box::pin(
-            async move { fetch_cursor(&pool, "notifications").await.unwrap() == Some((x6, s6)) },
-        )
+        let want = Some((x6.clone(), s6));
+        Box::pin(async move {
+            let cursor = fetch_cursor(&pool, "notifications")
+                .await
+                .map_err(|err| err.to_string())?;
+            if cursor == want {
+                Ok(())
+            } else {
+                Err(format!(
+                    "cursor {cursor:?}, want {want:?}; {}",
+                    xmin_state(&pool).await
+                ))
+            }
+        })
     })
     .await;
     stop(handle).await;
@@ -567,7 +694,7 @@ async fn forward_skip_needs_override_and_live_lease_blocks_apply() {
         .contains(&("push".into(), "0".into(), 0)));
     admin.close().await;
 
-    wait_for_no_sessions(&harness).await;
+    wait_for_settled_apply(&harness).await;
     let overridden = run(
         &harness,
         &[
@@ -684,7 +811,7 @@ async fn tail_seeded_external_consumers_need_ack_to_replay_history() {
 
     app.close().await;
     admin.close().await;
-    wait_for_no_sessions(&harness).await;
+    wait_for_settled_apply(&harness).await;
     let applied = run(&harness, &["--apply", "--reason", "routine"]).await;
     assert!(applied.ok, "{}", applied.output);
     let admin = self::admin(&harness).await;
@@ -695,7 +822,7 @@ async fn tail_seeded_external_consumers_need_ack_to_replay_history() {
     set_cursor(&admin, "push", &pos[4]).await;
     admin.close().await;
 
-    wait_for_no_sessions(&harness).await;
+    wait_for_settled_apply(&harness).await;
     let acked = run(
         &harness,
         &["--apply", "--reason", "replay", "--ack-external-replay"],
@@ -832,7 +959,7 @@ async fn blind_and_xmin_case(harness: &TestDb, roles: &[String], password: &str)
 
     sqlx::query("ROLLBACK").execute(&mut blocker).await.unwrap();
     blocker.close().await.unwrap();
-    wait_for_no_sessions(harness).await;
+    wait_for_settled_apply(harness).await;
     let applied = run(harness, &["--apply", "--reason", "r"]).await;
     assert!(applied.ok, "{}", applied.output);
     let admin = self::admin(harness).await;
