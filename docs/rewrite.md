@@ -487,17 +487,17 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 - **v0.1.0 이후 main에 반영된 제품 변경**(다음 patch 0.1.1 후보): #220 `fvoci-migrate --outbox-reset`, #221 첨부 viewer 첫 표시 ~300 ms 단축·페이지 지연 로드,
   #222 Prometheus 1단계(NaN-on-failure 게이지, RSS/예산 지표, scrape 문서, `compose.metrics.yml`). 그 외는 CI·문서·테스트 변경(#216 #217 #218 #219 #224).
 - **열린 PR**: #223 `fvoci/release-0-1-1-prep`(6320891e, draft): 0.1.1 버전 bump·계약 재생성·노트. 게시 전 main 기준으로 작성됐으므로
-  #220/#221/#222 반영 후 노트를 갱신하고 다시 검토한다. 그 외 열린 비봇 PR 없음.
+  #220/#221/#222 반영 후 노트를 갱신하고 다시 검토한다. 그 외 열린 비봇 PR은 아래 #225와 이 인계 PR #226뿐이다(나머지는 dependabot).
 - **원격 보존 브랜치(머지됨, 참조용)**: 위 PR들의 브랜치는 모두 push 상태. 삭제하지 않았다.
 - **수락 대기 PR(검토·CI 미완료)**: #225 `fvoci/collab-room-capacity` (base main 57497e2f, head
   `4a68ee709f423ad9546558d4e9d3e28d4041e9fc`, push됨): 협업 room 상한에서 빈 room 즉시 회수(`src/collab/hub.rs`·`room.rs`·`transport.rs`),
   클라이언트 재접속 폭주 제거(bounded jitter backoff, 소유 소켓), 거부된 room을 '로드되지 않음+이유'로 표시, opt-in perf flow h.
   작성자 전후 측정(같은 호스트·조용한 창·n=10/모드): idle 포화 새 문서 본문 39.5 s→0.44 s(cap 30), 36.7 s→0.45 s(cap 64); open당 소켓 886–944→1;
-  용량 거부 시 소켓 1,500–2,000→7; holder 해제→본문 34–45 s→3.4–5.4 s. collab suites 146·clippy·fmt·web unit 396 통과(작성자).
+  용량 거부 시 open당 소켓 중앙값 1,513–1,808(최대 1,968)→7; holder 해제→본문 34–45 s→3.4–5.4 s. collab suites 146·clippy·fmt·web unit 396 통과(작성자).
   독립 검토 없음. 남은 것: 첫 거부의 busy/unavailable 라벨 오류 가능성(미검증), 게시 이미지·다중 사용자 미측정.
   보고서 `/home/kinesis/orca/fvoci-evidence/opus-collab-room-capacity.md`, 원시 결과 `fvoci-evidence/perf-baseline/4a68ee70…-collab/`(로컬 보조자료).
 - **로컬에만 남은 자료**: `/home/kinesis/orca/fvoci-evidence/`의 작성자·검토 보고서와 원시 측정 결과, 세션 진행 기록
-  `coordinator-progress-2026-09-28-fable.md`. 미푸시 커밋·미커밋 변경은 없다(worktree `release-smoke-workflow-ref`의 `scripts/__pycache__/`만 미추적, 무시).
+  `coordinator-progress-2026-09-28-fable.md`. 미푸시 커밋·추적 파일 변경은 없다. 미추적 파일만 있다: 22개 worktree의 `scripts/__pycache__/`, `rust-dev-no-python`의 `examples/dev-tools.rs`·`examples/dev_tools/`(이전 인계에서 보존된 미채택 대안), `rust-license-policy`의 `target-license/`, `rust-scheduled-revisions`의 `logs/`(모두 무시·삭제하지 않음).
 - **측정 근거 구분**: 성능 기준선(#214 도구, 측정 SHA `1101e21b` 소스 빌드)과 hotspot 검증은 로컬 보고서
   `opus-perf-baseline.md`·`grok-editor-hotspots.md`. 게시 이미지(v0.1.0)에 대한 성능 측정은 없다. 보류 항목: `flushDelay` 50/100 실험,
   DocumentView 구독 분리, Prometheus 2단계(room 점유·거부·회수 지표; 협업 hub accessor 필요), SSE 750 ms 폴링 설계 결정.
