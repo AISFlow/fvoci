@@ -61,11 +61,14 @@ pub(super) fn is_unclassified_refusal(code: &str) -> bool {
 /// relay. lettre reports every 5xx as permanent whatever command it answers
 /// (greeting, EHLO, MAIL FROM, RCPT TO, DATA) and does not say which one, so
 /// the RFC 3463 enhanced status code that starts the server text decides:
-/// X.1.x (addressing, except X.1.7 and X.1.8, which are about the sender)
-/// and X.2.x (mailbox status) are about the recipient; X.3 to X.7 (system,
-/// network, protocol, content, policy, including quota such as 5.4.5) are
-/// not. Without an enhanced status code only 550, 551 and 553 count, the
-/// replies RFC 5321 gives for an unavailable or not allowed mailbox.
+/// X.1.x (addressing) and X.2.x (mailbox status) are about the recipient;
+/// X.3 to X.7 (system, network, protocol, content, policy, including quota
+/// such as 5.4.5) are not. Excluded as not certain to be about the recipient:
+/// X.1.7 and X.1.8 (the sender), X.1.0 (other address status, which Postfix
+/// and Exchange also send for a refused sender) and X.2.3 (message length
+/// over an administrative limit, which some relays apply to every
+/// recipient). Without an enhanced status code only 550, 551 and 553 count,
+/// the replies RFC 5321 gives for an unavailable or not allowed mailbox.
 fn is_mailbox_refusal(reply: u16, text: &str) -> bool {
     let enhanced = text.split_whitespace().next().and_then(|word| {
         let mut parts = word.split('.');
@@ -76,8 +79,8 @@ fn is_mailbox_refusal(reply: u16, text: &str) -> bool {
             .then_some((subject, detail))
     });
     match enhanced {
-        Some(("1", detail)) => detail != "7" && detail != "8",
-        Some(("2", _)) => true,
+        Some(("1", detail)) => !matches!(detail, "0" | "7" | "8"),
+        Some(("2", detail)) => detail != "3",
         Some(_) => false,
         None => matches!(reply, 550 | 551 | 553),
     }
@@ -188,9 +191,19 @@ mod tests {
         ));
         assert!(is_mailbox_refusal(550, "5.2.1 mailbox disabled"));
         assert!(is_mailbox_refusal(552, "5.2.2 mailbox full"));
-        // The sender, and every other subject, covers the relay.
+        // The sender, codes also sent for the sender or the whole relay, and
+        // every other subject are not certain to be about the recipient.
         assert!(!is_mailbox_refusal(553, "5.1.7 bad sender mailbox syntax"));
         assert!(!is_mailbox_refusal(550, "5.1.8 bad sender system address"));
+        assert!(!is_mailbox_refusal(
+            550,
+            "5.1.0 <from@example.com>: Sender address rejected: User unknown in virtual alias table"
+        ));
+        assert!(!is_mailbox_refusal(554, "5.1.0 Sender denied"));
+        assert!(!is_mailbox_refusal(
+            552,
+            "5.2.3 Your message exceeded the size limit"
+        ));
         assert!(!is_mailbox_refusal(
             550,
             "5.4.5 Daily SMTP relay limit exceeded"
