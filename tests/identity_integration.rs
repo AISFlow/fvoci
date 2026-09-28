@@ -1394,6 +1394,37 @@ fn redirect_path(authorization_url: &str) -> String {
     redirect.path().to_string()
 }
 
+/// The invite page's same-origin form post → provider → callback.
+async fn oidc_invite_round(
+    h: &Harness,
+    fake: &FakeOidc,
+    provider: &str,
+    invitation: &str,
+    consents: Option<&str>,
+    profile: Profile,
+    from: SocketAddr,
+) -> Response {
+    let mut fields = vec![("invitation", invitation)];
+    if let Some(consents) = consents {
+        fields.push(("consents", consents));
+    }
+    let res = form_post(
+        &h.app,
+        &format!("/api/v1/auth/oidc/{provider}/start"),
+        &fields,
+        Some("http://localhost"),
+        from,
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER, "{:?}", res.json);
+    let state_cookie = res.cookie_named("fvoci_oidc_state").expect("state cookie");
+    let location = res.location();
+    let path = redirect_path(&location);
+    assert_eq!(path, format!("/api/v1/auth/oidc/{provider}/callback"));
+    let query = fake.authorize(&location, profile);
+    callback_at(&h.app, &path, &query, Some(&state_cookie), None, from).await
+}
+
 /// start → provider authorize → callback, all for `profile`. Like a real
 /// provider, the fake sends the browser to the `redirect_uri` of the request.
 async fn oidc_round_on(
@@ -1874,12 +1905,11 @@ async fn oidc_state_is_single_use_and_bound_to_the_browser() {
     )
     .await;
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
-    let res = call(
+    let res = form_post(
         &h.app,
-        "GET",
-        "/api/v1/auth/oidc/generic/start?invitation=x&consents=nope",
-        None,
-        None,
+        "/api/v1/auth/oidc/generic/start",
+        &[("invitation", "x"), ("consents", "nope")],
+        Some("http://localhost"),
         peer(64),
     )
     .await;
@@ -2575,16 +2605,16 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
 
     // New account through Google.
     let token = invite("guest1@example.com").await;
-    let res = h
-        .oidc_round(
-            &fake,
-            &format!("/api/v1/auth/oidc/google/start?invitation={token}&consents=%5B%5D"),
-            "google",
-            Profile::new("g-1", "someone@gmail.test", true),
-            None,
-            peer(131),
-        )
-        .await;
+    let res = oidc_invite_round(
+        &h,
+        &fake,
+        "google",
+        &token,
+        Some("[]"),
+        Profile::new("g-1", "someone@gmail.test", true),
+        peer(131),
+    )
+    .await;
     assert_eq!(res.location(), "http://localhost/", "{:?}", res.headers);
     let (user_id, has_password): (Uuid, bool) = sqlx::query_as(
         "SELECT id, password_hash IS NOT NULL FROM fvoci.users WHERE email = 'guest1@example.com'",
@@ -2611,16 +2641,16 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
     );
     assert_eq!(h.login_methods(user_id).await, vec!["oidc:google"]);
     // The invitation is spent.
-    let res = h
-        .oidc_round(
-            &fake,
-            &format!("/api/v1/auth/oidc/google/start?invitation={token}"),
-            "google",
-            Profile::new("g-1", "someone@gmail.test", true),
-            None,
-            peer(132),
-        )
-        .await;
+    let res = oidc_invite_round(
+        &h,
+        &fake,
+        "google",
+        &token,
+        None,
+        Profile::new("g-1", "someone@gmail.test", true),
+        peer(132),
+    )
+    .await;
     assert_eq!(
         res.location(),
         "http://localhost/login?error=oidc_invitation_invalid"
@@ -2629,16 +2659,16 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
     // Existing account without that identity: refused (no takeover by email).
     let (_kim, kim_email, _c) = h.member("kim").await;
     let token = invite(Box::leak(kim_email.clone().into_boxed_str())).await;
-    let res = h
-        .oidc_round(
-            &fake,
-            &format!("/api/v1/auth/oidc/google/start?invitation={token}"),
-            "google",
-            Profile::new("g-kim", &kim_email, true),
-            None,
-            peer(133),
-        )
-        .await;
+    let res = oidc_invite_round(
+        &h,
+        &fake,
+        "google",
+        &token,
+        None,
+        Profile::new("g-kim", &kim_email, true),
+        peer(133),
+    )
+    .await;
     assert_eq!(
         res.location(),
         "http://localhost/login?error=oidc_invitation_invalid"
@@ -2646,16 +2676,16 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
 
     // An identity already linked to someone cannot open a new account.
     let token = invite("guest2@example.com").await;
-    let res = h
-        .oidc_round(
-            &fake,
-            &format!("/api/v1/auth/oidc/google/start?invitation={token}"),
-            "google",
-            Profile::new("g-1", "someone@gmail.test", true),
-            None,
-            peer(134),
-        )
-        .await;
+    let res = oidc_invite_round(
+        &h,
+        &fake,
+        "google",
+        &token,
+        None,
+        Profile::new("g-1", "someone@gmail.test", true),
+        peer(134),
+    )
+    .await;
     assert_eq!(
         res.location(),
         "http://localhost/login?error=oidc_already_linked"
@@ -3950,6 +3980,134 @@ async fn workspace_sso_callback_is_bound_to_its_workspace() {
     assert_eq!(
         link_row(&h, "generic", &format!("{ws}:ws-sub")).await,
         Some((h.owner_id, Some(evil.base.clone())))
+    );
+    h.finish().await;
+}
+
+async fn invite_token_for(h: &Harness, email: &str, from: SocketAddr) -> String {
+    let res = call(
+        &h.app,
+        "POST",
+        &format!("/api/v1/workspaces/{}/invitations", h.workspace_id),
+        Some(json!({ "email": email, "role": "member" })),
+        Some(&h.owner_cookie),
+        from,
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::CREATED, "{:?}", res.json);
+    res.json["acceptUrl"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+async fn oidc_state_rows(h: &Harness) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM fvoci.oidc_states")
+        .fetch_one(&h.admin)
+        .await
+        .unwrap()
+}
+
+/// Invite mode binds the browser's IdP identity to the invited account, so
+/// only a same-origin POST may start it (like link); consents come from the
+/// body, never from a URL another site can build.
+#[tokio::test]
+async fn oidc_invitation_start_is_a_same_origin_post() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;
+    let h = oidc_harness(&fake, &[ProviderKey::Google]).await;
+    let token = invite_token_for(&h, "post@example.com", peer(170)).await;
+    let start = "/api/v1/auth/oidc/google/start";
+
+    // GET start is plain login only.
+    for query in [
+        format!("invitation={token}"),
+        format!("invitation={token}&consents=%5B%5D"),
+        "consents=%5B%5D".to_string(),
+    ] {
+        let res = call(
+            &h.app,
+            "GET",
+            &format!("{start}?{query}"),
+            None,
+            None,
+            peer(170),
+        )
+        .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{query}");
+    }
+    assert_eq!(oidc_state_rows(&h).await, 0);
+    // A cross-site form post is refused before any state is issued.
+    let res = form_post(
+        &h.app,
+        start,
+        &[("invitation", &token), ("consents", "[]")],
+        Some("https://evil.example"),
+        peer(170),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(res.code(), "origin_mismatch");
+    // Body shape: an invitation, optional JSON consents, nothing else.
+    for (fields, code) in [
+        (vec![], "invalid_input"),
+        (vec![("invitation", "")], "invalid_input"),
+        (
+            vec![("invitation", token.as_str()), ("consents", "nope")],
+            "invalid_consents_query",
+        ),
+        (
+            vec![("invitation", token.as_str()), ("workspaceId", "x")],
+            "invalid_input",
+        ),
+        (
+            vec![("invitation", token.as_str()), ("invitation", "again")],
+            "invalid_input",
+        ),
+    ] {
+        let res = form_post(&h.app, start, &fields, Some("http://localhost"), peer(170)).await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{fields:?}");
+        assert_eq!(res.code(), code, "{fields:?}");
+    }
+    let res = form_post(
+        &h.app,
+        &format!("{start}?invitation={token}"),
+        &[("invitation", &token)],
+        Some("http://localhost"),
+        peer(170),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert_eq!(oidc_state_rows(&h).await, 0);
+
+    // A same-origin form post starts the invite flow and completes it.
+    let res = form_post(
+        &h.app,
+        start,
+        &[("invitation", &token), ("consents", "[]")],
+        Some("http://localhost"),
+        peer(171),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER, "{:?}", res.json);
+    let state_cookie = res.cookie_named("fvoci_oidc_state").expect("state cookie");
+    let location = res.location();
+    assert_eq!(
+        redirect_path(&location),
+        "/api/v1/auth/oidc/google/callback"
+    );
+    let query = fake.authorize(&location, Profile::new("g-post", "post@example.com", true));
+    let res = h
+        .callback("google", &query, Some(&state_cookie), None, peer(171))
+        .await;
+    assert_eq!(res.location(), "http://localhost/", "{:?}", res.headers);
+    assert_eq!(
+        link_row(&h, "google", "g-post")
+            .await
+            .map(|(_, issuer)| issuer),
+        Some(Some(fake.base.clone()))
     );
     h.finish().await;
 }

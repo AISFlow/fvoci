@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path, RawQuery, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -50,7 +51,10 @@ pub fn router(identity: Arc<Identity>) -> Router<AppState> {
         .route("/api/v1/auth/providers", get(providers))
         .route("/api/v1/auth/identities", get(identities))
         .route("/api/v1/auth/sso", get(sso))
-        .route("/api/v1/auth/oidc/{provider}/start", get(start))
+        .route(
+            "/api/v1/auth/oidc/{provider}/start",
+            get(start).post(start_invite),
+        )
         .route("/api/v1/auth/oidc/{provider}/callback", get(callback))
         .route(
             "/api/v1/auth/sso/{workspace_id}/callback",
@@ -120,7 +124,8 @@ struct ConsentQueryItem {
     version: i32,
 }
 
-/// Source `parseConsentsQuery`: JSON array of `{kind, version}`.
+/// Source `parseConsentsQuery`: JSON array of `{kind, version}` (here the
+/// invite form field).
 fn parse_consents(raw: Option<&String>) -> Result<Vec<(String, i32)>, AppError> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
@@ -262,6 +267,8 @@ async fn sso(
     Ok(state_redirect(&state, started, StatusCode::FOUND))
 }
 
+/// Plain sign-in only. Invite mode is [`start_invite`]: a GET can be started
+/// by any site's link.
 async fn start(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
@@ -271,15 +278,7 @@ async fn start(
 ) -> Result<Response, AppError> {
     let provider = provider_param(&provider)?;
     limit_ip(&state, peer).await?;
-    let query = strict_query(raw, &["invitation", "consents", "workspaceId"])?;
-    let invitation = query.get("invitation").cloned();
-    if invitation.as_deref() == Some("") {
-        return Err(AppError::with_source(
-            ProblemCode::InvalidInput,
-            "/invitation",
-        ));
-    }
-    let consents = parse_consents(query.get("consents"))?;
+    let query = strict_query(raw, &["workspaceId"])?;
     let workspace_id = uuid_query(&query, "workspaceId")?;
     let started = flow::begin(
         &state.auth.db.pool,
@@ -287,20 +286,74 @@ async fn start(
         &state.auth.db.license,
         BeginParams {
             provider,
-            mode: if invitation.is_some() {
-                Mode::Invite
-            } else {
-                Mode::Login
-            },
-            invitation_token: invitation,
+            mode: Mode::Login,
+            invitation_token: None,
             user_id: None,
-            consents,
+            consents: Vec::new(),
             workspace_id,
         },
     )
     .await
     .map_err(begin_error)?;
     Ok(state_redirect(&state, started, StatusCode::FOUND))
+}
+
+fn is_form(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| {
+            v.trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
+}
+
+/// Invite mode links the browser's provider identity to the invited account
+/// and replaces its session, so, like link, it starts only from a same-origin
+/// form post. The invitation token and the consents come from the body.
+async fn start_invite(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Arc<Identity>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+    RawQuery(raw): RawQuery,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    check_origin(&headers, &state.public_origin)?;
+    let provider = provider_param(&provider)?;
+    limit_ip(&state, peer).await?;
+    strict_query(raw, &[])?;
+    if !is_form(&headers) {
+        return Err(AppError::with_source(ProblemCode::InvalidInput, "/"));
+    }
+    let body = String::from_utf8(body.to_vec())
+        .map_err(|_| AppError::with_source(ProblemCode::InvalidInput, "/"))?;
+    let form = strict_query(Some(body), &["invitation", "consents"])?;
+    let Some(invitation) = form.get("invitation").filter(|v| !v.is_empty()).cloned() else {
+        return Err(AppError::with_source(
+            ProblemCode::InvalidInput,
+            "/invitation",
+        ));
+    };
+    let consents = parse_consents(form.get("consents"))?;
+    let started = flow::begin(
+        &state.auth.db.pool,
+        &identity,
+        &state.auth.db.license,
+        BeginParams {
+            provider,
+            mode: Mode::Invite,
+            invitation_token: Some(invitation),
+            user_id: None,
+            consents,
+            workspace_id: None,
+        },
+    )
+    .await
+    .map_err(begin_error)?;
+    Ok(state_redirect(&state, started, StatusCode::SEE_OTHER))
 }
 
 async fn callback(
