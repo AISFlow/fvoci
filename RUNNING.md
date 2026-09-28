@@ -238,7 +238,7 @@ consent or bearer checks (source `INFRA_PATHS`):
 | --- | --- |
 | `GET /health` | Liveness: always `200 {"ok":true}`. |
 | `GET /ready` | `200 {"ok":true}`, or `503 {"ok":false,"checks":{"pg":false,...}}`. Checks the app-role PostgreSQL pool (`SELECT 1`) and, when collaboration is enabled, that the hub is not shutting down (`collab`). Each check is bounded by 2 s. There is no Redis to check. |
-| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers get the generic `404 not_found` problem. `fvoci_http_request_duration_seconds{method,route,status}` (route is the router template or `unmatched`), `fvoci_outbox_lag_seconds` (age of the oldest event some outbox consumer cursor has not yet passed, as in the source, including events committed behind a long-running or idle-in-transaction session), `fvoci_outbox_xmin_stall_seconds` (age of the oldest transaction holding an xid anywhere in the PostgreSQL cluster, prepared transactions included; outbox delivery waits for it to end. The source instead counted relay warnings above `OUTBOX_XMIN_AGE_WARN_MS` in `fvoci_outbox_xmin_stall_total`; alert on this gauge with the threshold in the rule). Both are refreshed at most every 15 s and keep their last value when the query fails. `fvoci_task_stream_subscribers` (open SSE streams), `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections`. No label holds a workspace, user, token or concrete path. |
+| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers and other methods get the generic `404 not_found` problem. Metrics and scrape setup: "Prometheus scrape" below. |
 
 `fvoci-server healthcheck` requests `GET /ready` from the address in `FVOCI_BIND`
 (a wildcard bind is probed on loopback) and exits 0 on a 2xx answer within 4 s,
@@ -249,6 +249,94 @@ run inside the server here. The Compose server healthcheck runs
 source Compose used its binary's `healthcheck` with the same timeout), so the
 container is healthy only once `/ready` reports PostgreSQL (and collab, when
 enabled) ready.
+
+### Prometheus scrape
+
+`/metrics` is the only monitoring surface: the server adds no exporter, and
+neither Compose file starts Prometheus, Grafana or a collector. Point an
+existing Prometheus at it.
+
+**Access.** Every response is OpenMetrics 1.0.0 text whatever the `Accept`
+header (Prometheus 2.x/3.x parse it by the response `Content-Type`). Only a
+direct TCP peer inside `METRICS_ALLOW_IPS` (Environment table) gets it; an
+unset or empty list, any other peer and any method other than GET/HEAD get the
+same `404 not_found` problem. `X-Forwarded-For`, `X-Real-IP` and `Forwarded`
+are never read, so a proxy cannot vouch for a client. The user install passes
+`METRICS_ALLOW_IPS` from the `fvoci` service environment through the preparation
+to the server process unchanged; `.env` alone does not reach the container, so
+set it with the override below.
+
+**Compose override.** `infra/rust/compose.metrics.yml` (optional, next to
+`compose.yml`) adds `METRICS_ALLOW_IPS` from `.env` and joins `fvoci` to an
+internal network with no outside route and no published port. In `.env`:
+
+```sh
+FVOCI_METRICS_SUBNET=172.31.250.0/29   # a free private range on this host
+METRICS_ALLOW_IPS=172.31.250.2/32      # the Prometheus address in it
+```
+
+`docker compose -f compose.yml -f compose.metrics.yml up -d`, then attach the
+existing Prometheus container to network `fvoci_metrics` with that address
+(`docker network connect --ip 172.31.250.2 fvoci_metrics <prometheus>`, or
+`networks: {fvoci_metrics: {ipv4_address: 172.31.250.2}}` with the network
+declared `external` in its own Compose file). List single addresses, not the
+whole subnet: the host's bridge address is in it. Scraping through the
+published `127.0.0.1` port instead arrives from the default network's gateway,
+so allowing that address lets every local process read `/metrics`.
+
+**Scrape config** (Prometheus 2.49 or newer for `scrape_protocols`):
+
+```yaml
+scrape_configs:
+  - job_name: fvoci
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    scrape_protocols: [OpenMetricsText1.0.0, PrometheusText0.0.4]
+    static_configs:
+      - targets: ["fvoci:8080"]
+```
+
+**Metrics.** No label holds a workspace, user, document, room, token, URL or
+concrete path. Database-derived values are refreshed at most every 15 s by one
+bounded (2 s) query; everything else is read on each scrape.
+
+| Name | Type | Meaning | On failure |
+| --- | --- | --- | --- |
+| `fvoci_http_request_duration_seconds{method,route,status}` | histogram | Request duration; `route` is the router template or `unmatched`, `method` one of the standard verbs or `OTHER` | In-process, cannot fail |
+| `fvoci_outbox_lag_seconds` | gauge | Age of the oldest event some outbox consumer cursor has not passed, including events committed behind a long-running or idle-in-transaction session (source `lagSeconds()`) | `NaN` before the first successful refresh and after a failed or timed-out one |
+| `fvoci_outbox_xmin_stall_seconds` | gauge | Age of the oldest transaction holding an xid anywhere in the PostgreSQL cluster, prepared transactions included; outbox delivery waits for it (replaces the source counter `fvoci_outbox_xmin_stall_total`; alert on a threshold) | As above |
+| `fvoci_db_metrics_last_success_timestamp_seconds` | gauge | Unix time of the last successful outbox refresh | `0` until the first; kept on failure |
+| `fvoci_db_metrics_refresh_failures_total` | counter | Outbox refreshes that failed or timed out | — |
+| `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections` | gauge | This server's application-role connection pool and its limit. Not total PostgreSQL connections: collab room locks (one per live room, detached from the pool), the preparation, other servers and tools are outside it; use `pg_stat_activity` for totals | In-process, cannot fail |
+| `fvoci_task_stream_subscribers` | gauge | Open project task SSE streams | In-process |
+| `fvoci_process_resident_memory_bytes` | gauge | Observed RSS (`VmRSS`) of the server process, helpers excluded | `NaN` when `/proc/self/status` is unreadable |
+| `fvoci_collab_helper_resident_memory_bytes` | gauge | Observed RSS summed over live collaboration helper processes, the same sum collab admission reads | A helper exiting mid-read is skipped |
+| `fvoci_collab_helper_memory_budget_bytes` | gauge | Configured helper budget `FVOCI_COLLAB_MEMORY_BUDGET` (not an observation) | `NaN` when collaboration is off |
+
+Collab admission refuses a room start when helper RSS plus the start's own
+estimate (`max(16 MiB, factor × persisted bytes)`) would exceed the budget;
+that per-start estimate, room occupancy and refusals by reason are not
+exported yet.
+
+**PromQL examples.**
+
+```promql
+# request rate and 5xx ratio
+sum(rate(fvoci_http_request_duration_seconds_count[5m]))
+sum(rate(fvoci_http_request_duration_seconds_count{status=~"5.."}[5m]))
+  / sum(rate(fvoci_http_request_duration_seconds_count[5m]))
+# p95 latency per route
+histogram_quantile(0.95, sum by (le, route) (rate(fvoci_http_request_duration_seconds_bucket[5m])))
+# outbox stuck (NaN compares false, so pair it with the staleness rule)
+fvoci_outbox_lag_seconds > 300
+time() - fvoci_db_metrics_last_success_timestamp_seconds > 120
+increase(fvoci_db_metrics_refresh_failures_total[10m]) > 0
+fvoci_outbox_xmin_stall_seconds > 600
+# app pool saturation and helper memory against the budget
+fvoci_db_pool_connections{state="active"} / fvoci_db_pool_max_connections > 0.9
+fvoci_collab_helper_resident_memory_bytes / fvoci_collab_helper_memory_budget_bytes > 0.8
+```
 
 ### Response security headers
 
@@ -785,6 +873,7 @@ services:
 | OIDC sign-in | providers are set up in the app, sealed with `ENCRYPTION_KEYS`; `OIDC_ALLOW_INSECURE=1` only for a local http provider |
 | GitHub integration | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_STATE_SECRET` |
 | AI | `FVOCI_AI_ENABLED`, `FVOCI_AI_SECRET`, `FVOCI_AI_EMBEDDINGS_*` |
+| Prometheus scrape | `METRICS_ALLOW_IPS` via `compose.metrics.yml` ("Prometheus scrape"); no monitoring service is added |
 | Tuning | `FVOCI_COLLAB_*`, `FVOCI_EXTRACT_POLL_SECS`, `FVOCI_SHUTDOWN_DEADLINE_MS`, `FVOCI_UPLOAD_*`, `FVOCI_PREPARE_TIMEOUT_SECS`, `RUST_LOG` |
 
 Unset variables keep the product default; an empty value is a value, so do not
