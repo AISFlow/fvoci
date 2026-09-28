@@ -136,6 +136,8 @@ struct ProjectChangeRecord<'a> {
     client_ip: Option<&'a str>,
 }
 
+/// A live project row: [`lock_project`] returns it under a row lock,
+/// [`load_live_project`] without one.
 pub(crate) struct LockedProject {
     pub id: Uuid,
     pub key: String,
@@ -329,39 +331,44 @@ async fn count_project_leads_excluding(
     count_project_leads_except(tx, workspace_id, project_id, Some(exclude_user_id), None).await
 }
 
-pub(crate) async fn lock_project(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    project_id: Uuid,
-) -> Result<Option<LockedProject>, sqlx::Error> {
-    let row = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<Uuid>,
-            String,
-            Uuid,
-            DateTime<Utc>,
-            DateTime<Utc>,
-        ),
-    >(
+/// Columns of one live project row, shared by [`lock_project`] and
+/// [`load_live_project`].
+macro_rules! live_project_select {
+    () => {
         r#"
         SELECT id, key, name, description, icon, visibility, root_document_id, status,
                created_by, created_at, updated_at
         FROM fvoci.projects
         WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        FOR NO KEY UPDATE
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await?;
+        "#
+    };
+}
+
+type LiveProjectRow = (
+    Uuid,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<Uuid>,
+    String,
+    Uuid,
+    DateTime<Utc>,
+    DateTime<Utc>,
+);
+
+async fn fetch_live_project(
+    tx: &mut Transaction<'_, Postgres>,
+    sql: &'static str,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<LockedProject>, sqlx::Error> {
+    let row = sqlx::query_as::<_, LiveProjectRow>(sql)
+        .bind(workspace_id)
+        .bind(project_id)
+        .fetch_optional(&mut **tx)
+        .await?;
     Ok(row.map(
         |(
             id,
@@ -389,6 +396,28 @@ pub(crate) async fn lock_project(
             updated_at,
         },
     ))
+}
+
+/// The live project row under `FOR NO KEY UPDATE`, for writers: visibility,
+/// archive, trash and member changes serialize with the caller's write.
+pub(crate) async fn lock_project(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<LockedProject>, sqlx::Error> {
+    const SQL: &str = concat!(live_project_select!(), "FOR NO KEY UPDATE");
+    fetch_live_project(tx, SQL, workspace_id, project_id).await
+}
+
+/// The live project row without a row lock: the lock-free twin of
+/// [`lock_project`] for checks that only read.
+pub(crate) async fn load_live_project(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<LockedProject>, sqlx::Error> {
+    const SQL: &str = live_project_select!();
+    fetch_live_project(tx, SQL, workspace_id, project_id).await
 }
 
 pub(crate) async fn project_permission(

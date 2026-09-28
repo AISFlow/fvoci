@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::db::context::{session_is_live, set_tenant};
 use crate::db::documents::{document_permission, membership_role, workspace_is_live};
 use crate::db::group_grants::guest_wiki_document_ids_select_sql;
-use crate::db::projects::{project_permission, LockedProject};
+use crate::db::projects::{load_live_project, project_permission, LockedProject};
 use crate::db::workspace::{list_workspaces_for_user, WorkspaceRole};
 use crate::display_id::format_display_id;
 use crate::projects::ProjectPermission;
@@ -1726,67 +1726,6 @@ async fn visible_after_hydrate(
             Ok(permission.at_least(ProjectPermission::View))
         }
     }
-}
-
-pub(crate) async fn load_live_project(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    project_id: Uuid,
-) -> Result<Option<LockedProject>, sqlx::Error> {
-    let row = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<Uuid>,
-            String,
-            Uuid,
-            DateTime<Utc>,
-            DateTime<Utc>,
-        ),
-    >(
-        r#"
-        SELECT id, key, name, description, icon, visibility, root_document_id, status,
-               created_by, created_at, updated_at
-        FROM fvoci.projects
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.map(
-        |(
-            id,
-            key,
-            name,
-            description,
-            icon,
-            visibility,
-            root_document_id,
-            status,
-            created_by,
-            created_at,
-            updated_at,
-        )| LockedProject {
-            id,
-            key,
-            name,
-            description,
-            icon,
-            visibility,
-            root_document_id,
-            status,
-            created_by,
-            created_at,
-            updated_at,
-        },
-    ))
 }
 
 fn escape_html(s: &str) -> String {
