@@ -13,6 +13,7 @@ import {
   calibrate,
   elementPaint,
   eventsSince,
+  firstContentfulPaint,
   inputsSince,
   interactions,
   longTasks,
@@ -405,7 +406,7 @@ test("a: login to workspace shown", async ({ browser }) => {
           return n ? { ttfb: n.responseStart, domContentLoaded: n.domContentLoadedEventEnd, load: n.loadEventEnd } : null;
         })
       : null;
-    const fcp = nav ? (await paints(page)).find((p) => p.n === "first-contentful-paint")?.s ?? null : null;
+    const fcp = nav ? await firstContentfulPaint(page) : null;
     await page.getByLabel("이메일").fill(user.email);
     await page.getByLabel("비밀번호").fill(user.password);
     const id = `ws-${samples.length}`;

@@ -321,6 +321,19 @@ export async function paints(page: Page): Promise<{ n: string; s: number }[]> {
   return page.evaluate(() => performance.getEntriesByType("paint").map((e) => ({ n: e.name, s: e.startTime })));
 }
 
+/** Waits (bounded) for the first-contentful-paint entry; null when none arrives. */
+export async function firstContentfulPaint(page: Page, timeoutMs = 1000): Promise<number | null> {
+  try {
+    await page.waitForFunction(() => performance.getEntriesByName("first-contentful-paint", "paint").length > 0, undefined, {
+      timeout: timeoutMs,
+      polling: 16,
+    });
+  } catch {
+    return null;
+  }
+  return (await paints(page)).find((p) => p.n === "first-contentful-paint")?.s ?? null;
+}
+
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 /** Resource Timing entries since `since`; query strings dropped, ids masked. */
