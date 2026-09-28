@@ -106,6 +106,16 @@ static GLOBAL: fvoci_server::alloc_guard::RecordingAlloc =
     fvoci_server::alloc_guard::RecordingAlloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `fvoci-server --version`: build identity only. The release image build
+    // sets FVOCI_BUILD_SHA to the tagged commit; other builds report unknown.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--version")) {
+        println!(
+            "fvoci-server {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("FVOCI_BUILD_SHA").unwrap_or("unknown")
+        );
+        return Ok(());
+    }
     // The image preview, office and Markdown children are this binary in hidden modes: decide before
     // a runtime, logger or config exists, so the child holds nothing else.
     if let Some(code) = fvoci_server::attachments::preview::maybe_run_helper() {
