@@ -8,8 +8,9 @@
 #     compose's x-fvoci-image anchor pinned to the digest) and env.example
 #     copied to .env with a fresh value generated for every empty entry, as its
 #     comments show, in an empty directory with a scrubbed environment;
-#   - health/ready, doctor, the server process holding neither the database
-#     owner password nor the Meilisearch master key, first admin setup and
+#   - health/ready, doctor, the server process running as uid 1000 and holding
+#     neither the database owner password nor the Meilisearch master key, the
+#     secret files root-only, no secret in docker exec environ or inspect, first admin setup and
 #     login, the install-smoke API flows (collab, documents, attachment +
 #     extraction), search, keys kept across a second up and down/up, a failing
 #     preparation keeping the server down, an unfilled .env refused before any
@@ -287,34 +288,52 @@ fi
 python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["ok"] is True, r' <<<"$DOCTOR_REPORT"
 log_assert "installed doctor: ok"
 
-[[ "$(docker exec "$SERVER_CID" id -u)" == 1000 ]] || fail "server does not run as uid 1000"
 [[ "$(docker exec "$SERVER_CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] \
   || fail "pid 1 of $APP is not fvoci-server"
-# The owner password and master key as their own services hold them. The
-# container configuration of the app carries them for the startup preparation
-# (same container, same uid); the server process tree (pid 1 and its
-# descriptors, children, argv and files under /run) must not.
-# shellcheck disable=SC2016 # expanded by the postgres container's shell
-OWNER_PW="$(dc exec -T postgres sh -c 'if [ -n "${POSTGRES_PASSWORD_FILE:-}" ]; then cat "$POSTGRES_PASSWORD_FILE"; else printf %s "$POSTGRES_PASSWORD"; fi')"
-# shellcheck disable=SC2016 # expanded by the meilisearch container's shell
-MASTER_KEY="$(dc exec -T meilisearch sh -c 'for p in /proc/[0-9]*; do tr "\0" "\n" <"$p/environ" 2>/dev/null; done | sed -n "s/^MEILI_MASTER_KEY=//p" | head -1')"
-(( ${#OWNER_PW} >= 16 && ${#MASTER_KEY} >= 16 )) || fail "could not read the owner password / master key from their services"
+# uid boundary: the app container starts as root, reads the root-only secret
+# files, prepares, and runs the server as uid/gid 1000 without capabilities.
+PID1="$(docker exec "$SERVER_CID" sh -c 'grep -E "^(Uid|Gid|Groups|CapPrm|CapEff):" /proc/1/status')"
+grep -Eq '^Uid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server uids are not all 1000"
+grep -Eq '^Gid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server gids are not all 1000"
+grep -Eq '^Groups:[[:space:]]*$' <<<"$PID1" || fail "server keeps supplementary groups"
+grep -Eq '^CapEff:[[:space:]]+0+$' <<<"$PID1" || fail "server keeps effective capabilities"
+grep -Eq '^CapPrm:[[:space:]]+0+$' <<<"$PID1" || fail "server keeps permitted capabilities"
+env_value() { sed -n "s/^$1=//p" "$STACK_DIR/.env"; }
+OWNER_PW="$(env_value POSTGRES_PASSWORD)"
+MASTER_KEY="$(env_value MEILI_MASTER_KEY)"
+APP_PW="$(env_value FVOCI_APP_PASSWORD)"
+(( ${#OWNER_PW} >= 16 && ${#MASTER_KEY} >= 16 && ${#APP_PW} >= 16 )) || fail "could not read the generated secrets from .env"
+for f in postgres_password fvoci_app_password meili_master_key; do
+  [[ "$(docker exec "$SERVER_CID" stat -c '%u %g %a' "/run/secrets/$f")" == "0 0 400" ]] || fail "/run/secrets/$f is not root-only 0400"
+  if docker exec --user 1000:1000 "$SERVER_CID" cat "/run/secrets/$f" >/dev/null 2>&1; then
+    fail "uid 1000 can read /run/secrets/$f"
+  fi
+done
+# The server process tree (pid 1 and its descriptors, children, argv and files
+# under /run other than the secrets) holds neither the owner password nor the
+# master key; the container configuration, and so every docker exec and
+# healthcheck process, holds none of the three.
 # shellcheck disable=SC2016 # expanded by the app container's shell
-SERVER_VIEW="$(docker exec -e POSTGRES_PASSWORD= -e MEILI_MASTER_KEY= -e FVOCI_APP_PASSWORD= "$SERVER_CID" sh -c '
+SERVER_VIEW="$(docker exec "$SERVER_CID" sh -c '
   for p in /proc/[0-9]*; do
     a=${p#/proc/}
     while [ "$a" != 1 ] && [ "$a" != 0 ] && [ -n "$a" ]; do a=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$a/status" 2>/dev/null); done
     [ "$a" = 1 ] || continue
     tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; ls -l "$p/fd"
   done 2>/dev/null
-  find /run -type f -exec cat {} + 2>/dev/null; echo')"
+  find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
 if grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$SERVER_VIEW"; then
   fail "the server process tree holds the database owner password or the Meilisearch master key"
 fi
-if grep -Eq '^(POSTGRES_PASSWORD|DATABASE_URL|FVOCI_MIGRATION_URL|MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY|FVOCI_APP_PASSWORD)=' <<<"$SERVER_VIEW"; then
+if grep -Eq '^(POSTGRES_PASSWORD|DATABASE_URL|FVOCI_MIGRATION_URL|MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY|FVOCI_APP_PASSWORD)(_FILE)?=' <<<"$SERVER_VIEW"; then
   fail "a preparation-only variable reached the server process tree"
 fi
-log_assert "server is pid 1 fvoci-server as uid 1000; owner password and master key absent from its process tree (environ/argv/fds) and /run: ok"
+# shellcheck disable=SC2016 # expanded by the app container's shell
+EXEC_ENV="$(docker exec "$SERVER_CID" sh -c 'tr "\0" "\n" </proc/self/environ')"
+if grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" -e "$APP_PW" <<<"$EXEC_ENV$(docker inspect "$SERVER_CID")"; then
+  fail "docker exec / healthcheck environment or docker inspect holds a secret"
+fi
+log_assert "server is pid 1 fvoci-server as uid/gid 1000 without capabilities; /run/secrets root-only; owner password and master key absent from its process tree and /run; no secret in docker exec environ or docker inspect: ok"
 
 ORIGIN="$BASE_URL"
 COOKIE_JAR="$WORK/cookies"
