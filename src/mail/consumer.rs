@@ -87,6 +87,16 @@ impl OutboxConsumer for MailConsumer {
         DeliveryMode::External
     }
 
+    /// One event per chunk, like the GitHub consumer. Sends are sequential,
+    /// so batching gains nothing, and the default `deliver_batch` loses its
+    /// progress when a chunk hits the lease timeout: every mail of the chunk
+    /// would be sent again. With one event per chunk each event is marked
+    /// processed right after its SMTP sends, and a timeout is charged to the
+    /// event that overran.
+    fn batch_event_cap(&self) -> usize {
+        1
+    }
+
     fn deliver<'a>(
         &'a self,
         pool: &'a PgPool,

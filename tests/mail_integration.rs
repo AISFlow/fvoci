@@ -1390,6 +1390,60 @@ async fn comment_event_for_three_recipients(
     )
 }
 
+/// SMTP sessions slow enough that several mail events do not fit in one
+/// lease: each mail is still sent exactly once and nothing is dead-lettered.
+#[tokio::test]
+async fn slow_smtp_sends_each_mail_event_once() {
+    let harness = TestDb::bootstrap().await;
+    let sink = ScriptedSmtp::spawn(Duration::from_millis(700), Vec::new()).await;
+    let mailer = mailer_for(sink.port);
+    let (app, _cookie, user_id) = setup_session(&harness, mailer.clone()).await;
+    drop(app);
+    let admin = harness.admin().await;
+    start_mail_cursor_at_latest_event(&admin).await;
+    let providers = ["slow-p0", "slow-p1", "slow-p2", "slow-p3"];
+    let mut ids = Vec::new();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    for provider in providers {
+        let event_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.events (id, actor_user_id, verb, payload, channel)
+            VALUES ($1, $2, 'identity.linked', $3, 'web')
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .bind(json!({ "provider": provider }))
+        .execute(&mut *tx)
+        .await
+        .expect("identity event");
+        ids.push(event_id);
+    }
+    tx.commit().await.expect("commit events");
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(app_pool.clone(), mailer, Duration::from_secs(2));
+    wait_mail_settled(&app_pool, &ids, Duration::from_secs(25)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let counts: Vec<usize> = providers.iter().map(|p| sink.count_text(p)).collect();
+    assert_eq!(counts, vec![1; providers.len()], "mails per event");
+    assert_eq!(sink.count_to("admin@example.com"), providers.len());
+    for id in &ids {
+        assert!(is_processed(&app_pool, "mail", *id).await.unwrap());
+    }
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
 /// A permanent 550 for one of three recipients is final for that recipient:
 /// the other two get one mail each and the event is processed, not retried.
 #[tokio::test]
