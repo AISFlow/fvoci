@@ -32,8 +32,9 @@
 //! 6. `document_states` `FOR UPDATE`
 //!
 //! Empty-state seed only: `pg_advisory_xact_lock(1907004, lockKeyFromUuid(documentId))`.
-//! Reserved for a future room-manager connection lifetime lock:
-//! `pg_advisory_lock(1907007, lockKeyFromUuid(documentId))` — not acquired here.
+//! Room fence: `collab::guard::RoomGuard` holds the session lock
+//! `pg_advisory_lock(1907007, lockKeyFromUuid(documentId))` on a dedicated
+//! connection for the room's lifetime (not acquired in this module).
 
 use std::time::Instant;
 
@@ -65,8 +66,12 @@ pub struct CollabDbStageTimings {
 }
 
 pub const COLLAB_INIT_LOCK_NAMESPACE: i32 = 1_907_004;
-/// Reserved for a future room-manager session lock held for the connection lifetime.
-/// Init paths must not reuse this namespace/key pair.
+/// Room fence: `RoomGuard` holds this session lock, keyed by the document id,
+/// for the room's lifetime. No other two-int advisory lock may use this
+/// namespace (see `db::context` tests). Servers of different versions are
+/// not supported against one database (RUNNING.md: mixed-version rolling
+/// restart is unsupported), so this value, like the other namespaces, can be
+/// renumbered.
 pub const COLLAB_ROOM_SESSION_LOCK_NAMESPACE: i32 = 1_907_007;
 pub const COLLAB_STATE_ENCODING_V1: i16 = 1;
 pub const MAX_COLLAB_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;

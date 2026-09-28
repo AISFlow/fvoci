@@ -105,7 +105,7 @@ jobs:
             postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
             check: postgres
             shard: a
-            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration
           - runner: ubuntu-24.04
             pg_major: "18"
             postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
@@ -117,7 +117,7 @@ jobs:
             postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
             check: postgres-arm64
             shard: a
-            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration
           - runner: ubuntu-24.04-arm
             pg_major: "18"
             postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
@@ -129,7 +129,7 @@ jobs:
             postgres_image: postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
             check: postgres-pg16
             shard: a
-            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration
           - runner: ubuntu-24.04
             pg_major: "16"
             postgres_image: postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
@@ -141,7 +141,7 @@ jobs:
             postgres_image: postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
             check: postgres-pg17
             shard: a
-            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration
           - runner: ubuntu-24.04
             pg_major: "17"
             postgres_image: postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f

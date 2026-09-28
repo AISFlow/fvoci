@@ -49,7 +49,7 @@ const GITHUB_WEB: &str = "https://github.com";
 const STATE_TTL_MS: i64 = 600_000;
 pub const STATE_SECRET_MIN_BYTES: usize = 32;
 /// Serializes webhook and link writes for one `(workspace, repo, issue)`.
-const ISSUE_LOCK_NAMESPACE: i32 = 1_907_030;
+pub(crate) const ISSUE_LOCK_NAMESPACE: i32 = 1_907_030;
 const TITLE_MAX: usize = 500;
 /// Source 15 s; two calls per synced event must fit the 30 s outbox lease.
 const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);

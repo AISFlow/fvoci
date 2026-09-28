@@ -2,12 +2,15 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
+use crate::db::context::{
+    begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::documents::{
     document_permission, membership_role, membership_role_for_update, workspace_is_live,
 };
 use crate::db::projects::{
-    count_project_leads_except, is_private_lead_violation, lock_project, project_permission,
+    count_project_leads_except, is_private_lead_violation, load_live_project, lock_project,
+    project_permission,
 };
 use crate::db::workspace::WorkspaceRole;
 use crate::projects::{workspace_base_permission, ProjectMemberRole, ProjectPermission};
@@ -500,7 +503,7 @@ pub async fn list_project_group_grants(
     session_id: Uuid,
     project_id: Uuid,
 ) -> Result<Result<Vec<GroupGrantRow>, GroupDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -510,7 +513,7 @@ pub async fn list_project_group_grants(
         tx.rollback().await?;
         return Ok(Err(GroupDbError::NotFound));
     }
-    let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
         tx.rollback().await?;
         return Ok(Err(GroupDbError::NotFound));

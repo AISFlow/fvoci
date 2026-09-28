@@ -6,8 +6,8 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::db::comments::{row_to_comment, CommentRow};
-use crate::db::context::set_tenant;
-use crate::db::projects::{lock_project, project_permission, project_permission_by_id};
+use crate::db::context::{begin_read, set_tenant};
+use crate::db::projects::{load_live_project, project_permission, project_permission_by_id};
 use crate::db::tasks::{list_task_assignee_ids, list_task_label_ids, TaskRowRecord};
 use crate::projects::ProjectPermission;
 use crate::tasks::activity::{
@@ -306,7 +306,7 @@ pub async fn list_task_activity(
         None => None,
     };
 
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !crate::db::context::session_is_live(&mut tx, actor_user_id, session_id).await?
         || !crate::db::documents::workspace_is_live(&mut tx, workspace_id).await?
@@ -329,7 +329,7 @@ pub async fn list_task_activity(
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     };
-    let Some(locked) = lock_project(&mut tx, workspace_id, project_id).await? else {
+    let Some(locked) = load_live_project(&mut tx, workspace_id, project_id).await? else {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     };

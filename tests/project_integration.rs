@@ -14,8 +14,8 @@ use project_harness::{
     add_workspace_user, admin_pool, app_pool, count_rows, create_project, drop_insert_fail_trigger,
     hold_membership_user_lock, http_request, insert_stored_attachment, install_insert_fail_trigger,
     json_request, json_request_with_headers, session_id_for_user, setup_session,
-    wait_for_advisory_blocked_by, wait_for_blocked_query_count, wait_for_user_for_update_blocked,
-    TestDb,
+    wait_for_advisory_blocked_by, wait_for_blocked_by_holder, wait_for_blocked_query_count,
+    wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::{json, Value};
 use sqlx::Acquire;
@@ -2688,6 +2688,321 @@ async fn project_document_revisions_follow_project_permission() {
     let (status, _) = json_request(app.clone(), "GET", &base, None, Some(&lead.cookie)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Project reads take no row lock on the project
+// ---------------------------------------------------------------------------
+
+/// Project row locks other transactions hold while a read runs: a collab append
+/// or admission (`FOR SHARE`) and a project mutation (`FOR NO KEY UPDATE`).
+const PROJECT_ROW_HOLDERS: [&str; 2] = ["FOR SHARE", "FOR NO KEY UPDATE"];
+
+/// Project `RDL` (private), a lead, a workspace guest who is only a project
+/// viewer, one task with a comment, and the project root document with a
+/// comment.
+struct ProjectReadFixture {
+    workspace_id: Uuid,
+    project_id: String,
+    root_id: String,
+    task_id: String,
+    viewer: project_harness::TestUser,
+}
+
+async fn project_read_fixture(app: &axum::Router, admin: &sqlx::PgPool) -> ProjectReadFixture {
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(admin)
+            .await
+            .unwrap();
+    let lead = add_workspace_user(admin, workspace_id, "member", "lead").await;
+    let viewer = add_workspace_user(admin, workspace_id, "guest", "viewer").await;
+    let project = create_project(app.clone(), &lead.cookie, workspace_id, "RDL", "private").await;
+    let project_id = project["id"].as_str().unwrap().to_string();
+    let root_id = project["rootDocumentId"].as_str().unwrap().to_string();
+    let ws = format!("/api/v1/workspaces/{workspace_id}");
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{ws}/projects/{project_id}/members"),
+        Some(json!({"userId": viewer.user_id.to_string(), "role": "viewer"})),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{ws}/projects/{project_id}/tasks"),
+        Some(json!({"title": "Read barrier task"})),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task:?}");
+    let task_id = task["id"].as_str().unwrap().to_string();
+    for path in [
+        format!("{ws}/tasks/{task_id}/comments"),
+        format!("{ws}/projects/{project_id}/documents/{root_id}/comments"),
+    ] {
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(json!({"body": "hello"})),
+            Some(&lead.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "POST {path}: {body:?}");
+    }
+    ProjectReadFixture {
+        workspace_id,
+        project_id,
+        root_id,
+        task_id,
+        viewer,
+    }
+}
+
+/// GETs every path as the viewer while an admin transaction holds the project
+/// row with each of [`PROJECT_ROW_HOLDERS`], and returns the `(holder, path)`
+/// pairs that did not answer within 2 s. Each holder is released before the
+/// next request, so a request that waited finishes and frees its connection.
+async fn reads_waiting_on_project_row(
+    app: &axum::Router,
+    admin: &sqlx::PgPool,
+    fx: &ProjectReadFixture,
+    paths: &[String],
+) -> Vec<String> {
+    let mut waited = Vec::new();
+    for holder_lock in PROJECT_ROW_HOLDERS {
+        for path in paths {
+            let mut holder = admin.begin().await.unwrap();
+            sqlx::query(&format!(
+                "SELECT id FROM fvoci.projects WHERE workspace_id = $1 AND id = $2::uuid {holder_lock}"
+            ))
+            .bind(fx.workspace_id)
+            .bind(&fx.project_id)
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+            let response = tokio::time::timeout(
+                Duration::from_secs(2),
+                json_request(app.clone(), "GET", path, None, Some(&fx.viewer.cookie)),
+            )
+            .await;
+            holder.rollback().await.unwrap();
+            match response {
+                Ok((status, body)) => {
+                    assert_eq!(status, StatusCode::OK, "GET {path}: {body:?}")
+                }
+                Err(_) => waited.push(format!("{holder_lock}: GET {path}")),
+            }
+        }
+    }
+    waited
+}
+
+/// Task reads (list, detail, dependencies, activity, time entries, backlinks,
+/// parent candidates) read the project row without locking it, so a view-only
+/// guest cannot stall collab appends or project writes, and a collab append
+/// or project mutation does not stall them.
+#[tokio::test]
+async fn task_reads_do_not_wait_on_project_row_locks() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, _, _) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let fx = project_read_fixture(&app, &admin).await;
+    let ws = format!("/api/v1/workspaces/{}", fx.workspace_id);
+    let (project_id, task_id) = (&fx.project_id, &fx.task_id);
+    let paths = vec![
+        format!("{ws}/projects/{project_id}/tasks"),
+        format!("{ws}/tasks/{task_id}"),
+        format!("/api/v1/tasks/{task_id}"),
+        format!("{ws}/projects/{project_id}/dependencies"),
+        format!("{ws}/tasks/{task_id}/activity"),
+        format!("{ws}/tasks/{task_id}/time-entries"),
+        format!("{ws}/tasks/{task_id}/backlinks"),
+        format!("{ws}/projects/{project_id}/tasks/parents?childType=task"),
+    ];
+    let waited = reads_waiting_on_project_row(&app, &admin, &fx, &paths).await;
+    assert!(
+        waited.is_empty(),
+        "task reads waited on a project row lock: {waited:#?}"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Project, label, milestone, group-grant, comment, project document and
+/// revision reads take no project row lock either.
+#[tokio::test]
+async fn project_reads_do_not_wait_on_project_row_locks() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, _, _) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let fx = project_read_fixture(&app, &admin).await;
+    let ws = format!("/api/v1/workspaces/{}", fx.workspace_id);
+    let (project_id, task_id, root_id) = (&fx.project_id, &fx.task_id, &fx.root_id);
+    let doc = format!("{ws}/projects/{project_id}/documents/{root_id}");
+    let paths = vec![
+        format!("{ws}/projects/{project_id}"),
+        format!("{ws}/projects/{project_id}/members"),
+        format!("{ws}/projects/{project_id}/workflow"),
+        format!("{ws}/projects/{project_id}/groups"),
+        format!("{ws}/projects/{project_id}/labels"),
+        format!("{ws}/projects/{project_id}/milestones"),
+        format!("{ws}/tasks/{task_id}/comments"),
+        format!("{ws}/tasks/{task_id}/revisions"),
+        format!("{ws}/projects/{project_id}/documents"),
+        doc.clone(),
+        format!("{doc}/comments"),
+        format!("{doc}/children"),
+        format!("{doc}/ancestors"),
+        format!("{doc}/backlinks"),
+        format!("{doc}/revisions"),
+        format!("/api/v1/documents/{root_id}"),
+    ];
+    let waited = reads_waiting_on_project_row(&app, &admin, &fx, &paths).await;
+    assert!(
+        waited.is_empty(),
+        "project reads waited on a project row lock: {waited:#?}"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// A task list read that is paused after its permission check holds no
+/// transaction id, so a slow list never holds back the cluster-wide
+/// `pg_snapshot_xmin` gate that SSE and outbox consumers wait on.
+#[tokio::test]
+async fn paused_task_list_read_holds_no_transaction_id() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, _, _) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let fx = project_read_fixture(&app, &admin).await;
+    let path = format!(
+        "/api/v1/workspaces/{}/projects/{}/tasks",
+        fx.workspace_id, fx.project_id
+    );
+
+    // The list reads task_labels for its items after the permission check.
+    let mut pause = admin.begin().await.unwrap();
+    sqlx::query("LOCK TABLE fvoci.task_labels IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *pause)
+        .await
+        .unwrap();
+    let pause_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *pause)
+        .await
+        .unwrap();
+    let app_bg = app.clone();
+    let cookie = fx.viewer.cookie.clone();
+    let list =
+        tokio::spawn(async move { json_request(app_bg, "GET", &path, None, Some(&cookie)).await });
+    let waiting = wait_for_blocked_by_holder(&admin, pause_pid, Some("%task_labels%"), 1).await;
+    let backend_xid: Option<String> =
+        sqlx::query_scalar("SELECT backend_xid::text FROM pg_stat_activity WHERE pid = $1")
+            .bind(waiting[0])
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    pause.rollback().await.unwrap();
+    let (status, body) = tokio::time::timeout(Duration::from_secs(10), list)
+        .await
+        .expect("list finished")
+        .expect("join");
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["items"].as_array().map(Vec::len), Some(1), "{body:?}");
+    assert_eq!(
+        backend_xid, None,
+        "a paused task list read holds a transaction id"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Backlink reads scan the body of every live document and task in the
+/// workspace. With a table lock held on `fvoci.tasks`, the document read
+/// reaches its task body scan and the task read blocks earlier on its task
+/// lookup; both end at the per-transaction 15 s statement timeout with a 500
+/// instead of holding a pool connection and its snapshot for as long as they
+/// wait.
+#[tokio::test]
+async fn backlink_scans_end_at_the_statement_timeout() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, _, _) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let fx = project_read_fixture(&app, &admin).await;
+    let ws = format!("/api/v1/workspaces/{}", fx.workspace_id);
+    let document_backlinks = format!(
+        "{ws}/projects/{}/documents/{}/backlinks",
+        fx.project_id, fx.root_id
+    );
+    let paths = [
+        document_backlinks.clone(),
+        format!("{ws}/tasks/{}/backlinks", fx.task_id),
+    ];
+
+    let mut pause = admin.begin().await.unwrap();
+    sqlx::query("LOCK TABLE fvoci.tasks IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *pause)
+        .await
+        .unwrap();
+    let pause_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *pause)
+        .await
+        .unwrap();
+    let reads: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            let (app, path, cookie) = (app.clone(), path.clone(), fx.viewer.cookie.clone());
+            tokio::spawn(async move { json_request(app, "GET", &path, None, Some(&cookie)).await })
+        })
+        .collect();
+    // The document read has passed its permission check and reached the
+    // task body scan.
+    wait_for_blocked_by_holder(
+        &admin,
+        pause_pid,
+        Some("%jsonb_path_exists(t.content_json%"),
+        1,
+    )
+    .await;
+    wait_for_blocked_by_holder(&admin, pause_pid, None, paths.len()).await;
+
+    // Twice the statement timeout: a bounded read has ended well before.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut unbounded = Vec::new();
+    for (path, read) in paths.iter().zip(reads) {
+        match tokio::time::timeout_at(deadline, read).await {
+            Ok(joined) => {
+                let (status, body) = joined.expect("join");
+                assert_eq!(
+                    status,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "GET {path}: {body:?}"
+                );
+            }
+            Err(_) => unbounded.push(format!("GET {path}")),
+        }
+    }
+    pause.rollback().await.unwrap();
+    assert!(
+        unbounded.is_empty(),
+        "backlink scans still ran with fvoci.tasks locked for 30 s: {unbounded:#?}"
+    );
+
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &document_backlinks,
+        None,
+        Some(&fx.viewer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
     admin.close().await;
     harness.cleanup().await;
 }

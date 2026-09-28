@@ -2,9 +2,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
+use crate::db::context::{
+    begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::documents::between;
-use crate::db::projects::{lock_project, project_permission, ProjectDbError};
+use crate::db::projects::{load_live_project, lock_project, project_permission, ProjectDbError};
 use crate::projects::ProjectPermission;
 
 pub const MILESTONE_NAME_MAX: usize = 200;
@@ -50,7 +52,7 @@ async fn require_project_view(
     if !workspace_is_live(tx, workspace_id).await? {
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let Some(locked) = lock_project(tx, workspace_id, project_id).await? else {
+    let Some(locked) = load_live_project(tx, workspace_id, project_id).await? else {
         return Ok(Err(ProjectDbError::NotFound));
     };
     let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
@@ -153,7 +155,7 @@ pub async fn list_project_milestones(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<MilestoneRow>, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     match require_project_view(&mut tx, workspace_id, actor_user_id, session_id, project_id).await?
     {

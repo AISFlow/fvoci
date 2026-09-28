@@ -2,7 +2,7 @@ use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use sqlx::{PgPool, Row, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{session_is_live, set_tenant};
+use crate::db::context::{begin_read, session_is_live, set_tenant};
 use crate::db::holidays::list_holiday_dates;
 use crate::db::projects::{project_permission_by_id, ProjectDbError};
 use crate::db::tasks::{
@@ -45,10 +45,7 @@ pub async fn get_project_task_layout(
     let to = range.1.clone();
     let time_zone = crate::db::dashboard::user_time_zone(pool, actor_user_id).await?;
 
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
+    let mut tx = begin_read(pool).await?;
     sqlx::query("SET LOCAL statement_timeout = '15s'")
         .execute(&mut *tx)
         .await?;

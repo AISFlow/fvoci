@@ -14,10 +14,13 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
+use crate::db::context::{
+    begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::documents::document_permission;
 use crate::db::projects::{
-    lock_project, project_permission, project_permission_by_id, LockedProject, ProjectDbError,
+    load_live_project, lock_project, project_permission, project_permission_by_id, LockedProject,
+    ProjectDbError,
 };
 use crate::db::task_activity::record_task_activity;
 use crate::db::tasks::{
@@ -30,7 +33,7 @@ use crate::projects::ProjectPermission;
 use crate::settings::messages::{Message, Messages};
 use crate::tasks::activity::ActivitySnapshot;
 
-/// A task the actor can currently view, with its locked project.
+/// A task the actor can currently view, with its project row.
 struct ViewableTask {
     project: LockedProject,
     archived_at: Option<DateTime<Utc>>,
@@ -38,7 +41,9 @@ struct ViewableTask {
 }
 
 /// Read access in the `get_task` order: live credential, live workspace, live
-/// task, project row lock, view permission. Hidden and missing are both 404.
+/// task, project row, view permission. Hidden and missing are both 404. The
+/// caller's read transaction ([`begin_read`]) gives every check and the data it
+/// returns one snapshot; the project row is not locked.
 async fn viewable_task(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -66,7 +71,7 @@ async fn viewable_task(
     let Some((project_id, archived_at)) = row else {
         return Ok(Err(ProjectDbError::NotFound));
     };
-    let Some(project) = lock_project(tx, workspace_id, project_id).await? else {
+    let Some(project) = load_live_project(tx, workspace_id, project_id).await? else {
         return Ok(Err(ProjectDbError::NotFound));
     };
     let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
@@ -155,7 +160,7 @@ pub async fn list_time_entries(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<TimeEntryList, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     let task =
         match viewable_task(&mut tx, workspace_id, actor_user_id, session_id, task_id).await? {
@@ -395,7 +400,11 @@ pub async fn list_task_backlinks(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<TaskBacklink>, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
+    // Bounds the two body scans (JSONPath over every live document and task).
+    sqlx::query("SET LOCAL statement_timeout = '15s'")
+        .execute(&mut *tx)
+        .await?;
     set_tenant(&mut tx, workspace_id).await?;
     if let Err(err) =
         viewable_task(&mut tx, workspace_id, actor_user_id, session_id, task_id).await?
@@ -877,7 +886,7 @@ pub async fn list_task_parents(
             Err(()) => return Ok(Err(ProjectDbError::InvalidCursor)),
         },
     };
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -887,7 +896,7 @@ pub async fn list_task_parents(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let Some(project) = lock_project(&mut tx, workspace_id, project_id).await? else {
+    let Some(project) = load_live_project(&mut tx, workspace_id, project_id).await? else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
