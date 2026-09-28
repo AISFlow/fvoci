@@ -26,8 +26,9 @@ impl RateLimiter {
     }
 
     pub async fn allow_window(&self, key: &str, limit: u32, window: Duration) -> Result<(), u32> {
-        let now = Instant::now();
         let mut counters = self.inner.lock().await;
+        // Read the clock under the lock so hits are stored in time order.
+        let now = Instant::now();
         counters.allow_at(key, limit, window, now)
     }
 }
@@ -43,9 +44,9 @@ struct Counters {
 
 struct Counter {
     /// The longest window a caller has used for this key. Hits are kept that
-    /// long, both by each call and by pruning a full map, so neither pruning
-    /// nor a caller with a shorter window drops a hit a longer-window caller
-    /// of the same key still counts.
+    /// long, both by each call and by pruning a full map, so once a
+    /// longer-window caller has used the key, neither pruning nor a caller
+    /// with a shorter window drops a hit it still counts.
     window: Duration,
     /// In time order, oldest first.
     hits: Vec<Instant>,
@@ -125,9 +126,10 @@ impl Counters {
     /// flood evicts only its own one-hit keys. Until then, each new flood key
     /// evicts from the largest legitimate namespace, fewest hits first, so a
     /// flood into a map already full of live counters shrinks every larger
-    /// namespace down to its own size before it starts evicting itself. That
-    /// resets at most about half the map in total (about 5 000 counters when
-    /// one namespace fills it), and the most-used counters go last.
+    /// namespace down to its own size before it starts evicting itself. Per
+    /// flood that resets at most about half the map in total (about 5 000
+    /// counters when one namespace fills it), and within the namespace being
+    /// shrunk the most-used counters go last.
     fn evict_from_largest_namespace(&mut self) {
         let Some(largest) = self
             .namespaces
