@@ -17,7 +17,7 @@ def meminfo():
         if line.startswith("MemTotal"):
             return line.split(":")[1].strip()
 cpu = next((l.split(":", 1)[1].strip() for l in run("lscpu").splitlines() if l.startswith("Model name")), "")
-os_name = next((l.split("=", 1)[1].strip('"') for l in open("/etc/os-release") if l.startswith("PRETTY_NAME")), "")
+os_name = next((l.split("=", 1)[1].strip().strip('"') for l in open("/etc/os-release") if l.startswith("PRETTY_NAME")), "")
 print(json.dumps({
     "git_head": run("git", "rev-parse", "HEAD", cwd=root),
     "git_dirty_paths": len(run("git", "status", "--porcelain", cwd=root).splitlines()),
