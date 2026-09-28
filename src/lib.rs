@@ -29,6 +29,7 @@ pub mod projects;
 pub mod push;
 pub mod search;
 pub mod secret_box;
+pub mod secret_maintenance;
 pub mod secret_verify;
 pub mod settings;
 pub mod share_render;

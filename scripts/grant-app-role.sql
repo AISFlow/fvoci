@@ -252,3 +252,9 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_set_vapid(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_set_vapid(text, text) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_init_vapid(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_init_vapid(text, text) TO :"app_role";
+
+-- 042 secret maintenance (`fvoci-migrate --secrets-audit|--secrets-rotate`).
+REVOKE EXECUTE ON FUNCTION fvoci.app_password_key_inventory() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_password_key_inventory() TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_replace_vapid_private(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_replace_vapid_private(text, text) TO :"app_role";
