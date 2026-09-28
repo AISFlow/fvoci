@@ -3,9 +3,11 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{session_is_live, set_system, set_tenant};
+use crate::db::context::{begin_read, session_is_live, set_system, set_tenant};
 use crate::db::documents::workspace_is_live;
 use crate::db::identity::{append_event, EventAppend};
+use crate::db::projects::{load_live_project, project_permission, share_lock_project_permission};
+use crate::projects::ProjectPermission;
 
 const SESSION_REVISION_HEAD_RETRIES: u32 = 2;
 
@@ -305,9 +307,29 @@ async fn authorize_document(
     Ok(Ok(()))
 }
 
-/// Project document revision access: the owning project is share-locked with
-/// the caller's effective project permission (members and project group
-/// grants; wiki document grants never apply), and the live document must
+/// The actor's effective permission on a live project and whether it is
+/// archived. A write share-locks the project row so project mutations wait for
+/// it; a read (in [`begin_read`]) takes no row lock.
+async fn project_access(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    project_id: Uuid,
+    write: bool,
+) -> Result<Option<(ProjectPermission, bool)>, sqlx::Error> {
+    if write {
+        return share_lock_project_permission(tx, workspace_id, actor_user_id, project_id).await;
+    }
+    let Some(project) = load_live_project(tx, workspace_id, project_id).await? else {
+        return Ok(None);
+    };
+    let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
+    Ok(Some((permission, project.status == "archived")))
+}
+
+/// Project document revision access: the caller's effective project permission
+/// (members and project group grants; wiki document grants never apply), under
+/// a share lock on the project row for writes, and the live document must
 /// belong to the project named by the route. Writes refuse an archived
 /// project (source `assertProjectWritable`).
 async fn authorize_project_document(
@@ -322,17 +344,13 @@ async fn authorize_project_document(
     if !workspace_is_live(&mut *tx, workspace_id).await? {
         return Ok(Err(RevisionDbError::NotFound));
     }
-    let Some((permission, project_archived)) = crate::db::projects::share_lock_project_permission(
-        tx,
-        workspace_id,
-        actor_user_id,
-        project_id,
-    )
-    .await?
+    let Some((permission, project_archived)) =
+        project_access(tx, workspace_id, actor_user_id, project_id, write).await?
     else {
         return Ok(Err(RevisionDbError::NotFound));
     };
-    // Checked after the project lock wait so a session revoked meanwhile is refused.
+    // Checked after a write's project lock wait so a session revoked meanwhile
+    // is refused.
     if !session_is_live(&mut *tx, actor_user_id, session_id).await? {
         return Ok(Err(RevisionDbError::Forbidden));
     }
@@ -366,7 +384,7 @@ async fn authorize_project_document(
 
 /// Task revision access: a live task in a live project the caller can view
 /// (read) or edit (write). Writes also refuse an archived project or task
-/// (source `assertTaskWritable`). The project row is share-locked.
+/// (source `assertTaskWritable`) and share-lock the project row.
 async fn authorize_task(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -395,13 +413,8 @@ async fn authorize_task(
     let Some((project_id, archived_at)) = task else {
         return Ok(Err(RevisionDbError::NotFound));
     };
-    let Some((permission, project_archived)) = crate::db::projects::share_lock_project_permission(
-        tx,
-        workspace_id,
-        actor_user_id,
-        project_id,
-    )
-    .await?
+    let Some((permission, project_archived)) =
+        project_access(tx, workspace_id, actor_user_id, project_id, write).await?
     else {
         return Ok(Err(RevisionDbError::NotFound));
     };
@@ -462,7 +475,13 @@ pub async fn authorize_revision_target(
     write: bool,
 ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
     let scope = scope.into();
-    let mut tx = pool.begin().await?;
+    // A write check share-locks the project row, which a read-only
+    // transaction refuses.
+    let mut tx = if write {
+        pool.begin().await?
+    } else {
+        begin_read(pool).await?
+    };
     set_tenant(&mut tx, workspace_id).await?;
     let result = authorize_target(
         &mut tx,
@@ -557,7 +576,7 @@ pub async fn list_revisions(
 ) -> Result<Result<RevisionListPage, RevisionDbError>, sqlx::Error> {
     let scope = scope.into();
     let target = scope.target;
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_target(
         &mut tx,
@@ -676,7 +695,7 @@ pub async fn get_revision(
 ) -> Result<Result<RevisionDetail, RevisionDbError>, sqlx::Error> {
     let scope = scope.into();
     let target = scope.target;
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_target(
         &mut tx,

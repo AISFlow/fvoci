@@ -6,7 +6,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{
-    lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+    begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
 };
 use crate::db::documents::{empty_document_json, to_path_label, DOCUMENT_SCHEMA_VERSION};
 use crate::db::group_grants::{
@@ -1267,7 +1267,7 @@ pub async fn get_project(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -1277,7 +1277,7 @@ pub async fn get_project(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
@@ -1501,7 +1501,7 @@ pub async fn list_project_members(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<ProjectMemberRow>, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -1511,7 +1511,7 @@ pub async fn list_project_members(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
@@ -1845,7 +1845,7 @@ pub async fn get_project_workflow(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<WorkflowRow, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -1855,7 +1855,7 @@ pub async fn get_project_workflow(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));

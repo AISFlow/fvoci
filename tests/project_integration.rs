@@ -2835,6 +2835,44 @@ async fn task_reads_do_not_wait_on_project_row_locks() {
     harness.cleanup().await;
 }
 
+/// Project, label, milestone, group-grant, comment, project document and
+/// revision reads take no project row lock either.
+#[tokio::test]
+async fn project_reads_do_not_wait_on_project_row_locks() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, _, _) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let fx = project_read_fixture(&app, &admin).await;
+    let ws = format!("/api/v1/workspaces/{}", fx.workspace_id);
+    let (project_id, task_id, root_id) = (&fx.project_id, &fx.task_id, &fx.root_id);
+    let doc = format!("{ws}/projects/{project_id}/documents/{root_id}");
+    let paths = vec![
+        format!("{ws}/projects/{project_id}"),
+        format!("{ws}/projects/{project_id}/members"),
+        format!("{ws}/projects/{project_id}/workflow"),
+        format!("{ws}/projects/{project_id}/groups"),
+        format!("{ws}/projects/{project_id}/labels"),
+        format!("{ws}/projects/{project_id}/milestones"),
+        format!("{ws}/tasks/{task_id}/comments"),
+        format!("{ws}/tasks/{task_id}/revisions"),
+        format!("{ws}/projects/{project_id}/documents"),
+        doc.clone(),
+        format!("{doc}/comments"),
+        format!("{doc}/children"),
+        format!("{doc}/ancestors"),
+        format!("{doc}/backlinks"),
+        format!("{doc}/revisions"),
+        format!("/api/v1/documents/{root_id}"),
+    ];
+    let waited = reads_waiting_on_project_row(&app, &admin, &fx, &paths).await;
+    assert!(
+        waited.is_empty(),
+        "project reads waited on a project row lock: {waited:#?}"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 /// A task list read that is paused after its permission check holds no
 /// transaction id, so a slow list never holds back the cluster-wide
 /// `pg_snapshot_xmin` gate that SSE and outbox consumers wait on.
