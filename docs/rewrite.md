@@ -259,7 +259,7 @@ provenance: 실행 source `0e3e95dd`의 frontend(`apps/web`·`packages`)는 수�
   있으나 현재 원격 CI(관측 시 queued)와 코디네이터 수락 전이다.
   수락으로 표시하지 않으며 기존 PDF·DOCX·XLSX·PPTX·HWP 보기·변환·백업 수락 범위를 취소하지 않는다.
 - Web Push: 실제 제공자 실행 9회차에서 `AbortError: Subscription failed - no active Service Worker`가 구체 제품 결함으로
-  확인됐다. 수정은 C [#196](https://github.com/AISFlow/fvoci/pull/196)(`ec3da98d`; 독립 검토·원격 CI·실제 headed witness 대기, 미수락)이고,
+  확인됐다. 수정은 C [#196](https://github.com/AISFlow/fvoci/pull/196)(`ec3da98d`; 별도 Opus 독립 코드 검토 ACCEPT, 원격 CI·실제 headed witness·코디네이터 수락 대기, 미수락)이고,
   실제 외부 전달·브라우저 수신·로그아웃 해제는 별도 F로 witness가 아직 없다.
 - 실제 외부 IdP·인증 앱 스캔 F는 사용자 환경(계정·기기)이 필요한 실행 증거이며 코드 정책 선택 문제가 아니다.
 - 분류 근거·행별 종료 조건: `/home/kinesis/orca/fvoci-evidence/opus-decision-status-cleanup.md`.
