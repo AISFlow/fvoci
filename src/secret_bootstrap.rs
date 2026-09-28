@@ -160,12 +160,18 @@ pub fn install_env(
     };
     let mut out = Vec::new();
     if let Some(password) = optional(OWNER_PASSWORD_FILE)? {
-        conflict(&["DATABASE_URL", "FVOCI_MIGRATION_URL"], OWNER_PASSWORD_FILE)?;
+        conflict(
+            &["DATABASE_URL", "FVOCI_MIGRATION_URL"],
+            OWNER_PASSWORD_FILE,
+        )?;
         let names = DbNames::from_lookup(&get)?;
         out.push(("DATABASE_URL", names.url(&names.owner, &password)));
     }
     if let Some(master) = optional(MASTER_KEY_FILE)? {
-        conflict(&["MEILI_MASTER_KEY", "FVOCI_MEILI_MASTER_KEY"], MASTER_KEY_FILE)?;
+        conflict(
+            &["MEILI_MASTER_KEY", "FVOCI_MEILI_MASTER_KEY"],
+            MASTER_KEY_FILE,
+        )?;
         out.push(("MEILI_MASTER_KEY", master));
         if get("FVOCI_MEILI_URL").is_none() {
             out.push(("FVOCI_MEILI_URL", DEFAULT_MEILI_URL.to_string()));
@@ -174,7 +180,9 @@ pub fn install_env(
     let key_file = root
         .join(SERVER_DIR)
         .join(install_setting_file("FVOCI_MEILI_KEY"));
-    if key_file.is_file() && get("FVOCI_MEILI_KEY").is_none() && get("FVOCI_MEILI_KEY_FILE").is_none()
+    if key_file.is_file()
+        && get("FVOCI_MEILI_KEY").is_none()
+        && get("FVOCI_MEILI_KEY_FILE").is_none()
     {
         out.push(("FVOCI_MEILI_KEY_FILE", key_file.display().to_string()));
     }
@@ -198,7 +206,8 @@ enum ServerSecrets {
 
 fn server_secrets(dir: &Path, names: &DbNames) -> Result<ServerSecrets, String> {
     let mut missing = Vec::new();
-    for file in std::iter::once(MARKER).chain(SERVER_SECRETS.iter().map(|v| install_setting_file(v)))
+    for file in
+        std::iter::once(MARKER).chain(SERVER_SECRETS.iter().map(|v| install_setting_file(v)))
     {
         match fs::symlink_metadata(dir.join(file)) {
             Ok(meta) if meta.is_file() && meta.len() > 0 => {}
@@ -325,14 +334,21 @@ pub async fn install() -> Result<(), String> {
     migrate::grant_app_role(&owner_url, &names.app_role)
         .await
         .map_err(|e| e.to_string())?;
-    eprintln!("migrated; granted app role privileges to {}", names.app_role);
+    eprintln!(
+        "migrated; granted app role privileges to {}",
+        names.app_role
+    );
 
     if let Some(url) = std::env::var("FVOCI_MEILI_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())
     {
         ensure_meili_key_file(&server_dir.join(install_setting_file("FVOCI_MEILI_KEY"))).await?;
-        write_if_changed(&server_dir, install_setting_file("FVOCI_MEILI_URL"), url.trim())?;
+        write_if_changed(
+            &server_dir,
+            install_setting_file("FVOCI_MEILI_URL"),
+            url.trim(),
+        )?;
         eprintln!("search key ready");
     }
     sqlx::query("SELECT pg_advisory_unlock($1)")
@@ -473,8 +489,7 @@ mod tests {
             }
         );
         // The files are exactly what the server reads from its install directory.
-        let resolved =
-            crate::config::resolve_secret_files(|_| None, &tmp.server()).unwrap();
+        let resolved = crate::config::resolve_secret_files(|_| None, &tmp.server()).unwrap();
         let vars: Vec<_> = resolved.iter().map(|(n, _)| *n).collect();
         assert_eq!(vars, SERVER_SECRETS);
     }
@@ -506,7 +521,8 @@ mod tests {
     fn renamed_role_or_foreign_url_is_refused() {
         let tmp = TempDir::new();
         generate_server_secrets(&tmp.server(), &names()).unwrap();
-        let other = DbNames::from_lookup(|k| (k == "FVOCI_APP_ROLE").then(|| "other".into())).unwrap();
+        let other =
+            DbNames::from_lookup(|k| (k == "FVOCI_APP_ROLE").then(|| "other".into())).unwrap();
         assert!(server_secrets(&tmp.server(), &other)
             .unwrap_err()
             .contains("another role"));

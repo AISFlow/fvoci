@@ -507,7 +507,11 @@ pub const INSTALL_SETTINGS_DIR: &str = "/run/fvoci/secrets";
 
 /// `(variable, file name in INSTALL_SETTINGS_DIR, other variables that also set it)`.
 pub const INSTALL_SETTING_FILES: &[(&str, &str, &[&str])] = &[
-    ("DATABASE_APP_URL", "database_app_url", &["FVOCI_APP_DATABASE_URL"]),
+    (
+        "DATABASE_APP_URL",
+        "database_app_url",
+        &["FVOCI_APP_DATABASE_URL"],
+    ),
     ("PASSWORD_PEPPER_KEYS", "password_pepper_keys", &[]),
     (
         "PASSWORD_PEPPER_ACTIVE_KEY_ID",
@@ -517,7 +521,11 @@ pub const INSTALL_SETTING_FILES: &[(&str, &str, &[&str])] = &[
     ("ENCRYPTION_KEYS", "encryption_keys", &[]),
     ("ENCRYPTION_ACTIVE_KEY_ID", "encryption_active_key_id", &[]),
     ("FVOCI_MEILI_URL", "meili_url", &[]),
-    ("FVOCI_MEILI_KEY", "meili_api_key", &["FVOCI_MEILI_KEY_FILE"]),
+    (
+        "FVOCI_MEILI_KEY",
+        "meili_api_key",
+        &["FVOCI_MEILI_KEY_FILE"],
+    ),
 ];
 
 /// File name of `var` in [`INSTALL_SETTINGS_DIR`].
@@ -604,7 +612,8 @@ pub fn resolve_secret_files(
 /// every existing reader sees one source. Call at the start of `main`, before
 /// a runtime or any other thread exists (the environment is process-global).
 pub fn load_secret_files() -> Result<(), String> {
-    for (name, value) in resolve_secret_files(|k| env::var_os(k), Path::new(INSTALL_SETTINGS_DIR))? {
+    for (name, value) in resolve_secret_files(|k| env::var_os(k), Path::new(INSTALL_SETTINGS_DIR))?
+    {
         env::set_var(name, value);
     }
     Ok(())
@@ -632,12 +641,15 @@ mod tests {
         };
 
         let none = dir.join("no-install");
-        let got = resolve_secret_files(lookup(vec![
-            ("DATABASE_APP_URL_FILE", url.clone()),
-            ("ENCRYPTION_KEYS_FILE", keys.clone()),
-            // Not in the allowlist: ignored, never read.
-            ("DATABASE_URL_FILE", "/nonexistent".into()),
-        ]), &none)
+        let got = resolve_secret_files(
+            lookup(vec![
+                ("DATABASE_APP_URL_FILE", url.clone()),
+                ("ENCRYPTION_KEYS_FILE", keys.clone()),
+                // Not in the allowlist: ignored, never read.
+                ("DATABASE_URL_FILE", "/nonexistent".into()),
+            ]),
+            &none,
+        )
         .unwrap();
         assert_eq!(
             got,
@@ -647,22 +659,28 @@ mod tests {
             ]
         );
 
-        let both = resolve_secret_files(lookup(vec![
-            ("PASSWORD_PEPPER_KEYS", "x".into()),
-            ("PASSWORD_PEPPER_KEYS_FILE", keys.clone()),
-        ]), &none)
+        let both = resolve_secret_files(
+            lookup(vec![
+                ("PASSWORD_PEPPER_KEYS", "x".into()),
+                ("PASSWORD_PEPPER_KEYS_FILE", keys.clone()),
+            ]),
+            &none,
+        )
         .unwrap_err();
         assert!(both.contains("both set"), "{both}");
-        let err =
-            resolve_secret_files(lookup(vec![("PASSWORD_PEPPER_KEYS_FILE", empty)]), &none).unwrap_err();
+        let err = resolve_secret_files(lookup(vec![("PASSWORD_PEPPER_KEYS_FILE", empty)]), &none)
+            .unwrap_err();
         assert!(err.contains("is empty"), "{err}");
-        let err =
-            resolve_secret_files(lookup(vec![("PASSWORD_PEPPER_KEYS_FILE", big)]), &none).unwrap_err();
+        let err = resolve_secret_files(lookup(vec![("PASSWORD_PEPPER_KEYS_FILE", big)]), &none)
+            .unwrap_err();
         assert!(err.contains("64 KiB"), "{err}");
-        let err = resolve_secret_files(lookup(vec![(
-            "DATABASE_APP_URL_FILE",
-            dir.join("missing").into_os_string(),
-        )]), &none)
+        let err = resolve_secret_files(
+            lookup(vec![(
+                "DATABASE_APP_URL_FILE",
+                dir.join("missing").into_os_string(),
+            )]),
+            &none,
+        )
         .unwrap_err();
         assert!(
             err.starts_with("DATABASE_APP_URL_FILE: cannot read"),
@@ -676,7 +694,11 @@ mod tests {
     fn install_setting_files_fill_unset_variables_only() {
         let dir = std::env::temp_dir().join(format!("fvoci-install-dir-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("database_app_url"), "postgres://a:b@postgres:5432/fvoci\n").unwrap();
+        std::fs::write(
+            dir.join("database_app_url"),
+            "postgres://a:b@postgres:5432/fvoci\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("meili_api_key"), "k".repeat(64)).unwrap();
         let lookup = |pairs: Vec<(&'static str, &'static str)>| {
             move |k: &str| {
@@ -687,20 +709,30 @@ mod tests {
             }
         };
 
-        let got = resolve_secret_files(lookup(vec![("FVOCI_MEILI_URL", "http://m:7700")]), &dir)
-            .unwrap();
+        let got =
+            resolve_secret_files(lookup(vec![("FVOCI_MEILI_URL", "http://m:7700")]), &dir).unwrap();
         assert_eq!(
             got,
             vec![
-                ("DATABASE_APP_URL", "postgres://a:b@postgres:5432/fvoci".to_string()),
+                (
+                    "DATABASE_APP_URL",
+                    "postgres://a:b@postgres:5432/fvoci".to_string()
+                ),
                 ("FVOCI_MEILI_KEY", "k".repeat(64)),
             ]
         );
         // The variable, an alias or its _FILE form next to the install file is
         // ambiguous, including an explicitly empty value.
-        for var in ["DATABASE_APP_URL", "FVOCI_APP_DATABASE_URL", "FVOCI_MEILI_KEY_FILE"] {
+        for var in [
+            "DATABASE_APP_URL",
+            "FVOCI_APP_DATABASE_URL",
+            "FVOCI_MEILI_KEY_FILE",
+        ] {
             let err = resolve_secret_files(lookup(vec![(var, "")]), &dir).unwrap_err();
-            assert!(err.starts_with(&format!("{var} is set and the install file")), "{err}");
+            assert!(
+                err.starts_with(&format!("{var} is set and the install file")),
+                "{err}"
+            );
             assert!(!err.contains("postgres://a:b"), "{err}");
         }
         let url_file = dir.join("database_app_url");
@@ -709,7 +741,10 @@ mod tests {
             &dir,
         )
         .unwrap_err();
-        assert!(err.starts_with("DATABASE_APP_URL_FILE is set and the install file"), "{err}");
+        assert!(
+            err.starts_with("DATABASE_APP_URL_FILE is set and the install file"),
+            "{err}"
+        );
         // No directory (every other install): nothing is read.
         assert!(resolve_secret_files(lookup(vec![]), &dir.join("absent"))
             .unwrap()
