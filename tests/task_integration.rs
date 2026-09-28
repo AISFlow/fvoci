@@ -4375,28 +4375,6 @@ async fn poll_task_rows(
         .rows
 }
 
-/// Poll until at least `min_updates` `task.updated` rows are visible. The cursor
-/// is itself xmin-bounded, so an earlier `task.created` may still land in the
-/// window; counting every row would stop before a later update settles.
-async fn poll_task_updates_until(
-    pool: &sqlx::PgPool,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    credential: StreamCredential,
-    cursor: &fvoci_server::streams::EventCursor,
-    min_updates: usize,
-) -> Vec<fvoci_server::streams::StreamEventRow> {
-    let mut rows = Vec::new();
-    for _ in 0..30 {
-        rows = poll_task_rows(pool, workspace_id, project_id, credential, cursor, 100).await;
-        if rows.iter().filter(|r| r.verb == "task.updated").count() >= min_updates {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    rows
-}
-
 #[tokio::test]
 async fn task_meta_and_move_events_reach_only_their_project_poll() {
     let harness = TestDb::bootstrap().await;
@@ -4499,14 +4477,18 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    // Wait for the updates to pass the xmin gate, then poll once. The cursor is
+    // itself xmin-bounded, so `task.created` can land in the window when another
+    // test pinned xmin as it was taken: count updates only.
+    settle_committed_events(&admin).await;
     let credential = stream_credential(&admin, owner_id).await;
-    let rows = poll_task_updates_until(
+    let rows = poll_task_rows(
         &app_pool,
         workspace_id,
         project_a_id,
         credential,
         &cursor,
-        4,
+        100,
     )
     .await;
     let updates: Vec<&serde_json::Value> = rows
@@ -4537,8 +4519,8 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
 
 #[tokio::test]
 async fn task_update_poll_waits_for_update_held_behind_xmin() {
-    // Regression for the CI snapshot `task.created` + three updates while the
-    // move event was still above the cluster-wide xmin.
+    // An update committed above the cluster-wide xmin stays hidden until xmin
+    // passes it (CI once saw `task.created` + three updates at that point).
     let harness = TestDb::bootstrap().await;
     let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
@@ -4572,24 +4554,9 @@ async fn task_update_poll_waits_for_update_held_behind_xmin() {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
-    // Settle everything committed so far (bounded, read-only), then hold an
-    // xid so the move commits above xmin until the hold ends.
-    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-        .fetch_one(&admin)
-        .await
-        .expect("current xid");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !sqlx::query_scalar::<_, bool>(
-        "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8",
-    )
-    .bind(&horizon)
-    .fetch_one(&admin)
-    .await
-    .expect("snapshot xmin")
-    {
-        assert!(Instant::now() < deadline, "events never settled");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // Settle everything committed so far, then hold an xid so the move
+    // commits above xmin until the hold ends.
+    settle_committed_events(&admin).await;
     let mut hold = admin.begin().await.expect("hold tx");
     sqlx::query("SELECT pg_current_xact_id()")
         .execute(&mut *hold)
@@ -4629,14 +4596,17 @@ async fn task_update_poll_waits_for_update_held_behind_xmin() {
         "move must stay hidden while the hold is open: {pending:?}"
     );
 
-    let release = async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        hold.commit().await.expect("release hold");
-    };
-    let (rows, ()) = tokio::join!(
-        poll_task_updates_until(&app_pool, workspace_id, project_id, credential, &cursor, 4),
-        release
-    );
+    hold.commit().await.expect("release hold");
+    settle_committed_events(&admin).await;
+    let rows = poll_task_rows(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &cursor,
+        100,
+    )
+    .await;
     let updates: Vec<&serde_json::Value> = rows
         .iter()
         .filter(|r| r.verb == "task.updated")
