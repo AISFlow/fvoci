@@ -695,7 +695,13 @@ selects local storage; a storage doctor probe cannot detect that wrong choice.
 
 If init fails, leave the server stopped. Run `logs init` with the same Compose
 flags, fix the cause and repeat step 3: already applied migrations are skipped
-and the grant commits all or nothing. To go back to the old build, stop the
+and the grant commits all or nothing. If init fails with `outbox consumer seed
+repair: newest event xid ... is not settled`, a transaction on the same
+PostgreSQL cluster (any database, or a prepared transaction) is older than the
+newest event. Let it end or roll it back (`pg_stat_activity`,
+`pg_prepared_xacts`), then repeat step 3. Migration 041 adds the outbox cursors
+an earlier upgrade left missing, so notifications and mail do not replay past
+events. To go back to the old build, stop the
 upgraded server first; do not start the old image on the migrated database.
 Restore the pre-upgrade backup into a new project with the old image (local
 storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback

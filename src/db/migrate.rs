@@ -76,6 +76,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
     ),
     (include_str!("../../migrations/039_templates.sql"), 39),
     (include_str!("../../migrations/040_web_push.sql"), 40),
+    (
+        include_str!("../../migrations/041_outbox_consumer_seed_repair.sql"),
+        41,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
