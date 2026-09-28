@@ -1,7 +1,7 @@
 import { t } from "@fvoci/i18n";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, readCapped, zoomIn, zoomOut } from "./pdf-limits";
+import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, zoomIn, zoomOut } from "./pdf-limits";
 import {
   ViewerDownloadButton,
   ViewerErrorPane,
@@ -11,6 +11,7 @@ import {
 import { openXlsxInWorker, XlsxWorkerError, type RemoteXlsxBook } from "./xlsx-client";
 import { XLSX_MAX_BYTES } from "./xlsx-limits";
 import type { XlsxPage } from "./xlsx-workbook";
+import { downloadCapped, type ViewerPrefetch } from "./viewer-download";
 import "./xlsx-viewer.css";
 
 type BookState =
@@ -38,7 +39,13 @@ function pageError(error: unknown): BookState {
  * is parsed and paged in a dedicated worker (`xlsx-client.ts`) with a
  * wall-clock bound, and that worker is terminated on unmount or a new load.
  */
-export function XlsxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode {
+export function XlsxViewer({
+  downloadUrl,
+  prefetch,
+}: {
+  downloadUrl: string;
+  prefetch?: ViewerPrefetch;
+}): ReactNode {
   const [generation, setGeneration] = useState(0);
   const [state, setState] = useState<BookState>({ status: "loading" });
   const [sheetIndex, setSheetIndex] = useState(0);
@@ -58,17 +65,13 @@ export function XlsxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
     let book: RemoteXlsxBook | null = null;
     void (async () => {
       try {
-        const response = await fetch(downloadUrl, {
-          credentials: "include",
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          await response.body?.cancel();
-          if (alive) setState({ status: "error", message: t("load.failed"), retry: true });
+        const body = await (prefetch?.take(controller.signal) ??
+          downloadCapped(downloadUrl, XLSX_MAX_BYTES, controller.signal));
+        if (!alive) return;
+        if (body.status === "failed") {
+          setState({ status: "error", message: t("load.failed"), retry: true });
           return;
         }
-        const body = await readCapped(response, XLSX_MAX_BYTES);
-        if (!alive) return;
         if (body.status === "tooLarge") {
           setState({ status: "error", message: t("attachment.viewer.previewUnavailable"), retry: false });
           return;
@@ -108,7 +111,7 @@ export function XlsxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
       controller.abort();
       book?.close();
     };
-  }, [downloadUrl, generation]);
+  }, [downloadUrl, generation, prefetch]);
 
   const book = state.status === "ready" ? state.book : null;
   const sheet = book?.sheets[sheetIndex];

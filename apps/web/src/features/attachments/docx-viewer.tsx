@@ -11,7 +11,8 @@ import {
   transferInlineStyles,
 } from "./docx-frame";
 import { checkDocxPackage, DOCX_MAX_BYTES } from "./docx-limits";
-import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, readCapped, zoomIn, zoomOut } from "./pdf-limits";
+import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, zoomIn, zoomOut } from "./pdf-limits";
+import { downloadCapped, type ViewerPrefetch } from "./viewer-download";
 import { ViewerErrorPane, ViewerLoadingPane, ViewerZoomToolbar } from "./viewer-shell";
 
 type DocxState =
@@ -27,7 +28,13 @@ const PAGE_SELECTOR = ".docx-wrapper > section.docx";
  * save or export. Pages follow the document's explicit page and section
  * breaks, as docx-preview produces them.
  */
-export function DocxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode {
+export function DocxViewer({
+  downloadUrl,
+  prefetch,
+}: {
+  downloadUrl: string;
+  prefetch?: ViewerPrefetch;
+}): ReactNode {
   const [generation, setGeneration] = useState(0);
   const [state, setState] = useState<DocxState>({ status: "loading" });
   const [page, setPage] = useState(0);
@@ -47,17 +54,13 @@ export function DocxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
     setPage(0);
     void (async () => {
       try {
-        const response = await fetch(downloadUrl, {
-          credentials: "include",
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          await response.body?.cancel();
+        const body = await (prefetch?.take(controller.signal) ??
+          downloadCapped(downloadUrl, DOCX_MAX_BYTES, controller.signal));
+        if (!alive) return;
+        if (body.status === "failed") {
           fail(t("load.failed"), true);
           return;
         }
-        const body = await readCapped(response, DOCX_MAX_BYTES);
-        if (!alive) return;
         if (body.status === "tooLarge") {
           fail(t("attachment.viewer.previewUnavailable"), false);
           return;
@@ -123,7 +126,7 @@ export function DocxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
       controller.abort();
       mount.replaceChildren();
     };
-  }, [downloadUrl, generation]);
+  }, [downloadUrl, generation, prefetch]);
 
   const ready = state.status === "ready" ? state : null;
 
