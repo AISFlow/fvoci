@@ -99,7 +99,7 @@ class ReleaseDistTest(unittest.TestCase):
                 self.assertIn(f"x-fvoci-image: &fvoci-image {PINNED}\n", rendered)
                 self.assertEqual(rendered.count(IMAGE), 1)
                 self.assertNotIn("FVOCI_IMAGE", rendered)
-                self.assertGreaterEqual(rendered.count("image: *fvoci-image"), 3)
+                self.assertGreaterEqual(rendered.count("image: *fvoci-image"), 2)
                 record = json.loads(s.read("dist/release.json"))
                 self.assertEqual(record["image"], PINNED)
                 self.assertEqual(record["platforms"], {"linux/amd64": AMD64, "linux/arm64": ARM64})
@@ -121,9 +121,9 @@ class ReleaseDistTest(unittest.TestCase):
             "no anchor": (base.replace(anchor, "x-other: &fvoci-image ${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:0.1.0}"), "expected exactly one"),
             "second anchor": (base + "\n" + anchor + "\n", "expected exactly one"),
             "variable elsewhere": (base.replace("    mem_limit: 4g", "    mem_limit: 4g\n    labels: [\"${FVOCI_IMAGE}\"]"), "only in the x-fvoci-image anchor"),
-            "hard-coded image": (base.replace("  server:\n    image: *fvoci-image", "  server:\n    image: ghcr.io/aisflow/fvoci:latest"), "only through the x-fvoci-image anchor"),
+            "hard-coded image": (base.replace("  fvoci:\n    image: *fvoci-image", "  fvoci:\n    image: ghcr.io/aisflow/fvoci:latest"), "only through the x-fvoci-image anchor"),
             "no alias": (base.replace("image: *fvoci-image", "image: busybox"), "no service uses"),
-            "environment needed": (base.replace('FVOCI_COOKIE_SECURE: "false"', 'FVOCI_COOKIE_SECURE: "${COOKIE_SECURE}"'), "must need no environment"),
+            "environment needed": (base.replace('FVOCI_COLLAB_MAX_ROOMS: "64"', 'FVOCI_COLLAB_MAX_ROOMS: "${ROOMS}"'), "must need no environment"),
             "env file": (base.replace("    mem_limit: 4g", "    mem_limit: 4g\n    env_file: .env"), "env_file"),
         }
         for name, (compose, needle) in cases.items():
@@ -145,7 +145,7 @@ class ReleasePreflightTest(unittest.TestCase):
                 s.ready_notes()
                 proc = s.preflight()
                 self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertIn("one-shot: ['bootstrap', 'init']", proc.stdout)
+                self.assertIn("app: ['fvoci']; one-shot: ['init']", proc.stdout)
 
     def test_refuses_unwritten_notes(self) -> None:
         proc = self.scratch().preflight()
@@ -172,7 +172,7 @@ class ReleasePreflightTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, 1)
                 self.assertIn("ARG FVOCI_BUILD_SHA", proc.stderr)
 
-    def test_refuses_compose_without_one_shot_bootstrap(self) -> None:
+    def test_refuses_compose_without_one_shot_preparation(self) -> None:
         s = self.scratch()
         s.ready_notes()
         compose = s.read("infra/rust/compose.user.yml").replace("condition: service_completed_successfully",
@@ -181,6 +181,18 @@ class ReleasePreflightTest(unittest.TestCase):
         proc = s.preflight()
         self.assertEqual(proc.returncode, 1)
         self.assertIn("one-shot services []", proc.stderr)
+
+
+    def test_refuses_compose_without_one_published_app(self) -> None:
+        s = self.scratch()
+        s.ready_notes()
+        compose = s.read("infra/rust/compose.user.yml")
+        ports = '    ports:\n      # Local only. Changing the host port or address needs the same change in\n      # FVOCI_PUBLIC_ORIGIN.\n      - "127.0.0.1:8080:8080"\n'
+        self.assertIn(ports, compose)
+        s.write("infra/rust/compose.user.yml", compose.replace(ports, ""))
+        proc = s.preflight()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("expected one service publishing container port 8080, found []", proc.stderr)
 
 
 if __name__ == "__main__":

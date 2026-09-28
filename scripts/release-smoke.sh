@@ -6,11 +6,16 @@
 #     digest onto a daemon that did not hold the image before;
 #   - the rendered compose.yml (the user compose's x-fvoci-image anchor pinned
 #     to the digest) from an empty directory with a scrubbed environment: no
-#     .env, no secrets; the one-shot bootstrap service generates them;
-#   - health/ready, one-shot init, doctor, first admin setup and login, the
-#     install-smoke API flows (collab, documents, attachment + extraction),
-#     search, restart persistence across down/up, a forced bootstrap failure
-#     that must keep the server down, and a browser subset against fresh stacks.
+#     .env, no secrets; the install generates them on first start;
+#   - health/ready, every one-shot service exited 0, doctor, the server holding
+#     neither the database owner password nor the Meilisearch master key, first
+#     admin setup and login, the install-smoke API flows (collab, documents,
+#     attachment + extraction), search, keys kept across a second up and
+#     down/up, a forced failure of each one-shot service that must keep the
+#     server down, and a browser subset against fresh stacks.
+# Service names are not assumed: the app is the service publishing port 8080,
+# the one-shot services are those others wait for with
+# service_completed_successfully.
 #
 #   scripts/release-smoke.sh --dist DIR [--no-browser]
 # The browser subset needs apps/web dependencies and Playwright Chromium.
@@ -169,7 +174,7 @@ new_stack() { # name -> sets STACK_DIR STACK_PROJECT
 }
 dc() { compose_in "$STACK_DIR" "$STACK_PROJECT" "$@"; }
 
-# Services others wait for with service_completed_successfully (bootstrap, init).
+# Services others wait for with service_completed_successfully.
 one_shot_services() {
   dc config --format json | python3 -c '
 import json, sys
@@ -188,15 +193,26 @@ wait_http() {
   fail "timed out waiting for $url"
 }
 
+# The app service: the one publishing container port 8080.
+app_service() {
+  dc config --format json | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+apps = [n for n, s in services.items() if any(p.get("target") == 8080 for p in s.get("ports") or [])]
+if len(apps) != 1:
+    sys.exit(f"expected one service publishing 8080, found {apps}")
+print(apps[0])'
+}
+
 # The address a user opens: the server's configured public origin when set,
 # else the published port.
 resolve_base_url() {
   local cid published origin
-  cid="$(dc ps -q server)"
-  [[ -n "$cid" ]] || fail "server container missing"
+  cid="$(dc ps -q "$APP")"
+  [[ -n "$cid" ]] || fail "$APP container missing"
   origin="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/^FVOCI_PUBLIC_ORIGIN=//p')"
-  published="$(dc port server 8080 | head -1)"
-  [[ -n "$published" ]] || fail "server port 8080 is not published"
+  published="$(dc port "$APP" 8080 | head -1)"
+  [[ -n "$published" ]] || fail "$APP port 8080 is not published"
   BASE_URL="${origin:-http://127.0.0.1:${published##*:}}"
   BASE_URL="${BASE_URL%/}"
   SERVER_CID="$cid"
@@ -217,15 +233,16 @@ db_query() {
 
 new_stack install
 [[ "$(ls -A "$STACK_DIR")" == compose.yml ]] || fail "the install directory holds more than compose.yml"
+APP="$(app_service)" || fail "no single app service"
 dc config --format json | python3 -c '
 import json, sys
 services = json.load(sys.stdin)["services"]
 product = sorted(n for n, s in services.items() if s.get("image") == sys.argv[1])
-assert "server" in product and "bootstrap" in product, product
+assert sys.argv[2] in product, (sys.argv[2], product)
 assert not any(s.get("env_file") for s in services.values())
-print("product image services:", " ".join(product))' "$IMAGE_REF" | tee -a "$ASSERT_LOG"
+print("product image services:", " ".join(product), "app:", sys.argv[2])' "$IMAGE_REF" "$APP" | tee -a "$ASSERT_LOG"
 read -ra ONE_SHOT <<<"$(one_shot_services)"
-(( ${#ONE_SHOT[@]} )) || fail "no one-shot bootstrap/init service"
+(( ${#ONE_SHOT[@]} )) || fail "no one-shot preparation service"
 log_assert "== docker compose up -d --wait from an empty directory, no env file"
 UP_START=$SECONDS
 start_stack
@@ -236,7 +253,7 @@ for probe in /health /ready; do
 done
 log_assert "/health and /ready 200: ok"
 
-# Every one-shot service (bootstrap, init) ran and finished with exit code 0.
+# Every one-shot service ran and finished with exit code 0.
 EXITED="$(dc ps -a --status exited --format json | python3 -c '
 import json, sys
 text = sys.stdin.read().strip()
@@ -249,7 +266,7 @@ if missing:
 print(" ".join(f"{s}=0" for s in sys.argv[1:]))' "${ONE_SHOT[@]}")" || fail "one-shot services did not all succeed"
 log_assert "one-shot services exited 0: $EXITED"
 
-if ! DOCTOR_REPORT="$(dc exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)"; then
+if ! DOCTOR_REPORT="$(dc exec -T "$APP" /opt/fvoci/bin/fvoci-migrate --doctor)"; then
   printf '%s\n' "$DOCTOR_REPORT" >&2
   fail "doctor failed"
 fi
@@ -261,7 +278,21 @@ if grep -Eq '^(DATABASE_URL|FVOCI_MIGRATION_URL|MEILI_MASTER_KEY|FVOCI_MEILI_MAS
   fail "server container holds the migration owner URL or the Meilisearch master key"
 fi
 [[ "$(docker exec "$SERVER_CID" id -u)" == 1000 ]] || fail "server does not run as uid 1000"
-log_assert "server is uid 1000 without owner/master credentials: ok"
+# The owner password and master key as their own services hold them; the
+# server must not have them in any process environment, argv, open file
+# descriptor, file under /run or its container config.
+# shellcheck disable=SC2016 # expanded by the postgres container's shell
+OWNER_PW="$(dc exec -T postgres sh -c 'if [ -n "${POSTGRES_PASSWORD_FILE:-}" ]; then cat "$POSTGRES_PASSWORD_FILE"; else printf %s "$POSTGRES_PASSWORD"; fi')"
+# shellcheck disable=SC2016 # expanded by the meilisearch container's shell
+MASTER_KEY="$(dc exec -T meilisearch sh -c 'for p in /proc/[0-9]*; do tr "\0" "\n" <"$p/environ" 2>/dev/null; done | sed -n "s/^MEILI_MASTER_KEY=//p" | head -1')"
+(( ${#OWNER_PW} >= 16 && ${#MASTER_KEY} >= 16 )) || fail "could not read the owner password / master key from their services"
+SERVER_VIEW="$(docker exec "$SERVER_CID" sh -c '
+  for p in /proc/[0-9]*; do tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; ls -l "$p/fd"; done 2>/dev/null
+  find /run -type f -exec cat {} + 2>/dev/null; echo')"
+if grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$SERVER_VIEW$SERVER_ENV"; then
+  fail "the server can read the database owner password or the Meilisearch master key"
+fi
+log_assert "server is uid 1000; owner password and master key absent from its environ/argv/fds/files/config: ok"
 
 ORIGIN="$BASE_URL"
 COOKIE_JAR="$WORK/cookies"
@@ -349,24 +380,33 @@ log_assert "workspace search finds the document: ok"
 
 # --- restart persistence ------------------------------------------------------
 
-log_assert "== docker compose down (volumes kept), then up again"
+key_check() { # the session and password login use the pepper; sealed secrets open
+  [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "cookie: fvoci_session=$OLD_SESSION" "$BASE_URL/api/v1/auth/me")" == 200 ]] \
+    || fail "session did not survive $1"
+  login
+  dc exec -T "$APP" /opt/fvoci/bin/fvoci-migrate --verify-secrets >/dev/null || fail "sealed secrets do not open after $1"
+}
 OLD_SESSION="$SESSION"
+log_assert "== docker compose up -d again (running install)"
+start_stack
+key_check "a second up"
+log_assert "second up: keys kept (session, password login, sealed secrets): ok"
+
+log_assert "== docker compose down (volumes kept), then up again"
 dc down
 start_stack
-[[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "cookie: fvoci_session=$OLD_SESSION" "$BASE_URL/api/v1/auth/me")" == 200 ]] \
-  || fail "session did not survive down/up"
-login
+key_check "down/up"
 curl -fsS -b "$COOKIE_JAR" "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/body" \
   | python3 -c 'import json,sys; b=json.load(sys.stdin); assert b["contentJson"]==json.loads(sys.argv[1])["contentJson"], b' "$BODY_JSON"
 check_attachment
 check_search
 python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" "$COOKIE_JAR" "$DOCUMENT_STATE" restart
-log_assert "after down/up: generated secrets kept (session + password login), body, attachment, extraction, search, imports: ok"
+log_assert "after down/up: generated secrets kept (session, password login, sealed secrets), body, attachment, extraction, search, imports: ok"
 dc down -v --remove-orphans >/dev/null
 
-# --- bootstrap failure blocks the server --------------------------------------
+# --- a failed one-shot service blocks the server -------------------------------
 
-new_stack bootstrap-failure
+new_stack one-shot-failure
 for service in "${ONE_SHOT[@]}"; do
   printf 'services:\n  %s:\n    entrypoint: ["sh", "-c", "echo release-smoke forced failure >&2; exit 3"]\n' "$service" \
     >"$STACK_DIR/compose.fail.yml"
@@ -374,7 +414,7 @@ for service in "${ONE_SHOT[@]}"; do
     fail "up succeeded although $service failed"
   fi
   RUNNING="$(dc -f compose.yml -f compose.fail.yml ps --status running --format '{{.Service}}')"
-  if grep -qx server <<<"$RUNNING"; then fail "server runs although $service failed"; fi
+  if grep -qx "$APP" <<<"$RUNNING"; then fail "$APP runs although $service failed"; fi
   if curl -fsS "$BASE_URL/health" >/dev/null 2>&1; then fail "a server answers although $service failed"; fi
   dc -f compose.yml -f compose.fail.yml down -v --remove-orphans >/dev/null
   log_assert "forced failure of one-shot '$service' keeps the server down: ok"

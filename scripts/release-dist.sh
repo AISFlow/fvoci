@@ -74,8 +74,8 @@ out = Path(env["OUT"])
 image_ref = f"{env['IMAGE']}:{env['VERSION']}@{env['INDEX_DIGEST']}"
 
 compose_text = (root / env["COMPOSE_SOURCE"]).read_text(encoding="utf-8")
-# The user compose names the product image once, as the YAML anchor the
-# bootstrap, init and server services share:
+# The user compose names the product image once, as the YAML anchor every
+# product service (the app and its one-shot preparation) shares:
 #   x-fvoci-image: &fvoci-image ${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:<version>}
 anchor = re.compile(
     r"^(x-fvoci-image:[ \t]+&fvoci-image[ \t]+)\$\{FVOCI_IMAGE:-" + re.escape(env["IMAGE"]) + r":[^}\s$]+\}[ \t]*$",

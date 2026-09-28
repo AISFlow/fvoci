@@ -64,11 +64,13 @@ product = sorted(name for name, spec in services.items() if spec.get("image") ==
 one_shot = sorted({dep for spec in services.values()
                    for dep, cond in (spec.get("depends_on") or {}).items()
                    if cond.get("condition") == "service_completed_successfully"})
+apps = sorted(name for name, spec in services.items()
+              if any(p.get("target") == 8080 for p in spec.get("ports") or []))
 problems = []
-if "server" not in product:
-    problems.append("server does not use the product image")
-if not any(p.get("target") == 8080 for p in services.get("server", {}).get("ports", [])):
-    problems.append("server does not publish container port 8080")
+if len(apps) != 1:
+    problems.append(f"expected one service publishing container port 8080, found {apps}")
+elif apps[0] not in product:
+    problems.append(f"{apps[0]} (publishes 8080) does not use the product image")
 if not one_shot or not set(one_shot) <= set(product):
     problems.append(f"one-shot services {one_shot} must exist and use the product image")
 if "postgres" not in services:
@@ -76,7 +78,7 @@ if "postgres" not in services:
 for name, spec in services.items():
     if spec.get("env_file"):
         problems.append(f"{name} needs an env_file")
-print(f"product image services: {product}; one-shot: {one_shot}")
+print(f"product image services: {product}; app: {apps}; one-shot: {one_shot}")
 sys.exit("\n".join(problems) if problems else 0)
 PY
 echo "rendered user compose passes docker compose config with an empty environment: ok"
