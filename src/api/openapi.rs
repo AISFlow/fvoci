@@ -120,7 +120,7 @@ impl Modify for CookieSecurityAddon {
 #[openapi(
     info(
         title = "FVOCI API",
-        version = "0.1.0",
+        version = env!("CARGO_PKG_VERSION"),
         description = "Rust slice HTTP contract for authentication, workspace, wiki document, attachment, project, and task operations."
     ),
     paths(
