@@ -663,10 +663,9 @@ test("c: typing, menu and gantt interactions", async ({ browser }) => {
     const ints = interactions(await eventsSince(page, since));
     // Interactions below the 16 ms Event Timing threshold have no entry; they are
     // counted as "<16" and enter the stats at the 16 ms upper bound.
-    const durations = inputs.map((_, idx) => ints[idx]?.duration ?? null);
     const below = inputs.length - ints.length;
     const values = [...ints.map((x) => x.duration), ...Array.from({ length: Math.max(0, below) }, () => 16)];
-    out[`typing-${label}`] = { typedVisible, focusInEditor, keydowns: inputs.length, entries: ints.length, below16: below, interactions: ints, durations };
+    out[`typing-${label}`] = { typedVisible, focusInEditor, keydowns: inputs.length, entries: ints.length, below16: below, interactions: ints };
     record(
       `c.typing.${label}`,
       "interactionDuration",
