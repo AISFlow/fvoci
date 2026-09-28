@@ -297,3 +297,15 @@ Run `run_b01d432a9dee`에 `run-use` 성공, coordinator terminal
 세션 JSONL `~/.claude/projects/-home-kinesis-orca-workspaces-fvoci-daggertooth/5b3ea42d-2ae1-4abb-9973-8761b6952f92.jsonl`의
 모든 assistant 턴 `model` 필드가 `claude-fable-5-1`, `effort` 필드가 `medium`이다(요청값이 아닌 실제 응답 기록).
 상단 "실제 실행 확인" 표의 코디네이터 행과 2026-09-27 "현재 실행 설정" 절은 당시 기록이며, 현재 코디네이터 실행 근거는 이 절이다.
+
+## 2026-09-28 Fable 코디네이터 계속 진행·상한 확대·첫 release 실행
+
+같은 Fable 5.1 medium 코디네이터 세션이 계속 조정한다(위 인수 확인 절). 사용자 지시로 쓰기 상한은
+프로젝트 전체 8개(기존 5개 슬롯을 먼저 쓰고 파일·공통 계약·선행 작업이 분리될 때만 6~8개), 독립 검토는
+기본 2개·서로 다른 고정 후보가 쌓일 때 최대 3개로 확대됐다(#217, AGENTS.md). 위 5개·1/2개 기록은 당시 사실로 보존한다.
+
+`v0.1.0` tag는 `57497e2f`(#215 merge)에 있다. release 실행 36416132900(main `54dcfc86`, workflow_dispatch)은 index
+`sha256:638aad92f5b48f9e48c929552c3dc567548be1b73c1ff1dfbc31e9e7ac4e1e11`을 빌드했고 GHCR 익명 manifest inspect는 성공했다.
+digest smoke는 테스트 클라이언트의 localhost cookie 전송 결함으로 실패했으며 수정은 PR #218이다. smoke 재실행은 대기 중이다.
+
+Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key를 쓰지 않는다. 모델·effort·실행 경로 확인 방법은 위 절과 같다.

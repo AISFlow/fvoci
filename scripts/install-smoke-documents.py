@@ -7,6 +7,7 @@ import json
 import pathlib
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
@@ -19,18 +20,26 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+# Send the curl jar's cookies explicitly: http.cookiejar treats a dotless host such as
+# the release compose's http://localhost:8080 as "localhost.local" and silently drops
+# the host-only session cookie curl stored for "localhost".
 jar = http.cookiejar.MozillaCookieJar(cookie_file)
 jar.load(ignore_discard=True, ignore_expires=True)
-private = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPCookieProcessor(jar))
-public = urllib.request.build_opener(NoRedirect())
+host = urllib.parse.urlsplit(base).hostname
+cookies = {c.name: c.value for c in jar if c.domain.lstrip(".") == host}
+assert "fvoci_session" in cookies, f"no fvoci_session cookie for {host} in {cookie_file}"
+cookie_header = "; ".join(f"{name}={value}" for name, value in cookies.items())
+opener = urllib.request.build_opener(NoRedirect())
 
 
 def request(path, method="GET", body=None, authenticated=True, expected=200):
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(base + path, data=data, method=method,
-                                 headers={"Origin": base, "Content-Type": "application/json"})
+    headers = {"Origin": base, "Content-Type": "application/json"}
+    if authenticated:
+        headers["Cookie"] = cookie_header
+    req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
     try:
-        response = (private if authenticated else public).open(req, timeout=40)
+        response = opener.open(req, timeout=40)
     except urllib.error.HTTPError as error:
         response = error
     with response:

@@ -8,8 +8,9 @@ import { HwpClientError, HwpDocumentClient } from "./hwp-client";
 import { hwpExportFormat } from "./hwp-edit";
 import { DiscardEditsDialog, PendingEditsGuard } from "./hwp-pending-edits";
 import { clampPage, HWP_MAX_BYTES } from "./hwp-page";
-import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, readCapped, zoomIn, zoomOut } from "./pdf-limits";
+import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, zoomIn, zoomOut } from "./pdf-limits";
 import { loadRhwpModule } from "./rhwp-init";
+import { downloadCapped, type ViewerPrefetch } from "./viewer-download";
 import { ViewerErrorPane, ViewerLoadingPane, ViewerZoomToolbar } from "./viewer-shell";
 import "./hwp-viewer.css";
 
@@ -65,9 +66,11 @@ export function HwpViewer({
   downloadUrl,
   chunk,
   edit,
+  prefetch,
 }: {
   name: string;
   downloadUrl: string;
+  prefetch?: ViewerPrefetch;
   chunk?: number;
   edit?: HwpEditProps;
 }): ReactNode {
@@ -106,17 +109,13 @@ export function HwpViewer({
     setDiscard(null);
     void (async () => {
       try {
-        const response = await fetch(downloadUrl, {
-          credentials: "include",
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          await response.body?.cancel();
-          if (alive) setState({ status: "error", message: t("load.failed"), retry: true });
+        const body = await (prefetch?.take(controller.signal) ??
+          downloadCapped(downloadUrl, HWP_MAX_BYTES, controller.signal));
+        if (!alive) return;
+        if (body.status === "failed") {
+          setState({ status: "error", message: t("load.failed"), retry: true });
           return;
         }
-        const body = await readCapped(response, HWP_MAX_BYTES);
-        if (!alive) return;
         if (body.status === "tooLarge") {
           setState(unavailable());
           return;
@@ -150,7 +149,7 @@ export function HwpViewer({
       saveAbort.current = null;
       client?.close();
     };
-  }, [downloadUrl, generation]);
+  }, [downloadUrl, generation, prefetch]);
 
   const client = state.status === "ready" ? state.client : null;
   const pageCount = state.status === "ready" ? state.pageCount : 1;

@@ -2161,18 +2161,24 @@ fn run_healthcheck(bind: std::net::SocketAddr) -> std::process::Output {
         .expect("run healthcheck")
 }
 
-fn metric_value(body: &str, name: &str) -> i64 {
+fn metric_sample<'a>(body: &'a str, name: &str) -> &'a str {
     body.lines()
         .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
         .unwrap_or_else(|| panic!("{name} missing:\n{body}"))
-        .parse()
-        .expect("integer sample")
+}
+
+/// A finite sample truncated to whole units; NaN (unknown) panics.
+fn metric_value(body: &str, name: &str) -> i64 {
+    let value: f64 = metric_sample(body, name).parse().expect("numeric sample");
+    assert!(value.is_finite(), "{name} is {value}:\n{body}");
+    value as i64
 }
 
 /// Probes on the real app role over TCP: `/ready` 200 and healthcheck exit
 /// 0; `/metrics` reports the oldest undelivered event age of a registered
 /// consumer; once PostgreSQL is unreachable `/ready` answers 503, the CLI
-/// exits 1 and `/metrics` keeps answering with the last lag value.
+/// exits 1 and `/metrics` still answers, with the outbox gauges unknown
+/// (NaN), the failure counted and the last success time kept.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probes_report_real_database_and_outbox_lag() {
     use fvoci_server::http::probes::{MetricsAllowList, Observability, ObservabilitySettings};
@@ -2262,6 +2268,17 @@ async fn probes_report_real_database_and_outbox_lag() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     assert!((7_190..7_400).contains(&lag), "lag {lag}\n{body}");
+    assert_eq!(
+        metric_value(&body, "fvoci_db_metrics_refresh_failures_total"),
+        0,
+        "{body}"
+    );
+    let last_success = metric_value(&body, "fvoci_db_metrics_last_success_timestamp_seconds");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert!((now - 60..=now).contains(&last_success), "{last_success}");
     // Two direct calls and the healthcheck's.
     assert!(
         body.contains(r#"fvoci_http_request_duration_seconds_count{method="GET",route="/ready",status="200"} 3"#),
@@ -2290,8 +2307,22 @@ async fn probes_report_real_database_and_outbox_lag() {
     let (status, _, body) = get("/metrics").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
-        metric_value(&body, "fvoci_outbox_lag_seconds"),
-        lag,
+        metric_sample(&body, "fvoci_outbox_lag_seconds"),
+        "NaN",
+        "{body}"
+    );
+    assert_eq!(
+        metric_sample(&body, "fvoci_outbox_xmin_stall_seconds"),
+        "NaN",
+        "{body}"
+    );
+    assert!(
+        metric_value(&body, "fvoci_db_metrics_refresh_failures_total") >= 1,
+        "{body}"
+    );
+    assert_eq!(
+        metric_value(&body, "fvoci_db_metrics_last_success_timestamp_seconds"),
+        last_success,
         "{body}"
     );
 
