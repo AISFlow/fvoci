@@ -15,6 +15,25 @@ const SMTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Whole-session bound, kept below the 30 s outbox lease.
 const SMTP_SESSION_TIMEOUT: Duration = Duration::from_secs(20);
 
+// `MailSendError::code` values from `send_mail_op`. They never carry server
+// text or the recipient address.
+/// The From header and the envelope sender both fail to parse.
+const CODE_INVALID_FROM: &str = "invalid_from";
+/// The recipient address does not parse as a mailbox.
+const CODE_INVALID_RECIPIENT: &str = "invalid_recipient";
+/// The message could not be built.
+const CODE_INVALID_MESSAGE: &str = "invalid_message";
+/// TLS parameters for the host could not be built.
+const CODE_TLS_CONFIG: &str = "tls_config";
+/// The session, or one command in it, timed out.
+const CODE_TIMEOUT: &str = "timeout";
+/// The server answered with a permanent (5xx) reply.
+const CODE_PERMANENT: &str = "permanent";
+/// The server answered with a transient (4xx) reply.
+const CODE_TRANSIENT: &str = "transient";
+/// Connection, TLS or protocol failure.
+const CODE_CONNECTION: &str = "connection";
+
 pub async fn send_mail_op(
     smtp: &SmtpConfig,
     op: &'static str,
@@ -40,8 +59,8 @@ async fn send_mail_inner(
     let from: Mailbox = from_header
         .parse()
         .or_else(|_| envelope_from.parse())
-        .map_err(|_| "invalid_from".to_string())?;
-    let to: Mailbox = to.parse().map_err(|_| "invalid_recipient".to_string())?;
+        .map_err(|_| CODE_INVALID_FROM.to_string())?;
+    let to: Mailbox = to.parse().map_err(|_| CODE_INVALID_RECIPIENT.to_string())?;
     let message = Message::builder()
         .message_id(None)
         .from(from)
@@ -49,9 +68,9 @@ async fn send_mail_inner(
         .subject(subject)
         .header(ContentType::TEXT_PLAIN)
         .body(text.to_string())
-        .map_err(|_| "invalid_message".to_string())?;
+        .map_err(|_| CODE_INVALID_MESSAGE.to_string())?;
 
-    let tls = TlsParameters::new(smtp.host.clone()).map_err(|_| "tls_config".to_string())?;
+    let tls = TlsParameters::new(smtp.host.clone()).map_err(|_| CODE_TLS_CONFIG.to_string())?;
     let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(smtp.host.as_str())
         .port(smtp.port)
         .tls(Tls::Opportunistic(tls))
@@ -59,16 +78,16 @@ async fn send_mail_inner(
         .build();
     let sent = tokio::time::timeout(SMTP_SESSION_TIMEOUT, transport.send(message))
         .await
-        .map_err(|_| "timeout".to_string())?;
+        .map_err(|_| CODE_TIMEOUT.to_string())?;
     sent.map(|_| ()).map_err(|err| {
         if err.is_permanent() {
-            "permanent".to_string()
+            CODE_PERMANENT.to_string()
         } else if err.is_transient() {
-            "transient".to_string()
+            CODE_TRANSIENT.to_string()
         } else if err.is_timeout() {
-            "timeout".to_string()
+            CODE_TIMEOUT.to_string()
         } else {
-            "connection".to_string()
+            CODE_CONNECTION.to_string()
         }
     })
 }
