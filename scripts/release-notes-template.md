@@ -103,8 +103,9 @@ stand-ins. Treat them as untested with a real provider:
   volume entry.
 - **Quoting in `.env` for restore.** `scripts/restore.sh` accepts values
   written unquoted or wholly in single or double quotes, as Compose reads
-  them. It refuses other forms (escapes, `$`, inline comments, `export`)
-  instead of guessing. Keep the values unquoted, as `env.example` writes them.
+  them (inside single quotes `$` and backslashes are literal). It refuses
+  other forms (escapes outside quotes, `$` outside single quotes, inline
+  comments, `export`) instead of guessing. Keep the values unquoted, as `env.example` writes them.
 - **Upgrades only as documented.** Stop and back up first, then replace
   `compose.yml` (see below). Rolling upgrades, running two servers against
   one database, and downgrades are not supported.
@@ -114,7 +115,9 @@ stand-ins. Treat them as untested with a real provider:
 ## Install
 
 Requires Docker Engine with the Compose plugin (v2.24+) and `openssl`, on
-linux/amd64 or linux/arm64. From an empty directory:
+linux/amd64 or linux/arm64. Only Linux Docker Engine was exercised for this
+release; Docker Desktop, rootless Docker and Podman were not tested. From an
+empty directory:
 
 ```sh
 for f in compose.yml env.example INSTALL.md SHA256SUMS; do

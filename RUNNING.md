@@ -1060,8 +1060,8 @@ of every volume, and it is not PITR.
 ### Install from compose.yml and .env
 
 `scripts/backup.sh` and `scripts/restore.sh` take the user install like the
-env-file stack: its `.env` is the env file, and the app service is found as the
-one publishing port 8080. Run them from a checkout of the same release:
+developer stack: its `.env` is the env file, and the app service is found as
+the one publishing port 8080. Run them from a checkout of the same release:
 
 ```sh
 scripts/backup.sh --project fvoci --env-file /path/to/.env --compose-file /path/to/compose.yml --output /backups/fvoci-1
