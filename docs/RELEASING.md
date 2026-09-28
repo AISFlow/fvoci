@@ -154,10 +154,12 @@ service names are assumed), and expects:
 - `docker compose up -d --wait` to start it; an unfilled `.env` to be refused
   before any container exists; a placeholder value to be refused by the app;
 - the app's pid 1 to be `fvoci-server` with uid and gid 1000, no supplementary
-  groups and no capabilities; `/run/secrets/*` root-only and unreadable to uid
-  1000; neither the database owner password nor the Meilisearch master key in
-  the server's process tree or `/run`; no secret in a `docker exec` (and so
-  healthcheck) environment or in `docker inspect`;
+  groups, no capabilities and `NoNewPrivs: 1`, and no setuid/setgid file in the
+  image; `/run/secrets/*` (the three passwords and the two keyrings) root-only
+  and unreadable to uid 1000; neither the database owner password nor the
+  Meilisearch master key in the server's process tree or `/run`; the keyrings
+  in the server's environment only; no secret or keyring in a `docker exec`
+  (and so healthcheck) environment or in `docker inspect`;
 - a failed preparation (a read-only database) to keep the server down, and a
   restart after the fix to recover;
 - the keys and data to survive a second `up` and `down`/`up`;

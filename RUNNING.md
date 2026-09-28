@@ -641,15 +641,19 @@ the pepper and encryption keys open existing accounts and sealed secrets.
 Compose passes each service only the values it names (no `env_file`).
 
 The three passwords (`POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`,
-`MEILI_MASTER_KEY`) are not container environment: Compose passes them as file
+`MEILI_MASTER_KEY`) and the two keyrings (`PASSWORD_PEPPER_KEYS`,
+`ENCRYPTION_KEYS`) are not container environment: Compose passes them as file
 secrets read from `.env` (top-level `secrets:` with `environment:`, which needs
 Docker Compose v2.23; `INSTALL.md` asks for v2.24 or newer), copied into each container that needs them as
-`/run/secrets/<name>`, owner root, mode `0400`. `fvoci` gets all three and
-names them with `POSTGRES_PASSWORD_FILE`, `FVOCI_APP_PASSWORD_FILE` and
-`MEILI_MASTER_KEY_FILE`; `postgres` reads `POSTGRES_PASSWORD_FILE` (its image's
-entrypoint, as root); `meilisearch` exports its key from the file in its start
-command, so it is not on a command line. Compose copies the files when it
-creates a container: after changing one of these three values, run
+`/run/secrets/<name>`, owner root, mode `0400`. `fvoci` gets all five and
+names them with `POSTGRES_PASSWORD_FILE`, `FVOCI_APP_PASSWORD_FILE`,
+`MEILI_MASTER_KEY_FILE`, `PASSWORD_PEPPER_KEYS_FILE` and `ENCRYPTION_KEYS_FILE`
+(the two active key ids stay plain settings); `postgres` reads
+`POSTGRES_PASSWORD_FILE` (its image's entrypoint, as root); `meilisearch`
+exports its key from the file in its start command, so it is not on a command
+line. `fvoci-migrate` reads `<VAR>_FILE` for these five, as root; setting both
+`<VAR>` and `<VAR>_FILE` is an error. Compose copies the files when it creates
+a container: after changing one of these values, run
 `docker compose up -d --force-recreate` (PostgreSQL still keeps the passwords
 from its first start).
 
@@ -672,16 +676,25 @@ as root (`user: "0:0"`). Given the owner password (`POSTGRES_PASSWORD_FILE`, or
    Otherwise it creates the `NOBYPASSRLS` app role if missing, migrates (the
    same locked, transactional path as `fvoci-migrate`), applies the grants,
    checks that `FVOCI_APP_PASSWORD` opens the app role, and ensures the scoped
-   search key in `/run/fvoci/meili/api_key` (the `meili_key` volume).
+   search key in `/run/fvoci/meili/api_key` (the `meili_key` volume). Root
+   first makes that directory `root:root` `0755` (through the open directory;
+   one owned by any other user than uid 1000, or writable by others, is
+   refused), then writes the key to a new, unpredictably named file, sets it to
+   `root:1000` `0640` on the open descriptor and renames it into place, so the
+   server can read the key but not replace, redirect or change it; a symlink
+   left in the directory is replaced, never followed. Key files are read
+   without following a symlink.
 4. **Server.** It closes every preparation connection and `exec`s
    `fvoci-server` in the same process (pid 1, so signals, graceful shutdown and
    child reaping are the server's, as before), as uid/gid `1000` with no
    supplementary groups and so no capabilities. Its environment is the
    container's (the non-secret settings) without `POSTGRES_PASSWORD`,
    `DATABASE_URL`, `FVOCI_MIGRATION_URL`, `MEILI_MASTER_KEY`,
-   `FVOCI_MEILI_MASTER_KEY`, `FVOCI_APP_PASSWORD` or their `_FILE` names, plus
-   `DATABASE_APP_URL` (the app role; it contains the app password, which the
-   server needs) and `HOME=/nonexistent`. Descriptors the preparation opened are
+   `FVOCI_MEILI_MASTER_KEY`, `FVOCI_APP_PASSWORD` or any secret's `_FILE`
+   name, plus the two keyrings read from their files, `DATABASE_APP_URL` (the
+   app role; it contains the app password, which the server needs) and
+   `HOME=/nonexistent`. The service has `no-new-privileges`, and the image has
+   no setuid or setgid file. Descriptors the preparation opened are
    close-on-exec.
 
 If any step fails the server does not start; the container restarts and tries
@@ -693,7 +706,8 @@ compromised server cannot read `/run/secrets/*` (mode `0400`, root), the
 preparation's memory or environment (another uid, and root's processes are not
 traceable by it), or any secret in a `docker exec` or healthcheck process: those
 start from the container configuration, which holds only file paths, and run as
-root. `scripts/standalone-install-smoke.sh` checks each of these on a running
+root. Nor can it redirect root's search key write (above).
+`scripts/standalone-install-smoke.sh` checks each of these on a running
 install. What the server does hold: the app role password (in
 `DATABASE_APP_URL`), the pepper and encryption keyrings, and the scoped search
 key; that is what it needs to run. What is **not** separated:
@@ -706,8 +720,8 @@ key; that is what it needs to run. What is **not** separated:
   kernel or container escape from uid 1000 is outside this boundary.
 - Anyone who can run Docker commands on the host can read the secrets
   (`docker compose exec`, the containers' filesystems, `.env` itself).
-  `docker inspect` shows the file paths, not the values; `docker compose config`
-  prints the `.env` values.
+  `docker inspect` shows the file paths of all five secrets, not the values;
+  `docker compose config` prints the `.env` values.
 - `postgres` and `meilisearch` hold their own secret in their own process
   environment, readable by root in those containers.
 
