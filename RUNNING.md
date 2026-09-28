@@ -832,11 +832,16 @@ files under its `/proc/<pid>` by root, so the helpers it starts (collaboration, 
 extraction, preview, Office and Markdown conversion, all uid 1000) and a uid-1000
 `docker compose exec` session can read neither its environment (the keyrings,
 `DATABASE_APP_URL`) nor its memory or open descriptors, and cannot attach to
-it. The helpers do still share uid 1000 file access with the server: the
-attachment store (`/data/storage`, every workspace's files) and the scoped
-search key (`/run/fvoci/meili/api_key`, readable by group 1000). The helpers
-themselves stay dumpable, so where the host allows same-uid ptrace one helper
-can attach to another. What is **not** separated:
+it. For the same reason the server no longer leaves a core dump (unless the
+host sets `fs.suid_dumpable=2`, which writes one readable only by root), and
+`gdb -p`, `strace -p`, `perf -p` and `lsof` on the server no longer work from
+a uid-1000 session; run them as root with `CAP_SYS_PTRACE` through
+`docker compose exec --privileged fvoci …`. The helpers do still share uid
+1000 file access with the server: the attachment store (`/data/storage`,
+every workspace's files) and the scoped search key
+(`/run/fvoci/meili/api_key`, readable by group 1000). The helpers themselves
+stay dumpable, so where the host allows same-uid ptrace one helper can attach
+to another. What is **not** separated:
 
 - It is one container, not two: root in it (`docker compose exec fvoci …`,
   which defaults to root, and the healthcheck) can read the secret files.
