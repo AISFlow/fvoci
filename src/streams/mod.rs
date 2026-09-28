@@ -4,9 +4,8 @@ mod events;
 mod hub;
 
 pub use events::{
-    access_event_targets_user, initial_cursor, poll_access_events, poll_task_events,
-    project_stream_access, task_stream_wire_hint, workspace_stream_access, EventCursor,
-    StreamAccess, StreamEventRow,
+    initial_cursor, poll_access_events, poll_task_events, project_stream_access,
+    task_stream_wire_hint, workspace_stream_access, EventCursor, StreamAccess, StreamEventRow,
 };
 pub use hub::{StreamAcquireError, StreamGuard, StreamHub};
 

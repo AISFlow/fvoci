@@ -26,10 +26,10 @@ use crate::http::guard::check_origin;
 use crate::http::routes::tasks::{internal, require_session};
 use crate::http::state::AppState;
 use crate::streams::{
-    access_event_targets_user, initial_cursor, poll_access_events, poll_task_events,
-    project_stream_access, task_stream_wire_hint, workspace_stream_access, EventCursor,
-    StreamAccess, StreamAcquireError, StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY,
-    STREAM_HIGH_WATER_MARK, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
+    initial_cursor, poll_access_events, poll_task_events, project_stream_access,
+    task_stream_wire_hint, workspace_stream_access, EventCursor, StreamAccess, StreamAcquireError,
+    StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY, STREAM_HIGH_WATER_MARK, STREAM_KEEPALIVE,
+    STREAM_POLL_INTERVAL,
 };
 
 #[cfg(feature = "db-tests")]
@@ -507,14 +507,14 @@ fn access_sse_stream(
     workspace_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
-    mut cursor: EventCursor,
+    cursor: EventCursor,
     guard: StreamGuard,
 ) -> AccessSseStream {
     let (end_tx, end_rx) = tokio::sync::mpsc::channel(1);
     let (disconnect_tx, disconnect_rx) = tokio::sync::mpsc::channel::<()>(1);
     tokio::spawn(async move {
-        let mut finished = false;
-        while !finished {
+        let mut cursor = cursor;
+        loop {
             if !hub.accepting() {
                 break;
             }
@@ -522,27 +522,10 @@ fn access_sse_stream(
                 _ = disconnect_tx.closed() => break,
                 _ = tokio::time::sleep(STREAM_POLL_INTERVAL) => {}
             }
-            match poll_access_events(&pool, workspace_id, user_id, session_id, &cursor, 50).await {
+            // Credential, membership and access events share one transaction.
+            match poll_access_events(&pool, workspace_id, user_id, session_id, &cursor).await {
+                Ok(Some(next)) => cursor = next,
                 Ok(None) => break,
-                Ok(Some(rows)) => {
-                    for row in rows {
-                        cursor = EventCursor {
-                            xact: row.xact.clone(),
-                            seq: row.seq,
-                        };
-                        if !matches!(
-                            workspace_stream_access(&pool, workspace_id, user_id, session_id).await,
-                            Ok(StreamAccess::Allowed)
-                        ) {
-                            finished = true;
-                            break;
-                        }
-                        if access_event_targets_user(&row, user_id) {
-                            finished = true;
-                            break;
-                        }
-                    }
-                }
                 Err(err) => {
                     // Fail closed: the credential could not be checked.
                     tracing::warn!("access stream poll failed: {}", err);

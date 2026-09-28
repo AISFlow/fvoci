@@ -5176,6 +5176,72 @@ async fn task_stream_admits_and_delivers_while_project_rows_are_locked() {
 }
 
 #[tokio::test]
+async fn workspace_access_stream_closes_when_workspace_trashed() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "trash-member").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let reader = sse_admit(app.clone(), &path, session_cookie_header(&member.cookie))
+        .await
+        .expect("member admitted to the access stream");
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{workspace_id}"),
+        Some(json!({"confirmSlug": "acme"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "a member's access stream must end once the workspace is trashed"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_access_stream_closes_when_member_role_changed() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "role-member").await;
+    let bystander = add_workspace_user(&admin, workspace_id, "member", "role-bystander").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let reader = sse_admit(app.clone(), &path, session_cookie_header(&member.cookie))
+        .await
+        .expect("member admitted to the access stream");
+    let bystander_reader = sse_admit(app.clone(), &path, session_cookie_header(&bystander.cookie))
+        .await
+        .expect("bystander admitted to the access stream");
+    let (status, body) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/members/{}",
+            member.user_id
+        ),
+        Some(json!({"role": "admin"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "the member's access stream must end after its role changed"
+    );
+    assert!(
+        !bystander_reader.is_finished(),
+        "another member's role change must not end this member's stream"
+    );
+    bystander_reader.abort();
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn workspace_access_stream_closes_when_user_suspended() {
     let harness = TestDb::bootstrap().await;
     let (app, admin_cookie, _, workspace_id) = setup_session(&harness).await;

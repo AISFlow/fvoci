@@ -34,13 +34,14 @@ const TASK_VERBS: &[&str] = &["task.created", "task.updated", "task.deleted"];
 
 const COMMENT_ACTIVITY_VERBS: &[&str] = &["comment.created"];
 
-const ACCESS_VERBS: &[&str] = &[
-    "workspace_member.removed",
-    "workspace_member.role_changed",
-    "admin.user_suspended_set",
-    "user.withdrawn",
-    "user.withdraw_cancelled",
-];
+/// Membership changes aimed at one user (`target_id` = user). The access
+/// stream closes on them so the client refetches its workspace list.
+/// Suspension, withdrawal and credential revocation are instance-level (no
+/// workspace_id) and reach the stream through the per-tick credential check.
+const MEMBER_ACCESS_VERBS: &[&str] = &["workspace_member.removed", "workspace_member.role_changed"];
+
+/// Workspace-wide access changes, for every member.
+const WORKSPACE_ACCESS_VERBS: &[&str] = &["workspace.deleted"];
 
 /// Result of one stream access check. Every check runs in one transaction
 /// under the workspace tenant (api_tokens has RLS) and takes no row lock.
@@ -153,25 +154,28 @@ pub async fn poll_task_events(
     Ok(Some(rows))
 }
 
-/// One access stream tick in one transaction: the credential check, then
-/// the access events after `cursor`. `None` once the credential is dead.
+/// One access stream tick in one transaction: the credential and
+/// membership checks, then the access events after `cursor`. `None` ends the
+/// stream (credential dead, no longer a member, or an access event for this
+/// user); otherwise the cursor for the next tick.
 pub async fn poll_access_events(
     pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
     cursor: &EventCursor,
-    limit: i32,
-) -> Result<Option<Vec<StreamEventRow>>, sqlx::Error> {
+) -> Result<Option<EventCursor>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, user_id, session_id).await? {
+    if workspace_access_in(&mut tx, workspace_id, user_id, session_id).await?
+        != StreamAccess::Allowed
+    {
         tx.commit().await?;
         return Ok(None);
     }
-    let rows = query_access_events(&mut tx, workspace_id, user_id, cursor, limit).await?;
+    let changed = access_event_after(&mut tx, workspace_id, user_id, cursor).await?;
     tx.commit().await?;
-    Ok(Some(rows))
+    Ok((!changed).then(|| cursor.clone()))
 }
 
 /// Map a polled row to the wire `event: task` hint (`verb`, `taskId`), if any.
@@ -247,55 +251,35 @@ async fn query_task_project_events(
         .collect())
 }
 
-async fn query_access_events(
+async fn access_event_after(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,
     cursor: &EventCursor,
-    limit: i32,
-) -> Result<Vec<StreamEventRow>, sqlx::Error> {
-    let limit = limit.clamp(1, 100);
-    let rows = sqlx::query_as::<_, (String, i64, String, Value)>(
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
         r#"
-            SELECT e.xact::text, e.seq, e.verb, e.payload
+        SELECT EXISTS (
+            SELECT 1
             FROM fvoci.events AS e
             WHERE e.workspace_id = $1
               AND (e.xact, e.seq) > ($2::xid8, $3)
               AND e.xact < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
-              AND e.verb = ANY($4::text[])
               AND (
-                (e.verb IN ('workspace_member.removed', 'workspace_member.role_changed')
-                 AND e.target_id = $5)
-                OR (e.verb = 'admin.user_suspended_set' AND e.target_id = $5)
-                OR (e.verb IN ('user.withdrawn', 'user.withdraw_cancelled')
-                    AND e.actor_user_id = $5)
+                (e.verb = ANY($4::text[]) AND e.target_id = $5)
+                OR e.verb = ANY($6::text[])
               )
-            ORDER BY e.xact, e.seq
-            LIMIT $6
-            "#,
+        )
+        "#,
     )
     .bind(workspace_id)
     .bind(&cursor.xact)
     .bind(cursor.seq)
-    .bind(ACCESS_VERBS)
+    .bind(MEMBER_ACCESS_VERBS)
     .bind(user_id)
-    .bind(limit)
-    .fetch_all(&mut **tx)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|(xact, seq, verb, payload)| StreamEventRow {
-            xact,
-            seq,
-            verb,
-            payload,
-        })
-        .collect())
-}
-
-pub fn access_event_targets_user(row: &StreamEventRow, _user_id: Uuid) -> bool {
-    ACCESS_VERBS.contains(&row.verb.as_str())
+    .bind(WORKSPACE_ACCESS_VERBS)
+    .fetch_one(&mut **tx)
+    .await
 }
 
 #[cfg(test)]
