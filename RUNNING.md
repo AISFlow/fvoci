@@ -272,15 +272,17 @@ internal network with no outside route and no published port. In `.env`:
 
 ```sh
 FVOCI_METRICS_SUBNET=172.31.250.0/29   # a free private range on this host
-METRICS_ALLOW_IPS=172.31.250.2/32      # the Prometheus address in it
+METRICS_ALLOW_IPS=172.31.250.6/32      # the Prometheus address in it
 ```
 
 `docker compose -f compose.yml -f compose.metrics.yml up -d`, then attach the
 existing Prometheus container to network `fvoci_metrics` with that address
-(`docker network connect --ip 172.31.250.2 fvoci_metrics <prometheus>`, or
-`networks: {fvoci_metrics: {ipv4_address: 172.31.250.2}}` with the network
-declared `external` in its own Compose file). List single addresses, not the
-whole subnet: the host's bridge address is in it. Scraping through the
+(`docker network connect --ip 172.31.250.6 fvoci_metrics <prometheus>`, or
+`networks: {fvoci_metrics: {ipv4_address: 172.31.250.6}}` with the network
+declared `external` in its own Compose file). Use the highest address: `fvoci`
+takes a low dynamic one and the host holds the first. List that single
+address, not the subnet, or every host process can reach `/metrics` from the
+bridge address. Scraping through the
 published `127.0.0.1` port instead arrives from the default network's gateway,
 so allowing that address lets every local process read `/metrics`.
 

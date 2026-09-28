@@ -6,12 +6,14 @@
 # with, in .env (RUNNING.md "Prometheus scrape"):
 #
 #   FVOCI_METRICS_SUBNET=172.31.250.0/29      # a free private range
-#   METRICS_ALLOW_IPS=172.31.250.2/32         # the scraper's address in it
+#   METRICS_ALLOW_IPS=172.31.250.6/32         # the scraper's address in it
 #
 # The fvoci container joins an internal network (no outside route, no
-# published port); a Prometheus container attached to it with that fixed
-# address scrapes http://fvoci:8080/metrics. The allowlist matches only the
-# direct socket peer: X-Forwarded-For is ignored, every other peer gets 404.
+# published port) and takes a low dynamic address in it; the host holds the
+# first. A Prometheus container attached with the fixed, highest address
+# scrapes http://fvoci:8080/metrics. Allow that one address, not the subnet.
+# Only the direct socket peer counts: X-Forwarded-For is ignored, every other
+# peer gets 404.
 services:
   fvoci:
     environment:
@@ -22,7 +24,6 @@ services:
 
 networks:
   metrics:
-    name: ${COMPOSE_PROJECT_NAME:-fvoci}_metrics
     internal: true
     ipam:
       config:
