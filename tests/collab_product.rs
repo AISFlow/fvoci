@@ -27,10 +27,10 @@ use fvoci_server::collab::hub::{
 use fvoci_server::collab::room::{
     arm_append_in_tx_reject_barrier, arm_append_revoke_barrier, arm_force_primary_apply_fail,
     arm_force_primary_load_fail, arm_session_revision_persist_barrier, arm_spawn_room_block,
-    disarm_append_in_tx_reject_barrier, disarm_append_revoke_barrier,
+    arm_teardown_barrier, disarm_append_in_tx_reject_barrier, disarm_append_revoke_barrier,
     disarm_force_primary_apply_fail, disarm_force_primary_load_fail,
-    disarm_session_revision_persist_barrier, disarm_spawn_room_block, AuthenticatedConnection,
-    CollabSession, ConnectionLease, JoinError, RoomClientEvent, RoomJoin,
+    disarm_session_revision_persist_barrier, disarm_spawn_room_block, disarm_teardown_barrier,
+    AuthenticatedConnection, CollabSession, ConnectionLease, JoinError, RoomClientEvent, RoomJoin,
 };
 use fvoci_server::collab::transport::take_data_frame_send_budget;
 use fvoci_server::collab::wire::{
@@ -2428,6 +2428,165 @@ async fn collab_room_cap_reclaim_keeps_session_revision_after_stale_head() {
     run_lifecycle_test(
         "collab_room_cap_reclaim_keeps_session_revision_after_stale_head",
         reclaim_keeps_last_disconnect_session_revision(true),
+    )
+    .await;
+}
+
+async fn wait_for_joining_count(hub: &CollabHub, key: (Uuid, Uuid), expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hub.room_joining_count(key).await != expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("room joining count did not reach expected value");
+}
+
+/// An HTTP operation that borrowed the actor (`project_live`, queued behind a
+/// paused session revision) keeps its empty room from being reclaimed at the
+/// cap. Once the operation is done, the same room is reclaimable.
+#[tokio::test]
+async fn collab_room_cap_reclaim_skips_room_with_borrowed_operation() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaim_skips_room_with_borrowed_operation",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 5).await;
+            let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+            let keys = hub_keys(&docs);
+            let mut leases = DirectHubLeases::new();
+            let mut conn_ids = Vec::new();
+            for doc in docs.iter().take(4) {
+                conn_ids.push(
+                    hub_join(&mut leases, &hub, doc, 1)
+                        .await
+                        .expect("join room"),
+                );
+            }
+
+            let (persist_reached, persist_release) =
+                arm_session_revision_persist_barrier(docs[3].document_id).await;
+            hub.leave_room(keys[3], conn_ids[3]).await;
+            await_barrier(persist_reached, "session revision persist barrier").await;
+            let borrowed = tokio::spawn({
+                let hub = hub.clone();
+                let key = keys[3];
+                let user_id = docs[3].session.user_id;
+                let session_id = docs[3].session.session_id;
+                async move { hub.project_live(key, user_id, session_id).await }
+            });
+            wait_for_joining_count(&hub, keys[3], 1).await;
+            assert_eq!(hub.room_member_count(keys[3]).await, 0);
+            hub.age_room_past_reclaim_grace(keys[3]).await;
+
+            // Bounded only to report a wrong reclaim instead of hanging: that
+            // reclaim would wait for the actor held at the persist barrier.
+            let refused = tokio::time::timeout(
+                Duration::from_secs(5),
+                hub_join(&mut leases, &hub, &docs[4], 1),
+            )
+            .await;
+            assert!(
+                matches!(refused, Ok(Err(JoinError::RoomFull))),
+                "a room with a borrowed operation is not reclaimed, got {refused:?}"
+            );
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[3]).await,
+                RoomLifecyclePhase::Live
+            );
+
+            persist_release
+                .send(())
+                .expect("release session revision persist barrier");
+            tokio::time::timeout(Duration::from_secs(10), borrowed)
+                .await
+                .expect("borrowed operation finishes")
+                .expect("borrowed operation task")
+                .expect("projection completes on the live room");
+            wait_for_joining_count(&hub, keys[3], 0).await;
+
+            hub.age_room_past_reclaim_grace(keys[3]).await;
+            hub_join(&mut leases, &hub, &docs[4], 2)
+                .await
+                .expect("the room is reclaimable once the operation is done");
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[3]).await,
+                RoomLifecyclePhase::Absent
+            );
+            disarm_session_revision_persist_barrier(docs[3].document_id).await;
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// An admission cancelled while it waits for the room it reclaims leaks no
+/// capacity: the hub still finishes that room's teardown, frees its slot and
+/// removes it, and the next admission starts its room without reclaiming.
+#[tokio::test]
+async fn collab_room_cap_cancelled_reclaim_restores_capacity() {
+    run_lifecycle_test(
+        "collab_room_cap_cancelled_reclaim_restores_capacity",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 5).await;
+            let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+            let keys = hub_keys(&docs);
+            let mut leases = DirectHubLeases::new();
+            let mut conn_ids = Vec::new();
+            for doc in docs.iter().take(4) {
+                conn_ids.push(
+                    hub_join(&mut leases, &hub, doc, 1)
+                        .await
+                        .expect("join room"),
+                );
+            }
+            hub.leave_room(keys[0], conn_ids[0]).await;
+            wait_for_member_count(&hub, keys[0], 0).await;
+            hub.age_room_past_reclaim_grace(keys[0]).await;
+
+            let (teardown_reached, teardown_release) =
+                arm_teardown_barrier(docs[0].document_id).await;
+            let reclaiming = tokio::spawn({
+                let hub = hub.clone();
+                let doc = docs[4].clone_fixture();
+                async move { hub_join_document(&hub, &doc, doc.document_id, 1).await }
+            });
+            await_barrier(teardown_reached, "reclaimed room teardown barrier").await;
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[0]).await,
+                RoomLifecyclePhase::Closing
+            );
+            reclaiming.abort();
+            let aborted = reclaiming.await.expect_err("reclaiming join was aborted");
+            assert!(aborted.is_cancelled());
+
+            teardown_release
+                .send(())
+                .expect("release reclaimed room teardown");
+            wait_for_phase(&hub, keys[0], RoomLifecyclePhase::Absent).await;
+            assert_eq!(hub.available_room_slots(), 1);
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[4]).await,
+                RoomLifecyclePhase::Absent
+            );
+            assert_eq!(room_start_count(docs[4].document_id).await, 0);
+
+            hub_join(&mut leases, &hub, &docs[4], 2)
+                .await
+                .expect("the freed slot admits the next room");
+            assert_eq!(hub.available_room_slots(), 0);
+            for index in 1..5 {
+                assert_eq!(
+                    hub.room_lifecycle_phase(keys[index]).await,
+                    RoomLifecyclePhase::Live
+                );
+            }
+            disarm_teardown_barrier(docs[0].document_id).await;
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
     )
     .await;
 }
