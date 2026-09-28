@@ -309,3 +309,23 @@ Run `run_b01d432a9dee`에 `run-use` 성공, coordinator terminal
 digest smoke는 테스트 클라이언트의 localhost cookie 전송 결함으로 실패했으며 수정은 PR #218이다. smoke 재실행은 대기 중이다.
 
 Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key를 쓰지 않는다. 모델·effort·실행 경로 확인 방법은 위 절과 같다.
+
+## 2026-09-29 Claude Code Opus 5.5 코디네이터 인수 (내장 workflow)
+
+사용자 지시로 코디네이터는 Claude Code 주 세션 Opus 5.5이며 조사·구현·독립 검토는 내장 subagent/workflow를
+우선 사용한다(AGENTS.md 역할표). 이전 Fable 코디네이터·자동 체인은 재가동하지 않았고 Orca Run은 사용하지 않았다.
+
+- 실행 환경: 로컬 WSL2 Linux, Claude Code 2.1.283(`/home/kinesis/.local/bin/claude`), Max 구독 OAuth(세션 환경에
+  API key 없음). 계정·결제·전역 설정 변경 없음, 새 MCP 없음.
+- 주 세션: 시스템 보고 모델 ID `claude-opus-5-5`, `/effort ultracode`(세션 한정 xhigh + Dynamic Workflows),
+  `CLAUDE_EFFORT=xhigh`. 세션 JSONL의 assistant 턴 `model`/`effort` 필드가 모두 `claude-opus-5-5`/`xhigh`다.
+- 전역 `~/.claude/settings.json`은 `model: opus`, `modelSettings.claude-opus-5-5.effortLevel: medium`(새 세션 기본값)이며
+  이 세션에는 적용되지 않았다. 변경하지 않았다.
+- workflow agent: 기본값·명시 effort·`Plan` agent 유형 모두 transcript의 `model`/`effort`가 `claude-opus-5-5`/`xhigh`다
+  (probe `wf_c35a1d05-296`, 점검 `wf_2cd8e0c9-9cc`, 검토 `wf_17862adc-bd6`). 읽기 전용 검토·조사는 편집 도구가 없는
+  `Plan` 유형을 쓴다. Bash는 남아 있으므로 쓰기 금지는 프롬프트로도 명시한다.
+- 하위 agent에 주입되는 프로젝트 지침은 세션 시작 시점의 스냅샷이다(probe가 이전 브랜치의 AGENTS.md 역할표를 보고함).
+  세션 중 AGENTS.md를 바꾸면 하위 agent가 즉시 보지 못하므로 코디네이터가 필요한 규칙을 prompt에 명시한다.
+- CodeGraph 1.6.0(`/home/kinesis/.local/bin/codegraph`), MCP `codegraph serve --mcp`(env `CODEGRAPH_TELEMETRY=0`,
+  `DO_NOT_TRACK=1`, `~/.claude.json`의 프로젝트 설정). worktree별 `.codegraph/` 인덱스를 쓰고, 통합 worktree 인덱스에서
+  #220의 `src/db/outbox_reset.rs` 최신 소스가 반환됨을 확인했다. 인덱스는 `.gitignore` 대상이며 제품 산출물에 들어가지 않는다.
