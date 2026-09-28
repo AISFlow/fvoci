@@ -67,8 +67,9 @@ export FVOCI_WEBHOOK_ALLOW_TARGETS=127.0.0.1
 export FVOCI_BIND="127.0.0.1:0"
 # Request spans and response events (method, route template, status,
 # latency; no URI or headers, see src/http/request_trace.rs) so a failed
-# group's retained server.log shows which requests the browser made.
-export RUST_LOG="${RUST_LOG:-info,tower_http=debug}"
+# group's retained server.log shows which requests the browser made. Other
+# crates stay at warn; the server adds fvoci_server=info itself.
+export RUST_LOG="${RUST_LOG:-warn,tower_http=debug}"
 export FVOCI_PUBLIC_ORIGIN="http://127.0.0.1:0"
 export FVOCI_STATIC_DIR="${FVOCI_STATIC_DIR:?run-web-e2e.sh must provide isolated static assets}"
 # A run-owned directory is stable across server restarts and removed by the
