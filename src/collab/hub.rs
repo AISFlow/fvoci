@@ -41,6 +41,9 @@ const MAX_PRE_ENQUEUE_RETRIES: u8 = 1;
 /// Rooms a single admission may reclaim at the room cap before it reports `RoomFull`.
 const MAX_ADMISSION_RECLAIMS: u8 = 2;
 
+/// Floor of the admission-reclaim grace; see [`CollabHub::reclaim_grace`].
+const RECLAIM_GRACE_FLOOR_MS: u64 = 3_000;
+
 #[cfg(feature = "db-tests")]
 struct HubJoinBarrier {
     reached_tx: oneshot::Sender<()>,
@@ -600,6 +603,22 @@ impl CollabHub {
         }
     }
 
+    /// Age a live room's last activity past the admission-reclaim grace.
+    #[cfg(feature = "db-tests")]
+    pub async fn age_room_past_reclaim_grace(&self, key: impl Into<RoomKey>) {
+        let key: RoomKey = key.into();
+        let Some(slot) = self.room_slot(key).await else {
+            return;
+        };
+        let aged = Instant::now()
+            .checked_sub(self.reclaim_grace() + Duration::from_millis(1))
+            .expect("monotonic clock is older than the reclaim grace");
+        let mut phase = slot.phase.lock().await;
+        if let RoomPhase::Live(live) = &mut *phase {
+            live.last_activity = aged;
+        }
+    }
+
     #[cfg(feature = "db-tests")]
     pub async fn force_room_idle_eligible(&self, key: impl Into<RoomKey>) {
         let key: RoomKey = key.into();
@@ -1106,14 +1125,16 @@ impl CollabHub {
     }
 
     /// At the room cap, close the least recently active live room that has no
-    /// members, no join in flight and no borrowed operation, instead of making
-    /// the new room wait for the idle timer. Rooms with members are never
-    /// reclaimed, so a cap reached by active rooms still reports `RoomFull`.
+    /// members, no join in flight and no borrowed operation, and whose last
+    /// activity is older than the reclaim grace, instead of making the new room
+    /// wait for the idle timer. Rooms with members are never reclaimed, so a cap
+    /// reached by active rooms still reports `RoomFull`.
     /// Returns whether a room was closed (the caller retries its reservation).
     async fn reclaim_empty_room_for_admission(&self) -> bool {
         if self.shutting_down.load(Ordering::Acquire) {
             return false;
         }
+        let grace = self.reclaim_grace();
         let entries = self
             .rooms
             .read()
@@ -1130,7 +1151,7 @@ impl CollabHub {
             let RoomPhase::Live(live) = &*phase else {
                 continue;
             };
-            if !Self::reclaimable_without_members(live) {
+            if !Self::reclaimable_at_cap(live, grace) {
                 continue;
             }
             if oldest
@@ -1149,7 +1170,7 @@ impl CollabHub {
             let mut phase = slot.phase.lock().await;
             let still_reclaimable = matches!(
                 &*phase,
-                RoomPhase::Live(live) if Self::reclaimable_without_members(live)
+                RoomPhase::Live(live) if Self::reclaimable_at_cap(live, grace)
             );
             if !still_reclaimable || self.shutting_down.load(Ordering::Acquire) {
                 return false;
@@ -1181,10 +1202,23 @@ impl CollabHub {
         done_rx.await.is_ok()
     }
 
-    fn reclaimable_without_members(live: &LiveRoom) -> bool {
+    /// How long an emptied room stays out of admission reclaim, so a reload or
+    /// reconnect finds it still live: the RPC timeout with a floor of a few
+    /// seconds, never longer than the idle timer that would evict it anyway.
+    fn reclaim_grace(&self) -> Duration {
+        let grace_ms = self
+            .config
+            .rpc_timeout_ms
+            .max(RECLAIM_GRACE_FLOOR_MS)
+            .min(self.config.idle_evict_ms);
+        Duration::from_millis(grace_ms)
+    }
+
+    fn reclaimable_at_cap(live: &LiveRoom, grace: Duration) -> bool {
         live.handle.is_closed()
             || (live.joining.load(Ordering::Acquire) == 0
-                && live.live_conns.load(Ordering::Acquire) == 0)
+                && live.live_conns.load(Ordering::Acquire) == 0
+                && live.last_activity.elapsed() >= grace)
     }
 
     async fn wait_for_live_or_retry(

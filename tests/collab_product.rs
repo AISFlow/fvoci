@@ -2001,9 +2001,24 @@ async fn collab_room_cap_reclaims_empty_room_before_refusing() {
                 RoomLifecyclePhase::Live
             );
 
-            hub_join(&mut leases, &hub, &docs[4], 2)
+            // Within the reclaim grace the emptied room is kept for a returning
+            // member (reload or reconnect); the new document is refused.
+            let refused = hub_join(&mut leases, &hub, &docs[4], 2).await;
+            assert!(
+                matches!(refused, Err(JoinError::RoomFull)),
+                "a room emptied within the reclaim grace is not reclaimed, got {refused:?}"
+            );
+            let rejoined = hub_join(&mut leases, &hub, &docs[1], 3)
                 .await
-                .expect("empty room 1 is reclaimed for room 4");
+                .expect("returning member rejoins its live room");
+            assert_eq!(room_start_count(docs[1].document_id).await, 1);
+            hub.leave_room(keys[1], rejoined).await;
+            wait_for_member_count(&hub, keys[1], 0).await;
+
+            hub.age_room_past_reclaim_grace(keys[1]).await;
+            hub_join(&mut leases, &hub, &docs[4], 4)
+                .await
+                .expect("empty room 1 is reclaimed for room 4 after the grace");
             assert_eq!(
                 hub.room_lifecycle_phase(keys[1]).await,
                 RoomLifecyclePhase::Absent
@@ -2017,7 +2032,7 @@ async fn collab_room_cap_reclaims_empty_room_before_refusing() {
             }
             assert_eq!(hub.available_room_slots(), 0);
 
-            let again = hub_join(&mut leases, &hub, &docs[1], 3).await;
+            let again = hub_join(&mut leases, &hub, &docs[1], 5).await;
             assert!(
                 matches!(again, Err(JoinError::RoomFull)),
                 "every live room has a member, got {again:?}"
@@ -2096,6 +2111,8 @@ async fn collab_room_cap_reclaim_skips_room_started_for_paused_join() {
                 hub.room_lifecycle_phase(keys[3]).await,
                 RoomLifecyclePhase::Live
             );
+            // Past the reclaim grace: only the paused join's lease protects the room.
+            hub.age_room_past_reclaim_grace(keys[3]).await;
             let joining_in_window = hub.room_joining_count(keys[3]).await;
 
             let refused = hub_join(&mut leases, &hub, &docs[4], 1).await;
@@ -2164,6 +2181,7 @@ async fn collab_room_cap_reclaim_skips_empty_room_with_paused_rejoin() {
                 async move { hub_join_document(&hub, &doc, doc.document_id, 2).await }
             });
             await_barrier(slot_ready, "slot-ready barrier").await;
+            hub.age_room_past_reclaim_grace(keys[3]).await;
 
             let refused = hub_join(&mut leases, &hub, &docs[4], 1).await;
             assert!(
@@ -2226,6 +2244,7 @@ async fn collab_room_cap_reclaim_skips_room_started_for_paused_borrow() {
                 hub.room_lifecycle_phase(keys[3]).await,
                 RoomLifecyclePhase::Live
             );
+            hub.age_room_past_reclaim_grace(keys[3]).await;
 
             let refused = hub_join(&mut leases, &hub, &docs[4], 1).await;
             assert!(
