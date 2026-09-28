@@ -573,12 +573,14 @@ async fn rule_target(
         };
         return Ok((event_before(tx, &pos).await?, None));
     }
+    // ORDER BY names the xid8 column (e.xact): an unqualified `xact` would
+    // sort by the text alias, where "999" follows "1002".
     let newest = sqlx::query(
         r#"
-        SELECT xact::text AS xact, seq
-        FROM fvoci.events
-        WHERE created_at >= now() - make_interval(days => $1)
-        ORDER BY xact DESC, seq DESC
+        SELECT e.xact::text AS xact, e.seq
+        FROM fvoci.events AS e
+        WHERE e.created_at >= now() - make_interval(days => $1)
+        ORDER BY e.xact DESC, e.seq DESC
         LIMIT 1
         "#,
     )
@@ -607,12 +609,13 @@ async fn event_before(
     tx: &mut Transaction<'_, Postgres>,
     pos: &CursorPos,
 ) -> Result<CursorPos, OutboxResetError> {
+    // As in `rule_target`: order by the xid8 column, not the text alias.
     let prev = sqlx::query(
         r#"
-        SELECT xact::text AS xact, seq
-        FROM fvoci.events
-        WHERE (xact, seq) < ($1::xid8, $2)
-        ORDER BY xact DESC, seq DESC
+        SELECT e.xact::text AS xact, e.seq
+        FROM fvoci.events AS e
+        WHERE (e.xact, e.seq) < ($1::xid8, $2)
+        ORDER BY e.xact DESC, e.seq DESC
         LIMIT 1
         "#,
     )

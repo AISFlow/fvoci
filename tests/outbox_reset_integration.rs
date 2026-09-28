@@ -721,6 +721,59 @@ async fn forward_skip_needs_override_and_live_lease_blocks_apply() {
     harness.cleanup().await;
 }
 
+/// Positions compare as xid8 numbers. The "event before" and "newest event"
+/// lookups once sorted by the text alias of `xact`, so "9" came after "10"
+/// and a cluster whose xids crossed a digit boundary got the wrong target.
+#[tokio::test]
+async fn rule_targets_order_xids_numerically_across_a_digit_boundary() {
+    let harness = TestDb::bootstrap().await;
+    let admin = admin(&harness).await;
+    let app = app(&harness).await;
+    ensure_consumer(&app, "notifications").await.unwrap();
+    let mut ids = Vec::new();
+    for xact in ["9", "10", "11"] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fvoci.events (id, xact, verb, channel) VALUES ($1, $2::xid8, 'test.reset', 'system')",
+        )
+        .bind(id)
+        .bind(xact)
+        .execute(&admin)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let mut pos = Vec::new();
+    for id in &ids {
+        pos.push(event_pos(&admin, *id).await);
+    }
+    for id in &ids[..2] {
+        mark_processed(&app, "notifications", *id).await.unwrap();
+    }
+    set_cursor(&admin, "notifications", &pos[2]).await;
+
+    // xact 11 is the first unmarked event: the target is xact 10 just before it.
+    let diag = run(&harness, &["--consumer", "notifications"]).await;
+    assert!(diag.ok, "{}", diag.output);
+    let n = consumer(&diag.report, "notifications");
+    assert_eq!(pos_of(&n["target"]), pos[1], "{n}");
+    assert_eq!(n["direction"], "backward");
+    assert_eq!(n["redelivered"], 1);
+
+    // Every event marked: the target is the newest event, xact 11.
+    mark_processed(&app, "notifications", ids[2]).await.unwrap();
+    set_cursor(&admin, "notifications", &pos[0]).await;
+    let diag = run(&harness, &["--consumer", "notifications"]).await;
+    assert!(diag.ok, "{}", diag.output);
+    let n = consumer(&diag.report, "notifications");
+    assert_eq!(pos_of(&n["target"]), pos[2], "{n}");
+    assert_eq!(n["direction"], "forward");
+
+    close_pool(app).await;
+    close_pool(admin).await;
+    harness.cleanup().await;
+}
+
 async fn set_cursor(admin: &PgPool, name: &str, pos: &(String, i64)) {
     sqlx::query(
         "UPDATE fvoci.outbox_consumers SET last_xact = $2::xid8, last_seq = $3 WHERE consumer = $1",
