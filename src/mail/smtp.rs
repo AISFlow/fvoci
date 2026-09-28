@@ -65,10 +65,13 @@ pub(super) fn is_unclassified_refusal(code: &str) -> bool {
 /// X.3 to X.7 (system, network, protocol, content, policy, including quota
 /// such as 5.4.5) are not. Excluded as not certain to be about the recipient:
 /// X.1.7 and X.1.8 (the sender), X.1.0 (other address status, which Postfix
-/// and Exchange also send for a refused sender) and X.2.3 (message length
-/// over an administrative limit, which some relays apply to every
-/// recipient). Without an enhanced status code only 550, 551 and 553 count,
-/// the replies RFC 5321 gives for an unavailable or not allowed mailbox.
+/// and Exchange also send for a refused sender), X.2.0 (other mailbox status,
+/// which Exchange also sends for sender quotas and blocks) and X.2.3 (message
+/// length over an administrative limit, which some relays apply to every
+/// recipient). Without an enhanced status code only 551 (user not local)
+/// counts: a bare 550 or 553 is also sent for policy refusals and sending
+/// limits (for example cPanel's hourly limit, qmail's rcpthosts), so those
+/// stay unclassified and need a later accepted send to prove them.
 fn is_mailbox_refusal(reply: u16, text: &str) -> bool {
     let enhanced = text.split_whitespace().next().and_then(|word| {
         let mut parts = word.split('.');
@@ -80,9 +83,9 @@ fn is_mailbox_refusal(reply: u16, text: &str) -> bool {
     });
     match enhanced {
         Some(("1", detail)) => !matches!(detail, "0" | "7" | "8"),
-        Some(("2", detail)) => detail != "3",
+        Some(("2", detail)) => !matches!(detail, "0" | "3"),
         Some(_) => false,
-        None => matches!(reply, 550 | 551 | 553),
+        None => reply == 551,
     }
 }
 
@@ -214,10 +217,22 @@ mod tests {
         assert!(!is_mailbox_refusal(530, "5.7.0 authentication required"));
         assert!(!is_mailbox_refusal(500, "5.5.2 syntax error"));
         // Without an enhanced status code only the mailbox replies count.
-        assert!(is_mailbox_refusal(550, "no such user here"));
+        assert!(!is_mailbox_refusal(550, "no such user here"));
         assert!(is_mailbox_refusal(551, "user not local"));
-        assert!(is_mailbox_refusal(553, "mailbox name not allowed"));
-        assert!(is_mailbox_refusal(550, ""));
+        assert!(!is_mailbox_refusal(553, "mailbox name not allowed"));
+        assert!(!is_mailbox_refusal(550, ""));
+        assert!(!is_mailbox_refusal(
+            550,
+            "Domain example.com has exceeded the max emails per hour (100/100 (100%)) allowed."
+        ));
+        assert!(!is_mailbox_refusal(
+            553,
+            "sorry, that domain isn't in my list of allowed rcpthosts"
+        ));
+        assert!(!is_mailbox_refusal(
+            554,
+            "5.2.0 STOREDRV.Submission.Exception:SubmissionQuotaExceededException"
+        ));
         assert!(!is_mailbox_refusal(554, "transaction failed"));
         assert!(!is_mailbox_refusal(552, "storage allocation exceeded"));
         assert!(!is_mailbox_refusal(530, "authentication required"));
@@ -225,7 +240,7 @@ mod tests {
         assert!(!is_mailbox_refusal(554, "5.1 rejected"));
         assert!(!is_mailbox_refusal(554, "5.1.1.1 rejected"));
         assert!(!is_mailbox_refusal(554, "4.1.1 wrong class"));
-        assert!(is_mailbox_refusal(550, "5.x.1 rejected"));
+        assert!(!is_mailbox_refusal(550, "5.x.1 rejected"));
     }
 
     #[test]
