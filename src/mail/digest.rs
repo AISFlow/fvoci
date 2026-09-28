@@ -4,10 +4,14 @@ use uuid::Uuid;
 
 use crate::db::context::{set_system, set_tenant};
 use crate::mail::templates::{digest_text, DIGEST_SUBJECT};
-use crate::mail::Mailer;
+use crate::mail::{smtp, Mailer};
 
 const DIGEST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 const DIGEST_BATCH: i64 = 100;
+/// Wall-clock bound for one sweep. Sends run one after another in the
+/// maintenance task, which also runs the upload GC and revision sweeps; the
+/// rows a sweep does not reach stay due for the next daily sweep.
+const DIGEST_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DigestError {
@@ -17,12 +21,22 @@ pub enum DigestError {
     Mail(crate::mail::MailSendError),
 }
 
+type DigestClaim = (Uuid, Uuid, Option<DateTime<Utc>>);
+
 /// Source `sendDueDigests` with a row claim.
 ///
 /// Recipients are claimed with `FOR UPDATE SKIP LOCKED` and `last_digest_at`
 /// advances as the claim, so two processes cannot send the same digest and a
 /// failed recipient backs off until the next daily sweep instead of retrying
 /// every tick.
+///
+/// The sweep walks the due rows in `(workspace_id, user_id)` order, one claim
+/// batch after another, so every due row is served, not only the first
+/// batch. A failed claim is handed back after its batch; it lies behind the
+/// walk, so this sweep does not claim it again. The walk stops after a short
+/// batch, on cancel, after `DIGEST_TIME_BUDGET`, or after a batch in which
+/// every send failed (SMTP is most likely down; a refusal of one recipient
+/// does not count, it shows SMTP is up); unsent claims are handed back.
 pub async fn send_due_digests(
     pool: &PgPool,
     mailer: &Mailer,
@@ -31,29 +45,57 @@ pub async fn send_due_digests(
 ) -> Result<u32, DigestError> {
     let before =
         now - chrono::Duration::from_std(DIGEST_INTERVAL).unwrap_or(chrono::Duration::days(1));
-    let due = claim_digest_due(pool, before, now).await?;
+    let deadline = std::time::Instant::now() + DIGEST_TIME_BUDGET;
+    let stop = || cancel.is_cancelled() || std::time::Instant::now() >= deadline;
+    let mut after: Option<(Uuid, Uuid)> = None;
     let mut sent = 0u32;
-    let mut pending = due.into_iter();
-    while let Some((workspace_id, user_id, prev_last)) = pending.next() {
-        if cancel.is_cancelled() {
-            // Hand the unsent claims back so the next sweep sends them.
-            restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
-            for (ws, user, prev) in pending.by_ref() {
-                restore_claim(pool, ws, user, prev, now).await?;
-            }
+    while !stop() {
+        let due = claim_digest_due(pool, before, now, after).await?;
+        // UPDATE .. RETURNING has no order: the walk resumes after the largest key.
+        let Some(last) = due.iter().map(|(ws, user, _)| (*ws, *user)).max() else {
             break;
-        }
-        match send_claimed(pool, mailer, workspace_id, user_id, prev_last).await {
-            Ok(true) => sent += 1,
-            Ok(false) => {}
-            Err(err) => {
-                // Source keeps lastDigestAt on failure so the window is retried.
-                restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
-                tracing::warn!(
-                    message = %format!("digest: recipient deferred to the next sweep ({err})"),
-                    "mail.send_failed"
-                );
+        };
+        after = Some(last);
+        let short = (due.len() as i64) < DIGEST_BATCH;
+
+        let mut attempted = 0u32;
+        let mut failed = 0u32;
+        let mut hand_back: Vec<DigestClaim> = Vec::new();
+        let mut pending = due.into_iter();
+        while let Some(claim) = pending.next() {
+            if stop() {
+                // Hand the unsent claims back so the next sweep sends them.
+                hand_back.push(claim);
+                hand_back.extend(pending.by_ref());
+                break;
             }
+            let (workspace_id, user_id, prev_last) = claim;
+            match send_claimed(pool, mailer, workspace_id, user_id, prev_last).await {
+                Ok(true) => {
+                    attempted += 1;
+                    sent += 1;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    // Source keeps lastDigestAt on failure so the window is retried.
+                    attempted += 1;
+                    if !matches!(&err, DigestError::Mail(mail) if smtp::is_final_for_recipient(&mail.code))
+                    {
+                        failed += 1;
+                    }
+                    hand_back.push(claim);
+                    tracing::warn!(
+                        message = %format!("digest: recipient deferred to the next sweep ({err})"),
+                        "mail.send_failed"
+                    );
+                }
+            }
+        }
+        for (workspace_id, user_id, prev_last) in hand_back {
+            restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
+        }
+        if short || (attempted > 0 && failed == attempted) {
+            break;
         }
     }
     Ok(sent)
@@ -87,20 +129,23 @@ async fn restore_claim(
     Ok(())
 }
 
+/// Claim the next due batch after `after` in `(workspace_id, user_id)` order.
 async fn claim_digest_due(
     pool: &PgPool,
     before: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> Result<Vec<(Uuid, Uuid, Option<DateTime<Utc>>)>, sqlx::Error> {
+    after: Option<(Uuid, Uuid)>,
+) -> Result<Vec<DigestClaim>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_system(&mut tx).await?;
-    let rows: Vec<(Uuid, Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
+    let rows: Vec<DigestClaim> = sqlx::query_as(
         r#"
         WITH due AS (
             SELECT workspace_id, user_id, last_digest_at AS prev
             FROM fvoci.notification_prefs
             WHERE mail_digest = true
               AND (last_digest_at IS NULL OR last_digest_at <= $1)
+              AND ($4::uuid IS NULL OR (workspace_id, user_id) > ($4::uuid, $5::uuid))
             ORDER BY workspace_id, user_id
             LIMIT $3
             FOR UPDATE SKIP LOCKED
@@ -116,6 +161,8 @@ async fn claim_digest_due(
     .bind(before)
     .bind(now)
     .bind(DIGEST_BATCH)
+    .bind(after.map(|(workspace_id, _)| workspace_id))
+    .bind(after.map(|(_, user_id)| user_id))
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;

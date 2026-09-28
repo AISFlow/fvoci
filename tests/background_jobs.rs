@@ -2518,3 +2518,206 @@ async fn gc_retains_manual_when_promotion_races_row_lock() {
     pool.close().await;
     harness.cleanup().await;
 }
+
+/// `count` opted-in digest recipients in one workspace, each with one unread
+/// notification and no digest sent yet.
+async fn seed_digest_recipients(admin: &PgPool, workspace_id: Uuid, count: i32) {
+    sqlx::query(
+        r#"
+        WITH u AS (
+            INSERT INTO fvoci.users (id, email, given_name)
+            SELECT gen_random_uuid(), 'digest-' || g || '@example.com', 'Digest ' || g
+            FROM generate_series(1, $2) AS g
+            RETURNING id
+        ), m AS (
+            INSERT INTO fvoci.memberships (workspace_id, user_id, role)
+            SELECT $1, id, 'member' FROM u
+            RETURNING workspace_id, user_id
+        ), p AS (
+            INSERT INTO fvoci.notification_prefs (
+                workspace_id, user_id, in_app, mail_immediate, mail_digest
+            )
+            SELECT workspace_id, user_id, true, true, true FROM m
+            RETURNING workspace_id, user_id
+        )
+        INSERT INTO fvoci.notifications (id, workspace_id, user_id, event_id, verb, payload)
+        SELECT gen_random_uuid(), workspace_id, user_id, gen_random_uuid(), 'task.updated', '{}'::jsonb
+        FROM p
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(count)
+    .execute(admin)
+    .await
+    .expect("seed digest recipients");
+}
+
+async fn digest_rows_due(admin: &PgPool, now: chrono::DateTime<Utc>) -> i64 {
+    sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM fvoci.notification_prefs
+        WHERE mail_digest
+          AND (last_digest_at IS NULL OR last_digest_at <= $1 - interval '24 hours')
+        "#,
+    )
+    .bind(now)
+    .fetch_one(admin)
+    .await
+    .expect("due digest rows")
+}
+
+/// More opted-in rows than one claim batch: one sweep serves all of them,
+/// and the next day's sweep serves all of them again.
+#[tokio::test]
+async fn digest_sweep_serves_every_due_row_beyond_one_batch() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+
+    let now = Utc::now();
+    let sent = send_due_digests(&pool, &Mailer::disabled(), now, &CancellationToken::new())
+        .await
+        .expect("first sweep");
+    assert_eq!(sent, 150, "every due row is served in one sweep");
+    assert_eq!(digest_rows_due(&admin, now).await, 0);
+    let claimed_now: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.notification_prefs WHERE mail_digest AND last_digest_at = $1",
+    )
+    .bind(now)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(claimed_now, 150);
+
+    // A new unread notification for everyone, then the next day's sweep.
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.notifications (id, workspace_id, user_id, event_id, verb, payload)
+        SELECT gen_random_uuid(), workspace_id, user_id, gen_random_uuid(), 'task.updated', '{}'::jsonb
+        FROM fvoci.notification_prefs
+        WHERE mail_digest
+        "#,
+    )
+    .execute(&admin)
+    .await
+    .expect("next day's notifications");
+    let next_day = now + ChronoDuration::hours(25);
+    let sent = send_due_digests(
+        &pool,
+        &Mailer::disabled(),
+        next_day,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("next sweep");
+    assert_eq!(sent, 150, "the next day serves every row again");
+    assert_eq!(digest_rows_due(&admin, next_day).await, 0);
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// SMTP down with more due rows than one batch: the sweep returns, and every
+/// claimed row gets its previous `last_digest_at` back for the next sweep.
+#[tokio::test]
+async fn digest_sweep_with_smtp_down_restores_every_claim() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let now = Utc::now();
+    let started = std::time::Instant::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(dead_port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep with failing smtp");
+    assert_eq!(sent, 0);
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "sweep took {:?}",
+        started.elapsed()
+    );
+    let claimed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.notification_prefs WHERE mail_digest AND last_digest_at IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(claimed, 0, "every failed claim is handed back");
+    assert_eq!(digest_rows_due(&admin, now).await, 150);
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A recipient whose address SMTP cannot take is a refusal of that one
+/// recipient, not a sign that SMTP is down: even when it is the only send in
+/// a batch, the sweep goes on to the next batch.
+#[tokio::test]
+async fn digest_sweep_continues_past_a_batch_with_only_a_refused_recipient() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+    let users: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM fvoci.notification_prefs WHERE workspace_id = $1 AND mail_digest ORDER BY user_id",
+    )
+    .bind(workspace_id)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    let (refused, served) = (users[0], users[149]);
+    sqlx::query("DELETE FROM fvoci.notifications WHERE workspace_id = $1 AND user_id <> ALL($2)")
+        .bind(workspace_id)
+        .bind(vec![refused, served])
+        .execute(&admin)
+        .await
+        .unwrap();
+    // Stored, but not an address lettre can send to (invalid_recipient).
+    sqlx::query("UPDATE fvoci.users SET email = 'digest..refused@example.com' WHERE id = $1")
+        .bind(refused)
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let sink = SmtpSink::spawn().await;
+    let now = Utc::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sent, 1, "the second batch's recipient is served");
+    assert_eq!(sink.count(), 1);
+    let refused_last: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT last_digest_at FROM fvoci.notification_prefs WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(refused)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(refused_last, None, "the refused claim is handed back");
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
