@@ -4,12 +4,14 @@
 
 | 역할 | 실행 경로와 모델 | 책임 |
 | --- | --- | --- |
-| 코디네이터 | Orca Codex / GPT-6 Astra (`gpt-6-astra`) / medium | 인계, 우선순위·설계, 소유권, 공통 파일, 통합·수락, 원격 push·PR·머지, 다음 작업 |
+| 코디네이터 | Claude Code / Fable 5.1 (`claude-fable-5-1`) / medium | 인계, 우선순위·설계, 소유권, 공통 파일, 통합·수락, 원격 push·PR·머지, 다음 작업 |
 | 자문·독립 설계·보안 검토 | 별도 Claude Code / Opus 5.5 (`claude-opus-5-5`) / medium / 읽기 전용 | 고정 SHA의 원본 계약·보안·데이터·동시성·복구·복잡성 검토 |
 | 주 구현 워커 | Claude Code / Opus 5.5 (`claude-opus-5-5`) / medium | 배정된 Rust·프론트엔드 구현, 국소 리팩터링, 관련 회귀 |
 | 조사·실패 재현·교차 검증 워커 | cursor-agent / Grok 4.6 High (`cursor-grok-4.6-high`, 별도 effort 없음) | 계약·표준 조사, 반례, 좁은 실패 재현·교차 검증 |
 
-**현재 배정 (2026-09-27 사용자 정정):** Astra 코디네이터를 유지하고, 새 핵심 제품 구현과
+**현재 배정 (2026-09-28 사용자 인계 지시):** 코디네이터는 Claude Code Fable 5.1 medium이다.
+이전 Astra 코디네이터는 인계 체크포인트 이후 조정을 멈추며, 두 코디네이터가 동시에 dispatch·소유권·머지를 관리하지 않는다.
+Fable은 구현·독립 검토로 확대하지 않는다. 새 핵심 제품 구현과
 독립 수락 검토는 서로 다른 Claude Code Opus 5.5 medium 세션에 맡긴다. sol 라우팅 문제로
 신규 sol 호출·하위 위임·복구 재시도는 중단한다. Composer 신규 구현 배정과 Grok의 조건부
 필수 검토 대체도 종료한다. Grok은 조사·재현·교차 검증을 맡으며 추가 사용자 승인 없이
@@ -25,7 +27,7 @@ Auto/Fast나 다른 모델로 전환하지 않는다. 요청·유효 모델/effo
 reviewer는 코디네이터 및 구현자와 별도 세션이며, 자기 검토를 독립 검토로
 계산하지 않는다. 독립 검토는 기본 1개이며 서로 다른 고정 후보의 검토가 밀릴 때 최대 2개를 병렬 배정한다. 동일 PR에 추가 필수 검토를 요구하지 않는다. 검토자는 제품 코드를 수정하지 않는다. 동일 Opus 모델의 별도 세션을
 모델 다양성 검증이라 부르지 않는다. 기존 유효한 검토는 해당 SHA·범위의 근거로 보존하고,
-미완료 검토와 미수락 delta만 새 Opus reviewer에게 배정한다. 채택·수락은 Astra가 결정한다.
+미완료 검토와 미수락 delta만 새 Opus reviewer에게 배정한다. 채택·수락은 코디네이터가 결정한다.
 
 과거 배정 이력(2026-09-24 codex Astra 코디네이터 → Claude Code Opus 5.5 코디네이터, 2026-09-25
 임시 All-Opus, Composer/Grok/Fable/Astra 작업 기록)은 `.agents/environment.md`와 git 이력에

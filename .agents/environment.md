@@ -268,3 +268,32 @@ Claude Code로 실제 실행했다. requested/effective 모두 `claude-opus-5-5`
 구현 세션과 분리한다. 무거운 로컬 검사는 계속 한 묶음이고 원격 CI 병렬화는 별개다.
 상한은 슬롯 충원 의무가 아니며 파일·공통 계약 소유권과 기존 실행 모델 검증을 유지한다.
 과거 2·3개 실행 기록은 당시 사실로 보존한다.
+
+## 2026-09-28 다음 코디네이터 Fable 인계 준비
+
+사용자 지시로 다음 코디네이터는 Claude Code Fable 5.1 medium이다. 구현과 별도 독립 검토는
+Opus 5.5 medium, 조사는 `cursor-grok-4.6-high`(별도 effort 없음)를 유지한다.
+쓰기 상한 5개, 독립 검토 기본 1개/서로 다른 후보 최대 2개도 유지한다.
+
+2026-09-28 01:44 UTC Linux 확인: `/home/kinesis/.local/bin/claude`는 2.1.283이며
+현재 `--help`에 `--model`과 `--effort medium`이 있다. 정확한 Fable ID
+`claude-fable-5-1`은 위 2026-09-26의 실제 세션 기록에서 확인했다.
+이 확인은 현재 서버의 지원 목록·유효 라우팅이나 새 세션 실행 성공을 증명하지 않는다.
+이번 인계 준비에서는 새 Fable 세션을 시작하지 않았으며 현재 라우팅은 미확인이다.
+인수 시 실제 `/model`·`/effort`와 turn 시작을 확인하고, 불가하면 대체 없이 차단을 기록한다.
+과거 Astra·Opus·Fable 실행 기록은 당시 사실대로 보존한다. 현재 작업·체크포인트는
+`docs/rewrite.md`의 새 인계 포인터를 따른다.
+
+## 2026-09-28 Fable 코디네이터 인수 확인
+
+2026-09-28 01:52 UTC(첫 인수 커밋 시각) Linux, Claude Code 2.1.283 세션에서 인수했다. 확인 근거: `~/.claude/settings.json`의
+`model: claude-fable-5-1`과 `modelSettings.effortLevel: medium`, 세션 환경 `CLAUDE_EFFORT=medium`,
+세션 자체 보고 모델 ID `claude-fable-5-1`. 실제 turn이 시작되어 이 기록을 작성했다. 별도 `/model`
+TUI 출력은 이 세션 안에서 캡처하지 않았다. Orca 1.4.207 `/home/kinesis/.local/bin/orca-ide`로
+Run `run_b01d432a9dee`에 `run-use` 성공, coordinator terminal
+`term_77972376-fa56-44ae-a334-0c95413c4fab`, 인박스 0, 활성 워커 0, reclaimable 0.
+인계 문서 `coordinator-handoff-2026-09-28-0145-utc-linux.md`와 실제 상태(main `9e15d50e`,
+후보 `b09114df` clean/7 paths, Draft #198 `7f2433f8`) 일치를 확인했다. 전역 설정·MCP 변경 없음.
+세션 JSONL `~/.claude/projects/-home-kinesis-orca-workspaces-fvoci-daggertooth/5b3ea42d-2ae1-4abb-9973-8761b6952f92.jsonl`의
+모든 assistant 턴 `model` 필드가 `claude-fable-5-1`, `effort` 필드가 `medium`이다(요청값이 아닌 실제 응답 기록).
+상단 "실제 실행 확인" 표의 코디네이터 행과 2026-09-27 "현재 실행 설정" 절은 당시 기록이며, 현재 코디네이터 실행 근거는 이 절이다.
