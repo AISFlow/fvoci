@@ -33,6 +33,9 @@ pub enum InvitationDbError {
     GuestLimit,
     /// OIDC invite: the external identity already belongs to an account.
     AlreadyLinked,
+    /// The password check for an existing account is over the caller's
+    /// budget; seconds until it frees up.
+    RateLimited(u32),
 }
 
 pub struct InvitationRow {
@@ -264,13 +267,21 @@ pub async fn get_invitation_public(
     }))
 }
 
-pub async fn accept_invitation(
+/// `password_gate` runs with the invited address right before the password
+/// of an existing account is checked (the route charges login's budget);
+/// `Err(retry_after)` refuses the attempt without checking.
+pub async fn accept_invitation<G, F>(
     pool: &PgPool,
     license: &crate::license::Entitlements,
     keys: &Keyring,
     raw_token: &str,
     request: AcceptInvitationRequest<'_>,
-) -> Result<Result<crate::db::mfa::Issued, InvitationDbError>, sqlx::Error> {
+    password_gate: G,
+) -> Result<Result<crate::db::mfa::Issued, InvitationDbError>, sqlx::Error>
+where
+    G: FnOnce(String) -> F,
+    F: std::future::Future<Output = Result<(), u32>>,
+{
     let invitation = match load_invitation_by_token(pool, raw_token).await? {
         Ok(row) => row,
         Err(err) => return Ok(Err(err)),
@@ -291,6 +302,9 @@ pub async fn accept_invitation(
     let mut rehash = None;
 
     if let Some((existing_id, suspended_at)) = existing {
+        if let Err(retry_after) = password_gate(invitation.email.clone()).await {
+            return Ok(Err(InvitationDbError::RateLimited(retry_after)));
+        }
         let stored = password_hash_by_id(pool, existing_id).await?;
         let verified =
             verify_password(stored.as_deref(), request.password.unwrap_or(""), keys).await;
