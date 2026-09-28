@@ -1826,3 +1826,78 @@ async fn collab_lifecycle_idle_timer_reclaims_dead_slot_after_hold_release() {
     )
     .await;
 }
+
+fn proc_effective_uid(pid: u32) -> u32 {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("status");
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|rest| rest.split_whitespace().nth(1))
+        .and_then(|uid| uid.parse().ok())
+        .expect("Uid: line")
+}
+
+/// fvoci-server clears its dumpable flag before it spawns anything. The
+/// kernel then owns its /proc files by root, so a same-uid process (a
+/// helper, a uid-1000 `docker exec`, this non-root runner) cannot read its
+/// environ (keyrings, DATABASE_APP_URL). The room helper it spawns still
+/// raises its own oom_score_adj to 1000, and dies with a SIGKILLed server.
+#[tokio::test]
+async fn collab_lifecycle_server_process_is_non_dumpable() {
+    use std::os::unix::fs::MetadataExt;
+    use support::collab_process_server::{
+        collab_engine_descendants, spawn_server_process, wait_for_exit, wait_pids_exit,
+    };
+
+    run_lifecycle_test("collab_lifecycle_server_process_is_non_dumpable", |run| {
+        Box::pin(async {
+            let runner_euid = proc_effective_uid(std::process::id());
+            assert_ne!(
+                runner_euid, 0,
+                "the environ check needs a non-root runner (root may hold CAP_SYS_PTRACE)"
+            );
+            let wiki = setup_wiki_doc(&run.inner.harness).await;
+            let (mut child, addr, logs) = spawn_server_process(&run.inner.harness, 30_000);
+            let server_pid = child.pid().expect("server pid");
+            assert_eq!(proc_effective_uid(server_pid), runner_euid);
+            let environ = format!("/proc/{server_pid}/environ");
+            assert_eq!(
+                std::fs::metadata(&environ).expect("stat environ").uid(),
+                0,
+                "a non-dumpable server's /proc files are owned by root"
+            );
+            assert_eq!(
+                std::fs::read(&environ).map_err(|err| err.kind()).err(),
+                Some(std::io::ErrorKind::PermissionDenied),
+                "a same-uid reader must not see the server environ"
+            );
+
+            let mut ws = support::connect_member(addr, &wiki.session.session_token).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+            support::auth_and_join(&mut ws, &key, 1).await;
+            support::complete_sync_handshake(&mut ws, &key).await;
+            let helpers = collab_engine_descendants(server_pid);
+            assert!(!helpers.is_empty(), "the joined room must own a helper");
+            child.helper_pids = helpers.clone();
+            for pid in &helpers {
+                assert_eq!(
+                    collab_engine::process::child_oom_score_adj(*pid),
+                    Some(1000),
+                    "helper {pid} of a non-dumpable server"
+                );
+            }
+
+            let killed = std::process::Command::new("kill")
+                .args(["-s", "KILL", &server_pid.to_string()])
+                .status()
+                .expect("kill");
+            assert!(killed.success());
+            let status = wait_for_exit(&mut child, Duration::from_secs(10));
+            assert!(!status.success(), "SIGKILLed server: {status}");
+            wait_pids_exit(&helpers, Duration::from_secs(1));
+            drop(ws);
+            drop(logs);
+        })
+    })
+    .await;
+}

@@ -137,6 +137,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
+    // Before any helper exists: the helpers run as this uid, and without this
+    // any of them (or a uid-1000 `docker exec`) could read this process's
+    // environ (keyrings, DATABASE_APP_URL), memory and fds through /proc.
+    collab_engine::process::make_process_non_dumpable()
+        .map_err(|err| format!("cannot make fvoci-server non-dumpable: {err}"))?;
     collab_engine::process::raise_nofile_to_hard_limit();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("fvoci_server=info".parse()?))
