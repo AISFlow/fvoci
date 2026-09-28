@@ -2317,10 +2317,15 @@ async fn workspace_oidc_config_is_admin_only_and_sealed() {
     let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::ec("ec-1")).await;
     let h = oidc_harness(&fake, &[]).await;
     let path = format!("/api/v1/workspaces/{}/oidc", h.workspace_id);
+    let redirect_uri = format!(
+        "http://localhost/api/v1/auth/sso/{}/callback",
+        h.workspace_id
+    );
     let res = call(&h.app, "GET", &path, None, Some(&h.owner_cookie), peer(110)).await;
+    // The redirect URI to register comes with the form, before any save.
     assert_eq!(
         res.json,
-        json!({"issuer": null, "clientId": null, "label": null})
+        json!({"issuer": null, "clientId": null, "label": null, "redirectUri": redirect_uri})
     );
 
     let bad = call(
@@ -2364,7 +2369,42 @@ async fn workspace_oidc_config_is_admin_only_and_sealed() {
     assert!(stored.starts_with("enc:v2:k1:") && !stored.contains(CLIENT_SECRET));
     let res = call(&h.app, "GET", &path, None, Some(&h.owner_cookie), peer(110)).await;
     assert_eq!(res.json["clientId"], "fvoci-client");
+    assert_eq!(res.json["redirectUri"], redirect_uri.as_str());
     assert!(res.json.get("clientSecret").is_none());
+    // It is the exact redirect_uri the server sends that provider.
+    let sso = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/sso?slug=acme",
+        None,
+        None,
+        peer(110),
+    )
+    .await;
+    assert_eq!(sso.status, StatusCode::FOUND, "{:?}", sso.json);
+    assert_eq!(query_param(&sso.location(), "redirect_uri"), redirect_uri);
+    // Built from the server's public origin, whatever host the admin's
+    // browser is on.
+    let elsewhere = h.app_with_oidc(OidcSettings {
+        public_origin: "https://sso.example".into(),
+        ..oidc_settings(Vec::new(), true)
+    });
+    let res = call(
+        &elsewhere,
+        "GET",
+        &path,
+        None,
+        Some(&h.owner_cookie),
+        peer(110),
+    )
+    .await;
+    assert_eq!(
+        res.json["redirectUri"],
+        format!(
+            "https://sso.example/api/v1/auth/sso/{}/callback",
+            h.workspace_id
+        )
+    );
     let providers = call(
         &h.app,
         "GET",

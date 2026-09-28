@@ -3,7 +3,8 @@
 // tab; this app keeps workspace settings as sections of one page, so the view
 // is a collapsed disclosure (like API tokens) shown to owners/admins only.
 // A 404 from the configuration route is the enterprise-license gate. Unlike
-// the source, each workspace has its own redirect URI, shown above the form.
+// the source, each workspace has its own redirect URI, shown above the form
+// as the server returns it.
 import { t } from "@fvoci/i18n";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -19,9 +20,9 @@ import type { components } from "@/generated/api";
 import { formFieldMessage } from "@/lib/form-issues";
 import {
   copyText,
+  displayedRedirectUri,
   type RedirectCopyStatus,
   WorkspaceSsoRedirectUri,
-  workspaceSsoRedirectUri,
 } from "./workspace-sso-redirect";
 import "./settings-shell.css";
 
@@ -165,7 +166,6 @@ export function WorkspaceSsoSection({ workspaceId }: { workspaceId: string }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<RedirectCopyStatus>(null);
   const queryKey = workspaceOidcQueryKey(workspaceId);
-  const redirectUri = workspaceSsoRedirectUri(window.location.origin, workspaceId);
 
   const oidc = useQuery({
     queryKey,
@@ -177,6 +177,11 @@ export function WorkspaceSsoSection({ workspaceId }: { workspaceId: string }) {
       ),
     retry: false,
   });
+  const redirectUri = displayedRedirectUri(
+    oidc.data?.redirectUri,
+    window.location.origin,
+    workspaceId,
+  );
 
   const save = useMutation({
     mutationFn: async (input: WorkspaceOidcInput) =>

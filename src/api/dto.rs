@@ -2079,7 +2079,8 @@ pub struct WorkspaceOidcOutput {
     pub label: String,
 }
 
-/// All null when the workspace has no configuration.
+/// `issuer`, `clientId` and `label` are all null when the workspace has no
+/// configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
@@ -2090,6 +2091,9 @@ pub struct WorkspaceOidcGetOutput {
     pub client_id: Option<String>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub label: Option<String>,
+    /// The redirect URI to register at this workspace's identity provider,
+    /// exactly as the server sends it (built from the public origin).
+    pub redirect_uri: String,
 }
 
 /// An OIDC start answered with JSON: the page navigates the browser to

@@ -2,6 +2,8 @@
 // completes sign-in at its own callback (server
 // `OidcSettings::workspace_redirect_uri`), so the admin copies it into the
 // identity provider's client before saving the issuer and credentials here.
+// The server returns that exact string (`redirectUri`, built from its public
+// origin); the browser's origin is only a fallback for a response without it.
 import { createElement, useId } from "react";
 import { t } from "@fvoci/i18n";
 
@@ -11,6 +13,19 @@ export type RedirectCopyStatus = "copied" | "failed" | null;
 export function workspaceSsoRedirectUri(origin: string, workspaceId: string): string {
   const base = origin.replace(/\/+$/, "");
   return `${base}/api/v1/auth/sso/${encodeURIComponent(workspaceId)}/callback`;
+}
+
+/**
+ * The URI to show: the server's own, since the provider compares it as an
+ * exact string and the admin's browser may be on another host name than the
+ * public origin; built from `origin` only when the server sent none.
+ */
+export function displayedRedirectUri(
+  serverUri: string | null | undefined,
+  origin: string,
+  workspaceId: string,
+): string {
+  return serverUri ? serverUri : workspaceSsoRedirectUri(origin, workspaceId);
 }
 
 export async function copyText(value: string): Promise<void> {

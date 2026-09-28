@@ -31449,11 +31449,12 @@
       },
       "WorkspaceOidcGetOutput": {
         "type": "object",
-        "description": "All null when the workspace has no configuration.",
+        "description": "`issuer`, `clientId` and `label` are all null when the workspace has no\nconfiguration.",
         "required": [
           "issuer",
           "clientId",
-          "label"
+          "label",
+          "redirectUri"
         ],
         "properties": {
           "clientId": {
@@ -31473,6 +31474,10 @@
               "string",
               "null"
             ]
+          },
+          "redirectUri": {
+            "type": "string",
+            "description": "The redirect URI to register at this workspace's identity provider,\nexactly as the server sends it (built from the public origin)."
           }
         }
       },

@@ -630,6 +630,7 @@ fn workspace_path(raw: &str) -> Result<Uuid, AppError> {
 
 async fn get_workspace_oidc(
     State(state): State<AppState>,
+    Extension(identity): Extension<Arc<Identity>>,
     headers: HeaderMap,
     jar: CookieJar,
     Path(workspace_id): Path<String>,
@@ -648,16 +649,21 @@ async fn get_workspace_oidc(
     .await
     .map_err(internal)?
     .map_err(manage_error)?;
+    // The exact string the provider must register: the admin's browser may
+    // be on another host name than the public origin the server signs with.
+    let redirect_uri = identity.oidc.workspace_redirect_uri(workspace_id);
     Ok(Json(match row {
         Some(row) => WorkspaceOidcGetOutput {
             issuer: Some(row.issuer),
             client_id: Some(row.client_id),
             label: Some(row.label),
+            redirect_uri,
         },
         None => WorkspaceOidcGetOutput {
             issuer: None,
             client_id: None,
             label: None,
+            redirect_uri,
         },
     }))
 }

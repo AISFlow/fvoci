@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "@fvoci/i18n";
 import {
   copyText,
+  displayedRedirectUri,
   type RedirectCopyStatus,
   WorkspaceSsoRedirectUri,
   workspaceSsoRedirectUri,
@@ -34,6 +35,18 @@ test("redirect URI is the per-workspace SSO callback on the public origin", () =
     workspaceSsoRedirectUri("http://localhost:5173", "a/b"),
     "http://localhost:5173/api/v1/auth/sso/a%2Fb/callback",
   );
+});
+
+test("the shown URI is the server's; the browser origin is only a fallback", () => {
+  const server = `https://fvoci.example/api/v1/auth/sso/${WORKSPACE_ID}/callback`;
+  // An admin on another host name still sees the public-origin URI.
+  assert.equal(displayedRedirectUri(server, "http://intranet:8080", WORKSPACE_ID), server);
+  for (const missing of [undefined, null, ""]) {
+    assert.equal(
+      displayedRedirectUri(missing, "http://intranet:8080", WORKSPACE_ID),
+      `http://intranet:8080/api/v1/auth/sso/${WORKSPACE_ID}/callback`,
+    );
+  }
 });
 
 test("the section shows the URI read-only with Korean help and a copy button", () => {

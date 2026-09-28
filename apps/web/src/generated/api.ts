@@ -5804,11 +5804,19 @@ export interface components {
             issuer: string;
             label?: string | null;
         };
-        /** @description All null when the workspace has no configuration. */
+        /**
+         * @description `issuer`, `clientId` and `label` are all null when the workspace has no
+         *     configuration.
+         */
         WorkspaceOidcGetOutput: {
             clientId: string | null;
             issuer: string | null;
             label: string | null;
+            /**
+             * @description The redirect URI to register at this workspace's identity provider,
+             *     exactly as the server sends it (built from the public origin).
+             */
+            redirectUri: string;
         };
         WorkspaceOidcOutput: {
             clientId: string;
