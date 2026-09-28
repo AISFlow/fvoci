@@ -145,6 +145,11 @@ for pending in 0 1; do
   ((${#contexts[@]} == 1)) || fail "$label: expected 1 retained error-context.md, got ${#contexts[@]}" "$log"
   grep -q 'controlled failure' "${contexts[0]}" || fail "$label: error-context.md lacks the failing test" "$log"
   [[ "$(stat -c %a "$retained")" == "700" ]] || fail "$label: retained dir is not private" "$log"
+  mapfile -t summaries < <(find "$retained/playwright-output" -name browser-summary.txt -type f 2>/dev/null)
+  ((${#summaries[@]} >= 1)) || fail "$label: no browser-summary.txt next to the retained trace" "$log"
+  if [[ "$pending" == "0" ]]; then
+    [[ -f "$retained/server.log" ]] || fail "$label: the group server.log was not retained" "$log"
+  fi
   for shared in test-results test-results-collab e2e-pending/test-results-collab; do
     [[ ! -e "$FIXTURE_ROOT/apps/web/$shared" ]] || fail "$label: wrote shared $shared" "$log"
   done
