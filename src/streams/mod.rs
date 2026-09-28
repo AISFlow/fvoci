@@ -10,10 +10,12 @@ pub use events::{
 };
 pub use hub::{StreamAcquireError, StreamGuard, StreamHub};
 
-/// Bounded queue depth per SSE connection (slow readers block then disconnect).
+/// Queue depth per SSE connection, which is also its memory bound: at most
+/// this many queued hints plus one awaiting authorization, each under 100
+/// bytes. A producer that finds the queue full ends the stream, and the
+/// client resyncs on reconnect.
 pub const STREAM_CHANNEL_CAPACITY: usize = 8;
 
 pub const MAX_CONCURRENT_STREAMS: usize = 64;
-pub const STREAM_HIGH_WATER_MARK: usize = 64 * 1024;
 pub const STREAM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
 pub const STREAM_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);

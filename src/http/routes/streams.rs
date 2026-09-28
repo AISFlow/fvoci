@@ -1,7 +1,6 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -28,8 +27,7 @@ use crate::http::state::AppState;
 use crate::streams::{
     initial_cursor, poll_access_events, poll_task_events, project_stream_access,
     task_stream_wire_hint, workspace_stream_access, EventCursor, StreamAccess, StreamAcquireError,
-    StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY, STREAM_HIGH_WATER_MARK, STREAM_KEEPALIVE,
-    STREAM_POLL_INTERVAL,
+    StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
 };
 
 #[cfg(feature = "db-tests")]
@@ -233,7 +231,6 @@ struct TaskStreamAuth {
 /// Single bounded hint queue; HTTP `Stream` polls hints and authorizes on consumption.
 struct TaskAuthorizedSseStream {
     queue_rx: tokio::sync::mpsc::Receiver<TaskStreamQueueItem>,
-    queue_body_bytes: Arc<AtomicUsize>,
     auth: TaskStreamAuth,
     pending: Option<TaskStreamQueueItem>,
     authorize: Option<Pin<Box<dyn Future<Output = bool> + Send>>>,
@@ -262,7 +259,9 @@ impl Stream for TaskAuthorizedSseStream {
         match authorize.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(false) => {
-                drain_task_queue(&mut this.queue_rx, &this.queue_body_bytes);
+                // Deny ends the stream. Closing the queue stops the producer at
+                // its next send; the queued hints go with the receiver.
+                this.queue_rx.close();
                 this.pending = None;
                 this.authorize = None;
                 Poll::Ready(None)
@@ -270,7 +269,6 @@ impl Stream for TaskAuthorizedSseStream {
             Poll::Ready(true) => {
                 let item = this.pending.take().expect("pending after auth");
                 this.authorize = None;
-                release_queue_body_bytes(&this.queue_body_bytes, task_item_body_bytes(&item));
                 Poll::Ready(Some(Ok(queue_item_to_event(item))))
             }
         }
@@ -307,54 +305,15 @@ fn queue_item_to_event(item: TaskStreamQueueItem) -> Event {
     }
 }
 
-fn task_item_body_bytes(item: &TaskStreamQueueItem) -> usize {
-    match item {
-        TaskStreamQueueItem::Open => "event: open\ndata: {}\n\n".len(),
-        TaskStreamQueueItem::TaskHint { wire_verb, task_id } => {
-            let data = json!({"verb": wire_verb, "taskId": task_id}).to_string();
-            format!("event: task\ndata: {data}\n\n").len()
-        }
-    }
-}
-
-fn reserve_queue_body_bytes(budget: &AtomicUsize, bytes: usize, limit: usize) -> bool {
-    loop {
-        let current = budget.load(Ordering::Acquire);
-        let projected = current + bytes;
-        if projected > limit {
-            return false;
-        }
-        if budget
-            .compare_exchange_weak(current, projected, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            return true;
-        }
-    }
-}
-
-fn release_queue_body_bytes(budget: &AtomicUsize, bytes: usize) {
-    budget
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            Some(current.saturating_sub(bytes))
-        })
-        .expect("queue byte budget");
-}
-
+/// `Err` when the bounded queue is full or closed; the producer then exits.
 fn try_enqueue_task_hint(
     queue_tx: &tokio::sync::mpsc::Sender<TaskStreamQueueItem>,
-    queue_body_bytes: &Arc<AtomicUsize>,
     workspace_id: Uuid,
     project_id: Uuid,
     item: TaskStreamQueueItem,
 ) -> Result<(), ()> {
-    let bytes = task_item_body_bytes(&item);
-    if !reserve_queue_body_bytes(queue_body_bytes, bytes, STREAM_HIGH_WATER_MARK) {
-        return Err(());
-    }
     let is_hint = matches!(&item, TaskStreamQueueItem::TaskHint { .. });
     if queue_tx.try_send(item).is_err() {
-        release_queue_body_bytes(queue_body_bytes, bytes);
         return Err(());
     }
     if is_hint {
@@ -365,15 +324,6 @@ fn try_enqueue_task_hint(
 
 #[cfg(not(feature = "db-tests"))]
 fn record_task_hint_enqueued(_workspace_id: Uuid, _project_id: Uuid) {}
-
-fn drain_task_queue(
-    queue_rx: &mut tokio::sync::mpsc::Receiver<TaskStreamQueueItem>,
-    queue_body_bytes: &Arc<AtomicUsize>,
-) {
-    while let Ok(item) = queue_rx.try_recv() {
-        release_queue_body_bytes(queue_body_bytes, task_item_body_bytes(&item));
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 fn task_sse_stream(
@@ -387,7 +337,6 @@ fn task_sse_stream(
     guard: StreamGuard,
 ) -> TaskAuthorizedSseStream {
     let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
-    let queue_body_bytes = Arc::new(AtomicUsize::new(0));
     let auth = TaskStreamAuth {
         pool: pool.clone(),
         workspace_id,
@@ -396,11 +345,9 @@ fn task_sse_stream(
         session_id,
     };
 
-    let queue_body_bytes_producer = Arc::clone(&queue_body_bytes);
     tokio::spawn(async move {
         if try_enqueue_task_hint(
             &queue_tx,
-            &queue_body_bytes_producer,
             workspace_id,
             project_id,
             TaskStreamQueueItem::Open,
@@ -442,7 +389,6 @@ fn task_sse_stream(
                         };
                         if try_enqueue_task_hint(
                             &queue_tx,
-                            &queue_body_bytes_producer,
                             workspace_id,
                             project_id,
                             TaskStreamQueueItem::TaskHint { wire_verb, task_id },
@@ -468,7 +414,6 @@ fn task_sse_stream(
 
     TaskAuthorizedSseStream {
         queue_rx,
-        queue_body_bytes,
         auth,
         pending: None,
         authorize: None,
@@ -531,48 +476,5 @@ fn access_sse_stream(
         end_rx,
         _disconnect_rx: disconnect_rx,
         _guard: guard,
-    }
-}
-
-#[cfg(all(feature = "db-tests", test))]
-mod queue_budget_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::thread;
-
-    use super::{release_queue_body_bytes, reserve_queue_body_bytes};
-
-    #[test]
-    fn reserve_rolls_back_when_channel_send_fails() {
-        let budget = Arc::new(AtomicUsize::new(0));
-        let bytes = 40;
-        assert!(reserve_queue_body_bytes(&budget, bytes, 100));
-        assert_eq!(budget.load(Ordering::Acquire), bytes);
-        release_queue_body_bytes(&budget, bytes);
-        assert_eq!(budget.load(Ordering::Acquire), 0);
-    }
-
-    #[test]
-    fn concurrent_reserves_stay_within_limit() {
-        let budget = Arc::new(AtomicUsize::new(0));
-        let limit = 64;
-        let chunk = 8;
-        let threads: Vec<_> = (0..16)
-            .map(|_| {
-                let budget = Arc::clone(&budget);
-                thread::spawn(move || {
-                    for _ in 0..8 {
-                        reserve_queue_body_bytes(&budget, chunk, limit);
-                    }
-                })
-            })
-            .collect();
-        for t in threads {
-            t.join().expect("thread");
-        }
-        assert!(
-            budget.load(Ordering::Acquire) <= limit,
-            "budget must not exceed limit"
-        );
     }
 }
