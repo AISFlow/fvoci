@@ -2426,6 +2426,170 @@ async fn workspace_oidc_config_is_admin_only_and_sealed() {
     h.finish().await;
 }
 
+/// Any user can create a personal workspace, so an IdP configured there is
+/// one they chose (login CSRF into their own account through a plain GET
+/// start). A personal workspace takes no configuration, and a row saved
+/// before that rule is not advertised, starts nothing and completes nothing,
+/// while its owner can still read and remove it.
+#[tokio::test]
+async fn personal_workspaces_take_no_sso() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;
+    let h = oidc_harness(&fake, &[]).await;
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&h.owner_cookie),
+        peer(180),
+    )
+    .await;
+    assert!(res.status.is_success(), "{:?}", res.json);
+    let ws: Uuid = res.json["id"].as_str().unwrap().parse().unwrap();
+    let slug = res.json["slug"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/workspaces/{ws}/oidc");
+    let config =
+        json!({"issuer": &fake.base, "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET});
+
+    let res = call(
+        &h.app,
+        "PUT",
+        &path,
+        Some(config.clone()),
+        Some(&h.owner_cookie),
+        peer(180),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::CONFLICT, "{:?}", res.json);
+    assert_eq!(res.code(), "personal_workspace_is_immutable");
+    let rows = "SELECT count(*) FROM fvoci.workspace_oidc WHERE workspace_id = $1";
+    assert_eq!(h.count(rows, ws).await, 0);
+    // The team workspace still takes one.
+    let res = call(
+        &h.app,
+        "PUT",
+        &format!("/api/v1/workspaces/{}/oidc", h.workspace_id),
+        Some(config),
+        Some(&h.owner_cookie),
+        peer(180),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    sqlx::query("DELETE FROM fvoci.workspace_oidc")
+        .execute(&h.admin)
+        .await
+        .unwrap();
+
+    // A row saved on the personal workspace before the rule.
+    let sealed = fvoci_server::secret_box::seal(
+        &encryption_keys(),
+        CLIENT_SECRET,
+        &fvoci_server::identity::workspace_oidc_context(ws),
+    )
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.workspace_oidc (id, workspace_id, issuer, client_id, client_secret, label) \
+         VALUES ($1, $2, $3, $4, $5, 'SSO')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws)
+    .bind(&fake.base)
+    .bind(CLIENT_ID)
+    .bind(&sealed)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+
+    let providers = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/providers",
+        None,
+        None,
+        peer(181),
+    )
+    .await;
+    assert_eq!(providers.json["workspaceSso"], false);
+    for (method, start, cookie) in [
+        (
+            "GET",
+            format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
+            None,
+        ),
+        ("GET", format!("/api/v1/auth/sso?slug={slug}"), None),
+        (
+            "POST",
+            format!("/api/v1/auth/oidc/generic/link?workspaceId={ws}"),
+            Some(h.owner_cookie.as_str()),
+        ),
+    ] {
+        let res = call(&h.app, method, &start, None, cookie, peer(181)).await;
+        assert_eq!(res.status, StatusCode::NOT_FOUND, "{start}: {:?}", res.json);
+        assert_eq!(res.code(), "provider_not_configured", "{start}");
+        assert!(res.cookie_named("fvoci_oidc_state").is_none(), "{start}");
+    }
+    assert_eq!(oidc_state_rows(&h).await, 0);
+    assert_eq!(fake.discovery_hits.load(Ordering::SeqCst), 0);
+
+    // A flow begun while the row still signed in completes nothing once the
+    // workspace is personal: no token request reaches its IdP.
+    let set_kind = "UPDATE fvoci.workspaces SET kind = $2 WHERE id = $1";
+    sqlx::query(set_kind)
+        .bind(ws)
+        .bind("team")
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let started = h
+        .begin(
+            &format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
+            None,
+            peer(182),
+        )
+        .await;
+    sqlx::query(set_kind)
+        .bind(ws)
+        .bind("personal")
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let path_back = redirect_path(&started.location);
+    assert_eq!(path_back, format!("/api/v1/auth/sso/{ws}/callback"));
+    let query = fake.authorize(&started.location, Profile::new("p-sub", OWNER_EMAIL, true));
+    let res = callback_at(
+        &h.app,
+        &path_back,
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(182),
+    )
+    .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/login?error=oidc_provider_error"
+    );
+    assert!(res.cookie().is_none());
+    assert_eq!(token_hits(&fake), 0);
+
+    // Its owner still reads and removes it.
+    let res = call(&h.app, "GET", &path, None, Some(&h.owner_cookie), peer(183)).await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    assert_eq!(res.json["clientId"], CLIENT_ID);
+    let res = call(
+        &h.app,
+        "DELETE",
+        &path,
+        None,
+        Some(&h.owner_cookie),
+        peer(183),
+    )
+    .await;
+    assert_eq!(res.json, json!({"ok": true}));
+    assert_eq!(h.count(rows, ws).await, 0);
+    h.finish().await;
+}
+
 #[tokio::test]
 async fn workspace_sso_login_and_jit_join() {
     let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;

@@ -617,6 +617,9 @@ fn manage_error(err: ManageError) -> AppError {
         ManageError::NotFound => AppError::from_code(ProblemCode::NotFound),
         ManageError::Forbidden => AppError::from_code(ProblemCode::InsufficientPermissions),
         ManageError::SessionGone => AppError::from_code(ProblemCode::AuthenticationRequired),
+        ManageError::PersonalWorkspace => {
+            AppError::from_code(ProblemCode::PersonalWorkspaceImmutable)
+        }
     }
 }
 

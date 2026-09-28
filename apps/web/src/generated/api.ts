@@ -15722,6 +15722,15 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
+            /** @description personal_workspace_is_immutable: a personal workspace takes no SSO configuration */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
             /** @description encryption_unavailable */
             503: {
                 headers: {

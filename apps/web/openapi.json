@@ -13760,6 +13760,16 @@
               }
             }
           },
+          "409": {
+            "description": "personal_workspace_is_immutable: a personal workspace takes no SSO configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
           "503": {
             "description": "encryption_unavailable",
             "content": {

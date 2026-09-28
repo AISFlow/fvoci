@@ -272,6 +272,7 @@ fn workspace_oidc_get() {}
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 403, description = "Insufficient permissions", body = ProblemResponse),
         (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 409, description = "personal_workspace_is_immutable: a personal workspace takes no SSO configuration", body = ProblemResponse),
         (status = 503, description = "encryption_unavailable", body = ProblemResponse),
     )
 )]
