@@ -75,24 +75,40 @@ test("an ended stream asks for a reconcile and leaves the reconnect to the brows
   assert.equal(MockEventSource.instances.length, 1);
 });
 
-for (const status of [401, 404]) {
-  test(`a refused stream whose access is gone (${status}) stops and reconciles once`, async () => {
-    serveWorkspace(status);
-    let changes = 0;
-    const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
-    const source = MockEventSource.latest();
-    source.fail(MockEventSource.CLOSED);
-    await settle();
-    assert.deepEqual(probes, [`GET /api/v1/workspaces/${WS}`]);
-    assert.equal(changes, 1);
-    assert.equal(sharedEventSourceRefCount(STREAM), 0, "the watcher released its stream");
-    assert.equal(source.closed, true);
-    mock.timers.tick(60_000);
-    assert.equal(MockEventSource.instances.length, 1, "no reopen after the access is gone");
-    sub.close();
-    assert.equal(changes, 1);
-  });
-}
+test("a refused stream whose access is gone (404) stops and reconciles once", async () => {
+  serveWorkspace(404);
+  let changes = 0;
+  const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
+  const source = MockEventSource.latest();
+  source.fail(MockEventSource.CLOSED);
+  await settle();
+  assert.deepEqual(probes, [`GET /api/v1/workspaces/${WS}`]);
+  assert.equal(changes, 1);
+  assert.equal(sharedEventSourceRefCount(STREAM), 0, "the watcher released its stream");
+  assert.equal(source.closed, true);
+  mock.timers.tick(60_000);
+  assert.equal(MockEventSource.instances.length, 1, "no reopen after the access is gone");
+  sub.close();
+  assert.equal(changes, 1);
+});
+
+test("a refused stream whose session is gone (401) keeps reopening and leaves the session to the app", async () => {
+  serveWorkspace(401);
+  let changes = 0;
+  const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
+  MockEventSource.latest().fail(MockEventSource.CLOSED);
+  await settle();
+  assert.deepEqual(probes, [`GET /api/v1/workspaces/${WS}`]);
+  assert.equal(changes, 0, "a 401 is not an access change of this workspace");
+  assert.equal(sharedEventSourceRefCount(STREAM), 1, "the watcher keeps its stream");
+  mock.timers.tick(1_000);
+  assert.equal(MockEventSource.instances.length, 2, "reopened after the backoff");
+  // The 401 was transient: the reopen is admitted and catches up once.
+  MockEventSource.latest().open();
+  assert.equal(changes, 1);
+  sub.close();
+  assert.equal(MockEventSource.latest().closed, true);
+});
 
 test("a refused stream of a current member reconciles once when its reopen opens", async () => {
   serveWorkspace(200);

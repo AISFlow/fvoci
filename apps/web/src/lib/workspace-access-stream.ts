@@ -15,10 +15,19 @@ export type WorkspaceAccessSubscription = {
  * caller reconciles. A refused connection (401, 404, 429 at the stream cap, a
  * proxy's 5xx during a restart) is reopened by the pool with capped backoff.
  * Each refusal first asks the server whether this session still has the
- * workspace: on 401 or 404 the watcher stops reopening and the caller
- * reconciles once. Otherwise no list is fetched while refused; the caller
- * reconciles once when the reopened stream opens, because the server starts
- * it at the current event horizon, past any access event of the refused gap.
+ * workspace: on 404 the watcher stops reopening and the caller reconciles
+ * once. Otherwise no list is fetched while refused; the caller reconciles once
+ * when the reopened stream opens, because the server starts it at the current
+ * event horizon, past any access event of the refused gap.
+ *
+ * A 401 does not stop the watcher. Session loss belongs to the app's session
+ * handling (a failed `me` query sends the page to /login), and a list reconcile
+ * could not help: it would fail with the same 401. The watcher keeps reopening
+ * with the pool's backoff, so a transient 401 heals and then reconciles on
+ * the reopen instead of leaving the page unwatched until it remounts.
+ *
+ * A 404 whose reconcile still lists the workspace (a re-add racing the probe)
+ * leaves the watcher stopped until the layout remounts.
  */
 export function watchWorkspaceAccess(
   workspaceId: string,
@@ -73,13 +82,13 @@ export function watchWorkspaceAccess(
   };
 }
 
-/** 401 (session gone) or 404 (not a member, or the workspace is deleted). */
+/** 404: not a member, or the workspace is deleted. */
 async function workspaceAccessGone(workspaceId: string): Promise<boolean> {
   try {
     const { response } = await api.GET("/api/v1/workspaces/{workspace_id}", {
       params: { path: { workspace_id: workspaceId } },
     });
-    return response.status === 401 || response.status === 404;
+    return response.status === 404;
   } catch {
     // Network failure: keep reopening.
     return false;
