@@ -4,8 +4,8 @@ use utoipa::{OpenApi, ToSchema};
 
 use crate::api::dto::{
     MfaDisableBody, MfaEnableBody, MfaSetupBody, MfaSetupOutput, MfaStatusOutput, MfaVerifyBody,
-    OkResponse, ProblemResponse, SessionIssuedOutput, WorkspaceOidcBody, WorkspaceOidcGetOutput,
-    WorkspaceOidcOutput,
+    OidcAuthorizationOutput, OkResponse, ProblemResponse, SessionIssuedOutput, WorkspaceOidcBody,
+    WorkspaceOidcGetOutput, WorkspaceOidcOutput,
 };
 
 #[derive(OpenApi)]
@@ -34,6 +34,7 @@ use crate::api::dto::{
         MfaSetupOutput,
         MfaStatusOutput,
         MfaVerifyBody,
+        OidcAuthorizationOutput,
         OidcInviteStartForm,
         SessionIssuedOutput,
         WorkspaceOidcBody,
@@ -167,12 +168,12 @@ struct OidcInviteStartForm {
     request_body(
         content = OidcInviteStartForm,
         content_type = "application/x-www-form-urlencoded",
-        description = "Same-origin form post from the invite page; no query string"
+        description = "Same-origin `fetch` from the invite page; no query string"
     ),
     responses(
-        (status = 303, description = "Redirect to the provider in invite mode; sets fvoci_oidc_state"),
+        (status = 200, description = "Invite mode started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script (a form submission redirected to the provider would break the page's `form-action 'self'`)", body = OidcAuthorizationOutput),
         (status = 400, description = "Invalid input (not a form, unknown or repeated field, missing invitation, any query) or invalid_consents_query", body = ProblemResponse),
-        (status = 403, description = "origin_mismatch", body = ProblemResponse),
+        (status = 403, description = "origin_mismatch: another origin, or no `Origin` header at all", body = ProblemResponse),
         (status = 404, description = "provider_not_configured", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
     )
@@ -217,8 +218,10 @@ fn sso_callback() {}
         ("workspaceId" = Option<String>, Query, description = "Workspace SSO (generic)"),
     ),
     responses(
-        (status = 303, description = "Redirect to the provider; sets fvoci_oidc_state"),
+        (status = 200, description = "Link started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script", body = OidcAuthorizationOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "origin_mismatch", body = ProblemResponse),
         (status = 404, description = "provider_not_configured", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
     )

@@ -1302,6 +1302,51 @@ async fn oidc_start_on(
     call(app, method, path, None, cookie, from).await
 }
 
+/// A POST start (invite, link) answers `200 {authorizationUrl}` for the page
+/// to navigate to by script, never a redirect: the SPA's `form-action 'self'`
+/// blocks a form submission redirected to the provider.
+fn authorization_url_json(path: &str, res: &Response) -> String {
+    assert_eq!(res.status, StatusCode::OK, "{path}: {:?}", res.json);
+    assert!(res.headers.get("location").is_none(), "{path}");
+    assert!(
+        res.headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/json")),
+        "{path}: {:?}",
+        res.headers
+    );
+    let object = res.json.as_object().expect("json object");
+    assert_eq!(object.len(), 1, "{path}: {:?}", res.json);
+    let url = object["authorizationUrl"]
+        .as_str()
+        .expect("authorizationUrl")
+        .to_string();
+    let parsed = url::Url::parse(&url).expect("absolute authorization url");
+    assert!(matches!(parsed.scheme(), "http" | "https"), "{url}");
+    url
+}
+
+/// The state cookie a start sets: HttpOnly, Lax, ten minutes.
+fn state_cookie_of(path: &str, res: &Response) -> String {
+    let set = res
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("fvoci_oidc_state="))
+        .unwrap_or_else(|| panic!("{path}: state cookie"))
+        .to_string();
+    assert!(
+        set.contains("HttpOnly")
+            && set.contains("Path=/")
+            && set.contains("SameSite=Lax")
+            && set.contains("Max-Age=600"),
+        "{set}"
+    );
+    res.cookie_named("fvoci_oidc_state").unwrap()
+}
+
 async fn begin_on(
     app: &axum::Router,
     path: &str,
@@ -1309,26 +1354,15 @@ async fn begin_on(
     from: SocketAddr,
 ) -> Started {
     let res = oidc_start_on(app, path, cookie, from).await;
-    assert!(
-        res.status == StatusCode::FOUND || res.status == StatusCode::SEE_OTHER,
-        "{path}: {} {:?}",
-        res.status,
-        res.json
-    );
-    let set = res
-        .headers
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .find(|v| v.starts_with("fvoci_oidc_state="))
-        .expect("state cookie")
-        .to_string();
-    assert!(
-        set.contains("HttpOnly") && set.contains("SameSite=Lax") && set.contains("Max-Age=600")
-    );
+    let location = if path.contains("/link") {
+        authorization_url_json(path, &res)
+    } else {
+        assert_eq!(res.status, StatusCode::FOUND, "{path}: {:?}", res.json);
+        res.location()
+    };
     Started {
-        location: res.location(),
-        state_cookie: res.cookie_named("fvoci_oidc_state").unwrap(),
+        location,
+        state_cookie: state_cookie_of(path, &res),
     }
 }
 
@@ -1394,7 +1428,7 @@ fn redirect_path(authorization_url: &str) -> String {
     redirect.path().to_string()
 }
 
-/// The invite page's same-origin form post → provider → callback.
+/// The invite page's same-origin POST → provider → callback.
 async fn oidc_invite_round(
     h: &Harness,
     fake: &FakeOidc,
@@ -1408,17 +1442,10 @@ async fn oidc_invite_round(
     if let Some(consents) = consents {
         fields.push(("consents", consents));
     }
-    let res = form_post(
-        &h.app,
-        &format!("/api/v1/auth/oidc/{provider}/start"),
-        &fields,
-        Some("http://localhost"),
-        from,
-    )
-    .await;
-    assert_eq!(res.status, StatusCode::SEE_OTHER, "{:?}", res.json);
-    let state_cookie = res.cookie_named("fvoci_oidc_state").expect("state cookie");
-    let location = res.location();
+    let start = format!("/api/v1/auth/oidc/{provider}/start");
+    let res = form_post(&h.app, &start, &fields, Some("http://localhost"), from).await;
+    let location = authorization_url_json(&start, &res);
+    let state_cookie = state_cookie_of(&start, &res);
     let path = redirect_path(&location);
     assert_eq!(path, format!("/api/v1/auth/oidc/{provider}/callback"));
     let query = fake.authorize(&location, profile);
@@ -4013,7 +4040,8 @@ async fn oidc_state_rows(h: &Harness) -> i64 {
 
 /// Invite mode binds the browser's IdP identity to the invited account, so
 /// only a same-origin POST may start it (like link); consents come from the
-/// body, never from a URL another site can build.
+/// body, never from a URL another site can build. The answer is JSON for the
+/// page to navigate by script, not a redirect.
 #[tokio::test]
 async fn oidc_invitation_start_is_a_same_origin_post() {
     let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;
@@ -4050,6 +4078,20 @@ async fn oidc_invitation_start_is_a_same_origin_post() {
     .await;
     assert_eq!(res.status, StatusCode::FORBIDDEN);
     assert_eq!(res.code(), "origin_mismatch");
+    // So is a post without any Origin: browsers always send one on a POST,
+    // so only a client that strips it (e.g. an extension) lacks it.
+    let res = form_post(
+        &h.app,
+        start,
+        &[("invitation", &token), ("consents", "[]")],
+        None,
+        peer(170),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(res.code(), "origin_mismatch");
+    assert!(res.cookie_named("fvoci_oidc_state").is_none());
+    assert_eq!(oidc_state_rows(&h).await, 0);
     // Body shape: an invitation, optional JSON consents, nothing else.
     for (fields, code) in [
         (vec![], "invalid_input"),
@@ -4082,7 +4124,9 @@ async fn oidc_invitation_start_is_a_same_origin_post() {
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
     assert_eq!(oidc_state_rows(&h).await, 0);
 
-    // A same-origin form post starts the invite flow and completes it.
+    // A same-origin post (the invite page's fetch) answers 200 with only
+    // the authorization URL and sets the state cookie; the page navigates
+    // there by script, so the SPA's form-action 'self' is not involved.
     let res = form_post(
         &h.app,
         start,
@@ -4091,9 +4135,13 @@ async fn oidc_invitation_start_is_a_same_origin_post() {
         peer(171),
     )
     .await;
-    assert_eq!(res.status, StatusCode::SEE_OTHER, "{:?}", res.json);
-    let state_cookie = res.cookie_named("fvoci_oidc_state").expect("state cookie");
-    let location = res.location();
+    let location = authorization_url_json(start, &res);
+    let state_cookie = state_cookie_of(start, &res);
+    assert!(
+        location.starts_with(&format!("{}/authorize?", fake.base)),
+        "{location}"
+    );
+    assert_eq!(oidc_state_rows(&h).await, 1);
     assert_eq!(
         redirect_path(&location),
         "/api/v1/auth/oidc/google/callback"

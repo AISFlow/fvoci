@@ -108,6 +108,7 @@
 	"error.email.verifySend": "인증 메일을 보내지 못했습니다. 다시 시도해 주세요.",
 	"error.withdraw": "탈퇴를 처리하지 못했습니다. 다시 시도해 주세요.",
 	"error.unlink": "소셜 연결을 해제하지 못했습니다. 다시 시도해 주세요.",
+	"error.link": "소셜 계정을 연결하지 못했습니다. 다시 시도해 주세요.",
 	"error.export.me": "내 데이터를 내보내지 못했습니다. 다시 시도해 주세요.",
 	"error.workspace.create": "워크스페이스를 만들지 못했습니다. 다시 시도해 주세요.",
 	"error.share.failed": "공유 링크를 처리하지 못했습니다. 다시 시도해 주세요.",

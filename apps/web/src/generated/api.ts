@@ -4952,6 +4952,14 @@ export interface components {
             count: number;
         };
         /**
+         * @description An OIDC start answered with JSON: the page navigates the browser to
+         *     `authorizationUrl` itself. A form submission that redirects to the
+         *     provider would be blocked by the app's `form-action 'self'`.
+         */
+        OidcAuthorizationOutput: {
+            authorizationUrl: string;
+        };
+        /**
          * @description Form body of the invite-mode start (`application/x-www-form-urlencoded`,
          *     these fields once each and nothing else).
          */
@@ -7348,15 +7356,35 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Redirect to the provider; sets fvoci_oidc_state */
-            303: {
+            /** @description Link started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["OidcAuthorizationOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
             };
             /** @description Authentication required */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description origin_mismatch */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7445,19 +7473,21 @@ export interface operations {
             };
             cookie?: never;
         };
-        /** @description Same-origin form post from the invite page; no query string */
+        /** @description Same-origin `fetch` from the invite page; no query string */
         requestBody: {
             content: {
                 "application/x-www-form-urlencoded": components["schemas"]["OidcInviteStartForm"];
             };
         };
         responses: {
-            /** @description Redirect to the provider in invite mode; sets fvoci_oidc_state */
-            303: {
+            /** @description Invite mode started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script (a form submission redirected to the provider would break the page's `form-action 'self'`) */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["OidcAuthorizationOutput"];
+                };
             };
             /** @description Invalid input (not a form, unknown or repeated field, missing invitation, any query) or invalid_consents_query */
             400: {
@@ -7468,7 +7498,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description origin_mismatch */
+            /** @description origin_mismatch: another origin, or no `Origin` header at all */
             403: {
                 headers: {
                     [name: string]: unknown;

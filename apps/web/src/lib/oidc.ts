@@ -2,6 +2,10 @@
 // browser-navigation helpers of features/auth/{login,invite}.tsx and
 // routes/login.tsx (`#mfa=` fragment).
 import { t } from "@fvoci/i18n";
+import type { components } from "@/generated/api";
+import { consentGate, ProblemError, problemMessage } from "@/lib/api";
+
+type OidcAuthorizationOutput = components["schemas"]["OidcAuthorizationOutput"];
 
 export const OIDC_ERROR_CODES = [
   "oidc_not_linked",
@@ -60,9 +64,9 @@ export function oidcStartHref(provider: string): string {
 }
 
 /**
- * Accepting an invitation with a provider is a same-origin form POST to the
- * start route (the server refuses it from a GET or another origin); the
- * token and consents travel as form fields, never in the URL.
+ * Accepting an invitation with a provider is a same-origin POST to the start
+ * route (the server refuses it from a GET, another origin or no origin); the
+ * token and consents travel as urlencoded fields, never in the URL.
  */
 export function oidcInviteStartForm(
   provider: string,
@@ -77,9 +81,105 @@ export function oidcInviteStartForm(
   };
 }
 
-/** Form POST target for linking a provider to the signed-in account. */
+/** POST target for linking a provider to the signed-in account. */
 export function oidcLinkAction(provider: string): string {
   return `/api/v1/auth/oidc/${encodeURIComponent(provider)}/link`;
+}
+
+export type OidcStartDeps = {
+  fetch: (input: string, init: RequestInit) => Promise<Response>;
+  navigate: (url: string) => void;
+};
+
+function browserStartDeps(): OidcStartDeps {
+  return {
+    fetch: async (input, init) => consentGate(await globalThis.fetch(input, init)),
+    navigate: (url) => window.location.assign(url),
+  };
+}
+
+function problemCode(body: unknown): string | undefined {
+  if (body === null || typeof body !== "object") return undefined;
+  const code = (body as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The POST starts (invite, link): a same-origin `fetch` answers
+ * `{authorizationUrl}` and sets the state cookie, then the page navigates to
+ * the provider by script. Not a form submission: under the app's
+ * `Referrer-Policy: no-referrer` a form navigation sends `Origin: null`, which
+ * the server refuses, and its redirect to the provider's origin would be
+ * blocked by the CSP `form-action 'self'` (Chromium, WebKit). A `fetch`
+ * (mode cors) sends the page's origin. Throws a `ProblemError` and stays put
+ * on any failure.
+ */
+export async function startOidcPost(
+  action: string,
+  body: URLSearchParams | undefined,
+  deps: OidcStartDeps = browserStartDeps(),
+): Promise<void> {
+  const response = await deps.fetch(action, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { Accept: "application/json" },
+    ...(body ? { body } : {}),
+  });
+  const data: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new ProblemError(response.status, problemCode(data));
+  const url = (data as Partial<OidcAuthorizationOutput> | null)?.authorizationUrl;
+  if (typeof url !== "string" || !isHttpUrl(url)) throw new ProblemError(500);
+  deps.navigate(url);
+}
+
+/** Invite page: accept the invitation with `provider`. */
+export function startOidcInvite(
+  provider: string,
+  invitation: { token: string; consents: readonly ConsentItem[] },
+  deps?: OidcStartDeps,
+): Promise<void> {
+  const start = oidcInviteStartForm(provider, invitation);
+  return startOidcPost(start.action, new URLSearchParams(start.fields), deps);
+}
+
+/** Account settings: link `provider` to the signed-in account. */
+export function startOidcLink(provider: string, deps?: OidcStartDeps): Promise<void> {
+  return startOidcPost(oidcLinkAction(provider), undefined, deps);
+}
+
+export type OidcStartUi = {
+  setPending: (provider: string | null) => void;
+  setError: (message: string | null) => void;
+};
+
+/**
+ * Click on a provider button that starts a POST flow: clears the last error
+ * and marks the provider pending while the page leaves for the provider; on
+ * failure it shows the problem and releases the buttons.
+ */
+export async function clickOidcStart(
+  provider: string,
+  start: () => Promise<void>,
+  ui: OidcStartUi,
+  fallback: Parameters<typeof t>[0],
+): Promise<void> {
+  ui.setError(null);
+  ui.setPending(provider);
+  try {
+    await start();
+  } catch (err) {
+    ui.setError(problemMessage(err, fallback));
+    ui.setPending(null);
+  }
 }
 
 export const WORKSPACE_SSO_ACTION = "/api/v1/auth/sso";

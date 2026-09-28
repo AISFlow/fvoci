@@ -19,8 +19,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    IdentitiesOutput, IdentityOutput, OkResponse, ProviderOutput, ProvidersOutput,
-    WorkspaceOidcBody, WorkspaceOidcGetOutput, WorkspaceOidcOutput,
+    IdentitiesOutput, IdentityOutput, OidcAuthorizationOutput, OkResponse, ProviderOutput,
+    ProvidersOutput, WorkspaceOidcBody, WorkspaceOidcGetOutput, WorkspaceOidcOutput,
 };
 use crate::auth::scopes::ApiTokenScope;
 use crate::db::oidc::{self as db, ManageError, UnlinkOutcome, WorkspaceOidcInput};
@@ -156,6 +156,26 @@ fn redirect(status: StatusCode, location: &str) -> Response {
 
 fn state_redirect(state: &AppState, started: Started, status: StatusCode) -> Response {
     let mut response = redirect(status, &started.authorization_url);
+    append_cookie(
+        &mut response,
+        &state_cookie(state.cookie_secure, &started.signed_state, STATE_TTL_SECS),
+    );
+    response
+}
+
+/// The POST starts (invite, link) answer `200 {authorizationUrl}` with the
+/// state cookie, and the page navigates there by script. They are not form
+/// submissions: under the SPA's `Referrer-Policy: no-referrer` a form
+/// navigation carries `Origin: null`, which the Origin check refuses, and a
+/// 303 to the provider would end the submission on another origin, which the
+/// SPA's `form-action 'self'` blocks in Chromium and WebKit. The page's
+/// `fetch` sends its real origin. The request is still same-origin only: a
+/// cross-site post fails the Origin check and could not read this body.
+fn state_json(state: &AppState, started: Started) -> Response {
+    let mut response = Json(OidcAuthorizationOutput {
+        authorization_url: started.authorization_url,
+    })
+    .into_response();
     append_cookie(
         &mut response,
         &state_cookie(state.cookie_secure, &started.signed_state, STATE_TTL_SECS),
@@ -311,7 +331,12 @@ fn is_form(headers: &HeaderMap) -> bool {
 
 /// Invite mode links the browser's provider identity to the invited account
 /// and replaces its session, so, like link, it starts only from a same-origin
-/// form post. The invitation token and the consents come from the body.
+/// POST. The invitation token and the consents come from the urlencoded body.
+///
+/// Unlike the shared [`check_origin`], a request without `Origin` is refused
+/// too: browsers send it on every POST (the invite page's `fetch` included),
+/// so only a client that strips it, such as some privacy extensions, would
+/// otherwise get a cross-site post through.
 async fn start_invite(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
@@ -321,6 +346,9 @@ async fn start_invite(
     RawQuery(raw): RawQuery,
     body: Bytes,
 ) -> Result<Response, AppError> {
+    if !headers.contains_key(header::ORIGIN) {
+        return Err(AppError::from_code(ProblemCode::OriginMismatch));
+    }
     check_origin(&headers, &state.public_origin)?;
     let provider = provider_param(&provider)?;
     limit_ip(&state, peer).await?;
@@ -353,7 +381,7 @@ async fn start_invite(
     )
     .await
     .map_err(begin_error)?;
-    Ok(state_redirect(&state, started, StatusCode::SEE_OTHER))
+    Ok(state_json(&state, started))
 }
 
 async fn callback(
@@ -536,7 +564,7 @@ async fn link(
     )
     .await
     .map_err(begin_error)?;
-    Ok(state_redirect(&state, started, StatusCode::SEE_OTHER))
+    Ok(state_json(&state, started))
 }
 
 async fn unlink(

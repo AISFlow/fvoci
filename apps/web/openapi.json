@@ -1901,11 +1901,38 @@
           }
         ],
         "responses": {
-          "303": {
-            "description": "Redirect to the provider; sets fvoci_oidc_state"
+          "200": {
+            "description": "Link started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcAuthorizationOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
           },
           "401": {
             "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "origin_mismatch",
             "content": {
               "application/json": {
                 "schema": {
@@ -2021,7 +2048,7 @@
           }
         ],
         "requestBody": {
-          "description": "Same-origin form post from the invite page; no query string",
+          "description": "Same-origin `fetch` from the invite page; no query string",
           "content": {
             "application/x-www-form-urlencoded": {
               "schema": {
@@ -2032,8 +2059,15 @@
           "required": true
         },
         "responses": {
-          "303": {
-            "description": "Redirect to the provider in invite mode; sets fvoci_oidc_state"
+          "200": {
+            "description": "Invite mode started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script (a form submission redirected to the provider would break the page's `form-action 'self'`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcAuthorizationOutput"
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid input (not a form, unknown or repeated field, missing invitation, any query) or invalid_consents_query",
@@ -2046,7 +2080,7 @@
             }
           },
           "403": {
-            "description": "origin_mismatch",
+            "description": "origin_mismatch: another origin, or no `Origin` header at all",
             "content": {
               "application/json": {
                 "schema": {
@@ -28112,6 +28146,18 @@
           "count": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "OidcAuthorizationOutput": {
+        "type": "object",
+        "description": "An OIDC start answered with JSON: the page navigates the browser to\n`authorizationUrl` itself. A form submission that redirects to the\nprovider would be blocked by the app's `form-action 'self'`.",
+        "required": [
+          "authorizationUrl"
+        ],
+        "properties": {
+          "authorizationUrl": {
+            "type": "string"
           }
         }
       },

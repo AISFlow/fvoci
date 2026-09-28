@@ -2092,6 +2092,16 @@ pub struct WorkspaceOidcGetOutput {
     pub label: Option<String>,
 }
 
+/// An OIDC start answered with JSON: the page navigates the browser to
+/// `authorizationUrl` itself. A form submission that redirects to the
+/// provider would be blocked by the app's `form-action 'self'`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct OidcAuthorizationOutput {
+    pub authorization_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
