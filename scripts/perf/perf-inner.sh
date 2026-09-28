@@ -76,6 +76,12 @@ PLAYWRIGHT_BASE_URL="$BASE_URL" FVOCI_PERF_RUN_DIR="$RUN_DIR" CARGO_TARGET_DIR="
   "$ROOT/apps/web/node_modules/.bin/playwright" test --config=e2e/perf/perf.config.ts "${GREP_ARGS[@]}"
 status=$?
 set -e
-# Keep only the count of server warnings/errors; the log itself stays in the run dir.
+# Keep only the count of server warnings/errors; the log itself stays in the run dir
+# unless FVOCI_PERF_KEEP_SERVER_LOG=1 asks for a redacted copy (diagnosis only).
 grep -cE ' (WARN|ERROR) ' "$SERVER_LOG" >"$FVOCI_PERF_OUT/server-warn-error-count-$FVOCI_PERF_DATASET$TAG.txt" || true
+if [[ "${FVOCI_PERF_KEEP_SERVER_LOG:-}" == "1" ]]; then
+  sed -E -e 's#postgres://[^[:space:]]+#postgres://redacted#g' \
+    -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|MEILI[A-Z_]*KEY|PASSWORD[A-Z_]*|ENCRYPTION_KEYS)=[^[:space:]]+#\1=redacted#g' \
+    "$SERVER_LOG" >"$FVOCI_PERF_OUT/server-log-$FVOCI_PERF_DATASET$TAG.txt"
+fi
 exit "$status"

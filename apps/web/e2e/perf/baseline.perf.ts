@@ -1070,3 +1070,72 @@ test("f: attachment viewers", async ({ browser }) => {
   }
   flush();
 });
+
+// (g) first-ever open of freshly API-seeded documents (one cold open per document).
+// Added after an intermittent multi-second delay between collab `connected` and
+// the first text on the first open of the seeded small document in (b).
+test("g: first open of freshly seeded documents", async ({ browser }) => {
+  test.setTimeout(1_800_000);
+  const setup = await browser.newContext({ storageState: ctx.ownerState });
+  const docs: { id: string; displayId: string; marker: string }[] = [];
+  for (let i = 0; i < N; i += 1) {
+    const marker = `새 문서 ${i} 첫 문단 marker`;
+    const res = await setup.request.post(`/api/v1/workspaces/${ctx.wsId}/documents`, {
+      data: { parentId: null, title: `첫 열기 측정 ${i}` },
+    });
+    expect(res.ok(), await res.text()).toBeTruthy();
+    const doc = (await res.json()) as { id: string; displayId: string };
+    const put = await setup.request.put(`/api/v1/workspaces/${ctx.wsId}/documents/${doc.id}/body`, {
+      data: { contentMd: `${marker}\n\n두 번째 문단입니다.\n` },
+    });
+    expect(put.ok(), await put.text()).toBeTruthy();
+    docs.push({ ...doc, marker });
+  }
+  await setup.close();
+  await quietWindow("g-first-open", loadLog);
+  const samples: Record<string, unknown>[] = [];
+  for (const [i, doc] of docs.entries()) {
+    const context = await newProbedContext(browser, ctx.ownerState);
+    const page = await context.newPage();
+    const sockets: { opened: number; closed: number | null; sent: number; recv: number }[] = [];
+    const consoleCounts: Record<string, number> = {};
+    page.on("console", (m) => {
+      consoleCounts[m.type()] = (consoleCounts[m.type()] ?? 0) + 1;
+    });
+    page.on("websocket", (ws) => {
+      const rec = { opened: nodeNow(), closed: null as number | null, sent: 0, recv: 0 };
+      sockets.push(rec);
+      ws.on("framesent", () => (rec.sent += 1));
+      ws.on("framereceived", () => (rec.recv += 1));
+      ws.on("close", () => (rec.closed = nodeNow()));
+    });
+    await guarded(samples, { i }, async () => {
+      const t0 = nodeNow();
+      await page.goto(`/w/${owner.workspaceSlug}/${doc.displayId}`, { waitUntil: "commit" });
+      await watch(page, `g-text-${i}`, { selector: ".fvoci-editor .ProseMirror p", text: doc.marker });
+      await watch(page, `g-conn-${i}`, { selector: '[data-collab-status="connected"]' });
+      const text = await waitHit(page, `g-text-${i}`, 60_000);
+      const conn = await waitHit(page, `g-conn-${i}`, 60_000);
+      samples.push({
+        i,
+        textDom: text && !text.pre ? round(text.dom) : null,
+        collabConnectedDom: conn && !conn.pre ? round(conn.dom) : null,
+        connectedToText: text && conn ? round(text.dom - conn.dom) : null,
+        sockets: sockets.map((s) => ({
+          openedAfterMs: round(s.opened - t0),
+          closedAfterMs: s.closed === null ? null : round(s.closed - t0),
+          sent: s.sent,
+          recv: s.recv,
+        })),
+        console: consoleCounts,
+      });
+    });
+    await context.close();
+  }
+  results.g = samples;
+  const pick = (m: string) => samples.map((x) => x[m] as number | null);
+  record("g.firstOpen", "textDom", "DOM-observed", pick("textDom"));
+  record("g.firstOpen", "collabConnectedDom", "DOM-observed (collab ack state)", pick("collabConnectedDom"));
+  record("g.firstOpen", "connectedToText", "DOM-observed interval", pick("connectedToText"));
+  flush();
+});
