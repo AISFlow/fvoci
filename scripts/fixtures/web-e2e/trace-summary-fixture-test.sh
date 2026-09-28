@@ -22,6 +22,8 @@ def snap(url, status, failure="", kind="document", t=1.0):
 network = [
     snap(f"http://127.0.0.1:4000/s/{share}?code=QUERYSECRET", 404),
     snap("http://127.0.0.1:4000/assets/index-DiwrgTda.js", 0, "net::ERR_ABORTED", "script", 1.5),
+    # Shorter than LONG_TOKEN: only the path-token rule redacts it.
+    snap("http://127.0.0.1:4000/api/v1/invitations/PATHSECRET/accept", 404, kind="fetch", t=1.7),
 ]
 events = [
     {"type": "console", "messageType": "error", "time": 2.0,
@@ -44,10 +46,11 @@ fail() {
 timeout 20 python3 "$ROOT/scripts/web-e2e-trace-summary.py" "$WORK/trace.zip" >"$WORK/summary.txt" \
   || fail "summarizer failed or took over 20 s"
 [[ "$(head -n1 "$WORK/summary.txt")" == "browser summary: "* ]] || fail "missing header"
-for secret in QUERYSECRET PARAMSECRET1 PARAMSECRET2 PARAMSECRET3 DBSECRET SSSSSSSSSSSSSSSSSSSS BBBBBBBBBBBBBBBBBBBB; do
+for secret in PATHSECRET QUERYSECRET PARAMSECRET1 PARAMSECRET2 PARAMSECRET3 DBSECRET SSSSSSSSSSSSSSSSSSSS BBBBBBBBBBBBBBBBBBBB; do
   ! grep -q "$secret" "$WORK/summary.txt" || fail "$secret leaked"
 done
 grep -q '/s/<redacted>?…' "$WORK/summary.txt" || fail "share path not summarized"
+grep -q '/api/v1/invitations/<redacted>/accept' "$WORK/summary.txt" || fail "invitation path token not redacted"
 grep -q 'GET ERR script /assets/index-DiwrgTda.js' "$WORK/summary.txt" || fail "failed asset request not listed"
 grep -q 'net::ERR_ABORTED' "$WORK/summary.txt" || fail "failure text missing"
 grep -q 'console   error fetch failed' "$WORK/summary.txt" || fail "console error missing"
