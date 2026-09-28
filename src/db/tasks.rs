@@ -6,7 +6,8 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{
-    lock_key_from_uuid, lock_membership_users, recheck_session, session_is_live, set_tenant,
+    begin_read, lock_key_from_uuid, lock_membership_users, recheck_session, session_is_live,
+    set_tenant,
 };
 use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
 use crate::db::holidays::list_holiday_dates;
@@ -14,7 +15,8 @@ use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::labels::{assignee_filter_member_exists, project_label_exists};
 use crate::db::milestones::project_milestone_exists;
 use crate::db::projects::{
-    lock_project, project_permission, visible_project_sql_for_guest, ProjectDbError,
+    load_live_project, lock_project, project_permission, visible_project_sql_for_guest,
+    ProjectDbError,
 };
 use crate::db::task_activity::{record_task_activity, task_activity_snapshot};
 use crate::db::view_query::{
@@ -1194,7 +1196,7 @@ pub async fn get_task(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<TaskDetailRow, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -1231,7 +1233,7 @@ pub async fn get_task(
     .fetch_one(&mut *tx)
     .await?;
     let project_id = task_row.project_id;
-    let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
@@ -1337,7 +1339,7 @@ async fn list_tasks_in_scope(
             return Ok(Err(ProjectDbError::InvalidCursor));
         }
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     // Bounds the correlated filter/sort subqueries of a user-built view query.
     sqlx::query("SET LOCAL statement_timeout = '15s'")
         .execute(&mut *tx)
@@ -1353,7 +1355,7 @@ async fn list_tasks_in_scope(
     }
     let scope_condition = match project_id {
         Some(project_id) => {
-            let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+            let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
             let Some(locked) = locked else {
                 tx.rollback().await?;
                 return Ok(Err(ProjectDbError::NotFound));
@@ -3332,7 +3334,7 @@ pub async fn list_project_dependencies(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<TaskDependencyEdge>, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -3342,7 +3344,7 @@ pub async fn list_project_dependencies(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let Some(locked) = lock_project(&mut tx, workspace_id, project_id).await? else {
+    let Some(locked) = load_live_project(&mut tx, workspace_id, project_id).await? else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };

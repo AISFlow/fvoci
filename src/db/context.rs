@@ -1,4 +1,4 @@
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 pub const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
@@ -16,6 +16,18 @@ tokio::task_local! {
 /// Runs `fut` with event deferral to `job_id` (source `deferEvents`).
 pub async fn defer_import_events<F: std::future::Future>(job_id: Uuid, fut: F) -> F::Output {
     IMPORT_DEFER_JOB.scope(job_id, fut).await
+}
+
+/// Begins a read-only transaction on one REPEATABLE READ snapshot, for reads
+/// that check the credential and permission and then load data. Every
+/// statement sees the same snapshot, so the permission check covers the rows
+/// returned without locking the project row: the read never waits on (or
+/// blocks) project writers and collab appends, and it never takes a
+/// transaction id, which would hold back the `pg_snapshot_xmin` gate of SSE and
+/// outbox readers. A row lock added to such a read fails instead of blocking.
+pub async fn begin_read(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    pool.begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .await
 }
 
 pub async fn set_tenant(
