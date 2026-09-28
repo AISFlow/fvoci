@@ -7,6 +7,8 @@ use crate::db::projects::project_permission_by_id;
 use crate::db::workspace::membership_role;
 use crate::projects::ProjectPermission;
 
+/// Position in the event log, in `(xact, seq)` order. `xact` is an xid8 in
+/// text form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventCursor {
     pub xact: String,
@@ -28,6 +30,27 @@ pub struct StreamEventRow {
     pub seq: i64,
     pub verb: String,
     pub payload: Value,
+}
+
+/// Events after a cursor, and where the next poll starts.
+#[derive(Debug, Clone)]
+pub struct EventPage {
+    pub rows: Vec<StreamEventRow>,
+    /// The last row of a full page. Otherwise `(horizon, 0)`: past every
+    /// settled event, matching or not, so the next poll does not rescan them.
+    pub next: EventCursor,
+}
+
+/// Every transaction with an xid below this horizon had ended when it was
+/// read, so a later statement sees all of their committed events. Read it
+/// before the events query, never after: under READ COMMITTED a later
+/// horizon could pass rows that the query did not see. `seq` starts at 1,
+/// so `(horizon, 0)` sorts before every event of the horizon transaction.
+const HORIZON_SQL: &str =
+    "SELECT pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())::text";
+
+async fn settled_horizon(tx: &mut Transaction<'_, Postgres>) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar(HORIZON_SQL).fetch_one(&mut **tx).await
 }
 
 const TASK_VERBS: &[&str] = &["task.created", "task.updated", "task.deleted"];
@@ -109,31 +132,20 @@ async fn workspace_access_in(
     })
 }
 
-pub async fn initial_cursor(pool: &PgPool, workspace_id: Uuid) -> Result<EventCursor, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
-    let row: Option<(String, i64)> = sqlx::query_as(
-        r#"
-        SELECT e.xact::text, e.seq
-        FROM fvoci.events AS e
-        WHERE e.workspace_id = $1
-          AND e.xact < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
-        ORDER BY e.xact DESC, e.seq DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(match row {
-        Some((xact, seq)) => EventCursor { xact, seq },
-        None => EventCursor::default(),
+/// Where a new stream starts: past every settled event. Events of
+/// transactions still open now sort after it and are delivered once settled;
+/// the client's resync on `open` covers everything before it.
+pub async fn initial_cursor(pool: &PgPool) -> Result<EventCursor, sqlx::Error> {
+    let horizon: String = sqlx::query_scalar(HORIZON_SQL).fetch_one(pool).await?;
+    Ok(EventCursor {
+        xact: horizon,
+        seq: 0,
     })
 }
 
-/// One task stream tick in one transaction: the credential check, then the
-/// project's events after `cursor`. `None` once the credential is dead.
+/// One task stream tick in one transaction: the credential check, then up
+/// to `limit` (clamped to 1..=100) project events after `cursor`. `None` once
+/// the credential is dead.
 pub async fn poll_task_events(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -142,22 +154,36 @@ pub async fn poll_task_events(
     session_id: Uuid,
     cursor: &EventCursor,
     limit: i32,
-) -> Result<Option<Vec<StreamEventRow>>, sqlx::Error> {
+) -> Result<Option<EventPage>, sqlx::Error> {
+    let limit = limit.clamp(1, 100);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, user_id, session_id).await? {
         tx.commit().await?;
         return Ok(None);
     }
-    let rows = query_task_project_events(&mut tx, workspace_id, project_id, cursor, limit).await?;
+    let horizon = settled_horizon(&mut tx).await?;
+    let rows =
+        query_task_project_events(&mut tx, workspace_id, project_id, cursor, &horizon, limit)
+            .await?;
     tx.commit().await?;
-    Ok(Some(rows))
+    let next = match rows.last() {
+        Some(last) if rows.len() >= limit as usize => EventCursor {
+            xact: last.xact.clone(),
+            seq: last.seq,
+        },
+        _ => EventCursor {
+            xact: horizon,
+            seq: 0,
+        },
+    };
+    Ok(Some(EventPage { rows, next }))
 }
 
 /// One access stream tick in one transaction: the credential and
 /// membership checks, then the access events after `cursor`. `None` ends the
 /// stream (credential dead, no longer a member, or an access event for this
-/// user); otherwise the cursor for the next tick.
+/// user); otherwise the cursor for the next tick, `(horizon, 0)`.
 pub async fn poll_access_events(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -173,9 +199,13 @@ pub async fn poll_access_events(
         tx.commit().await?;
         return Ok(None);
     }
-    let changed = access_event_after(&mut tx, workspace_id, user_id, cursor).await?;
+    let horizon = settled_horizon(&mut tx).await?;
+    let changed = access_event_after(&mut tx, workspace_id, user_id, cursor, &horizon).await?;
     tx.commit().await?;
-    Ok((!changed).then(|| cursor.clone()))
+    Ok((!changed).then_some(EventCursor {
+        xact: horizon,
+        seq: 0,
+    }))
 }
 
 /// Map a polled row to the wire `event: task` hint (`verb`, `taskId`), if any.
@@ -198,16 +228,16 @@ async fn query_task_project_events(
     workspace_id: Uuid,
     project_id: Uuid,
     cursor: &EventCursor,
+    horizon: &str,
     limit: i32,
 ) -> Result<Vec<StreamEventRow>, sqlx::Error> {
-    let limit = limit.clamp(1, 100);
     let rows = sqlx::query_as::<_, (String, i64, String, Value)>(
         r#"
         SELECT e.xact::text, e.seq, e.verb, e.payload
         FROM fvoci.events AS e
         WHERE e.workspace_id = $1
           AND (e.xact, e.seq) > ($2::xid8, $3)
-          AND e.xact < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
+          AND e.xact < $9::xid8
           AND (
             (
               e.verb = ANY($4::text[])
@@ -237,6 +267,7 @@ async fn query_task_project_events(
     .bind(COMMENT_ACTIVITY_VERBS)
     .bind(project_id)
     .bind(limit)
+    .bind(horizon)
     .fetch_all(&mut **tx)
     .await?;
 
@@ -256,6 +287,7 @@ async fn access_event_after(
     workspace_id: Uuid,
     user_id: Uuid,
     cursor: &EventCursor,
+    horizon: &str,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         r#"
@@ -264,7 +296,7 @@ async fn access_event_after(
             FROM fvoci.events AS e
             WHERE e.workspace_id = $1
               AND (e.xact, e.seq) > ($2::xid8, $3)
-              AND e.xact < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
+              AND e.xact < $7::xid8
               AND (
                 (e.verb = ANY($4::text[]) AND e.target_id = $5)
                 OR e.verb = ANY($6::text[])
@@ -278,6 +310,7 @@ async fn access_event_after(
     .bind(MEMBER_ACCESS_VERBS)
     .bind(user_id)
     .bind(WORKSPACE_ACCESS_VERBS)
+    .bind(horizon)
     .fetch_one(&mut **tx)
     .await
 }

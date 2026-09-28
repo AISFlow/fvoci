@@ -15,7 +15,9 @@ use fvoci_server::db::pool;
 use fvoci_server::http::routes::streams::{
     reset_task_stream_task_hint_enqueue_count, task_stream_task_hint_enqueue_count,
 };
-use fvoci_server::streams::{initial_cursor, poll_task_events, StreamHub};
+use fvoci_server::streams::{
+    initial_cursor, poll_access_events, poll_task_events, EventCursor, EventPage, StreamHub,
+};
 use project_harness::{
     add_workspace_user, admin_pool, app_state, count_rows, create_project,
     drop_insert_fail_trigger, insert_minimal_project, insert_project_document,
@@ -4338,14 +4340,14 @@ async fn stream_credential(admin: &sqlx::PgPool, user_id: Uuid) -> StreamCredent
 }
 
 /// One producer poll with a live credential.
-async fn poll_task_rows(
+async fn poll_task_page(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     project_id: Uuid,
     credential: StreamCredential,
-    cursor: &fvoci_server::streams::EventCursor,
+    cursor: &EventCursor,
     limit: i32,
-) -> Vec<fvoci_server::streams::StreamEventRow> {
+) -> EventPage {
     poll_task_events(
         pool,
         workspace_id,
@@ -4358,6 +4360,19 @@ async fn poll_task_rows(
     .await
     .expect("poll")
     .expect("live credential")
+}
+
+async fn poll_task_rows(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    credential: StreamCredential,
+    cursor: &EventCursor,
+    limit: i32,
+) -> Vec<fvoci_server::streams::StreamEventRow> {
+    poll_task_page(pool, workspace_id, project_id, credential, cursor, limit)
+        .await
+        .rows
 }
 
 /// Poll until at least `min_updates` `task.updated` rows are visible. The cursor
@@ -4411,9 +4426,7 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
         .0
         .clone();
     let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
-    let cursor = initial_cursor(&app_pool, workspace_id)
-        .await
-        .expect("cursor");
+    let cursor = initial_cursor(&app_pool).await.expect("cursor");
     let events_before = count_rows(&admin, "events").await;
 
     // Denied, conflicting and no-op patches must not manufacture events.
@@ -4938,9 +4951,7 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     // an unsettled create would reappear in the poll below as a committed row.
     settle_committed_events(&admin).await;
     let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
-    let cursor = initial_cursor(&app_pool, workspace_id)
-        .await
-        .expect("cursor");
+    let cursor = initial_cursor(&app_pool).await.expect("cursor");
     let mut tx = admin.begin().await.expect("tx");
     sqlx::query("SELECT set_config('fvoci.workspace_id', $1::text, true)")
         .bind(workspace_id)
@@ -4983,6 +4994,241 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
         }
     }
     assert!(seen, "committed event should become visible to poll");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+fn cursor_of(row: &fvoci_server::streams::StreamEventRow) -> EventCursor {
+    EventCursor {
+        xact: row.xact.clone(),
+        seq: row.seq,
+    }
+}
+
+/// Workspace events after `cursor`, as the admin sees them.
+async fn events_after(admin: &sqlx::PgPool, workspace_id: Uuid, cursor: &EventCursor) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.events WHERE workspace_id = $1 AND (xact, seq) > ($2::xid8, $3)",
+    )
+    .bind(workspace_id)
+    .bind(&cursor.xact)
+    .bind(cursor.seq)
+    .fetch_one(admin)
+    .await
+    .expect("count events")
+}
+
+/// Inserts `count` events in one committed transaction: `task.created` rows
+/// of `task_project`, or, with `None`, collab updates that no stream matches.
+async fn insert_workspace_events(
+    admin: &sqlx::PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    count: i32,
+    task_project: Option<Uuid>,
+) {
+    let (verb, target_type) = match task_project {
+        Some(_) => ("task.created", "task"),
+        None => ("document.collab_update_appended", "document"),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        SELECT gen_random_uuid(), $1, $2, $3, gen_random_uuid(), $4,
+               CASE WHEN $6::uuid IS NULL THEN '{}'::jsonb
+                    ELSE jsonb_build_object('taskId', gen_random_uuid()::text, 'projectId', $6::text)
+               END,
+               'web'
+        FROM generate_series(1, $5)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(verb)
+    .bind(target_type)
+    .bind(actor_user_id)
+    .bind(count)
+    .bind(task_project)
+    .execute(admin)
+    .await
+    .expect("insert events");
+}
+
+/// `next` may jump to the settled horizon but never past an event whose
+/// transaction is still open: polling from it after the commit returns it.
+#[tokio::test]
+async fn task_stream_next_cursor_keeps_an_in_flight_event() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "SAF", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    settle_committed_events(&admin).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let credential = stream_credential(&admin, owner_id).await;
+    let start = initial_cursor(&app_pool).await.expect("cursor");
+    let task_id = Uuid::now_v7().to_string();
+    let mut tx = admin.begin().await.expect("tx");
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        VALUES ($1, $2, 'task.updated', 'task', gen_random_uuid(), $3, $4::jsonb, 'web')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(owner_id)
+    .bind(json!({"taskId": task_id, "projectId": project_id.to_string()}))
+    .execute(&mut *tx)
+    .await
+    .expect("insert uncommitted");
+    let in_flight: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("event xid");
+    // A later transaction commits while the event's is still open, so the
+    // newest completed xid is past the open one.
+    sqlx::query("SELECT pg_current_xact_id()")
+        .execute(&admin)
+        .await
+        .expect("later xid");
+    let held = poll_task_page(&app_pool, workspace_id, project_id, credential, &start, 10).await;
+    assert!(held.rows.is_empty(), "{:?}", held.rows);
+    assert!(
+        held.next.xact.parse::<u64>().expect("xid8") <= in_flight.parse::<u64>().expect("xid8"),
+        "next {:?} passed the open transaction {in_flight}",
+        held.next
+    );
+    tx.commit().await.expect("commit");
+    settle_committed_events(&admin).await;
+    let page = poll_task_page(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &held.next,
+        10,
+    )
+    .await;
+    assert!(
+        page.rows.iter().any(|row| row.payload["taskId"] == task_id),
+        "event committed after the poll must follow its next cursor {:?}: {:?}",
+        held.next,
+        page.rows
+    );
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Polls that match nothing still advance, so no poll rescans events it has
+/// already passed (the access stream matches almost nothing).
+#[tokio::test]
+async fn stream_polls_advance_past_non_matching_events() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "PRG", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    settle_committed_events(&admin).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let credential = stream_credential(&admin, owner_id).await;
+    let start = initial_cursor(&app_pool).await.expect("cursor");
+    insert_workspace_events(&admin, workspace_id, owner_id, 2_000, None).await;
+    settle_committed_events(&admin).await;
+    assert_eq!(events_after(&admin, workspace_id, &start).await, 2_000);
+
+    let page = poll_task_page(&app_pool, workspace_id, project_id, credential, &start, 50).await;
+    assert!(page.rows.is_empty(), "{:?}", page.rows);
+    assert_eq!(
+        events_after(&admin, workspace_id, &page.next).await,
+        0,
+        "task stream next cursor {:?}",
+        page.next
+    );
+    let next = poll_access_events(
+        &app_pool,
+        workspace_id,
+        credential.user_id,
+        credential.session_id,
+        &start,
+    )
+    .await
+    .expect("access poll")
+    .expect("still a member");
+    assert_eq!(
+        events_after(&admin, workspace_id, &next).await,
+        0,
+        "access stream next cursor {next:?}"
+    );
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// A full page continues from its last row, so a burst larger than the
+/// limit is read in order across polls. The limit is clamped to 100: a
+/// larger request must not jump past the rows it did not return.
+#[tokio::test]
+async fn task_stream_full_page_continues_from_its_last_row() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LIM", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    settle_committed_events(&admin).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let credential = stream_credential(&admin, owner_id).await;
+    let start = initial_cursor(&app_pool).await.expect("cursor");
+    insert_workspace_events(&admin, workspace_id, owner_id, 25, Some(project_id)).await;
+    settle_committed_events(&admin).await;
+
+    let mut cursor = start;
+    let mut seen = Vec::new();
+    for expected in [10, 10, 5] {
+        let page =
+            poll_task_page(&app_pool, workspace_id, project_id, credential, &cursor, 10).await;
+        assert_eq!(page.rows.len(), expected, "{:?}", page.rows);
+        if expected == 10 {
+            assert_eq!(
+                page.next,
+                cursor_of(&page.rows[9]),
+                "a full page ends at its 10th row"
+            );
+        }
+        seen.extend(page.rows.iter().map(cursor_of));
+        cursor = page.next;
+    }
+    assert_eq!(events_after(&admin, workspace_id, &cursor).await, 0);
+    let order: Vec<(u64, i64)> = seen
+        .iter()
+        .map(|c| (c.xact.parse().expect("xid8"), c.seq))
+        .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+
+    insert_workspace_events(&admin, workspace_id, owner_id, 105, Some(project_id)).await;
+    settle_committed_events(&admin).await;
+    let clamped = poll_task_page(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &cursor,
+        1_000,
+    )
+    .await;
+    assert_eq!(clamped.rows.len(), 100);
+    assert_eq!(clamped.next, cursor_of(&clamped.rows[99]));
+    let rest = poll_task_page(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &clamped.next,
+        1_000,
+    )
+    .await;
+    assert_eq!(rest.rows.len(), 5);
+    app_pool.close().await;
     admin.close().await;
     harness.cleanup().await;
 }

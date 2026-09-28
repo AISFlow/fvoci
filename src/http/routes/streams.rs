@@ -125,9 +125,7 @@ async fn project_task_stream(
 
     let pool = state.auth.db.pool.clone();
     let hub = state.streams.clone();
-    let cursor = initial_cursor(&pool, workspace_id)
-        .await
-        .map_err(internal)?;
+    let cursor = initial_cursor(&pool).await.map_err(internal)?;
     let stream = task_sse_stream(
         hub,
         pool,
@@ -167,9 +165,7 @@ async fn workspace_access_stream(
 
     let pool = state.auth.db.pool.clone();
     let hub = state.streams.clone();
-    let cursor = initial_cursor(&pool, workspace_id)
-        .await
-        .map_err(internal)?;
+    let cursor = initial_cursor(&pool).await.map_err(internal)?;
     let stream = access_sse_stream(hub, pool, workspace_id, user_id, session_id, cursor, guard);
     Ok(sse_response(stream))
 }
@@ -439,13 +435,9 @@ fn task_sse_stream(
             .await
             {
                 Ok(None) => return,
-                Ok(Some(rows)) => {
-                    for row in rows {
-                        let Some((wire_verb, task_id)) = task_stream_wire_hint(&row) else {
-                            cursor = EventCursor {
-                                xact: row.xact.clone(),
-                                seq: row.seq,
-                            };
+                Ok(Some(page)) => {
+                    for row in &page.rows {
+                        let Some((wire_verb, task_id)) = task_stream_wire_hint(row) else {
                             continue;
                         };
                         if try_enqueue_task_hint(
@@ -457,13 +449,13 @@ fn task_sse_stream(
                         )
                         .is_err()
                         {
+                            // A full queue ends the stream; the client resyncs on reconnect.
                             return;
                         }
-                        cursor = EventCursor {
-                            xact: row.xact.clone(),
-                            seq: row.seq,
-                        };
                     }
+                    // Only after every row was handled: past the page, or
+                    // past every settled event when the page was not full.
+                    cursor = page.next;
                 }
                 Err(err) => {
                     // Fail closed: the credential could not be checked.
