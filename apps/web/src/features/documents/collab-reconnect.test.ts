@@ -4,28 +4,10 @@ import { HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import {
 	CLOSE_TRY_AGAIN_LATER,
 	createRefusalAwareSocket,
-	RECONNECT_BASE_MS,
-	RECONNECT_MAX_MS,
+	RECONNECT_BACKOFF,
 	RefusalWatch,
-	reconnectDelayMs,
 	refusalOf,
 } from "./collab-reconnect.ts";
-
-test("backoff 은 지수로 커지고 상한에서 멈추며 jitter 는 [ceiling/2, ceiling] 이다", () => {
-	for (let attempt = 0; attempt < 12; attempt += 1) {
-		const ceiling = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempt);
-		assert.equal(reconnectDelayMs(attempt, () => 0), Math.round(ceiling / 2));
-		assert.equal(reconnectDelayMs(attempt, () => 1), ceiling);
-		const mid = reconnectDelayMs(attempt, () => 0.5);
-		assert.ok(mid >= ceiling / 2 && mid <= ceiling);
-	}
-	assert.equal(reconnectDelayMs(0, () => 0), 500);
-	assert.equal(reconnectDelayMs(3, () => 1), 8_000);
-	assert.equal(reconnectDelayMs(4, () => 1), 10_000);
-	assert.equal(reconnectDelayMs(4, () => 0), 5_000);
-	assert.equal(reconnectDelayMs(1_000, () => 1), RECONNECT_MAX_MS);
-	assert.equal(reconnectDelayMs(-3, () => 0), 500);
-});
 
 test("열린 뒤 서버 프레임 없이 닫히면 거절이고 1013 만 수용 한도다", () => {
 	assert.equal(refusalOf(true, CLOSE_TRY_AGAIN_LATER), "capacity");
@@ -109,6 +91,26 @@ async function measure(
 	return { live, afterDestroy: opened.length };
 }
 
+test("backoff 설정: 첫 재시도부터 jitter, 상한 있음, attempt 검증을 통과한다", () => {
+	const { delay, minDelay, maxDelay, factor, jitter } = RECONNECT_BACKOFF;
+	for (const value of [delay, minDelay, maxDelay]) assert.ok(Number.isInteger(value) && value > 0);
+	assert.ok(minDelay < delay, "minDelay == delay would give every client the same first retry");
+	assert.ok(delay <= maxDelay);
+	assert.ok(factor > 1);
+	assert.equal(jitter, true);
+	const socket = createRefusalAwareSocket(
+		{ url: "ws://127.0.0.1:9/collab", autoConnect: false, WebSocketPolyfill: RefusingSocket },
+		() => {},
+	);
+	try {
+		for (const key of ["delay", "minDelay", "maxDelay", "factor", "jitter"] as const) {
+			assert.equal(socket.configuration[key], RECONNECT_BACKOFF[key], key);
+		}
+	} finally {
+		socket.destroy();
+	}
+});
+
 test("재현: provider 4.6.0 은 인증 전 거절마다 재시도 루프가 늘어 폭주한다", async () => {
 	const { live } = await measure(
 		1_500,
@@ -131,16 +133,30 @@ test("재현: provider 4.6.0 은 파기 전에 예약된 재접속으로 파기 
 	assert.equal(afterDestroy, 1, "the 400 ms reconnect timer fires on the destroyed instance");
 });
 
-test("거절을 넘겨받은 소켓은 스스로 다시 열지 않고 파기 뒤에도 열지 않는다", async () => {
+/* Wider than FAST so a single loop (gaps ≥ minDelay) and a storm (gaps shrinking under it) differ. */
+const REFUSE_FAST = {
+	url: "ws://127.0.0.1:9/collab",
+	delay: 60,
+	minDelay: 30,
+	maxDelay: 120,
+};
+
+test("거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열고, 파기 뒤에는 열지 않는다", async () => {
 	const refusals: string[] = [];
 	const { live, afterDestroy } = await measure(1_500, () =>
-		createRefusalAwareSocket({ ...FAST, WebSocketPolyfill: RefusingSocket }, (refusal) =>
+		createRefusalAwareSocket({ ...REFUSE_FAST, WebSocketPolyfill: RefusingSocket }, (refusal) =>
 			refusals.push(refusal),
 		),
 	);
-	assert.equal(live.length, 1);
-	assert.deepEqual(refusals, ["capacity"]);
-	assert.equal(afterDestroy, 0);
+	/* 루프 하나: 매 간격이 minDelay 이상이라 1.5 s 에 많아야 50 번. 폭주는 수백 번이다. */
+	assert.ok(live.length >= 4, `the socket retries by itself: ${live.length} opens`);
+	assert.ok(live.length <= 1_500 / REFUSE_FAST.minDelay, `one bounded loop: ${live.length} opens`);
+	const gaps = live.slice(1).map((at, i) => at - live[i]);
+	const minGap = Math.min(...gaps);
+	assert.ok(minGap >= REFUSE_FAST.minDelay - 3, `a gap below minDelay means a second loop: ${minGap} ms`);
+	assert.deepEqual([...new Set(refusals)], ["capacity"]);
+	assert.ok(refusals.length >= live.length - 1, `every open was refused: ${refusals.length}/${live.length}`);
+	assert.equal(afterDestroy, 0, "destroy stops the retry loop and the reconnect timer");
 });
 
 test("서비스 중 끊긴 세션은 provider 가 다시 붙고, 파기하면 예약된 재접속도 열지 않는다", async () => {
