@@ -53,11 +53,15 @@ COPY apps/web ./
 RUN npm run build
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+# No setuid/setgid files (su, passwd, mount, ...): nothing in the image
+# changes user through one, and the server's uid must not reach root by one.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl postgresql-client \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 1000 fvoci \
- && useradd --uid 1000 --gid fvoci --no-create-home --home-dir /nonexistent fvoci
+ && useradd --uid 1000 --gid fvoci --no-create-home --home-dir /nonexistent fvoci \
+ && find / -xdev -perm /6000 -type f -exec chmod ug-s {} + \
+ && test -z "$(find / -xdev -perm /6000 -type f)"
 WORKDIR /opt/fvoci
 COPY --from=rust-build --chown=root:root /src/target/release/fvoci-server /src/target/release/fvoci-migrate ./bin/
 COPY --from=rust-build --chown=root:root /src/target/release/collab-engine ./bin/
@@ -69,6 +73,9 @@ COPY --chown=root:root packages/editor/src/fonts/*-OFL.txt ./share/licenses/font
 COPY --chown=root:root src/http/api_docs_assets/LICENSE src/http/api_docs_assets/NOTICE src/http/api_docs_assets/swagger-ui-bundle.js.LICENSE.txt ./share/licenses/swagger-ui-dist-5.33.0/
 COPY --from=web-build --chown=root:root /src/apps/web/dist ./static/
 COPY --chown=root:root infra/rust/init-db.sh ./sbin/init-db.sh
+# /run/fvoci/meili is the service user's for the env-file stack's `init`; the
+# Compose install's root preparation takes it over (root:root 0755) before
+# writing the key there (src/search/meili.rs `prepare_key_dir`).
 RUN chmod 755 ./sbin/init-db.sh ./bin/* \
  && mkdir -p /data/storage /run/fvoci/meili \
  && chown fvoci:fvoci /data/storage /run/fvoci/meili
