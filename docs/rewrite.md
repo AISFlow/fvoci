@@ -260,9 +260,9 @@ main push 대기 관측은 이미 수락된 PR의 취소가 아니다.
 | PR | 고정 HEAD | merge | 수락 범위와 한계 |
 | --- | --- | --- | --- |
 | [#221](https://github.com/AISFlow/fvoci/pull/221) | `4d007602` | `7c4c1c9449ec255fbff09f05c8807766f68f0db6` | 첨부 viewer 첫 표시 지연 단축, admin·Gantt·첨부·legal 페이지 지연 로드. 이후 CI에서 첫 로드 빈 화면 간헐 관측(원인 미확정, 진단 수집 #229) |
-| [#220](https://github.com/AISFlow/fvoci/pull/220) | `2ada34bd` | `e06fa8dfc1896bec4cf43ba6f8cf217f15d55e17` | (독립 검토 ACCEPT는 `ea5dfe27`; 이후 N1 반영 `c8eb6645`·테스트 `2ada34bd`는 Fable 기록) `fvoci-migrate --outbox-reset`(진단·apply). 사용자 설치용 절차 문서 없음 |
+| [#220](https://github.com/AISFlow/fvoci/pull/220) | `2ada34bd` | `e06fa8dfc1896bec4cf43ba6f8cf217f15d55e17` | (독립 검토 ACCEPT는 `ea5dfe27`; 이후 N1–N3 반영 `c8eb6645`·테스트 `2ada34bd`는 Fable 기록) `fvoci-migrate --outbox-reset`(진단·apply). 사용자 설치용 절차 문서 없음 |
 | [#222](https://github.com/AISFlow/fvoci/pull/222) | `c6843b26` | `feeee159701cd568d07bc48e985228b3eb2d99b0` | (검토 ACCEPT는 `fdc4c323`, 이후 delta는 Fable 기록) Prometheus 1단계: NaN-on-failure 게이지, RSS·예산 지표, `compose.metrics.yml`(release 파일 아님) |
-| [#226](https://github.com/AISFlow/fvoci/pull/226) | `f4c8b8e5` | `a53074f74046af6e4e3c1e9e255fd5d23f29dd8b` | 문서: 2026-09-29 인계 체크포인트 |
+| [#226](https://github.com/AISFlow/fvoci/pull/226) | `f4c8b8e5` | `a53074f74046af6e4e3c1e9e255fd5d23f29dd8b` | (검토 ACCEPT는 `de340d11`, 조건부 문구 수정 반영 `f4c8b8e5`) 문서: 2026-09-29 인계 체크포인트 |
 | [#228](https://github.com/AISFlow/fvoci/pull/228) | `66464864` | `b2ff90ccf5b09d15568d32d2f8a592be72facfd8` | outbox-reset 이전 이벤트/newest 조회의 xid8 text 정렬 결함 수정(digit 경계에서 잘못된 target·external replay floor), 테스트 pool `close_pool`(PG16 CI 실패 원인). 게시 버전 영향 없음 |
 | [#227](https://github.com/AISFlow/fvoci/pull/227) | `42b9e56a` | `df0b5921fe88298e71143799fd2dbf50b955311b` | 문서: 2026-09-29 역할(Claude Code Opus 5.5 코디네이터·내장 workflow) |
 | [#225](https://github.com/AISFlow/fvoci/pull/225) | `f5a09f2d` | `1367b05c1c431fa98be653784d66fdfb69d8a3bf` | 협업 room 상한에서 grace 지난 빈 room 회수(lease 원자 등록·동시 회수 재탐색·세션 리비전 보존), 단일 socket bounded backoff, 거부 시 '로드되지 않음+이유'. 성능 수치는 초기 head `4a68ee70` 작성자 측정(소스 빌드·단일 호스트)이며 최종 head·게시 이미지 미측정 |
@@ -321,8 +321,8 @@ provenance: 실행 source `0e3e95dd`의 frontend(`apps/web`·`packages`)는 수�
 - 문서 변환의 정상 Rust 경로는 수락됐으며 Node 구현 복원은 필요 없다. 개발·CI의 Node/Python과 독립 reader는
   제품 런타임과 별개다. 필수 백업·복원 자체 검증은 Rust이며 pg_dump/pg_restore·얇은 실행 스크립트는 유지한다.
 - migration 037·038·039·040은 main에 수락됐다. 번호를 다시 배정하지 않는다.
-- 잔여 기능·검증: #149 S3 전송 E, 인증 앱 스캔·#77 외부 IdP F. `fvoci outbox-reset`은 #220(최종 delta 검토 ACCEPT는 로컬
-  코디네이터 기록에만 있음)과 #228(target 정렬 결함 수정, 독립 검토 ACCEPT)로 수락됐고, `v0.1.0`은 release 36433264742로 게시됐다. 추가 DB는 원본도 제품 백엔드가 아닌 G로 종료(§3). wiki 컬렉션 권한 N+1(#76 S4)은 #200으로,
+- 잔여 기능·검증: #149 S3 전송 E, 인증 앱 스캔·#77 외부 IdP F. `fvoci outbox-reset`은 #220(독립 검토 ACCEPT `ea5dfe27`, 이후
+  `c8eb6645`·`2ada34bd`는 Fable 기록)과 #228(target 정렬 결함 수정, 독립 검토 ACCEPT)로 수락됐고, `v0.1.0`은 release 36433264742로 게시됐다. 추가 DB는 원본도 제품 백엔드가 아닌 G로 종료(§3). wiki 컬렉션 권한 N+1(#76 S4)은 #200으로,
   HWP 편집·사본 저장은 #189로, 실제 Web Push 제공자 1회 witness는 #196 범위로 수락됐다(HWP 보기 #187·PPTX #188·DOCX #180·XLSX #186 수락). 수락(`3919a326`): S3 이미지 업그레이드·versioned rollback 로컬 S3 호환 silo x64 실행(#190; 실제 클라우드
   제공자 미검증), ARM64 이미지 간 업그레이드 고정 쌍 `d0942f10`→`1e0acbe1` local storage 실제 실행(#192; S3·다른 쌍 아님),
   실제 OS IME witness(위 범위 한정). 이미지 간 업그레이드·init 실패 복구 로컬 x64(#181)와 PostgreSQL 16/17 x64 matrix(#175; UUID 호환 #177)는 수락.
@@ -478,7 +478,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 - 성능 기준선(`opus-perf-baseline.md`, 소스 빌드 `1101e21b`, 단일 호스트): 협업 room 상한(이미지 기본 30, 사용자 compose 64)이
   차면 새 본문 join이 1013으로 닫히고 클라이언트가 backoff 없이 재연결하며, room은 마지막 클라이언트 후 30 s에 해제되므로 새 본문이
   최대 ~30 s 비어 보인다(서버 로그 없음). 태스크 메타의 다른 브라우저 반영은 SSE 750 ms poll이 지배한다(p95 ~0.75 s).
-  첨부 viewer는 첫 표시 전 ~300 ms 유휴 구간이 있다. 모두 후속 개선 대상이며 결함 수정은 아직 배정되지 않았다.
+  첨부 viewer는 첫 표시 전 ~300 ms 유휴 구간이 있다. 첨부 viewer 첫 표시는 #221, room 상한 동작은 #225로 개선했다(최종 head·게시 이미지 재측정 없음). SSE poll은 설계 결정 대기다.
 - 초대·공유·ICS 경로 토큰과 OIDC code/state가 요청 trace span의 원시 URI로 debug 로그에 남던 문제는 #178로 수정·수락했다
   (span에는 method·`MatchedPath` 템플릿 또는 고정 fallback·version만 기록). 임의 애플리케이션 로그 전체 감사는 아니다.
 - TS 데이터 이전은 사용자 확인으로 범위 밖이다(§2).
