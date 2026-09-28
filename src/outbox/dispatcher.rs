@@ -56,6 +56,10 @@ pub trait OutboxConsumer: Send + Sync {
 
     /// Deliver a read batch in order. Returns how many leading events are durably
     /// done (all their external effects confirmed), plus the first error if any.
+    /// The dispatcher drops the call when it runs past the lease timeout, and
+    /// then counts none of the chunk as done. An error without an exact index
+    /// (`done == 0`) is charged to the first event, which is then delivered on
+    /// its own.
     fn deliver_batch<'a>(
         &'a self,
         pool: &'a PgPool,
@@ -83,7 +87,10 @@ pub trait OutboxConsumer: Send + Sync {
     }
 
     /// Max events this consumer wants in one `deliver_batch`. The dispatcher
-    /// also applies [`OutboxDispatcherSettings::batch_limit`].
+    /// also applies [`OutboxDispatcherSettings::batch_limit`]. A consumer that
+    /// keeps the default `deliver_batch` and whose effect is not idempotent
+    /// (mail) returns 1: a lease timeout then drops one event's work, not the
+    /// progress of a whole chunk.
     fn batch_event_cap(&self) -> usize {
         usize::MAX
     }
