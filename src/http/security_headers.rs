@@ -11,8 +11,9 @@
 //! `Strict-Transport-Security` is sent only when the public origin is https
 //! (browsers ignore it over http anyway), and a `Permissions-Policy` denies
 //! device APIs the product never uses. Inline blocks in the shell are allowed
-//! by build-time hashes (the source's shell policy); the Rust server renders no
-//! other inline HTML under this policy, so there is no per-request nonce.
+//! by build-time hashes (the source's shell policy). The session-only
+//! `/api/docs` page sets its own copy of this policy with a per-request nonce
+//! instead ([`nonce_policy`], the source's `cspNonce`).
 
 use std::path::Path;
 
@@ -152,6 +153,13 @@ fn content_security_policy(https: bool, script: &[String], style: &[String]) -> 
         .map(|d| format!("{d};"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The application policy allowing inline blocks that carry `nonce` (source
+/// `cspNonce` on `/api/docs`); still no `'unsafe-inline'`.
+pub fn nonce_policy(public_origin: &str, nonce: &str) -> String {
+    let source = [format!("'nonce-{nonce}'")];
+    content_security_policy(public_origin.starts_with("https://"), &source, &source)
 }
 
 /// `'sha256-…'` sources for inline `<script>`/`<style>` bodies of the shell

@@ -4911,6 +4911,16 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
 
+    /// `/api/docs/json` serves the checked-in export; it must be exactly what
+    /// `fvoci-export-openapi` prints (`scripts/generate-api.sh`).
+    #[test]
+    fn served_api_docs_json_is_the_live_export() {
+        assert!(
+            spec_json() == crate::http::routes::api_docs::OPENAPI_JSON,
+            "apps/web/openapi.json is stale; run scripts/generate-api.sh"
+        );
+    }
+
     fn schema_is_nullable(schema: &Value) -> bool {
         if schema["type"]
             .as_array()
