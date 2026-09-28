@@ -15,6 +15,7 @@ import {
   eventsSince,
   inputsSince,
   interactions,
+  longTasks,
   nodeNow,
   pageNow,
   paints,
@@ -23,6 +24,7 @@ import {
   stats,
   waitHit,
   watch,
+  waterfall,
   writeJson,
   type Calibration,
   type LoadWindow,
@@ -33,6 +35,8 @@ test.describe.configure({ mode: "serial" });
 
 const DATASET = process.env.FVOCI_PERF_DATASET === "scaled" ? "scaled" : "minimal";
 const N = Number(process.env.FVOCI_PERF_SAMPLES ?? 30);
+// Diagnostic: keep sanitized per-sample resource waterfalls (paths only).
+const WATERFALL = process.env.FVOCI_PERF_WATERFALL === "1";
 // Suffix for partial re-runs (FVOCI_PERF_GREP) so they never overwrite a full run.
 const TAG = (process.env.FVOCI_PERF_TAG ?? "").replace(/[^a-z0-9-]/gi, "");
 const HIT_TIMEOUT = 20_000;
@@ -473,6 +477,8 @@ test("b: task detail and document open", async ({ browser }) => {
       apiCount: api.length,
       apiMaxTtfb: round(Math.max(0, ...api.map((r) => r.respStart - r.reqStart))),
       apiLastEnd: api.length ? round(Math.max(...api.map((r) => r.end)) - start) : null,
+      longTasksBeforeTitle: title ? await longTasks(page, start, title.dom) : null,
+      ...(WATERFALL ? { waterfall: waterfall(res) } : {}),
     });
     if (mode === "warm-spa") {
       await page.goBack();
@@ -551,6 +557,8 @@ test("b: task detail and document open", async ({ browser }) => {
         apiCount: api.length,
         apiBytes: api.reduce((a, r) => a + r.bytes, 0),
         apiMaxTtfb: round(Math.max(0, ...api.map((r) => r.respStart - r.reqStart))),
+        longTasksBeforeText: text ? await longTasks(page, 0, text.dom) : null,
+        ...(WATERFALL ? { waterfall: waterfall(res) } : {}),
       });
     };
     await quietWindow(`b-doc-${doc.label}-cold`, loadLog);
@@ -1026,6 +1034,8 @@ test("f: attachment viewers", async ({ browser }) => {
       apiBytes: api.reduce((a, r) => a + r.bytes, 0),
       jsBytes: res.filter((r) => r.name.endsWith(".js") || r.name.endsWith(".mjs") || r.name.endsWith(":file")).reduce((a, r) => a + r.bytes, 0),
       wasmOrWorker: res.filter((r) => /\.wasm$|worker/i.test(r.name)).map((r) => ({ name: r.name, ms: round(r.end - r.start), bytes: r.bytes })),
+      longTasksBeforeDisplay: hit ? await longTasks(page, 0, hit.dom) : null,
+      ...(WATERFALL ? { waterfall: waterfall(res) } : {}),
     });
   };
   for (const kind of Object.keys(VIEWERS)) {

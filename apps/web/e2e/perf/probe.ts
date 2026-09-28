@@ -45,6 +45,7 @@ export type ResourceEntry = {
 };
 
 type ProbeState = {
+  lt: { s: number; d: number }[];
   ev: EventEntry[];
   el: ElementEntry[];
   paint: { n: string; s: number }[];
@@ -71,6 +72,7 @@ declare global {
 function installProbe(): void {
   if (window.__fp) return;
   const st = {
+    lt: [] as { s: number; d: number }[],
     ev: [] as EventEntry[],
     el: [] as ElementEntry[],
     paint: [] as { n: string; s: number }[],
@@ -112,6 +114,7 @@ function installProbe(): void {
     st.el.push({ id: e.identifier, r: e.renderTime, l: e.loadTime });
   });
   observe("paint", {}, (e) => st.paint.push({ n: e.name, s: e.startTime }));
+  observe("longtask", {}, (e) => st.lt.push({ s: e.startTime, d: e.duration }));
   for (const t of ["keydown", "pointerdown", "click", "beforeinput", "input"]) {
     addEventListener(
       t,
@@ -283,6 +286,22 @@ export async function elementPaint(page: Page, id: string, timeoutMs = 1000): Pr
     const e = window.__fp!.el.find((x) => x.id === i)!;
     return e.r || e.l || null;
   }, id);
+}
+
+/** Main-thread long tasks (>50 ms) that started in [from, to). */
+export async function longTasks(page: Page, from: number, to: number): Promise<{ count: number; totalMs: number }> {
+  return page.evaluate(
+    ([f, t]) => {
+      const hits = window.__fp!.lt.filter((x) => x.s >= f && x.s < t);
+      return { count: hits.length, totalMs: Math.round(hits.reduce((a, x) => a + x.d, 0)) };
+    },
+    [from, to] as const,
+  );
+}
+
+export function waterfall(res: ResourceEntry[]): { n: string; t: string; s: number; w: number; e: number; b: number }[] {
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  return res.map((r) => ({ n: r.name, t: r.type, s: r1(r.start), w: r1(r.respStart), e: r1(r.end), b: r.bytes }));
 }
 
 export async function pageNow(page: Page): Promise<number> {
