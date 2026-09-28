@@ -25,7 +25,7 @@ use fvoci_server::outbox::{
     spawn_outbox_dispatcher, DeliveryMode, OutboxConsumer, OutboxDispatcherHandle,
     OutboxDispatcherSettings, OutboxProcessError,
 };
-use project_harness::TestDb;
+use project_harness::{close_pool, TestDb};
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgPool, Row};
@@ -465,8 +465,8 @@ async fn diagnose_is_read_only_while_live_and_github_is_opt_in() {
     assert_eq!(cursors(&admin).await, before);
 
     // With the pools gone the default set moves; github stays excluded.
-    app.close().await;
-    admin.close().await;
+    close_pool(app).await;
+    close_pool(admin).await;
     wait_for_settled_apply(&harness).await;
     let applied = run(&harness, &["--apply", "--reason", "ticket-1"]).await;
     assert!(applied.ok, "{}", applied.output);
@@ -480,7 +480,7 @@ async fn diagnose_is_read_only_while_live_and_github_is_opt_in() {
     assert!(after.contains(&("notifications".into(), x2.clone(), s2)));
     assert!(after.contains(&("github".into(), "0".into(), 0)));
     assert_eq!(counts(&admin).await, totals);
-    admin.close().await;
+    close_pool(admin).await;
 
     wait_for_settled_apply(&harness).await;
     let github = run(
@@ -491,7 +491,7 @@ async fn diagnose_is_read_only_while_live_and_github_is_opt_in() {
     assert!(github.ok, "{}", github.output);
     let admin = self::admin(&harness).await;
     assert!(cursors(&admin).await.contains(&("github".into(), x2, s2)));
-    admin.close().await;
+    close_pool(admin).await;
     harness.cleanup().await;
 }
 
@@ -542,8 +542,8 @@ async fn apply_rewinds_and_redelivers_exactly_once_then_is_idempotent() {
     .unwrap();
     let totals = counts(&admin).await;
     let (x4, s4) = event_pos(&admin, ids[3]).await;
-    app.close().await;
-    admin.close().await;
+    close_pool(app).await;
+    close_pool(admin).await;
     wait_for_no_sessions(&harness).await;
 
     let applied = run(&harness, &["--apply", "--reason", "cursor ahead of marks"]).await;
@@ -608,8 +608,8 @@ async fn apply_rewinds_and_redelivers_exactly_once_then_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(failures, 0, "no duplicate delivery failed");
-    app.close().await;
-    admin.close().await;
+    close_pool(app).await;
+    close_pool(admin).await;
     harness.cleanup().await;
 }
 
@@ -651,8 +651,8 @@ async fn forward_skip_needs_override_and_live_lease_blocks_apply() {
     assert_eq!(push["skip"]["sample"][0]["eventId"], old.to_string());
     assert_eq!(push["skip"]["sample"][0]["verb"], "test.old");
 
-    app.close().await;
-    admin.close().await;
+    close_pool(app).await;
+    close_pool(admin).await;
     wait_for_no_sessions(&harness).await;
     let leased = run(
         &harness,
@@ -675,7 +675,7 @@ async fn forward_skip_needs_override_and_live_lease_blocks_apply() {
         .execute(&admin)
         .await
         .unwrap();
-    admin.close().await;
+    close_pool(admin).await;
     wait_for_no_sessions(&harness).await;
     let no_override = run(
         &harness,
@@ -692,7 +692,7 @@ async fn forward_skip_needs_override_and_live_lease_blocks_apply() {
     assert!(cursors(&admin)
         .await
         .contains(&("push".into(), "0".into(), 0)));
-    admin.close().await;
+    close_pool(admin).await;
 
     wait_for_settled_apply(&harness).await;
     let overridden = run(
@@ -717,7 +717,7 @@ async fn forward_skip_needs_override_and_live_lease_blocks_apply() {
     let admin = self::admin(&harness).await;
     assert!(cursors(&admin).await.contains(&("push".into(), xr, sr)));
     assert_eq!(counts(&admin).await, totals, "the skipped event is kept");
-    admin.close().await;
+    close_pool(admin).await;
     harness.cleanup().await;
 }
 
@@ -809,8 +809,8 @@ async fn tail_seeded_external_consumers_need_ack_to_replay_history() {
     assert_eq!(pos_of(&webhooks["externalReplay"]["floor"]), pos[2]);
     assert_eq!(webhooks["externalReplay"]["redelivered"], 3);
 
-    app.close().await;
-    admin.close().await;
+    close_pool(app).await;
+    close_pool(admin).await;
     wait_for_settled_apply(&harness).await;
     let applied = run(&harness, &["--apply", "--reason", "routine"]).await;
     assert!(applied.ok, "{}", applied.output);
@@ -820,7 +820,7 @@ async fn tail_seeded_external_consumers_need_ack_to_replay_history() {
     assert!(after.contains(&("push".into(), pos[3].0.clone(), pos[3].1)));
     assert!(after.contains(&("webhooks".into(), pos[4].0.clone(), pos[4].1)));
     set_cursor(&admin, "push", &pos[4]).await;
-    admin.close().await;
+    close_pool(admin).await;
 
     wait_for_settled_apply(&harness).await;
     let acked = run(
@@ -844,7 +844,7 @@ async fn tail_seeded_external_consumers_need_ack_to_replay_history() {
     assert!(after.contains(&("push".into(), "0".into(), 0)));
     assert!(after.contains(&("webhooks".into(), "0".into(), 0)));
     assert_eq!(counts(&admin).await, totals);
-    admin.close().await;
+    close_pool(admin).await;
     harness.cleanup().await;
 }
 
@@ -884,7 +884,7 @@ async fn apply_refuses_blind_owner_and_in_flight_xmin() {
     .execute(&admin)
     .await
     .unwrap();
-    admin.close().await;
+    close_pool(admin).await;
 
     let result = AssertUnwindSafe(blind_and_xmin_case(&harness, &roles, &password))
         .catch_unwind()
@@ -897,7 +897,7 @@ async fn apply_refuses_blind_owner_and_in_flight_xmin() {
             .await
             .unwrap();
     }
-    admin.close().await;
+    close_pool(admin).await;
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
@@ -946,8 +946,8 @@ async fn blind_and_xmin_case(harness: &TestDb, roles: &[String], password: &str)
     mark_processed(&app, "notifications", second).await.unwrap();
     let (x2, s2) = event_pos(&admin, second).await;
 
-    app.close().await;
-    admin.close().await;
+    close_pool(app).await;
+    close_pool(admin).await;
     wait_for_no_sessions(harness).await;
     let in_flight = run(harness, &["--apply", "--reason", "r"]).await;
     assert!(!in_flight.ok);
@@ -966,5 +966,5 @@ async fn blind_and_xmin_case(harness: &TestDb, roles: &[String], password: &str)
     assert!(cursors(&admin)
         .await
         .contains(&("notifications".into(), x2, s2)));
-    admin.close().await;
+    close_pool(admin).await;
 }
