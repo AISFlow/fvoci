@@ -9,11 +9,16 @@
 #
 # Meilisearch data is not included. The index is derived; restore recreates a
 # scoped key and index settings. Product search-rebuild is not in this slice.
-# Pepper keys, ENCRYPTION_KEYS, DB passwords, and the Meili master key stay in
-# the operator env file — they are not copied into the archive (beyond whatever
-# the database dump already contains). The manifest records only fingerprints
-# of the pepper keyring and of each ENCRYPTION_KEYS key id, which restore
-# compares before touching volumes.
+# With an env file (infra/rust/compose.yml), pepper keys, ENCRYPTION_KEYS, DB
+# passwords, and the Meili master key stay in the operator env file — they are
+# not copied into the archive (beyond whatever the database dump already
+# contains). The standalone install (infra/rust/compose.user.yml, no env file)
+# keeps the server's keys in the volume mounted at /run/fvoci/secrets; that
+# volume is archived as server-secrets.tar, so the backup directory then holds
+# the pepper and encryption keys and the app role password. The owner password
+# and Meili master key are not archived: a restore generates new ones. The
+# manifest records only fingerprints of the pepper keyring and of each
+# ENCRYPTION_KEYS key id, which restore compares before touching volumes.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,10 +33,11 @@ TAR_IMAGE="postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d
 
 usage() {
   cat <<'EOF' >&2
-usage: scripts/backup.sh --project NAME --env-file PATH --output DIR [options]
+usage: scripts/backup.sh --project NAME [--env-file PATH] --output DIR [options]
 
   --project NAME       Compose project name of the running install
-  --env-file PATH      Compose env file (not copied into the archive)
+  --env-file PATH      Compose env file (not copied into the archive); omit for
+                       the standalone install, whose keys are archived
   --output DIR         New directory for the backup (mode 0700); must not exist
   --compose-file PATH  default: infra/rust/compose.yml
   --leave-stopped      do not restart the server after the dump
@@ -72,7 +78,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$PROJECT" && -n "$ENV_FILE" && -n "$OUTPUT" ]] || usage
+[[ -n "$PROJECT" && -n "$OUTPUT" ]] || usage
 # These are host-side tools; no Python runtime is needed for these operations.
 # Fail before stopping the server or creating backup state.
 for dependency in docker jq tar; do
@@ -86,7 +92,7 @@ if [[ ! "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
   echo "--project must be a lowercase Compose project name" >&2
   exit 1
 fi
-if [[ ! -f "$ENV_FILE" ]]; then
+if [[ -n "$ENV_FILE" && ! -f "$ENV_FILE" ]]; then
   echo "env file not found: $ENV_FILE" >&2
   exit 1
 fi
@@ -107,7 +113,12 @@ if [[ ! -d "$PARENT" ]]; then
   exit 1
 fi
 
-COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT" --env-file "$ENV_FILE")
+COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT")
+[[ -z "$ENV_FILE" ]] || COMPOSE+=(--env-file "$ENV_FILE")
+# The app service publishes container port 8080 (`server` in compose.yml,
+# `fvoci` in the standalone compose).
+SERVER="$("${COMPOSE[@]}" config --format json \
+  | jq -er '[.services | to_entries[] | select(any(.value.ports[]?; .target == 8080)) | .key] | if length == 1 then .[0] else error("expected one service publishing 8080") end')"
 STAGING="${OUTPUT}.partial-$$"
 SERVER_STOPPED=0
 
@@ -117,7 +128,7 @@ cleanup() {
     rm -rf "$STAGING"
   fi
   if (( SERVER_STOPPED == 1 && LEAVE_STOPPED == 0 )); then
-    "${COMPOSE[@]}" up -d --wait server >/dev/null 2>&1 || true
+    "${COMPOSE[@]}" up -d --wait "$SERVER" >/dev/null 2>&1 || true
   fi
   exit "$status"
 }
@@ -132,7 +143,7 @@ if [[ -z "$PG_CID" ]]; then
   echo "postgres service is not running for project ${PROJECT}" >&2
   exit 1
 fi
-SERVER_CID="$("${COMPOSE[@]}" ps -a -q server | head -1)"
+SERVER_CID="$("${COMPOSE[@]}" ps -a -q "$SERVER" | head -1)"
 if [[ -z "$SERVER_CID" ]]; then
   echo "server container is missing for project ${PROJECT}" >&2
   exit 1
@@ -158,14 +169,30 @@ fi
 docker volume inspect "$STORAGE_VOL" >/dev/null
 # Use the exact installed product image that is running this server. No pull or
 # alternate host executable may decide the backup key/manifest policy.
-SELECTED_IMAGE="$("${COMPOSE[@]}" config --format json | jq -er '.services.server.image')"
+SELECTED_IMAGE="$("${COMPOSE[@]}" config --format json | jq -er --arg s "$SERVER" '.services[$s].image')"
 PRODUCT_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$SELECTED_IMAGE")"
 if [[ "$(docker inspect -f '{{.Image}}' "$SERVER_CID")" != "$PRODUCT_IMAGE_ID" ]]; then
   echo "running server image differs from the selected Compose product image" >&2
   exit 1
 fi
+# Standalone install: the keys live in the volume mounted at /run/fvoci/secrets.
+SECRETS_VOL="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/fvoci/secrets"}}{{.Name}}{{end}}{{end}}' "$SERVER_CID")"
+if [[ -z "$ENV_FILE" && -z "$SECRETS_VOL" ]]; then
+  echo "--env-file is required: the server has no /run/fvoci/secrets volume" >&2
+  exit 1
+fi
+if [[ -n "$ENV_FILE" && -n "$SECRETS_VOL" ]]; then
+  echo "the server keeps its keys in volume $SECRETS_VOL; omit --env-file" >&2
+  exit 1
+fi
 runtime_key() {
   local name="$1"
+  if [[ -n "$SECRETS_VOL" ]]; then
+    # Read as the server's own uid; config::INSTALL_SETTING_FILES names.
+    docker run --rm --network none --read-only --user 1000:1000 --entrypoint cat \
+      -v "${SECRETS_VOL}:/s:ro" "$PRODUCT_IMAGE_ID" "/s/${name,,}"
+    return
+  fi
   docker inspect "$SERVER_CID" | jq -r --arg name "$name" \
     '.[0].Config.Env | map(select(startswith($name + "="))) | last | if . == null then "" else .[($name | length) + 1:] end'
 }
@@ -179,9 +206,11 @@ ENCRYPTION_ACTIVE="$(runtime_key ENCRYPTION_ACTIVE_KEY_ID)"
 export FVOCI_IMAGE="$PRODUCT_IMAGE_ID"
 export PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE"
 export ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE"
-if ! "${COMPOSE[@]}" config --format json | jq -e '
-  .services.server.image == env.FVOCI_IMAGE and
-  (.services.server.environment as $settings |
+# (The standalone compose takes neither from the environment; its keys stay in
+# the volume and its image was checked against the running server above.)
+if [[ -z "$SECRETS_VOL" ]] && ! "${COMPOSE[@]}" config --format json | jq -e --arg s "$SERVER" '
+  .services[$s].image == env.FVOCI_IMAGE and
+  (.services[$s].environment as $settings |
     all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
       . as $key | $settings[$key] == env[$key]))' >/dev/null; then
   echo "Compose must preserve the selected product image and key snapshot" >&2
@@ -189,7 +218,7 @@ if ! "${COMPOSE[@]}" config --format json | jq -e '
 fi
 
 echo "stopping server so dump and storage share a quiesced point"
-"${COMPOSE[@]}" stop -t 45 server
+"${COMPOSE[@]}" stop -t 45 "$SERVER"
 SERVER_STOPPED=1
 STOP_STATE="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$SERVER_CID")"
 if [[ "$STOP_STATE" != "exited 0 false" ]]; then
@@ -229,6 +258,18 @@ if [[ ! -s "$STAGING/storage.tar" ]]; then
   exit 1
 fi
 
+if [[ -n "$SECRETS_VOL" ]]; then
+  docker run --rm --network none --user 0:0 --entrypoint tar \
+    -v "${SECRETS_VOL}:/v:ro" \
+    "$TAR_IMAGE" \
+    --numeric-owner -cf - -C /v . >"$STAGING/server-secrets.tar"
+  chmod 600 "$STAGING/server-secrets.tar"
+  tar -tf "$STAGING/server-secrets.tar" | grep -qx './.fvoci-install-complete' || {
+    echo "server keys volume $SECRETS_VOL is incomplete (no install marker)" >&2
+    exit 1
+  }
+fi
+
 TAR_LIST="$(tar -tf "$STAGING/storage.tar" | sed 's|^\./||')"
 MISSING=0
 # Capture first so a failing psql fails the backup instead of an empty loop.
@@ -264,8 +305,9 @@ mv --no-target-directory --no-clobber "$STAGING" "$OUTPUT"
 chmod 700 "$OUTPUT"
 
 if (( LEAVE_STOPPED == 0 )); then
-  "${COMPOSE[@]}" up -d --wait server
+  "${COMPOSE[@]}" up -d --wait "$SERVER"
   SERVER_STOPPED=0
 fi
 
-jq -nc --arg backup "$OUTPUT" '{backup: $backup, objectsChecked: true}'
+jq -nc --arg backup "$OUTPUT" --argjson keys "$([[ -n "$SECRETS_VOL" ]] && echo true || echo false)" \
+  '{backup: $backup, objectsChecked: true, serverKeysArchived: $keys}'

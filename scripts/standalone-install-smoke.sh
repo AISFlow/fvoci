@@ -228,6 +228,41 @@ for s in "${SECRETS[@]}"; do
 done
 echo "checked ${#SECRETS[@]} secret values against $(wc -l <<<"$LOGS") log lines: none found"
 
+step "scripts/backup.sh + restore.sh (no env file): the restored install keeps its keys"
+bash "$ROOT/scripts/backup.sh" --project "$COMPOSE_PROJECT_NAME" --compose-file "$WORK/compose.yml" \
+  --output "$WORK/backup" | tee "$WORK/backup.json"
+jq -e '.serverKeysArchived == true' "$WORK/backup.json" >/dev/null || fail "backup did not archive the server keys"
+stat -c '%A %n' "$WORK/backup"/*
+docker compose down
+RESTORED="${COMPOSE_PROJECT_NAME}-restored"
+PROJECTS+=("$RESTORED")
+bash "$ROOT/scripts/restore.sh" --project "$RESTORED" --compose-file "$WORK/compose.yml" --input "$WORK/backup"
+SOURCE_KEYS="$(awk '$4 ~ /^server_secrets\/(database_app_url|password_pepper|encryption)/ {print $3, $4}' <<<"$MANIFEST1")"
+RESTORED_KEYS="$(COMPOSE_PROJECT_NAME="$RESTORED" secret_manifest \
+  | awk '$4 ~ /^server_secrets\/(database_app_url|password_pepper|encryption)/ {print $3, $4}')"
+[[ "$RESTORED_KEYS" == "$SOURCE_KEYS" ]] || fail "restored server keys differ from the source"
+rm -f "$JAR"
+login
+curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/documents/${DOC}" | jq -e '.title == "Standalone doc"' >/dev/null \
+  || fail "document lost in restore"
+COMPOSE_PROJECT_NAME="$RESTORED" docker compose down -v
+docker compose up -d
+wait_healthy
+echo "backup archived the server keys; restore into $RESTORED: same keys, login, document: ok"
+
+step "restore without the keys is refused before any volume exists"
+mv "$WORK/backup/server-secrets.tar" "$WORK/server-secrets.tar"
+set +e
+OUT="$(bash "$ROOT/scripts/restore.sh" --project "${RESTORED}2" --compose-file "$WORK/compose.yml" --input "$WORK/backup" 2>&1)"
+STATUS=$?
+set -e
+printf '%s\n' "$OUT" | tail -1
+if (( STATUS == 0 )) || ! grep -q 'backup has no server-secrets.tar' <<<"$OUT"; then
+  fail "restore without keys was not refused"
+fi
+[[ -z "$(docker volume ls -q --filter "name=${RESTORED}2_")" ]] || fail "restore without keys created volumes"
+echo "restore without server-secrets.tar: refused, no volume created: ok"
+
 step "init failure (grants refused by a read-only database) keeps the server down"
 docker compose exec -T postgres psql -X -q -U fvoci_owner -d postgres \
   -c 'ALTER DATABASE fvoci SET default_transaction_read_only = on'
