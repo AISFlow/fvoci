@@ -117,11 +117,17 @@ impl Counters {
         });
     }
 
-    /// Makes room in a map that is still full of live counters. The
+    /// Makes room in a map that is still full of live counters: the
     /// namespace with the most keys gives up its counter with the fewest
-    /// hits. One client can mint unlimited fresh keys (`invite-accept` takes
-    /// any token), so a flood evicts its own one-hit keys and never resets
-    /// another namespace's counters.
+    /// hits; ties are broken arbitrarily. The incoming key's namespace plays
+    /// no part. One client can mint unlimited fresh keys (`invite-accept`
+    /// takes any token). Once the flooding namespace holds the most keys, the
+    /// flood evicts only its own one-hit keys. Until then, each new flood key
+    /// evicts from the largest legitimate namespace, fewest hits first, so a
+    /// flood into a map already full of live counters shrinks every larger
+    /// namespace down to its own size before it starts evicting itself. That
+    /// resets at most about half the map in total (about 5 000 counters when
+    /// one namespace fills it), and the most-used counters go last.
     fn evict_from_largest_namespace(&mut self) {
         let Some(largest) = self
             .namespaces
@@ -223,9 +229,12 @@ mod tests {
         );
     }
 
-    /// One anonymous client can mint unlimited invite-accept keys. Once the
-    /// map is full, those keys must evict each other, not the per-user
+    /// One anonymous client can mint unlimited invite-accept keys. Here the
+    /// other namespace is small, so the flood already holds the most keys
+    /// when the map fills: its keys must evict each other, not the per-user
     /// counters of other namespaces (an evicted counter starts again at 0).
+    /// A flood into a map already full of a larger namespace is bounded,
+    /// not blocked; see `evict_from_largest_namespace`.
     #[test]
     fn a_flood_of_new_keys_does_not_reset_other_namespaces() {
         let mut counters = Counters::default();
