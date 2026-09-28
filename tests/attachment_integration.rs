@@ -147,11 +147,6 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
         .expect("grant");
 }
 
-async fn app_state(app_url: &str) -> AppState {
-    let storage_root = std::env::temp_dir().join(format!("fvoci-att-store-{}", Uuid::now_v7()));
-    app_state_with_storage(app_url, storage_root).await
-}
-
 async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
     std::fs::create_dir_all(&storage_root).expect("storage root");
@@ -271,7 +266,16 @@ fn extract_session_cookie(set_cookie: &str) -> String {
 }
 
 async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid, Uuid) {
-    let app = app_router(app_state(&harness.app_url).await);
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-store-{}", Uuid::now_v7()));
+    setup_session_with_storage(harness, storage_root).await
+}
+
+/// `setup_session` with the local driver rooted at `storage_root`.
+async fn setup_session_with_storage(
+    harness: &TestDb,
+    storage_root: PathBuf,
+) -> (axum::Router, String, Uuid, Uuid) {
+    let app = app_router(app_state_with_storage(&harness.app_url, storage_root).await);
     let (_, _, cookie_hdr) = json_request(
         app.clone(),
         "POST",
