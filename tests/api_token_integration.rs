@@ -1115,8 +1115,9 @@ async fn raw_get(
 
 /// Source `platform/api-docs.ts` guard `access: { auth: "session" }`: a
 /// session reads the Swagger UI page, the live OpenAPI export and the page's
-/// assets; an API token (even a valid scoped one) gets 404 and an unknown
-/// session 401. The page is static and runs under the application CSP: no inline code and no
+/// assets; an API token (even a valid scoped one) gets 404, an unknown or
+/// logged-out session 401, and a session owing a required consent 428. The
+/// page is static and runs under the application CSP: no inline code and no
 /// `'unsafe-inline'`, while `connect-src 'self'` lets "Try it out" call the API.
 #[tokio::test]
 async fn api_docs_are_session_only_and_serve_the_live_export() {
@@ -1240,6 +1241,50 @@ async fn api_docs_are_session_only_and_serve_the_live_export() {
         assert_eq!(body["code"], "not_found", "{path}");
 
         let (status, _, body) = raw_get(app.clone(), path, Some("not-a-session"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "authentication_required", "{path}");
+    }
+
+    // A newly required legal document gates the docs like every API route.
+    let (status, published, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/admin/legal",
+        Some(json!({
+            "kind": "terms",
+            "title": "약관",
+            "bodyMarkdown": "# 약관",
+            "required": true,
+            "effectiveAt": "2026-10-01T00:00:00Z"
+        })),
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    for path in DOCS_PATHS {
+        let (status, _, body) = raw_get(app.clone(), path, Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{path}");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "consent_required", "{path}");
+    }
+
+    // A logged-out session no longer reads anything.
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/logout",
+        None,
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    for path in DOCS_PATHS {
+        let (status, _, body) = raw_get(app.clone(), path, Some(&cookie), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "authentication_required", "{path}");
