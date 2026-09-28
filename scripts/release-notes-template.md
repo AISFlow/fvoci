@@ -17,9 +17,11 @@ Installs are never updated automatically.
 
 ## Accepted in this release
 
-FVOCI 0.1.1 is the first published build of the Rust server with the
-existing React web app. The features below were accepted on `main` with their tests, CI and an
-independent review (feature table in `docs/rewrite.md` at `@SHA@`):
+FVOCI 0.1.1 is a patch release on top of 0.1.0 (`57497e2f`): the same
+database schema, configuration and install files, with the fixes and
+additions listed under "Changes since 0.1.0". The features below were
+accepted on `main` with their tests, CI and an independent review (feature
+table in `docs/rewrite.md` at `@SHA@`):
 
 - **Accounts:** first-admin setup, sign-in and sessions, profile, password
   reset, email and password change, account deletion and export, magic links,
@@ -53,6 +55,49 @@ independent review (feature table in `docs/rewrite.md` at `@SHA@`):
   `scripts/restore.sh`) that verify keys, stored files and sealed secrets
   before the server starts.
 
+## Changes since 0.1.0
+
+- **Collaboration at the room limit.** When every collaboration room is
+  taken, opening another document or task body now reclaims the least
+  recently used room that nobody is in (and that has been empty for a few
+  seconds) instead of waiting for the 30 s idle timer. If every room is in
+  use, the body shows "not loaded yet" with the reason, instead of an empty
+  body, and the browser retries with a bounded backoff (0.5 to 10 s) on a
+  single connection instead of reconnecting rapidly. Typing elsewhere on the
+  page (title, comments) is no longer reset by those retries, and edits made
+  just before leaving a document are sent before its connection closes.
+- **Attachment viewers and page loading.** Attachment viewers show their
+  first page sooner, and the admin, Gantt, attachment and legal pages load
+  on demand.
+- **Metrics (`/metrics`).** `fvoci_outbox_lag_seconds` and
+  `fvoci_outbox_xmin_stall_seconds` now read `NaN` before the first
+  successful refresh and after a failed one (0.1.0 kept `0` or the last
+  value), so threshold alerts no longer fire on stale values; alert on the
+  new `fvoci_db_metrics_refresh_failures_total` or
+  `fvoci_db_metrics_last_success_timestamp_seconds` instead. Also new:
+  `fvoci_process_resident_memory_bytes`,
+  `fvoci_collab_helper_resident_memory_bytes` and
+  `fvoci_collab_helper_memory_budget_bytes`. An optional
+  `compose.metrics.yml` override for a Prometheus scrape is in
+  `infra/rust/` at tag `v@VERSION@`; it is not one of the release files.
+- **Operator command `fvoci-migrate --outbox-reset`.** Diagnoses (default,
+  read-only) or moves (`--apply --reason …`) the cursors of the outbox
+  consumers (notifications, mail, push, webhooks, search index). `--apply`
+  needs a PostgreSQL superuser (or `pg_read_all_stats`) and refuses while any
+  other database session is connected, so the server must be stopped. It is
+  documented for the development stack in `RUNNING.md`; there is no
+  release-install procedure for it yet.
+
+## Upgrading from 0.1.0
+
+No database migration and no new `.env` value between 0.1.0 and 0.1.1:
+back up, download the new `compose.yml` and `SHA256SUMS` and check them,
+replace `compose.yml`, keep `.env`, and run
+`docker compose up -d --wait --wait-timeout 900`. `fvoci-server --version`
+then shows `@VERSION@` and the source commit. Reload open browser tabs
+after the upgrade (the pages are loaded in new chunks). Going back to 0.1.0
+means restoring the backup taken before the upgrade.
+
 ## Not verified or optional
 
 These are shipped but off by default, or were only checked against local
@@ -75,15 +120,16 @@ stand-ins. Treat them as untested with a real provider:
   not tried.
 - **Korean input (IME):** checked with a real Linux (IBus) input method in
   Chromium only. Windows, macOS and mobile input methods were not tried.
-
-## About 0.1.0
-
-The `v0.1.0` tag exists in git but was never published: its release smoke
-failed inside the release test client (a cookie handling bug in the smoke
-script, not in the product), so no `0.1.0` image tag or GitHub release was
-created. 0.1.1 is the first published trial build. Its product code is
-identical to `v0.1.0` (`57497e2f`); only the release tooling, documentation
-and version number changed.
+- **Collaboration room-limit behaviour** was measured on a source build of an
+  earlier revision of the change on one host; it was not measured on this
+  published image or with many real users.
+- **`/metrics` and `--outbox-reset`** are not part of the release smoke, and
+  there is no automated upgrade test from the published 0.1.0 files to
+  0.1.1 (the upgrade tests build both images from source).
+- **Blank first page (under investigation).** In CI, the web app's first
+  load occasionally rendered nothing (2 of about 8 test runs on fast
+  runners since the page-loading change); it was not reproduced locally in
+  about 1,800 attempts. If a page stays blank, reload it.
 
 ## Known limitations
 
@@ -104,9 +150,10 @@ and version number changed.
   pushed and not affected.
 - **Collaboration room limit.** At most 64 documents or task bodies can be
   open for editing at the same time in this compose file (30 is the image
-  default). A room is released 30 s after its last user leaves. While the
-  limit is reached, a newly opened body stays empty until a room frees up
-  (up to about 30 s), and the browser retries the connection rapidly.
+  default). While every room has a user in it, a newly opened body shows
+  "not loaded yet" and retries until a room frees up; a room emptied a few
+  seconds ago is kept for a returning user first. Reclaiming only applies to
+  the room count, not to the helpers' memory budget.
 - **Search key file must not be a symlink.** A `FVOCI_MEILI_KEY_FILE` path
   that is a symlink is refused at startup, for example a Kubernetes Secret
   volume entry.
