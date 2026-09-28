@@ -237,8 +237,11 @@ consent or bearer checks (source `INFRA_PATHS`):
 (a wildcard bind is probed on loopback) and exits 0 on a 2xx answer within 4 s,
 otherwise 1. It reads no other configuration or secrets. The source modes
 `worker`, `compact` and `thumbnail` exit 1 with a message because those roles
-run inside the server here. The Compose server healthcheck still requests
-`/api/v1/setup` with curl.
+run inside the server here. The Compose server healthcheck runs
+`/opt/fvoci/bin/fvoci-server healthcheck` every 2 s with a 5 s timeout (the
+source Compose used its binary's `healthcheck` with the same timeout), so the
+container is healthy only once `/ready` reports PostgreSQL (and collab, when
+enabled) ready.
 
 ### Response security headers
 
