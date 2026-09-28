@@ -21,10 +21,13 @@ export type WorkspaceAccessSubscription = {
  * event horizon, past any access event of the refused gap.
  *
  * A 401 does not stop the watcher. Session loss belongs to the app's session
- * handling (a failed `me` query sends the page to /login), and a list reconcile
- * could not help: it would fail with the same 401. The watcher keeps reopening
- * with the pool's backoff, so a transient 401 heals and then reconciles on
- * the reopen instead of leaving the page unwatched until it remounts.
+ * handling (the layout sends the page to /login on the next failed `me`
+ * refetch; nothing refetches it on a 401 today), and a list reconcile could
+ * not help: it would fail with the same 401. The watcher keeps reopening with
+ * the pool's backoff (at most one stream attempt and one probe per 30 s), so a
+ * transient 401 heals and then reconciles on the reopen instead of leaving the
+ * page unwatched until it remounts; after a real session loss it keeps
+ * probing at that rate until the page navigates.
  *
  * A 404 whose reconcile still lists the workspace (a re-add racing the probe)
  * leaves the watcher stopped until the layout remounts.
