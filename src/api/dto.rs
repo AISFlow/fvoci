@@ -2214,6 +2214,41 @@ pub struct AuditLogListResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Source `eventListQuery` (strict: only `limit` and `cursor`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceEventListQuery {
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// Source `eventOutput` (packages/contracts/src/events.ts).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceEventOutput {
+    pub id: String,
+    pub verb: String,
+    pub workspace_id: Option<String>,
+    pub actor_user_id: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Object))]
+    pub payload: Value,
+    pub channel: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceEventListResponse {
+    pub items: Vec<WorkspaceEventOutput>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct AdminSystemOutput {

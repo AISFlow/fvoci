@@ -178,7 +178,7 @@ pub(crate) async fn membership_role(
     Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
 }
 
-async fn workspace_kind_read(
+pub(crate) async fn workspace_kind_read(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
 ) -> Result<Option<String>, sqlx::Error> {
