@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { QueryError } from "@/components/query-status";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
@@ -8,7 +9,9 @@ import { AttachmentViewer } from "@/features/attachments/attachment-viewer";
 import {
   attachmentDownloadUrl,
   attachmentPreviewHtmlUrl,
+  attachmentViewPath,
   chunkSearch,
+  viewerKind,
 } from "@/features/attachments/attachment-kind";
 import "@/features/attachments/attachment-shell.css";
 
@@ -28,6 +31,20 @@ export function AttachmentViewPage() {
         }),
       ),
     enabled: Boolean(workspaceId) && Boolean(id),
+    retry: false,
+  });
+  const navigate = useNavigate();
+  // Source `hwpEditable`: whether this session may save an edited HWP/HWPX copy.
+  const isHwp = query.data !== undefined && viewerKind(query.data) === "hwp";
+  const editContext = useQuery({
+    queryKey: ["attachment-edit-context", workspaceId, id],
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/edit-context", {
+          params: { path: { workspace_id: workspaceId, attachment_id: id } },
+        }),
+      ),
+    enabled: isHwp,
     retry: false,
   });
 
@@ -70,6 +87,12 @@ export function AttachmentViewPage() {
           {...(retryable ? { onMetadataRetry: () => void query.refetch() } : {})}
         />
       ) : null}
+      {isHwp && editContext.isError ? (
+        <QueryError
+          message={t("attachment.viewer.edit.permissionFailed")}
+          onRetry={() => void editContext.refetch()}
+        />
+      ) : null}
       {query.data ? (
         <AttachmentViewer
           key={id}
@@ -78,6 +101,19 @@ export function AttachmentViewPage() {
           image={query.data.image}
           downloadUrl={downloadUrl}
           previewHtmlUrl={attachmentPreviewHtmlUrl(workspace.id, id)}
+          {...(isHwp
+            ? {
+                hwpEdit: {
+                  editable: editContext.data?.editable === true,
+                  save: {
+                    workspaceId: workspace.id,
+                    attachmentId: id,
+                    // The copy opens without the original's search chunk.
+                    onSavedCopy: (copyId: string) => void navigate(attachmentViewPath(slug, copyId)),
+                  },
+                },
+              }
+            : {})}
           {...(chunk === undefined ? {} : { chunk })}
         />
       ) : null}

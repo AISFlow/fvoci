@@ -1,9 +1,13 @@
-import type { HwpFailure, HwpRequest, HwpResponse } from "./hwp-worker-core.ts";
+import type { HwpExportFormat } from "./hwp-edit.ts";
+import type { HwpFailure, HwpReplaceOutcome, HwpRequest, HwpResponse } from "./hwp-worker-core.ts";
 
 /** A parse (package check + rhwp) that runs longer is terminated. */
 export const HWP_OPEN_TIMEOUT_MS = 60_000;
 
-/** Page text and page render requests are terminated after this long. */
+/**
+ * Page text, page render, replace and export requests are terminated after
+ * this long; a revert re-parses the original and gets the open deadline.
+ */
 export const HWP_REQUEST_TIMEOUT_MS = 30_000;
 
 /** What the client needs from a `Worker` (a fake in tests). */
@@ -46,7 +50,10 @@ function createHwpWorker(): HwpWorkerPort {
 type RequestBody =
   | { op: "open"; bytes: Uint8Array; module: WebAssembly.Module }
   | { op: "startPage"; chunk: number }
-  | { op: "render"; page: number };
+  | { op: "render"; page: number }
+  | { op: "replace"; find: string; replacement: string; all: boolean }
+  | { op: "revert" }
+  | { op: "export"; format: HwpExportFormat };
 
 /**
  * One HWP/HWPX document in its own module worker. rhwp's wasm memory only
@@ -58,13 +65,15 @@ type RequestBody =
 export class HwpDocumentClient {
   readonly #worker: HwpWorkerPort;
   readonly #requestTimeoutMs: number;
+  readonly #openTimeoutMs: number;
   readonly #pending = new Map<number, Pending>();
   #nextId = 0;
   #closed = false;
 
-  private constructor(worker: HwpWorkerPort, requestTimeoutMs: number) {
+  private constructor(worker: HwpWorkerPort, requestTimeoutMs: number, openTimeoutMs: number) {
     this.#worker = worker;
     this.#requestTimeoutMs = requestTimeoutMs;
+    this.#openTimeoutMs = openTimeoutMs;
     worker.onmessage = (event) => this.#receive(event.data);
     worker.onerror = () => this.#fail("failed");
     worker.onmessageerror = () => this.#fail("failed");
@@ -82,16 +91,18 @@ export class HwpDocumentClient {
   ): Promise<{ client: HwpDocumentClient; pageCount: number }> {
     const { signal } = options;
     if (signal?.aborted) throw new HwpClientError("closed");
+    const openTimeoutMs = options.openTimeoutMs ?? HWP_OPEN_TIMEOUT_MS;
     const client = new HwpDocumentClient(
       (options.createWorker ?? createHwpWorker)(),
       options.requestTimeoutMs ?? HWP_REQUEST_TIMEOUT_MS,
+      openTimeoutMs,
     );
     const abort = () => client.close();
     signal?.addEventListener("abort", abort, { once: true });
     try {
       const opened = await client.#request(
         { op: "open", bytes, module },
-        options.openTimeoutMs ?? HWP_OPEN_TIMEOUT_MS,
+        openTimeoutMs,
         [bytes.buffer as ArrayBuffer],
       );
       if (opened.op !== "open") throw new HwpClientError("failed");
@@ -121,6 +132,45 @@ export class HwpDocumentClient {
     const response = await this.#request({ op: "render", page }, this.#requestTimeoutMs);
     if (response.op !== "render") throw new HwpClientError("failed");
     return response.svg;
+  }
+
+  /**
+   * Replaces the first (`all` false) or every case-insensitive match of
+   * `find`. A replace that failed inside rhwp may have left the document half
+   * edited, so that failure terminates the worker: nothing after it can
+   * render, export or save that document.
+   */
+  async replace(
+    find: string,
+    replacement: string,
+    all: boolean,
+  ): Promise<{ outcome: HwpReplaceOutcome; pageCount: number }> {
+    let response: HwpResponse & { ok: true };
+    try {
+      response = await this.#request({ op: "replace", find, replacement, all }, this.#requestTimeoutMs);
+    } catch (error) {
+      this.close();
+      throw error;
+    }
+    if (response.op !== "replace") {
+      this.close();
+      throw new HwpClientError("failed");
+    }
+    return { outcome: response.outcome, pageCount: response.pageCount };
+  }
+
+  /** Discards every edit by re-parsing the original bytes; resolves to the page count. */
+  async revert(): Promise<number> {
+    const response = await this.#request({ op: "revert" }, this.#openTimeoutMs);
+    if (response.op !== "revert") throw new HwpClientError("failed");
+    return response.pageCount;
+  }
+
+  /** The current (edited) document written as `format`. */
+  async exportDocument(format: HwpExportFormat): Promise<Uint8Array> {
+    const response = await this.#request({ op: "export", format }, this.#requestTimeoutMs);
+    if (response.op !== "export") throw new HwpClientError("failed");
+    return response.bytes;
   }
 
   /** Terminates the worker, releasing the document; pending requests fail. */
