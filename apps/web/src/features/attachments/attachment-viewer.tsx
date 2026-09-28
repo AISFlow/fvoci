@@ -4,6 +4,7 @@ import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "rea
 import { loadErrorMessage } from "@/components/query-status";
 import { publicInstanceQuery } from "@/lib/queries/admin";
 import { chunkPlainText } from "./chunk-plain-text";
+import type { HwpEditProps } from "./hwp-viewer";
 import { viewerKind } from "./attachment-kind";
 import { ViewerDownloadButton, ViewerErrorPane, ViewerLoadingPane } from "./viewer-shell";
 import "./attachment-shell.css";
@@ -43,6 +44,8 @@ export type AttachmentViewerProps = {
   chunk?: number;
   /** Session-only `preview-html` URL for the search-chunk supplement; share views omit it. */
   previewHtmlUrl?: string;
+  /** Session-only HWP/HWPX 간단 편집 (edit-context + save-copy); share views omit it. */
+  hwpEdit?: HwpEditProps;
 };
 
 function ChunkText({ text, chunk }: { text: string; chunk?: number }) {
@@ -181,13 +184,17 @@ function SearchChunkSupplement({ previewHtmlUrl, chunk }: { previewHtmlUrl: stri
  * not wait for it.
  */
 function HwpPane({
+  name,
   downloadUrl,
   previewHtmlUrl,
   chunk,
+  edit,
 }: {
+  name: string;
   downloadUrl: string;
   previewHtmlUrl?: string;
   chunk?: number;
+  edit?: HwpEditProps;
 }) {
   const wantsSupplement = previewHtmlUrl !== undefined && chunk !== undefined;
   const mode = useQuery({
@@ -201,7 +208,13 @@ function HwpPane({
         <SearchChunkSupplement previewHtmlUrl={previewHtmlUrl} chunk={chunk} />
       ) : null}
       <Suspense fallback={<ViewerLoadingPane />}>
-        <HwpViewer key={downloadUrl} downloadUrl={downloadUrl} {...(chunk === undefined ? {} : { chunk })} />
+        <HwpViewer
+          key={downloadUrl}
+          name={name}
+          downloadUrl={downloadUrl}
+          {...(chunk === undefined ? {} : { chunk })}
+          {...(edit === undefined ? {} : { edit })}
+        />
       </Suspense>
     </>
   );
@@ -254,9 +267,11 @@ export function AttachmentViewer(props: AttachmentViewerProps): ReactNode {
   } else if (kind === "hwp") {
     body = (
       <HwpPane
+        name={props.name}
         downloadUrl={props.downloadUrl}
         {...(props.previewHtmlUrl === undefined ? {} : { previewHtmlUrl: props.previewHtmlUrl })}
         {...(props.chunk === undefined ? {} : { chunk: props.chunk })}
+        {...(props.hwpEdit === undefined ? {} : { edit: props.hwpEdit })}
       />
     );
   } else if (kind === "docx" || kind === "pptx" || kind === "xlsx") {
