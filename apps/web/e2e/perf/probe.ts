@@ -365,22 +365,26 @@ export type LoadWindow = {
   busy: string[];
 };
 
+const STALE_CARGO_S = 6 * 3600;
+
+/** Active build work on this host; a cargo client older than 6 h (hung, idle) is reported as stale. */
 function busyBuilds(): string[] {
   let out = "";
   try {
-    out = execFileSync("ps", ["-eo", "pid=,args="], { encoding: "utf8" });
+    out = execFileSync("ps", ["-eo", "pid=,etimes=,args="], { encoding: "utf8" });
   } catch {
     return ["ps-unavailable"];
   }
   const busy: string[] = [];
   for (const line of out.split("\n")) {
-    const m = line.trim().match(/^(\d+)\s+(.*)$/);
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
     if (!m) continue;
-    const args = m[2] ?? "";
+    const age = Number(m[2]);
+    const args = m[3] ?? "";
     const exe = path.basename(args.split(/\s+/)[0] ?? "");
-    if (exe === "cargo" || exe === "rustc" || /\bdocker(-buildx)?\s+(buildx\s+)?build\b/.test(args)) {
-      busy.push(exe === "cargo" || exe === "rustc" ? exe : "docker-build");
-    }
+    if (exe === "rustc") busy.push("rustc");
+    else if (exe === "cargo") busy.push(age > STALE_CARGO_S ? "stale-cargo" : "cargo");
+    else if (/\bdocker(-buildx)?\s+(buildx\s+)?build\b/.test(args)) busy.push("docker-build");
   }
   return busy;
 }
@@ -394,10 +398,11 @@ export async function quietWindow(label: string, log: LoadWindow[]): Promise<Loa
   const maxWaitMs = Number(process.env.FVOCI_PERF_QUIET_MAX_MS ?? 300_000);
   const cores = os.cpus().length;
   const started = Date.now();
+  const active = (list: string[]) => list.filter((b) => b !== "stale-cargo");
   let busy = busyBuilds();
   const loads = () => os.loadavg() as [number, number, number];
   let [load1, load5] = loads();
-  while ((busy.length > 0 || load1 >= cores) && Date.now() - started < maxWaitMs) {
+  while ((active(busy).length > 0 || load1 >= cores) && Date.now() - started < maxWaitMs) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     busy = busyBuilds();
     [load1, load5] = loads();
@@ -408,7 +413,7 @@ export async function quietWindow(label: string, log: LoadWindow[]): Promise<Loa
     label,
     startedAt: new Date().toISOString(),
     waitedMs: Date.now() - started,
-    quiet: busy.length === 0 && load1 < cores,
+    quiet: active(busy).length === 0 && load1 < cores,
     load1: Number(load1.toFixed(2)),
     load5: Number(load5.toFixed(2)),
     busy: [...counts.entries()].map(([k, v]) => `${k}x${v}`),

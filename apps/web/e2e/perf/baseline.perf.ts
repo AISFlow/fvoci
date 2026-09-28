@@ -580,6 +580,9 @@ test("c: typing, menu and gantt interactions", async ({ browser }) => {
       await page.waitForTimeout(80); // human-like spacing so each key is its own interaction (pacing, not a result)
     }
     await page.waitForTimeout(500);
+    // The keys must have reached this editor; otherwise the series is invalid.
+    const typedVisible = await editor.evaluate((el, k) => (el.textContent ?? "").includes(k), keys.slice(0, 20));
+    const focusInEditor = await editor.evaluate((el) => el.contains(document.activeElement) || el === document.activeElement);
     const inputs = (await inputsSince(page, since)).filter((i) => i.t === "keydown");
     const ints = interactions(await eventsSince(page, since));
     // Interactions below the 16 ms Event Timing threshold have no entry; they are
@@ -587,8 +590,13 @@ test("c: typing, menu and gantt interactions", async ({ browser }) => {
     const durations = inputs.map((_, idx) => ints[idx]?.duration ?? null);
     const below = inputs.length - ints.length;
     const values = [...ints.map((x) => x.duration), ...Array.from({ length: Math.max(0, below) }, () => 16)];
-    out[`typing-${label}`] = { keydowns: inputs.length, entries: ints.length, below16: below, interactions: ints, durations };
-    record(`c.typing.${label}`, "interactionDuration", "scripted-scenario INP-style (Event Timing, <16ms counted as 16)", values);
+    out[`typing-${label}`] = { typedVisible, focusInEditor, keydowns: inputs.length, entries: ints.length, below16: below, interactions: ints, durations };
+    record(
+      `c.typing.${label}`,
+      "interactionDuration",
+      "scripted-scenario INP-style (Event Timing, <16ms counted as 16)",
+      typedVisible ? values : inputs.map(() => null),
+    );
     record(`c.typing.${label}`, "inputDelay", "Event Timing processingStart-startTime (entries >=16ms only)", ints.map((x) => x.inputDelay));
   };
 
