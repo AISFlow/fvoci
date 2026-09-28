@@ -10,7 +10,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::dto::{WorkspaceEventListQuery, WorkspaceEventListResponse, WorkspaceEventOutput};
-use crate::db::workspace_events::{decode_event_cursor, encode_event_cursor, list_workspace_events};
+use crate::db::workspace_events::{
+    decode_event_cursor, encode_event_cursor, list_workspace_events,
+};
 use crate::error::{AppError, ProblemCode};
 use crate::http::state::AppState;
 

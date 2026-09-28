@@ -1693,8 +1693,15 @@ async fn workspace_events_are_manage_only_and_hide_unviewable_projects() {
 
     // Private project nobody but `member` belongs to; an open project for contrast.
     let hidden_project = Uuid::now_v7();
-    insert_minimal_project(&admin, workspace_id, hidden_project, "HID", member.user_id, "private")
-        .await;
+    insert_minimal_project(
+        &admin,
+        workspace_id,
+        hidden_project,
+        "HID",
+        member.user_id,
+        "private",
+    )
+    .await;
     sqlx::query(
         "INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES (uuidv7(), $1, $2, $3, 'lead')",
     )
@@ -1705,15 +1712,36 @@ async fn workspace_events_are_manage_only_and_hide_unviewable_projects() {
     .await
     .unwrap();
     let hidden_doc = Uuid::now_v7();
-    insert_project_document(&admin, workspace_id, hidden_project, hidden_doc, member.user_id, 1)
-        .await;
+    insert_project_document(
+        &admin,
+        workspace_id,
+        hidden_project,
+        hidden_doc,
+        member.user_id,
+        1,
+    )
+    .await;
     let hidden_attachment =
         insert_stored_attachment(&admin, workspace_id, hidden_doc, member.user_id).await;
     let open_project = Uuid::now_v7();
-    insert_minimal_project(&admin, workspace_id, open_project, "OPN", owner_id, "workspace").await;
+    insert_minimal_project(
+        &admin,
+        workspace_id,
+        open_project,
+        "OPN",
+        owner_id,
+        "workspace",
+    )
+    .await;
 
-    insert_marked_event(&admin, workspace_id, "workspace.created", None, json!({"marker": "v1"}))
-        .await;
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "workspace.created",
+        None,
+        json!({"marker": "v1"}),
+    )
+    .await;
     insert_marked_event(
         &admin,
         workspace_id,
@@ -1762,17 +1790,34 @@ async fn workspace_events_are_manage_only_and_hide_unviewable_projects() {
         json!({"marker": "h-garbage", "projectId": "not-a-uuid"}),
     )
     .await;
-    insert_marked_event(&admin, workspace_id, "invitation.created", None, json!({"marker": "v3"}))
-        .await;
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "invitation.created",
+        None,
+        json!({"marker": "v3"}),
+    )
+    .await;
     // Another tenant's row never leaks through this workspace's log.
-    insert_marked_event(&admin, Uuid::now_v7(), "workspace.created", None, json!({"marker": "x"}))
-        .await;
+    insert_marked_event(
+        &admin,
+        Uuid::now_v7(),
+        "workspace.created",
+        None,
+        json!({"marker": "x"}),
+    )
+    .await;
 
     let path = format!("/api/v1/workspaces/{workspace_id}/events?limit=100");
     let (status, body) = json_request(app.clone(), "GET", &path, None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body:?}");
-    for (who, user) in [("member", &member), ("guest", &guest), ("outsider", &outsider)] {
-        let (status, body) = json_request(app.clone(), "GET", &path, None, Some(&user.cookie)).await;
+    for (who, user) in [
+        ("member", &member),
+        ("guest", &guest),
+        ("outsider", &outsider),
+    ] {
+        let (status, body) =
+            json_request(app.clone(), "GET", &path, None, Some(&user.cookie)).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{who}: {body:?}");
         assert_eq!(body["code"], "not_found", "{who}");
     }
@@ -1813,7 +1858,15 @@ async fn workspace_events_are_manage_only_and_hide_unviewable_projects() {
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(
         event_markers(&body),
-        ["v1", "h-project", "v2", "h-doc-target", "h-attachment", "h-doc-payload", "v3"],
+        [
+            "v1",
+            "h-project",
+            "v2",
+            "h-doc-target",
+            "h-attachment",
+            "h-doc-payload",
+            "v3"
+        ],
         "{body}"
     );
     let (status, body) =
@@ -1822,12 +1875,14 @@ async fn workspace_events_are_manage_only_and_hide_unviewable_projects() {
     assert_eq!(event_markers(&body), ["v1", "v2", "v3"], "{body}");
 
     // Demoting the admin revokes the log on the next request.
-    sqlx::query("UPDATE fvoci.memberships SET role = 'member' WHERE workspace_id = $1 AND user_id = $2")
-        .bind(workspace_id)
-        .bind(ws_admin.user_id)
-        .execute(&admin)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.memberships SET role = 'member' WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(ws_admin.user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
     let (status, _) = json_request(app.clone(), "GET", &path, None, Some(&ws_admin.cookie)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
@@ -1842,10 +1897,24 @@ async fn workspace_events_paginate_visible_rows_in_relay_order() {
     let admin = admin_pool(&harness).await;
     let member = add_workspace_user(&admin, workspace_id, "member", "member").await;
     let hidden_project = Uuid::now_v7();
-    insert_minimal_project(&admin, workspace_id, hidden_project, "HID", member.user_id, "private")
-        .await;
+    insert_minimal_project(
+        &admin,
+        workspace_id,
+        hidden_project,
+        "HID",
+        member.user_id,
+        "private",
+    )
+    .await;
     let base = format!("/api/v1/workspaces/{workspace_id}/events");
-    let (status, before) = json_request(app.clone(), "GET", &format!("{base}?limit=100"), None, Some(&cookie)).await;
+    let (status, before) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}?limit=100"),
+        None,
+        Some(&cookie),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{before:?}");
     let preexisting = before["items"].as_array().unwrap().len();
     assert!(preexisting < 100 && before["nextCursor"].is_null());
@@ -1861,8 +1930,14 @@ async fn workspace_events_paginate_visible_rows_in_relay_order() {
         )
         .await;
         let marker = format!("p{i}");
-        insert_marked_event(&admin, workspace_id, "workspace.created", None, json!({"marker": marker}))
-            .await;
+        insert_marked_event(
+            &admin,
+            workspace_id,
+            "workspace.created",
+            None,
+            json!({"marker": marker}),
+        )
+        .await;
         expected.push(marker);
     }
 
@@ -1891,7 +1966,10 @@ async fn workspace_events_paginate_visible_rows_in_relay_order() {
         }
         match body["nextCursor"].as_str() {
             Some(next) => {
-                assert!(!items.is_empty(), "a cursor is only returned after a full page");
+                assert!(
+                    !items.is_empty(),
+                    "a cursor is only returned after a full page"
+                );
                 cursor = Some(next.to_string());
             }
             None => break,

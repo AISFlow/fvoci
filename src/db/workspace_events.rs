@@ -246,15 +246,23 @@ mod tests {
 
     #[test]
     fn cursor_round_trips_and_rejects_foreign_shapes() {
-        let cursor = EventCursor { xact: 7_500_000_000, seq: 42 };
-        assert_eq!(decode_event_cursor(&encode_event_cursor(cursor)), Some(cursor));
+        let cursor = EventCursor {
+            xact: 7_500_000_000,
+            seq: 42,
+        };
+        assert_eq!(
+            decode_event_cursor(&encode_event_cursor(cursor)),
+            Some(cursor)
+        );
         let enc = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
         assert!(decode_event_cursor(&enc(json!({"xact": "1", "seq": "2", "x": 1}))).is_none());
         assert!(decode_event_cursor(&enc(json!({"xact": 1, "seq": "2"}))).is_none());
         assert!(decode_event_cursor(&enc(json!({"xact": "-1", "seq": "2"}))).is_none());
         assert!(decode_event_cursor(&enc(json!({"xact": "", "seq": "2"}))).is_none());
-        assert!(decode_event_cursor(&enc(json!({"xact": "1", "seq": "99999999999999999999"})))
-            .is_none());
+        assert!(
+            decode_event_cursor(&enc(json!({"xact": "1", "seq": "99999999999999999999"})))
+                .is_none()
+        );
         assert!(decode_event_cursor("not base64 !").is_none());
         assert!(decode_event_cursor(&"A".repeat(1025)).is_none());
     }
