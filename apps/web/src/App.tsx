@@ -1,4 +1,6 @@
+import { t } from "@fvoci/i18n";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ComponentType } from "react";
 import {
   createBrowserRouter,
   createRoutesFromElements,
@@ -21,26 +23,19 @@ import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
 import { TemplatesSettingsPage } from "@/pages/TemplatesSettingsPage";
 import { ProjectCollectionPage } from "@/pages/ProjectCollectionPage";
-import { ProjectGanttPage } from "@/pages/ProjectGanttPage";
 import { MyTasksPage } from "@/pages/MyTasksPage";
 import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
 import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
 import { NotificationsPage } from "@/pages/NotificationsPage";
 import { InvitePage } from "@/pages/InvitePage";
-import { AttachmentViewPage } from "@/pages/AttachmentViewPage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
-import { ShareAttachmentViewPage } from "@/pages/ShareAttachmentViewPage";
 import { WorkspaceHomePage } from "@/pages/WorkspaceHomePage";
 import { MagicLinkPage } from "@/pages/MagicLinkPage";
 import { ConfirmEmailPage } from "@/pages/ConfirmEmailPage";
 import { CancelWithdrawPage } from "@/pages/CancelWithdrawPage";
 import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
-import { AdminPage } from "@/pages/AdminPage";
-import { AdminAuditPage } from "@/pages/AdminAuditPage";
-import { AdminLegalPage } from "@/pages/AdminLegalPage";
 import { ConsentPage } from "@/pages/ConsentPage";
-import { LegalPage } from "@/pages/LegalPage";
 import { ServiceInfoPage } from "@/pages/ServiceInfoPage";
 
 const queryClient = new QueryClient({
@@ -52,6 +47,36 @@ const queryClient = new QueryClient({
   },
 });
 
+function RouteLoading() {
+  return <p role="status">{t("load.loading")}</p>;
+}
+
+/**
+ * A page kept out of the main bundle (admin, gantt, attachment viewers,
+ * legal). The router loads it before rendering the route: on a navigation
+ * the current page stays until it is in, and on a page load only this route
+ * shows `RouteLoading` while its parents render and fetch as usual. Not a
+ * React.lazy Suspense boundary: React holds a boundary's reveal until 300 ms
+ * after its fallback appeared.
+ */
+function lazyPage(load: () => Promise<ComponentType>, options: { setupGuard?: boolean } = {}) {
+  return {
+    HydrateFallback: RouteLoading,
+    lazy: async () => {
+      const Page = await load();
+      return options.setupGuard
+        ? {
+            element: (
+              <SetupGuard>
+                <Page />
+              </SetupGuard>
+            ),
+          }
+        : { Component: Page };
+    },
+  };
+}
+
 // A data router, so pages can hold navigation behind unsaved edits (`useBlocker`).
 // Built once per page load, outside React, so StrictMode does not start a second one.
 const router = createBrowserRouter(
@@ -60,7 +85,10 @@ const router = createBrowserRouter(
       <Route path="/setup" element={<SetupPage />} />
       {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
       <Route path="/s/:token" element={<PublicSharePage />} />
-      <Route path="/s/:token/attachments/:attachmentId/view" element={<ShareAttachmentViewPage />} />
+      <Route
+        path="/s/:token/attachments/:attachmentId/view"
+        {...lazyPage(() => import("@/pages/ShareAttachmentViewPage").then((m) => m.ShareAttachmentViewPage))}
+      />
       <Route
         path="/invite/:token"
         element={
@@ -87,30 +115,18 @@ const router = createBrowserRouter(
       />
       <Route path="/consent" element={<ConsentPage />} />
       <Route path="/service-info" element={<ServiceInfoPage />} />
-      <Route path="/legal/:kind" element={<LegalPage />} />
+      <Route path="/legal/:kind" {...lazyPage(() => import("@/pages/LegalPage").then((m) => m.LegalPage))} />
       <Route
         path="/settings/admin"
-        element={
-          <SetupGuard>
-            <AdminPage />
-          </SetupGuard>
-        }
+        {...lazyPage(() => import("@/pages/AdminPage").then((m) => m.AdminPage), { setupGuard: true })}
       />
       <Route
         path="/settings/audit"
-        element={
-          <SetupGuard>
-            <AdminAuditPage />
-          </SetupGuard>
-        }
+        {...lazyPage(() => import("@/pages/AdminAuditPage").then((m) => m.AdminAuditPage), { setupGuard: true })}
       />
       <Route
         path="/settings/legal"
-        element={
-          <SetupGuard>
-            <AdminLegalPage />
-          </SetupGuard>
-        }
+        {...lazyPage(() => import("@/pages/AdminLegalPage").then((m) => m.AdminLegalPage), { setupGuard: true })}
       />
       <Route
         path="/magic-link"
@@ -170,12 +186,15 @@ const router = createBrowserRouter(
         <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
         <Route path="settings/templates" element={<TemplatesSettingsPage />} />
         <Route path="notifications" element={<NotificationsPage />} />
-        <Route path="a/:attachmentId/view" element={<AttachmentViewPage />} />
+        <Route
+          path="a/:attachmentId/view"
+          {...lazyPage(() => import("@/pages/AttachmentViewPage").then((m) => m.AttachmentViewPage))}
+        />
         <Route path=":ref/tasks" element={<ProjectTasksPage />} />
         <Route path=":ref/table" element={<ProjectCollectionPage type="table" />} />
         <Route path=":ref/board" element={<ProjectCollectionPage type="board" />} />
         <Route path=":ref/calendar" element={<ProjectCollectionPage type="calendar" />} />
-        <Route path=":ref/gantt" element={<ProjectGanttPage />} />
+        <Route path=":ref/gantt" {...lazyPage(() => import("@/pages/ProjectGanttPage").then((m) => m.ProjectGanttPage))} />
         <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
         <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
         <Route path=":ref" element={<WorkspaceRefPage />} />
