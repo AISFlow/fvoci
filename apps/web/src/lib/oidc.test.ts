@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import { t } from "@fvoci/i18n";
 import { ProblemError } from "./api.ts";
@@ -13,6 +15,9 @@ import {
   readMfaFragment,
   startOidcInvite,
   startOidcLink,
+  startWorkspaceSso,
+  WORKSPACE_SSO_ACTION,
+  workspaceSsoHref,
 } from "./oidc.ts";
 
 test("oidcErrorMessage maps each callback code to its catalog message", () => {
@@ -192,4 +197,54 @@ test("the provider button click: pending while leaving, the problem on failure",
     `error:${t("error.network")}`,
     "pending:null",
   ]);
+});
+
+test("the SSO slug form navigates to the slug's start", () => {
+  assert.equal(WORKSPACE_SSO_ACTION, "/api/v1/auth/sso");
+  assert.equal(workspaceSsoHref("a&b c"), "/api/v1/auth/sso?slug=a%26b%20c");
+  const navigated: string[] = [];
+  const navigate = (url: string) => void navigated.push(url);
+  assert.equal(startWorkspaceSso("acme-2", navigate), null);
+  // Trimmed and NFKC-folded as the server reads it (fullwidth -> ASCII).
+  assert.equal(startWorkspaceSso("  ａｃｍｅ\n", navigate), null);
+  assert.deepEqual(navigated, ["/api/v1/auth/sso?slug=acme-2", "/api/v1/auth/sso?slug=acme"]);
+
+  // By default the page itself goes there: `location.assign`, not a form.
+  const assigned: string[] = [];
+  const g = globalThis as { window?: unknown };
+  const saved = g.window;
+  g.window = { location: { assign: (url: string) => void assigned.push(url) } };
+  try {
+    assert.equal(startWorkspaceSso("acme"), null);
+  } finally {
+    g.window = saved;
+  }
+  assert.deepEqual(assigned, ["/api/v1/auth/sso?slug=acme"]);
+});
+
+test("the SSO slug form stays put on a slug the server would refuse", () => {
+  const navigated: string[] = [];
+  const navigate = (url: string) => void navigated.push(url);
+  assert.equal(startWorkspaceSso("", navigate), "form.too_small");
+  assert.equal(startWorkspaceSso("   ", navigate), "form.too_small");
+  for (const slug of ["a", "Acme", "ac me", "acme/x", "a".repeat(33), "acme?slug=x", "워크"]) {
+    assert.equal(startWorkspaceSso(slug, navigate), "form.invalid", slug);
+  }
+  assert.deepEqual(navigated, []);
+  assert.equal(t("form.too_small"), "값을 입력해 주세요.");
+  assert.equal(t("form.invalid"), "입력을 확인해 주세요.");
+});
+
+test("the login page's SSO form submits through startWorkspaceSso, never to the server", () => {
+  const login = readFileSync(
+    path.join(import.meta.dirname, "../features/auth/login.tsx"),
+    "utf8",
+  );
+  const form = /function SsoSlugForm\(\)[\s\S]*?\n}\n/.exec(login)?.[0] ?? "";
+  assert.match(form, /<form\b/);
+  assert.match(form, /event\.preventDefault\(\);/);
+  assert.match(form, /startWorkspaceSso\(/);
+  assert.doesNotMatch(form, /\b(method|action|formAction)=/);
+  // Nor does any other form on the login page.
+  assert.doesNotMatch(login, /\b(method|action)=/);
 });

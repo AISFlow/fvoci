@@ -183,3 +183,31 @@ export async function clickOidcStart(
 }
 
 export const WORKSPACE_SSO_ACTION = "/api/v1/auth/sso";
+
+// The server's workspace slug rule (`normalize_slug`: trim, NFKC, then this).
+const WORKSPACE_SLUG = /^[a-z0-9-]{2,32}$/;
+
+export function workspaceSsoHref(slug: string): string {
+  return `${WORKSPACE_SSO_ACTION}?slug=${encodeURIComponent(slug)}`;
+}
+
+/** Catalog key of a slug the server would refuse. */
+export type WorkspaceSsoSlugIssue = "form.too_small" | "form.invalid";
+
+/**
+ * Login page "SSO로 로그인": the server resolves the workspace slug and
+ * answers 302 to that workspace's IdP. The page navigates there by script, a
+ * top-level navigation: a form submission's redirect to the IdP's origin is
+ * blocked by the CSP `form-action 'self'` (Chromium). Returns the field
+ * problem and stays put, or navigates and returns null.
+ */
+export function startWorkspaceSso(
+  input: string,
+  navigate: (url: string) => void = (url) => window.location.assign(url),
+): WorkspaceSsoSlugIssue | null {
+  const slug = input.trim().normalize("NFKC");
+  if (slug === "") return "form.too_small";
+  if (!WORKSPACE_SLUG.test(slug)) return "form.invalid";
+  navigate(workspaceSsoHref(slug));
+  return null;
+}
