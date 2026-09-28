@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::any;
 use axum::{Json, Router};
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::family::Family;
@@ -213,7 +213,9 @@ impl Observability {
         let outbox_lag = Gauge::default();
         registry.register(
             "fvoci_outbox_lag_seconds",
-            "Age in seconds of the oldest unpublished outbox event",
+            "Age in seconds of the oldest outbox event deliverable under the current \
+             snapshot xmin that some consumer cursor has not passed; backlog held \
+             behind a long-running transaction (xmin stall) is not visible here",
             outbox_lag.clone(),
         );
         let task_stream_subscribers = Gauge::default();
@@ -332,20 +334,34 @@ struct ProbeState {
 /// canonicalization (source `CONSENT_ALLOWLIST`, `SESSIONLESS_PATHS`).
 pub fn router(state: AppState, observability: Arc<Observability>) -> Router {
     Router::new()
-        .route(HEALTH_PATH, get(health))
-        .route(READY_PATH, get(ready))
-        .route(METRICS_PATH, get(metrics))
+        .route(HEALTH_PATH, any(health))
+        .route(READY_PATH, any(ready))
+        .route(METRICS_PATH, any(metrics))
         .with_state(ProbeState {
             app: state,
             observability,
         })
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "ok": true }))
+/// Methods other than GET/HEAD get the same generic 404 as a denied
+/// `/metrics` peer. The routes use `any` because axum's `get(..).fallback(..)`
+/// would still add `Allow: GET,HEAD` and announce the route.
+fn reject_method(method: &Method) -> Option<Response> {
+    (method != Method::GET && method != Method::HEAD)
+        .then(|| AppError::from_code(ProblemCode::NotFound).into_response())
 }
 
-async fn ready(State(probe): State<ProbeState>) -> Response {
+async fn health(method: Method) -> Response {
+    if let Some(rejected) = reject_method(&method) {
+        return rejected;
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+async fn ready(method: Method, State(probe): State<ProbeState>) -> Response {
+    if let Some(rejected) = reject_method(&method) {
+        return rejected;
+    }
     let state = &probe.app;
     let pg = ping_database(&state.auth.db.pool).await;
     let mut checks = Map::new();
@@ -377,6 +393,9 @@ async fn ping_database(pool: &PgPool) -> bool {
 /// The direct socket peer decides (like the rate limiter); forwarded
 /// headers are never read. No peer info (in-process calls) is denied.
 async fn metrics(State(probe): State<ProbeState>, req: Request) -> Response {
+    if let Some(rejected) = reject_method(req.method()) {
+        return rejected;
+    }
     let observability = &probe.observability;
     let allowed = req
         .extensions()

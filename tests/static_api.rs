@@ -590,6 +590,27 @@ async fn metrics_probe_is_hidden_outside_allow_list() {
     }
 }
 
+/// Non-GET/HEAD methods on the probes get the same generic 404 as a denied
+/// peer, never a 405 that would announce the route.
+#[tokio::test]
+async fn probe_other_methods_get_generic_not_found() {
+    let app = probe_router("127.0.0.1/32").await;
+    let (_, _, denied) = probe_body(&probe_router("").await, probe_request("/metrics", None)).await;
+    for (method, uri) in [
+        ("POST", "/metrics"),
+        ("DELETE", "/metrics"),
+        ("POST", "/health"),
+        ("PUT", "/ready"),
+    ] {
+        let mut request = probe_request(uri, Some([127, 0, 0, 1]));
+        *request.method_mut() = method.parse().unwrap();
+        let (status, headers, body) = probe_body(&app, request).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert!(headers.get("allow").is_none(), "{method} {uri}");
+        assert_eq!(body, denied, "{method} {uri}");
+    }
+}
+
 /// An allowed peer gets the Prometheus/OpenMetrics text with the source
 /// metric names; HTTP labels carry route templates, not concrete paths.
 #[tokio::test]
