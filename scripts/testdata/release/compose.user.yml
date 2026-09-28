@@ -1,5 +1,5 @@
 # Test copy of infra/rust/compose.user.yml as landed by the compose-bootstrap-secrets
-# branch (74dfb5ee); scripts/test_release_dist.py also checks the real file when present.
+# branch (d6186c2e); scripts/test_release_dist.py also checks the real file when present.
 # FVOCI standalone trial install.
 #
 # Save this file as compose.yml in an empty folder and run:
@@ -79,7 +79,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fvoci_owner -d fvoci"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fvoci_owner -d fvoci"]
       interval: 2s
       timeout: 2s
       retries: 30
