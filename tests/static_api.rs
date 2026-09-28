@@ -520,8 +520,8 @@ async fn robots_txt_is_the_source_policy_with_public_text_headers() {
 
 /// Source `apiDocs` guard `access: { auth: "session" }`: no cookie and no
 /// bearer is 401 `authentication_required` as problem JSON on every docs path
-/// (page, JSON, every asset), with the global CSP rather than the page's
-/// nonce policy, and nothing of the page or spec leaks.
+/// (page, JSON, every asset) with the global CSP, and nothing of the page or
+/// spec leaks, also when the SPA fallback is mounted.
 #[tokio::test]
 async fn api_docs_require_a_session() {
     let dir = std::env::temp_dir().join(format!("fvoci-static-docs-{}", uuid::Uuid::now_v7()));
@@ -532,6 +532,8 @@ async fn api_docs_require_a_session() {
         for uri in [
             "/api/docs",
             "/api/docs/json",
+            "/api/docs/static/fvoci-swagger-initializer.js",
+            "/api/docs/static/fvoci-swagger-theme.css",
             "/api/docs/static/swagger-ui-bundle.js",
             "/api/docs/static/swagger-ui.css",
             "/api/docs/static/swagger-ui-bundle.js.LICENSE.txt",
@@ -547,10 +549,10 @@ async fn api_docs_require_a_session() {
                 .to_str()
                 .unwrap()
                 .starts_with("application/problem+json"));
-            assert!(!h["content-security-policy"]
+            assert!(h["content-security-policy"]
                 .to_str()
                 .unwrap()
-                .contains("nonce-"));
+                .starts_with("default-src 'self';"));
             let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();

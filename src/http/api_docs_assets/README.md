@@ -23,4 +23,18 @@ reports installs.
 
 The three served files are pinned by a unit test (`api_docs::tests`). To upgrade,
 replace every file from the new tarball, verify its integrity against the
-registry, and update this table, the test hashes and `SWAGGER_UI_VERSION`.
+registry, and update this table, the test hashes, `SWAGGER_UI_VERSION`, the
+`?v=` query in `fvoci-api-docs.html` and the license directory name in
+`infra/rust/Dockerfile`.
+
+## FVOCI files
+
+Not part of the package; written for FVOCI and served next to it:
+
+- `fvoci-api-docs.html`: the static `/api/docs` page (source `SwaggerUIRender`
+  markup) with no inline script or style, so it runs under the application CSP.
+- `fvoci-swagger-initializer.js`: the `SwaggerUIBundle` call on `/api/docs/json`.
+- `fvoci-swagger-theme.css`: the source's dark-mode block.
+
+Their URLs are unversioned and served `private, no-cache`; the page itself and
+the OpenAPI document are `no-store`.
