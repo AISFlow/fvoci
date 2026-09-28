@@ -1,6 +1,6 @@
 # FVOCI @VERSION@ (trial pre-release)
 
-<!-- notes-for: 0.1.0 -->
+<!-- notes-for: 0.1.1 -->
 
 This is a 0.x trial release. It is not covered by any compatibility promise:
 a later 0.y release may change configuration, data layout or behaviour.
@@ -17,9 +17,11 @@ Installs are never updated automatically.
 
 ## Accepted in this release
 
-FVOCI 0.1.0 is the first build of the Rust server with the existing React web
-app. The features below were accepted on `main` with their tests, CI and an
-independent review (feature table in `docs/rewrite.md` at `@SHA@`):
+FVOCI 0.1.1 is a patch release on top of 0.1.0 (`57497e2f`): the same
+database schema, configuration and install files, with the fixes and
+additions listed under "Changes since 0.1.0". The features below were
+accepted on `main` with their tests, CI and an independent review (feature
+table in `docs/rewrite.md` at `@SHA@`):
 
 - **Accounts:** first-admin setup, sign-in and sessions, profile, password
   reset, email and password change, account deletion and export, magic links,
@@ -53,6 +55,56 @@ independent review (feature table in `docs/rewrite.md` at `@SHA@`):
   `scripts/restore.sh`) that verify keys, stored files and sealed secrets
   before the server starts.
 
+## Changes since 0.1.0
+
+- **Collaboration at the room limit.** When every collaboration room is
+  taken, opening another document or task body now reclaims the least
+  recently used room that nobody is in (and that has been empty for a few
+  seconds) instead of waiting for the 30 s idle timer. If every room is in
+  use, the body shows "not loaded yet" with the reason, instead of an endless
+  "Loading…" with no reason, and the browser retries with a bounded backoff
+  (0.5 to 10 s) on a single connection instead of reconnecting rapidly.
+  Edits made just before leaving a document are sent before its connection
+  closes.
+- **Attachment viewers and page loading.** Attachment viewers show their
+  first page sooner, and the admin, Gantt, attachment and legal pages load
+  on demand.
+- **Metrics (`/metrics`).** `fvoci_outbox_lag_seconds` and
+  `fvoci_outbox_xmin_stall_seconds` now read `NaN` before the first
+  successful refresh and after a failed one (0.1.0 kept `0` or the last
+  value), so a stale or zero value no longer looks healthy. A threshold
+  alert on these gauges does not fire while they are `NaN`: keep it, and
+  also alert on the new `fvoci_db_metrics_refresh_failures_total` or
+  `fvoci_db_metrics_last_success_timestamp_seconds` (see "PromQL examples"
+  in `RUNNING.md`). Also new:
+  `fvoci_process_resident_memory_bytes`,
+  `fvoci_collab_helper_resident_memory_bytes` and
+  `fvoci_collab_helper_memory_budget_bytes`. An optional
+  `compose.metrics.yml` override for a Prometheus scrape is in
+  `infra/rust/` at tag `v@VERSION@`; it is not one of the release files.
+- **Operator command `fvoci-migrate --outbox-reset`.** Diagnoses (default,
+  read-only) or moves (`--apply --reason …`) the cursors of the outbox
+  consumers (notifications, mail, push, webhooks, search index). `--apply`
+  needs a PostgreSQL superuser (or `pg_read_all_stats`) and refuses while any
+  other database session is connected, so the server must be stopped. It is
+  documented for the development stack in `RUNNING.md`; there is no
+  release-install procedure for it yet.
+
+## Upgrading from 0.1.0
+
+No database migration and no new `.env` value between 0.1.0 and 0.1.1.
+Back up first (see "Data, keys and upgrades" below). Download the 0.1.1
+`compose.yml` and `SHA256SUMS` into an empty directory and run
+`sha256sum --ignore-missing -c SHA256SUMS` there (the install directory
+still holds the 0.1.0 `INSTALL.md`, which no longer matches), then copy
+`compose.yml` over the old one, keep `.env`, and run
+`docker compose up -d --wait --wait-timeout 900` in the install directory;
+Compose stops the old `fvoci` container before the new one migrates.
+`docker compose exec fvoci /opt/fvoci/bin/fvoci-server --version` then
+shows `@VERSION@` and the source commit. Reload open browser tabs
+after the upgrade (the pages are loaded in new chunks). Going back to 0.1.0
+means restoring the backup taken before the upgrade.
+
 ## Not verified or optional
 
 These are shipped but off by default, or were only checked against local
@@ -75,6 +127,12 @@ stand-ins. Treat them as untested with a real provider:
   not tried.
 - **Korean input (IME):** checked with a real Linux (IBus) input method in
   Chromium only. Windows, macOS and mobile input methods were not tried.
+- **Collaboration room-limit behaviour** was measured on a source build of an
+  earlier revision of the change on one host; it was not measured on this
+  published image or with many real users.
+- **`/metrics` and `--outbox-reset`** are not part of the release smoke, and
+  there is no automated upgrade test from the published 0.1.0 files to
+  0.1.1 (the upgrade tests build both images from source).
 
 ## Known limitations
 
@@ -95,9 +153,15 @@ stand-ins. Treat them as untested with a real provider:
   pushed and not affected.
 - **Collaboration room limit.** At most 64 documents or task bodies can be
   open for editing at the same time in this compose file (30 is the image
-  default). A room is released 30 s after its last user leaves. While the
-  limit is reached, a newly opened body stays empty until a room frees up
-  (up to about 30 s), and the browser retries the connection rapidly.
+  default). While every room has a user in it, a newly opened body shows
+  "not loaded yet" and retries until a room frees up; a room emptied a few
+  seconds ago is kept for a returning user first. Reclaiming only applies to
+  the room count, not to the helpers' memory budget.
+- **Blank first page (under investigation).** In CI the web app's first load
+  rendered nothing twice in about 17 runs of the browser suite since the
+  page-loading change (runs 36437471155 and 36446247787); it was not
+  reproduced locally in about 1,800 attempts. If a page stays blank, reload
+  it.
 - **Search key file must not be a symlink.** A `FVOCI_MEILI_KEY_FILE` path
   that is a symlink is refused at startup, for example a Kubernetes Secret
   volume entry.
@@ -106,7 +170,7 @@ stand-ins. Treat them as untested with a real provider:
   them (inside single quotes `$` and backslashes are literal). It refuses
   other forms (escapes outside quotes, `$` outside single quotes, inline
   comments, `export`) instead of guessing. Keep the values unquoted, as `env.example` writes them.
-- **Upgrades only as documented.** Stop and back up first, then replace
+- **Upgrades only as documented.** Back up first, then replace
   `compose.yml` (see below). Rolling upgrades, running two servers against
   one database, and downgrades are not supported.
 - **ARM64** (linux/arm64) is verified by the CI release smoke on native
@@ -151,11 +215,12 @@ from a backup cannot be read. Only use it to throw an install away.
 
 - Back up before any upgrade (see `RUNNING.md` at `@SHA@` for backup and
   restore). Keep the copy of `.env` separate from the database backup.
-- To upgrade, stop the stack, replace `compose.yml` with the one from the new
-  release (check its `SHA256SUMS`), keep `.env`, and run
-  `docker compose up -d --wait --wait-timeout 900` (a long migration can
-  outlast the default wait; `docker compose logs -f fvoci` shows progress).
-  The `fvoci` container applies database
+- To upgrade, back up, replace `compose.yml` with the one from the new
+  release (check its `SHA256SUMS` in an empty directory first), keep `.env`,
+  and run `docker compose up -d --wait --wait-timeout 900` (a long migration
+  can outlast the default wait; `docker compose logs -f fvoci` shows
+  progress). Compose recreates `fvoci`, so the old server stops before the
+  new container migrates. The `fvoci` container applies database
   migrations before the server starts; if that fails the server does not
   start, and it refuses to migrate while another server is still connected.
 - Migrations only move forward. Going back to an older 0.y release means
