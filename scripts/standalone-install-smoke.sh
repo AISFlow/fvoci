@@ -115,6 +115,15 @@ copy_volume() { # from to
     -c 'rm -rf /to/..?* /to/.[!.]* /to/*; cp -a /from/. /to/'
 }
 
+check_logs() {
+  local logs s
+  logs="$(docker compose logs --no-color 2>&1)"
+  for s in "${SECRETS[@]}"; do
+    grep -qF "$s" <<<"$logs" && fail "a secret value appears in container logs"
+  done
+  echo "checked ${#SECRETS[@]} secret values against $(wc -l <<<"$logs") log lines: none found"
+}
+
 step "first up -d (compose.yml only, no env file)"
 T0=$SECONDS
 docker compose up -d
@@ -204,6 +213,9 @@ until curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/search?q=Standalone%20d
 done
 echo "setup + login + document create + search + web root: ok"
 
+step "no secret value in any container log (first start, generation included)"
+check_logs
+
 step "second up -d leaves secrets byte-identical"
 docker compose up -d
 wait_healthy
@@ -224,12 +236,8 @@ curl -fsS -b "$JAR" "$BASE/api/v1/workspaces/${WS}/documents/${DOC}" | jq -e '.t
 curl -fsS "$BASE/api/v1/setup" | jq -e '.needed == false' >/dev/null || fail "setup needed again"
 echo "login with the same pepper, workspace and document survive down/up: ok"
 
-step "no secret value in any container log"
-LOGS="$(docker compose logs --no-color 2>&1)"
-for s in "${SECRETS[@]}"; do
-  grep -qF "$s" <<<"$LOGS" && fail "a secret value appears in container logs"
-done
-echo "checked ${#SECRETS[@]} secret values against $(wc -l <<<"$LOGS") log lines: none found"
+step "no secret value in any container log (containers after down/up)"
+check_logs
 
 step "scripts/backup.sh + restore.sh (no env file): the restored install keeps its keys"
 bash "$ROOT/scripts/backup.sh" --project "$COMPOSE_PROJECT_NAME" --compose-file "$WORK/compose.yml" \
