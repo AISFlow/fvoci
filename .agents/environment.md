@@ -283,3 +283,14 @@ Opus 5.5 medium, 조사는 `cursor-grok-4.6-high`(별도 effort 없음)를 유�
 인수 시 실제 `/model`·`/effort`와 turn 시작을 확인하고, 불가하면 대체 없이 차단을 기록한다.
 과거 Astra·Opus·Fable 실행 기록은 당시 사실대로 보존한다. 현재 작업·체크포인트는
 `docs/rewrite.md`의 새 인계 포인터를 따른다.
+
+## 2026-09-28 Fable 코디네이터 인수 확인
+
+2026-09-28 02:xx UTC Linux, Claude Code 2.1.283 세션에서 인수했다. 확인 근거: `~/.claude/settings.json`의
+`model: claude-fable-5-1`과 `modelSettings.effortLevel: medium`, 세션 환경 `CLAUDE_EFFORT=medium`,
+세션 자체 보고 모델 ID `claude-fable-5-1`. 실제 turn이 시작되어 이 기록을 작성했다. 별도 `/model`
+TUI 출력은 이 세션 안에서 캡처하지 않았다. Orca 1.4.207 `/home/kinesis/.local/bin/orca-ide`로
+Run `run_b01d432a9dee`에 `run-use` 성공, coordinator terminal
+`term_77972376-fa56-44ae-a334-0c95413c4fab`, 인박스 0, 활성 워커 0, reclaimable 0.
+인계 문서 `coordinator-handoff-2026-09-28-0145-utc-linux.md`와 실제 상태(main `9e15d50e`,
+후보 `b09114df` clean/7 paths, Draft #198 `7f2433f8`) 일치를 확인했다. 전역 설정·MCP 변경 없음.
