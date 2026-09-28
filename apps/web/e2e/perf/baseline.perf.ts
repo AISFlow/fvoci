@@ -1163,3 +1163,191 @@ test("g: first open of freshly seeded documents", async ({ browser }) => {
   record("g.firstOpen", "connectedToText", "DOM-observed interval", pick("connectedToText"));
   flush();
 });
+
+// (h) collab room saturation. Opt-in (FVOCI_PERF_GREP="setup dataset|h: "); the server's
+// FVOCI_COLLAB_MAX_ROOMS is read from the same environment (default 30), so each cap is a
+// separate run. Before every sample the runner waits past the idle eviction window
+// (30 s + one 15 s tick) so all rooms are gone; that pacing is recorded, never measured.
+// Occupiers are opened in 4 parallel pages per session (the per-session socket cap is 4).
+//   idle:   `cap` occupier documents opened and left again (rooms live, no clients),
+//           then a fresh seeded document is opened.
+//   active: `cap` occupier rooms held open by pages of ceil(cap/4) member sessions, a
+//           fresh document is opened and observed for 20 s, then one holder page closes.
+const ROOM_CAP = Number(process.env.FVOCI_COLLAB_MAX_ROOMS ?? 30);
+const DRAIN_MS = 30_000 + 15_000 + 2_000;
+const ACTIVE_OBSERVE_MS = 20_000;
+const PROBE_TIMEOUT = 90_000;
+
+
+async function openUntilReady(page: Page, displayId: string): Promise<boolean> {
+  await page.goto(`/w/${owner.workspaceSlug}/${displayId}`, { waitUntil: "commit" });
+  try {
+    await page.locator(".fvoci-editor .ProseMirror").first().waitFor({ state: "attached", timeout: HIT_TIMEOUT });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function occupy(contexts: BrowserContext[], docs: { displayId: string }[], hold: boolean) {
+  const t0 = nodeNow();
+  const pages: Page[] = [];
+  let failures = 0;
+  const lanes: { context: BrowserContext; queue: { displayId: string }[] }[] = [];
+  docs.forEach((doc, i) => {
+    const lane = hold ? i : i % 4;
+    const context = contexts[Math.floor(lane / 4) % contexts.length]!;
+    (lanes[lane] ??= { context, queue: [] }).queue.push(doc);
+  });
+  await Promise.all(
+    lanes.map(async ({ context, queue }) => {
+      const page = await context.newPage();
+      pages.push(page);
+      for (const doc of queue) if (!(await openUntilReady(page, doc.displayId))) failures += 1;
+      if (!hold) await page.goto("about:blank");
+    }),
+  );
+  if (!hold) await Promise.all(pages.map((p) => p.close()));
+  return { pages, failures, ms: round(nodeNow() - t0) };
+}
+
+type SocketRec = { opened: number; closed: number | null; recv: number };
+
+async function probeOpen(browser: Browser, doc: { displayId: string; marker: string }, i: number, mode: string) {
+  const context = await newProbedContext(browser, ctx.ownerState);
+  const page = await context.newPage();
+  const sockets: SocketRec[] = [];
+  page.on("websocket", (ws: WebSocket) => {
+    const rec: SocketRec = { opened: nodeNow(), closed: null, recv: 0 };
+    sockets.push(rec);
+    ws.on("framereceived", () => (rec.recv += 1));
+    ws.on("close", () => (rec.closed = nodeNow()));
+  });
+  const t0 = nodeNow();
+  await page.goto(`/w/${owner.workspaceSlug}/${doc.displayId}`, { waitUntil: "commit" });
+  await watch(page, `h-text-${mode}-${i}`, { selector: ".fvoci-editor .ProseMirror p", text: doc.marker });
+  await watch(page, `h-busy-${mode}-${i}`, { selector: '[data-collab-status="busy"]' });
+  await watch(page, `h-note-${mode}-${i}`, { selector: ".document-page__body-note" });
+  return { context, page, sockets, t0 };
+}
+
+function socketSummary(sockets: SocketRec[], t0: number, until: number) {
+  const inWindow = sockets.filter((s) => s.opened <= until);
+  const opens = inWindow.map((s) => s.opened - t0);
+  const gaps = opens.slice(1).map((at, k) => at - opens[k]!);
+  return {
+    opened: inWindow.length,
+    closedWithoutFrames: inWindow.filter((s) => s.closed !== null && s.recv === 0).length,
+    minGapMs: gaps.length ? round(Math.min(...gaps)) : null,
+    lastGapsMs: gaps.slice(-5).map((g) => round(g)),
+  };
+}
+
+test("h: collab room saturation", async ({ browser }) => {
+  test.setTimeout(7_200_000);
+  const setup = await browser.newContext({ storageState: ctx.ownerState });
+  const api = await setup.newPage();
+  await api.goto("/");
+  const occupiers: { displayId: string }[] = [];
+  for (let i = 0; i < ROOM_CAP; i += 1) {
+    const res = await api.request.post(`/api/v1/workspaces/${ctx.wsId}/documents`, {
+      data: { parentId: null, title: `방 점유 ${i}` },
+    });
+    expect(res.ok(), await res.text()).toBeTruthy();
+    occupiers.push((await res.json()) as { displayId: string });
+  }
+  // Holder sessions (4 sockets each): dedicated members, logins paced under the login budget.
+  const holders: BrowserContext[] = [];
+  for (let s = 0; s < Math.ceil(ROOM_CAP / 4); s += 1) {
+    const user = { email: `perf-holder-${s}@example.com`, password: `perfpass-holder-${s}` };
+    createE2eUser(user.email, user.password, `점유${s}`, {
+      familyName: "성능",
+      workspaceSlug: owner.workspaceSlug,
+      membershipRole: "member",
+    });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto("/login");
+    await page.getByLabel("이메일").fill(user.email);
+    await page.getByLabel("비밀번호").fill(user.password);
+    await paceLogin();
+    await page.getByRole("button", { name: "로그인", exact: true }).click();
+    await page.waitForURL(/\/$/, { timeout: HIT_TIMEOUT });
+    await page.close();
+    holders.push(context);
+  }
+  await setup.close();
+
+  const probes = ctx.freshDocs;
+  const samples: Record<string, unknown>[] = [];
+  const drains: number[] = [];
+  const drain = async () => {
+    const started = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, DRAIN_MS));
+    drains.push(Date.now() - started);
+  };
+  const half = Math.ceil(probes.length / 2);
+  for (const mode of ["idle", "active"] as const) {
+    const docs = mode === "idle" ? probes.slice(0, half) : probes.slice(half);
+    await quietWindow(`h-${mode}-cap${ROOM_CAP}`, loadLog);
+    for (const [i, doc] of docs.entries()) {
+      await drain();
+      await guarded(samples, { mode, i, cap: ROOM_CAP }, async () => {
+        // Idle occupiers use a member session so their closing sockets never count
+        // against the owner's per-session socket cap when the probe opens.
+        const occ = await occupy(mode === "idle" ? [holders[0]!] : holders, occupiers, mode === "active");
+        const probe = await probeOpen(browser, doc, i, mode);
+        let releasedPage: number | null = null;
+        let observeEnd: number | null = null;
+        if (mode === "active") {
+          await waitHit(probe.page, `h-text-${mode}-${i}`, ACTIVE_OBSERVE_MS);
+          observeEnd = nodeNow();
+          await occ.pages.pop()?.close();
+          releasedPage = await pageNow(probe.page);
+        }
+        const found = await waitHit(probe.page, `h-text-${mode}-${i}`, PROBE_TIMEOUT);
+        const end = nodeNow();
+        const [busy, note] = await probe.page.evaluate(
+          (ids) => ids.map((id) => window.__fp!.hits[id] ?? null),
+          [`h-busy-${mode}-${i}`, `h-note-${mode}-${i}`],
+        );
+        const text = found && !found.pre ? found : null;
+        samples.push({
+          mode,
+          i,
+          cap: ROOM_CAP,
+          occupyMs: occ.ms,
+          occupyFailures: occ.failures,
+          textShown: text !== null,
+          // Page clock: ms from navigation start of the fresh page to the marker text in the DOM.
+          textDom: text ? round(text.dom) : null,
+          releaseToTextDom: text && releasedPage !== null ? round(text.dom - releasedPage) : null,
+          busyShown: busy !== null,
+          busyDom: busy ? round(busy.dom) : null,
+          noteShown: note !== null,
+          socketsTotal: socketSummary(probe.sockets, probe.t0, end),
+          socketsObserveWindow:
+            observeEnd === null ? null : socketSummary(probe.sockets, probe.t0, observeEnd),
+        });
+        await probe.context.close();
+        await Promise.all(occ.pages.map((p) => p.close()));
+      });
+    }
+  }
+  results.h = { cap: ROOM_CAP, drainPacingMs: drains, samples };
+  for (const mode of ["idle", "active"]) {
+    const all = samples.filter((x) => x.mode === mode);
+    const pick = (key: string) => all.map((x) => (x.textShown === true ? (x[key] as number) : null));
+    const flow = `h.${mode}.cap${ROOM_CAP}`;
+    record(flow, "textDom", "DOM-observed (nav start → marker text)", pick("textDom"));
+    if (mode === "active") record(flow, "releaseToTextDom", "DOM-observed (holder closed → marker text)", pick("releaseToTextDom"));
+    record(
+      flow,
+      "socketsPerOpen",
+      "count of Playwright websocket events (not ms)",
+      all.map((x) => (x.socketsTotal as { opened: number } | undefined)?.opened ?? null),
+    );
+  }
+  flush();
+  await Promise.all(holders.map((c) => c.close()));
+});
