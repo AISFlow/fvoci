@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # Idempotency guard for a release re-run. Prints the image index digest that
-# this version already has (empty when nothing was published yet), so the
-# workflow reuses it instead of building and retagging:
+# this version already carries (empty when it has none yet), so the workflow
+# reuses it instead of building again:
 #   - a GitHub release for the tag must carry release.json for the same source
 #     SHA, and the registry tag must still point at the digest it records;
-#   - a registry tag without a release (a run that stopped before the release
-#     job) is reused only when its OCI labels name this version and SHA.
-# Anything else fails closed; this never moves a tag a release records.
-# Needs GH_TOKEN (contents: read), GITHUB_REPOSITORY and a registry login.
+#   - a registry tag without a release (a run that tagged after its smoke but
+#     stopped before the release job) is reused only when its OCI labels name
+#     this version and SHA.
+# The :0.y.z tag is only applied after the smoke passed (docs/RELEASING.md), so
+# an index pushed by digest for a run whose smoke failed is never reused.
+# Decisions use exit codes and JSON (scripts/release-api.py), not error text.
+# Anything else fails closed; this never moves a tag.
+# Needs GH_TOKEN (contents: read), GITHUB_REPOSITORY, REGISTRY_USER/PASSWORD
+# (packages: read) and a docker registry login for the label check.
 #
 #   scripts/release-existing.sh --tag v0.y.z --version 0.y.z --sha <sha> --image ghcr.io/aisflow/fvoci
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="" VERSION="" SHA="" IMAGE=""
 while (($#)); do
   case "$1" in
@@ -25,15 +31,19 @@ while (($#)); do
 done
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 fail() { echo "release-existing: $*" >&2; exit 1; }
+API=(python3 "$ROOT/scripts/release-api.py")
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+STATE="$("${API[@]}" release-state --tag "$TAG")"
 RECORD_DIGEST=""
-if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>"$WORK/view.err"; then
-  gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern release.json --dir "$WORK" \
-    || fail "release $TAG exists without release.json; inspect it and delete it by hand before re-running"
-  RECORD_DIGEST="$(python3 - "$WORK/release.json" "$VERSION" "$SHA" <<'PY'
+case "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state"])' "$STATE")" in
+  none) ;;
+  published)
+    gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern release.json --dir "$WORK" \
+      || fail "release $TAG exists without release.json; inspect it and delete it by hand before re-running"
+    RECORD_DIGEST="$(python3 - "$WORK/release.json" "$VERSION" "$SHA" <<'PY'
 import json, sys
 record = json.load(open(sys.argv[1]))
 if record.get("version") != sys.argv[2] or record.get("sourceSha") != sys.argv[3]:
@@ -41,24 +51,26 @@ if record.get("version") != sys.argv[2] or record.get("sourceSha") != sys.argv[3
 print(record["indexDigest"])
 PY
 )"
-elif ! grep -qi 'release not found' "$WORK/view.err"; then
-  cat "$WORK/view.err" >&2
-  fail "could not read the GitHub release for $TAG"
-fi
+    ;;
+  *) fail "release $TAG is a draft; inspect it and delete it by hand before re-running" ;;
+esac
 
 REGISTRY_DIGEST=""
-if docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' >"$WORK/manifest.json" 2>"$WORK/manifest.err"; then
-  REGISTRY_DIGEST="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["digest"])' "$WORK/manifest.json")"
-elif grep -Eqi 'not found|manifest unknown|name unknown' "$WORK/manifest.err"; then
-  :
-elif [[ -z "$RECORD_DIGEST" ]] && grep -qi 'denied' "$WORK/manifest.err"; then
-  # GHCR answers "denied" for a package that does not exist yet (first
-  # release). Without a release there is no recorded digest to protect.
-  echo "release-existing: $IMAGE:$VERSION not readable (denied); treating as unpublished" >&2
-else
-  cat "$WORK/manifest.err" >&2
-  fail "could not inspect $IMAGE:$VERSION"
-fi
+set +e
+REGISTRY_DIGEST="$("${API[@]}" registry-digest --image "$IMAGE" --tag "$VERSION")"
+status=$?
+set -e
+case "$status" in
+  0) ;;
+  4)
+    # The job token cannot read the package; the first release has no package
+    # yet. Without a release there is no recorded digest to protect here, and
+    # the publish job re-checks the tag with its write token before tagging.
+    [[ -z "$RECORD_DIGEST" ]] || fail "release $TAG records $RECORD_DIGEST but $IMAGE is not readable"
+    echo "release-existing: $IMAGE not readable with this token; treating $VERSION as untagged" >&2
+    ;;
+  *) fail "could not inspect $IMAGE:$VERSION" ;;
+esac
 
 if [[ -n "$RECORD_DIGEST" && "$RECORD_DIGEST" != "$REGISTRY_DIGEST" ]]; then
   fail "release $TAG records $RECORD_DIGEST but $IMAGE:$VERSION is '${REGISTRY_DIGEST:-missing}'"

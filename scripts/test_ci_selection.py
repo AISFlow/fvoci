@@ -1311,6 +1311,30 @@ class RegistryMutationCliTest(unittest.TestCase):
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "release.yml: verify may not write ['contents']")
 
+    def test_release_workflow_per_tag_concurrency_rejected(self) -> None:
+        root = self._mutated_root()
+        release = root / ".github" / "workflows" / "release.yml"
+        text = release.read_text(encoding="utf-8")
+        marker = "  group: release-ghcr-fvoci\n"
+        self.assertIn(marker, text)
+        release.write_text(text.replace(marker, "  group: release-${{ github.ref_name }}\n", 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(
+            proc, output, "release.yml: concurrency must be one fixed group with cancel-in-progress: false"
+        )
+
+    def test_release_publish_job_may_not_write_contents(self) -> None:
+        root = self._mutated_root()
+        release = root / ".github" / "workflows" / "release.yml"
+        text = release.read_text(encoding="utf-8")
+        marker = "  publish:\n    needs: [verify, index, smoke]\n"
+        self.assertIn(marker, text)
+        publish = text.index(marker)
+        scope = text.index("      packages: write\n", publish)
+        release.write_text(text[:scope] + "      contents: write\n" + text[scope:], encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "release.yml: publish may not write ['contents']")
+
     def test_new_workflow_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         extra = root / ".github" / "workflows" / "extra.yml"

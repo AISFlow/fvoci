@@ -51,7 +51,8 @@ WORKFLOW_YAML: dict[str, str] = {
 RELEASE_WORKFLOW_FILE = "release.yml"
 RELEASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
     "build": frozenset({"packages"}),
-    "manifest": frozenset({"packages"}),
+    "index": frozenset({"packages"}),
+    "publish": frozenset({"packages"}),
     "release": frozenset({"contents"}),
 }
 
@@ -1407,6 +1408,17 @@ def verify_release_workflow(path: Path) -> list[str]:
             errors.append(f"{name}: push must list only v0.* tags")
     if data.get("permissions") != {"contents": "read"}:
         errors.append(f"{name}: top-level permissions must be exactly contents: read")
+    # One queue for every tag: runs for two patch tags must not race on :0.y.
+    concurrency = data.get("concurrency")
+    if (
+        not isinstance(concurrency, dict)
+        or not isinstance(concurrency.get("group"), str)
+        or "${{" in concurrency["group"]
+        or concurrency.get("cancel-in-progress") is not False
+    ):
+        errors.append(
+            f"{name}: concurrency must be one fixed group with cancel-in-progress: false"
+        )
     jobs = data.get("jobs")
     if not isinstance(jobs, dict) or not jobs:
         return [*errors, f"{name}: jobs mapping missing"]

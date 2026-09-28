@@ -14,8 +14,11 @@ on:
         required: true
         type: string
 
+# One release run at a time across all tags, so two patch tags cannot race on
+# the floating :0.y tag. GitHub keeps one pending run per group: a third run
+# queued behind it is cancelled and must be dispatched again.
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-ghcr-fvoci
   cancel-in-progress: false
 
 permissions:
@@ -26,7 +29,8 @@ env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  # Tag -> main commit that CI already accepted; version policy; existing state.
+  # Tag -> main commit that CI already accepted; version policy; cheap preflight
+  # of everything the smoke needs; existing state. Nothing is pushed before it.
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -39,7 +43,6 @@ jobs:
       sha: ${{ steps.source.outputs.sha }}
       version: ${{ steps.version.outputs.version }}
       minor: ${{ steps.version.outputs.minor }}
-      update_minor: ${{ steps.version.outputs.update_minor }}
       existing_digest: ${{ steps.existing.outputs.digest }}
     steps:
       - name: Validate tag name
@@ -50,14 +53,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: refs/tags/${{ env.RELEASE_TAG }}
+          # Full history fetches every branch, so origin/main is present
+          # without a later authenticated fetch.
           fetch-depth: 0
+          persist-credentials: false
       - id: source
         name: Tag points to a first-parent commit of main
         run: |
           set -euo pipefail
           sha="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
           test "$(git rev-parse HEAD)" = "$sha"
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null
           if ! git rev-list --first-parent refs/remotes/origin/main | grep -qx "$sha"; then
             echo "::error::${RELEASE_TAG} (${sha}) is not a commit on main"
             exit 1
@@ -69,21 +75,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/release-check-ci.sh "${{ steps.source.outputs.sha }}"
       - id: version
-        name: Version policy and release notes
+        name: Version policy
         run: |
           set -euo pipefail
           version="$(bash scripts/release-check-version.sh --tag "$RELEASE_TAG")"
-          if grep -n 'TODO(release)' scripts/release-notes-template.md; then
-            echo "::error::scripts/release-notes-template.md still has TODO(release) markers at ${RELEASE_TAG}"
-            exit 1
-          fi
-          minor="${version%.*}"
-          newest="$(git tag -l "v${minor}.*" | grep -E '^v0\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
           {
             echo "version=${version}"
-            echo "minor=${minor}"
-            echo "update_minor=$([[ "$newest" == "$RELEASE_TAG" ]] && echo true || echo false)"
+            echo "minor=${version%.*}"
           } >>"$GITHUB_OUTPUT"
+      - name: Preflight (notes for this version, Dockerfile build SHA, user compose)
+        run: bash scripts/release-preflight.sh --version "${{ steps.version.outputs.version }}" --image "$IMAGE"
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -93,6 +94,8 @@ jobs:
         name: Reuse an image this version already published
         env:
           GH_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ github.token }}
         run: |
           set -euo pipefail
           digest="$(bash scripts/release-existing.sh --tag "$RELEASE_TAG" \
@@ -125,6 +128,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -160,8 +164,8 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # One multi-arch index tagged 0.y.z (and 0.y when this is the newest 0.y.*).
-  manifest:
+  # One multi-arch index pushed BY DIGEST: no tag moves before the smoke.
+  index:
     needs: [verify, build]
     if: always() && needs.verify.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.verify.outputs.existing_digest != ''))
     runs-on: ubuntu-24.04
@@ -174,62 +178,42 @@ jobs:
       amd64_digest: ${{ steps.index.outputs.amd64_digest }}
       arm64_digest: ${{ steps.index.outputs.arm64_digest }}
     env:
-      VERSION: ${{ needs.verify.outputs.version }}
-      MINOR: ${{ needs.verify.outputs.minor }}
-      UPDATE_MINOR: ${{ needs.verify.outputs.update_minor }}
       EXISTING: ${{ needs.verify.outputs.existing_digest }}
+      REGISTRY_USER: ${{ github.actor }}
+      REGISTRY_PASSWORD: ${{ github.token }}
     steps:
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
       - if: needs.verify.outputs.existing_digest == ''
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: digest-*
           merge-multiple: true
           path: ${{ runner.temp }}/digest
-      - name: Create or reuse the index
+      - id: index
+        name: Push the index by digest (or reuse the version's tagged index)
         run: |
           set -euo pipefail
-          tags=(-t "$IMAGE:$VERSION")
-          [[ "$UPDATE_MINOR" == true ]] && tags+=(-t "$IMAGE:$MINOR")
           if [[ -z "$EXISTING" ]]; then
             amd64="$(cat "$RUNNER_TEMP/digest/amd64")"
             arm64="$(cat "$RUNNER_TEMP/digest/arm64")"
-            docker buildx imagetools create "${tags[@]}" "$IMAGE@$amd64" "$IMAGE@$arm64"
-            printf '%s\n' "$amd64" >"$RUNNER_TEMP/expect-amd64"
-            printf '%s\n' "$arm64" >"$RUNNER_TEMP/expect-arm64"
-          elif [[ "$UPDATE_MINOR" == true ]]; then
-            docker buildx imagetools create -t "$IMAGE:$MINOR" "$IMAGE@$EXISTING"
+            index="$(python3 scripts/release-api.py push-index --image "$IMAGE" --amd64 "$amd64" --arm64 "$arm64")"
+          else
+            index="$EXISTING"
           fi
-      - id: index
-        name: Record the published index
-        run: |
-          set -euo pipefail
-          docker buildx imagetools inspect "$IMAGE:$VERSION" --raw >"$RUNNER_TEMP/index.json"
-          index="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
-          [[ "$index" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ -z "$EXISTING" || "$EXISTING" == "$index" ]] || { echo "::error::$IMAGE:$VERSION moved to $index"; exit 1; }
-          python3 - "$RUNNER_TEMP/index.json" "$RUNNER_TEMP" "$index" >>"$GITHUB_OUTPUT" <<'PY'
-          import json, pathlib, sys
-          index = json.load(open(sys.argv[1]))
-          found = {m["platform"]["architecture"]: m["digest"] for m in index["manifests"] if m["platform"]["os"] == "linux"}
-          assert sorted(found) == ["amd64", "arm64"] and len(index["manifests"]) == 2, index
-          for arch, digest in found.items():
-              expect = pathlib.Path(sys.argv[2], f"expect-{arch}")
-              assert not expect.exists() or expect.read_text().strip() == digest, (arch, digest)
-              print(f"{arch}_digest={digest}")
-          print(f"index_digest={sys.argv[3]}")
-          PY
-          cat "$GITHUB_OUTPUT"
+          python3 scripts/release-api.py describe --image "$IMAGE" --digest "$index" >"$RUNNER_TEMP/index.out"
+          if [[ -z "$EXISTING" ]]; then
+            grep -qx "amd64_digest=$amd64" "$RUNNER_TEMP/index.out"
+            grep -qx "arm64_digest=$arm64" "$RUNNER_TEMP/index.out"
+          fi
+          tee -a "$GITHUB_OUTPUT" <"$RUNNER_TEMP/index.out"
 
   # Release files rendered from the tagged tree and the published index.
   dist:
-    needs: [verify, manifest]
-    if: always() && needs.manifest.result == 'success'
+    needs: [verify, index]
+    if: always() && needs.index.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -238,6 +222,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
       - name: Render compose.yml, release.json, notes and SHA256SUMS
         run: |
           bash scripts/release-dist.sh \
@@ -245,9 +230,9 @@ jobs:
             --sha "${{ needs.verify.outputs.sha }}" \
             --repository "${{ github.repository }}" \
             --image "$IMAGE" \
-            --index-digest "${{ needs.manifest.outputs.index_digest }}" \
-            --amd64-digest "${{ needs.manifest.outputs.amd64_digest }}" \
-            --arm64-digest "${{ needs.manifest.outputs.arm64_digest }}" \
+            --index-digest "${{ needs.index.outputs.index_digest }}" \
+            --amd64-digest "${{ needs.index.outputs.amd64_digest }}" \
+            --arm64-digest "${{ needs.index.outputs.arm64_digest }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --out "$RUNNER_TEMP/dist"
           cat "$RUNNER_TEMP/dist/SHA256SUMS"
@@ -258,8 +243,8 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  # Anonymous pull of the PUBLISHED index on each native architecture: no
-  # registry login, no packages permission, no locally built image.
+  # Anonymous pull of the index BY DIGEST on each native architecture: no
+  # registry login, no packages permission, no locally built image, no tag yet.
   smoke:
     needs: [verify, dist]
     if: always() && needs.dist.result == 'success'
@@ -280,6 +265,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.21.0'
@@ -301,11 +287,48 @@ jobs:
       - name: Release smoke against the published digest
         run: bash scripts/release-smoke.sh --dist "$RUNNER_TEMP/dist"
 
-  # The only job that can write repository contents: the GitHub pre-release,
-  # created once both architectures passed the smoke.
-  release:
-    needs: [verify, dist, smoke]
+  # Tags only after both smokes passed: the immutable :0.y.z first, then the
+  # floating :0.y when this is the newest 0.y.* tag at this moment. Release
+  # runs are serialized (concurrency above), so :0.y cannot move backwards.
+  publish:
+    needs: [verify, index, smoke]
     if: always() && needs.smoke.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      MINOR: ${{ needs.verify.outputs.minor }}
+      INDEX: ${{ needs.index.outputs.index_digest }}
+      REGISTRY_USER: ${{ github.actor }}
+      REGISTRY_PASSWORD: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - name: Tag the smoked index 0.y.z (immutable)
+        run: python3 scripts/release-api.py tag --image "$IMAGE" --digest "$INDEX" --tag "$VERSION"
+      - name: Move 0.y when this is the newest 0.y.* release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          newest="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v${MINOR}." --jq '.[].ref' \
+            | sed 's#^refs/tags/##' | grep -E '^v0\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+          if [[ "$newest" != "v${VERSION}" ]]; then
+            echo "newest ${MINOR}.* tag is ${newest}; leaving ${IMAGE}:${MINOR} alone"
+            exit 0
+          fi
+          python3 scripts/release-api.py tag --image "$IMAGE" --digest "$INDEX" --tag "$MINOR" --floating
+
+  # The only job that can write repository contents: the GitHub pre-release,
+  # created after the image tags point at the smoked digest.
+  release:
+    needs: [verify, dist, publish]
+    if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -314,6 +337,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-dist
