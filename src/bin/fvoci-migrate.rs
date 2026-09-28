@@ -5,6 +5,7 @@ use fvoci_server::auth::password::Keyring;
 use fvoci_server::config::storage_settings_from_env;
 use fvoci_server::db::migrate;
 use fvoci_server::db::outbox_recover::{parse_recover_outbox_args, recover_outbox};
+use fvoci_server::db::outbox_reset::{outbox_reset, parse_outbox_reset_args};
 use fvoci_server::identity::encryption_keys_from_env;
 use fvoci_server::search::index::{rebuild_pool, rebuild_search_index};
 use fvoci_server::search::meili::{ensure_meili_key_file, meili_config_from_env};
@@ -176,9 +177,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report = recover_outbox(&url, opts).await?;
             println!("{}", serde_json::to_string(&report)?);
         }
+        [flag, rest @ ..] if flag == "--outbox-reset" => {
+            let url = migration_url()?;
+            let opts = parse_outbox_reset_args(rest)?;
+            let search_configured = meili_config_from_env()?.is_some();
+            let report = outbox_reset(&url, opts, search_configured).await?;
+            println!("{}", serde_json::to_string(&report)?);
+        }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --rotate-vapid | --secrets-audit | --secrets-rotate | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --start [server args] | --prepare | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay] | --backup-manifest <manifest> <project> <created-utc> <pg-version> <dump> <storage-tar> | --restore-preflight <manifest> <dump> <storage-tar> <target-project>]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --rotate-vapid | --secrets-audit | --secrets-rotate | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --start [server args] | --prepare | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay] | --outbox-reset [--consumer <name>]... [--apply --reason <text> [--override-reason <text>]] | --backup-manifest <manifest> <project> <created-utc> <pg-version> <dump> <storage-tar> | --restore-preflight <manifest> <dump> <storage-tar> <target-project>]".into(),
             );
         }
     }
