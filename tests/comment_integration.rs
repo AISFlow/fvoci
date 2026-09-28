@@ -1400,3 +1400,96 @@ async fn unresolve_waiting_behind_resolve_applies_to_resolved_comment() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// A database failure inside a comment's parent permission check reaches the
+/// route as a logged 500 `internal_error`. Before, the helpers mapped every
+/// sqlx error to `not_found`, so a transient fault looked like a deleted or
+/// hidden parent.
+#[tokio::test]
+async fn comment_permission_query_failure_is_internal_error() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "CERR", "workspace").await;
+    let project_id = project["id"].as_str().unwrap().to_string();
+    let root_id = project["rootDocumentId"].as_str().unwrap().to_string();
+    let ws = format!("/api/v1/workspaces/{workspace_id}");
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{ws}/projects/{project_id}/tasks"),
+        Some(json!({"title": "Comment fault task"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task:?}");
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let paths = [
+        format!("{ws}/tasks/{task_id}/comments"),
+        format!("{ws}/projects/{project_id}/documents/{root_id}/comments"),
+    ];
+    for path in &paths {
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            path,
+            Some(json!({"body": "before"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "POST {path}: {body:?}");
+    }
+
+    let app_pool = project_harness::app_pool(&harness).await;
+    let app_role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&app_pool)
+        .await
+        .unwrap();
+    app_pool.close().await;
+    let role = format!("\"{}\"", app_role.replace('"', "\"\""));
+    // The project permission check reads project_members after the parent
+    // lookup; nothing earlier on these paths does.
+    sqlx::query(&format!(
+        "REVOKE SELECT ON fvoci.project_members FROM {role}"
+    ))
+    .execute(&admin)
+    .await
+    .unwrap();
+    let comments_before = count_rows(&admin, "comments").await;
+    for path in &paths {
+        let (status, body) = json_request(app.clone(), "GET", path, None, Some(&cookie)).await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "GET {path}: {body:?}"
+        );
+        assert_eq!(body["code"], "internal_error", "GET {path}: {body:?}");
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            path,
+            Some(json!({"body": "lost"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "POST {path}: {body:?}"
+        );
+        assert_eq!(body["code"], "internal_error", "POST {path}: {body:?}");
+    }
+    assert_eq!(count_rows(&admin, "comments").await, comments_before);
+
+    sqlx::query(&format!("GRANT SELECT ON fvoci.project_members TO {role}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    for path in &paths {
+        let (status, body) = json_request(app.clone(), "GET", path, None, Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "GET {path}: {body:?}");
+        assert_eq!(body["items"].as_array().map(Vec::len), Some(1), "{body:?}");
+    }
+    admin.close().await;
+    harness.cleanup().await;
+}

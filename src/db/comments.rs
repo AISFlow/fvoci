@@ -24,21 +24,14 @@ const MENTION_MAX: usize = 50;
 const REACTION_TRIES: usize = 8;
 const VALID_REACTIONS: &[&str] = &["👍", "❤️", "🎉"];
 
+/// Unwraps a helper's inner result, returning its refusal as `Ok(Err(_))`.
+/// Database errors travel in the outer `Result` (`?`) and reach the route as a
+/// logged 500; only refusals become `CommentDbError`.
 macro_rules! commit_comment {
     ($expr:expr) => {
         match $expr {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
-        }
-    };
-}
-
-macro_rules! comment_result {
-    ($expr:expr) => {
-        match $expr {
-            Ok(value) => value,
-            Err(sqlx::Error::RowNotFound) => return Ok(Err(CommentDbError::NotFound)),
-            Err(error) => return Err(error),
         }
     };
 }
@@ -264,11 +257,12 @@ enum ParentTarget {
     Task(TaskTarget),
 }
 
+/// The live document, or `None` when it is missing or trashed.
 async fn document_target(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     document_id: Uuid,
-) -> Result<DocumentTarget, sqlx::Error> {
+) -> Result<Option<DocumentTarget>, sqlx::Error> {
     let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
         "SELECT project_id, deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
     )
@@ -276,20 +270,21 @@ async fn document_target(
     .bind(document_id)
     .fetch_optional(&mut **tx)
     .await?;
-    match row {
-        Some((project_id, None)) => Ok(DocumentTarget {
+    Ok(match row {
+        Some((project_id, None)) => Some(DocumentTarget {
             document_id,
             project_id,
         }),
-        _ => Err(sqlx::Error::RowNotFound),
-    }
+        _ => None,
+    })
 }
 
+/// The live task, or `None` when it is missing or trashed.
 async fn task_target(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     task_id: Uuid,
-) -> Result<TaskTarget, sqlx::Error> {
+) -> Result<Option<TaskTarget>, sqlx::Error> {
     type TaskTargetRow = (Uuid, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
     let row: Option<TaskTargetRow> = sqlx::query_as(
         "SELECT project_id, deleted_at, archived_at FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2",
@@ -298,34 +293,33 @@ async fn task_target(
     .bind(task_id)
     .fetch_optional(&mut **tx)
     .await?;
-    match row {
-        Some((project_id, None, archived_at)) => Ok(TaskTarget {
+    Ok(match row {
+        Some((project_id, None, archived_at)) => Some(TaskTarget {
             task_id,
             project_id,
             archived_at,
         }),
-        _ => Err(sqlx::Error::RowNotFound),
-    }
+        _ => None,
+    })
 }
 
 async fn target_of_comment(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     comment: &CommentRow,
-) -> Result<ParentTarget, CommentDbError> {
-    if let Some(document_id) = comment.document_id {
-        return document_target(tx, workspace_id, document_id)
-            .await
+) -> Result<Result<ParentTarget, CommentDbError>, sqlx::Error> {
+    let target = if let Some(document_id) = comment.document_id {
+        document_target(tx, workspace_id, document_id)
+            .await?
             .map(ParentTarget::Document)
-            .map_err(|_| CommentDbError::NotFound);
-    }
-    if let Some(task_id) = comment.task_id {
-        return task_target(tx, workspace_id, task_id)
-            .await
+    } else if let Some(task_id) = comment.task_id {
+        task_target(tx, workspace_id, task_id)
+            .await?
             .map(ParentTarget::Task)
-            .map_err(|_| CommentDbError::NotFound);
-    }
-    Err(CommentDbError::NotFound)
+    } else {
+        None
+    };
+    Ok(target.ok_or(CommentDbError::NotFound))
 }
 
 fn map_document_error(_err: DocumentDbError) -> CommentDbError {
@@ -340,25 +334,22 @@ async fn require_wiki_document_access(
     document: &DocumentTarget,
     min: ProjectPermission,
     writable: bool,
-) -> Result<(), CommentDbError> {
+) -> Result<Result<(), CommentDbError>, sqlx::Error> {
     if document.project_id.is_some() {
-        return Err(CommentDbError::NotFound);
+        return Ok(Err(CommentDbError::NotFound));
     }
     // Single wiki document permission path (db::documents::document_permission).
     let permission =
-        document_permission(tx, workspace_id, actor_user_id, document.document_id, true)
-            .await
-            .map_err(|_| CommentDbError::NotFound)?;
+        document_permission(tx, workspace_id, actor_user_id, document.document_id, true).await?;
     if !permission.at_least(min) || permission == ProjectPermission::None {
-        return Err(CommentDbError::NotFound);
+        return Ok(Err(CommentDbError::NotFound));
     }
     if writable {
-        let writable = assert_document_writable(tx, workspace_id, document.document_id, None)
-            .await
-            .map_err(|_| CommentDbError::NotFound)?;
-        writable.map_err(map_document_error)?;
+        let writable =
+            assert_document_writable(tx, workspace_id, document.document_id, None).await?;
+        commit_comment!(writable.map_err(map_document_error));
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// The parent's live project row: locked for a comment write, so a concurrent
@@ -386,34 +377,30 @@ async fn require_project_document_access(
     document: &DocumentTarget,
     min: ProjectPermission,
     writable: bool,
-) -> Result<(), CommentDbError> {
+) -> Result<Result<(), CommentDbError>, sqlx::Error> {
     let Some(project_id) = document.project_id else {
-        return Err(CommentDbError::NotFound);
+        return Ok(Err(CommentDbError::NotFound));
     };
     if expected_project_id.is_some_and(|expected| expected != project_id) {
-        return Err(CommentDbError::NotFound);
+        return Ok(Err(CommentDbError::NotFound));
     }
-    let locked = parent_project(tx, workspace_id, project_id, writable)
-        .await
-        .map_err(|_| CommentDbError::NotFound)?
-        .ok_or(CommentDbError::NotFound)?;
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked)
-        .await
-        .map_err(|_| CommentDbError::NotFound)?;
+    let Some(project) = parent_project(tx, workspace_id, project_id, writable).await? else {
+        return Ok(Err(CommentDbError::NotFound));
+    };
+    let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(min) {
-        return Err(CommentDbError::NotFound);
+        return Ok(Err(CommentDbError::NotFound));
     }
     if writable {
-        if locked.status == "archived" {
-            return Err(CommentDbError::ProjectArchived);
+        if project.status == "archived" {
+            return Ok(Err(CommentDbError::ProjectArchived));
         }
         let writable =
             assert_document_writable(tx, workspace_id, document.document_id, Some(project_id))
-                .await
-                .map_err(|_| CommentDbError::NotFound)?;
-        writable.map_err(map_document_error)?;
+                .await?;
+        commit_comment!(writable.map_err(map_document_error));
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 async fn require_task_access(
@@ -423,35 +410,32 @@ async fn require_task_access(
     task: &TaskTarget,
     min: ProjectPermission,
     writable: bool,
-) -> Result<(), CommentDbError> {
-    let locked = parent_project(tx, workspace_id, task.project_id, writable)
-        .await
-        .map_err(|_| CommentDbError::NotFound)?
-        .ok_or(CommentDbError::NotFound)?;
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked)
-        .await
-        .map_err(|_| CommentDbError::NotFound)?;
+) -> Result<Result<(), CommentDbError>, sqlx::Error> {
+    let Some(project) = parent_project(tx, workspace_id, task.project_id, writable).await? else {
+        return Ok(Err(CommentDbError::NotFound));
+    };
+    let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(min) {
-        return Err(CommentDbError::NotFound);
+        return Ok(Err(CommentDbError::NotFound));
     }
     if writable {
-        if locked.status == "archived" {
-            return Err(CommentDbError::ProjectArchived);
+        if project.status == "archived" {
+            return Ok(Err(CommentDbError::ProjectArchived));
         }
         // `task` was read before the project lock. Task trash, restore and
         // archive take this project lock before changing the task row, so a
         // fresh read now sees any of them that committed while we waited.
-        let current = task_target(tx, workspace_id, task.task_id)
-            .await
-            .map_err(|_| CommentDbError::NotFound)?;
+        let Some(current) = task_target(tx, workspace_id, task.task_id).await? else {
+            return Ok(Err(CommentDbError::NotFound));
+        };
         if current.project_id != task.project_id {
-            return Err(CommentDbError::NotFound);
+            return Ok(Err(CommentDbError::NotFound));
         }
         if current.archived_at.is_some() {
-            return Err(CommentDbError::TaskArchived);
+            return Ok(Err(CommentDbError::TaskArchived));
         }
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 async fn require_parent_access(
@@ -461,7 +445,7 @@ async fn require_parent_access(
     target: &ParentTarget,
     min: ProjectPermission,
     writable: bool,
-) -> Result<(), CommentDbError> {
+) -> Result<Result<(), CommentDbError>, sqlx::Error> {
     match target {
         ParentTarget::Document(doc) => {
             if doc.project_id.is_some() {
@@ -493,19 +477,21 @@ async fn require_author_or_level(
     comment: &CommentRow,
     min: ProjectPermission,
     writable: bool,
-) -> Result<(), CommentDbError> {
-    let target = target_of_comment(tx, workspace_id, comment).await?;
-    require_parent_access(
-        tx,
-        workspace_id,
-        actor_user_id,
-        &target,
-        ProjectPermission::View,
-        writable,
-    )
-    .await?;
+) -> Result<Result<(), CommentDbError>, sqlx::Error> {
+    let target = commit_comment!(target_of_comment(tx, workspace_id, comment).await?);
+    commit_comment!(
+        require_parent_access(
+            tx,
+            workspace_id,
+            actor_user_id,
+            &target,
+            ProjectPermission::View,
+            writable,
+        )
+        .await?
+    );
     if comment.created_by == actor_user_id {
-        return Ok(());
+        return Ok(Ok(()));
     }
     require_parent_access(tx, workspace_id, actor_user_id, &target, min, writable).await
 }
@@ -662,36 +648,33 @@ async fn comment_page(
     kind: &str,
     target_id: Uuid,
     query: CommentListQuery,
-) -> Result<CommentListPage, CommentDbError> {
+) -> Result<Result<CommentListPage, CommentDbError>, sqlx::Error> {
     if !(1..=100).contains(&query.limit) {
-        return Err(CommentDbError::InvalidInput);
+        return Ok(Err(CommentDbError::InvalidInput));
     }
     let limit = query.limit;
     let scope = comment_scope(workspace_id, kind, target_id);
     let after = if let Some(cursor) = &query.cursor {
         if cursor.len() > 1024 {
-            return Err(CommentDbError::InvalidInput);
+            return Ok(Err(CommentDbError::InvalidInput));
         }
-        let id = decode_cursor(cursor, &scope)?;
-        let anchor = fetch_comment(tx, workspace_id, id)
-            .await
-            .map_err(|_| CommentDbError::NotFound)?
-            .ok_or(CommentDbError::InvalidCursor)?;
+        let id = commit_comment!(decode_cursor(cursor, &scope));
+        let Some(anchor) = fetch_comment(tx, workspace_id, id).await? else {
+            return Ok(Err(CommentDbError::InvalidCursor));
+        };
         let matches = match kind {
             "document" => anchor.document_id == Some(target_id),
             "task" => anchor.task_id == Some(target_id),
             _ => false,
         };
         if !matches {
-            return Err(CommentDbError::InvalidCursor);
+            return Ok(Err(CommentDbError::InvalidCursor));
         }
         Some(id)
     } else {
         None
     };
-    let rows = list_rows(tx, workspace_id, kind, target_id, limit + 1, after)
-        .await
-        .map_err(|_| CommentDbError::NotFound)?;
+    let rows = list_rows(tx, workspace_id, kind, target_id, limit + 1, after).await?;
     let has_more = rows.len() > limit as usize;
     let items = rows.into_iter().take(limit as usize).collect::<Vec<_>>();
     let next_cursor = if has_more {
@@ -699,7 +682,7 @@ async fn comment_page(
     } else {
         None
     };
-    Ok(CommentListPage { items, next_cursor })
+    Ok(Ok(CommentListPage { items, next_cursor }))
 }
 
 async fn insert_comment(
@@ -822,24 +805,22 @@ pub async fn list_document_comments(
         tx.rollback().await?;
         return Ok(Err(CommentDbError::NotFound));
     }
-    let target = comment_result!(document_target(&mut tx, workspace_id, document_id).await);
-    match require_wiki_document_access(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        &target,
-        ProjectPermission::View,
-        false,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
-    let page = match comment_page(&mut tx, workspace_id, "document", document_id, query).await {
-        Ok(value) => value,
-        Err(err) => return Ok(Err(err)),
+    let Some(target) = document_target(&mut tx, workspace_id, document_id).await? else {
+        return Ok(Err(CommentDbError::NotFound));
     };
+    commit_comment!(
+        require_wiki_document_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            &target,
+            ProjectPermission::View,
+            false,
+        )
+        .await?
+    );
+    let page =
+        commit_comment!(comment_page(&mut tx, workspace_id, "document", document_id, query).await?);
     tx.commit().await?;
     Ok(Ok(page))
 }
@@ -862,24 +843,21 @@ pub async fn list_task_comments(
         tx.rollback().await?;
         return Ok(Err(CommentDbError::NotFound));
     }
-    let target = comment_result!(task_target(&mut tx, workspace_id, task_id).await);
-    match require_parent_access(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        &ParentTarget::Task(target),
-        ProjectPermission::View,
-        false,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
-    let page = match comment_page(&mut tx, workspace_id, "task", task_id, query).await {
-        Ok(value) => value,
-        Err(err) => return Ok(Err(err)),
+    let Some(target) = task_target(&mut tx, workspace_id, task_id).await? else {
+        return Ok(Err(CommentDbError::NotFound));
     };
+    commit_comment!(
+        require_parent_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            &ParentTarget::Task(target),
+            ProjectPermission::View,
+            false,
+        )
+        .await?
+    );
+    let page = commit_comment!(comment_page(&mut tx, workspace_id, "task", task_id, query).await?);
     tx.commit().await?;
     Ok(Ok(page))
 }
@@ -895,20 +873,20 @@ pub async fn create_document_comment(
 ) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
     let mut tx =
         commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
-    let target = comment_result!(document_target(&mut tx, workspace_id, document_id).await);
-    match require_wiki_document_access(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        &target,
-        ProjectPermission::Edit,
-        true,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
+    let Some(target) = document_target(&mut tx, workspace_id, document_id).await? else {
+        return Ok(Err(CommentDbError::NotFound));
+    };
+    commit_comment!(
+        require_wiki_document_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            &target,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+    );
     let created = match insert_comment(
         &mut tx,
         workspace_id,
@@ -946,25 +924,23 @@ pub async fn list_project_document_comments(
         tx.rollback().await?;
         return Ok(Err(CommentDbError::NotFound));
     }
-    let target = comment_result!(document_target(&mut tx, workspace_id, document_id).await);
-    match require_project_document_access(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        Some(project_id),
-        &target,
-        ProjectPermission::View,
-        false,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
-    let page = match comment_page(&mut tx, workspace_id, "document", document_id, query).await {
-        Ok(value) => value,
-        Err(err) => return Ok(Err(err)),
+    let Some(target) = document_target(&mut tx, workspace_id, document_id).await? else {
+        return Ok(Err(CommentDbError::NotFound));
     };
+    commit_comment!(
+        require_project_document_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            Some(project_id),
+            &target,
+            ProjectPermission::View,
+            false,
+        )
+        .await?
+    );
+    let page =
+        commit_comment!(comment_page(&mut tx, workspace_id, "document", document_id, query).await?);
     tx.commit().await?;
     Ok(Ok(page))
 }
@@ -981,21 +957,21 @@ pub async fn create_project_document_comment(
     let (project_id, document_id) = project_and_document;
     let mut tx =
         commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
-    let target = comment_result!(document_target(&mut tx, workspace_id, document_id).await);
-    match require_project_document_access(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        Some(project_id),
-        &target,
-        ProjectPermission::Edit,
-        true,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
+    let Some(target) = document_target(&mut tx, workspace_id, document_id).await? else {
+        return Ok(Err(CommentDbError::NotFound));
+    };
+    commit_comment!(
+        require_project_document_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            Some(project_id),
+            &target,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+    );
     let created = match insert_comment(
         &mut tx,
         workspace_id,
@@ -1031,7 +1007,7 @@ pub async fn comment_write_kind(
         tx.rollback().await?;
         return Ok(Err(CommentDbError::NotFound));
     }
-    let comment = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let comment = fetch_comment(&mut tx, workspace_id, comment_id).await?;
     let Some(comment) = comment else {
         return Ok(Err(CommentDbError::NotFound));
     };
@@ -1057,20 +1033,20 @@ pub async fn create_task_comment(
 ) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
     let mut tx =
         commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
-    let target = comment_result!(task_target(&mut tx, workspace_id, task_id).await);
-    match require_parent_access(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        &ParentTarget::Task(target),
-        ProjectPermission::Edit,
-        true,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
+    let Some(target) = task_target(&mut tx, workspace_id, task_id).await? else {
+        return Ok(Err(CommentDbError::NotFound));
+    };
+    commit_comment!(
+        require_parent_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            &ParentTarget::Task(target),
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+    );
     let created = match insert_comment(
         &mut tx,
         workspace_id,
@@ -1100,24 +1076,22 @@ pub async fn update_comment(
 ) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
     let mut tx =
         commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
-    let comment = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let comment = fetch_comment(&mut tx, workspace_id, comment_id).await?;
     let comment = match comment {
         Some(value) => value,
         None => return Ok(Err(CommentDbError::NotFound)),
     };
-    match require_author_or_level(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        &comment,
-        ProjectPermission::Edit,
-        true,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
+    commit_comment!(
+        require_author_or_level(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            &comment,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+    );
     if let Some(body) = input.body {
         let body = match normalize_body(body) {
             Ok(value) => value,
@@ -1145,7 +1119,7 @@ pub async fn update_comment(
             .await?;
         }
     }
-    let updated = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let updated = fetch_comment(&mut tx, workspace_id, comment_id).await?;
     let updated = match updated {
         Some(value) => value,
         None => return Ok(Err(CommentDbError::NotFound)),
@@ -1164,24 +1138,22 @@ pub async fn purge_comment(
 ) -> Result<Result<(), CommentDbError>, sqlx::Error> {
     let mut tx =
         commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
-    let comment = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let comment = fetch_comment(&mut tx, workspace_id, comment_id).await?;
     let comment = match comment {
         Some(value) => value,
         None => return Ok(Err(CommentDbError::NotFound)),
     };
-    match require_author_or_level(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        &comment,
-        ProjectPermission::Manage,
-        true,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
+    commit_comment!(
+        require_author_or_level(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            &comment,
+            ProjectPermission::Manage,
+            true,
+        )
+        .await?
+    );
     if lock_comment(&mut tx, workspace_id, comment_id)
         .await?
         .is_none()
@@ -1216,7 +1188,7 @@ pub async fn resolve_comment(
 ) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
     let mut tx =
         commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
-    let comment = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let comment = fetch_comment(&mut tx, workspace_id, comment_id).await?;
     let comment = match comment {
         Some(value) => value,
         None => return Ok(Err(CommentDbError::NotFound)),
@@ -1224,23 +1196,18 @@ pub async fn resolve_comment(
     if comment.parent_id.is_some() {
         return Ok(Err(CommentDbError::InvalidInput));
     }
-    let target = match target_of_comment(&mut tx, workspace_id, &comment).await {
-        Ok(value) => value,
-        Err(err) => return Ok(Err(err)),
-    };
-    match require_parent_access(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        &target,
-        ProjectPermission::Edit,
-        true,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
+    let target = commit_comment!(target_of_comment(&mut tx, workspace_id, &comment).await?);
+    commit_comment!(
+        require_parent_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            &target,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+    );
     sqlx::query(
         "UPDATE fvoci.comments SET resolved_at = now(), updated_at = now() WHERE workspace_id = $1 AND id = $2",
     )
@@ -1262,7 +1229,7 @@ pub async fn resolve_comment(
         client_ip,
     )
     .await?;
-    let updated = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let updated = fetch_comment(&mut tx, workspace_id, comment_id).await?;
     let updated = match updated {
         Some(value) => value,
         None => return Ok(Err(CommentDbError::NotFound)),
@@ -1281,7 +1248,7 @@ pub async fn unresolve_comment(
 ) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
     let mut tx =
         commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
-    let comment = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let comment = fetch_comment(&mut tx, workspace_id, comment_id).await?;
     let comment = match comment {
         Some(value) => value,
         None => return Ok(Err(CommentDbError::NotFound)),
@@ -1289,23 +1256,18 @@ pub async fn unresolve_comment(
     if comment.parent_id.is_some() {
         return Ok(Err(CommentDbError::InvalidInput));
     }
-    let target = match target_of_comment(&mut tx, workspace_id, &comment).await {
-        Ok(value) => value,
-        Err(err) => return Ok(Err(err)),
-    };
-    match require_parent_access(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        &target,
-        ProjectPermission::Edit,
-        true,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
+    let target = commit_comment!(target_of_comment(&mut tx, workspace_id, &comment).await?);
+    commit_comment!(
+        require_parent_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            &target,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+    );
     let comment = match lock_comment(&mut tx, workspace_id, comment_id).await? {
         Some(value) => value,
         None => return Ok(Err(CommentDbError::NotFound)),
@@ -1328,7 +1290,7 @@ pub async fn unresolve_comment(
         )
         .await?;
     }
-    let updated = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let updated = fetch_comment(&mut tx, workspace_id, comment_id).await?;
     let updated = match updated {
         Some(value) => value,
         None => return Ok(Err(CommentDbError::NotFound)),
@@ -1380,28 +1342,23 @@ pub async fn set_comment_reaction(
     }
     let mut tx =
         commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
-    let comment = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let comment = fetch_comment(&mut tx, workspace_id, comment_id).await?;
     let comment = match comment {
         Some(value) => value,
         None => return Ok(Err(CommentDbError::NotFound)),
     };
-    let target = match target_of_comment(&mut tx, workspace_id, &comment).await {
-        Ok(value) => value,
-        Err(err) => return Ok(Err(err)),
-    };
-    match require_parent_access(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        &target,
-        ProjectPermission::View,
-        true,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => return Ok(Err(err)),
-    }
+    let target = commit_comment!(target_of_comment(&mut tx, workspace_id, &comment).await?);
+    commit_comment!(
+        require_parent_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            &target,
+            ProjectPermission::View,
+            true,
+        )
+        .await?
+    );
     let mut current = comment;
     for _ in 0..REACTION_TRIES {
         let mut next = reactions_map(&current.reactions);
@@ -1443,7 +1400,7 @@ pub async fn set_comment_reaction(
                 )
                 .await?;
             }
-            let updated = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+            let updated = fetch_comment(&mut tx, workspace_id, comment_id).await?;
             let updated = match updated {
                 Some(value) => value,
                 None => return Ok(Err(CommentDbError::NotFound)),
@@ -1451,7 +1408,7 @@ pub async fn set_comment_reaction(
             tx.commit().await?;
             return Ok(Ok(updated));
         }
-        current = match comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await) {
+        current = match fetch_comment(&mut tx, workspace_id, comment_id).await? {
             Some(value) => value,
             None => return Ok(Err(CommentDbError::NotFound)),
         };
