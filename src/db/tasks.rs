@@ -539,8 +539,9 @@ async fn default_backlog_status(
 
 /// Serializes WIP-limit checks per target status (transaction-scoped). It
 /// used to share 1_907_002 with attachment storage. Renumbering is safe:
-/// servers of different versions never run against one database (RUNNING.md:
-/// stop old, migrate, start new; mixed-version rolling restart is unsupported).
+/// servers of different versions are not supported against one database
+/// (RUNNING.md: stop old, migrate, start new; mixed-version rolling restart is
+/// unsupported).
 pub(crate) const TASK_STATUS_LOCK_NAMESPACE: i32 = 1_907_003;
 
 fn violates_task_hierarchy(child_type: &str, parent_type: &str) -> bool {

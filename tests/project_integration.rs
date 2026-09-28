@@ -2924,9 +2924,11 @@ async fn paused_task_list_read_holds_no_transaction_id() {
 }
 
 /// Backlink reads scan the body of every live document and task in the
-/// workspace. A scan that does not finish (here it waits behind a table lock
-/// on `fvoci.tasks`) ends at the 15 s statement timeout with a 500 instead of
-/// holding a pool connection and its snapshot for as long as it runs.
+/// workspace. With a table lock held on `fvoci.tasks`, the document read
+/// reaches its task body scan and the task read blocks earlier on its task
+/// lookup; both end at the per-transaction 15 s statement timeout with a 500
+/// instead of holding a pool connection and its snapshot for as long as they
+/// wait.
 #[tokio::test]
 async fn backlink_scans_end_at_the_statement_timeout() {
     let harness = TestDb::bootstrap().await;
