@@ -353,6 +353,33 @@ test("task list uses server statusCounts and paginates without duplicate rows", 
   const serverCount = firstPage.statusCounts.find((row) => row.statusId === backlog.id)?.count;
   expect(serverCount).toBe(created);
 
+  // Hold the project stream until "load more" is in flight, and the second page
+  // until the stream has opened, so the stream's `open` resync lands while the
+  // page loads: the order that dropped the requested page in CI.
+  const streamPath = `/api/v1/workspaces/${id}/projects/${project.id}/stream`;
+  let loadMoreSent!: () => void;
+  const loadMoreInFlight = new Promise<void>((resolve) => {
+    loadMoreSent = resolve;
+  });
+  await page.route((url) => url.pathname === streamPath, async (route) => {
+    await loadMoreInFlight;
+    await route.continue();
+  });
+  let secondPageHeld = false;
+  await page.route(
+    (url) => url.pathname === listUrl && url.searchParams.has("cursor"),
+    async (route) => {
+      if (secondPageHeld) return route.continue();
+      secondPageHeld = true;
+      const streamOpened = page.waitForResponse(
+        (response) => new URL(response.url()).pathname === streamPath,
+      );
+      loadMoreSent();
+      await streamOpened;
+      await route.continue();
+    },
+  );
+
   await page.goto("/w/acme/PAG/tasks");
   await expect(page.getByRole("heading", { name: "Pages" })).toBeVisible();
   const countBadge = page.locator(".task-status__count").first();

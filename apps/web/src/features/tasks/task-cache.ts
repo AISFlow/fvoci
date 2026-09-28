@@ -1,5 +1,23 @@
 import type { QueryClient } from "@tanstack/react-query";
 
+/**
+ * Refetch the project task list without cancelling an in-flight "load more".
+ * The default `cancelRefetch` would silently drop the requested page and refetch
+ * only the pages already loaded, so the click does nothing. Instead, let the
+ * running fetch finish, then refetch every loaded page so the hint still applies.
+ */
+async function invalidateTaskList(
+  queryClient: QueryClient,
+  workspaceId: string,
+  projectId: string,
+): Promise<void> {
+  const filters = { queryKey: ["tasks", workspaceId, projectId] };
+  const inFlight = queryClient.isFetching(filters) > 0;
+  await queryClient.invalidateQueries(filters, { cancelRefetch: false });
+  // A fetch that was running joined the call above and may predate the hint.
+  if (inFlight) await queryClient.invalidateQueries(filters, { cancelRefetch: false });
+}
+
 export async function invalidateTaskCaches(
   queryClient: QueryClient,
   workspaceId: string,
@@ -10,7 +28,7 @@ export async function invalidateTaskCaches(
     queryClient.invalidateQueries({ queryKey: ["task", workspaceId, taskId] }),
     queryClient.invalidateQueries({ queryKey: ["task-activity", workspaceId, taskId] }),
     queryClient.invalidateQueries({ queryKey: ["task-layout", workspaceId, projectId] }),
-    queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId, projectId] }),
+    invalidateTaskList(queryClient, workspaceId, projectId),
     queryClient.invalidateQueries({ queryKey: ["project-collection", workspaceId, projectId] }),
     queryClient.invalidateQueries({ queryKey: ["collection", workspaceId] }),
     queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] }),
@@ -23,7 +41,7 @@ export function invalidateTaskStreamResyncCaches(
   projectId: string,
 ): void {
   void queryClient.invalidateQueries({ queryKey: ["task-layout", workspaceId, projectId] });
-  void queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId, projectId] });
+  void invalidateTaskList(queryClient, workspaceId, projectId);
   void queryClient.invalidateQueries({ queryKey: ["project-collection", workspaceId, projectId] });
   void queryClient.invalidateQueries({ queryKey: ["collection", workspaceId] });
   void queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] });
