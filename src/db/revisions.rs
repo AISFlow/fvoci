@@ -3,7 +3,9 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{begin_read, session_is_live, set_system, set_tenant};
+use crate::db::context::{
+    begin_read, lock_membership_users, recheck_session, session_is_live, set_system, set_tenant,
+};
 use crate::db::documents::workspace_is_live;
 use crate::db::identity::{append_event, EventAppend};
 use crate::db::projects::{load_live_project, project_permission, share_lock_project_permission};
@@ -782,6 +784,15 @@ pub async fn create_manual_revision(
     let target = scope.target;
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
+    // Writer prologue, before the project share lock `authorize_target` takes
+    // (membership lock -> credential rows -> project, the order every project
+    // writer uses): a logout, token revocation, suspension or member removal
+    // that commits while this waits is seen instead of missed.
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::Forbidden));
+    }
     match authorize_target(
         &mut tx,
         workspace_id,

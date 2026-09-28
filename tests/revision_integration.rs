@@ -3139,3 +3139,349 @@ async fn scheduled_revision_continues_past_empty_workspaces() {
     )
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// Manual revision creation is fenced against credential and member revocation
+// ---------------------------------------------------------------------------
+
+async fn admin_pool_of(harness: &support::TestDb) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap()
+}
+
+/// Pid of the backend running a statement like `query_like` that waits on a
+/// lock held by `blocker_pid`.
+async fn wait_for_revision_write_blocked(
+    admin: &PgPool,
+    blocker_pid: i32,
+    query_like: &str,
+) -> i32 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        let blocked: Option<i32> = sqlx::query_scalar(
+            r#"
+            SELECT activity.pid
+            FROM pg_stat_activity AS activity
+            WHERE activity.datname = current_database()
+              AND activity.wait_event_type = 'Lock'
+              AND activity.state = 'active'
+              AND activity.query ILIKE $2
+              AND $1 = ANY(pg_blocking_pids(activity.pid))
+            LIMIT 1
+            "#,
+        )
+        .bind(blocker_pid)
+        .bind(query_like)
+        .fetch_optional(admin)
+        .await
+        .unwrap();
+        if let Some(pid) = blocked {
+            return pid;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the manual revision write never waited on {query_like} held by pid {blocker_pid}");
+}
+
+async fn count_target_revisions(admin: &PgPool, workspace_id: Uuid, target_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.revisions WHERE workspace_id = $1 AND target_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(target_id)
+    .fetch_one(admin)
+    .await
+    .unwrap()
+}
+
+async fn hold_users_row(
+    admin: &PgPool,
+    user_id: Uuid,
+) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let mut barrier = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
+        .bind(user_id)
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    (barrier, pid)
+}
+
+/// A logout that commits while a manual revision POST waits on the actor's
+/// credential row is seen by the write: 404 and no revision row.
+#[tokio::test]
+async fn manual_revision_refuses_session_revoked_while_waiting() {
+    run_test(
+        "manual_revision_refuses_session_revoked_while_waiting",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            append_outside_room(&wiki.session, wiki.document_id, "structured.v1").await;
+            let admin = admin_pool_of(&run.harness).await;
+            let workspace_id = wiki.session.workspace_id;
+            let before = count_target_revisions(&admin, workspace_id, wiki.document_id).await;
+
+            let (mut barrier, blocker_pid) = hold_users_row(&admin, wiki.session.user_id).await;
+            let path = revision_path(&wiki, "");
+            let token = wiki.session.session_token.clone();
+            let post = tokio::spawn(async move {
+                http_json(addr, reqwest::Method::POST, &path, &token, None).await
+            });
+            wait_for_revision_write_blocked(&admin, blocker_pid, "%fvoci.users%FOR UPDATE%").await;
+            sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE id = $1")
+                .bind(wiki.session.session_id)
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            barrier.commit().await.unwrap();
+
+            let (status, body) = tokio::time::timeout(Duration::from_secs(10), post)
+                .await
+                .expect("post finished")
+                .expect("join");
+            assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(
+                count_target_revisions(&admin, workspace_id, wiki.document_id).await,
+                before
+            );
+            admin.close().await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// Same fence for a task revision created with an API token (the token branch
+/// of the credential recheck): the token owner is suspended while the POST
+/// waits.
+#[tokio::test]
+async fn manual_task_revision_refuses_token_owner_suspended_while_waiting() {
+    run_test(
+        "manual_task_revision_refuses_token_owner_suspended_while_waiting",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let owner = setup_owner_session(&run.harness).await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let addr = run.spawn_router_state(state, hub.clone()).await;
+            let project = create_project(
+                &owner.pool,
+                owner.workspace_id,
+                owner.user_id,
+                owner.session_id,
+                CreateProjectInput {
+                    key: "REVPAT",
+                    name: "Revision token project",
+                    visibility: "workspace",
+                    description: None,
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+            .expect("create project")
+            .expect("ok");
+            let task = create_task(
+                &owner.pool,
+                owner.workspace_id,
+                project.id,
+                owner.user_id,
+                owner.session_id,
+                CreateTaskInput {
+                    title: "token revision task",
+                    task_type: "task",
+                    priority: "none",
+                    status_id: None,
+                    start_date: None,
+                    due_date: None,
+                    parent_id: None,
+                    milestone_id: None,
+                    recurrence: None,
+                },
+                None,
+                "api",
+            )
+            .await
+            .expect("create task")
+            .expect("ok");
+            let update = SeedEngine::from_hub(&hub)
+                .tiptap_to_yjs_update(&json!({
+                    "type": "doc",
+                    "content": [{
+                        "type": "paragraph",
+                        "attrs": {"id": "rev-pat-1"},
+                        "content": [{"type": "text", "text": "token revision body"}]
+                    }]
+                }))
+                .await
+                .expect("task seed update");
+            let claim = fvoci_server::db::collab::claim_writer_and_load_kind(
+                &owner.pool,
+                CollabKind::Task,
+                owner.workspace_id,
+                owner.user_id,
+                owner.session_id,
+                task.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let appended = fvoci_server::db::collab::append_collab_update_kind(
+                &owner.pool,
+                CollabKind::Task,
+                AppendCollabInput {
+                    workspace_id: owner.workspace_id,
+                    actor_user_id: owner.user_id,
+                    session_id: owner.session_id,
+                    document_id: task.id,
+                    writer_generation: claim.writer_generation,
+                    expected_tail_seq: claim.load.tail_seq,
+                    op_id: Uuid::now_v7(),
+                    payload: &update,
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(matches!(appended, AppendCollabResult::Committed { .. }));
+            let created = fvoci_server::db::api_tokens::create_api_token(
+                &owner.pool,
+                owner.workspace_id,
+                owner.user_id,
+                owner.session_id,
+                fvoci_server::db::api_tokens::CreateApiTokenInput {
+                    name: "revision writer",
+                    scopes: &[
+                        fvoci_server::auth::scopes::ApiTokenScope::TasksRead,
+                        fvoci_server::auth::scopes::ApiTokenScope::TasksWrite,
+                    ],
+                    unlimited: false,
+                    service: false,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("token");
+            let admin = admin_pool_of(&run.harness).await;
+            let before = count_target_revisions(&admin, owner.workspace_id, task.id).await;
+
+            let (mut barrier, blocker_pid) = hold_users_row(&admin, owner.user_id).await;
+            let url = format!(
+                "http://{addr}/api/v1/workspaces/{}/tasks/{}/revisions",
+                owner.workspace_id, task.id
+            );
+            let secret = created.token.clone();
+            let post = tokio::spawn(async move {
+                let response = reqwest::Client::new()
+                    .post(url)
+                    .header("origin", PUBLIC_ORIGIN)
+                    .header("authorization", format!("Bearer {secret}"))
+                    .send()
+                    .await
+                    .expect("http");
+                let status = response.status();
+                (
+                    status,
+                    response.json::<Value>().await.unwrap_or(Value::Null),
+                )
+            });
+            wait_for_revision_write_blocked(&admin, blocker_pid, "%fvoci.users%FOR UPDATE%").await;
+            sqlx::query("UPDATE fvoci.users SET suspended_at = now() WHERE id = $1")
+                .bind(owner.user_id)
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            barrier.commit().await.unwrap();
+
+            let (status, body) = tokio::time::timeout(Duration::from_secs(10), post)
+                .await
+                .expect("post finished")
+                .expect("join");
+            assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(
+                count_target_revisions(&admin, owner.workspace_id, task.id).await,
+                before
+            );
+            admin.close().await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// A member removal that holds the member's membership lock while a manual
+/// revision POST starts is serialized before the write: the POST waits, then
+/// sees the removal (404, no revision row).
+#[tokio::test]
+async fn manual_revision_refuses_member_removed_while_waiting() {
+    run_test(
+        "manual_revision_refuses_member_removed_while_waiting",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let workspace_id = wiki.session.workspace_id;
+            let member =
+                create_member_session(&run.harness, workspace_id, "rev-member@example.com").await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            append_outside_room(&wiki.session, wiki.document_id, "structured.v1").await;
+            let admin = admin_pool_of(&run.harness).await;
+            let before = count_target_revisions(&admin, workspace_id, wiki.document_id).await;
+
+            let mut barrier = admin.begin().await.unwrap();
+            sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+                .bind(fvoci_server::db::context::MEMBERSHIP_LOCK_NAMESPACE)
+                .bind(fvoci_server::db::context::lock_key_from_uuid(
+                    member.user_id,
+                ))
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *barrier)
+                .await
+                .unwrap();
+            let path = revision_path(&wiki, "");
+            let token = member.session_token.clone();
+            let post = tokio::spawn(async move {
+                http_json(addr, reqwest::Method::POST, &path, &token, None).await
+            });
+            wait_for_revision_write_blocked(&admin, blocker_pid, "%pg_advisory_xact_lock%").await;
+            sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
+                .bind(workspace_id)
+                .bind(member.user_id)
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            barrier.commit().await.unwrap();
+
+            let (status, body) = tokio::time::timeout(Duration::from_secs(10), post)
+                .await
+                .expect("post finished")
+                .expect("join");
+            assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(
+                count_target_revisions(&admin, workspace_id, wiki.document_id).await,
+                before
+            );
+            member.pool.close().await;
+            admin.close().await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
