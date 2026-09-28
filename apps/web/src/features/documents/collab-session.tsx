@@ -30,6 +30,7 @@ import {
 import {
 	blockIdOf,
 	CLAIM_RETRY_LIMIT,
+	collabStatusOf,
 	type CollabPeer,
 	type CollabSession,
 	type CollabStatus,
@@ -277,15 +278,7 @@ export function useCollabSession(
 			provider,
 			doc: provider.document,
 			fragment: provider.document.getXmlFragment(FVOCI_YDOC_FRAGMENT),
-			/* WHY: 소켓이 열리기만 해도 provider 는 connected 다. 방이 거절된 동안은 인증될 때까지
-			 * 거절 상태를 보여 준다 — 본문은 비어 있는 게 아니라 아직 불러오지 못한 것이다. */
-			status: unauthorized
-				? "unauthorized"
-				: refusal === "capacity"
-					? "busy"
-					: refusal === "unavailable"
-						? "unavailable"
-						: connectionStatus,
+			status: collabStatusOf(unauthorized, refusal, connectionStatus),
 			synced,
 			// WHY: #517 — readOnly 연결은 서버가 update 에 ack 를 주지 않아 카운터가 내려가지 않는다.
 			pending: unsent && !readOnly,

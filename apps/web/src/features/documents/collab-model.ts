@@ -11,6 +11,7 @@ import type {
 } from "@hocuspocus/provider";
 import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
+import type { CollabRefusal } from "./collab-reconnect";
 
 export type CollabStatus =
 	| "connecting"
@@ -21,6 +22,20 @@ export type CollabStatus =
 	| "busy"
 	/** Server refused the room before auth for another reason; retrying with backoff. */
 	| "unavailable";
+
+/* WHY: 소켓이 열리기만 해도 provider 는 connected 다. 방이 거절된 동안은 인증될 때까지 거절 상태를
+ * 보여 준다 — 본문은 비어 있는 게 아니라 아직 불러오지 못한 것이다. 권한 거부는 재시도로 풀리지 않으니
+ * 거절보다 앞서고, 거절이 없으면(거절이 아닌 close 가 지웠으면) 원래 연결 상태다. */
+export function collabStatusOf(
+	unauthorized: boolean,
+	refusal: CollabRefusal | null,
+	connectionStatus: "connecting" | "connected" | "disconnected",
+): CollabStatus {
+	if (unauthorized) return "unauthorized";
+	if (refusal === "capacity") return "busy";
+	if (refusal === "unavailable") return "unavailable";
+	return connectionStatus;
+}
 
 export interface CollabUser {
 	[key: string]: string;
