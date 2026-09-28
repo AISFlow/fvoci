@@ -2922,3 +2922,85 @@ async fn paused_task_list_read_holds_no_transaction_id() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// Backlink reads scan the body of every live document and task in the
+/// workspace. A scan that does not finish (here it waits behind a table lock
+/// on `fvoci.tasks`) ends at the 15 s statement timeout with a 500 instead of
+/// holding a pool connection and its snapshot for as long as it runs.
+#[tokio::test]
+async fn backlink_scans_end_at_the_statement_timeout() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, _, _) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let fx = project_read_fixture(&app, &admin).await;
+    let ws = format!("/api/v1/workspaces/{}", fx.workspace_id);
+    let document_backlinks = format!(
+        "{ws}/projects/{}/documents/{}/backlinks",
+        fx.project_id, fx.root_id
+    );
+    let paths = [
+        document_backlinks.clone(),
+        format!("{ws}/tasks/{}/backlinks", fx.task_id),
+    ];
+
+    let mut pause = admin.begin().await.unwrap();
+    sqlx::query("LOCK TABLE fvoci.tasks IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *pause)
+        .await
+        .unwrap();
+    let pause_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *pause)
+        .await
+        .unwrap();
+    let reads: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            let (app, path, cookie) = (app.clone(), path.clone(), fx.viewer.cookie.clone());
+            tokio::spawn(async move { json_request(app, "GET", &path, None, Some(&cookie)).await })
+        })
+        .collect();
+    // The document read has passed its permission check and reached the
+    // task body scan.
+    wait_for_blocked_by_holder(
+        &admin,
+        pause_pid,
+        Some("%jsonb_path_exists(t.content_json%"),
+        1,
+    )
+    .await;
+    wait_for_blocked_by_holder(&admin, pause_pid, None, paths.len()).await;
+
+    // Twice the statement timeout: a bounded read has ended well before.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut unbounded = Vec::new();
+    for (path, read) in paths.iter().zip(reads) {
+        match tokio::time::timeout_at(deadline, read).await {
+            Ok(joined) => {
+                let (status, body) = joined.expect("join");
+                assert_eq!(
+                    status,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "GET {path}: {body:?}"
+                );
+            }
+            Err(_) => unbounded.push(format!("GET {path}")),
+        }
+    }
+    pause.rollback().await.unwrap();
+    assert!(
+        unbounded.is_empty(),
+        "backlink scans still ran with fvoci.tasks locked for 30 s: {unbounded:#?}"
+    );
+
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &document_backlinks,
+        None,
+        Some(&fx.viewer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    admin.close().await;
+    harness.cleanup().await;
+}

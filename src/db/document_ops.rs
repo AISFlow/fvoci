@@ -267,6 +267,10 @@ pub async fn list_document_backlinks(
     document_id: Uuid,
 ) -> Result<Result<Vec<Backlink>, DocumentDbError>, sqlx::Error> {
     let mut tx = begin_read(pool).await?;
+    // Bounds the two body scans (JSONPath over every live document and task).
+    sqlx::query("SET LOCAL statement_timeout = '15s'")
+        .execute(&mut *tx)
+        .await?;
     set_tenant(&mut tx, workspace_id).await?;
     if let Err(err) = scoped_access(
         &mut tx,
