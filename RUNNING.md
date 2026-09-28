@@ -819,6 +819,24 @@ Container install workflow with `run_upgrade_smoke_arm=true`
 tested commit as `--main-ref`. The job being registered is not a result. Record the pair, image IDs,
 architecture and logs of a run with the change it supports; this guide does not.
 
+### Release images (0.x)
+
+Trial releases are published by `.github/workflows/release.yml` as
+`ghcr.io/aisflow/fvoci:0.y.z` (linux/amd64 and linux/arm64) with a GitHub
+pre-release holding `compose.yml` pinned to the image digest, `release.json`
+and `SHA256SUMS`; maintainer steps are in `docs/RELEASING.md`. Nothing updates
+an install on its own. To move a release install to a newer 0.y.z, back it up,
+check the new release's `SHA256SUMS`, replace `compose.yml` in the same
+directory (same Compose project name, so the same volumes) and run
+`docker compose up -d --wait`; the one-shot services migrate before the
+server starts, and a failure leaves the server stopped as described above.
+0.x releases make no compatibility promise between minor versions and there is
+no downgrade: going back means restoring the pre-upgrade backup.
+`docker compose down -v` deletes the data and the generated keys.
+`fvoci-server --version` (for example
+`docker compose exec server /opt/fvoci/bin/fvoci-server --version`) prints the
+version and source commit.
+
 ## Backup and restore
 
 This is the logical backup for the Compose install above (the source advanced
