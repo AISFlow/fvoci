@@ -15,6 +15,12 @@ const DIGEST_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(1
 /// Failed sends in a row, across batches, after which the sweep takes SMTP
 /// to be down and stops. A sent digest or a refusal of one recipient's
 /// mailbox resets the count: both show the relay is up and serving.
+///
+/// Known limitation: a row with nothing to send does not reset the count.
+/// Five recipients whose sends fail every day (a lasting 4xx such as
+/// `452 4.2.2` over quota, or a 5xx policy refusal), with only such rows
+/// between them, still end the walk. It ends at the same row every day, so
+/// the rows after it are not served while those recipients keep failing.
 const DIGEST_DOWN_STREAK: u32 = 5;
 
 #[derive(Debug, thiserror::Error)]
