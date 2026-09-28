@@ -4215,3 +4215,63 @@ async fn oidc_invitation_new_account_needs_the_verified_invited_email() {
     );
     h.finish().await;
 }
+
+// RFC 6238 appendix secret: steps 910737 and 910738 share one code.
+const RFC_SECRET: &[u8] = b"12345678901234567890";
+
+async fn insert_enabled_mfa(h: &Harness, user_id: Uuid, secret: &[u8]) {
+    let sealed = fvoci_server::secret_box::seal(
+        &encryption_keys(),
+        &hex::encode(secret),
+        &fvoci_server::identity::user_mfa_context(user_id),
+    )
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.user_mfa (user_id, totp_secret, enabled_at) VALUES ($1, $2, now())",
+    )
+    .bind(user_id)
+    .bind(sealed)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+}
+
+async fn mfa_challenge(h: &Harness, email: &str, from: SocketAddr) -> String {
+    let res = h.login(email, PASSWORD, from).await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    res.json["mfaToken"]
+        .as_str()
+        .expect("mfa token")
+        .to_string()
+}
+
+/// RFC 6238 §5.2: a code is accepted once. When two adjacent steps share a
+/// code, the newest one is the replay floor.
+#[tokio::test]
+async fn totp_code_shared_by_adjacent_steps_is_accepted_once() {
+    let h = Harness::start().await;
+    let (user_id, email, _cookie) = h.member("shared").await;
+    insert_enabled_mfa(&h, user_id, RFC_SECRET).await;
+    let code = totp::totp_code(RFC_SECRET, 910_738);
+    assert_eq!(code, totp::totp_code(RFC_SECRET, 910_737));
+    h.clock.store(910_738 * 30_000, Ordering::SeqCst);
+
+    let token = mfa_challenge(&h, &email, peer(180)).await;
+    let res = h.verify(&token, &code, peer(180)).await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    // One step later the same code (still in the window) is a replay.
+    h.advance_steps(1);
+    let token = mfa_challenge(&h, &email, peer(181)).await;
+    let res = h.verify(&token, &code, peer(181)).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{:?}", res.json);
+    assert_eq!(res.code(), "mfa_invalid");
+    let floor: Option<i32> =
+        sqlx::query_scalar("SELECT last_used_step FROM fvoci.user_mfa WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(floor, Some(910_738));
+    assert_eq!(h.login_methods(user_id).await, vec!["password", "totp"]);
+    h.finish().await;
+}
