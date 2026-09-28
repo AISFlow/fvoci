@@ -13,8 +13,9 @@
 //! a tenant, user, document or concrete request path.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
@@ -23,6 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::{Json, Router};
 use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
@@ -177,15 +179,30 @@ struct PoolLabels {
     state: &'static str,
 }
 
+/// A gauge that can say "unknown": `NaN` instead of a value that could be
+/// read as healthy.
+type FloatGauge = Gauge<f64, AtomicU64>;
+
+fn unknown_gauge() -> FloatGauge {
+    let gauge = FloatGauge::default();
+    gauge.set(f64::NAN);
+    gauge
+}
+
 /// Process-wide metrics and the `/metrics` access list.
 pub struct Observability {
     registry: Registry,
     http_duration: Family<HttpLabels, Histogram>,
-    outbox_lag: Gauge,
-    outbox_xmin_stall: Gauge,
+    outbox_lag: FloatGauge,
+    outbox_xmin_stall: FloatGauge,
+    db_refresh_last_success: FloatGauge,
+    db_refresh_failures: Counter,
     task_stream_subscribers: Gauge,
     db_pool_connections: Family<PoolLabels, Gauge>,
     db_pool_max_connections: Gauge,
+    process_rss: FloatGauge,
+    collab_helper_rss: Gauge,
+    collab_memory_budget: FloatGauge,
     allow: MetricsAllowList,
     outbox_consumers: Vec<String>,
     refresh_interval: Duration,
@@ -211,19 +228,34 @@ impl Observability {
             "HTTP request duration",
             http_duration.clone(),
         );
-        let outbox_lag = Gauge::default();
+        let outbox_lag = unknown_gauge();
         registry.register(
             "fvoci_outbox_lag_seconds",
             "Age in seconds of the oldest outbox event some consumer cursor has not \
-             passed, including events held behind a long-running transaction",
+             passed, including events held behind a long-running transaction; NaN \
+             until the first successful refresh and after a failed one",
             outbox_lag.clone(),
         );
-        let outbox_xmin_stall = Gauge::default();
+        let outbox_xmin_stall = unknown_gauge();
         registry.register(
             "fvoci_outbox_xmin_stall_seconds",
             "Age in seconds of the oldest transaction holding an xid in the \
-             PostgreSQL cluster; it holds back the snapshot xmin outbox delivery waits on",
+             PostgreSQL cluster; it holds back the snapshot xmin outbox delivery waits on; \
+             NaN until the first successful refresh and after a failed one",
             outbox_xmin_stall.clone(),
+        );
+        let db_refresh_last_success = FloatGauge::default();
+        registry.register(
+            "fvoci_db_metrics_last_success_timestamp_seconds",
+            "Unix time of the last successful refresh of the database-derived \
+             outbox gauges; 0 until the first one",
+            db_refresh_last_success.clone(),
+        );
+        let db_refresh_failures = Counter::default();
+        registry.register(
+            "fvoci_db_metrics_refresh_failures",
+            "Refreshes of the database-derived outbox gauges that failed or timed out",
+            db_refresh_failures.clone(),
         );
         let task_stream_subscribers = Gauge::default();
         registry.register(
@@ -234,23 +266,51 @@ impl Observability {
         let db_pool_connections = Family::<PoolLabels, Gauge>::default();
         registry.register(
             "fvoci_db_pool_connections",
-            "Application database pool connections by state",
+            "Connections of this server's application-role pool by state; not total \
+             PostgreSQL connections (collab room locks, other processes and servers \
+             are outside it)",
             db_pool_connections.clone(),
         );
         let db_pool_max_connections = Gauge::default();
         registry.register(
             "fvoci_db_pool_max_connections",
-            "Application database pool connection limit",
+            "Connection limit of this server's application-role pool",
             db_pool_max_connections.clone(),
+        );
+        let process_rss = unknown_gauge();
+        registry.register(
+            "fvoci_process_resident_memory_bytes",
+            "Observed resident memory (VmRSS) of the server process, helpers excluded; \
+             NaN when /proc/self/status is unreadable",
+            process_rss.clone(),
+        );
+        let collab_helper_rss = Gauge::default();
+        registry.register(
+            "fvoci_collab_helper_resident_memory_bytes",
+            "Observed resident memory (VmRSS) summed over live collaboration helper \
+             processes, the value collab admission compares with the budget",
+            collab_helper_rss.clone(),
+        );
+        let collab_memory_budget = unknown_gauge();
+        registry.register(
+            "fvoci_collab_helper_memory_budget_bytes",
+            "Configured aggregate helper memory budget (FVOCI_COLLAB_MEMORY_BUDGET); \
+             NaN when the collaboration engine is off",
+            collab_memory_budget.clone(),
         );
         Self {
             registry,
             http_duration,
             outbox_lag,
             outbox_xmin_stall,
+            db_refresh_last_success,
+            db_refresh_failures,
             task_stream_subscribers,
             db_pool_connections,
             db_pool_max_connections,
+            process_rss,
+            collab_helper_rss,
+            collab_memory_budget,
             allow: settings.allow,
             outbox_consumers: settings.outbox_consumers,
             refresh_interval: settings.refresh_interval,
@@ -269,22 +329,46 @@ impl Observability {
     }
 
     /// Database-derived values, at most once per `refresh_interval`;
-    /// concurrent scrapes wait for the one in flight. A failed query keeps
-    /// the last value: `/metrics` never answers 503 (source).
+    /// concurrent scrapes wait for the one in flight. A failed query sets
+    /// both gauges to NaN and counts the failure, so neither a stale nor a
+    /// zero value reads as healthy; `/metrics` still answers 200 (source).
     async fn refresh(&self, pool: &PgPool) {
         let mut last = self.last_refresh.lock().await;
         if last.is_some_and(|at| at.elapsed() < self.refresh_interval) {
             return;
         }
-        match tokio::time::timeout(CHECK_TIMEOUT, outbox_ages(pool, &self.outbox_consumers)).await {
-            Ok(Ok((lag, stall))) => {
-                self.outbox_lag.set(lag);
-                self.outbox_xmin_stall.set(stall);
+        let result =
+            tokio::time::timeout(CHECK_TIMEOUT, outbox_ages(pool, &self.outbox_consumers)).await;
+        self.record_refresh(match result {
+            Ok(Ok(ages)) => Some(ages),
+            Ok(Err(err)) => {
+                tracing::debug!(error = %err, "metrics: outbox lag query failed");
+                None
             }
-            Ok(Err(err)) => tracing::debug!(error = %err, "metrics: outbox lag query failed"),
-            Err(_) => tracing::debug!("metrics: outbox lag query timed out"),
-        }
+            Err(_) => {
+                tracing::debug!("metrics: outbox lag query timed out");
+                None
+            }
+        });
         *last = Some(Instant::now());
+    }
+
+    fn record_refresh(&self, ages: Option<(i64, i64)>) {
+        match ages {
+            Some((lag, stall)) => {
+                self.outbox_lag.set(lag as f64);
+                self.outbox_xmin_stall.set(stall as f64);
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(f64::NAN, |d| d.as_secs_f64());
+                self.db_refresh_last_success.set(now);
+            }
+            None => {
+                self.outbox_lag.set(f64::NAN);
+                self.outbox_xmin_stall.set(f64::NAN);
+                self.db_refresh_failures.inc();
+            }
+        }
     }
 
     fn sample_live(&self, state: &AppState) {
@@ -301,6 +385,23 @@ impl Observability {
             .set(i64::from(pool.options().get_max_connections()));
         self.task_stream_subscribers
             .set(i64::try_from(state.streams.active_count()).unwrap_or(i64::MAX));
+        self.process_rss.set(
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| vm_rss_bytes(&status))
+                .map_or(f64::NAN, |bytes| bytes as f64),
+        );
+        // The registry admission reads; a helper that exits mid-scrape is skipped.
+        self.collab_helper_rss.set(
+            i64::try_from(collab_engine::process::sum_live_children_rss_bytes())
+                .unwrap_or(i64::MAX),
+        );
+        self.collab_memory_budget.set(
+            state
+                .collab
+                .as_ref()
+                .map_or(f64::NAN, |hub| hub.config().memory_budget_bytes as f64),
+        );
     }
 
     fn encode(&self) -> Result<String, std::fmt::Error> {
@@ -308,6 +409,18 @@ impl Observability {
         prometheus_client::encoding::text::encode(&mut out, &self.registry)?;
         Ok(out)
     }
+}
+
+/// `VmRSS:` of a `/proc/<pid>/status` text, in bytes.
+fn vm_rss_bytes(status: &str) -> Option<u64> {
+    let kib: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    kib.checked_mul(1024)
 }
 
 /// Oldest undelivered event age across `consumers` (each has its own
@@ -490,6 +603,90 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    fn sample<'a>(body: &'a str, name: &str) -> &'a str {
+        body.lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+            .unwrap_or_else(|| panic!("{name} missing:\n{body}"))
+    }
+
+    #[test]
+    fn vm_rss_parses_kib_and_refuses_garbage() {
+        let status = "Name:\tfvoci\nVmPeak:\t  9 kB\nVmRSS:\t   2048 kB\nThreads:\t4\n";
+        assert_eq!(vm_rss_bytes(status), Some(2048 * 1024));
+        assert_eq!(vm_rss_bytes("Name:\tx\n"), None);
+        assert_eq!(vm_rss_bytes("VmRSS:\t  kB\n"), None);
+        assert_eq!(vm_rss_bytes("VmRSS:\t-1 kB\n"), None);
+        assert_eq!(vm_rss_bytes(&format!("VmRSS:\t{} kB\n", u64::MAX)), None);
+        let own = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert!(vm_rss_bytes(&own).unwrap() > 0);
+    }
+
+    /// Before any refresh the database-derived gauges are unknown (NaN) and
+    /// the success timestamp 0, never a healthy-looking 0 lag.
+    #[test]
+    fn db_gauges_start_unknown() {
+        let body = Observability::new(ObservabilitySettings::default())
+            .encode()
+            .unwrap();
+        assert_eq!(sample(&body, "fvoci_outbox_lag_seconds"), "NaN");
+        assert_eq!(sample(&body, "fvoci_outbox_xmin_stall_seconds"), "NaN");
+        assert_eq!(
+            sample(&body, "fvoci_db_metrics_last_success_timestamp_seconds"),
+            "0.0"
+        );
+        assert_eq!(
+            sample(&body, "fvoci_db_metrics_refresh_failures_total"),
+            "0"
+        );
+        assert!(body.contains("# TYPE fvoci_db_metrics_refresh_failures counter"));
+        assert_eq!(
+            sample(&body, "fvoci_collab_helper_memory_budget_bytes"),
+            "NaN"
+        );
+        assert_eq!(sample(&body, "fvoci_process_resident_memory_bytes"), "NaN");
+    }
+
+    /// A failed refresh replaces the last values with NaN and counts; a later
+    /// success restores values and stamps the time; the counter stays.
+    #[test]
+    fn db_refresh_failure_is_nan_and_counted() {
+        let obs = Observability::new(ObservabilitySettings::default());
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        obs.record_refresh(Some((42, 7)));
+        let body = obs.encode().unwrap();
+        assert_eq!(sample(&body, "fvoci_outbox_lag_seconds"), "42.0");
+        assert_eq!(sample(&body, "fvoci_outbox_xmin_stall_seconds"), "7.0");
+        let stamp: f64 = sample(&body, "fvoci_db_metrics_last_success_timestamp_seconds")
+            .parse()
+            .unwrap();
+        assert!(stamp >= before.floor(), "{stamp} {before}");
+
+        obs.record_refresh(None);
+        obs.record_refresh(None);
+        let body = obs.encode().unwrap();
+        assert_eq!(sample(&body, "fvoci_outbox_lag_seconds"), "NaN");
+        assert_eq!(sample(&body, "fvoci_outbox_xmin_stall_seconds"), "NaN");
+        assert_eq!(
+            sample(&body, "fvoci_db_metrics_refresh_failures_total"),
+            "2"
+        );
+        let kept: f64 = sample(&body, "fvoci_db_metrics_last_success_timestamp_seconds")
+            .parse()
+            .unwrap();
+        assert_eq!(kept, stamp, "the last success time is kept");
+
+        obs.record_refresh(Some((0, 0)));
+        let body = obs.encode().unwrap();
+        assert_eq!(sample(&body, "fvoci_outbox_lag_seconds"), "0.0");
+        assert_eq!(
+            sample(&body, "fvoci_db_metrics_refresh_failures_total"),
+            "2"
+        );
     }
 
     #[test]
