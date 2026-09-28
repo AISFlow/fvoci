@@ -75,6 +75,20 @@ async function paceLogin(): Promise<number> {
   return Date.now() - started;
 }
 
+// Body writes share a server budget (30 per user per 60 s); stay under it.
+const WRITE_BUDGET = 25;
+const WRITE_WINDOW_MS = 61_000;
+const writeTimes: number[] = [];
+async function paceWrite(): Promise<void> {
+  for (;;) {
+    const now = Date.now();
+    while (writeTimes.length && now - writeTimes[0]! > WRITE_WINDOW_MS) writeTimes.shift();
+    if (writeTimes.length < WRITE_BUDGET) break;
+    await new Promise((resolve) => setTimeout(resolve, WRITE_WINDOW_MS - (now - writeTimes[0]!) + 50));
+  }
+  writeTimes.push(Date.now());
+}
+
 type Ctx = {
   wsId: string;
   projectId: string;
@@ -245,6 +259,7 @@ test("setup dataset", async ({ browser }) => {
   };
   const smallMarker = "작은 문서 첫 문단 marker";
   const small = await docsRes("작은 측정 문서");
+  await paceWrite();
   const put = await page.request.put(`/api/v1/workspaces/${wsId}/documents/${small.id}/body`, {
     data: { contentMd: `${smallMarker}\n\n두 번째 문단입니다.\n` },
   });
@@ -255,6 +270,7 @@ test("setup dataset", async ({ browser }) => {
   for (let i = 0; i < N; i += 1) {
     const marker = `새 문서 ${i} 첫 문단 marker`;
     const doc = await docsRes(`첫 열기 측정 ${i}`);
+    await paceWrite();
     const res = await page.request.put(`/api/v1/workspaces/${wsId}/documents/${doc.id}/body`, {
       data: { contentMd: `${marker}\n\n두 번째 문단입니다.\n` },
     });
@@ -291,6 +307,7 @@ test("setup dataset", async ({ browser }) => {
     }
     const md = lines.join("\n");
     const big = await docsRes("큰 측정 문서");
+    await paceWrite();
     const bigPut = await page.request.put(`/api/v1/workspaces/${wsId}/documents/${big.id}/body`, { data: { contentMd: md } });
     expect(bigPut.ok(), await bigPut.text()).toBeTruthy();
     bigDoc = { displayId: big.displayId, marker: bigMarker, bytes: Buffer.byteLength(md) };
