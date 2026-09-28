@@ -2577,9 +2577,9 @@ async fn collab_room_cap_cancelled_reclaim_restores_capacity() {
                 .await
                 .expect("the freed slot admits the next room");
             assert_eq!(hub.available_room_slots(), 0);
-            for index in 1..5 {
+            for key in &keys[1..] {
                 assert_eq!(
-                    hub.room_lifecycle_phase(keys[index]).await,
+                    hub.room_lifecycle_phase(*key).await,
                     RoomLifecyclePhase::Live
                 );
             }
