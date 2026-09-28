@@ -853,3 +853,184 @@ fn assert_fully_reaped(pid: u32) {
     }
     panic!("pid {pid} still exists:\n{status}");
 }
+
+#[cfg(feature = "test-hang")]
+#[derive(Debug, PartialEq, Eq)]
+enum PidView {
+    Gone,
+    Zombie,
+    Live,
+}
+
+/// `/proc/<pid>/stat` field 22: pins a pid to one process across pid reuse.
+#[cfg(feature = "test-hang")]
+fn proc_starttime(pid: u32) -> Option<u64> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = raw.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(feature = "test-hang")]
+fn proc_status_field(pid: u32, field: &str) -> Option<String> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .map(|rest| rest.trim().to_string())
+}
+
+#[cfg(feature = "test-hang")]
+fn observe_pid(pid: u32, starttime: u64) -> PidView {
+    if proc_starttime(pid) != Some(starttime) {
+        return PidView::Gone;
+    }
+    match proc_status_field(pid, "State:") {
+        None => PidView::Gone,
+        Some(state) if state.starts_with('Z') => PidView::Zombie,
+        Some(_) => PidView::Live,
+    }
+}
+
+/// A `collab-parent-death-driver` run and the helper it spawned. Drop SIGKILLs
+/// only this owned pair (the helper only while its start time still matches).
+#[cfg(feature = "test-hang")]
+struct ParentDeathRun {
+    driver: std::process::Child,
+    helper: (u32, u64),
+    dir: std::path::PathBuf,
+}
+
+#[cfg(feature = "test-hang")]
+impl ParentDeathRun {
+    fn start(extra_args: &[&str]) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "fvoci-collab-pdeath-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("pid dir");
+        let pid_file = dir.join("helper.pid");
+        let mut driver = Command::new(env!("CARGO_BIN_EXE_collab-parent-death-driver"))
+            .arg(bin())
+            .arg(&pid_file)
+            .args(extra_args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn parent-death driver");
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let helper_pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                break pid;
+            }
+            if let Ok(Some(status)) = driver.try_wait() {
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!("parent-death driver exited before writing a pid: {status}");
+            }
+            if Instant::now() >= deadline {
+                let _ = driver.kill();
+                let _ = driver.wait();
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!("parent-death driver wrote no helper pid");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let start = proc_starttime(helper_pid).expect("helper start time");
+        Self {
+            driver,
+            helper: (helper_pid, start),
+            dir,
+        }
+    }
+
+    fn helper_view(&self) -> PidView {
+        observe_pid(self.helper.0, self.helper.1)
+    }
+
+    /// Poll until the helper is no longer running (gone, or a zombie nobody
+    /// has reaped yet), for at most `within`.
+    fn wait_helper_terminated(&self, within: std::time::Duration) -> PidView {
+        let deadline = Instant::now() + within;
+        loop {
+            let view = self.helper_view();
+            if view != PidView::Live || Instant::now() >= deadline {
+                return view;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(feature = "test-hang")]
+impl Drop for ParentDeathRun {
+    fn drop(&mut self) {
+        let _ = self.driver.kill();
+        let _ = self.driver.wait();
+        let (pid, start) = self.helper;
+        if proc_starttime(pid) == Some(start) {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A server that dies (SIGKILL, crash) mid-request must not leave its helper
+/// running until RLIMIT_CPU: PDEATHSIG kills it without the parent's watchdog.
+#[cfg(feature = "test-hang")]
+#[test]
+fn parent_sigkill_kills_hanging_collab_helper() {
+    let mut run = ParentDeathRun::start(&[]);
+    let (helper_pid, _) = run.helper;
+    let driver_pid = run.driver.id();
+    assert_eq!(
+        proc_status_field(helper_pid, "PPid:").as_deref(),
+        Some(driver_pid.to_string().as_str()),
+        "pid file must name this driver's helper"
+    );
+    assert_eq!(
+        proc_status_field(helper_pid, "Name:").as_deref(),
+        Some("collab-engine")
+    );
+    assert_eq!(
+        run.helper_view(),
+        PidView::Live,
+        "helper must be alive before the parent dies"
+    );
+    let rc = unsafe { libc::kill(driver_pid as libc::pid_t, libc::SIGKILL) };
+    assert_eq!(rc, 0, "SIGKILL driver");
+    let _ = run.driver.wait().expect("reap driver");
+    let view = run.wait_helper_terminated(std::time::Duration::from_secs(1));
+    assert_ne!(
+        view,
+        PidView::Live,
+        "helper must die with its parent (PDEATHSIG), view={view:?}"
+    );
+}
+
+/// PDEATHSIG follows the spawning thread, not the process: a session leaked
+/// past its thread loses its helper while the process lives on. This is why
+/// an `EngineSession` must never outlive the thread that spawned it.
+#[cfg(feature = "test-hang")]
+#[test]
+fn spawning_thread_exit_kills_collab_helper() {
+    let mut run = ParentDeathRun::start(&["--exit-spawning-thread"]);
+    let view = run.wait_helper_terminated(std::time::Duration::from_secs(1));
+    assert_ne!(
+        view,
+        PidView::Live,
+        "helper must die when its spawning thread exits, view={view:?}"
+    );
+    assert!(
+        run.driver.try_wait().expect("driver status").is_none(),
+        "the driver process itself must still be running"
+    );
+}

@@ -289,9 +289,17 @@ struct LiveChild {
 /// Drop kills and reaps. A rejected or uncertain candidate must be recycled
 /// via [`EngineSession::kill_and_reap`] and a fresh load of the last committed
 /// snapshot — never Yrs undo as a DB rollback. Success here is not durable.
+///
+/// The child is spawned with `PR_SET_PDEATHSIG(SIGKILL)`, which Linux ties to
+/// the spawning *thread*, not the process: the helper dies when that thread
+/// exits. A session must therefore never outlive, or be used off, the thread
+/// that spawned it. The room bridge spawns, calls and reaps on its own worker
+/// thread; offline sessions spawn, call and reap inside one `spawn_blocking`
+/// closure. Debug builds assert this on every [`EngineSession::call`].
 pub struct EngineSession {
     live: Option<LiveChild>,
     pid: u32,
+    spawned_on: thread::ThreadId,
 }
 
 impl EngineSession {
@@ -342,6 +350,11 @@ impl EngineSession {
     }
 
     pub fn call(&mut self, request: &Request) -> EngineReport {
+        debug_assert_eq!(
+            thread::current().id(),
+            self.spawned_on,
+            "EngineSession used off its spawning thread; PDEATHSIG kills the helper when that thread exits"
+        );
         let (max_frame, timeout_ms, limits) = match self.live.as_ref() {
             Some(live) => (
                 live.limits.max_frame_bytes,
@@ -763,6 +776,7 @@ fn spawn_child(req: SpawnRequest, slot: SlotGuard) -> Result<EngineSession, Engi
             _slot: slot,
         }),
         pid,
+        spawned_on: thread::current().id(),
     })
 }
 
@@ -1079,13 +1093,14 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         let as_bytes = limits.max_child_as_bytes;
         let stack_bytes = limits.max_child_stack_bytes;
         let cpu_secs = limits.cpu_budget_secs();
+        let expected_ppid = std::process::id() as libc::pid_t;
         unsafe {
             cmd.pre_exec(move || {
                 apply_rlimits_now(as_bytes, cpu_secs, stack_bytes)?;
                 // Best effort: container profiles (e.g. AppArmor docker-default)
                 // may deny writing oom_score_adj; the helper must still start.
                 let _ = apply_child_oom_score_adj();
-                Ok(())
+                apply_parent_death_signal(expected_ppid)
             });
         }
         Ok(())
@@ -1095,6 +1110,35 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         let _ = (cmd, limits);
         Err("rlimit pre_exec is Linux-only".into())
     }
+}
+
+/// Ask the kernel to SIGKILL this child when the forking thread dies, and cover
+/// the fork-to-prctl race where the parent is already gone (the forking thread
+/// itself is blocked in `spawn` until exec). Same contract as the
+/// document-extract client. A server that dies mid-request (SIGKILL, crash,
+/// shutdown deadline) must not leave a helper running until RLIMIT_CPU.
+#[cfg(target_os = "linux")]
+fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<()> {
+    // SAFETY: runs between fork and exec. Only async-signal-safe libc without
+    // allocation: `syscall`, `getppid`, `raise`, `_exit`.
+    unsafe {
+        let rc = libc::syscall(
+            libc::SYS_prctl,
+            libc::PR_SET_PDEATHSIG as libc::c_long,
+            libc::SIGKILL as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
+        );
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::getppid() != expected_ppid {
+            let _ = libc::raise(libc::SIGKILL);
+            libc::_exit(127);
+        }
+    }
+    Ok(())
 }
 
 /// Apply OS ceilings in the current process. Used from `pre_exec` and the child

@@ -27,6 +27,12 @@ name = "collab-engine"
 path = "src/bin/collab-engine.rs"
 required-features = ["worker"]
 
+# Test fixture only: never built without `test-hang`.
+[[bin]]
+name = "collab-parent-death-driver"
+path = "src/bin/collab-parent-death-driver.rs"
+required-features = ["test-hang"]
+
 [[test]]
 name = "yjs_compat"
 required-features = ["worker"]
