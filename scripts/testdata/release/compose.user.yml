@@ -11,8 +11,8 @@
 # waits for PostgreSQL and Meilisearch, creates the app role, migrates, grants
 # and writes the search key, then runs the server as uid 1000 without the
 # database owner password or the Meilisearch master key. The three passwords
-# reach containers only as root-only secret files, not as environment
-# (Compose v2.23 or newer). Optional settings: RUNNING.md "Install".
+# and the two keyrings reach containers only as root-only secret files, not as
+# environment (Compose v2.23 or newer). Optional settings: RUNNING.md "Install".
 name: fvoci
 
 # One product image. Release files pin it to a digest.
@@ -24,6 +24,8 @@ x-required-secrets:
   - ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
   - ${FVOCI_APP_PASSWORD:?set FVOCI_APP_PASSWORD in .env}
   - ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
+  - ${PASSWORD_PEPPER_KEYS:?set PASSWORD_PEPPER_KEYS in .env}
+  - ${ENCRYPTION_KEYS:?set ENCRYPTION_KEYS in .env}
 
 # Secret files under /run/secrets, readable by root only.
 x-root-secret: &root-secret
@@ -37,18 +39,23 @@ services:
     # Root prepares with the secret files, then drops to uid 1000 for the
     # server. docker exec and the healthcheck run as root too.
     user: "0:0"
+    # The drop to uid 1000 is setgid/setuid before exec; nothing may regain
+    # privileges through a setuid file afterwards.
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:${FVOCI_PUBLISH_PORT:?set FVOCI_PUBLISH_PORT in .env}:8080"
     environment:
       FVOCI_PUBLIC_ORIGIN: ${FVOCI_PUBLIC_ORIGIN:?set FVOCI_PUBLIC_ORIGIN in .env}
-      PASSWORD_PEPPER_KEYS: ${PASSWORD_PEPPER_KEYS:?set PASSWORD_PEPPER_KEYS in .env}
       PASSWORD_PEPPER_ACTIVE_KEY_ID: ${PASSWORD_PEPPER_ACTIVE_KEY_ID:?set PASSWORD_PEPPER_ACTIVE_KEY_ID in .env}
-      ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:?set ENCRYPTION_KEYS in .env}
       ENCRYPTION_ACTIVE_KEY_ID: ${ENCRYPTION_ACTIVE_KEY_ID:?set ENCRYPTION_ACTIVE_KEY_ID in .env}
-      # Preparation only (file paths, not values); not passed to the server.
+      # File paths, not values. Root reads them; the keyrings reach the
+      # server only in its own environment, the passwords not at all.
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       FVOCI_APP_PASSWORD_FILE: /run/secrets/fvoci_app_password
       MEILI_MASTER_KEY_FILE: /run/secrets/meili_master_key
+      PASSWORD_PEPPER_KEYS_FILE: /run/secrets/password_pepper_keys
+      ENCRYPTION_KEYS_FILE: /run/secrets/encryption_keys
       # Verified capacity pair: 64 collaboration rooms need postgres
       # max_connections=150 below (64 room fences + app pool 64 + reserve 10).
       FVOCI_COLLAB_MAX_ROOMS: "64"
@@ -56,6 +63,8 @@ services:
       - { source: postgres_password, <<: *root-secret }
       - { source: fvoci_app_password, <<: *root-secret }
       - { source: meili_master_key, <<: *root-secret }
+      - { source: password_pepper_keys, <<: *root-secret }
+      - { source: encryption_keys, <<: *root-secret }
     volumes:
       - storage:/data/storage
       - meili_key:/run/fvoci/meili
@@ -124,6 +133,10 @@ secrets:
     environment: FVOCI_APP_PASSWORD
   meili_master_key:
     environment: MEILI_MASTER_KEY
+  password_pepper_keys:
+    environment: PASSWORD_PEPPER_KEYS
+  encryption_keys:
+    environment: ENCRYPTION_KEYS
 
 volumes:
   pgdata:

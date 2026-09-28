@@ -189,12 +189,16 @@ pub fn install_env(
     Ok(out)
 }
 
-/// Preparation secrets that may instead be read from a file named by
-/// `<VAR>_FILE`: the Compose install mounts them as root-only secret files.
+/// Secrets that may instead be read from a file named by `<VAR>_FILE`: the
+/// Compose install mounts them as root-only secret files. The preparation
+/// uses the first three; the keyrings reach the server only through its
+/// `exec` environment ([`exec_server`]), not the container configuration.
 pub const SECRET_FILE_VARS: &[&str] = &[
     "POSTGRES_PASSWORD",
     "FVOCI_APP_PASSWORD",
     "MEILI_MASTER_KEY",
+    "PASSWORD_PEPPER_KEYS",
+    "ENCRYPTION_KEYS",
 ];
 
 const SECRET_FILE_MAX_BYTES: u64 = 64 * 1024;
@@ -553,8 +557,17 @@ pub fn running_as_root() -> Result<bool, String> {
         .map_err(|e| format!("cannot tell the process uid from /proc/self: {e}"))
 }
 
+/// Whether `exec_server` keeps the variable `name`.
+fn passed_to_server(name: &str) -> bool {
+    !PREP_ONLY.contains(&name)
+        && !name
+            .strip_suffix("_FILE")
+            .is_some_and(|v| PREP_ONLY.contains(&v) || SECRET_FILE_VARS.contains(&v))
+}
+
 /// Replaces this process with `fvoci-server args`, its environment minus
-/// [`PREP_ONLY`] and their `<VAR>_FILE` forms. Started as root (the Compose
+/// [`PREP_ONLY`] and the `<VAR>_FILE` forms of those and of
+/// [`SECRET_FILE_VARS`] (the keyrings read from files stay, as values). Started as root (the Compose
 /// install, whose secret files only root can read), it first becomes
 /// [`SERVER_UID`]:[`SERVER_GID`] with no supplementary groups, so the server
 /// and its children hold no capability and cannot read those files. Every
@@ -568,12 +581,7 @@ pub fn exec_server(args: &[String]) -> String {
         Ok(root) => root,
         Err(e) => return e,
     };
-    let env = std::env::vars_os().filter(|(k, _)| {
-        !PREP_ONLY.iter().any(|p| {
-            k.to_str()
-                .is_some_and(|k| k == *p || k == format!("{p}_FILE"))
-        })
-    });
+    let env = std::env::vars_os().filter(|(k, _)| k.to_str().is_none_or(passed_to_server));
     let mut command = std::process::Command::new(&path);
     command.args(args).env_clear().envs(env);
     if root {
@@ -736,6 +744,29 @@ mod tests {
     }
 
     #[test]
+    fn server_env_keeps_keyrings_but_no_prep_value_or_file_path() {
+        for kept in [
+            "PASSWORD_PEPPER_KEYS",
+            "ENCRYPTION_KEYS",
+            "DATABASE_APP_URL",
+            "FVOCI_BIND",
+        ] {
+            assert!(passed_to_server(kept), "{kept}");
+        }
+        for dropped in [
+            "POSTGRES_PASSWORD",
+            "POSTGRES_PASSWORD_FILE",
+            "FVOCI_APP_PASSWORD_FILE",
+            "MEILI_MASTER_KEY",
+            "DATABASE_URL",
+            "PASSWORD_PEPPER_KEYS_FILE",
+            "ENCRYPTION_KEYS_FILE",
+        ] {
+            assert!(!passed_to_server(dropped), "{dropped}");
+        }
+    }
+
+    #[test]
     fn secret_files_resolve_and_refuse_ambiguity() {
         let dir = std::env::temp_dir().join(format!("fvoci-secret-file-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -752,9 +783,11 @@ mod tests {
             move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
         };
 
+        let keyring = file("keyring", b"{\"install\":\"00\"}\n");
         let got = resolve_secret_files(lookup(vec![
             ("POSTGRES_PASSWORD_FILE", owner.clone()),
             ("MEILI_MASTER_KEY_FILE", key.clone()),
+            ("ENCRYPTION_KEYS_FILE", keyring.clone()),
             // Not a preparation secret: ignored, never read.
             ("DATABASE_URL_FILE", "/nonexistent".into()),
         ]))
@@ -764,7 +797,17 @@ mod tests {
             vec![
                 ("POSTGRES_PASSWORD", "p@ss/w:rd-0123456789".to_string()),
                 ("MEILI_MASTER_KEY", "k".repeat(32)),
+                ("ENCRYPTION_KEYS", r#"{"install":"00"}"#.to_string()),
             ]
+        );
+        let both = resolve_secret_files(lookup(vec![
+            ("PASSWORD_PEPPER_KEYS", "{}".into()),
+            ("PASSWORD_PEPPER_KEYS_FILE", keyring),
+        ]))
+        .unwrap_err();
+        assert!(
+            both.starts_with("PASSWORD_PEPPER_KEYS and PASSWORD_PEPPER_KEYS_FILE are both set"),
+            "{both}"
         );
 
         let both = resolve_secret_files(lookup(vec![

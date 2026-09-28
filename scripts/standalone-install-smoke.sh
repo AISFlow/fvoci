@@ -176,24 +176,31 @@ step "uid boundary: the server (uid 1000) cannot reach the owner password, maste
 OWNER_PW="$(env_value POSTGRES_PASSWORD)"
 MASTER_KEY="$(env_value MEILI_MASTER_KEY)"
 APP_PW="$(env_value FVOCI_APP_PASSWORD)"
+PEPPER_KEYS="$(env_value PASSWORD_PEPPER_KEYS)"
+ENC_KEYS="$(env_value ENCRYPTION_KEYS)"
 has_secret() { grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" -e "$APP_PW"; }
+has_keyring() { grep -qF -e "$PEPPER_KEYS" -e "$ENC_KEYS"; }
 CID="$(docker compose ps -q fvoci)"
 [[ "$(docker exec "$CID" id -u)" == 0 ]] || fail "docker exec in fvoci does not default to root"
 # Root in the container lacks CAP_SYS_PTRACE, so the server's /proc entries
 # (exe, environ, fd) are read as its own uid.
 [[ "$(docker exec --user 1000:1000 "$CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] || fail "pid 1 is not fvoci-server"
 if docker exec "$CID" cat /proc/1/environ >/dev/null 2>&1; then fail "expected root in the container to be unable to read the server environ"; fi
-PID1="$(docker exec "$CID" sh -c 'grep -E "^(Uid|Gid|Groups|CapPrm|CapEff|CapAmb):" /proc/1/status')"
+PID1="$(docker exec "$CID" sh -c 'grep -E "^(Uid|Gid|Groups|CapPrm|CapEff|CapAmb|NoNewPrivs):" /proc/1/status')"
 printf '%s\n' "$PID1"
 grep -Eq '^Uid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server uids are not all 1000"
 grep -Eq '^Gid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server gids are not all 1000"
 grep -Eq '^Groups:[[:space:]]*$' <<<"$PID1" || fail "server keeps supplementary groups"
 grep -Eq '^CapEff:[[:space:]]+0+$' <<<"$PID1" || fail "server keeps effective capabilities"
 grep -Eq '^CapPrm:[[:space:]]+0+$' <<<"$PID1" || fail "server keeps permitted capabilities"
+grep -Eq '^NoNewPrivs:[[:space:]]+1$' <<<"$PID1" || fail "server runs without no-new-privileges"
+[[ -z "$(docker exec "$CID" find / -xdev -perm /6000 -type f)" ]] || fail "the image has setuid/setgid files"
+echo "no-new-privileges and no setuid/setgid file: ok"
+SECRET_FILES=(postgres_password fvoci_app_password meili_master_key password_pepper_keys encryption_keys)
 docker exec "$CID" ls -ln /run/secrets
-[[ "$(docker exec "$CID" stat -c '%u %g %a' /run/secrets/postgres_password /run/secrets/fvoci_app_password /run/secrets/meili_master_key | sort -u)" == "0 0 400" ]] \
+[[ "$(docker exec "$CID" stat -c '%u %g %a' "${SECRET_FILES[@]/#//run/secrets/}" | sort | uniq -c | tr -s ' ')" == " 5 0 0 400" ]] \
   || fail "secret files are not root-only 0400"
-for f in postgres_password fvoci_app_password meili_master_key; do
+for f in "${SECRET_FILES[@]}"; do
   if docker exec --user 1000:1000 "$CID" cat "/run/secrets/$f" >/dev/null 2>&1; then
     fail "uid 1000 can read /run/secrets/$f"
   fi
@@ -213,8 +220,11 @@ VIEW="$(docker exec --user 1000:1000 "$CID" sh -c '
   find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
 grep '^pid ' <<<"$VIEW"
 grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$VIEW" && fail "owner password or master key in the server process tree"
-grep -Eq '^(POSTGRES_PASSWORD|MEILI_MASTER_KEY|FVOCI_APP_PASSWORD|DATABASE_URL)(_FILE)?=' <<<"$VIEW" \
-  && fail "a preparation-only variable reached the server"
+grep -Eq '^((POSTGRES_PASSWORD|MEILI_MASTER_KEY|FVOCI_APP_PASSWORD|DATABASE_URL)(_FILE)?|(PASSWORD_PEPPER|ENCRYPTION)_KEYS_FILE)=' <<<"$VIEW" \
+  && fail "a preparation-only variable or a secret file path reached the server"
+if ! grep -qxF "PASSWORD_PEPPER_KEYS=$PEPPER_KEYS" <<<"$VIEW" || ! grep -qxF "ENCRYPTION_KEYS=$ENC_KEYS" <<<"$VIEW"; then
+  fail "the server lacks its keyrings"
+fi
 grep -q '^DATABASE_APP_URL=postgres://fvoci_app:' <<<"$VIEW" || fail "server lacks its app role URL"
 echo "server tree: DATABASE_APP_URL only; no owner password, master key or _FILE path in environ/argv/fds/files: ok"
 # Healthcheck and docker exec processes start from the container
@@ -225,6 +235,7 @@ sleep 1
 EXEC_ENV="$(docker exec "$CID" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = sleep ] && tr "\0" "\n" <"$p/environ"; done; true')"
 [[ -n "$EXEC_ENV" ]] || fail "no docker exec process found"
 has_secret <<<"$EXEC_ENV" && fail "a docker exec (healthcheck) process environ holds a secret"
+has_keyring <<<"$EXEC_ENV" && fail "a docker exec (healthcheck) process environ holds a keyring"
 grep -Eq '^(POSTGRES_PASSWORD|MEILI_MASTER_KEY|FVOCI_APP_PASSWORD)=' <<<"$EXEC_ENV" && fail "docker exec environ has a prep variable"
 # shellcheck disable=SC2016 # expanded in the app container
 UID_VIEW="$(docker exec --user 1000:1000 "$CID" sh -c 'for p in /proc/[0-9]*; do tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; done 2>/dev/null')"
@@ -233,7 +244,8 @@ grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$UID_VIEW" && fail "uid 1000 reads 
 echo "docker exec / healthcheck environ holds no secret; uid 1000 finds no owner password or master key under /proc: ok"
 INSPECT="$(docker inspect "$CID")"
 has_secret <<<"$INSPECT" && fail "docker inspect shows a secret"
-echo "docker inspect: no owner password, master key or app password: ok"
+has_keyring <<<"$INSPECT" && fail "docker inspect shows a keyring"
+echo "docker inspect: no owner password, master key, app password or keyring: ok"
 docker compose exec -T fvoci /opt/fvoci/bin/fvoci-migrate --doctor | jq -e '.ok == true' >/dev/null || fail "doctor"
 echo "doctor in the fvoci container: ok"
 

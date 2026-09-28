@@ -169,10 +169,19 @@ if [[ "$(docker inspect -f '{{.Image}}' "$SERVER_CID")" != "$PRODUCT_IMAGE_ID" ]
   echo "running server image differs from the selected Compose product image" >&2
   exit 1
 fi
-runtime_key() {
-  local name="$1"
-  docker inspect "$SERVER_CID" | jq -r --arg name "$name" \
+config_env() {
+  docker inspect "$SERVER_CID" | jq -r --arg name "$1" \
     '.[0].Config.Env | map(select(startswith($name + "="))) | last | if . == null then "" else .[($name | length) + 1:] end'
+}
+runtime_key() {
+  local name="$1" file
+  file="$(config_env "${name}_FILE")"
+  if [[ -n "$file" ]]; then
+    # compose.user.yml: the running container's root-only secret file.
+    docker exec --user 0:0 "$SERVER_CID" cat -- "$file"
+  else
+    config_env "$name"
+  fi
 }
 PEPPER_KEYS="$(runtime_key PASSWORD_PEPPER_KEYS)"
 PEPPER_ACTIVE="$(runtime_key PASSWORD_PEPPER_ACTIVE_KEY_ID)"
@@ -184,13 +193,19 @@ ENCRYPTION_ACTIVE="$(runtime_key ENCRYPTION_ACTIVE_KEY_ID)"
 export FVOCI_IMAGE="$PRODUCT_IMAGE_ID"
 export PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE"
 export ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE"
+# Each key is the exported value: as environment, or (compose.user.yml) as a
+# secret file Compose fills from that variable, where the exported value also
+# wins over the env file.
+# shellcheck disable=SC2016 # a jq program
+SNAPSHOT_KEPT='(.services[$s].environment // {}) as $settings | (.secrets // {}) as $secrets |
+  all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
+    . as $key | if $settings | has($key + "_FILE")
+      then ($settings | has($key) | not) and any($secrets[]; .environment == $key)
+      else $settings[$key] == env[$key] end)'
 # A release compose pins the image instead of reading FVOCI_IMAGE: compare ids.
 CONFIG_IMAGE="$("${COMPOSE[@]}" config --format json | jq -er --arg s "$SERVER" '.services[$s].image')"
 if [[ "$(docker image inspect -f '{{.Id}}' "$CONFIG_IMAGE")" != "$PRODUCT_IMAGE_ID" ]] ||
-   ! "${COMPOSE[@]}" config --format json | jq -e --arg s "$SERVER" '
-  (.services[$s].environment as $settings |
-    all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
-      . as $key | $settings[$key] == env[$key]))' >/dev/null; then
+   ! "${COMPOSE[@]}" config --format json | jq -e --arg s "$SERVER" "$SNAPSHOT_KEPT" >/dev/null; then
   echo "Compose must preserve the selected product image and key snapshot" >&2
   exit 1
 fi

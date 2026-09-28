@@ -142,7 +142,14 @@ PREP="${INIT:-$SERVER}"
 SELECTED_IMAGE="$(jq -er --arg s "$SERVER" '.services[$s].image' <<<"$COMPOSE_CONFIG")"
 PRODUCT_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$SELECTED_IMAGE")"
 compose_key() {
-  jq -r --arg s "$SERVER" --arg name "$1" '.services[$s].environment[$name] // ""' <<<"$COMPOSE_CONFIG"
+  if jq -e --arg s "$SERVER" --arg name "${1}_FILE" '.services[$s].environment // {} | has($name)' \
+    <<<"$COMPOSE_CONFIG" >/dev/null; then
+    # compose.user.yml: a secret file Compose fills from the variable; an
+    # exported value wins over the env file, as in Compose.
+    if [[ -n "${!1+x}" ]]; then printf '%s\n' "${!1}"; else read_env "$1"; fi
+  else
+    jq -r --arg s "$SERVER" --arg name "$1" '.services[$s].environment[$name] // ""' <<<"$COMPOSE_CONFIG"
+  fi
 }
 PEPPER_KEYS="$(compose_key PASSWORD_PEPPER_KEYS)"
 PEPPER_ACTIVE="$(compose_key PASSWORD_PEPPER_ACTIVE_KEY_ID)"
@@ -162,10 +169,13 @@ for service in "$SERVER" "$PREP"; do
     exit 1
   fi
 done
-if ! jq -e --arg s "$SERVER" '
-  (.services[$s].environment as $settings |
-    all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
-      . as $key | $settings[$key] == env[$key]))' <<<"$PINNED_CONFIG" >/dev/null; then
+# Each key is the exported value: as environment, or (compose.user.yml) as a
+# secret file Compose fills from that variable.
+if ! jq -e --arg s "$SERVER" '(.services[$s].environment // {}) as $settings | (.secrets // {}) as $secrets |
+  all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
+    . as $key | if $settings | has($key + "_FILE")
+      then ($settings | has($key) | not) and any($secrets[]; .environment == $key)
+      else $settings[$key] == env[$key] end)' <<<"$PINNED_CONFIG" >/dev/null; then
   echo "Compose must preserve the selected product image and key snapshot" >&2
   exit 1
 fi
