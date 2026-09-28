@@ -2127,21 +2127,30 @@ async fn wiki_share_needs_view_on_every_exposed_document() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{view_only}");
-    for (path, body) in [
-        (
-            format!("/api/v1/workspaces/{ws}/documents/{parent}/share-links"),
-            json!({}),
-        ),
-        (
-            format!("/api/v1/workspaces/{ws}/share-links"),
-            json!({"documentId": parent}),
-        ),
-    ] {
-        let (status, body) =
-            json_request(app.clone(), "POST", &path, Some(body), Some(&guest.cookie)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
-        assert_eq!(body, view_only);
-    }
+    let refused = |label: &'static str| {
+        let app = app.clone();
+        let cookie = guest.cookie.clone();
+        let parent = parent.clone();
+        let view_only = view_only.clone();
+        async move {
+            for (path, body) in [
+                (
+                    format!("/api/v1/workspaces/{ws}/documents/{parent}/share-links"),
+                    json!({}),
+                ),
+                (
+                    format!("/api/v1/workspaces/{ws}/share-links"),
+                    json!({"documentId": parent}),
+                ),
+            ] {
+                let (status, body) =
+                    json_request(app.clone(), "POST", &path, Some(body), Some(&cookie)).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{label} {path}: {body}");
+                assert_eq!(body, view_only, "{label}");
+            }
+        }
+    };
+    refused("hidden child").await;
     assert_eq!(links(&admin).await, 0);
 
     // A trashed subpage is not served, so it does not block the link.
@@ -2151,14 +2160,29 @@ async fn wiki_share_needs_view_on_every_exposed_document() {
         .execute(&admin)
         .await
         .unwrap();
-    // With view on the child the link is allowed and serves both pages.
+    // View on the child is not enough while a page below it stays hidden:
+    // every depth of the subtree is checked, not only direct subpages.
     grant_group_on_document(&admin, ws, group_id, &child, "viewer").await;
+    let grandchild = create_wiki_doc(&app, &cookie, ws, Some(&child), "비공개 손자").await;
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/documents/{grandchild}"),
+        None,
+        Some(&guest.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    refused("hidden grandchild").await;
+    assert_eq!(links(&admin).await, 0);
+    // With view on every live page the link is allowed and serves all three.
+    grant_group_on_document(&admin, ws, group_id, &grandchild, "viewer").await;
     let (_, token) = share_document(&app, &guest.cookie, ws, &parent).await;
     let (status, tree) = public_json(app.clone(), &format!("/api/v1/share/{token}/tree")).await;
     assert_eq!(status, StatusCode::OK, "{tree}");
     let mut tree_ids = ids(&tree);
     tree_ids.sort();
-    let mut expected = vec![parent.clone(), child.clone()];
+    let mut expected = vec![parent.clone(), child.clone(), grandchild.clone()];
     expected.sort();
     assert_eq!(tree_ids, expected);
     // Members hold base edit on every wiki page and are unaffected.

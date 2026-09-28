@@ -286,8 +286,9 @@ pub async fn create_share_link(
         tx.rollback().await?;
         return Ok(Err(ShareDbError::Forbidden));
     }
-    // Same answer as a missing edit right: which pages are hidden, or that
-    // any are, is not told apart.
+    // Same answer as a missing edit right, so which pages are hidden is not
+    // revealed. An actor who knows they hold edit on the root does learn that
+    // some page below it is hidden; any refusal tells that much.
     if let ShareTarget::Document(root) = target {
         if !sees_whole_wiki_subtree(&mut tx, workspace_id, actor_user_id, root).await? {
             tx.rollback().await?;
