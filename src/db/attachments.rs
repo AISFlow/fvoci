@@ -1092,6 +1092,9 @@ async fn complete_owned_inner(
     };
     if att.status == "stored" {
         tx.commit().await?;
+        // A retried or repeated complete also clears parts that an earlier
+        // run's finalize never removed (cancelled, crashed or failed).
+        finalize_stored_parts(storage, attachment_id, &att.storage_key).await;
         return Ok(CompleteAttempt::Done(att));
     }
 
@@ -1205,7 +1208,7 @@ async fn complete_owned_inner(
     };
     if att.status == "stored" {
         tx.commit().await?;
-        let _ = storage.finalize_multipart(&storage_key).await;
+        finalize_stored_parts(storage, attachment_id, &storage_key).await;
         return Ok(CompleteAttempt::Done(att));
     }
     if att.status != "uploading" && att.status != "assembling" {
@@ -1235,7 +1238,7 @@ async fn complete_owned_inner(
         let stored = fetch_attachment(&mut tx, workspace_id, attachment_id).await?;
         if stored.as_ref().is_some_and(|row| row.status == "stored") {
             tx.commit().await?;
-            let _ = storage.finalize_multipart(&storage_key).await;
+            finalize_stored_parts(storage, attachment_id, &storage_key).await;
             return Ok(CompleteAttempt::Done(stored.expect("stored row")));
         }
         tx.rollback().await?;
@@ -1260,8 +1263,19 @@ async fn complete_owned_inner(
         .await?
         .expect("stored row");
     tx.commit().await?;
-    let _ = storage.finalize_multipart(&storage_key).await;
+    finalize_stored_parts(storage, attachment_id, &storage_key).await;
     Ok(CompleteAttempt::Done(row))
+}
+
+/// Removes the local part copies of an upload whose 'stored' row has
+/// committed (a no-op on S3). Never before that commit: an 'assembling'
+/// retry re-lists and re-checks the parts. The upload is complete either
+/// way, so a failure is logged rather than returned; the leftover copy is
+/// removed by the next complete of this upload or when it is deleted.
+async fn finalize_stored_parts(storage: &ObjectStorage, attachment_id: Uuid, storage_key: &str) {
+    if let Err(err) = storage.finalize_multipart(storage_key).await {
+        tracing::warn!(%attachment_id, error = %err, "attachment.finalize_parts_failed");
+    }
 }
 
 async fn delete_attachment_row(
