@@ -3996,6 +3996,50 @@ async fn task_layout_can_edit_follows_project_permission_and_archive() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    // The hint ignores API-token scopes: a tasks.read token of the lead sees
+    // `true` although PATCH also needs tasks.write.
+    let (status, token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "read", "scopes": ["tasks.read"]})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{token}");
+    let (status, layout) = json_request_bearer(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout?{month}"),
+        token["token"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{layout}");
+    assert_eq!(layout["canEdit"], true);
+
+    // On a workspace-visibility project the workspace role decides for
+    // non-guests: the workspace member who only views PRV may edit here. A
+    // guest added as a project viewer may not.
+    let guest = add_workspace_user(&admin, workspace_id, "guest", "guest").await;
+    let wsp = create_project(app.clone(), &owner_cookie, workspace_id, "WSP", "workspace").await;
+    let wsp_id = wsp["id"].as_str().unwrap();
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{wsp_id}/members"),
+        Some(json!({"userId": guest.user_id.to_string(), "role": "viewer"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for (who, cookie, can_edit) in [
+        ("workspace member", &viewer.cookie, true),
+        ("guest viewer", &guest.cookie, false),
+    ] {
+        let layout = get_task_layout(app.clone(), workspace_id, wsp_id, month, cookie).await;
+        assert_eq!(layout["canEdit"], can_edit, "{who}");
+    }
+
     let (status, body) = json_request(
         app.clone(),
         "POST",
