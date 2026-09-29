@@ -1,10 +1,7 @@
 import { t } from "@fvoci/i18n";
 import { Button } from "@/components/ui/button";
-import { ProblemError } from "@/lib/api";
 
-export function loadErrorMessage(error: unknown): string {
-  return error instanceof ProblemError ? error.title : t("load.failed");
-}
+export { loadErrorMessage } from "@/lib/api";
 
 export function QueryLoading() {
   return (

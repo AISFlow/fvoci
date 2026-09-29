@@ -66,6 +66,7 @@
         "@radix-ui/react-popover": "1.1.23",
         "@react-pdf/renderer": "^4.9.0",
         "@tiptap/core": "3.31.3",
+        "@tiptap/extension-bubble-menu": "3.31.3",
         "@tiptap/extension-code-block-lowlight": "3.31.3",
         "@tiptap/extension-collaboration": "3.31.3",
         "@tiptap/extension-collaboration-caret": "3.31.3",
@@ -113,6 +114,7 @@
         "react-dom": "19.3.0",
         "typescript": "5.9.3",
         "vue": "3.5.43",
+        "vue-tsc": "3.3.11",
       },
       "peerDependencies": {
         "react": "^19.3.0",

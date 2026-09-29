@@ -2,8 +2,9 @@ import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { api, ensureOk, problemMessage } from "@/lib/api";
+import { problemMessage } from "@/lib/api";
 import { starsQuery } from "@/lib/queries/share";
+import { toggleStar } from "./share-api";
 
 /** Source cmdk star/unstar action, surfaced as a toggle on the item page. */
 export function StarToggle({
@@ -21,21 +22,7 @@ export function StarToggle({
   const star = stars.data?.items.find((item) => item.type === type && item.targetId === targetId);
 
   const toggle = useMutation({
-    mutationFn: async () => {
-      if (star) {
-        return ensureOk(
-          await api.DELETE("/api/v1/workspaces/{workspace_id}/stars/{id}", {
-            params: { path: { workspace_id: workspaceId, id: star.id } },
-          }),
-        );
-      }
-      return ensureOk(
-        await api.POST("/api/v1/workspaces/{workspace_id}/stars", {
-          params: { path: { workspace_id: workspaceId } },
-          body: { type, id: targetId },
-        }),
-      );
-    },
+    mutationFn: () => toggleStar(workspaceId, star, type, targetId),
     onSuccess: async () => {
       setError(null);
       await queryClient.invalidateQueries({ queryKey: ["stars", workspaceId] });

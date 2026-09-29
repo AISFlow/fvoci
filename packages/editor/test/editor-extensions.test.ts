@@ -12,52 +12,13 @@ import { Attachment } from "../src/nodes/attachment.ts";
 import { Embed } from "../src/nodes/embed.ts";
 import { MathBlock, MathInline } from "../src/nodes/math.ts";
 import { Mermaid } from "../src/nodes/mermaid.ts";
-
-type AttrDump = {
-  name: string;
-  hasDefault: boolean;
-  default: unknown;
-  validate: string | null;
-};
-type NodeDump = { name: string; attrs: AttrDump[] };
-type MarkDump = NodeDump & { rank: number; overlapping: boolean };
-type SchemaDump = { nodes: NodeDump[]; marks: MarkDump[] };
-
-type AttrSpec = { hasDefault: boolean; default: unknown; validate?: unknown };
-// NodeType/MarkType fields that prosemirror-model's .d.ts leaves out.
-type TypeInternals = { attrs: Readonly<Record<string, AttrSpec>>; rank: number };
-const internals = (type: object) => type as unknown as TypeInternals;
-
-// Same projection as scripts/document-convert/schema-dump.mjs, which writes
-// the fixture the Rust seed tables are tested against.
-function attrsOf(attrs: Readonly<Record<string, AttrSpec>>): AttrDump[] {
-  return Object.entries(attrs).map(([name, a]) => ({
-    name,
-    hasDefault: a.hasDefault,
-    default: a.default,
-    validate: a.validate ? String(a.validate) : null,
-  }));
-}
-
-function dumpSchema(schema: ReturnType<typeof getSchema>): SchemaDump {
-  return {
-    nodes: Object.entries(schema.nodes).map(([name, type]) => ({
-      name,
-      attrs: attrsOf(internals(type).attrs),
-    })),
-    marks: Object.entries(schema.marks).map(([name, type]) => ({
-      name,
-      rank: internals(type).rank,
-      overlapping: !type.excludes(type),
-      attrs: attrsOf(internals(type).attrs),
-    })),
-  };
-}
+import { dumpSchema, editorSchemaFixture } from "./schema-dump.ts";
 
 // Never called: getSchema does not build views. Distinct functions let the
-// wiring test check that each node gets its own entry. A host's real map is
-// built in a component module (react/fvoci-editor.tsx), which node:test cannot
-// load; the addNodeView-only test below is what keeps any map schema-neutral,
+// wiring test check that each node gets its own entry. The React host's real
+// map is built in a component module (react/fvoci-editor.tsx), which node:test
+// cannot load; the addNodeView-only test below is what keeps any map
+// schema-neutral. The Vue host's real map is tested in vue-node-views.test.ts,
 // and apps/web/e2e/workspace-wiki-flow.spec.ts checks the schema of the editor
 // the web app mounts.
 const stubView = () => () => ({ dom: {} as HTMLElement });
@@ -81,24 +42,7 @@ function extensions() {
 }
 
 test("editor schema matches the server's yjs seed schema contract", () => {
-  const fixture = JSON.parse(
-    readFileSync(
-      new URL("../../../compat/fixtures/yjs-seed/schema.json", import.meta.url),
-      "utf8",
-    ),
-  ) as SchemaDump;
-  const mention = fixture.nodes.find((node) => node.name === "mention");
-  assert.ok(mention);
-  // The fixture is getSchema(createFvociExtensions()). The editor has always
-  // re-added Mention (with its label view) after that list, so mention is its
-  // last node. The server looks nodes up by name and ranks marks by order
-  // (crates/collab-engine/src/seed.rs); the node order is pinned here so the
-  // editor's own order only changes on purpose.
-  const expected: SchemaDump = {
-    nodes: [...fixture.nodes.filter((node) => node !== mention), mention],
-    marks: fixture.marks,
-  };
-  assert.deepEqual(dumpSchema(getSchema(extensions())), expected);
+  assert.deepEqual(dumpSchema(getSchema(extensions())), editorSchemaFixture());
 });
 
 test("host node views are applied only as addNodeView", () => {
@@ -149,7 +93,13 @@ test("the factory and its neutral modules import no UI framework", () => {
       walk(target);
     }
   };
-  for (const root of ["editor-extensions.ts", "entities.ts", "math-ml.ts"]) {
+  for (const root of [
+    "editor-extensions.ts",
+    "entities.ts",
+    "math-ml.ts",
+    "embed-model.ts",
+    "attachment-model.ts",
+  ]) {
     walk(new URL(`../src/${root}`, import.meta.url));
   }
   assert.deepEqual(

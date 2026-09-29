@@ -1,7 +1,7 @@
 import type {
   AttachmentBlockBridge,
   AttachmentUploadResult,
-} from "@fvoci/editor/react";
+} from "@fvoci/editor/attachment-model";
 import type { components } from "@/generated/api";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 
