@@ -6,9 +6,9 @@ use uuid::Uuid;
 use crate::db::context::{
     begin_read, lock_membership_users, recheck_session, session_is_live, set_system, set_tenant,
 };
-use crate::db::documents::workspace_is_live;
 use crate::db::identity::{append_event, EventAppend};
 use crate::db::projects::{load_live_project, project_permission, share_lock_project_permission};
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
 const SESSION_REVISION_HEAD_RETRIES: u32 = 2;
@@ -506,25 +506,6 @@ pub async fn authorize_revision_target(
     }
 }
 
-pub async fn authorize_revision_document(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-    write: bool,
-) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
-    authorize_revision_target(
-        pool,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        RevisionTarget::Document(document_id),
-        write,
-    )
-    .await
-}
-
 async fn collab_state_exists(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -544,27 +525,6 @@ async fn collab_state_exists(
         .fetch_one(&mut **tx)
         .await?;
     Ok(exists)
-}
-
-pub async fn list_document_revisions(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-    limit: i64,
-    before: Option<RevisionCursor>,
-) -> Result<Result<RevisionListPage, RevisionDbError>, sqlx::Error> {
-    list_revisions(
-        pool,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        RevisionTarget::Document(document_id),
-        limit,
-        before,
-    )
-    .await
 }
 
 pub async fn list_revisions(
@@ -668,25 +628,6 @@ pub async fn list_revisions(
     Ok(Ok(RevisionListPage { items, next_cursor }))
 }
 
-pub async fn get_document_revision(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-    revision_id: Uuid,
-) -> Result<Result<RevisionDetail, RevisionDbError>, sqlx::Error> {
-    get_revision(
-        pool,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        RevisionTarget::Document(document_id),
-        revision_id,
-    )
-    .await
-}
-
 pub async fn get_revision(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -751,25 +692,6 @@ pub async fn get_revision(
         })),
         _ => Ok(Err(RevisionDbError::NotFound)),
     }
-}
-
-pub async fn create_manual_document_revision(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-    input: CreateRevisionInput,
-) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
-    create_manual_revision(
-        pool,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        RevisionTarget::Document(document_id),
-        input,
-    )
-    .await
 }
 
 pub async fn create_manual_revision(
@@ -1124,27 +1046,6 @@ pub async fn create_system_revision(
     Ok(Ok(id))
 }
 
-pub async fn resolve_document_restore(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-    revision_id: Uuid,
-    client_ip: Option<&str>,
-) -> Result<Result<Vec<u8>, RevisionDbError>, sqlx::Error> {
-    resolve_restore(
-        pool,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        RevisionTarget::Document(document_id),
-        revision_id,
-        client_ip,
-    )
-    .await
-}
-
 pub async fn resolve_restore(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1222,23 +1123,6 @@ pub async fn resolve_restore(
     .await?;
     tx.commit().await?;
     Ok(Ok(y_snapshot))
-}
-
-pub async fn load_persisted_collab_source(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-) -> Result<Result<PersistedCollabSource, RevisionDbError>, sqlx::Error> {
-    load_persisted_target_source(
-        pool,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        RevisionTarget::Document(document_id),
-    )
-    .await
 }
 
 pub async fn load_persisted_target_source(

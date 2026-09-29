@@ -2,14 +2,11 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{
-    begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
-};
+use crate::db::context::{begin_read, session_is_live, set_tenant};
 use crate::db::projects::{
-    load_live_project, lock_project, project_permission, visible_project_sql, ProjectDbError,
+    require_project_edit, require_project_view, visible_project_sql, ProjectDbError,
 };
-use crate::db::workspace::WorkspaceRole;
-use crate::projects::ProjectPermission;
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 
 pub const LABEL_NAME_MAX: usize = 100;
 pub const LABEL_COLORS: &[&str] = &[
@@ -33,83 +30,6 @@ pub fn label_name_is_valid(name: &str) -> bool {
 
 pub fn label_color_is_valid(color: &str) -> bool {
     LABEL_COLORS.contains(&color)
-}
-
-async fn workspace_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
-}
-
-async fn membership_role(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-) -> Result<Option<WorkspaceRole>, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
-}
-
-async fn require_project_view(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    project_id: Uuid,
-) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
-    if !session_is_live(tx, actor_user_id, session_id).await? {
-        return Ok(Err(ProjectDbError::Forbidden));
-    }
-    if !workspace_is_live(tx, workspace_id).await? {
-        return Ok(Err(ProjectDbError::NotFound));
-    }
-    let Some(locked) = load_live_project(tx, workspace_id, project_id).await? else {
-        return Ok(Err(ProjectDbError::NotFound));
-    };
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
-    if !permission.at_least(ProjectPermission::View) {
-        return Ok(Err(ProjectDbError::NotFound));
-    }
-    Ok(Ok(()))
-}
-
-async fn require_project_edit(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    project_id: Uuid,
-) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
-    lock_membership_users(tx, &[actor_user_id]).await?;
-    if !recheck_session(tx, actor_user_id, session_id).await? {
-        return Ok(Err(ProjectDbError::Forbidden));
-    }
-    if !workspace_is_live(tx, workspace_id).await? {
-        return Ok(Err(ProjectDbError::NotFound));
-    }
-    let Some(locked) = lock_project(tx, workspace_id, project_id).await? else {
-        return Ok(Err(ProjectDbError::NotFound));
-    };
-    if locked.status == "archived" {
-        return Ok(Err(ProjectDbError::Archived));
-    }
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
-    if !permission.at_least(ProjectPermission::Edit) {
-        return Ok(Err(ProjectDbError::NotFound));
-    }
-    Ok(Ok(()))
 }
 
 fn map_label_row(

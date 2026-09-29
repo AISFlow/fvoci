@@ -5,14 +5,14 @@ use uuid::Uuid;
 use crate::db::context::{
     begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
 };
-use crate::db::documents::{
-    document_permission, membership_role, membership_role_for_update, workspace_is_live,
-};
+use crate::db::documents::document_permission;
 use crate::db::projects::{
     count_project_leads_except, is_private_lead_violation, load_live_project, lock_project,
     project_permission,
 };
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{
+    membership_role, membership_role_for_update, workspace_is_live, WorkspaceRole,
+};
 use crate::projects::{workspace_base_permission, ProjectMemberRole, ProjectPermission};
 
 #[derive(Debug)]
@@ -513,12 +513,12 @@ pub async fn list_project_group_grants(
         tx.rollback().await?;
         return Ok(Err(GroupDbError::NotFound));
     }
-    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
+    let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+    let Some(project) = project else {
         tx.rollback().await?;
         return Ok(Err(GroupDbError::NotFound));
     };
-    if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+    if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
         .await?
         .at_least(ProjectPermission::View)
     {

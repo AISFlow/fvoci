@@ -16,10 +16,10 @@ use crate::db::context::{
     lock_membership_users, recheck_session, set_self_user, set_system, set_tenant,
 };
 use crate::db::identity::{
-    append_audit, append_event, lock_sign_in, revoke_all_sessions_for_user, AuditAppend,
-    EventAppend, INSTANCE_ADMIN_LOCK_KEY,
+    append_audit, append_event, lock_instance_admin_changes, lock_sign_in,
+    revoke_all_sessions_for_user, AuditAppend, EventAppend,
 };
-use crate::db::quota::{acquire_admission_lock, require_new_instance_billable_user, QuotaError};
+use crate::db::quota::{require_new_instance_billable_user, QuotaError};
 
 /// Source `requireInstanceAdmin`: a live (not deleted, not suspended) user
 /// with the flag. `FOR SHARE` holds the row so a concurrent demotion or
@@ -480,11 +480,7 @@ pub async fn patch_instance_user(
     ip: Option<&str>,
 ) -> Result<Option<PatchUserOutcome>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    acquire_admission_lock(&mut tx).await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(INSTANCE_ADMIN_LOCK_KEY)
-        .execute(&mut *tx)
-        .await?;
+    lock_instance_admin_changes(&mut tx).await?;
     lock_membership_users(&mut tx, &[actor, target]).await?;
     lock_sign_in(&mut tx, target).await?;
     let current: Option<(bool, Option<DateTime<Utc>>)> = sqlx::query_as(

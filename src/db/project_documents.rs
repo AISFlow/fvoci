@@ -5,7 +5,9 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{begin_read, lock_tree, set_tenant};
+use crate::db::context::{
+    begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::documents::{
     assert_document_writable, between, depth_of, empty_document_json, fetch_document_row,
     format_display_id, is_descendant, list_live_siblings_in, lock_document_rows, move_subtree,
@@ -13,10 +15,8 @@ use crate::db::documents::{
     trash_document_row, trash_expired, CreateDocumentInput, DocumentDbError, DocumentMeta,
     TrashChildrenMode, TreeNode, UpdateDocumentMetaInput, DOCUMENT_SCHEMA_VERSION, MAX_TREE_DEPTH,
 };
-use crate::db::documents::{
-    lock_membership_users, recheck_session, session_is_live, workspace_is_live,
-};
 use crate::db::projects::{load_live_project, lock_project, project_permission};
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
 /// Live credential and workspace, then at least `min` on the live project.
@@ -44,13 +44,13 @@ pub(crate) async fn require_project_document_access(
     } else {
         load_live_project(tx, workspace_id, project_id).await?
     };
-    let Some(locked) = project else {
+    let Some(project) = project else {
         return Ok(Err(DocumentDbError::NotFound));
     };
-    if locked.status == "archived" && min >= ProjectPermission::Edit {
+    if project.status == "archived" && min >= ProjectPermission::Edit {
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(min) {
         return Ok(Err(DocumentDbError::NotFound));
     }

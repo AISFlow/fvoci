@@ -19,10 +19,12 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::db::context::{session_is_live, set_tenant};
-use crate::db::documents::{document_permission, membership_role, workspace_is_live};
+use crate::db::documents::document_permission;
 use crate::db::group_grants::guest_wiki_document_ids_select_sql;
-use crate::db::projects::{load_live_project, project_permission, LockedProject};
-use crate::db::workspace::{list_workspaces_for_user, WorkspaceRole};
+use crate::db::projects::{load_live_project, project_permission, LiveProject};
+use crate::db::workspace::{
+    list_workspaces_for_user, membership_role, workspace_is_live, WorkspaceRole,
+};
 use crate::display_id::format_display_id;
 use crate::projects::ProjectPermission;
 use crate::search::embed::Embedder;
@@ -490,7 +492,7 @@ pub(crate) async fn load_search_acl(
 
     let mut project_ids = Vec::new();
     for row in rows {
-        let locked = LockedProject {
+        let project = LiveProject {
             id: row.0,
             key: row.1,
             name: row.2,
@@ -503,9 +505,9 @@ pub(crate) async fn load_search_acl(
             created_at: row.9,
             updated_at: row.10,
         };
-        let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+        let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
         if permission.at_least(ProjectPermission::View) {
-            project_ids.push(locked.id);
+            project_ids.push(project.id);
         }
     }
     let wiki_document_ids = if role == WorkspaceRole::Guest {
@@ -1708,10 +1710,10 @@ async fn visible_after_hydrate(
             if !acl.project_ids.contains(&pid) {
                 return Ok(false);
             }
-            let Some(locked) = load_live_project(tx, workspace_id, pid).await? else {
+            let Some(project) = load_live_project(tx, workspace_id, pid).await? else {
                 return Ok(false);
             };
-            let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+            let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
             Ok(permission.at_least(ProjectPermission::View))
         }
         None => {

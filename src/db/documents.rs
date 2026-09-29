@@ -5,14 +5,17 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_tree, set_tenant};
+use crate::db::context::{
+    lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::group_grants::{group_document_grant_roles_select_sql, group_members_join_sql};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission};
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{
+    membership_role, membership_role_for_update, workspace_is_live, WorkspaceRole,
+};
 use crate::projects::{workspace_base_permission, ProjectMemberRole, ProjectPermission};
 
-pub(crate) use crate::db::context::{lock_membership_users, recheck_session, session_is_live};
 pub const MAX_TREE_DEPTH: i32 = 20;
 pub const DOCUMENT_SCHEMA_VERSION: i32 = 2;
 const DOCUMENT_TITLE_MAX: usize = 300;
@@ -410,48 +413,6 @@ pub(crate) async fn assert_document_writable(
         }
     }
     Ok(Ok(()))
-}
-
-pub(crate) async fn membership_role(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-) -> Result<Option<WorkspaceRole>, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
-}
-
-pub(crate) async fn membership_role_for_update(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-) -> Result<Option<WorkspaceRole>, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
-}
-
-pub async fn workspace_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(bool,)> =
-        sqlx::query_as("SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row.map(|(live,)| live).unwrap_or(false))
 }
 
 pub(crate) async fn record_document_event_and_audit(

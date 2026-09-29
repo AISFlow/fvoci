@@ -178,6 +178,33 @@ pub(crate) async fn membership_role(
     Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
 }
 
+pub(crate) async fn membership_role_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<WorkspaceRole>, sqlx::Error> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
+}
+
+pub(crate) async fn workspace_is_live(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(bool,)> =
+        sqlx::query_as("SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    Ok(row.map(|(live,)| live).unwrap_or(false))
+}
+
 pub(crate) async fn workspace_kind_read(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,

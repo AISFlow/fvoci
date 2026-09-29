@@ -2270,11 +2270,6 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StatementRouter {
     }
 }
 
-/// The statement `db::pool` sends on an idle app connection before handing it
-/// out (`OUTSIDE_TRANSACTION_SQL` there).
-const POOL_ACQUIRE_CHECK_SQL: &str =
-    "SELECT pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp()";
-
 /// Runs the guest's wiki collection query, checks every row's canEdit against
 /// the single-document lookup and returns (rows, statements the query issued).
 async fn guest_query_checked(
@@ -2287,6 +2282,7 @@ async fn guest_query_checked(
 ) -> (usize, Vec<String>) {
     use fvoci_server::db::context::set_tenant;
     use fvoci_server::db::documents::document_permission;
+    use fvoci_server::db::pool::ACQUIRE_CHECK_SQL;
     use fvoci_server::projects::ProjectPermission;
 
     counter.take();
@@ -2307,7 +2303,7 @@ async fn guest_query_checked(
         .take_statements()
         .into_iter()
         .filter(|sql| !sql.contains("pg_catalog.pg_timezone_names"))
-        .filter(|sql| !sql.contains(POOL_ACQUIRE_CHECK_SQL))
+        .filter(|sql| !sql.contains(ACQUIRE_CHECK_SQL))
         .collect();
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!(result["nextCursor"], Value::Null, "{result}");

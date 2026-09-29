@@ -21,11 +21,11 @@ use crate::collections::{
     QueryConfig, ValueInput, Visibility, FIELDS_PER_COLLECTION_MAX, WINDOW_DAYS_MAX,
 };
 use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
-use crate::db::documents::{document_permission, membership_role, workspace_is_live};
+use crate::db::documents::document_permission;
 use crate::db::identity::{append_audit, AuditAppend};
 use crate::db::projects::{lock_project, project_permission, project_permission_by_id};
 use crate::db::view_query::{compile_view_query, CompileOptions, RootKind, SqlArgs, ViewScope};
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::projects::{workspace_base_permission, ProjectPermission};
 use crate::search::query::load_search_acl;
 

@@ -9,14 +9,14 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::collab::derived_body::to_chosung;
-use crate::db::context::{begin_read, set_tenant};
-use crate::db::documents::{
-    assert_document_writable, document_permission, lock_membership_users, recheck_session,
-    session_is_live, workspace_is_live, DocumentDbError,
+use crate::db::context::{
+    begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
 };
+use crate::db::documents::{assert_document_writable, document_permission, DocumentDbError};
 use crate::db::groups::list_group_member_user_ids;
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
-use crate::db::projects::{load_live_project, lock_project, project_permission, LockedProject};
+use crate::db::projects::{load_live_project, lock_project, project_permission, LiveProject};
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
 pub const COMMENT_BODY_MAX: usize = 8000;
@@ -361,7 +361,7 @@ async fn parent_project(
     workspace_id: Uuid,
     project_id: Uuid,
     writable: bool,
-) -> Result<Option<LockedProject>, sqlx::Error> {
+) -> Result<Option<LiveProject>, sqlx::Error> {
     if writable {
         lock_project(tx, workspace_id, project_id).await
     } else {

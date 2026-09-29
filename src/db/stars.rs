@@ -10,8 +10,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
-use crate::db::documents::{membership_role, workspace_is_live};
 use crate::db::notifications::ContentKind;
+use crate::db::workspace::{membership_role, workspace_is_live};
 use crate::search::query::{load_search_acl, SearchAcl};
 
 pub const RECENT_DEFAULT_LIMIT: i64 = 20;

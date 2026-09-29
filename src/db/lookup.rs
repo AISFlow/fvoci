@@ -1,9 +1,8 @@
 use uuid::Uuid;
 
 use crate::db::context::{session_is_live, set_tenant};
-use crate::db::documents::membership_role;
 use crate::db::projects::project_member_role;
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::display_id::{format_display_id, parse_display_id, ParsedDisplayId};
 use crate::projects::{effective_permission, ProjectPermission};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -231,18 +230,6 @@ async fn search_project_acl(
         }
     }
     Ok(SearchAcl { project_ids })
-}
-
-async fn workspace_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<chrono::DateTime<chrono::Utc>>,)> =
-        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

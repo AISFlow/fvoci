@@ -23,6 +23,7 @@ use crate::db::view_query::{
     compile_view_query, due_date_sql, scalar_value_sql, value_column, CompileOptions, CompiledView,
     RootKind, SqlArgs, ViewScope,
 };
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 use crate::tasks::activity::{patch_activity_fields, ActivitySnapshot};
 use crate::tasks::dependency::{
@@ -137,18 +138,6 @@ pub(crate) struct TaskChangeRecord<'a> {
     pub(crate) target_id: Uuid,
     pub(crate) payload: Value,
     pub(crate) client_ip: Option<&'a str>,
-}
-
-pub(crate) async fn workspace_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
 }
 
 const MAX_TASK_REFS: usize = 50;
@@ -537,11 +526,7 @@ async fn default_backlog_status(
     Ok(fallback.map(|(id,)| id))
 }
 
-/// Serializes WIP-limit checks per target status (transaction-scoped). It
-/// used to share 1_907_002 with attachment storage. Renumbering is safe:
-/// servers of different versions are not supported against one database
-/// (RUNNING.md: stop old, migrate, start new; mixed-version rolling restart is
-/// unsupported).
+/// Serializes WIP-limit checks per target status (transaction-scoped).
 pub(crate) const TASK_STATUS_LOCK_NAMESPACE: i32 = 1_907_003;
 
 fn violates_task_hierarchy(child_type: &str, parent_type: &str) -> bool {
@@ -1238,12 +1223,12 @@ pub async fn get_task(
     .fetch_one(&mut *tx)
     .await?;
     let project_id = task_row.project_id;
-    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
+    let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+    let Some(project) = project else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
@@ -1360,12 +1345,12 @@ async fn list_tasks_in_scope(
     }
     let scope_condition = match project_id {
         Some(project_id) => {
-            let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
-            let Some(locked) = locked else {
+            let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+            let Some(project) = project else {
                 tx.rollback().await?;
                 return Ok(Err(ProjectDbError::NotFound));
             };
-            if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+            if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
                 .await?
                 .at_least(ProjectPermission::View)
             {
@@ -1376,7 +1361,7 @@ async fn list_tasks_in_scope(
         }
         None => {
             let Some(role) =
-                crate::db::documents::membership_role(&mut tx, workspace_id, actor_user_id).await?
+                crate::db::workspace::membership_role(&mut tx, workspace_id, actor_user_id).await?
             else {
                 tx.rollback().await?;
                 return Ok(Err(ProjectDbError::NotFound));
@@ -3349,11 +3334,11 @@ pub async fn list_project_dependencies(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let Some(locked) = load_live_project(&mut tx, workspace_id, project_id).await? else {
+    let Some(project) = load_live_project(&mut tx, workspace_id, project_id).await? else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+    if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
         .await?
         .at_least(ProjectPermission::View)
     {

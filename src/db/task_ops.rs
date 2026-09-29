@@ -19,15 +19,16 @@ use crate::db::context::{
 };
 use crate::db::documents::document_permission;
 use crate::db::projects::{
-    load_live_project, lock_project, project_permission, project_permission_by_id, LockedProject,
+    load_live_project, lock_project, project_permission, project_permission_by_id, LiveProject,
     ProjectDbError,
 };
 use crate::db::task_activity::record_task_activity;
 use crate::db::tasks::{
     copy_task_assignees_and_labels, insert_task_in_locked_project, list_task_assignee_ids,
-    record_task_event_and_audit, require_task_write_access, uuid_strings, workspace_is_live,
-    CreateTaskInput, TaskChangeRecord, TaskMetaRow,
+    record_task_event_and_audit, require_task_write_access, uuid_strings, CreateTaskInput,
+    TaskChangeRecord, TaskMetaRow,
 };
+use crate::db::workspace::workspace_is_live;
 use crate::display_id::{format_display_id, parse_display_id};
 use crate::projects::ProjectPermission;
 use crate::settings::messages::{Message, Messages};
@@ -35,7 +36,7 @@ use crate::tasks::activity::ActivitySnapshot;
 
 /// A task the actor can currently view, with its project row.
 struct ViewableTask {
-    project: LockedProject,
+    project: LiveProject,
     archived_at: Option<DateTime<Utc>>,
     permission: ProjectPermission,
 }

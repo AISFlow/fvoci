@@ -309,7 +309,7 @@ pub async fn list_task_activity(
     let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !crate::db::context::session_is_live(&mut tx, actor_user_id, session_id).await?
-        || !crate::db::documents::workspace_is_live(&mut tx, workspace_id).await?
+        || !crate::db::workspace::workspace_is_live(&mut tx, workspace_id).await?
     {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
@@ -329,11 +329,11 @@ pub async fn list_task_activity(
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     };
-    let Some(locked) = load_live_project(&mut tx, workspace_id, project_id).await? else {
+    let Some(project) = load_live_project(&mut tx, workspace_id, project_id).await? else {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     };
-    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));

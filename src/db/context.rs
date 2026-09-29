@@ -1,6 +1,37 @@
+//! Transaction context (tenant, system, self user, invitation token) and the
+//! credential and advisory-lock checks request transactions run.
+//!
+//! Every setting is transaction-local (`set_config(.., true)`), so a pooled
+//! connection never carries one into its next checkout.
+//!
+//! Order for workspace-scoped request transactions. Writers: [`set_tenant`]
+//! → [`lock_membership_users`] → [`recheck_session`] → (only where the write
+//! depends on the actor's workspace role)
+//! `db::workspace::membership_role_for_update` → parent rows before child
+//! rows. Writers that admit members, change seats or create or delete
+//! workspaces first take `quota::acquire_admission_lock`; writers that change
+//! instance users take `identity::lock_instance_admin_changes` (admission,
+//! then instance-admin). Both come before [`lock_membership_users`], and
+//! `identity::lock_sign_in` comes after it. Module-specific tails are
+//! documented in `db::collab`, `db::task_ops` and `db::project_documents`.
+//!
+//! Workspace-scoped reads take no row locks and check the credential and
+//! permission in the same transaction as the data; project-scoped reads use
+//! [`begin_read`] (one REPEATABLE READ, READ ONLY snapshot). Instance-admin
+//! reads are the exception: `db::admin::require_live_instance_admin` holds the
+//! actor's users row `FOR SHARE`; `db::admin` reads run it in the reading
+//! transaction, while the instance-settings read route runs it in a
+//! transaction of its own before and again after loading the settings.
+
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+// Advisory-lock namespaces: two-int locks are (namespace, key), one-bigint
+// locks a separate key space. Every fixed namespace and bigint key in the
+// crate is listed in `tests::advisory_lock_namespaces_are_unique`, which
+// states why each must be unique. Values may be renumbered: servers of different
+// versions never run against one database (RUNNING.md: mixed-version rolling
+// restart is not supported).
 pub const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
 pub const TREE_LOCK_NAMESPACE: i32 = 1_907_005;
 /// Per-workspace search index lock (transaction-scoped). Not 1_907_007: that is
@@ -111,6 +142,12 @@ pub async fn clear_invitation_token_hash(
     Ok(())
 }
 
+/// The low 32 bits of `id`, the key of a two-int advisory lock on that id.
+/// Every process must derive the same key for the same id (the room fence and
+/// the tests that hold its keys depend on it). Equal keys never grant access,
+/// but they make unrelated ids contend: a transaction lock waits, and a
+/// try-lock (room fence, attachment upload) reports busy for as long as the
+/// holder keeps it.
 pub fn lock_key_from_uuid(id: Uuid) -> i32 {
     let hex = id.simple().to_string();
     let tail = hex.chars().rev().take(8).collect::<Vec<_>>();
@@ -119,6 +156,12 @@ pub fn lock_key_from_uuid(id: Uuid) -> i32 {
     parsed as i32
 }
 
+/// Takes the transaction-scoped membership advisory lock of each user, keys
+/// sorted and deduplicated, one statement per key. Writers take it for the
+/// actor before [`recheck_session`]; membership, admin and account changes
+/// take it for every affected user, so those changes and the user's writes
+/// serialize. The fixed key order keeps transactions that lock overlapping
+/// user sets deadlock-free.
 pub async fn lock_membership_users(
     tx: &mut Transaction<'_, Postgres>,
     user_ids: &[Uuid],
@@ -139,7 +182,7 @@ pub async fn lock_membership_users(
     Ok(())
 }
 
-pub const CREDENTIAL_LIVE_SQL: &str = r#"
+const CREDENTIAL_LIVE_SQL: &str = r#"
         SELECT (
             u.deleted_at IS NULL
             AND u.suspended_at IS NULL
@@ -188,6 +231,13 @@ const TOKEN_RECHECK_SQL: &str = r#"
         FOR UPDATE OF u, t
         "#;
 
+/// Write-path credential check: the same condition as [`session_is_live`],
+/// but it locks the user row and the session or API token row `FOR UPDATE`,
+/// so a revocation, suspension or deletion of those rows either committed
+/// first (and is seen) or waits until this transaction ends. Session first,
+/// then token, as two statements: `FOR UPDATE` cannot lock the nullable side
+/// of an outer join. Call it after [`lock_membership_users`]; the tenant rule
+/// of [`session_is_live`] applies.
 pub async fn recheck_session(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
@@ -209,6 +259,14 @@ pub async fn recheck_session(
     Ok(token_live.map(|(v,)| v).unwrap_or(false))
 }
 
+/// Whether `session_id` names a live credential of a live user: an unrevoked,
+/// unexpired session or an unexpired API token, of a user neither deleted nor
+/// suspended. Takes no lock (read path; writers use [`recheck_session`]).
+///
+/// Run after [`set_tenant`]: `api_tokens` has RLS, so with no tenant a live
+/// token reads as dead, and under system context another workspace's token
+/// would be visible. The route-level binding of a token to its workspace is
+/// `http::authz::apply_token_access`; this is its second layer.
 pub async fn session_is_live(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
@@ -282,8 +340,8 @@ mod tests {
                 ),
             ],
         );
-        // MIGRATION_LOCK_KEY (db::migrate) and PREPARE_LOCK_KEY (prepare) are
-        // private to their modules and not listed here.
+        // db::legal also takes one-bigint locks, keyed by an int4
+        // hashtext('fvoci.legal:' || kind); they cannot be listed here.
         assert_unique(
             "one-bigint",
             &[
@@ -293,6 +351,11 @@ mod tests {
                     "instance admin",
                     crate::db::identity::INSTANCE_ADMIN_LOCK_KEY,
                 ),
+                // prepare holds its session lock while migrate takes the
+                // migration lock on other connections: equal values would
+                // deadlock prepare.
+                ("migration", crate::db::migrate::MIGRATION_LOCK_KEY),
+                ("prepare", crate::prepare::PREPARE_LOCK_KEY),
             ],
         );
     }

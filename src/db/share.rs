@@ -20,11 +20,9 @@ use crate::collab::derived_body::extract_text;
 use crate::db::context::{
     lock_membership_users, recheck_session, restore_system, session_is_live, set_system, set_tenant,
 };
-use crate::db::documents::{
-    document_permission, document_permissions, membership_role, workspace_is_live,
-};
+use crate::db::documents::{document_permission, document_permissions};
 use crate::db::projects::project_permission_by_id;
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::projects::ProjectPermission;
 use crate::settings::catalog::SharePolicy;
 

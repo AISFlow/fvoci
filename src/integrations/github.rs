@@ -31,14 +31,13 @@ use crate::auth::password::Keyring;
 use crate::db::context::{
     lock_membership_users, recheck_session, restore_system, set_system, set_tenant,
 };
-use crate::db::documents::{
-    between, empty_document_json, workspace_is_live, DOCUMENT_SCHEMA_VERSION,
-};
+use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
 use crate::db::identity::{append_audit, append_event_channel, AuditAppend, EventAppend};
 use crate::db::integrations::{require_manager_read, require_manager_write, IntegrationDbError};
 use crate::db::outbox::{advance_cursor_tx, OutboxEvent};
 use crate::db::projects::{lock_project, project_permission};
 use crate::db::task_activity::record_task_activity;
+use crate::db::workspace::workspace_is_live;
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
 use crate::projects::ProjectPermission;
 use crate::tasks::activity::ActivitySnapshot;

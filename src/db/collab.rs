@@ -45,13 +45,11 @@ use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::collab::derived_body::PreparedDerivedBody;
-use crate::db::context::{lock_key_from_uuid, set_tenant};
-use crate::db::documents::{
-    document_permission, empty_document_json, lock_membership_users, membership_role_for_update,
-    recheck_session, workspace_is_live,
-};
+use crate::db::context::{lock_key_from_uuid, lock_membership_users, recheck_session, set_tenant};
+use crate::db::documents::{document_permission, empty_document_json};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::share_lock_project_permission;
+use crate::db::workspace::{membership_role_for_update, workspace_is_live};
 use crate::projects::ProjectPermission;
 
 pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
