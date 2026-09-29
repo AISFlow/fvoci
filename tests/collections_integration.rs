@@ -2270,6 +2270,23 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StatementRouter {
     }
 }
 
+/// Statements finished since the last take that belong to the request. The
+/// process-wide time zone name cache (db::dashboard) fills once, on whichever
+/// query comes first; it is not part of the request's own work. Neither is the
+/// app pool's acquire check (db::pool): it runs only when an idle connection is
+/// reused, not on a newly opened one, so how often it appears depends on the
+/// pool's state, not on the request.
+fn request_statements(counter: &StatementCounter) -> Vec<String> {
+    use fvoci_server::db::pool::ACQUIRE_CHECK_SQL;
+
+    counter
+        .take_statements()
+        .into_iter()
+        .filter(|sql| !sql.contains("pg_catalog.pg_timezone_names"))
+        .filter(|sql| !sql.contains(ACQUIRE_CHECK_SQL))
+        .collect()
+}
+
 /// Runs the guest's wiki collection query, checks every row's canEdit against
 /// the single-document lookup and returns (rows, statements the query issued).
 async fn guest_query_checked(
@@ -2282,7 +2299,6 @@ async fn guest_query_checked(
 ) -> (usize, Vec<String>) {
     use fvoci_server::db::context::set_tenant;
     use fvoci_server::db::documents::document_permission;
-    use fvoci_server::db::pool::ACQUIRE_CHECK_SQL;
     use fvoci_server::projects::ProjectPermission;
 
     counter.take();
@@ -2294,17 +2310,7 @@ async fn guest_query_checked(
         json!({"config": {"query": {"sort": [{"field": "title", "direction": "asc"}]}}, "limit": 100}),
     )
     .await;
-    // The process-wide time zone name cache (db::dashboard) fills once, on
-    // whichever query comes first; it is not part of the query's own work.
-    // Neither is the app pool's acquire check (db::pool): it runs only when an
-    // idle connection is reused, not on a newly opened one, so how often it
-    // appears depends on the pool's state, not on the query.
-    let statements: Vec<String> = counter
-        .take_statements()
-        .into_iter()
-        .filter(|sql| !sql.contains("pg_catalog.pg_timezone_names"))
-        .filter(|sql| !sql.contains(ACQUIRE_CHECK_SQL))
-        .collect();
+    let statements = request_statements(counter);
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!(result["nextCursor"], Value::Null, "{result}");
     let rows = result["items"].as_array().unwrap();
