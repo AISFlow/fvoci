@@ -486,18 +486,24 @@ Generate the OpenAPI contract and TypeScript client from Rust DTOs:
 scripts/generate-api.sh
 ```
 
+The web workspace (`apps/web`, `packages/*`, `scripts/document-convert`) is
+installed and run with Bun: the version in `.bun-version`, `bun ci` at the
+repository root for the locked `bun.lock`, and `--bun` so package binaries run
+on Bun even where Node is installed. `bunfig.toml` keeps the hoisted linker (one
+root `node_modules`), which the type paths and scripts rely on.
+
 Development (Vite proxy to a running `fvoci-server` API):
 
 ```sh
+bun ci
 cd apps/web
-npm install
-API_PROXY_TARGET=http://127.0.0.1:8080 npm run dev
+API_PROXY_TARGET=http://127.0.0.1:8080 bun --bun run dev
 ```
 
 Production-style serving from the Rust binary (built assets required):
 
 ```sh
-(cd apps/web && npm ci && npm run build)
+bun ci && (cd apps/web && bun --bun run build)
 export FVOCI_STATIC_DIR="$PWD/apps/web/dist"
 export FVOCI_PUBLIC_ORIGIN=http://127.0.0.1:8080
 export FVOCI_BIND=127.0.0.1:8080
@@ -560,7 +566,7 @@ PDF run in the same child as the Markdown conversions
 (`--op tiptap-to-md-export|tiptap-to-docx|tiptap-to-pdf|tiptap-to-pptx`), see "DOCX export",
 "PDF export" and "PPTX and Markdown export" below. The server no longer runs the Node document
 convert helper; the final image contains no Node/Bun/Deno or bundled JavaScript engine.
-Node is used only to build the web assets and run development oracles/tests.
+Bun is used only to build the web assets and run development oracles/tests.
 `scripts/document-convert` remains only
 as the development oracle for the fixture regeneration scripts (`scripts/regen-*-oracle.sh`).
 The installed document smoke uses a host-side Python standard-library client;
@@ -711,7 +717,7 @@ The install artifact is a multi-stage Docker image used by both. It builds relea
 `collab-engine` helper (`--features worker`), the production `document-extract`
 helper (same rhwp pin as `scripts/prepare-extract-helper.sh` / `rust.yml`, without
 `test-hang`), and the `apps/web` production bundle (same steps as
-`scripts/prepare-web-e2e.sh` + `npm run build`). Runtime images pin base digests,
+`bun ci` + `bun --bun run build`). Runtime images pin base digests,
 run as uid/gid `1000` (`fvoci`) by default (the user install below starts the
 container as root and runs the server as `1000`), and set:
 

@@ -9,9 +9,8 @@ cd "$ROOT"
 cargo fetch --locked
 cargo fetch --locked --manifest-path "$ROOT/crates/collab-engine/Cargo.toml"
 
+bun ci
 cd "$ROOT/apps/web"
-npm ci --no-audit --no-fund
-npm ci --prefix "$ROOT/packages/editor" --ignore-scripts --no-audit --no-fund
-npx playwright install chromium
+bun --bun x --no-install playwright install chromium
 
 echo "Web e2e preparation complete."

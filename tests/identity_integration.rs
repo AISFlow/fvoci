@@ -14,6 +14,9 @@ mod fake_oidc;
 #[path = "support/license.rs"]
 mod license_fixture;
 
+#[path = "support/log_capture.rs"]
+mod log_capture;
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -100,10 +103,7 @@ impl Harness {
     }
 
     pub async fn start_with(options: Options) -> Self {
-        let _ = tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_env_filter("warn")
-            .try_init();
+        log_capture::install();
         let db = TestDb::bootstrap().await;
         let app_pool = pool::connect_app(&db.app_url).await.expect("app pool");
         let storage_root =
@@ -1383,53 +1383,6 @@ fn assert_sso_refused(res: &Response, code: &str) {
         "{code}: {:?}",
         res.headers
     );
-}
-
-/// Warn-level events written on this thread while the guard lives. A
-/// `#[tokio::test]` runs the router on the test thread, so the handlers'
-/// events land here.
-#[derive(Clone, Default)]
-struct CapturedWarnings(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for CapturedWarnings {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWarnings {
-    type Writer = CapturedWarnings;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-impl CapturedWarnings {
-    fn start() -> (Self, tracing::subscriber::DefaultGuard) {
-        let captured = Self::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(captured.clone())
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
-        (captured, guard)
-    }
-
-    fn lines_with(&self, needle: &str) -> Vec<String> {
-        String::from_utf8(self.0.lock().unwrap().clone())
-            .unwrap()
-            .lines()
-            .filter(|line| line.contains(needle))
-            .map(str::to_owned)
-            .collect()
-    }
 }
 
 async fn begin_on(
@@ -2888,7 +2841,7 @@ async fn workspace_sso_login_and_jit_join() {
     // the problem instead of a raw problem+json page.
     let states = oidc_state_rows(&h).await;
     let discovery = fake.discovery_hits.load(Ordering::SeqCst);
-    let (logs, logs_guard) = CapturedWarnings::start();
+    let (logs, logs_guard) = log_capture::capture_warnings();
     let res = call(
         &h.app,
         "GET",

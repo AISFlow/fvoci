@@ -1,6 +1,6 @@
 /**
  * Waiting for the push service worker to become active, kept free of DOM
- * globals so it runs under `node --test`.
+ * globals so it runs under `bun test`.
  *
  * `register()` resolves while the new worker is still installing, and
  * `PushManager.subscribe` rejects without an active worker ("no active

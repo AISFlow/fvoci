@@ -1,6 +1,6 @@
 /**
  * Browser push helpers for {@link PushToggle}, kept free of React and DOM
- * globals so they run under `node --test`.
+ * globals so they run under `bun test`.
  */
 
 export const SW_URL = "/sw.js";

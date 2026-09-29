@@ -2,7 +2,7 @@
 # Binaries and static assets are root-owned and read-only to the service user;
 # only /data/storage is writable by it.
 # Multi-stage install image for the Rust FVOCI slice: server, migrate, collab-engine,
-# document-extract and built React static assets. Node is used only by web-build;
+# document-extract and built React static assets. Bun is used only by web-build;
 # the runtime contains Rust helpers and no JavaScript runtime.
 
 FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-sources
@@ -34,23 +34,28 @@ RUN cargo build --locked --release --bin fvoci-server --bin fvoci-migrate \
  && cargo build --locked --release --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine \
  && cargo build --locked --release --manifest-path crates/document-extract/Cargo.toml --bin document-extract
 
-FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS web-build
+FROM oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS web-build
 WORKDIR /src
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+# The Bun workspace (package.json workspaces, bun.lock, bunfig.toml's linker)
+# spans apps/web, packages/* and scripts/document-convert; `bun ci` needs every
+# member manifest.
+COPY package.json bun.lock bunfig.toml .bun-version ./
+COPY scripts/document-convert/package.json ./scripts/document-convert/
 COPY packages ./packages
 COPY LICENSE ./LICENSE
 COPY third-party/browser-licenses ./third-party/browser-licenses
-COPY apps/web/package.json apps/web/package-lock.json ./apps/web/
-WORKDIR /src/apps/web
-RUN npm ci --install-links --no-audit --no-fund \
- && npm ci --prefix ../../packages/editor --ignore-scripts --no-audit --no-fund
+COPY apps/web/package.json ./apps/web/
+# One pinned Bun: this image's, packageManager and the .bun-version CI uses.
+RUN bun -e 'const v = (await Bun.file(".bun-version").text()).trim(); \
+  const pm = (await Bun.file("package.json").json()).packageManager; \
+  if (Bun.version !== v || pm !== `bun@${v}`) throw new Error(`Bun ${Bun.version}, packageManager ${pm}, .bun-version ${v}`)' \
+ && bun ci
 # The committed openapi.json / generated api.ts are kept in sync with the Rust
 # DTOs by the Web workflow's generate-api drift check, so this stage does not
 # depend on the Rust build.
-COPY apps/web ./
-RUN npm run build
+COPY apps/web ./apps/web/
+WORKDIR /src/apps/web
+RUN bun --bun run build
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 # No setuid/setgid files (su, passwd, mount, ...): nothing in the image
