@@ -486,7 +486,9 @@ impl CollabHub {
             .map(|(handle, _lease)| handle)
     }
 
-    /// Start or reuse the room and borrow its actor for one operation.
+    /// Start or reuse the room and borrow its actor for one operation. A room
+    /// whose actor has exited is reclaimed as a join reclaims it, so the next
+    /// pass starts a successor instead of waiting for the idle timer.
     async fn borrow_live_room(
         &self,
         key: impl Into<RoomKey>,
@@ -500,22 +502,24 @@ impl CollabHub {
             let LiveSlot { slot, lease } = self.get_or_create_room(key).await?;
             #[cfg(feature = "db-tests")]
             pause_for_hub_join_barrier(key.1, HUB_BORROW_BARRIER_AFTER_SLOT_READY).await;
-            let handle = {
+            let borrow = {
                 let mut phase = slot.phase.lock().await;
-                match &mut *phase {
-                    RoomPhase::Live(live) if !live.handle.is_closed() => {
-                        live.last_activity = Instant::now();
-                        Some(live.handle.clone())
-                    }
-                    _ => None,
-                }
+                Self::borrow_live_phase(&mut phase)
             };
-            if let Some(handle) = handle {
-                // The admission lease stays with the operation until it finishes.
-                return Ok((handle, lease));
+            match borrow {
+                LiveBorrow::Live(handle) => {
+                    // The admission lease stays with the operation until it finishes.
+                    return Ok((handle, lease));
+                }
+                LiveBorrow::Dead(live) => {
+                    drop(lease);
+                    self.spawn_reclaim(key, slot, live);
+                }
+                LiveBorrow::NotLive => {
+                    drop(lease);
+                    let _ = self.wait_for_live_or_retry(key, slot).await?;
+                }
             }
-            drop(lease);
-            let _ = self.wait_for_live_or_retry(key, slot).await?;
             if !Self::allow_pre_enqueue_retry(&mut retries) {
                 return Err(JoinError::EngineUnavailable);
             }
@@ -802,22 +806,13 @@ impl CollabHub {
             #[cfg(feature = "db-tests")]
             pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
 
-            let deliver = {
+            let borrow = {
                 let mut phase = slot.phase.lock().await;
-                let closed_live =
-                    matches!(&*phase, RoomPhase::Live(live) if live.handle.is_closed());
-                if closed_live {
-                    Self::take_dead_live(&mut phase).map(Err)
-                } else if let RoomPhase::Live(live) = &mut *phase {
-                    live.last_activity = Instant::now();
-                    Some(Ok(live.handle.clone()))
-                } else {
-                    None
-                }
+                Self::borrow_live_phase(&mut phase)
             };
 
-            match deliver {
-                Some(Ok(handle)) => {
+            match borrow {
+                LiveBorrow::Live(handle) => {
                     #[cfg(feature = "db-tests")]
                     pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN).await;
                     let delivery = handle.deliver_join(join).await;
@@ -839,14 +834,14 @@ impl CollabHub {
                         }
                     }
                 }
-                Some(Err(live)) => {
+                LiveBorrow::Dead(live) => {
                     drop(joining_lease);
                     self.spawn_reclaim(key, slot, live);
                     if !Self::allow_pre_enqueue_retry(&mut retries) {
                         return Err(JoinError::EngineUnavailable);
                     }
                 }
-                None => {
+                LiveBorrow::NotLive => {
                     drop(joining_lease);
                     let _ = self.wait_for_live_or_retry(key, slot).await?;
                     if !Self::allow_pre_enqueue_retry(&mut retries) {
@@ -863,6 +858,23 @@ impl CollabHub {
         }
         *retries += 1;
         true
+    }
+
+    /// Take the actor of a slot a join or borrow got back Live. Refreshes the
+    /// room's activity when the actor runs. When it has exited, moves the slot
+    /// to Closing and hands its [`LiveRoom`] to the caller, who must pass it to
+    /// [`Self::spawn_reclaim`]; dropping it would leave the slot Closing.
+    fn borrow_live_phase(phase: &mut RoomPhase) -> LiveBorrow {
+        if let Some(dead) = Self::take_dead_live(phase) {
+            return LiveBorrow::Dead(dead);
+        }
+        match phase {
+            RoomPhase::Live(live) => {
+                live.last_activity = Instant::now();
+                LiveBorrow::Live(live.handle.clone())
+            }
+            _ => LiveBorrow::NotLive,
+        }
     }
 
     fn take_dead_live(phase: &mut RoomPhase) -> Option<LiveRoom> {
@@ -1655,6 +1667,13 @@ impl ShutdownStatus {
 pub struct ShutdownProgress {
     pub rooms: Option<usize>,
     pub sockets_held: usize,
+}
+
+/// See [`CollabHub::borrow_live_phase`].
+enum LiveBorrow {
+    Live(RoomHandle),
+    Dead(LiveRoom),
+    NotLive,
 }
 
 enum ReserveOutcome {
