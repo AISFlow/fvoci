@@ -698,7 +698,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
     - `r11-dependabot`
   - 대기:
     - #259·#260: #261 A 수락 뒤
-    - 협업 엔진 비교: #262 수락됨(`f3f53c90`). 고정 main SHA에서 시작 가능.
+    - 협업 엔진 비교: #280 `b9d6cf30` 초안(`docs/collab-engine-comparison.md`). **기본안 Yrs 유지.** 다른 CRDT는 rewrite에 후보로 적히기 전 범위 밖. 계약 팩은 tracer 후. 교체 PR 없음.
     - sqlx 0.9, outbox C10·C12, 첨부 C9·C11, CO-11, HI-09: 관련 wave 통합 뒤
 - **다음 후속(비차단, 순서는 코디네이터 결정)**: Vue 전환 다음 tracer와 #253 contract 단계(pixel layout 필드 제거); presigned 실제 S3 제공자·
   Firefox·Safari 검증(#149 F); Dependabot bun.lock v2·#155 recreate 대응(§5); `collab-reconnect.test.ts`
@@ -805,7 +805,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 5. **#266** `ddce8bf2` — CI 후 머지(기능 전환과 별개).
 6. **#269** nit `79236b2e` **ACCEPT**, head `ef17b410` — CI(mfa-flow 샤드) 후 머지. 인증 기능군 전체 완료 아님.
 7. 미연결 Vue PR: #270–#279. boundary는 실행자가 순차. 기능군 완료로 세지 않음.
-8. 협업 엔진 비교: 문서 초안 브랜치 `fvoci/collab-engine-comparison` (제품 코드 없음). 예광탄 CI와 병렬.
+8. 협업 엔진 비교: #280 `b9d6cf30` 문서만. 코디네이터 기본안 **Yrs 유지**. 엔진 전환 PR 없음. #261을 닫지 않음.
 
 #### 전체 전환 종결까지 남은 필수
 
