@@ -20,9 +20,18 @@ export const routes: RouteRecordRaw[] = [
   { path: "/w/:slug/:ref/table", name: "project-table", component: () => import("./pages/ProjectCollectionPage.vue") },
   { path: "/w/:slug/:ref/board", name: "project-board", component: () => import("./pages/ProjectCollectionPage.vue") },
   { path: "/w/:slug/:ref/calendar", name: "project-calendar", component: () => import("./pages/ProjectCollectionPage.vue") },
+  // Task and project-document item refs. More specific than project-home's
+  // `/w/:slug/:ref`; wiki-document above is more specific still (`wiki-3`
+  // never reaches this page). Not live: STAGED_WORKSPACE_ITEM_PATH is the
+  // regex the coordinator would add later.
+  {
+    path: STAGED_VUE_ROUTE_PATHS.workspaceItem,
+    name: "workspace-item",
+    component: () => import("./pages/WorkspaceItemPage.vue"),
+  },
   // Project home overview. Same `/w/:slug/:ref` shape as the collection
-  // routes; wiki-document above is more specific. Not live: STAGED_PROJECT_HOME_PATH
-  // is the regex the coordinator would add later.
+  // routes; wiki-document and workspace-item above are more specific. Not
+  // live: STAGED_PROJECT_HOME_PATH is the regex the coordinator would add later.
   {
     path: STAGED_VUE_ROUTE_PATHS.projectHome,
     name: "project-home",

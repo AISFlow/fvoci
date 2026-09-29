@@ -63,8 +63,9 @@ test("the boot module sends wiki documents, and only them, to the Vue app", () =
   assert.equal(isVueAppPath("/w/acme/WIKI-0"), false);
   assert.equal(isVueAppPath("/w/acme/WIKI-01"), false);
   assert.equal(isVueAppPath("/w/acme/WIKI-1234567890"), false);
-  // Task and project-document refs stay React pages.
+  // Task and project-document refs stay React pages (the Vue route is staged).
   assert.equal(isVueAppPath("/w/acme/PRJ-1"), false);
+  assert.equal(isVueAppPath("/w/acme/GNT-1"), false);
   assert.equal(isVueAppPath("/w/acme/XWIKI-1"), false);
   assert.equal(isVueAppPath("/w/acme/wiki"), false);
 });

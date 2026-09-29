@@ -1,0 +1,125 @@
+<script setup lang="ts">
+import { FvociEditor } from "@fvoci/editor/vue";
+import "@fvoci/editor/styles.css";
+import { t } from "@fvoci/i18n";
+import UButton from "@nuxt/ui/components/Button.vue";
+import { computed, type FunctionalComponent, h, markRaw, ref } from "vue";
+import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
+import type { CollabUser } from "@/features/documents/collab-model";
+import type { CollabRoomSession } from "../../collab/useCollabRoom";
+import QueryLoading from "../../components/QueryLoading.vue";
+import EditorBubble from "../editor/EditorBubble.vue";
+import EditorToolbar from "../editor/EditorToolbar.vue";
+import UnfurlCard from "../editor/UnfurlCard.vue";
+import CollabPresence from "../documents/CollabPresence.vue";
+import RevisionPanel from "../documents/RevisionPanel.vue";
+import "@/features/documents/document-shell.css";
+
+// The task body is the `${ws}:task:${id}` collab room (React task-body-editor).
+// The parent owns the single useCollabRoom (TaskDetailView), keyed by the room name.
+const props = defineProps<{
+  workspaceId: string;
+  slug: string;
+  taskId: string;
+  readOnly: boolean;
+  session: CollabRoomSession | null;
+  collabUser: CollabUser | null;
+}>();
+
+const persisting = ref(false);
+const persistError = ref<string | null>(null);
+
+const readOnly = computed(() => props.readOnly || (props.session?.readOnly ?? false));
+const ready = computed(() => Boolean(props.session?.synced && props.collabUser));
+const refusalNote = computed(() => collabRefusalNote(props.session?.status, ready.value));
+const badge = computed(() =>
+  props.session
+    ? collabBadge(props.session.status, props.session.pending || persisting.value, props.session.durableSaved)
+    : null,
+);
+const canPersist = computed(
+  () =>
+    ready.value &&
+    !readOnly.value &&
+    props.session !== null &&
+    props.session.status === "connected" &&
+    !persisting.value,
+);
+
+const UrlEmbed: FunctionalComponent<{ url: string }> = markRaw((embed: { url: string }) =>
+  h(UnfurlCard, { workspaceId: props.workspaceId, url: embed.url }),
+);
+UrlEmbed.props = ["url"];
+
+async function persistBody(): Promise<void> {
+  const current = props.session;
+  if (!current || !canPersist.value) return;
+  persistError.value = null;
+  persisting.value = true;
+  try {
+    await current.persistNow();
+  } catch (error) {
+    const timedOut = error instanceof Error && error.message.includes("timed out");
+    persistError.value = timedOut ? t("collab timeout — retry") : t("collab unavailable");
+    throw error;
+  } finally {
+    persisting.value = false;
+  }
+}
+</script>
+
+<template>
+  <section class="task-detail__body" :aria-label="t('doc.body.a11y')" data-testid="task-body">
+    <div class="document-page__collab">
+      <span
+        v-if="badge"
+        :class="`document-page__collab-status document-page__collab-status--${badge.tone}`"
+        :data-collab-status="session?.status"
+        :data-collab-pending="session?.pending ? 'true' : 'false'"
+        :data-collab-persisted="session?.durableSaved ? 'true' : 'false'"
+      >
+        {{ t(badge.label) }}
+      </span>
+      <span v-else class="document-page__collab-status document-page__collab-status--wait" data-collab-persisted="false">
+        {{ t("doc.collab.connecting") }}
+      </span>
+      <UButton size="sm" :disabled="!canPersist" @click="persistBody().catch(() => undefined)">
+        {{ persisting ? t("doc.title.saving") : t("doc.title.save") }}
+      </UButton>
+      <CollabPresence v-if="session" :peers="session.peers" />
+      <RevisionPanel
+        :workspace-id="workspaceId"
+        :document-id="taskId"
+        :project-id="null"
+        target-kind="task"
+        :read-only="readOnly"
+        :persist-now="canPersist ? persistBody : undefined"
+      />
+    </div>
+    <p v-if="persistError" role="alert" class="document-page__error">{{ persistError }}</p>
+    <p v-if="session?.status === 'unauthorized'" class="document-page__body-note" role="alert">
+      {{ t("task.collab.unauthorized") }}
+    </p>
+    <p v-if="refusalNote" class="document-page__body-note" role="status">{{ t(refusalNote) }}</p>
+    <QueryLoading v-if="!ready && session?.status !== 'unauthorized' && !refusalNote" />
+    <div v-if="ready && session && collabUser" class="document-page__body document-page__body--editor">
+      <FvociEditor
+        :key="session.generation"
+        :ydoc="session.doc"
+        :provider="session.provider"
+        :user="collabUser"
+        :editable="!readOnly"
+        :aria-label="t('doc.body.a11y')"
+        :workspace-slug="slug"
+        :url-embed="UrlEmbed"
+      >
+        <template #toolbar="{ editor: live }">
+          <EditorToolbar :editor="live" :disabled="readOnly" />
+        </template>
+        <template #bubble="{ editor: live }">
+          <EditorBubble :editor="live" />
+        </template>
+      </FvociEditor>
+    </div>
+  </section>
+</template>

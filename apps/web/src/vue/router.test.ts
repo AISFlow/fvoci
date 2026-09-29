@@ -66,3 +66,16 @@ test("wiki documents stay wiki; project keys are project-home; gantt stays gantt
   assert.equal(isVueAppPath("/w/acme/GNT"), false);
   assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
 });
+
+test("workspace-item is more specific than project-home; wiki stays wiki", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/GNT-1").name, "workspace-item");
+  assert.equal(router.resolve("/w/acme/gnt-12").name, "workspace-item");
+  assert.equal(router.resolve("/w/acme/wiki-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/WIKI-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/GNT").name, "project-home");
+  assert.equal(router.resolve("/w/acme/GNT/tasks").name, "project-tasks");
+  // Declared but not live: afterEach still full-loads (same as /login above).
+  assert.equal(isVueAppPath("/w/acme/GNT-1"), false);
+  assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
+});
