@@ -2699,6 +2699,146 @@ async fn complete_after_revocation_is_refused_in_both_modes() {
     }
 }
 
+/// A request authenticated with an API token instead of the session cookie.
+async fn token_request(
+    app: &axum::Router,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {token}"));
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let mut req = builder
+        .body(axum::body::Body::from(body.unwrap_or_default()))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(test_peer()));
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, headers, bytes.to_vec())
+}
+
+#[tokio::test]
+async fn api_token_requests_keep_the_proxy_path_in_presigned_mode() {
+    let harness = TestDb::bootstrap().await;
+    let storage = presign_backend(PresignTtls::default()).await;
+    let (app, cookie, workspace_id) = setup_session(&harness, storage.clone()).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let (status, body) = patch_transfer(&app, &cookie, json!({"mode": "presigned"})).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["attachmentTransfer"]["effective"], "presigned");
+    let ws = format!("/api/v1/workspaces/{workspace_id}");
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{ws}/api-tokens"),
+        Some(json!({"name": "script", "scopes": ["documents.write"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let token = created["token"].as_str().unwrap().to_string();
+    let json_type = [("content-type", "application/json")];
+
+    // A token client uploads through the API part paths, as in proxy mode,
+    // and is never handed a signed storage URL.
+    let payload = patterned(2048, 5);
+    let (status, _, body) = token_request(
+        &app,
+        &token,
+        "POST",
+        &format!("{ws}/documents/{document_id}/uploads"),
+        Some(serde_json::to_vec(&json!({"name": "t.bin", "sizeBytes": payload.len()})).unwrap()),
+        &json_type,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created["transfer"], "proxy");
+    assert_eq!(created["partUrlsExpireAt"], Value::Null);
+    let part_url = created["parts"][0]["url"].as_str().unwrap();
+    assert!(part_url.starts_with("/api/v1/"), "{part_url}");
+    let id = created["attachmentId"].as_str().unwrap().to_string();
+    let (status, headers, _) = token_request(
+        &app,
+        &token,
+        "PUT",
+        part_url,
+        Some(payload.clone()),
+        &[("content-type", "application/octet-stream")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers["etag"].to_str().unwrap().to_string();
+    let (status, _, body) = token_request(
+        &app,
+        &token,
+        "POST",
+        &format!("{ws}/attachments/{id}/complete"),
+        Some(serde_json::to_vec(&json!({"parts": [{"partNumber": 1, "etag": etag}]})).unwrap()),
+        &json_type,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    // Its downloads stream from the API; a browser session asking for the
+    // same attachment is still redirected to storage.
+    let path = format!("{ws}/attachments/{id}/download");
+    let (status, headers, bytes) = token_request(&app, &token, "GET", &path, None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("location").is_none());
+    assert_eq!(bytes, payload);
+    let (status, headers, bytes) = token_request(
+        &app,
+        &token,
+        "GET",
+        &path,
+        None,
+        &[("range", "bytes=10-19")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert!(headers.get("location").is_none());
+    assert_eq!(&bytes[..], &payload[10..20]);
+    let (status, _, _) = download_request(&app, &cookie, "GET", &path, None).await;
+    assert_eq!(status, StatusCode::FOUND);
+
+    // A session keeps its own mode: the same user's token resuming a session
+    // the browser created in presigned mode gets signed part URLs.
+    let browser_session =
+        create_upload_session(&app, &cookie, workspace_id, &document_id, "b.bin", 10).await;
+    assert_eq!(browser_session["transfer"], "presigned");
+    let (status, _, body) = token_request(
+        &app,
+        &token,
+        "GET",
+        &format!(
+            "{ws}/attachments/{}/upload",
+            browser_session["attachmentId"].as_str().unwrap()
+        ),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let resumed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(resumed["transfer"], "presigned");
+    let url = resumed["parts"][0]["url"].as_str().unwrap();
+    assert!(url.starts_with(&format!("{}/", public_endpoint())), "{url}");
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn mismatched_parts_are_refused_before_anything_is_published() {
     let harness = TestDb::bootstrap().await;

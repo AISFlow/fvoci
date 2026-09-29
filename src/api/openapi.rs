@@ -3752,7 +3752,7 @@ fn restore_project_document_revision() {}
     ),
     request_body = CreateAttachmentUploadBody,
     responses(
-        (status = 201, description = "Upload session created, bound to the transfer mode in effect now", body = CreateAttachmentUploadResponse),
+        (status = 201, description = "Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request", body = CreateAttachmentUploadResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 402, description = "Storage or upload limit", body = ProblemResponse),
@@ -3865,7 +3865,7 @@ fn get_attachment_meta() {}
     responses(
         (status = 200, description = "Original bytes, or the WebP preview for variant=preview", content_type = "application/octet-stream"),
         (status = 206, description = "Partial content", content_type = "application/octet-stream"),
-        (status = 302, description = "Presigned transfer mode, original only: `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here.",
+        (status = 302, description = "Presigned transfer mode, browser sessions and the original only (API-token requests always get the bytes here): `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here.",
             headers(("Location" = String, description = "Signed storage URL"))),
         (status = 304, description = "Preview not modified (If-None-Match)"),
         (status = 400, description = "Invalid download variant", body = ProblemResponse),
@@ -3909,7 +3909,7 @@ fn delete_attachment() {}
     ),
     request_body = CreateAttachmentUploadBody,
     responses(
-        (status = 201, description = "Upload session created, bound to the transfer mode in effect now", body = CreateAttachmentUploadResponse),
+        (status = 201, description = "Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request", body = CreateAttachmentUploadResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 402, description = "Storage or upload limit", body = ProblemResponse),
@@ -3933,7 +3933,7 @@ fn create_project_document_attachment_upload() {}
     ),
     request_body = CreateAttachmentUploadBody,
     responses(
-        (status = 201, description = "Upload session created, bound to the transfer mode in effect now", body = CreateAttachmentUploadResponse),
+        (status = 201, description = "Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request", body = CreateAttachmentUploadResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 402, description = "Storage or upload limit", body = ProblemResponse),

@@ -278,6 +278,26 @@ fn part_targets(
     Ok((parts, expires_at))
 }
 
+/// The transfer mode for a new upload session or an original download
+/// requested with `auth`. Browser sessions get the mode in effect now.
+/// API-token requests always get `proxy`, whatever the admin selects: token
+/// clients keep the API part paths and streamed downloads they were written
+/// against, and a client that attaches `Authorization` to every request never
+/// sends its token to the storage origin. Resume follows the session's own
+/// mode instead, so a token resuming a session a browser created still gets
+/// signed URLs.
+async fn transfer_mode_for(state: &AppState, auth: &RequestAuth) -> Result<TransferMode, AppError> {
+    if auth.token_scopes.is_some() {
+        return Ok(TransferMode::Proxy);
+    }
+    crate::settings::attachment_transfer_mode(
+        &state.auth.db.pool,
+        state.storage.presign_unavailable(),
+    )
+    .await
+    .map_err(internal)
+}
+
 /// A presigned session on a process that can no longer sign (restarted
 /// without `S3_PUBLIC_ENDPOINT`) cannot continue: it is never moved to the
 /// proxy path. The upload fails; the uploader can delete it, otherwise the
@@ -414,13 +434,9 @@ async fn create_upload_session(
         return Err(AppError::rate_limited(retry_after));
     }
     let ip = peer_ip(peer.ip());
-    // The session is bound to the mode in effect now (see `UploadMeta::transfer`).
-    let transfer = crate::settings::attachment_transfer_mode(
-        &state.auth.db.pool,
-        state.storage.presign_unavailable(),
-    )
-    .await
-    .map_err(internal)?;
+    // The session is bound to this mode for its whole life (see
+    // `UploadMeta::transfer`).
+    let transfer = transfer_mode_for(state, &auth).await?;
     let (att, meta) = create_upload(
         &state.auth.db.pool,
         &state.storage,
@@ -904,16 +920,11 @@ async fn serve_download(
     let parsed = parse_range(range_header, size as u64);
     // Presigned mode hands original bytes to storage after the same access
     // check; HEAD (metadata only) and an unsatisfiable range stay here.
-    if !head_only && !matches!(parsed, ParsedRange::Invalid) {
-        let mode = crate::settings::attachment_transfer_mode(
-            &state.auth.db.pool,
-            state.storage.presign_unavailable(),
-        )
-        .await
-        .map_err(internal)?;
-        if mode == TransferMode::Presigned {
-            return presigned_download(state, &att);
-        }
+    if !head_only
+        && !matches!(parsed, ParsedRange::Invalid)
+        && transfer_mode_for(state, &auth).await? == TransferMode::Presigned
+    {
+        return presigned_download(state, &att);
     }
     let mut response_headers = HeaderMap::new();
     response_headers.insert(

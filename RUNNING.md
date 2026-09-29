@@ -204,7 +204,10 @@ Two ways for attachment bytes to travel; exactly one is in effect at a time:
 
 `HEAD .../download`, an unsatisfiable `Range` (`416`), `variant=preview`, the
 preview route, share-link downloads, `--verify-storage` and restore always stay
-on the API.
+on the API. So do upload sessions created and original downloads requested
+with an API token: token clients keep the API part paths and streamed
+downloads whatever the mode. (A token that resumes a session a browser
+created still gets that session's own mode.)
 
 Choosing the mode: `FVOCI_ATTACHMENT_TRANSFER_MODE` wins over the admin
 setting `attachmentTransfer.mode` (Instance settings → 첨부 전송 방식), which
@@ -292,9 +295,8 @@ Chromium cross-origin check, `scripts/run-web-e2e-s3.sh`). Not run: real AWS S3
 (CORS on the redirected fetch, `Access-Control-Allow-Credentials` for the
 viewers, enforcement of the signed `content-length`, virtual-host style,
 `response-*` overrides, lifecycle rules), other S3-compatible services,
-reverse proxies or CDNs in front of the bucket, Firefox and Safari, clock skew,
-and third-party API clients following the `302` (curl and reqwest drop
-`Authorization` on a cross-host redirect; other clients may not).
+reverse proxies or CDNs in front of the bucket, Firefox and Safari, and clock
+skew.
 
 ## Tests
 

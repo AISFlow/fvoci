@@ -907,7 +907,9 @@ pub struct AttachmentPartUrlResponse {
 pub struct CreateAttachmentUploadResponse {
     pub attachment_id: String,
     pub part_size_bytes: i64,
-    /// Transfer mode of this upload session, fixed for its whole life.
+    /// Transfer mode of this upload session, fixed for its whole life:
+    /// the mode in effect now for a browser session, always `proxy` for an
+    /// API-token request.
     pub transfer: crate::attachments::TransferMode,
     /// When the presigned part URLs expire (resume re-issues them); null for
     /// `proxy`.
@@ -2484,7 +2486,8 @@ pub struct AdminInstanceSettingsOutput {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct AdminAttachmentTransferOutput {
-    /// Mode for new upload sessions and original downloads.
+    /// Mode for new upload sessions and original downloads of browser
+    /// sessions; API-token requests always use `proxy`.
     pub effective: crate::attachments::TransferMode,
     /// Where the configured mode comes from; `env` cannot be changed here.
     pub source: crate::settings::TransferSource,
