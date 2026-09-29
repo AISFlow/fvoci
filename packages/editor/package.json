@@ -27,7 +27,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --import ./test/register-ts.mjs --test test/*.test.ts"
+    "test": "bun test --isolate ./test"
   },
   "dependencies": {
     "@floating-ui/dom": "1.8.0",

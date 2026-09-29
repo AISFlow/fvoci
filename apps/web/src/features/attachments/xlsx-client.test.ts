@@ -91,9 +91,13 @@ test("cap and format failures come back from the worker, which is then terminate
 
 // --- A hostile DEFLATE stream behind a broken directory -----------------------
 
-/** `mib` MiB of zeros as one raw DEFLATE stream, fed to zlib 1 MiB at a time. */
+/**
+ * `mib` MiB of zeros as one raw DEFLATE stream, fed to zlib 1 MiB at a time.
+ * Level 9 gives the same 521,826 bytes for 512 MiB under Bun's and Node's
+ * zlib; level 1 does not (5.2 MB under Bun, over the 4 MiB bound below).
+ */
 async function zeroStream(mib: number): Promise<Uint8Array> {
-  const deflate = createDeflateRaw({ level: 1 });
+  const deflate = createDeflateRaw({ level: 9 });
   const chunks: Buffer[] = [];
   deflate.on("data", (chunk: Buffer) => chunks.push(chunk));
   const zeros = Buffer.alloc(1024 * 1024);
@@ -127,7 +131,9 @@ test("a stream that decodes far past its declared size passes the metadata check
   assert.equal(checkXlsxPackage(zip), "ok");
 });
 
-test("negative control: left to finish, the worker decodes it and reports invalid, off the main thread", async () => {
+// Decoding the 512 MiB takes about 1.3 s under V8 and 10 s under Bun's
+// JavaScriptCore, past bun test's 5 s default; the browser runs it under V8.
+test("negative control: left to finish, the worker decodes it and reports invalid, off the main thread", { timeout: 60_000 }, async () => {
   const worker = threadWorker();
   await worker.booted;
   let ticks = 0;
