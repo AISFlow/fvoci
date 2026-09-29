@@ -16,8 +16,7 @@ import {
   wikiDisplayId,
   wikiPath,
 } from "@/lib/href";
-import { api, ensureOk, ProblemError } from "@/lib/api";
-import type { components } from "@/generated/api";
+import { ProblemError } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
 import {
   ancestorsQuery,
@@ -43,9 +42,14 @@ import { DocumentExportMenu } from "./document-export-menu";
 import { ShareDialog } from "@/features/share/share-dialog";
 import { StarToggle } from "@/features/share/star-toggle";
 import { DocumentTagsBar } from "./document-tags-bar";
+import {
+  type DocumentScope,
+  moveDocument,
+  type PatchDocumentBody,
+  patchDocument,
+  trashDocument,
+} from "./document-api";
 import "./document-shell.css";
-
-type PatchDocumentBody = components["schemas"]["PatchDocumentBody"];
 
 const STATUSES = ["draft", "published", "archived"] as const;
 const TITLE_MAX = 300;
@@ -145,30 +149,10 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
     return bindBlockPresence(editor, awareness);
   }, [editor, collabSession?.provider.awareness]);
 
+  const scope: DocumentScope = { workspaceId, documentId, projectId: project?.id ?? null };
+
   const trashDoc = useMutation({
-    mutationFn: async () =>
-      project
-        ? ensureOk(
-            await api.POST(
-              "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/trash",
-              {
-                params: {
-                  path: {
-                    workspace_id: workspaceId,
-                    project_id: project.id,
-                    document_id: documentId,
-                  },
-                },
-              },
-            ),
-          )
-        : ensureOk(
-            await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/trash", {
-              params: {
-                path: { workspace_id: workspaceId, document_id: documentId },
-              },
-            }),
-          ),
+    mutationFn: () => trashDocument(scope),
     onSuccess: async () => {
       setLifecycleError(null);
       await navigate(trashPath(slug));
@@ -181,31 +165,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
   });
 
   const moveDoc = useMutation({
-    mutationFn: async (newParentId: string) =>
-      project
-        ? ensureOk(
-            await api.POST(
-              "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/move",
-              {
-                params: {
-                  path: {
-                    workspace_id: workspaceId,
-                    project_id: project.id,
-                    document_id: documentId,
-                  },
-                },
-                body: { newParentId },
-              },
-            ),
-          )
-        : ensureOk(
-            await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/move", {
-              params: {
-                path: { workspace_id: workspaceId, document_id: documentId },
-              },
-              body: { newParentId },
-            }),
-          ),
+    mutationFn: (newParentId: string) => moveDocument(scope, newParentId),
     onSuccess: async () => {
       setLifecycleError(null);
       setMoveParentId("");
@@ -219,31 +179,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
   });
 
   const patchMeta = useMutation({
-    mutationFn: async (body: PatchDocumentBody) =>
-      project
-        ? ensureOk(
-            await api.PATCH(
-              "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
-              {
-                params: {
-                  path: {
-                    workspace_id: workspaceId,
-                    project_id: project.id,
-                    document_id: documentId,
-                  },
-                },
-                body,
-              },
-            ),
-          )
-        : ensureOk(
-            await api.PATCH("/api/v1/workspaces/{workspace_id}/documents/{document_id}", {
-              params: {
-                path: { workspace_id: workspaceId, document_id: documentId },
-              },
-              body,
-            }),
-          ),
+    mutationFn: (body: PatchDocumentBody) => patchDocument(scope, body),
     onSuccess: async () => {
       setSaveError(null);
       await Promise.all([
