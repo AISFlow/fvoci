@@ -10,9 +10,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PLAYWRIGHT_MODULES="$ROOT/apps/web/node_modules"
-if [[ ! -x "$PLAYWRIGHT_MODULES/.bin/playwright" ]]; then
-  echo "missing $PLAYWRIGHT_MODULES/.bin/playwright; run npm ci --prefix apps/web" >&2
+# The web workspace's install (bun ci at the repository root).
+WORKSPACE_MODULES="$ROOT/node_modules"
+if ! (cd "$ROOT/apps/web" && bun --bun x --no-install playwright --version) >/dev/null 2>&1; then
+  echo "missing the locked Playwright install; run bun ci" >&2
   exit 1
 fi
 
@@ -33,7 +34,7 @@ cp "$ROOT/scripts/web-e2e-run-group.sh" "$ROOT/scripts/web-e2e-inner.sh" \
   "$ROOT/scripts/web-e2e-trace-summary.py" "$FIXTURE_ROOT/scripts/"
 cp "$ROOT/apps/web/playwright.config.ts" "$FIXTURE_ROOT/apps/web/"
 cp "$ROOT/apps/web/e2e-pending/collab-playwright.config.ts" "$FIXTURE_ROOT/apps/web/e2e-pending/"
-ln -s "$PLAYWRIGHT_MODULES" "$FIXTURE_ROOT/apps/web/node_modules"
+ln -s "$WORKSPACE_MODULES" "$FIXTURE_ROOT/node_modules"
 echo "fixture" >"$FIXTURE_ROOT/apps/web/dist/index.html"
 
 for dir in e2e e2e-pending; do

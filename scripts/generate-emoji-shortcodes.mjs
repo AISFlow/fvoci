@@ -1,8 +1,8 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Dev-only generator: materialize @tiptap/extension-emoji shortcode lookup for Rust.
  *
- * Resolves the installed package from local node_modules (apps/web preferred) and
+ * Resolves the installed package from the web workspace's node_modules and
  * asserts its version matches packages/editor/package.json. Not invoked by cargo
  * build or CI tests; commit the generated artifacts.
  */
@@ -33,8 +33,7 @@ function readPinnedVersion() {
 function resolveModuleRoot() {
 	const roots = [
 		process.env.FVOCI_EMOJI_GEN_NODE_MODULES,
-		join(ROOT, "apps/web/node_modules"),
-		join(ROOT, "packages/editor/node_modules"),
+		join(ROOT, "node_modules"),
 		join(dirname(fileURLToPath(import.meta.url)), "node_modules"),
 	].filter(Boolean);
 	for (const root of roots) {
@@ -44,7 +43,7 @@ function resolveModuleRoot() {
 		}
 	}
 	throw new Error(
-		"Install @tiptap/extension-emoji locally (apps/web npm install) or set FVOCI_EMOJI_GEN_NODE_MODULES",
+		"Install @tiptap/extension-emoji locally (bun ci) or set FVOCI_EMOJI_GEN_NODE_MODULES",
 	);
 }
 
