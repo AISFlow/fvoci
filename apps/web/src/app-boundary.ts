@@ -5,10 +5,13 @@
 // runtime objects, only the session cookie and the framework-neutral modules.
 // A path moves here when its Vue flow is accepted and its React page is removed.
 
-/** Path patterns the Vue app renders (src/vue/router.ts declares the same routes). */
+/**
+ * Path patterns the Vue app renders (src/vue/router.ts declares the same
+ * routes). Case-insensitive, as vue-router and React Router match by default.
+ */
 export const VUE_APP_PATHS: readonly RegExp[] = [
   // Project Gantt: /w/:slug/:ref/gantt
-  /^\/w\/[^/]+\/[^/]+\/gantt\/?$/,
+  /^\/w\/[^/]+\/[^/]+\/gantt\/?$/i,
 ];
 
 export function isVueAppPath(pathname: string): boolean {

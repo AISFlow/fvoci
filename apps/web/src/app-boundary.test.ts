@@ -8,6 +8,11 @@ const SAMPLES = [
   "/w/acme/GNT/gantt",
   "/w/acme/GNT/gantt/",
   "/w/acme/gnt/gantt",
+  "/w/acme/GNT/Gantt",
+  "/w/acme/GNT/GANTT",
+  "/W/acme/GNT/gantt",
+  "/W/acme/GNT/Gantt/",
+  "/w/acme/GNT/Tasks",
   "/w/acme/WIKI-3/gantt",
   "/w/acme/GNT",
   "/w/acme/GNT/tasks",
@@ -25,6 +30,9 @@ const SAMPLES = [
 test("the boot module sends the Gantt path, and only it, to the Vue app", () => {
   assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
   assert.equal(isVueAppPath("/w/acme/GNT/gantt/"), true);
+  // React Router matched the Gantt route in any case; the boundary does too.
+  assert.equal(isVueAppPath("/w/acme/GNT/Gantt"), true);
+  assert.equal(isVueAppPath("/W/acme/GNT/GANTT"), true);
   assert.equal(isVueAppPath("/w/acme/GNT"), false);
   assert.equal(isVueAppPath("/w/acme/GNT/gantt/extra"), false);
   assert.equal(isVueAppPath("/w/acme/GNT/tasks"), false);
