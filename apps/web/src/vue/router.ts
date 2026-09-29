@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { isVueAppPath } from "@/app-boundary";
-import { VUE_ROUTE_PATHS } from "./route-paths";
+import { STAGED_VUE_ROUTE_PATHS, VUE_ROUTE_PATHS } from "./route-paths";
 
 /** The Vue app's pages; src/app-boundary.ts sends exactly these paths here.
  * Each page is its own chunk, so the Gantt page does not load the wiki
@@ -8,6 +8,8 @@ import { VUE_ROUTE_PATHS } from "./route-paths";
  * (import-graph.test.ts and e2e/project-gantt-flow.spec.ts check this). */
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
+  // Wiki refs are more specific than project home's `/w/:slug/:ref` and must
+  // stay listed first so `/w/acme/wiki-3` is never the project overview.
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
   // Task list / collection views. src/app-boundary.ts is coordinator-owned;
   // these routes stay unreachable until that regex list includes them
@@ -18,6 +20,14 @@ export const routes: RouteRecordRaw[] = [
   { path: "/w/:slug/:ref/table", name: "project-table", component: () => import("./pages/ProjectCollectionPage.vue") },
   { path: "/w/:slug/:ref/board", name: "project-board", component: () => import("./pages/ProjectCollectionPage.vue") },
   { path: "/w/:slug/:ref/calendar", name: "project-calendar", component: () => import("./pages/ProjectCollectionPage.vue") },
+  // Project home overview. Same `/w/:slug/:ref` shape as the collection
+  // routes; wiki-document above is more specific. Not live: STAGED_PROJECT_HOME_PATH
+  // is the regex the coordinator would add later.
+  {
+    path: STAGED_VUE_ROUTE_PATHS.projectHome,
+    name: "project-home",
+    component: () => import("./pages/ProjectHomePage.vue"),
+  },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

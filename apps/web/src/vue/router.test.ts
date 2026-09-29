@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createMemoryHistory } from "vue-router";
+import { isVueAppPath } from "@/app-boundary";
 import { createAppRouter } from "./router.ts";
 
 // A navigation to a React page leaves the Vue app with a full load; one that
@@ -50,3 +51,18 @@ test(
     assert.deepEqual(loads, ["/w/acme"]);
   }),
 );
+
+test("wiki documents stay wiki; project keys are project-home; gantt stays gantt", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/wiki-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/WIKI-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/GNT").name, "project-home");
+  assert.equal(router.resolve("/w/acme/gnt").name, "project-home");
+  assert.equal(router.resolve("/w/acme/GNT/gantt").name, "project-gantt");
+  assert.equal(router.resolve("/w/acme/GNT/tasks").name, "project-tasks");
+  assert.equal(router.resolve("/w/acme/GNT/board").name, "project-board");
+  // Declared but not live: afterEach still full-loads (same as /login above).
+  assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
+  assert.equal(isVueAppPath("/w/acme/GNT"), false);
+  assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
+});
