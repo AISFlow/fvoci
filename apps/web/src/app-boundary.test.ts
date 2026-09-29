@@ -25,6 +25,10 @@ const SAMPLES = [
   "/",
   "/login",
   "/login/",
+  "/legal/terms",
+  "/legal/privacy",
+  "/service-info",
+  "/service-info/",
   "/w/acme",
   "/w/acme/a/123/view",
   "/w/acme/WIKI-1",
@@ -87,6 +91,14 @@ test("every wiki path the boundary sends parses as the React app's wiki ref", ()
     const login = /^\/login\/?$/i.test(path);
     if (!gantt && !login) assert.equal(isVueAppPath(path), wiki !== null, path);
   }
+});
+
+test("staged home/legal/service-info paths stay on the React app", () => {
+  assert.equal(isVueAppPath("/"), false);
+  assert.equal(isVueAppPath("/legal/terms"), false);
+  assert.equal(isVueAppPath("/legal/privacy"), false);
+  assert.equal(isVueAppPath("/service-info"), false);
+  assert.equal(isVueAppPath("/service-info/"), false);
 });
 
 test("the Vue router matches exactly the paths the boundary sends it", () => {

@@ -44,6 +44,21 @@ test("the login route is declared (the boundary regex sends /login to Vue)", () 
   );
 });
 
+test("home, legal, and service-info are declared but not live Vue paths", () => {
+  assert.equal(
+    routes.some((route) => route.name === "home" && route.path === "/"),
+    true,
+  );
+  assert.equal(
+    routes.some((route) => route.name === "legal" && route.path === "/legal/:kind"),
+    true,
+  );
+  assert.equal(
+    routes.some((route) => route.name === "service-info" && route.path === "/service-info"),
+    true,
+  );
+});
+
 test(
   "a failed or superseded navigation to a React page loads nothing",
   withLocation(async (loads) => {
