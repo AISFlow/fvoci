@@ -33,9 +33,10 @@ fn parse_options() -> ParseOptions {
 /// on a stack sized for it.
 pub const MAX_MDAST_DEPTH: usize = 4096;
 
-/// Deepest Tiptap JSON (objects and arrays) a conversion may return: the
-/// document must stay readable by `serde_json` (recursion limit 128), which
-/// also parsed the Node helper's `{"ok":true,"contentJson":…}` reply, so 126.
+/// Deepest Tiptap JSON (objects and arrays) a conversion may return:
+/// `serde_json` reads at most 127 nested levels, and the stored document must
+/// still parse one level down, inside the export child's
+/// `{title, contentJson}` request, so 126.
 pub const MAX_TIPTAP_DEPTH: usize = 126;
 
 /// The Markdown nests deeper than the stored document may (source: the TS

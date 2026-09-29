@@ -63,7 +63,10 @@ impl StagedPart {
 /// Which file a cached etag describes. A rename keeps the inode and mtime,
 /// while any republish (this version's or v0.1.0's after a rollback) renames
 /// a new inode over `{n}`, so a sidecar left behind by an older part, a
-/// cancelled publish or a restore never matches the current file.
+/// cancelled publish or a restore does not match the current file in
+/// practice (a false match needs a reused inode with the same size and mtime
+/// tick). Even then `copy_hashed` re-hashes every part at assembly, so a false
+/// match can only fail complete with `EtagMismatch`, never store other bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PartIdentity {
     ino: u64,

@@ -151,8 +151,10 @@ impl AttachmentSessionLock {
         // Fail-safe: close_on_drop before try-lock so cancellation during
         // acquisition cannot return a lock-holding connection to the pool.
         // Moving this after a successful lock would leak a session advisory lock
-        // if the task is cancelled between acquire and the flag. Connection churn
-        // while losers poll is a tracked follow-up (review N3), not this change.
+        // if the task is cancelled between acquire and the flag. The cost: every
+        // try_acquire, winner or loser, closes its connection on drop, and
+        // complete's loser repeats that every ASSEMBLE_POLL (100 ms) for up to
+        // ASSEMBLE_WAIT.
         conn.close_on_drop();
         let lock_key = lock_key_from_uuid(attachment_id);
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
