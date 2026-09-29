@@ -1,7 +1,8 @@
 // Adapted from source apps/web/src/lib/queries/admin.ts and the legal queries
-// in apps/web/src/lib/queries/auth.ts.
-import { queryOptions } from "@tanstack/react-query";
+// in apps/web/src/lib/queries/auth.ts. Framework-neutral: both web apps run
+// these (the React legal reader, the Vue admin pages).
 import { api, ensureOk, ProblemError } from "@/lib/api";
+import { queryOptions } from "@/lib/query-options";
 
 export {
   invalidateInstanceWrites,
@@ -56,16 +57,18 @@ export function legalDocQuery(kind: string, version?: number) {
   });
 }
 
+/** The published versions of `kind` (the list itself: its one reader needs no more). */
 export function legalVersionsQuery(kind: string) {
   return queryOptions({
     queryKey: ["legal", kind, "versions"] as const,
     queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/legal/{kind}/versions", {
-          params: { path: { kind } },
-        }),
-      ),
-    select: (data) => data.versions,
+      (
+        await ensureOk(
+          await api.GET("/api/v1/legal/{kind}/versions", {
+            params: { path: { kind } },
+          }),
+        )
+      ).versions,
     retry: false,
   });
 }
