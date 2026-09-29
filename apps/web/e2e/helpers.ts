@@ -92,6 +92,10 @@ export function watchCspViolations(page: Page): string[] {
 export async function logout(page: Page): Promise<void> {
   await page.getByRole("button", { name: "로그아웃" }).click();
   await expect(page).toHaveURL(/\/login$/);
+  // React routing changes the URL before NoRoute loads the Vue login app.
+  // Wait for its form before another navigation or evaluation uses the page.
+  await expect(page.getByLabel("이메일")).toBeVisible();
+  await expect(page.getByLabel("비밀번호")).toBeVisible();
 }
 
 export async function login(page: Page, email: string, password: string): Promise<void> {
