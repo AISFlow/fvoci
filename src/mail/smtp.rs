@@ -12,7 +12,10 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use super::{MailSendError, SmtpConfig};
 
 const SMTP_TIMEOUT: Duration = Duration::from_secs(15);
-/// Whole-session bound, kept below the 30 s outbox lease.
+/// Whole-session bound. One session must finish inside the outbox
+/// dispatcher's per-call timeout (the lease minus 0.5 s) with room left for
+/// collecting the recipients, so every mail attempt settles at least its
+/// first unsent recipient before the call can be dropped.
 const SMTP_SESSION_TIMEOUT: Duration = Duration::from_secs(20);
 
 // `MailSendError::code` values from `send_mail_op`. They never carry server

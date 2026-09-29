@@ -1,12 +1,10 @@
 //! Mail transport and the outbox `mail` External consumer.
 //!
-//! Source SMTP env is the trio SMTP_HOST/SMTP_PORT/SMTP_FROM (all or none).
-//! There is no TLS or AUTH env; the client speaks plaintext SMTP. Invitation
-//! mail is sent inline after the invite row commits. Notification mail goes
-//! through the outbox: mark processed_events only after SMTP accepts. If SMTP
-//! accepted and the process then crashed before the cursor advanced,
-//! `--recover-outbox` will send again (at-least-once). processed_events stops
-//! a second send after a successful mark.
+//! SMTP env is the source trio SMTP_HOST/SMTP_PORT/SMTP_FROM (all or none),
+//! with no TLS or AUTH env: STARTTLS is used whenever the server offers it
+//! (see `smtp`). Invitation mail is sent inline after the invite row commits.
+//! Notification mail goes through the outbox, delivered at least once per
+//! recipient (see `consumer::MailConsumer` and the `crate::outbox` doc).
 
 pub mod consumer;
 pub mod digest;

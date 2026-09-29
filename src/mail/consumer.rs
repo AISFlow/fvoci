@@ -16,7 +16,8 @@ pub const MAIL_CONSUMER: &str = "mail";
 
 const MAIL_VERBS: &[&str] = &["comment.created", "identity.linked", "identity.unlinked"];
 
-/// Sends the mail of `comment.created` and `identity.*` events.
+/// Sends the mail of `comment.created` and `identity.*` events, at least
+/// once per recipient (see `AcceptedRecipients` for when one gets it twice).
 ///
 /// The unit of delivery is the recipient. An address that does not parse as
 /// a mailbox is skipped without asking the relay. A permanent refusal of the
@@ -56,18 +57,24 @@ impl MailConsumer {
 /// Events whose accepted recipients are kept at most, oldest pushed out
 /// first. The consumer sends one mail event per call and the dispatcher
 /// retries an event before it passes it, so an event is redelivered long
-/// before 64 newer mail events push it out.
+/// before 64 newer mail events push it out. A dead letter requeued by hand
+/// (`fvoci.app_outbox_requeue`, SQL only) is the exception: it is delivered
+/// again after the cursor passed it, possibly after more newer mail events,
+/// and its accepted recipients may then get the mail again.
 const ACCEPTED_EVENTS_KEPT: usize = 64;
 
 /// Recipients SMTP accepted, per event. An entry is kept after its event
 /// completes too: the dispatcher marks the event processed only after
-/// `deliver` returns, and when that mark (or the lease renewal next to it)
-/// fails, the event is delivered again and must skip these recipients. An
-/// entry is only ever a recipient SMTP really accepted, so keeping it can
-/// never suppress a send that failed. This lives in memory only: a restart,
-/// or another replica taking over the lease, starts empty and may send an
-/// accepted recipient's mail again (the documented at-least-once edge, like
-/// a crash between SMTP and the processed mark).
+/// `deliver` returns, and when that mark fails, the event is delivered again
+/// and must skip these recipients. An entry is only ever a recipient SMTP
+/// really accepted, so keeping it can never suppress a send that failed.
+///
+/// A recipient gets the mail twice when its entry is missing: a send whose
+/// acceptance was not seen (the session timeout, a connection dropped after
+/// DATA, or the dispatcher dropping the call at its lease timeout) is not
+/// recorded and the retry sends it again; and the entries live in memory
+/// only, so a restart, or another replica taking over the lease, starts
+/// empty and may send an accepted recipient's mail again.
 #[derive(Default)]
 struct AcceptedRecipients {
     events: VecDeque<(Uuid, HashSet<String>)>,
