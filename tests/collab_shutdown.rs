@@ -23,8 +23,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use support::collab_process_server::{
     assert_nonzero_deadline_exit, collab_engine_descendants, collected_log_text,
-    spawn_server_process, spawn_server_process_with_auth_wait, wait_for_exit,
-    wait_for_http_100_continue, wait_pids_exit, OwnedChild,
+    spawn_server_process, spawn_server_process_with_auth_wait, spawn_server_process_with_env,
+    wait_for_exit, wait_for_http_100_continue, wait_pids_exit, OwnedChild,
 };
 use support::{
     setup_wiki_doc, sync_update_frame, test_collab_config, TestDb, TestRun, WikiDocFixture,
@@ -473,6 +473,60 @@ async fn process_sigterm_joins_helper_and_releases_guard() {
             run.retain_child(child);
         })
     })
+    .await;
+}
+
+/// A set but unusable FVOCI_COLLAB_ENGINE leaves collaboration off. The server
+/// still starts and answers /ready, and says so once at startup instead of
+/// only answering `collab_unavailable` later.
+#[tokio::test]
+async fn process_unusable_collab_engine_is_logged_once_at_startup() {
+    run_shutdown_test(
+        "process_unusable_collab_engine_is_logged_once_at_startup",
+        |run| {
+            Box::pin(async {
+                let missing = std::env::temp_dir()
+                    .join(format!("fvoci-missing-collab-engine-{}", Uuid::now_v7()));
+                let (mut child, addr, logs) = spawn_server_process_with_env(
+                    &run.inner.harness,
+                    30_000,
+                    &[("FVOCI_COLLAB_ENGINE", missing.display().to_string())],
+                );
+                let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+                tokio::io::AsyncWriteExt::write_all(
+                    &mut stream,
+                    b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("send /ready");
+                let mut response = Vec::new();
+                tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response)
+                    .await
+                    .expect("read /ready");
+                let response = String::from_utf8_lossy(&response);
+                assert!(
+                    response.starts_with("HTTP/1.1 200"),
+                    "collaboration off must not fail readiness: {response}"
+                );
+
+                let needle = "FVOCI_COLLAB_ENGINE is not an existing regular file";
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !collected_log_text(&logs).contains(needle) && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                child.send_sigterm();
+                let status = wait_for_exit(&mut child, Duration::from_secs(10));
+                let text = collected_log_text(&logs);
+                assert_eq!(text.matches(needle).count(), 1, "logs={text}");
+                assert!(
+                    !text.contains("FVOCI_COLLAB_ENGINE unset"),
+                    "a set variable is not reported as unset: {text}"
+                );
+                assert!(status.success(), "SIGTERM must exit 0, got {status}");
+                run.retain_child(child);
+            })
+        },
+    )
     .await;
 }
 

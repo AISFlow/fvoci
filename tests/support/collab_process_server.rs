@@ -374,6 +374,15 @@ pub fn spawn_server_process_with_auth_wait(
     spawn_server_process_inner(harness, deadline_ms, auth_wait_ms, &[])
 }
 
+/// `spawn_server_process` with extra or overriding environment variables.
+pub fn spawn_server_process_with_env(
+    harness: &TestDb,
+    deadline_ms: u64,
+    extra_env: &[(&str, String)],
+) -> (OwnedChild, SocketAddr, Arc<Mutex<Vec<String>>>) {
+    spawn_server_process_inner(harness, deadline_ms, None, extra_env)
+}
+
 pub fn spawn_capacity_probe_server_process(
     harness: &TestDb,
     max_rooms: usize,
