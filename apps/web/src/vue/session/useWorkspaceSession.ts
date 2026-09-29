@@ -55,10 +55,18 @@ export function useWorkspaceSession(slug: MaybeRefOrGetter<string>) {
     { immediate: true },
   );
 
+  const failedWithoutData = (query: { isError: { value: boolean }; data: { value: unknown } }) =>
+    query.isError.value && query.data.value === undefined;
+
   const status = computed<SessionStatus>(() => {
     // Leaving for /setup, /login or home: keep showing "loading" until the page goes.
     if (setup.data.value?.needed || signedOut.value || denied.value) return "loading";
-    if (setup.isError.value || me.isError.value || workspaces.isError.value) return "error";
+    // A failed background refetch keeps the cached data (TanStack keeps `data`
+    // with status "error"): only a query with nothing to show makes the page an
+    // error, so one network blip during a stream reconnect does not unmount it.
+    if (failedWithoutData(setup) || failedWithoutData(me) || failedWithoutData(workspaces)) {
+      return "error";
+    }
     if (!setup.data.value || !me.data.value || !workspace.value) return "loading";
     return "ready";
   });
