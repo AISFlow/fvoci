@@ -36,7 +36,7 @@ test("downloadCapped sends the session cookie and caps the body", async () => {
       const signal = new AbortController().signal;
       assert.deepEqual(await downloadCapped("/f", 10, signal), { status: "bytes", bytes: new Uint8Array(10) });
       assert.deepEqual(await downloadCapped("/f", 9, signal), { status: "tooLarge" });
-      assert.equal(seen[0]?.credentials, "include");
+      assert.equal(seen[0]?.credentials, "same-origin");
       assert.equal(seen[0]?.signal, signal);
     },
   );

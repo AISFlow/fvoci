@@ -21,10 +21,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::api::dto::{
-    AdminEraseBody, AdminErasureScheduleOutput, AdminInstanceSettingsOutput, AdminSystemOutput,
-    AdminUserItemOutput, AdminUserListResponse, AdminUserPatchBody, AdminUserPatchOutput,
-    AdminWorkspaceItemOutput, AdminWorkspaceListResponse, AuditLogItemOutput, AuditLogListResponse,
-    AuditLogQuery, InstanceAdminBody, LegalDocumentOutput, LegalPublishBody, OkResponse,
+    AdminAttachmentTransferOutput, AdminEraseBody, AdminErasureScheduleOutput,
+    AdminInstanceSettingsOutput, AdminSystemOutput, AdminUserItemOutput, AdminUserListResponse,
+    AdminUserPatchBody, AdminUserPatchOutput, AdminWorkspaceItemOutput, AdminWorkspaceListResponse,
+    AuditLogItemOutput, AuditLogListResponse, AuditLogQuery, InstanceAdminBody,
+    LegalDocumentOutput, LegalPublishBody, OkResponse,
 };
 use crate::db::account::{
     admin_cancel_user_erasure, schedule_user_erasure, AdminEraseOutcome, CancelWithdrawOutcome,
@@ -475,6 +476,7 @@ pub fn admin_settings_output(
     snapshot: &SettingsSnapshot,
 ) -> AdminInstanceSettingsOutput {
     let boot = settings::boot_values(&state.auth.db.settings_boot, &snapshot.values);
+    let transfer = settings::effective_transfer(snapshot, state.storage.presign_unavailable());
     AdminInstanceSettingsOutput {
         version: snapshot.revision,
         values: snapshot.values.clone(),
@@ -497,6 +499,13 @@ pub fn admin_settings_output(
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        attachment_transfer: AdminAttachmentTransferOutput {
+            effective: transfer.mode,
+            source: transfer.source,
+            presigned_available: transfer.unavailable.is_none(),
+            unavailable_reason: transfer.unavailable,
+            blocked: transfer.blocked,
+        },
     }
 }
 
@@ -556,6 +565,17 @@ fn parse_settings_patch(body: &Value) -> Result<Vec<(SettingsKey, Option<Value>)
     Ok(items)
 }
 
+fn requests_presigned(items: &[(SettingsKey, Option<Value>)]) -> bool {
+    items.iter().any(|(key, value)| {
+        *key == SettingsKey::AttachmentTransfer
+            && value
+                .as_ref()
+                .and_then(|v| v.get("mode"))
+                .and_then(Value::as_str)
+                == Some(crate::attachments::TransferMode::Presigned.as_str())
+    })
+}
+
 fn map_settings_write(err: SettingsWriteError) -> AppError {
     match err {
         SettingsWriteError::NotAdmin | SettingsWriteError::AssetMissing => not_found(),
@@ -581,6 +601,14 @@ async fn patch_instance_settings(
     {
         require_admin_read(&state, auth.user_id).await?;
         return Err(AppError::from_code(ProblemCode::EnterpriseLicenseRequired));
+    }
+    // The catalog cannot know the storage driver: storing `presigned` where it
+    // could never apply would only produce a blocked setting.
+    if requests_presigned(&items) && state.storage.presign_unavailable().is_some() {
+        require_admin_read(&state, auth.user_id).await?;
+        return Err(AppError::from_code(
+            ProblemCode::AttachmentTransferUnavailable,
+        ));
     }
     let ip = peer_ip(peer.ip());
     let outcome = settings::apply_change(

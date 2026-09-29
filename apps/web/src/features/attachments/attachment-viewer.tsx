@@ -7,6 +7,7 @@ import { chunkPlainText } from "./chunk-plain-text";
 import type { HwpEditProps } from "./hwp-viewer";
 import { viewerKind } from "./attachment-kind";
 import {
+  ORIGINAL_FETCH_CREDENTIALS,
   startViewerPrefetch,
   VIEWER_MAX_BYTES,
   type LayoutKind,
@@ -130,7 +131,7 @@ function TextBytesPane({ downloadUrl, chunk }: { downloadUrl: string; chunk?: nu
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
-    void fetch(downloadUrl, { credentials: "include" })
+    void fetch(downloadUrl, { credentials: ORIGINAL_FETCH_CREDENTIALS })
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(String(response.status));

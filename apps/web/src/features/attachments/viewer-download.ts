@@ -23,11 +23,19 @@ export const VIEWER_MAX_BYTES: Readonly<Record<LayoutKind, number>> = {
 export type ViewerBytes = CappedBytes | { status: "failed" };
 
 /**
+ * Credentials for fetching an original through the API's download route: the
+ * session cookie goes to the app origin, and nothing goes to the storage
+ * origin a presigned `302` leads to (the signed URL is the whole
+ * authorization), so bucket CORS needs no `Access-Control-Allow-Credentials`.
+ */
+export const ORIGINAL_FETCH_CREDENTIALS: RequestCredentials = "same-origin";
+
+/**
  * Downloads a viewer's file with the session cookie, never buffering more
  * than `max` bytes. Network errors and aborts reject.
  */
 export async function downloadCapped(url: string, max: number, signal: AbortSignal): Promise<ViewerBytes> {
-  const response = await fetch(url, { credentials: "include", signal });
+  const response = await fetch(url, { credentials: ORIGINAL_FETCH_CREDENTIALS, signal });
   if (!response.ok) {
     await response.body?.cancel();
     return { status: "failed" };
