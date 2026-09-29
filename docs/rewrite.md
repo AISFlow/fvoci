@@ -683,7 +683,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   - #262 head 기준:
     - `r9-vue-editor-parity`(#261 A)
     - `r9-vue-shell-parity`(#261 B)
-    - `r11-vue-{auth,workspace,project-views,settings,account-admin,viewers}`(Vue 페이지 이식; project-views는 SA-12 포함)
+    - `r11-vue-{auth,setup,workspace,project-views,settings,account-admin,viewers}`(Vue 페이지 이식; setup은 #269에 넣지 않음)
   - main `9e4f3af3` 기준:
     - `r7-ime-first-jamo`(#258, PR #268)
     - `r8-reconnect-dispose-race` — **수락·main** (#264)
@@ -765,7 +765,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Math-draft | 인라인 수식 원격 변경 시 초안 (#259) | 미착수 | issue #259 | #262에 관련 고정 테스트·이슈 주석 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
 | FE-Undo-IME | 조합 중 undo 단위 (#260) | 미착수 | issue #260 | 없음 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
 | FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` ACCEPT_WITH_NITS; nit `79236b2e` vs `e33b6013` **ACCEPT** | 단위 20. e2e `login-vue-flow` 3/3. **`mfa-flow`는 원격 web-browser 필수**(로컬 미실행). 기능군(setup/초대/동의) 완료 아님 | #262 머지 + `79236b2e` CI(mfa-flow 샤드 포함). **머지하지 않음** | Grok 임시 실행자 | #262 | 미포함 |
-| FE-Auth-setup | `/setup` | 미착수 | React `SetupPage` | 기존 React e2e | Vue 페이지 없음. 로그인 연결 후 이어서 | Grok 임시 실행자 | FE-Auth-login 권장 | — |
+| FE-Auth-setup | `/setup` | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-setup` `f1f973aa` (on #269 `79236b2e`) | Vue `SetupPage`+`SetupForm`. router에 `/setup`. **app-boundary 불변** — boot는 React. 단위 24. vue-tsc pass. **#269에 넣지 않음** | 코디네이터 `/^\/setup\/?$/i` + React 라우트 제거 + e2e. 로그인 PR 머지 후 연결 | Grok 임시 실행자 | FE-Auth-login | — |
 | FE-Auth-invite | `/invite/:token` | 미착수 | React `InvitePage` | 기존 `workspace-invite-flow` | Vue 없음 | Grok 임시 실행자 | 없음 | — |
 | FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 미착수 | React 각 페이지 | 미확인(기존 React e2e 범위는 흐름별 상이) | Vue 없음. 매직/리셋 **요청**은 로그인 폼 하위 | Grok 임시 실행자 | 없음 | — |
 | FE-WS-home | `/w/:slug` 랜딩 | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-workspace` `09764331` | `WorkspaceHomePage.vue` + router. boundary 없음 | regex `/^\/w\/[^/]+\/?$/i`를 gantt/wiki와 충돌 없이. e2e 직접 URL·새로고침 | Grok 임시 실행자 | #262, app-boundary 소유 | — |
