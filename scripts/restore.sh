@@ -211,6 +211,11 @@ PEPPER_KEYS="$(compose_key PASSWORD_PEPPER_KEYS)"
 PEPPER_ACTIVE="$(compose_key PASSWORD_PEPPER_ACTIVE_KEY_ID)"
 ENCRYPTION_KEYS_VALUE="$(compose_key ENCRYPTION_KEYS)"
 ENCRYPTION_ACTIVE="$(compose_key ENCRYPTION_ACTIVE_KEY_ID)"
+if [[ -z "$PEPPER_KEYS" ]]; then
+  # A compose.yml of an older release that passed the keyrings as secret files.
+  echo "$COMPOSE_FILE passes no PASSWORD_PEPPER_KEYS to $SERVER (a release that used secret files); run scripts/restore.sh from that release" >&2
+  exit 1
+fi
 # These exported values take precedence over later env-file interpolation.
 # Preflight and every subsequent Compose operation share this exact snapshot.
 export FVOCI_IMAGE="$PRODUCT_IMAGE_ID"
