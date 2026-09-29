@@ -478,7 +478,7 @@ export FVOCI_COLLAB_ENGINE=/path/to/collab-engine
 cargo test --features db-tests --test collab_product
 ```
 
-## Web UI (React)
+## Web UI (React and Vue)
 
 Generate the OpenAPI contract and TypeScript client from Rust DTOs:
 
@@ -499,6 +499,29 @@ bun ci
 cd apps/web
 API_PROXY_TARGET=http://127.0.0.1:8080 bun --bun run dev
 ```
+
+The React app and the Vue app (`src/vue`, Nuxt UI) share one `index.html`;
+`src/boot.ts` loads the Vue app for the paths in `src/app-boundary.ts` (the
+project Gantt, `/w/:slug/:ref/gantt`) and the React app for every other path.
+
+Type checking runs both checkers under Bun (`build` runs them before `vite build`):
+
+```sh
+cd apps/web && bun --bun run typecheck   # tsc -b (React) and vue-tsc -b tsconfig.vue.json (Vue)
+```
+
+vue-tsc under Bun needs `patches/@volar%2Ftypescript@2.4.28.patch` (Bun
+`patchedDependencies` in the root `package.json`, applied by `bun ci`/`bun
+install`): without it Volar's `runTsc` cannot hook the TypeScript compiler
+under Bun, every `.vue` import fails with TS2307 and errors inside `.vue` files
+are not reported (vuejs/language-tools#4082). The patch is the upstream fix,
+volarjs/volar.js#310. The patch is keyed to `@volar/typescript` 2.4.28: after
+a vue-tsc (or Volar) bump that changes that version it no longer applies and
+vue-tsc under Bun fails with TS2307 again, so update or drop it with the bump.
+Once a Volar release contains volarjs/volar.js#310, remove the
+`patchedDependencies` entry and the patch file, then check that vue-tsc still
+fails on a deliberate type error in a `.vue` script and template under Bun
+with no `node` on PATH.
 
 Production-style serving from the Rust binary (built assets required):
 
