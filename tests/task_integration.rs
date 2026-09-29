@@ -3918,6 +3918,15 @@ async fn get_task_layout(
     layout
 }
 
+fn layout_item<'a>(layout: &'a serde_json::Value, task_id: &str) -> &'a serde_json::Value {
+    layout["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == task_id)
+        .unwrap_or_else(|| panic!("task {task_id} missing from layout {layout}"))
+}
+
 fn layout_links(layout: &serde_json::Value) -> Vec<(String, String, String, i64)> {
     let mut links: Vec<_> = layout["links"]
         .as_array()
@@ -4228,6 +4237,164 @@ async fn task_layout_calendar_lists_workspace_holidays_within_scale() {
         monday["calendar"]["holidays"],
         json!(["2026-09-02", "2026-10-03", "2026-10-04"])
     );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// The Gantt reschedules through PATCH /tasks/{id}, sending the layout item's
+/// dates back as `expectedDates`. Pins the rules it relies on: only the sent
+/// date fields change, a sent `dueAt` keeps the time of day the client chose,
+/// a stale snapshot is 409 and a dependency contradiction is 400, and neither
+/// refusal writes anything.
+#[tokio::test]
+async fn task_patch_gantt_reschedule_through_expected_dates() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let month = "year=2026&month=9";
+    let expected_of = |item: &serde_json::Value| {
+        json!({
+            "startDate": item["startDate"],
+            "dueDate": item["dueDate"],
+            "dueAt": item["dueAt"],
+        })
+    };
+    let due_only = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Due only", "dueDate": "2026-09-10"}),
+    )
+    .await;
+    let due_only = due_only["id"].as_str().unwrap().to_string();
+    let timed = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Timed", "startDate": "2026-09-14"}),
+    )
+    .await;
+    let timed = timed["id"].as_str().unwrap().to_string();
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &timed,
+        json!({"dueAt": "2026-09-15T09:30:00Z"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+
+    // (a) Moving a due-date-only bar by three days writes only dueDate.
+    let due_item = layout_item(&before, &due_only);
+    assert_eq!(due_item["inferred"], "from-due");
+    let stale_due_only = expected_of(due_item);
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &due_only,
+        json!({"dueDate": "2026-09-13", "expectedDates": stale_due_only}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["startDate"], serde_json::Value::Null);
+    assert_eq!(body["dueDate"], "2026-09-13");
+    assert_eq!(body["dueAt"], serde_json::Value::Null);
+
+    // (b) Moving a start + dueAt bar by three days: the client shifts dueAt by
+    // whole days, and the stored value keeps 09:30 UTC.
+    let timed_item = layout_item(&before, &timed);
+    assert_eq!(timed_item["dueAt"], "2026-09-15T09:30:00.000Z");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &timed,
+        json!({
+            "startDate": "2026-09-17",
+            "dueAt": "2026-09-18T09:30:00.000Z",
+            "expectedDates": expected_of(timed_item),
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["dueDate"], serde_json::Value::Null);
+
+    let after = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let due_item = layout_item(&after, &due_only);
+    assert_eq!(due_item["startDate"], serde_json::Value::Null);
+    assert_eq!(due_item["dueDate"], "2026-09-13");
+    assert_eq!(due_item["dueAt"], serde_json::Value::Null);
+    assert_eq!(due_item["start"], "2026-09-13");
+    assert_eq!(due_item["end"], "2026-09-13");
+    let timed_item = layout_item(&after, &timed);
+    assert_eq!(timed_item["startDate"], "2026-09-17");
+    assert_eq!(timed_item["dueDate"], serde_json::Value::Null);
+    assert_eq!(timed_item["dueAt"], "2026-09-18T09:30:00.000Z");
+    assert_eq!(timed_item["start"], "2026-09-17");
+    assert_eq!(timed_item["end"], "2026-09-18");
+
+    // (c) A stale snapshot is refused and writes nothing.
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &due_only,
+        json!({"dueDate": "2026-09-20", "expectedDates": stale_due_only}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "document_version_mismatch");
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+
+    // (d) Moving the blocked task before its blocker's due date is refused
+    // even with a current snapshot, and writes nothing.
+    let blocker = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Blocker", "startDate": "2026-09-01", "dueDate": "2026-09-10"}),
+    )
+    .await;
+    let blocker = blocker["id"].as_str().unwrap();
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{blocker}/dependencies"),
+        Some(json!({"blockedId": timed, "type": "FS"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &timed,
+        json!({
+            "startDate": "2026-09-08",
+            "dueAt": "2026-09-09T09:30:00.000Z",
+            "expectedDates": expected_of(timed_item),
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "dependency_contradiction");
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+    let unchanged = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let timed_item = layout_item(&unchanged, &timed);
+    assert_eq!(timed_item["startDate"], "2026-09-17");
+    assert_eq!(timed_item["dueAt"], "2026-09-18T09:30:00.000Z");
 
     admin.close().await;
     harness.cleanup().await;
