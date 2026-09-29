@@ -1,4 +1,8 @@
 {
+  "@iconify-json/lucide@1.2.137": {
+    "file": "supplements/iconify-json-lucide-1.2.137-LICENSE",
+    "source": "https://raw.githubusercontent.com/lucide-icons/lucide/e715245d62667c800e7f54c94b1b023692e900a3/LICENSE"
+  },
   "@nodable/entities@3.0.0": {
     "file": "supplements/nodable-entities-3.0.0-LICENSE",
     "source": "https://raw.githubusercontent.com/nodable/val-parsers/4fe544c219e52cb6e302c43a88824a8333babe3e/LICENSE"

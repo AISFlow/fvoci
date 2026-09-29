@@ -1,0 +1,37 @@
+{
+  // The Vue app (src/vue) and the shared modules it imports, checked by
+  // vue-tsc. tsconfig.app.json (tsc) checks the React app and excludes src/vue.
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "preserve",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "yjs": ["../../node_modules/yjs"],
+      "@hocuspocus/provider": ["../../node_modules/@hocuspocus/provider"]
+    }
+  },
+  "vueCompilerOptions": {
+    // strictTemplates without checkUnknownProps, which also refuses data-*
+    // and aria-* attributes on elements and components.
+    "checkUnknownComponents": true,
+    "checkUnknownDirectives": true,
+    "checkUnknownEvents": true
+  },
+  "include": ["src/vite-env.d.ts", "src/vue/**/*.ts", "src/vue/**/*.vue"],
+  "exclude": ["src/**/*.test.ts"]
+}

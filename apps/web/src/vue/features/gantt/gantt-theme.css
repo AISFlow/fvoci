@@ -1,4 +1,4 @@
-/* packages/gantt/src/theme.css */
+/* Gantt chart theme (was features/tasks/gantt/theme.css; originally packages/gantt/src/theme.css) */
 
 :where(.fvoci-gantt) {
 	--fvoci-gantt-font-family: var(
@@ -307,6 +307,12 @@ svg.fvoci-gantt__canvas rect.fvoci-gantt__today-band {
 	touch-action: none;
 }
 
+/* The bar group spans its whole lane (the row hit area), so the browser's own
+   focus ring would outline the lane; focus is shown on the bar itself. */
+.fvoci-gantt__bar[role="button"]:focus {
+	outline: none;
+}
+
 .fvoci-gantt__bar[role="button"]:focus-visible .fvoci-gantt__bar-rect,
 .fvoci-gantt__bar[role="button"]:focus-visible .fvoci-gantt__milestone {
 	stroke: var(--fvoci-gantt-ring-contrast);
@@ -314,152 +320,6 @@ svg.fvoci-gantt__canvas rect.fvoci-gantt__today-band {
 	filter: drop-shadow(
 		0 0 3px color-mix(in oklch, var(--fvoci-gantt-ring) 45%, transparent)
 	);
-}
-
-.fvoci-cal {
-	width: 100%;
-	border-collapse: collapse;
-	table-layout: fixed;
-	background: transparent;
-}
-
-.fvoci-cal > caption {
-	caption-side: top;
-	text-align: start;
-	padding: 0.75rem 1rem;
-	font-size: var(--fvoci-gantt-font-size-header);
-	font-weight: 600;
-	line-height: 1.4;
-	color: var(--fvoci-gantt-fg);
-	border-bottom: 1px solid var(--fvoci-gantt-grid-color);
-}
-
-.fvoci-cal__weekdays th {
-	padding: 0.5rem 0.25rem;
-	font-weight: 500;
-	text-align: center;
-	color: var(--fvoci-gantt-muted-fg);
-	border-bottom: 1px solid var(--fvoci-gantt-grid-color);
-}
-
-.fvoci-cal__bars {
-	display: grid;
-	grid-template-columns: repeat(7, 1fr);
-}
-
-.fvoci-cal__week {
-	position: relative;
-	border-top: 1px solid var(--fvoci-gantt-grid-color);
-}
-
-.fvoci-cal__day {
-	height: calc(var(--fvoci-gantt-lane-height) * 3.25);
-	vertical-align: top;
-	position: relative;
-	border-inline-start: 1px solid var(--fvoci-gantt-grid-color);
-	padding: 0.375rem 0.25rem;
-}
-
-.fvoci-cal__day--outside {
-	color: var(--fvoci-gantt-muted-fg);
-}
-
-.fvoci-cal__date {
-	display: inline-flex;
-	min-width: 1.5rem;
-	min-height: 1.5rem;
-	align-items: center;
-	justify-content: center;
-	border-radius: 999px;
-	font-size: var(--fvoci-gantt-font-size-tick);
-	font-variant-numeric: tabular-nums;
-}
-
-.fvoci-gantt__day--today .fvoci-cal__date {
-	background: var(--primary, currentColor);
-	color: var(--primary-foreground, var(--background, #fff));
-	font-weight: 600;
-}
-
-.fvoci-cal__bars {
-	position: absolute;
-	z-index: 1;
-	inset-block-start: calc(var(--fvoci-gantt-lane-height) * 0.95);
-	inset-inline-start: 0;
-	width: calc(700% + 6px);
-	gap: 0.125rem;
-	pointer-events: none;
-}
-
-.fvoci-cal__bar {
-	pointer-events: auto;
-	margin-inline: 0.125rem;
-	padding-inline: 0.5rem;
-	min-height: 1.5rem;
-	border: 1px solid var(--fvoci-gantt-bar-border);
-	border-radius: var(--fvoci-gantt-bar-radius);
-	background: var(--fvoci-gantt-bar-bg);
-	color: var(--fvoci-gantt-bar-fg);
-	font: inherit;
-	font-size: var(--fvoci-gantt-font-size-bar);
-	font-weight: 500;
-	text-align: start;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	cursor: pointer;
-	transition:
-		background var(--fvoci-gantt-motion, 0ms),
-		border-color var(--fvoci-gantt-motion, 0ms);
-}
-
-.fvoci-cal__bar:hover {
-	background: var(--fvoci-gantt-bar-selected-bg);
-}
-
-.fvoci-cal__bar:focus-visible {
-	outline: none;
-	box-shadow: 0 0 0 3px
-		color-mix(in oklch, var(--fvoci-gantt-ring) 50%, transparent);
-	border-color: var(--fvoci-gantt-ring);
-}
-
-.fvoci-cal__bar--selected {
-	background: var(--fvoci-gantt-bar-selected-bg);
-	border-color: var(--primary, currentColor);
-}
-
-.fvoci-cal__bar--cont-left {
-	border-start-start-radius: 0;
-	border-end-start-radius: 0;
-	border-inline-start-style: dashed;
-	margin-inline-start: 0;
-}
-
-.fvoci-cal__bar--cont-right {
-	border-start-end-radius: 0;
-	border-end-end-radius: 0;
-	border-inline-end-style: dashed;
-	margin-inline-end: 0;
-}
-
-.fvoci-cal__overflow {
-	pointer-events: auto;
-	grid-column: 1 / -1;
-	justify-self: start;
-	display: inline-flex;
-	min-height: 2.75rem;
-	align-items: center;
-	margin-inline-start: 0.25rem;
-	padding: 0.125rem 0.5rem;
-	border-radius: 999px;
-	border: 1px solid var(--fvoci-gantt-grid-color);
-	background: var(--secondary, var(--muted, transparent));
-	color: var(--secondary-foreground, var(--fvoci-gantt-muted-fg));
-	font: inherit;
-	font-size: var(--fvoci-gantt-font-size-header);
-	font-weight: 500;
-	cursor: pointer;
 }
 
 /*
@@ -470,8 +330,5 @@ svg.fvoci-gantt__canvas rect.fvoci-gantt__today-band {
 @media (pointer: coarse) {
 	:where(.fvoci-gantt) {
 		--fvoci-gantt-lane-height: 3.75rem;
-	}
-	.fvoci-cal__bar {
-		min-height: 2.75rem;
 	}
 }

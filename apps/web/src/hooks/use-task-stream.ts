@@ -7,9 +7,8 @@ import {
 import { subscribeTaskStream } from "@/lib/task-stream";
 
 /**
- * Subscribe to project task invalidation for the current page context.
- * Gantt collection route (#130): call `useTaskStream(workspaceId, projectId)` from the
- * future Gantt page the same way as `ProjectCollectionPage`.
+ * Subscribe to project task invalidation for the current page context (the
+ * Vue app's twin is src/vue/composables/useTaskStream.ts).
  */
 export function useTaskStream(workspaceId: string | undefined, projectId: string | undefined) {
   const queryClient = useQueryClient();

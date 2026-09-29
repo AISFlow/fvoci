@@ -1,0 +1,29 @@
+/* FVOCI design tokens, shared by the React (app.css) and Vue (vue/styles.css) stylesheets. */
+:root {
+  color-scheme: light;
+  --radius: 0.5rem;
+  --background: #ffffff;
+  --foreground: #18262f;
+  --card: #ffffff;
+  --primary: #087579;
+  --primary-foreground: #ffffff;
+  --muted: #f3f6f8;
+  --muted-foreground: #5b6b76;
+  --destructive: #b42318;
+  --border: #d7e0e6;
+  --input: #d7e0e6;
+  --ring: #087579;
+  --accent: #eef4f6;
+  --popover: #ffffff;
+  --popover-foreground: var(--foreground);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: var(--radius);
+  --text-title-size: 1.5rem;
+  --text-title-leading: 1.25;
+  --text-ui-size: 0.9375rem;
+  --text-ui-leading: 1.45;
+  --text-dense-size: 0.8125rem;
+  --text-dense-leading: 1.4;
+  --text-caption-size: 0.75rem;
+  --text-caption-leading: 1.35;
+}
