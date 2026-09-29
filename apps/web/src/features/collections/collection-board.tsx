@@ -8,16 +8,14 @@ import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
-import { api, ensureOk, isInvalidCursor } from "@/lib/api";
+import { isInvalidCursor } from "@/lib/api";
 import {
-  asJsonObject,
-  collectionPrefix,
+  collectionBoardColumnQuery,
   type CollectionConfig,
   type CollectionQueryItem,
 } from "@/lib/queries/collections";
 import {
   BOARD_DRAG_TYPE,
-  boardColumnBody,
   columnRows,
   moveChoices,
   moveRequest,
@@ -77,27 +75,9 @@ function BoardColumn({
   setOver: (group: string | null | undefined) => void;
 }) {
   const queryClient = useQueryClient();
-  const queryKey = [
-    ...collectionPrefix(workspaceId, collectionId),
-    "board",
-    config,
-    group.id,
-  ] as const;
-  const pages = useInfiniteQuery({
-    queryKey,
-    initialPageParam: undefined as string | undefined,
-    queryFn: async ({ pageParam }) => {
-      const body = boardColumnBody(config, group.id, pageParam);
-      return ensureOk(
-        await api.POST("/api/v1/workspaces/{workspace_id}/collections/{collection_id}/query", {
-          params: { path: { workspace_id: workspaceId, collection_id: collectionId } },
-          body: { ...body, config: asJsonObject(body.config) },
-        }),
-      );
-    },
-    getNextPageParam: (last) => last.nextCursor ?? undefined,
-    retry: false,
-  });
+  const columnQuery = collectionBoardColumnQuery(workspaceId, collectionId, config, group.id);
+  const queryKey = columnQuery.queryKey;
+  const pages = useInfiniteQuery(columnQuery);
 
   // A cursor from an older snapshot (fields/catalog changed) restarts only this column.
   const invalidCursor = isInvalidCursor(pages.error);
