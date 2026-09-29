@@ -70,6 +70,11 @@ export function isInvalidInput(err: unknown): boolean {
   return err instanceof ProblemError && err.code === "invalid_input" && !isInvalidCursor(err);
 }
 
+/** A failed load's message: the problem title, or the generic load failure. */
+export function loadErrorMessage(error: unknown): string {
+  return error instanceof ProblemError ? error.title : t("load.failed");
+}
+
 export function problemMessage(err: unknown, fallback: Parameters<typeof t>[0]): string {
   if (!(err instanceof ProblemError)) return t("error.network");
   return err.titleKnown ? err.title : t(fallback);

@@ -5,8 +5,10 @@
   "exports": {
     "./json": "./src/json.ts",
     "./sanitize": "./src/sanitize.ts",
+    "./attachment-model": "./src/attachment-model.ts",
     "./react": "./src/react/schema.tsx",
     "./fvoci-editor": "./src/react/fvoci-editor.tsx",
+    "./vue": "./src/vue/index.ts",
     "./block-menu": "./src/react/block-menu.tsx",
     "./format-toolbar": "./src/react/format-toolbar.tsx",
     "./link-popover": "./src/react/tiptap-ui/link-popover.tsx",
@@ -26,8 +28,8 @@
     "./styles.css": "./src/react/editor.css"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "bun test --isolate --timeout=60000 ./test"
+    "typecheck": "tsc --noEmit && vue-tsc --noEmit -p tsconfig.vue.json",
+    "test": "bun test --isolate --timeout=60000 --preload ./test/setup/vue-sfc.ts ./test"
   },
   "dependencies": {
     "@floating-ui/dom": "1.8.0",
@@ -40,6 +42,7 @@
     "@radix-ui/react-popover": "1.1.23",
     "@react-pdf/renderer": "^4.9.0",
     "@tiptap/core": "3.31.3",
+    "@tiptap/extension-bubble-menu": "3.31.3",
     "@tiptap/extension-code-block-lowlight": "3.31.3",
     "@tiptap/extension-collaboration": "3.31.3",
     "@tiptap/extension-collaboration-caret": "3.31.3",
@@ -86,7 +89,8 @@
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "typescript": "5.9.3",
-    "vue": "3.5.43"
+    "vue": "3.5.43",
+    "vue-tsc": "3.3.11"
   },
   "peerDependencies": {
     "react": "^19.3.0",

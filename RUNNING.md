@@ -653,13 +653,19 @@ API_PROXY_TARGET=http://127.0.0.1:8080 bun --bun run dev
 
 The React app and the Vue app (`src/vue`, Nuxt UI) share one `index.html`;
 `src/boot.ts` loads the Vue app for the paths in `src/app-boundary.ts` (the
-project Gantt, `/w/:slug/:ref/gantt`) and the React app for every other path.
+project Gantt, `/w/:slug/:ref/gantt`, and wiki documents, `/w/:slug/WIKI-<n>`)
+and the React app for every other path.
 
 Type checking runs both checkers under Bun (`build` runs them before `vite build`):
 
 ```sh
 cd apps/web && bun --bun run typecheck   # tsc -b (React) and vue-tsc -b tsconfig.vue.json (Vue)
+cd packages/editor && bun --bun run typecheck   # tsc, and vue-tsc for the Vue editor host (src/vue)
 ```
+
+The editor package's tests load the Vue editor's single-file components
+through `test/setup/vue-sfc.ts` (a `bun test --preload` plugin that compiles
+them with Vue's own compiler, as the build does).
 
 vue-tsc under Bun needs `patches/@volar%2Ftypescript@2.4.28.patch` (Bun
 `patchedDependencies` in the root `package.json`, applied by `bun ci`/`bun

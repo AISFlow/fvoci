@@ -43,10 +43,9 @@ import { createFvociExtensions, type EmojiMenuItem } from "./tiptap-schema.js";
  * (react/fvoci-editor.tsx) supply the framework-rendered node views, the
  * loaders and the upload hooks; the schema comes only from
  * createFvociExtensions, so every host edits the same Yjs content.
- * The helpers imported from react/ (and overlay-owner behind suggestion-menu)
- * are plain DOM/ProseMirror code despite their directory; the import-graph
- * test in test/editor-extensions.test.ts fails if any of them pulls in a UI
- * framework. */
+ * The helpers imported from react/ are plain DOM/ProseMirror code despite
+ * their directory; the import-graph test in test/editor-extensions.test.ts
+ * fails if any of them pulls in a UI framework. */
 
 /** WHY: #749 — at textblock edges, block insertion happens outside the paragraph. */
 export function uploadAnchor(
@@ -354,9 +353,13 @@ export type FvociNodeViewName =
 /** One `addNodeView` per node, e.g. `() => ReactNodeViewRenderer(MathNodeView)`.
  * The factory applies each only as `.extend({ addNodeView })`, so a map cannot
  * change attributes or parse rules: the schema — the collab contract in
- * tests/fixtures/yjs-seed/schema.json — is the same for every host. */
+ * tests/fixtures/yjs-seed/schema.json — is the same for every host. A host
+ * may leave `mermaid` out: `.extend` with no view keeps the node's own plain
+ * source view (nodes/mermaid.ts). */
 export type FvociNodeViews = Readonly<
-	Record<FvociNodeViewName, () => NodeViewRenderer>
+	Record<Exclude<FvociNodeViewName, "mermaid">, () => NodeViewRenderer> & {
+		mermaid?: () => NodeViewRenderer;
+	}
 >;
 
 /** Transaction meta, set to the upload key, on the transaction that inserts a

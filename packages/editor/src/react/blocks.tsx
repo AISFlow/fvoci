@@ -1,4 +1,4 @@
-import { type I18nKey, t } from "@fvoci/i18n";
+import { t } from "@fvoci/i18n";
 import {
 	type ChangeEvent,
 	createContext,
@@ -10,10 +10,15 @@ import {
 	useState,
 } from "react";
 import {
+	EMBED_ICON,
+	EMBED_KIND_KEY as EMBED_KEY,
+	type EmbedCardState,
+	resolveEmbedProps,
+} from "../embed-model.js";
+import {
 	EMBED_ENTITIES,
 	type EmbedEntity,
 	type EntityResolver,
-	type EntitySnapshot,
 	isEmbedEntity,
 	type MentionEntity,
 } from "../entities.js";
@@ -245,30 +250,7 @@ export function MermaidBlockView({
 	);
 }
 
-const EMBED_KEY = {
-	document: "editor.embed.document",
-	task: "editor.embed.task",
-	project: "editor.embed.project",
-	url: "editor.link",
-} as const satisfies Record<EmbedEntity, I18nKey>;
-
-function isEmbedHttpUrl(value: string): boolean {
-	try {
-		const parsed = new URL(value);
-		return parsed.protocol === "http:" || parsed.protocol === "https:";
-	} catch {
-		return false;
-	}
-}
-
-export function resolveEmbedProps(
-	raw: string,
-	selected: EmbedEntity,
-): { entity: EmbedEntity; ref: string } {
-	const ref = raw.trim();
-	if (isEmbedHttpUrl(ref)) return { entity: "url", ref };
-	return { entity: selected, ref };
-}
+export { type EmbedCardState, resolveEmbedProps };
 
 function readEmbedEdit(container: HTMLElement): {
 	entity: EmbedEntity;
@@ -286,21 +268,9 @@ function readEmbedEdit(container: HTMLElement): {
 
 export const EntityResolverContext = createContext<EntityResolver | null>(null);
 
-const EMBED_ICON: Record<Exclude<EmbedEntity, "url">, string> = {
-	document: "📄",
-	task: "☑",
-	project: "📁",
-};
-
 export type UrlEmbedRenderer = (url: string) => ReactNode;
 
 export const UrlEmbedContext = createContext<UrlEmbedRenderer | null>(null);
-
-export type EmbedCardState =
-	| { state: "loading" }
-	| { state: "inaccessible" }
-	| { state: "plain"; ref: string }
-	| { state: "resolved"; snapshot: EntitySnapshot };
 
 export function EmbedCardView({
 	entity,

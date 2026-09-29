@@ -1,5 +1,4 @@
 // packages/editor/src/react/attachment-view.tsx
-import { uuid } from "../uuid.js";
 import { t } from "@fvoci/i18n";
 import {
 	type ChangeEvent,
@@ -12,49 +11,27 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { formatBytes } from "./format-bytes.js";
+import {
+	type AttachmentBlockBridge,
+	type AttachmentMeta,
+	type AttachmentUploadResult,
+	attachmentBadge,
+	decodeFilename,
+	isStoredAttachmentId,
+	META_RETRY_MS,
+} from "../attachment-model.js";
 import {
 	type PreviewAttachment,
 	pickPreviewRenderer,
 } from "./preview-registry.js";
 
-export function isStoredAttachmentId(id: string): boolean {
-	return uuid.safeParse(id).success;
-}
-
-export function decodeFilename(name: string): string {
-	if (!/%[0-9A-Fa-f]{2}/.test(name)) return name;
-	try {
-		return decodeURIComponent(name);
-	} catch {
-		return name;
-	}
-}
-
-export interface AttachmentUploadResult {
-	id: string;
-	name: string;
-	image: boolean;
-}
-
-export interface AttachmentMeta {
-	sizeBytes: number | null;
-	mime: string;
-	preview: { width: number; height: number } | null;
-}
-
-export interface AttachmentBlockBridge {
-	upload(
-		file: File,
-		onProgress: (fraction: number) => void,
-		signal?: AbortSignal,
-	): Promise<AttachmentUploadResult>;
-	downloadUrl(attachmentId: string): string;
-	/** WHY: 치수 예약(C3)·크기/MIME 배지는 GET attachments/:id 메타에서 — 호스트가 없으면 카드는 이름만. */
-	attachmentMeta?(attachmentId: string): Promise<AttachmentMeta | null>;
-}
-
-const META_RETRY_MS = [1000, 2000, 4000];
+export {
+	type AttachmentBlockBridge,
+	type AttachmentMeta,
+	type AttachmentUploadResult,
+	decodeFilename,
+	isStoredAttachmentId,
+};
 
 /** WHY: 썸네일 잡은 완료 뒤에 돈다 — preview 가 생길 때까지만 1·2·4초 재시도(R5·G2-1). */
 export function useAttachmentMeta(
@@ -237,12 +214,7 @@ export function AttachmentCardView(props: {
 				</div>
 			);
 		case "stored": {
-			const badge = [
-				typeof state.sizeBytes === "number" ? formatBytes(state.sizeBytes) : "",
-				state.mime ?? "",
-			]
-				.filter((s) => s.length > 0)
-				.join(" · ");
+			const badge = attachmentBadge(state.sizeBytes, state.mime);
 			const body = (
 				<>
 					<span className="afn-attachment-icon" aria-hidden>

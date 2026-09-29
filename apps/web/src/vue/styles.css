@@ -5,6 +5,8 @@
 @import "../styles/tokens.css";
 
 @source "./";
+/* The Vue editor host and node views (@fvoci/editor/vue). */
+@source "../../../../packages/editor/src/vue";
 
 @theme {
   --font-sans: "Noto Sans KR", system-ui, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
@@ -13,6 +15,16 @@
 /* FVOCI's primary colour (styles/tokens.css) for Nuxt UI's primary. */
 :root {
   --ui-primary: var(--primary);
+}
+
+/* The React stylesheet's theme values that the shared editor and document
+   styles (@fvoci/editor/styles.css, features/*.css) read. */
+:root {
+  --text-ui: var(--text-ui-size);
+  --text-dense: var(--text-dense-size);
+  --text-caption: var(--text-caption-size);
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
 }
 
 body {

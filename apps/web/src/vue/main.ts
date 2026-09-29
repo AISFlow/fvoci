@@ -5,17 +5,20 @@ import App from "./App.vue";
 import { createAppRouter } from "./router";
 import "./styles.css";
 
-// The React app's query defaults (src/App.tsx).
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      refetchOnWindowFocus: false,
+/** Mounts the Vue app (src/boot.ts calls this for the Vue pages). */
+export function start(): void {
+  // The React app's query defaults (src/App.tsx).
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 30_000,
+        refetchOnWindowFocus: false,
+      },
     },
-  },
-});
+  });
 
-const root = document.getElementById("root")!;
-root.classList.add("isolate");
+  const root = document.getElementById("root")!;
+  root.classList.add("isolate");
 
-createApp(App).use(createAppRouter()).use(ui).use(VueQueryPlugin, { queryClient }).mount(root);
+  createApp(App).use(createAppRouter()).use(ui).use(VueQueryPlugin, { queryClient }).mount(root);
+}

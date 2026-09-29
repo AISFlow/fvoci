@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeModal } from "@/features/projects/native-modal";
-import { api, ensureOk, problemMessage } from "@/lib/api";
+import { problemMessage } from "@/lib/api";
 import { documentShareLinksQuery, type ShareDocumentTarget } from "@/lib/queries/share";
 import { publicInstanceQuery, refreshPublicInstance } from "@/lib/queries/admin";
 import {
@@ -14,26 +14,13 @@ import {
   shareExpiresOptions,
 } from "@/lib/share-links";
 import "@/features/projects/projects.css";
+import {
+  copyText,
+  createDocumentShareLink,
+  formatShareDate as formatDate,
+  revokeShareLink,
+} from "./share-api";
 import "./share.css";
-
-const dateFormat = new Intl.DateTimeFormat("ko", {
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-function formatDate(iso: string): string {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? iso : dateFormat.format(date);
-}
-
-async function copyText(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  throw new Error("clipboard unavailable");
-}
 
 function RevealedShareUrl({ url }: { url: string }) {
   const [copied, setCopied] = useState(false);
@@ -90,27 +77,7 @@ export function ShareDialog({
   }
 
   const create = useMutation({
-    mutationFn: async (days: number) =>
-      ensureOk(
-        target.projectId === null
-          ? await api.POST("/api/v1/workspaces/{workspace_id}/documents/{id}/share-links", {
-              params: { path: { workspace_id: workspaceId, id: target.documentId } },
-              body: { expiresInDays: days },
-            })
-          : await api.POST(
-              "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{id}/share-links",
-              {
-                params: {
-                  path: {
-                    workspace_id: workspaceId,
-                    project_id: target.projectId,
-                    id: target.documentId,
-                  },
-                },
-                body: { expiresInDays: days },
-              },
-            ),
-      ),
+    mutationFn: (days: number) => createDocumentShareLink(workspaceId, target, days),
     onSuccess: async (created) => {
       setActionError(null);
       setCreatedUrl(created.url);
@@ -122,12 +89,7 @@ export function ShareDialog({
   });
 
   const revoke = useMutation({
-    mutationFn: async (id: string) =>
-      ensureOk(
-        await api.DELETE("/api/v1/workspaces/{workspace_id}/share-links/{id}", {
-          params: { path: { workspace_id: workspaceId, id } },
-        }),
-      ),
+    mutationFn: (id: string) => revokeShareLink(workspaceId, id),
     onSuccess: async () => {
       setActionError(null);
       await invalidateLinks();

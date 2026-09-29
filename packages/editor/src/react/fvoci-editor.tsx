@@ -47,8 +47,8 @@ import {
 	MathNodeView,
 	MermaidNodeView,
 } from "./node-views.js";
-import { overlayOwner } from "./overlay-owner.js";
-import { selectAllEscape, selectAllStep } from "./table-actions.js";
+import { overlayOwner } from "../overlay-owner.js";
+import { selectAllEscape, selectAllStep } from "../table-actions.js";
 import { TableHandles } from "./table-handles.js";
 
 export type { TiptapEditor };

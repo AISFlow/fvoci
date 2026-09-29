@@ -11,10 +11,15 @@ import {
 
 // The workspace header of the React app's WorkspaceShell, reduced to links:
 // every target is a React page, so each is a plain anchor (a full page load).
-defineProps<{
-  slug: string;
-  workspaceName: string;
-}>();
+withDefaults(
+  defineProps<{
+    slug: string;
+    workspaceName: string;
+    /** The section the page belongs to. */
+    active?: "wiki" | "projects";
+  }>(),
+  { active: "projects" },
+);
 </script>
 
 <template>
@@ -24,8 +29,18 @@ defineProps<{
         <a href="/" class="underline underline-offset-2">{{ t("nav.backHome") }}</a>
         <nav class="flex flex-wrap items-center gap-3" :aria-label="t('nav.workspace')">
           <a :href="workspaceHomePath(slug)">{{ t("nav.home") }}</a>
-          <a :href="wikiPath(slug)">{{ t("nav.wiki") }}</a>
-          <a :href="projectsPath(slug)" class="font-medium text-highlighted" aria-current="page">{{ t("nav.projects") }}</a>
+          <a
+            :href="wikiPath(slug)"
+            :class="active === 'wiki' ? 'font-medium text-highlighted' : undefined"
+            :aria-current="active === 'wiki' ? 'page' : undefined"
+            >{{ t("nav.wiki") }}</a
+          >
+          <a
+            :href="projectsPath(slug)"
+            :class="active === 'projects' ? 'font-medium text-highlighted' : undefined"
+            :aria-current="active === 'projects' ? 'page' : undefined"
+            >{{ t("nav.projects") }}</a
+          >
           <a :href="myTasksPath(slug)">{{ t("task.mine") }}</a>
           <a :href="searchPath(slug)">{{ t("nav.search") }}</a>
           <a :href="settingsPath(slug)">{{ t("nav.settings") }}</a>

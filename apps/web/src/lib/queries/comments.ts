@@ -1,4 +1,4 @@
-import { infiniteQueryOptions } from "@tanstack/react-query";
+import { infiniteQueryOptions } from "@/lib/query-options";
 import { api, ensureOk } from "@/lib/api";
 import type { components } from "@/generated/api";
 

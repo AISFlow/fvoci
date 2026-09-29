@@ -1,7 +1,13 @@
 // Adapted from source apps/web/src/lib/queries/admin.ts and the legal queries
 // in apps/web/src/lib/queries/auth.ts.
-import { queryOptions, type QueryClient } from "@tanstack/react-query";
+import { queryOptions } from "@tanstack/react-query";
 import { api, ensureOk, ProblemError } from "@/lib/api";
+
+export {
+  invalidateInstanceWrites,
+  publicInstanceQuery,
+  refreshPublicInstance,
+} from "@/lib/queries/instance";
 
 export const adminUsersQuery = queryOptions({
   queryKey: ["admin", "users"] as const,
@@ -34,27 +40,6 @@ export const adminAuditQuery = queryOptions({
     !(error instanceof ProblemError && error.status === 404) && failureCount < 3,
 });
 
-export const publicInstanceQuery = queryOptions({
-  queryKey: ["instance"] as const,
-  // Server sends Cache-Control max-age=60 + ETag; after admin updates, the browser
-  // can reuse a pre-patch empty body within that window (see service-info-flow e2e).
-  queryFn: async () =>
-    ensureOk(await api.GET("/api/v1/instance", { cache: "no-cache" })),
-});
-
-/**
- * Revalidates `/instance` past the browser's 60 s HTTP cache (ETag, so a 304
- * when nothing changed) and stores it under the shared `["instance"]` key.
- * For screens that act on a policy an admin may just have changed.
- */
-export function refreshPublicInstance(queryClient: QueryClient) {
-  return queryClient.fetchQuery({
-    queryKey: publicInstanceQuery.queryKey,
-    queryFn: async () => ensureOk(await api.GET("/api/v1/instance", { cache: "no-cache" })),
-    staleTime: 0,
-  });
-}
-
 export function legalDocQuery(kind: string, version?: number) {
   return queryOptions({
     queryKey: ["legal", kind, version ?? "latest"] as const,
@@ -83,13 +68,4 @@ export function legalVersionsQuery(kind: string) {
     select: (data) => data.versions,
     retry: false,
   });
-}
-
-/** Operator text and attachment preview mode also live in the public `/instance` view. */
-export async function invalidateInstanceWrites(queryClient: QueryClient): Promise<void> {
-  await Promise.all([
-    queryClient.invalidateQueries({ queryKey: ["admin", "instance-settings"] }),
-    queryClient.invalidateQueries({ queryKey: ["instance"] }),
-    queryClient.invalidateQueries({ queryKey: ["setup", "status"] }),
-  ]);
 }
