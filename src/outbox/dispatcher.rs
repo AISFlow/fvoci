@@ -426,7 +426,8 @@ fn external_deliver_chunk_len(
 /// lease is renewed right before each call, so the call is dropped before the
 /// lease can expire and no second owner delivers the same events at the same
 /// time, as long as the renewal's `now()` precedes the timer start by less
-/// than the margin.
+/// than the margin and `lease_ttl` is whole seconds from 1 to 3600 s: the SQL
+/// lease is `lease_ttl` truncated to seconds and clamped to that range.
 fn lease_batch_timeout(lease: Duration) -> Duration {
     let margin = Duration::from_millis(500);
     lease.saturating_sub(margin).max(Duration::from_millis(1))
