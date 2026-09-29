@@ -199,12 +199,14 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
 fn log_collab_disabled() {
     match std::env::var("FVOCI_COLLAB_ENGINE") {
         Ok(raw) if !raw.trim().is_empty() => tracing::error!(
+            event = "collab.disabled",
             path = raw.trim(),
             "FVOCI_COLLAB_ENGINE is not an existing regular file; collaboration disabled"
         ),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            tracing::error!("FVOCI_COLLAB_ENGINE is not valid UTF-8; collaboration disabled")
-        }
+        Err(std::env::VarError::NotUnicode(_)) => tracing::error!(
+            event = "collab.disabled",
+            "FVOCI_COLLAB_ENGINE is not valid UTF-8; collaboration disabled"
+        ),
         _ => tracing::info!("collaboration disabled (FVOCI_COLLAB_ENGINE unset)"),
     }
 }

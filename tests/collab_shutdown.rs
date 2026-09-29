@@ -518,6 +518,11 @@ async fn process_unusable_collab_engine_is_logged_once_at_startup() {
                 let status = wait_for_exit(&mut child, Duration::from_secs(10));
                 let text = collected_log_text(&logs);
                 assert_eq!(text.matches(needle).count(), 1, "logs={text}");
+                let line = text.lines().find(|line| line.contains(needle)).unwrap();
+                assert!(
+                    line.contains("ERROR") && line.contains("collab.disabled"),
+                    "the startup line is a greppable collab.disabled error: {line}"
+                );
                 assert!(
                     !text.contains("FVOCI_COLLAB_ENGINE unset"),
                     "a set variable is not reported as unset: {text}"
