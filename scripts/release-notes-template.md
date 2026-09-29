@@ -266,8 +266,7 @@ request, not a measurement of the published image.
   volarjs/volar.js#310) until a Volar release contains it; the image's web
   build stage copies `patches/` for it.
 - An opt-in check of instance OIDC against a local Keycloak was added
-  (`scripts/keycloak-oidc-e2e.sh`; it still builds the web app with npm,
-  moving it to Bun is a follow-up).
+  (`scripts/keycloak-oidc-e2e.sh`, run with Bun).
 
 ## Upgrading from 0.2.0
 

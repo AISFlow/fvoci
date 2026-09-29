@@ -17,7 +17,7 @@
 
 전체 재작성은 **부분 구현**이다. Orca Run `run_b01d432a9dee`.
 최초 기준 main(역사적 anchor)은 `6ba876503e2a8340c0c21f8f110d2ec14f67f8b3` (#141, 2026-09-27, main 5개 workflow 성공)이다.
-최신 수락 제품 main은 아래 `d265b42629a06520cdd3a209c0d5f395ece3a176` 표(#255 merge, 2026-09-29)이며, 그 사이 anchor는 당시 관측으로 보존한다. 열린 제품·CI PR은 아래에
+최신 수락 제품 main은 아래 `a7261dc8138fe163731de65c700413ed16f466a3` 표(#256 merge, 2026-09-29)이며, 그 사이 anchor는 당시 관측으로 보존한다. 열린 제품·CI PR은 아래에
 별도로 표시한다. 개별 PR이나 main CI 성공은 전체 포팅 완료를 뜻하지 않는다.
 
 | PR | merge | 범위 | 수락 근거 |
@@ -289,7 +289,7 @@ main push 대기 관측은 이미 수락된 PR의 취소가 아니다.
 | [#239](https://github.com/AISFlow/fvoci/pull/239) | `c55bee4d` | `e600047c1aef043357061f00fe735a3ce0d9e4ea` | 테스트 전용: `collections_integration` `wiki_collection_can_edit_uses_one_set_based_permission_lookup`의 문 목록 비교에서 #231 acquire 검사 문을 제외(sqlx는 재사용 idle 연결에만 `before_acquire`를 실행하므로 검사 수가 pool 상태에 따른다). `086f2b4d` main의 `postgres-pg16-b` 실패(run 36498519146) 수정. 제품 변경 없음. 검토: 독립 Plan-agent 검토(다른 컨텍스트) ACCEPT_WITH_NITS(run `wq2qspket`) | 39 성공·1 skip, 5개 gate 성공 |
 | [#240](https://github.com/AISFlow/fvoci/pull/240) | `874dbecf` | `d560ac8f017e283de548ad3edc97977a4406582c` | 0.2.0 release 준비: `Cargo.toml`·`Cargo.lock` 0.2.0, `apps/web/openapi.json`, `scripts/release-notes-template.md`(`notes-for: 0.2.0`), 이 문서. merge 커밋이 `v0.2.0` tag 대상(release [36514930444](https://github.com/AISFlow/fvoci/actions/runs/36514930444), tag push). PR head CI 39 성공·1 skip, 5개 gate 성공. 검토: `<TBD>`(PR 본문·evidence에 검토 기록 없음, 코디네이터 기입) | main push 39 성공·1 skip, 5개 gate 성공 (+ v0.2.0 release 실행 9 성공) |
 
-2026-09-29 KST 추가 대조 지점(수락 제품 main): `d265b42629a06520cdd3a209c0d5f395ece3a176`(#255 merge). 아래는 v0.2.0 tag(`d560ac8f`) 이후
+2026-09-29 KST 추가 대조 지점(수락 제품 main): `a7261dc8138fe163731de65c700413ed16f466a3`(#256 merge). 아래는 v0.2.0 tag(`d560ac8f`) 이후
 first-parent 순서의 수락분이며 0.3.0 준비 PR merge의 `v0.3.0` 게시 대상이다. 각 PR의 고정 HEAD(merge 직전 PR head) 원격 CI는
 39 성공·1 skip, 5개 gate 성공이다(#251 head는 `.github/dependabot.yml` 검사 1개가 더 있어 40 성공). "검토"는 구현·코디네이터와 다른
 컨텍스트의 내장 Plan agent 독립 검토이며 판정은 PR 본문과 코디네이터 workflow 결과에서 옮겼다. 마지막 열은 merge 커밋의 main push CI이며
@@ -312,6 +312,7 @@ first-parent 순서의 수락분이며 0.3.0 준비 PR merge의 `v0.3.0` 게시 
 | [#253](https://github.com/AISFlow/fvoci/pull/253) | `e8c0038a` | `7cbb8beaca8da30966e28fdb2c6bd1703fe9642e` | Vue Gantt 백엔드 expand: task layout `canEdit`(표시 힌트, PATCH가 재검사)·`links`/`linkTotal`·`calendar` 추가(필드 제거·migration 없음). 결함: PATCH `expectedDates.dueAt`을 microsecond로 비교해 layout 값(ms)으로 보낸 재일정이 409 → millisecond 비교(저장값 절삭, §5 완화 범위). 후속: React Gantt 대체 후 pixel layout 필드 제거(contract). 검토: `1daaeeef` ACCEPT_WITH_NITS → fix `e82afffb` delta ACCEPT_WITH_NITS, `dueAt` 수정과 절삭 테스트도 각각 delta ACCEPT_WITH_NITS | web-ci-gate 실패: `web-checks` 웹 단위 테스트 `collab-reconnect.test.ts` "거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열고, 파기 뒤에는 열지 않는다" `afterDestroy` 1≠0(run [36548921685](https://github.com/AISFlow/fvoci/actions/runs/36548921685) attempt 1, 재실행 없음, §5). 나머지 4개 gate 성공(37 성공·2 실패·1 skip). 다음 main `995ad6e2`는 성공 |
 | [#254](https://github.com/AISFlow/fvoci/pull/254) | `73f01bd9` | `995ad6e24664378cc2b6a3fa782d62f8f2b799cc` | #149 A/B 첨부 전송(사용자 결정 2026-09-29, #149 기록): `FVOCI_ATTACHMENT_TRANSFER_MODE` > 관리자 설정 `attachmentTransfer.mode` > 기본 `proxy`. `presigned`(S3+`S3_PUBLIC_ENDPOINT`)는 `rusty_s3` presigned UploadPart·GetObject, 세션별 mode 고정(`upload_meta`, migration 없음), complete 전 ListParts 개수·번호·크기·ETag 대조와 권한 재검사, 기동 거부(잘못된 값·S3/endpoint 없음·https origin 아래 http·앱과 같은 host)와 400 `attachment_transfer_unavailable`, API token·local 저장소는 proxy, CSP에 storage origin(`S3_PUBLIC_ENDPOINT` 설정 시), S3 overlay 변수, RUNNING.md 운영자 설정. 검증: MinIO+PG `attachment_s3_integration` 24, 수동 Chromium cross-origin(`scripts/run-web-e2e-s3.sh`, CI 아님). 미검증: 실제 AWS S3·다른 S3 호환·CDN/proxy·Firefox·Safari. 발급 URL 만료 전 철회 불가(§5). 검토: `76ad2775` ACCEPT_WITH_NITS → fix·finish·nit 라운드 delta 모두 ACCEPT_WITH_NITS, 이후 main merge만 | 39 성공·1 skip, 5개 gate 성공 |
 | [#255](https://github.com/AISFlow/fvoci/pull/255) | `bd31bfd3` | `d265b42629a06520cdd3a209c0d5f395ece3a176` | Vue 3 + Nuxt UI 전환 tracer 1(사용자 결정, #250 기반): 프로젝트 Gantt를 Vue 페이지로. vue 3.5.43·@nuxt/ui 4.11.2 등 정확 고정, react-query와 vue-query가 query-core 1벌 공유, `bun-lock.test.ts`가 중복·`@tiptap-pro/` 거부. 단일 `index.html`에서 `src/boot.ts`가 Gantt 경로만 Vue, 나머지는 React로 시작하고 경계 이동은 전체 페이지 로드. 저장은 기존 `PATCH /tasks/{id}`에 layout 그대로의 `expectedDates`(권한·의존성·충돌은 서버): 이동은 태스크가 가진 날짜 필드만, 시작 handle은 `startDate`만, 끝 handle은 due 쪽만, `dueAt`은 시각 유지. 화살표·Shift+화살표, 409 메시지·refetch, 400 의존성 모순 snap back, 오늘·기본 월은 사용자 시간대. React Gantt 삭제(서버 pixel layout 필드는 유지, 후속 contract 단계), React 로그인 페이지의 `returnTo`(`safeReturnTo`). CSP: Nuxt UI colors `<style>`을 `index.html`에 그대로 기록해 기존 hash로 허용(`'unsafe-inline'`·Rust 변경 없음), Lucide 아이콘 오프라인 번들·오픈소스 고지. `vue-tsc`용 `@volar/typescript` 2.4.28 Bun `patchedDependencies` patch(volarjs/volar.js#310, Dockerfile `COPY patches`). API·DB·설치 계약 변경 없음. 검증: 웹 단위 480, 실제 PG·Meili e2e 45 group 85/85와 Vue Gantt spec, 협업 26, Node 없는 `oven/bun:1.4.2`. 한계: DST를 건너 이동한 `dueAt`은 그린 막대와 하루 어긋날 수 있음, overlap mode rail 행 정렬, Chromium만. 검토: REJECT(월 경계 막대 날짜 오저장·아이콘 고지 누락 major 2) → fix round(13건) delta ACCEPT_WITH_NITS → minor(백그라운드 refetch 실패 시 캐시된 프로젝트 목록 유지) `6e99ce66` 수정 → 추가 수정 `bd31bfd3`(실패 query에 보여줄 데이터가 없을 때만 Vue 오류 상태) 검토 ACCEPT_WITH_NITS | 39 성공·1 skip, 5개 gate 성공 |
+| [#256](https://github.com/AISFlow/fvoci/pull/256) | `8ddd1486` | `a7261dc8138fe163731de65c700413ed16f466a3` | 도구: #241의 실제 Keycloak 확인을 Bun으로(`bun` 요구, `bun --bun run build`, Playwright 확인을 `run-web-e2e.sh`와 같게; #250 이후 hoisted layout에서 이전 Playwright 확인이 main에서 실패하던 문제 해소). redaction·xtrace guard·interrupt 정리·`--skip-build` HEAD 확인 유지. 실제 재실행 flows 8·failures 7·wrong-secret 1·workspace-sso 1 통과(Keycloak 26.7.4, Bun 1.4.2, Playwright 1.63.0). 검토: 독립 Plan-agent 검토(다른 컨텍스트) ACCEPT_WITH_NITS | 39 성공·1 skip, 5개 gate 성공(PR head) |
 | 0.3.0 준비 PR `<TBD>` | `<TBD>` | `<TBD>` | 0.3.0 release 준비: `Cargo.toml`·`Cargo.lock` 0.3.0, `apps/web/openapi.json`(`info.version`만), `scripts/release-notes-template.md`(`notes-for: 0.3.0`), `RUNNING.md`(npm→Bun 전환 시 `node_modules` 삭제), 이 문서, `.agents/environment.md`, main(#255) merge. merge 커밋이 `v0.3.0` tag 대상. 검토: `<TBD>` | `<TBD>` |
 
 실제 OS IME witness(F, 협업 행): 별도 Opus 5.5 medium 검토가 ACCEPT했다. 비공개 WSL2 X11 silo(IBus hangul 2벌식,
@@ -625,7 +626,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   `c5e7a9e9` run [36538130129](https://github.com/AISFlow/fvoci/actions/runs/36538130129); 원인 미확인). 둘 다 gate가 아니며 갱신은 수동이 필요하다.
 - Bun 전환(#250): Playwright는 Bun을 upstream에서 지원하지 않는다. main의 browser shard는 Bun에서 통과하고 있으나 upstream 보장은 없다.
   `bun test`는 기본 5 s 제한이라 모든 실행이 60 s를 지정하고, XLSX hostile-stream 음성 대조는 Bun에서 10.2 s(Node 1.3 s)다.
-  #241의 `scripts/keycloak-oidc-e2e.sh`는 아직 `npm`을 요구하고 `npm run build`를 쓴다(#250 이전 작성, opt-in이라 CI guard 밖).
+  #241의 `scripts/keycloak-oidc-e2e.sh`는 #256에서 Bun으로 옮겼다(실제 재실행 8·7·1·1 통과, `fvoci-evidence/keycloak-oidc-bun-8ddd1486`; opt-in이라 CI guard 밖).
   #255 이후 `vue-tsc`용 `@volar/typescript` 2.4.28 Bun `patchedDependencies` patch(volarjs/volar.js#310)를 upstream 수정 전까지 유지해야 한다.
   vue-tsc·Volar 갱신으로 그 버전이 바뀌면 patch가 적용되지 않아 Bun의 vue-tsc가 TS2307로 실패하므로 갱신과 함께 고치거나 지운다(RUNNING.md "Web UI").
 - 웹 단위 테스트 `collab-reconnect.test.ts` "거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열고, 파기 뒤에는 열지 않는다"가 `7cbb8bea` main
@@ -661,7 +662,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
     `:0.2` 동일, pre-release https://github.com/AISFlow/fvoci/releases/tag/v0.2.0.
   - `v0.3.0`: 게시 예정(게시 후 기입). tag `<TBD>`, release `<TBD>`, 이미지 `ghcr.io/aisflow/fvoci:0.3.0@<TBD>`
     (amd64 `<TBD>`, arm64 `<TBD>`), `:0.3` `<TBD>`, pre-release https://github.com/AISFlow/fvoci/releases/tag/v0.3.0.
-- **0.3.0 포함 변경**(v0.2.0 이후, first-parent): 제품 #242 #243 #244 #245 #246 #247 #248 #253 #254, 프론트엔드 #255(Vue Gantt tracer 1), 빌드·구조 #250 #251, 테스트·도구 #241 #252,
+- **0.3.0 포함 변경**(v0.2.0 이후, first-parent): 제품 #242 #243 #244 #245 #246 #247 #248 #253 #254, 프론트엔드 #255(Vue Gantt tracer 1), 빌드·구조 #250 #251, 테스트·도구 #241 #252 #256,
   문서 #249. minor 사유: #246(설치 파일 변경과 폐기된 `<VAR>_FILE` 기동 거부), #254(운영자 설정 `FVOCI_ATTACHMENT_TRANSFER_MODE`·
   `attachmentTransfer.mode`). migration 없음(044 유지), 새 필수 `.env` 값 없음. 발행 노트는 `scripts/release-notes-template.md`(`notes-for: 0.3.0`,
   #255 "Tasks: Gantt" 절 포함).
