@@ -867,7 +867,8 @@ pub enum JoinError {
     /// per-room connection cap.
     RoomFull,
     /// Aggregate helper memory budget, or the primary helper pool at its cap.
-    /// The WebSocket transport closes this and `RoomFull` with 1013.
+    /// The WebSocket transport closes this and `RoomFull` with 1013 (1012
+    /// while the hub shuts down).
     CapacityRetry,
     EngineUnavailable,
     WriterStale,

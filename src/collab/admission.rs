@@ -15,8 +15,11 @@ use uuid::Uuid;
 ///
 /// The check and the record happen under one lock, and the live RSS is read
 /// inside it: a room returns its reservation only after its load finished, so
-/// a read under the lock counts every room either as outstanding or through its
-/// helper's RSS. The lock covers synchronous `/proc` reads only, never an await.
+/// a read under the lock counts every room between admission and its first
+/// load either as outstanding or through its helper's RSS. A loaded room whose
+/// helper is being recycled, or whose respawn was refused, is counted by
+/// neither until a helper loads again. The lock covers one synchronous `/proc`
+/// read per live helper, never an await.
 ///
 /// A room that was admitted but never loads (the join that started it was
 /// denied, or every load failed) keeps its reservation until the room is torn

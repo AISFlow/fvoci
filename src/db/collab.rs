@@ -57,8 +57,9 @@ pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
 /// Stage timings of one collab transaction, logged as `collab.stage` fields.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CollabDbStageTimings {
-    /// Never measured: the append runs on the room's dedicated fence
-    /// connection, so there is no pool wait. Kept as a stable log field.
+    /// Not measured (always 0): the timed append runs on the room's fence
+    /// connection; the pool variant discards its timings. Kept as a stable log
+    /// field.
     pub pool_wait_us: u64,
     pub advisory_lock_us: u64,
     pub row_lock_us: u64,

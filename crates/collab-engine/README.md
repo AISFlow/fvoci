@@ -82,10 +82,11 @@ validator, seed; crate defaults 8/8/2, the server derives its caps from
 `FVOCI_COLLAB_MAX_ROOMS` in `src/collab/config.rs`). A full primary pool
 refuses at once with `ResourceLimit` (`Ops`); validator and seed spawns with
 a `slot_wait` wait up to that long for a slot. The server's room map keeps one
-room, so one primary helper, per document. Native `RLIMIT_AS` is 1 GiB and
-parent-observed RSS kill is 512 MiB per child; the server's
-`FVOCI_COLLAB_MEMORY_BUDGET` admission bounds the aggregate. A 32 MiB aggregate load is in range for representative fragmented
-snapshot+tail data; structurally memory-heavy CRDTs still return
+room, so one room helper, per document (offline revision capture uses the
+primary pool's headroom). Native `RLIMIT_AS` is 1 GiB and parent-observed RSS
+kill is 512 MiB per child; the server checks `FVOCI_COLLAB_MEMORY_BUDGET` when
+admitting a room. A 32 MiB aggregate load is in range for representative
+fragmented snapshot+tail data; structurally memory-heavy CRDTs still return
 `ResourceLimit` (Memory/Output) and are not a universal decode guarantee.
 Apply succeeds only when the authoritative completeV1 (pending + delete set)
 still fits the 8 MiB reload cap; the apply reply is small `applied`/`pending`
