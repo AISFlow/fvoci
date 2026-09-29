@@ -229,7 +229,7 @@ pub async fn get_project_task_layout(
 /// loses nothing, which covers every value the web UI writes, so the form it
 /// already reads does not change.
 fn due_at_string(at: DateTime<Utc>) -> String {
-    let format = if at.timestamp_subsec_nanos() % 1_000_000 == 0 {
+    let format = if at.timestamp_subsec_nanos().is_multiple_of(1_000_000) {
         SecondsFormat::Millis
     } else {
         SecondsFormat::Micros
