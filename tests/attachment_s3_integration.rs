@@ -3727,5 +3727,46 @@ async fn transfer_mode_env_lock_restart_and_startup_refusals() {
         "the servers logged at debug: {}",
         logs.len()
     );
+
+    // Nor any audit or event row written along the way (the presigned upload
+    // and download, the admin changes), in any column.
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let attachment_id = Uuid::parse_str(&id).unwrap();
+    let completed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'attachment.completed' AND target_id = $1",
+    )
+    .bind(attachment_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let settings_audit: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.audit_log WHERE verb = 'instance_settings.updated'",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(completed, 1);
+    assert!(settings_audit >= 1, "{settings_audit}");
+    for secret in [
+        "X-Amz-",
+        "x-amz-",
+        s3.access_key_id.as_str(),
+        s3.secret_access_key.as_str(),
+    ] {
+        let leaked: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM fvoci.events e WHERE strpos(e::text, $1) > 0) \
+                  + (SELECT count(*) FROM fvoci.audit_log a WHERE strpos(a::text, $1) > 0)",
+        )
+        .bind(secret)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(leaked, 0, "audit or event rows contain {secret}");
+    }
+    admin.close().await;
     harness.cleanup().await;
 }
