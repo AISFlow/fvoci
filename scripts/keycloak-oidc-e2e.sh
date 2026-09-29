@@ -16,9 +16,10 @@
 #
 # Usage: scripts/keycloak-oidc-e2e.sh [--skip-build] [--workspace-sso]
 #   FVOCI_KC_E2E_EVIDENCE_DIR=<dir>  also keep redacted evidence there
-# Needs docker (compose), openssl, python3, git, cargo, node/npm, setsid
+# Needs docker (compose), openssl, python3, git, cargo, bun, setsid
 # (util-linux) and scripts/prepare-web-e2e.sh; the first run pulls the
-# Keycloak image.
+# Keycloak image. The web build and Playwright run under Bun (bun --bun), as
+# in the web e2e harness; node and npm are not used.
 # Exits non-zero when a group fails or when its compose project could not be
 # removed completely.
 set -euo pipefail
@@ -65,16 +66,27 @@ for arg in "$@"; do
   esac
 done
 
-for dependency in docker openssl python3 git cargo npm setsid; do
+for dependency in docker openssl python3 git cargo bun setsid; do
   command -v "$dependency" >/dev/null 2>&1 || {
     echo "$dependency is required" >&2
     exit 1
   }
 done
-if [[ ! -x "$ROOT/apps/web/node_modules/.bin/playwright" ]]; then
-  echo "missing Playwright install; run scripts/prepare-web-e2e.sh" >&2
+# The workspace's locked Playwright, run by Bun; never fetched on demand.
+if ! (cd "$ROOT/apps/web" && bun --bun x --no-install playwright --version) >/dev/null 2>&1; then
+  echo "missing web dependencies or Playwright; run scripts/prepare-web-e2e.sh" >&2
   exit 1
 fi
+# For versions.json: the package.json of @playwright/test and the
+# browsers.json of the playwright-core it runs, as Bun resolves them from
+# apps/web (bunfig.toml hoists them to the root node_modules).
+PLAYWRIGHT_FILES="$(cd "$ROOT/apps/web" && bun --bun -e '
+const path = require("node:path");
+const test = require.resolve("@playwright/test/package.json");
+const playwright = require.resolve("playwright/package.json", { paths: [path.dirname(test)] });
+const core = require.resolve("playwright-core/package.json", { paths: [path.dirname(playwright)] });
+console.log(JSON.stringify({ test, browsers: path.join(path.dirname(core), "browsers.json") }));
+')"
 # The redaction every log and evidence file goes through, on its known cases.
 python3 "$HELPER" selftest >&2
 # The groups run with TMPDIR=$TMPDIR/fvoci-kc-e2e.XXXXXX/tmp (removed on
@@ -90,7 +102,7 @@ if [[ "$SKIP_BUILD" == 0 ]]; then
   echo "=== build: release fvoci-server/fvoci-migrate and web assets at ${SOURCE_SHA} ===" >&2
   (cd "$ROOT" && FVOCI_BUILD_SHA="$SOURCE_SHA" cargo build --locked --offline --release \
     --bin fvoci-server --bin fvoci-migrate)
-  (cd "$ROOT/apps/web" && npm run build)
+  (cd "$ROOT/apps/web" && bun --bun run build)
   if [[ "$WORKSPACE_SSO" == 1 ]]; then
     (cd "$ROOT" && "${SSO_TEST[@]}" --no-run)
   fi
@@ -319,15 +331,16 @@ python3 "$HELPER" verify "${VERIFY_ARGS[@]}" >"$WORK/keycloak-setup.json"
 keep keycloak-setup.json <"$WORK/keycloak-setup.json"
 
 KC_REPO_DIGESTS="$(docker image inspect --format '{{json .RepoDigests}}' "$KC_IMAGE")"
-python3 - "$EVIDENCE" <<PY
+python3 - "$EVIDENCE" "$PLAYWRIGHT_FILES" <<PY
 import json, os, platform, subprocess, sys
 evidence = sys.argv[1]
+playwright_files = json.loads(sys.argv[2])
 def run(*cmd):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip()
     except OSError:
         return None
-browsers = json.load(open("$ROOT/apps/web/node_modules/playwright-core/browsers.json"))
+browsers = json.load(open(playwright_files["browsers"]))
 # Headless runs use Playwright's chromium-headless-shell build.
 shell = next(b for b in browsers["browsers"] if b["name"] == "chromium-headless-shell")
 info = {
@@ -336,8 +349,9 @@ info = {
     "fvociServer": run("$CARGO_TARGET_DIR/release/fvoci-server", "--version"),
     "fvociServerBinary": "$CARGO_TARGET_DIR/release/fvoci-server (cargo build --release from source)",
     "rustc": run("rustc", "-V"),
-    "node": run("node", "-v"),
-    "playwright": json.load(open("$ROOT/apps/web/node_modules/@playwright/test/package.json"))["version"],
+    "bun": run("bun", "--version"),
+    "playwrightRuntime": "bun --bun x --no-install playwright test",
+    "playwright": json.load(open(playwright_files["test"]))["version"],
     "browser": {"name": "chromium-headless-shell", "revision": shell["revision"],
                 "version": shell["browserVersion"], "headless": True},
     "keycloakImage": "$KC_IMAGE",
