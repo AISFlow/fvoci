@@ -33,13 +33,13 @@ const MAIL_VERBS: &[&str] = &["comment.created", "identity.linked", "identity.un
 /// mailbox of every recipient it was asked about and none was accepted in
 /// this attempt or an earlier one, as a relay that refuses everyone that
 /// way would. The retry skips the recipients SMTP already accepted (see
-/// `AcceptedRecipients`). A skipped recipient proves nothing
-/// about the relay now, so a refusal the classifier cannot tie to the
-/// recipient (any 5xx outside the X.1/X.2 mailbox codes, including a bare
-/// 550 or 553 from relays that send no enhanced status codes, such as Exim
-/// by default or qmail, for an unknown user) of the last recipient still to
-/// send looks like a relay-wide one: that event retries and dead-letters,
-/// after the recipients before it got their mail.
+/// `AcceptedRecipients`). A skipped recipient proves nothing about the relay
+/// now, so a refusal the classifier cannot tie to the recipient (any 5xx
+/// outside the X.1/X.2 mailbox codes, including a bare 550 or 553 from
+/// relays that send no enhanced status codes, such as Exim by default or
+/// qmail, for an unknown user) of the last recipient still to send looks
+/// like a relay-wide one: that event retries and dead-letters, after the
+/// recipients before it got their mail.
 pub struct MailConsumer {
     mailer: Arc<Mailer>,
     accepted: Mutex<AcceptedRecipients>,
