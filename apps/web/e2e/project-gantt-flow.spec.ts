@@ -605,6 +605,27 @@ test("an archived project's Gantt is read-only", async ({ page }) => {
   await expect(chart.locator(".fvoci-gantt__handle")).toHaveCount(0);
 });
 
+test("a project list that fails to load offers a retry", async ({ page }) => {
+  await ensureSetup(page);
+  const wsId = await workspaceId(page.request, admin.workspaceSlug);
+  const project = await createProject(page.request, wsId, "GRT");
+  const task = await createTask(page.request, wsId, project.id, { title: "Gantt retry", startDate: day(3), dueDate: day(4) });
+  let failList = true;
+  await page.route(/\/api\/v1\/workspaces\/[^/]+\/projects(\?[^/]*)?$/, (route) => {
+    if (!failList || route.request().method() !== "GET") return route.continue();
+    return route.fulfill({
+      status: 503,
+      contentType: "application/problem+json",
+      body: JSON.stringify({ type: "about:blank", title: "Service Unavailable", status: 503 }),
+    });
+  });
+  await page.goto(ganttUrl(project.key));
+  await expect(page.getByRole("alert")).toContainText("불러오지 못했습니다");
+  failList = false;
+  await page.getByRole("button", { name: "다시 시도" }).click();
+  await expect(bar(page, task.id)).toHaveAttribute("data-start", day(3));
+});
+
 test("the Vue Gantt and the React pages link to each other with full page loads", async ({ page }) => {
   test.setTimeout(120_000);
   const csp = watchCspViolations(page);
