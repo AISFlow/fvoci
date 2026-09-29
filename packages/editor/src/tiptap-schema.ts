@@ -269,7 +269,23 @@ export function createFvociExtensions(opts?: {
 		NodeRange,
 		UniqueID.configure({
 			types: [...UNIQUE_ID_NODE_TYPES],
-			filterTransaction: (tr) => !isChangeOrigin(tr),
+			/* WHY: #258 — a block without an id (a body the server seeded, a new
+			 * document's first paragraph) gets one on the first local edit in it.
+			 * UniqueID (@tiptap/extension-unique-id 3.31.3, the latest) appends
+			 * that setNodeMarkup to the same dispatch, so when the edit is an IME
+			 * composition's first update, ProseMirror (prosemirror-view 1.42.5)
+			 * redraws the block under the composition and Chromium restarts it:
+			 * IBus Hangul 한글 after "첫 문단" gave "첫 문단ㅎ한글". Tiptap's
+			 * TableOfContents skips composition transactions for the same reason
+			 * (ueberdosis/tiptap#7126, PR #7134); UniqueID has no such check and
+			 * no upstream issue. The id waits for the block's next edit outside a
+			 * composition (a syllable commit, a space, Enter). Tests:
+			 * packages/editor/test/unique-id-composition.test.ts and
+			 * apps/web/e2e-pending/workspace-wiki-ime.spec.ts. Drop the
+			 * composition check once UniqueID skips composition transactions
+			 * itself (those tests then pass without it). */
+			filterTransaction: (tr) =>
+				!isChangeOrigin(tr) && !tr.getMeta("composition"),
 		}),
 		YChangeAttr,
 		YChangeMark,
