@@ -437,7 +437,7 @@
             }
           },
           "400": {
-            "description": "Invalid input",
+            "description": "Invalid input, or `attachment_transfer_unavailable`: `attachmentTransfer.mode` = `presigned` on a server whose storage cannot presign (local driver, or S3 without `S3_PUBLIC_ENDPOINT`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5856,6 +5856,7 @@
         "tags": [
           "attachments"
         ],
+        "description": "Publishes the upload after re-checking the session and permissions (again right before the row is marked stored). For a `presigned` session storage must first list exactly parts 1..N, each of its exact length, with the submitted ETags; otherwise nothing is published and the session stays open.",
         "operationId": "complete_attachment_upload",
         "parameters": [
           {
@@ -5899,7 +5900,7 @@
             }
           },
           "400": {
-            "description": "Invalid parts",
+            "description": "Invalid parts (`submitted_parts_do_not_match_uploaded_parts` when storage holds other parts than submitted)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6003,6 +6004,17 @@
             "description": "Partial content",
             "content": {
               "application/octet-stream": {}
+            }
+          },
+          "302": {
+            "description": "Presigned transfer mode, original only: `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Signed storage URL"
+              }
             }
           },
           "304": {
@@ -6367,7 +6379,7 @@
             }
           },
           "409": {
-            "description": "Upload is not in the required state",
+            "description": "Upload is not in the required state, or a `presigned` session (its parts go to the signed storage URLs only)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6494,6 +6506,7 @@
         "tags": [
           "attachments"
         ],
+        "description": "Re-checks the session, workspace, edit permission, uploader and writable parent, lists the parts storage holds, and returns targets for the rest in the session's own transfer mode. For a `presigned` session every call signs fresh part URLs (the re-issue path after expiry).",
         "operationId": "resume_attachment_upload",
         "parameters": [
           {
@@ -6557,7 +6570,17 @@
             }
           },
           "409": {
-            "description": "Upload is not in the required state",
+            "description": "Upload is not in the required state, or `attachment_transfer_unavailable`: a `presigned` session on a server that can no longer presign (it is never moved to the proxy path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Presigned URL re-issue rate limited",
             "content": {
               "application/json": {
                 "schema": {
@@ -11423,7 +11446,7 @@
         },
         "responses": {
           "201": {
-            "description": "Upload session created",
+            "description": "Upload session created, bound to the transfer mode in effect now",
             "content": {
               "application/json": {
                 "schema": {
@@ -17217,7 +17240,7 @@
         },
         "responses": {
           "201": {
-            "description": "Upload session created",
+            "description": "Upload session created, bound to the transfer mode in effect now",
             "content": {
               "application/json": {
                 "schema": {
@@ -22276,7 +22299,7 @@
         },
         "responses": {
           "201": {
-            "description": "Upload session created",
+            "description": "Upload session created, bound to the transfer mode in effect now",
             "content": {
               "application/json": {
                 "schema": {
@@ -23634,6 +23657,45 @@
         },
         "additionalProperties": false
       },
+      "AdminAttachmentTransferOutput": {
+        "type": "object",
+        "description": "The attachment transfer mode this process applies, next to the configured\n`values.attachmentTransfer.mode`.",
+        "required": [
+          "effective",
+          "source",
+          "presignedAvailable",
+          "unavailableReason",
+          "blocked"
+        ],
+        "properties": {
+          "blocked": {
+            "type": "boolean",
+            "description": "A stored `presigned` that cannot apply here, so `proxy` is in effect."
+          },
+          "effective": {
+            "$ref": "#/components/schemas/TransferMode",
+            "description": "Mode for new upload sessions and original downloads."
+          },
+          "presignedAvailable": {
+            "type": "boolean",
+            "description": "Whether this server's storage can serve `presigned`."
+          },
+          "source": {
+            "$ref": "#/components/schemas/TransferSource",
+            "description": "Where the configured mode comes from; `env` cannot be changed here."
+          },
+          "unavailableReason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TransferUnavailable"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "AdminEraseBody": {
         "type": "object",
         "description": "Source `adminEraseInput` (strict object).",
@@ -23677,9 +23739,13 @@
           "overridden",
           "restartRequired",
           "envApplied",
-          "eeFeatures"
+          "eeFeatures",
+          "attachmentTransfer"
         ],
         "properties": {
+          "attachmentTransfer": {
+            "$ref": "#/components/schemas/AdminAttachmentTransferOutput"
+          },
           "eeFeatures": {
             "type": "array",
             "items": {
@@ -24285,7 +24351,8 @@
             "format": "int32"
           },
           "url": {
-            "type": "string"
+            "type": "string",
+            "description": "`proxy`: the same-origin API path (PUT with the session). `presigned`:\nan absolute signed storage URL for one PUT of exactly this part's\nbytes, sent without cookies, `Authorization` or `Content-Type`; it\nstops working at `partUrlsExpireAt`."
           }
         }
       },
@@ -24325,6 +24392,19 @@
         "properties": {
           "mode": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AttachmentTransferSettings": {
+        "type": "object",
+        "description": "How attachment part uploads and original downloads travel: `proxy` through\nthe API, `presigned` directly between the browser and S3. The stored value\nis what the admin chose; the admin output's `attachmentTransfer` reports\nwhether this server's storage lets it apply.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/TransferMode"
           }
         },
         "additionalProperties": false
@@ -25724,6 +25804,8 @@
         "required": [
           "attachmentId",
           "partSizeBytes",
+          "transfer",
+          "partUrlsExpireAt",
           "parts"
         ],
         "properties": {
@@ -25734,11 +25816,23 @@
             "type": "integer",
             "format": "int64"
           },
+          "partUrlsExpireAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the presigned part URLs expire (resume re-issues them); null for\n`proxy`."
+          },
           "parts": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AttachmentPartUrlResponse"
             }
+          },
+          "transfer": {
+            "$ref": "#/components/schemas/TransferMode",
+            "description": "Transfer mode of this upload session, fixed for its whole life."
           }
         }
       },
@@ -27098,6 +27192,16 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/AttachmentPreviewSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attachmentTransfer": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AttachmentTransferSettings"
               },
               {
                 "type": "null"
@@ -29219,6 +29323,8 @@
         "required": [
           "attachmentId",
           "partSizeBytes",
+          "transfer",
+          "partUrlsExpireAt",
           "uploadedParts",
           "parts"
         ],
@@ -29230,11 +29336,23 @@
             "type": "integer",
             "format": "int64"
           },
+          "partUrlsExpireAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the freshly issued presigned part URLs expire; null for `proxy`."
+          },
           "parts": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AttachmentPartUrlResponse"
             }
+          },
+          "transfer": {
+            "$ref": "#/components/schemas/TransferMode",
+            "description": "The session's own transfer mode (not the current setting)."
           },
           "uploadedParts": {
             "type": "array",
@@ -29633,6 +29751,7 @@
           "embed",
           "features",
           "attachmentPreview",
+          "attachmentTransfer",
           "i18n",
           "security",
           "operator"
@@ -29640,6 +29759,9 @@
         "properties": {
           "attachmentPreview": {
             "$ref": "#/components/schemas/AttachmentPreviewSettings"
+          },
+          "attachmentTransfer": {
+            "$ref": "#/components/schemas/AttachmentTransferSettings"
           },
           "auth": {
             "$ref": "#/components/schemas/AuthSettings"
@@ -30869,6 +30991,30 @@
           }
         },
         "additionalProperties": false
+      },
+      "TransferMode": {
+        "type": "string",
+        "enum": [
+          "proxy",
+          "presigned"
+        ]
+      },
+      "TransferSource": {
+        "type": "string",
+        "description": "Where the configured attachment transfer mode comes from.",
+        "enum": [
+          "env",
+          "stored",
+          "default"
+        ]
+      },
+      "TransferUnavailable": {
+        "type": "string",
+        "description": "Why this process cannot hand out presigned URLs. Fixed for the life of the\nprocess: it follows `STORAGE_DRIVER` and `S3_PUBLIC_ENDPOINT`.",
+        "enum": [
+          "storage_local",
+          "public_endpoint_missing"
+        ]
       },
       "TrashItemResponse": {
         "type": "object",
