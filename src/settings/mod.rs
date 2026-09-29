@@ -22,6 +22,7 @@ pub use catalog::{
     SettingsValues, SharePolicy, BRANDING_ASSET_MIME, SETTINGS_KEYS,
 };
 
+use crate::attachments::{TransferMode, TransferUnavailable};
 use crate::db::admin::{record_instance_change, require_admin_session, InstanceChange};
 use crate::db::context::set_system;
 
@@ -208,6 +209,90 @@ pub async fn attachment_preview_mode(pool: &PgPool) -> Result<String, sqlx::Erro
         .values
         .attachment_preview
         .mode)
+}
+
+/// Where the configured attachment transfer mode comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "api-schema", derive(utoipa::ToSchema))]
+pub enum TransferSource {
+    /// `FVOCI_ATTACHMENT_TRANSFER_MODE`; admin writes cannot change it.
+    Env,
+    /// The admin-stored `attachmentTransfer` row.
+    Stored,
+    Default,
+}
+
+/// The attachment transfer mode for new upload sessions and download
+/// requests of this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveTransfer {
+    pub mode: TransferMode,
+    pub source: TransferSource,
+    /// Why this process cannot presign (`None`: it can).
+    pub unavailable: Option<TransferUnavailable>,
+    /// The configured mode is `presigned` but `unavailable` holds, so `proxy`
+    /// applies. Only a stored row can get here: an environment value that
+    /// cannot apply refuses startup instead.
+    pub blocked: bool,
+}
+
+/// Resolves the effective transfer mode from a settings snapshot and the
+/// storage capability. A stored `presigned` whose capability disappeared
+/// (driver switched to local, public endpoint removed) falls back to `proxy`
+/// and reports `blocked`, so a stale row never keeps uploads from working;
+/// the admin sees why and can reset it.
+pub fn effective_transfer(
+    snapshot: &SettingsSnapshot,
+    unavailable: Option<TransferUnavailable>,
+) -> EffectiveTransfer {
+    let configured = snapshot.values.attachment_transfer.mode;
+    let env_leaf = format!("{}.mode", SettingsKey::AttachmentTransfer.as_str());
+    let source = if snapshot.env_applied.contains(&env_leaf) {
+        TransferSource::Env
+    } else if snapshot
+        .overridden
+        .contains(&SettingsKey::AttachmentTransfer)
+    {
+        TransferSource::Stored
+    } else {
+        TransferSource::Default
+    };
+    let blocked = configured == TransferMode::Presigned && unavailable.is_some();
+    EffectiveTransfer {
+        mode: if blocked {
+            TransferMode::Proxy
+        } else {
+            configured
+        },
+        source,
+        unavailable,
+        blocked,
+    }
+}
+
+/// Read API: the transfer status for storage with capability `unavailable`,
+/// resolved from the current rows (no boot snapshot).
+pub async fn attachment_transfer(
+    pool: &PgPool,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<EffectiveTransfer, sqlx::Error> {
+    let rows = load_rows(pool).await?;
+    let snapshot = resolve(rows, 0, "FVOCI", &crate::license::absent());
+    Ok(effective_transfer(&snapshot, unavailable))
+}
+
+/// Read API for upload creation and original downloads: the mode in effect
+/// now, read per request so an admin change reaches every process on its next
+/// request. Storage that cannot presign is always `proxy`, without a read.
+pub async fn attachment_transfer_mode(
+    pool: &PgPool,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<TransferMode, sqlx::Error> {
+    if unavailable.is_some() {
+        return Ok(TransferMode::Proxy);
+    }
+    Ok(attachment_transfer(pool, None).await?.mode)
 }
 
 /// Effective values without touching the boot snapshot.
@@ -508,6 +593,59 @@ mod tests {
         assert_eq!(href, "/api/v1/branding/logo?v=aaaaaaaaaaaa");
         assert!(!href.contains(&Uuid::nil().to_string()));
         assert_eq!(asset_href(BrandingAssetKind::Favicon, None), None);
+    }
+
+    #[test]
+    fn transfer_mode_precedence_and_blocked_fallback() {
+        let row = |mode: &str| vec![("attachmentTransfer".to_string(), json!({"mode": mode}))];
+        let absent = crate::license::absent();
+
+        let default = resolve(Vec::new(), 1, "F", &absent);
+        let status = effective_transfer(&default, None);
+        assert_eq!(
+            (status.mode, status.source, status.blocked),
+            (TransferMode::Proxy, TransferSource::Default, false)
+        );
+
+        let stored = resolve(row("presigned"), 1, "F", &absent);
+        let status = effective_transfer(&stored, None);
+        assert_eq!(
+            (status.mode, status.source, status.blocked),
+            (TransferMode::Presigned, TransferSource::Stored, false)
+        );
+        for reason in [
+            TransferUnavailable::StorageLocal,
+            TransferUnavailable::PublicEndpointMissing,
+        ] {
+            let status = effective_transfer(&stored, Some(reason));
+            assert_eq!(
+                (
+                    status.mode,
+                    status.source,
+                    status.blocked,
+                    status.unavailable
+                ),
+                (
+                    TransferMode::Proxy,
+                    TransferSource::Stored,
+                    true,
+                    Some(reason)
+                )
+            );
+        }
+        // A stored `proxy` is never blocked.
+        let proxy = resolve(row("proxy"), 1, "F", &absent);
+        assert!(!effective_transfer(&proxy, Some(TransferUnavailable::StorageLocal)).blocked);
+
+        // The environment leaf wins over the row (`resolve` records it).
+        let mut env = resolve(row("proxy"), 1, "F", &absent);
+        env.values.attachment_transfer.mode = TransferMode::Presigned;
+        env.env_applied.push("attachmentTransfer.mode".into());
+        let status = effective_transfer(&env, None);
+        assert_eq!(
+            (status.mode, status.source),
+            (TransferMode::Presigned, TransferSource::Env)
+        );
     }
 
     #[test]

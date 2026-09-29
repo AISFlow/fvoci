@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::attachments::UploadLimits;
+use crate::attachments::{PresignTtls, TransferMode, UploadLimits};
 use crate::auth::password::Keyring;
 use crate::search::meili::{meili_config_from_env, MeiliConfig};
 
@@ -112,6 +112,7 @@ pub struct Config {
     /// SMTP_HOST/PORT/FROM all set, or None when mail is disabled.
     pub smtp: Option<crate::mail::SmtpConfig>,
     pub revision: RevisionSettings,
+    pub attachment_transfer: AttachmentTransferConfig,
 }
 
 impl Clone for Config {
@@ -131,6 +132,7 @@ impl Clone for Config {
             meili: self.meili.clone(),
             smtp: self.smtp.clone(),
             revision: self.revision,
+            attachment_transfer: self.attachment_transfer,
         }
     }
 }
@@ -151,6 +153,7 @@ impl fmt::Debug for Config {
             .field("meili", &self.meili)
             .field("smtp", &self.smtp.as_ref().map(|_| "<configured>"))
             .field("revision", &self.revision)
+            .field("attachment_transfer", &self.attachment_transfer)
             .finish()
     }
 }
@@ -207,6 +210,17 @@ impl Config {
         let meili = meili_config_from_env()?;
         let smtp = crate::mail::smtp_from_env()?;
         let revision = revision_settings_from_env();
+        let attachment_transfer = attachment_transfer_from_values(
+            env_os("FVOCI_ATTACHMENT_TRANSFER_MODE")?.as_deref(),
+            env::var("FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS")
+                .ok()
+                .as_deref(),
+            env::var("FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS")
+                .ok()
+                .as_deref(),
+            &storage,
+            &public_origin,
+        )?;
 
         Ok(Self {
             bind,
@@ -223,8 +237,132 @@ impl Config {
             meili,
             smtp,
             revision,
+            attachment_transfer,
         })
     }
+}
+
+/// A variable that is unset or valid Unicode; anything else is refused
+/// rather than read as unset.
+fn env_os(name: &str) -> Result<Option<String>, String> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8")),
+    }
+}
+
+/// Startup view of the attachment transfer settings (#149). The mode itself
+/// is resolved per request by the settings store
+/// ([`crate::settings::attachment_transfer`]); startup proves that every mode
+/// the store could apply is usable, so a bad environment value refuses to
+/// start instead of being ignored with a warning.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AttachmentTransferConfig {
+    /// `FVOCI_ATTACHMENT_TRANSFER_MODE`, when set to a non-empty value.
+    pub env_mode: Option<TransferMode>,
+    pub ttls: PresignTtls,
+}
+
+/// Validates the transfer variables against the storage and app origin.
+///
+/// # Errors
+///
+/// A message naming the offending variable when the mode is not exactly
+/// `proxy` or `presigned`; when `presigned` is forced without
+/// `STORAGE_DRIVER=s3` or `S3_PUBLIC_ENDPOINT`; when a TTL is outside its
+/// range; or when `S3_PUBLIC_ENDPOINT` (checked whenever it is set, since an
+/// admin can switch to `presigned` at run time) is plain http under an https
+/// app origin (mixed content) or shares the app's host. Cookies are scoped to
+/// the host and not the port (RFC 6265 §8.5), so a same-host storage origin
+/// would receive the session cookie on browser navigations and image loads,
+/// and it cannot send the `nosniff` and sandbox CSP headers the app origin
+/// relies on for attachment bytes.
+pub fn attachment_transfer_from_values(
+    mode: Option<&str>,
+    part_ttl: Option<&str>,
+    download_ttl: Option<&str>,
+    storage: &StorageSettings,
+    public_origin: &str,
+) -> Result<AttachmentTransferConfig, String> {
+    const MODE_VAR: &str = "FVOCI_ATTACHMENT_TRANSFER_MODE";
+    // Empty counts as unset, as in the settings store.
+    let env_mode = match mode.filter(|raw| !raw.is_empty()) {
+        None => None,
+        Some(raw) => Some(
+            TransferMode::parse(raw)
+                .ok_or_else(|| format!("{MODE_VAR} must be \"proxy\" or \"presigned\""))?,
+        ),
+    };
+    let ttls = PresignTtls {
+        part: parse_ttl_secs(
+            "FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS",
+            part_ttl,
+            PresignTtls::default().part,
+            5..=3600,
+        )?,
+        download: parse_ttl_secs(
+            "FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS",
+            download_ttl,
+            PresignTtls::default().download,
+            5..=300,
+        )?,
+    };
+    let storage_origin = match storage {
+        StorageSettings::S3(s3) => crate::attachments::presign_origin_for(s3)?,
+        StorageSettings::Local { .. } => None,
+    };
+    if let Some(storage_origin) = &storage_origin {
+        let app = url::Url::parse(public_origin)
+            .map_err(|e| format!("invalid FVOCI_PUBLIC_ORIGIN: {e}"))?;
+        if app.scheme() == "https" && storage_origin.scheme() != "https" {
+            return Err(
+                "S3_PUBLIC_ENDPOINT must be https when FVOCI_PUBLIC_ORIGIN is https (browsers block mixed content)"
+                    .into(),
+            );
+        }
+        if app.host_str() == storage_origin.host_str() {
+            return Err(
+                "S3_PUBLIC_ENDPOINT must use a host other than FVOCI_PUBLIC_ORIGIN's: cookies ignore ports, and the storage origin cannot send the app's nosniff/sandbox headers"
+                    .into(),
+            );
+        }
+    }
+    if env_mode == Some(TransferMode::Presigned) {
+        match storage {
+            StorageSettings::Local { .. } => {
+                return Err(format!("{MODE_VAR}=presigned requires STORAGE_DRIVER=s3"));
+            }
+            StorageSettings::S3(_) if storage_origin.is_none() => {
+                return Err(format!("{MODE_VAR}=presigned requires S3_PUBLIC_ENDPOINT"));
+            }
+            StorageSettings::S3(_) => {}
+        }
+    }
+    Ok(AttachmentTransferConfig { env_mode, ttls })
+}
+
+fn parse_ttl_secs(
+    name: &str,
+    raw: Option<&str>,
+    default: Duration,
+    range: std::ops::RangeInclusive<u64>,
+) -> Result<Duration, String> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let out_of_range = || {
+        format!(
+            "{name} must be an integer from {} to {} (seconds)",
+            range.start(),
+            range.end()
+        )
+    };
+    let secs: u64 = raw.trim().parse().map_err(|_| out_of_range())?;
+    if !range.contains(&secs) {
+        return Err(out_of_range());
+    }
+    Ok(Duration::from_secs(secs))
 }
 
 fn nonempty_env(name: &str) -> Result<String, String> {
@@ -616,6 +754,121 @@ mod tests {
             parse_s3_endpoint("S3_ENDPOINT", "http://127.0.0.1:9000/").unwrap(),
             "http://127.0.0.1:9000"
         );
+    }
+
+    fn s3_with_public(public_endpoint: Option<&str>, path_style: bool) -> StorageSettings {
+        StorageSettings::S3(S3Settings {
+            endpoint: "http://minio.internal:9000".into(),
+            public_endpoint: public_endpoint.map(str::to_string),
+            region: "us-east-1".into(),
+            bucket: "fvoci".into(),
+            access_key_id: "id".into(),
+            secret_access_key: "secret".into(),
+            force_path_style: path_style,
+        })
+    }
+
+    #[test]
+    fn transfer_mode_env_is_exact_and_needs_a_presign_capable_storage() {
+        let local = StorageSettings::Local {
+            root: PathBuf::from("/tmp/x"),
+        };
+        let capable = s3_with_public(Some("http://files.example.test"), true);
+        let origin = "http://app.example.test";
+        let run = |mode: Option<&str>, storage: &StorageSettings| {
+            attachment_transfer_from_values(mode, None, None, storage, origin)
+        };
+        assert_eq!(run(None, &local).unwrap().env_mode, None);
+        assert_eq!(run(Some(""), &local).unwrap().env_mode, None);
+        assert_eq!(
+            run(Some("proxy"), &local).unwrap().env_mode,
+            Some(TransferMode::Proxy)
+        );
+        assert_eq!(
+            run(Some("presigned"), &capable).unwrap().env_mode,
+            Some(TransferMode::Presigned)
+        );
+        for bad in ["direct", " presigned", "PROXY"] {
+            let err = run(Some(bad), &capable).unwrap_err();
+            assert!(err.contains("FVOCI_ATTACHMENT_TRANSFER_MODE"), "{err}");
+        }
+        let err = run(Some("presigned"), &local).unwrap_err();
+        assert!(err.contains("STORAGE_DRIVER=s3"), "{err}");
+        let err = run(Some("presigned"), &s3_with_public(None, true)).unwrap_err();
+        assert!(err.contains("S3_PUBLIC_ENDPOINT"), "{err}");
+        // Proxy needs no capability.
+        assert!(run(Some("proxy"), &s3_with_public(None, true)).is_ok());
+    }
+
+    #[test]
+    fn public_endpoint_must_be_https_under_https_and_on_another_host() {
+        let check = |endpoint: &str, path_style: bool, origin: &str| {
+            attachment_transfer_from_values(
+                None,
+                None,
+                None,
+                &s3_with_public(Some(endpoint), path_style),
+                origin,
+            )
+        };
+        let err = check(
+            "http://files.example.test",
+            true,
+            "https://app.example.test",
+        )
+        .unwrap_err();
+        assert!(err.contains("https"), "{err}");
+        assert!(check(
+            "https://files.example.test",
+            true,
+            "https://app.example.test"
+        )
+        .is_ok());
+        // Same origin, and same host on another port (cookies ignore ports).
+        for endpoint in ["http://app.example.test", "http://app.example.test:9000"] {
+            let err = check(endpoint, true, "http://app.example.test").unwrap_err();
+            assert!(err.contains("S3_PUBLIC_ENDPOINT"), "{err}");
+        }
+        // The app's port-0 placeholder is compared by host as well.
+        assert!(check("http://127.0.0.1:9000", true, "http://127.0.0.1:0").is_err());
+        assert!(check("http://localhost:9000", true, "http://127.0.0.1:0").is_ok());
+        // Virtual-host style: browsers use `<bucket>.<host>`, another host.
+        assert!(check("http://app.example.test", false, "http://app.example.test").is_ok());
+    }
+
+    #[test]
+    fn presign_ttls_default_and_stay_in_range() {
+        let local = StorageSettings::Local {
+            root: PathBuf::from("/tmp/x"),
+        };
+        let ttls = |part: Option<&str>, download: Option<&str>| {
+            attachment_transfer_from_values(None, part, download, &local, "http://a.test")
+                .map(|c| c.ttls)
+        };
+        assert_eq!(ttls(None, None).unwrap(), PresignTtls::default());
+        assert_eq!(ttls(None, None).unwrap().part, Duration::from_secs(900));
+        assert_eq!(ttls(None, None).unwrap().download, Duration::from_secs(60));
+        assert_eq!(
+            ttls(Some("5"), Some("300")).unwrap(),
+            PresignTtls {
+                part: Duration::from_secs(5),
+                download: Duration::from_secs(300)
+            }
+        );
+        for (part, download, var) in [
+            (Some("4"), None, "FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS"),
+            (Some("3601"), None, "FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS"),
+            (Some("x"), None, "FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS"),
+            (
+                None,
+                Some("301"),
+                "FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS",
+            ),
+            (None, Some(""), "FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS"),
+        ] {
+            let err = ttls(part, download).unwrap_err();
+            assert!(err.contains(var), "{err}");
+        }
     }
 
     #[test]

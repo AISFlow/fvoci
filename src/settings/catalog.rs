@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::attachments::TransferMode;
 use crate::validate::utf16_len;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,12 +38,13 @@ pub enum SettingsKey {
     Embed,
     Features,
     AttachmentPreview,
+    AttachmentTransfer,
     I18n,
     Security,
     Operator,
 }
 
-pub const SETTINGS_KEYS: [SettingsKey; 10] = [
+pub const SETTINGS_KEYS: [SettingsKey; 11] = [
     SettingsKey::Branding,
     SettingsKey::DefaultsUser,
     SettingsKey::Auth,
@@ -50,6 +52,7 @@ pub const SETTINGS_KEYS: [SettingsKey; 10] = [
     SettingsKey::Embed,
     SettingsKey::Features,
     SettingsKey::AttachmentPreview,
+    SettingsKey::AttachmentTransfer,
     SettingsKey::I18n,
     SettingsKey::Security,
     SettingsKey::Operator,
@@ -65,6 +68,7 @@ impl SettingsKey {
             Self::Embed => "embed",
             Self::Features => "features",
             Self::AttachmentPreview => "attachmentPreview",
+            Self::AttachmentTransfer => "attachmentTransfer",
             Self::I18n => "i18n",
             Self::Security => "security",
             Self::Operator => "operator",
@@ -84,7 +88,9 @@ impl SettingsKey {
 
     pub fn visibility(self) -> Visibility {
         match self {
-            Self::Auth | Self::Embed | Self::I18n | Self::Security => Visibility::Admin,
+            Self::Auth | Self::Embed | Self::AttachmentTransfer | Self::I18n | Self::Security => {
+                Visibility::Admin
+            }
             _ => Visibility::Public,
         }
     }
@@ -93,6 +99,9 @@ impl SettingsKey {
     pub fn env_fallback(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Self::Features => &[("ai", "FVOCI_AI_ENABLED")],
+            // Validated at startup (`config::attachment_transfer_from_values`),
+            // so the store never meets a value it would have to ignore.
+            Self::AttachmentTransfer => &[("mode", "FVOCI_ATTACHMENT_TRANSFER_MODE")],
             _ => &[],
         }
     }
@@ -497,6 +506,23 @@ impl SettingsDoc for AttachmentPreviewSettings {
     }
 }
 
+/// How attachment part uploads and original downloads travel: `proxy` through
+/// the API, `presigned` directly between the browser and S3. The stored value
+/// is what the admin chose; the admin output's `attachmentTransfer` reports
+/// whether this server's storage lets it apply.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(utoipa::ToSchema))]
+pub struct AttachmentTransferSettings {
+    pub mode: TransferMode,
+}
+
+impl SettingsDoc for AttachmentTransferSettings {
+    fn normalize(self) -> Option<Self> {
+        Some(self)
+    }
+}
+
 /// Server-sent strings an operator may override, with the exact `{{var}}` set
 /// each must keep (source `OVERRIDABLE_MESSAGES`).
 pub const OVERRIDABLE_MESSAGES: &[(&str, &[&str])] = &[
@@ -641,6 +667,8 @@ pub struct SettingsValues {
     pub features: FeaturesSettings,
     #[serde(rename = "attachmentPreview")]
     pub attachment_preview: AttachmentPreviewSettings,
+    #[serde(rename = "attachmentTransfer")]
+    pub attachment_transfer: AttachmentTransferSettings,
     pub i18n: I18nSettings,
     pub security: SecuritySettings,
     pub operator: OperatorSettings,
@@ -656,6 +684,7 @@ impl SettingsValues {
             embed: EmbedSettings::default(),
             features: FeaturesSettings::default(),
             attachment_preview: AttachmentPreviewSettings::default(),
+            attachment_transfer: AttachmentTransferSettings::default(),
             i18n: I18nSettings::default(),
             security: SecuritySettings::default(),
             operator: OperatorSettings::default(),
@@ -671,6 +700,7 @@ impl SettingsValues {
             SettingsKey::Embed => serde_json::to_value(&self.embed),
             SettingsKey::Features => serde_json::to_value(&self.features),
             SettingsKey::AttachmentPreview => serde_json::to_value(&self.attachment_preview),
+            SettingsKey::AttachmentTransfer => serde_json::to_value(&self.attachment_transfer),
             SettingsKey::I18n => serde_json::to_value(&self.i18n),
             SettingsKey::Security => serde_json::to_value(&self.security),
             SettingsKey::Operator => serde_json::to_value(&self.operator),
@@ -688,6 +718,7 @@ impl SettingsValues {
             SettingsKey::Embed => self.embed = parse_doc(value)?,
             SettingsKey::Features => self.features = parse_doc(value)?,
             SettingsKey::AttachmentPreview => self.attachment_preview = parse_doc(value)?,
+            SettingsKey::AttachmentTransfer => self.attachment_transfer = parse_doc(value)?,
             SettingsKey::I18n => self.i18n = parse_doc(value)?,
             SettingsKey::Security => self.security = parse_doc(value)?,
             SettingsKey::Operator => self.operator = parse_doc(value)?,
@@ -834,6 +865,36 @@ mod tests {
         assert!(parse_patch_value(SettingsKey::Operator, &op).is_some());
         op["supportEmail"] = json!("..a@example.com");
         assert!(parse_patch_value(SettingsKey::Operator, &op).is_none());
+    }
+
+    #[test]
+    fn attachment_transfer_accepts_only_the_two_modes() {
+        let key = SettingsKey::parse("attachmentTransfer").unwrap();
+        assert_eq!(key, SettingsKey::AttachmentTransfer);
+        assert_eq!(key.visibility(), Visibility::Admin);
+        assert_eq!(key.safety(), Safety::Live);
+        assert_eq!(
+            key.env_fallback(),
+            &[("mode", "FVOCI_ATTACHMENT_TRANSFER_MODE")]
+        );
+        for mode in ["proxy", "presigned"] {
+            assert_eq!(
+                parse_patch_value(key, &json!({"mode": mode})),
+                Some(json!({"mode": mode}))
+            );
+        }
+        for bad in [
+            json!({"mode": "direct"}),
+            json!({"mode": "Presigned"}),
+            json!({}),
+            json!({"mode": "proxy", "ttl": 5}),
+        ] {
+            assert!(parse_patch_value(key, &bad).is_none(), "{bad}");
+        }
+        assert_eq!(
+            SettingsValues::defaults("F").get_json(key),
+            json!({"mode": "proxy"})
+        );
     }
 
     #[test]
