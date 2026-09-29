@@ -8,6 +8,7 @@ export {
   publicInstanceQuery,
   refreshPublicInstance,
 } from "@/lib/queries/instance";
+export { legalDocQuery, legalVersionsQuery, selectLegalVersions } from "@/lib/queries/legal";
 
 export const adminUsersQuery = queryOptions({
   queryKey: ["admin", "users"] as const,
@@ -39,33 +40,3 @@ export const adminAuditQuery = queryOptions({
   retry: (failureCount, error) =>
     !(error instanceof ProblemError && error.status === 404) && failureCount < 3,
 });
-
-export function legalDocQuery(kind: string, version?: number) {
-  return queryOptions({
-    queryKey: ["legal", kind, version ?? "latest"] as const,
-    queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/legal/{kind}", {
-          params: {
-            path: { kind },
-            query: version === undefined ? {} : { version },
-          },
-        }),
-      ),
-    retry: false,
-  });
-}
-
-export function legalVersionsQuery(kind: string) {
-  return queryOptions({
-    queryKey: ["legal", kind, "versions"] as const,
-    queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/legal/{kind}/versions", {
-          params: { path: { kind } },
-        }),
-      ),
-    select: (data) => data.versions,
-    retry: false,
-  });
-}

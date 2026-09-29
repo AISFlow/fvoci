@@ -8,7 +8,7 @@ import { AuthAlert } from "@/features/auth/auth-form";
 import { AuthLayout, AuthPanel } from "@/features/auth/auth-layout";
 import { ProblemError } from "@/lib/api";
 import { formatDateKo } from "@/lib/datetime";
-import { legalDocQuery, legalVersionsQuery } from "@/lib/queries/admin";
+import { legalDocQuery, legalVersionsQuery, selectLegalVersions } from "@/lib/queries/admin";
 
 export function LegalPage() {
   const { kind = "" } = useParams<{ kind: string }>();
@@ -16,7 +16,7 @@ export function LegalPage() {
   const raw = params.get("version");
   const version = raw && /^\d+$/.test(raw) ? Number(raw) : undefined;
   const doc = useQuery(legalDocQuery(kind, version));
-  const versions = useQuery(legalVersionsQuery(kind));
+  const versions = useQuery({ ...legalVersionsQuery(kind), select: selectLegalVersions });
 
   if (doc.error instanceof ProblemError && doc.error.status === 404) {
     return (
