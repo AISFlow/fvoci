@@ -778,7 +778,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Proj-collections | `/w/:slug/:ref/{table,board,calendar}` | 구현 중·로컬 WIP (연결 전) | #276 동일 | `ProjectCollectionPage.vue` | boundary 3경로 + collections e2e | Grok 임시 실행자 | FE-Proj-tasks와 같은 PR | — |
 | FE-Proj-home | `/w/:slug/:ref` 프로젝트 홈 | 구현 중·로컬 WIP (연결 전) | #282 `8623ab2a` (on #276) | Vue 개요. `STAGED_PROJECT_HOME_PATH`는 `KEY-n` 제외. **boundary 불변** | 위키 `:ref`와 겹치지 않게 | Grok 임시 실행자 | 없음 | — |
 | FE-Doc-project | 프로젝트 문서 `:ref` 중 문서 prefix | 구현 중·로컬 WIP | `fvoci/r11-vue-task-detail` (on #282) | TaskDetailPage lookup의 project-document 분기. **boundary 없음** | `KEY-n`이며 wiki 아님. 위키 라우트보다 뒤에 | Grok 임시 실행자 | FE-Proj-home | — |
-| FE-Doc-task | 태스크 상세·본문 `/w/:slug/:ref` item | 미착수 | React `TaskDetailPage` | 기존 task-* e2e | Vue 없음 | Grok 임시 실행자 | 없음 | — |
+| FE-Doc-task | 태스크 상세·본문 `/w/:slug/:ref` item | 구현 중·로컬 WIP | `fvoci/r11-vue-task-detail` (on #282) | React `TaskDetailPage` 이식. **boundary 없음** | regex는 wiki-를 삼키면 안 됨. 프로젝트 홈과 별 라우트 | Grok 임시 실행자 | FE-Proj-home | — |
 | FE-Attach-view | `/w/:slug/a/:id/view` | 구현 중·로컬 WIP (연결 전) | #275 `9ec6c413` | `AttachmentViewPage.vue`. **boundary 없음** | regex + viewer e2e | Grok 임시 실행자 | 없음 | — |
 | FE-Attach-share | `/s/:token/attachments/:id/view` | 구현 중·로컬 WIP (연결 전) | #275 동일 | `ShareAttachmentViewPage.vue` | `share-attachment-view-flow` | Grok 임시 실행자 | FE-Attach-view와 같은 PR | — |
 | FE-Attach-upload | 문서/태스크 첨부 업로드·재개·A/B | 미확인 | React 문서/태스크 + #254 전송 | 기존 attachment e2e(React) | Vue 위키는 attachment-upload bridge가 WikiDocumentView에 있음. drop/paste e2e는 #261 잔여. 전송 모드 전용 메시지 미구현(§5) | Grok 임시 실행자 | #261 drop/paste | — |
