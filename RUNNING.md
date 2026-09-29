@@ -288,7 +288,18 @@ Setting up `presigned`:
 4. Keep the access key least-privilege and Block Public Access on; the bucket
    needs no public ACL or policy.
 5. Switch the mode on the admin page, or pin it with
-   `FVOCI_ATTACHMENT_TRANSFER_MODE=presigned`.
+   `FVOCI_ATTACHMENT_TRANSFER_MODE=presigned`. With the compose install, the
+   S3 overlay (`infra/rust/compose.s3.yml`) passes the server only the
+   variables in its `environment` list: `FVOCI_ATTACHMENT_TRANSFER_MODE` and
+   the two TTL variables take effect only when listed there. An empty
+   `FVOCI_ATTACHMENT_TRANSFER_MODE` counts as unset; an empty TTL refuses
+   startup, so give TTL entries non-empty defaults.
+
+Upgrading: earlier versions validated `S3_PUBLIC_ENDPOINT` but did not use
+it. A value left set from then now makes `presigned` available (the mode stays
+`proxy` until chosen) and adds its origin to the CSP, and startup is refused
+when it is plain http under an https `FVOCI_PUBLIC_ORIGIN` or uses the app's
+host. Correct or remove it before upgrading.
 
 Verified against the pinned MinIO-compatible silo (Rust integration tests and a
 Chromium cross-origin check, `scripts/run-web-e2e-s3.sh`). Not run: real AWS S3
