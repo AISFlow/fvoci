@@ -5,20 +5,36 @@ import type {
 import type { components } from "@/generated/api";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 
+// Framework-neutral upload pipeline (React today, Vue later): no UI state.
+//
+// A session is bound to its transfer mode by the server (#149) and never
+// switches: `proxy` PUTs each part to the API with the session cookie;
+// `presigned` PUTs it straight to storage with the signed URL alone (no
+// cookies, no Authorization, no Content-Type) and reads the ETag the bucket
+// CORS exposes. A presigned failure is never retried through the API.
+
 const PARALLEL = 3;
 const PART_RETRIES = 2;
 /** Re-sends of an idempotent complete after a gateway failure or lost response. */
 const COMPLETE_RETRIES = 2;
 /** Total time a part may wait out 503 `Retry-After` (server upload capacity). */
 const CAPACITY_WAIT_BUDGET_MS = 120_000;
+/** Presigned URLs this close to expiry are re-issued before a part is sent. */
+const URL_EXPIRY_MARGIN_MS = 60_000;
 
 type CreateAttachmentUploadResponse = components["schemas"]["CreateAttachmentUploadResponse"];
 type AttachmentOutput = components["schemas"]["AttachmentOutput"];
 type PartTargetRef = CreateAttachmentUploadResponse["parts"][number];
+/** Part targets of a create or resume answer, in the session's own mode. */
+type PartTargets = Pick<
+  CreateAttachmentUploadResponse,
+  "transfer" | "partUrlsExpireAt" | "partSizeBytes" | "parts"
+>;
 
 interface UploadPipelineDeps {
   fetchImpl?: (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
   delay?: (ms: number) => Promise<void>;
+  now?: () => number;
 }
 
 const defaultDelay = (ms: number): Promise<void> =>
@@ -76,10 +92,39 @@ class PartUploadError extends Error {
   }
 }
 
+/** Presigned URLs expired or are about to: resume signs fresh ones. */
+class PartUrlsExpiredError extends Error {
+  constructor(partNumber: number) {
+    super(`part ${partNumber}: presigned URL expired`);
+    this.name = "PartUrlsExpiredError";
+  }
+}
+
+/** Storage accepted the part but the bucket CORS hides its ETag: resending cannot help. */
+class MissingEtagError extends Error {
+  constructor(partNumber: number) {
+    super(`part ${partNumber}: storage did not expose the ETag header (bucket CORS ExposeHeaders)`);
+    this.name = "MissingEtagError";
+  }
+}
+
 function isPermanentUploadError(err: unknown): boolean {
+  if (err instanceof MissingEtagError) return true;
   if (err instanceof PartUploadError) return isPermanentPartStatus(err.status);
   if (err instanceof ProblemError) return isPermanentPartStatus(err.status);
   return false;
+}
+
+/**
+ * Client-clock time after which the presigned targets are re-issued before
+ * sending a part, or null (proxy targets, or a lifetime that does not fit the
+ * client clock, where only storage's own 403 on an expired URL counts).
+ */
+function refreshAt(targets: PartTargets, receivedAt: number): number | null {
+  if (targets.transfer !== "presigned" || !targets.partUrlsExpireAt) return null;
+  const expiresAt = Date.parse(targets.partUrlsExpireAt);
+  if (!Number.isFinite(expiresAt) || expiresAt - receivedAt < 2 * URL_EXPIRY_MARGIN_MS) return null;
+  return expiresAt - URL_EXPIRY_MARGIN_MS;
 }
 
 async function readPartEtag(res: Response): Promise<string> {
@@ -106,7 +151,59 @@ function retryAfterMillis(res: Response): number | null {
   return Math.max(1, Math.min(seconds, 30)) * 1000;
 }
 
-async function putPart(
+/**
+ * One part straight to storage. The signed URL is the whole authorization:
+ * `credentials: "omit"` keeps FVOCI cookies away from the storage origin, and
+ * no header is set, because the URL signs only `host` and the exact
+ * `content-length` the browser derives from the Blob. 403 means the URL
+ * expired (or storage refused its signature); it is re-issued, never retried
+ * through the API.
+ */
+async function putPresignedPart(
+  target: PartTargetRef,
+  file: File,
+  partSizeBytes: number,
+  deps: Required<UploadPipelineDeps>,
+  refreshAfter: number | null,
+  signal?: AbortSignal,
+): Promise<{ partNumber: number; etag: string }> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= PART_RETRIES; attempt += 1) {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+    }
+    if (attempt > 0) await abortableDelay(300 * 2 ** (attempt - 1), signal, deps.delay);
+    if (refreshAfter !== null && deps.now() >= refreshAfter) {
+      throw new PartUrlsExpiredError(target.partNumber);
+    }
+    try {
+      const res = await deps.fetchImpl(target.url, {
+        method: "PUT",
+        credentials: "omit",
+        body: partChunk(file, target.partNumber, partSizeBytes),
+        signal,
+      });
+      if (res.ok) {
+        const etag = res.headers.get("etag");
+        if (!etag) throw new MissingEtagError(target.partNumber);
+        return { partNumber: target.partNumber, etag };
+      }
+      if (res.status === 403) throw new PartUrlsExpiredError(target.partNumber);
+      lastError = new PartUploadError(target.partNumber, res.status);
+      if (res.status < 500) break;
+    } catch (err) {
+      if (isAbortError(err) || signal?.aborted) throw err;
+      if (err instanceof PartUrlsExpiredError || err instanceof MissingEtagError) throw err;
+      // A network or CORS failure: bounded retries, then one resume.
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`part ${target.partNumber} failed`);
+}
+
+async function putProxyPart(
   target: PartTargetRef,
   file: File,
   partSizeBytes: number,
@@ -160,14 +257,19 @@ async function putPart(
 }
 
 async function putParts(
-  targets: PartTargetRef[],
+  targets: PartTargets,
+  receivedAt: number,
   file: File,
-  partSizeBytes: number,
   onPartDone: () => void,
   deps: Required<UploadPipelineDeps>,
   signal?: AbortSignal,
 ): Promise<{ partNumber: number; etag: string }[]> {
-  const queue = [...targets];
+  const refreshAfter = refreshAt(targets, receivedAt);
+  const put = (target: PartTargetRef) =>
+    targets.transfer === "presigned"
+      ? putPresignedPart(target, file, targets.partSizeBytes, deps, refreshAfter, signal)
+      : putProxyPart(target, file, targets.partSizeBytes, deps, signal);
+  const queue = [...targets.parts];
   const done: { partNumber: number; etag: string }[] = [];
   let aborted = false;
   const workers = Array.from({ length: Math.min(PARALLEL, queue.length) }, async () => {
@@ -176,7 +278,7 @@ async function putParts(
       const next = queue.shift();
       if (!next) return;
       try {
-        done.push(await putPart(next, file, partSizeBytes, deps, signal));
+        done.push(await put(next));
       } catch (err) {
         aborted = true;
         throw err;
@@ -308,6 +410,7 @@ function uploadsBridge(
   const deps: Required<UploadPipelineDeps> = {
     fetchImpl: pipelineDeps.fetchImpl ?? fetch.bind(globalThis),
     delay: pipelineDeps.delay ?? defaultDelay,
+    now: pipelineDeps.now ?? Date.now,
   };
   return {
     async attachmentMeta(attachmentId) {
@@ -324,23 +427,38 @@ function uploadsBridge(
       const created = await createUpload(file, signal);
       const total = created.parts.length;
       let finished = 0;
+      let progressed = false;
       const tick = (): void => {
         finished += 1;
+        progressed = true;
         onProgress(total === 0 ? 1 : finished / total);
       };
+      let targets: PartTargets = created;
+      let receivedAt = deps.now();
+      let uploaded: { partNumber: number; etag: string }[] = [];
+      // One resume after a transfer failure, as before #149. Expired presigned
+      // URLs are re-issued as often as parts keep completing in between, so a
+      // long upload outlives the URL lifetime but a URL storage keeps refusing
+      // cannot loop.
+      let failureResumed = false;
+      let expiredWithoutProgress = 0;
       let parts: { partNumber: number; etag: string }[];
-      try {
-        parts = await putParts(
-          created.parts,
-          file,
-          created.partSizeBytes,
-          tick,
-          deps,
-          signal,
-        );
-      } catch (err) {
-        if (isAbortError(err) || signal?.aborted) throw err;
-        if (isPermanentUploadError(err)) throw err;
+      for (;;) {
+        progressed = false;
+        try {
+          const rest = await putParts(targets, receivedAt, file, tick, deps, signal);
+          parts = [...uploaded, ...rest];
+          break;
+        } catch (err) {
+          if (isAbortError(err) || signal?.aborted) throw err;
+          if (err instanceof PartUrlsExpiredError) {
+            expiredWithoutProgress = progressed ? 1 : expiredWithoutProgress + 1;
+            if (expiredWithoutProgress > 1) throw err;
+          } else {
+            if (isPermanentUploadError(err) || failureResumed) throw err;
+            failureResumed = true;
+          }
+        }
         const resumed = await ensureOk(
           await api.GET("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload", {
             params: {
@@ -349,17 +467,11 @@ function uploadsBridge(
             signal,
           }),
         );
-        finished = resumed.uploadedParts.length;
+        receivedAt = deps.now();
+        targets = resumed;
+        uploaded = resumed.uploadedParts;
+        finished = uploaded.length;
         onProgress(total === 0 ? 1 : finished / total);
-        const rest = await putParts(
-          resumed.parts,
-          file,
-          resumed.partSizeBytes,
-          tick,
-          deps,
-          signal,
-        );
-        parts = [...resumed.uploadedParts, ...rest];
       }
       return await completeUpload(workspaceId, created.attachmentId, parts, deps, signal);
     },
