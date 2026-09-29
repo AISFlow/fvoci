@@ -3,8 +3,13 @@ import { nextTick, useTemplateRef, watch } from "vue";
 
 // A modal <dialog> opened with showModal() (features/projects/native-modal.tsx):
 // the browser traps focus and Escape asks to close; focus returns to the
-// element that had it when the dialog opened.
-const props = defineProps<{ open: boolean; labelledBy: string }>();
+// element that had it when the dialog opened. `dialogClass` replaces the
+// project dialog look; with `closeOnBackdrop` a click on the backdrop (the
+// dialog element itself, outside its content) asks to close too.
+const props = withDefaults(
+  defineProps<{ open: boolean; labelledBy: string; dialogClass?: string; closeOnBackdrop?: boolean }>(),
+  { dialogClass: "project-dialog", closeOnBackdrop: false },
+);
 const emit = defineEmits<{ close: [] }>();
 const dialog = useTemplateRef<HTMLDialogElement>("dialog");
 let opener: HTMLElement | null = null;
@@ -31,10 +36,22 @@ function onCancel(event: Event): void {
   event.preventDefault();
   emit("close");
 }
+
+function onClick(event: MouseEvent): void {
+  if (props.closeOnBackdrop && event.target === dialog.value) emit("close");
+}
 </script>
 
 <template>
-  <dialog v-if="open" ref="dialog" class="project-dialog" :aria-labelledby="labelledBy" aria-modal="true" @cancel="onCancel">
+  <dialog
+    v-if="open"
+    ref="dialog"
+    :class="dialogClass"
+    :aria-labelledby="labelledBy"
+    aria-modal="true"
+    @cancel="onCancel"
+    @click="onClick"
+  >
     <slot />
   </dialog>
 </template>
