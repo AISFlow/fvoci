@@ -349,3 +349,22 @@ Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key�
   - 실제 배정은 workflow 단위로 기록한다. 구현은 `general-purpose` agent, 독립 검토는 편집 도구가 없는 `Plan` agent이며, 둘 다 주 세션 모델을 상속한다.
   - 호스트 자원: 32 core, 62 GB RAM. 메모리(가용 5 GB 미만)와 디스크(여유 15 GB 미만) 감시를 켠다.
   - frontend 전용 e2e는 `prebuilt-8adaf1b8` backend 바이너리를 읽기 전용으로 공유한다.
+
+## 2026-09-29 임시 Grok 주 실행 (Opus 주간 한도)
+
+사용자 직접 승인(2026-09-29 23:24 KST): Claude Code Opus 5.5 Ultracode가 주간 한도
+("You've hit your weekly limit · resets Oct 1, 12pm (Asia/Seoul)")에 도달해 신규 Claude dispatch가
+거부된다. 한도 세션을 재시작해 복구를 기다리지 않는다.
+
+- 임시 주 실행: Cursor `cursor-grok-4.6-high`(별도 effort 인자 없음; 기존 검증 ID).
+  이 세션은 Cursor Grok 4.6이며 Ultracode 모드·effort CLI 옵션을 만들지 않는다.
+- 코디네이터는 하나다. 기존 Opus 컨트롤러와 같은 후보를 동시에 머지·릴리스하지 않는다.
+- Grok은 조사 전용이 아니다. 합의된 tracer의 구현·검증·독립 검토 조정·PR·통합·승인된 0.x를 수행한다.
+- 구현자와 다른 컨텍스트의 Grok 워커가 독립 검토를 할 수 있다. 같은 모델 여러 개의 찬성은 객관적 검증이 아니다.
+- 서브에이전트·쓰기·검토의 고정 수량 상한은 적용하지 않는다(AGENTS.md 수량 면제). 경로당 한 작성자와
+  공통 계약 소유권은 유지한다.
+- 실행 경로: Cursor 네이티브 `Task` 서브에이전트(`generalPurpose`, 모델 `cursor-grok-4.6-high`).
+  새 상주 오케스트레이터·Orca 자동 체인을 만들지 않는다.
+- 계정·결제·다른 API 키를 도입하지 않는다. Opus가 돌아와도 진행 중 소유권을 자동으로 뒤집지 않는다.
+- 기존 Opus 워커의 미커밋·미푸시 결과는 폐기하지 않고 회수한다. 한도 종료 시각은 세션
+  `e800da32-68b6-4e7a-a2da-5ad4517a542a`의 workflow output(23:09–23:10 KST)이다.
