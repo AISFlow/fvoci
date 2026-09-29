@@ -670,10 +670,11 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   문서 #249. minor 사유: #246(설치 파일 변경과 폐기된 `<VAR>_FILE` 기동 거부), #254(운영자 설정 `FVOCI_ATTACHMENT_TRANSFER_MODE`·
   `attachmentTransfer.mode`). migration 없음(044 유지), 새 필수 `.env` 값 없음. 발행 노트는 `scripts/release-notes-template.md`(`notes-for: 0.3.0`,
   #255 "Tasks: Gantt" 절 포함).
-- **열린 PR**(2026-09-30 01:42 KST 대조):
-  - **main**: `f3f53c90` = #262 merge (위키 tracer, 제품 `8adaf1b8`, typefix `73bf4a22`). 그 전 `83c01480` = #268 (#258). `9e4f3af3` = #264. v0.3.0 태그는 `6f64febc`에 고정.
-  - 제품: #265 편집 컨트롤 제품 `6eb0380d`, 스택+main `1ee57935`. #267 셸 제품 `ea8bd1c9` ACCEPT, 스택+main `e257a434`. #269 `/login` 제품 `dcf3ca77` ACCEPT_WITH_NITS, nit `79236b2e` ACCEPT, 스택+main `ef17b410`. #266 compat `ddce8bf2` (#262 충돌 해소).
-  - 문서: #263 (`47d09ad4`; 제품 전환 수에 넣지 않음).
+- **열린 PR**(2026-09-30 01:50 KST 대조):
+  - **main**: `f3f53c90` = #262. `83c01480` = #268. `9e4f3af3` = #264. v0.3.0 태그는 `6f64febc`에 고정.
+  - 제품(연결 예정): #265 `1ee57935`, #267 `e257a434`, #269 `ef17b410`, #266 `ddce8bf2`.
+  - Vue 미연결 WIP: #270 setup, #271 invite, #272 home/legal, #273 settings, #274 workspace, #275 viewers, #276 project-views, #277 account-admin. 모두 **live 아님**.
+  - 문서: #263 (`fb082853`).
   - Dependabot(비게이트): #152 #153 #155 #156 #157 #158 #160 #191.
   프론트엔드 전환 현황·실행 TODO는 §6.3이 정본이다. #262·#265·#267은 같은 위키 흐름이며 서로 다른 기능군 완료로 세지 않는다.
 - **추적 issue**(2026-09-29 개설): #258 한글 IME 첫 자모 — **닫힘**(#268). #259 인라인 수식 원격 변경 시 초안 유실, #260 조합 중 멈춤과 undo 분리, #261 Vue 위키 편집기 React 대비 누락 컨트롤.
@@ -765,30 +766,30 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Math-draft | 인라인 수식 원격 변경 시 초안 (#259) | 미착수 | issue #259 | #262에 관련 고정 테스트·이슈 주석 | #261 A 수락 뒤 (#258은 main) | Grok 임시 실행자 | FE-Wiki-editor | 출시 차단 |
 | FE-Undo-IME | 조합 중 undo 단위 (#260) | 미착수 | issue #260 | 없음 | #261 A 수락 뒤 (#258은 main) | Grok 임시 실행자 | FE-Wiki-editor | 출시 차단 |
 | FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` ACCEPT_WITH_NITS; nit `79236b2e` **ACCEPT**; 스택+main `ef17b410` | 단위 20. e2e `login-vue-flow` 3/3. **`mfa-flow` 원격 필수** | CI on `ef17b410`(mfa-flow 샤드). 기능군 완료 아님 | Grok 임시 실행자 | CI | 미포함 |
-| FE-Auth-setup | `/setup` | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-setup` `f1f973aa` (on #269 `79236b2e`) | Vue `SetupPage`+`SetupForm`. router에 `/setup`. **app-boundary 불변** — boot는 React. 단위 24. vue-tsc pass. **#269에 넣지 않음** | 코디네이터 `/^\/setup\/?$/i` + React 라우트 제거 + e2e. 로그인 PR 머지 후 연결 | Grok 임시 실행자 | FE-Auth-login | — |
-| FE-Auth-invite | `/invite/:token` | 미착수 | React `InvitePage` | 기존 `workspace-invite-flow` | Vue 없음 | Grok 임시 실행자 | 없음 | — |
+| FE-Auth-setup | `/setup` | 구현 중·로컬 WIP (연결 전) | #270 `2ac22248` (on #269) | Vue SetupPage. **app-boundary 불변**. 단위 24 | #269 머지 후 boundary + e2e | Grok 임시 실행자 | FE-Auth-login | — |
+| FE-Auth-invite | `/invite/:token` | 구현 중·로컬 WIP (연결 전) | #271 `d0437fe5` (on #269) | Vue invite. **app-boundary 불변** | boundary + `workspace-invite-flow` | Grok 임시 실행자 | FE-Auth-login | — |
 | FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 미착수 | React 각 페이지 | 미확인(기존 React e2e 범위는 흐름별 상이) | Vue 없음. 매직/리셋 **요청**은 로그인 폼 하위 | Grok 임시 실행자 | 없음 | — |
-| FE-WS-home | `/w/:slug` 랜딩 | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-workspace` `09764331` | `WorkspaceHomePage.vue` + router. boundary 없음 | regex `/^\/w\/[^/]+\/?$/i`를 gantt/wiki와 충돌 없이. e2e 직접 URL·새로고침 | Grok 임시 실행자 | #262, app-boundary 소유 | — |
-| FE-WS-projects | `/w/:slug/projects` | 구현 중·로컬 WIP (연결 전) | 위와 동일 | `ProjectsPage.vue` | `/^\/w\/[^/]+\/projects\/?$/i` + 목록 e2e | Grok 임시 실행자 | FE-WS-home과 같은 PR이 안전 | — |
+| FE-WS-home | `/w/:slug` 랜딩 | 구현 중·로컬 WIP (연결 전) | #274 `e18fdbbe` | `WorkspaceHomePage.vue`. **boundary 없음** | regex + e2e | Grok 임시 실행자 | app-boundary 소유 | — |
+| FE-WS-projects | `/w/:slug/projects` | 구현 중·로컬 WIP (연결 전) | #274 동일 | `ProjectsPage.vue` | `/^\/w\/[^/]+\/projects\/?$/i` + 목록 e2e | Grok 임시 실행자 | FE-WS-home과 같은 PR | — |
 | FE-WS-wiki-list | `/w/:slug/wiki` 트리/목록 | 미착수 | React `WikiPage` | 기존 `workspace-wiki-flow` | Vue 없음. 문서 페이지(#262)와 별개 | Grok 임시 실행자 | 없음 | — |
 | FE-WS-search | `/w/:slug/search` | 미착수 | React `SearchPage` | 기존 검색 e2e | Vue 없음 | Grok 임시 실행자 | 없음 | — |
 | FE-WS-nav | `/w/:slug/my-tasks` `/notifications` `/trash` | 미착수 | React | 기존 각 e2e | Vue 없음 | Grok 임시 실행자 | 없음 | — |
-| FE-Proj-tasks | `/w/:slug/:ref/tasks` | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-project-views` `d510bdb7` | `ProjectTasksPage.vue` + SA-12 커밋 | boundary + 목록/필터 e2e. 태스크 **상세**는 `:ref` React | Grok 임시 실행자 | #262 | — |
-| FE-Proj-collections | `/w/:slug/:ref/{table,board,calendar}` | 구현 중·로컬 WIP (연결 전) | 위와 동일 | `ProjectCollectionPage.vue` | boundary 3경로 + 기존 collections e2e를 Vue 경로에서 | Grok 임시 실행자 | FE-Proj-tasks와 충돌 없이 통합 | — |
+| FE-Proj-tasks | `/w/:slug/:ref/tasks` | 구현 중·로컬 WIP (연결 전) | #276 `dc2611e6` | `ProjectTasksPage.vue` + SA-12 | boundary + 목록 e2e | Grok 임시 실행자 | 없음 | — |
+| FE-Proj-collections | `/w/:slug/:ref/{table,board,calendar}` | 구현 중·로컬 WIP (연결 전) | #276 동일 | `ProjectCollectionPage.vue` | boundary 3경로 + collections e2e | Grok 임시 실행자 | FE-Proj-tasks와 같은 PR | — |
 | FE-Proj-home | `/w/:slug/:ref` 프로젝트 홈 | 미착수 | React `ProjectHomePage` | 기존 project e2e | Vue 없음 | Grok 임시 실행자 | 없음 | — |
 | FE-Doc-project | 프로젝트 문서 `:ref` 중 문서 prefix | 미착수 | React `DocumentPage` | 협업은 Rust. UI는 React | Vue 없음. 위키와 다른 경로 | Grok 임시 실행자 | FE-Wiki-collab 수락 후 재사용 | — |
 | FE-Doc-task | 태스크 상세·본문 `/w/:slug/:ref` item | 미착수 | React `TaskDetailPage` | 기존 task-* e2e | Vue 없음 | Grok 임시 실행자 | 없음 | — |
-| FE-Attach-view | `/w/:slug/a/:id/view` | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-viewers` `21c20548` | `AttachmentViewPage.vue` + router. boundary 없음 | regex + 기존 viewer e2e(HWP/PDF/PPTX/DOCX/XLSX)를 Vue boot에서 | Grok 임시 실행자 | #262 | — |
-| FE-Attach-share | `/s/:token/attachments/:id/view` | 구현 중·로컬 WIP (연결 전) | 위와 동일 | `ShareAttachmentViewPage.vue` | 공개 세션 없이. `share-attachment-view-flow` | Grok 임시 실행자 | FE-Attach-view와 같은 PR | — |
+| FE-Attach-view | `/w/:slug/a/:id/view` | 구현 중·로컬 WIP (연결 전) | #275 `9ec6c413` | `AttachmentViewPage.vue`. **boundary 없음** | regex + viewer e2e | Grok 임시 실행자 | 없음 | — |
+| FE-Attach-share | `/s/:token/attachments/:id/view` | 구현 중·로컬 WIP (연결 전) | #275 동일 | `ShareAttachmentViewPage.vue` | `share-attachment-view-flow` | Grok 임시 실행자 | FE-Attach-view와 같은 PR | — |
 | FE-Attach-upload | 문서/태스크 첨부 업로드·재개·A/B | 미확인 | React 문서/태스크 + #254 전송 | 기존 attachment e2e(React) | Vue 위키는 attachment-upload bridge가 WikiDocumentView에 있음. drop/paste e2e는 #261 잔여. 전송 모드 전용 메시지 미구현(§5) | Grok 임시 실행자 | #261 drop/paste | — |
 | FE-Share-public | `/s/:token` 문서 공유 읽기 | 미착수 | React `PublicSharePage` | 기존 share e2e | Vue 없음. 첨부 뷰어 WIP와 별개 | Grok 임시 실행자 | 없음 | — |
 | FE-Wiki-chrome | 위키 페이지의 댓글·공유·별·리비전·보내기·태그 | 실제 라우트 연결 완료(위키 URL만) | #262 WikiDocumentView | 컴포넌트 존재. **대화상자 e2e 범위는 미확인**(wiki-vue-flow는 본문/협업 중심) | 각 컨트롤의 종단 검사. 태스크/프로젝트 문서 표면은 여전히 React | Grok 임시 실행자 | FE-Wiki-collab 수락 | — |
 | FE-Import-export | 가져오기/보내기·휴지통 복원(워크스페이스) | 미착수(워크스페이스 URL) | React trash/settings import | 기존 import/export e2e | Vue 위키 DocumentExportMenu는 문서 단위. 워크스페이스 import UI 없음 | Grok 임시 실행자 | 없음 | — |
-| FE-Settings-ws | `/w/:slug/settings` 멤버·권한·SSO·토큰 등 | 구현 중·로컬 WIP (라우트도 미연결) | `fvoci/r11-vue-settings` `482423ce` | 사용자 가능 섹션(멤버·그룹·토큰·웹훅·GitHub·import/export·캘린더·삭제 프로젝트·이벤트·문서 태그·템플릿) Vue 이식. router 경로 선언. **app-boundary는 React 유지** — 연결 전 live 주장 금지. 계정 설정은 이 브랜치 밖 | 코디네이터 boundary 연결 + 종단 e2e. 기능군 완료 아님 | Grok 임시 실행자 | 없음 | — |
-| FE-Settings-account | `/settings/account` | 구현 중·로컬 WIP (연결 전) | `r11-vue-settings` 및 `r11-vue-account-admin` `b36ea974` | account-admin은 router에 있음, boundary 없음. settings 브랜치에도 페이지 있음(**중복 WIP**) | 한 브랜치로 통합. MFA 설정 UI는 `mfa-flow`가 React 계정 페이지를 탐 | Grok 임시 실행자 | 중복 정리 | — |
-| FE-Admin | `/settings/admin` `/audit` `/legal` | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-account-admin` `b36ea974` | 세 페이지 + router. boundary 없음 | boundary + admin e2e. 인스턴스 관리 하위 탭 완전성은 미확인 | Grok 임시 실행자 | #262 | — |
-| FE-Home | `/` 워크스페이스 선택 | 미착수 | React `HomePage` | 기존 홈 e2e | Vue 없음 | Grok 임시 실행자 | FE-Auth-login 이후가 자연스러움 | — |
-| FE-Legal | `/legal/:kind` `/service-info` | 미착수 | React | 미확인 | Vue 없음. 로그인 푸터 링크는 풀 로드 | Grok 임시 실행자 | 없음 | — |
+| FE-Settings-ws | `/w/:slug/settings` 멤버·권한·SSO·토큰 등 | 구현 중·로컬 WIP (연결 전) | #273 `c4c7d878` | 사용자 가능 섹션 Vue 이식. **app-boundary React** | boundary + e2e. 기능군 완료 아님 | Grok 임시 실행자 | 없음 | — |
+| FE-Settings-account | `/settings/account` | 구현 중·로컬 WIP (연결 전) | #277 `b16c20b0` (#273에도 초안) | **중복 WIP**. boundary 없음 | 한 브랜치로 정리. `mfa-flow`는 계정 페이지 | Grok 임시 실행자 | 중복 정리 | — |
+| FE-Admin | `/settings/admin` `/audit` `/legal` | 구현 중·로컬 WIP (연결 전) | #277 `b16c20b0` | 세 페이지 + router. **boundary 없음**. legal은 #272와 중복 | boundary + admin e2e | Grok 임시 실행자 | 중복 정리 | — |
+| FE-Home | `/` 워크스페이스 선택 | 구현 중·로컬 WIP (연결 전) | #272 `c9b59494` (on #269) | Vue Home. **boundary 없음** | #269 후 연결 + 홈 e2e | Grok 임시 실행자 | FE-Auth-login | — |
+| FE-Legal | `/legal/:kind` `/service-info` | 구현 중·로컬 WIP (연결 전) | #272 (및 #277 중복) | Vue 페이지 있음. **boundary 없음** | 한 PR로 연결 | Grok 임시 실행자 | 중복 정리 | — |
 | FE-Dispose | collab socket retire/dispose | main 수락 완료 | merge `9e4f3af3` ← `bf3387ec` #264 | 검토 ACCEPT_WITH_NITS×2. CI 24 success·6 skip | 없음. #262 `web-checks`가 이 계약을 재실행 | 수락됨 | 없음 | 제품 UI 전환 아님 |
 | FE-Compat | `compat/` 폐기, fixture를 `tests/fixtures`로 | 독립 검토·CI 중 | #266 제품 `6dd4bff9` ACCEPT_WITH_NITS; main+#262 merge `ddce8bf2` | #262 합친 뒤 schema 경로 충돌 해소(`tests/fixtures/yjs-seed`) | `ddce8bf2` CI 후 merge. **프론트엔드 기능군 완료가 아님** | Grok 임시 실행자 | CI | 아님 |
 | FE-Docs-ops | 운영·역할 문서 | 독립 검토·CI 중 | `fvoci/docs-0-3-0-record` `bdd72e1b` #263 | 문서 PR | 제품 전환 수에 미포함 | Grok 임시 실행자 | 없음 | 아님 |
@@ -804,7 +805,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 5. **#266** `ddce8bf2` — CI 후 머지(기능 전환과 별개).
 6. **#269** nit `79236b2e` **ACCEPT**, head `ef17b410` — CI(mfa-flow 샤드) 후 머지. 인증 기능군 전체 완료 아님.
 7. 그다음 연결(서로 다른 URL, boundary는 실행자가 순차 통합): workspace home/projects, viewers, project-views, account-admin.
-8. 협업 엔진 비교는 **#262 main 수락 뒤** 고정 SHA에서 시작(순서 유지). 지금 예광탄을 늘려 비교를 미루지 않는다.
+8. 협업 엔진 비교는 고정 main `f3f53c90`에서 시작 가능(사용자 순서: 예광탄 다음).
 
 #### 전체 전환 종결까지 남은 필수
 
