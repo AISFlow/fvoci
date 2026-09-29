@@ -95,7 +95,7 @@ EXPOSE 8080
 # `fvoci-migrate --start` execs fvoci-server (same pid, arguments passed on).
 # It first refuses the retired <VAR>_FILE settings of older compose files.
 # Given the database owner password (the Compose install: POSTGRES_PASSWORD)
-# it first validates the settings, waits for PostgreSQL and Meilisearch, creates
+# it then validates the settings, waits for PostgreSQL and Meilisearch, creates
 # the app role, migrates, grants and writes the scoped search key; the server
 # starts without the owner password or master key and, if this ran as root, as
 # uid/gid 1000 with no supplementary groups (src/prepare.rs).

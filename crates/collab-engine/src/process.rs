@@ -1059,13 +1059,15 @@ pub fn raise_nofile_to_hard_limit() {
 }
 
 /// Clear this process's dumpable flag (`PR_SET_DUMPABLE` 0). Same-uid
-/// processes (every helper the server spawns, a uid-1000 `docker exec`) can
-/// then no longer read its `/proc/<pid>/environ`, memory or fds, nor attach
-/// to it; the kernel owns its `/proc/<pid>/*` files by root. Children become
-/// dumpable again at exec (readable binaries, no uid change), so the parent
-/// still reads their `/proc/<pid>/status` and `oom_score_adj`. A forked child
-/// before exec is not dumpable yet, which is why the collab helper sets its
-/// own `oom_score_adj` after exec. Linux only; a no-op elsewhere.
+/// processes (every helper the server spawns) can then no longer read its
+/// `/proc/<pid>/environ`, memory or fds, nor attach to it; the kernel owns its
+/// `/proc/<pid>/*` files by root. A uid-1000 `docker exec` is kept out of
+/// memory and fds too; its own environment already holds every value of the
+/// container configuration. Children become dumpable again at exec (readable
+/// binaries, no uid change), so the parent still reads their
+/// `/proc/<pid>/status` and `oom_score_adj`. A forked child before exec is not
+/// dumpable yet, which is why the collab helper sets its own `oom_score_adj`
+/// after exec. Linux only; a no-op elsewhere.
 pub fn make_process_non_dumpable() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     // SAFETY: PR_SET_DUMPABLE and PR_GET_DUMPABLE take only integer arguments
