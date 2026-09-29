@@ -489,7 +489,8 @@ scripts/generate-api.sh
 The web workspace (`apps/web`, `packages/*`, `scripts/document-convert`) is
 installed and run with Bun: the version in `.bun-version`, `bun ci` at the
 repository root for the locked `bun.lock`, and `--bun` so package binaries run
-on Bun even where Node is installed.
+on Bun even where Node is installed. `bunfig.toml` keeps the hoisted linker (one
+root `node_modules`), which the type paths and scripts rely on.
 
 Development (Vite proxy to a running `fvoci-server` API):
 

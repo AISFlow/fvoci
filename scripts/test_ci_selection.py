@@ -1577,6 +1577,7 @@ class AgentDocsSelectionTest(unittest.TestCase):
             "packages/editor/package.json",
             "package.json",
             "bun.lock",
+            "bunfig.toml",
             ".bun-version",
             "scripts/document-convert/package.json",
         ):

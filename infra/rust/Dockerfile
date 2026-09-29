@@ -36,9 +36,10 @@ RUN cargo build --locked --release --bin fvoci-server --bin fvoci-migrate \
 
 FROM oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS web-build
 WORKDIR /src
-# The Bun workspace (package.json workspaces, bun.lock) spans apps/web,
-# packages/* and scripts/document-convert; `bun ci` needs every member manifest.
-COPY package.json bun.lock .bun-version ./
+# The Bun workspace (package.json workspaces, bun.lock, bunfig.toml's linker)
+# spans apps/web, packages/* and scripts/document-convert; `bun ci` needs every
+# member manifest.
+COPY package.json bun.lock bunfig.toml .bun-version ./
 COPY scripts/document-convert/package.json ./scripts/document-convert/
 COPY packages ./packages
 COPY LICENSE ./LICENSE
