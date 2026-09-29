@@ -34,6 +34,7 @@ import {
 import * as Y from "yjs";
 import { FVOCI_YDOC_FRAGMENT } from "../collab/constants.js";
 import { tiptapJsonToYDoc } from "../collab-tiptap.js";
+import { type EntityResolver, isMentionEntity } from "../entities.js";
 import { isTiptapDoc } from "../json.js";
 import { Attachment } from "../nodes/attachment.js";
 import { Embed } from "../nodes/embed.js";
@@ -45,11 +46,7 @@ import {
 	AttachmentBlockContext,
 	AttachmentBlockView,
 } from "./attachment-view.js";
-import {
-	type EntityResolver,
-	EntityResolverContext,
-	isMentionEntity,
-} from "./blocks.js";
+import { EntityResolverContext } from "./blocks.js";
 import { CodeBlockChrome } from "./code-block-chrome.js";
 import { FormatToolbar } from "./format-toolbar.js";
 import { Gutter } from "./gutter.js";
@@ -263,7 +260,7 @@ export type {
 	EntityResolver,
 	EntitySnapshot,
 	MentionEntity,
-} from "./blocks.js";
+} from "../entities.js";
 
 const EMOJI_SUGGESTION_RENDER = () => suggestionRenderer<EmojiMenuItem>();
 

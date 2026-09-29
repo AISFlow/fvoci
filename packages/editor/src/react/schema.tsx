@@ -13,15 +13,17 @@ export {
 	useAttachmentMeta,
 } from "./attachment-view.js";
 export {
-	EmbedBlockView,
-	type EmbedCardState,
-	EmbedCardView,
 	type EmbedEntity,
 	type EntityResolver,
-	EntityResolverContext,
 	type EntitySnapshot,
 	isMentionEntity,
 	type MentionEntity,
+} from "../entities.js";
+export {
+	EmbedBlockView,
+	type EmbedCardState,
+	EmbedCardView,
+	EntityResolverContext,
 	MentionView,
 	MermaidBlockView,
 	resolveEmbedProps,
