@@ -18,7 +18,14 @@ export function useProjectRef(workspaceId: MaybeRefOrGetter<string | undefined>,
       (projects.isSuccess.value && project.value === undefined) ||
       (projects.error.value instanceof ProblemError && projects.error.value.status === 404),
   );
-  /** The list failed for another reason (5xx, network): the page offers a retry. */
-  const failed = computed(() => projects.isError.value && !notFound.value);
+  /**
+   * The list failed for another reason (5xx, network) and there is no cached
+   * list to show: the page offers a retry. A failed background refetch keeps
+   * the cached list (TanStack keeps `data` with status "error"), so the page
+   * stays on it.
+   */
+  const failed = computed(
+    () => projects.isError.value && projects.data.value === undefined && !notFound.value,
+  );
   return { projects, project, notFound, failed, retry: () => projects.refetch() };
 }
