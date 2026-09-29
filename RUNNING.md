@@ -23,7 +23,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `METRICS_ALLOW_IPS` | `/metrics` allowlist (source contract): comma-separated IPv4 addresses or CIDRs with a required `/1`–`/32` prefix; IPv4-mapped IPv6 peers compare as IPv4, IPv6 entries are refused. Unset or empty denies every peer (404). Only the direct socket peer counts; `X-Forwarded-For` is ignored. List the scraper's direct address; a reverse proxy must not forward `/metrics` (or must restrict it itself), because listing the proxy's address makes `/metrics` public to everyone the proxy forwards. One malformed entry refuses startup. `/health` and `/ready` are not affected. |
 | `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). Trailing slashes are normalized. An explicit port `0` follows the actual bound port. |
 | `FVOCI_COOKIE_SECURE` | `true`/`1` to set `Secure` on session cookies; defaults from `FVOCI_PUBLIC_ORIGIN` scheme. |
-| `FVOCI_LICENSE_KEY` | Optional secret FVOCI2 enterprise entitlement. Absent, malformed, untrusted, or expired tokens do not block startup: audit, branding, and workspace SSO remain disabled; seats default to 10 and storage/upload limits to unlimited. The server verifies offline using only the public keys compiled into `src/license-trust.json`, which is currently empty, matching the fixed source. No issued token can activate enterprise features until issuer public keys are supplied in a reviewed release build; there is no environment trust-key override. Rotate the token by restarting the server; its validity window is rechecked during use. Keep the token out of logs and backups shared outside the operator boundary. Instance OIDC remains available without an enterprise license. |
+| `FVOCI_LICENSE_KEY` | Optional secret FVOCI2 enterprise entitlement. Absent, malformed, untrusted, or expired tokens do not block startup: audit, branding, and workspace SSO remain disabled; seats default to 10 and storage/upload limits to unlimited. The server verifies offline using only the public keys compiled into `src/license-trust.json`, which is currently empty, matching the fixed source. No issued token can activate enterprise features until issuer public keys are supplied in a reviewed release build; there is no environment trust-key override. Rotate the token by recreating the server (`docker compose up -d`); its validity window is rechecked during use. Keep the token out of logs and backups shared outside the operator boundary. Instance OIDC remains available without an enterprise license. |
 | `FVOCI_STATIC_DIR` | Optional built frontend directory containing index.html; validated at startup. |
 | `FVOCI_STORAGE_DIR` | Required persistent local attachment directory when `STORAGE_DRIVER=local` (the default). Writable by the server. Reuse the same directory across restarts and preserve it with the database. |
 | `STORAGE_LOCAL_PATH` | Source-compatible storage path alias, used only when `FVOCI_STORAGE_DIR` is absent. |
@@ -1543,7 +1543,8 @@ password hashes and key material are never printed.
   reports `changed: 0`. Password hashes are re-peppered at sign-in, not here.
 
 Key rotation: add the new key to `ENCRYPTION_KEYS`, switch
-`ENCRYPTION_ACTIVE_KEY_ID`, restart the server, run `--secrets-rotate`, then
+`ENCRYPTION_ACTIVE_KEY_ID`, recreate the server with `docker compose up -d` (a
+plain `restart` keeps the old keyring), run `--secrets-rotate`, then
 `--secrets-audit`; drop the old key only once `secrets` no longer names it.
 
 ```sh
