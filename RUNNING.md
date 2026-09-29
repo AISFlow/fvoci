@@ -309,8 +309,9 @@ it. A value left set from then now makes `presigned` available (the mode stays
 when it is plain http under an https `FVOCI_PUBLIC_ORIGIN` or uses the app's
 host. Correct or remove it before upgrading.
 
-Verified against the pinned MinIO-compatible silo (Rust integration tests and a
-Chromium cross-origin check, `scripts/run-web-e2e-s3.sh`). Not run: real AWS S3
+Verified against the pinned MinIO-compatible silo (Rust integration tests and
+Chromium cross-origin checks, `scripts/run-web-e2e-s3.sh` with and without
+`--narrow-cors`). Not run: real AWS S3
 (CORS on the redirected fetch, enforcement of the signed `content-length`, virtual-host style,
 `response-*` overrides, lifecycle rules), other S3-compatible services,
 reverse proxies or CDNs in front of the bucket, Firefox and Safari, and clock
@@ -347,10 +348,14 @@ scripts/start-test-minio.sh scripts/start-test-postgres.sh cargo test --locked -
 
 The presigned transfer mode in Chromium, with MinIO as a separate storage
 origin (after `scripts/prepare-web-e2e.sh`; not part of the normal e2e shards,
-which have no MinIO):
+which have no MinIO). The first run covers presigned and proxy transfers and
+the viewers without `Access-Control-Allow-Credentials`; the second starts MinIO
+with CORS for another origin only and expects the presigned upload to fail with
+no fallback to the API:
 
 ```sh
 scripts/run-web-e2e-s3.sh
+scripts/run-web-e2e-s3.sh --narrow-cors
 ```
 
 Integration tests always create and drop their own UUID database and app role; they never reuse or drop an externally supplied database.

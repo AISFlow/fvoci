@@ -6,24 +6,11 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { crc32, deflateSync } from "node:zlib";
 import { expect, test, type Page, type Request } from "@playwright/test";
+import { buildFixturePdf } from "../src/features/attachments/pdf-test-fixture";
 import { watchCspViolations } from "../e2e/helpers";
-
-const owner = {
-  email: "transfer@example.com",
-  password: "supersecret1",
-  familyName: "김",
-  givenName: "전송",
-  workspaceSlug: "xfer",
-  workspaceName: "Transfer",
-};
+import { setTransferMode, setUpOwnerTask, storageOrigin, WORKSPACE_SLUG } from "./transfer-helpers";
 
 const PART_SIZE = 5 * 1024 * 1024;
-
-function storageOrigin(): string {
-  const endpoint = process.env.S3_PUBLIC_ENDPOINT;
-  if (!endpoint) throw new Error("S3_PUBLIC_ENDPOINT is required (scripts/run-web-e2e-s3.sh)");
-  return new URL(endpoint).origin;
-}
 
 /** A real width×height RGB PNG (gradient), built without extra packages. */
 function pngBytes(width: number, height: number): Buffer {
@@ -65,24 +52,26 @@ function patterned(seed: number): Buffer {
 
 const sha256 = (bytes: Buffer | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-async function setTransferMode(page: Page, mode: "proxy" | "presigned", label: string): Promise<void> {
-  await page.goto("/settings/admin");
-  const card = page.getByRole("region", { name: "첨부 전송 방식", exact: true });
-  await expect(card.locator('option[value="presigned"]')).toBeEnabled();
-  await card.getByLabel("attachmentTransfer.mode").selectOption(mode);
-  const saved = page.waitForResponse(
-    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
-  );
-  await card.getByRole("button", { name: "저장" }).click();
-  expect((await saved).status()).toBe(200);
-  await expect(card.getByText(`현재 적용: ${label}`)).toBeVisible();
-  await expect(card.getByText("오버라이드됨")).toBeVisible();
-}
-
 type PageFetch = { status: number; redirected: boolean; url: string; range: string | null; sha: string; length: number };
 
 /** `fetch` from the page, like the viewers do; hashes the body in the page. */
 type FetchInit = { credentials?: RequestCredentials; headers?: Record<string, string> };
+
+/** Like `pageFetch`, but only whether the fetch settled or rejected (a CORS refusal rejects). */
+async function pageFetchOutcome(page: Page, url: string, init: FetchInit): Promise<string> {
+  return page.evaluate(
+    async ({ url, init }) => {
+      try {
+        const res = await fetch(url, init);
+        await res.arrayBuffer();
+        return `status ${res.status}`;
+      } catch (err) {
+        return `rejected: ${err instanceof Error ? err.name : String(err)}`;
+      }
+    },
+    { url, init },
+  );
+}
 
 async function pageFetch(page: Page, url: string, init: FetchInit): Promise<PageFetch> {
   return page.evaluate(
@@ -114,34 +103,13 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
     if (req.method() === "PUT" && req.url().includes("/parts/")) apiParts.push(req.url());
   });
 
-  await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
-  await page.getByLabel("성").fill(owner.familyName);
-  await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
-  await page.getByLabel("이메일").fill(owner.email);
-  await page.getByLabel("비밀번호").fill(owner.password);
-  await page.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
-  await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
-  await page.getByRole("button", { name: "시작하기" }).click();
-  await expect(page).toHaveURL(/\/$/);
+  const taskUrl = await setUpOwnerTask(page);
 
   // The page policy names the storage origin for fetches and images only.
   const shell = await page.request.get("/");
   const policy = shell.headers()["content-security-policy"] ?? "";
   expect(policy).toContain(`connect-src 'self' ${storage};`);
   expect(policy).toContain(`img-src 'self' data: blob: ${storage};`);
-
-  await page.goto(`/w/${owner.workspaceSlug}/projects`);
-  await page.getByRole("button", { name: "새 프로젝트" }).click();
-  await page.getByLabel("키").fill("xfr");
-  await page.getByLabel("이름", { exact: true }).fill("Transfer");
-  await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
-  await expect(page).toHaveURL(new RegExp(`/w/${owner.workspaceSlug}/XFR/tasks$`));
-  await page.getByRole("button", { name: "새 태스크" }).click();
-  await page.getByLabel("제목").fill("전송 대상");
-  await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
-  await expect(page).toHaveURL(new RegExp(`/w/${owner.workspaceSlug}/XFR-2$`));
-  const taskUrl = page.url();
 
   // ---- presigned
   await setTransferMode(page, "presigned", "직접 전송 (S3 서명 URL)");
@@ -155,18 +123,24 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
       created.push((await res.json()) as Record<string, unknown>);
     }
   });
+  const pdf = Buffer.from(buildFixturePdf([{ text: "FVOCI PRESIGNED", script: "latin", band: "top-red" }]));
+  const note = Buffer.from("presigned text viewer body\n", "utf8");
   await panel.getByLabel("파일 첨부").setInputFiles([
     { name: "big.bin", mimeType: "application/octet-stream", buffer: big },
     { name: "사진.png", mimeType: "image/png", buffer: photo },
+    { name: "report.pdf", mimeType: "application/pdf", buffer: pdf },
+    { name: "notes.txt", mimeType: "text/plain", buffer: note },
   ]);
   await expect(panel.getByRole("link", { name: "big.bin" })).toBeVisible({ timeout: 60_000 });
   await expect(panel.getByRole("link", { name: "사진.png" })).toBeVisible();
-  expect(created.map((c) => c.transfer)).toEqual(["presigned", "presigned"]);
+  await expect(panel.getByRole("link", { name: "report.pdf" })).toBeVisible();
+  await expect(panel.getByRole("link", { name: "notes.txt" })).toBeVisible();
+  expect(created.map((c) => c.transfer)).toEqual(["presigned", "presigned", "presigned", "presigned"]);
 
-  // Three part PUTs (two for big.bin, one for the PNG), all to storage with
-  // nothing but the signed URL, and none through the API.
+  // Five part PUTs (two for big.bin, one each for the others), all to storage
+  // with nothing but the signed URL, and none through the API.
   expect(apiParts).toEqual([]);
-  expect(storagePuts).toHaveLength(3);
+  expect(storagePuts).toHaveLength(5);
   for (const req of storagePuts) {
     const headers = await req.allHeaders();
     expect(headers.cookie).toBeUndefined();
@@ -182,8 +156,13 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
 
   const bigHref = await panel.getByRole("link", { name: "big.bin" }).getAttribute("href");
   expect(bigHref).toBeTruthy();
-  const photoHref = await panel.getByRole("link", { name: "사진.png" }).getAttribute("href");
-  const photoId = (photoHref as string).split("/attachments/")[1]?.split("/")[0] ?? "";
+  const idOf = async (name: string): Promise<string> => {
+    const href = await panel.getByRole("link", { name }).getAttribute("href");
+    return (href as string).split("/attachments/")[1]?.split("/")[0] ?? "";
+  };
+  const photoId = await idOf("사진.png");
+  const pdfId = await idOf("report.pdf");
+  const noteId = await idOf("notes.txt");
 
   // The download link: the API answers 302 and storage sends the bytes as an
   // attachment.
@@ -195,8 +174,9 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
   expect(sha256(readFileSync(saved))).toBe(sha256(big));
 
   // Viewer-style fetches follow the redirect: the whole file with the
-  // session (like viewer-download.ts), and a range across the part boundary.
-  const whole = await pageFetch(page, bigHref as string, { credentials: "include" });
+  // viewers' credentials mode (viewer-download.ts: the session cookie to the
+  // API, none to storage), and a range across the part boundary.
+  const whole = await pageFetch(page, bigHref as string, { credentials: "same-origin" });
   expect(whole).toMatchObject({ status: 200, redirected: true, length: big.length, sha: sha256(big) });
   expect(whole.url.startsWith(`${storage}/`)).toBe(true);
   const start = PART_SIZE - 10;
@@ -211,10 +191,49 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
   });
 
   // The original image viewer loads the PNG through the redirect (img-src).
-  await page.goto(`/w/${owner.workspaceSlug}/a/${photoId}/view`);
+  await page.goto(`/w/${WORKSPACE_SLUG}/a/${photoId}/view`);
   const img = page.locator("img.attachment-viewer__image");
   await expect(img).toBeVisible();
   await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBe(2400);
+
+  // Storage needs no Access-Control-Allow-Credentials: with it removed from
+  // every storage GET response, the viewers (which send no credentials past
+  // the redirect) still load, while a fetch with credentials "include" is
+  // refused by CORS. MinIO always allows credentials, so the header is
+  // stripped here, through the DevTools protocol: Playwright's page.route does
+  // not see the request a redirect leads to.
+  const strippedFor: (string | undefined)[] = [];
+  const cdp = await page.context().newCDPSession(page);
+  cdp.on("Fetch.requestPaused", (event) => {
+    const response = event.responseHeaders;
+    if (event.request.method !== "GET" || event.responseStatusCode === undefined || !response) {
+      void cdp.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => {});
+      return;
+    }
+    strippedFor.push(response.find((h) => h.name.toLowerCase() === "access-control-allow-origin")?.value);
+    void cdp
+      .send("Fetch.continueResponse", {
+        requestId: event.requestId,
+        responseCode: event.responseStatusCode,
+        responseHeaders: response.filter((h) => h.name.toLowerCase() !== "access-control-allow-credentials"),
+      })
+      .catch(() => {});
+  });
+  await cdp.send("Fetch.enable", { patterns: [{ urlPattern: `${storage}/*`, requestStage: "Response" }] });
+  expect(await pageFetchOutcome(page, bigHref as string, { credentials: "include" })).toBe("rejected: TypeError");
+  expect(await pageFetchOutcome(page, bigHref as string, { credentials: "same-origin" })).toBe("status 200");
+  // The PDF viewer (downloadCapped) and the text viewer through the redirect.
+  await page.goto(`/w/${WORKSPACE_SLUG}/a/${pdfId}/view`);
+  const pdfViewer = page.locator("[data-pdf-viewer]");
+  await expect(pdfViewer).toBeVisible({ timeout: 20_000 });
+  await expect(pdfViewer.getByText("1 / 1")).toBeVisible();
+  await page.goto(`/w/${WORKSPACE_SLUG}/a/${noteId}/view`);
+  await expect(page.getByText("presigned text viewer body")).toBeVisible();
+  await cdp.send("Fetch.disable");
+  await cdp.detach();
+  // Two probe fetches, the PDF and the text file: one storage GET each, every
+  // one still allowing exactly the app origin.
+  expect(strippedFor).toEqual(Array(4).fill(new URL(page.url()).origin));
 
   // ---- proxy: the same server switched back; bytes stay on the app origin.
   await setTransferMode(page, "proxy", "프록시 (API 서버 경유)");
@@ -230,11 +249,11 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
   expect(storagePuts).toHaveLength(putsBefore);
   expect(apiParts).toHaveLength(2);
   const proxyHref = (await proxyLink.getAttribute("href")) as string;
-  const viaApi = await pageFetch(page, proxyHref, { credentials: "include" });
+  const viaApi = await pageFetch(page, proxyHref, { credentials: "same-origin" });
   expect(viaApi).toMatchObject({ status: 200, redirected: false, length: proxied.length, sha: sha256(proxied) });
   expect(viaApi.url.startsWith(new URL(page.url()).origin)).toBe(true);
   // Originals uploaded in presigned mode are now served by the API too.
-  const bigViaApi = await pageFetch(page, bigHref as string, { credentials: "include" });
+  const bigViaApi = await pageFetch(page, bigHref as string, { credentials: "same-origin" });
   expect(bigViaApi).toMatchObject({ status: 200, redirected: false, sha: sha256(big) });
 
   // Reset through the existing button returns to the default.
