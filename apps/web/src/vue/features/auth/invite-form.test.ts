@@ -28,6 +28,7 @@ test("the invite page leaves the Vue app with a full load", () => {
   assert.match(page, /redirectTo\("\/setup"\)/);
   assert.match(page, /api\.POST\("\/api\/v1\/invitations\/\{token\}\/accept"/);
   assert.match(page, /invitationPublicQuery/);
+  assert.match(page, /enabled: setupReady\.value/);
   assert.doesNotMatch(page, /from ["']react["']/);
   assert.doesNotMatch(page, /from ["']@tanstack\/react-query["']/);
   assert.doesNotMatch(page, /takeMfaFragment/);

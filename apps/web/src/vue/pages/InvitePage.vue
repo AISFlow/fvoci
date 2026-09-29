@@ -19,9 +19,22 @@ import MfaStep from "../features/auth/MfaStep.vue";
 
 const route = useRoute();
 const token = computed(() => String(route.params.token ?? ""));
-const invitation = useQuery(() => invitationPublicQuery(token.value));
 const setup = useQuery(setupStatusQuery);
-const providers = useQuery(providersQuery);
+// React SetupGuard mounts InvitePage only after setup succeeds.
+const setupReady = computed(
+  () =>
+    !setup.isLoading.value &&
+    !setup.isError.value &&
+    setup.data.value?.needed !== true,
+);
+const invitation = useQuery(() => ({
+  ...invitationPublicQuery(token.value),
+  enabled: setupReady.value,
+}));
+const providers = useQuery(() => ({
+  ...providersQuery,
+  enabled: setupReady.value,
+}));
 
 const mfaToken = ref<string | null>(null);
 const brandingName = computed(() => setup.data.value?.branding.name);
