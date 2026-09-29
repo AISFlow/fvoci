@@ -310,16 +310,12 @@ async fn relation_exists(
 }
 
 fn parse_recovery_utc(label: &str, value: &str) -> Result<DateTime<Utc>, RecoverOutboxError> {
-    if !RECOVERY_UTC.is_match(value) || value.parse::<DateTime<Utc>>().is_err() {
-        return Err(RecoverOutboxError::Rejected(format!(
+    match value.parse::<DateTime<Utc>>() {
+        Ok(parsed) if RECOVERY_UTC.is_match(value) => Ok(parsed),
+        _ => Err(RecoverOutboxError::Rejected(format!(
             "recovery requires explicit UTC {label} and snapshot-at boundaries"
-        )));
+        ))),
     }
-    value.parse::<DateTime<Utc>>().map_err(|_| {
-        RecoverOutboxError::Rejected(
-            "recovery requires explicit UTC since and snapshot-at boundaries".into(),
-        )
-    })
 }
 
 pub fn parse_recover_outbox_args(
@@ -406,4 +402,30 @@ pub fn parse_recover_outbox_args(
         reason,
         acknowledge_external_replay,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_boundaries_are_explicit_utc() {
+        for ok in ["2026-09-01T00:00:00Z", "2026-09-01T00:00:00.123456Z"] {
+            assert!(parse_recovery_utc("since", ok).is_ok(), "{ok}");
+        }
+        // Outside the pattern, or matching it but not a calendar time.
+        for bad in [
+            "2026-09-01T00:00:00+00:00",
+            "2026-09-01 00:00:00Z",
+            "2026-09-01T00:00:00.1234567Z",
+            "2026-02-30T00:00:00Z",
+            "2026-09-01T24:00:00Z",
+        ] {
+            let err = parse_recovery_utc("since", bad).expect_err(bad);
+            assert_eq!(
+                err.to_string(),
+                "recovery requires explicit UTC since and snapshot-at boundaries"
+            );
+        }
+    }
 }
