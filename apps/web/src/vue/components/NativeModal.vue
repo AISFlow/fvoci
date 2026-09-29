@@ -13,6 +13,9 @@ watch(
   () => props.open,
   async (open) => {
     if (!open) {
+      // Close it first: while the modal dialog is shown the rest of the page
+      // is inert, and focusing the opener there would do nothing.
+      if (dialog.value?.open) dialog.value.close();
       opener?.focus();
       opener = null;
       return;
