@@ -24,9 +24,11 @@ export function useProjectRef(workspaceId: MaybeRefOrGetter<string | undefined>,
    * list (TanStack keeps `data` with status "error"), so a page that resolved
    * its project stays on it; one that had not (for example after "not found",
    * which needs a successful list) shows the retry instead of loading forever.
+   * While that retry is fetching the page shows loading again.
    */
   const failed = computed(
-    () => projects.isError.value && project.value === undefined && !notFound.value,
+    () =>
+      projects.isError.value && project.value === undefined && !notFound.value && !projects.isFetching.value,
   );
   return { projects, project, notFound, failed, retry: () => projects.refetch() };
 }
