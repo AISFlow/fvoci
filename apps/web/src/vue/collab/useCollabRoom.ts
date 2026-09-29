@@ -1,5 +1,5 @@
 import { FVOCI_YDOC_FRAGMENT } from "@fvoci/editor/collab";
-import { HocuspocusProvider, type HocuspocusProviderWebsocket } from "@hocuspocus/provider";
+import { HocuspocusProvider } from "@hocuspocus/provider";
 import {
   computed,
   effectScope,
@@ -40,6 +40,7 @@ import {
 import {
   createRefusalAwareSocket,
   RoomConnection,
+  type RefusalAwareSocket,
   type RoomConnectionState,
   type RoomTimers,
 } from "@/features/documents/collab-reconnect";
@@ -120,10 +121,10 @@ export function useCollabRoom(
   /* WHY: #664 — 서버는 연결이 접속 때 선언한 awareness clientId 하나만 받는다. clientId 는
    * Y.Doc 의 것이라 우리가 만들어 token 으로 넘긴다. #683 — 선언이 거부되면 clientID 를 갈고
    * 소켓 층부터 다시 세운다. Y.Doc 은 살아남아 미전송 편집을 다음 동기화에 싣는다(#704). */
-  const room: ShallowRef<RoomConnectionState<HocuspocusProviderWebsocket>> = shallowRef(
-    undefined as unknown as RoomConnectionState<HocuspocusProviderWebsocket>,
+  const room: ShallowRef<RoomConnectionState<RefusalAwareSocket>> = shallowRef(
+    undefined as unknown as RoomConnectionState<RefusalAwareSocket>,
   );
-  const connection = new RoomConnection<HocuspocusProviderWebsocket>({
+  const connection = new RoomConnection<RefusalAwareSocket>({
     open: (onClosed) => markRaw(createRefusalAwareSocket({ url }, onClosed)),
     onChange: (state) => {
       room.value = state;
@@ -145,7 +146,7 @@ export function useCollabRoom(
   const current = shallowRef<Generation | null>(null);
   let disposed = false;
 
-  function bindGeneration(state: RoomConnectionState<HocuspocusProviderWebsocket>): void {
+  function bindGeneration(state: RoomConnectionState<RefusalAwareSocket>): void {
     const previous = current.value;
     /* WHY: #683 — provider 만 갈아끼우면 업스트림 detach 가 방 이름만 보고 지워 옛 연결의
      * 지연 destroy 가 새 연결을 라우팅 맵에서 밀어낸다. 소켓(세대)마다 provider 를 새로 만든다. */
