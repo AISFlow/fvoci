@@ -24,9 +24,11 @@ export function createAppRouter(history: RouterHistory = createWebHistory()) {
   // boot module loads the React app for it. The navigation completes first
   // (the Vue page unmounts, its collab room flushes and closes) and the load
   // replaces the entry it made. A guard that cancelled it instead would make
-  // vue-router undo a history pop with go(-1), which races the load.
-  router.afterEach((to) => {
-    if (!isVueAppPath(to.path)) window.location.replace(to.fullPath);
+  // vue-router undo a history pop with go(-1), which races the load. A
+  // navigation that failed or was superseded by another one did not happen:
+  // afterEach sees those too, and they load nothing.
+  router.afterEach((to, _from, failure) => {
+    if (!failure && !isVueAppPath(to.path)) window.location.replace(to.fullPath);
   });
   return router;
 }
