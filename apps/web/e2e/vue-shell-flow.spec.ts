@@ -469,18 +469,26 @@ test("the bell shows a notification created through the API and opens it from bo
     await expect(m.page.getByText(secondMessage, { exact: true }).first()).toBeVisible();
     expect(await sameDocument(m.page)).toBe(false);
 
-    // The toggle closes the panel again. On a 390px viewport the panel stays
-    // on-screen (it is not clipped by absolute right-0).
+    // The toggle closes the panel again. On a 390px viewport the header
+    // wraps, so the panel must stay on-screen and below the trigger.
     await m.page.setViewportSize({ width: 390, height: 844 });
-    await openGantt(m.page);
-    const readBell = m.page.getByRole("button", { name: "알림", exact: true });
-    await readBell.click();
-    await expect(panel).toBeVisible();
-    const panelBox = await panel.boundingBox();
-    expect(panelBox).toBeTruthy();
-    expect(panelBox!.x).toBeGreaterThanOrEqual(0);
-    await readBell.click();
-    await expect(panel).toHaveCount(0);
+    for (const open of [openGantt, (p: Page) => openWiki(p, doc)]) {
+      await open(m.page);
+      const readBell = m.page.getByRole("button", { name: "알림", exact: true });
+      await readBell.click();
+      await expect(panel).toBeVisible();
+      const panelBox = await panel.boundingBox();
+      const bellBox = await readBell.boundingBox();
+      expect(panelBox).toBeTruthy();
+      expect(bellBox).toBeTruthy();
+      expect(panelBox!.x).toBeGreaterThanOrEqual(0);
+      expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(390);
+      expect(panelBox!.y, "the notification panel must not cover its toggle").toBeGreaterThanOrEqual(
+        bellBox!.y + bellBox!.height,
+      );
+      await readBell.click();
+      await expect(panel).toHaveCount(0);
+    }
     expect(seen.csp).toEqual([]);
     expect(seen.icons).toEqual([]);
   } finally {

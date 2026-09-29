@@ -53,7 +53,7 @@ function onSwitch(event: Event): void {
     <div v-if="logoutError" role="alert" class="border-b border-default bg-muted px-4 py-2 text-sm text-muted">
       {{ logoutError }}
     </div>
-    <header class="flex flex-wrap items-center justify-between gap-3 border-b border-default px-4 py-3">
+    <header class="relative flex flex-wrap items-center justify-between gap-3 border-b border-default px-4 py-3">
       <div class="flex flex-wrap items-center gap-4">
         <a href="/" class="underline underline-offset-2">{{ t("nav.backHome") }}</a>
         <nav class="flex flex-wrap items-center gap-3" :aria-label="t('nav.workspace')">

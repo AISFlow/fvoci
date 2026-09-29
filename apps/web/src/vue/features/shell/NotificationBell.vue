@@ -46,7 +46,8 @@ function onReadAll(): void {
 </script>
 
 <template>
-  <div class="relative">
+  <!-- On narrow screens, the wrapping shell header anchors the panel. -->
+  <div class="sm:relative">
     <UButton
       color="neutral"
       variant="outline"
@@ -70,7 +71,7 @@ function onReadAll(): void {
       :id="panelId"
       role="region"
       :aria-label="t('notif.bell.title')"
-      class="z-20 mt-1.5 w-[min(22rem,calc(100vw-1.5rem))] rounded-xl border border-default bg-default shadow-lg max-sm:fixed max-sm:inset-x-3 max-sm:top-14 max-sm:mt-0 max-sm:w-auto sm:absolute sm:top-full sm:right-0"
+      class="absolute top-full z-20 mt-1.5 w-[min(22rem,calc(100vw-1.5rem))] rounded-xl border border-default bg-default shadow-lg max-sm:inset-x-3 max-sm:w-auto sm:right-0"
     >
       <div class="flex items-center justify-between gap-2 border-b border-default px-3 py-2">
         <p class="m-0 text-sm font-semibold">{{ t("notif.bell.title") }}</p>
