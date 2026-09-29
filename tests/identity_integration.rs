@@ -1370,6 +1370,21 @@ fn state_cookie_of(path: &str, res: &Response) -> String {
     res.cookie_named("fvoci_oidc_state").unwrap()
 }
 
+/// `GET /auth/sso` is a browser navigation: a refusal redirects to the
+/// login page with the problem code and issues no state.
+fn assert_sso_refused(res: &Response, code: &str) {
+    assert_eq!(res.status, StatusCode::FOUND, "{code}: {:?}", res.json);
+    assert_eq!(
+        res.location(),
+        format!("http://localhost/login?error={code}")
+    );
+    assert!(
+        res.cookie_named("fvoci_oidc_state").is_none(),
+        "{code}: {:?}",
+        res.headers
+    );
+}
+
 async fn begin_on(
     app: &axum::Router,
     path: &str,
@@ -2331,7 +2346,7 @@ async fn oidc_outbound_fetches_are_ssrf_guarded() {
         peer(102),
     )
     .await;
-    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_sso_refused(&res, "internal_error");
     h.finish().await;
 }
 
@@ -2484,8 +2499,7 @@ async fn workspace_oidc_config_is_admin_only_and_sealed() {
         peer(112),
     )
     .await;
-    assert_eq!(res.status, StatusCode::NOT_FOUND);
-    assert_eq!(res.code(), "provider_not_configured");
+    assert_sso_refused(&res, "provider_not_configured");
     h.finish().await;
 }
 
@@ -2579,7 +2593,6 @@ async fn personal_workspaces_take_no_sso() {
             format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
             None,
         ),
-        ("GET", format!("/api/v1/auth/sso?slug={slug}"), None),
         (
             "POST",
             format!("/api/v1/auth/oidc/generic/link?workspaceId={ws}"),
@@ -2591,6 +2604,16 @@ async fn personal_workspaces_take_no_sso() {
         assert_eq!(res.code(), "provider_not_configured", "{start}");
         assert!(res.cookie_named("fvoci_oidc_state").is_none(), "{start}");
     }
+    let res = call(
+        &h.app,
+        "GET",
+        &format!("/api/v1/auth/sso?slug={slug}"),
+        None,
+        None,
+        peer(181),
+    )
+    .await;
+    assert_sso_refused(&res, "provider_not_configured");
     assert_eq!(oidc_state_rows(&h).await, 0);
     assert_eq!(fake.discovery_hits.load(Ordering::SeqCst), 0);
 
@@ -2814,7 +2837,8 @@ async fn workspace_sso_login_and_jit_join() {
         vec!["oidc:generic", "oidc:generic"]
     );
 
-    // Unknown slug.
+    // Unknown slug, and a slug the server refuses: the login page shows
+    // the problem instead of a raw problem+json page.
     let res = call(
         &h.app,
         "GET",
@@ -2824,7 +2848,40 @@ async fn workspace_sso_login_and_jit_join() {
         peer(126),
     )
     .await;
-    assert_eq!(res.code(), "provider_not_configured");
+    assert_sso_refused(&res, "provider_not_configured");
+    let res = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/sso?slug=No%20Such",
+        None,
+        None,
+        peer(126),
+    )
+    .await;
+    assert_sso_refused(&res, "invalid_input");
+    // The per-address limit is charged first; its refusal redirects too.
+    for _ in 0..30 {
+        let res = call(
+            &h.app,
+            "GET",
+            "/api/v1/auth/sso?slug=nope",
+            None,
+            None,
+            peer(127),
+        )
+        .await;
+        assert_sso_refused(&res, "provider_not_configured");
+    }
+    let res = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/sso?slug=acme",
+        None,
+        None,
+        peer(127),
+    )
+    .await;
+    assert_sso_refused(&res, "rate_limit_exceeded");
     h.finish().await;
 }
 

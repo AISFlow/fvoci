@@ -20,13 +20,18 @@ import {
   workspaceSsoHref,
 } from "./oidc.ts";
 
-test("oidcErrorMessage maps each callback code to its catalog message", () => {
+test("oidcErrorMessage maps each redirect code to its catalog message", () => {
   for (const code of OIDC_ERROR_CODES) {
     const message = oidcErrorMessage(code);
     assert.equal(message, t(code));
     assert.notEqual(message, t("oidc_fallback"));
   }
   assert.equal(oidcErrorMessage("oidc_last_method"), "마지막 로그인 수단은 해제할 수 없습니다.");
+  // The workspace SSO start sends an unknown slug back to /login with this.
+  assert.equal(
+    oidcErrorMessage("provider_not_configured"),
+    "SSO로 로그인할 수 없는 워크스페이스입니다. 워크스페이스 주소를 확인해 주세요.",
+  );
 });
 
 test("oidcErrorMessage falls back for unknown codes and stays silent without one", () => {

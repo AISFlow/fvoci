@@ -248,13 +248,36 @@ async fn identities(
     }))
 }
 
+/// Workspace SSO by slug. The login page navigates here (a top-level
+/// navigation, not an API call), so every answer is a redirect: 302 to the
+/// workspace's provider with the state cookie, or on any refusal 302 to
+/// `/login?error=<problem code>`, which the login page shows, instead of a
+/// problem+json page. The refusal issues no state, and its Location is only
+/// the public origin and a static code.
 async fn sso(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     RawQuery(raw): RawQuery,
-) -> Result<Response, AppError> {
-    limit_ip(&state, peer).await?;
+) -> Response {
+    match begin_sso(&state, &identity, peer, raw).await {
+        Ok(started) => state_redirect(&state, started, StatusCode::FOUND),
+        Err(err) => {
+            let code = err.code.as_str();
+            tracing::warn!(reason = code, "oidc.sso_refused");
+            let origin = state.public_origin.trim_end_matches('/');
+            redirect(StatusCode::FOUND, &format!("{origin}/login?error={code}"))
+        }
+    }
+}
+
+async fn begin_sso(
+    state: &AppState,
+    identity: &Identity,
+    peer: SocketAddr,
+    raw: Option<String>,
+) -> Result<Started, AppError> {
+    limit_ip(state, peer).await?;
     if !state.auth.db.license.has_feature("workspaceSso") {
         return Err(AppError::from_code(ProblemCode::ProviderNotConfigured));
     }
@@ -269,9 +292,9 @@ async fn sso(
     else {
         return Err(AppError::from_code(ProblemCode::ProviderNotConfigured));
     };
-    let started = flow::begin(
+    flow::begin(
         &state.auth.db.pool,
-        &identity,
+        identity,
         &state.auth.db.license,
         BeginParams {
             provider: ProviderKey::Generic,
@@ -283,8 +306,7 @@ async fn sso(
         },
     )
     .await
-    .map_err(begin_error)?;
-    Ok(state_redirect(&state, started, StatusCode::FOUND))
+    .map_err(begin_error)
 }
 
 /// Plain sign-in only. Invite mode is [`start_invite`]: a GET can be started
