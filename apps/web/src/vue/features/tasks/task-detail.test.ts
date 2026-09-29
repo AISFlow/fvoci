@@ -157,9 +157,29 @@ test("task body uses collab kind task; project document uses kind document (sour
   const page = source("../../pages/WorkspaceItemPage.vue");
   const docView = source("../documents/ProjectDocumentView.vue");
   assert.match(taskView, /useCollabRoom\(collabRoomName\(props\.workspaceId, "task", props\.task\.id\)/);
+  assert.equal((taskView.match(/useCollabRoom\(/g) ?? []).length, 1);
   assert.match(page, /collabRoomName\(workspace\.id, ['"]task['"]/);
   assert.match(page, /collabRoomName\(workspace\.id, ['"]document['"]/);
   assert.match(docView, /useCollabRoom\(\s*collabRoomName\(props\.workspaceId, "document", props\.documentId\)/);
   const room = readFileSync(path.join(import.meta.dirname, "../../collab/useCollabRoom.ts"), "utf8");
   assert.match(room, /function retire\(/);
+});
+
+test("TaskDetailView wires the React side panels without a second collab room (source)", () => {
+  const taskView = source("./TaskDetailView.vue");
+  assert.match(taskView, /TaskCollectionProperties/);
+  assert.match(taskView, /TaskAttachmentsPanel/);
+  assert.match(taskView, /TaskTimeEntries/);
+  assert.match(taskView, /TaskActivityPanel/);
+  assert.match(taskView, /TaskBacklinks/);
+  assert.match(taskView, /OriginPanel/);
+  assert.match(taskView, /hide-when-empty/);
+  assert.match(taskView, /:task-id="task\.id"/);
+  assert.match(taskView, /:current-user-id="currentUserId"/);
+  assert.match(taskView, /readOnly \|\| task\.archivedAt != null/);
+  const template = taskView.slice(taskView.indexOf("<template>"));
+  const collectionAt = template.indexOf("TaskCollectionProperties");
+  const bodyAt = template.indexOf("TaskBodyEditor");
+  const attachAt = template.indexOf("TaskAttachmentsPanel");
+  assert.ok(collectionAt > 0 && collectionAt < bodyAt && bodyAt < attachAt);
 });

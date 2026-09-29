@@ -48,7 +48,9 @@ function toggleResolved(): void {
 
 <template>
   <li class="comment-thread__item" :style="depth ? { marginLeft: `${depth * 16}px` } : undefined">
+    <slot name="before" />
     <p class="comment-thread__body">{{ comment.body }}</p>
+    <slot name="meta" />
     <div class="comment-thread__actions">
       <UButton
         v-for="emoji in REACTIONS"

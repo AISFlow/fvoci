@@ -13,10 +13,16 @@ import {
 import { originCreateSurface } from "@/features/collections/origin-create-surface";
 import { itemPath } from "@/lib/href";
 
-// Tasks this document started, and the form to start one
-// (features/collections/origin-panel.tsx, document side). Links to task
-// pages are full page loads: those are the React app's.
-const props = defineProps<{ workspaceId: string; slug: string; documentId: string }>();
+// Tasks this document started, or the documents a task came from
+// (features/collections/origin-panel.tsx). Create-task lives on the document
+// page only. Links to the other app are full page loads.
+const props = defineProps<{
+  workspaceId: string;
+  slug: string;
+  documentId?: string;
+  taskId?: string;
+  hideWhenEmpty?: boolean;
+}>();
 const queryClient = useQueryClient();
 const after = ref<string | null>(null);
 const projectId = ref("");
@@ -25,8 +31,20 @@ const requestId = ref(crypto.randomUUID());
 const projectName = ref("");
 const projectKey = ref("");
 
-const origins = useQuery(() => taskOriginsQuery(props.workspaceId, { documentId: props.documentId }, after.value));
+const origins = useQuery(() =>
+  taskOriginsQuery(props.workspaceId, { documentId: props.documentId, taskId: props.taskId }, after.value),
+);
 const projects = useQuery(() => documentTaskProjectsQuery(props.workspaceId, props.documentId));
+const hide = computed(
+  () =>
+    Boolean(props.hideWhenEmpty) &&
+    !origins.isLoading.value &&
+    !origins.isError.value &&
+    origins.data.value?.count === 0,
+);
+const heading = computed(() =>
+  props.documentId ? t("collection.linkedTasks") : t("collection.sourceDocument"),
+);
 
 watch(
   [() => projects.data.value, projectId],
@@ -39,7 +57,7 @@ watch(
 
 const createTask = useMutation({
   mutationFn: () =>
-    createTaskFromDocument(props.workspaceId, props.documentId, {
+    createTaskFromDocument(props.workspaceId, props.documentId!, {
       projectId: projectId.value,
       requestId: requestId.value,
       title: title.value.trim(),
@@ -101,17 +119,25 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
 </script>
 
 <template>
-  <section :aria-label="t('collection.linkedTasks')" class="flex flex-col gap-3 rounded-md border border-default p-4">
-    <h2 class="text-lg">{{ t("collection.linkedTasks") }} ({{ origins.data.value?.count ?? 0 }})</h2>
+  <section
+    v-if="!hide"
+    :aria-label="heading"
+    class="flex flex-col gap-3 rounded-md border border-default p-4"
+  >
+    <h2 class="text-lg">{{ heading }} ({{ origins.data.value?.count ?? 0 }})</h2>
     <p v-if="origins.isLoading.value" role="status">{{ t("collection.origins.loading") }}</p>
     <p v-if="origins.isError.value" role="alert">{{ originErrorText(origins.error.value, t("collection.origins.error")) }}</p>
     <a
       v-for="item in origins.data.value?.items ?? []"
       :key="item.taskId"
       class="text-sm underline"
-      :href="itemPath(slug, item.taskDisplayId)"
+      :href="itemPath(slug, documentId ? item.taskDisplayId : item.documentDisplayId)"
     >
-      {{ `${item.taskDisplayId} · ${item.taskTitle}` }}
+      {{
+        documentId
+          ? `${item.taskDisplayId} · ${item.taskTitle}`
+          : `${item.documentDisplayId} · ${item.documentTitle}`
+      }}
     </a>
     <p v-if="origins.data.value && origins.data.value.count === 0">{{ t("collection.noOrigins") }}</p>
     <UButton v-if="after" class="w-fit" variant="outline" color="neutral" @click="after = null">
@@ -126,7 +152,7 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
     >
       {{ t("collection.origins.next") }}
     </UButton>
-    <div class="flex flex-col gap-3">
+    <div v-if="documentId" class="flex flex-col gap-3">
       <p v-if="surface === 'loading'" role="status">{{ t("collection.taskCreation.projectsLoading") }}</p>
       <p v-if="surface === 'error'" role="alert">
         {{ originErrorText(projects.error.value, t("collection.taskCreation.projectsError")) }}

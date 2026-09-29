@@ -13,9 +13,15 @@ import { meQuery } from "@/lib/queries";
 import { useCollabRoom, collabRoomName } from "../../collab/useCollabRoom";
 import AppLink from "../../components/AppLink.vue";
 import ConfirmActionButton from "../../components/ConfirmActionButton.vue";
+import TaskCollectionProperties from "../collections/TaskCollectionProperties.vue";
+import TaskActivityPanel from "../comments/TaskActivityPanel.vue";
+import OriginPanel from "../documents/OriginPanel.vue";
 import StarToggle from "../documents/StarToggle.vue";
+import TaskAttachmentsPanel from "./TaskAttachmentsPanel.vue";
+import TaskBacklinks from "./TaskBacklinks.vue";
 import TaskBodyEditor from "./TaskBodyEditor.vue";
 import TaskDetailForm from "./TaskDetailForm.vue";
+import TaskTimeEntries from "./TaskTimeEntries.vue";
 import "@/features/projects/projects.css";
 
 const props = defineProps<{
@@ -184,6 +190,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
         {{ t("task.delete") }}
       </ConfirmActionButton>
     </div>
+    <TaskCollectionProperties :workspace-id="workspaceId" :task-id="task.id" :read-only="readOnly" />
     <TaskBodyEditor
       :workspace-id="workspaceId"
       :slug="slug"
@@ -192,5 +199,26 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :session="session"
       :collab-user="collabUser"
     />
+    <TaskAttachmentsPanel
+      :workspace-id="workspaceId"
+      :task-id="task.id"
+      :read-only="readOnly || task.archivedAt != null"
+    />
+    <TaskTimeEntries
+      :workspace-id="workspaceId"
+      :task-id="task.id"
+      :members="members"
+      :read-only="readOnly"
+    />
+    <TaskActivityPanel
+      v-if="currentUserId"
+      :key="task.id"
+      :workspace-id="workspaceId"
+      :task-id="task.id"
+      :current-user-id="currentUserId"
+      :read-only="readOnly"
+    />
+    <TaskBacklinks :slug="slug" :workspace-id="workspaceId" :task-id="task.id" />
+    <OriginPanel :slug="slug" :workspace-id="workspaceId" :task-id="task.id" hide-when-empty />
   </div>
 </template>
