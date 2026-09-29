@@ -9,6 +9,15 @@ import { VUE_ROUTE_PATHS } from "./route-paths";
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
+  // Task list / collection views. src/app-boundary.ts is coordinator-owned;
+  // these routes stay unreachable until that regex list includes them
+  // (VUE_ROUTE_PATHS must be updated in the same change). A navigation that
+  // reaches them while the boundary still sends React will full-load away
+  // (afterEach below).
+  { path: "/w/:slug/:ref/tasks", name: "project-tasks", component: () => import("./pages/ProjectTasksPage.vue") },
+  { path: "/w/:slug/:ref/table", name: "project-table", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: "/w/:slug/:ref/board", name: "project-board", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: "/w/:slug/:ref/calendar", name: "project-calendar", component: () => import("./pages/ProjectCollectionPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

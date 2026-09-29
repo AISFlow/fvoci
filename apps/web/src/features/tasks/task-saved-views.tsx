@@ -10,32 +10,14 @@ import { Label } from "@/components/ui/label";
 import { NativeModal } from "@/features/projects/native-modal";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { asJsonObject, projectViewsQuery, type ProjectView } from "@/lib/queries/collections";
-import { normalizeViewQuery, viewQueriesEqual, type ViewQuery } from "@/lib/view-query";
+import { viewQueriesEqual, type ViewQuery } from "@/lib/view-query";
+import {
+  PROJECT_VIEW_TYPES,
+  projectViewTypeLabel,
+  viewConfigOf,
+  type ProjectViewType,
+} from "./project-views";
 import "@/features/projects/projects.css";
-
-export const PROJECT_VIEW_TYPES = ["list", "board", "calendar", "gantt", "table"] as const;
-export type ProjectViewType = (typeof PROJECT_VIEW_TYPES)[number];
-
-export function projectViewTypeLabel(type: string): string {
-  switch (type) {
-    case "list":
-      return t("view.backlog");
-    case "board":
-      return t("view.board");
-    case "calendar":
-      return t("view.calendar");
-    case "gantt":
-      return t("view.gantt");
-    case "table":
-      return t("view.table");
-    default:
-      return type;
-  }
-}
-
-export function viewConfigOf(view: ProjectView): ViewQuery {
-  return normalizeViewQuery(view.config) ?? { filters: {}, sort: [] };
-}
 
 export function ProjectTaskSavedViews({
   workspaceId,

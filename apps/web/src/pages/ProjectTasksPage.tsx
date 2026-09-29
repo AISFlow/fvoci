@@ -15,7 +15,8 @@ import { TaskCreateDialog } from "@/features/tasks/task-create-dialog";
 import { ProjectViewNav } from "@/features/collections/project-view-nav";
 import { TaskFilters } from "@/features/tasks/task-filters";
 import { TaskList } from "@/features/tasks/task-list";
-import { ProjectTaskSavedViews, viewConfigOf } from "@/features/tasks/task-saved-views";
+import { viewConfigOf } from "@/features/tasks/project-views";
+import { ProjectTaskSavedViews } from "@/features/tasks/task-saved-views";
 import {
   projectLabelsQuery,
   projectMilestonesQuery,

@@ -48,12 +48,7 @@ import {
   type CollectionQueryPreview,
   type CollectionView,
 } from "@/lib/queries/collections";
-import {
-  normalizeViewQuery,
-  readPrimarySort,
-  setPrimarySort,
-  type ViewQuery,
-} from "@/lib/view-query";
+import { readPrimarySort, setPrimarySort } from "@/lib/view-query";
 import { moveRequest, type BoardGroup } from "./board-model";
 import {
   CALENDAR_DRAG_TYPE,
@@ -62,46 +57,17 @@ import {
   type CalendarRow,
 } from "./calendar-model";
 import { CollectionBoard } from "./collection-board";
+import {
+  collectionConfigOf,
+  defaultConfig,
+  isViewType,
+  PAGE_LIMIT,
+  weekdayNames,
+  type CollectionViewType,
+} from "./collection-view";
 import { CustomFilters } from "./custom-filters";
 import { ValueEditor } from "./value-editor";
 import "./collections.css";
-
-export type CollectionViewType = "table" | "board" | "calendar";
-
-const PAGE_LIMIT = 50;
-
-function defaultConfig(type: CollectionViewType, query?: ViewQuery): CollectionConfig {
-  return {
-    query: query ?? { filters: {}, sort: [] },
-    groupBy: type === "board" ? "status" : null,
-    dateBy: type === "calendar" ? "due" : null,
-  };
-}
-
-/** Saved `config` → typed config (unknown shapes fall back to the type default). */
-export function collectionConfigOf(view: CollectionView): CollectionConfig {
-  const raw = view.config as unknown as Record<string, unknown>;
-  const query = normalizeViewQuery(raw?.query) ?? { filters: {}, sort: [] };
-  const type = view.type === "board" || view.type === "calendar" ? view.type : "table";
-  const base = defaultConfig(type, query);
-  return {
-    query,
-    groupBy: typeof raw?.groupBy === "string" ? raw.groupBy : raw?.groupBy === null ? null : base.groupBy,
-    dateBy: typeof raw?.dateBy === "string" ? raw.dateBy : raw?.dateBy === null ? null : base.dateBy,
-  };
-}
-
-function isViewType(value: string): value is CollectionViewType {
-  return value === "table" || value === "board" || value === "calendar";
-}
-
-function weekdayNames(weekStartsOn: number): string[] {
-  const formatter = new Intl.DateTimeFormat("ko-KR", { weekday: "short", timeZone: "UTC" });
-  // 2026-09-06 is a Sunday.
-  return Array.from({ length: 7 }, (_, index) =>
-    formatter.format(new Date(Date.UTC(2026, 8, 6 + ((weekStartsOn + index) % 7)))),
-  );
-}
 
 export function CollectionContents({
   workspaceId,
