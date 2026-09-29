@@ -253,20 +253,6 @@ test("the SSO slug form stays put on a slug the server would refuse", () => {
   assert.equal(t("form.invalid"), "입력을 확인해 주세요.");
 });
 
-test("the login page's SSO form submits through startWorkspaceSso, never to the server", () => {
-  const login = readFileSync(
-    path.join(import.meta.dirname, "../features/auth/login.tsx"),
-    "utf8",
-  );
-  const form = /function SsoSlugForm\(\)[\s\S]*?\n}\n/.exec(login)?.[0] ?? "";
-  assert.match(form, /<form\b/);
-  assert.match(form, /event\.preventDefault\(\);/);
-  assert.match(form, /startWorkspaceSso\(/);
-  assert.doesNotMatch(form, /\b(method|action|formAction)=/);
-  // Nor does any other form on the login page.
-  assert.doesNotMatch(login, /\b(method|action)=/);
-});
-
 test("the Vue login page's SSO form submits through startWorkspaceSso, never to the server", () => {
   const vueAuth = path.join(import.meta.dirname, "../vue/features/auth");
   const sso = readFileSync(path.join(vueAuth, "SsoSlugForm.vue"), "utf8");

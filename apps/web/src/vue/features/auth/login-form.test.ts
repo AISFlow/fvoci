@@ -37,6 +37,8 @@ test("the login page leaves the Vue app with a full load", () => {
   assert.match(page, /api\.POST\("\/api\/v1\/auth\/login"/);
   assert.match(page, /api\.POST\("\/api\/v1\/auth\/magic-link"/);
   assert.match(page, /api\.POST\("\/api\/v1\/auth\/password-reset"/);
+  assert.match(page, /if \(setup\.isLoading\.value \|\| setup\.isError\.value\) return/);
+  assert.match(page, /if \(mfaToken\.value === null\) mfaToken\.value = takeMfaFragment\(\)/);
   assert.match(page, /from "@\/lib\/queries\/instance"/);
   assert.doesNotMatch(page, /from ["']react["']/);
   assert.doesNotMatch(page, /from ["']@tanstack\/react-query["']/);

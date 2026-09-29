@@ -23,7 +23,7 @@ const instance = useQuery(publicInstanceQuery);
 const me = useQuery(meQuery);
 const providers = useQuery(providersQuery);
 
-const mfaToken = ref<string | null>(takeMfaFragment());
+const mfaToken = ref<string | null>(null);
 const brandingName = computed(() => setup.data.value?.branding.name);
 const operator = computed(() => instance.data.value?.values.operator ?? null);
 const returnTo = computed(() =>
@@ -40,10 +40,14 @@ const leaving = computed(
 );
 
 watchEffect(() => {
+  if (setup.isLoading.value || setup.isError.value) return;
   if (setup.data.value?.needed) {
     redirectTo("/setup");
     return;
   }
+  // React SetupGuard mounts LoginPage only after setup succeeds, so #mfa=
+  // survives a setup-error refresh. Take the fragment only on that same screen.
+  if (mfaToken.value === null) mfaToken.value = takeMfaFragment();
   if (me.data.value) {
     // Home and every other non-login page are the React app: a full load.
     window.location.replace(returnTo.value);
