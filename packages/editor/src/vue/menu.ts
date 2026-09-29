@@ -43,10 +43,13 @@ export function restoreNativeSelection(editor: {
 		const dom = editor.view.dom;
 		const editable = dom.getAttribute("contenteditable");
 		dom.contentEditable = "false";
-		sel.removeAllRanges();
-		sel.addRange(range);
-		if (editable === null) dom.removeAttribute("contenteditable");
-		else dom.setAttribute("contenteditable", editable);
+		try {
+			sel.removeAllRanges();
+			sel.addRange(range);
+		} finally {
+			if (editable === null) dom.removeAttribute("contenteditable");
+			else dom.setAttribute("contenteditable", editable);
+		}
 	} catch {
 		/* A widget or unmapped pos cannot become a Range. */
 	}
