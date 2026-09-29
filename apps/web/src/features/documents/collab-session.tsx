@@ -1,5 +1,4 @@
 import { FVOCI_YDOC_FRAGMENT } from "@fvoci/editor/collab";
-import type { HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import {
 	HocuspocusProviderWebsocketComponent,
 	HocuspocusRoom,
@@ -44,6 +43,7 @@ import {
 import {
 	type CollabRefusal,
 	createRefusalAwareSocket,
+	type RefusalAwareSocket,
 	RoomConnection,
 	type RoomConnectionState,
 	type RoomTimers,
@@ -107,11 +107,11 @@ function ClaimedRoom({
 	const proto = window.location.protocol === "https:" ? "wss" : "ws";
 	const url = `${proto}://${window.location.host}/collab`;
 	const [doc] = useState(() => new Y.Doc({ gc: false }));
-	const [room, setRoom] = useState<RoomConnectionState<HocuspocusProviderWebsocket> | null>(null);
-	const connection = useRef<RoomConnection<HocuspocusProviderWebsocket> | null>(null);
+	const [room, setRoom] = useState<RoomConnectionState<RefusalAwareSocket> | null>(null);
+	const connection = useRef<RoomConnection<RefusalAwareSocket> | null>(null);
 	/* Built in a layout effect so StrictMode's double run cannot leave a connected socket behind. */
 	useLayoutEffect(() => {
-		const next = new RoomConnection<HocuspocusProviderWebsocket>({
+		const next = new RoomConnection<RefusalAwareSocket>({
 			open: (onClosed) => createRefusalAwareSocket({ url }, onClosed),
 			onChange: setRoom,
 			/* WHY: #704 — Yjs 도 clientID 충돌을 보면 같은 자리를 이렇게 갈아 낀다(yjs.mjs:3342).
