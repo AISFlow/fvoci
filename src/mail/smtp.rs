@@ -134,12 +134,7 @@ async fn send_mail_inner(
         .body(text.to_string())
         .map_err(|_| CODE_INVALID_MESSAGE.to_string())?;
 
-    let tls = TlsParameters::new(smtp.host.clone()).map_err(|_| CODE_TLS_CONFIG.to_string())?;
-    let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(smtp.host.as_str())
-        .port(smtp.port)
-        .tls(Tls::Opportunistic(tls))
-        .timeout(Some(SMTP_TIMEOUT))
-        .build();
+    let transport = build_transport(smtp).map_err(str::to_string)?;
     let sent = tokio::time::timeout(SMTP_SESSION_TIMEOUT, transport.send(message))
         .await
         .map_err(|_| CODE_TIMEOUT.to_string())?;
@@ -166,17 +161,25 @@ async fn send_mail_inner(
     })
 }
 
-/// Connection check for `fvoci-migrate --doctor`: connect, EHLO and STARTTLS
-/// when offered (the same transport settings as sending), then QUIT. Sends no
-/// mail. The error is a short code without server text.
-pub async fn probe_smtp(smtp: &SmtpConfig) -> Result<(), String> {
-    let tls = TlsParameters::new(smtp.host.clone()).map_err(|_| "tls_config".to_string())?;
-    let transport: AsyncSmtpTransport<Tokio1Executor> =
+/// The transport of every send and of the doctor probe: STARTTLS whenever
+/// the server offers it, with the certificate verified for `smtp.host`, and
+/// `SMTP_TIMEOUT` per command. The error is `CODE_TLS_CONFIG`.
+fn build_transport(smtp: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>, &'static str> {
+    let tls = TlsParameters::new(smtp.host.clone()).map_err(|_| CODE_TLS_CONFIG)?;
+    Ok(
         AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(smtp.host.as_str())
             .port(smtp.port)
             .tls(Tls::Opportunistic(tls))
             .timeout(Some(SMTP_TIMEOUT))
-            .build();
+            .build(),
+    )
+}
+
+/// Connection check for `fvoci-migrate --doctor`: connect, EHLO and STARTTLS
+/// when offered (`build_transport`, as for sending), then QUIT. Sends no
+/// mail. The error is a short code without server text.
+pub async fn probe_smtp(smtp: &SmtpConfig) -> Result<(), String> {
+    let transport = build_transport(smtp).map_err(str::to_string)?;
     match tokio::time::timeout(SMTP_SESSION_TIMEOUT, transport.test_connection()).await {
         Ok(Ok(true)) => Ok(()),
         Ok(Ok(false)) => Err("smtp_not_ready".into()),
