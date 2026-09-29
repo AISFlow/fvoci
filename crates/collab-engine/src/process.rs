@@ -1041,6 +1041,8 @@ fn worker_fail(reason: WorkerFailureReason, detail: impl Into<String>) -> Engine
 /// Raise the soft `RLIMIT_NOFILE` to the hard ceiling for the server process.
 pub fn raise_nofile_to_hard_limit() {
     #[cfg(target_os = "linux")]
+    // SAFETY: getrlimit and setrlimit only read or write the stack-local `lim`,
+    // which outlives both calls.
     unsafe {
         let mut lim = libc::rlimit {
             rlim_cur: 0,
@@ -1066,6 +1068,8 @@ pub fn raise_nofile_to_hard_limit() {
 /// own `oom_score_adj` after exec. Linux only; a no-op elsewhere.
 pub fn make_process_non_dumpable() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_DUMPABLE and PR_GET_DUMPABLE take only integer arguments
+    // and read or write no memory of this process.
     unsafe {
         let zero: libc::c_ulong = 0;
         if libc::prctl(libc::PR_SET_DUMPABLE, zero, zero, zero, zero) != 0 {
@@ -1131,6 +1135,13 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         let stack_bytes = limits.max_child_stack_bytes;
         let cpu_secs = limits.cpu_budget_secs();
         let expected_ppid = std::process::id() as libc::pid_t;
+        // SAFETY: the closure runs in the forked child of a multi-threaded
+        // process, before exec, where another thread may have held the
+        // allocator or any other lock at fork time. It captures only integers
+        // and calls apply_rlimits_now and apply_parent_death_signal, which make
+        // raw syscalls (setrlimit, prctl via syscall, getppid, raise, _exit)
+        // and build errors with io::Error::last_os_error; none of them
+        // allocates, takes a lock or reads the environment.
         unsafe {
             cmd.pre_exec(move || {
                 apply_rlimits_now(as_bytes, cpu_secs, stack_bytes)?;
@@ -1151,10 +1162,15 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
 /// itself is blocked in `spawn` until exec). Same contract as the
 /// document-extract client. A server that dies mid-request (SIGKILL, crash,
 /// shutdown deadline) must not leave a helper running until RLIMIT_CPU.
+///
+/// `expected_ppid` is the server's pid, read before fork; any other
+/// `getppid()` means the server died before PDEATHSIG was armed and the child
+/// was reparented.
 #[cfg(target_os = "linux")]
 fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<()> {
-    // SAFETY: runs between fork and exec. Only async-signal-safe libc without
-    // allocation: `syscall`, `getppid`, `raise`, `_exit`.
+    // SAFETY: runs between fork and exec (see apply_pre_exec_rlimits). Thin
+    // syscall wrappers only (`syscall(SYS_prctl)`, `getppid`, `raise`,
+    // `_exit`) with integer arguments: no allocation, no locks.
     unsafe {
         let rc = libc::syscall(
             libc::SYS_prctl,
@@ -1176,9 +1192,12 @@ fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<()> 
 }
 
 /// Apply OS ceilings in the current process. Used from `pre_exec` and the child
-/// binary before it reads frames.
+/// binary before it reads frames. Must stay allocation- and lock-free: the
+/// `pre_exec` closure calls it in the forked child.
 pub fn apply_rlimits_now(as_bytes: u64, cpu_secs: u64, stack_bytes: u64) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
+    // SAFETY: each setrlimit call reads a stack-local rlimit that outlives the
+    // call.
     unsafe {
         let stack_lim = libc::rlimit {
             rlim_cur: stack_bytes,
