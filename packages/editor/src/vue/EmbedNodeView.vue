@@ -30,9 +30,8 @@ const showEditor = computed(
 );
 /** The form's values when they differ from the node's; null otherwise. */
 let draft: { entity: EmbedEntity; ref: string } | null = null;
-/** The form's starting values, fixed while it is open (a remote edit must not overwrite typing). */
-const initial = shallowRef({ entity: entity.value, ref: refValue.value });
 const form = useTemplateRef<HTMLElement>("form");
+const kindSelect = useTemplateRef<HTMLSelectElement>("kindSelect");
 const refInput = useTemplateRef<HTMLTextAreaElement>("refInput");
 
 function readForm(container: HTMLElement): { entity: EmbedEntity; ref: string } {
@@ -64,14 +63,25 @@ function commitIfLeaving(event: FocusEvent): void {
 }
 
 function open(): void {
-  initial.value = { entity: entity.value, ref: refValue.value };
   editing.value = true;
 }
 
+// The form's fields are uncontrolled, like the React view's defaultValue:
+// they get the node's values once, when the form opens (on mount for a new
+// empty embed), and are never bound. Vue re-applies a bound value whenever
+// the template re-renders, and the form re-renders on a peer's change to
+// this node (data-entity), which would reset what was typed.
 watch(
   showEditor,
   (shown) => {
-    if (shown) void nextTick(() => refInput.value?.focus());
+    if (!shown) return;
+    const start = { entity: entity.value, ref: refValue.value };
+    void nextTick(() => {
+      if (kindSelect.value) kindSelect.value.value = start.entity;
+      if (!refInput.value) return;
+      refInput.value.value = start.ref;
+      refInput.value.focus();
+    });
   },
   { immediate: true },
 );
@@ -117,8 +127,8 @@ watch(
   <NodeViewWrapper>
     <div v-if="showEditor" ref="form" class="afn-embed afn-embed-edit" :data-entity="entity">
       <select
+        ref="kindSelect"
         class="afn-embed-entity"
-        :value="initial.entity"
         :aria-label="t('editor.embed.kind')"
         @change="rememberDraft"
         @blur="commitIfLeaving"
@@ -128,7 +138,6 @@ watch(
       <textarea
         ref="refInput"
         class="afn-embed-ref-input"
-        :value="initial.ref"
         :aria-label="t('editor.embed.ref')"
         :placeholder="t('editor.embed.placeholder')"
         @input="rememberDraft"

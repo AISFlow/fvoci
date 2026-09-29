@@ -24,14 +24,19 @@ function commit(next: string): void {
   props.updateAttributes({ latex: next });
 }
 
-/** The source when editing opened; a remote change while typing must not
- * overwrite the field (the React views use an uncontrolled defaultValue). */
-const initial = ref("");
-
+/** Opens the source field. The field is uncontrolled, like the React view's
+ * defaultValue: its value is written once, here, and never bound, because
+ * Vue re-applies a bound value on every re-render of its template, so a
+ * peer's change to this node while typing would reset what was typed. */
 function open(): void {
-  initial.value = latex.value;
+  const source = latex.value;
   editing.value = true;
-  void nextTick(() => input.value?.focus());
+  void nextTick(() => {
+    const field = input.value;
+    if (!field) return;
+    field.value = source;
+    field.focus();
+  });
 }
 
 function onInput(event: Event): void {
@@ -62,7 +67,6 @@ watch(editable, (value) => {
       v-if="editing && editable"
       ref="input"
       class="afn-math-edit"
-      :value="initial"
       :aria-label="t('editor.math.latex')"
       @input="onInput"
       @blur="onBlur"

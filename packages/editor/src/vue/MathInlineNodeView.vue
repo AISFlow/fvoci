@@ -16,14 +16,17 @@ const empty = computed(() => latex.value.trim() === "");
 const editing = ref(false);
 const input = useTemplateRef<HTMLInputElement>("input");
 
-/** The source when editing opened; a remote change while typing must not
- * overwrite the field (the React views use an uncontrolled defaultValue). */
-const initial = ref("");
-
+/** Opens the source field, uncontrolled like the block view's (MathNodeView.vue):
+ * its value is written once, so a peer's change never resets what was typed. */
 function open(): void {
-  initial.value = latex.value;
+  const source = latex.value;
   editing.value = true;
-  void nextTick(() => input.value?.focus());
+  void nextTick(() => {
+    const field = input.value;
+    if (!field) return;
+    field.value = source;
+    field.focus();
+  });
 }
 
 function onBlur(event: FocusEvent): void {
@@ -47,7 +50,6 @@ watch(editable, (value) => {
       v-if="editing && editable"
       ref="input"
       class="afn-math-inline-edit"
-      :value="initial"
       :aria-label="t('editor.math.latex')"
       @keydown="onKeydown"
       @blur="onBlur"

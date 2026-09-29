@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { getSchema } from "@tiptap/core";
 import * as Y from "yjs";
@@ -84,4 +84,21 @@ test("the Vue editor imports no React module", () => {
   walk(new URL("../src/vue/index.ts", import.meta.url));
   assert.deepEqual([...bare].filter((spec) => react.test(spec)), []);
   assert.ok(bare.has("@tiptap/vue-3"));
+});
+
+// Vue re-applies a bound `value` whenever the template that owns the field
+// re-renders, and a node view re-renders on a peer's change to its node: a
+// bound field would drop what the user is typing. The fields are
+// uncontrolled (the React views' defaultValue) and get their value once,
+// when they open.
+test("the Vue node views never bind the value of a field being edited", () => {
+  const dir = new URL("../src/vue/", import.meta.url);
+  const bound: string[] = [];
+  for (const name of readdirSync(dir).filter((file) => file.endsWith(".vue"))) {
+    const source = readFileSync(new URL(name, dir), "utf8");
+    for (const [tag] of source.matchAll(/<(?:input|textarea|select)\b[^>]*>/g)) {
+      if (/(?:^|\s)(?::value|v-bind:value|v-model(?:\.[a-z]+)*)=/.test(tag)) bound.push(`${name}: ${tag.replace(/\s+/g, " ")}`);
+    }
+  }
+  assert.deepEqual(bound, []);
 });

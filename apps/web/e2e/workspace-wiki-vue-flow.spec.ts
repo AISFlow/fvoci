@@ -323,6 +323,92 @@ test("a math block inserted with /math reaches the peer, the saved body and a re
   }
 });
 
+test("a peer's change to an embed or math block being edited keeps the typed draft, and leaving the field commits it", async ({
+  browser,
+  baseURL,
+}) => {
+  // Not inline math: a peer's change to an inline node rebuilds its
+  // paragraph and the node view with it, in the React editor as well, so
+  // the open field closes there (a separate, pre-existing issue).
+  const a = await newSignedInPage(browser, baseURL, admin);
+  const b = await newSignedInPage(browser, baseURL, member);
+  try {
+    const wsId = await workspaceId(a.page.request);
+    const doc = await createDoc(a.page.request, wsId, "편집 중 원격 변경");
+    const paragraph = (text: string) => ({ type: "paragraph", content: [{ type: "text", text }] });
+    const put = await a.page.request.put(`/api/v1/workspaces/${wsId}/documents/${doc.id}/body`, {
+      data: {
+        contentJson: {
+          type: "doc",
+          content: [
+            paragraph("앞"),
+            { type: "embed", attrs: { entity: "document", ref: "WIKI-9999" } },
+            { type: "math", attrs: { latex: "x" } },
+            paragraph("뒤"),
+          ],
+        },
+      },
+    });
+    expect(put.ok(), await put.text()).toBe(true);
+    await openDoc(a.page, doc.path);
+    await openDoc(b.page, doc.path);
+
+    // Embed: A types a new reference; meanwhile B changes the embed's kind.
+    await a.page.getByRole("button", { name: "참조 편집" }).click();
+    const refA = a.page.getByLabel("참조", { exact: true });
+    await expect(refA).toBeFocused();
+    await refA.fill("WIKI-1234");
+    await b.page.getByRole("button", { name: "참조 편집" }).click();
+    await b.page.getByLabel("참조 종류").selectOption("task");
+    await caretAtEndOf(b.page, 3);
+    // A's form follows the node (its kind attribute is now B's)...
+    await expect(a.page.locator(".fvoci-editor .afn-embed-edit")).toHaveAttribute("data-entity", "task");
+    // ...and keeps what A typed and chose, as the React view's uncontrolled fields do.
+    await expect(refA).toBeFocused();
+    await expect(refA).toHaveValue("WIKI-1234");
+    await expect(a.page.getByLabel("참조 종류")).toHaveValue("document");
+    // Leaving the form commits A's form: the last writer wins, on both peers.
+    await caretAtEndOf(a.page, 0);
+    for (const page of [a.page, b.page]) {
+      const card = page.locator(".fvoci-editor .afn-embed-host .afn-embed");
+      await expect(card).toHaveAttribute("data-entity", "document");
+      await expect(card.locator(".afn-embed-ref")).toHaveText("WIKI-1234");
+    }
+
+    // Block math: A types a new source while B commits another one.
+    await a.page.locator(".fvoci-editor button.afn-math").click();
+    const sourceA = a.page.getByLabel("수식 LaTeX");
+    await expect(sourceA).toBeFocused();
+    await sourceA.fill("a+b");
+    await b.page.locator(".fvoci-editor button.afn-math").click();
+    await b.page.getByLabel("수식 LaTeX").fill("y");
+    await b.page.getByLabel("수식 LaTeX").blur();
+    await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("y");
+    // B's later text edit reaches A after B's latex (one socket, in order).
+    await caretAtEndOf(b.page, 3);
+    await b.page.keyboard.type(" 끝");
+    await expect.poll(async () => (await blockTexts(a.page)).at(-1), { timeout: 15_000 }).toBe("뒤 끝");
+    await expect(sourceA).toBeFocused();
+    await expect(sourceA).toHaveValue("a+b");
+    await sourceA.blur();
+    await expect(a.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b");
+    await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b", { timeout: 15_000 });
+
+    await save(a.page);
+    const saved = JSON.parse(await bodyJson(a.page.request, wsId, doc.id)) as {
+      content: { type: string; attrs?: Record<string, unknown> }[];
+    };
+    expect(saved.content.find((node) => node.type === "embed")?.attrs).toMatchObject({
+      entity: "document",
+      ref: "WIKI-1234",
+    });
+    expect(saved.content.find((node) => node.type === "math")?.attrs).toMatchObject({ latex: "a+b" });
+  } finally {
+    await a.context.close();
+    await b.context.close();
+  }
+});
+
 test("Korean composition survives a concurrent remote edit, then undoes and redoes", async ({
   browser,
   baseURL,
