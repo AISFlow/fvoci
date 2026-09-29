@@ -5,7 +5,14 @@ use uuid::Uuid;
 
 pub const OUTBOX_LEASE_SECS: i64 = 30;
 pub const OUTBOX_DEFAULT_BATCH: i32 = 100;
+/// Failed attempts after which an event is dead-lettered: the cursor passes
+/// it, and it is delivered again only after a manual SQL call to
+/// `fvoci.app_outbox_requeue` (see the `crate::outbox` module doc).
 pub const OUTBOX_MAX_ATTEMPTS: i32 = 5;
+/// Delay before the first retry; `app_outbox_record_failure` doubles it
+/// after each further failure (up to 60 s). With the defaults the fifth
+/// failure, and so the dead letter, comes about 15 s (1 + 2 + 4 + 8) plus
+/// attempt time after the first.
 pub const OUTBOX_FAILURE_BACKOFF_MS: i32 = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -19,9 +19,13 @@ use crate::db::outbox::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryMode {
-    /// Apply the consumer effect and advance the cursor in one transaction.
+    /// The effect is written to this database in one transaction with the
+    /// processed mark and the cursor advance, so it is applied once.
     PgOnly,
-    /// Idempotent at-least-once delivery for external side effects.
+    /// The effect reaches outside this database and is delivered at least
+    /// once: a repeat must be harmless (search re-upserts from current rows,
+    /// GitHub sets the issue's current state) or accepted (mail, see
+    /// `crate::mail::consumer::MailConsumer`).
     External,
 }
 
@@ -40,13 +44,19 @@ pub trait OutboxConsumer: Send + Sync {
         OUTBOX_MAX_ATTEMPTS
     }
 
-    /// Deliver one event. For `PgOnly`, implementations must apply their effect
-    /// and advance the cursor in the same transaction via `advance_cursor_tx`.
-    /// Retrying an event at or below the cursor is allowed only after a
-    /// dead-letter skip was requeued; `advance_cursor_tx` then returns true and
-    /// deletes that failure row. `External` implementations must be idempotent:
-    /// a duplicate delivery after a crash or overlapping lease must converge to
-    /// the same side effect.
+    /// Deliver one event (see the `crate::outbox` module doc for the order).
+    ///
+    /// `PgOnly`: in one transaction, write the processed mark first
+    /// (`mark_processed_tx`), apply the effect only when the mark is new, then
+    /// advance the cursor with `advance_cursor_tx`; when the advance is
+    /// rejected, roll back and return `Delivery`. A consumer that keeps no
+    /// marks (GitHub while unconfigured) only advances. An event at or below
+    /// the cursor is retried only after a dead-letter skip was requeued;
+    /// `advance_cursor_tx` then returns true and deletes that failure row.
+    ///
+    /// `External`: return once the effect is confirmed; the dispatcher marks
+    /// and advances. A repeated delivery must be harmless or accepted (see
+    /// [`DeliveryMode::External`]).
     fn deliver<'a>(
         &'a self,
         pool: &'a PgPool,
@@ -89,10 +99,11 @@ pub trait OutboxConsumer: Send + Sync {
 
     /// Max events this consumer wants in one `deliver_batch`. The dispatcher
     /// also applies [`OutboxDispatcherSettings::batch_limit`]. A consumer that
-    /// keeps the default `deliver_batch` and whose effect is not idempotent
-    /// returns 1 (GitHub): a lease timeout then drops one event's work, not
-    /// the progress of a whole chunk. The mail consumer instead ends its own
-    /// calls after one mail event.
+    /// keeps the default `deliver_batch` and whose events each take much of
+    /// the lease returns 1 (GitHub: two 10 s requests per event): a lease
+    /// timeout then drops one event's progress, not a whole chunk's, and is
+    /// charged to the event that overran. The mail consumer instead ends its
+    /// own calls after one mail event.
     fn batch_event_cap(&self) -> usize {
         usize::MAX
     }
@@ -218,6 +229,8 @@ async fn run_dispatcher_loop(
         }
     }
 
+    // This task owns the leases. Releasing them lets the next start take
+    // over without waiting out the TTL; after a crash they expire on their own.
     for (consumer, owner) in owners {
         if let Err(err) = release_consumer(&pool, consumer.name(), owner).await {
             warn!(
@@ -246,8 +259,10 @@ async fn process_consumer_cycle(
         return Ok(true);
     }
 
-    // Fail closed on restore xid epoch before the retry sweep. `read` evaluates
-    // snapshot and comparison in one statement; a separate xmax helper raced.
+    // Read before the retry sweep, so a cluster restored with a different xid
+    // epoch delivers neither retries nor new events until --recover-outbox.
+    // `app_outbox_read` compares the cursor and events with the snapshot
+    // taken in the same statement.
     let events = match read_events(pool, consumer.name(), settings.batch_limit).await {
         Ok(events) => events,
         Err(err) if is_outbox_xid_epoch_mismatch(&err) => {
@@ -405,6 +420,13 @@ fn external_deliver_chunk_len(
     }
 }
 
+/// The lease minus a 0.5 s margin: the timeout of each `deliver_batch` call,
+/// and the budget of one consumer's External turn after which no new chunk
+/// starts, so the one dispatcher task moves on to the other consumers. The
+/// lease is renewed right before each call, so the call is dropped before the
+/// lease can expire and no second owner delivers the same events at the same
+/// time, as long as the renewal's `now()` precedes the timer start by less
+/// than the margin.
 fn lease_batch_timeout(lease: Duration) -> Duration {
     let margin = Duration::from_millis(500);
     lease.saturating_sub(margin).max(Duration::from_millis(1))
