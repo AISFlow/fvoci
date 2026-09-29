@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# Restore a logical backup into a FRESH infra/rust Compose project.
-#
-# Target volumes must not already exist. Restores PostgreSQL, restores the
-# storage volume, then starts init (fvoci-migrate, --grant-app-role,
-# --ensure-meili-key), checks every stored attachment exists in storage
-# (fvoci-migrate --verify-storage) and starts the server. Meilisearch data is not in the backup;
-# init creates a scoped key and empty index with the required settings.
-#
-# The standalone compose.user.yml has no init service: its fvoci service runs
-# the same steps with `fvoci-migrate --prepare` (and the owner commands) from
-# the owner password in its environment.
+# Restore a logical backup into a FRESH infra/rust Compose project whose
+# volumes do not exist yet, in this order:
+#   1. offline preflight of the backup against the manifest (format,
+#      PostgreSQL major version, file hashes, dump magic and tar layout,
+#      source differs from target, pepper and ENCRYPTION_KEYS fingerprints):
+#      fvoci-migrate --restore-preflight in the product image with no network,
+#      before any target volume exists;
+#   2. storage volume restore, then the app role and pg_restore;
+#   3. preparation: the developer stack's init service (fvoci-migrate,
+#      --grant-app-role, --ensure-meili-key), or `fvoci-migrate --prepare` in
+#      the app service of the user install (compose.user.yml has no init);
+#   4. --recover-outbox: rebase the outbox cursors onto this cluster's xids;
+#   5. --rebuild-search: reindex from PostgreSQL (Meilisearch data is not in
+#      the backup);
+#   6. --verify-storage: every stored attachment and published preview exists
+#      with its recorded size, and every branding asset with its digest;
+#   7. --verify-secrets: every sealed secret (MFA, workspace SSO, webhooks, the
+#      VAPID key) opens with the configured ENCRYPTION_KEYS;
+#   8. server start.
 #
 # Keep POSTGRES_USER, POSTGRES_DB, and FVOCI_APP_ROLE names the same as the
 # backed-up install. Database and Meili passwords may be new. PASSWORD_PEPPER_KEYS
 # must match the original or existing passwords will not verify. ENCRYPTION_KEYS
 # must hold every key id of the original with the same key (a rotated superset
-# is fine); both are checked against the manifest before any volume exists.
-# After the database is restored, fvoci-migrate --verify-secrets opens every
-# sealed secret (MFA, workspace SSO, webhooks) before the server starts.
+# is fine); step 1 checks both.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -196,19 +202,17 @@ SERVER="$(jq -er '[.services | to_entries[] | select(any(.value.ports[]?; .targe
 INIT="$(jq -r --arg s "$SERVER" '[.services[$s].depends_on // {} | to_entries[]
   | select(.value.condition == "service_completed_successfully") | .key] | .[0] // ""' <<<"$COMPOSE_CONFIG")"
 PREP="${INIT:-$SERVER}"
-SELECTED_IMAGE="$(jq -er --arg s "$SERVER" '.services[$s].image' <<<"$COMPOSE_CONFIG")"
-PRODUCT_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$SELECTED_IMAGE")"
 compose_key() {
-  if jq -e --arg s "$SERVER" --arg name "${1}_FILE" '.services[$s].environment // {} | has($name)' \
-    <<<"$COMPOSE_CONFIG" >/dev/null; then
-    # compose.user.yml: a secret file Compose fills from the variable; an
-    # exported value wins over the env file, as in Compose.
-    if [[ -n "${!1+x}" ]]; then printf '%s\n' "${!1}"; else read_env "$1"; fi
-  else
-    jq -r --arg s "$SERVER" --arg name "$1" '.services[$s].environment[$name] // ""' <<<"$COMPOSE_CONFIG"
-  fi
+  jq -r --arg s "$SERVER" --arg name "$1" '.services[$s].environment[$name] // ""' <<<"$COMPOSE_CONFIG"
 }
 PEPPER_KEYS="$(compose_key PASSWORD_PEPPER_KEYS)"
+if [[ -z "$PEPPER_KEYS" ]]; then
+  # A compose.yml of an older release that passed the keyrings as secret files.
+  echo "$COMPOSE_FILE passes no PASSWORD_PEPPER_KEYS to $SERVER (a release that used secret files); run scripts/restore.sh from that release" >&2
+  exit 1
+fi
+SELECTED_IMAGE="$(jq -er --arg s "$SERVER" '.services[$s].image' <<<"$COMPOSE_CONFIG")"
+PRODUCT_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$SELECTED_IMAGE")"
 PEPPER_ACTIVE="$(compose_key PASSWORD_PEPPER_ACTIVE_KEY_ID)"
 ENCRYPTION_KEYS_VALUE="$(compose_key ENCRYPTION_KEYS)"
 ENCRYPTION_ACTIVE="$(compose_key ENCRYPTION_ACTIVE_KEY_ID)"
@@ -226,13 +230,10 @@ for service in "$SERVER" "$PREP"; do
     exit 1
   fi
 done
-# Each key is the exported value: as environment, or (compose.user.yml) as a
-# secret file Compose fills from that variable.
-if ! jq -e --arg s "$SERVER" '(.services[$s].environment // {}) as $settings | (.secrets // {}) as $secrets |
+# Each key the server environment gets is the exported value.
+if ! jq -e --arg s "$SERVER" '(.services[$s].environment // {}) as $settings |
   all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
-    . as $key | if $settings | has($key + "_FILE")
-      then ($settings | has($key) | not) and any($secrets[]; .environment == $key)
-      else $settings[$key] == env[$key] end)' <<<"$PINNED_CONFIG" >/dev/null; then
+    . as $key | $settings[$key] == env[$key])' <<<"$PINNED_CONFIG" >/dev/null; then
   echo "Compose must preserve the selected product image and key snapshot" >&2
   exit 1
 fi

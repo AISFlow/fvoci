@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The $ in single quotes below is literal env-file text on purpose.
 # shellcheck disable=SC2016
-# Checks how scripts/restore.sh reads keyring and password values from the
+# Checks how scripts/restore.sh reads the app role and its password from the
 # operator env file: the accepted forms must give the value docker compose
 # interpolates, and every other form must be refused. When `docker compose`
 # is available each accepted case is also compared with Compose's own parse.

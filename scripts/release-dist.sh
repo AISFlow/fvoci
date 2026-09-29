@@ -116,12 +116,6 @@ for ref in references:
     if not match:
         sys.exit(f"{env['COMPOSE_SOURCE']}: every interpolation must be ${{VAR:?message}}; found ${ref}")
     used.add(match.group(1))
-# Compose file secrets read their variable without interpolation; each such
-# variable must also be required above, or an unfilled .env would reach a
-# container as an empty secret.
-secret_sources = set(re.findall(r"^    environment:[ \t]+([A-Z][A-Z0-9_]*)[ \t]*$", rendered, re.MULTILINE))
-if secret_sources - used:
-    sys.exit(f"{env['COMPOSE_SOURCE']}: secrets read {sorted(secret_sources - used)} without a ${{VAR:?message}} check")
 if used != set(assigned):
     sys.exit(f"{env['ENV_SOURCE']} must assign exactly the variables {env['COMPOSE_SOURCE']} reads: "
              f"missing {sorted(used - set(assigned))}, unused {sorted(set(assigned) - used)}")

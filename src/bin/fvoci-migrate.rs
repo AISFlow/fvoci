@@ -14,11 +14,9 @@ use fvoci_server::secret_verify::verify_sealed_secrets;
 use uuid::Uuid;
 
 fn main() {
-    // Before the runtime starts any thread: the preparation secrets named by
-    // `<VAR>_FILE` become `<VAR>`, and the install variables become URLs.
-    if let Err(error) = fvoci_server::prepare::load_secret_files()
-        .and_then(|()| fvoci_server::prepare::load_install_env())
-    {
+    // Before the runtime starts any thread: the Compose install's variables
+    // become the URLs the commands read.
+    if let Err(error) = fvoci_server::prepare::load_install_env() {
         eprintln!("fvoci-migrate: {error}");
         std::process::exit(1);
     }
@@ -29,11 +27,20 @@ fn main() {
     async_main();
 }
 
-/// `--start [server args]`, the image entrypoint: prepare the install when the
+/// `--start [server args]`, the image entrypoint: refuse the retired
+/// `<VAR>_FILE` settings of older compose files, prepare the install when the
 /// owner password is given (`fvoci_server::prepare`), then become
 /// `fvoci-server` with the preparation-only values removed.
 fn start(server_args: &[String]) -> ! {
     use fvoci_server::prepare;
+    let retired = prepare::retired_secret_files(|k| std::env::var(k).ok());
+    if !retired.is_empty() {
+        for problem in retired {
+            eprintln!("fvoci: {problem}");
+        }
+        eprintln!("fvoci: not starting");
+        std::process::exit(2);
+    }
     if prepare::wants_prepare() {
         let problems = prepare::validate(|k| std::env::var(k).ok());
         if !problems.is_empty() {

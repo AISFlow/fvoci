@@ -23,7 +23,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `METRICS_ALLOW_IPS` | `/metrics` allowlist (source contract): comma-separated IPv4 addresses or CIDRs with a required `/1`–`/32` prefix; IPv4-mapped IPv6 peers compare as IPv4, IPv6 entries are refused. Unset or empty denies every peer (404). Only the direct socket peer counts; `X-Forwarded-For` is ignored. List the scraper's direct address; a reverse proxy must not forward `/metrics` (or must restrict it itself), because listing the proxy's address makes `/metrics` public to everyone the proxy forwards. One malformed entry refuses startup. `/health` and `/ready` are not affected. |
 | `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). Trailing slashes are normalized. An explicit port `0` follows the actual bound port. |
 | `FVOCI_COOKIE_SECURE` | `true`/`1` to set `Secure` on session cookies; defaults from `FVOCI_PUBLIC_ORIGIN` scheme. |
-| `FVOCI_LICENSE_KEY` | Optional secret FVOCI2 enterprise entitlement. Absent, malformed, untrusted, or expired tokens do not block startup: audit, branding, and workspace SSO remain disabled; seats default to 10 and storage/upload limits to unlimited. The server verifies offline using only the public keys compiled into `src/license-trust.json`, which is currently empty, matching the fixed source. No issued token can activate enterprise features until issuer public keys are supplied in a reviewed release build; there is no environment trust-key override. Rotate the token by restarting the server; its validity window is rechecked during use. Keep the token out of logs and backups shared outside the operator boundary. Instance OIDC remains available without an enterprise license. |
+| `FVOCI_LICENSE_KEY` | Optional secret FVOCI2 enterprise entitlement. Absent, malformed, untrusted, or expired tokens do not block startup: audit, branding, and workspace SSO remain disabled; seats default to 10 and storage/upload limits to unlimited. The server verifies offline using only the public keys compiled into `src/license-trust.json`, which is currently empty, matching the fixed source. No issued token can activate enterprise features until issuer public keys are supplied in a reviewed release build; there is no environment trust-key override. Rotate the token by recreating the server (`docker compose up -d`); its validity window is rechecked during use. Keep the token out of logs and backups shared outside the operator boundary. Instance OIDC remains available without an enterprise license. |
 | `FVOCI_STATIC_DIR` | Optional built frontend directory containing index.html; validated at startup. |
 | `FVOCI_STORAGE_DIR` | Required persistent local attachment directory when `STORAGE_DRIVER=local` (the default). Writable by the server. Reuse the same directory across restarts and preserve it with the database. |
 | `STORAGE_LOCAL_PATH` | Source-compatible storage path alias, used only when `FVOCI_STORAGE_DIR` is absent. |
@@ -47,7 +47,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. The file must be a regular file of at most 4 KiB and is opened without following a symlink: a path that is a symlink (for example a Kubernetes Secret or projected volume entry, which points into `..data/`) is refused at startup. |
 | `FVOCI_MEILI_INDEX` | Index uid (default `fvoci`). Tests may set a per-run uid. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | Outgoing mail (invitations, password reset). All three or none; unset disables mail and invitation links are shown instead. No AUTH (same as the source). STARTTLS is used whenever the relay offers it, with certificate verification against public roots, so an internal relay needs a publicly trusted certificate or must not offer STARTTLS. |
-| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --secrets-rotate` re-seals them under the active key; `--secrets-audit` and `--verify-secrets` list the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
+| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --secrets-rotate` re-seals them under the active key; `--secrets-audit` and `--verify-secrets` list the key ids in use). Back it up (apart from the database backup); restore checks it (see Backup and restore). |
 | `FVOCI_WEBHOOK_ALLOW_TARGETS` | Comma list of host names / IP addresses that webhook URLs may use despite the outbound rules (default empty). A listed URL host skips the port (80/443) and host-name rules; a listed IP is accepted as a literal or resolved private address. Meant for local receivers (tests, e2e); leave empty in production. `0.0.0.0` / `::` are refused. |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET` | Optional GitHub App (all three or none; the PEM may use literal `\n`). Enables `/github/install`, `/api/v1/github/callback`, the signed `/api/v1/github/webhook` endpoint and the `github` outbox consumer that closes/reopens linked issues. The install `state` is single use and bound to the admin session that started it (the callback needs that session cookie); the callback confirms the installation with `GET /app/installations/{id}` and never replaces an existing link to another installation (uninstall first). While the app is not configured the `github` cursor still advances, so enabling it later does not replay older status changes. |
 | `GITHUB_STATE_SECRET` | Server-only key (at least 32 bytes) for the install `state` MAC. If unset it is derived (HKDF-SHA256) from the active `ENCRYPTION_KEYS` key; with neither, a configured GitHub App fails at boot. The webhook secret is not used because GitHub App managers also hold it. |
@@ -749,31 +749,29 @@ administrator (no administrator is created automatically). Services: `fvoci`,
 (`openssl rand -hex 32` each) and the keyrings `PASSWORD_PEPPER_KEYS` and
 `ENCRYPTION_KEYS` (`{"install":"<openssl rand -hex 32>"}`, the same format as
 `fvoci-migrate --init-env`). Compose requires each value, so an unfilled `.env`
-stops before any container is created. Keep `.env` private and with your
-backups; PostgreSQL keeps the owner and app passwords from the first start, and
-the pepper and encryption keys open existing accounts and sealed secrets.
-Compose passes each service only the values it names (no `env_file`).
+stops before any container is created. Keep `.env` private (`chmod 600 .env`)
+and back it up apart from the database backups; PostgreSQL keeps the owner and
+app passwords from the first start, and the pepper and encryption keys open
+existing accounts and sealed secrets.
 
-The three passwords (`POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`,
-`MEILI_MASTER_KEY`) and the two keyrings (`PASSWORD_PEPPER_KEYS`,
-`ENCRYPTION_KEYS`) are not container environment: Compose passes them as file
-secrets read from `.env` (top-level `secrets:` with `environment:`, which needs
-Docker Compose v2.23; `INSTALL.md` asks for v2.24 or newer), copied into each container that needs them as
-`/run/secrets/<name>`, owner root, mode `0400`. `fvoci` gets all five and
-names them with `POSTGRES_PASSWORD_FILE`, `FVOCI_APP_PASSWORD_FILE`,
-`MEILI_MASTER_KEY_FILE`, `PASSWORD_PEPPER_KEYS_FILE` and `ENCRYPTION_KEYS_FILE`
-(the two active key ids stay plain settings); `postgres` reads
-`POSTGRES_PASSWORD_FILE` (its image's entrypoint, as root); `meilisearch`
-exports its key from the file in its start command, so it is not on a command
-line. `fvoci-migrate` reads `<VAR>_FILE` for these five, as root; setting both
-`<VAR>` and `<VAR>_FILE` is an error. Compose copies the files when it creates
-a container: after changing one of these values, run
-`docker compose up -d --force-recreate` (PostgreSQL still keeps the passwords
-from its first start).
+Compose passes the values as container environment, each service only those
+it names (no `env_file`): `fvoci` all of them except `FVOCI_PUBLISH_PORT`
+(the published port), `postgres` only `POSTGRES_PASSWORD`, `meilisearch` only
+`MEILI_MASTER_KEY`. A container keeps the environment it was created with:
+after editing `.env`, run `docker compose up -d`, which recreates the
+containers whose values changed (`docker compose restart` keeps the old
+values). That applies a changed setting; it does not change a password or key
+already in use. PostgreSQL keeps both passwords from its first start (a
+different value is refused, below), and a keyring changes by adding a key and
+switching its active id, keeping the old key while anything still uses it
+(`--secrets-audit`, `--secrets-rotate` in "Operator commands").
 
 The image entrypoint is `fvoci-migrate --start`. The `fvoci` service starts it
-as root (`user: "0:0"`). Given the owner password (`POSTGRES_PASSWORD_FILE`, or
-`POSTGRES_PASSWORD`), it runs, on every start of `fvoci`:
+as root (`user: "0:0"`). It first refuses any `<VAR>_FILE` setting of the five
+generated values (`POSTGRES_PASSWORD_FILE` and the like, from the `compose.yml`
+of an older release; nothing reads them any more): it names each and exits 2,
+with or without the owner password. Given the owner password
+(`POSTGRES_PASSWORD`), it then runs, on every start of `fvoci`:
 
 1. **Settings check.** Every required value is set, not empty and not an
    example placeholder (`<…>`, `change-me`, …); passwords and the master key
@@ -802,25 +800,29 @@ as root (`user: "0:0"`). Given the owner password (`POSTGRES_PASSWORD_FILE`, or
    `fvoci-server` in the same process (pid 1, so signals, graceful shutdown and
    child reaping are the server's, as before), as uid/gid `1000` with no
    supplementary groups and so no capabilities. Its environment is the
-   container's (the non-secret settings) without `POSTGRES_PASSWORD`,
-   `DATABASE_URL`, `FVOCI_MIGRATION_URL`, `MEILI_MASTER_KEY`,
-   `FVOCI_MEILI_MASTER_KEY`, `FVOCI_APP_PASSWORD` or any secret's `_FILE`
-   name, plus the two keyrings read from their files, `DATABASE_APP_URL` (the
-   app role; it contains the app password, which the server needs) and
-   `HOME=/nonexistent`. The service has `no-new-privileges`, and the image has
-   no setuid or setgid file. Descriptors the preparation opened are
+   container's without `POSTGRES_PASSWORD`, `DATABASE_URL`,
+   `FVOCI_MIGRATION_URL`, `MEILI_MASTER_KEY`, `FVOCI_MEILI_MASTER_KEY` and
+   `FVOCI_APP_PASSWORD`, plus `DATABASE_APP_URL` (the app role; it contains
+   the app password, which the server needs) and `HOME=/nonexistent`: it keeps
+   the keyrings and never holds the owner password or the master key. This
+   removes them from the server process only; the container configuration
+   still holds them (below). The service has `no-new-privileges`, and the
+   image has no setuid or setgid file. Descriptors the preparation opened are
    close-on-exec.
 
 If any step fails the server does not start; the container restarts and tries
 again (`docker compose logs fvoci` names the problem).
 
 **The boundary is the uid, inside one container.** The server and everything it
-starts run as uid 1000; the secret files and the preparation are root's. So a
-compromised server cannot read `/run/secrets/*` (mode `0400`, root), the
-preparation's memory or environment (another uid, and root's processes are not
-traceable by it), or any secret in a `docker exec` or healthcheck process: those
-start from the container configuration, which holds only file paths, and run as
-root. Nor can it redirect root's search key write (above).
+starts run as uid 1000; the preparation is root's. Every `docker exec` and
+healthcheck process starts from the container configuration, so it holds every
+value Compose passes to `fvoci`, the owner password and master key included;
+they run as root (the service's user). So a compromised server cannot read
+those processes' environment, the preparation's memory or environment (another
+uid, and root's processes are not traceable by it), or redirect root's search
+key write (above). The exception is a session you start as uid 1000
+(`docker compose exec -u 1000:1000 fvoci …`): it holds every configured value
+in an environment the server's uid can read while it runs.
 `scripts/standalone-install-smoke.sh` checks each of these on a running
 install. What the server does hold: the app role password (in
 `DATABASE_APP_URL`), the pepper and encryption keyrings, and the scoped search
@@ -830,9 +832,9 @@ The server also makes itself non-dumpable at startup (`PR_SET_DUMPABLE` 0) and
 refuses to start if the kernel does not allow it. The kernel then owns the
 files under its `/proc/<pid>` by root, so the helpers it starts (collaboration, document
 extraction, preview, Office and Markdown conversion, all uid 1000) and a uid-1000
-`docker compose exec` session can read neither its environment (the keyrings,
-`DATABASE_APP_URL`) nor its memory or open descriptors, and cannot attach to
-it. For the same reason the server writes no core dump at all, whatever
+`docker compose exec` session (which starts with the configured values itself)
+can read neither its environment (the keyrings, `DATABASE_APP_URL`) nor its
+memory or open descriptors, and cannot attach to it. For the same reason the server writes no core dump at all, whatever
 `fs.suid_dumpable` is set to (that setting only applies after a credential
 change, which the server never makes), and `gdb -p`, `strace -p` and `lsof` on
 the server no longer work from a uid-1000 session. Run them as root with
@@ -848,25 +850,27 @@ stay dumpable, so where the host allows same-uid ptrace one helper can attach
 to another. What is **not** separated:
 
 - It is one container, not two: root in it (`docker compose exec fvoci …`,
-  which defaults to root, and the healthcheck) can read the secret files.
-  Under Docker's default capabilities (no `CAP_SYS_PTRACE`) that root cannot
+  which defaults to root, and the healthcheck) starts with every configured
+  value. Under Docker's default capabilities (no `CAP_SYS_PTRACE`) that root cannot
   read the server's `/proc/1/environ` either, and neither can uid 1000 since
   the server is non-dumpable; inspect the server with
   `docker compose exec --privileged fvoci …` (root with `CAP_SYS_PTRACE`). A
   kernel or container escape from uid 1000 is outside this boundary.
-- Anyone who can run Docker commands on the host can read the secrets
-  (`docker compose exec`, the containers' filesystems, `.env` itself).
-  `docker inspect` shows the file paths of all five secrets, not the values;
-  `docker compose config` prints the `.env` values.
-- `postgres` and `meilisearch` hold their own secret in their own process
-  environment, readable by root in those containers.
+- Anyone who can run Docker commands on the host can read every value:
+  `docker inspect`, `docker compose config` and `docker compose exec` show
+  them, as `.env` itself does. Do not paste their raw output into logs,
+  issues or reviews.
+- `postgres` and `meilisearch` hold their own value (the owner password, the
+  master key) in their container configuration and process environment;
+  neither gets the app's passwords or keyrings.
 
 The owner never reaches the network beyond the Compose network: PostgreSQL and
 Meilisearch publish no port.
 
-Without the owner password the entrypoint only execs `fvoci-server` (the
-developer stack, `infra/rust/compose.yml`, prepares in its separate `init`
-service instead); started as root, it still runs the server as uid 1000.
+Without the owner password the entrypoint, after that `<VAR>_FILE` check, only
+execs `fvoci-server` (the developer stack, `infra/rust/compose.yml`, prepares in
+its separate `init` service instead); started as root, it still runs the server
+as uid 1000.
 
 Other defaults come from the image and the Rust loader: helper paths, static
 and storage directories, bind address, shutdown deadline (30 s), collaboration
@@ -989,7 +993,8 @@ CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
 `.github/workflows/install.yml` (no secrets, no image publish). This is the
 developer stack. The user install is exercised by
 `scripts/standalone-install-smoke.sh` (a local, manual run: fresh `.env`,
-first admin, the uid and secret boundary, restart, backup and restore) and, for
+first admin, each service's environment, the uid boundary, restart, recreate,
+backup and restore) and, for
 a published release, by `scripts/release-smoke.sh` in `release.yml`
 (`docs/RELEASING.md`).
 
@@ -1014,8 +1019,9 @@ selects local storage; a storage doctor probe cannot detect that wrong choice.
 2. From the old checkout, with its `.env` unchanged, back up and leave the server
    stopped (old servers must not run during migrate):
    `scripts/backup.sh --project <name> --env-file infra/rust/.env --output <new-dir> --leave-stopped`.
-   Keep a protected copy of the env file with the backup (file mode 0600,
-   directory 0700); the archive omits the pepper, encryption keys and passwords.
+   Keep a protected copy of the env file (file mode 0600, directory 0700),
+   stored apart from the backup; the archive omits the pepper, encryption keys
+   and passwords.
    With S3 the script refuses. First stop the server using the existing flags:
    `docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml --project-name <name> --env-file infra/rust/.env stop -t 45 server`,
    then take the quiesced dump and protect bucket objects as in "S3 storage backup".
@@ -1161,7 +1167,12 @@ recreates `fvoci`, so the old server has stopped before the new container
 migrates. Stopping it during a migration is safe (that migration rolls back),
 but the next start waits until PostgreSQL has ended the interrupted statement; the preparation refuses to migrate while any other server still has
 app-role sessions open, and a failure leaves the server stopped as described
-above. 0.x releases make no compatibility promise between minor versions and
+above. From a release whose `compose.yml` passed the passwords and keyrings
+as Compose secret files (0.1.x and 0.2.0), the same steps apply: the new file
+reads the same `.env`, Compose recreates all three containers on the same
+volumes, and those files existed only inside the old containers. An old
+`compose.yml` with only its image line changed does not start: the new image
+names each `<VAR>_FILE` setting it no longer reads and exits 2. 0.x releases make no compatibility promise between minor versions and
 there is no downgrade: going back means restoring the pre-upgrade backup.
 `docker compose down -v` deletes the data; the keys stay in `.env`.
 `fvoci-server --version` (for example
@@ -1186,12 +1197,13 @@ scripts/restore.sh --project fvoci-restored --env-file /path/to/.env --compose-f
 ```
 
 The keys stay in `.env` and are not copied into the backup; keep a copy of
-`.env` with it. Without an init service, restore runs the preparation with
+`.env`, stored apart from it. Without an init service, restore runs the preparation with
 `fvoci-migrate --prepare` and the owner commands in the `fvoci` service. As
 with every restore the target is a new project name; run it with
 `docker compose -p fvoci-restored …` (or change `name:`).
 
-`restore.sh` reads the passwords and keyrings from the env file the way
+`restore.sh` takes the keyrings from `docker compose config` (what the server
+will get) and reads the app role and its password from the env file the way
 Compose does for these forms: `KEY=value`, `KEY='value'` and `KEY="value"`
 (the whole value in one pair of quotes, with no `\`, `$` or inner quote of the
 same kind inside double quotes). It refuses anything whose Compose meaning
@@ -1538,7 +1550,8 @@ password hashes and key material are never printed.
   reports `changed: 0`. Password hashes are re-peppered at sign-in, not here.
 
 Key rotation: add the new key to `ENCRYPTION_KEYS`, switch
-`ENCRYPTION_ACTIVE_KEY_ID`, restart the server, run `--secrets-rotate`, then
+`ENCRYPTION_ACTIVE_KEY_ID`, recreate the server with `docker compose up -d` (a
+plain `restart` keeps the old keyring), run `--secrets-rotate`, then
 `--secrets-audit`; drop the old key only once `secrets` no longer names it.
 
 ```sh
@@ -1636,7 +1649,7 @@ cargo run --release --bin fvoci-migrate -- --init-env \
   --public-origin https://fvoci.example.com --out infra/rust/.env
 ```
 
-Back up the generated file with the database backups: the pepper and
+Back up the generated file, apart from the database backups: the pepper and
 encryption keys cannot be regenerated.
 
 **`--doctor`** checks the server's environment without starting it and prints
