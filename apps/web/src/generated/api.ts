@@ -4611,8 +4611,9 @@ export interface components {
              */
             linkTotal: number;
             /**
-             * @description Dependencies whose both ends are in `items`, capped at 2048 (over the
-             *     cap, the lowest `(blockerId, blockedId)` pairs).
+             * @description Dependencies whose both ends are in `items`, ascending
+             *     `(blockerId, blockedId)` and capped at 2048 (over the cap, the lowest
+             *     pairs).
              */
             links: components["schemas"]["GanttLinkOutput"][];
             monthBands: components["schemas"]["MonthBandOutput"][];

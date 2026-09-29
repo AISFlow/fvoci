@@ -47,7 +47,7 @@ pub fn prepare_gantt(input: PrepareInput) -> GanttLayoutOutput {
     // `links` follows `items`, not `bars`: overlap packing can leave an item
     // without a bar, and a client that lays out its own bars needs them all.
     let item_ids: HashSet<Uuid> = scheduled.iter().map(|t| t.id).collect();
-    let (item_links, link_total) = cap_links(
+    let (mut item_links, link_total) = cap_links(
         input
             .links
             .iter()
@@ -55,6 +55,9 @@ pub fn prepare_gantt(input: PrepareInput) -> GanttLayoutOutput {
             .cloned()
             .collect(),
     );
+    // The dependency query has no ORDER BY; sorting keeps a refetch of the
+    // same data identical. `paths` keeps the query order the React Gantt got.
+    item_links.sort_by(link_pair_order);
     let bar_ids: HashSet<Uuid> = bars.iter().map(|b| b.id).collect();
     let (shown, path_total) = cap_links(
         input
@@ -156,14 +159,18 @@ pub fn prepare_gantt(input: PrepareInput) -> GanttLayoutOutput {
 fn cap_links(mut links: Vec<GanttLinkInput>) -> (Vec<GanttLinkInput>, usize) {
     let total = links.len();
     if total > MAX_DISPLAY_PATHS {
-        links.sort_by(|a, b| {
-            a.blocker_id
-                .cmp(&b.blocker_id)
-                .then(a.blocked_id.cmp(&b.blocked_id))
-        });
+        links.sort_by(link_pair_order);
         links.truncate(MAX_DISPLAY_PATHS);
     }
     (links, total)
+}
+
+/// Ascending `(blocker_id, blocked_id)`, the primary key of
+/// `task_dependencies`, so the order is total.
+fn link_pair_order(a: &GanttLinkInput, b: &GanttLinkInput) -> std::cmp::Ordering {
+    a.blocker_id
+        .cmp(&b.blocker_id)
+        .then(a.blocked_id.cmp(&b.blocked_id))
 }
 
 /// The holidays of `cal` within `scale.start..=scale.end`, ascending. Every
@@ -295,6 +302,45 @@ mod tests {
         );
         assert_eq!(out.path_total, 1);
         assert_eq!(out.paths.len(), 1);
+    }
+
+    #[test]
+    fn links_are_sorted_by_pair_and_paths_keep_input_order() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let out = september(
+            vec![
+                task(a, "2026-09-01", "2026-09-02"),
+                task(b, "2026-09-03", "2026-09-04"),
+                task(c, "2026-09-07", "2026-09-08"),
+            ],
+            vec![fs(b, c), fs(a, c), fs(a, b)],
+            PackMode::Rows,
+            None,
+        );
+        let links: Vec<(String, String)> = out
+            .links
+            .iter()
+            .map(|l| (l.blocker_id.clone(), l.blocked_id.clone()))
+            .collect();
+        let pair = |x: Uuid, y: Uuid| (x.to_string(), y.to_string());
+        assert_eq!(links, vec![pair(a, b), pair(a, c), pair(b, c)]);
+        let index = |id: Uuid| {
+            out.items
+                .iter()
+                .position(|item| item.id == id.to_string())
+                .unwrap() as i64
+        };
+        let path_pairs: Vec<(i64, i64)> = out.paths.iter().map(|p| (p[0], p[1])).collect();
+        assert_eq!(
+            path_pairs,
+            vec![
+                (index(b), index(c)),
+                (index(a), index(c)),
+                (index(a), index(b))
+            ]
+        );
     }
 
     #[test]

@@ -243,8 +243,9 @@ pub struct GanttLayoutOutput {
     /// same snapshot as `items`. A display hint: PATCH re-checks both under
     /// the project row lock.
     pub can_edit: bool,
-    /// Dependencies whose both ends are in `items`, capped at 2048 (over the
-    /// cap, the lowest `(blockerId, blockedId)` pairs).
+    /// Dependencies whose both ends are in `items`, ascending
+    /// `(blockerId, blockedId)` and capped at 2048 (over the cap, the lowest
+    /// pairs).
     pub links: Vec<GanttLinkOutput>,
     /// Dependencies among `items` before the cap.
     pub link_total: i32,
