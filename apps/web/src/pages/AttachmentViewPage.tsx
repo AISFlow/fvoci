@@ -3,7 +3,8 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { QueryError } from "@/components/query-status";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
-import { api, ensureOk, ProblemError } from "@/lib/api";
+import { ProblemError } from "@/lib/api";
+import { attachmentEditContextQuery, attachmentQuery } from "@/lib/queries/attachments";
 import { t } from "@fvoci/i18n";
 import { AttachmentViewer } from "@/features/attachments/attachment-viewer";
 import {
@@ -22,31 +23,11 @@ export function AttachmentViewPage() {
   const { chunk } = chunkSearch(search);
   const id = attachmentId ?? "";
   const workspaceId = workspace?.id ?? "";
-  const query = useQuery({
-    queryKey: ["attachment", workspaceId, id],
-    queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}", {
-          params: { path: { workspace_id: workspaceId, attachment_id: id } },
-        }),
-      ),
-    enabled: Boolean(workspaceId) && Boolean(id),
-    retry: false,
-  });
+  const query = useQuery(attachmentQuery(workspaceId, id));
   const navigate = useNavigate();
   // Source `hwpEditable`: whether this session may save an edited HWP/HWPX copy.
   const isHwp = query.data !== undefined && viewerKind(query.data) === "hwp";
-  const editContext = useQuery({
-    queryKey: ["attachment-edit-context", workspaceId, id],
-    queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/edit-context", {
-          params: { path: { workspace_id: workspaceId, attachment_id: id } },
-        }),
-      ),
-    enabled: isHwp,
-    retry: false,
-  });
+  const editContext = useQuery(attachmentEditContextQuery(workspaceId, id, isHwp));
 
   if (!workspace) return null;
 
