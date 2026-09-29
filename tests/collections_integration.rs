@@ -2270,6 +2270,11 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StatementRouter {
     }
 }
 
+/// The statement `db::pool` sends on an idle app connection before handing it
+/// out (`OUTSIDE_TRANSACTION_SQL` there).
+const POOL_ACQUIRE_CHECK_SQL: &str =
+    "SELECT pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp()";
+
 /// Runs the guest's wiki collection query, checks every row's canEdit against
 /// the single-document lookup and returns (rows, statements the query issued).
 async fn guest_query_checked(
@@ -2295,10 +2300,14 @@ async fn guest_query_checked(
     .await;
     // The process-wide time zone name cache (db::dashboard) fills once, on
     // whichever query comes first; it is not part of the query's own work.
+    // Neither is the app pool's acquire check (db::pool): it runs only when an
+    // idle connection is reused, not on a newly opened one, so how often it
+    // appears depends on the pool's state, not on the query.
     let statements: Vec<String> = counter
         .take_statements()
         .into_iter()
         .filter(|sql| !sql.contains("pg_catalog.pg_timezone_names"))
+        .filter(|sql| !sql.contains(POOL_ACQUIRE_CHECK_SQL))
         .collect();
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!(result["nextCursor"], Value::Null, "{result}");
