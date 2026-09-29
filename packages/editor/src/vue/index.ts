@@ -1,6 +1,7 @@
 // The Vue editor host and its node views (@fvoci/editor/vue).
 export { default as FvociEditor } from "./FvociEditor.vue";
 export { default as SafeHtml } from "./SafeHtml.vue";
+export { asSafeHtml, type SafeHtml as SafeHtmlString } from "../safe-html.js";
 export {
 	attachmentBridgeKey,
 	entityResolverKey,

@@ -10,7 +10,7 @@ import {
   revokeShareLink,
 } from "@/features/share/share-api";
 import { problemMessage } from "@/lib/api";
-import { publicInstanceQuery, refreshPublicInstance } from "@/lib/queries/admin";
+import { publicInstanceQuery, refreshPublicInstance } from "@/lib/queries/instance";
 import { documentShareLinksQuery, type ShareDocumentTarget } from "@/lib/queries/share";
 import { SHARE_POLICY_DEFAULT, selectedShareExpires, shareExpiresOptions } from "@/lib/share-links";
 import NativeModal from "../../components/NativeModal.vue";

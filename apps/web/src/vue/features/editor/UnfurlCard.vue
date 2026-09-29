@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { SafeHtml } from "@fvoci/editor/vue";
-import { asSafeHtml } from "@fvoci/editor/safe-html";
+import { asSafeHtml, SafeHtml } from "@fvoci/editor/vue";
 import { t } from "@fvoci/i18n";
 import { useQuery } from "@tanstack/vue-query";
 import { computed } from "vue";

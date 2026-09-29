@@ -24,9 +24,8 @@ import {
 } from "@/features/documents/document-ai-api";
 import { ProblemError, problemMessage } from "@/lib/api";
 import { documentPath, wikiDisplayId } from "@/lib/href";
-import { publicInstanceQuery } from "@/lib/queries/admin";
 import { treeQuery } from "@/lib/queries/documents";
-import { selectAiEnabled } from "@/lib/queries/instance-settings";
+import { publicInstanceQuery, selectAiEnabled } from "@/lib/queries/instance";
 
 // The document AI actions (features/documents/document-ai-menu.tsx): run
 // against the saved document, reviewed, and applied only on confirmation —
