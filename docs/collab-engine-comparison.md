@@ -62,23 +62,27 @@ join은 DB `resolve_collab_admission_kind`(멤버십·세션·문서/태스크 �
 
 ## 2. 이 문서에서 “비교”가 뜻하는 것
 
-rewrite.md §4의 유지 결정:
+rewrite.md §4의 과거 “프레임워크·CRDT를 다시 비교하지 않는다”는 **당시 스택 고정**이지,
+2026-09-30 사용자 지시보다 우선하지 않는다. 현재 제품은 **Yrs를 유지**한다. 합의한
+Vue 예광탄이 수락된 뒤에, 현행 Yrs 경로의 **비용 측정**과 필요하면 **ProseMirror step
+기반 Rust authority**를 비교한다. 기존 collab 계약 팩을 다시 돌린 것만으로 대안 비교
+완료를 보고하지 않는다. 기본 엔진 교체와 사용자 데이터 이전은 별도 채택 판단이다.
 
-> 작은 단일 Rust 서버 … 협업은 Yrs native engine … 프레임워크·CRDT·HWP 구현체를 다시 비교하지 않는다.
+이 문서에서 비교가 뜻하는 것:
 
-§5는 Yrs **교체 후보를 적지 않는다.** 알려진 결함은 caret(#24), ACL tick(#27), room당 PG 연결, helper OOM backstop(#238), room 상한 1013/유휴 지연, `collab_product` 디버그 flake다. §6.1 보류는 `flushDelay` 50/100, DocumentView 구독 분리, Svelte·Astro·Valkey·대규모 room **재설계**이며, 다른 CRDT 엔진이 아니다.
+1. **기본 제품 경로: Yrs 0.28.0 + native child + Hocuspocus 4.6.0.** Vue tracer에
+   Automerge/Loro/Y-Sweet 대체 경로를 넣지 않는다.
+2. **다음 실험(tracer 수락 후):** 현재 helper RSS·지연·encode 비용을 같은 SHA에서
+   측정하고, 차단이 있으면 ProseMirror step authority를 제품 `/collab`과 분리된
+   실험으로만 둔다. 계약 검사 재실행은 회귀 확인이지 비교 완료가 아니다.
+3. **구현·기본 엔진 교체 PR이 아니다.** 채택 전까지 저장 본문 encoding 1을 옮기지 않는다.
 
-따라서 여기서의 비교는:
+### 범위 밖 (rewrite.md §5에 엔진 후보로 없음)
 
-1. **기본안: 현재 Yrs 0.28.0 + native child + Hocuspocus 4.6.0 유지.** 전환은 이 SHA에서 재현된, 현재 경로로 고칠 수 없는 차단 결함이 있을 때만 연다.
-2. **이미 FVOCI가 글로 남긴 선택지만 비용 항목으로 둔다.** in-process Yrs(격리 포기), helper 수/메모리 예산 조정, Hocuspocus 핀 유지, 대규모 room 재설계 보류.
-3. **구현·Vue 삽입이 아니다.** 결정 전에 쓸 계약과 비용을 적는다.
-
-### 범위 밖 (rewrite.md §5/§6에 없음)
-
-Automerge, Loro, Y-Sweet, Diamond, Liveblocks, Jazz, y-websocket 단독 서버 등 **이 저장소의 rewrite.md·candidates.md·collab-engine README에 제품 후보로 적힌 적이 없다.** 표준 구현 스킬 `candidates.md`는 “문서/CRDT는 RFC가 아니라 현재 client 계약”이며 **Yrs를 재사용**하라고만 한다. 라이선스가 MIT여도, 목록에 오르기 전에는 평가하지 않는다.
-
-`compat/` Yrs 0.23.5 브리지는 2026-09-24 위험 probe이지 제품이 아니다. 제품 Yrs는 0.28.0이다. 열린 PR #266이 `compat/` 금본을 `tests/fixtures/`로 옮기려 하므로, 이후 SHA에서는 경로만 바뀌고 계약은 같다.
+Automerge, Loro, Y-Sweet, Diamond, Liveblocks, Jazz, y-websocket 단독 서버는
+rewrite.md·candidates.md·collab-engine README에 제품 후보로 적힌 적이 없다.
+MIT여도 목록에 오르기 전에는 기본 엔진으로 넣지 않는다. 비교 실험이 열려도
+사용자 데이터 이전은 포함하지 않는다.
 
 ## 3. 어떤 엔진이든 유지해야 하는 실패·호환 계약
 
@@ -135,15 +139,20 @@ in-process Yrs는 rewrite.md가 유지하는 격리를 풀어, helper OOM·stack
 
 ## 5. 다음 실험 (가장 작고 되돌릴 수 있는 것)
 
-**구현하지 않는다.** Vue tracer와 #266 fixture 이동이 끝난 뒤에, 코디네이터가 고정 SHA에서 아래를 **기존 테스트만** 묶어 한 번 돌린 결과를 이 문서에 붙이면 충분하다.
+**기본 엔진은 Yrs다.** 계약 팩은 회귀 확인이지 대안 비교 완료가 아니다. Vue 예광탄이
+수락된 뒤에 같은 고정 SHA에서 아래를 순서대로 한다.
 
-계약 팩(새 코드 없음):
+1. **현행 비용 측정 (필수).** 제품 helper 경로에서 RSS·apply/encode 지연·room 상한을
+   기록한다. 계약 팩을 먼저 돌려 측정 SHA가 깨지지 않았음을 확인한다.
+   - `cargo test --locked --offline --test collab_wire`
+   - `cargo test --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --test yjs_compat --test seed_compat`
+   - db-tests: `collab_two_clients_update_persists_and_broadcasts`, 한글 fixture, reconnect Step1, 세션 철회, restore-after-restart
+   - 브라우저: `workspace-wiki-collab` 한글·emoji와 Vue `workspace-wiki-vue-collab` / `workspace-wiki-vue-flow`
+2. **ProseMirror step 기반 Rust authority (필요 시).** 비용이 차단이거나 step
+   권위가 제품 요구를 더 잘 맞출 때만, **제품 `/collab`·Vue와 분리된** 실험으로
+   PM step 적용·권위 서버를 비교한다. 그 바이너리를 서버에 넣거나 저장 본문
+   encoding 1을 옮기지 않는다. 사용자 데이터 이전은 포함하지 않는다.
+3. **채택은 별도 판단.** 측정·실험 결과가 나와도 기본 엔진 교체 PR을 자동으로
+   열지 않는다.
 
-1. `cargo test --locked --offline --test collab_wire`
-2. `cargo test --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --test yjs_compat --test seed_compat`
-3. db-tests: `collab_two_clients_update_persists_and_broadcasts`, 한글 fixture 적용, reconnect Step1, 세션 철회, restore-after-restart (`collab_product` / `collab_lifecycle` / `revision_integration`에서 해당 이름)
-4. 브라우저: `workspace-wiki-collab` 한글·emoji 시나리오와 Vue `workspace-wiki-vue-collab` / `workspace-wiki-vue-flow`(이미 있는 spec). **새 Yjs 어댑터 없음.**
-
-이 팩이 깨지지 않는 한 엔진 교체 PR을 열지 않는다. 나중에 격리가 실제 용량 차단이 되면, **제품 `/collab`·Vue와 분리된** throwaway binary로 `yjs_compat` fixture만 in-process Yrs에 돌려 RSS/시간을 재는 실험이 다음 최소 단위다. 그 바이너리를 서버에 넣거나 다른 CRDT를 추가하지 않는다.
-
-코디네이터 결정 기본값: **Yrs 유지.** 이 초안은 #261(Vue 편집기 컨트롤)을 닫지 않는다. 비교는 Vue tracer 이후 작업이며, tracer CI와 병렬로 문서만 둔다.
+코디네이터 결정 기본값: **Yrs 유지.** 이 초안은 #261을 닫지 않는다.
