@@ -66,8 +66,12 @@ async function abortableDelay(
   });
 }
 
+/**
+ * An untyped part body: a typed Blob would make fetch add a Content-Type
+ * header, which the bucket's CORS rule (AllowedHeaders: range) refuses.
+ */
 function partChunk(file: File, partNumber: number, partSize: number): Blob {
-  return file.slice((partNumber - 1) * partSize, partNumber * partSize);
+  return file.slice((partNumber - 1) * partSize, partNumber * partSize, "");
 }
 
 function isAbortError(err: unknown): boolean {

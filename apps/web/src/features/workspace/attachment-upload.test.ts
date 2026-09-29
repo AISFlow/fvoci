@@ -730,9 +730,10 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
       storage: (_put, n) => stored(n),
     });
     const bridge = await loadBridge({ fetchImpl, delay: () => Promise.resolve() });
-    // Untyped: Bun's Blob.slice keeps the File's type, where browsers (File
-    // API) drop it. That a typed file's parts go without Content-Type is
-    // checked in Chromium by e2e-s3 (a PNG); here, that nothing adds a type.
+    // Untyped: Bun's Blob.slice keeps the File's type even when given "" as
+    // the content type, where browsers (File API) use "". That typed files'
+    // parts go without Content-Type is checked in Chromium by e2e-s3 (PNG,
+    // PDF and text files); here, that nothing adds a type.
     const file = new File([new Uint8Array(PART_SIZE * 2 + 7)], "f.bin");
     const result = await bridge.upload(file, () => undefined);
     assert.equal(result.id, ATT);
