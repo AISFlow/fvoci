@@ -149,7 +149,6 @@ class ReleaseDistTest(unittest.TestCase):
             "no alias": (base.replace("image: *fvoci-image", "image: busybox"), "no service uses"),
             "optional variable": (base.replace("${FVOCI_PUBLIC_ORIGIN:?set FVOCI_PUBLIC_ORIGIN in .env}", "${FVOCI_PUBLIC_ORIGIN:-http://localhost:8080}"), "every interpolation must be ${VAR:?message}"),
             "variable not in env.example": (base.replace('FVOCI_COLLAB_MAX_ROOMS: "64"', 'FVOCI_COLLAB_MAX_ROOMS: "${ROOMS:?set ROOMS}"'), "missing ['ROOMS']"),
-            "unguarded secret": (base.replace("  - ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}\n", ""), "secrets read ['MEILI_MASTER_KEY'] without"),
             "env file": (base.replace("    mem_limit: 4g", "    mem_limit: 4g\n    env_file: .env"), "env_file"),
         }
         for name, (compose, needle) in cases.items():
@@ -262,14 +261,21 @@ class ReleasePreflightTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("expected one service publishing container port 8080, found []", proc.stderr)
 
-    def test_refuses_secret_values_in_environment_or_readable_secret_files(self) -> None:
+    def test_refuses_values_a_service_does_not_need(self) -> None:
+        app_key = "      ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:?set ENCRYPTION_KEYS in .env}\n"
         cases = {
-            "environment": (lambda c: c.replace(
-                "      FVOCI_APP_PASSWORD_FILE: /run/secrets/fvoci_app_password\n",
-                "      FVOCI_APP_PASSWORD: ${FVOCI_APP_PASSWORD:?set FVOCI_APP_PASSWORD in .env}\n"),
-                "fvoci gets secret values as environment: ['FVOCI_APP_PASSWORD']"),
-            "readable file": (lambda c: c.replace("  mode: 0400", "  mode: 0444"),
-                              "fvoci secret postgres_password is not root-only"),
+            "app keyring in postgres": (lambda c: c.replace(
+                "      POSTGRES_DB: fvoci\n", "      POSTGRES_DB: fvoci\n" + app_key),
+                "postgres gets .env values it does not need: ['ENCRYPTION_KEYS']"),
+            "owner password in meilisearch": (lambda c: c.replace(
+                '      MEILI_NO_ANALYTICS: "true"\n',
+                '      MEILI_NO_ANALYTICS: "true"\n      DB: "x:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"\n'),
+                "meilisearch gets .env values it does not need: ['POSTGRES_PASSWORD']"),
+            "master key on a command line": (lambda c: c.replace(
+                "    environment:\n      MEILI_ENV: production\n",
+                '    command: ["meilisearch", "--master-key", "${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}"]\n'
+                "    environment:\n      MEILI_ENV: production\n"),
+                "meilisearch has .env values outside its environment: ['MEILI_MASTER_KEY']"),
         }
         for name, (edit, needle) in cases.items():
             with self.subTest(name):
