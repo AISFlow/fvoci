@@ -270,7 +270,6 @@ test("the Vue login page's SSO form submits through startWorkspaceSso, never to 
 
 test("the invite and account pages start OIDC by script, never by a native form", () => {
   for (const [file, start] of [
-    ["../features/auth/invite.tsx", "startOidcInvite"],
     ["../vue/features/auth/InviteAcceptForm.vue", "startOidcInvite"],
     ["../features/settings/settings-account.tsx", "startOidcLink"],
   ] as const) {

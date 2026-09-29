@@ -29,6 +29,11 @@ const SAMPLES = [
   "/invite/tok/",
   "/INVITE/abc-DEF",
   "/invite",
+  "/invite/",
+  "/invite//",
+  "/invites/tok",
+  "/invite/tok/extra",
+  "/invite/a%2Fb",
   "/w/acme",
   "/w/acme/a/123/view",
   "/w/acme/WIKI-1",
@@ -82,11 +87,16 @@ test("the boot module sends /login, and only that path, to the Vue app", () => {
   assert.equal(isVueAppPath("/logins"), false);
 });
 
-test("the boot module keeps /invite on the React app", () => {
-  assert.equal(isVueAppPath("/invite/tok"), false);
-  assert.equal(isVueAppPath("/invite/tok/"), false);
-  assert.equal(isVueAppPath("/INVITE/tok"), false);
+test("the boot module sends exactly single-token invite paths to Vue", () => {
+  assert.equal(isVueAppPath("/invite/tok"), true);
+  assert.equal(isVueAppPath("/invite/tok/"), true);
+  assert.equal(isVueAppPath("/INVITE/tok"), true);
+  assert.equal(isVueAppPath("/invite/a%2Fb"), true);
   assert.equal(isVueAppPath("/invite"), false);
+  assert.equal(isVueAppPath("/invite/"), false);
+  assert.equal(isVueAppPath("/invite//"), false);
+  assert.equal(isVueAppPath("/invite/tok/extra"), false);
+  assert.equal(isVueAppPath("/invites/tok"), false);
 });
 
 test("every wiki path the boundary sends parses as the React app's wiki ref", () => {
@@ -96,7 +106,8 @@ test("every wiki path the boundary sends parses as the React app's wiki ref", ()
     const wiki = ref ? parseWikiRef(ref) : null;
     const gantt = /\/gantt\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
-    if (!gantt && !login) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const invite = /^\/invite\/[^/]+\/?$/i.test(path);
+    if (!gantt && !login && !invite) assert.equal(isVueAppPath(path), wiki !== null, path);
   }
 });
 

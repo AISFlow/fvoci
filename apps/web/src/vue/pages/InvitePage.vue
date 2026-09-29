@@ -15,7 +15,6 @@ import InviteAcceptForm from "../features/auth/InviteAcceptForm.vue";
 import MfaStep from "../features/auth/MfaStep.vue";
 
 // /invite/:token: public invitation (consents, password accept, OIDC start).
-// The boot module still sends this path to React (src/app-boundary.ts).
 
 const route = useRoute();
 const token = computed(() => String(route.params.token ?? ""));

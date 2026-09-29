@@ -10,11 +10,7 @@ export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
   { path: VUE_ROUTE_PATHS.login, name: "login", component: () => import("./pages/LoginPage.vue") },
-  // Invite. apps/web/src/app-boundary.ts is owned elsewhere;
-  // boot still sends /invite/:token to React until that file includes:
-  //   /^\/invite\/[^/]+\/?$/i
-  // Pair it with VUE_ROUTE_PATHS.invite = "/invite/:token" (app-boundary.test.ts).
-  { path: "/invite/:token", name: "invite", component: () => import("./pages/InvitePage.vue") },
+  { path: VUE_ROUTE_PATHS.invite, name: "invite", component: () => import("./pages/InvitePage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

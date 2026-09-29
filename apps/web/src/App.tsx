@@ -28,7 +28,6 @@ import { MyTasksPage } from "@/pages/MyTasksPage";
 import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
 import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
 import { NotificationsPage } from "@/pages/NotificationsPage";
-import { InvitePage } from "@/pages/InvitePage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
 import { WorkspaceHomePage } from "@/pages/WorkspaceHomePage";
@@ -102,14 +101,6 @@ const router = createBrowserRouter(
       <Route
         path="/s/:token/attachments/:attachmentId/view"
         {...lazyPage(() => import("@/pages/ShareAttachmentViewPage").then((m) => m.ShareAttachmentViewPage))}
-      />
-      <Route
-        path="/invite/:token"
-        element={
-          <SetupGuard>
-            <InvitePage />
-          </SetupGuard>
-        }
       />
       <Route
         path="/reset-password"
