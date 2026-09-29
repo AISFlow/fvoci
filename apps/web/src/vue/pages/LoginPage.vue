@@ -93,11 +93,11 @@ async function onPasswordReset(email: string): Promise<void> {
 </script>
 
 <template>
-  <p v-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
-  <div v-else-if="setup.isError.value" class="p-8">
+  <div v-if="setup.isError.value" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>
   </div>
+  <p v-else-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
   <MfaStep
     v-else-if="mfaToken !== null"
     :mfa-token="mfaToken"
