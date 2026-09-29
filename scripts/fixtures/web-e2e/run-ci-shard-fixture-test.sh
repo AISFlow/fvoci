@@ -11,7 +11,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/apps/web/node_modules/.bin"
+mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/apps/web"
 cp "$ROOT/scripts/run-web-e2e.sh" "$ROOT/scripts/web-e2e-groups.py" "$FIXTURE_ROOT/scripts/"
 chmod +x "$FIXTURE_ROOT/scripts/run-web-e2e.sh"
 
@@ -31,22 +31,20 @@ echo "fvoci-web-e2e-fake-generate-api" >&2
 STUB
 chmod +x "$FIXTURE_ROOT/scripts/generate-api.sh"
 
-cat >"$FIXTURE_ROOT/apps/web/node_modules/.bin/playwright" <<'STUB'
+# Only the harness's prepared check and web build are allowed; anything else fails closed.
+cat >"$FAKE_BIN/bun" <<'STUB'
 #!/usr/bin/env bash
-exit 0
-STUB
-chmod +x "$FIXTURE_ROOT/apps/web/node_modules/.bin/playwright"
-
-cat >"$FAKE_BIN/npm" <<'STUB'
-#!/usr/bin/env bash
-if [[ "${1:-}" == "run" && "${2:-}" == "build" ]]; then
-  echo "fvoci-web-e2e-fake-npm-build" >&2
+if [[ "$*" == "--bun x --no-install playwright --version" ]]; then
   exit 0
 fi
-echo "unexpected npm invocation: $*" >&2
+if [[ "$*" == "--bun run build" ]]; then
+  echo "fvoci-web-e2e-fake-bun-build" >&2
+  exit 0
+fi
+echo "unexpected bun invocation: $*" >&2
 exit 1
 STUB
-chmod +x "$FAKE_BIN/npm"
+chmod +x "$FAKE_BIN/bun"
 
 cat >"$FAKE_BIN/cargo" <<'STUB'
 #!/usr/bin/env bash

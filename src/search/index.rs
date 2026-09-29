@@ -1,4 +1,10 @@
-//! Outbox search indexer: state-based refresh under a per-workspace session lock.
+//! Outbox search indexer. Each event re-reads the current rows and upserts or
+//! deletes their Meili documents, so the outbox's at-least-once replay is
+//! harmless. A per-workspace transaction-scoped advisory lock
+//! (`with_workspace_lock`) makes read-then-enqueue one step: Meili applies an
+//! index's tasks in enqueue order, so the index ends at the newest read, also
+//! against rebuild pages, which take the same lock. An outbox batch awaits its
+//! Meili tasks after releasing the lock.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -516,6 +522,8 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, SearchIndexError>>,
 {
+    // Holders read rows and enqueue their Meili tasks under this lock, so
+    // enqueue order per workspace follows read order.
     // Transaction-scoped lock: if this future is cancelled (e.g. the batch
     // timeout), the dropped transaction rolls back before the connection is
     // reused, which releases the lock. A session lock would stay held on an idle

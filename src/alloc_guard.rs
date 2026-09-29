@@ -3,11 +3,20 @@
 //!
 //! Rust's own collections abort on allocation failure (SIGABRT, which the
 //! parent classifies as a resource limit). Some libraries instead see the null
-//! pointer and panic: `zlib-rs` (flate2's backend once `docx-rs` enables
-//! `zip/deflate`) asserts in `InflateStream::new`. Without this record such a
-//! panic reads as "the bytes broke the parser". `main` installs
-//! [`RecordingAlloc`] as the global allocator; the office child's panic hook
-//! aborts when [`allocation_failed`] is set.
+//! pointer and panic: `zlib-rs` (flate2's backend once `docx-rs` and
+//! `docx-zip` enable `zip/deflate`) asserts in `InflateStream::new`. Without
+//! this record such a panic reads as "the bytes broke the parser". `main`
+//! installs [`RecordingAlloc`] as the global allocator; the office child's
+//! panic hook aborts when [`allocation_failed`] is set.
+//!
+//! Workaround for zlib-rs 0.6.8 (through flate2 1.1.10), whose `Inflate::new`
+//! reaches `assert_eq!(ret, ReturnCode::Ok)` in `InflateStream::new` and so
+//! panics when its state allocation fails. Regression test:
+//! `tests/office_extract_process.rs`
+//! `address_space_ceiling_kills_the_child_not_the_server`. Remove the
+//! allocator and the hook once zlib-rs returns an error for a failed
+//! allocation, or no crate in this binary builds flate2 with zlib-rs, and that
+//! test still passes without them.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +26,9 @@ static FAILED: AtomicBool = AtomicBool::new(false);
 /// The system allocator, remembering whether any request returned null.
 pub struct RecordingAlloc;
 
+/// Runs inside the global allocator: it only stores to an atomic and must
+/// never allocate (re-entry), lock or panic (unwinding out of `GlobalAlloc`
+/// is undefined behaviour).
 fn record(ptr: *mut u8) -> *mut u8 {
     if ptr.is_null() {
         FAILED.store(true, Ordering::Relaxed);
@@ -24,7 +36,12 @@ fn record(ptr: *mut u8) -> *mut u8 {
     ptr
 }
 
-// SAFETY: every call forwards to `System` unchanged; only a null result is noted.
+// SAFETY: every method passes its arguments to `System` unchanged, so the
+// caller's `GlobalAlloc` preconditions (non-zero sizes; for `realloc` and
+// `dealloc` a pointer this allocator returned, with the layout it was
+// allocated with) are exactly System's, and they hold there because every
+// pointer this allocator returns came from System. `record` only looks at the
+// result.
 unsafe impl GlobalAlloc for RecordingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(unsafe { System.alloc(layout) })

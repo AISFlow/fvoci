@@ -78,7 +78,7 @@ require_cmd() {
     }
   done
 }
-require_cmd git docker openssl curl node python3 sha256sum tar awk diff
+require_cmd git docker openssl curl bun python3 sha256sum tar awk diff
 
 RUN_ID="$(openssl rand -hex 8)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-upgrade.${RUN_ID}.XXXXXX")"
@@ -541,7 +541,7 @@ assert info.get("versioning", {}).get("status") == "Enabled", info
   log_assert "old server on STORAGE_DRIVER=s3, run-owned silo bucket ${S3_BUCKET_NAME} versioning Enabled: ok"
 fi
 # The old checkout's own collab client, matched to the old server's API.
-BODY_BEFORE="$(node "$OLD_TREE/scripts/install-smoke-collab.mjs" --base-url "$BASE" --origin "$BASE" \
+BODY_BEFORE="$(bun "$OLD_TREE/scripts/install-smoke-collab.mjs" --base-url "$BASE" --origin "$BASE" \
   --session "$SESSION" --workspace-id "$WORKSPACE_ID" --document-id "$DOCUMENT_ID")"
 grep -q '"contentJson"' <<<"$BODY_BEFORE" || fail "collab body projection failed on old image"
 

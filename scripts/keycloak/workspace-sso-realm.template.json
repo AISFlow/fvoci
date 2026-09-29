@@ -1,0 +1,60 @@
+{
+  "realm": "@@REALM@@",
+  "displayName": "FVOCI e2e workspace SSO (local test realm)",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "editUsernameAllowed": false,
+  "internationalizationEnabled": false,
+  "eventsEnabled": true,
+  "eventsExpiration": 86400,
+  "eventsListeners": [],
+  "adminEventsEnabled": false,
+  "clients": [
+    {
+      "clientId": "fvoci-ws",
+      "name": "FVOCI e2e workspace SSO",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "@@CLIENT_SECRET@@",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "consentRequired": false,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": false,
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "standard.token.exchange.enabled": "false",
+        "exclude.issuer.from.auth.response": "false"
+      },
+      "defaultClientScopes": ["basic"],
+      "optionalClientScopes": ["email", "profile"]
+    }
+  ],
+  "users": [
+    {
+      "username": "@@USERNAME@@",
+      "enabled": true,
+      "email": "@@EMAIL@@",
+      "emailVerified": true,
+      "firstName": "Workspace",
+      "lastName": "Member",
+      "credentials": [{ "type": "password", "value": "@@PASSWORD@@", "temporary": false }]
+    }
+  ]
+}

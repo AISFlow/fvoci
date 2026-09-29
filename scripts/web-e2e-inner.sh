@@ -7,8 +7,18 @@ set -euo pipefail
 : "${RUN_DIR:?RUN_DIR is required}"
 
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-SERVER_BIN="$CARGO_TARGET_DIR/debug/fvoci-server"
-MIGRATE_BIN="$CARGO_TARGET_DIR/debug/fvoci-migrate"
+# Cargo profile of the server and migrate binaries: debug for the normal
+# groups; scripts/keycloak-oidc-e2e.sh runs the release build.
+E2E_PROFILE="${FVOCI_E2E_PROFILE:-debug}"
+case "$E2E_PROFILE" in
+  debug | release) ;;
+  *)
+    echo "FVOCI_E2E_PROFILE must be debug or release" >&2
+    exit 1
+    ;;
+esac
+SERVER_BIN="$CARGO_TARGET_DIR/$E2E_PROFILE/fvoci-server"
+MIGRATE_BIN="$CARGO_TARGET_DIR/$E2E_PROFILE/fvoci-migrate"
 
 SERVER_PID=""
 SMTP_PID=""
@@ -137,7 +147,7 @@ run_playwright() {
   settle_network_before_browser
   before="$(net_event_count)"
   net_mark "playwright start"
-  "$ROOT/apps/web/node_modules/.bin/playwright" test "$@" || status=$?
+  (cd "$ROOT/apps/web" && bun --bun x --no-install playwright test "$@") || status=$?
   net_mark "playwright exited with status ${status}"
   if [[ -n "${NET_MONITOR_PID:-}" ]] && kill -0 "$NET_MONITOR_PID" 2>/dev/null; then
     echo "network: netlink address/link events while Playwright ran: $(($(net_event_count) - before))" >&2

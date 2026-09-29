@@ -229,6 +229,11 @@ struct TaskStreamAuth {
 }
 
 /// Single bounded hint queue; HTTP `Stream` polls hints and authorizes on consumption.
+/// Every item, `open` included, is checked against current project access
+/// when the body takes it, so a hint queued before a revocation commits is
+/// withheld (`task_stream_enqueue_before_revoke_discards_queued_hints`). The
+/// producer's poll checks only the credential, so lost project access ends
+/// the stream at its next item.
 struct TaskAuthorizedSseStream {
     queue_rx: tokio::sync::mpsc::Receiver<TaskStreamQueueItem>,
     auth: TaskStreamAuth,

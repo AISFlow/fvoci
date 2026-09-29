@@ -12,7 +12,8 @@ pub const MAX_OUTPUT_CHARS: usize = 500_000;
 /// Default child-process watchdog (FVOCI `EXTRACT_TEXT_WATCHDOG_MS`).
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
-/// Child RSS ceiling (FVOCI `ISOLATE_CHILD_MAX_RSS_BYTES`).
+/// Child address-space ceiling (`RLIMIT_AS`, FVOCI
+/// `ISOLATE_CHILD_MAX_RSS_BYTES`). RSS cannot exceed it.
 pub const MAX_CHILD_RSS_BYTES: u64 = 1536 * 1024 * 1024;
 
 /// Zip central-directory entry cap before the parser (FVOCI `unzipStore`).
@@ -35,8 +36,9 @@ pub const MAX_WARNING_ENTRIES: usize = 32;
 /// Slot wait and the child wait loop honor `extract_killable_with_cancel`.
 pub const MAX_CHILD_CONCURRENCY: usize = 1;
 
-/// RSS poll interval while a child is running.
-pub const RSS_POLL_MS: u64 = 250;
+/// How often the parent checks a running child for exit, cancel and the
+/// deadline (a non-blocking `waitpid` each time).
+pub const CHILD_WAIT_POLL_MS: u64 = 10;
 
 /// Smallest accepted wall-clock timeout (zero is invalid).
 pub const MIN_TIMEOUT_MS: u64 = 1;

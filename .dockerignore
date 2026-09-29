@@ -1,7 +1,11 @@
 .git
 .github
+# Install settings with real secrets; never part of an image build context.
+.env
+**/.env
 target
 **/target
+node_modules
 apps/web/node_modules
 apps/web/dist
 packages/editor/node_modules
