@@ -548,8 +548,8 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 - 0.2.0 업그레이드는 단방향이다. 0.1.x는 migration 044가 적용된 DB를 거부하며(`database schema has migrations [44] newer than
   this binary (43)`로 `fvoci` 컨테이너가 재시작을 반복하고, `--wait` 없는 `docker compose up -d`는 0으로 끝난다), 되돌리기는 업그레이드
   전 백업 복원이다. 한 번 수동 확인(amd64·local storage): 게시 0.1.1 release 파일에서 release 준비 commit `b2218c75`로 로컬 빌드한
-  0.2.0 이미지(게시 0.2.0 이미지 아님)로 올린 뒤 seed한 계정·workspace·project·task·댓글·wiki 본문·HWPX 첨부·봉인 MFA secret이
-  그대로였고(044 적용, `--doctor`·`--verify-secrets`·로그인 정상), 0.1.1은 migrated DB를 바꾸지 않고 거부했으며(전후 `pg_dump` 동일),
+  0.2.0 이미지(게시 0.2.0 이미지 아님)로 올린 뒤 seed한 계정·workspace·project·task·댓글·wiki 본문·HWPX 첨부가
+  그대로였고 봉인 MFA secret은 열렸으며(044 적용, `--doctor`·`--verify-secrets`·로그인 정상), 0.1.1은 migrated DB를 바꾸지 않고 거부했으며(전후 `pg_dump` 동일),
   0.1.1 `scripts/backup.sh` 백업이 새 0.1.1 설치에 0.1.1 `restore.sh`로 복원됐다. 자동 업그레이드 테스트는 없고 arm64·S3는 시도하지
   않았다. 근거 `/home/kinesis/orca/fvoci-evidence/upgrade-0.1.1-to-0.2.0-b2218c75`. workspace SSO 사용권을 받는 빌드에서는 새
   workspace별 callback을 IdP에 등록하기 전까지 로그인이 실패하고, 개인 workspace SSO 행은 비활성이 된다.

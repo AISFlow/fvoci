@@ -55,9 +55,10 @@ their tests, CI and an independent review (feature table in
 - **Sharing and organizing:** public share links and pages, favorites, recent
   items, tags, collections and saved views, and calendar (ICS) feeds.
 - **Administration:** consent and legal documents, audit log, license and
-  quotas, admin settings and user management, branding. The audit log and
-  branding need an enterprise license, which a published build cannot
-  accept (the same as workspace SSO).
+  quotas, admin settings and user management, branding. Viewing the audit
+  log and branding need an enterprise license, which a published build
+  cannot accept (the same as workspace SSO); audit entries are recorded
+  either way.
 - **Operations:** API documentation at `/api/docs` (signed-in users), `/health`,
   `/ready` and `/metrics` probes with a container healthcheck,
   `fvoci-migrate --secrets-audit` / `--secrets-rotate` for the encryption
@@ -96,8 +97,8 @@ their tests, CI and an independent review (feature table in
   on every page below it; a guest could publish child pages they could not
   read. The refusal is 404. The check is made only when a link is created,
   not when it is served: a link serves its page's whole current subtree, so
-  links created before this release, and pages added or restricted below a
-  shared page later, are still exposed through the link.
+  pages under links created before this release, and pages added or
+  restricted below a shared page later, are still served through the link.
 - **No SSO on personal workspaces** (licensed builds only). Saving an SSO
   configuration on a personal workspace answers 409
   `personal_workspace_is_immutable`, and one saved before no longer starts
@@ -300,14 +301,14 @@ stand-ins. Treat them as untested with a real provider:
   the image default; the release compose uses 64. With every room in use,
   a waiting document showed its text after an editor left in 34.7 s and
   8.2 s (30 rooms), 30.6 s and 8.7 s (64 rooms); the 0.1.1 figures include
-  that 5 s, while 0.1.0 never reclaims a room and waits for the 30 s idle
+  that 5 s, while 0.1.0 never reclaims a room at the limit and waits for the 30 s idle
   eviction.
   The 0.2.0 helper changes were not measured this way, nor under Docker's
   default AppArmor profile, nor with many real users.
 - **Upgrade from 0.1.1:** checked once by hand on amd64 with local storage,
   from the published 0.1.1 release files to a 0.2.0 image built locally from
   the release-prep commit `b2218c75` (not the published 0.2.0 image). A
-  seeded account, workspace, project, task, comments, wiki body, HWPX
+  seeded account, workspace, project, task, comments, wiki body and HWPX
   attachment were unchanged after the upgrade, and a sealed two-factor secret
   still opened (migration 044 applied; `--doctor`, `--verify-secrets` and
   sign-in passed).
