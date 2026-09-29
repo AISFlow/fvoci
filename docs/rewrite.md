@@ -670,11 +670,14 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   문서 #249. minor 사유: #246(설치 파일 변경과 폐기된 `<VAR>_FILE` 기동 거부), #254(운영자 설정 `FVOCI_ATTACHMENT_TRANSFER_MODE`·
   `attachmentTransfer.mode`). migration 없음(044 유지), 새 필수 `.env` 값 없음. 발행 노트는 `scripts/release-notes-template.md`(`notes-for: 0.3.0`,
   #255 "Tasks: Gantt" 절 포함).
-- **열린 PR**: #262(Vue tracer 2, 위키 문서; 독립 검토 ACCEPT_WITH_NITS). `8adaf1b8` CI 37 성공·2 실패·1 skip.
-  실패는 `web-checks`의 기존 `collab-room-connection.test.ts` dispose 단언 한 건(run 36572851229, 재실행 없음)이다. `fvoci/r8-reconnect-dispose-race`에서 원인을 조사·수정한 뒤 main에 merge하고 #262를 다시 검사한다.
-  그 밖에 Dependabot #152 #153 #155 #156 #157 #158 #160 #191.
+- **열린 PR**(2026-09-30 00:20 KST 대조, origin/main 여전히 `6f64febc` = v0.3.0):
+  - 제품: #262 Vue 위키 (`8adaf1b8`, base main; `web-checks` 실패 = dispose 단언, #264로 수정). #265 위키 편집 컨트롤(`6eb0380d`, base #262; CI pass+skip만). #264 collab dispose (`bf3387ec`, base main; check-runs 24 success·6 skipped, combined success). #266 compat 정리(`6dd4bff9`, base main; 프론트엔드 기능 완료가 아님).
+  - 문서: #263 (`bdd72e1b`; 제품 기능 전환 수에 넣지 않음).
+  - Dependabot(비게이트): #152 #153 #155 #156 #157 #158 #160 #191.
+  프론트엔드 전환 현황·실행 TODO는 §6.3이 정본이다. #262와 #265는 같은 위키 흐름의 기반·보완이며 서로 다른 기능군 완료로 세지 않는다.
 - **추적 issue**(2026-09-29 개설): #258 한글 IME 첫 자모, #259 인라인 수식 원격 변경 시 초안 유실, #260 조합 중 멈춤과 undo 분리, #261 Vue 위키 편집기 React 대비 누락 컨트롤.
   #261은 **0.4.0 발행 전 필수**다. 해결 전에는 Vue 위키가 포함된 릴리스를 발행하지 않는다.
+- **프론트엔드 전환 TODO**: §6.3 (정본). 아래 브랜치는 그 표와 같다.
 - **진행 중 작업**(Ultracode 수량 면제; 각 작업은 자기 worktree에서 구현한 뒤 독립 검토 2개, 수정, delta 검토를 거친다):
   - #262 head 기준:
     - `r9-vue-editor-parity`(#261 A)
@@ -722,3 +725,91 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
    --features db-tests --test <suite>`. 서버 실행 전 `fvoci-migrate` → `fvoci-migrate --grant-app-role <role>`.
 4. 설치 확인: 개발 stack `scripts/install-smoke.sh`, 사용자 설치 `scripts/standalone-install-smoke.sh`(RUNNING.md "Install"); 릴리스 절차 `docs/RELEASING.md`.
 5. 다음 기능은 위 대응표의 잔여 행에서 의존성이 준비된 사용자 흐름을 먼저 고른다.
+
+### 6.3 Vue 프론트엔드 전환 체크리스트 (2026-09-30, 정본)
+
+승인 범위는 합의된 사용자 기능 전체(Vue 3 + Nuxt UI + Tiptap)이며 Gantt·위키 예광탄만이 아니다. 필요한 Rust/API/OpenAPI/DB 변경은 막지 않는다. React DOM 복제가 아니라 동등한 제공이 목표다. 이 절이 유일한 전환 TODO다(이슈·PR은 여기 ID에 연결).
+
+**단계**: 미착수 / 구현 중·로컬 WIP / 실제 라우트 연결 완료 / 종단 간 검증 완료 / 독립 검토·CI 중 / main 수락 완료.
+예광탄 수락 ≠ 상위 기능군 완료. stacked PR을 main 수락으로 적지 않는다. 확인하지 못한 항목은 미확인. #263·#266은 제품 기능군 완료 수에 넣지 않는다.
+
+**라우트 대조(실행 경로, 페이지 파일만으로 완료 판정하지 않음)**
+
+- main `6f64febc` `app-boundary.ts` / `boot.ts`: Vue는 `/w/:slug/:ref/gantt`만. 나머지는 React `App.tsx`.
+- #262 `8adaf1b8`: 위키 `/w/:slug/WIKI-<n>` 추가. React `WorkspaceRefPage`는 위키를 Vue로 handoff. 프로젝트 문서·태스크 상세는 React.
+- 회수 WIP는 Vue `router.ts`에 경로가 있어도 `app-boundary.ts`가 안 보내면 boot는 React다(연결 전).
+
+React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/invite/:token`, `/reset-password`, `/consent`, `/service-info`, `/legal/:kind`, `/magic-link`, `/confirm-email`, `/cancel-withdraw`, `/`, `/w/:slug/wiki`, `/w/:slug/search`, `/w/:slug/trash`, `/w/:slug/settings`(+ document-tags·templates), `/w/:slug/notifications`, `/w/:slug/my-tasks`, `/w/:slug/:ref`(프로젝트 홈·태스크·프로젝트 문서), `/w/:slug/:ref/settings/fields|workflow`. MFA·OIDC 버튼은 별도 URL이 아니라 `/login` 하위.
+
+#### 기능군 완료 체크 (상위는 필수 하위·출시 차단·구 경로 제거가 모두 끝날 때)
+
+- [x] 프로젝트 Gantt tracer 1 — main 수락, v0.3.0에 포함. 기능군 「프로젝트 뷰 전체」의 완료가 아님.
+- [ ] 최초 설정·로그인·로그아웃·OIDC/MFA·초대·동의
+- [ ] 워크스페이스 탐색·위키 목록/트리·검색·알림·공통 셸
+- [ ] 위키 문서·프로젝트 문서·태스크 본문과 협업 편집
+- [ ] 프로젝트·태스크 목록/상세·보드·간트·캘린더·컬렉션
+- [ ] 첨부 업로드/재개·A/B 전송·다운로드·지원 형식별 뷰어
+- [ ] 댓글·공유·즐겨찾기·리비전·가져오기/내보내기·휴지통/복원
+- [ ] 워크스페이스 설정·계정·멤버/권한·인스턴스 관리자 화면
+
+#### 현황표
+
+| ID | 사용자 흐름·라우트 | 단계 | 브랜치/HEAD·PR | 검증 근거 | 남은 작업·선행 | 담당 | 차단 | 배포 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| FE-Gantt | `/w/:slug/:ref/gantt` | main 수락 완료 | main `d265b426` #255 | e2e `project-gantt-flow`·웹 단위·CI 39/1 skip | DST/`dueAt`·overlap rail은 §5 한계. pixel layout 필드 제거는 #253 contract | 수락됨 | 없음 | v0.3.0 |
+| FE-Wiki-collab | `/w/:slug/WIKI-<n>` 열기·편집·저장·재접속 | 독립 검토·CI 중 | `fvoci/r6-vue-wiki` `8adaf1b8` #262 (base main) | 독립 검토 ACCEPT_WITH_NITS. e2e `workspace-wiki-vue-flow`. CI 37 성공·**web-checks 실패**(dispose) | #264 merge 후 #262 재검증. React 위키 문서는 이 브랜치에서 제거됨 | Grok 임시 실행자 | #264 | 미포함. 0.4.0 전 #261 필수 |
+| FE-Wiki-editor | 위키 거터·표 손잡이·코드 크롬·버블·모바일 툴바 | 독립 검토·CI 중 | `fvoci/r9-vue-editor-parity` `6eb0380d` #265 (base #262) | 로컬 e2e controls 6/6. CI pass(+ skip). 백엔드 diff 없음 vs `8adaf1b8` | 파일 drop/paste e2e는 #261 잔여. 6/6 ≠ 전체 편집기 완료. #262 머지 선행 | 워커 r9-editor / 검토 Grok | #262 | 미포함 |
+| FE-Wiki-shell | Vue 셸: 로그아웃·벨·검색·푸터·전환 | 구현 중·로컬 WIP | `fvoci/r9-vue-shell-parity` `ea8bd1c9` 미푸시 | 로컬 e2e `vue-shell-flow.spec.ts` 존재. 원격 CI 없음 | origin에 push·PR(#262 위). app-boundary 불변 | 워커 r9-shell | #262 | 미포함 |
+| FE-IME | 한글 첫 자모 (#258), React·Vue 공통 편집기 | 구현 중·로컬 WIP | `fvoci/r7-ime-first-jamo` `d5093efd` vs main | 커밋 2개(UniqueID 유지 + CDP/opt-in witness). 원격 미제출 | PR vs main. 실제 OS IME는 opt-in witness | 워커 r7-ime | 없음 | 출시 차단(#258) |
+| FE-Math-draft | 인라인 수식 원격 변경 시 초안 (#259) | 미착수 | issue #259 | #262에 관련 고정 테스트·이슈 주석 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
+| FE-Undo-IME | 조합 중 undo 단위 (#260) | 미착수 | issue #260 | 없음 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
+| FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 구현 중·로컬 WIP (라우트 연결 전) | `fvoci/r11-vue-auth` `dbaeba39` 미푸시 | 페이지·LoginForm/MfaStep/OIDC 있음. `router.ts`에 `/login` 있으나 **boundary 없음 → boot는 React** | `app-boundary` `/^\/login\/?$/i` + `VUE_ROUTE_PATHS.login` + React `/login` 제거 + `login-vue-flow` e2e + 기존 `mfa-flow` 회귀. #262 위 스택 | 워커 r11-auth | #262 (스택) | 미포함 |
+| FE-Auth-setup | `/setup` | 미착수 | React `SetupPage` | 기존 React e2e | Vue 페이지 없음. 로그인 연결 후 이어서 | Grok 임시 실행자 | FE-Auth-login 권장 | — |
+| FE-Auth-invite | `/invite/:token` | 미착수 | React `InvitePage` | 기존 `workspace-invite-flow` | Vue 없음 | Grok 임시 실행자 | 없음 | — |
+| FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 미착수 | React 각 페이지 | 미확인(기존 React e2e 범위는 흐름별 상이) | Vue 없음. 매직/리셋 **요청**은 로그인 폼 하위 | Grok 임시 실행자 | 없음 | — |
+| FE-WS-home | `/w/:slug` 랜딩 | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-workspace` `09764331` | `WorkspaceHomePage.vue` + router. boundary 없음 | regex `/^\/w\/[^/]+\/?$/i`를 gantt/wiki와 충돌 없이. e2e 직접 URL·새로고침 | Grok 임시 실행자 | #262, app-boundary 소유 | — |
+| FE-WS-projects | `/w/:slug/projects` | 구현 중·로컬 WIP (연결 전) | 위와 동일 | `ProjectsPage.vue` | `/^\/w\/[^/]+\/projects\/?$/i` + 목록 e2e | Grok 임시 실행자 | FE-WS-home과 같은 PR이 안전 | — |
+| FE-WS-wiki-list | `/w/:slug/wiki` 트리/목록 | 미착수 | React `WikiPage` | 기존 `workspace-wiki-flow` | Vue 없음. 문서 페이지(#262)와 별개 | Grok 임시 실행자 | 없음 | — |
+| FE-WS-search | `/w/:slug/search` | 미착수 | React `SearchPage` | 기존 검색 e2e | Vue 없음 | Grok 임시 실행자 | 없음 | — |
+| FE-WS-nav | `/w/:slug/my-tasks` `/notifications` `/trash` | 미착수 | React | 기존 각 e2e | Vue 없음 | Grok 임시 실행자 | 없음 | — |
+| FE-Proj-tasks | `/w/:slug/:ref/tasks` | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-project-views` `d510bdb7` | `ProjectTasksPage.vue` + SA-12 커밋 | boundary + 목록/필터 e2e. 태스크 **상세**는 `:ref` React | Grok 임시 실행자 | #262 | — |
+| FE-Proj-collections | `/w/:slug/:ref/{table,board,calendar}` | 구현 중·로컬 WIP (연결 전) | 위와 동일 | `ProjectCollectionPage.vue` | boundary 3경로 + 기존 collections e2e를 Vue 경로에서 | Grok 임시 실행자 | FE-Proj-tasks와 충돌 없이 통합 | — |
+| FE-Proj-home | `/w/:slug/:ref` 프로젝트 홈 | 미착수 | React `ProjectHomePage` | 기존 project e2e | Vue 없음 | Grok 임시 실행자 | 없음 | — |
+| FE-Doc-project | 프로젝트 문서 `:ref` 중 문서 prefix | 미착수 | React `DocumentPage` | 협업은 Rust. UI는 React | Vue 없음. 위키와 다른 경로 | Grok 임시 실행자 | FE-Wiki-collab 수락 후 재사용 | — |
+| FE-Doc-task | 태스크 상세·본문 `/w/:slug/:ref` item | 미착수 | React `TaskDetailPage` | 기존 task-* e2e | Vue 없음 | Grok 임시 실행자 | 없음 | — |
+| FE-Attach-view | `/w/:slug/a/:id/view` | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-viewers` `21c20548` | `AttachmentViewPage.vue` + router. boundary 없음 | regex + 기존 viewer e2e(HWP/PDF/PPTX/DOCX/XLSX)를 Vue boot에서 | Grok 임시 실행자 | #262 | — |
+| FE-Attach-share | `/s/:token/attachments/:id/view` | 구현 중·로컬 WIP (연결 전) | 위와 동일 | `ShareAttachmentViewPage.vue` | 공개 세션 없이. `share-attachment-view-flow` | Grok 임시 실행자 | FE-Attach-view와 같은 PR | — |
+| FE-Attach-upload | 문서/태스크 첨부 업로드·재개·A/B | 미확인 | React 문서/태스크 + #254 전송 | 기존 attachment e2e(React) | Vue 위키는 attachment-upload bridge가 WikiDocumentView에 있음. drop/paste e2e는 #261 잔여. 전송 모드 전용 메시지 미구현(§5) | Grok 임시 실행자 | #261 drop/paste | — |
+| FE-Share-public | `/s/:token` 문서 공유 읽기 | 미착수 | React `PublicSharePage` | 기존 share e2e | Vue 없음. 첨부 뷰어 WIP와 별개 | Grok 임시 실행자 | 없음 | — |
+| FE-Wiki-chrome | 위키 페이지의 댓글·공유·별·리비전·보내기·태그 | 실제 라우트 연결 완료(위키 URL만) | #262 WikiDocumentView | 컴포넌트 존재. **대화상자 e2e 범위는 미확인**(wiki-vue-flow는 본문/협업 중심) | 각 컨트롤의 종단 검사. 태스크/프로젝트 문서 표면은 여전히 React | Grok 임시 실행자 | FE-Wiki-collab 수락 | — |
+| FE-Import-export | 가져오기/보내기·휴지통 복원(워크스페이스) | 미착수(워크스페이스 URL) | React trash/settings import | 기존 import/export e2e | Vue 위키 DocumentExportMenu는 문서 단위. 워크스페이스 import UI 없음 | Grok 임시 실행자 | 없음 | — |
+| FE-Settings-ws | `/w/:slug/settings` 멤버·권한·SSO·토큰 등 | 구현 중·로컬 WIP (라우트도 미연결) | `fvoci/r11-vue-settings` `0b2d1c07` | `WorkspaceSettingsPage.vue` 있으나 **router.ts 미등록**. 본문은 identity+알림 위주 → React 전 섹션 대비 **부분** | router + boundary + 멤버/그룹/GitHub/webhook/import 등 잔여 섹션 | Grok 임시 실행자 | 없음 | — |
+| FE-Settings-account | `/settings/account` | 구현 중·로컬 WIP (연결 전) | `r11-vue-settings` 및 `r11-vue-account-admin` `b36ea974` | account-admin은 router에 있음, boundary 없음. settings 브랜치에도 페이지 있음(**중복 WIP**) | 한 브랜치로 통합. MFA 설정 UI는 `mfa-flow`가 React 계정 페이지를 탐 | Grok 임시 실행자 | 중복 정리 | — |
+| FE-Admin | `/settings/admin` `/audit` `/legal` | 구현 중·로컬 WIP (연결 전) | `fvoci/r11-vue-account-admin` `b36ea974` | 세 페이지 + router. boundary 없음 | boundary + admin e2e. 인스턴스 관리 하위 탭 완전성은 미확인 | Grok 임시 실행자 | #262 | — |
+| FE-Home | `/` 워크스페이스 선택 | 미착수 | React `HomePage` | 기존 홈 e2e | Vue 없음 | Grok 임시 실행자 | FE-Auth-login 이후가 자연스러움 | — |
+| FE-Legal | `/legal/:kind` `/service-info` | 미착수 | React | 미확인 | Vue 없음. 로그인 푸터 링크는 풀 로드 | Grok 임시 실행자 | 없음 | — |
+| FE-Dispose | collab socket retire/dispose | 독립 검토·CI 중 | `fvoci/r8-reconnect-dispose-race` `bf3387ec` #264 | CI combined success. GitHub review 스레드 없음. 별도 컨텍스트 검토 진행 | 검토 ACCEPT 후 main merge → #262 재실행 | 검토 Grok / 머지 코디네이터 | 검토 대기 | 제품 UI 전환 아님 |
+| FE-Compat | `compat/` 폐기, fixture를 `tests/fixtures`로 | 독립 검토·CI 중 | `fvoci/retire-compat-probes` `6dd4bff9` #266 | 로컬 관련 테스트 통과. 검토 ACCEPT_WITH_NITS. 원격 CI 진행 | CI green 후 merge. **프론트엔드 기능군 완료가 아님** | Grok 임시 실행자 | CI | 아님 |
+| FE-Docs-ops | 운영·역할 문서 | 독립 검토·CI 중 | `fvoci/docs-0-3-0-record` `bdd72e1b` #263 | 문서 PR | 제품 전환 수에 미포함 | Grok 임시 실행자 | 없음 | 아님 |
+
+공통 파일(`app-boundary.ts`, vue `router.ts`/`route-paths.ts`, i18n, manifest/lockfile, OpenAPI) 소유: 임시 실행자. 워커는 regex·경로 추가를 요청하고 실행자가 작은 단위로 넣는다. 이 때문에 모든 Vue 페이지를 한 줄로 세우지 않는다.
+
+#### 바로 수락할 후보와 병렬 다음 작업
+
+1. **#264** `bf3387ec` — CI green. 독립 검토 회신 후 main 머지. 검사: 이미 통과한 web-checks·collaboration-flow. 머지 후 #262 `web-checks` 재실행.
+2. **#265** `6eb0380d` — #262 위에 유지. 독립 검토 회신 후 #262 머지 뒤 재기반·머지. 검사: `workspace-wiki-vue-controls.spec.ts` 회귀.
+3. **#266** — CI 남은 job 대기 후 머지(기능 전환과 별개).
+4. **#261 B 셸** — push·PR(#262 위). 검사: `vue-shell-flow.spec.ts`.
+5. **#258 IME** — main 기준 PR. 검사: 편집기 단위 + 브랜치의 IME 테스트.
+6. **`/login` 연결** — r11-vue-auth에서 boundary 연결·React 라우트 제거·e2e. 선행: #262 스택. 검사: 새 login Vue spec + `mfa-flow.spec.ts`.
+7. 그다음 연결(서로 다른 URL, boundary는 실행자가 순차 통합): workspace home/projects, viewers, project-views, account-admin.
+8. 협업 엔진 비교는 **#262 main 수락 뒤** 고정 SHA에서 시작(순서 유지). 지금 예광탄을 늘려 비교를 미루지 않는다.
+
+#### 전체 전환 종결까지 남은 필수
+
+- 기능 누락: 위 표의 미착수 URL 전부 + settings 부분 이식 + 계정 페이지 중복 WIP 정리.
+- 출시 차단: #258 #259 #260, #261(편집 컨트롤 A + 셸 B + drop/paste e2e). Vue 위키를 넣은 0.4.0은 #261 전에 발행하지 않는다.
+- 구 React 경로: 경로가 Vue로 수락된 뒤에만 제거(#255 Gantt, #262 위키 문서). 연결 전 파일은 쌓아 두지 않고 해당 ID의 연결 TODO로 끝낸다.
+- 후속 배정 검증: 각 연결 PR은 실제 사용자 URL + Rust API/DB + production dist + 인가/오류 + 독립 검토 + CI. mock 수락 없음. 관련 백엔드 무변경이면 `prebuilt-8adaf1b8` 재사용(SHA·diff 근거).
+
+임의 백분율은 쓰지 않는다. 분모는 위 ID가 닫힐 때 확정된다.
