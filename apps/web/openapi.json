@@ -26734,7 +26734,7 @@
           },
           "canEdit": {
             "type": "boolean",
-            "description": "At least Edit on the project and the project not archived, read in the\nsame snapshot as `items`. A display hint: PATCH re-checks both under\nthe project row lock."
+            "description": "At least Edit on the project and the project not archived, read in the\nsame snapshot as `items`. A display hint: PATCH re-checks both under\nthe project row lock. Ignores API-token scopes; PATCH also needs\n`tasks.write`."
           },
           "columns": {
             "type": "array",

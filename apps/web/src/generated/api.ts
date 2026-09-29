@@ -4593,7 +4593,8 @@ export interface components {
             /**
              * @description At least Edit on the project and the project not archived, read in the
              *     same snapshot as `items`. A display hint: PATCH re-checks both under
-             *     the project row lock.
+             *     the project row lock. Ignores API-token scopes; PATCH also needs
+             *     `tasks.write`.
              */
             canEdit: boolean;
             columns: components["schemas"]["ScaleTickOutput"][];

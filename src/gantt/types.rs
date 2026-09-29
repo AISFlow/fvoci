@@ -241,7 +241,8 @@ pub struct GanttLayoutOutput {
     pub items: Vec<GanttLayoutItemOutput>,
     /// At least Edit on the project and the project not archived, read in the
     /// same snapshot as `items`. A display hint: PATCH re-checks both under
-    /// the project row lock.
+    /// the project row lock. Ignores API-token scopes; PATCH also needs
+    /// `tasks.write`.
     pub can_edit: bool,
     /// Dependencies whose both ends are in `items`, ascending
     /// `(blockerId, blockedId)` and capped at 2048 (over the cap, the lowest
