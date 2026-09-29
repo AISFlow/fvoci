@@ -1015,8 +1015,9 @@ selects local storage; a storage doctor probe cannot detect that wrong choice.
 2. From the old checkout, with its `.env` unchanged, back up and leave the server
    stopped (old servers must not run during migrate):
    `scripts/backup.sh --project <name> --env-file infra/rust/.env --output <new-dir> --leave-stopped`.
-   Keep a protected copy of the env file with the backup (file mode 0600,
-   directory 0700); the archive omits the pepper, encryption keys and passwords.
+   Keep a protected copy of the env file (file mode 0600, directory 0700),
+   stored apart from the backup; the archive omits the pepper, encryption keys
+   and passwords.
    With S3 the script refuses. First stop the server using the existing flags:
    `docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml --project-name <name> --env-file infra/rust/.env stop -t 45 server`,
    then take the quiesced dump and protect bucket objects as in "S3 storage backup".
@@ -1642,7 +1643,7 @@ cargo run --release --bin fvoci-migrate -- --init-env \
   --public-origin https://fvoci.example.com --out infra/rust/.env
 ```
 
-Back up the generated file with the database backups: the pepper and
+Back up the generated file, apart from the database backups: the pepper and
 encryption keys cannot be regenerated.
 
 **`--doctor`** checks the server's environment without starting it and prints
