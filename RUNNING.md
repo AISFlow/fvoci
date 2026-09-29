@@ -288,12 +288,16 @@ Setting up `presigned`:
 4. Keep the access key least-privilege and Block Public Access on; the bucket
    needs no public ACL or policy.
 5. Switch the mode on the admin page, or pin it with
-   `FVOCI_ATTACHMENT_TRANSFER_MODE=presigned`. With the compose install, the
-   S3 overlay (`infra/rust/compose.s3.yml`) passes the server only the
-   variables in its `environment` list: `FVOCI_ATTACHMENT_TRANSFER_MODE` and
-   the two TTL variables take effect only when listed there. An empty
+   `FVOCI_ATTACHMENT_TRANSFER_MODE=presigned`. An empty
    `FVOCI_ATTACHMENT_TRANSFER_MODE` counts as unset; an empty TTL refuses
-   startup, so give TTL entries non-empty defaults.
+   startup. Compose passes the server only the variables its files name:
+   - Developer stack: the S3 overlay (`infra/rust/compose.s3.yml`) passes
+     `FVOCI_ATTACHMENT_TRANSFER_MODE` and the two TTL variables from `.env`
+     (commented in `infra/rust/.env.example`). Left out, the mode is unset, so
+     the admin page decides, and the TTLs are 900 and 60 s.
+   - User install: list them in `compose.override.yml` beside the other S3
+     settings, only the ones you set ("Optional settings"). Leave the mode
+     out to choose it on the admin page.
 
 Upgrading: earlier versions validated `S3_PUBLIC_ENDPOINT` but did not use
 it. A value left set from then now makes `presigned` available (the mode stays
@@ -1030,7 +1034,7 @@ services:
 | Topic | Variables (details in this file) |
 | --- | --- |
 | Domain, HTTPS, proxy | `FVOCI_PUBLIC_ORIGIN=https://…` in `.env` (also turns on secure cookies) and the published address; see "Developer stack (compose.yml with init)" below for the proxy rules, which apply to both stacks |
-| S3 storage | `STORAGE_DRIVER=s3`, `S3_*` ("S3 storage backup") |
+| S3 storage | `STORAGE_DRIVER=s3`, `S3_*` ("S3 storage backup"); for direct browser transfer `S3_PUBLIC_ENDPOINT` and optionally `FVOCI_ATTACHMENT_TRANSFER_MODE`, `FVOCI_ATTACHMENT_PRESIGN_*_TTL_SECS` ("Attachment transfer modes") |
 | Mail | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` |
 | OIDC sign-in | providers are set up in the app, sealed with `ENCRYPTION_KEYS`; `OIDC_ALLOW_INSECURE=1` only for a local http provider |
 | GitHub integration | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_STATE_SECRET` |

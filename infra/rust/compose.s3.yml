@@ -20,6 +20,13 @@ services:
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required}
       S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-1}
       UPLOAD_INCOMPLETE_TTL_HOURS: ${UPLOAD_INCOMPLETE_TTL_HOURS:-24}
+      # Attachment transfer (RUNNING.md "Attachment transfer modes"). Unset or
+      # empty mode leaves the choice to the admin setting (default proxy);
+      # `presigned` or `proxy` pins it. The TTLs need a value (empty refuses
+      # startup), so they default to the server's own defaults.
+      FVOCI_ATTACHMENT_TRANSFER_MODE: ${FVOCI_ATTACHMENT_TRANSFER_MODE:-}
+      FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS: ${FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS:-900}
+      FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS: ${FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS:-60}
     depends_on:
       silo-init:
         condition: service_completed_successfully
