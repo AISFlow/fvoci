@@ -73,8 +73,8 @@ Vue 예광탄이 수락된 뒤에, 현행 Yrs 경로의 **비용 측정**과 필
 1. **기본 제품 경로: Yrs 0.28.0 + native child + Hocuspocus 4.6.0.** Vue tracer에
    Automerge/Loro/Y-Sweet 대체 경로를 넣지 않는다.
 2. **다음 실험(tracer 수락 후):** 현재 helper RSS·지연·encode 비용을 같은 SHA에서
-   측정하고, 차단이 있으면 ProseMirror step authority를 제품 `/collab`과 분리된
-   실험으로만 둔다. 계약 검사 재실행은 회귀 확인이지 비교 완료가 아니다.
+   측정하고, 성능·복잡성·운영 비용의 비교 가치가 확인되면 ProseMirror step authority를
+   제품 `/collab`과 분리된 작은 종단 간 실험으로 둔다. 계약 검사 재실행은 회귀 확인이지 비교 완료가 아니다.
 3. **구현·기본 엔진 교체 PR이 아니다.** 채택 전까지 저장 본문 encoding 1을 옮기지 않는다.
 
 ### 범위 밖 (rewrite.md §5에 엔진 후보로 없음)
