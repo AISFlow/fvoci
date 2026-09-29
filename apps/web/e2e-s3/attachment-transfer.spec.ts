@@ -82,7 +82,9 @@ async function setTransferMode(page: Page, mode: "proxy" | "presigned", label: s
 type PageFetch = { status: number; redirected: boolean; url: string; range: string | null; sha: string; length: number };
 
 /** `fetch` from the page, like the viewers do; hashes the body in the page. */
-async function pageFetch(page: Page, url: string, init: RequestInit): Promise<PageFetch> {
+type FetchInit = { credentials?: RequestCredentials; headers?: Record<string, string> };
+
+async function pageFetch(page: Page, url: string, init: FetchInit): Promise<PageFetch> {
   return page.evaluate(
     async ({ url, init }) => {
       const res = await fetch(url, init);
