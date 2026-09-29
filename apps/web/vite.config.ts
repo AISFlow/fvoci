@@ -109,6 +109,11 @@ function rhwpWasmNotice() {
  */
 function officeKitXlsxNotice() {
   // The package exports no ./package.json; walk up from an exported entry.
+  // import.meta.resolve is why the scripts pass `--configLoader native`: Vite
+  // 8.3's default bundle loader serves it through Node's module resolve hooks,
+  // which Bun 1.4 lacks (oven-sh/bun#27369), and the Bun build then fails with
+  // "Cannot find package 'vite-module-runner:import-meta-resolve'". The flag can
+  // go when Bun implements Module.registerHooks.
   let dir = path.dirname(fileURLToPath(import.meta.resolve("@office-kit/xlsx/cell")));
   let manifest: { name?: string; version: string };
   for (;;) {
