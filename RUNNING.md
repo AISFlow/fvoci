@@ -1159,13 +1159,13 @@ same volumes; keep `.env`) and run `docker compose up -d --wait --wait-timeout 9
 `--wait` still gives up, the preparation keeps going: follow
 `docker compose logs -f fvoci` until `prepared; starting the server`). Compose
 recreates `fvoci`, so the old server has stopped before the new container
-migrates. From a release whose `compose.yml` passed the passwords and keyrings
-as Compose secret files (0.1.x), the same steps apply: the new file reads the
-same `.env`, Compose recreates all three containers on the same volumes, and
-those files existed only inside the old containers. Stopping it during a migration is safe (that migration rolls back),
+migrates. Stopping it during a migration is safe (that migration rolls back),
 but the next start waits until PostgreSQL has ended the interrupted statement; the preparation refuses to migrate while any other server still has
 app-role sessions open, and a failure leaves the server stopped as described
-above. 0.x releases make no compatibility promise between minor versions and
+above. From a release whose `compose.yml` passed the passwords and keyrings
+as Compose secret files (0.1.x and 0.2.0), the same steps apply: the new file
+reads the same `.env`, Compose recreates all three containers on the same
+volumes, and those files existed only inside the old containers. 0.x releases make no compatibility promise between minor versions and
 there is no downgrade: going back means restoring the pre-upgrade backup.
 `docker compose down -v` deletes the data; the keys stay in `.env`.
 `fvoci-server --version` (for example
