@@ -40,6 +40,10 @@ test("RefusalWatch: 거절 뒤 열리지도 못한 시도(서버 다운·오프�
 });
 
 let opened: number[] = [];
+/** Every socket constructed, in order: a reconnect is a new one. */
+let made: RefusingSocket[] = [];
+/** Runs right after a socket is constructed, before its open (tests that time the race). */
+let onMade: ((socket: RefusingSocket) => void) | null = null;
 
 /** Opens, then the server closes before any frame — the room-cap refusal shape. */
 class RefusingSocket extends EventTarget {
@@ -49,12 +53,16 @@ class RefusingSocket extends EventTarget {
 	constructor(url: string) {
 		super();
 		this.url = url;
+		made.push(this);
 		setTimeout(() => {
+			/* Like a browser socket: one closed while connecting never opens. */
+			if (this.readyState !== 0) return;
 			this.readyState = 1;
 			opened.push(performance.now());
 			this.dispatchEvent(new Event("open"));
 			setTimeout(() => this.serverClose(), 1);
 		}, 1);
+		onMade?.(this);
 	}
 	protected serverClose() {
 		if (this.readyState === 3) return;
@@ -86,20 +94,29 @@ const FAST = {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Opens while live for `liveMs`, then opens in the second after destroy(). */
+async function until(condition: () => boolean, deadlineMs: number): Promise<void> {
+	const end = performance.now() + deadlineMs;
+	while (!condition() && performance.now() < end) await sleep(5);
+}
+
+/** Opens while live for `liveMs`; then what destroy() left: sockets it did not close, and the
+ * sockets constructed and opens in the second after it. */
 async function measure(
 	liveMs: number,
 	make: () => { destroy(): void },
-): Promise<{ live: number[]; afterDestroy: number }> {
+): Promise<{ live: number[]; leftOpen: number; madeAfterDestroy: number; afterDestroy: number }> {
 	await sleep(1_000);
 	opened = [];
+	made = [];
 	const socket = make();
 	await sleep(liveMs);
 	const live = opened;
 	opened = [];
+	const before = made.length;
 	socket.destroy();
+	const leftOpen = made.filter((ws) => ws.readyState !== 3).length;
 	await sleep(1_000);
-	return { live, afterDestroy: opened.length };
+	return { live, leftOpen, madeAfterDestroy: made.length - before, afterDestroy: opened.length };
 }
 
 test("backoff 설정: 첫 재시도부터 jitter, 상한 있음, attempt 검증을 통과한다", () => {
@@ -135,13 +152,14 @@ test("재현: provider 4.6.0 은 인증 전 거절마다 재시도 루프가 늘
 });
 
 test("재현: provider 4.6.0 은 파기 전에 예약된 재접속으로 파기 뒤에도 소켓을 연다", async () => {
-	const { live, afterDestroy } = await measure(
+	const { live, madeAfterDestroy, afterDestroy } = await measure(
 		300,
 		() =>
 			new HocuspocusProviderWebsocket({ ...FAST, delay: 400, WebSocketPolyfill: DroppingSocket }),
 	);
 	assert.equal(live.length, 1);
-	assert.equal(afterDestroy, 1, "the 400 ms reconnect timer fires on the destroyed instance");
+	assert.equal(madeAfterDestroy, 1, "the 400 ms reconnect timer builds a socket on the destroyed instance");
+	assert.equal(afterDestroy, 1, "and nothing closes it before it opens");
 });
 
 /* Wider than FAST so a single loop (gaps ≥ minDelay) and a storm (gaps shrinking under it) differ. */
@@ -154,7 +172,7 @@ const REFUSE_FAST = {
 
 test("거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열고, 파기 뒤에는 열지 않는다", async () => {
 	const refusals: Array<CollabRefusal | null> = [];
-	const { live, afterDestroy } = await measure(1_500, () =>
+	const { live, leftOpen, madeAfterDestroy, afterDestroy } = await measure(1_500, () =>
 		createRefusalAwareSocket({ ...REFUSE_FAST, WebSocketPolyfill: RefusingSocket }, (refusal) =>
 			refusals.push(refusal),
 		),
@@ -167,12 +185,14 @@ test("거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열
 	assert.ok(minGap >= REFUSE_FAST.minDelay - 3, `a gap below minDelay means a second loop: ${minGap} ms`);
 	assert.deepEqual([...new Set(refusals)], ["capacity"]);
 	assert.ok(refusals.length >= live.length - 1, `every open was refused: ${refusals.length}/${live.length}`);
-	assert.equal(afterDestroy, 0, "destroy stops the retry loop and the reconnect timer");
+	assert.equal(leftOpen, 0, "destroy closes the socket it had, connecting or open");
+	assert.equal(madeAfterDestroy, 0, "destroy stops the retry loop and the reconnect timer");
+	assert.equal(afterDestroy, 0);
 });
 
 test("서비스 중 끊긴 세션은 provider 가 다시 붙고, 파기하면 예약된 재접속도 열지 않는다", async () => {
 	const refusals: Array<CollabRefusal | null> = [];
-	const { live, afterDestroy } = await measure(300, () =>
+	const { live, leftOpen, madeAfterDestroy, afterDestroy } = await measure(300, () =>
 		createRefusalAwareSocket(
 			{ ...FAST, delay: 400, WebSocketPolyfill: DroppingSocket },
 			(refusal) => refusals.push(refusal),
@@ -184,5 +204,44 @@ test("서비스 중 끊긴 세션은 provider 가 다시 붙고, 파기하면 �
 		refusals.every((refusal) => refusal === null),
 		`a dropped served session is not a refusal: ${refusals}`,
 	);
-	assert.equal(afterDestroy, 0, "the pending 400 ms reconnect must not fire after destroy");
+	assert.equal(leftOpen, 0);
+	assert.equal(madeAfterDestroy, 0, "the pending 400 ms reconnect must not fire after destroy");
+	assert.equal(afterDestroy, 0);
+});
+
+/* The race behind a CI flake of the refused-socket test above (afterDestroy 1 !== 0): the retry
+ * timer constructs a socket and destroy() runs in the same timer pass, before that socket opens.
+ * The old fake opened it anyway although destroy() had closed it; a browser socket does not. */
+test("파기 직전에 만든 연결 중 소켓은 파기가 닫아 열리지 않고, 파기 뒤 새 소켓은 없다", async () => {
+	opened = [];
+	made = [];
+	let atDestroy = null as { state: number; closed: number; made: number } | null;
+	const socket = createRefusalAwareSocket(
+		{ ...REFUSE_FAST, WebSocketPolyfill: RefusingSocket },
+		() => {},
+	);
+	onMade = (ws) => {
+		if (made.length < 3) return;
+		onMade = null;
+		queueMicrotask(() => {
+			const state = ws.readyState;
+			opened = [];
+			socket.destroy();
+			atDestroy = { state, closed: ws.readyState, made: made.length };
+		});
+	};
+	try {
+		await until(() => atDestroy !== null, 5_000);
+		assert.ok(atDestroy, "a third socket was constructed");
+		assert.equal(atDestroy.state, 0, "destroy ran while that socket was still connecting");
+		assert.equal(atDestroy.closed, 3, "destroy closes it");
+		/* Longer than any reconnect the socket had pending: onClose's delay, the loop's backoff. */
+		await sleep(REFUSE_FAST.delay + REFUSE_FAST.maxDelay + 50);
+		assert.equal(made.length, atDestroy.made, "no socket after destroy");
+		assert.equal(opened.length, 0, "a socket closed while connecting never opens");
+		assert.ok(made.every((ws) => ws.readyState === 3), "every socket ends closed");
+	} finally {
+		onMade = null;
+		socket.destroy();
+	}
 });
