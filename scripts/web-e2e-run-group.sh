@@ -5,15 +5,25 @@ set -euo pipefail
 : "${ROOT:?ROOT is required}"
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR is required}"
 
+# The label names the spec arguments; Playwright options (arguments that
+# start with "-", such as --config=... after the spec; give option values in
+# the same argument) are passed on but not named.
+LABEL_SPECS=()
+for arg in "$@"; do
+  if [[ "$arg" != -* ]]; then
+    LABEL_SPECS+=("$arg")
+  fi
+done
+
 GROUP_LABEL="default-suite"
-if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]] && (($# < 1)); then
+if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]] && ((${#LABEL_SPECS[@]} < 1)); then
   GROUP_LABEL="collaboration-pending"
 fi
 
-if (($# >= 1)); then
-  GROUP_LABEL="$(basename -- "${1%.spec.ts}")"
-  if (($# > 1)); then
-    GROUP_LABEL="${GROUP_LABEL}+$(basename -- "${2%.spec.ts}")"
+if ((${#LABEL_SPECS[@]} >= 1)); then
+  GROUP_LABEL="$(basename -- "${LABEL_SPECS[0]%.spec.ts}")"
+  if ((${#LABEL_SPECS[@]} > 1)); then
+    GROUP_LABEL="${GROUP_LABEL}+$(basename -- "${LABEL_SPECS[1]%.spec.ts}")"
   fi
 fi
 
