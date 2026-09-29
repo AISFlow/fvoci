@@ -353,20 +353,22 @@ ANSI = re.compile(r"(?:\x1b|\\\\?u001[bB])\[[0-9;]*m")
 # ordinary things, so for those a value that cannot be an OAuth value is kept:
 # a lower_snake_case word ("origin_mismatch", "open"); for code also a short
 # number (SMTP 550) or an errno name (ECONNREFUSED); for state a capitalised
-# word (Open). Every other value is redacted.
+# word (Open). Every other value is redacted. (A lowercase-word MFA recovery
+# code would be kept under `code`; this check never prints one.)
 AMBIGUOUS_KEYS = "code|state|nonce|session_state"
 ALWAYS_KEYS = ("code_id|session_code|client_data|tab_id|auth_session_[a-z_]+|userSessionId"
                "|sessionId|session_id|code_challenge|code_verifier|access_token|refresh_token"
                "|id_token|id_token_hint|invitation|mfa")
 KEYS = f"{AMBIGUOUS_KEYS}|{ALWAYS_KEYS}"
 PLAIN_WORD = r"[a-z][a-z_]{0,63}"
+KEPT_CODE = rf"(?:{PLAIN_WORD}|[0-9]{{1,5}}|E[A-Z]{{2,31}})"
+KEPT_STATE = rf"(?:{PLAIN_WORD}|[A-Z][a-z]{{1,31}})"
 KEPT = {
-    "code": re.compile(rf"^(?:{PLAIN_WORD}|[0-9]{{1,5}}|E[A-Z]{{2,31}})$"),
-    "state": re.compile(rf"^(?:{PLAIN_WORD}|[A-Z][a-z]{{1,31}})$"),
+    "code": re.compile(rf"^{KEPT_CODE}$"),
+    "state": re.compile(rf"^{KEPT_STATE}$"),
     "nonce": re.compile(rf"^{PLAIN_WORD}$"),
     "session_state": re.compile(rf"^{PLAIN_WORD}$"),
 }
-KEPT_WORD = rf"(?:{PLAIN_WORD}|[0-9]{{1,5}}|E[A-Z]{{2,31}}|[A-Z][a-z]{{1,31}})"
 # A quoted value after `key=`, `key: ` (Rust Debug), `"key": ` (JSON) or
 # `\"key\":` (JSON inside a JSON string), optionally inside `Some(...)`. The
 # value is lexed as a string of its own quoting: `\x` escapes in a plain
@@ -377,15 +379,25 @@ QUOTED = re.compile(
     r'(?:Some\()?(?:(?P<esc>\\))?")'
     r'(?P<value>(?(esc)(?:[^"\\]|\\\\\\["\\]|\\\\[^"\\])*|(?:[^"\\]|\\.)*))'
     r'(?P<close>(?(esc)\\"|"))')
-# The same prefixes, to fail closed on a value the lexer above did not take.
-QUOTED_HEAD = re.compile(
-    rf'(?:\b(?:{KEYS})(?:=|:[ \t]*)|\\?"(?:{KEYS})\\?"[ \t]*:[ \t]*)(?:Some\()?\\?"')
-# After QUOTED: a redacted value, or one it kept (a closing quote follows).
-HANDLED = re.compile(rf'(?:<redacted>|{KEPT_WORD}\\?")')
+# Fail closed: any other `key=` / `key:` / `"key":` form (spaces, single
+# quotes, String("..."), unquoted Some(...), deeper JSON escaping) whose value
+# is neither redacted nor a kept word in its own quotes cuts the line there.
+SENSITIVE = re.compile(rf'(?:\\*"(?P<jk>{KEYS})\\*"|\b(?P<k>{KEYS})\b)[ \t]*[=:][ \t]*')
+REDACTED = r"<redacted[a-z-]*>"
+
+
+def settled_value(key: str) -> re.Pattern:
+    body = {"code": KEPT_CODE, "state": KEPT_STATE}.get(key, PLAIN_WORD if key in (
+        "nonce", "session_state") else "(?!)")
+    return re.compile(
+        rf"""(?:Some\()?(?:(?P<q>\\*["'])(?:{REDACTED}|{body})(?P=q)"""
+        rf"""|(?:{REDACTED}|{body})(?=$|[\s"'\\&,;)}}\]]))""")
+
+
 # key=value in URLs and logs (unquoted).
 URL_PARAMS = re.compile(
     rf"\b(?P<key>{KEYS})=(?!<redacted>|Some\(|\\?\")"
-    r"(?P<value>(?:[^&\s\"'<>\;,)]|\\(?!\"))+)")
+    r"(?P<value>(?:[^&\s\"'<>\\;,)]|\\(?!\"))+)")
 COOKIES = re.compile(
     r"\b(fvoci_session|fvoci_oidc_state|KEYCLOAK_[A-Z_]+|AUTH_SESSION_ID[A-Z_]*|KC_RESTART"
     r"|KC_AUTH_SESSION_HASH|KC_STATE_CHECKER)=[^;\s\"']+")
@@ -411,10 +423,15 @@ def quoted(match: re.Match) -> str:
     return f"{match.group('head')}<redacted>{match.group('close')}"
 
 
+SETTLED = {}
+
+
 def fail_closed(line: str) -> str:
-    """Cuts the line after a quoted value the lexer could not take."""
-    for match in QUOTED_HEAD.finditer(line):
-        if not HANDLED.match(line, match.end()):
+    """Cuts the line at a sensitive value no rule above redacted or kept."""
+    for match in SENSITIVE.finditer(line):
+        key = match.group("jk") or match.group("k")
+        settled = SETTLED.get(key) or SETTLED.setdefault(key, settled_value(key))
+        if not settled.match(line, match.end()):
             return line[:match.end()] + "<redacted-rest>" + ("\n" if line.endswith("\n") else "")
     return line
 
@@ -437,8 +454,8 @@ def redact_line(line: str, secrets: list[str]) -> str:
     for secret in secrets:
         line = line.replace(secret, "<redacted-secret>")
     line = QUOTED.sub(quoted, line)
-    line = fail_closed(line)
     line = URL_PARAMS.sub(url_param, line)
+    line = fail_closed(line)
     line = COOKIES.sub(r"\1=<redacted>", line)
     line = JWT.sub("<redacted-jwt>", line)
     line = INVITE.sub("/invite/<redacted>", line)
@@ -467,7 +484,16 @@ REDACTION_CASES = [
     ('{"msg":"{\\"state\\":\\"Qw9_Zz\\",\\"code\\":\\"origin_mismatch\\",\\"access_token\\":\\"t0k\\"}"}',
      '{"msg":"{\\"state\\":\\"<redacted>\\",\\"code\\":\\"origin_mismatch\\",\\"access_token\\":\\"<redacted>\\"}"}'),
     ('{\\"code\\":\\"a\\\\\\"b-SECRET\\"}', '{\\"code\\":\\"<redacted>\\"}'),
-    ('"state": "unterminated SECRET', '"state": "<redacted-rest>'),
+    ('"state": "unterminated SECRET', '"state": <redacted-rest>'),
+    ('"url": "\\"http://h/cb?code=a1b-2c\\" next"', '"url": "\\"http://h/cb?code=<redacted>\\" next"'),
+    ('"state": String("X") tail', '"state": <redacted-rest>'),
+    ("state: 'X' tail", 'state: <redacted-rest>'),
+    ("state='X' tail", 'state=<redacted-rest>'),
+    ('state = "X" tail', 'state = <redacted-rest>'),
+    ('state=Some(X) tail', 'state=<redacted-rest>'),
+    ('\\\\\\"state\\\\\\":\\\\\\"X\\\\\\"} tail', '\\\\\\"state\\\\\\":<redacted-rest>'),
+    ('state=Some(Open) state = "open" "code": 403, \\\"code\\\":\\\"origin_mismatch\\\"',
+     'state=Some(Open) state = "open" "code": 403, \\\"code\\\":\\\"origin_mismatch\\\"'),
     ('mail failed code=smtp_timeout; next', 'mail failed code=smtp_timeout; next'),
     ('GET /cb?code=9f2c.aa-11&state=abcDEF123&iss=x', 'GET /cb?code=<redacted>&state=<redacted>&iss=x'),
     ('type="X", code_id="abc-123", auth_session_parent_id="p1", userSessionId="u1", code="XyZ.123"',

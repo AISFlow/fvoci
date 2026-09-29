@@ -1350,8 +1350,8 @@ adds two workspace realms and runs the ignored Rust test
 `keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
 license, not the release server) against them.
 
-Needs docker with compose, openssl, python3, git, cargo, node/npm and access
-to quay.io for the first image pull. The script exits non-zero when a group
+Needs docker with compose, openssl, python3, git, cargo, node/npm, setsid
+(util-linux) and access to quay.io for the first image pull. The script exits non-zero when a group
 fails or when its compose project `fvoci-kc-e2e-<run id>` could not be removed
 completely; the last command below removes a leftover one (the two variables
 only satisfy the compose file). A failing group's
@@ -1360,8 +1360,9 @@ Playwright output and server log are copied, redacted, to
 inside the run directory (`$TMPDIR/fvoci-kc-e2e.*/tmp`, so `$TMPDIR` must be
 at most 36 characters), which is removed on exit together with the raw copies
 the web e2e harness keeps; Ctrl-C stops the run once the current group has
-cleaned up; a further Ctrl-C during the script's own cleanup is ignored, so the run
-directory (per-run secrets) and the Keycloak project are always removed. The
+cleaned up; a further Ctrl-C, or a closed pipe on stderr, during the script's
+own cleanup is ignored, so the run directory (per-run secrets) and the
+Keycloak project are always removed. The
 script refuses to run under `set -x`. `--skip-build` checks only that
 `fvoci-server --version` reports the checked-out commit; `fvoci-migrate` (no
 version output) and `apps/web/dist` are used as they are. The clean-tree

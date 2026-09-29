@@ -16,8 +16,9 @@
 #
 # Usage: scripts/keycloak-oidc-e2e.sh [--skip-build] [--workspace-sso]
 #   FVOCI_KC_E2E_EVIDENCE_DIR=<dir>  also keep redacted evidence there
-# Needs docker (compose), openssl, python3, git, cargo, node/npm and
-# scripts/prepare-web-e2e.sh; the first run pulls the Keycloak image.
+# Needs docker (compose), openssl, python3, git, cargo, node/npm, setsid
+# (util-linux) and scripts/prepare-web-e2e.sh; the first run pulls the
+# Keycloak image.
 # Exits non-zero when a group fails or when its compose project could not be
 # removed completely.
 set -euo pipefail
@@ -236,12 +237,13 @@ detached() {
   setsid -w "$@"
 }
 
+# Runs as the EXIT trap, which captures the status and ignores INT, TERM,
+# HUP and PIPE before calling it: a further signal, or a stderr reader that
+# is gone (`... 2>&1 | tee log` after Ctrl-C), must not cut it short. The run
+# directory holds the rendered realms and the spec config (per-run
+# secrets). The helpers below inherit the ignore.
 cleanup() {
-  local status=$?
-  # A further INT/TERM/HUP must not cut the cleanup short: the run directory
-  # holds the rendered realms and the spec config (per-run secrets). The
-  # ignore is inherited by the helpers below.
-  trap '' INT TERM HUP
+  local status=$EXIT_STATUS
   set +e
   collect_failure_artifacts
   if [[ -n "$EVIDENCE" && -f "$CONFIG" ]]; then
@@ -263,12 +265,12 @@ cleanup() {
   rm -rf "$WORK"
   exit "$status"
 }
-trap cleanup EXIT
-# Each ignores further signals before exiting, so none can land between the
-# trap and the first statement of cleanup.
-trap 'trap "" INT TERM HUP; exit 130' INT
-trap 'trap "" INT TERM HUP; exit 143' TERM
-trap 'trap "" INT TERM HUP; exit 129' HUP
+trap 'EXIT_STATUS=$?; trap "" INT TERM HUP PIPE; cleanup' EXIT
+# Each ignores further signals before exiting. PIPE: stderr's reader is gone.
+trap 'trap "" INT TERM HUP PIPE; exit 130' INT
+trap 'trap "" INT TERM HUP PIPE; exit 143' TERM
+trap 'trap "" INT TERM HUP PIPE; exit 129' HUP
+trap 'trap "" INT TERM HUP PIPE; exit 141' PIPE
 
 echo "=== keycloak: compose project ${PROJECT} ===" >&2
 with_secrets python3 "$HELPER" render "$KC_DIR/realm.template.json" "$REALM_DIR/fvoci-e2e-realm.json"
