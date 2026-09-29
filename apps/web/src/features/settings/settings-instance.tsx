@@ -1,6 +1,8 @@
 // Adapted from source apps/web/src/features/settings/settings-instance.tsx.
 // The catalog draws the form: adding a key needs no screen code, and the
-// widget switch has no default so a new widget is a compile error.
+// widget switch has no default so a new widget is a compile error. The one
+// exception is `attachmentTransfer`, whose card also shows what this server's
+// storage allows (`attachmentTransferView`).
 import { type I18nKey, isI18nKey, t } from "@fvoci/i18n";
 import { useState } from "react";
 import { ConfirmActionButton } from "@/components/confirm-action";
@@ -19,6 +21,7 @@ import {
   SETTING_ENUM_OPTIONS,
   SETTINGS_CATALOG,
   SETTINGS_ENTRIES,
+  attachmentTransferView,
   type SettingsEntry,
   type SettingsKey,
   type SettingsWidget,
@@ -143,7 +146,7 @@ function SettingField({
   id: string;
   value: unknown;
   disabled: boolean;
-  options: readonly { value: string; label: string }[];
+  options: readonly { value: string; label: string; disabled?: boolean }[];
   onChange: (next: unknown) => void;
 }) {
   switch (widget) {
@@ -170,7 +173,7 @@ function SettingField({
           value={String(value)}
         >
           {options.map((option) => (
-            <option key={option.value} value={option.value}>
+            <option disabled={option.disabled} key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
@@ -354,6 +357,7 @@ export function InstanceSettingsView({
   const restartPending = new Set(data?.restartRequired ?? []);
   const envApplied = new Set(data?.envApplied ?? []);
   const eeFeatures = new Set(data?.eeFeatures ?? []);
+  const transfer = attachmentTransferView(data?.attachmentTransfer);
   const brandingName = leafValue(values.branding, "name");
   const instanceName = typeof brandingName === "string" ? brandingName : "";
 
@@ -437,6 +441,21 @@ export function InstanceSettingsView({
                   {restartPending.has(key) ? (
                     <p className="text-caption text-destructive">{t("settings.ui.restartPending")}</p>
                   ) : null}
+                  {key === "attachmentTransfer" && transfer.effectiveOptionKey !== null ? (
+                    <p className="text-caption text-muted-foreground">
+                      {t("settings.attachmentTransfer.effective", {
+                        mode: label(transfer.effectiveOptionKey),
+                      })}
+                    </p>
+                  ) : null}
+                  {key === "attachmentTransfer" && transfer.unavailableKey !== null ? (
+                    <p className="text-caption text-muted-foreground">{t(transfer.unavailableKey)}</p>
+                  ) : null}
+                  {key === "attachmentTransfer" && transfer.blocked ? (
+                    <p className="text-caption text-destructive" role="alert">
+                      {t("settings.attachmentTransfer.blocked")}
+                    </p>
+                  ) : null}
                   {Object.entries(entry.widgets).map(([leaf, widget]) => {
                     const path = `${key}.${leaf}`;
                     const fixed = envApplied.has(path);
@@ -445,6 +464,7 @@ export function InstanceSettingsView({
                     const options = (SETTING_ENUM_OPTIONS[path] ?? []).map((value) => ({
                       value,
                       label: label(optionKey(key, leaf, value)),
+                      disabled: key === "attachmentTransfer" && transfer.disabledOptions.has(value),
                     }));
                     return (
                       <div className="flex flex-col gap-1" key={leaf}>
