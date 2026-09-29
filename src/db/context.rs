@@ -17,10 +17,14 @@
 //! `db::project_documents`.
 //!
 //! Workspace-scoped reads take no row locks and check the credential and
-//! permission in the same transaction as the data, except
-//! `db::legal::workspace_consents`, which holds the live workspace row
-//! `FOR SHARE` and leaves the credential check to its route. Project-scoped
-//! reads use [`begin_read`] (one REPEATABLE READ, READ ONLY snapshot).
+//! permission in the same transaction as the data, with two exceptions.
+//! `db::legal::workspace_consents` holds the live workspace row `FOR SHARE`
+//! and leaves the credential check to its route. The collab reads in
+//! `db::collab` (room admission, operation lookup and verify, read-only load)
+//! run the writers' actor prefix, `lock_collab_actor` (steps 1-5 of that
+//! module's lock order), and the read-only load also locks, and may seed, the
+//! state row. Other project-scoped reads use [`begin_read`] (one REPEATABLE
+//! READ, READ ONLY snapshot).
 //! Instance-admin reads are also an exception:
 //! `db::admin::require_live_instance_admin` holds the actor's users row
 //! `FOR SHARE`; `db::admin` reads run it in the reading transaction, while

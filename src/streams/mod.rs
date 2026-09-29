@@ -16,10 +16,15 @@ pub use hub::{StreamAcquireError, StreamGuard, StreamHub};
 /// client resyncs on reconnect.
 pub const STREAM_CHANNEL_CAPACITY: usize = 8;
 
-/// Bounds the streams' poll transactions on the shared app pool (one per
-/// stream per [`STREAM_POLL_INTERVAL`]); past it a new stream gets 429.
+/// Bounds the streams' transactions on the shared app pool; past it a new
+/// stream gets 429. Every stream runs one poll transaction per
+/// [`STREAM_POLL_INTERVAL`]. A task stream also runs one
+/// `project_stream_access` transaction for each queued item before it sends
+/// it (`open` included), one item at a time and alongside its poll, so it
+/// holds at most two connections at once.
 pub const MAX_CONCURRENT_STREAMS: usize = 64;
-/// Poll period of every stream: one transaction per tick, and a settled event
-/// reaches the client up to one tick later.
+/// Poll period of every stream: one poll transaction per tick (plus a task
+/// stream's per-item check, above), and a settled event reaches the client up
+/// to one tick later.
 pub const STREAM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
 pub const STREAM_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);

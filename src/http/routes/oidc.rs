@@ -254,9 +254,12 @@ async fn identities(
 /// `/login?error=<problem code>`, which the login page shows, instead of a
 /// problem+json page. The refusal issues no state, and its Location is only
 /// the public origin and a static code. HTTP status metrics therefore count
-/// every refusal, 429 and 5xx causes included, as a 302; the reason shows
-/// only in the `oidc.sso_refused` log line (debug for the limiter's refusal,
-/// warn otherwise).
+/// every refusal, 429 and 5xx causes included, as a 302. Every refusal's
+/// problem code is logged in the `oidc.sso_refused` line (debug for the
+/// limiter's refusal, warn otherwise). A database error or provider failure
+/// is also logged with its cause before it, by [`internal`] (error) or as
+/// `oidc.begin_failed` (warn), and a workspace client secret that does not
+/// open logs an error before its refusal reads `provider_not_configured`.
 async fn sso(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,

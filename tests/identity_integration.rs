@@ -2932,7 +2932,10 @@ async fn workspace_sso_login_and_jit_join() {
     )
     .await;
     assert_sso_refused(&res, "rate_limit_exceeded");
-    // No refusal issues a state row or asks the provider.
+    // No refusal issues a state row; that is the check that would catch one
+    // starting a flow. The discovery count only shows that no refusal fetched
+    // the discovery document: the sign-ins above left it cached, so a start
+    // would not move it.
     assert_eq!(oidc_state_rows(&h).await, states);
     assert_eq!(fake.discovery_hits.load(Ordering::SeqCst), discovery);
     // Each refusal the limiter lets through is one warn line with its code;
