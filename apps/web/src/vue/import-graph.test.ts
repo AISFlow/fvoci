@@ -85,8 +85,28 @@ test("the Vue entry's static graph leaves the wiki editor to the wiki page's chu
   };
   walk(path.join(web, "src/vue/main.ts"));
   assert.ok(seen.has(path.join(web, "src/vue/router.ts")), "the walk reaches the router");
-  for (const page of ["WikiDocumentPage.vue", "ProjectGanttPage.vue"]) {
+  for (const page of ["WikiDocumentPage.vue", "ProjectGanttPage.vue", "PublicSharePage.vue"]) {
     assert.equal(seen.has(path.join(web, "src/vue/pages", page)), false, `${page} is a lazy route chunk`);
   }
+  assert.deepEqual(found, []);
+});
+
+test("the public share page does not load the wiki editor stack", () => {
+  const seen = new Set<string>();
+  const found: string[] = [];
+  const walk = (file: string) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = readFileSync(file, "utf8");
+    for (const [, spec] of source.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
+      if (!spec) continue;
+      if (EDITOR_STACK.test(spec)) found.push(`${spec} in ${path.relative(web, file)}`);
+      if (REACT.test(spec)) found.push(`${spec} in ${path.relative(web, file)}`);
+      const next = resolve(spec, file);
+      if (next && !next.endsWith(".css")) walk(next);
+    }
+  };
+  walk(path.join(web, "src/vue/pages/PublicSharePage.vue"));
+  assert.ok(seen.size > 1, `walked ${seen.size} modules`);
   assert.deepEqual(found, []);
 });

@@ -7,4 +7,7 @@ export const VUE_ROUTE_PATHS = {
   // The wiki document refs of lib/href.ts parseWikiRef; route paths match
   // case-insensitively, as the boundary does.
   wikiDocument: "/w/:slug/:ref(wiki-[1-9]\\d{0,8})",
+  // Public share: add `publicShare: "/s/:token"` here in the same change as
+  // apps/web/src/app-boundary.ts `/^\/s\/[^/]+\/?$/i`. That regex must not
+  // match `/s/:token/attachments/...` (a different route).
 } as const;

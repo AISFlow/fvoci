@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createMemoryHistory } from "vue-router";
-import { createAppRouter } from "./router.ts";
+import { createAppRouter, routes } from "./router.ts";
 
 // A navigation to a React page leaves the Vue app with a full load; one that
 // failed or was superseded never happened and loads nothing.
@@ -25,6 +25,36 @@ test(
     const router = createAppRouter(createMemoryHistory());
     await router.push("/login?next=%2Fw%2Facme");
     assert.deepEqual(loads, ["/login?next=%2Fw%2Facme"]);
+  }),
+);
+
+test("the public-share route is declared (boot still needs the boundary regex)", () => {
+  assert.equal(
+    routes.some((route) => route.name === "public-share" && route.path === "/s/:token"),
+    true,
+  );
+  assert.equal(
+    routes.some((route) => typeof route.path === "string" && route.path.includes("attachments")),
+    false,
+  );
+});
+
+test(
+  "a completed navigation to /s/tok is a full page load (boot is still React)",
+  withLocation(async (loads) => {
+    const router = createAppRouter(createMemoryHistory());
+    await router.push("/s/tok");
+    assert.deepEqual(loads, ["/s/tok"]);
+  }),
+);
+
+test(
+  "a completed navigation to the share attachment viewer is not this page",
+  withLocation(async (loads) => {
+    const router = createAppRouter(createMemoryHistory());
+    await router.push("/s/tok/attachments/att/view");
+    assert.equal(router.currentRoute.value.name, "react-app");
+    assert.deepEqual(loads, ["/s/tok/attachments/att/view"]);
   }),
 );
 

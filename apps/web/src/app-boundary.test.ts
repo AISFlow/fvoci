@@ -24,6 +24,9 @@ const SAMPLES = [
   "/x/acme/GNT/gantt",
   "/",
   "/login",
+  "/s/tok",
+  "/s/tok/",
+  "/s/tok/attachments/att/view",
   "/w/acme",
   "/w/acme/a/123/view",
   "/w/acme/WIKI-1",
@@ -67,6 +70,13 @@ test("the boot module sends wiki documents, and only them, to the Vue app", () =
   assert.equal(isVueAppPath("/w/acme/PRJ-1"), false);
   assert.equal(isVueAppPath("/w/acme/XWIKI-1"), false);
   assert.equal(isVueAppPath("/w/acme/wiki"), false);
+});
+
+test("the boot module keeps /s/:token on the React app", () => {
+  assert.equal(isVueAppPath("/s/tok"), false);
+  assert.equal(isVueAppPath("/s/tok/"), false);
+  assert.equal(isVueAppPath("/S/tok"), false);
+  assert.equal(isVueAppPath("/s/tok/attachments/att/view"), false);
 });
 
 test("every wiki path the boundary sends parses as the React app's wiki ref", () => {

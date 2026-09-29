@@ -9,6 +9,10 @@ import { VUE_ROUTE_PATHS } from "./route-paths";
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
+  // Public share reader. apps/web/src/app-boundary.ts is owned elsewhere;
+  // boot still needs `/^\/s\/[^/]+\/?$/i` and must NOT match
+  // `/s/:token/attachments/...` (that stays a different route).
+  { path: "/s/:token", name: "public-share", component: () => import("./pages/PublicSharePage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {
