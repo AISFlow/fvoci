@@ -8,12 +8,13 @@
 //! → [`lock_membership_users`] → [`recheck_session`] → (only where the write
 //! depends on the actor's workspace role)
 //! `db::workspace::membership_role_for_update` → parent rows before child
-//! rows. Writers that admit members, change seats or create or delete
-//! workspaces first take `quota::acquire_admission_lock`; writers that change
-//! instance users take `identity::lock_instance_admin_changes` (admission,
-//! then instance-admin). Both come before [`lock_membership_users`], and
-//! `identity::lock_sign_in` comes after it. Module-specific tails are
-//! documented in `db::collab`, `db::task_ops` and `db::project_documents`.
+//! rows. Writers that admit members, change a member's role, or create or
+//! delete workspaces first take `quota::acquire_admission_lock`; writers that
+//! change instance users take `identity::lock_instance_admin_changes`
+//! (admission, then instance-admin). Both come before
+//! [`lock_membership_users`], and `identity::lock_sign_in` comes after it.
+//! Module-specific tails are documented in `db::collab`, `db::task_ops` and
+//! `db::project_documents`.
 //!
 //! Workspace-scoped reads take no row locks and check the credential and
 //! permission in the same transaction as the data; project-scoped reads use
