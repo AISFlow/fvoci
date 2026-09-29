@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
-    "test": "bun test --parallel ./src",
+    "test": "bun test --parallel --timeout=60000 ./src",
     "test:e2e": "playwright test"
   },
   "dependencies": {

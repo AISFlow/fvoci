@@ -196,9 +196,10 @@ jobs:
         working-directory: apps/web
         run: bun --bun x --no-install playwright install --with-deps chromium
       - name: Check collaborative browser fixtures
+        # Same per-test bound as the web and editor test scripts (node --test had none).
         run: |
-          bun test --isolate ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
-          bun test --isolate ./apps/web/e2e-pending/collab-helpers.test.ts
+          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
+          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
           (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
       - name: Real React collaborative editing with PostgreSQL app role
         id: browser

@@ -27,7 +27,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test --isolate ./test"
+    "test": "bun test --isolate --timeout=60000 ./test"
   },
   "dependencies": {
     "@floating-ui/dom": "1.8.0",
