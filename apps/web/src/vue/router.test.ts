@@ -44,9 +44,18 @@ test(
     assert.deepEqual(loads, []);
 
     const slow = router.push("/slow");
-    await router.push("/w/acme");
+    await router.push("/w/acme/search");
     release();
     assert.ok(await slow, "the later navigation superseded it");
-    assert.deepEqual(loads, ["/w/acme"]);
+    assert.deepEqual(loads, ["/w/acme/search"]);
   }),
 );
+
+test("the workspace landing and project list resolve as Vue routes", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme").name, "workspace-home");
+  assert.equal(router.resolve("/w/acme/projects").name, "projects");
+  assert.equal(router.resolve("/w/acme/projects/").name, "projects");
+  assert.equal(router.resolve("/w/acme/wiki").name, "react-app");
+  assert.equal(router.resolve("/w/acme/WIKI-1").name, "wiki-document");
+});
