@@ -368,3 +368,12 @@ Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key�
 - 계정·결제·다른 API 키를 도입하지 않는다. Opus가 돌아와도 진행 중 소유권을 자동으로 뒤집지 않는다.
 - 기존 Opus 워커의 미커밋·미푸시 결과는 폐기하지 않고 회수한다. 한도 종료 시각은 세션
   `e800da32-68b6-4e7a-a2da-5ad4517a542a`의 workflow output(23:09–23:10 KST)이다.
+
+## 2026-09-30 우선순위 교정 후 인계 (Cursor Grok 4.6)
+
+같은 임시 주 실행이 사용자 지시(신규 미연결 확대보다 기존 흐름 종결)를 적용했다.
+실제 모델은 Cursor Grok 4.6(설치 ID `cursor-grok-4.6-high`와 동일 계열; 이 세션은
+Ultracode/effort CLI를 쓰지 않음). daggertooth detached `a4662256`에는 제품 커밋 없음.
+
+인계 정본: `docs/rewrite.md` §6.2.1·§6.3. 다음 수락 후보는 #287 `485d118e`(독립 검토 +
+Web 36631118948 CLEAN). 자기 검토를 독립 검토로 세지 않음. worktree·WIP PR은 보존.

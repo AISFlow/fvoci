@@ -675,7 +675,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   - 제품(연결 예정): #265 `1ee57935`, #267 `e257a434`, #269 `ef17b410`, #266 `ddce8bf2`.
   - 후보에서 연결됨(main 아님): #270 `/setup` `b601ef64` (on #269). IME CI 수정 #287 `485d118e` (main 직전).
   - Vue 미연결 WIP: #271–#279, #281–#283, #285–#286. 모두 **live 아님**. #280은 문서(`ffeacb19`). #284는 live 위키 크롬 e2e.
-  - 문서: #263 (`fb082853`).
+  - 문서: #263 (`42be6870`). base는 아직 `6f64febc`(v0.3.0). 독립 검토 없이 머지하지 않음.
   - Dependabot(비게이트): #152 #153 #155 #156 #157 #158 #160 #191.
   프론트엔드 전환 현황·실행 TODO는 §6.3이 정본이다. #262·#265·#267은 같은 위키 흐름이며 서로 다른 기능군 완료로 세지 않는다.
 - **추적 issue**(2026-09-29 개설): #258 한글 IME 첫 자모 — **닫힘**(#268). #259 인라인 수식 원격 변경 시 초안 유실, #260 조합 중 멈춤과 undo 분리, #261 Vue 위키 편집기 React 대비 누락 컨트롤.
@@ -718,6 +718,31 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   이미지 측정이 아니다. 보류: `flushDelay` 50/100 실험, DocumentView 구독 분리, Svelte·Astro·Valkey·대규모 room 재설계.
 - **로컬 자료·자원**: 위 작업별 worktree(`/home/kinesis/orca/workspaces/fvoci/<이름>`), 공유 읽기 전용 backend `prebuilt-8adaf1b8`, 통합 worktree `daggertooth`. 2026-09-29 디스크 정리 기록은 `.agents/environment.md`와 `fvoci-evidence/space-reclaim-2026-09-29`.
 - **자동 연결**: 이 세션의 내장 workflow·agent만 사용한다(외부 scheduler 없음). 세션이 끝나면 위 worktree의 미수락 커밋을 기준으로 재개한다. 진행 중 릴리스 없음.
+
+### 6.2.1 재개 인계 (2026-09-30 06:41 KST, Cursor Grok 4.6)
+
+임시 주 실행은 Cursor Grok 4.6이며 daggertooth(`a4662256` detached)에는 제품 커밋이 없다. 정본은 이 절과 §6.3. Opus 주간 한도 리셋은 2026-10-01 12:00 Asia/Seoul. 한도 복구를 기다리지 말고 우선순위 교정을 이어간다: **신규 미연결 페이지를 늘리지 않고 기존 흐름을 연결·검증·수락한다.** Vue 전환 전체 권한·수량 상한 해제는 유지. GitHub auto-merge 없음. force push·main 직접 push·1.0.0+·사용자 환경 자동 배포 없음.
+
+**다음 명령 (한 번에 하나)**
+
+1. #287 `485d118e`를 **구현과 다른 컨텍스트**에서 독립 검토한다(편집 도구 없는 Plan). 범위: `apps/web/e2e/workspace-wiki-vue-flow.spec.ts`만. 단언 `"첫 문단한글"` 불변.
+2. Web [36631118948](https://github.com/AISFlow/fvoci/actions/runs/36631118948): **shard 5 success**(원래 `test.fail` 샤드). `collaboration-flow` **failure** — `e2e-pending/workspace-wiki-collab.spec.ts:604` SIGKILL 후 `placeContentCaret` (`collab-helpers.ts:697`, 5s). #287은 이 파일을 건드리지 않음. skip·무조건 재실행으로 숨기지 말고 main `f3f53c90`의 같은 job과 대조한다. CLEAN이 아니면 머지하지 않음.
+3. CLEAN+검토 후에만 `expectedHeadSha=485d118e` merge. 그다음 #269 `ef17b410` CI, 이어서 #270 `b601ef64`.
+4. 다음 미연결 연결은 인증이면 #271, 프로젝트면 #276이 묶음의 첫 실행 가능 흐름. 화면만 추가하지 않음.
+
+**고정 SHA (푸시됨, 로컬 dirty 없음; docs worktree만 `scripts/__pycache__` 미추적)**
+
+| 작업 | worktree | HEAD | PR |
+| --- | --- | --- | --- |
+| IME e2e 표기 | `fix-wiki-ime-expected-fail` | `485d118e` | #287 |
+| `/setup` 연결 | `r11-vue-setup` | `b601ef64` | #270 (base #269) |
+| `/login` | `r11-vue-auth` | `ef17b410` | #269 |
+| Yrs 비교 문서 | `collab-engine-comparison` | `ffeacb19` | #280 |
+| tracker | `docs-0-3-0-record` | 이 브랜치 HEAD | #263 |
+
+로컬 검사 (숨기지 않음): IME 회귀 2 passed (`ensureSetup` 포함); `/setup` 단위 19 + `workspace-flow` 7/7, prebuilt `8adaf1b8`. 소유 e2e 컨테이너는 그룹 종료 시 정리됨. worktree 삭제하지 않음.
+
+**금지**: #263 독립 검토 없이 머지. 자기 검토를 독립 검토로 셈. PR 일괄 폐기. 계약 팩 재실행을 #280 비교 완료로 보고. React 공통 기반을 경로 수락 전에 제거.
 
 ### 6.2 재개 절차
 
@@ -769,7 +794,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` ACCEPT_WITH_NITS; nit `79236b2e` **ACCEPT**; 스택+main `ef17b410` | 단위 20. e2e `login-vue-flow` 3/3. **`mfa-flow` 원격 필수** | IME `485d118e` 후 CI. 기능군 완료 아님 | Grok 임시 실행자 | CI (IME test.fail) | 미포함 |
 | FE-Auth-setup | `/setup` | 종단 간 검증 완료 (후보) | #270 `b601ef64` (on #269) | boundary `/^\/setup\/?$/i`. React SetupPage 제거. 단위 19. e2e `workspace-flow` 7/7 (prebuilt `8adaf1b8`, `#root.isolate`, `/api/v1/auth/me`) | #269 뒤 독립 검토·CI. 기능군 완료 아님 | Grok 임시 실행자 | FE-Auth-login | — |
 | FE-Auth-invite | `/invite/:token` | 구현 중·로컬 WIP (연결 전) | #271 `d31d33a4` (on #269) | Vue invite. setup 성공 뒤에만 invitation/providers `enabled`. **app-boundary 불변** | boundary + `workspace-invite-flow` | Grok 임시 실행자 | FE-Auth-login | — |
-| FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 구현 중·로컬 WIP (연결 전) | #278 `09b623d4` (on #269) | Vue 페이지·라우트 선언. setup 가드는 폼 표시만(consume는 클릭). **app-boundary 불변** | boundary + mail-reset/account-lifecycle e2e. 동의 청크 `@fvoci/editor/vue` barrel | Grok 임시 실행자 | FE-Auth-login | — |
+| FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 구현 중·로컬 WIP (연결 전) | #278 `20846dd8` (on #269) | Vue 페이지·라우트 선언. setup 가드는 폼 표시만(consume는 클릭). **app-boundary 불변** | boundary + mail-reset/account-lifecycle e2e. 동의 청크 `@fvoci/editor/vue` barrel | Grok 임시 실행자 | FE-Auth-login | — |
 | FE-WS-home | `/w/:slug` 랜딩 | 구현 중·로컬 WIP (연결 전) | #274 `e18fdbbe` | `WorkspaceHomePage.vue`. **boundary 없음** | regex + e2e | Grok 임시 실행자 | app-boundary 소유 | — |
 | FE-WS-projects | `/w/:slug/projects` | 구현 중·로컬 WIP (연결 전) | #274 동일 | `ProjectsPage.vue` | `/^\/w\/[^/]+\/projects\/?$/i` + 목록 e2e | Grok 임시 실행자 | FE-WS-home과 같은 PR | — |
 | FE-WS-wiki-list | `/w/:slug/wiki` 트리/목록 | 구현 중·로컬 WIP (연결 전) | #279 `4fe8480f` (on #274) | Vue 목록. treeQuery `enabled`는 workspace id. 문서 URL(#262)과 별개. **boundary 불변** | regex는 `wiki-[1-9]…`를 삼키면 안 됨. `workspace-wiki-flow` | Grok 임시 실행자 | 없음 | — |
@@ -793,7 +818,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Legal | `/legal/:kind` `/service-info` | 구현 중·로컬 WIP (연결 전) | #272 정본 | 공개 문서. #277 관리자 legal과 다름 | #272에서 연결 | Grok 임시 실행자 | 없음 | — |
 | FE-Dispose | collab socket retire/dispose | main 수락 완료 | merge `9e4f3af3` ← `bf3387ec` #264 | 검토 ACCEPT_WITH_NITS×2. CI 24 success·6 skip | 없음. #262 `web-checks`가 이 계약을 재실행 | 수락됨 | 없음 | 제품 UI 전환 아님 |
 | FE-Compat | `compat/` 폐기, fixture를 `tests/fixtures`로 | 독립 검토·CI 중 | #266 제품 `6dd4bff9` ACCEPT_WITH_NITS; main+#262 merge `ddce8bf2` | #262 합친 뒤 schema 경로 충돌 해소(`tests/fixtures/yjs-seed`) | `ddce8bf2` CI 후 merge. **프론트엔드 기능군 완료가 아님** | Grok 임시 실행자 | CI | 아님 |
-| FE-Docs-ops | 운영·역할 문서 | 독립 검토·CI 중 | `fvoci/docs-0-3-0-record` `bdd72e1b` #263 | 문서 PR | 제품 전환 수에 미포함 | Grok 임시 실행자 | 없음 | 아님 |
+| FE-Docs-ops | 운영·역할 문서 | 독립 검토·CI 중 | `fvoci/docs-0-3-0-record` `42be6870` #263 | 문서 PR. 제품 전환 수에 미포함 | 독립 검토 후. base는 v0.3.0 | Grok 임시 실행자 | 없음 | 아님 |
 
 공통 파일(`app-boundary.ts`, vue `router.ts`/`route-paths.ts`, i18n, manifest/lockfile, OpenAPI) 소유: 임시 실행자(코디네이터). `app-boundary.ts` 단독 소유는 유지하되, 미연결 PR은 그 후보에서 경로를 연결하고 e2e 한다. 모든 페이지가 main에 먼저 있어야 E2E 가능하다는 전제를 두지 않는다.
 
@@ -851,7 +876,7 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 #### 바로 수락할 후보
 
-1. **#287** `485d118e` — 독립 검토 + Web CI 후 main. #269 차단을 푼다.
+1. **#287** `485d118e` — 독립 검토 + Web CI CLEAN 후 main. shard 5는 통과. `collaboration-flow`(React pending SIGKILL caret)는 별도 대조.
 2. **#265** `1ee57935` / **#267** `e257a434` / **#266** `ddce8bf2` — 각 CI CLEAN + 기존 독립 검토.
 3. **#269** `ef17b410` — IME 후 CI. 인증 기능군 완료 아님.
 4. **#270** `b601ef64` — #269 뒤. 로컬 연결 검증됨.
