@@ -1360,9 +1360,13 @@ Playwright output and server log are copied, redacted, to
 inside the run directory (`$TMPDIR/fvoci-kc-e2e.*/tmp`, so `$TMPDIR` must be
 at most 36 characters), which is removed on exit together with the raw copies
 the web e2e harness keeps; Ctrl-C stops the run once the current group has
-cleaned up. The script refuses to run under `set -x`. `--skip-build` checks
-only that `fvoci-server --version` reports the checked-out commit;
-`fvoci-migrate` (no version output) and `apps/web/dist` are used as they are.
+cleaned up; a further Ctrl-C during the script's own cleanup is ignored, so the run
+directory (per-run secrets) and the Keycloak project are always removed. The
+script refuses to run under `set -x`. `--skip-build` checks only that
+`fvoci-server --version` reports the checked-out commit; `fvoci-migrate` (no
+version output) and `apps/web/dist` are used as they are. The clean-tree
+check (`versions.json`) looks at tracked files only; untracked files under
+`apps/web/public` still end up in `dist`.
 
 ```sh
 bash scripts/prepare-web-e2e.sh    # once

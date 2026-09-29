@@ -13,6 +13,7 @@ Subcommands:
                                         behaviour
   events <config>                       Keycloak event summary (no ids/tokens)
   redact <config>                       stdin to stdout without secrets
+  selftest                              the redaction cases below
 
 Secrets come from the environment or the mode-600 config file and are never
 printed; `redact` replaces them and every code/state/token-shaped value.
@@ -345,27 +346,46 @@ def events(path: str, realms: list[str]) -> None:
     print(json.dumps(report, indent=2))
 
 
-# Terminal colour codes (tracing's ANSI output) are dropped first, so
-# `ESC[3mstateESC[0mESC[2m=ESC[0m"..."` reads as `state="..."`.
-ANSI = re.compile(r"\x1b\[[0-9;]*m")
-# code/state/nonce/session_state keep a lower_snake_case word (problem codes
-# such as "origin_mismatch", the pool's state="open", a mail error code);
-# anything else under these names is redacted.
+# Terminal colour codes go first, raw or JSON-escaped (a coloured Playwright
+# diff inside a JSON report), so `ESC[3mstateESC[0m=...` reads as `state=...`.
+ANSI = re.compile(r"(?:\x1b|\\\\?u001[bB])\[[0-9;]*m")
+# Names whose value is secret. code/state/nonce/session_state also name
+# ordinary things, so for those a value that cannot be an OAuth value is kept:
+# a lower_snake_case word ("origin_mismatch", "open"); for code also a short
+# number (SMTP 550) or an errno name (ECONNREFUSED); for state a capitalised
+# word (Open). Every other value is redacted.
 AMBIGUOUS_KEYS = "code|state|nonce|session_state"
 ALWAYS_KEYS = ("code_id|session_code|client_data|tab_id|auth_session_[a-z_]+|userSessionId"
                "|sessionId|session_id|code_challenge|code_verifier|access_token|refresh_token"
                "|id_token|id_token_hint|invitation|mfa")
-AMBIGUOUS = re.compile(rf"^(?:{AMBIGUOUS_KEYS})$")
-PLAIN_WORD = re.compile(r"^[a-z][a-z_]*$")
-# key=value in URLs and logs.
-URL_PARAMS = re.compile(
-    rf"\b(?P<key>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})=(?P<value>[^&\s\"'<>\\;,]+)")
-# key="value" (event and tracing logs) and "key": "value" (JSON), also with
-# the quotes escaped (\"key\":\"value\", JSON inside a JSON string).
+KEYS = f"{AMBIGUOUS_KEYS}|{ALWAYS_KEYS}"
+PLAIN_WORD = r"[a-z][a-z_]{0,63}"
+KEPT = {
+    "code": re.compile(rf"^(?:{PLAIN_WORD}|[0-9]{{1,5}}|E[A-Z]{{2,31}})$"),
+    "state": re.compile(rf"^(?:{PLAIN_WORD}|[A-Z][a-z]{{1,31}})$"),
+    "nonce": re.compile(rf"^{PLAIN_WORD}$"),
+    "session_state": re.compile(rf"^{PLAIN_WORD}$"),
+}
+KEPT_WORD = rf"(?:{PLAIN_WORD}|[0-9]{{1,5}}|E[A-Z]{{2,31}}|[A-Z][a-z]{{1,31}})"
+# A quoted value after `key=`, `key: ` (Rust Debug), `"key": ` (JSON) or
+# `\"key\":` (JSON inside a JSON string), optionally inside `Some(...)`. The
+# value is lexed as a string of its own quoting: `\x` escapes in a plain
+# string; in an escaped string (`\"...\"`) the doubled escapes `\\\"`,
+# `\\\\` and `\\x`.
 QUOTED = re.compile(
-    rf"(\b(?P<key>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})=\\?\""
-    rf"|\\?\"(?P<jkey>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})\\?\"\s*:\s*\\?\")"
-    r"(?P<value>[^\"\\]*)(?P<close>\\?\")")
+    rf'(?P<head>(?:\b(?P<k1>{KEYS})(?:=|:[ \t]*)|(?P<jq>\\?)"(?P<k3>{KEYS})(?P=jq)"[ \t]*:[ \t]*)'
+    r'(?:Some\()?(?:(?P<esc>\\))?")'
+    r'(?P<value>(?(esc)(?:[^"\\]|\\\\\\["\\]|\\\\[^"\\])*|(?:[^"\\]|\\.)*))'
+    r'(?P<close>(?(esc)\\"|"))')
+# The same prefixes, to fail closed on a value the lexer above did not take.
+QUOTED_HEAD = re.compile(
+    rf'(?:\b(?:{KEYS})(?:=|:[ \t]*)|\\?"(?:{KEYS})\\?"[ \t]*:[ \t]*)(?:Some\()?\\?"')
+# After QUOTED: a redacted value, or one it kept (a closing quote follows).
+HANDLED = re.compile(rf'(?:<redacted>|{KEPT_WORD}\\?")')
+# key=value in URLs and logs (unquoted).
+URL_PARAMS = re.compile(
+    rf"\b(?P<key>{KEYS})=(?!<redacted>|Some\(|\\?\")"
+    r"(?P<value>(?:[^&\s\"'<>\;,)]|\\(?!\"))+)")
 COOKIES = re.compile(
     r"\b(fvoci_session|fvoci_oidc_state|KEYCLOAK_[A-Z_]+|AUTH_SESSION_ID[A-Z_]*|KC_RESTART"
     r"|KC_AUTH_SESSION_HASH|KC_STATE_CHECKER)=[^;\s\"']+")
@@ -381,14 +401,28 @@ CREDENTIAL_SHAPE = re.compile(r"[0-9+/=]|.[A-Z]")
 
 
 def keeps(key: str, value: str) -> bool:
-    return bool(AMBIGUOUS.match(key) and PLAIN_WORD.match(value))
+    kept = KEPT.get(key)
+    return bool(kept and kept.match(value))
 
 
 def quoted(match: re.Match) -> str:
-    key = match.group("key") or match.group("jkey")
-    if keeps(key, match.group("value")):
+    if keeps(match.group("k1") or match.group("k3"), match.group("value")):
         return match.group(0)
-    return f"{match.group(1)}<redacted>{match.group('close')}"
+    return f"{match.group('head')}<redacted>{match.group('close')}"
+
+
+def fail_closed(line: str) -> str:
+    """Cuts the line after a quoted value the lexer could not take."""
+    for match in QUOTED_HEAD.finditer(line):
+        if not HANDLED.match(line, match.end()):
+            return line[:match.end()] + "<redacted-rest>" + ("\n" if line.endswith("\n") else "")
+    return line
+
+
+def url_param(match: re.Match) -> str:
+    if keeps(match.group("key"), match.group("value")):
+        return match.group(0)
+    return f"{match.group('key')}=<redacted>"
 
 
 def basic(match: re.Match) -> str:
@@ -398,17 +432,12 @@ def basic(match: re.Match) -> str:
     return match.group(0)
 
 
-def url_param(match: re.Match) -> str:
-    if keeps(match.group("key"), match.group("value")):
-        return match.group(0)
-    return f"{match.group('key')}=<redacted>"
-
-
 def redact_line(line: str, secrets: list[str]) -> str:
     line = ANSI.sub("", line)
     for secret in secrets:
         line = line.replace(secret, "<redacted-secret>")
     line = QUOTED.sub(quoted, line)
+    line = fail_closed(line)
     line = URL_PARAMS.sub(url_param, line)
     line = COOKIES.sub(r"\1=<redacted>", line)
     line = JWT.sub("<redacted-jwt>", line)
@@ -416,6 +445,48 @@ def redact_line(line: str, secrets: list[str]) -> str:
     line = POSTGRES.sub("postgres://<redacted>", line)
     line = BEARER.sub("Bearer <redacted>", line)
     return BASIC.sub(basic, line)
+
+
+# (input, expected output) for `selftest`, run by the runner before it starts.
+REDACTION_CASES = [
+    ('"state": "abc&X"', '"state": "<redacted>"'),
+    ('state="a\\\\bX"', 'state="<redacted>"'),
+    ('/cb?state=\\u001b[7mXsecretX', '/cb?state=<redacted>'),
+    ('{"message":"url /cb?state=\\u001b[7mQw9_Zz\\u001b[27m&x=1"}',
+     '{"message":"url /cb?state=<redacted>&x=1"}'),
+    ('"code": "x\\"y-SECRET"', '"code": "<redacted>"'),
+    ('state=Some("SECRETX")', 'state=Some("<redacted>")'),
+    ('Foo { nonce: "SECRETN", code: "origin_mismatch" }',
+     'Foo { nonce: "<redacted>", code: "origin_mismatch" }'),
+    ('code=550 "code": "ECONNREFUSED" state=Open state="open"',
+     'code=550 "code": "ECONNREFUSED" state=Open state="open"'),
+    ('state="SECRETX" nonce=Open code=SECRETX session_state=Open',
+     'state="<redacted>" nonce=<redacted> code=<redacted> session_state=<redacted>'),
+    ('\x1b[3mstate\x1b[0m\x1b[2m=\x1b[0m"Ab3-xY" \x1b[3mreason\x1b[0m\x1b[2m=\x1b[0m"oidc_not_linked"',
+     'state="<redacted>" reason="oidc_not_linked"'),
+    ('{"msg":"{\\"state\\":\\"Qw9_Zz\\",\\"code\\":\\"origin_mismatch\\",\\"access_token\\":\\"t0k\\"}"}',
+     '{"msg":"{\\"state\\":\\"<redacted>\\",\\"code\\":\\"origin_mismatch\\",\\"access_token\\":\\"<redacted>\\"}"}'),
+    ('{\\"code\\":\\"a\\\\\\"b-SECRET\\"}', '{\\"code\\":\\"<redacted>\\"}'),
+    ('"state": "unterminated SECRET', '"state": "<redacted-rest>'),
+    ('mail failed code=smtp_timeout; next', 'mail failed code=smtp_timeout; next'),
+    ('GET /cb?code=9f2c.aa-11&state=abcDEF123&iss=x', 'GET /cb?code=<redacted>&state=<redacted>&iss=x'),
+    ('type="X", code_id="abc-123", auth_session_parent_id="p1", userSessionId="u1", code="XyZ.123"',
+     'type="X", code_id="<redacted>", auth_session_parent_id="<redacted>", userSessionId="<redacted>", code="<redacted>"'),
+    ('Basic authentication is off; Basic Authentication', 'Basic authentication is off; Basic Authentication'),
+    ('Authorization: Basic dXNlcjpwYXNz; Bearer abc.def', 'Authorization: Basic <redacted>; Bearer <redacted>'),
+    ('fvoci_session=abc; /invite/abcdefghijklmnopqrst postgres://u:p@h/db eyJhbGciOiJ9.eyJzdWIiOjF9.sig',
+     'fvoci_session=<redacted>; /invite/<redacted> postgres://<redacted> <redacted-jwt>'),
+]
+
+
+def selftest() -> None:
+    failed = [(i, out) for i, (given, want) in enumerate(REDACTION_CASES)
+              if (out := redact_line(given, [])) != want]
+    for i, out in failed:
+        print(f"redaction case {i}: got {out!r}, want {REDACTION_CASES[i][1]!r}", file=sys.stderr)
+    if failed:
+        fail(f"{len(failed)} of {len(REDACTION_CASES)} redaction cases failed")
+    print(f"redaction selftest: {len(REDACTION_CASES)} cases ok")
 
 
 def redact(path: str) -> None:
@@ -448,6 +519,8 @@ def main() -> None:
         verify(*args)
     elif command == "events" and args:
         events(args[0], args[1:])
+    elif command == "selftest" and not args:
+        selftest()
     elif command == "redact" and len(args) <= 1:
         redact(args[0] if args else "")
     else:

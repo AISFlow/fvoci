@@ -29,6 +29,8 @@ if [[ $- == *x* ]]; then
   exit 2
 fi
 unset BASH_XTRACEFD BASH_ENV ENV
+# No bytecode caches next to the helper.
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KC_DIR="$ROOT/scripts/keycloak"
@@ -62,7 +64,7 @@ for arg in "$@"; do
   esac
 done
 
-for dependency in docker openssl python3 git cargo npm; do
+for dependency in docker openssl python3 git cargo npm setsid; do
   command -v "$dependency" >/dev/null 2>&1 || {
     echo "$dependency is required" >&2
     exit 1
@@ -72,6 +74,8 @@ if [[ ! -x "$ROOT/apps/web/node_modules/.bin/playwright" ]]; then
   echo "missing Playwright install; run scripts/prepare-web-e2e.sh" >&2
   exit 1
 fi
+# The redaction every log and evidence file goes through, on its known cases.
+python3 "$HELPER" selftest >&2
 # The groups run with TMPDIR=$TMPDIR/fvoci-kc-e2e.XXXXXX/tmp (removed on
 # exit); Chromium keeps sockets there and aborts on a long path.
 TMP_BASE="${TMPDIR:-/tmp}"
@@ -157,23 +161,28 @@ compose() {
     docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"
 }
 
+compose_detached() {
+  KC_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASSWORD" FVOCI_KC_REALM_DIR="$REALM_DIR" \
+    setsid -w docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"
+}
+
 redact() {
   python3 "$HELPER" redact "$CONFIG"
 }
 
-# Readers of a group's output. They ignore INT and TERM (Python keeps an
+# Readers of a group's output. They ignore INT, TERM and HUP (Python keeps an
 # inherited ignore), so after Ctrl-C they read on until the group's own
 # cleanup (retained artifacts, run directory) has finished writing.
 redact_stream() {
-  (trap '' INT TERM; exec python3 "$HELPER" redact "$CONFIG")
+  (trap '' INT TERM HUP; exec python3 "$HELPER" redact "$CONFIG")
 }
 log_stream() {
-  (trap '' INT TERM; exec tee -a "$@")
+  (trap '' INT TERM HUP; exec tee -a "$@")
 }
 
-# A group that ends by INT or TERM stops the run.
+# A group that ends by HUP, INT or TERM stops the run.
 stop_if_interrupted() {
-  if (( $1 == 130 || $1 == 143 )); then
+  if (( $1 == 129 || $1 == 130 || $1 == 143 )); then
     echo "group $2 was interrupted (exit $1); stopping" >&2
     exit "$1"
   fi
@@ -220,19 +229,30 @@ collect_failure_artifacts() {
   done
 }
 
+# Docker commands of the cleanup run in their own session: a further Ctrl-C
+# to the terminal's process group does not reach them (the docker CLI
+# installs its own SIGINT handler even when the signal is ignored).
+detached() {
+  setsid -w "$@"
+}
+
 cleanup() {
   local status=$?
+  # A further INT/TERM/HUP must not cut the cleanup short: the run directory
+  # holds the rendered realms and the spec config (per-run secrets). The
+  # ignore is inherited by the helpers below.
+  trap '' INT TERM HUP
   set +e
   collect_failure_artifacts
   if [[ -n "$EVIDENCE" && -f "$CONFIG" ]]; then
-    compose logs --no-color keycloak 2>/dev/null | keep keycloak-container.log
+    compose_detached logs --no-color keycloak 2>/dev/null | keep keycloak-container.log
   fi
-  compose down -v --remove-orphans >/dev/null 2>&1
+  compose_detached down -v --remove-orphans >/dev/null 2>&1
   local left
   left="$(
-    docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}"
-    docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT}"
-    docker network ls -q --filter "label=com.docker.compose.project=${PROJECT}"
+    detached docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}"
+    detached docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT}"
+    detached docker network ls -q --filter "label=com.docker.compose.project=${PROJECT}"
   )"
   if [[ -n "$left" ]]; then
     echo "warning: compose project ${PROJECT} left resources behind" >&2
@@ -244,8 +264,11 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# Each ignores further signals before exiting, so none can land between the
+# trap and the first statement of cleanup.
+trap 'trap "" INT TERM HUP; exit 130' INT
+trap 'trap "" INT TERM HUP; exit 143' TERM
+trap 'trap "" INT TERM HUP; exit 129' HUP
 
 echo "=== keycloak: compose project ${PROJECT} ===" >&2
 with_secrets python3 "$HELPER" render "$KC_DIR/realm.template.json" "$REALM_DIR/fvoci-e2e-realm.json"
