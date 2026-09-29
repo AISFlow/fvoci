@@ -646,7 +646,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 다음 세션은 이 절과 실제 `origin/main`·열린 PR·브랜치·release를 대조한 뒤 인수한다. 로컬 evidence(`/home/kinesis/orca/fvoci-evidence/*`)는
 보조자료이며 재개에 필수는 아니다. 이전 체크포인트(2026-09-29, 0.2.0 준비·게시)는 이 파일의 git 이력에 있다.
 
-- **확인한 origin/main**: `6f64febc487808246596f02922b1826b4fcc939a`(#257 merge, `v0.3.0`). main push CI 39 성공·1 skip, 5개 gate 성공(+ release 실행 9 성공).
+- **확인한 origin/main**: `9e4f3af3c0389a6b875c6b24c3f00d23f27b41f8`(#264 merge). 그 전 `6f64febc487808246596f02922b1826b4fcc939a`(#257 merge, `v0.3.0` 태그 대상, 이동하지 않음).
   직전 관측: `d265b426`(#255 merge) main CI 39 성공·1 skip, 5개 gate 성공(push 실행 5개, Dependabot 실행 없음), `995ad6e2`(#254 merge)도 같다. `42b9255a`(#244)의 `rust-ci-gate`는 `postgres-arm64`
   `pool_release_integration` 테스트 경합으로 빨간 상태였고 #252(`4c73c0fa`)로 수정했다. `7cbb8bea`(#253)의 `web-ci-gate`는 웹 단위 테스트
   `collab-reconnect.test.ts` 1회 실패로 빨간 상태였다(재실행 없음, §5). `d929c985`(#246)·`c5e7a9e9`(#250)의 Dependabot 실패는 gate가 아니다(§5).
@@ -672,7 +672,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   #255 "Tasks: Gantt" 절 포함).
 - **열린 PR**(2026-09-30 00:28 KST 대조):
   - **main**: `9e4f3af3` = #264 merge (`bf3387ec` 제품 SHA). 독립 검토 2건 ACCEPT_WITH_NITS, CI 24 success·6 skip. v0.3.0 태그는 `6f64febc`에 고정(이동하지 않음).
-  - 제품: #262 Vue 위키 head `350ae5e6`(#264를 main에서 merge; 제품 커밋은 `8adaf1b8`). `web-checks` 재실행 중. #265 편집 컨트롤 제품 `6eb0380d`, 스택 merge `4b927f98`(독립 검토는 `6eb0380d`, ACCEPT_WITH_NITS×2). #267 셸 제품 `ea8bd1c9`, 스택 merge `460e1813`. #268 IME `#258` (`d5093efd`). #266 compat (`6dd4bff9`).
+  - 제품: #262 Vue 위키 head `350ae5e6`(#264를 main에서 merge; 제품 커밋은 `8adaf1b8`). `web-checks` 재실행 중. #265 편집 컨트롤 제품 `6eb0380d`, 스택 merge `4b927f98`(독립 검토는 `6eb0380d`, ACCEPT_WITH_NITS×2). #267 셸 제품 `ea8bd1c9`, 스택 merge `460e1813`. #268 IME `#258` (`d5093efd`). #269 `/login` Vue 연결 제품 `dcf3ca77`, 스택 merge `89dbbf02`. #266 compat (`6dd4bff9`).
   - 문서: #263 (`4d7ba105`; 제품 기능 전환 수에 넣지 않음).
   - Dependabot(비게이트): #152 #153 #155 #156 #157 #158 #160 #191.
   프론트엔드 전환 현황·실행 TODO는 §6.3이 정본이다. #262·#265·#267은 같은 위키 흐름이며 서로 다른 기능군 완료로 세지 않는다.
@@ -764,7 +764,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-IME | 한글 첫 자모 (#258), React·Vue 공통 편집기 | 독립 검토·CI 중 | #268 제품 `d5093efd` | UniqueID composition skip. editor unit 26/26. CDP 7 (워커). OS IME 미실행(이 세션) | 검토+CI 후 main. #259/#260 아님 | 검토 Grok | 없음 | 출시 차단(#258) |
 | FE-Math-draft | 인라인 수식 원격 변경 시 초안 (#259) | 미착수 | issue #259 | #262에 관련 고정 테스트·이슈 주석 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
 | FE-Undo-IME | 조합 중 undo 단위 (#260) | 미착수 | issue #260 | 없음 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
-| FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 구현 중·로컬 WIP (라우트 연결 전) | `fvoci/r11-vue-auth` `dbaeba39` 미푸시 | 페이지·LoginForm/MfaStep/OIDC 있음. `router.ts`에 `/login` 있으나 **boundary 없음 → boot는 React** | `app-boundary` `/^\/login\/?$/i` + `VUE_ROUTE_PATHS.login` + React `/login` 제거 + `login-vue-flow` e2e + 기존 `mfa-flow` 회귀. #262 위 스택 | 워커 r11-auth | #262 (스택) | 미포함 |
+| FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` (스택 on #262) | 단위 32. e2e `login-vue-flow` 3/3 (prebuilt `8adaf1b8`). `#root.isolate`, 잘못된 비밀번호 alert, `returnTo` Gantt. **`mfa-flow.spec.ts` 미실행** | 검토+CI. `mfa-flow` 회귀. 기능군(setup/초대/동의) 완료 아님. React `login.tsx`는 oidc 소스 검사용으로 잔존 | 검토 Grok | #262 | 미포함 |
 | FE-Auth-setup | `/setup` | 미착수 | React `SetupPage` | 기존 React e2e | Vue 페이지 없음. 로그인 연결 후 이어서 | Grok 임시 실행자 | FE-Auth-login 권장 | — |
 | FE-Auth-invite | `/invite/:token` | 미착수 | React `InvitePage` | 기존 `workspace-invite-flow` | Vue 없음 | Grok 임시 실행자 | 없음 | — |
 | FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 미착수 | React 각 페이지 | 미확인(기존 React e2e 범위는 흐름별 상이) | Vue 없음. 매직/리셋 **요청**은 로그인 폼 하위 | Grok 임시 실행자 | 없음 | — |
