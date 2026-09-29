@@ -377,3 +377,21 @@ Ultracode/effort CLI를 쓰지 않음). daggertooth detached `a4662256`에는 �
 
 인계 정본: `docs/rewrite.md` §6.2.1·§6.3. 다음 수락 후보는 #287 `485d118e`(독립 검토 +
 Web 36631118948 CLEAN). 자기 검토를 독립 검토로 세지 않음. worktree·WIP PR은 보존.
+
+
+## 2026-09-30 Astra 전면 인수 / Sol 6.1 실제 실행
+
+사용자 직접 지시가 이전 Grok/Opus 전용 배정을 대체했다. native Codex collaboration 도구를 사용하며 새 Orca Run·daemon을 만들지 않았다.
+- 코디네이터: `gpt-6-astra`, effort `medium`; session `01a0ef48-5c88-77f1-9f45-9008284a2deb`의 최신 `turn_context` 확인.
+- `/root/ci287`: `gpt-6.1-sol`, effort `low`; session `01a0ef62-400c-7192-b6db-8a99f6b99c54` 확인.
+- `/root/auth_acceptance`: `gpt-6.1-sol`, effort `low`; session `01a0ef62-70fb-7040-9e82-2144118ecbb0` 확인.
+- `/root/review287_setup`: 별도 컨텍스트의 `gpt-6.1-sol`, effort `low`; 완료 보고서의 turn_context 대조로 확인했다.
+- worker effort는 override하지 않은 실제 default이며 Ultracode를 사용했다고 주장하지 않는다. 과거 Sol6.1 요청 거부와
+  Sol6 대체 기록은 과거 사실로 보존하며 이번 실제 실행 성공과 구분한다.
+- 현재 서비스가 제공하는 native 동시 슬롯 4개는 도구 제한이다. 사용자 작업 수량 상한을 다시 도입한 것이 아니다.
+- 이전 Grok의 동결·쓰기 클레임 반납은 handoff-main.json과 Orca done 응답으로 확인했다. 기존 rust-oidc-ms Sol 터미널은
+  capacity 오류 후 입력 대기이며 유지했다. 이전 pending child를 새 작업으로 재실행하지 않았다.
+
+사용자의 후속 지시로 effort는 코디네이터가 작업별 자동 배정한다. `/root/review_ci_auth_delta`는 high,
+`/root/evidence_recovery`와 `/root/review_takeover_docs`는 medium(모두 transcript 확인). 구현 후속은
+invite_connect high, setup_integrate medium으로 요청했으며 실제 완료 보고의 runtime을 대조한다.
