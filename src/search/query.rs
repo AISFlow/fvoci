@@ -252,7 +252,7 @@ pub async fn query_workspace_search(
     pool: &PgPool,
     input: WorkspaceSearchRequest<'_>,
 ) -> Result<Result<SearchResultPage, SearchQueryError>, sqlx::Error> {
-    let prepared = match prepare_query(&input) {
+    let prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
         Ok(Some(prepared)) => prepared,
         Ok(None) => {
             return Ok(Ok(SearchResultPage {
@@ -325,7 +325,7 @@ pub async fn query_global_search(
     pool: &PgPool,
     input: GlobalSearchRequest<'_>,
 ) -> Result<Result<SearchResultPage, SearchQueryError>, sqlx::Error> {
-    let prepared = match prepare_global_query(&input) {
+    let prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
         Ok(Some(prepared)) => prepared,
         Ok(None) => {
             return Ok(Ok(SearchResultPage {
@@ -367,56 +367,17 @@ pub async fn query_global_search(
     Ok(Ok(SearchResultPage { items, next_cursor }))
 }
 
-fn prepare_global_query(
-    input: &GlobalSearchRequest<'_>,
-) -> Result<Option<PreparedQuery>, SearchQueryError> {
-    let limit = input.limit.clamp(1, 50);
-    let raw = input.q.trim();
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    let raw: String = raw.chars().take(200).collect();
-    let title_prefix = raw
-        .strip_prefix('^')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.chars().take(200).collect::<String>());
-    let q = title_prefix.clone().unwrap_or(raw);
-    if q.is_empty() {
-        return Ok(None);
-    }
-    let chosung = is_chosung_query(&q);
-    if chosung && q.chars().filter(|c| !c.is_whitespace()).count() < CHOSUNG_MIN_LENGTH {
-        return Ok(None);
-    }
-    if chosung && input.r#type == SearchTypeFilter::Attachment {
-        return Ok(None);
-    }
-    let stem = if chosung {
-        String::new()
-    } else {
-        stem_text(&q)
-    };
-    let offset = match input.cursor {
-        None => 0,
-        Some(cursor) => decode_cursor_offset(cursor)?,
-    };
-    Ok(Some(PreparedQuery {
-        q,
-        stem,
-        chosung,
-        title_prefix,
-        r#type: input.r#type,
-        limit,
-        offset,
-    }))
-}
-
+/// Normalizes a search request the same way for workspace and global search
+/// (length cap, `^` title prefix, chosung rules, cursor offset). `Ok(None)`
+/// means nothing can match, so the caller answers an empty page.
 fn prepare_query(
-    input: &WorkspaceSearchRequest<'_>,
+    q: &str,
+    r#type: SearchTypeFilter,
+    limit: u32,
+    cursor: Option<&str>,
 ) -> Result<Option<PreparedQuery>, SearchQueryError> {
-    let limit = input.limit.clamp(1, 50);
-    let raw = input.q.trim();
+    let limit = limit.clamp(1, 50);
+    let raw = q.trim();
     if raw.is_empty() {
         return Ok(None);
     }
@@ -434,7 +395,7 @@ fn prepare_query(
     if chosung && q.chars().filter(|c| !c.is_whitespace()).count() < CHOSUNG_MIN_LENGTH {
         return Ok(None);
     }
-    if chosung && input.r#type == SearchTypeFilter::Attachment {
+    if chosung && r#type == SearchTypeFilter::Attachment {
         return Ok(None);
     }
     let stem = if chosung {
@@ -442,7 +403,7 @@ fn prepare_query(
     } else {
         stem_text(&q)
     };
-    let offset = match input.cursor {
+    let offset = match cursor {
         None => 0,
         Some(cursor) => decode_cursor_offset(cursor)?,
     };
@@ -451,7 +412,7 @@ fn prepare_query(
         stem,
         chosung,
         title_prefix,
-        r#type: input.r#type,
+        r#type,
         limit,
         offset,
     }))
@@ -737,18 +698,13 @@ struct ScannedPage {
     next_off: Option<u32>,
 }
 
-struct ScannedGlobalPage {
-    items: Vec<(MeiliHit, HydratedRow)>,
-    next_off: Option<u32>,
-}
-
 async fn scan_lexical_global(
     pool: &PgPool,
     meili: &MeiliConfig,
     input: &GlobalSearchRequest<'_>,
     visible: &[VisibleWorkspaceAcl],
     prepared: &PreparedQuery,
-) -> Result<ScannedGlobalPage, ScanError> {
+) -> Result<ScannedPage, ScanError> {
     let workspace_ids: HashSet<String> = visible
         .iter()
         .map(|entry| entry.workspace_id.to_string())
@@ -872,7 +828,7 @@ async fn scan_lexical_global(
             items.push((hit.clone(), row.clone()));
         }
         if stopped_mid {
-            return Ok(ScannedGlobalPage {
+            return Ok(ScannedPage {
                 items,
                 next_off: Some(next_off),
             });
@@ -891,7 +847,7 @@ async fn scan_lexical_global(
     } else {
         None
     };
-    Ok(ScannedGlobalPage { items, next_off })
+    Ok(ScannedPage { items, next_off })
 }
 
 async fn scan_lexical(
