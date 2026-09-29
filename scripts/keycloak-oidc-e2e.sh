@@ -72,10 +72,11 @@ if [[ ! -x "$ROOT/apps/web/node_modules/.bin/playwright" ]]; then
   echo "missing Playwright install; run scripts/prepare-web-e2e.sh" >&2
   exit 1
 fi
-# Chromium keeps sockets under TMPDIR; a long path makes it abort.
+# The groups run with TMPDIR=$TMPDIR/fvoci-kc-e2e.XXXXXX/tmp (removed on
+# exit); Chromium keeps sockets there and aborts on a long path.
 TMP_BASE="${TMPDIR:-/tmp}"
-if (( ${#TMP_BASE} > 60 )); then
-  echo "TMPDIR is too long for Chromium's socket paths; use a short TMPDIR" >&2
+if (( ${#TMP_BASE} > 36 )); then
+  echo "TMPDIR is too long for Chromium's socket paths under the run directory; use a short TMPDIR" >&2
   exit 1
 fi
 
@@ -108,7 +109,10 @@ RUN_ID="$(openssl rand -hex 6)"
 PROJECT="fvoci-kc-e2e-${RUN_ID}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-kc-e2e.XXXXXX")"
 chmod 700 "$WORK"
-mkdir -p "$WORK/out" "$WORK/realm"
+# The groups' own TMPDIR: whatever the harness, Playwright or Chromium leave
+# there (also after an interrupt) goes with $WORK.
+GROUP_TMP="$WORK/tmp"
+mkdir -p "$WORK/out" "$WORK/realm" "$GROUP_TMP"
 # Listed by the container's keycloak user; $WORK above stays 0700.
 chmod 755 "$WORK/realm"
 CONFIG="$WORK/kc-e2e.json"
@@ -157,6 +161,24 @@ redact() {
   python3 "$HELPER" redact "$CONFIG"
 }
 
+# Readers of a group's output. They ignore INT and TERM (Python keeps an
+# inherited ignore), so after Ctrl-C they read on until the group's own
+# cleanup (retained artifacts, run directory) has finished writing.
+redact_stream() {
+  (trap '' INT TERM; exec python3 "$HELPER" redact "$CONFIG")
+}
+log_stream() {
+  (trap '' INT TERM; exec tee -a "$@")
+}
+
+# A group that ends by INT or TERM stops the run.
+stop_if_interrupted() {
+  if (( $1 == 130 || $1 == 143 )); then
+    echo "group $2 was interrupted (exit $1); stopping" >&2
+    exit "$1"
+  fi
+}
+
 keep() {
   # keep <name>: stdin, redacted, into the evidence directory (if any).
   if [[ -n "$EVIDENCE" ]]; then
@@ -168,11 +190,12 @@ keep() {
 
 # A failing group leaves a copy of its Playwright output (error-context.md
 # with the page's URLs and text) and server log in
-# $TMPDIR/fvoci-collab-e2e-fail.* (web-e2e-run-group.sh), named in the group's
-# GITHUB_OUTPUT file. Keep a redacted copy as evidence, then remove the raw one.
+# $GROUP_TMP/fvoci-collab-e2e-fail.* (web-e2e-run-group.sh), named in the
+# group's GITHUB_OUTPUT file. Keep a redacted copy as evidence, then remove the
+# raw one (the rest of $GROUP_TMP goes with $WORK).
 collect_failure_artifacts() {
   local out retained real base mode dest file
-  base="$(realpath -e -- "$TMP_BASE")"
+  base="$(realpath -e -- "$GROUP_TMP")"
   for out in "$WORK"/group-*.out; do
     [[ -f "$out" ]] || continue
     mode="$(basename "$out" .out)"
@@ -316,24 +339,28 @@ for mode in "${MODES[@]}"; do
   fi
   echo "=== group ${mode}: release server, OIDC_GENERIC_ISSUER=${ISSUER} ===" >&2
   status=0
-  FVOCI_E2E_PROFILE=release GITHUB_OUTPUT="$WORK/group-${mode}.out" PLAYWRIGHT_NO_COPY_PROMPT=1 \
+  TMPDIR="$GROUP_TMP" FVOCI_E2E_PROFILE=release GITHUB_OUTPUT="$WORK/group-${mode}.out" \
+    PLAYWRIGHT_NO_COPY_PROMPT=1 \
     OIDC_GENERIC_ISSUER="$ISSUER" OIDC_GENERIC_CLIENT_ID="$CLIENT_ID" \
     OIDC_GENERIC_CLIENT_SECRET="$secret" OIDC_GENERIC_LABEL="$LABEL" OIDC_ALLOW_INSECURE=1 \
     FVOCI_KC_E2E_CONFIG="$CONFIG" FVOCI_KC_E2E_MODE="$mode" FVOCI_KC_E2E_OUT="$WORK/out" \
     bash "$ROOT/scripts/web-e2e-run-group.sh" e2e-keycloak/oidc-keycloak-flow.spec.ts \
       --config=e2e-keycloak/keycloak.config.ts </dev/null 2>&1 |
-    redact | tee -a "$WORK/run.log" || status=$?
+    redact_stream | log_stream "$WORK/run.log" || status=$?
   GROUP_STATUS[$mode]=$status
+  stop_if_interrupted "$status" "$mode"
 done
 
 if [[ "$WORKSPACE_SSO" == 1 ]]; then
   echo "=== workspace SSO: ignored Rust test, test entitlement environment ===" >&2
   status=0
-  (cd "$ROOT" && FVOCI_KC_SSO_E2E_CONFIG="$SSO_CONFIG" bash "$ROOT/scripts/start-test-postgres.sh" \
+  (cd "$ROOT" && TMPDIR="$GROUP_TMP" FVOCI_KC_SSO_E2E_CONFIG="$SSO_CONFIG" \
+    bash "$ROOT/scripts/start-test-postgres.sh" \
     "${SSO_TEST[@]}" keycloak_workspace_sso_with_a_test_entitlement -- --ignored --nocapture) \
     </dev/null 2>&1 |
-    redact | tee -a "$WORK/run.log" "$WORK/out/workspace-sso.log" || status=$?
+    redact_stream | log_stream "$WORK/run.log" "$WORK/out/workspace-sso.log" || status=$?
   GROUP_STATUS[workspace-sso]=$status
+  stop_if_interrupted "$status" workspace-sso
   MODES+=(workspace-sso)
 fi
 

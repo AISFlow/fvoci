@@ -1356,10 +1356,13 @@ fails or when its compose project `fvoci-kc-e2e-<run id>` could not be removed
 completely; the last command below removes a leftover one (the two variables
 only satisfy the compose file). A failing group's
 Playwright output and server log are copied, redacted, to
-`$FVOCI_KC_E2E_EVIDENCE_DIR/failure-<group>/`, and the raw copy the web e2e
-harness keeps under `$TMPDIR/fvoci-collab-e2e-fail.*` is removed. The script
-refuses to run under `set -x`. `--skip-build` requires the release server to
-report the checked-out commit and reuses `apps/web/dist` as it is.
+`$FVOCI_KC_E2E_EVIDENCE_DIR/failure-<group>/`. The groups run with a TMPDIR
+inside the run directory (`$TMPDIR/fvoci-kc-e2e.*/tmp`, so `$TMPDIR` must be
+at most 36 characters), which is removed on exit together with the raw copies
+the web e2e harness keeps; Ctrl-C stops the run once the current group has
+cleaned up. The script refuses to run under `set -x`. `--skip-build` checks
+only that `fvoci-server --version` reports the checked-out commit;
+`fvoci-migrate` (no version output) and `apps/web/dist` are used as they are.
 
 ```sh
 bash scripts/prepare-web-e2e.sh    # once

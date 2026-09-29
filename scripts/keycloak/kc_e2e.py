@@ -345,22 +345,27 @@ def events(path: str, realms: list[str]) -> None:
     print(json.dumps(report, indent=2))
 
 
-URL_PARAMS = re.compile(
-    r"\b((?:code|state|session_state|session_code|client_data|tab_id|nonce|code_challenge"
-    r"|code_verifier|id_token|access_token|refresh_token|id_token_hint|invitation|mfa)=)"
-    r"[^&\s\"'<>]+")
-# `key="value"` (Keycloak's event log) and `"key": "value"` (JSON). The
-# ambiguous names keep lower_snake_case values (problem codes such as
-# "origin_mismatch", the pool's state="open"); anything else is redacted.
+# Terminal colour codes (tracing's ANSI output) are dropped first, so
+# `ESC[3mstateESC[0mESC[2m=ESC[0m"..."` reads as `state="..."`.
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# code/state/nonce/session_state keep a lower_snake_case word (problem codes
+# such as "origin_mismatch", the pool's state="open", a mail error code);
+# anything else under these names is redacted.
 AMBIGUOUS_KEYS = "code|state|nonce|session_state"
 ALWAYS_KEYS = ("code_id|session_code|client_data|tab_id|auth_session_[a-z_]+|userSessionId"
                "|sessionId|session_id|code_challenge|code_verifier|access_token|refresh_token"
                "|id_token|id_token_hint|invitation|mfa")
-QUOTED = re.compile(
-    rf"(\b(?P<key>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})=\"|\"(?P<jkey>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})\"\s*:\s*\")"
-    r"(?P<value>[^\"]*)\"")
 AMBIGUOUS = re.compile(rf"^(?:{AMBIGUOUS_KEYS})$")
 PLAIN_WORD = re.compile(r"^[a-z][a-z_]*$")
+# key=value in URLs and logs.
+URL_PARAMS = re.compile(
+    rf"\b(?P<key>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})=(?P<value>[^&\s\"'<>\\;,]+)")
+# key="value" (event and tracing logs) and "key": "value" (JSON), also with
+# the quotes escaped (\"key\":\"value\", JSON inside a JSON string).
+QUOTED = re.compile(
+    rf"(\b(?P<key>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})=\\?\""
+    rf"|\\?\"(?P<jkey>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})\\?\"\s*:\s*\\?\")"
+    r"(?P<value>[^\"\\]*)(?P<close>\\?\")")
 COOKIES = re.compile(
     r"\b(fvoci_session|fvoci_oidc_state|KEYCLOAK_[A-Z_]+|AUTH_SESSION_ID[A-Z_]*|KC_RESTART"
     r"|KC_AUTH_SESSION_HASH|KC_STATE_CHECKER)=[^;\s\"']+")
@@ -368,28 +373,49 @@ JWT = re.compile(r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*")
 INVITE = re.compile(r"/invite/[A-Za-z0-9_-]{16,}")
 POSTGRES = re.compile(r"postgres(?:ql)?://\S+")
 BEARER = re.compile(r"\bBearer\s+\S+")
-BASIC = re.compile(r"\bBasic\s+[A-Za-z0-9+/]{8,}={0,2}")
+BASIC = re.compile(r"\bBasic\s+(?P<token>[A-Za-z0-9+/]{7,}={0,2})")
+# A Basic credential, not prose ("Basic authentication"): base64 of 8+
+# characters with a digit, "+", "/", padding or an uppercase letter past the
+# first character.
+CREDENTIAL_SHAPE = re.compile(r"[0-9+/=]|.[A-Z]")
+
+
+def keeps(key: str, value: str) -> bool:
+    return bool(AMBIGUOUS.match(key) and PLAIN_WORD.match(value))
 
 
 def quoted(match: re.Match) -> str:
     key = match.group("key") or match.group("jkey")
-    value = match.group("value")
-    if AMBIGUOUS.match(key) and PLAIN_WORD.match(value):
+    if keeps(key, match.group("value")):
         return match.group(0)
-    return f"{match.group(1)}<redacted>\""
+    return f"{match.group(1)}<redacted>{match.group('close')}"
+
+
+def basic(match: re.Match) -> str:
+    token = match.group("token")
+    if len(token) >= 8 and CREDENTIAL_SHAPE.search(token):
+        return "Basic <redacted>"
+    return match.group(0)
+
+
+def url_param(match: re.Match) -> str:
+    if keeps(match.group("key"), match.group("value")):
+        return match.group(0)
+    return f"{match.group('key')}=<redacted>"
 
 
 def redact_line(line: str, secrets: list[str]) -> str:
+    line = ANSI.sub("", line)
     for secret in secrets:
         line = line.replace(secret, "<redacted-secret>")
     line = QUOTED.sub(quoted, line)
-    line = URL_PARAMS.sub(r"\1<redacted>", line)
+    line = URL_PARAMS.sub(url_param, line)
     line = COOKIES.sub(r"\1=<redacted>", line)
     line = JWT.sub("<redacted-jwt>", line)
     line = INVITE.sub("/invite/<redacted>", line)
     line = POSTGRES.sub("postgres://<redacted>", line)
     line = BEARER.sub("Bearer <redacted>", line)
-    return BASIC.sub("Basic <redacted>", line)
+    return BASIC.sub(basic, line)
 
 
 def redact(path: str) -> None:
