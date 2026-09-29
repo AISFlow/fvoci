@@ -16,6 +16,7 @@ use tokio::time::MissedTickBehavior;
 use collab_engine::b64;
 use collab_engine::outcome::EngineStatus;
 use collab_engine::outcome::LimitKind;
+use collab_engine::process::is_slot_cap_refusal;
 use collab_engine::protocol::Request;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPool;
@@ -3302,15 +3303,7 @@ impl RoomActor {
                 // (1013) and the next reload spawns again. Debug, like the
                 // transport's capacity refusals: a line per retry would grow
                 // with the waiting clients.
-                RecycleError::Spawn(report)
-                    if matches!(
-                        report.outcome,
-                        EngineStatus::ResourceLimit {
-                            kind: LimitKind::Ops,
-                            ..
-                        }
-                    ) =>
-                {
+                RecycleError::Spawn(report) if is_slot_cap_refusal(&report) => {
                     tracing::debug!(
                         workspace_id = %self.workspace_id,
                         document_id = %self.document_id,

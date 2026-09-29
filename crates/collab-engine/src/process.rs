@@ -138,6 +138,23 @@ pub enum ChildSlotKind {
     Seed,
 }
 
+/// True when a spawn was refused because its live-child pool is at its cap, a
+/// transient condition worth retrying, as opposed to any other spawn failure.
+/// Meaningful only for an [`EngineSession::spawn`] or
+/// [`EngineSession::spawn_with_timings`] result: the helper reports its own
+/// per-session op and tail-row caps with the same `LimitKind::Ops`. The slot
+/// cap has no variant of its own because `LimitKind` is part of the serialized
+/// helper protocol and appears in logs.
+pub fn is_slot_cap_refusal(report: &EngineReport) -> bool {
+    matches!(
+        report.outcome,
+        EngineStatus::ResourceLimit {
+            kind: LimitKind::Ops,
+            ..
+        }
+    )
+}
+
 struct SlotGuard {
     kind: ChildSlotKind,
 }
@@ -180,13 +197,7 @@ impl SlotGuard {
             match Self::try_acquire(kind) {
                 Ok(guard) => return Ok(guard),
                 Err(report) => {
-                    if !matches!(
-                        report.outcome,
-                        EngineStatus::ResourceLimit {
-                            kind: LimitKind::Ops,
-                            ..
-                        }
-                    ) {
+                    if !is_slot_cap_refusal(&report) {
                         return Err(report);
                     }
                     if Instant::now() >= deadline {
