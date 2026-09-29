@@ -641,12 +641,12 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 
 ## 6. 재개
 
-### 6.1 인계 체크포인트 (2026-09-29 `<TBD>` KST, 0.3.0 준비·게시, Claude Code Opus 5.5 코디네이터)
+### 6.1 인계 체크포인트 (2026-09-29 22:58 KST, 0.3.0 게시 후 병렬 wave, Claude Code Opus 5.5 코디네이터)
 
 다음 세션은 이 절과 실제 `origin/main`·열린 PR·브랜치·release를 대조한 뒤 인수한다. 로컬 evidence(`/home/kinesis/orca/fvoci-evidence/*`)는
 보조자료이며 재개에 필수는 아니다. 이전 체크포인트(2026-09-29, 0.2.0 준비·게시)는 이 파일의 git 이력에 있다.
 
-- **확인한 origin/main**: 0.3.0 준비 PR merge `<TBD>`(게시 후 기입). main push CI: `<TBD>`.
+- **확인한 origin/main**: `6f64febc487808246596f02922b1826b4fcc939a`(#257 merge, `v0.3.0`). main push CI 39 성공·1 skip, 5개 gate 성공(+ release 실행 9 성공).
   직전 관측: `d265b426`(#255 merge) main CI 39 성공·1 skip, 5개 gate 성공(push 실행 5개, Dependabot 실행 없음), `995ad6e2`(#254 merge)도 같다. `42b9255a`(#244)의 `rust-ci-gate`는 `postgres-arm64`
   `pool_release_integration` 테스트 경합으로 빨간 상태였고 #252(`4c73c0fa`)로 수정했다. `7cbb8bea`(#253)의 `web-ci-gate`는 웹 단위 테스트
   `collab-reconnect.test.ts` 1회 실패로 빨간 상태였다(재실행 없음, §5). `d929c985`(#246)·`c5e7a9e9`(#250)의 Dependabot 실패는 gate가 아니다(§5).
@@ -670,7 +670,31 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   문서 #249. minor 사유: #246(설치 파일 변경과 폐기된 `<VAR>_FILE` 기동 거부), #254(운영자 설정 `FVOCI_ATTACHMENT_TRANSFER_MODE`·
   `attachmentTransfer.mode`). migration 없음(044 유지), 새 필수 `.env` 값 없음. 발행 노트는 `scripts/release-notes-template.md`(`notes-for: 0.3.0`,
   #255 "Tasks: Gantt" 절 포함).
-- **열린 PR**: 0.3.0 준비 PR `<TBD>`, Dependabot #152 #153 #155 #156 #157 #158 #160 #191.
+- **열린 PR**: #262(Vue tracer 2, 위키 문서; 독립 검토 ACCEPT_WITH_NITS). `8adaf1b8` CI 37 성공·2 실패·1 skip.
+  실패는 `web-checks`의 기존 `collab-room-connection.test.ts` dispose 단언 한 건(run 36572851229, 재실행 없음)이다. `fvoci/r8-reconnect-dispose-race`에서 원인을 조사·수정한 뒤 main에 merge하고 #262를 다시 검사한다.
+  그 밖에 Dependabot #152 #153 #155 #156 #157 #158 #160 #191.
+- **추적 issue**(2026-09-29 개설): #258 한글 IME 첫 자모, #259 인라인 수식 원격 변경 시 초안 유실, #260 조합 중 멈춤과 undo 분리, #261 Vue 위키 편집기 React 대비 누락 컨트롤.
+  #261은 **0.4.0 발행 전 필수**다. 해결 전에는 Vue 위키가 포함된 릴리스를 발행하지 않는다.
+- **진행 중 작업**(Ultracode 수량 면제; 각 작업은 자기 worktree에서 구현한 뒤 독립 검토 2개, 수정, delta 검토를 거친다):
+  - #262 head 기준:
+    - `r9-vue-editor-parity`(#261 A)
+    - `r9-vue-shell-parity`(#261 B)
+    - `r11-vue-{auth,workspace,project-views,settings,account-admin,viewers}`(Vue 페이지 이식; project-views는 SA-12 포함)
+  - main `6f64febc` 기준:
+    - `r7-ime-first-jamo`(#258)
+    - `r8-reconnect-dispose-race`
+    - `r10-digest-rotation`(outbox C9)
+    - `r10-import-admission`(첨부 C10·C12)
+    - `r10-gantt-contract`(#253 contract)
+    - `r11-identity`(HI-04·08·10·11; HI-11 IPv6 /64는 코디네이터 결정, 사용자가 되돌릴 수 있음)
+    - `r11-search-streams`(SA-7·10·11, SA-9 측정)
+    - `r11-collab-structure`(db·collab C11·C12)
+    - `r11-ops-cli`(CO-10·12)
+    - `r11-dependabot`
+  - 대기:
+    - #259·#260: #261 A와 #258 수락 뒤
+    - 협업 엔진 비교: #262 수락 뒤 고정 main SHA에서 시작(사용자 순서 지시)
+    - sqlx 0.9, outbox C10·C12, 첨부 C9·C11, CO-11, HI-09: 관련 wave 통합 뒤
 - **다음 후속(비차단, 순서는 코디네이터 결정)**: Vue 전환 다음 tracer와 #253 contract 단계(pixel layout 필드 제거); presigned 실제 S3 제공자·
   Firefox·Safari 검증(#149 F); Dependabot bun.lock v2·#155 recreate 대응(§5); `collab-reconnect.test.ts`
   실패 원인 확인; sqlx 0.9 업그레이드와 acquire 검사 제거·`disallowed-methods`; 메일 수락 수신자 영속화(migration); digest streak 한계 재검토;
@@ -686,8 +710,8 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   정상 서버는 uid 1000·제한 앱 역할; 무설정 bootstrap 서비스·secrets 모드·미배포 초안 호환 계층을 다시 만들지 않는다. 웹 프론트엔드는 Bun 고정
   버전·lockfile로 Vue 3 + Nuxt UI + Tiptap 전환 중이다(사용자 결정; #250 기반, #255 tracer 1). 성능 수치는 각 PR의 작성자 로컬 측정이며 게시
   이미지 측정이 아니다. 보류: `flushDelay` 50/100 실험, DocumentView 구독 분리, Svelte·Astro·Valkey·대규모 room 재설계.
-- **로컬 자료·자원**: `<TBD>`. 2026-09-29 디스크 정리 기록은 `.agents/environment.md`와 `fvoci-evidence/space-reclaim-2026-09-29`.
-- **자동 연결**: `<TBD>`. 진행 중 릴리스 `<TBD>`.
+- **로컬 자료·자원**: 위 작업별 worktree(`/home/kinesis/orca/workspaces/fvoci/<이름>`), 공유 읽기 전용 backend `prebuilt-8adaf1b8`, 통합 worktree `daggertooth`. 2026-09-29 디스크 정리 기록은 `.agents/environment.md`와 `fvoci-evidence/space-reclaim-2026-09-29`.
+- **자동 연결**: 이 세션의 내장 workflow·agent만 사용한다(외부 scheduler 없음). 세션이 끝나면 위 worktree의 미수락 커밋을 기준으로 재개한다. 진행 중 릴리스 없음.
 
 ### 6.2 재개 절차
 
