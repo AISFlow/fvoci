@@ -1575,6 +1575,11 @@ class AgentDocsSelectionTest(unittest.TestCase):
             "apps/web/playwright.config.ts",
             "crates/collab-engine/Cargo.toml",
             "packages/editor/package.json",
+            "package.json",
+            "bun.lock",
+            "bunfig.toml",
+            ".bun-version",
+            "scripts/document-convert/package.json",
         ):
             self.assert_full([*AGENT_DOCS, extra], "FULL_PATH_BROADEN")
 

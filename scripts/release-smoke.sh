@@ -44,7 +44,7 @@ BROWSER_SPECS=(
   attachment-hwp-edit-flow.spec.ts        # HWPX edit, draft download, save-copy
 )
 
-for cmd in docker curl python3 node openssl sha256sum; do
+for cmd in docker curl python3 bun openssl sha256sum; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "missing required command: $cmd" >&2; exit 1; }
 done
 
@@ -431,7 +431,7 @@ WORKSPACE_ID="$(json_get "$(api "$BASE_URL/api/v1/me/workspaces")" items 0 id)"
 DOC_TITLE="Release smoke ${RUN_ID}"
 DOCUMENT_ID="$(json_get "$(api -H "content-type: application/json" -X POST \
   "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents" -d "{\"parentId\":null,\"title\":\"$DOC_TITLE\"}")" id)"
-BODY_JSON="$(node "$ROOT/scripts/install-smoke-collab.mjs" --base-url "$BASE_URL" --origin "$ORIGIN" \
+BODY_JSON="$(bun "$ROOT/scripts/install-smoke-collab.mjs" --base-url "$BASE_URL" --origin "$ORIGIN" \
   --session "$SESSION" --workspace-id "$WORKSPACE_ID" --document-id "$DOCUMENT_ID")"
 grep -q '"contentJson"' <<<"$BODY_JSON" || fail "collab body projection failed: $BODY_JSON"
 log_assert "workspace document create + collab save and projection: ok"
@@ -559,7 +559,7 @@ if (( BROWSER )); then
     fi
     new_stack "browser-${spec%%.*}"
     start_stack
-    (cd "$ROOT/apps/web" && PLAYWRIGHT_BASE_URL="$BASE_URL" npm exec --no -- playwright test "e2e/$spec" \
+    (cd "$ROOT/apps/web" && PLAYWRIGHT_BASE_URL="$BASE_URL" bun --bun x --no-install playwright test "e2e/$spec" \
       --reporter=line --output "$WORK/playwright-output")
     dc down -v --remove-orphans >/dev/null
     log_assert "browser $spec on a fresh stack: ok"

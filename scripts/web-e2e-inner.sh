@@ -147,7 +147,7 @@ run_playwright() {
   settle_network_before_browser
   before="$(net_event_count)"
   net_mark "playwright start"
-  "$ROOT/apps/web/node_modules/.bin/playwright" test "$@" || status=$?
+  (cd "$ROOT/apps/web" && bun --bun x --no-install playwright test "$@") || status=$?
   net_mark "playwright exited with status ${status}"
   if [[ -n "${NET_MONITOR_PID:-}" ]] && kill -0 "$NET_MONITOR_PID" 2>/dev/null; then
     echo "network: netlink address/link events while Playwright ran: $(($(net_event_count) - before))" >&2
