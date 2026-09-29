@@ -253,7 +253,10 @@ async fn identities(
 /// workspace's provider with the state cookie, or on any refusal 302 to
 /// `/login?error=<problem code>`, which the login page shows, instead of a
 /// problem+json page. The refusal issues no state, and its Location is only
-/// the public origin and a static code.
+/// the public origin and a static code. HTTP status metrics therefore count
+/// every refusal, 429 and 5xx causes included, as a 302; the reason shows
+/// only in the `oidc.sso_refused` log line (debug for the limiter's refusal,
+/// warn otherwise).
 async fn sso(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
@@ -264,7 +267,15 @@ async fn sso(
         Ok(started) => state_redirect(&state, started, StatusCode::FOUND),
         Err(err) => {
             let code = err.code.as_str();
-            tracing::warn!(reason = code, "oidc.sso_refused");
+            // The limiter's own refusal logs at debug: the limiter does not
+            // count it, so anyone can repeat it without signing in and a warn
+            // each time would be unbounded. Every other refusal is counted by
+            // that limiter first.
+            if err.code == ProblemCode::RateLimitExceeded {
+                tracing::debug!(reason = code, "oidc.sso_refused");
+            } else {
+                tracing::warn!(reason = code, "oidc.sso_refused");
+            }
             let origin = state.public_origin.trim_end_matches('/');
             redirect(StatusCode::FOUND, &format!("{origin}/login?error={code}"))
         }
