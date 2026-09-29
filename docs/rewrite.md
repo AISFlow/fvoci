@@ -673,7 +673,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 - **열린 PR**(2026-09-30 01:50 KST 대조):
   - **main**: `f3f53c90` = #262. `83c01480` = #268. `9e4f3af3` = #264. v0.3.0 태그는 `6f64febc`에 고정.
   - 제품(연결 예정): #265 `1ee57935`, #267 `e257a434`, #269 `ef17b410`, #266 `ddce8bf2`.
-  - Vue 미연결 WIP: #270–#279, #281–#283. 모두 **live 아님**. #280은 문서.
+  - Vue 미연결 WIP: #270–#279, #281–#283. 모두 **live 아님**. #280은 문서. #284는 live 위키 크롬 e2e.
   - 문서: #263 (`fb082853`).
   - Dependabot(비게이트): #152 #153 #155 #156 #157 #158 #160 #191.
   프론트엔드 전환 현황·실행 TODO는 §6.3이 정본이다. #262·#265·#267은 같은 위키 흐름이며 서로 다른 기능군 완료로 세지 않는다.
@@ -783,7 +783,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Attach-share | `/s/:token/attachments/:id/view` | 구현 중·로컬 WIP (연결 전) | #275 동일 | `ShareAttachmentViewPage.vue` | `share-attachment-view-flow` | Grok 임시 실행자 | FE-Attach-view와 같은 PR | — |
 | FE-Attach-upload | 문서/태스크 첨부 업로드·재개·A/B | 미확인 | React 문서/태스크 + #254 전송 | 기존 attachment e2e(React) | Vue 위키는 attachment-upload bridge가 WikiDocumentView에 있음. drop/paste e2e는 #261 잔여. 전송 모드 전용 메시지 미구현(§5) | Grok 임시 실행자 | #261 drop/paste | — |
 | FE-Share-public | `/s/:token` 문서 공유 읽기 | 구현 중·로컬 WIP (연결 전) | #281 제품 `a5fff966`; nit `beaa095c` (on main) | Vue 익명 읽기. tree/body는 meta 성공 뒤. href는 v-html 전에 고정. **boundary 불변** | regex `/^\/s\/[^/]+\/?$/i`가 attachments를 삼키면 안 됨 | Grok 임시 실행자 | 없음 | — |
-| FE-Wiki-chrome | 위키 페이지의 댓글·공유·별·리비전·보내기·태그 | 실제 라우트 연결 완료(위키 URL만) | #262 WikiDocumentView; e2e `fvoci/r11-vue-wiki-chrome` | 컴포넌트 존재. chrome e2e PR 작성 중 | 각 컨트롤의 종단 검사. 태스크/프로젝트 문서 표면은 여전히 React | Grok 임시 실행자 | FE-Wiki-collab 수락 | — |
+| FE-Wiki-chrome | 위키 페이지의 댓글·공유·별·리비전·보내기·태그 | 종단 간 검증 중 | #284 `6e90189a` on main `f3f53c90` | live Vue 크롬 e2e 6/6 (로컬, prebuilt `8adaf1b8`). 기능군 완료 아님 | 원격 web 샤드. 태스크/프로젝트 문서 표면은 React | Grok 임시 실행자 | CI | — |
 | FE-Import-export | 가져오기/보내기·휴지통 복원(워크스페이스) | 구현 중·로컬 WIP (연결 전) | #273 import/export 섹션; 휴지통 복원 #283 | 워크스페이스 URL은 settings/trash. 문서 export는 위키 크롬 | boundary 후 `workspace-import-export`·trash e2e | Grok 임시 실행자 | FE-Settings-ws · FE-WS-nav | — |
 | FE-Settings-ws | `/w/:slug/settings` 멤버·권한·SSO·토큰 등 | 구현 중·로컬 WIP (연결 전) | #273 `c4c7d878` | 사용자 가능 섹션 Vue 이식. **app-boundary React** | boundary + e2e. 기능군 완료 아님 | Grok 임시 실행자 | 없음 | — |
 | FE-Settings-account | `/settings/account` | 구현 중·로컬 WIP (연결 전) | #277 `b16c20b0` (#273에도 초안) | **중복 WIP**. boundary 없음 | 한 브랜치로 정리. `mfa-flow`는 계정 페이지 | Grok 임시 실행자 | 중복 정리 | — |
@@ -805,7 +805,8 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 5. **#266** `ddce8bf2` — CI 후 머지(기능 전환과 별개).
 6. **#269** nit `79236b2e` **ACCEPT**, head `ef17b410` — CI(mfa-flow 샤드) 후 머지. 인증 기능군 전체 완료 아님.
 7. 미연결 Vue PR: #270–#283. boundary는 실행자가 순차. 기능군 완료로 세지 않음.
-8. 협업 엔진 비교: #280 `b9d6cf30` 문서만. 코디네이터 기본안 **Yrs 유지**. 엔진 전환 PR 없음. #261을 닫지 않음.
+8. **#284** `6e90189a` — live 위키 크롬 e2e. CI 후 머지. #261 A/B 아님.
+9. 협업 엔진 비교: #280 `b9d6cf30` 문서만. 코디네이터 기본안 **Yrs 유지**. 엔진 전환 PR 없음. #261을 닫지 않음.
 
 #### 전체 전환 종결까지 남은 필수
 
