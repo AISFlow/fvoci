@@ -4818,9 +4818,7 @@ impl KcSso {
         response.json().await.unwrap_or(Value::Null)
     }
 
-    /// Registers exactly `redirect_uri`, the one the server reports for the
-    /// workspace, on the realm's client.
-    async fn register_redirect(&self, realm: &KcRealm, redirect_uri: &str) {
+    async fn client(&self, realm: &KcRealm) -> Value {
         let clients = self
             .admin(
                 reqwest::Method::GET,
@@ -4828,7 +4826,14 @@ impl KcSso {
                 None,
             )
             .await;
-        let mut client = clients[0].clone();
+        assert_eq!(clients.as_array().map(Vec::len), Some(1), "{}", realm.realm);
+        clients[0].clone()
+    }
+
+    /// Registers exactly `redirect_uri`, the one the server reports for the
+    /// workspace, on the realm's client, and reads it back.
+    async fn register_redirect(&self, realm: &KcRealm, redirect_uri: &str) {
+        let mut client = self.client(realm).await;
         client["redirectUris"] = json!([redirect_uri]);
         client["webOrigins"] = json!([]);
         let id = client["id"].as_str().expect("client id").to_string();
@@ -4838,6 +4843,14 @@ impl KcSso {
             Some(client),
         )
         .await;
+        let stored = self.client(realm).await;
+        assert_eq!(
+            stored["redirectUris"],
+            json!([redirect_uri]),
+            "{}",
+            realm.realm
+        );
+        assert_eq!(stored["webOrigins"], json!([]), "{}", realm.realm);
     }
 
     async fn user_id(&self, realm: &KcRealm) -> String {

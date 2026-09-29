@@ -1350,11 +1350,24 @@ adds two workspace realms and runs the ignored Rust test
 `keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
 license, not the release server) against them.
 
+Needs docker with compose, openssl, python3, git, cargo, node/npm and access
+to quay.io for the first image pull. The script exits non-zero when a group
+fails or when its compose project `fvoci-kc-e2e-<run id>` could not be removed
+completely; the last command below removes a leftover one (the two variables
+only satisfy the compose file). A failing group's
+Playwright output and server log are copied, redacted, to
+`$FVOCI_KC_E2E_EVIDENCE_DIR/failure-<group>/`, and the raw copy the web e2e
+harness keeps under `$TMPDIR/fvoci-collab-e2e-fail.*` is removed. The script
+refuses to run under `set -x`. `--skip-build` requires the release server to
+report the checked-out commit and reuses `apps/web/dist` as it is.
+
 ```sh
 bash scripts/prepare-web-e2e.sh    # once
 TMPDIR=/tmp FVOCI_KC_E2E_EVIDENCE_DIR=/tmp/kc-evidence bash scripts/keycloak-oidc-e2e.sh
 bash scripts/keycloak-oidc-e2e.sh --skip-build    # reuse target/release and apps/web/dist
 bash scripts/keycloak-oidc-e2e.sh --workspace-sso    # also the workspace SSO test
+KC_BOOTSTRAP_ADMIN_PASSWORD=x FVOCI_KC_REALM_DIR=/nonexistent \
+  docker compose -p fvoci-kc-e2e-<run id> -f scripts/keycloak/compose.yml down -v
 ```
 
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated

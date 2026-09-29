@@ -13,7 +13,7 @@
   "internationalizationEnabled": false,
   "eventsEnabled": true,
   "eventsExpiration": 86400,
-  "eventsListeners": ["jboss-logging"],
+  "eventsListeners": [],
   "adminEventsEnabled": false,
   "requiredActions": [
     {

@@ -9,7 +9,8 @@
 // is printed, recorded, or passed to an assertion that would print it.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
@@ -35,6 +36,8 @@ type KcConfig = {
   keycloakOrigin: string;
   admin: { username: string; password: string };
   users: Record<KcUserKey, KcUser>;
+  /** Passwords of the FVOCI accounts this spec creates (the runner's redactor knows them). */
+  fvoci: { ownerPassword: string; memberPassword: string };
 };
 
 const configPath = process.env.FVOCI_KC_E2E_CONFIG ?? "";
@@ -53,13 +56,13 @@ const redirectUri = `${fvociOrigin}${CALLBACK_PATH}`;
 const WORKSPACE = { slug: "kc-e2e", name: "Keycloak E2E 워크스페이스" };
 const OWNER = {
   email: "kc-owner@example.com",
-  password: randomBytes(12).toString("hex"),
+  password: kc?.fvoci.ownerPassword ?? "",
   familyName: "김",
   givenName: "소유자",
 };
 const PAT = {
   email: "kc-pat@example.com",
-  password: randomBytes(12).toString("hex"),
+  password: kc?.fvoci.memberPassword ?? "",
   familyName: "박",
   givenName: "비번",
 };
@@ -449,12 +452,20 @@ async function problemCode(response: PlaywrightResponse): Promise<string | null>
   }
 }
 
-type SentPost = { origin?: string; sessionCookieSent?: boolean; status?: number; setsStateCookie?: boolean };
+type SentPost = {
+  origin?: string;
+  sessionCookieSent?: boolean;
+  status?: number;
+  setsStateCookie?: boolean;
+  /** Problem `code` of the answer (read before the browser's CORS check). */
+  code?: string | null;
+};
 
 /**
  * The browser's own record (DevTools network events) of POSTs to `urls`: the
- * Origin it sent, whether the session cookie went along, and the status that
- * came back, also for responses the page itself is not allowed to read.
+ * Origin it sent, whether the session cookie went along, the status and the
+ * problem code that came back, also for answers the page may not read (the
+ * body is taken at the Fetch domain's response stage, before CORS applies).
  */
 async function watchPosts(page: Page, urls: readonly string[]) {
   const cdp = await page.context().newCDPSession(page);
@@ -485,13 +496,34 @@ async function watchPosts(page: Page, urls: readonly string[]) {
     const setCookie = event.headers["Set-Cookie"] ?? event.headers["set-cookie"] ?? "";
     sent.setsStateCookie = setCookie.includes("fvoci_oidc_state");
   });
+  cdp.on("Fetch.requestPaused", (event) => {
+    void (async () => {
+      if (event.networkId && event.responseStatusCode !== undefined) {
+        const sent = entry(event.networkId);
+        try {
+          const body = await cdp.send("Fetch.getResponseBody", { requestId: event.requestId });
+          const text = body.base64Encoded ? Buffer.from(body.body, "base64").toString("utf8") : body.body;
+          sent.code = (JSON.parse(text) as { code?: string }).code ?? null;
+        } catch {
+          sent.code = null;
+        }
+      }
+      await cdp.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => undefined);
+    })();
+  });
   await cdp.send("Network.enable");
+  await cdp.send("Fetch.enable", {
+    patterns: urls.map((url) => ({ urlPattern: url, requestStage: "Response" as const })),
+  });
   return {
     last(url: string): SentPost | undefined {
       const id = [...order].reverse().find((candidate) => urlById.get(candidate) === url);
       return id ? byId.get(id) : undefined;
     },
-    stop: () => cdp.detach(),
+    stop: async () => {
+      await cdp.send("Fetch.disable").catch(() => undefined);
+      await cdp.detach();
+    },
   };
 }
 
@@ -545,7 +577,32 @@ async function prepareInstance(browser: Browser): Promise<void> {
   const providers = JSON.parse(providersText) as { providers: unknown };
   expect(providers.providers).toEqual([{ provider: "generic", label: c.label }]);
   observe("providers", providers);
+  observe("servedWebAssets", await servedAssetsWithout(page, secret));
   await context.close();
+}
+
+/** Every file of the static root as this server serves it, plus the SPA entry routes. */
+async function servedAssetsWithout(page: Page, secret: string): Promise<Record<string, number>> {
+  const root = process.env.FVOCI_STATIC_DIR ?? "";
+  expect(root.length > 0, "the harness serves a static root").toBe(true);
+  const files = (readdirSync(root, { recursive: true, withFileTypes: true }) as Array<{
+    name: string;
+    parentPath: string;
+    isFile(): boolean;
+  }>)
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.relative(root, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"));
+  const paths = ["/", "/login", "/settings/account", ...files.map((file) => `/${file}`)];
+  let checked = 0;
+  for (const asset of paths) {
+    const response = await page.request.get(asset);
+    expect(response.status(), asset).toBe(200);
+    const body = await response.body();
+    expect(secret.length > 0 && body.includes(secret), `${asset} holds the client secret`).toBe(false);
+    checked += 1;
+  }
+  expect(files).toContain("index.html");
+  return { filesInStaticRoot: files.length, responsesChecked: checked, clientSecretFound: 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -709,15 +766,14 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     expect(await workspaceSlugs(page)).toEqual([WORKSPACE.slug]);
     expect(userCount()).toBe(1);
 
-    // D: sign out again; Keycloak's own session stays (no single logout).
+    // D: sign out again; this browser's Keycloak session stays (no single
+    // logout): the next provider sign-in skips Keycloak's form.
     const signedIn = await context.storageState();
     await page.goto("/");
     await logout(page);
     const replayOidc = await playwrightRequest.newContext({ baseURL, storageState: signedIn });
     expect((await replayOidc.get("/api/v1/auth/me")).status()).toBe(401);
     await replayOidc.dispose();
-    const keycloakSessions = await kcSessionCount("alice");
-    expect(keycloakSessions).toBeGreaterThan(0);
     const again = await providerSignIn(page, null);
     expect(again.via).toBe("sso");
     expect(again.me.userId).toBe(ownerId);
@@ -735,8 +791,8 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       oidcSessionReplayAfterLogout: 401,
       providerSignInSameAccount: true,
       firstProviderSignInKeycloakStep: first.via,
-      keycloakSessionsAfterFvociLogout: keycloakSessions,
       reSignInKeycloakStep: again.via,
+      keycloakSessionAfterFvociLogout: "kept (re-sign-in answered by Keycloak's session, no form)",
       fvociSessionAfterKeycloakAdminLogout: "still valid (no back-channel logout)",
       users: userCount(),
     });
@@ -1126,11 +1182,18 @@ window.post = async (url, body) => {
         );
         expect(pageSees).toBe("unreadable (TypeError)");
         await expect.poll(() => network.last(url)?.status).toBe(403);
+        await expect.poll(() => network.last(url)?.code).toBe("origin_mismatch");
         const sent = network.last(url);
         expect(sent?.origin).toBe(otherOrigin);
         expect(sent?.sessionCookieSent).toBe(true);
         expect(sent?.setsStateCookie).toBe(false);
-        refused[name] = { status: sent?.status, sentOrigin: sent?.origin, sessionCookieSent: true, pageSees };
+        refused[name] = {
+          status: sent?.status,
+          code: sent?.code,
+          sentOrigin: sent?.origin,
+          sessionCookieSent: true,
+          pageSees,
+        };
       }
       // Form submissions: a top-level navigation to FVOCI with the page's origin.
       for (const [name, form, url] of [
@@ -1144,6 +1207,7 @@ window.post = async (url, body) => {
         expect(answered.status()).toBe(403);
         expect(await problemCode(answered)).toBe("origin_mismatch");
         await expect.poll(() => network.last(url)?.status).toBe(403);
+        await expect.poll(() => network.last(url)?.code).toBe("origin_mismatch");
         const sent = network.last(url);
         expect(sent?.origin).toBe(otherOrigin);
         expect(sent?.sessionCookieSent).toBe(true);

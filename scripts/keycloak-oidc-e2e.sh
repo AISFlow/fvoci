@@ -16,8 +16,19 @@
 #
 # Usage: scripts/keycloak-oidc-e2e.sh [--skip-build] [--workspace-sso]
 #   FVOCI_KC_E2E_EVIDENCE_DIR=<dir>  also keep redacted evidence there
-# Needs docker (compose), openssl, python3 and scripts/prepare-web-e2e.sh.
+# Needs docker (compose), openssl, python3, git, cargo, node/npm and
+# scripts/prepare-web-e2e.sh; the first run pulls the Keycloak image.
+# Exits non-zero when a group fails or when its compose project could not be
+# removed completely.
 set -euo pipefail
+
+# The per-run secrets reach child processes as environment assignments; a
+# shell trace would print them.
+if [[ $- == *x* ]]; then
+  echo "refusing to run with xtrace on: it would print the per-run secrets" >&2
+  exit 2
+fi
+unset BASH_XTRACEFD BASH_ENV ENV
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KC_DIR="$ROOT/scripts/keycloak"
@@ -51,7 +62,7 @@ for arg in "$@"; do
   esac
 done
 
-for dependency in docker openssl python3 git; do
+for dependency in docker openssl python3 git cargo npm; do
   command -v "$dependency" >/dev/null 2>&1 || {
     echo "$dependency is required" >&2
     exit 1
@@ -84,6 +95,14 @@ for bin in fvoci-server fvoci-migrate; do
     exit 1
   }
 done
+BUILT="$("$CARGO_TARGET_DIR/release/fvoci-server" --version)"
+if [[ "$BUILT" != *"(${SOURCE_SHA})"* ]]; then
+  echo "target/release/fvoci-server is not the build of HEAD ${SOURCE_SHA} (${BUILT}); run without --skip-build" >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+  echo "warning: uncommitted changes; the binaries report ${SOURCE_SHA} and --skip-build reuses apps/web/dist as is" >&2
+fi
 
 RUN_ID="$(openssl rand -hex 6)"
 PROJECT="fvoci-kc-e2e-${RUN_ID}"
@@ -114,6 +133,9 @@ for user in ALICE BOB CAROL MALLORY ERIN TINA SSO_A SSO_B; do
 done
 SSO_A_SECRET="$(openssl rand -hex 32)"
 SSO_B_SECRET="$(openssl rand -hex 32)"
+# Passwords of the FVOCI accounts the spec creates.
+FVOCI_OWNER_PASSWORD="$(openssl rand -hex 16)"
+FVOCI_MEMBER_PASSWORD="$(openssl rand -hex 16)"
 
 with_secrets() {
   KC_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASSWORD" KC_E2E_CLIENT_SECRET="$CLIENT_SECRET" \
@@ -122,7 +144,8 @@ with_secrets() {
     KC_E2E_PASSWORD_CAROL="${USER_PASSWORD[CAROL]}" KC_E2E_PASSWORD_MALLORY="${USER_PASSWORD[MALLORY]}" \
     KC_E2E_PASSWORD_ERIN="${USER_PASSWORD[ERIN]}" KC_E2E_PASSWORD_TINA="${USER_PASSWORD[TINA]}" \
     KC_E2E_SSO_A_CLIENT_SECRET="$SSO_A_SECRET" KC_E2E_SSO_A_PASSWORD="${USER_PASSWORD[SSO_A]}" \
-    KC_E2E_SSO_B_CLIENT_SECRET="$SSO_B_SECRET" KC_E2E_SSO_B_PASSWORD="${USER_PASSWORD[SSO_B]}" "$@"
+    KC_E2E_SSO_B_CLIENT_SECRET="$SSO_B_SECRET" KC_E2E_SSO_B_PASSWORD="${USER_PASSWORD[SSO_B]}" \
+    KC_E2E_FVOCI_OWNER_PASSWORD="$FVOCI_OWNER_PASSWORD" KC_E2E_FVOCI_MEMBER_PASSWORD="$FVOCI_MEMBER_PASSWORD" "$@"
 }
 
 compose() {
@@ -143,9 +166,41 @@ keep() {
   fi
 }
 
+# A failing group leaves a copy of its Playwright output (error-context.md
+# with the page's URLs and text) and server log in
+# $TMPDIR/fvoci-collab-e2e-fail.* (web-e2e-run-group.sh), named in the group's
+# GITHUB_OUTPUT file. Keep a redacted copy as evidence, then remove the raw one.
+collect_failure_artifacts() {
+  local out retained real base mode dest file
+  base="$(realpath -e -- "$TMP_BASE")"
+  for out in "$WORK"/group-*.out; do
+    [[ -f "$out" ]] || continue
+    mode="$(basename "$out" .out)"
+    mode="${mode#group-}"
+    while IFS= read -r retained; do
+      real="$(realpath -e -- "$retained" 2>/dev/null)" || continue
+      if [[ "$(dirname "$real")" != "$base" || "$(basename "$real")" != fvoci-collab-e2e-fail.* ]]; then
+        echo "warning: not removing unexpected failure-artifacts path ${retained}" >&2
+        continue
+      fi
+      if [[ -n "$EVIDENCE" ]]; then
+        dest="$EVIDENCE/failure-${mode}"
+        mkdir -p "$dest"
+        while IFS= read -r -d '' file; do
+          redact <"$file" >"$dest/$(realpath --relative-to="$real" "$file" | tr '/' '_')"
+        done < <(find "$real" -type f \( -name '*.md' -o -name '*.log' -o -name '*.txt' \) -print0)
+        echo "failure artifacts of group ${mode}: redacted copy in ${dest}" >&2
+      fi
+      rm -rf -- "$real"
+      echo "failure artifacts of group ${mode}: raw copy ${real} removed" >&2
+    done < <(sed -n 's/^failure-artifacts=//p' "$out")
+  done
+}
+
 cleanup() {
   local status=$?
   set +e
+  collect_failure_artifacts
   if [[ -n "$EVIDENCE" && -f "$CONFIG" ]]; then
     compose logs --no-color keycloak 2>/dev/null | keep keycloak-container.log
   fi
@@ -208,12 +263,12 @@ until last_reason="$(python3 "$HELPER" ready "${READY_ISSUERS[@]}" 2>&1)"; do
 done
 echo "keycloak ready after $((SECONDS - started))s: ${READY_ISSUERS[*]}" >&2
 
-python3 "$HELPER" verify "$CONFIG" >"$WORK/keycloak-setup.json"
-keep keycloak-setup.json <"$WORK/keycloak-setup.json"
-if grep -rqF -f <(printf '%s\n' "$CLIENT_SECRET") "$ROOT/apps/web/dist"; then
-  echo "the client secret is in the web bundle" >&2
-  exit 1
+VERIFY_ARGS=("$CONFIG")
+if [[ "$WORKSPACE_SSO" == 1 ]]; then
+  VERIFY_ARGS+=("$SSO_CONFIG")
 fi
+python3 "$HELPER" verify "${VERIFY_ARGS[@]}" >"$WORK/keycloak-setup.json"
+keep keycloak-setup.json <"$WORK/keycloak-setup.json"
 
 KC_REPO_DIGESTS="$(docker image inspect --format '{{json .RepoDigests}}' "$KC_IMAGE")"
 python3 - "$EVIDENCE" <<PY
@@ -261,7 +316,7 @@ for mode in "${MODES[@]}"; do
   fi
   echo "=== group ${mode}: release server, OIDC_GENERIC_ISSUER=${ISSUER} ===" >&2
   status=0
-  FVOCI_E2E_PROFILE=release \
+  FVOCI_E2E_PROFILE=release GITHUB_OUTPUT="$WORK/group-${mode}.out" PLAYWRIGHT_NO_COPY_PROMPT=1 \
     OIDC_GENERIC_ISSUER="$ISSUER" OIDC_GENERIC_CLIENT_ID="$CLIENT_ID" \
     OIDC_GENERIC_CLIENT_SECRET="$secret" OIDC_GENERIC_LABEL="$LABEL" OIDC_ALLOW_INSECURE=1 \
     FVOCI_KC_E2E_CONFIG="$CONFIG" FVOCI_KC_E2E_MODE="$mode" FVOCI_KC_E2E_OUT="$WORK/out" \

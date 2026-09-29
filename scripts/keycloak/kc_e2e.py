@@ -8,8 +8,9 @@ Subcommands:
   config <issuer> <out>                 the spec's mode-600 config
   sso-config <keycloak-origin> <out>    the Rust workspace SSO test's config
   ready <issuer>...                     exit 0 once discovery and JWKS answer
-  verify <config>                       imported realm/client read back via the
-                                        admin API and token endpoint behaviour
+  verify <config> [<sso-config>]        imported realms/clients read back via
+                                        the admin API and token endpoint
+                                        behaviour
   events <config>                       Keycloak event summary (no ids/tokens)
   redact <config>                       stdin to stdout without secrets
 
@@ -138,8 +139,12 @@ def write_config(issuer: str, out: str) -> None:
                    "password": os.environ[f"KC_E2E_PASSWORD_{name.upper()}"]}
             for name, (email, _verified, _actions) in USERS.items()
         },
+        # FVOCI accounts the spec creates (password sign-in).
+        "fvoci": {"ownerPassword": os.environ["KC_E2E_FVOCI_OWNER_PASSWORD"],
+                  "memberPassword": os.environ["KC_E2E_FVOCI_MEMBER_PASSWORD"]},
         "secrets": [os.environ["KC_E2E_CLIENT_SECRET"], os.environ["KC_E2E_WRONG_SECRET"],
                     os.environ["KC_BOOTSTRAP_ADMIN_PASSWORD"],
+                    os.environ["KC_E2E_FVOCI_OWNER_PASSWORD"], os.environ["KC_E2E_FVOCI_MEMBER_PASSWORD"],
                     *(sso_secret(key, what) for key in SSO_REALMS
                       for what in ("CLIENT_SECRET", "PASSWORD"))],
     }
@@ -192,18 +197,11 @@ def admin_get(config: dict, token: str, path: str):
     return json.loads(body)
 
 
-def verify(path: str) -> None:
-    """Reads the imported settings back instead of assuming the import applied."""
-    config = load_config(path)
-    token = admin_token(config)
-    problems: list[str] = []
-
-    def check(name: str, actual, expected) -> None:
-        if actual != expected:
-            problems.append(f"{name}: {actual!r} != {expected!r}")
-
-    clients = admin_get(config, token, f"/{REALM}/clients?clientId={CLIENT_ID}")
-    check("clients named fvoci-e2e", len(clients), 1)
+def client_summary(config: dict, token: str, realm: str, client_id: str, problems: list[str]) -> dict:
+    clients = admin_get(config, token, f"/{realm}/clients?clientId={client_id}")
+    if len(clients) != 1:
+        problems.append(f"{realm}: {len(clients)} clients named {client_id}")
+        return {}
     client = clients[0]
     attributes = client.get("attributes", {})
     summary = {
@@ -229,13 +227,13 @@ def verify(path: str) -> None:
         "post.logout.redirect.uris": attributes.get("post.logout.redirect.uris"),
     }
     expected = {
-        "clientId": CLIENT_ID, "publicClient": False, "bearerOnly": False,
+        "clientId": client_id, "publicClient": False, "bearerOnly": False,
         "clientAuthenticatorType": "client-secret", "standardFlowEnabled": True,
         "implicitFlowEnabled": False, "directAccessGrantsEnabled": False,
         "serviceAccountsEnabled": False, "consentRequired": False, "fullScopeAllowed": False,
         "frontchannelLogout": False,
-        # The server's port is chosen at start: the spec registers the exact
-        # callback URI of each server before its first flow.
+        # The server's port (or workspace id) is known only later: the spec and
+        # the Rust test register the exact callback URI before the first flow.
         "redirectUris": [], "webOrigins": [],
         "defaultClientScopes": ["basic"], "optionalClientScopes": ["email", "profile"],
         "pkce.code.challenge.method": "S256",
@@ -243,43 +241,80 @@ def verify(path: str) -> None:
         "standard.token.exchange.enabled": "false",
     }
     for key, value in expected.items():
-        check(f"client {key}", summary[key], value)
+        if summary[key] != value:
+            problems.append(f"{realm} client {key}: {summary[key]!r} != {value!r}")
+    return summary
 
-    realm = admin_get(config, token, f"/{REALM}")
-    realm_summary = {k: realm.get(k) for k in (
+
+def realm_summary(config: dict, token: str, realm: str, users: list, problems: list[str]) -> dict:
+    rep = admin_get(config, token, f"/{realm}")
+    summary = {k: rep.get(k) for k in (
         "realm", "enabled", "sslRequired", "registrationAllowed", "resetPasswordAllowed",
-        "verifyEmail", "eventsEnabled")}
-    check("realm sslRequired", realm_summary["sslRequired"], "external")
-    check("realm registrationAllowed", realm_summary["registrationAllowed"], False)
-    users = admin_get(config, token, f"/{REALM}/users?max=100")
-    user_summary = sorted(
-        (u["username"], u.get("email"), u.get("emailVerified"), sorted(u.get("requiredActions", [])))
-        for u in users)
-    check("realm users", user_summary, sorted(
-        (name, email, verified, actions) for name, (email, verified, actions) in USERS.items()))
-    actions = {a["alias"]: a.get("enabled") for a in
-               admin_get(config, token, f"/{REALM}/authentication/required-actions")}
-    check("TERMS_AND_CONDITIONS enabled", actions.get("TERMS_AND_CONDITIONS"), True)
-    master_users = sorted(u["username"] for u in admin_get(config, token, "/master/users?max=100"))
-    check("master realm users", master_users, ["admin"])
+        "verifyEmail", "eventsEnabled", "eventsListeners")}
+    for key, value in (("sslRequired", "external"), ("registrationAllowed", False),
+                       ("eventsEnabled", True), ("eventsListeners", [])):
+        if summary[key] != value:
+            problems.append(f"{realm} {key}: {summary[key]!r} != {value!r}")
+    actual = sorted(
+        [u["username"], u.get("email"), u.get("emailVerified"), sorted(u.get("requiredActions", []))]
+        for u in admin_get(config, token, f"/{realm}/users?max=100"))
+    if actual != sorted(users):
+        problems.append(f"{realm} users: {actual!r} != {sorted(users)!r}")
+    summary["users"] = actual
+    return summary
 
-    # Token endpoint behaviour with the real secret: grants other than the
-    # authorization code are refused for this client.
-    token_url = f"{config['issuer']}/protocol/openid-connect/token"
-    secret = config["secrets"][0]
+
+def grant_refusals(issuer: str, client_id: str, secret: str, username: str, password: str,
+                   problems: list[str]) -> dict:
+    """Grants other than the authorization code are refused, with the real secret."""
+    token_url = f"{issuer}/protocol/openid-connect/token"
     refusals = {}
-    for grant, extra in (("password", {"username": "alice", "password": config["users"]["alice"]["password"]}),
+    for grant, extra in (("password", {"username": username, "password": password}),
                          ("client_credentials", {})):
         status, body, _ = http("POST", token_url, form={
-            "grant_type": grant, "client_id": CLIENT_ID, "client_secret": secret, "scope": "openid", **extra})
-        error = json.loads(body or b"{}").get("error")
-        refusals[grant] = {"status": status, "error": error}
-        if status < 400 or "access_token" in json.loads(body or b"{}"):
-            problems.append(f"{grant} grant was not refused")
+            "grant_type": grant, "client_id": client_id, "client_secret": secret, "scope": "openid",
+            **extra})
+        answer = json.loads(body or b"{}")
+        refusals[grant] = {"status": status, "error": answer.get("error")}
+        if status < 400 or "access_token" in answer:
+            problems.append(f"{issuer}: {grant} grant was not refused")
+    return refusals
 
-    report = {"client": summary, "realm": realm_summary, "users": user_summary,
-              "requiredActions": actions, "masterRealmUsers": master_users,
-              "tokenEndpointRefusals": refusals}
+
+def verify(path: str, sso_path: str | None = None) -> None:
+    """Reads the imported settings back instead of assuming the import applied."""
+    config = load_config(path)
+    token = admin_token(config)
+    problems: list[str] = []
+    users = [[name, email, verified, actions] for name, (email, verified, actions) in USERS.items()]
+    report = {
+        "realm": realm_summary(config, token, REALM, users, problems),
+        "client": client_summary(config, token, REALM, CLIENT_ID, problems),
+        "tokenEndpointRefusals": grant_refusals(
+            config["issuer"], CLIENT_ID, config["secrets"][0], "alice",
+            config["users"]["alice"]["password"], problems),
+    }
+    actions = {a["alias"]: a.get("enabled") for a in
+               admin_get(config, token, f"/{REALM}/authentication/required-actions")}
+    if actions.get("TERMS_AND_CONDITIONS") is not True:
+        problems.append("TERMS_AND_CONDITIONS is not enabled")
+    report["requiredActions"] = actions
+    master_users = sorted(u["username"] for u in admin_get(config, token, "/master/users?max=100"))
+    if master_users != ["admin"]:
+        problems.append(f"master realm users: {master_users!r}")
+    report["masterRealmUsers"] = master_users
+    if sso_path:
+        report["workspaceSsoRealms"] = {}
+        for realm in load_config(sso_path)["realms"]:
+            name = realm["realm"]
+            report["workspaceSsoRealms"][name] = {
+                "realm": realm_summary(config, token, name,
+                                       [[realm["username"], realm["email"], True, []]], problems),
+                "client": client_summary(config, token, name, realm["clientId"], problems),
+                "tokenEndpointRefusals": grant_refusals(
+                    realm["issuer"], realm["clientId"], realm["clientSecret"], realm["username"],
+                    realm["password"], problems),
+            }
     print(json.dumps(report, indent=2))
     if problems:
         fail("imported settings differ:\n  " + "\n  ".join(problems))
@@ -314,13 +349,47 @@ URL_PARAMS = re.compile(
     r"\b((?:code|state|session_state|session_code|client_data|tab_id|nonce|code_challenge"
     r"|code_verifier|id_token|access_token|refresh_token|id_token_hint|invitation|mfa)=)"
     r"[^&\s\"'<>]+")
+# `key="value"` (Keycloak's event log) and `"key": "value"` (JSON). The
+# ambiguous names keep lower_snake_case values (problem codes such as
+# "origin_mismatch", the pool's state="open"); anything else is redacted.
+AMBIGUOUS_KEYS = "code|state|nonce|session_state"
+ALWAYS_KEYS = ("code_id|session_code|client_data|tab_id|auth_session_[a-z_]+|userSessionId"
+               "|sessionId|session_id|code_challenge|code_verifier|access_token|refresh_token"
+               "|id_token|id_token_hint|invitation|mfa")
+QUOTED = re.compile(
+    rf"(\b(?P<key>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})=\"|\"(?P<jkey>{AMBIGUOUS_KEYS}|{ALWAYS_KEYS})\"\s*:\s*\")"
+    r"(?P<value>[^\"]*)\"")
+AMBIGUOUS = re.compile(rf"^(?:{AMBIGUOUS_KEYS})$")
+PLAIN_WORD = re.compile(r"^[a-z][a-z_]*$")
 COOKIES = re.compile(
     r"\b(fvoci_session|fvoci_oidc_state|KEYCLOAK_[A-Z_]+|AUTH_SESSION_ID[A-Z_]*|KC_RESTART"
     r"|KC_AUTH_SESSION_HASH|KC_STATE_CHECKER)=[^;\s\"']+")
 JWT = re.compile(r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*")
 INVITE = re.compile(r"/invite/[A-Za-z0-9_-]{16,}")
 POSTGRES = re.compile(r"postgres(?:ql)?://\S+")
-BEARER = re.compile(r"Bearer\s+\S+")
+BEARER = re.compile(r"\bBearer\s+\S+")
+BASIC = re.compile(r"\bBasic\s+[A-Za-z0-9+/]{8,}={0,2}")
+
+
+def quoted(match: re.Match) -> str:
+    key = match.group("key") or match.group("jkey")
+    value = match.group("value")
+    if AMBIGUOUS.match(key) and PLAIN_WORD.match(value):
+        return match.group(0)
+    return f"{match.group(1)}<redacted>\""
+
+
+def redact_line(line: str, secrets: list[str]) -> str:
+    for secret in secrets:
+        line = line.replace(secret, "<redacted-secret>")
+    line = QUOTED.sub(quoted, line)
+    line = URL_PARAMS.sub(r"\1<redacted>", line)
+    line = COOKIES.sub(r"\1=<redacted>", line)
+    line = JWT.sub("<redacted-jwt>", line)
+    line = INVITE.sub("/invite/<redacted>", line)
+    line = POSTGRES.sub("postgres://<redacted>", line)
+    line = BEARER.sub("Bearer <redacted>", line)
+    return BASIC.sub("Basic <redacted>", line)
 
 
 def redact(path: str) -> None:
@@ -330,15 +399,7 @@ def redact(path: str) -> None:
         secrets = [*config.get("secrets", []), *(u["password"] for u in config["users"].values())]
     secrets = sorted({s for s in secrets if len(s) >= 8}, key=len, reverse=True)
     for line in sys.stdin:
-        for secret in secrets:
-            line = line.replace(secret, "<redacted-secret>")
-        line = URL_PARAMS.sub(r"\1<redacted>", line)
-        line = COOKIES.sub(r"\1=<redacted>", line)
-        line = JWT.sub("<redacted-jwt>", line)
-        line = INVITE.sub("/invite/<redacted>", line)
-        line = POSTGRES.sub("postgres://<redacted>", line)
-        line = BEARER.sub("Bearer <redacted>", line)
-        sys.stdout.write(line)
+        sys.stdout.write(redact_line(line, secrets))
         sys.stdout.flush()
 
 
@@ -357,8 +418,8 @@ def main() -> None:
     elif command == "ready" and args:
         for issuer in args:
             ready(issuer)
-    elif command == "verify" and len(args) == 1:
-        verify(args[0])
+    elif command == "verify" and len(args) in (1, 2):
+        verify(*args)
     elif command == "events" and args:
         events(args[0], args[1:])
     elif command == "redact" and len(args) <= 1:
