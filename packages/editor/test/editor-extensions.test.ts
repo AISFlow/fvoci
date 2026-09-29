@@ -127,7 +127,7 @@ test("host node views are applied only as addNodeView", () => {
 
 test("the factory and its neutral modules import no UI framework", () => {
   const framework =
-    /^(react|react-dom|vue|@tiptap\/react|@tiptap\/vue-3|@tiptap\/extension-drag-handle-react|@hocuspocus\/provider-react|@radix-ui\/.*)(\/.*)?$/;
+    /^(react|react-dom|vue|@tiptap\/react|@tiptap\/vue-3|@tiptap\/extension-drag-handle-react|@tiptap\/extension-drag-handle-vue-3|@hocuspocus\/provider-react|@radix-ui\/.*|@nuxt\/.*)(\/.*)?$/;
   const seen = new Set<string>();
   const bare = new Set<string>();
   const walk = (url: URL): void => {
