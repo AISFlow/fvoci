@@ -1350,6 +1350,46 @@ unregistered redirect URI) and remove the old one once no instance `generic`
 provider shares that client. Sign-ins started before the upgrade fail once
 with `oidc_state_mismatch`. Instance providers keep their URIs.
 
+Local check against a real Keycloak (opt-in, not in CI): the official image
+in `start-dev` with one imported test realm (`scripts/keycloak/`), published on
+`127.0.0.1` only, as the instance `generic` provider of the release server built
+from the checkout, driven by Playwright Chromium through the web UI
+(`apps/web/e2e-keycloak/`). Secrets are generated per run; the Keycloak compose
+project is removed on exit. It does not cover external providers, HTTPS or a
+reverse proxy, or the container deployment path. Workspace SSO needs a
+`workspaceSso` license, which published builds cannot load; `--workspace-sso`
+adds two workspace realms and runs the ignored Rust test
+`keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
+license, not the release server) against them.
+
+Needs docker with compose, openssl, python3, git, cargo, node/npm, setsid
+(util-linux) and access to quay.io for the first image pull. The script exits non-zero when a group
+fails or when its compose project `fvoci-kc-e2e-<run id>` could not be removed
+completely; the last command below removes a leftover one (the two variables
+only satisfy the compose file). A failing group's
+Playwright output and server log are copied, redacted, to
+`$FVOCI_KC_E2E_EVIDENCE_DIR/failure-<group>/`. The groups run with a TMPDIR
+inside the run directory (`$TMPDIR/fvoci-kc-e2e.*/tmp`, so `$TMPDIR` must be
+at most 36 characters), which is removed on exit together with the raw copies
+the web e2e harness keeps; Ctrl-C stops the run once the current group has
+cleaned up; a further Ctrl-C, or a closed pipe on stderr, during the script's
+own cleanup is ignored, so the run directory (per-run secrets) and the
+Keycloak project are always removed. The
+script refuses to run under `set -x`. `--skip-build` checks only that
+`fvoci-server --version` reports the checked-out commit; `fvoci-migrate` (no
+version output) and `apps/web/dist` are used as they are. The clean-tree
+check (`versions.json`) looks at tracked files only; untracked files under
+`apps/web/public` still end up in `dist`.
+
+```sh
+bash scripts/prepare-web-e2e.sh    # once
+TMPDIR=/tmp FVOCI_KC_E2E_EVIDENCE_DIR=/tmp/kc-evidence bash scripts/keycloak-oidc-e2e.sh
+bash scripts/keycloak-oidc-e2e.sh --skip-build    # reuse target/release and apps/web/dist
+bash scripts/keycloak-oidc-e2e.sh --workspace-sso    # also the workspace SSO test
+KC_BOOTSTRAP_ADMIN_PASSWORD=x FVOCI_KC_REALM_DIR=/nonexistent \
+  docker compose -p fvoci-kc-e2e-<run id> -f scripts/keycloak/compose.yml down -v
+```
+
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
 project/task, a document comment, an MFA secret sealed with `ENCRYPTION_KEYS`),
