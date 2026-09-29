@@ -1338,6 +1338,21 @@ unregistered redirect URI) and remove the old one once no instance `generic`
 provider shares that client. Sign-ins started before the upgrade fail once
 with `oidc_state_mismatch`. Instance providers keep their URIs.
 
+Local check against a real Keycloak (opt-in, not in CI): the official image
+in `start-dev` with one imported test realm (`scripts/keycloak/`), published on
+`127.0.0.1` only, as the instance `generic` provider of the release server built
+from the checkout, driven by Playwright Chromium through the web UI
+(`apps/web/e2e-keycloak/`). Secrets are generated per run; the Keycloak compose
+project is removed on exit. It does not cover external providers, HTTPS or a
+reverse proxy, the container deployment path, or workspace SSO (needs a
+`workspaceSso` license, which published builds cannot load).
+
+```sh
+bash scripts/prepare-web-e2e.sh    # once
+TMPDIR=/tmp FVOCI_KC_E2E_EVIDENCE_DIR=/tmp/kc-evidence bash scripts/keycloak-oidc-e2e.sh
+bash scripts/keycloak-oidc-e2e.sh --skip-build    # reuse target/release and apps/web/dist
+```
+
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
 project/task, a document comment, an MFA secret sealed with `ENCRYPTION_KEYS`),

@@ -1,0 +1,117 @@
+{
+  "realm": "fvoci-e2e",
+  "displayName": "FVOCI e2e (local test realm)",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "editUsernameAllowed": false,
+  "internationalizationEnabled": false,
+  "eventsEnabled": true,
+  "eventsExpiration": 86400,
+  "eventsListeners": ["jboss-logging"],
+  "adminEventsEnabled": false,
+  "requiredActions": [
+    {
+      "alias": "TERMS_AND_CONDITIONS",
+      "name": "Terms and Conditions",
+      "providerId": "TERMS_AND_CONDITIONS",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 20,
+      "config": {}
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "fvoci-e2e",
+      "name": "FVOCI e2e",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "@@CLIENT_SECRET@@",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "consentRequired": false,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": false,
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "standard.token.exchange.enabled": "false",
+        "exclude.issuer.from.auth.response": "false"
+      },
+      "defaultClientScopes": ["basic"],
+      "optionalClientScopes": ["email", "profile"]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "kc-alice@example.com",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Linked",
+      "credentials": [{ "type": "password", "value": "@@PASSWORD_ALICE@@", "temporary": false }]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "kc-bob@example.com",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Unlinked",
+      "credentials": [{ "type": "password", "value": "@@PASSWORD_BOB@@", "temporary": false }]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "kc-carol@example.com",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Invited",
+      "credentials": [{ "type": "password", "value": "@@PASSWORD_CAROL@@", "temporary": false }]
+    },
+    {
+      "username": "mallory",
+      "enabled": true,
+      "email": "kc-mallory@example.com",
+      "emailVerified": true,
+      "firstName": "Mallory",
+      "lastName": "Mismatch",
+      "credentials": [{ "type": "password", "value": "@@PASSWORD_MALLORY@@", "temporary": false }]
+    },
+    {
+      "username": "erin",
+      "enabled": true,
+      "email": "kc-erin@example.com",
+      "emailVerified": false,
+      "firstName": "Erin",
+      "lastName": "Unverified",
+      "credentials": [{ "type": "password", "value": "@@PASSWORD_ERIN@@", "temporary": false }]
+    },
+    {
+      "username": "tina",
+      "enabled": true,
+      "email": "kc-tina@example.com",
+      "emailVerified": true,
+      "firstName": "Tina",
+      "lastName": "Terms",
+      "requiredActions": ["TERMS_AND_CONDITIONS"],
+      "credentials": [{ "type": "password", "value": "@@PASSWORD_TINA@@", "temporary": false }]
+    }
+  ]
+}
