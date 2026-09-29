@@ -56,8 +56,10 @@ export function useWorkspaceSession(slug: MaybeRefOrGetter<string>) {
   );
 
   const status = computed<SessionStatus>(() => {
-    if (setup.isError.value || (me.isError.value && !signedOut.value) || workspaces.isError.value) return "error";
-    if (!setup.data.value || setup.data.value.needed || !me.data.value || !workspace.value) return "loading";
+    // Leaving for /setup, /login or home: keep showing "loading" until the page goes.
+    if (setup.data.value?.needed || signedOut.value || denied.value) return "loading";
+    if (setup.isError.value || me.isError.value || workspaces.isError.value) return "error";
+    if (!setup.data.value || !me.data.value || !workspace.value) return "loading";
     return "ready";
   });
 
