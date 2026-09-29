@@ -211,7 +211,7 @@ impl Config {
         let smtp = crate::mail::smtp_from_env()?;
         let revision = revision_settings_from_env();
         let attachment_transfer = attachment_transfer_from_values(
-            env_os("FVOCI_ATTACHMENT_TRANSFER_MODE")?.as_deref(),
+            env_unicode("FVOCI_ATTACHMENT_TRANSFER_MODE")?.as_deref(),
             env::var("FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS")
                 .ok()
                 .as_deref(),
@@ -244,7 +244,7 @@ impl Config {
 
 /// A variable that is unset or valid Unicode; anything else is refused
 /// rather than read as unset.
-fn env_os(name: &str) -> Result<Option<String>, String> {
+fn env_unicode(name: &str) -> Result<Option<String>, String> {
     match env::var(name) {
         Ok(value) => Ok(Some(value)),
         Err(env::VarError::NotPresent) => Ok(None),
