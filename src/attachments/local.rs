@@ -259,6 +259,10 @@ pub enum StorageError {
     /// Nothing is stored; this is the client's failure, not the server's.
     #[error("client request body failed")]
     ClientBody,
+    /// This storage cannot sign browser URLs (local driver, or S3 without
+    /// `S3_PUBLIC_ENDPOINT`).
+    #[error("presigned transfer unavailable")]
+    PresignUnavailable,
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 }

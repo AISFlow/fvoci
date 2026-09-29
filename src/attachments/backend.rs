@@ -11,6 +11,7 @@ use tokio_util::io::ReaderStream;
 
 use super::local::{LocalStorage, PartInfo, StagedPart, StorageError};
 use super::s3::S3Storage;
+use super::transfer::{PresignTtls, PresignedUrl, TransferUnavailable};
 use crate::config::StorageSettings;
 
 /// Local or S3-compatible attachment bytes, sharing the multipart contract
@@ -42,6 +43,66 @@ impl ObjectStorage {
         match settings {
             StorageSettings::Local { root } => Ok(Self::local(root.clone())),
             StorageSettings::S3(s3) => Ok(Self::S3(Arc::new(S3Storage::new(s3.clone())?))),
+        }
+    }
+
+    /// Browser URL lifetimes for the presigned mode (no effect on local).
+    pub fn with_presign_ttls(self, ttls: PresignTtls) -> Self {
+        match self {
+            Self::S3(s3) => Self::S3(Arc::new((*s3).clone().with_presign_ttls(ttls))),
+            local => local,
+        }
+    }
+
+    /// Why this storage cannot serve the presigned mode, or `None` when it
+    /// can. Fixed for the life of the process.
+    pub fn presign_unavailable(&self) -> Option<TransferUnavailable> {
+        match self {
+            Self::Local(_) => Some(TransferUnavailable::StorageLocal),
+            Self::S3(s3) => s3
+                .presign_origin()
+                .is_none()
+                .then_some(TransferUnavailable::PublicEndpointMissing),
+        }
+    }
+
+    /// Browser-facing storage origin (for the CSP), when presigned transfers
+    /// are possible.
+    pub fn presign_origin(&self) -> Option<String> {
+        match self {
+            Self::Local(_) => None,
+            Self::S3(s3) => s3.presign_origin(),
+        }
+    }
+
+    /// See [`S3Storage::presign_upload_part`]. Signing does no I/O.
+    pub fn presign_upload_part(
+        &self,
+        key: &str,
+        upload_ref: Option<&str>,
+        part_number: i32,
+        content_length: u64,
+    ) -> Result<PresignedUrl, StorageError> {
+        match self {
+            Self::Local(_) => Err(StorageError::PresignUnavailable),
+            Self::S3(s3) => s3.presign_upload_part(
+                key,
+                upload_ref.unwrap_or_default(),
+                part_number,
+                content_length,
+            ),
+        }
+    }
+
+    /// See [`S3Storage::presign_download`]. Signing does no I/O.
+    pub fn presign_download(
+        &self,
+        key: &str,
+        content_disposition: &str,
+    ) -> Result<PresignedUrl, StorageError> {
+        match self {
+            Self::Local(_) => Err(StorageError::PresignUnavailable),
+            Self::S3(s3) => s3.presign_download(key, content_disposition),
         }
     }
 

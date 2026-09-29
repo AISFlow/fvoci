@@ -8,6 +8,7 @@ mod preview_html;
 mod preview_job;
 mod range;
 mod s3;
+pub mod transfer;
 mod verify;
 
 pub use backend::{ObjectBody, ObjectStorage};
@@ -24,7 +25,8 @@ pub use preview_job::{
     process_one_preview, spawn_preview_job, PreviewJobHandle, PreviewJobSettings,
 };
 pub use range::{parse_range, ParsedRange};
-pub use s3::{S3Storage, UploadTimeouts, MINIO_TEST_IMAGE};
+pub use s3::{presign_origin_for, S3Storage, UploadTimeouts, MINIO_TEST_IMAGE};
+pub use transfer::{PresignTtls, PresignedUrl, TransferMode, TransferUnavailable};
 pub use verify::{verify_stored_objects, StorageVerifyReport};
 
 use std::fmt;
