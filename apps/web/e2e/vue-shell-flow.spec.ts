@@ -283,7 +283,11 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
 
   // Ctrl+K from inside the editor; another wiki document keeps this page
-  // (the shell stays mounted) and the palette closes with the navigation.
+  // (the shell stays mounted) and the palette, like the bell's open panel,
+  // closes with the navigation.
+  const bellPanel = page.getByRole("region", { name: "알림" });
+  await page.getByRole("button", { name: /^(알림|안 읽은 알림 \d+건)$/ }).click();
+  await expect(bellPanel).toBeVisible();
   await page.locator(".fvoci-editor .ProseMirror").click();
   await page.keyboard.press("Control+k");
   await expect(palette.getByLabel("검색어")).toBeFocused();
@@ -292,6 +296,7 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   await expect(page).toHaveURL(new RegExp(`${second.path}$`));
   await expect(page.getByLabel("문서 제목")).toHaveValue(second.title);
   await expect(palette).toHaveCount(0);
+  await expect(bellPanel).toHaveCount(0);
   expect(await sameDocument(page), "wiki → wiki stays in the Vue app").toBe(true);
 
   // A task result is a React page: a full load.

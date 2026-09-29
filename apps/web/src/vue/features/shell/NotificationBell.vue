@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { useId } from "vue";
-import { useRouter } from "vue-router";
+import { useId, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import type { NotificationItem } from "@/features/notifications/notification-target";
 import { loadErrorMessage } from "@/lib/api";
 import { notificationsPath } from "@/lib/href";
@@ -23,6 +23,16 @@ const bell = useNotificationBell({
 });
 const { open, count, items, label, badge } = bell;
 const { isPending: listPending, isError: listFailed, error: listError } = bell.list;
+
+// An in-app navigation (to another wiki document) keeps the shell mounted;
+// the panel closes with it, as on a new page.
+const route = useRoute();
+watch(
+  () => route.fullPath,
+  () => {
+    open.value = false;
+  },
+);
 
 // As in the React bell, a failed write leaves the panel as it was.
 function onItem(item: NotificationItem): void {
