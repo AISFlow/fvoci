@@ -1,9 +1,10 @@
 # collab-engine
 
 Isolated native Yrs child for FVOCI `COLLAB_STATE_ENCODING_V1` / Yjs 13.6.32
-updateV1. This crate is **not** wired to `fvoci-server`, does not open
-WebSockets, and does not touch a database. rlimits isolate resource/failure,
-not the filesystem or network.
+updateV1. `fvoci-server` links the parent side and its room actor
+(`src/collab/room.rs`) drives one helper per open room; Yrs runs only in the
+helper binary. The crate opens no WebSockets and touches no database. rlimits
+isolate resource/failure, not the filesystem or network.
 
 ## Pins
 
@@ -76,10 +77,14 @@ Caps: `max_input_bytes == max_output_bytes` (default 8 MiB =
 `STATE_OVERSIZE_FACTOR * DOCUMENT_MAX_BODY_BYTES`) so snapshots reload;
 `max_load_bytes` (32 MiB) is the decoded snapshot+tail aggregate and is
 checked **together with each blob** before base64 copies; JSON frames 48 MiB;
-tail rows 64; global live children 8 with immediate `ResourceLimit` (not a wait);
-per-document uniqueness is the future room map. Native `RLIMIT_AS` is 1 GiB
-and parent-observed RSS kill is 512 MiB, so eight live children budget 4 GiB
-RSS. A 32 MiB aggregate load is in range for representative fragmented
+tail rows 64. Live children are capped per pool (`ChildSlotKind`: primary,
+validator, seed; crate defaults 8/8/2, the server derives its caps from
+`FVOCI_COLLAB_MAX_ROOMS` in `src/collab/config.rs`). A full primary pool
+refuses at once with `ResourceLimit` (`Ops`); validator and seed spawns with
+a `slot_wait` wait up to that long for a slot. The server's room map keeps one
+room, so one primary helper, per document. Native `RLIMIT_AS` is 1 GiB and
+parent-observed RSS kill is 512 MiB per child; the server's
+`FVOCI_COLLAB_MEMORY_BUDGET` admission bounds the aggregate. A 32 MiB aggregate load is in range for representative fragmented
 snapshot+tail data; structurally memory-heavy CRDTs still return
 `ResourceLimit` (Memory/Output) and are not a universal decode guarantee.
 Apply succeeds only when the authoritative completeV1 (pending + delete set)
@@ -88,9 +93,12 @@ metadata, and `snapshot` supplies the bytes at persist points. Oversize
 recycles the child before any parent DB admission. `load` is once per child
 session and is refused after a successful `apply` so two documents cannot
 merge; `ping` before the first load is allowed. Direct `apply` onto an empty
-child remains valid. Child
-`env_clear` / scrub; no inherited `DATABASE_APP_URL`. Per-request wall
-deadline stays 8 s. Cumulative child `RLIMIT_CPU` is
+child remains valid. Isolation: the child gets `env_clear` plus a scrub (no
+inherited `DATABASE_APP_URL` or keyrings), rlimits in `pre_exec` and again in
+its own `main`, and `PR_SET_PDEATHSIG(SIGKILL)`, which Linux ties to the
+spawning thread, so a session is spawned, called and reaped on one thread. The
+helper raises its own `oom_score_adj` after exec so an OOM kill prefers it
+over the server. Per-request wall deadline stays 8 s. Cumulative child `RLIMIT_CPU` is
 `ceil(timeout_ms/1000) * max_ops` so 256 healthy ops are not killed by an
 8 s process CPU budget. Writer and reader run on helper threads; timeout
 kills, waits, and joins. Pipe EOF/IO waits for an observed exit until that

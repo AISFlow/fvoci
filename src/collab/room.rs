@@ -664,6 +664,12 @@ impl From<LiveSession> for CollabSession {
 }
 
 struct ConnectionOutboundBudget {
+    /// Counts the frames queued for this connection plus the one the transport
+    /// is sending (a permit drops only after the send). The events channel has
+    /// the same capacity, so while the transport is blocked mid-send a slot
+    /// stays free for `enqueue_close_ordered` to queue Close behind the data
+    /// (unaccounted pre-auth frames aside); otherwise Close falls back to the
+    /// cancel watch.
     frame_sem: Arc<Semaphore>,
     queued_bytes: AtomicUsize,
     max_bytes: usize,
@@ -857,8 +863,11 @@ pub struct ActorProbe {
 pub enum JoinError {
     AdmissionDenied,
     UnsupportedKind,
+    /// Hub room cap, room-permit semaphore closed, actor queue full, or the
+    /// per-room connection cap.
     RoomFull,
-    /// Hub room count, helper child cap, or aggregate memory budget exhausted.
+    /// Aggregate helper memory budget, or the primary helper pool at its cap.
+    /// The WebSocket transport closes this and `RoomFull` with 1013.
     CapacityRetry,
     EngineUnavailable,
     WriterStale,

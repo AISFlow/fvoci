@@ -1,39 +1,37 @@
-//! Collaboration DB admission boundary.
+//! Collaboration DB boundary for document and task rooms: access checks,
+//! durable state (snapshot, update tail, op receipts) and the writer fence.
+//! The database stays the ACL, durability and fence authority.
 //!
-//! ## Caps (source-grounded final)
-//! - `MAX_COLLAB_SNAPSHOT_BYTES` / `MAX_COLLAB_UPDATE_BYTES`: 8 MiB each (supersedes 1 MiB).
+//! ## Caps
+//! - `MAX_COLLAB_SNAPSHOT_BYTES` / `MAX_COLLAB_UPDATE_BYTES`: 8 MiB each.
 //! - `MAX_COLLAB_TAIL_UPDATES`: 64 tail rows.
 //! - `MAX_COLLAB_LOAD_BYTES`: snapshot + tail combined 32 MiB (engine reload budget).
-//! - Engine Load framed JSON cap 48 MiB (documented; DB refuses tails engine cannot reload).
+//! - Engine Load framed JSON cap 48 MiB (DB refuses tails the engine cannot reload).
 //! - Op receipts are append-only identity rows (seq/actor/len/digest); history grows without
 //!   automatic retention or a per-document receipt count cap. Memory/recovery stays bounded by
 //!   the 32 MiB / 64-row tail load budget above.
-//!
-//! ## Public API (room actor consumes later; DB remains ACL/durable/fence authority)
-//! - `claim_writer_and_load(pool, workspace_id, actor_user_id, session_id, document_id)`
-//! - `load_collab_document(pool, workspace_id, actor_user_id, session_id, document_id)`
-//! - `append_collab_update(pool, AppendCollabInput)` → `AppendCollabResult` | `CollabDbError`
-//! - `lookup_collab_operation(pool, workspace_id, actor_user_id, session_id, document_id, op_id)`
-//! - `verify_collab_operation(pool, VerifyCollabInput)` → length+digest+actor mismatch → `OpIdConflict`
 //!
 //! ## Op receipts (immutable identity, no raw payload)
 //! Receipts retain `seq`, `actor_user_id`, `payload_len`, and `payload_sha256` only.
 //! They do not store historical update bytes; callers cannot recover raw payload from a
 //! receipt alone and must load the canonical snapshot plus tail for payload bytes.
-//! - `compact_collab_snapshot(pool, CompactCollabInput)` — exact cutoff fence; receipts retained
+//! Compaction keeps receipts and fences its cutoff exactly.
 //!
-//! ## Lock order within one transaction (sorted when multiple user ids):
-//! 1. `pg_advisory_xact_lock(1907006, lockKeyFromUuid(userId))` for each actor user
+//! ## Lock order within one transaction
+//! Every authorizing transaction starts with `lock_collab_actor` (steps 1-5):
+//! 1. `lock_membership_users` for the actor (the membership advisory lock;
+//!    keys sorted when several users are locked)
 //! 2. `users` + `sessions` `FOR UPDATE` via `recheck_session`
 //! 3. `memberships` `FOR UPDATE` via `membership_role_for_update`
-//! 4. project documents only: `projects` `FOR SHARE` (before the document row, matching
-//!    the project → document order of project document mutations)
-//! 5. `documents` `FOR UPDATE` for the wiki or project document row
-//! 6. `document_states` `FOR UPDATE`
+//! 4. project documents and tasks: `projects` `FOR SHARE` (before the resource
+//!    row, matching the project → document/task order of their mutations)
+//! 5. `documents` `FOR UPDATE`, or `tasks` `FOR NO KEY UPDATE`
+//! 6. the state row (`document_states` / `task_states`) `FOR UPDATE`
 //!
-//! Empty-state seed only: `pg_advisory_xact_lock(1907004, lockKeyFromUuid(documentId))`.
-//! Room fence: `collab::guard::RoomGuard` holds the session lock
-//! `pg_advisory_lock(1907007, lockKeyFromUuid(documentId))` on a dedicated
+//! Empty-state seed only: a transaction advisory lock in
+//! `COLLAB_INIT_LOCK_NAMESPACE`, keyed by `lock_key_from_uuid(resource_id)`.
+//! Room fence: `collab::guard::RoomGuard` holds a session advisory lock in
+//! `COLLAB_ROOM_SESSION_LOCK_NAMESPACE`, keyed the same way, on a dedicated
 //! connection for the room's lifetime (not acquired in this module).
 
 use std::time::Instant;
@@ -68,13 +66,13 @@ pub struct CollabDbStageTimings {
     pub commit_us: u64,
 }
 
+/// Serializes seeding a missing state row (transaction lock keyed by the
+/// resource id), so concurrent first claims insert it once.
 pub const COLLAB_INIT_LOCK_NAMESPACE: i32 = 1_907_004;
-/// Room fence: `RoomGuard` holds this session lock, keyed by the document id,
-/// for the room's lifetime. No other two-int advisory lock may use this
-/// namespace (see `db::context` tests). Servers of different versions are
-/// not supported against one database (RUNNING.md: mixed-version rolling
-/// restart is unsupported), so this value, like the other namespaces, can be
-/// renumbered.
+/// Room fence: `RoomGuard` holds this session lock, keyed by the resource id,
+/// for the room's lifetime, so at most one room, in any server process, owns a
+/// resource at a time. No other two-int advisory lock may use this namespace
+/// (see `db::context` tests).
 pub const COLLAB_ROOM_SESSION_LOCK_NAMESPACE: i32 = 1_907_007;
 pub const COLLAB_STATE_ENCODING_V1: i16 = 1;
 pub const MAX_COLLAB_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
