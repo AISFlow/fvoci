@@ -12,14 +12,15 @@ use crate::attachments::{
     ATTACHMENT_LOCK_NAMESPACE, MAX_PART_COUNT, STORAGE_LOCK_NAMESPACE,
 };
 use crate::attachments::{ObjectStorage, StorageError};
-use crate::db::context::{lock_key_from_uuid, restore_system, set_system, set_tenant};
-use crate::db::documents::{
-    document_permission, lock_membership_users, membership_role, membership_role_for_update,
-    recheck_session, session_is_live, workspace_is_live,
+use crate::db::context::{
+    lock_key_from_uuid, lock_membership_users, recheck_session, restore_system, session_is_live,
+    set_system, set_tenant,
 };
+use crate::db::documents::document_permission;
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::project_member_role;
 use crate::db::quota::{StorageQuota, StorageQuotaError};
+use crate::db::workspace::{membership_role, membership_role_for_update, workspace_is_live};
 use crate::projects::effective_permission;
 use crate::projects::ProjectPermission;
 

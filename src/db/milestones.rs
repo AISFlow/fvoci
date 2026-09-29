@@ -7,6 +7,7 @@ use crate::db::context::{
 };
 use crate::db::documents::between;
 use crate::db::projects::{load_live_project, lock_project, project_permission, ProjectDbError};
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
 pub const MILESTONE_NAME_MAX: usize = 200;
@@ -25,18 +26,6 @@ pub struct MilestoneRow {
 pub fn milestone_name_is_valid(name: &str) -> bool {
     let trimmed = name.trim();
     !trimmed.is_empty() && trimmed.chars().count() <= MILESTONE_NAME_MAX
-}
-
-async fn workspace_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
 }
 
 async fn require_project_view(

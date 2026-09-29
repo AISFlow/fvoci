@@ -14,7 +14,7 @@ use crate::db::identity::{
 };
 use crate::db::quota::{acquire_admission_lock, require_membership_admission, QuotaError};
 use crate::db::workspace::{
-    record_workspace_event_and_audit, WorkspaceChangeRecord, WorkspaceRole,
+    membership_role, record_workspace_event_and_audit, WorkspaceChangeRecord, WorkspaceRole,
 };
 
 const INVITE_TTL: Duration = Duration::days(7);
@@ -758,21 +758,6 @@ async fn lock_workspace_kind(
         Some((kind, deleted)) if deleted.is_none() => Ok(kind),
         _ => Ok(None),
     }
-}
-
-async fn membership_role(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-) -> Result<Option<WorkspaceRole>, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
 }
 
 async fn user_is_present(

@@ -139,7 +139,7 @@ pub async fn lock_membership_users(
     Ok(())
 }
 
-pub const CREDENTIAL_LIVE_SQL: &str = r#"
+const CREDENTIAL_LIVE_SQL: &str = r#"
         SELECT (
             u.deleted_at IS NULL
             AND u.suspended_at IS NULL

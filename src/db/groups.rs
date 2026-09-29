@@ -5,14 +5,14 @@ use uuid::Uuid;
 use crate::db::context::{
     begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
 };
-use crate::db::documents::{
-    document_permission, membership_role, membership_role_for_update, workspace_is_live,
-};
+use crate::db::documents::document_permission;
 use crate::db::projects::{
     count_project_leads_except, is_private_lead_violation, load_live_project, lock_project,
     project_permission,
 };
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{
+    membership_role, membership_role_for_update, workspace_is_live, WorkspaceRole,
+};
 use crate::projects::{workspace_base_permission, ProjectMemberRole, ProjectPermission};
 
 #[derive(Debug)]

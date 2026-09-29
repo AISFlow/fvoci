@@ -14,19 +14,19 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::collab::COLLAB_STATE_ENCODING_V1;
-use crate::db::context::{begin_read, lock_tree, set_tenant};
+use crate::db::context::{
+    begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::documents::{
     between, document_permission, fetch_document_row, format_display_id,
     record_document_event_and_audit, row_to_meta, to_path_label, AncestorCrumb, DocumentDbError,
     DocumentMeta, DOCUMENT_SCHEMA_VERSION,
 };
-use crate::db::documents::{
-    lock_membership_users, recheck_session, session_is_live, workspace_is_live,
-};
 use crate::db::project_documents::{
     assert_project_document, project_key, require_project_document_access, with_project_display_id,
 };
 use crate::db::projects::project_permission_by_id;
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
 /// Which route family addressed the document (source `affiliationFromParams`).
@@ -688,7 +688,7 @@ pub async fn commit_duplicate(
     // (group grants on the source document do not allow creating documents).
     if scope.project_id().is_none() {
         let role =
-            crate::db::documents::membership_role_for_update(&mut tx, workspace_id, actor_user_id)
+            crate::db::workspace::membership_role_for_update(&mut tx, workspace_id, actor_user_id)
                 .await?;
         if !crate::db::documents::wiki_can_edit(role) {
             tx.rollback().await?;

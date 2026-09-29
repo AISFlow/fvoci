@@ -16,8 +16,9 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{session_is_live, set_tenant};
-use crate::db::documents::{document_permission, membership_role, workspace_is_live};
+use crate::db::documents::document_permission;
 use crate::db::projects::project_permission_by_id;
+use crate::db::workspace::{membership_role, workspace_is_live};
 use crate::projects::ProjectPermission;
 
 pub const SUMMARY_MAX_CHARS: usize = 400;

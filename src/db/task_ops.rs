@@ -25,9 +25,10 @@ use crate::db::projects::{
 use crate::db::task_activity::record_task_activity;
 use crate::db::tasks::{
     copy_task_assignees_and_labels, insert_task_in_locked_project, list_task_assignee_ids,
-    record_task_event_and_audit, require_task_write_access, uuid_strings, workspace_is_live,
-    CreateTaskInput, TaskChangeRecord, TaskMetaRow,
+    record_task_event_and_audit, require_task_write_access, uuid_strings, CreateTaskInput,
+    TaskChangeRecord, TaskMetaRow,
 };
+use crate::db::workspace::workspace_is_live;
 use crate::display_id::{format_display_id, parse_display_id};
 use crate::projects::ProjectPermission;
 use crate::settings::messages::{Message, Messages};

@@ -13,16 +13,16 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_key_from_uuid, recheck_session, session_is_live, set_tenant};
-use crate::db::documents::{
-    document_permission, lock_membership_users, membership_role, workspace_is_live,
+use crate::db::context::{
+    lock_key_from_uuid, lock_membership_users, recheck_session, session_is_live, set_tenant,
 };
+use crate::db::documents::document_permission;
 use crate::db::group_grants::group_members_join_sql;
 use crate::db::projects::{
     lock_project, project_permission, project_permission_by_id, visible_project_sql, ProjectDbError,
 };
 use crate::db::tasks::{create_task_tx, CreateTaskInput};
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::projects::ProjectPermission;
 
 /// Serialises origin creation per source document (see module docs).

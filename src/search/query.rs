@@ -19,10 +19,12 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::db::context::{session_is_live, set_tenant};
-use crate::db::documents::{document_permission, membership_role, workspace_is_live};
+use crate::db::documents::document_permission;
 use crate::db::group_grants::guest_wiki_document_ids_select_sql;
 use crate::db::projects::{load_live_project, project_permission, LockedProject};
-use crate::db::workspace::{list_workspaces_for_user, WorkspaceRole};
+use crate::db::workspace::{
+    list_workspaces_for_user, membership_role, workspace_is_live, WorkspaceRole,
+};
 use crate::display_id::format_display_id;
 use crate::projects::ProjectPermission;
 use crate::search::embed::Embedder;

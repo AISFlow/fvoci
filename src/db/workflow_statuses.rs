@@ -11,10 +11,9 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
-use crate::db::documents::{between, membership_role};
+use crate::db::documents::between;
 use crate::db::projects::{lock_project, project_permission, visible_project_sql, ProjectDbError};
-use crate::db::tasks::workspace_is_live;
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::projects::ProjectPermission;
 
 /// Source `MAX_WORKFLOW_STATUSES`.

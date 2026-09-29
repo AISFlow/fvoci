@@ -6,9 +6,9 @@ use uuid::Uuid;
 use crate::db::context::{
     begin_read, lock_membership_users, recheck_session, session_is_live, set_system, set_tenant,
 };
-use crate::db::documents::workspace_is_live;
 use crate::db::identity::{append_event, EventAppend};
 use crate::db::projects::{load_live_project, project_permission, share_lock_project_permission};
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
 const SESSION_REVISION_HEAD_RETRIES: u32 = 2;

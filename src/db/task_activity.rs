@@ -309,7 +309,7 @@ pub async fn list_task_activity(
     let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !crate::db::context::session_is_live(&mut tx, actor_user_id, session_id).await?
-        || !crate::db::documents::workspace_is_live(&mut tx, workspace_id).await?
+        || !crate::db::workspace::workspace_is_live(&mut tx, workspace_id).await?
     {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));

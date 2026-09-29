@@ -23,6 +23,7 @@ use crate::db::view_query::{
     compile_view_query, due_date_sql, scalar_value_sql, value_column, CompileOptions, CompiledView,
     RootKind, SqlArgs, ViewScope,
 };
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 use crate::tasks::activity::{patch_activity_fields, ActivitySnapshot};
 use crate::tasks::dependency::{
@@ -137,18 +138,6 @@ pub(crate) struct TaskChangeRecord<'a> {
     pub(crate) target_id: Uuid,
     pub(crate) payload: Value,
     pub(crate) client_ip: Option<&'a str>,
-}
-
-pub(crate) async fn workspace_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
 }
 
 const MAX_TASK_REFS: usize = 50;
@@ -1376,7 +1365,7 @@ async fn list_tasks_in_scope(
         }
         None => {
             let Some(role) =
-                crate::db::documents::membership_role(&mut tx, workspace_id, actor_user_id).await?
+                crate::db::workspace::membership_role(&mut tx, workspace_id, actor_user_id).await?
             else {
                 tx.rollback().await?;
                 return Ok(Err(ProjectDbError::NotFound));

@@ -5,7 +5,9 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{begin_read, lock_tree, set_tenant};
+use crate::db::context::{
+    begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::documents::{
     assert_document_writable, between, depth_of, empty_document_json, fetch_document_row,
     format_display_id, is_descendant, list_live_siblings_in, lock_document_rows, move_subtree,
@@ -13,10 +15,8 @@ use crate::db::documents::{
     trash_document_row, trash_expired, CreateDocumentInput, DocumentDbError, DocumentMeta,
     TrashChildrenMode, TreeNode, UpdateDocumentMetaInput, DOCUMENT_SCHEMA_VERSION, MAX_TREE_DEPTH,
 };
-use crate::db::documents::{
-    lock_membership_users, recheck_session, session_is_live, workspace_is_live,
-};
 use crate::db::projects::{load_live_project, lock_project, project_permission};
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
 /// Live credential and workspace, then at least `min` on the live project.

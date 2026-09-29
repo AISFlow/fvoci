@@ -54,7 +54,7 @@ pub async fn get_project_task_layout(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::Forbidden));
     }
-    if !crate::db::documents::workspace_is_live(&mut tx, workspace_id).await? {
+    if !crate::db::workspace::workspace_is_live(&mut tx, workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
