@@ -59,6 +59,15 @@ const RELEASE_IN_TRANSACTION: &str = "db.pool.release_in_transaction";
 /// `Connection::is_in_transaction` reads that depth counter, not the server
 /// status, so the check asks the server.
 ///
+/// Guard and removal: `tests/pool_release_integration.rs`
+/// `cancelled_begin_does_not_leak_its_transaction` reproduces the upstream
+/// bug. The `released_*` tests there pin this check's own contract (no
+/// connection is handed out inside a server-side transaction, whatever opened
+/// it), so they fail without the hook on any sqlx version. On sqlx >= 0.9,
+/// once `cancelled_begin_*` passes without the hook, the hook is defense in
+/// depth only; removing it and restoring `test_before_acquire` also drops the
+/// `released_*` guarantees, which is a separate decision.
+///
 /// Ordering: sqlx-core 0.8.6 `Floating::return_to_pool` (pool/connection.rs)
 /// always runs `ping` (`write_sync` + `wait_until_ready`) before `release`
 /// puts the connection in the idle queue. That flushes the write buffer (the
@@ -99,11 +108,9 @@ const RELEASE_IN_TRANSACTION: &str = "db.pool.release_in_transaction";
 /// error (I/O, protocol, a server that ended the session) is logged here with
 /// its kind and SQLSTATE only, never the message, and returned, so sqlx
 /// closes the connection hard and connects a fresh one. sqlx's own warning for
-/// it (target `sqlx_core::pool::inner`, with the message) does not reach the
-/// default log: `main.rs` adds only `fvoci_server=info` to `RUST_LOG`, which
-/// compose leaves empty, so other targets log at ERROR only. A server restart
-/// thus logs this warning once per idle connection, where the skipped ping
-/// logged at info.
+/// it (target `sqlx_core::pool::inner`, with the message) is below the default
+/// log filter. A server restart thus logs this warning once per idle
+/// connection, where the skipped ping logged at info.
 async fn idle_outside_transaction(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
     let checked = conn
         .fetch_one(OUTSIDE_TRANSACTION_SQL)

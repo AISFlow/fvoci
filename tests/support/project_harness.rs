@@ -415,6 +415,9 @@ async fn setup_session_with(
 /// extra semaphore permit, so close's wait for all permits passes early. That
 /// connection then goes idle in the closed pool and stays open while any clone
 /// of the pool lives; each further `close` sweeps whatever went idle since.
+/// Guarded by `notification_integration.rs`
+/// `close_pool_closes_a_connection_returned_during_close`; go back to a single
+/// `pool.close()` once that test passes with `close_pool` replaced by it.
 pub async fn close_pool(pool: PgPool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
