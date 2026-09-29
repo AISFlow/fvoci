@@ -68,9 +68,10 @@ export class RefusalWatch {
  *    지운다. 그 전의 close 는 루프가 backoff 로 다시 시도하고, onClose 는 핸들이 있어 새 루프를
  *    만들지 않는다. 서비스 중 끊긴 세션(프레임 뒤)은 핸들이 없어 onClose 가 새 루프를 연다.
  * 2) destroy() 는 이미 걸린 onClose 의 setTimeout(connect) 를 지우지 못한다. 그 connect() 가
- *    shouldConnect 를 다시 켜서 파기된 인스턴스가 리스너 없는 소켓을 연다(좀비). 파기 뒤 connect 는 무시한다. */
-class OwnedSocket extends HocuspocusProviderWebsocket {
-	private destroyed = false;
+ *    shouldConnect 를 다시 켜서 파기된 인스턴스가 리스너 없는 소켓을 연다(좀비). retire() 나 파기 뒤
+ *    connect 는 무시한다. retire() 는 지금 소켓을 닫지 않고 새 시도만 막는다(RoomConnection.release). */
+class OwnedSocket extends HocuspocusProviderWebsocket implements RefusalAwareSocket {
+	private retired = false;
 
 	onOpen(event: Event): Promise<void> {
 		const loop = this.cancelWebsocketRetry;
@@ -86,14 +87,26 @@ class OwnedSocket extends HocuspocusProviderWebsocket {
 	}
 
 	connect(): Promise<unknown> {
-		if (this.destroyed) return Promise.resolve();
+		if (this.retired) return Promise.resolve();
 		return super.connect();
 	}
 
+	retire(): void {
+		this.retired = true;
+		/* The retry loop aborts before its next attempt and onClose schedules no connect. */
+		this.shouldConnect = false;
+	}
+
 	destroy(): void {
-		this.destroyed = true;
+		this.retire();
 		super.destroy();
 	}
+}
+
+/** A room socket that can be retired: it never opens another WebSocket, and the current one
+ * stays as it is until destroy(). */
+export interface RefusalAwareSocket extends HocuspocusProviderWebsocket {
+	retire(): void;
 }
 
 /** The room's socket. It retries refusals itself with RECONNECT_BACKOFF (callers may
@@ -103,7 +116,7 @@ class OwnedSocket extends HocuspocusProviderWebsocket {
 export function createRefusalAwareSocket(
 	configuration: HocuspocusProviderWebsocketConfiguration,
 	onClosed: (refusal: CollabRefusal | null) => void,
-): HocuspocusProviderWebsocket {
+): RefusalAwareSocket {
 	const watch = new RefusalWatch();
 	return new OwnedSocket({
 		...RECONNECT_BACKOFF,
@@ -124,6 +137,8 @@ export interface RoomSocketHandle {
 	readonly configuration: {
 		readonly providerMap: ReadonlyMap<string, { flushPendingUpdates(): void }>;
 	};
+	/** Stops opening WebSockets at once; leaves the current one open for the flush. */
+	retire(): void;
 	destroy(): void;
 }
 
@@ -153,8 +168,9 @@ export interface RoomConnectionOptions<S extends RoomSocketHandle> {
  * - authenticated() clears the refusal and refills the reclaim budget.
  * - reclaim() (authenticationFailed) swaps the clientID and opens the next socket generation,
  *   at most `reclaimLimit` times between authentications.
- * - dispose() and every replaced socket flush the attached rooms' batched edits while the
- *   socket is still open, then destroy it one task later; later events are ignored. */
+ * - dispose() and every replaced socket stop reconnecting at once (no WebSocket is opened
+ *   after it), flush the attached rooms' batched edits while the socket is still open, then
+ *   destroy it one task later; later events are ignored. */
 export class RoomConnection<S extends RoomSocketHandle> {
 	private readonly options: RoomConnectionOptions<S>;
 	private current: RoomConnectionState<S>;
@@ -212,8 +228,12 @@ export class RoomConnection<S extends RoomSocketHandle> {
 	 * queue the last ≤200 ms batch on a dead socket, and on unmount the Y.Doc is dropped with it.
 	 * Flush here, while the socket is still open. On a reclaim the flush is moot (a closed socket
 	 * only queues it; an unauthenticated one is ignored by the server, transport.rs Denied), and
-	 * nothing is lost: that Y.Doc survives and the next socket's sync carries the edits. */
+	 * nothing is lost: that Y.Doc survives and the next socket's sync carries the edits.
+	 * Retire first: until the deferred destroy runs (one task, far longer in a busy or throttled
+	 * tab) the socket's retry loop or a pending onClose connect would open a new WebSocket for a
+	 * room that is gone. Retiring leaves the current WebSocket open, so the flush still goes out. */
 	private release(socket: S): void {
+		socket.retire();
 		for (const provider of socket.configuration.providerMap.values()) {
 			provider.flushPendingUpdates();
 		}
