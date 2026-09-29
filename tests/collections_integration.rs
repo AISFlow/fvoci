@@ -2972,3 +2972,137 @@ async fn search_acl_statements_do_not_grow_with_project_count() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// Adds wiki collection `i` holding one new wiki document, readable by
+/// `group` when it is given; returns the collection id.
+async fn add_wiki_collection(
+    app: &axum::Router,
+    owner: &str,
+    ws: Uuid,
+    i: usize,
+    group: Option<Uuid>,
+) -> String {
+    let (status, collection) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/collections"),
+        Some(json!({"name": format!("wiki {i}"), "kind": "document", "projectId": null})),
+        owner,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{collection}");
+    let cid = collection["id"].as_str().unwrap().to_string();
+    let doc = create_wiki_doc(app, owner, ws, &format!("wiki doc {i}")).await;
+    if let Some(group) = group {
+        let (status, body) = call(
+            app,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/documents/{doc}/groups"),
+            Some(json!({"groupId": group, "role": "viewer"})),
+            owner,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, body) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/collections/{cid}/items"),
+        Some(json!({"documentId": doc})),
+        owner,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    cid
+}
+
+/// The guest's collection list: (visible collection ids, statements issued).
+async fn guest_collection_list(
+    app: &axum::Router,
+    guest: &project_harness::TestUser,
+    ws: Uuid,
+    counter: &StatementCounter,
+) -> (std::collections::BTreeSet<String>, Vec<String>) {
+    counter.take();
+    let (status, list) = call(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/collections"),
+        None,
+        &guest.cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let ids = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_string())
+        .collect();
+    (ids, request_statements(counter))
+}
+
+/// A guest sees a wiki collection only through an item document it can read.
+/// The list reads the workspace ACL once and checks each wiki collection with
+/// one statement, so every extra wiki collection costs exactly one statement.
+#[tokio::test]
+async fn guest_collection_list_reads_the_acl_once() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let guest = add_workspace_user(&admin, ws, "guest", "wiki-list-guest").await;
+    let group = create_group(&app, &owner, ws, "wiki-list", &[guest.user_id]).await;
+    let project = Uuid::now_v7();
+    project_harness::insert_minimal_project(&admin, ws, project, "WLP", owner_id, "private").await;
+    grant_project_group(&admin, ws, project, group, "viewer").await;
+    let project_cid: String = sqlx::query_scalar(
+        "SELECT id::text FROM fvoci.collections WHERE project_id = $1 AND kind = 'task'",
+    )
+    .bind(project)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+
+    // Collection i's document is readable by the guest's group for even i.
+    let mut readable = vec![add_wiki_collection(&app, &owner, ws, 0, Some(group)).await];
+    // Warm-up: the guest's first request slides the session expiry.
+    let counter = StatementCounter::default();
+    guest_collection_list(&app, &guest, ws, &counter).await;
+    let _guard = counter.activate();
+    let (one_ids, one) = guest_collection_list(&app, &guest, ws, &counter).await;
+    for i in 1..5 {
+        let cid = add_wiki_collection(&app, &owner, ws, i, (i % 2 == 0).then_some(group)).await;
+        if i % 2 == 0 {
+            readable.push(cid);
+        }
+    }
+    let (five_ids, five) = guest_collection_list(&app, &guest, ws, &counter).await;
+
+    let expected = |wiki: &[String]| {
+        let mut ids: std::collections::BTreeSet<String> = wiki.iter().cloned().collect();
+        ids.insert(project_cid.clone());
+        ids
+    };
+    assert_eq!(one_ids, expected(&readable[..1]));
+    assert_eq!(five_ids, expected(&readable));
+    let acl_reads = |statements: &[String]| {
+        statements
+            .iter()
+            .filter(|sql| sql.contains("FROM fvoci.projects p"))
+            .count()
+    };
+    eprintln!(
+        "guest collection list statements: 1 wiki collection {} (ACL project reads {}), 5 wiki collections {} (ACL project reads {})",
+        one.len(),
+        acl_reads(&one),
+        five.len(),
+        acl_reads(&five)
+    );
+    assert_eq!(acl_reads(&one), 1, "{one:#?}");
+    assert_eq!(acl_reads(&five), 1, "{five:#?}");
+    assert_eq!(five.len(), one.len() + 4, "1: {one:#?}\n5: {five:#?}");
+
+    drop(_guard);
+    admin.close().await;
+    harness.cleanup().await;
+}
