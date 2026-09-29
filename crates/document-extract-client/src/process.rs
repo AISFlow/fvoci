@@ -309,6 +309,10 @@ fn spawn_child(
         // nothing from the server (database URLs, peppers, ENCRYPTION_KEYS,
         // SMTP or storage credentials). It reads no variables itself; the
         // test hang arrives as `--test-hang-ms`, never through the env.
+        // This clears only the child's own copy: the helper runs as the
+        // server's uid, and what keeps it from reading the server's
+        // /proc/<pid>/environ is that fvoci-server makes itself non-dumpable
+        // at startup.
         .env_clear();
     for key in CHILD_ENV_ALLOWLIST {
         if let Some(value) = std::env::var_os(key) {

@@ -824,13 +824,35 @@ root. Nor can it redirect root's search key write (above).
 `scripts/standalone-install-smoke.sh` checks each of these on a running
 install. What the server does hold: the app role password (in
 `DATABASE_APP_URL`), the pepper and encryption keyrings, and the scoped search
-key; that is what it needs to run. What is **not** separated:
+key; that is what it needs to run.
+
+The server also makes itself non-dumpable at startup (`PR_SET_DUMPABLE` 0) and
+refuses to start if the kernel does not allow it. The kernel then owns the
+files under its `/proc/<pid>` by root, so the helpers it starts (collaboration, document
+extraction, preview, Office and Markdown conversion, all uid 1000) and a uid-1000
+`docker compose exec` session can read neither its environment (the keyrings,
+`DATABASE_APP_URL`) nor its memory or open descriptors, and cannot attach to
+it. For the same reason the server writes no core dump at all, whatever
+`fs.suid_dumpable` is set to (that setting only applies after a credential
+change, which the server never makes), and `gdb -p`, `strace -p` and `lsof` on
+the server no longer work from a uid-1000 session. Run them as root with
+`CAP_SYS_PTRACE` (`docker compose exec --privileged fvoci …`); the image ships
+none of these tools, so install them in the container first or attach from the
+host. `perf -p` additionally needs a container created with `CAP_PERFMON` or
+`CAP_SYS_ADMIN`, since `exec --privileged` does not change the container's
+seccomp profile. The helpers do still share uid
+1000 file access with the server: the attachment store (`/data/storage`,
+every workspace's files) and the scoped search key
+(`/run/fvoci/meili/api_key`, readable by group 1000). The helpers themselves
+stay dumpable, so where the host allows same-uid ptrace one helper can attach
+to another. What is **not** separated:
 
 - It is one container, not two: root in it (`docker compose exec fvoci …`,
   which defaults to root, and the healthcheck) can read the secret files.
   Under Docker's default capabilities (no `CAP_SYS_PTRACE`) that root cannot
-  read the server's `/proc/1/environ` either; inspect the server as uid 1000
-  (`docker compose exec -u 1000:1000 fvoci …`). A
+  read the server's `/proc/1/environ` either, and neither can uid 1000 since
+  the server is non-dumpable; inspect the server with
+  `docker compose exec --privileged fvoci …` (root with `CAP_SYS_PTRACE`). A
   kernel or container escape from uid 1000 is outside this boundary.
 - Anyone who can run Docker commands on the host can read the secrets
   (`docker compose exec`, the containers' filesystems, `.env` itself).

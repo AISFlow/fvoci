@@ -182,10 +182,16 @@ has_secret() { grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" -e "$APP_PW"; }
 has_keyring() { grep -qF -e "$PEPPER_KEYS" -e "$ENC_KEYS"; }
 CID="$(docker compose ps -q fvoci)"
 [[ "$(docker exec "$CID" id -u)" == 0 ]] || fail "docker exec in fvoci does not default to root"
-# Root in the container lacks CAP_SYS_PTRACE, so the server's /proc entries
-# (exe, environ, fd) are read as its own uid.
-[[ "$(docker exec --user 1000:1000 "$CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] || fail "pid 1 is not fvoci-server"
+# The server is non-dumpable: the kernel owns its /proc entries (exe, environ,
+# fd) by root and requires CAP_SYS_PTRACE, so neither uid 1000 (its helpers, a
+# uid-1000 exec) nor root in the container (Docker's default capabilities) can
+# read them. Only a privileged exec can; argv stays world-readable.
+[[ "$(docker exec --user 1000:1000 "$CID" sh -c 'tr "\0" "\n" </proc/1/cmdline | head -n 1')" == /opt/fvoci/bin/fvoci-server ]] || fail "pid 1 is not fvoci-server"
+[[ "$(docker exec "$CID" stat -c '%u' /proc/1/environ)" == 0 ]] || fail "the server's /proc files are not root-owned: the server is dumpable"
 if docker exec "$CID" cat /proc/1/environ >/dev/null 2>&1; then fail "expected root in the container to be unable to read the server environ"; fi
+if docker exec --user 1000:1000 "$CID" cat /proc/1/environ >/dev/null 2>&1; then fail "uid 1000 can read the server environ"; fi
+if docker exec --user 1000:1000 "$CID" ls /proc/1/fd >/dev/null 2>&1; then fail "uid 1000 can list the server's descriptors"; fi
+echo "server is non-dumpable: neither uid 1000 nor unprivileged root reads its environ or descriptors: ok"
 PID1="$(docker exec "$CID" sh -c 'grep -E "^(Uid|Gid|Groups|CapPrm|CapEff|CapAmb|NoNewPrivs):" /proc/1/status')"
 printf '%s\n' "$PID1"
 grep -Eq '^Uid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server uids are not all 1000"
@@ -206,26 +212,31 @@ for f in "${SECRET_FILES[@]}"; do
   fi
 done
 echo "uid 1000 cannot read /run/secrets/*: ok"
-# The server's own tree (read as uid 1000): environ, argv, fds, files under
-# /run other than the root-only secrets.
+# The server's own tree: environ, argv and fds of pid 1 and its descendants,
+# read by a privileged exec (root with CAP_SYS_PTRACE, since the server is
+# non-dumpable); files under /run other than the root-only secrets, read as
+# the server's uid 1000.
 # shellcheck disable=SC2016 # expanded in the app container
-VIEW="$(docker exec --user 1000:1000 "$CID" sh -c '
+PROC_VIEW="$(docker exec --privileged --user 0:0 "$CID" sh -c '
   for p in /proc/[0-9]*; do
     a=${p#/proc/}
     while [ "$a" != 1 ] && [ "$a" != 0 ] && [ -n "$a" ]; do a=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$a/status" 2>/dev/null); done
     [ "$a" = 1 ] || continue
     echo "pid ${p#/proc/}: $(tr "\0" " " <"$p/cmdline")"
     tr "\0" "\n" <"$p/environ"; ls -l "$p/fd"
-  done 2>/dev/null
-  find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
+  done 2>/dev/null; true')"
+RUN_VIEW="$(docker exec --user 1000:1000 "$CID" sh -c 'find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
+VIEW="${PROC_VIEW}"$'\n'"${RUN_VIEW}"
 grep '^pid ' <<<"$VIEW"
+# The view must hold the server's environ, or the negative checks below pass
+# on an empty read.
+grep -q '^DATABASE_APP_URL=postgres://fvoci_app:' <<<"$VIEW" || fail "the privileged view lacks the server's app role URL"
 grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$VIEW" && fail "owner password or master key in the server process tree"
 grep -Eq '^((POSTGRES_PASSWORD|MEILI_MASTER_KEY|FVOCI_APP_PASSWORD|DATABASE_URL)(_FILE)?|(PASSWORD_PEPPER|ENCRYPTION)_KEYS_FILE)=' <<<"$VIEW" \
   && fail "a preparation-only variable or a secret file path reached the server"
 if ! grep -qxF "PASSWORD_PEPPER_KEYS=$PEPPER_KEYS" <<<"$VIEW" || ! grep -qxF "ENCRYPTION_KEYS=$ENC_KEYS" <<<"$VIEW"; then
   fail "the server lacks its keyrings"
 fi
-grep -q '^DATABASE_APP_URL=postgres://fvoci_app:' <<<"$VIEW" || fail "server lacks its app role URL"
 echo "server tree: DATABASE_APP_URL only; no owner password, master key or _FILE path in environ/argv/fds/files: ok"
 # Healthcheck and docker exec processes start from the container
 # configuration: hold one open (as the healthcheck does, as root) and read its
@@ -239,9 +250,12 @@ has_keyring <<<"$EXEC_ENV" && fail "a docker exec (healthcheck) process environ 
 grep -Eq '^(POSTGRES_PASSWORD|MEILI_MASTER_KEY|FVOCI_APP_PASSWORD)=' <<<"$EXEC_ENV" && fail "docker exec environ has a prep variable"
 # shellcheck disable=SC2016 # expanded in the app container
 UID_VIEW="$(docker exec --user 1000:1000 "$CID" sh -c 'for p in /proc/[0-9]*; do tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; done 2>/dev/null')"
-# (The app password is readable there: it is in the server's own DATABASE_APP_URL.)
-grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$UID_VIEW" && fail "uid 1000 reads the owner password or master key under /proc"
-echo "docker exec / healthcheck environ holds no secret; uid 1000 finds no owner password or master key under /proc: ok"
+grep -q '^PATH=' <<<"$UID_VIEW" || fail "uid 1000 read no environ at all under /proc"
+# The server's DATABASE_APP_URL (with the app password) and keyrings are out of
+# reach too: the server is non-dumpable and its helpers start without its env.
+has_secret <<<"$UID_VIEW" && fail "uid 1000 reads the owner password, master key or app password under /proc"
+has_keyring <<<"$UID_VIEW" && fail "uid 1000 reads a keyring under /proc"
+echo "docker exec / healthcheck environ holds no secret; uid 1000 finds no secret or keyring under /proc: ok"
 INSPECT="$(docker inspect "$CID")"
 has_secret <<<"$INSPECT" && fail "docker inspect shows a secret"
 has_keyring <<<"$INSPECT" && fail "docker inspect shows a keyring"

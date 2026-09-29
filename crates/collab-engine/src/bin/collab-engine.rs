@@ -4,12 +4,15 @@ use std::io::{self, BufReader, Write};
 use collab_engine::frame::{read_frame, write_frame};
 use collab_engine::limits::Limits;
 use collab_engine::outcome::{EngineReport, EngineStatus, LimitKind};
-use collab_engine::process::apply_rlimits_now;
+use collab_engine::process::{apply_rlimits_now, raise_own_oom_score_adj};
 use collab_engine::protocol::{preflight_wire_json, Request};
 use collab_engine::CollabEngine;
 
 fn main() {
     scrub_inherited_env();
+    // Best effort, before any frame: the parent reads the value back after the
+    // first reply and warns once when the container profile denied it.
+    let _ = raise_own_oom_score_adj();
     let mut limits = Limits::default();
     #[cfg(feature = "test-hang")]
     let mut dump_rlimits = false;

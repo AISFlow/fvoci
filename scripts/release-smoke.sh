@@ -293,8 +293,23 @@ fi
 python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["ok"] is True, r' <<<"$DOCTOR_REPORT"
 log_assert "installed doctor: ok"
 
-[[ "$(docker exec --user 1000:1000 "$SERVER_CID" readlink /proc/1/exe)" == /opt/fvoci/bin/fvoci-server ]] \
+[[ "$(docker exec --user 1000:1000 "$SERVER_CID" sh -c 'tr "\0" "\n" </proc/1/cmdline | head -n 1')" == /opt/fvoci/bin/fvoci-server ]] \
   || fail "pid 1 of $APP is not fvoci-server"
+# The server is non-dumpable: the kernel owns its /proc entries by root and
+# requires CAP_SYS_PTRACE, so uid 1000 (its helpers, a uid-1000 exec) and root
+# in the container (Docker's default capabilities) cannot read its environ or
+# descriptors.
+[[ "$(docker exec "$SERVER_CID" stat -c '%u' /proc/1/environ)" == 0 ]] \
+  || fail "the server's /proc files are not root-owned: the server is dumpable"
+for reader in 1000:1000 0:0; do
+  if docker exec --user "$reader" "$SERVER_CID" cat /proc/1/environ >/dev/null 2>&1; then
+    fail "uid ${reader%%:*} can read the server environ"
+  fi
+done
+if docker exec --user 1000:1000 "$SERVER_CID" ls /proc/1/fd >/dev/null 2>&1; then
+  fail "uid 1000 can list the server's descriptors"
+fi
+log_assert "server is non-dumpable: neither uid 1000 nor unprivileged root reads its environ or descriptors: ok"
 # uid boundary: the app container starts as root, reads the root-only secret
 # files, prepares, and runs the server as uid/gid 1000 without capabilities.
 PID1="$(docker exec "$SERVER_CID" sh -c 'grep -E "^(Uid|Gid|Groups|CapPrm|CapEff|NoNewPrivs):" /proc/1/status')"
@@ -319,20 +334,24 @@ for f in postgres_password fvoci_app_password meili_master_key password_pepper_k
     fail "uid 1000 can read /run/secrets/$f"
   fi
 done
-# The server process tree (pid 1 and its descriptors, children, argv and files
-# under /run other than the secrets; read as uid 1000, since root in the
-# container lacks CAP_SYS_PTRACE) holds neither the owner password nor the
-# master key; the container configuration, and so every docker exec and
-# healthcheck process, holds none of the three.
+# The server process tree (pid 1 and its descriptors, children and argv, read
+# by a privileged exec since the server is non-dumpable; files under /run other
+# than the secrets, read as the server's uid 1000) holds neither the owner
+# password nor the master key; the container configuration, and so every
+# docker exec and healthcheck process, holds none of the three.
 # shellcheck disable=SC2016 # expanded by the app container's shell
-SERVER_VIEW="$(docker exec --user 1000:1000 "$SERVER_CID" sh -c '
+SERVER_PROC_VIEW="$(docker exec --privileged --user 0:0 "$SERVER_CID" sh -c '
   for p in /proc/[0-9]*; do
     a=${p#/proc/}
     while [ "$a" != 1 ] && [ "$a" != 0 ] && [ -n "$a" ]; do a=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$a/status" 2>/dev/null); done
     [ "$a" = 1 ] || continue
     tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; ls -l "$p/fd"
-  done 2>/dev/null
-  find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
+  done 2>/dev/null; true')"
+SERVER_RUN_VIEW="$(docker exec --user 1000:1000 "$SERVER_CID" sh -c 'find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
+SERVER_VIEW="${SERVER_PROC_VIEW}"$'\n'"${SERVER_RUN_VIEW}"
+# The view must hold the server's environ, or the negative checks below pass
+# on an empty read.
+grep -q '^DATABASE_APP_URL=postgres://' <<<"$SERVER_VIEW" || fail "the privileged view lacks the server's app role URL"
 if grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$SERVER_VIEW"; then
   fail "the server process tree holds the database owner password or the Meilisearch master key"
 fi

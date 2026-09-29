@@ -26,7 +26,9 @@ use crate::collab::admission::warn_join_db_error;
 use crate::collab::awareness::{decode_awareness, AwarenessRegistry};
 use crate::collab::config::CollabConfig;
 use crate::collab::derived_body::prepare_derived_body;
-use crate::collab::engine_bridge::{warn_engine_not_applied, BridgeError, EngineBridge};
+use crate::collab::engine_bridge::{
+    warn_engine_not_applied, BridgeError, EngineBridge, RecycleError,
+};
 use crate::collab::guard::RoomGuard;
 use crate::collab::revision::prepare_revision_text;
 use crate::collab::validation::{
@@ -1198,18 +1200,10 @@ pub async fn spawn_room(
     live_conns: Arc<AtomicUsize>,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
     wait_spawn_room_block(document_id).await;
-    let engine = match EngineBridge::spawn(config.engine_bin.clone(), config.limits) {
-        Ok(engine) => engine,
-        Err(report) => {
-            if matches!(
-                report.outcome,
-                collab_engine::EngineStatus::ResourceLimit { .. }
-            ) {
-                return Err(JoinError::CapacityRetry);
-            }
-            return Err(JoinError::EngineUnavailable);
-        }
-    };
+    // Starts only the bridge thread (it fails only if the OS refuses a thread);
+    // the helper spawns on the actor's first reload.
+    let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
+        .map_err(|_| JoinError::EngineUnavailable)?;
     let (tx, mut rx) = mpsc::channel(config.max_queued_room_ops);
     let (session_cancel_tx, session_cancel_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = oneshot::channel();
@@ -3306,15 +3300,48 @@ impl RoomActor {
     }
 
     async fn reload_primary_from_committed(&mut self) -> Result<(), JoinError> {
-        if self.engine.recycle().await.is_err() {
-            tracing::warn!(
-                workspace_id = %self.workspace_id,
-                document_id = %self.document_id,
-                "collab primary recycle failed: engine bridge dead"
-            );
+        if let Err(err) = self.engine.recycle().await {
             self.primary_loaded = false;
             self.primary_dirty = true;
-            return Err(JoinError::EngineUnavailable);
+            return Err(match err {
+                // Every primary slot taken is transient: the client retries
+                // (1013) and the next reload spawns again. Debug, like the
+                // transport's capacity refusals: a line per retry would grow
+                // with the waiting clients.
+                RecycleError::Spawn(report)
+                    if matches!(
+                        report.outcome,
+                        EngineStatus::ResourceLimit {
+                            kind: LimitKind::Ops,
+                            ..
+                        }
+                    ) =>
+                {
+                    tracing::debug!(
+                        workspace_id = %self.workspace_id,
+                        document_id = %self.document_id,
+                        "collab primary helper spawn refused at capacity"
+                    );
+                    JoinError::CapacityRetry
+                }
+                RecycleError::Spawn(report) => {
+                    warn_engine_not_applied(
+                        "room.reload_primary_spawn",
+                        Some(self.workspace_id),
+                        Some(self.document_id),
+                        &report.outcome,
+                    );
+                    JoinError::EngineUnavailable
+                }
+                RecycleError::Dead => {
+                    tracing::warn!(
+                        workspace_id = %self.workspace_id,
+                        document_id = %self.document_id,
+                        "collab primary recycle failed: engine bridge dead"
+                    );
+                    JoinError::EngineUnavailable
+                }
+            });
         }
         match self.load_engine_primary().await {
             Ok(()) => {
