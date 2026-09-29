@@ -14,10 +14,8 @@ import { redirectTo } from "../session/navigation";
 import LoginForm from "../features/auth/LoginForm.vue";
 import MfaStep from "../features/auth/MfaStep.vue";
 
-// /login (and the logout landing). Boot still sends this path to the React
-// app until apps/web/src/app-boundary.ts includes:
-//   /^\/login\/?$/i
-// Pair that with VUE_ROUTE_PATHS.login = "/login" (app-boundary.test.ts).
+// /login: logout landing, MFA step, and OIDC error query. The boot module
+// sends this path to the Vue app (src/app-boundary.ts).
 
 const route = useRoute();
 const setup = useQuery(setupStatusQuery);

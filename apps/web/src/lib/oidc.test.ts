@@ -267,6 +267,21 @@ test("the login page's SSO form submits through startWorkspaceSso, never to the 
   assert.doesNotMatch(login, /\b(method|action)=/);
 });
 
+test("the Vue login page's SSO form submits through startWorkspaceSso, never to the server", () => {
+  const vueAuth = path.join(import.meta.dirname, "../vue/features/auth");
+  const sso = readFileSync(path.join(vueAuth, "SsoSlugForm.vue"), "utf8");
+  const login = readFileSync(path.join(vueAuth, "LoginForm.vue"), "utf8");
+  for (const [file, source] of [
+    ["SsoSlugForm.vue", sso],
+    ["LoginForm.vue", login],
+  ] as const) {
+    assert.match(source, /<form\b/, file);
+    assert.doesNotMatch(source, /\b(method|action|formAction)=/, file);
+  }
+  assert.match(sso, /event\.preventDefault\(\)/);
+  assert.match(sso, /startWorkspaceSso\(/);
+});
+
 test("the invite and account pages start OIDC by script, never by a native form", () => {
   for (const [file, start] of [
     ["../features/auth/invite.tsx", "startOidcInvite"],

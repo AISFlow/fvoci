@@ -28,7 +28,16 @@ test(
   }),
 );
 
-test("the login route is declared (boot still needs the boundary regex)", () => {
+test(
+  "a completed navigation to /login stays in the Vue app",
+  withLocation(async (loads) => {
+    const router = createAppRouter(createMemoryHistory());
+    await router.push("/login");
+    assert.deepEqual(loads, []);
+  }),
+);
+
+test("the login route is declared (the boundary regex sends /login to Vue)", () => {
   assert.equal(
     routes.some((route) => route.name === "login" && route.path === "/login"),
     true,

@@ -12,7 +12,6 @@ import {
 import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
 import { HomePage } from "@/pages/HomePage";
-import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { SearchPage } from "@/pages/SearchPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
@@ -109,14 +108,6 @@ const router = createBrowserRouter(
         element={
           <SetupGuard>
             <InvitePage />
-          </SetupGuard>
-        }
-      />
-      <Route
-        path="/login"
-        element={
-          <SetupGuard>
-            <LoginPage />
           </SetupGuard>
         }
       />

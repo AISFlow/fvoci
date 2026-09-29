@@ -24,6 +24,7 @@ const SAMPLES = [
   "/x/acme/GNT/gantt",
   "/",
   "/login",
+  "/login/",
   "/w/acme",
   "/w/acme/a/123/view",
   "/w/acme/WIKI-1",
@@ -69,13 +70,22 @@ test("the boot module sends wiki documents, and only them, to the Vue app", () =
   assert.equal(isVueAppPath("/w/acme/wiki"), false);
 });
 
+test("the boot module sends /login, and only that path, to the Vue app", () => {
+  assert.equal(isVueAppPath("/login"), true);
+  assert.equal(isVueAppPath("/login/"), true);
+  assert.equal(isVueAppPath("/LOGIN"), true);
+  assert.equal(isVueAppPath("/login/extra"), false);
+  assert.equal(isVueAppPath("/logins"), false);
+});
+
 test("every wiki path the boundary sends parses as the React app's wiki ref", () => {
   for (const path of SAMPLES) {
     // React Router matches /w/:slug in any case, as the boundary does.
     const ref = /^\/w\/[^/]+\/([^/]+)\/?$/i.exec(path)?.[1];
     const wiki = ref ? parseWikiRef(ref) : null;
     const gantt = /\/gantt\/?$/i.test(path);
-    if (!gantt) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const login = /^\/login\/?$/i.test(path);
+    if (!gantt && !login) assert.equal(isVueAppPath(path), wiki !== null, path);
   }
 });
 
