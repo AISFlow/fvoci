@@ -44,4 +44,3 @@ export function currentStep(): number {
 export function freshCode(secret: string, usedStep: number): string {
   return totp(secret, Math.max(currentStep(), usedStep + 1));
 }
-
