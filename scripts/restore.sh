@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Restore a logical backup into a FRESH infra/rust Compose project whose
 # volumes do not exist yet, in this order:
-#   1. offline keyring preflight against the manifest (fvoci-migrate
-#      --restore-preflight in the product image, no network), before any
-#      target volume exists;
+#   1. offline preflight of the backup against the manifest (format,
+#      PostgreSQL major version, file hashes, dump magic and tar layout,
+#      source differs from target, pepper and ENCRYPTION_KEYS fingerprints):
+#      fvoci-migrate --restore-preflight in the product image with no network,
+#      before any target volume exists;
 #   2. storage volume restore, then the app role and pg_restore;
 #   3. preparation: the developer stack's init service (fvoci-migrate,
 #      --grant-app-role, --ensure-meili-key), or `fvoci-migrate --prepare` in
