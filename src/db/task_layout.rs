@@ -186,7 +186,9 @@ pub async fn get_project_task_layout(
                     .unwrap_or_default(),
                 start_date: item.start_date.map(|d| d.format("%Y-%m-%d").to_string()),
                 due_date: item.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
-                due_at: item.due_at.map(due_at_string),
+                due_at: item
+                    .due_at
+                    .map(|d| d.to_rfc3339_opts(SecondsFormat::Millis, true)),
                 start,
                 end,
                 milestone: false,
@@ -222,19 +224,6 @@ pub async fn get_project_task_layout(
         item_meta,
         can_edit,
     })))
-}
-
-/// `dueAt` exact to the stored microsecond, because PATCH compares
-/// `expectedDates.dueAt` with the stored value exactly. Milliseconds when that
-/// loses nothing, which covers every value the web UI writes, so the form it
-/// already reads does not change.
-fn due_at_string(at: DateTime<Utc>) -> String {
-    let format = if at.timestamp_subsec_nanos().is_multiple_of(1_000_000) {
-        SecondsFormat::Millis
-    } else {
-        SecondsFormat::Micros
-    };
-    at.to_rfc3339_opts(format, true)
 }
 
 struct DepRow {

@@ -4444,66 +4444,93 @@ async fn task_patch_gantt_reschedule_through_expected_dates() {
     harness.cleanup().await;
 }
 
-/// `expectedDates.dueAt` must equal the stored value exactly, so the layout
-/// has to return every stored digit: an API client may set a `dueAt` with
-/// sub-millisecond precision, which a millisecond rendering would turn into a
-/// permanent 409 for the Gantt.
+/// PATCH compares `expectedDates.dueAt` with the stored value to the
+/// millisecond. Browsers hold `dueAt` in a JS `Date`, and the layout and
+/// collection rows render it with milliseconds, so a `dueAt` an API client set
+/// with sub-millisecond digits must not turn every reschedule into a 409; a
+/// different millisecond is still a stale snapshot and writes nothing.
 #[tokio::test]
-async fn task_layout_due_at_round_trips_as_expected_dates() {
+async fn task_patch_expected_due_at_compares_to_the_millisecond() {
     let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
     let month = "year=2026&month=9";
-    let mut tasks = Vec::new();
-    for (title, due_at, shown, moved) in [
-        (
-            "Micros",
-            "2026-09-15T09:30:00.123456Z",
-            "2026-09-15T09:30:00.123456Z",
-            "2026-09-16T09:30:00.123456Z",
-        ),
-        (
-            "Millis",
-            "2026-09-15T09:30:00.123Z",
-            "2026-09-15T09:30:00.123Z",
-            "2026-09-16T09:30:00.123Z",
-        ),
-    ] {
-        let task = create_task_with_title(
-            app.clone(),
-            &cookie,
-            ws,
-            &project_id,
-            json!({"title": title, "startDate": "2026-09-14"}),
-        )
-        .await;
-        let id = task["id"].as_str().unwrap().to_string();
-        let (status, body) =
-            patch_task(app.clone(), ws, &id, json!({"dueAt": due_at}), &cookie).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        tasks.push((title, id, shown, moved));
-    }
+    let task = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Micros", "startDate": "2026-09-14"}),
+    )
+    .await;
+    let id = task["id"].as_str().unwrap().to_string();
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({"dueAt": "2026-09-15T09:30:00.123456Z"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let expected =
+        |due_at: &str| json!({"startDate": "2026-09-14", "dueDate": null, "dueAt": due_at});
 
-    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
-    for (title, id, shown, moved) in tasks {
-        let item = layout_item(&layout, &id);
+    // A neighbouring millisecond is a stale snapshot and writes nothing.
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    for stale in ["2026-09-15T09:30:00.122Z", "2026-09-15T09:30:00.124Z"] {
         let (status, body) = patch_task(
             app.clone(),
             ws,
             &id,
-            json!({
-                "dueAt": moved,
-                "expectedDates": {
-                    "startDate": item["startDate"],
-                    "dueDate": item["dueDate"],
-                    "dueAt": item["dueAt"],
-                },
-            }),
+            json!({"title": "Stale", "expectedDates": expected(stale)}),
             &cookie,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{title}: {body}");
-        // Millisecond values keep the form the web UI already reads.
-        assert_eq!(item["dueAt"], shown, "{title}");
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}: {body}");
+        assert_eq!(body["code"], "document_version_mismatch");
     }
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+
+    // The same millisecond, as a browser sends it, matches.
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({
+            "dueAt": "2026-09-16T09:30:00.123456Z",
+            "expectedDates": expected("2026-09-15T09:30:00.123Z"),
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The layout keeps its millisecond form, and sending it back matches.
+    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let item = layout_item(&layout, &id);
+    assert_eq!(item["dueAt"], "2026-09-16T09:30:00.123Z");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({
+            "dueAt": "2026-09-17T09:30:00.123Z",
+            "expectedDates": {
+                "startDate": item["startDate"],
+                "dueDate": item["dueDate"],
+                "dueAt": item["dueAt"],
+            },
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    assert_eq!(
+        layout_item(&layout, &id)["dueAt"],
+        "2026-09-17T09:30:00.123Z"
+    );
 
     admin.close().await;
     harness.cleanup().await;

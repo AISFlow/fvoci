@@ -26500,7 +26500,8 @@
               "string",
               "null"
             ],
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Compared with the stored `dueAt` to the millisecond; finer digits are\nignored."
           },
           "dueDate": {
             "type": [
@@ -26617,7 +26618,7 @@
               "string",
               "null"
             ],
-            "description": "RFC 3339 UTC with milliseconds, or microseconds when the stored value\nhas finer precision; send it back unchanged as `expectedDates.dueAt`."
+            "description": "RFC 3339 UTC with milliseconds; send it back unchanged as\n`expectedDates.dueAt`, which PATCH compares to the millisecond."
           },
           "dueDate": {
             "oneOf": [

@@ -4536,7 +4536,11 @@ export interface components {
             ok: boolean;
         };
         ExpectedDatesBody: {
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Compared with the stored `dueAt` to the millisecond; finer digits are
+             *     ignored.
+             */
             dueAt: string | null;
             /** Format: date */
             dueDate: string | null;
@@ -4570,8 +4574,8 @@ export interface components {
         GanttLayoutItemOutput: {
             assigneeIds: string[];
             /**
-             * @description RFC 3339 UTC with milliseconds, or microseconds when the stored value
-             *     has finer precision; send it back unchanged as `expectedDates.dueAt`.
+             * @description RFC 3339 UTC with milliseconds; send it back unchanged as
+             *     `expectedDates.dueAt`, which PATCH compares to the millisecond.
              */
             dueAt?: string | null;
             dueDate?: components["schemas"]["String"] | null;

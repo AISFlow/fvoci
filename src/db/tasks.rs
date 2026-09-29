@@ -2332,13 +2332,20 @@ async fn transition_task_status(
     }))
 }
 
+/// `dueAt` is compared to the millisecond, not to the microsecond PostgreSQL
+/// stores: browser clients hold it in a JS `Date`, and the task layout and
+/// collection rows render it with milliseconds. A different millisecond is
+/// still a conflict.
 fn dates_conflict(
     expected: &crate::tasks::patch::ExpectedDatesInput,
     start_date: Option<NaiveDate>,
     due_date: Option<NaiveDate>,
     due_at: Option<DateTime<Utc>>,
 ) -> bool {
-    expected.start_date != start_date || expected.due_date != due_date || expected.due_at != due_at
+    let millis = |at: Option<DateTime<Utc>>| at.map(|at| at.timestamp_millis());
+    expected.start_date != start_date
+        || expected.due_date != due_date
+        || millis(expected.due_at) != millis(due_at)
 }
 
 fn patch_only_unarchives(input: &crate::tasks::patch::PatchTaskMetaInput) -> bool {

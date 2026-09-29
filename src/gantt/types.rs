@@ -197,8 +197,8 @@ pub struct GanttLayoutItemOutput {
     pub assignee_ids: Vec<String>,
     pub start_date: Option<IsoDate>,
     pub due_date: Option<IsoDate>,
-    /// RFC 3339 UTC with milliseconds, or microseconds when the stored value
-    /// has finer precision; send it back unchanged as `expectedDates.dueAt`.
+    /// RFC 3339 UTC with milliseconds; send it back unchanged as
+    /// `expectedDates.dueAt`, which PATCH compares to the millisecond.
     pub due_at: Option<String>,
     pub start: IsoDate,
     pub end: IsoDate,
