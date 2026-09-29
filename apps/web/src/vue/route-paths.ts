@@ -9,8 +9,14 @@
  *   /^\/w\/[^/]+\/projects\/?$/i
  * Fold them into this object in the same change as those regexes, and extend
  * app-boundary.test.ts SAMPLES (`/w/acme`, `/w/acme/projects`, trailing slashes
- * and mixed case). `/w/:slug/wiki`, settings, search, my-tasks and the rest
- * stay React pages.
+ * and mixed case).
+ *
+ * Wiki list `/w/:slug/wiki` and workspace search `/w/:slug/search` are also
+ * implemented here and stay off this object until:
+ *   /^\/w\/[^/]+\/wiki\/?$/i
+ *   /^\/w\/[^/]+\/search\/?$/i
+ * Those must not swallow wiki documents (`/w/:slug/WIKI-<n>`), which already
+ * boot the Vue app. Settings, my-tasks and the rest stay React pages.
  */
 export const VUE_ROUTE_PATHS = {
   projectGantt: "/w/:slug/:ref/gantt",
@@ -20,12 +26,14 @@ export const VUE_ROUTE_PATHS = {
 } as const;
 
 /**
- * Vue routes for the workspace landing and project list. Boot still uses
- * app-boundary.ts, so these pages load only after the regexes above land.
- * Leaving React until then means a full page load from a Vue page (Gantt,
- * wiki) still opens the existing React home/list.
+ * Vue routes for the workspace landing, project list, wiki list and search.
+ * Boot still uses app-boundary.ts, so these pages load only after the regexes
+ * above land. Leaving React until then means a full page load from a Vue page
+ * (Gantt, wiki document) still opens the existing React home/list/wiki/search.
  */
 export const VUE_WORKSPACE_ROUTE_PATHS = {
   workspaceHome: "/w/:slug",
   projects: "/w/:slug/projects",
+  wikiList: "/w/:slug/wiki",
+  search: "/w/:slug/search",
 } as const;

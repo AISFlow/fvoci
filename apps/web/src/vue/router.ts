@@ -12,6 +12,8 @@ export const routes: RouteRecordRaw[] = [
   // More specific than `/w/:slug`. Coordinator-owned app-boundary.ts still
   // boots the React app for these until its regexes include them.
   { path: VUE_WORKSPACE_ROUTE_PATHS.projects, name: "projects", component: () => import("./pages/ProjectsPage.vue") },
+  { path: VUE_WORKSPACE_ROUTE_PATHS.wikiList, name: "wiki-list", component: () => import("./pages/WikiPage.vue") },
+  { path: VUE_WORKSPACE_ROUTE_PATHS.search, name: "search", component: () => import("./pages/SearchPage.vue") },
   {
     path: VUE_WORKSPACE_ROUTE_PATHS.workspaceHome,
     name: "workspace-home",

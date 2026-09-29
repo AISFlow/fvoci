@@ -39,6 +39,10 @@ const SAMPLES = [
   "/w/acme/WIKI-WIKI-1",
   "/w/acme/WIKI-1/extra",
   "/w/acme/wiki",
+  "/w/acme/wiki/",
+  "/w/acme/search",
+  "/w/acme/search/",
+  "/w/acme/Search",
   "/w/acme/PRJ-1",
   "/w//WIKI-1",
 ];
@@ -67,6 +71,18 @@ test("the boot module sends wiki documents, and only them, to the Vue app", () =
   assert.equal(isVueAppPath("/w/acme/PRJ-1"), false);
   assert.equal(isVueAppPath("/w/acme/XWIKI-1"), false);
   assert.equal(isVueAppPath("/w/acme/wiki"), false);
+});
+
+test("boot still sends the wiki list and workspace search to the React app", () => {
+  assert.equal(isVueAppPath("/w/acme/wiki"), false);
+  assert.equal(isVueAppPath("/w/acme/wiki/"), false);
+  assert.equal(isVueAppPath("/w/acme/WIKI"), false);
+  assert.equal(isVueAppPath("/w/acme/search"), false);
+  assert.equal(isVueAppPath("/w/acme/search/"), false);
+  assert.equal(isVueAppPath("/w/acme/Search"), false);
+  // Wiki documents stay on the Vue app; the list path must not steal them.
+  assert.equal(isVueAppPath("/w/acme/WIKI-1"), true);
+  assert.equal(isVueAppPath("/w/acme/wiki-12"), true);
 });
 
 test("every wiki path the boundary sends parses as the React app's wiki ref", () => {
