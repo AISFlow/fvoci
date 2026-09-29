@@ -10,10 +10,13 @@
 //! move. Events older than the window that the move would pass unprocessed
 //! are a forward skip and need `--override-reason`.
 //!
-//! Migrations 027/040/041 seed later consumers at the tail, so they hold no
-//! marks for older events. A consumer with external effects is therefore not
-//! rewound past its own first mark (nor behind its cursor when it has none)
-//! unless `--ack-external-replay` accepts delivering that history again.
+//! The migrations that add a consumer (018, 020, 027, 040, with missing rows
+//! repaired by 041) seed it after the events already present, so it holds no
+//! marks for older events. A consumer with external effects is therefore
+//! not rewound past its own first mark (nor behind its cursor when it has
+//! none) unless `--ack-external-replay` accepts delivering that history
+//! again. On a fresh database the seeds insert nothing, and every consumer,
+//! like search-index (which has no seed), starts at the origin.
 //!
 //! The app role has no access to the cursor tables (grant-app-role.sql), so
 //! this runs as the owner like `--recover-outbox`, in system context because
@@ -40,9 +43,11 @@ const MARKING_CONSUMERS: &[&str] = &[
     WEBHOOKS_CONSUMER,
     SEARCH_INDEX_CONSUMER,
 ];
-/// Consumers whose effects stay in this database. Every other consumer
-/// (mail, push, webhooks, github or one this build does not know) reaches
-/// devices or endpoints outside it.
+/// Consumers whose replay re-derives the same state (in-app rows
+/// deduplicated by the processed mark; search documents re-upserted from
+/// current rows into this install's own index) and reaches no person or
+/// third party. Every other consumer (mail, push, webhooks, github or one
+/// this build does not know) reaches people or endpoints outside it.
 const INTERNAL_CONSUMERS: &[&str] = &[NOTIFICATIONS_CONSUMER, SEARCH_INDEX_CONSUMER];
 const SKIP_SAMPLE_LIMIT: i64 = 100;
 
