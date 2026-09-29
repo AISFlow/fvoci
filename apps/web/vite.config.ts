@@ -194,6 +194,7 @@ export default defineConfig({
       manifestPath: browserLicenseManifest,
       assetNotices: () => [...pdfjsAssetNotices(), officeKitXlsxNotice(), rhwpWasmNotice()],
       workerModuleIds: () => workerModuleIds,
+      iconSetRoot: import.meta.dirname,
     }),
     pdfjsAssets(),
   ],
