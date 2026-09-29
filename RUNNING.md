@@ -767,8 +767,11 @@ switching its active id, keeping the old key while anything still uses it
 (`--secrets-audit`, `--secrets-rotate` in "Operator commands").
 
 The image entrypoint is `fvoci-migrate --start`. The `fvoci` service starts it
-as root (`user: "0:0"`). Given the owner password (`POSTGRES_PASSWORD`), it
-runs, on every start of `fvoci`:
+as root (`user: "0:0"`). It first refuses any `<VAR>_FILE` setting of the five
+generated values (`POSTGRES_PASSWORD_FILE` and the like, from the `compose.yml`
+of an older release; nothing reads them any more): it names each and exits 2,
+with or without the owner password. Given the owner password
+(`POSTGRES_PASSWORD`), it then runs, on every start of `fvoci`:
 
 1. **Settings check.** Every required value is set, not empty and not an
    example placeholder (`<…>`, `change-me`, …); passwords and the master key
@@ -864,9 +867,10 @@ to another. What is **not** separated:
 The owner never reaches the network beyond the Compose network: PostgreSQL and
 Meilisearch publish no port.
 
-Without the owner password the entrypoint only execs `fvoci-server` (the
-developer stack, `infra/rust/compose.yml`, prepares in its separate `init`
-service instead); started as root, it still runs the server as uid 1000.
+Without the owner password the entrypoint, after that `<VAR>_FILE` check, only
+execs `fvoci-server` (the developer stack, `infra/rust/compose.yml`, prepares in
+its separate `init` service instead); started as root, it still runs the server
+as uid 1000.
 
 Other defaults come from the image and the Rust loader: helper paths, static
 and storage directories, bind address, shutdown deadline (30 s), collaboration
@@ -1166,7 +1170,9 @@ app-role sessions open, and a failure leaves the server stopped as described
 above. From a release whose `compose.yml` passed the passwords and keyrings
 as Compose secret files (0.1.x and 0.2.0), the same steps apply: the new file
 reads the same `.env`, Compose recreates all three containers on the same
-volumes, and those files existed only inside the old containers. 0.x releases make no compatibility promise between minor versions and
+volumes, and those files existed only inside the old containers. An old
+`compose.yml` with only its image line changed does not start: the new image
+names each `<VAR>_FILE` setting it no longer reads and exits 2. 0.x releases make no compatibility promise between minor versions and
 there is no downgrade: going back means restoring the pre-upgrade backup.
 `docker compose down -v` deletes the data; the keys stay in `.env`.
 `fvoci-server --version` (for example

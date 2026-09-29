@@ -1,10 +1,12 @@
 //! Container startup of the Compose install (`fvoci-migrate --start`, the
 //! image entrypoint).
 //!
-//! Without the database owner password it only execs `fvoci-server` (the
-//! separate-`init` installs of `infra/rust/compose.yml`). With it
-//! (`infra/rust/compose.user.yml`, which passes the `.env` values as container
-//! environment):
+//! It first refuses, with exit 2, the `<VAR>_FILE` secret settings of older
+//! `compose.yml` files ([`retired_secret_files`]), whether or not the owner
+//! password is given. Then, without the database owner password it only execs
+//! `fvoci-server` (the separate-`init` installs of `infra/rust/compose.yml`).
+//! With it (`infra/rust/compose.user.yml`, which passes the `.env` values as
+//! container environment):
 //!
 //! 1. validate the required settings (missing, placeholder, format), naming
 //!    variables only;
@@ -23,8 +25,9 @@
 //! the server and its children run as uid 1000. The [`PREP_ONLY`] filter
 //! shapes only the server's own environment: the values stay in the container
 //! configuration, so every `docker exec` and healthcheck process starts with
-//! them (as root, whose environment uid 1000 cannot read), and anyone with
-//! Docker access can read them. Nothing here generates or stores keys.
+//! them (by default as root, whose environment uid 1000 cannot read), and
+//! anyone with Docker access can read them. Nothing here generates or stores
+//! keys.
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -266,8 +269,8 @@ pub fn validate(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
     problems
 }
 
-/// Values the Compose files of 0.2.0 and earlier passed as root-only secret
-/// files named by `<VAR>_FILE`.
+/// Values the Compose files of 0.2.0 and earlier passed as secret files named
+/// by `<VAR>_FILE`.
 const RETIRED_SECRET_FILE_VALUES: &[&str] = &[
     "POSTGRES_PASSWORD",
     "FVOCI_APP_PASSWORD",
