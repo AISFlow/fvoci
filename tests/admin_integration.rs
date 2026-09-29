@@ -1189,6 +1189,34 @@ async fn instance_settings_validate_persist_audit_and_project_publicly() {
     h.finish().await;
 }
 
+/// The boot snapshot holds the values this process first resolved, also when
+/// its first settings call is a write: a PATCH before any read reports the
+/// changed restart-required key, and the next read still reports it.
+#[tokio::test]
+async fn restart_required_survives_a_settings_write_before_any_read() {
+    let h = harness().await;
+    let changed = with_json(
+        &h.app,
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        json!({"features": {"ai": true}}),
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.json);
+    assert_eq!(changed.json["values"]["features"]["ai"], true);
+    assert_eq!(changed.json["restartRequired"], json!(["features"]));
+    let read = get(
+        &h.app,
+        "/api/v1/admin/instance-settings",
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.json);
+    assert_eq!(read.json["restartRequired"], json!(["features"]));
+    h.finish().await;
+}
+
 fn tiny_png() -> Vec<u8> {
     // 1x1 RGBA PNG.
     let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];

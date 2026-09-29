@@ -20,6 +20,7 @@ use crate::db::workspace::WorkspaceRole;
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
+use crate::http::routes::auth::{charge_login_email, charge_login_ip};
 use crate::http::state::AppState;
 use crate::settings::messages::Message;
 use crate::validate::{normalize_email, validate_family_name, validate_given_name};
@@ -28,10 +29,6 @@ use crate::validate::{normalize_email, validate_family_name, validate_given_name
 /// per-token key so a client cannot mint a limiter key per made-up token.
 const INVITE_ACCEPT_PER_IP: u32 = 60;
 const INVITE_ACCEPT_PER_TOKEN: u32 = 30;
-/// `routes::auth::login`'s buckets: accepting for an existing account checks
-/// its password, so it draws on the same `login:*` keys and limits.
-const LOGIN_PER_IP: u32 = 30;
-const LOGIN_PER_EMAIL: u32 = 10;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -233,16 +230,14 @@ async fn accept_invitation(
             consents: &consents,
             defaults: &settings.defaults_user,
         },
+        // Accepting for an existing account checks its password: it draws
+        // on login's budget for that account.
         {
             let limiter = state.rate_limiter.clone();
             let ip = ip.clone();
             move |email: String| async move {
-                limiter
-                    .allow(&format!("login:ip:{ip}"), LOGIN_PER_IP)
-                    .await?;
-                limiter
-                    .allow(&format!("login:email:{ip}:{email}"), LOGIN_PER_EMAIL)
-                    .await
+                charge_login_ip(&limiter, &ip).await?;
+                charge_login_email(&limiter, &ip, &email).await
             }
         },
     )

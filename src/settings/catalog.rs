@@ -75,6 +75,11 @@ impl SettingsKey {
         SETTINGS_KEYS.into_iter().find(|k| k.as_str() == key)
     }
 
+    /// `RestartRequired` keys appear in the admin output's `restartRequired`
+    /// while they differ from the boot snapshot (source parity). This server
+    /// reads them without a restart: `embed` per request, and `features` only
+    /// for the public instance flags; the server-side AI gates follow
+    /// `FVOCI_AI_ENABLED`.
     pub fn safety(self) -> Safety {
         match self {
             Self::Embed | Self::Features => Safety::RestartRequired,

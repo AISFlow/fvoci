@@ -11,6 +11,7 @@ use tokio_util::io::ReaderStream;
 
 use super::local::{LocalStorage, PartInfo, StagedPart, StorageError};
 use super::s3::S3Storage;
+use super::sniff_mime_from_bytes;
 use crate::config::StorageSettings;
 
 /// Local or S3-compatible attachment bytes, sharing the multipart contract
@@ -131,10 +132,6 @@ impl ObjectStorage {
         }
     }
 
-    pub async fn discard_staged_part(staged: &mut StagedPart) {
-        staged.discard().await;
-    }
-
     pub async fn list_parts(
         &self,
         key: &str,
@@ -165,10 +162,6 @@ impl ObjectStorage {
             self.abort_multipart(key, upload_ref.as_deref()).await?;
         }
         self.delete_object(key).await
-    }
-
-    pub async fn payload_exists(&self, key: &str) -> Result<bool, StorageError> {
-        Ok(self.head(key).await?.is_some())
     }
 
     pub async fn discard_uncommitted_payload(&self, key: &str) -> Result<(), StorageError> {
@@ -275,11 +268,16 @@ impl ObjectStorage {
         result
     }
 
+    /// MIME type sniffed from the object's first 4 KiB; an empty or missing
+    /// object is `application/octet-stream`.
     pub async fn sniff_mime(&self, key: &str) -> Result<String, StorageError> {
-        match self {
-            Self::Local(local) => local.sniff_mime(key).await,
-            Self::S3(s3) => s3.sniff_mime(key).await,
+        let size = self.head(key).await?.unwrap_or(0);
+        if size == 0 {
+            return Ok("application/octet-stream".to_string());
         }
+        let end = (size - 1).min(4095);
+        let sample = self.read_range(key, 0, end).await?;
+        Ok(sniff_mime_from_bytes(&sample))
     }
 
     pub async fn probe(&self) -> Result<(), String> {

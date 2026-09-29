@@ -25,57 +25,16 @@ const FLAGS: u16 = FLAG_UTF8 | 0x0008;
 const ZIP32_MAX: u64 = 0xffff_ffff;
 const MAX_ENTRIES: usize = 0xffff;
 
-const CRC_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut c = i as u32;
-        let mut k = 0;
-        while k < 8 {
-            c = if c & 1 != 0 {
-                0xedb8_8320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
-            k += 1;
-        }
-        table[i] = c;
-        i += 1;
-    }
-    table
-};
-
-#[derive(Clone, Copy, Debug)]
-pub struct Crc32(u32);
-
-impl Default for Crc32 {
-    fn default() -> Self {
-        Self(0xffff_ffff)
-    }
-}
-
-impl Crc32 {
-    pub fn update(&mut self, data: &[u8]) {
-        let mut c = self.0;
-        for byte in data {
-            c = CRC_TABLE[((c ^ u32::from(*byte)) & 0xff) as usize] ^ (c >> 8);
-        }
-        self.0 = c;
-    }
-
-    pub fn finish(self) -> u32 {
-        self.0 ^ 0xffff_ffff
-    }
-}
-
+/// CRC-32 (IEEE) of `data`, as stored in the zip headers.
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = Crc32::default();
+    let mut crc = flate2::Crc::new();
     crc.update(data);
-    crc.finish()
+    crc.sum()
 }
 
 /// Source `zipEntryName`: backslashes to `/`, drop NUL, empty, `.` and `..`
-/// segments.
+/// segments. Imports use the same rules (`documents::import_zip`), after
+/// rejecting traversal names instead of rewriting them.
 pub fn zip_entry_name(raw: &str) -> String {
     let normalized = raw.replace('\\', "/").replace('\0', "");
     let joined = normalized
@@ -124,7 +83,7 @@ struct CentralEntry {
 struct OpenEntry {
     name: Vec<u8>,
     offset: u64,
-    crc: Crc32,
+    crc: flate2::Crc,
     size: u64,
 }
 
@@ -182,7 +141,7 @@ impl ZipStream {
         self.open = Some(OpenEntry {
             name,
             offset: self.offset,
-            crc: Crc32::default(),
+            crc: flate2::Crc::new(),
             size: 0,
         });
         self.offset += out.len() as u64;
@@ -241,7 +200,7 @@ impl ZipStream {
 
     pub fn end_entry(&mut self) -> Result<Bytes, ZipError> {
         let open = self.open.take().ok_or(ZipError::NoEntry)?;
-        let crc = open.crc.finish();
+        let crc = open.crc.sum();
         let size = to_u32(open.size)?;
         let mut out = Vec::with_capacity(16);
         put_u32(&mut out, DESCRIPTOR_SIG);
@@ -308,10 +267,38 @@ mod tests {
     fn crc32_matches_reference() {
         assert_eq!(crc32(b""), 0);
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
-        let mut split = Crc32::default();
+        let mut split = flate2::Crc::new();
         split.update(b"1234");
         split.update(b"56789");
-        assert_eq!(split.finish(), 0xcbf4_3926);
+        assert_eq!(split.sum(), 0xcbf4_3926);
+    }
+
+    /// Pins the archive bytes, CRCs included, for a streamed entry fed in odd
+    /// chunk sizes between two whole entries.
+    #[test]
+    fn archive_bytes_are_stable() {
+        use sha2::Digest;
+        let payload: Vec<u8> = (0..70_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let mut zip = ZipStream::new();
+        let mut archive = Vec::new();
+        archive.extend_from_slice(
+            &zip.whole_entry("project.json", "{\"name\":\"계획\"}\n".as_bytes())
+                .unwrap(),
+        );
+        archive.extend_from_slice(&zip.begin_entry("attachments/1-보고서.hwp").unwrap());
+        for chunk in payload.chunks(4103) {
+            zip.entry_data(chunk).unwrap();
+            archive.extend_from_slice(chunk);
+        }
+        archive.extend_from_slice(&zip.end_entry().unwrap());
+        archive.extend_from_slice(&zip.whole_entry("empty", b"").unwrap());
+        archive.extend_from_slice(&zip.finish().unwrap());
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&archive)),
+            "9aaf72c5c6944541da6242bfe986f7798f057cb62bb6ef8369f3031e94e8b69f"
+        );
     }
 
     #[test]

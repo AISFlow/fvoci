@@ -1,9 +1,11 @@
 //! Isolated native Yrs child for FVOCI collaboration.
 //!
-//! This crate is its own compile graph. It is **not** wired into `fvoci-server`,
-//! does not open WebSockets, and does not touch the database. A future room
-//! actor should keep a FIFO per document, apply candidates here, persist
-//! completeV1, then broadcast — never Yrs-undo as a DB rollback.
+//! This crate is its own compile graph. `fvoci-server` links its parent side,
+//! and its room actor (`src/collab/room.rs`) keeps a FIFO per document: an
+//! update is committed to the database before it is broadcast, and a rejected
+//! or uncertain candidate is recovered by reloading committed state — never by
+//! Yrs undo as a DB rollback. The crate opens no WebSockets and touches no
+//! database.
 //!
 //! Parent code should depend with `default-features = false` and talk to the
 //! child through [`process`] and [`protocol`] only. Feature `worker` pulls in

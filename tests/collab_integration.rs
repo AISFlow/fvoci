@@ -1078,6 +1078,89 @@ async fn append_rejects_oversized_payload() {
     harness.cleanup().await;
 }
 
+/// Claim creates the state row, so only an append to a document that was never
+/// claimed reaches the append's seeding fallback. It seeds the way claim does:
+/// an empty body gets a generation-0 row that a claimed writer generation does
+/// not match (StaleWriter), a non-empty body is NotFound even for generation 0.
+/// Both refusals roll back, leaving no state row, update or receipt.
+#[tokio::test]
+async fn append_to_unclaimed_document_seeds_like_claim_and_rolls_back() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let session = &fixture.session;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let collab_rows = |document_id: Uuid| {
+        let admin = admin.clone();
+        async move {
+            let row: (i64, i64, i64) = sqlx::query_as(
+                r#"
+                SELECT
+                  (SELECT count(*) FROM fvoci.document_states WHERE document_id = $1),
+                  (SELECT count(*) FROM fvoci.document_collab_updates WHERE document_id = $1),
+                  (SELECT count(*) FROM fvoci.document_collab_op_receipts WHERE document_id = $1)
+                "#,
+            )
+            .bind(document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+            row
+        }
+    };
+
+    let empty_doc = fixture.document_id;
+    assert_eq!(collab_rows(empty_doc).await, (0, 0, 0));
+    let stale = append_collab_update(
+        &session.pool,
+        append_input(session, empty_doc, 1, 0, Uuid::now_v7(), b"unclaimed"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stale, Err(CollabDbError::StaleWriter));
+    assert_eq!(collab_rows(empty_doc).await, (0, 0, 0));
+
+    let typed_doc = create_wiki_doc(session, "Typed before collab").await;
+    sqlx::query("UPDATE fvoci.documents SET content_json = $2 WHERE id = $1")
+        .bind(typed_doc)
+        .bind(derived_doc_json("typed before collab"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let missing = append_collab_update(
+        &session.pool,
+        append_input(session, typed_doc, 0, 0, Uuid::now_v7(), b"unclaimed"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(missing, Err(CollabDbError::NotFound));
+    assert_eq!(collab_rows(typed_doc).await, (0, 0, 0));
+
+    // The document stays claimable: a claim starts at generation 1 from the
+    // empty Yjs state. The collab_rows checks above show the rollback; this
+    // claim cannot, since a leaked generation-0 seed would claim the same way.
+    let claim = claim_writer_and_load(
+        &session.pool,
+        session.workspace_id,
+        session.user_id,
+        session.session_id,
+        empty_doc,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(claim.writer_generation, 1);
+    assert_eq!(claim.load.snapshot, vec![0, 0]);
+    assert_eq!(claim.load.tail_seq, 0);
+
+    admin.close().await;
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn collab_append_loses_to_session_revoke_barrier() {
     let harness = TestDb::bootstrap().await;
