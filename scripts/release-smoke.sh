@@ -9,8 +9,9 @@
 #     copied to .env with a fresh value generated for every empty entry, as its
 #     comments show, in an empty directory with a scrubbed environment;
 #   - health/ready, doctor, the server process running as uid 1000 and holding
-#     neither the database owner password nor the Meilisearch master key, the
-#     secret files root-only, no secret in docker exec environ or inspect, first admin setup and
+#     neither the database owner password nor the Meilisearch master key, each
+#     service's environment holding only the .env values it needs, none of
+#     them readable by uid 1000 under /proc, first admin setup and
 #     login, the install-smoke API flows (collab, documents, attachment +
 #     extraction), search, keys kept across a second up and down/up, a failing
 #     preparation keeping the server down, an unfilled .env refused before any
@@ -310,8 +311,8 @@ if docker exec --user 1000:1000 "$SERVER_CID" ls /proc/1/fd >/dev/null 2>&1; the
   fail "uid 1000 can list the server's descriptors"
 fi
 log_assert "server is non-dumpable: neither uid 1000 nor unprivileged root reads its environ or descriptors: ok"
-# uid boundary: the app container starts as root, reads the root-only secret
-# files, prepares, and runs the server as uid/gid 1000 without capabilities.
+# uid boundary: the app container starts as root, prepares, and runs the
+# server as uid/gid 1000 without capabilities.
 PID1="$(docker exec "$SERVER_CID" sh -c 'grep -E "^(Uid|Gid|Groups|CapPrm|CapEff|NoNewPrivs):" /proc/1/status')"
 grep -Eq '^Uid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server uids are not all 1000"
 grep -Eq '^Gid:[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000[[:space:]]+1000$' <<<"$PID1" || fail "server gids are not all 1000"
@@ -328,17 +329,34 @@ PEPPER_KEYS="$(env_value PASSWORD_PEPPER_KEYS)"
 ENC_KEYS="$(env_value ENCRYPTION_KEYS)"
 (( ${#OWNER_PW} >= 16 && ${#MASTER_KEY} >= 16 && ${#APP_PW} >= 16 && ${#PEPPER_KEYS} >= 16 && ${#ENC_KEYS} >= 16 )) \
   || fail "could not read the generated secrets from .env"
-for f in postgres_password fvoci_app_password meili_master_key password_pepper_keys encryption_keys; do
-  [[ "$(docker exec "$SERVER_CID" stat -c '%u %g %a' "/run/secrets/$f")" == "0 0 400" ]] || fail "/run/secrets/$f is not root-only 0400"
-  if docker exec --user 1000:1000 "$SERVER_CID" cat "/run/secrets/$f" >/dev/null 2>&1; then
-    fail "uid 1000 can read /run/secrets/$f"
+# Compose passes each service only the .env values it names, as container
+# environment (names printed, values compared in memory). Outside the app,
+# postgres may get only the owner password and another service only the
+# master key; docker inspect escapes the keyrings' quotes, so their key
+# material is matched.
+key_hex() { local v="${1#*\":\"}"; printf '%s' "${v%\"\}}"; }
+PEPPER_HEX="$(key_hex "$PEPPER_KEYS")"
+ENC_HEX="$(key_hex "$ENC_KEYS")"
+(( ${#PEPPER_HEX} == 64 && ${#ENC_HEX} == 64 )) || fail "could not take the key material from the keyrings"
+ENV_KEYS="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$STACK_DIR/.env" | LC_ALL=C sort)"
+for svc in $(dc config --services); do
+  cid="$(dc ps -q "$svc")"
+  [[ -n "$cid" ]] || fail "$svc container missing"
+  names="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/=.*//p' | LC_ALL=C sort)"
+  log_assert "  $svc environment from .env: $(LC_ALL=C comm -12 <(printf '%s\n' "$names") <(printf '%s\n' "$ENV_KEYS") | tr '\n' ' ')"
+  if grep -q '_FILE$' <<<"$names"; then fail "$svc is configured with a *_FILE setting"; fi
+  [[ "$svc" == "$APP" ]] && continue
+  config="$(docker inspect "$cid")"
+  if grep -qF -e "$APP_PW" -e "$PEPPER_HEX" -e "$ENC_HEX" <<<"$config" ||
+     { [[ "$svc" != postgres ]] && grep -qF -e "$OWNER_PW" <<<"$config"; } ||
+     { [[ "$svc" == postgres ]] && grep -qF -e "$MASTER_KEY" <<<"$config"; }; then
+    fail "$svc's configuration holds a .env value it does not need"
   fi
 done
 # The server process tree (pid 1 and its descriptors, children and argv, read
-# by a privileged exec since the server is non-dumpable; files under /run other
-# than the secrets, read as the server's uid 1000) holds neither the owner
-# password nor the master key; the container configuration, and so every
-# docker exec and healthcheck process, holds none of the three.
+# by a privileged exec since the server is non-dumpable; files under /run,
+# read as the server's uid 1000) holds neither the owner password nor the
+# master key.
 # shellcheck disable=SC2016 # expanded by the app container's shell
 SERVER_PROC_VIEW="$(docker exec --privileged --user 0:0 "$SERVER_CID" sh -c '
   for p in /proc/[0-9]*; do
@@ -347,7 +365,7 @@ SERVER_PROC_VIEW="$(docker exec --privileged --user 0:0 "$SERVER_CID" sh -c '
     [ "$a" = 1 ] || continue
     tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; ls -l "$p/fd"
   done 2>/dev/null; true')"
-SERVER_RUN_VIEW="$(docker exec --user 1000:1000 "$SERVER_CID" sh -c 'find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
+SERVER_RUN_VIEW="$(docker exec --user 1000:1000 "$SERVER_CID" sh -c 'find /run -type f -exec cat {} + 2>/dev/null; echo')"
 SERVER_VIEW="${SERVER_PROC_VIEW}"$'\n'"${SERVER_RUN_VIEW}"
 # The view must hold the server's environ, or the negative checks below pass
 # on an empty read.
@@ -355,18 +373,30 @@ grep -q '^DATABASE_APP_URL=postgres://' <<<"$SERVER_VIEW" || fail "the privilege
 if grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$SERVER_VIEW"; then
   fail "the server process tree holds the database owner password or the Meilisearch master key"
 fi
-if grep -Eq '^((POSTGRES_PASSWORD|DATABASE_URL|FVOCI_MIGRATION_URL|MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY|FVOCI_APP_PASSWORD)(_FILE)?|(PASSWORD_PEPPER|ENCRYPTION)_KEYS_FILE)=' <<<"$SERVER_VIEW"; then
+if grep -Eq '^(POSTGRES_PASSWORD|DATABASE_URL|FVOCI_MIGRATION_URL|MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY|FVOCI_APP_PASSWORD)=' <<<"$SERVER_VIEW"; then
   fail "a preparation-only variable reached the server process tree"
 fi
-# shellcheck disable=SC2016 # expanded by the app container's shell
-EXEC_ENV="$(docker exec "$SERVER_CID" sh -c 'tr "\0" "\n" </proc/self/environ')"
 if ! grep -qxF "PASSWORD_PEPPER_KEYS=$PEPPER_KEYS" <<<"$SERVER_VIEW" || ! grep -qxF "ENCRYPTION_KEYS=$ENC_KEYS" <<<"$SERVER_VIEW"; then
   fail "the server lacks its keyrings"
 fi
-if grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" -e "$APP_PW" -e "$PEPPER_KEYS" -e "$ENC_KEYS" <<<"$EXEC_ENV$(docker inspect "$SERVER_CID")"; then
-  fail "docker exec / healthcheck environment or docker inspect holds a secret"
+# docker exec and healthcheck processes start from the container
+# configuration, so they hold every value Compose passes to the app, and run
+# as root (whose environment uid 1000 cannot read). Hold one open and confirm
+# both; then nothing uid 1000 can read under /proc may hold a value.
+docker exec -d "$SERVER_CID" sh -c 'exec sleep 30'
+sleep 1
+# shellcheck disable=SC2016 # expanded by the app container's shell
+EXEC_ENV="$(docker exec "$SERVER_CID" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = sleep ] && [ "$(stat -c %u $p)" = 0 ] && tr "\0" "\n" <"$p/environ"; done; true')"
+grep -qF -e "$OWNER_PW" <<<"$EXEC_ENV" || fail "no root docker exec process with the configured values found"
+# The probe itself is a docker exec and so would start with every
+# configured value: it clears its environment first.
+# shellcheck disable=SC2016 # expanded by the app container's shell
+UID_VIEW="$(docker exec --user 1000:1000 "$SERVER_CID" env -i PATH=/usr/bin:/bin sh -c 'for p in /proc/[0-9]*; do tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; done 2>/dev/null')"
+grep -q '^PATH=' <<<"$UID_VIEW" || fail "uid 1000 read no environment at all under /proc"
+if grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" -e "$APP_PW" -e "$PEPPER_KEYS" -e "$ENC_KEYS" <<<"$UID_VIEW"; then
+  fail "uid 1000 reads a password or keyring under /proc"
 fi
-log_assert "server is pid 1 fvoci-server as uid/gid 1000 without capabilities, with no-new-privileges and no setuid file; /run/secrets root-only; owner password and master key absent from its process tree and /run; no secret in docker exec environ or docker inspect: ok"
+log_assert "server is pid 1 fvoci-server as uid/gid 1000 without capabilities, with no-new-privileges and no setuid file; owner password and master key absent from its process tree and /run; root docker exec processes hold the configured values, uid 1000 reads none of them under /proc: ok"
 
 ORIGIN="$BASE_URL"
 COOKIE_JAR="$WORK/cookies"

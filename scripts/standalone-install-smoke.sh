@@ -2,8 +2,9 @@
 # Install smoke for the user procedure of infra/rust/compose.user.yml: an empty
 # folder with compose.yml and env.example, `cp env.example .env`, fill in every
 # empty value as its comments show, `docker compose up -d`. Checks that an
-# unfilled or placeholder .env is refused, the startup preparation and the
-# server's restricted process, first-admin setup/login/search, restart and
+# unfilled, placeholder or malformed .env is refused, which .env values each
+# service's environment gets, the startup preparation and the server's
+# restricted process, first-admin setup/login/search, restart, recreate and
 # down/up persistence, refused changed passwords, preparation failures and
 # signals keeping the server down, upgrade refusal while a server is live,
 # backup/restore, and concurrent starts.
@@ -145,15 +146,21 @@ for attempt in none unfilled; do
 done
 echo "compose refused both before creating anything: ok"
 
-step "a placeholder value: the app names it and the server does not start"
+step "a placeholder value, then a malformed key: the app names it and the server does not start"
 fill_env
 PEPPER="$(env_value PASSWORD_PEPPER_KEYS)"
 set_env PASSWORD_PEPPER_KEYS '{"install":"<openssl rand -hex 32>"}'
 docker compose up -d
 wait_refused 'PASSWORD_PEPPER_KEYS still holds an example placeholder'
 set_env PASSWORD_PEPPER_KEYS "$PEPPER"
+ENC="$(env_value ENCRYPTION_KEYS)"
+set_env ENCRYPTION_KEYS '{"install":"00"}'
+# A changed .env value reaches the container only when Compose recreates it.
+docker compose up -d
+wait_refused 'ENCRYPTION_KEYS / ENCRYPTION_ACTIVE_KEY_ID:'
+set_env ENCRYPTION_KEYS "$ENC"
 docker compose down -v
-echo "placeholder refused by the app (nothing prepared): ok"
+echo "placeholder and malformed keyring refused by the app (nothing prepared): ok"
 
 step "docker compose up -d with the filled .env"
 T0=$SECONDS
@@ -172,7 +179,7 @@ PUBLISHED="$(docker compose ps --format json | jq -rs '[.[] | .Publishers[]? | s
 [[ "$PUBLISHED" == "127.0.0.1:8080->8080" ]] || fail "unexpected published ports: $PUBLISHED"
 echo "published: $PUBLISHED"
 
-step "uid boundary: the server (uid 1000) cannot reach the owner password, master key or raw app password"
+step "each service's environment: only the .env values it needs (names printed, values compared in memory)"
 OWNER_PW="$(env_value POSTGRES_PASSWORD)"
 MASTER_KEY="$(env_value MEILI_MASTER_KEY)"
 APP_PW="$(env_value FVOCI_APP_PASSWORD)"
@@ -180,6 +187,32 @@ PEPPER_KEYS="$(env_value PASSWORD_PEPPER_KEYS)"
 ENC_KEYS="$(env_value ENCRYPTION_KEYS)"
 has_secret() { grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" -e "$APP_PW"; }
 has_keyring() { grep -qF -e "$PEPPER_KEYS" -e "$ENC_KEYS"; }
+# docker inspect escapes the keyrings' quotes: match their key material.
+key_hex() { local v="${1#*\":\"}"; printf '%s' "${v%\"\}}"; }
+PEPPER_HEX="$(key_hex "$PEPPER_KEYS")"
+ENC_HEX="$(key_hex "$ENC_KEYS")"
+(( ${#PEPPER_HEX} == 64 && ${#ENC_HEX} == 64 )) || fail "could not take the key material from the keyrings"
+ENV_KEYS="$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' .env | LC_ALL=C sort)"
+config_env() { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose ps -q "$1")"; }
+env_names() { # service: the .env names in its container configuration
+  config_env "$1" | sed -n 's/=.*//p' | LC_ALL=C sort | LC_ALL=C comm -12 - <(printf '%s\n' "$ENV_KEYS") | tr '\n' ' '
+}
+for svc in fvoci postgres meilisearch; do
+  printf '  %s: %s\n' "$svc" "$(env_names "$svc")"
+  if config_env "$svc" | sed -n 's/=.*//p' | grep -q '_FILE$'; then fail "$svc is configured with a *_FILE setting"; fi
+done
+[[ "$(env_names fvoci)" == "ENCRYPTION_ACTIVE_KEY_ID ENCRYPTION_KEYS FVOCI_APP_PASSWORD FVOCI_PUBLIC_ORIGIN MEILI_MASTER_KEY PASSWORD_PEPPER_ACTIVE_KEY_ID PASSWORD_PEPPER_KEYS POSTGRES_PASSWORD " ]] \
+  || fail "fvoci does not get exactly its .env values"
+[[ "$(env_names postgres)" == "POSTGRES_PASSWORD " ]] || fail "postgres gets .env values other than POSTGRES_PASSWORD"
+[[ "$(env_names meilisearch)" == "MEILI_MASTER_KEY " ]] || fail "meilisearch gets .env values other than MEILI_MASTER_KEY"
+# No value reaches another service under another name, or its command line.
+grep -qF -e "$APP_PW" -e "$MASTER_KEY" -e "$PEPPER_HEX" -e "$ENC_HEX" <<<"$(docker inspect "$(docker compose ps -q postgres)")" \
+  && fail "postgres's configuration holds a value it does not need"
+grep -qF -e "$OWNER_PW" -e "$APP_PW" -e "$PEPPER_HEX" -e "$ENC_HEX" <<<"$(docker inspect "$(docker compose ps -q meilisearch)")" \
+  && fail "meilisearch's configuration holds a value it does not need"
+echo "fvoci: its eight .env values; postgres: the owner password; meilisearch: the master key; no *_FILE setting: ok"
+
+step "uid boundary: the server (uid 1000) cannot reach the owner password, master key or raw app password"
 CID="$(docker compose ps -q fvoci)"
 [[ "$(docker exec "$CID" id -u)" == 0 ]] || fail "docker exec in fvoci does not default to root"
 # The server is non-dumpable: the kernel owns its /proc entries (exe, environ,
@@ -202,20 +235,9 @@ grep -Eq '^CapPrm:[[:space:]]+0+$' <<<"$PID1" || fail "server keeps permitted ca
 grep -Eq '^NoNewPrivs:[[:space:]]+1$' <<<"$PID1" || fail "server runs without no-new-privileges"
 [[ -z "$(docker exec "$CID" find / -xdev -perm /6000 -type f)" ]] || fail "the image has setuid/setgid files"
 echo "no-new-privileges and no setuid/setgid file: ok"
-SECRET_FILES=(postgres_password fvoci_app_password meili_master_key password_pepper_keys encryption_keys)
-docker exec "$CID" ls -ln /run/secrets
-[[ "$(docker exec "$CID" stat -c '%u %g %a' "${SECRET_FILES[@]/#//run/secrets/}" | sort | uniq -c | tr -s ' ')" == " 5 0 0 400" ]] \
-  || fail "secret files are not root-only 0400"
-for f in "${SECRET_FILES[@]}"; do
-  if docker exec --user 1000:1000 "$CID" cat "/run/secrets/$f" >/dev/null 2>&1; then
-    fail "uid 1000 can read /run/secrets/$f"
-  fi
-done
-echo "uid 1000 cannot read /run/secrets/*: ok"
 # The server's own tree: environ, argv and fds of pid 1 and its descendants,
 # read by a privileged exec (root with CAP_SYS_PTRACE, since the server is
-# non-dumpable); files under /run other than the root-only secrets, read as
-# the server's uid 1000.
+# non-dumpable); files under /run, read as the server's uid 1000.
 # shellcheck disable=SC2016 # expanded in the app container
 PROC_VIEW="$(docker exec --privileged --user 0:0 "$CID" sh -c '
   for p in /proc/[0-9]*; do
@@ -225,41 +247,39 @@ PROC_VIEW="$(docker exec --privileged --user 0:0 "$CID" sh -c '
     echo "pid ${p#/proc/}: $(tr "\0" " " <"$p/cmdline")"
     tr "\0" "\n" <"$p/environ"; ls -l "$p/fd"
   done 2>/dev/null; true')"
-RUN_VIEW="$(docker exec --user 1000:1000 "$CID" sh -c 'find /run -path /run/secrets -prune -o -type f -exec cat {} + 2>/dev/null; echo')"
+RUN_VIEW="$(docker exec --user 1000:1000 "$CID" sh -c 'find /run -type f -exec cat {} + 2>/dev/null; echo')"
 VIEW="${PROC_VIEW}"$'\n'"${RUN_VIEW}"
 grep '^pid ' <<<"$VIEW"
 # The view must hold the server's environ, or the negative checks below pass
 # on an empty read.
 grep -q '^DATABASE_APP_URL=postgres://fvoci_app:' <<<"$VIEW" || fail "the privileged view lacks the server's app role URL"
 grep -qF -e "$OWNER_PW" -e "$MASTER_KEY" <<<"$VIEW" && fail "owner password or master key in the server process tree"
-grep -Eq '^((POSTGRES_PASSWORD|MEILI_MASTER_KEY|FVOCI_APP_PASSWORD|DATABASE_URL)(_FILE)?|(PASSWORD_PEPPER|ENCRYPTION)_KEYS_FILE)=' <<<"$VIEW" \
-  && fail "a preparation-only variable or a secret file path reached the server"
+grep -Eq '^(POSTGRES_PASSWORD|FVOCI_APP_PASSWORD|MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY|DATABASE_URL|FVOCI_MIGRATION_URL)=' <<<"$VIEW" \
+  && fail "a preparation-only variable reached the server"
 if ! grep -qxF "PASSWORD_PEPPER_KEYS=$PEPPER_KEYS" <<<"$VIEW" || ! grep -qxF "ENCRYPTION_KEYS=$ENC_KEYS" <<<"$VIEW"; then
   fail "the server lacks its keyrings"
 fi
-echo "server tree: DATABASE_APP_URL only; no owner password, master key or _FILE path in environ/argv/fds/files: ok"
+echo "server tree: keyrings and DATABASE_APP_URL; no owner password, master key or other preparation-only variable in environ/argv/fds or /run files: ok"
 # Healthcheck and docker exec processes start from the container
-# configuration: hold one open (as the healthcheck does, as root) and read its
-# environ; then everything uid 1000 can read under /proc.
+# configuration, so they hold every value Compose passes to fvoci, the
+# preparation's included, and run as root. Hold one open (as the healthcheck
+# does) and confirm that; then everything uid 1000 can read under /proc must
+# hold none of it.
 docker exec -d "$CID" sh -c 'exec sleep 30'
 sleep 1
 EXEC_ENV="$(docker exec "$CID" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = sleep ] && tr "\0" "\n" <"$p/environ"; done; true')"
 [[ -n "$EXEC_ENV" ]] || fail "no docker exec process found"
-has_secret <<<"$EXEC_ENV" && fail "a docker exec (healthcheck) process environ holds a secret"
-has_keyring <<<"$EXEC_ENV" && fail "a docker exec (healthcheck) process environ holds a keyring"
-grep -Eq '^(POSTGRES_PASSWORD|MEILI_MASTER_KEY|FVOCI_APP_PASSWORD)=' <<<"$EXEC_ENV" && fail "docker exec environ has a prep variable"
+has_secret <<<"$EXEC_ENV" || fail "the root docker exec process lacks the configured passwords, so the uid 1000 check below proves nothing"
+# The probe itself is a docker exec and so would start with every
+# configured value: it clears its environment first.
 # shellcheck disable=SC2016 # expanded in the app container
-UID_VIEW="$(docker exec --user 1000:1000 "$CID" sh -c 'for p in /proc/[0-9]*; do tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; done 2>/dev/null')"
+UID_VIEW="$(docker exec --user 1000:1000 "$CID" env -i PATH=/usr/bin:/bin sh -c 'for p in /proc/[0-9]*; do tr "\0" "\n" <"$p/environ"; tr "\0" " " <"$p/cmdline"; echo; done 2>/dev/null')"
 grep -q '^PATH=' <<<"$UID_VIEW" || fail "uid 1000 read no environ at all under /proc"
 # The server's DATABASE_APP_URL (with the app password) and keyrings are out of
 # reach too: the server is non-dumpable and its helpers start without its env.
 has_secret <<<"$UID_VIEW" && fail "uid 1000 reads the owner password, master key or app password under /proc"
 has_keyring <<<"$UID_VIEW" && fail "uid 1000 reads a keyring under /proc"
-echo "docker exec / healthcheck environ holds no secret; uid 1000 finds no secret or keyring under /proc: ok"
-INSPECT="$(docker inspect "$CID")"
-has_secret <<<"$INSPECT" && fail "docker inspect shows a secret"
-has_keyring <<<"$INSPECT" && fail "docker inspect shows a keyring"
-echo "docker inspect: no owner password, master key, app password or keyring: ok"
+echo "root docker exec / healthcheck processes hold the configured values; uid 1000 finds no secret or keyring under /proc: ok"
 docker compose exec -T fvoci /opt/fvoci/bin/fvoci-migrate --doctor | jq -e '.ok == true' >/dev/null || fail "doctor"
 echo "doctor in the fvoci container: ok"
 
@@ -269,33 +289,36 @@ key_layout() { docker exec "$CID" stat -c '%u %g %a %F' "$KEYDIR" "$KEYDIR/api_k
 [[ "$(key_layout)" == "0 0 755 directory;0 1000 640 regular file;" ]] \
   || fail "key directory/file are not root:root 0755 / root:1000 0640: $(key_layout)"
 docker exec --user 1000:1000 "$CID" test -r "$KEYDIR/api_key" || fail "uid 1000 cannot read the search key"
-for attempt in "ln -s /run/secrets/postgres_password $KEYDIR/x" ": >$KEYDIR/x" "rm -f $KEYDIR/api_key" \
+# A root-only file (root:shadow 0640) stands in for anything root may write
+# and uid 1000 may not read.
+TARGET=/etc/shadow
+for attempt in "ln -s $TARGET $KEYDIR/x" ": >$KEYDIR/x" "rm -f $KEYDIR/api_key" \
   "chmod 666 $KEYDIR/api_key" ": >$KEYDIR/api_key"; do
   if docker exec --user 1000:1000 "$CID" sh -c "$attempt" 2>/dev/null; then fail "uid 1000 could: $attempt"; fi
 done
 # An earlier release's volume (or a server that ran before root took the
 # directory over) is uid 1000's: plant symlinks where root writes, then run
 # root's key write as an operator would (docker compose exec defaults to root).
-SECRET_BEFORE="$(docker exec "$CID" sh -c 'stat -c "%u %g %a %s" /run/secrets/postgres_password; sha256sum </run/secrets/postgres_password')"
+target_state() { docker exec "$CID" sh -c "stat -c '%u %g %a %s' $TARGET; sha256sum <$TARGET"; }
+TARGET_BEFORE="$(target_state)"
+if docker exec --user 1000:1000 "$CID" cat "$TARGET" >/dev/null 2>&1; then fail "uid 1000 can read $TARGET"; fi
 KEY_BEFORE="$(docker exec "$CID" cat "$KEYDIR/api_key")"
 docker exec "$CID" chown 1000:1000 "$KEYDIR"
 docker exec --user 1000:1000 "$CID" sh -c "rm -f $KEYDIR/api_key \
-  && ln -s /run/secrets/postgres_password $KEYDIR/api_key \
-  && ln -s /run/secrets/postgres_password $KEYDIR/api_key.tmp \
-  && ln -s /run/secrets/postgres_password $KEYDIR/.api_key.tmp"
+  && ln -s $TARGET $KEYDIR/api_key \
+  && ln -s $TARGET $KEYDIR/api_key.tmp \
+  && ln -s $TARGET $KEYDIR/.api_key.tmp"
 docker exec "$CID" ls -ln "$KEYDIR" | sed 's/^/  planted: /'
 docker exec "$CID" /opt/fvoci/bin/fvoci-migrate --ensure-meili-key "$KEYDIR/api_key" || fail "root --ensure-meili-key over planted links"
-[[ "$(docker exec "$CID" sh -c 'stat -c "%u %g %a %s" /run/secrets/postgres_password; sha256sum </run/secrets/postgres_password')" == "$SECRET_BEFORE" ]] \
-  || fail "the planted link changed /run/secrets/postgres_password"
-if docker exec --user 1000:1000 "$CID" cat /run/secrets/postgres_password >/dev/null 2>&1; then
-  fail "uid 1000 can read postgres_password after the planted link"
+[[ "$(target_state)" == "$TARGET_BEFORE" ]] || fail "the planted link changed $TARGET"
+if docker exec --user 1000:1000 "$CID" cat "$TARGET" >/dev/null 2>&1; then
+  fail "uid 1000 can read $TARGET after the planted link"
 fi
 [[ "$(key_layout)" == "0 0 755 directory;0 1000 640 regular file;" ]] \
   || fail "root did not take the directory back or replace the link: $(key_layout)"
 [[ "$(docker exec "$CID" cat "$KEYDIR/api_key")" == "$KEY_BEFORE" ]] || fail "the scoped key changed"
-grep -qF -e "$OWNER_PW" <<<"$(docker exec "$CID" cat "$KEYDIR/api_key")" && fail "the key file holds the owner password"
 docker exec "$CID" find "$KEYDIR" -type l -delete
-echo "planted symlinks replaced, not followed; secret file unchanged; directory root-owned again: ok"
+echo "planted symlinks replaced, not followed; $TARGET unchanged; directory root-owned again: ok"
 
 step "first-admin setup, login and search"
 curl -fsS "$BASE/api/v1/setup" | jq -c .
@@ -323,7 +346,7 @@ check_same_install() { # after
   docker compose exec -T fvoci /opt/fvoci/bin/fvoci-migrate --verify-secrets >/dev/null || fail "sealed secrets after $1"
 }
 
-step "second up -d, restart (preparation runs again) and down/up keep data and keys"
+step "second up -d, restart (preparation runs again), recreate and down/up keep data and keys"
 docker compose up -d
 wait_healthy
 docker compose restart fvoci
@@ -331,6 +354,9 @@ wait_healthy
 [[ "$(logs fvoci | grep -c 'prepared; starting the server')" -ge 2 ]] || fail "restart did not prepare again"
 [[ "$(logs fvoci | grep -c 'created app role')" == 1 ]] || fail "app role not created exactly once"
 check_same_install "restart"
+docker compose up -d --force-recreate
+wait_healthy
+check_same_install "up -d --force-recreate"
 # SIGTERM reaches the server as pid 1 after the uid drop: graceful exit 0.
 docker compose stop fvoci
 [[ "$(state fvoci)" == "exited 0" ]] || fail "server did not stop gracefully: $(state fvoci)"
@@ -338,7 +364,7 @@ docker compose down
 docker compose up -d
 wait_healthy
 check_same_install "down/up"
-echo "same-version re-runs: role created once, login (same pepper), document, sealed secrets: ok"
+echo "same-version re-runs and recreated containers: role created once, login (same pepper), document, sealed secrets: ok"
 
 step "no secret value in any container log"
 LOGS="$(docker compose logs --no-color 2>&1)"
@@ -351,16 +377,21 @@ for key in POSTGRES_PASSWORD FVOCI_APP_PASSWORD MEILI_MASTER_KEY PASSWORD_PEPPER
 done
 echo "checked $N secret values against $(wc -l <<<"$LOGS") log lines: none found"
 
-step "a changed POSTGRES_PASSWORD is refused, the original starts again"
+step "a changed POSTGRES_PASSWORD: restart keeps the old value, up -d applies it and is refused, the original starts again"
 set_env POSTGRES_PASSWORD "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-# Secret files are copied at container creation: a changed value needs a new container.
-docker compose up -d --force-recreate fvoci
+# The container keeps the environment it was created with.
+docker compose restart fvoci
+wait_healthy
+check_same_install "restart after editing .env"
+# up -d recreates every container whose configuration changed (fvoci and
+# postgres); PostgreSQL keeps the password from its first start.
+docker compose up -d
 wait_refused 'POSTGRES_PASSWORD is not the password of fvoci_owner'
 set_env POSTGRES_PASSWORD "$OWNER_PW"
-docker compose up -d --force-recreate fvoci
+docker compose up -d
 wait_healthy
 check_same_install "restoring POSTGRES_PASSWORD"
-echo "changed owner password: named and refused; original value recovers: ok"
+echo "changed owner password: kept out by restart, named and refused after up -d; original value recovers: ok"
 
 step "a preparation failure (grants refused by a read-only database) keeps the server down"
 psql_owner 'ALTER DATABASE fvoci SET default_transaction_read_only = on'
