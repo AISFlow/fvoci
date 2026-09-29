@@ -18,17 +18,22 @@ Installs are never updated automatically.
 ## Accepted in this release
 
 FVOCI 0.2.0 is a minor release on top of 0.1.1 (`71d252a6`). It adds one
-database migration (044) and changes the redirect URI of workspace SSO; the
-install files (`compose.yml`, `env.example`, `INSTALL.md`) change only in the
-version, source commit and image digest they name, and there is no new `.env`
-value. It is still a 0.x
-trial with no compatibility promise. The fixes are listed under "Changes since
-0.1.1". The features below were accepted on `main` with their tests, CI and an
-independent review (feature table in `docs/rewrite.md` at `@SHA@`):
+database migration (044) and gives workspace SSO a per-workspace redirect
+URI. Workspace SSO needs an enterprise license (`workspaceSso`), and a
+published build trusts no license key (`src/license-trust.json` is empty), so
+a published install cannot turn it on; the workspace SSO items below apply
+only to a build that accepts such a license. The install files
+(`compose.yml`, `env.example`, `INSTALL.md`) change only in the version,
+source commit and image digest they name, and there is no new `.env` value.
+It is still a 0.x trial with no compatibility promise. The fixes are listed
+under "Changes since 0.1.1". The features below were accepted on `main` with
+their tests, CI and an independent review (feature table in
+`docs/rewrite.md` at `@SHA@`):
 
 - **Accounts:** first-admin setup, sign-in and sessions, profile, password
   reset, email and password change, account deletion and export, magic links,
-  personal API tokens, TOTP two-factor sign-in, OIDC sign-in and workspace SSO.
+  personal API tokens, TOTP two-factor sign-in, OIDC sign-in, and workspace
+  SSO (licensed builds only, see above).
 - **Workspaces:** members, invitations with seat limits, groups and
   permissions, projects, workspace export, trash and purge, a workspace event
   log with an activity section in settings.
@@ -62,10 +67,10 @@ independent review (feature table in `docs/rewrite.md` at `@SHA@`):
 
 ### Security
 
-- **Workspace SSO has its own callback.** Every workspace SSO provider shared
-  the instance `generic` callback, so an authorization response from one
-  identity provider could complete a sign-in started with another (IdP
-  mix-up). Each workspace now uses
+- **Workspace SSO has its own callback** (licensed builds only). Every
+  workspace SSO provider shared the instance `generic` callback, so an
+  authorization response from one identity provider could complete a
+  sign-in started with another (IdP mix-up). Each workspace now uses
   `/api/v1/auth/sso/{workspace_id}/callback`; a response on another
   workspace's or an instance provider's callback ends with
   `oidc_state_mismatch` before any request to the provider. The new URI must
@@ -81,23 +86,26 @@ independent review (feature table in `docs/rewrite.md` at `@SHA@`):
   steps recorded the older one, so the same code could be used again.
   Verifying or enabling two-factor no longer rejects a valid code while
   `fvoci-migrate --secrets-rotate` runs.
-- **Changing an email address ends the old mailbox's links** (migration
-  044): password reset, sign-in and email-change links mailed before the
-  change, and pending two-factor challenges, stop working. Sessions stay
-  signed in.
+- **Changing an email address ends every pending link** (migration 044):
+  all password reset, sign-in and email-change links issued before the
+  change, not only those mailed to the old address, and pending two-factor
+  challenges stop working. Sessions stay signed in.
 - **Wiki share links.** Creating a public link to a wiki page now needs View
   on every page below it; a guest could publish child pages they could not
-  read. The refusal is 404. Links created before this release are not
-  re-checked.
-- **No SSO on personal workspaces.** Saving an SSO configuration on a
-  personal workspace answers 409 `personal_workspace_is_immutable`, and one
-  saved before no longer starts or completes any sign-in.
+  read. The refusal is 404. The check is made only when a link is created,
+  not when it is served: links created before this release, and pages added
+  or restricted below a shared page later, are served as before.
+- **No SSO on personal workspaces** (licensed builds only). Saving an SSO
+  configuration on a personal workspace answers 409
+  `personal_workspace_is_immutable`, and one saved before no longer starts
+  or completes any sign-in.
 - **Rate limits.** A client creating many new keys could fill the limiter's
   table and reset every other limit (sign-in, two-factor re-authentication,
   setup, share). Each key now keeps its own window, and a full table evicts
-  the least-used key of the kind (namespace) that holds the most keys, so a
-  flood ends up evicting its own keys. Limit values and windows are
-  unchanged.
+  the least-used key of the kind (namespace) that holds the most keys: a
+  flood first shrinks any namespace larger than its own, then evicts its own
+  keys. The existing limit values and windows are unchanged (the invitation
+  accept limit above is new).
 - **Revoked sessions during writes.** An instance-admin change (users,
   admins, erase and its cancellation, legal documents, settings, branding)
   that was waiting when its session was revoked was still applied; it now
@@ -118,12 +126,14 @@ independent review (feature table in `docs/rewrite.md` at `@SHA@`):
 
 - In 0.1.x, linking a sign-in provider in account settings was refused (403:
   the form sent `Origin: null`), and in Chromium the page's content security
-  policy also blocked it and workspace SSO sign-in by slug on the login page.
-  Both now start by script and reach the provider.
+  policy also blocked it. It now starts by script and reaches the provider.
   `POST /api/v1/auth/oidc/{provider}/link` answers 200
-  `{"authorizationUrl": …}` instead of a 303.
-- The workspace SSO settings show the exact redirect URI to register (from
-  the server, with a copy button), only for team workspaces.
+  `{"authorizationUrl": …}` instead of a 303. Workspace SSO sign-in by slug
+  on the login page (licensed builds only) had the same Chromium block and
+  now starts the same way.
+- The workspace SSO settings (licensed builds only) show the exact redirect
+  URI to register (from the server, with a copy button), only for team
+  workspaces.
 
 ### Mail and outbox delivery
 
@@ -209,7 +219,10 @@ migration, so the steps below apply with 0.1.0 in place of 0.1.1.
 1. Back up first (see "Data, keys and upgrades" below). Migration 044 runs
    when the new `fvoci` container starts. There is no downgrade: 0.1.1 does
    not start on the migrated database, so going back to 0.1.1 means
-   restoring the backup taken before the upgrade.
+   restoring the backup taken before the upgrade. Started on it, the 0.1.1
+   `fvoci` container keeps restarting with `database schema has migrations
+   [44] newer than this binary (43)`, and `docker compose up -d` without
+   `--wait` still exits 0: check with `--wait` or `docker compose logs fvoci`.
 2. Download the 0.2.0 `compose.yml` and `SHA256SUMS` into an empty directory
    and run `sha256sum --ignore-missing -c SHA256SUMS` there (the install
    directory still holds the 0.1.1 `INSTALL.md`, which no longer matches),
@@ -218,7 +231,8 @@ migration, so the steps below apply with 0.1.0 in place of 0.1.1.
    directory; Compose stops the old `fvoci` container before the new one
    migrates. `docker compose exec fvoci /opt/fvoci/bin/fvoci-server --version`
    then shows `@VERSION@` and the source commit. Reload open browser tabs.
-3. **Workspace SSO:** register each workspace's new redirect URI,
+3. **Workspace SSO** (only a build that accepts a workspace SSO license; not
+   a published install): register each workspace's new redirect URI,
    `<FVOCI_PUBLIC_ORIGIN>/api/v1/auth/sso/<workspace id>/callback` (shown in
    the workspace's SSO settings), at its provider before users sign in; until
    then the provider refuses the sign-in. Remove the old
@@ -227,9 +241,9 @@ migration, so the steps below apply with 0.1.0 in place of 0.1.1.
    once with `oidc_state_mismatch`. Instance providers (`OIDC_<KEY>_*`) keep
    their URIs. See "Redirect URIs to register at the provider" in
    `RUNNING.md` at `@SHA@`.
-4. **SSO saved on a personal workspace** stops working: users who signed in
-   through it must use another method. The settings page no longer shows the
-   section there; remove the row with
+4. **SSO saved on a personal workspace** (same builds only) stops working:
+   users who signed in through it must use another method. The settings page
+   no longer shows the section there; remove the row with
    `DELETE /api/v1/workspaces/{id}/oidc`.
 5. **After an email change**, password reset, sign-in and email-change links
    and two-factor challenges must be started again. Sessions are kept.
@@ -273,18 +287,29 @@ stand-ins. Treat them as untested with a real provider:
   measured with the server, collaboration engine and web app taken from the
   published 0.1.0 and 0.1.1 images, run on one host outside the container
   with one headless Chromium and synthetic users, 10 opens per case (median).
-  With every room taken, a newly opened document showed its text after 39.5 s
-  in 0.1.0 and 3.0 s in 0.1.1 at the 30-room default (978 and 3 connection
-  attempts), and 36.6 s and 0.44 s at 64 rooms. When an editor left, a
-  waiting document showed its text after 34.7 s and 8.2 s (30 rooms), 30.6 s
-  and 8.7 s (64 rooms); the 5 s a just-emptied room is kept for a returning
-  user is part of that. The 0.2.0 helper changes were not measured this way,
-  nor under Docker's default AppArmor profile, nor with many real users.
-<!-- COORDINATOR: upgrade-test -->
-- **`/metrics` and `--outbox-reset`** are not part of the release smoke, and
-  there is no automated upgrade test from the published 0.1.1 files to
-  0.2.0 (migration 044 runs in the database test suites, not in an image
-  upgrade test).
+  With every room held by a document whose users had just left it (about
+  3 s earlier with 30 rooms, about 6 s with 64), a newly opened document
+  showed its text after 39.5 s in 0.1.0 and 3.0 s in 0.1.1 with 30 rooms
+  (978 and 3 connection attempts), and 36.6 s and 0.44 s with 64 rooms. The
+  3.0 s against 0.44 s comes from the 5 s a just-emptied room is kept for a
+  returning user plus that timing, not from the number of rooms. 30 rooms is
+  the image default; the release compose uses 64. With every room in use,
+  a waiting document showed its text after an editor left in 34.7 s and
+  8.2 s (30 rooms), 30.6 s and 8.7 s (64 rooms); these include that 5 s.
+  The 0.2.0 helper changes were not measured this way, nor under Docker's
+  default AppArmor profile, nor with many real users.
+- **Upgrade from 0.1.1:** checked once by hand on amd64 with local storage,
+  from the published 0.1.1 release files to a 0.2.0 image built locally from
+  the release-prep commit `b2218c75` (not the published 0.2.0 image). A
+  seeded account, workspace, project, task, comments, wiki body, HWPX
+  attachment and sealed two-factor secret were unchanged after the upgrade
+  (migration 044 applied; `--doctor`, `--verify-secrets` and sign-in passed).
+  0.1.1 then refused the migrated database without changing it (identical
+  `pg_dump` before and after), and a backup taken with the 0.1.1
+  `scripts/backup.sh` restored into a fresh 0.1.1 install with the 0.1.1
+  `restore.sh`. There is no automated upgrade test; arm64 and S3 storage
+  were not tried.
+- **`/metrics` and `--outbox-reset`** are not part of the release smoke.
 
 ## Known limitations
 
@@ -299,7 +324,13 @@ stand-ins. Treat them as untested with a real provider:
   `docker inspect` shows the secret file paths, not their values. The server
   makes itself non-dumpable and refuses to start if the kernel does not
   allow it; the helpers still share uid 1000 file access with it (stored
-  files and the scoped search key).
+  files and the scoped search key). The helpers themselves stay dumpable, so
+  where the host allows same-uid ptrace one helper can attach to another.
+- **Collaboration helper memory.** Helpers set `oom_score_adj=1000` so an
+  out-of-memory kill prefers a helper over the server; where the container
+  profile denies it (for example AppArmor docker-default), the helper still
+  starts without it and the server logs a warning once. This was not
+  re-measured for 0.2.0 under that profile.
 - **Local HTTP by default.** The app is published on `127.0.0.1` over plain
   HTTP. For other users or a domain, put a TLS reverse proxy in front and
   set an `https://` `FVOCI_PUBLIC_ORIGIN` (see `RUNNING.md`).
@@ -307,10 +338,10 @@ stand-ins. Treat them as untested with a real provider:
   Forwarded headers are ignored, so behind a reverse proxy all clients share
   one address (for example 30 sign-ins per 5 minutes). Each IPv6 address
   counts separately, and there is no per-account sign-in limit.
-- **Workspace SSO login CSRF.** A manager of a team workspace with SSO can
-  make a link that signs a visitor in through an identity provider that
-  manager controls (sign-in starts are still GET). Team workspaces are
-  created only by instance administrators.
+- **Workspace SSO login CSRF** (licensed builds only). A manager of a team
+  workspace with SSO can make a link that signs a visitor in through an
+  identity provider that manager controls (sign-in starts are still GET).
+  Team workspaces are created only by instance administrators.
 - **Invitations accepted through a provider.** A new account opened this
   way gets the invited address and is linked to whatever identity the
   provider returns; the provider's email does not have to match or be
@@ -318,6 +349,11 @@ stand-ins. Treat them as untested with a real provider:
   `email_verified` and Kakao often omits it). A decision is pending.
 - **Share links outlive their creator's access** until someone revokes them
   (same as the original product; a decision is pending).
+- **Digest can stop at the same place every day.** If the same recipients
+  fail every day (a lasting temporary refusal such as `452 4.2.2`, or a bare
+  `550` from a mail server that sends no enhanced status codes), the daily
+  run can stop at the same user each day, and users after it get no digest
+  while those failures last.
 - **Mail can be sent twice to one recipient** when the server restarts
   between retries of one mail event: the list of recipients already accepted
   is kept in memory only.
