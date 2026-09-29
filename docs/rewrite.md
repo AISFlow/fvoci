@@ -17,7 +17,7 @@
 
 전체 재작성은 **부분 구현**이다. Orca Run `run_b01d432a9dee`.
 최초 기준 main(역사적 anchor)은 `6ba876503e2a8340c0c21f8f110d2ec14f67f8b3` (#141, 2026-09-27, main 5개 workflow 성공)이다.
-최신 수락 제품 main은 아래 `95160cddaffd8961b0e9974e0cedc2f6bd498e9f` 표(#207 merge, 2026-09-28 19:04 KST)이며, 그 사이 anchor는 당시 관측으로 보존한다. 열린 제품·CI PR은 아래에
+최신 수락 제품 main은 아래 `e600047c1aef043357061f00fe735a3ce0d9e4ea` 표(#239 merge, 2026-09-29)이며, 그 사이 anchor는 당시 관측으로 보존한다. 열린 제품·CI PR은 아래에
 별도로 표시한다. 개별 PR이나 main CI 성공은 전체 포팅 완료를 뜻하지 않는다.
 
 | PR | merge | 범위 | 수락 근거 |
@@ -267,6 +267,28 @@ main push 대기 관측은 이미 수락된 PR의 취소가 아니다.
 | [#227](https://github.com/AISFlow/fvoci/pull/227) | `42b9e56a` | `df0b5921fe88298e71143799fd2dbf50b955311b` | 문서: 2026-09-29 역할(Claude Code Opus 5.5 코디네이터·내장 workflow) |
 | [#225](https://github.com/AISFlow/fvoci/pull/225) | `f5a09f2d` | `1367b05c1c431fa98be653784d66fdfb69d8a3bf` | 협업 room 상한에서 grace 지난 빈 room 회수(lease 원자 등록·동시 회수 재탐색·세션 리비전 보존), 단일 socket bounded backoff, 거부 시 '로드되지 않음+이유'. 성능 수치는 초기 head `4a68ee70` 작성자 측정(소스 빌드·단일 호스트)이며 최종 head·게시 이미지 미측정 |
 
+2026-09-29 KST 추가 대조 지점(수락 제품 main): `e600047c1aef043357061f00fe735a3ce0d9e4ea`(#239 merge). v0.1.0 tag 이후 v0.1.1에 포함된
+#229·#223은 위 표에 없어 앞 두 행에 기록하고, 나머지는 v0.1.1 tag(`71d252a6`) 이후 수락분으로 0.2.0 준비 PR(마지막 행) merge의 `v0.2.0` 게시 대상이다.
+아래 PR은 Claude Code Opus 5.5 코디네이터가 구현·코디네이터와 다른 컨텍스트의 내장 Plan agent 독립 검토(행마다 "검토")와 고정 HEAD의 원격 CI
+성공(각 PR head 39 성공·1 skip, 5개 gate 성공)을 확인하고 기대 HEAD를 지정해 머지했다. `w…` 이름은 코디네이터 세션의 workflow run이다.
+마지막 열은 merge 커밋의 main push CI이며 PR 수락 근거와 구분한다.
+
+| PR | 고정 HEAD | merge | 수락 범위와 한계 | merge 커밋 main CI |
+| --- | --- | --- | --- | --- |
+| [#229](https://github.com/AISFlow/fvoci/pull/229) | `ab67a3ca` | `e5eec53936041aaef3546b18acf234e7ffd4587c` | CI 전용: 실패한 web-e2e group의 redaction된 `server.log`·`browser-summary.txt` 보존·업로드, e2e 서버 `RUST_LOG=info,tower_http=debug`. 로컬 ~1,800회 재현 실패. v0.1.1 포함. 검토: 초기 검토와 delta 검토 2회(run `wv33rdfzh`·`w8rfk0v60`·`wmhb1vxz7`) | 39 성공·1 skip, 5개 gate 성공 |
+| [#223](https://github.com/AISFlow/fvoci/pull/223) | `9fa6aa1a` | `71d252a6e593adce2b960cefd60b8abe6171df41` | 0.1.1 release 준비(version·계약·노트·이 문서). `v0.1.1` tag 대상(release [36484451812](https://github.com/AISFlow/fvoci/actions/runs/36484451812)). 검토: run `whp738bne`(delta 범위)·`weevirgfz`·`wy13oxr21` | 48 성공·1 skip, 5개 gate 성공 |
+| [#230](https://github.com/AISFlow/fvoci/pull/230) | `9685d6a8` | `e02fe71b28ab2cab6a52ef310d727e72dad8e6f0` | 테스트 저장소 스크립트(PG·MinIO·Meili)가 익명 volume까지 제거(`docker rm -f -v`). 테스트 도구 전용, 제품 영향 없음. 호스트에 이미 쌓인 volume은 건드리지 않음. 검토: 전체·delta(run `weevirgfz`·`wy13oxr21`) | 39 성공·1 skip, 5개 gate 성공 |
+| [#234](https://github.com/AISFlow/fvoci/pull/234) | `3ec4240a` | `5c13ee37883493e617ceff1eb47d9413a6d583e9` | 감사 WP2: SSE 접근 검사 단일 트랜잭션·project row lock 없음(SSE-AUTH-07), access stream이 `workspace_member.removed`·`role_changed`·`workspace.deleted`에서 닫힘(SSE-ACCESS-06), settled-horizon cursor(`pg_snapshot_xmin`, SSE-CURSOR-02), 브라우저 EventSource 재개(1 s→30 s jitter backoff)와 컬렉션 stale cursor 복구(http-F3). migration·wire 변경 없음. 64 stream poll 비용 미측정. 검토: 독립 Plan-agent 검토(다른 컨텍스트) | 39 성공·1 skip, 5개 gate 성공 |
+| [#235](https://github.com/AISFlow/fvoci/pull/235) | `fae3898e` | `edce73fba7ad144581e79b6bfa3721b805cb6cb8` | 감사 WP6: local 저장소 재개 시 part 재해시 제거(etag sidecar, 조립 시 전체 hash 검사 유지; 1 GiB 재개 CPU ~24 s→12 ms는 작성자 로컬 측정), 계정 export가 저장소 재검사 오류 시 중단, 24 h 넘은 unleased pending markdown-zip import 행 실패 처리, part 정리 오류 로그. S3 불변, migration 없음. 검토: 독립 Plan-agent 검토(다른 컨텍스트) | 39 성공·1 skip, 5개 gate 성공 |
+| [#233](https://github.com/AISFlow/fvoci/pull/233) | `59a0925d` | `0a04131c7601202a5852a50ed5c1f70f478eb43c` | 감사 WP4: rate limiter 키별 window·최대 namespace 축출(http-F1), instance-admin 쓰기의 `require_admin_session`(ARX-2, 대기 중 철회된 세션 404·무기록), `restore.sh` 앱 비밀번호 argv 제거(install-F02). 미포함: IPv6 회전·계정별 로그인 제한(정책), `\gexec` `CREATE ROLE … PASSWORD`의 `log_statement>=ddl` 로그 노출(문서화). 검토: 독립 Plan-agent 검토(다른 컨텍스트) | web-ci-gate 실패: `web-browser-shard-4` project-trash-flow 첫 로드 빈 화면(`net::ERR_NETWORK_CHANGED`, #237 이전, run [36488304394](https://github.com/AISFlow/fvoci/actions/runs/36488304394)). 나머지 4개 gate 성공 |
+| [#237](https://github.com/AISFlow/fvoci/pull/237) | `8d714a9a` | `933c51c8230f04028a6763fcfe9a854a3f5a051b` | CI 전용: web-e2e group별 netlink 이벤트 기록(`net-events.log`)과 Playwright 전 네트워크 settle 대기(10 s 상한 후 경고, 재시도·timeout 변경 없음). 첫 로드 빈 화면의 완화이며 원인 증명이 아니다(§5). 검토: 독립 Plan-agent 검토(다른 컨텍스트) | 39 성공·1 skip, 5개 gate 성공 |
+| [#231](https://github.com/AISFlow/fvoci/pull/231) | `32278fb6` | `ea0e85a84e831b441257d4d33764b425f86e4fc9` | 감사 WP1: 프로젝트 읽기를 `begin_read`(REPEATABLE READ READ ONLY, xid 없음)로 옮겨 project row lock 제거, 수동 리비전 쓰기 fence(ARX-4), 댓글 권한 DB 오류 500(ARX-5), 검색 색인·WIP advisory namespace 분리(ARX-7), task·document backlink 15 s statement timeout. sqlx 0.8.6 BEGIN 취소 누수 대응 앱 pool acquire 검사(`src/db/pool.rs`, `tests/pool_release_integration.rs`, §5). 검토: 전체·delta ACCEPT_WITH_NITS → pool delta REQUEST_CHANGES → 최종 delta ACCEPT(`32278fb6`) | 39 성공·1 skip, 5개 gate 성공 |
+| [#232](https://github.com/AISFlow/fvoci/pull/232) | `31d5fc83` | `086f2b4d398a7b460612e36274f0c11ddedfc70f` | 감사 WP3: External 전달(mail·search-index·설정된 GitHub)의 종료·lease 예산 중단(F8), 실패 이력 event 단독 전달(F1), batch 후 lease 갱신·mark 후 진행(F6), 수신자 단위 메일(F2, 수락 수신자 메모리 64 event), digest keyset paging·15분 예산·실패 streak 중단(F4), `--recover-outbox` 재생 window mark 보존(F5). 잔여: 수락 수신자 목록은 메모리만, digest streak 한계(§5). migration 없음. 검토: 독립 Plan-agent 검토(다른 컨텍스트) | rust-ci-gate 실패: `postgres-pg16-b` `collections_integration` `wiki_collection_can_edit_uses_one_set_based_permission_lookup` 3행/21행 문 목록 불일치(#231 acquire 검사 문 1개 차이, run [36498519146](https://github.com/AISFlow/fvoci/actions/runs/36498519146); 테스트 전제 결함, #239로 수정, §5). 나머지 4개 gate 성공 |
+| [#238](https://github.com/AISFlow/fvoci/pull/238) | `7a1529dd` | `1b8666a5e84aad763fddef3f46b8ca49705e8a9d` | 감사 WP5: 서버 `PR_SET_DUMPABLE 0`(실패 시 기동 거부, install-F01), helper 자체 `oom_score_adj=1000`과 부모 확인, helper PDEATHSIG(collab-F10), 지연·복구 가능한 engine bridge(collab F1/F4, room open당 helper 1개), helper slot 포화 1013(이전 1011), `collab_product` 예약 교착 테스트 수정. migration 없음. 미실행: AppArmor docker-default 측정. 잔여: `RUNNING.md` perf/seccomp 문구 nit(§5). 검토: 독립 Plan-agent 검토(다른 컨텍스트) | 39 성공·1 skip, 5개 gate 성공 |
+| [#236](https://github.com/AISFlow/fvoci/pull/236) | `5866007b` | `31459b3c9228a0ea4f27848bfee5536ced116b3f` | identity·공개 endpoint 강화(0.2.0 minor 사유): workspace SSO별 callback `/api/v1/auth/sso/{workspace_id}/callback`(OIDC-1 IdP mix-up), 초대 OIDC start same-origin POST(INV-1, 403 `origin_mismatch`), 초대 수락 login 한도·IP당 60/5분(INV-2), TOTP 최신 step claim(MFA F3), 동시 `--secrets-rotate` 검증(MFA F4), migration 044 이메일 변경 시 `auth_generation` 증가(MAG-1), wiki 공유 링크 생성 시 하위 트리 View 요구(Share F1 A), 개인 workspace SSO 저장 409·기존 행 비활성, 서버 제공 `redirectUri`, link·SSO slug의 script 시작(Chromium CSP). 사용자 결정 대기: ACC-1, Share B. 잔여: team workspace 관리자의 GET start login CSRF, 검토 nit(§5). Chromium 153 1회 실행만(브라우저 테스트 미커밋). 검토: 독립 Plan-agent 검토(다른 컨텍스트) | 39 성공·1 skip, 5개 gate 성공 |
+| [#239](https://github.com/AISFlow/fvoci/pull/239) | `c55bee4d` | `e600047c1aef043357061f00fe735a3ce0d9e4ea` | 테스트 전용: `collections_integration` `wiki_collection_can_edit_uses_one_set_based_permission_lookup`의 문 목록 비교에서 #231 acquire 검사 문을 제외(sqlx는 재사용 idle 연결에만 `before_acquire`를 실행하므로 검사 수가 pool 상태에 따른다). `086f2b4d` main의 `postgres-pg16-b` 실패(run 36498519146) 수정. 제품 변경 없음. 검토: 독립 Plan-agent 검토(다른 컨텍스트) ACCEPT_WITH_NITS(run `wq2qspket`) | `<TBD>` |
+| #`<TBD>` | `<TBD>` | `<TBD>` | 0.2.0 release 준비: `Cargo.toml`·`Cargo.lock` 0.2.0, `apps/web/openapi.json`, `scripts/release-notes-template.md`(`notes-for: 0.2.0`), 이 문서. merge 커밋이 `v0.2.0` tag 대상. 검토: `<TBD>` | `<TBD>` |
+
 실제 OS IME witness(F, 협업 행): 별도 Opus 5.5 medium 검토가 ACCEPT했다. 비공개 WSL2 X11 silo(IBus hangul 2벌식,
 headed Chromium 153)에서 실제 XTEST 키 입력으로 preedit 중 다른 문단의 원격 갱신(조합 유지), preedit Backspace와 조합 후
 Backspace/undo(원격 편집 보존), 제품 저장 버튼의 persist ACK, graceful 서버 재시작 후 새 컨텍스트 재열기를 2/2 통과했다.
@@ -308,6 +330,10 @@ provenance: 실행 source `0e3e95dd`의 frontend(`apps/web`·`packages`)는 수�
   index `sha256:638aad92f5b48f9e48c929552c3dc567548be1b73c1ff1dfbc31e9e7ac4e1e11`을 빌드했고 GHCR 익명 manifest 조회는 성공했으나,
   digest smoke가 테스트 클라이언트 cookie 결함으로 실패해 실행은 failure였다(#218로 수정). 이후 release 실행 36433264742가
   `v0.1.0`을 게시했다(index `sha256:02380fef1b906eb0be6de6bdbd94f338595ba62ae26b7ef301319d57fad07cfe`, smoke 도구 `06b039e4`).
+- 0.1.1·0.2.0 trial release: `v0.1.1` tag는 `71d252a6e593adce2b960cefd60b8abe6171df41`(#223 merge)에 있고 release 실행
+  [36484451812](https://github.com/AISFlow/fvoci/actions/runs/36484451812)(tag push, 제품·smoke 도구 SHA 동일)이 게시했다(index
+  `sha256:419529858229c6792612ee5bda38521ccceac366cec08aee65b4537edb484223`, `:0.1` 동일). `v0.2.0` tag는 `<TBD>`(0.2.0 준비 PR merge)이며
+  release 실행 `<TBD>`이 게시한다(index `<TBD>`). 0.2.0은 migration 044와 workspace SSO redirect URI 변경 때문에 minor다.
 - 사용자 설치 설계(#207): `infra/rust/compose.user.yml`+`compose.user.env.example`(release의 `compose.yml`·`env.example`),
   서비스 `fvoci`·`postgres`·`meilisearch`, 준비(설정 검사·준비 확인·앱 역할·migration·grant·검색 키)는 `fvoci` 컨테이너의
   `fvoci-migrate --start`가 root로 수행한 뒤 uid 1000 `fvoci-server`를 exec한다. `infra/rust/compose.yml`(init 서비스)은
@@ -320,7 +346,7 @@ provenance: 실행 source `0e3e95dd`의 frontend(`apps/web`·`packages`)는 수�
 - 분류 근거·행별 종료 조건: `/home/kinesis/orca/fvoci-evidence/opus-decision-status-cleanup.md`.
 - 문서 변환의 정상 Rust 경로는 수락됐으며 Node 구현 복원은 필요 없다. 개발·CI의 Node/Python과 독립 reader는
   제품 런타임과 별개다. 필수 백업·복원 자체 검증은 Rust이며 pg_dump/pg_restore·얇은 실행 스크립트는 유지한다.
-- migration 037·038·039·040은 main에 수락됐다. 번호를 다시 배정하지 않는다.
+- migration 037–043은 main에 수락됐고 044는 #236으로 수락됐다. 번호를 다시 배정하지 않는다.
 - 잔여 기능·검증: #149 S3 전송 E, 인증 앱 스캔·#77 외부 IdP F. `fvoci outbox-reset`은 #220(독립 검토 ACCEPT `ea5dfe27`, 이후
   `c8eb6645`·`2ada34bd`는 Fable 기록)과 #228(target 정렬 결함 수정, 독립 검토 ACCEPT)로 수락됐고, `v0.1.0`은 release 36433264742로 게시됐다. 추가 DB는 원본도 제품 백엔드가 아닌 G로 종료(§3). wiki 컬렉션 권한 N+1(#76 S4)은 #200으로,
   HWP 편집·사본 저장은 #189로, 실제 Web Push 제공자 1회 witness는 #196 범위로 수락됐다(HWP 보기 #187·PPTX #188·DOCX #180·XLSX #186 수락). 수락(`3919a326`): S3 이미지 업그레이드·versioned rollback 로컬 S3 호환 silo x64 실행(#190; 실제 클라우드
@@ -461,7 +487,11 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   테스트 harness 수정과 용량 작업에서 함께 다룬다.
 - 실제 OS IME는 Linux X11 IBus hangul 2벌식·Chromium의 실제 XTEST witness로 수락했다(§2). Windows·macOS·모바일·특정 기기 입력은
   그 witness 범위 밖의 한계로 기록한다(새 필수 조건 아님). 합성 이벤트 성공을 IME 검증으로 표시하지 않는다.
-- 제한기는 프로세스 로컬·직접 socket IP 기준이며 신뢰 프록시·분산 제한은 없다.
+- 제한기는 프로세스 로컬·직접 socket IP 기준이며 신뢰 프록시·분산 제한은 없다. reverse proxy 뒤에서는 모든 사용자가 proxy 주소
+  하나의 bucket을 공유하므로 로그인 IP당 30/5분, 초대 수락 IP당 60/5분(#236)에 대량 온보딩이 걸릴 수 있다. 한 익명 client의 새 키
+  폭주가 다른 한도(로그인·MFA 재인증·setup·share)를 초기화하던 결함은 #233(키별 window·최대 namespace 축출)으로 수정·수락했다.
+  축출은 키가 가장 많은 namespace의 hit가 가장 적은 키부터이므로 폭주 namespace가 최대가 되기 전까지는 더 큰 다른 namespace의 키를
+  축출할 수 있다(`src/http/rate_limit.rs`). IPv6 주소 회전(주소별 key)과 계정별 로그인 제한은 정책 항목으로 미포함이다.
 - 협업 receipt/이벤트/감사 누적은 원본과 같이 보존 정책이 없다. 첨부 중단 업로드 정리는 #63·#65로 수락했다.
 - 전역 보안 헤더(원본 nosecone CSP·Referrer-Policy 등)는 #81로 수락했다(공유 응답의 개별 CSP·no-referrer 유지).
 - 2026-09-26 감사의 identity link issuer·link tx 세션 재검증·ENCRYPTION_KEYS 복구 검증·`--verify-storage` preview·
@@ -470,7 +500,11 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   helper는 #101·#103·#106·#107로 Rust child로 대체돼 제품 이미지에서 제거됐다.
 - collab_product `collab_empty_byte_update_is_rejected`가 #66 CI에서 1회 auth 전 close로 실패했다(로컬 7회
   재현 실패, 재실행 성공). #67로 close code를 남기며 재발 시 원인을 닫는다.
-- 컨테이너 AppArmor docker-default 환경(예: GitHub runner)은 helper의 `oom_score_adj=1000` 쓰기를 거부한다. helper는 그대로 시작하고 서버가 1회 경고를 남기며, 이때 cgroup OOM이 서버 대신 helper를 고른다는 보장은 없다(컨테이너 mem_limit·helper별 AS/RSS 한도가 상한). #46
+- 협업 helper의 OOM backstop: #238부터 helper가 `main` 첫 단계에서 자기 `oom_score_adj=1000`을 쓰고 서버가 첫 응답 뒤 읽어 확인한다
+  (비-dumpable 부모의 `pre_exec` 쓰기가 실패하던 경로 제거). 값이 1000이 아니면 서버가 1회 경고하며, 이때 cgroup OOM이 서버 대신 helper를
+  고른다는 보장은 없다(컨테이너 mem_limit·helper별 AS/RSS 한도가 상한). 이전 관측은 AppArmor docker-default 환경(예: GitHub runner)이
+  쓰기를 거부한 것이며, #238 경로의 AppArmor 재측정은 실행하지 않았다. 새 서버와 이전 helper binary를 섞으면 backstop이 없고 경고한다
+  (같은 이미지면 해당 없음). #46, #238
 - 검색 색인 소비자는 outbox chunk(기본 최대 100 event)를 묶어 Meili 작업을 enqueue하고 chunk 끝에서 한 번 모든 task를
   기다린다(`src/search/index.rs` `deliver_batch`·`MeiliBatchSink`, `wait_meili_tasks`). 이전의 "단건마다 대기, 약 0.5 event/s"
   기술은 배치 전 관측이라 더 이상 맞지 않는다(`grok-fresh-install-port-audit.md`). 남은 위험: 소비자는 chunk의 Meili task가
@@ -481,48 +515,82 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   첨부 viewer는 첫 표시 전 ~300 ms 유휴 구간이 있다. 첨부 viewer 첫 표시는 #221, room 상한 동작은 #225로 개선했다(최종 head·게시 이미지 재측정 없음). SSE poll은 설계 결정 대기다.
 - 초대·공유·ICS 경로 토큰과 OIDC code/state가 요청 trace span의 원시 URI로 debug 로그에 남던 문제는 #178로 수정·수락했다
   (span에는 method·`MatchedPath` 템플릿 또는 고정 fallback·version만 기록). 임의 애플리케이션 로그 전체 감사는 아니다.
+- 첫 로드 빈 화면(#221 이후 CI 간헐): #229 진단이 Chromium의 boot chunk 요청 `net::ERR_NETWORK_CHANGED` 중단을 포착했고(run 36472777008,
+  서버는 정상 응답), #233 merge의 main push(run 36488304394, project-trash-flow)도 같은 서명이었다. #237은 Playwright 전 네트워크 settle
+  대기와 group별 `net-events.log`를 추가한 완화이며 원인 증명이 아니다. 다음 실패의 `net-events.log`에 중단 요청과 ms 단위로 맞는
+  주소/링크 이벤트가 없으면 가설은 반박된다. 앱은 첫 로드의 chunk 실패를 재시도하지 않으므로(`apps/web/src`에 preload 오류·chunk 재시도
+  처리 없음) 사용자 측 네트워크 변경 때도 빈 화면이 될 수 있다(새로고침; 0.2.0 노트의 Known limitations에 기록).
+- sqlx 0.8.6 `Transaction::begin`은 `BEGIN`을 보낸 뒤 depth를 올리므로 `BEGIN` 도중 취소된 요청이 서버 측 트랜잭션을 연 채 연결을
+  pool에 돌려준다(upstream 수정 #3980은 0.9에만). #231이 앱 pool `before_acquire`에서 재사용 idle 연결마다
+  `SELECT now() OPERATOR(pg_catalog.=) statement_timestamp()`(simple protocol, `test_before_acquire(false)`로 ping 대체)를 보내 열린·중단
+  트랜잭션 연결을 닫는다(`src/db/pool.rs`). 비용은 작성자 로컬 측정(release build, PG18 Docker, 잡음 있는 호스트) `SELECT 1` 기준 순차
+  +10–12%, 포화 +1–24%이며 게시 이미지 측정은 없다. 후속: sqlx 0.9 업그레이드 후 검사 제거, `try_acquire`/`try_begin` 우회를 clippy
+  `disallowed-methods`로 금지.
+- #231의 acquire 검사 문은 PG 문 기록에도 남으므로 문 목록 전체를 비교하는 테스트가 pool 상태에 따라 달라진다: `086f2b4d` main push의
+  `postgres-pg16-b`에서 `collections_integration` `wiki_collection_can_edit_uses_one_set_based_permission_lookup`이 3행/21행 문 목록의
+  검사 문 1개 차이로 실패했다(run 36498519146; 같은 테스트는 `ea0e85a8`·#232 PR 실행에서 통과). 테스트 전제 결함이며 제품 영향은 없다.
+  #239(`e600047c`)가 비교에서 검사 문을 제외해 수정했다(query 자체의 문은 그대로 정확히 비교).
+- 읽기 경로는 #231 이후 xid를 잡지 않지만 `purge_workspace` 같은 긴 쓰기 트랜잭션은 여전히 cluster xmin을 붙잡아 모든 tenant의 SSE·outbox
+  진행을 늦출 수 있다(측정 대상). 구·신 서버 혼합 시 검색 색인·WIP lock namespace가 서로 직렬화되지 않는다(제품은 rolling upgrade 거부).
+- SSE settled-horizon cursor(#234)의 64 stream poll 비용은 전후 측정하지 않았다.
+- 메일 수신자 단위 전달(#232)의 수락 수신자 목록은 프로세스 메모리(최근 64 mail event, `ACCEPTED_EVENTS_KEPT`)에만 있다. 한 event의 재시도
+  사이에 재시작하거나 다른 replica가 lease를 넘겨받으면 이미 수락된 수신자에게 다시 보낼 수 있다. 영속화는 migration이 필요한 후속이다.
+- digest(#232)는 15분 예산(`DIGEST_TIME_BUDGET`), 응답 없음·4xx 실패 5회(`DIGEST_DOWN_STREAK`), 수신자를 특정하지 않는 5xx 20회
+  (`DIGEST_REFUSAL_STREAK`; 발송 성공이나 한 mailbox 거절이 두 수를 초기화)에서 walk를 멈추고, 못 보낸 행은 다음 날 sweep으로 넘긴다.
+  알려진 한계(`src/mail/digest.rs`): 매일 같은 수신자들이 지속 4xx(예: `452 4.2.2` 용량 초과)나 향상 상태 코드 없는 relay의 bare 550으로
+  실패하면 walk가 매일 같은 행에서 끝나 그 뒤 행은 digest를 받지 못한다.
+- `restore.sh`의 `\gexec` `CREATE ROLE … PASSWORD`는 PostgreSQL `log_statement`가 `ddl` 이상(기본 off)이면 서버 로그에 남는다(#233, 스크립트에 문서화).
+- identity(#236) 잔여: team workspace 관리자는 자신이 제어하는 IdP로 cross-site `GET /api/v1/auth/oidc/generic/start?workspaceId=` 또는
+  `GET /api/v1/auth/sso?slug=`를 통해 login CSRF를 일으킬 수 있다(로그인 start는 GET 유지; team workspace는 instance admin만 생성).
+  사용자 결정 대기: ACC-1(OIDC로 만드는 초대 계정에 검증된 초대 이메일 요구; 구현 후 `23967a06`으로 되돌림 — Naver는 `email_verified`를
+  보내지 않고 Kakao는 자주 생략. 원본 `39379526` `acceptInviteWithIdentity`도 provider email 일치·검증을 요구하지 않는다), Share part B
+  (생성자 권한을 잃은 뒤에도 링크 유지, 원본과 동일). Share F1 A는 생성 시점 검사이며 기존 링크는 재검사하지 않는다. 개인 workspace에
+  저장된 SSO 행은 비활성이지만 설정 화면이 그 영역을 숨기므로 `DELETE /api/v1/workspaces/{id}/oidc` API로만 지울 수 있다. 후속(검토 nit):
+  link에서도 `Origin` 없는 요청 거부(초대 start와 같이), 테스트의 fetch mode 고정, 초대·계정 페이지가 script 시작을 유지하는지 source 검사.
+  OIDC는 로컬 test provider만 사용했고(실제 외부 IdP 미검증), 브라우저 시작은 Chromium 153의 미커밋 1회 실행으로만 확인했다.
+- 서버 비-dumpable(#238): uid 1000 helper·`docker compose exec`(uid 1000, 또는 `CAP_SYS_PTRACE` 없는 기본 root)는 서버 environ·메모리·fd를
+  읽지 못하며 core dump도 남지 않는다(`fs.suid_dumpable`과 무관). 운영 진단은 `docker compose exec --privileged fvoci …`(CAP_SYS_PTRACE)가
+  필요하고 이미지에는 gdb·strace·lsof가 없다. `perf -p`는 `CAP_PERFMON`/`CAP_SYS_ADMIN`으로 만든 컨테이너가 필요하다. helper는 여전히
+  uid 1000 파일 접근(첨부 저장소 `/data/storage`, scoped 검색 키)을 서버와 공유하고 helper끼리는 dumpable이다(호스트가 같은 uid ptrace를
+  허용하면 서로 attach 가능). 후속(검토 nit): `RUNNING.md`의 perf/seccomp 문구 정밀화.
 - TS 데이터 이전은 사용자 확인으로 범위 밖이다(§2).
 
 ## 6. 재개
 
-### 6.1 인계 체크포인트 (2026-09-29 00:10 KST / 2026-09-28 15:10 UTC, Fable 코디네이터 세션 종료)
+### 6.1 인계 체크포인트 (2026-09-29 `<TBD>` KST, 0.2.0 게시 후, Claude Code Opus 5.5 코디네이터)
 
-다음 세션(Claude Code 앱)은 이 절과 실제 `origin/main`·열린 PR·브랜치를 대조한 뒤 인수한다. 로컬 evidence
-(`/home/kinesis/orca/fvoci-evidence/*.md`, Orca Run `run_b01d432a9dee`)는 보조자료이며 재개에 필수는 아니다.
+다음 세션은 이 절과 실제 `origin/main`·열린 PR·브랜치·release를 대조한 뒤 인수한다. 로컬 evidence(`/home/kinesis/orca/fvoci-evidence/*.md`)는
+보조자료이며 재개에 필수는 아니다. 이전 체크포인트(2026-09-29 00:10 KST, Fable 코디네이터 세션 종료)는 이 파일의 git 이력에 있다.
 
-- **확인한 origin/main**: `feeee159701cd568d07bc48e985228b3eb2d99b0` (= #222 머지). 이 커밋의 main push CI는
-  `postgres-pg16`이 실패해 `rust-ci-gate`가 빨간 상태다: `tests/outbox_reset_integration.rs`
-  `apply_rewinds_and_redelivers_exactly_once_then_is_idempotent`가 "no other session in the test database" 대기 15 s 초과
-  (관측된 잔여 세션: `postgres` idle 1개; run 36436625732). PG17/PG18/ARM64는 통과. #220의 xmin-settle 수정(2ada34bd) 이후에도
-  PG16에서 재발했으므로 다음 세션의 첫 수정 대상이다(테스트 harness의 admin idle 세션이 apply의 "다른 세션" 거부에 걸리는지 확인).
-  나머지 gate(web/documents/collab-engine/install)는 성공.
-- **게시된 버전**: `v0.1.0` = `57497e2fce9efd9e953592f539003c1e0c52d7e2`, pre-release
-  https://github.com/AISFlow/fvoci/releases/tag/v0.1.0 (compose.yml·env.example·INSTALL.md·RELEASE-NOTES.md·release.json·SHA256SUMS),
-  이미지 `ghcr.io/aisflow/fvoci:0.1.0@sha256:02380fef1b906eb0be6de6bdbd94f338595ba62ae26b7ef301319d57fad07cfe` (`:0.1` 동일; 익명 pull 확인),
-  release run 36433264742 성공(제품 SHA 57497e2f, smoke 도구 SHA main 06b039e4; `release.json` 참조). 태그·이미지·Release는 이동/덮어쓰기하지 않는다.
-- **v0.1.0 이후 main에 반영된 제품 변경**(다음 patch 0.1.1 후보): #220 `fvoci-migrate --outbox-reset`, #221 첨부 viewer 첫 표시 ~300 ms 단축·페이지 지연 로드,
-  #222 Prometheus 1단계(NaN-on-failure 게이지, RSS/예산 지표, scrape 문서, `compose.metrics.yml`). 그 외는 CI·문서·테스트 변경(#216 #217 #218 #219 #224).
-- **열린 PR**: #223 `fvoci/release-0-1-1-prep`(6320891e, draft): 0.1.1 버전 bump·계약 재생성·노트. 게시 전 main 기준으로 작성됐으므로
-  #220/#221/#222 반영 후 노트를 갱신하고 다시 검토한다. 그 외 열린 비봇 PR은 아래 #225와 이 인계 PR #226뿐이다(나머지는 dependabot).
-- **원격 보존 브랜치(머지됨, 참조용)**: 위 PR들의 브랜치는 모두 push 상태. 삭제하지 않았다.
-- **수락 대기 PR(검토·CI 미완료)**: #225 `fvoci/collab-room-capacity` (base main 57497e2f, head
-  `4a68ee709f423ad9546558d4e9d3e28d4041e9fc`, push됨): 협업 room 상한에서 빈 room 즉시 회수(`src/collab/hub.rs`·`room.rs`·`transport.rs`),
-  클라이언트 재접속 폭주 제거(bounded jitter backoff, 소유 소켓), 거부된 room을 '로드되지 않음+이유'로 표시, opt-in perf flow h.
-  작성자 전후 측정(같은 호스트·조용한 창·n=10/모드): idle 포화 새 문서 본문 39.5 s→0.44 s(cap 30), 36.7 s→0.45 s(cap 64); open당 소켓 886–944→1;
-  용량 거부 시 open당 소켓 중앙값 1,513–1,808(최대 1,968)→7; holder 해제→본문 34–45 s→3.4–5.4 s. collab suites 146·clippy·fmt·web unit 396 통과(작성자).
-  독립 검토 없음. 남은 것: 첫 거부의 busy/unavailable 라벨 오류 가능성(미검증), 게시 이미지·다중 사용자 미측정.
-  보고서 `/home/kinesis/orca/fvoci-evidence/opus-collab-room-capacity.md`, 원시 결과 `fvoci-evidence/perf-baseline/4a68ee70…-collab/`(로컬 보조자료).
-- **로컬에만 남은 자료**: `/home/kinesis/orca/fvoci-evidence/`의 작성자·검토 보고서와 원시 측정 결과, 세션 진행 기록
-  `coordinator-progress-2026-09-28-fable.md`. 미푸시 커밋·추적 파일 변경은 없다. 미추적 파일만 있다: 22개 worktree의 `scripts/__pycache__/`, `rust-dev-no-python`의 `examples/dev-tools.rs`·`examples/dev_tools/`(이전 인계에서 보존된 미채택 대안), `rust-license-policy`의 `target-license/`, `rust-scheduled-revisions`의 `logs/`(모두 무시·삭제하지 않음).
-- **측정 근거 구분**: 성능 기준선(#214 도구, 측정 SHA `1101e21b` 소스 빌드)과 hotspot 검증은 로컬 보고서
-  `opus-perf-baseline.md`·`grok-editor-hotspots.md`. 게시 이미지(v0.1.0)에 대한 성능 측정은 없다. 보류 항목: `flushDelay` 50/100 실험,
-  DocumentView 구독 분리, Prometheus 2단계(room 점유·거부·회수 지표; 협업 hub accessor 필요), SSE 750 ms 폴링 설계 결정.
-- **사용자 결정·외부 검증(변경 없음)**: #149 S3 전송 정책은 확인된 사람의 결정 근거 대기, 수락된 API 프록시 유지. 실제 IdP·인증 앱·푸시 제공자 witness는
-  사용자 환경 필요. Mac Docker Desktop·rootless·Podman 미검증(Linux Docker Engine만). Svelte·Astro·Valkey·대규모 room 재설계는 보류.
-- **설치 방향(확정)**: 사용자가 짧은 `.env`를 작성하고 `docker compose up -d`; 기본 서비스 fvoci·postgres·meilisearch; 앱 시작 절차가 준비(검증·migrate·grant·검색 키) 담당,
-  정상 서버는 uid 1000·제한 앱 역할. 무설정 bootstrap 서비스·미배포 초안 호환 계층을 다시 만들지 않는다.
-- **자동 연결 해제**: 이 세션이 만든 자동 머지/릴리스 체인·CI 모니터는 모두 종료됐다. 진행 중 릴리스 없음. 원격 변경을 일으키는 예약 없음.
-- **다음 세션 예정 목표**: 백엔드 통합 점검과 선별적 정리(이 인계에서는 착수하지 않음). 그 전에 위 PG16 gate 실패를 닫고 협업 room 브랜치를 검토·통합한다.
+- **확인한 origin/main**: `<TBD>` (= 0.2.0 준비 PR #`<TBD>` merge). main push CI: `<TBD>`.
+  직전 관측: `086f2b4d`(#232 merge)의 `rust-ci-gate`는 `postgres-pg16-b` 문 목록 비교 테스트의 상태 의존 실패로 빨간 상태였고 #239
+  (`e600047c`)로 테스트를 수정했다(§5). `0a04131c`(#233 merge)의 `web-ci-gate`는 #237 이전의 `net::ERR_NETWORK_CHANGED` 첫 로드 빈 화면으로
+  빨간 상태였다. `1b8666a5`(#238)·`31459b3c`(#236)의 main CI는 39 성공·1 skip, 5개 gate 성공. `e600047c`(#239) main CI: `<TBD>`.
+- **게시된 버전**(태그·이미지·Release는 이동/덮어쓰기하지 않는다):
+  - `v0.1.0` = `57497e2fce9efd9e953592f539003c1e0c52d7e2`, release 36433264742, index `sha256:02380fef1b906eb0be6de6bdbd94f338595ba62ae26b7ef301319d57fad07cfe`.
+  - `v0.1.1` = `71d252a6e593adce2b960cefd60b8abe6171df41`, release [36484451812](https://github.com/AISFlow/fvoci/actions/runs/36484451812)
+    (tag push), 이미지 `ghcr.io/aisflow/fvoci:0.1.1@sha256:419529858229c6792612ee5bda38521ccceac366cec08aee65b4537edb484223`
+    (amd64 `sha256:4a277883cb70f0e4522974b2317c83cca1387f8405a6116876ed6f53efd5c3b5`, arm64 `sha256:462c9a1ce8aee08d8d6291e0080bc36d32bc4c12fc36460f4dddf5121313086f`), `:0.1` 동일.
+  - `v0.2.0` = `<TBD>`, release `<TBD>`, 이미지 `ghcr.io/aisflow/fvoci:0.2.0@<TBD>`
+    (amd64 `<TBD>`, arm64 `<TBD>`), `:0.2` `<TBD>`. pre-release https://github.com/AISFlow/fvoci/releases/tag/v0.2.0.
+- **0.2.0 포함 변경**(v0.1.1 이후): 제품 #231 #232 #233 #234 #235 #236 #238, CI·테스트 #230 #237 #239. migration 044(#236),
+  workspace SSO redirect URI `/api/v1/auth/sso/{workspace_id}/callback`. 새 `.env` 값 없음, 설치 파일은 버전·source commit·image digest만 바뀐다.
+- **열린 PR**: `<TBD>`.
+- **다음 후속(비차단, 순서는 코디네이터 결정)**: sqlx 0.9 업그레이드와 acquire 검사 제거·`disallowed-methods`; #236 검토 nit(link의 `Origin`
+  없는 요청 거부, fetch mode 테스트 고정, script 시작 source 검사)와 개인 workspace SSO 행 정리 경로; #238 `RUNNING.md` perf/seccomp 문구 nit;
+  메일 수락 수신자 영속화(migration); digest streak 한계 재검토; SSE 64 stream poll 비용 측정; `purge_workspace` xmin 영향 측정;
+  AppArmor docker-default에서 helper OOM backstop 재측정; 첫 로드 빈 화면 재발 시 `net-events.log` 대조; Prometheus 2단계(room 점유·거부·회수 지표);
+  0.1.1 게시 파일에서 0.2.0으로의 이미지 업그레이드 검증(`<TBD>`).
+- **사용자 결정 대기**: ACC-1, Share part B, team workspace 관리자의 GET start login CSRF 수용 여부, #149 S3 전송 정책(변경 없음, 수락된
+  API 프록시 유지), SSE 750 ms 폴링 설계.
+- **외부 검증(사용자 환경)**: 실제 IdP(workspace SSO 새 callback 포함)·인증 앱 스캔·다른 푸시 제공자, Chromium 외 브라우저의 OIDC 시작,
+  Mac Docker Desktop·rootless·Podman.
+- **이전 체크포인트에서 유지**: 설치 방향(확정) — 사용자가 짧은 `.env`를 작성하고 `docker compose up -d`, 기본 서비스 fvoci·postgres·meilisearch,
+  앱 시작 절차가 준비(검증·migrate·grant·검색 키) 담당, 정상 서버는 uid 1000·제한 앱 역할; 무설정 bootstrap 서비스·미배포 초안 호환 계층을
+  다시 만들지 않는다. 이 문서의 성능 수치는 소스 빌드의 로컬 측정이며 게시 이미지(v0.1.x·v0.2.0)에 대한 성능 측정은 없다. 보류: `flushDelay`
+  50/100 실험, DocumentView 구독 분리, Svelte·Astro·Valkey·대규모 room 재설계.
+- **로컬 자료·자원**: `<TBD>`.
+- **자동 연결**: `<TBD>`. 진행 중 릴리스 `<TBD>`.
 
 ### 6.2 재개 절차
 
