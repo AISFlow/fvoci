@@ -376,9 +376,11 @@ pub async fn find_user_id_by_email(
 
 /// Lock prologue shared by first-owner setup, `admin::patch_instance_user` and
 /// the account lifecycle (`account::lock_account_for`): the admission lock,
-/// then the instance-admin lock, both transaction-scoped. Callers then take
-/// `lock_membership_users` and [`lock_sign_in`]; one order in every caller
-/// keeps these transactions from deadlocking on each other.
+/// then the instance-admin lock, both transaction-scoped. Callers that act on
+/// existing users (`patch_instance_user`, `lock_account_for`) then take
+/// `lock_membership_users` and [`lock_sign_in`]; first-owner setup takes no
+/// further lock. One order in every caller keeps these transactions from
+/// deadlocking on each other.
 pub(crate) async fn lock_instance_admin_changes(
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<(), sqlx::Error> {

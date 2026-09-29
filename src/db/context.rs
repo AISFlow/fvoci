@@ -4,14 +4,24 @@
 //! Every setting is transaction-local (`set_config(.., true)`), so a pooled
 //! connection never carries one into its next checkout.
 //!
-//! Writers: [`set_tenant`] → [`lock_membership_users`] → [`recheck_session`]
-//! → (only where the write depends on the actor's workspace role)
+//! Order for workspace-scoped request transactions. Writers: [`set_tenant`]
+//! → [`lock_membership_users`] → [`recheck_session`] → (only where the write
+//! depends on the actor's workspace role)
 //! `db::workspace::membership_role_for_update` → parent rows before child
-//! rows. Module-specific tails are documented in `db::collab`, `db::task_ops`
-//! and `db::project_documents`. Reads take no row locks and check the
-//! credential and permission in the same transaction as the data;
-//! project-scoped reads use [`begin_read`] (one REPEATABLE READ, READ ONLY
-//! snapshot).
+//! rows. Writers that admit members, change seats or create or delete
+//! workspaces first take `quota::acquire_admission_lock`; writers that change
+//! instance users take `identity::lock_instance_admin_changes` (admission,
+//! then instance-admin). Both come before [`lock_membership_users`], and
+//! `identity::lock_sign_in` comes after it. Module-specific tails are
+//! documented in `db::collab`, `db::task_ops` and `db::project_documents`.
+//!
+//! Workspace-scoped reads take no row locks and check the credential and
+//! permission in the same transaction as the data; project-scoped reads use
+//! [`begin_read`] (one REPEATABLE READ, READ ONLY snapshot). Instance-admin
+//! reads are the exception: `db::admin::require_live_instance_admin` holds the
+//! actor's users row `FOR SHARE`; `db::admin` reads run it in the reading
+//! transaction, while the instance-settings read route runs it in a
+//! transaction of its own before and again after loading the settings.
 
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
