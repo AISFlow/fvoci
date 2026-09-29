@@ -131,8 +131,8 @@ test("a stream that decodes far past its declared size passes the metadata check
   assert.equal(checkXlsxPackage(zip), "ok");
 });
 
-// Decoding the 512 MiB takes about 1.3 s under V8 and 10 s under Bun's
-// JavaScriptCore, past bun test's 5 s default; the browser runs it under V8.
+// Decoding the 512 MiB takes about 1.3 s under V8 (Chromium, the e2e browser)
+// and 10 s under Bun's JavaScriptCore, past bun test's 5 s default.
 test("negative control: left to finish, the worker decodes it and reports invalid, off the main thread", { timeout: 60_000 }, async () => {
   const worker = threadWorker();
   await worker.booted;
