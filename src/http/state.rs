@@ -12,6 +12,9 @@ use crate::streams::StreamHub;
 pub struct AppState {
     pub auth: Arc<AuthService>,
     pub branding_name: String,
+    /// The public origin as `guard::normalize_public_origin` returns it
+    /// (scheme, host, non-default port; no trailing slash). Whoever builds
+    /// the state normalizes it.
     pub public_origin: String,
     pub cookie_secure: bool,
     pub rate_limiter: RateLimiter,

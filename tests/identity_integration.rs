@@ -467,6 +467,29 @@ pub async fn form_post(
     respond(app, builder.body(Body::from(body)).unwrap(), from).await
 }
 
+/// A POST with a session cookie and exactly the `Origin` given (raw bytes,
+/// or none at all), as a browser, a stripping extension or a hand-built
+/// client would send it.
+pub async fn post_with_origin(
+    app: &axum::Router,
+    path: &str,
+    cookie: &str,
+    origin: Option<&[u8]>,
+    from: SocketAddr,
+) -> Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("cookie", format!("fvoci_session={cookie}"));
+    if let Some(origin) = origin {
+        builder = builder.header(
+            "origin",
+            axum::http::HeaderValue::from_bytes(origin).expect("header value"),
+        );
+    }
+    respond(app, builder.body(Body::empty()).unwrap(), from).await
+}
+
 pub async fn call(
     app: &axum::Router,
     method: &str,
@@ -1345,6 +1368,68 @@ fn state_cookie_of(path: &str, res: &Response) -> String {
         "{set}"
     );
     res.cookie_named("fvoci_oidc_state").unwrap()
+}
+
+/// `GET /auth/sso` is a browser navigation: a refusal redirects to the
+/// login page with the problem code and issues no state.
+fn assert_sso_refused(res: &Response, code: &str) {
+    assert_eq!(res.status, StatusCode::FOUND, "{code}: {:?}", res.json);
+    assert_eq!(
+        res.location(),
+        format!("http://localhost/login?error={code}")
+    );
+    assert!(
+        res.cookie_named("fvoci_oidc_state").is_none(),
+        "{code}: {:?}",
+        res.headers
+    );
+}
+
+/// Warn-level events written on this thread while the guard lives. A
+/// `#[tokio::test]` runs the router on the test thread, so the handlers'
+/// events land here.
+#[derive(Clone, Default)]
+struct CapturedWarnings(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedWarnings {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWarnings {
+    type Writer = CapturedWarnings;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl CapturedWarnings {
+    fn start() -> (Self, tracing::subscriber::DefaultGuard) {
+        let captured = Self::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (captured, guard)
+    }
+
+    fn lines_with(&self, needle: &str) -> Vec<String> {
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains(needle))
+            .map(str::to_owned)
+            .collect()
+    }
 }
 
 async fn begin_on(
@@ -2308,7 +2393,7 @@ async fn oidc_outbound_fetches_are_ssrf_guarded() {
         peer(102),
     )
     .await;
-    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_sso_refused(&res, "internal_error");
     h.finish().await;
 }
 
@@ -2461,8 +2546,7 @@ async fn workspace_oidc_config_is_admin_only_and_sealed() {
         peer(112),
     )
     .await;
-    assert_eq!(res.status, StatusCode::NOT_FOUND);
-    assert_eq!(res.code(), "provider_not_configured");
+    assert_sso_refused(&res, "provider_not_configured");
     h.finish().await;
 }
 
@@ -2556,7 +2640,6 @@ async fn personal_workspaces_take_no_sso() {
             format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
             None,
         ),
-        ("GET", format!("/api/v1/auth/sso?slug={slug}"), None),
         (
             "POST",
             format!("/api/v1/auth/oidc/generic/link?workspaceId={ws}"),
@@ -2568,6 +2651,16 @@ async fn personal_workspaces_take_no_sso() {
         assert_eq!(res.code(), "provider_not_configured", "{start}");
         assert!(res.cookie_named("fvoci_oidc_state").is_none(), "{start}");
     }
+    let res = call(
+        &h.app,
+        "GET",
+        &format!("/api/v1/auth/sso?slug={slug}"),
+        None,
+        None,
+        peer(181),
+    )
+    .await;
+    assert_sso_refused(&res, "provider_not_configured");
     assert_eq!(oidc_state_rows(&h).await, 0);
     assert_eq!(fake.discovery_hits.load(Ordering::SeqCst), 0);
 
@@ -2791,7 +2884,11 @@ async fn workspace_sso_login_and_jit_join() {
         vec!["oidc:generic", "oidc:generic"]
     );
 
-    // Unknown slug.
+    // Unknown slug, and a slug the server refuses: the login page shows
+    // the problem instead of a raw problem+json page.
+    let states = oidc_state_rows(&h).await;
+    let discovery = fake.discovery_hits.load(Ordering::SeqCst);
+    let (logs, logs_guard) = CapturedWarnings::start();
     let res = call(
         &h.app,
         "GET",
@@ -2801,7 +2898,57 @@ async fn workspace_sso_login_and_jit_join() {
         peer(126),
     )
     .await;
-    assert_eq!(res.code(), "provider_not_configured");
+    assert_sso_refused(&res, "provider_not_configured");
+    let res = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/sso?slug=No%20Such",
+        None,
+        None,
+        peer(126),
+    )
+    .await;
+    assert_sso_refused(&res, "invalid_input");
+    // The per-address limit is charged first; its refusal redirects too.
+    for _ in 0..30 {
+        let res = call(
+            &h.app,
+            "GET",
+            "/api/v1/auth/sso?slug=nope",
+            None,
+            None,
+            peer(127),
+        )
+        .await;
+        assert_sso_refused(&res, "provider_not_configured");
+    }
+    let res = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/sso?slug=acme",
+        None,
+        None,
+        peer(127),
+    )
+    .await;
+    assert_sso_refused(&res, "rate_limit_exceeded");
+    // No refusal issues a state row or asks the provider.
+    assert_eq!(oidc_state_rows(&h).await, states);
+    assert_eq!(fake.discovery_hits.load(Ordering::SeqCst), discovery);
+    // Each refusal the limiter lets through is one warn line with its code;
+    // the limiter's own refusal, which anyone can repeat without signing in,
+    // writes none.
+    drop(logs_guard);
+    let refused = logs.lines_with("oidc.sso_refused");
+    assert_eq!(refused.len(), 32, "{refused:#?}");
+    assert!(
+        refused.iter().all(|line| line.contains(" WARN ")),
+        "{refused:#?}"
+    );
+    assert!(
+        logs.lines_with("rate_limit_exceeded").is_empty(),
+        "{refused:#?}"
+    );
     h.finish().await;
 }
 
@@ -4361,6 +4508,44 @@ async fn oidc_invitation_start_is_a_same_origin_post() {
             .map(|(_, issuer)| issuer),
         Some(Some(fake.base.clone()))
     );
+    h.finish().await;
+}
+
+/// Link binds a provider identity to the signed-in account, so like invite
+/// it starts only from a same-origin POST: another origin, `null`, no
+/// `Origin` at all and an unreadable one are refused before any state is
+/// issued or any provider is contacted.
+#[tokio::test]
+async fn oidc_link_start_is_a_same_origin_post() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;
+    let h = oidc_harness(&fake, &[ProviderKey::Generic]).await;
+    let (_user_id, _email, cookie) = h.member("linker").await;
+    let link = "/api/v1/auth/oidc/generic/link";
+    for origin in [
+        Some(&b"https://evil.example"[..]),
+        Some(b"null"),
+        None,
+        Some(b"http://localhost\xff"),
+    ] {
+        let label = origin.map(String::from_utf8_lossy);
+        let res = post_with_origin(&h.app, link, &cookie, origin, peer(175)).await;
+        assert_eq!(
+            res.status,
+            StatusCode::FORBIDDEN,
+            "{label:?}: {:?}",
+            res.json
+        );
+        assert_eq!(res.code(), "origin_mismatch", "{label:?}");
+        assert!(res.cookie_named("fvoci_oidc_state").is_none(), "{label:?}");
+    }
+    assert_eq!(oidc_state_rows(&h).await, 0);
+    assert_eq!(fake.discovery_hits.load(Ordering::SeqCst), 0);
+
+    // The settings page's same-origin fetch.
+    let res = post_with_origin(&h.app, link, &cookie, Some(b"http://localhost"), peer(176)).await;
+    authorization_url_json(link, &res);
+    state_cookie_of(link, &res);
+    assert_eq!(oidc_state_rows(&h).await, 1);
     h.finish().await;
 }
 

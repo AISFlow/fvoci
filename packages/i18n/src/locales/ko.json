@@ -129,6 +129,7 @@
 	"oidc_not_linked": "연결된 소셜 계정이 없습니다. 이메일로 로그인해 주세요.",
 	"oidc_provider_error": "소셜 로그인을 완료하지 못했습니다. 다시 시도해 주세요.",
 	"oidc_state_mismatch": "로그인 요청이 만료되었습니다. 다시 시도해 주세요.",
+	"provider_not_configured": "SSO로 로그인할 수 없는 워크스페이스입니다. 워크스페이스 주소를 확인해 주세요.",
 	"owner_transfer_required": "워크스페이스 소유자는 이관 후 탈퇴할 수 있습니다.",
 	"workspace must retain an owner": "워크스페이스에는 소유자가 한 명 이상 필요합니다.",
 	"workspace members cannot change or remove themselves here": "이 화면에서는 자신의 역할을 바꾸거나 자신을 제거할 수 없습니다.",

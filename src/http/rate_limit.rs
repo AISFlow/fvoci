@@ -11,6 +11,11 @@ const MAX_KEYS: usize = 10_000;
 pub const REVISION_WRITE_WINDOW: Duration = Duration::from_secs(60);
 pub const REVISION_WRITE_LIMIT: u32 = 30;
 
+/// In-process sliding-window counters shared by clones (not shared between
+/// server processes; reset on restart). Keys must be `namespace:...`: a full
+/// map evicts from the namespace (the text before the first `:`) holding the
+/// most keys, which bounds what a flood of fresh keys can reset in other
+/// namespaces (`Counters::evict_from_largest_namespace`).
 #[derive(Clone, Default)]
 pub struct RateLimiter {
     inner: Arc<Mutex<Counters>>,
@@ -21,10 +26,14 @@ impl RateLimiter {
         Self::default()
     }
 
+    /// [`Self::allow_window`] over the default 5-minute window.
     pub async fn allow(&self, key: &str, limit: u32) -> Result<(), u32> {
         self.allow_window(key, limit, WINDOW).await
     }
 
+    /// Counts one hit on `key` if fewer than `limit` hits fall within
+    /// `window`. `Err` carries the Retry-After seconds (at least 1), and a
+    /// refused call is not counted.
     pub async fn allow_window(&self, key: &str, limit: u32, window: Duration) -> Result<(), u32> {
         let mut counters = self.inner.lock().await;
         // Read the clock under the lock so hits are stored in time order.

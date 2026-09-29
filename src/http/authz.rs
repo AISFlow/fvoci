@@ -9,10 +9,15 @@ use crate::db::api_tokens::{resolve_api_token_session, ApiTokenSession};
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::state::AppState;
 
+/// Which credentials a route admits. A session cookie passes every variant;
+/// the variants differ only in the API tokens they admit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
+    /// Session cookie only: every API token is refused.
     Session,
+    /// A session, or an API token with at least one scope.
     Any,
+    /// A session, or an API token that grants this scope.
     Scope(ApiTokenScope),
 }
 
@@ -20,6 +25,8 @@ pub enum Access {
 pub struct RequestAuth {
     pub user: SessionUser,
     pub user_id: Uuid,
+    /// The session id for a cookie, the token id for an API token: what a
+    /// write re-checks under its fence (`db::context::recheck_session`).
     pub credential_id: Uuid,
     /// Present only for API tokens. Session auth keeps mixed content unfiltered.
     pub token_scopes: Option<Vec<ApiTokenScope>>,
@@ -27,6 +34,9 @@ pub struct RequestAuth {
     pub token_workspace_id: Option<Uuid>,
 }
 
+/// The Bearer path rule (source parity): 404 when the path, once
+/// percent-decoded, has a `.` or `..` segment or does not decode (a bad
+/// escape or invalid UTF-8). The query and fragment are not checked.
 pub fn canonicalize_api_token_path(raw_path: &str) -> Result<(), AppError> {
     let cut = raw_path.split('#').next().unwrap_or(raw_path);
     let cut = cut.split('?').next().unwrap_or(cut);
@@ -79,6 +89,32 @@ fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
     Uuid::parse_str(value).map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))
 }
 
+/// Entry authorization for a request: who is calling, and whether the
+/// route's [`Access`] admits that credential.
+///
+/// A `fvoci_session` cookie, when present, decides alone: a stale cookie is
+/// 401 even when a valid Bearer token is also sent. Without a cookie, a
+/// `Bearer` API token is resolved. `workspace_id` binds a token to the
+/// route's workspace; sessions get no workspace or membership check here,
+/// the route or its DB call does that.
+///
+/// Side effects: a session's expiry may slide, and a token's `last_used_at`
+/// is updated.
+///
+/// # Errors
+///
+/// - 401 `authentication_required`: no credential; a session or token that
+///   is unknown, expired or revoked, or whose user is suspended or deleted;
+///   a stale cookie even alongside a valid Bearer token.
+/// - 404 `not_found`: a live token that `access` refuses (`Access::Session`,
+///   a missing scope) or that is bound to another workspace, so a token
+///   cannot tell a session-only route from a missing one.
+/// - 500 on a database failure.
+///
+/// This is an entry check on the pool, not part of the caller's write
+/// transaction, so it does not stop a write racing a logout, revocation or
+/// suspension. A write passes [`RequestAuth::credential_id`] to its DB call,
+/// which re-checks it after taking its fence (`db::context::recheck_session`).
 pub async fn require_request_auth(
     state: &AppState,
     headers: &HeaderMap,
