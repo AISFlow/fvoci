@@ -2161,10 +2161,12 @@ fn proc_effective_uid(pid: u32) -> u32 {
 
 /// fvoci-server clears its dumpable flag before it spawns anything. The
 /// kernel then owns its /proc files by root, so a same-uid process (a
-/// helper, a uid-1000 `docker exec`, this non-root runner) cannot read its
-/// environ (keyrings, DATABASE_APP_URL). The room helper it spawns still
-/// raises its own oom_score_adj to 1000, and dies with a SIGKILLed server.
-/// Skips as root; on a non-root runner a missing protection fails.
+/// helper, this non-root runner) cannot read its environ (keyrings,
+/// DATABASE_APP_URL). A uid-1000 `docker exec` is kept out too, but its own
+/// environment already holds every value of the container configuration.
+/// The room helper it spawns still raises its own oom_score_adj to 1000, and
+/// dies with a SIGKILLed server. Skips as root; on a non-root runner a
+/// missing protection fails.
 #[tokio::test]
 async fn collab_lifecycle_server_process_is_non_dumpable() {
     use std::os::unix::fs::MetadataExt;
