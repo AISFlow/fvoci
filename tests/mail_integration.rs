@@ -1934,3 +1934,79 @@ async fn mail_consumer_batches_other_events_and_takes_one_mail_event_per_call() 
     app_pool.close().await;
     harness.cleanup().await;
 }
+
+/// Every recipient's mailbox refused with a mailbox code (`550 5.1.1`) and
+/// none accepted: the event still fails and dead-letters where it is
+/// visible, as it would for a relay that refuses everyone that way.
+#[tokio::test]
+async fn every_mailbox_refused_still_dead_letters_the_event() {
+    const NO_SUCH_USER: &str = "550 5.1.1 no such user";
+    let outcome = deliver_three_recipient_comment([Some(NO_SUCH_USER); 3]).await;
+    assert_eq!(outcome.counts, vec![0, 0, 0], "mails per recipient");
+    assert!(!outcome.processed);
+    assert!(outcome.dead);
+}
+
+/// An address `users.email` can hold but that does not parse as a mailbox
+/// never reaches the relay, so it says nothing about the relay: an event
+/// whose only recipient it is completes (no failure row, no dead letter)
+/// instead of holding back the mail cursor, and the mail event after it is
+/// sent once.
+#[tokio::test]
+async fn unsendable_lone_recipient_does_not_hold_the_mail_cursor() {
+    let harness = TestDb::bootstrap().await;
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, Vec::new()).await;
+    let mailer = mailer_for(sink.port);
+    let (app, _cookie, user_id) = setup_session(&harness, mailer.clone()).await;
+    drop(app);
+    let admin = harness.admin().await;
+    let unsendable_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, 'unsendable')")
+        .bind(unsendable_id)
+        .bind("a..b@example.com")
+        .execute(&admin)
+        .await
+        .expect("insert user");
+    start_mail_cursor_at_latest_event(&admin).await;
+    let mut ids = Vec::new();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    for (actor, provider) in [(unsendable_id, "unsendable-p0"), (user_id, "after-p1")] {
+        let event_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.events (id, actor_user_id, verb, payload, channel)
+            VALUES ($1, $2, 'identity.linked', $3, 'web')
+            "#,
+        )
+        .bind(event_id)
+        .bind(actor)
+        .bind(json!({ "provider": provider }))
+        .execute(&mut *tx)
+        .await
+        .expect("identity event");
+        ids.push(event_id);
+    }
+    tx.commit().await.expect("commit events");
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(app_pool.clone(), mailer, Duration::from_secs(5));
+    wait_mail_settled(&app_pool, &ids, Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(
+        is_processed(&app_pool, "mail", ids[0]).await.unwrap(),
+        "the event with only an unsendable recipient completes"
+    );
+    assert!(is_processed(&app_pool, "mail", ids[1]).await.unwrap());
+    assert_eq!(mail_failure_rows(&admin).await, 0, "no failure row");
+    assert_eq!(sink.count_text("unsendable-p0"), 0);
+    assert_eq!(sink.count_text("after-p1"), 1);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}

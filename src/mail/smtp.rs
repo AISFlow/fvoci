@@ -50,6 +50,13 @@ pub(super) fn is_final_for_recipient(code: &str) -> bool {
     code == CODE_RECIPIENT_REJECTED || code == CODE_INVALID_RECIPIENT
 }
 
+/// Whether the recipient address does not parse as a mailbox. The send
+/// fails before any contact with the relay, so this says nothing about the
+/// relay, and no retry can send it.
+pub(super) fn is_unsendable_address(code: &str) -> bool {
+    code == CODE_INVALID_RECIPIENT
+}
+
 /// Whether a send failure is a permanent (5xx) refusal that does not say
 /// whether it is about the recipient or about every recipient (see
 /// `CODE_PERMANENT`).
@@ -301,5 +308,55 @@ mod tests {
         ] {
             assert!(!is_unclassified_refusal(code), "{code}");
         }
+        assert!(is_unsendable_address(CODE_INVALID_RECIPIENT));
+        for code in [
+            CODE_RECIPIENT_REJECTED,
+            CODE_PERMANENT,
+            CODE_TRANSIENT,
+            CODE_TIMEOUT,
+            CODE_CONNECTION,
+        ] {
+            assert!(!is_unsendable_address(code), "{code}");
+        }
+    }
+
+    /// `users.email` only has to pass `normalize_email`, whose pattern is
+    /// broader than lettre's mailbox parser: these addresses can be stored
+    /// but not sent to.
+    #[test]
+    fn stored_addresses_can_fail_to_parse_as_a_mailbox() {
+        for address in ["a..b@example.com", "bob@example.com."] {
+            assert!(
+                crate::validate::normalize_email(address).is_ok(),
+                "{address}"
+            );
+            assert!(address.parse::<Mailbox>().is_err(), "{address}");
+        }
+    }
+
+    /// The recipient is parsed before the transport is built or the relay is
+    /// contacted, so `invalid_recipient` never follows a session.
+    #[tokio::test]
+    async fn an_unsendable_address_fails_before_any_connection() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("free port")
+            .port();
+        let smtp = SmtpConfig {
+            host: "127.0.0.1".into(),
+            port,
+            from: "noreply@example.com".into(),
+        };
+        let code = send_mail_inner(
+            &smtp,
+            "noreply@example.com",
+            "noreply@example.com",
+            "a..b@example.com",
+            "subject",
+            "text",
+        )
+        .await
+        .expect_err("unsendable");
+        assert_eq!(code, CODE_INVALID_RECIPIENT);
     }
 }
