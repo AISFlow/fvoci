@@ -41,7 +41,7 @@ helper IPC는 길이 접두 JSON(`u32 LE`): `ping`, `load`, `apply`, `sync`, `sn
 
 ### awareness
 
-`src/collab/awareness.rs`는 Yrs가 아니라 lib0 awareness blob이다. 상한 65 KiB / 클라이언트 128. presence 색·caret `block` id·제목 포커스(`title`)만 싣는다. 세션 JWT를 awareness token으로 쓰지 않는다(토큰은 Yjs `clientID` 십진). generation takeover 후 늦은 Leave는 클리어하지 않는다(#194).
+`src/collab/awareness.rs`는 Yrs가 아니라 lib0 awareness blob이다. 상한 64 KiB(65536 bytes) / 클라이언트 128. presence 색·caret `block` id·제목 포커스(`title`)만 싣는다. 세션 JWT를 awareness token으로 쓰지 않는다(토큰은 Yjs `clientID` 십진). generation takeover 후 늦은 Leave는 클리어하지 않는다(#194).
 
 ### ACL poll
 
@@ -108,7 +108,7 @@ MIT여도 목록에 오르기 전에는 기본 엔진으로 넣지 않는다. �
 - persist barrier: durable commit 전 broadcast 없음. `durable: false`는 child 보고일 뿐이다.
 - writer generation / lease: 축출 후 늦은 Leave 무시(#194).
 - 빈 byte update 거부(`collab_empty_byte_update_is_rejected`).
-- Linux X11 IBus hangul witness는 수락됐으나 Windows·macOS·모바일 IME는 범위 밖(§5). 합성 이벤트를 IME 검증으로 쓰지 않는다.
+- Linux X11 IBus hangul witness는 수락됐으나 Windows·macOS·모바일 IME는 이 Linux witness 검증 범위 밖의 미검증 한계로 남는다(rewrite.md §5). 지원 범위를 제외한다는 뜻이 아니다. 합성 이벤트를 IME 검증으로 쓰지 않는다.
 
 ## 4. 유지 비용 vs 전환 비용
 
