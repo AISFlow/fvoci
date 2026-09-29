@@ -154,6 +154,7 @@ pub fn router_with_observability(
     observability: std::sync::Arc<probes::Observability>,
 ) -> Router {
     let public_origin = state.public_origin.clone();
+    let storage_origin = state.storage.presign_origin();
     let share_state = state.clone();
     let collab = Router::new()
         .route("/collab", get(collab_entry))
@@ -206,6 +207,7 @@ pub fn router_with_observability(
     let security = std::sync::Arc::new(security_headers::SecurityHeaders::new(
         &public_origin,
         static_dir.as_deref(),
+        storage_origin.as_deref(),
     ));
     let app = match static_dir {
         Some(root) => api.merge(static_assets::static_router_with_share_head(

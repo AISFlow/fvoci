@@ -22,35 +22,35 @@ use crate::api::collections_dto::{
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
     ActivityActorOutput, ActivityChangeOutput, ActivityCommentParentOutput, ActivityItemOutput,
-    ActivityListResponse, AddProjectMemberBody, AdminEraseBody, AdminErasureScheduleOutput,
-    AdminInstanceSettingsOutput, AdminSystemOutput, AdminUserItemOutput, AdminUserListResponse,
-    AdminUserPatchBody, AdminUserPatchOutput, AdminWorkspaceItemOutput, AdminWorkspaceListResponse,
-    AncestorsResponse, ApiTokenCreateBody, ApiTokenCreatedOutput, ApiTokenListResponse,
-    ApiTokenOutput, AttachmentEditContextOutput, AttachmentListOutput, AttachmentOutput,
-    AttachmentPartUrlResponse, AttachmentPreviewHtmlOutput, AttachmentUploadedPartResponse,
-    AuditLogItemOutput, AuditLogListResponse, BodyResponse, BrandingOutput, BrandingPatchSchema,
-    CloneProjectBody, CommentListResponse, CommentOutput, CommentReactionBody,
-    CommentReactionSummary, CompleteAttachmentUploadBody, ConsentItemBody, ConsentsPendingResponse,
-    ConsentsSubmitBody, CreateAttachmentUploadBody, CreateAttachmentUploadResponse,
-    CreateCommentBody, CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody,
-    CreateMilestoneBody, CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody,
-    CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse, DocumentShareLinkCreateBody,
-    ExpectedDatesBody, GroupListResponse, GroupMemberBody, GroupMemberListResponse,
-    GroupMemberOutput, GroupOutput, HolidaysListResponse, IcsTokenResponse, ImportJobResponse,
-    InstanceAdminBody, InstanceSettingsOutput, InstanceSettingsPatchSchema, InvitationAcceptBody,
-    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
-    InvitationPublicResponse, LabelListResponse, LabelOutput, LegalDocumentOutput,
-    LegalPublishBody, LegalVersionMetaOutput, LegalVersionsResponse, LoginBody, LoginResponse,
-    LogoutBody, LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput,
-    MemberResponse, MemberRoleBody, MembersResponse, MilestoneListResponse, MilestoneOutput,
-    MoveDocumentBody, MoveTaskBody, NotificationItemOutput, NotificationListResponse,
-    NotificationPatchBody, NotificationPrefsBody, NotificationReadAllResponse,
-    NotificationUnreadCountResponse, OkResponse, PasswordResetBody, PasswordResetConfirmBody,
-    PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody,
-    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
-    ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
-    ProjectListResponse, ProjectMembersResponse, ProjectOutput, PublicBrandingOutput,
-    PublicSettingsValues, PushSubscriptionBody, PushSubscriptionKeysBody,
+    ActivityListResponse, AddProjectMemberBody, AdminAttachmentTransferOutput, AdminEraseBody,
+    AdminErasureScheduleOutput, AdminInstanceSettingsOutput, AdminSystemOutput,
+    AdminUserItemOutput, AdminUserListResponse, AdminUserPatchBody, AdminUserPatchOutput,
+    AdminWorkspaceItemOutput, AdminWorkspaceListResponse, AncestorsResponse, ApiTokenCreateBody,
+    ApiTokenCreatedOutput, ApiTokenListResponse, ApiTokenOutput, AttachmentEditContextOutput,
+    AttachmentListOutput, AttachmentOutput, AttachmentPartUrlResponse, AttachmentPreviewHtmlOutput,
+    AttachmentUploadedPartResponse, AuditLogItemOutput, AuditLogListResponse, BodyResponse,
+    BrandingOutput, BrandingPatchSchema, CloneProjectBody, CommentListResponse, CommentOutput,
+    CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody, ConsentItemBody,
+    ConsentsPendingResponse, ConsentsSubmitBody, CreateAttachmentUploadBody,
+    CreateAttachmentUploadResponse, CreateCommentBody, CreateDocumentBody, CreateGroupBody,
+    CreateHolidayBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody, CreateTaskBody,
+    CreateTaskDependencyBody, CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse,
+    DocumentShareLinkCreateBody, ExpectedDatesBody, GroupListResponse, GroupMemberBody,
+    GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
+    IcsTokenResponse, ImportJobResponse, InstanceAdminBody, InstanceSettingsOutput,
+    InstanceSettingsPatchSchema, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
+    InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LabelListResponse,
+    LabelOutput, LegalDocumentOutput, LegalPublishBody, LegalVersionMetaOutput,
+    LegalVersionsResponse, LoginBody, LoginResponse, LogoutBody, LookupItemOutput,
+    LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput, MemberResponse, MemberRoleBody,
+    MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
+    NotificationItemOutput, NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
+    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PasswordResetBody,
+    PasswordResetConfirmBody, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
+    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
+    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
+    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
+    PublicBrandingOutput, PublicSettingsValues, PushSubscriptionBody, PushSubscriptionKeysBody,
     PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
     ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
     RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
@@ -79,6 +79,8 @@ use crate::api::dto::{
     WorkspaceEventListResponse, WorkspaceEventOutput, WorkspaceStatusOutput,
 };
 #[cfg(feature = "api-schema")]
+use crate::attachments::{TransferMode, TransferUnavailable};
+#[cfg(feature = "api-schema")]
 use crate::gantt::{
     GanttBarOutput, GanttLayoutItemOutput, GanttLayoutOutput, GanttScaleOutput, MonthBandOutput,
     ScaleTickOutput, ScheduleInference,
@@ -87,10 +89,12 @@ use crate::gantt::{
 use crate::integrations::unfurl::{UnfurlKind, UnfurlResult};
 #[cfg(feature = "api-schema")]
 use crate::settings::catalog::{
-    AttachmentPreviewSettings, AuthSettings, BrandingAsset, BrandingSettings, DefaultsUserSettings,
-    EmbedSettings, FeaturesSettings, I18nSettings, OperatorSettings, SecuritySettings,
-    SettingsValues, SharePolicy,
+    AttachmentPreviewSettings, AttachmentTransferSettings, AuthSettings, BrandingAsset,
+    BrandingSettings, DefaultsUserSettings, EmbedSettings, FeaturesSettings, I18nSettings,
+    OperatorSettings, SecuritySettings, SettingsValues, SharePolicy,
 };
+#[cfg(feature = "api-schema")]
+use crate::settings::TransferSource;
 
 #[cfg(feature = "api-schema")]
 struct CookieSecurityAddon;
@@ -537,6 +541,10 @@ impl Modify for CookieSecurityAddon {
             WorkspaceMemberConsentsOutput,
             WorkspaceConsentsResponse,
             AdminInstanceSettingsOutput,
+            AdminAttachmentTransferOutput,
+            TransferMode,
+            TransferUnavailable,
+            TransferSource,
             PublicBrandingOutput,
             PublicSettingsValues,
             InstanceSettingsOutput,
@@ -551,6 +559,7 @@ impl Modify for CookieSecurityAddon {
             EmbedSettings,
             FeaturesSettings,
             AttachmentPreviewSettings,
+            AttachmentTransferSettings,
             I18nSettings,
             SecuritySettings,
             OperatorSettings,
@@ -3743,7 +3752,7 @@ fn restore_project_document_revision() {}
     ),
     request_body = CreateAttachmentUploadBody,
     responses(
-        (status = 201, description = "Upload session created", body = CreateAttachmentUploadResponse),
+        (status = 201, description = "Upload session created, bound to the transfer mode in effect now", body = CreateAttachmentUploadResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 402, description = "Storage or upload limit", body = ProblemResponse),
@@ -3771,7 +3780,7 @@ fn create_attachment_upload() {}
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 403, description = "Uploader mismatch", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
-        (status = 409, description = "Upload is not in the required state", body = ProblemResponse),
+        (status = 409, description = "Upload is not in the required state, or a `presigned` session (its parts go to the signed storage URLs only)", body = ProblemResponse),
         (status = 413, description = "Part too large", body = ProblemResponse),
     )
 )]
@@ -3787,12 +3796,14 @@ fn put_attachment_part() {}
         ("workspace_id" = String, description = "Workspace id"),
         ("attachment_id" = String, description = "Attachment id"),
     ),
+    description = "Re-checks the session, workspace, edit permission, uploader and writable parent, lists the parts storage holds, and returns targets for the rest in the session's own transfer mode. For a `presigned` session every call signs fresh part URLs (the re-issue path after expiry).",
     responses(
         (status = 200, description = "Resume state", body = ResumeAttachmentUploadResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 403, description = "Uploader mismatch", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
-        (status = 409, description = "Upload is not in the required state", body = ProblemResponse),
+        (status = 409, description = "Upload is not in the required state, or `attachment_transfer_unavailable`: a `presigned` session on a server that can no longer presign (it is never moved to the proxy path)", body = ProblemResponse),
+        (status = 429, description = "Presigned URL re-issue rate limited", body = ProblemResponse),
     )
 )]
 fn resume_attachment_upload() {}
@@ -3808,9 +3819,10 @@ fn resume_attachment_upload() {}
         ("attachment_id" = String, description = "Attachment id"),
     ),
     request_body = CompleteAttachmentUploadBody,
+    description = "Publishes the upload after re-checking the session and permissions (again right before the row is marked stored). For a `presigned` session storage must first list exactly parts 1..N, each of its exact length, with the submitted ETags; otherwise nothing is published and the session stays open.",
     responses(
         (status = 200, description = "Stored attachment", body = AttachmentOutput),
-        (status = 400, description = "Invalid parts", body = ProblemResponse),
+        (status = 400, description = "Invalid parts (`submitted_parts_do_not_match_uploaded_parts` when storage holds other parts than submitted)", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 403, description = "Uploader mismatch", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
@@ -3853,6 +3865,8 @@ fn get_attachment_meta() {}
     responses(
         (status = 200, description = "Original bytes, or the WebP preview for variant=preview", content_type = "application/octet-stream"),
         (status = 206, description = "Partial content", content_type = "application/octet-stream"),
+        (status = 302, description = "Presigned transfer mode, original only: `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here.",
+            headers(("Location" = String, description = "Signed storage URL"))),
         (status = 304, description = "Preview not modified (If-None-Match)"),
         (status = 400, description = "Invalid download variant", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
@@ -3895,7 +3909,7 @@ fn delete_attachment() {}
     ),
     request_body = CreateAttachmentUploadBody,
     responses(
-        (status = 201, description = "Upload session created", body = CreateAttachmentUploadResponse),
+        (status = 201, description = "Upload session created, bound to the transfer mode in effect now", body = CreateAttachmentUploadResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 402, description = "Storage or upload limit", body = ProblemResponse),
@@ -3919,7 +3933,7 @@ fn create_project_document_attachment_upload() {}
     ),
     request_body = CreateAttachmentUploadBody,
     responses(
-        (status = 201, description = "Upload session created", body = CreateAttachmentUploadResponse),
+        (status = 201, description = "Upload session created, bound to the transfer mode in effect now", body = CreateAttachmentUploadResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 402, description = "Storage or upload limit", body = ProblemResponse),
@@ -4163,7 +4177,7 @@ fn admin_instance_settings() {}
     request_body = InstanceSettingsPatchSchema,
     responses(
         (status = 200, description = "Settings after the change", body = AdminInstanceSettingsOutput),
-        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 400, description = "Invalid input, or `attachment_transfer_unavailable`: `attachmentTransfer.mode` = `presigned` on a server whose storage cannot presign (local driver, or S3 without `S3_PUBLIC_ENDPOINT`)", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 403, description = "Origin mismatch", body = ProblemResponse),
         (status = 404, description = "Not an instance admin", body = ProblemResponse),
