@@ -673,7 +673,8 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 - **열린 PR**(2026-09-30 01:50 KST 대조):
   - **main**: `f3f53c90` = #262. `83c01480` = #268. `9e4f3af3` = #264. v0.3.0 태그는 `6f64febc`에 고정.
   - 제품(연결 예정): #265 `1ee57935`, #267 `e257a434`, #269 `ef17b410`, #266 `ddce8bf2`.
-  - Vue 미연결 WIP: #270–#279, #281–#283, #285–#286. 모두 **live 아님**. #280은 문서. #284는 live 위키 크롬 e2e.
+  - 후보에서 연결됨(main 아님): #270 `/setup` `b601ef64` (on #269). IME CI 수정 `485d118e` (main 직전).
+  - Vue 미연결 WIP: #271–#279, #281–#283, #285–#286. 모두 **live 아님**. #280은 문서(`ffeacb19`). #284는 live 위키 크롬 e2e.
   - 문서: #263 (`fb082853`).
   - Dependabot(비게이트): #152 #153 #155 #156 #157 #158 #160 #191.
   프론트엔드 전환 현황·실행 TODO는 §6.3이 정본이다. #262·#265·#267은 같은 위키 흐름이며 서로 다른 기능군 완료로 세지 않는다.
@@ -698,7 +699,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
     - `r11-dependabot`
   - 대기:
     - #259·#260: #261 A 수락 뒤
-    - 협업 엔진 비교: #280 `b9d6cf30` 초안(`docs/collab-engine-comparison.md`). **기본안 Yrs 유지.** 다른 CRDT는 rewrite에 후보로 적히기 전 범위 밖. 계약 팩은 tracer 후. 교체 PR 없음.
+    - 협업 엔진 비교: #280 `ffeacb19`. **Yrs 유지.** tracer 수락 후 현행 비용 측정, 필요 시 제품과 분리된 ProseMirror step authority 실험. 계약 팩 재실행 ≠ 비교 완료. 엔진 교체·데이터 이전은 별도 채택.
     - sqlx 0.9, outbox C10·C12, 첨부 C9·C11, CO-11, HI-09: 관련 wave 통합 뒤
 - **다음 후속(비차단, 순서는 코디네이터 결정)**: Vue 전환 다음 tracer와 #253 contract 단계(pixel layout 필드 제거); presigned 실제 S3 제공자·
   Firefox·Safari 검증(#149 F); Dependabot bun.lock v2·#155 recreate 대응(§5); `collab-reconnect.test.ts`
@@ -737,9 +738,9 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 
 **라우트 대조(실행 경로, 페이지 파일만으로 완료 판정하지 않음)**
 
-- main `6f64febc` `app-boundary.ts` / `boot.ts`: Vue는 `/w/:slug/:ref/gantt`만. 나머지는 React `App.tsx`.
-- #262 `8adaf1b8`: 위키 `/w/:slug/WIKI-<n>` 추가. React `WorkspaceRefPage`는 위키를 Vue로 handoff. 프로젝트 문서·태스크 상세는 React.
-- 회수 WIP는 Vue `router.ts`에 경로가 있어도 `app-boundary.ts`가 안 보내면 boot는 React다(연결 전).
+- main `f3f53c90` `app-boundary.ts` / `boot.ts`: Vue는 Gantt + 위키 문서. `/login`·`/setup`은 아직 React.
+- 후보: #269가 `/login`을 Vue로 보냄. #270 `b601ef64`가 `/setup`을 Vue로 보내고 React `SetupPage`를 제거함. 둘 다 main 아님.
+- 회수 WIP는 Vue `router.ts`에 경로가 있어도 `app-boundary.ts`가 안 보내면 boot는 React다(연결 전). `app-boundary.ts` 단독 소유는 코디네이터. 후보는 필요한 경로를 그 브랜치에서 연결·검사한다.
 
 React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/invite/:token`, `/reset-password`, `/consent`, `/service-info`, `/legal/:kind`, `/magic-link`, `/confirm-email`, `/cancel-withdraw`, `/`, `/w/:slug/wiki`, `/w/:slug/search`, `/w/:slug/trash`, `/w/:slug/settings`(+ document-tags·templates), `/w/:slug/notifications`, `/w/:slug/my-tasks`, `/w/:slug/:ref`(프로젝트 홈·태스크·프로젝트 문서), `/w/:slug/:ref/settings/fields|workflow`. MFA·OIDC 버튼은 별도 URL이 아니라 `/login` 하위.
 
@@ -762,11 +763,11 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Wiki-collab | `/w/:slug/WIKI-<n>` 열기·편집·저장·재접속 | main 수락 완료 | merge `f3f53c90` ← `73bf4a22` #262 | 제품 `8adaf1b8` ACCEPT_WITH_NITS. typefix `RefusalAwareSocket`. 기능군 「위키 전체」완료 아님. 0.4.0 전 #261 | 없음 | 수락됨 | 없음 | 미포함. 0.4.0 전 #261 필수 |
 | FE-Wiki-editor | 위키 거터·표 손잡이·코드 크롬·버블·모바일 툴바 | 독립 검토·CI 중 | #265 제품 `6eb0380d`, 스택+main `1ee57935` | 제품 SHA 검토 ACCEPT_WITH_NITS×2. 로컬 e2e controls 6/6 | drop/paste e2e는 #261 잔여. 6/6 ≠ 전체 편집기. CI on `1ee57935` | 검토는 `6eb0380d` | CI | 미포함 |
 | FE-Wiki-shell | Vue 셸: 로그아웃·벨·검색·푸터·전환 | 독립 검토·CI 중 | #267 제품 `ea8bd1c9` **ACCEPT**, 스택+main `e257a434` | app-boundary 불변 | CI on `e257a434`. `vue-shell-flow` | 수락 대기(CI) | CI | 미포함 |
-| FE-IME | 한글 첫 자모 (#258), React·Vue 공통 편집기 | main 수락 완료 | merge `83c01480` ← `d5093efd` #268 | UniqueID composition skip. ACCEPT_WITH_NITS. CI CLEAN 후 머지 | #259/#260 아님 | 수락됨 | 없음 | 출시 차단 해제(#258) |
+| FE-IME | 한글 첫 자모 (#258), React·Vue 공통 편집기 | main 수락 완료 | merge `83c01480` ← `d5093efd` #268. e2e 회귀 `485d118e` | UniqueID composition skip. 제품 수정은 main. e2e `test.fail`이 CI 36599369890에서 통과해 실패 | `485d118e` 독립 검토·CI 후 머지. 단언 불변 | Grok 임시 실행자 | CI (e2e 표기) | 출시 차단 해제(#258) |
 | FE-Math-draft | 인라인 수식 원격 변경 시 초안 (#259) | 미착수 | issue #259 | #262에 관련 고정 테스트·이슈 주석 | #261 A 수락 뒤 (#258은 main) | Grok 임시 실행자 | FE-Wiki-editor | 출시 차단 |
 | FE-Undo-IME | 조합 중 undo 단위 (#260) | 미착수 | issue #260 | 없음 | #261 A 수락 뒤 (#258은 main) | Grok 임시 실행자 | FE-Wiki-editor | 출시 차단 |
-| FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` ACCEPT_WITH_NITS; nit `79236b2e` **ACCEPT**; 스택+main `ef17b410` | 단위 20. e2e `login-vue-flow` 3/3. **`mfa-flow` 원격 필수** | CI on `ef17b410`(mfa-flow 샤드). 기능군 완료 아님 | Grok 임시 실행자 | CI | 미포함 |
-| FE-Auth-setup | `/setup` | 구현 중·로컬 WIP (연결 전) | #270 `2ac22248` (on #269) | Vue SetupPage. **app-boundary 불변**. 단위 24 | #269 머지 후 boundary + e2e | Grok 임시 실행자 | FE-Auth-login | — |
+| FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` ACCEPT_WITH_NITS; nit `79236b2e` **ACCEPT**; 스택+main `ef17b410` | 단위 20. e2e `login-vue-flow` 3/3. **`mfa-flow` 원격 필수** | IME `485d118e` 후 CI. 기능군 완료 아님 | Grok 임시 실행자 | CI (IME test.fail) | 미포함 |
+| FE-Auth-setup | `/setup` | 종단 간 검증 완료 (후보) | #270 `b601ef64` (on #269) | boundary `/^\/setup\/?$/i`. React SetupPage 제거. 단위 19. e2e `workspace-flow` 7/7 (prebuilt `8adaf1b8`, `#root.isolate`, `/api/v1/auth/me`) | #269 뒤 독립 검토·CI. 기능군 완료 아님 | Grok 임시 실행자 | FE-Auth-login | — |
 | FE-Auth-invite | `/invite/:token` | 구현 중·로컬 WIP (연결 전) | #271 `d31d33a4` (on #269) | Vue invite. setup 성공 뒤에만 invitation/providers `enabled`. **app-boundary 불변** | boundary + `workspace-invite-flow` | Grok 임시 실행자 | FE-Auth-login | — |
 | FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 구현 중·로컬 WIP (연결 전) | #278 `09b623d4` (on #269) | Vue 페이지·라우트 선언. setup 가드는 폼 표시만(consume는 클릭). **app-boundary 불변** | boundary + mail-reset/account-lifecycle e2e. 동의 청크 `@fvoci/editor/vue` barrel | Grok 임시 실행자 | FE-Auth-login | — |
 | FE-WS-home | `/w/:slug` 랜딩 | 구현 중·로컬 WIP (연결 전) | #274 `e18fdbbe` | `WorkspaceHomePage.vue`. **boundary 없음** | regex + e2e | Grok 임시 실행자 | app-boundary 소유 | — |
@@ -786,27 +787,76 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Wiki-chrome | 위키 페이지의 댓글·공유·별·리비전·보내기·태그 | 종단 간 검증 중 | #284 `6e90189a` on main `f3f53c90` | live Vue 크롬 e2e 6/6 (로컬, prebuilt `8adaf1b8`). 기능군 완료 아님 | 원격 web 샤드. 태스크/프로젝트 문서 표면은 React | Grok 임시 실행자 | CI | — |
 | FE-Import-export | 가져오기/보내기·휴지통 복원(워크스페이스) | 구현 중·로컬 WIP (연결 전) | #273 import/export 섹션; 휴지통 복원 #283 | 워크스페이스 URL은 settings/trash. 문서 export는 위키 크롬 | boundary 후 `workspace-import-export`·trash e2e | Grok 임시 실행자 | FE-Settings-ws · FE-WS-nav | — |
 | FE-Settings-ws | `/w/:slug/settings` 멤버·권한·SSO·토큰 등 | 구현 중·로컬 WIP (연결 전) | #273 `c4c7d878` | 사용자 가능 섹션 Vue 이식. **app-boundary React** | boundary + e2e. 기능군 완료 아님 | Grok 임시 실행자 | 없음 | — |
-| FE-Settings-account | `/settings/account` | 구현 중·로컬 WIP (연결 전) | #277 `b16c20b0` (#273에도 초안) | **중복 WIP**. boundary 없음 | 한 브랜치로 정리. `mfa-flow`는 계정 페이지 | Grok 임시 실행자 | 중복 정리 | — |
-| FE-Admin | `/settings/admin` `/audit` `/legal` | 구현 중·로컬 WIP (연결 전) | #277 `b16c20b0` | 세 페이지 + router. **boundary 없음**. legal은 #272와 중복 | boundary + admin e2e | Grok 임시 실행자 | 중복 정리 | — |
+| FE-Settings-account | `/settings/account` | 구현 중·로컬 WIP (연결 전) | #277 `b16c20b0` 정본 (#273 초안은 미사용) | MFA/export/withdraw. boundary 없음. PR 폐기 없음 | #277에서 연결 + `mfa-flow` | Grok 임시 실행자 | 없음 | — |
+| FE-Admin | `/settings/admin` `/audit` `/legal` | 구현 중·로컬 WIP (연결 전) | #277 `b16c20b0` | 관리자 legal은 게시 UI. 공개 `/legal`은 #272 | boundary + admin e2e | Grok 임시 실행자 | 없음 | — |
 | FE-Home | `/` 워크스페이스 선택 | 구현 중·로컬 WIP (연결 전) | #272 `c9b59494` (on #269) | Vue Home. **boundary 없음** | #269 후 연결 + 홈 e2e | Grok 임시 실행자 | FE-Auth-login | — |
-| FE-Legal | `/legal/:kind` `/service-info` | 구현 중·로컬 WIP (연결 전) | #272 (및 #277 중복) | Vue 페이지 있음. **boundary 없음** | 한 PR로 연결 | Grok 임시 실행자 | 중복 정리 | — |
+| FE-Legal | `/legal/:kind` `/service-info` | 구현 중·로컬 WIP (연결 전) | #272 정본 | 공개 문서. #277 관리자 legal과 다름 | #272에서 연결 | Grok 임시 실행자 | 없음 | — |
 | FE-Dispose | collab socket retire/dispose | main 수락 완료 | merge `9e4f3af3` ← `bf3387ec` #264 | 검토 ACCEPT_WITH_NITS×2. CI 24 success·6 skip | 없음. #262 `web-checks`가 이 계약을 재실행 | 수락됨 | 없음 | 제품 UI 전환 아님 |
 | FE-Compat | `compat/` 폐기, fixture를 `tests/fixtures`로 | 독립 검토·CI 중 | #266 제품 `6dd4bff9` ACCEPT_WITH_NITS; main+#262 merge `ddce8bf2` | #262 합친 뒤 schema 경로 충돌 해소(`tests/fixtures/yjs-seed`) | `ddce8bf2` CI 후 merge. **프론트엔드 기능군 완료가 아님** | Grok 임시 실행자 | CI | 아님 |
 | FE-Docs-ops | 운영·역할 문서 | 독립 검토·CI 중 | `fvoci/docs-0-3-0-record` `bdd72e1b` #263 | 문서 PR | 제품 전환 수에 미포함 | Grok 임시 실행자 | 없음 | 아님 |
 
-공통 파일(`app-boundary.ts`, vue `router.ts`/`route-paths.ts`, i18n, manifest/lockfile, OpenAPI) 소유: 임시 실행자. 워커는 regex·경로 추가를 요청하고 실행자가 작은 단위로 넣는다. 이 때문에 모든 Vue 페이지를 한 줄로 세우지 않는다.
+공통 파일(`app-boundary.ts`, vue `router.ts`/`route-paths.ts`, i18n, manifest/lockfile, OpenAPI) 소유: 임시 실행자(코디네이터). `app-boundary.ts` 단독 소유는 유지하되, 미연결 PR은 그 후보에서 경로를 연결하고 e2e 한다. 모든 페이지가 main에 먼저 있어야 E2E 가능하다는 전제를 두지 않는다.
 
-#### 바로 수락할 후보와 병렬 다음 작업
+#### 연결·검증·수락 (2026-09-30 우선순위 교정)
 
-1. **#262** `f3f53c90` — **main 수락**. 위키 예광탄. 기능군 완료 아님.
-2. **#265** 제품 `6eb0380d` — CI `1ee57935` 후 머지. 검사: controls e2e.
-3. **#267** 제품 `ea8bd1c9` **ACCEPT** — CI `e257a434` 후 머지.
-4. **#268** `83c01480` — **main 수락**. #258 닫힘.
-5. **#266** `ddce8bf2` — CI 후 머지(기능 전환과 별개).
-6. **#269** nit `79236b2e` **ACCEPT**, head `ef17b410` — CI(mfa-flow 샤드) 후 머지. 인증 기능군 전체 완료 아님.
-7. 미연결 Vue PR: #270–#283, #285–#286. boundary는 실행자가 순차. 기능군 완료로 세지 않음.
-8. **#284** `6e90189a` — live 위키 크롬 e2e. CI 후 머지. #261 A/B 아님.
-9. 협업 엔진 비교: #280 `b9d6cf30` 문서만. 코디네이터 기본안 **Yrs 유지**. 엔진 전환 PR 없음. #261을 닫지 않음.
+수락 단위는 실제 라우트 → Rust/API·DB → 확정 결과·재조회다. 작성된 페이지·단위 검사 통과·PR 개수는 수락이 아니다.
+
+**main에서 live인 경로**
+
+| 경로 | SHA/PR | 담당 | 다음 |
+| --- | --- | --- | --- |
+| `/w/:slug/:ref/gantt` | #255 | 수락됨 | 없음 |
+| `/w/:slug/WIKI-<n>` | #262 `f3f53c90` | 수락됨 | #261 편집 컨트롤은 0.4.0 전 |
+| 위키 한글 첫 자모 | #268 `83c01480` | 수락됨 | e2e `test.fail` 잔존 → `485d118e` |
+
+**후보에서 연결·검증한 경로 (main 수락 아님)**
+
+| 경로 | PR/HEAD | 담당 | 다음 수락 행동 |
+| --- | --- | --- | --- |
+| Hangul composition 회귀 (같은 단언, `test.fail` 제거) | `485d118e` on main | Grok 임시 실행자 | 독립 검토 + Web CI 후 머지. skip 없음 |
+| `/login` | #269 `ef17b410` | Grok 임시 실행자 | IME PR 머지 후 CI(mfa-flow 포함). 같은 wiki IME `test.fail`이 샤드 실패 |
+| `/setup` | #270 `b601ef64` | Grok 임시 실행자 | 로컬 `workspace-flow` 7/7. #269 뒤 독립 검토·CI |
+
+**남은 미연결 흐름 (구현은 보존, 다음 화면 생성 금지)**
+
+| 흐름 | PR | 연결·e2e 책임 | 다음 수락 행동 |
+| --- | --- | --- | --- |
+| `/invite/:token` | #271 | Grok 임시 실행자 | #269 뒤 boundary + `workspace-invite-flow`. setup `enabled` 유지 |
+| auth-rest (`/reset-password` 등) | #278 | Grok 임시 실행자 | #269 뒤 경로별로 boundary + mail-reset/account-lifecycle |
+| `/` 홈·공개 `/legal` `/service-info` | #272 | Grok 임시 실행자 | 공개 legal이 정본. #277의 공개 legal 초안은 쓰지 않음 |
+| `/w/:slug/settings` | #273 | Grok 임시 실행자 | 워크스페이스 설정만. `/settings/account`는 #277 |
+| `/settings/account`·admin `/settings/{admin,audit,legal}` | #277 | Grok 임시 실행자 | 계정+관리자 정본. 공개 legal(#272)과 다름. 폐기하지 않음 |
+| WS 랜딩·projects | #274 | Grok 임시 실행자 | 가장 작은 `/w/:slug`부터 |
+| wiki 목록·검색 | #279 | Grok 임시 실행자 | wiki- 문서 URL을 삼키지 않는 regex |
+| my-tasks·notifications·trash | #283 | Grok 임시 실행자 | #274 뒤 세 경로 |
+| 프로젝트 목록/컬렉션 | #276 | Grok 임시 실행자 | 묶음 #276→#282→#285→#286의 **첫** 실행 가능 흐름 |
+| 프로젝트 홈 | #282 | Grok 임시 실행자 | `STAGED_PROJECT_HOME_PATH`(KEY-n 제외) |
+| 태스크·프로젝트 문서 | #285 | Grok 임시 실행자 | item regex를 wiki보다 먼저 |
+| 태스크 패널 | #286 | Grok 임시 실행자 | #285 뒤. 한 `useCollabRoom` |
+| 첨부 뷰어 | #275 | Grok 임시 실행자 | `/a/:id/view`와 share attachments |
+| 공개 공유 `/s/:token` | #281 | Grok 임시 실행자 | attachments를 삼키지 않는 regex |
+| 위키 크롬 e2e | #284 | Grok 임시 실행자 | CI. 이미 live 위키 위 |
+| Yrs 비용·PM-step 비교 | #280 `ffeacb19` | 코디네이터 | tracer 수락 후 측정. 계약 팩만으로 완료 보고 금지 |
+
+**CI 게이트 (main `f3f53c90`)**
+
+Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expected to fail, but passed". 원인은 #268이 main에 있고 e2e만 기대 실패로 남은 것. `485d118e`가 같은 단언을 회귀로 둔다. #265/#267/#266/#269는 wiki 샤드가 같은 표기로 실패하면 IME 먼저.
+
+**중복 정본 (#277 등, PR 일괄 폐기 없음)**
+
+- 공개 `/` `/legal/:kind` `/service-info` → #272
+- 관리자 `/settings/legal`(게시) → #277 `AdminLegalPage` (공개 legal과 다름)
+- `/settings/account` → #277 (MFA/export/withdraw). #273의 계정 초안은 쓰지 않음
+- `/w/:slug/settings` → #273
+
+#### 바로 수락할 후보
+
+1. **IME e2e** `485d118e` — 독립 검토 + Web CI 후 main. #269 차단을 푼다.
+2. **#265** `1ee57935` / **#267** `e257a434` / **#266** `ddce8bf2` — 각 CI CLEAN + 기존 독립 검토.
+3. **#269** `ef17b410` — IME 후 CI. 인증 기능군 완료 아님.
+4. **#270** `b601ef64` — #269 뒤. 로컬 연결 검증됨.
+5. **#284** `6e90189a` — live 위키 크롬 e2e. #261 아님.
+6. **#280** `ffeacb19` — 문서. 엔진 전환 PR 없음.
 
 #### 전체 전환 종결까지 남은 필수
 
