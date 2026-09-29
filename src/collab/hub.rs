@@ -480,6 +480,10 @@ impl CollabHub {
         Some(handle.capture_revision(actor_user_id, session_id).await)
     }
 
+    /// Tests only: drops the joining lease, so idle eviction or admission
+    /// reclaim may close the room under the returned handle. Production
+    /// borrows go through `borrow_live_room`, which keeps the lease.
+    #[cfg(feature = "db-tests")]
     pub async fn ensure_live_room(&self, key: impl Into<RoomKey>) -> Result<RoomHandle, JoinError> {
         self.borrow_live_room(key)
             .await

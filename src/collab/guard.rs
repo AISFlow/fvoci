@@ -1,5 +1,5 @@
 use sqlx::pool::PoolConnection;
-use sqlx::postgres::{PgConnection, PgPool};
+use sqlx::postgres::PgConnection;
 use sqlx::Postgres;
 use uuid::Uuid;
 
@@ -17,8 +17,11 @@ pub struct RoomGuard {
 
 impl RoomGuard {
     /// Try to acquire the room fence without blocking. Returns None if another room holds it.
+    /// Tests only: production takes the fence through [`Self::try_lock_pooled`]
+    /// after a cancellable pool acquire.
+    #[cfg(feature = "db-tests")]
     pub async fn try_acquire(
-        pool: &PgPool,
+        pool: &sqlx::PgPool,
         document_id: Uuid,
     ) -> Result<Option<Self>, sqlx::Error> {
         let pooled = pool.acquire().await?;
