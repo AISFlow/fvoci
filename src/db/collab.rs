@@ -1669,24 +1669,6 @@ pub async fn resolve_collab_admission_kind(
 }
 
 /// Read-only collab load for sync without claiming writer generation.
-pub async fn load_collab_readonly(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
-    load_collab_readonly_kind(
-        pool,
-        CollabKind::Document,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-    )
-    .await
-}
-
 pub async fn load_collab_readonly_kind(
     pool: &PgPool,
     kind: CollabKind,
