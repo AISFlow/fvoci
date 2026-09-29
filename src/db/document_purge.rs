@@ -4,16 +4,22 @@
 //! A document trashed more than `TRASH_RETENTION_DAYS + TRASH_PURGE_MARGIN_DAYS`
 //! ago (database clock) is deleted with its attachment rows, revisions and
 //! cascading rows (collab state, comments, members, stars, share links, tag
-//! assignments, collection items). Differences from the source, for storage
-//! crash-safety without a cleanup journal table:
-//! - attachment objects are removed through `ObjectStorage::purge_key` *before*
-//!   the DB rows. The purge runs in three steps so no workspace lock is held
-//!   during storage I/O: (1) tree lock + document row recheck + collect keys,
-//!   commit; (2) delete the objects without any lock, each bounded by
+//! assignments, collection items). Differences from the source:
+//! - original attachment objects are removed through `ObjectStorage::purge_key`
+//!   *before* the DB rows. The purge runs in three steps so no workspace lock
+//!   is held during storage I/O: (1) tree lock + document row recheck + collect
+//!   keys, commit; (2) delete the objects without any lock, each bounded by
 //!   `PURGE_KEY_TIMEOUT` and the sweep deadline; (3) tree lock again, recheck,
 //!   delete the rows and append `document.purged` in one transaction. A storage
 //!   error or timeout keeps every row for the next sweep; an already missing
 //!   object counts as deleted.
+//! - deleting the rows also journals each original and preview key through
+//!   the migration-030 trigger (`attachment_object_cleanups`), so
+//!   `reclaim_attachment_objects` purges the originals again (as already
+//!   missing) and is what removes preview objects, which step (1) does not
+//!   collect. Storage-first predates that journal and stays; a DB-only purge
+//!   would hand every key to the reclaimer's batched drain
+//!   (`jobs::OBJECT_CLEANUP_BATCH` rows per upload-GC run).
 //! - restore and the trash lists refuse rows past `TRASH_RETENTION_DAYS`
 //!   (`trash_expired`), and the purge only selects rows a margin day older, so
 //!   between steps (1) and (3), or after a crash with some objects deleted, no
