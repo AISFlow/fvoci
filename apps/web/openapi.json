@@ -26594,7 +26594,8 @@
               "string",
               "null"
             ],
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Compared with the stored `dueAt` to the millisecond; finer digits are\nignored."
           },
           "dueDate": {
             "type": [
@@ -26659,6 +26660,32 @@
           }
         }
       },
+      "GanttCalendarOutput": {
+        "type": "object",
+        "description": "Non-working days, as the server applies them to `columns[].offDuty` and\nto dependency lag.",
+        "required": [
+          "weekend",
+          "holidays"
+        ],
+        "properties": {
+          "holidays": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/String"
+            },
+            "description": "Workspace holidays within `scale.start..=scale.end`, ascending."
+          },
+          "weekend": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Weekdays that are never working days, 0 = Sunday .. 6 = Saturday."
+          }
+        }
+      },
       "GanttLayoutItemOutput": {
         "type": "object",
         "required": [
@@ -26684,7 +26711,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "RFC 3339 UTC with milliseconds; send it back unchanged as\n`expectedDates.dueAt`, which PATCH compares to the millisecond."
           },
           "dueDate": {
             "oneOf": [
@@ -26741,6 +26769,10 @@
         "required": [
           "truncated",
           "items",
+          "canEdit",
+          "links",
+          "linkTotal",
+          "calendar",
           "scale",
           "laneHeight",
           "laneCount",
@@ -26761,6 +26793,13 @@
             "items": {
               "$ref": "#/components/schemas/GanttBarOutput"
             }
+          },
+          "calendar": {
+            "$ref": "#/components/schemas/GanttCalendarOutput"
+          },
+          "canEdit": {
+            "type": "boolean",
+            "description": "At least Edit on the project and the project not archived, read in the\nsame snapshot as `items`. A display hint: PATCH re-checks both under\nthe project row lock. Ignores API-token scopes; PATCH also needs\n`tasks.write`."
           },
           "columns": {
             "type": "array",
@@ -26791,6 +26830,18 @@
           "laneHeight": {
             "type": "integer",
             "format": "int32"
+          },
+          "linkTotal": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Dependencies among `items` before the cap."
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GanttLinkOutput"
+            },
+            "description": "Dependencies whose both ends are in `items`, ascending\n`(blockerId, blockedId)` and capped at 2048 (over the cap, the lowest\npairs)."
           },
           "monthBands": {
             "type": "array",
@@ -26833,6 +26884,41 @@
             "format": "double"
           }
         }
+      },
+      "GanttLinkOutput": {
+        "type": "object",
+        "description": "A dependency between two returned items. The server alone enforces it: a\nPATCH that breaks it is refused with `dependency_contradiction`.",
+        "required": [
+          "blockerId",
+          "blockedId",
+          "type",
+          "lagDays"
+        ],
+        "properties": {
+          "blockedId": {
+            "type": "string"
+          },
+          "blockerId": {
+            "type": "string"
+          },
+          "lagDays": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Working days the blocked task's date must trail the blocker's date by;\nweekends and workspace holidays do not count."
+          },
+          "type": {
+            "$ref": "#/components/schemas/GanttLinkType"
+          }
+        }
+      },
+      "GanttLinkType": {
+        "type": "string",
+        "description": "Dependency type: finish-to-start, start-to-start or finish-to-finish.",
+        "enum": [
+          "FS",
+          "SS",
+          "FF"
+        ]
       },
       "GanttScaleOutput": {
         "type": "object",

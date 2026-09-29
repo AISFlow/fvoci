@@ -4584,7 +4584,11 @@ export interface components {
             ok: boolean;
         };
         ExpectedDatesBody: {
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Compared with the stored `dueAt` to the millisecond; finer digits are
+             *     ignored.
+             */
             dueAt: string | null;
             /** Format: date */
             dueDate: string | null;
@@ -4605,8 +4609,22 @@ export interface components {
             /** Format: double */
             x: number;
         };
+        /**
+         * @description Non-working days, as the server applies them to `columns[].offDuty` and
+         *     to dependency lag.
+         */
+        GanttCalendarOutput: {
+            /** @description Workspace holidays within `scale.start..=scale.end`, ascending. */
+            holidays: components["schemas"]["String"][];
+            /** @description Weekdays that are never working days, 0 = Sunday .. 6 = Saturday. */
+            weekend: number[];
+        };
         GanttLayoutItemOutput: {
             assigneeIds: string[];
+            /**
+             * @description RFC 3339 UTC with milliseconds; send it back unchanged as
+             *     `expectedDates.dueAt`, which PATCH compares to the millisecond.
+             */
             dueAt?: string | null;
             dueDate?: components["schemas"]["String"] | null;
             end: components["schemas"]["String"];
@@ -4623,6 +4641,14 @@ export interface components {
         };
         GanttLayoutOutput: {
             bars: components["schemas"]["GanttBarOutput"][];
+            calendar: components["schemas"]["GanttCalendarOutput"];
+            /**
+             * @description At least Edit on the project and the project not archived, read in the
+             *     same snapshot as `items`. A display hint: PATCH re-checks both under
+             *     the project row lock. Ignores API-token scopes; PATCH also needs
+             *     `tasks.write`.
+             */
+            canEdit: boolean;
             columns: components["schemas"]["ScaleTickOutput"][];
             dropped: string[];
             /** Format: double */
@@ -4632,6 +4658,17 @@ export interface components {
             laneCount: number;
             /** Format: int32 */
             laneHeight: number;
+            /**
+             * Format: int32
+             * @description Dependencies among `items` before the cap.
+             */
+            linkTotal: number;
+            /**
+             * @description Dependencies whose both ends are in `items`, ascending
+             *     `(blockerId, blockedId)` and capped at 2048 (over the cap, the lowest
+             *     pairs).
+             */
+            links: components["schemas"]["GanttLinkOutput"][];
             monthBands: components["schemas"]["MonthBandOutput"][];
             overflow: string[];
             pack: string;
@@ -4644,6 +4681,26 @@ export interface components {
             /** Format: double */
             width: number;
         };
+        /**
+         * @description A dependency between two returned items. The server alone enforces it: a
+         *     PATCH that breaks it is refused with `dependency_contradiction`.
+         */
+        GanttLinkOutput: {
+            blockedId: string;
+            blockerId: string;
+            /**
+             * Format: int32
+             * @description Working days the blocked task's date must trail the blocker's date by;
+             *     weekends and workspace holidays do not count.
+             */
+            lagDays: number;
+            type: components["schemas"]["GanttLinkType"];
+        };
+        /**
+         * @description Dependency type: finish-to-start, start-to-start or finish-to-finish.
+         * @enum {string}
+         */
+        GanttLinkType: "FS" | "SS" | "FF";
         GanttScaleOutput: {
             end: components["schemas"]["String"];
             /** Format: double */

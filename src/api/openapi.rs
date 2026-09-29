@@ -82,8 +82,8 @@ use crate::api::dto::{
 use crate::attachments::{TransferMode, TransferUnavailable};
 #[cfg(feature = "api-schema")]
 use crate::gantt::{
-    GanttBarOutput, GanttLayoutItemOutput, GanttLayoutOutput, GanttScaleOutput, MonthBandOutput,
-    ScaleTickOutput, ScheduleInference,
+    GanttBarOutput, GanttCalendarOutput, GanttLayoutItemOutput, GanttLayoutOutput, GanttLinkOutput,
+    GanttScaleOutput, LinkType, MonthBandOutput, ScaleTickOutput, ScheduleInference,
 };
 #[cfg(feature = "api-schema")]
 use crate::integrations::unfurl::{UnfurlKind, UnfurlResult};
@@ -453,6 +453,9 @@ impl Modify for CookieSecurityAddon {
             TaskListResponse,
             GanttLayoutOutput,
             GanttLayoutItemOutput,
+            GanttLinkOutput,
+            LinkType,
+            GanttCalendarOutput,
             GanttScaleOutput,
             GanttBarOutput,
             ScaleTickOutput,
