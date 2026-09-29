@@ -10,11 +10,7 @@ export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
   { path: VUE_ROUTE_PATHS.login, name: "login", component: () => import("./pages/LoginPage.vue") },
-  // First-instance setup. apps/web/src/app-boundary.ts is owned elsewhere;
-  // boot still sends /setup to React until that file includes:
-  //   /^\/setup\/?$/i
-  // Pair it with VUE_ROUTE_PATHS.setup = "/setup" (app-boundary.test.ts).
-  { path: "/setup", name: "setup", component: () => import("./pages/SetupPage.vue") },
+  { path: VUE_ROUTE_PATHS.setup, name: "setup", component: () => import("./pages/SetupPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

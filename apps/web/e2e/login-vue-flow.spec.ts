@@ -1,5 +1,6 @@
 // /login is a page of the Vue app (logout landing, MFA step, OIDC error
-// query). Home, setup, invite, and reset-password stay on the React app.
+// query). /setup is also Vue on this branch. Home, invite, and reset-password
+// stay on the React app.
 // These flows run against the production build served by the Rust server.
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { login, logout, watchCspViolations } from "./helpers";

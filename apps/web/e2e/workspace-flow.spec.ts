@@ -27,6 +27,7 @@ const readonlyMember = {
 test("setup → home → rename → logout → login → denied workspace", async ({ page }) => {
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page.locator("#root.isolate")).toHaveCount(1);
 
   await page.getByLabel("성").fill(admin.familyName);
   await page.getByLabel("이름", { exact: true }).fill(admin.givenName);

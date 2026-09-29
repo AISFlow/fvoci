@@ -24,8 +24,17 @@ test(
   "a completed navigation to a React page is a full page load",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
+    await router.push("/w/acme");
+    assert.deepEqual(loads, ["/w/acme"]);
+  }),
+);
+
+test(
+  "a completed navigation to /setup stays in the Vue app",
+  withLocation(async (loads) => {
+    const router = createAppRouter(createMemoryHistory());
     await router.push("/setup?next=%2Fw%2Facme");
-    assert.deepEqual(loads, ["/setup?next=%2Fw%2Facme"]);
+    assert.deepEqual(loads, []);
   }),
 );
 
@@ -45,15 +54,15 @@ test("the login route is declared (the boundary regex sends /login to Vue)", () 
   );
 });
 
-test("the setup route is declared (boot still needs the boundary regex)", () => {
+test("the setup route is declared and the boundary sends /setup to Vue", () => {
   assert.equal(
     routes.some((route) => route.name === "setup" && route.path === "/setup"),
     true,
   );
-  // Boot still loads the React app for /setup (src/app-boundary.ts).
-  assert.equal(isVueAppPath("/setup"), false);
-  assert.equal(isVueAppPath("/setup/"), false);
-  assert.equal(isVueAppPath("/SETUP"), false);
+  assert.equal(isVueAppPath("/setup"), true);
+  assert.equal(isVueAppPath("/setup/"), true);
+  assert.equal(isVueAppPath("/SETUP"), true);
+  assert.equal(isVueAppPath("/setups"), false);
 });
 
 test(

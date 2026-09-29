@@ -8,6 +8,5 @@ export const VUE_ROUTE_PATHS = {
   // case-insensitively, as the boundary does.
   wikiDocument: "/w/:slug/:ref(wiki-[1-9]\\d{0,8})",
   login: "/login",
-  // Setup: add `setup: "/setup"` here in the same change as
-  // apps/web/src/app-boundary.ts `/^\/setup\/?$/i` (app-boundary.test.ts).
+  setup: "/setup",
 } as const;

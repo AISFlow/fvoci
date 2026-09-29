@@ -80,10 +80,11 @@ test("the boot module sends /login, and only that path, to the Vue app", () => {
   assert.equal(isVueAppPath("/logins"), false);
 });
 
-test("the boot module still sends /setup to the React app", () => {
-  assert.equal(isVueAppPath("/setup"), false);
-  assert.equal(isVueAppPath("/setup/"), false);
-  assert.equal(isVueAppPath("/SETUP"), false);
+test("the boot module sends /setup, and only that path, to the Vue app", () => {
+  assert.equal(isVueAppPath("/setup"), true);
+  assert.equal(isVueAppPath("/setup/"), true);
+  assert.equal(isVueAppPath("/SETUP"), true);
+  assert.equal(isVueAppPath("/setup/extra"), false);
   assert.equal(isVueAppPath("/setups"), false);
 });
 
@@ -94,7 +95,8 @@ test("every wiki path the boundary sends parses as the React app's wiki ref", ()
     const wiki = ref ? parseWikiRef(ref) : null;
     const gantt = /\/gantt\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
-    if (!gantt && !login) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const setup = /^\/setup\/?$/i.test(path);
+    if (!gantt && !login && !setup) assert.equal(isVueAppPath(path), wiki !== null, path);
   }
 });
 

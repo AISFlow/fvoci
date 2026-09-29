@@ -9,10 +9,8 @@ import type { SetupInput } from "@/lib/contracts";
 import { setupStatusQuery } from "@/lib/queries";
 import SetupForm from "../features/auth/SetupForm.vue";
 
-// First-instance setup (branding and the first administrator). Boot still
-// sends this path to the React app until apps/web/src/app-boundary.ts includes:
-//   /^\/setup\/?$/i
-// Pair that with VUE_ROUTE_PATHS.setup = "/setup" (app-boundary.test.ts).
+// First-instance setup (branding and the first administrator). Boot sends
+// `/setup` to this Vue page (`src/app-boundary.ts` `/^\/setup\/?$/i`).
 
 const router = useRouter();
 const queryClient = useQueryClient();
