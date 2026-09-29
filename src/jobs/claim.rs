@@ -1,7 +1,6 @@
 use sqlx::{Connection, PgConnection, PgPool};
 
-/// Session advisory locks for maintenance jobs. Distinct from membership (1907006)
-/// and collab room (1907007) namespaces.
+/// Session advisory locks for maintenance jobs.
 pub const JOB_LOCK_NAMESPACE: i32 = 1_907_020;
 
 pub const JOB_KEY_DAILY: i32 = 1;
