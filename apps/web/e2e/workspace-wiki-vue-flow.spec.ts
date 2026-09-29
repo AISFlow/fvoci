@@ -426,8 +426,8 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
     // text, each step replacing the syllable being composed, then a commit.
     // The composing syllable is the selected block, as Korean IMEs show it.
     // Synthetic events: this is not the OS IME witness. With the caret at
-    // the end of the marked text instead, the first jamo stays behind (the
-    // known bug the next test pins); the real IBus witness shows that too.
+    // the end of the marked text previously left the first jamo behind.
+    // The next test pins the repaired path; the IBus witness recorded the bug.
     const ime = await a.context.newCDPSession(a.page);
     const setComposition = (text: string) =>
       ime.send("Input.imeSetComposition", { text, selectionStart: 0, selectionEnd: text.length });
