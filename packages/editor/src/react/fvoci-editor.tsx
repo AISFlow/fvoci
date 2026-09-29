@@ -190,9 +190,9 @@ export const FvociEditor = memo(function FvociEditor({
 		[ariaLabel],
 	);
 
-	/* WHY: #738 — Tiptap 기본값은 nonce 없는 <style data-tiptap-style> 을 head 에 꽂는다
-	 * (@tiptap/core createStyleTag). nonce 가 붙은 style-src 아래에서 'unsafe-inline' 은
-	 * 죽어 있으므로 그 <style> 은 통째로 차단된다 — 규칙은 apps/web/src/index.css 로 옮겼다. */
+	/* WHY: #738 — Tiptap 기본값은 <style data-tiptap-style> 을 head 에 꽂는다
+	 * (@tiptap/core createStyleTag). style-src 는 'self' 와 셸 인라인 블록의 빌드 시점 해시뿐이고
+	 * 'unsafe-inline' 이 없으므로 그 <style> 은 통째로 차단된다 — 규칙은 react/editor.css 로 옮겼다. */
 	const editor = useEditor({
 		immediatelyRender: false,
 		injectCSS: false,

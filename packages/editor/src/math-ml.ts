@@ -13,8 +13,9 @@ import { asSafeHtml, type SafeHtml } from "./safe-html.js";
 const MAX_LATEX = 10_000;
 const MAX_SIZE = 100;
 
-/* WHY: #738 — nonce 가 붙은 style-src 아래에서 style= 속성은 CSP3 §6.7.3.3 상 nonce 로
- * 구제되지 않는다. output:"mathml" 에서 katex 가 style= 을 내는 곳은 셋뿐이고 전부 장식이다 —
+/* WHY: #738 — 해시 기반 style-src('unsafe-inline'·'unsafe-hashes' 없음) 아래에서 style= 속성은
+ * CSP3 §6.7.3.3 상 해시로 구제되지 않는다. output:"mathml" 에서 katex 가 style= 을 내는
+ * 곳은 셋뿐이고 전부 장식이다 —
  * \pmb(text-shadow) · \fcolorbox(border) · 그리고 렌더 전체가 중단되는 오류(`{`·`\frac{`)의
  * <span class="katex-error" style="color:#cc0000">. 식 내부 오류(\thisisnotacommand 등)는
  * <mstyle mathcolor> 즉 속성이라 애초에 CSP 밖이다. 간격·레이아웃도 전부 MathML 속성이라

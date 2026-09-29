@@ -63,9 +63,9 @@ export type FvociCollabUser = { id: string; name: string; color: string };
 
 /*
  * WHY: #738 — CollaborationCaret 기본 render 는 색을 setAttribute("style", …) 로 준다.
- * nonce 가 붙은 style-src 아래에서 style= 속성은 CSP3 §6.7.3.3 상 nonce 로 구제되지 않아
- * 통째로 차단되고, 피어 캐럿·라벨이 색을 잃는다. CSSOM 쓰기는 그 검사를 타지 않는다 —
- * 피어 색만 커스텀 속성으로 넘기고 규칙은 apps/web/src/index.css 의 에디터 스킨에 둔다.
+ * 해시 기반 style-src('unsafe-inline'·'unsafe-hashes' 없음) 아래에서 style= 속성은 CSP3 §6.7.3.3
+ * 상 해시로 구제되지 않아 통째로 차단되고, 피어 캐럿·라벨이 색을 잃는다. CSSOM 쓰기는 그 검사를
+ * 타지 않는다 — 피어 색만 커스텀 속성으로 넘기고 규칙은 react/editor.css 의 에디터 스킨에 둔다.
  * 라벨은 캐럿의 자식이라 --afn-caret-color 를 상속한다.
  */
 export function collabCaretRender(peer: {
