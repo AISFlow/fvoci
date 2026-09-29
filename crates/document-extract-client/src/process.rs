@@ -584,6 +584,11 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         let as_bytes = limits.max_child_rss_bytes;
         let cpu_secs = (limits.timeout_ms / 1000).max(1);
         let expected_ppid = std::process::id() as libc::pid_t;
+        // SAFETY: the closure runs in the forked child before exec. It
+        // captures only `Copy` integers and calls setrlimit, prctl, getppid,
+        // raise and _exit through `apply_rlimits_now` and
+        // `apply_parent_death_signal`, which allocate nothing and take no
+        // locks (an error is `io::Error::last_os_error`, an OS code).
         unsafe {
             cmd.pre_exec(move || {
                 apply_rlimits_now(as_bytes, cpu_secs)?;
@@ -630,6 +635,11 @@ pub fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<
 /// Apply OS ceilings in the current process. Used from `pre_exec` and the child
 /// binary before it reads input.
 pub fn apply_rlimits_now(as_bytes: u64, cpu_secs: u64) -> std::io::Result<()> {
+    // SAFETY: `as_lim` and `cpu_lim` are initialized locals that outlive the
+    // calls, and setrlimit only reads them. glibc's setrlimit is a thin
+    // prlimit64 syscall wrapper that neither allocates nor locks, which is why
+    // the `pre_exec` closure may call this between fork and exec (setrlimit is
+    // not on POSIX's async-signal-safe list).
     #[cfg(target_os = "linux")]
     unsafe {
         let as_lim = libc::rlimit {
