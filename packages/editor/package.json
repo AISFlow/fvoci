@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "@floating-ui/dom": "1.8.0",
-    "@fvoci/i18n": "file:../i18n",
+    "@fvoci/i18n": "workspace:*",
     "@hocuspocus/provider": "4.6.0",
     "@jsamuel1/pptxgenjs": "5.0.9",
     "@m2d/core": "1.7.1",

@@ -72,13 +72,22 @@ test("worker-only packages join Vite's entries sorted by id; Vite's entry wins a
   );
 });
 
+/** The directory `name` is installed in for the web app: its own or a workspace ancestor's node_modules. */
+function installedPackageDir(name: string): string {
+  for (let dir = webRoot; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, "node_modules", name);
+    if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
+    if (path.dirname(dir) === dir) throw new Error(`${name} is not installed`);
+  }
+}
+
 test("installed XLSX worker packages reach the public notice, with the existing supplements", () => {
   const modules = [
-    "node_modules/@office-kit/xlsx/dist/io.mjs",
-    "node_modules/fflate/esm/browser.js",
-    "node_modules/saxes/saxes.js",
-    "node_modules/@nodable/entities/src/index.js",
-  ].map((relative) => path.join(webRoot, relative));
+    ["@office-kit/xlsx", "dist/io.mjs"],
+    ["fflate", "esm/browser.js"],
+    ["saxes", "saxes.js"],
+    ["@nodable/entities", "src/index.js"],
+  ].map(([name, file]) => path.join(installedPackageDir(name!), file!));
   const entries = packageLicenseEntries(modules);
   assert.deepEqual(
     entries.map((entry) => `${entry.name}@${entry.version}`),

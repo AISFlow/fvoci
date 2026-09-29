@@ -10,8 +10,8 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@fvoci/editor": "file:../../packages/editor",
-    "@fvoci/i18n": "file:../../packages/i18n",
+    "@fvoci/editor": "workspace:*",
+    "@fvoci/i18n": "workspace:*",
     "@hocuspocus/provider": "4.6.0",
     "@hocuspocus/provider-react": "4.6.0",
     "@hookform/resolvers": "^5.9.1",
