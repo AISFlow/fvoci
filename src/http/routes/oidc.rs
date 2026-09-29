@@ -257,8 +257,8 @@ async fn identities(
 /// every refusal, 429 and 5xx causes included, as a 302. Every refusal's
 /// problem code is logged in the `oidc.sso_refused` line (debug for the
 /// limiter's refusal, warn otherwise). A database error or provider failure
-/// is also logged with its cause before it, by [`internal`] (error) or as
-/// `oidc.begin_failed` (warn), and a workspace client secret that does not
+/// is also logged before it, by [`internal`] (error; with the PostgreSQL
+/// message only for a database error) or as `oidc.begin_failed` (warn), and a workspace client secret that does not
 /// open logs an error before its refusal reads `provider_not_configured`.
 async fn sso(
     State(state): State<AppState>,

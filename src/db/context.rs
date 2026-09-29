@@ -16,20 +16,26 @@
 //! Module-specific tails are documented in `db::collab`, `db::task_ops` and
 //! `db::project_documents`.
 //!
-//! Workspace-scoped reads take no row locks and check the credential and
-//! permission in the same transaction as the data, with two exceptions.
-//! `db::legal::workspace_consents` holds the live workspace row `FOR SHARE`
-//! and leaves the credential check to its route. The collab reads in
-//! `db::collab` (room admission, operation lookup and verify, read-only load)
-//! run the writers' actor prefix, `lock_collab_actor` (steps 1-5 of that
-//! module's lock order), and the read-only load also locks, and may seed, the
-//! state row. Other project-scoped reads use [`begin_read`] (one REPEATABLE
-//! READ, READ ONLY snapshot).
-//! Instance-admin reads are also an exception:
-//! `db::admin::require_live_instance_admin` holds the actor's users row
-//! `FOR SHARE`; `db::admin` reads run it in the reading transaction, while
-//! the instance-settings read route runs it in a transaction of its own
-//! before and again after loading the settings.
+//! Reads check the credential and permission in the same transaction as the
+//! data. Whether they take row locks depends on the check they reuse, not on
+//! being a read:
+//! - [`session_is_live`] (the usual read check) and [`begin_read`] (one
+//!   REPEATABLE READ, READ ONLY snapshot, used by most project-scoped reads)
+//!   take no row locks. Stream access checks use a plain transaction with the
+//!   same non-locking checks.
+//! - A read that reuses the writers' prefix locks what that prefix locks:
+//!   [`recheck_session`] holds the actor's users and session (or token) rows
+//!   `FOR UPDATE` (for example the admin-only import job, workspace SSO
+//!   config and workspace export reads), and the collab reads in `db::collab`
+//!   (room admission, operation lookup and verify, read-only load) run
+//!   `lock_collab_actor` (steps 1-5 of that module's lock order); the
+//!   read-only load also locks, and may seed, the state row.
+//! - `db::legal::workspace_consents` holds the live workspace row `FOR SHARE`
+//!   and leaves the credential check to its route.
+//! - Instance-admin reads use `db::admin::require_live_instance_admin`, which
+//!   holds the actor's users row `FOR SHARE`: `db::admin` reads run it in the
+//!   reading transaction, and the instance-settings read route runs it in a
+//!   transaction of its own before and again after loading the settings.
 
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;

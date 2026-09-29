@@ -5,11 +5,12 @@
 //! a write is visible to the next request in every process.
 //!
 //! The boot snapshot is recorded once per process, by whichever of two calls
-//! runs first: [`load`] (`GET /api/v1/instance` and
+//! first resolves the settings: [`load`] (`GET /api/v1/instance` and
 //! `GET /api/v1/admin/instance-settings`) records the values it resolved, and
 //! [`apply_change`] (the admin settings PATCH and branding asset upload and
-//! removal) records the values it resolved before the change. The other
-//! readers here never record it. The admin output's `restartRequired` lists
+//! removal) records the values it resolved before the change; a change
+//! refused before that point (session or licence check) records nothing.
+//! The other readers here never record it. The admin output's `restartRequired` lists
 //! the restart-required keys whose current value differs from that snapshot:
 //! changes since this process's first recording call, not since it started, so
 //! a change another process committed before that call is not listed.
