@@ -2,7 +2,6 @@
 import { t } from "@fvoci/i18n";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { z } from "zod";
 import { QueryError, QueryLoading } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,35 +9,12 @@ import { Label } from "@/components/ui/label";
 import type { components } from "@/generated/api";
 import { ProblemError } from "@/lib/api";
 import { formatDateKo } from "@/lib/datetime";
+import { issueMessage } from "@/lib/issue-message";
+import { LEGAL_KIND_PRESETS as KIND_PRESETS, legalPublishInput } from "./legal-publish";
 import "./settings-shell.css";
 
 type LegalDocument = components["schemas"]["LegalDocumentOutput"];
 export type LegalPublishInput = components["schemas"]["LegalPublishBody"];
-
-const KIND_PRESETS = [
-  { kind: "terms", label: t("legal.terms") },
-  { kind: "privacy", label: t("legal.privacy") },
-];
-
-/** Source legalPublishInput; the date field becomes midnight UTC (`Z`) as the server requires. */
-export const legalPublishInput = z.object({
-  kind: z
-    .string()
-    .min(1, "i18n:form.too_small")
-    .max(50, "i18n:form.too_big")
-    .regex(/^[a-z0-9-]+$/, "i18n:form.invalid"),
-  title: z.string().trim().min(1, "i18n:form.too_small").max(300, "i18n:form.too_big"),
-  bodyMarkdown: z.string().min(1, "i18n:form.too_small").max(200_000, "i18n:form.too_big"),
-  required: z.boolean(),
-  effectiveAt: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, "i18n:form.invalid")
-    .transform((date) => `${date}T00:00:00Z`),
-});
-
-function issueText(message: string): string {
-  return message.startsWith("i18n:") ? t(message.slice(5) as Parameters<typeof t>[0]) : message;
-}
 
 const textareaClass =
   "min-h-48 w-full min-w-0 rounded-md border border-input bg-background px-3 py-2 text-ui outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring";
@@ -118,7 +94,7 @@ export function SettingsLegalView({
             setPublished(false);
             const parsed = legalPublishInput.safeParse({ kind, ...values });
             if (!parsed.success) {
-              setFieldError(issueText(parsed.error.issues[0]?.message ?? "i18n:form.invalid"));
+              setFieldError(issueMessage(parsed.error.issues[0]?.message ?? "i18n:form.invalid"));
               return;
             }
             try {

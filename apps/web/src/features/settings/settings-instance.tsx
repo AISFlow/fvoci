@@ -3,7 +3,7 @@
 // widget switch has no default so a new widget is a compile error. The one
 // exception is `attachmentTransfer`, whose card also shows what this server's
 // storage allows (`attachmentTransferView`).
-import { type I18nKey, isI18nKey, t } from "@fvoci/i18n";
+import { t } from "@fvoci/i18n";
 import { useState } from "react";
 import { ConfirmActionButton } from "@/components/confirm-action";
 import { QueryError, QueryLoading } from "@/components/query-status";
@@ -17,67 +17,39 @@ import {
   BRANDING_ASSET_MIME,
   type BrandingAssetKind,
   EE_GATED,
-  OVERRIDABLE_MESSAGES,
   SETTING_ENUM_OPTIONS,
   SETTINGS_CATALOG,
   SETTINGS_ENTRIES,
   attachmentTransferView,
-  type SettingsEntry,
   type SettingsKey,
   type SettingsWidget,
   optionKey,
   withoutAssets,
 } from "./settings-catalog";
+import {
+  ASSET_COPY,
+  MESSAGE_KEYS,
+  assetDigest,
+  assetPreviewSrc,
+  isRecord,
+  leafValue,
+  listFieldValue,
+  numberFieldValue,
+  previewText,
+  settingLabel as label,
+  settingMatches as matches,
+  textFieldValue,
+  withLeaf,
+  withMessageOverride,
+} from "./settings-instance-model";
 import "./settings-shell.css";
 
 type AdminInstanceSettingsOutput = components["schemas"]["AdminInstanceSettingsOutput"];
-
-const MESSAGE_KEYS = Object.keys(OVERRIDABLE_MESSAGES);
 
 const textareaClass =
   "w-full min-w-0 rounded-md border border-input bg-background px-3 py-2 text-ui outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring disabled:opacity-50";
 const badgeClass =
   "inline-flex items-center rounded-full border border-border px-2 py-0.5 text-caption text-muted-foreground";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function leafValue(doc: unknown, path: string): unknown {
-  let cursor: unknown = doc;
-  for (const part of path.split(".")) {
-    if (!isRecord(cursor)) return undefined;
-    cursor = cursor[part];
-  }
-  return cursor;
-}
-
-function withLeaf(doc: unknown, path: string, value: unknown): unknown {
-  const [head, ...rest] = path.split(".");
-  if (head === undefined) return value;
-  const base = isRecord(doc) ? doc : {};
-  return {
-    ...base,
-    [head]: rest.length === 0 ? value : withLeaf(base[head], rest.join("."), value),
-  };
-}
-
-/** The preview never renders HTML: variables are shown by name only. */
-function previewText(text: string): string {
-  return text.replace(/\{\{(\w+)\}\}/g, "$1");
-}
-
-function label(key: string): string {
-  return isI18nKey(key) ? t(key) : key;
-}
-
-function matches(key: SettingsKey, entry: SettingsEntry, q: string) {
-  if (q === "") return true;
-  const hay = [key, label(entry.labelKey), label(entry.helpKey), label(entry.group), ...Object.keys(entry.widgets)]
-    .join(" ")
-    .toLowerCase();
-  return hay.includes(q.toLowerCase());
-}
 
 function MessageOverrides({
   value,
@@ -105,15 +77,7 @@ function MessageOverrides({
               className={textareaClass}
               disabled={disabled}
               id={`msg-${key}`}
-              onChange={(event) => {
-                const next: Record<string, string> = {};
-                for (const [k, v] of Object.entries(map)) {
-                  if (typeof v === "string") next[k] = v;
-                }
-                if (event.target.value === "") delete next[key];
-                else next[key] = event.target.value;
-                onChange(next);
-              }}
+              onChange={(event) => onChange(withMessageOverride(map, key, event.target.value))}
               rows={2}
               value={current}
             />
@@ -186,11 +150,7 @@ function SettingField({
           className="w-56"
           disabled={disabled}
           id={id}
-          onChange={(event) => {
-            // Number("") === 0 — an emptied field stays unset instead.
-            const raw = event.target.value;
-            onChange(raw === "" ? undefined : Number(raw));
-          }}
+          onChange={(event) => onChange(numberFieldValue(event.target.value))}
           type="number"
           value={typeof value === "number" ? value : ""}
         />
@@ -200,8 +160,7 @@ function SettingField({
         <Input
           disabled={disabled}
           id={id}
-          // Empty = null (unset); required leaves reject both "" and null.
-          onChange={(event) => onChange(event.target.value === "" ? null : event.target.value)}
+          onChange={(event) => onChange(textFieldValue(event.target.value))}
           value={typeof value === "string" ? value : ""}
         />
       );
@@ -211,13 +170,7 @@ function SettingField({
           className={textareaClass}
           disabled={disabled}
           id={id}
-          onChange={(event) => {
-            const lines = event.target.value
-              .split("\n")
-              .map((line) => line.trim())
-              .filter((line) => line !== "");
-            onChange([...new Set(lines)]);
-          }}
+          onChange={(event) => onChange(listFieldValue(event.target.value))}
           rows={4}
           value={Array.isArray(value) ? value.join("\n") : ""}
         />
@@ -226,36 +179,6 @@ function SettingField({
       return <MessageOverrides disabled={disabled} onChange={onChange} value={value} />;
   }
 }
-
-function assetDigest(value: unknown): string | null {
-  if (!isRecord(value)) return null;
-  return typeof value.sha256 === "string" ? value.sha256 : null;
-}
-
-/** The upload digest versions the URL so a replaced asset is not served from cache. */
-export function assetPreviewSrc(kind: BrandingAssetKind, digest: string): string {
-  return `/api/v1/branding/${kind}?v=${digest.slice(0, 12)}`;
-}
-
-const ASSET_COPY: Record<
-  BrandingAssetKind,
-  { alt: I18nKey; none: I18nKey; clear: I18nKey; title: I18nKey; body: I18nKey }
-> = {
-  logo: {
-    alt: "settings.ui.assetAlt.logo",
-    none: "settings.ui.assetNone.logo",
-    clear: "settings.ui.assetClear.logo",
-    title: "settings.ui.assetClearTitle.logo",
-    body: "settings.ui.assetClearBody.logo",
-  },
-  favicon: {
-    alt: "settings.ui.assetAlt.favicon",
-    none: "settings.ui.assetNone.favicon",
-    clear: "settings.ui.assetClear.favicon",
-    title: "settings.ui.assetClearTitle.favicon",
-    body: "settings.ui.assetClearBody.favicon",
-  },
-};
 
 /** Asset leaves bypass the draft: upload is a raw POST, clearing is a DELETE. */
 function AssetField({
