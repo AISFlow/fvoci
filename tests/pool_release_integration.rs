@@ -14,13 +14,16 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
-use std::io::Write;
+#[path = "support/log_capture.rs"]
+mod log_capture;
+
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fvoci_server::db::context::begin_read;
 use fvoci_server::db::pool;
+use log_capture::{capture_warnings, Captured};
 use project_harness::{admin_pool, close_pool, TestDb};
 use sqlx::PgPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,58 +36,10 @@ const CHECK_FAILED_EVENT: &str = "db.pool.acquire_check_failed";
 const POOL_TARGET: &str = " fvoci_server::db::pool: ";
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Warn-level log lines emitted on this test's thread. `#[tokio::test]` runs a
-/// current-thread runtime, so sqlx's spawned release tasks log here too.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Captured {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
-    type Writer = Captured;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-impl Captured {
-    fn lines(&self) -> Vec<String> {
-        String::from_utf8(self.0.lock().unwrap().clone())
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
-
-    /// Only `db::pool`'s own events: other warnings on the thread, such as
-    /// sqlx's slow-statement or slow-acquire lines on a stalled runner, are
-    /// not counted.
-    fn pool_events(&self) -> Vec<String> {
-        let mut events = self.lines();
-        events.retain(|line| line.contains(POOL_TARGET));
-        events
-    }
-}
-
-fn capture_warnings() -> (Captured, tracing::subscriber::DefaultGuard) {
-    let captured = Captured::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(captured.clone())
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
-    (captured, guard)
+/// Only `db::pool`'s own events: other warnings on the thread, such as sqlx's
+/// slow-statement or slow-acquire lines on a stalled runner, are not counted.
+fn pool_events(logs: &Captured) -> Vec<String> {
+    logs.lines_with(POOL_TARGET)
 }
 
 /// The pool check logged once per closed connection, with its fixed event
@@ -92,7 +47,7 @@ fn capture_warnings() -> (Captured, tracing::subscriber::DefaultGuard) {
 /// logged no error path of its own, so each leaked connection was closed
 /// gracefully.
 fn assert_release_warnings(logs: &Captured, states: &[&str]) {
-    let events = logs.pool_events();
+    let events = pool_events(logs);
     assert_eq!(events.len(), states.len(), "pool events: {events:#?}");
     for (line, state) in events.iter().zip(states) {
         assert!(line.contains(RELEASE_EVENT), "{line}");
@@ -156,6 +111,20 @@ async fn wait_backend_state(admin: &PgPool, pid: i32, state: &str) {
             "backend {pid} state {current:?}, want {state}"
         );
         tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// Waits until `idle` connections sit in the pool's idle queue: sqlx's
+/// release ping answered for each returned connection.
+async fn wait_idle(pool: &PgPool, idle: usize) {
+    let deadline = Instant::now() + WAIT;
+    while pool.num_idle() < idle {
+        assert!(
+            Instant::now() < deadline,
+            "{} idle connections, want {idle}",
+            pool.num_idle()
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }
 
@@ -465,6 +434,12 @@ async fn dead_idle_connection_is_replaced() {
     let (logs, _guard) = capture_warnings();
 
     let dead_pid = backend_pid(&pool).await;
+    // Dropping the connection only spawns sqlx's `return_to_pool`; its ping
+    // must answer before the connection goes idle. A backend terminated
+    // before that ping fails it, and sqlx closes the connection there, so the
+    // next checkout connects afresh without running the check (the CI run
+    // 36525958194 failure: a new pid, no pool event).
+    wait_idle(&pool, 1).await;
     let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(dead_pid)
         .fetch_one(&admin)
@@ -477,8 +452,13 @@ async fn dead_idle_connection_is_replaced() {
     assert_ne!(pid, dead_pid);
     assert_eq!(backend_pid(&pool).await, pid);
 
-    let events = logs.pool_events();
-    assert_eq!(events.len(), 1, "pool events: {events:#?}");
+    let events = pool_events(&logs);
+    assert_eq!(
+        events.len(),
+        1,
+        "pool events: {events:#?}\nall warnings: {:#?}",
+        logs.lines()
+    );
     let line = &events[0];
     assert!(line.contains(CHECK_FAILED_EVENT), "{line}");
     // PostgreSQL's FATAL 57P01 when its reply is read first, else the socket
@@ -489,6 +469,8 @@ async fn dead_idle_connection_is_replaced() {
         "{line}"
     );
     assert!(!line.contains("terminating"), "{line}");
+    let release_failures = logs.lines_with("testing the connection on-release");
+    assert!(release_failures.is_empty(), "{release_failures:#?}");
 
     close_pool(pool).await;
     admin.close().await;
