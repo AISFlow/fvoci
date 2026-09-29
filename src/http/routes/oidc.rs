@@ -27,7 +27,7 @@ use crate::db::oidc::{self as db, ManageError, UnlinkOutcome, WorkspaceOidcInput
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::authz::{require_request_auth, Access, RequestAuth};
 use crate::http::cookie::set_session_cookie;
-use crate::http::guard::check_origin;
+use crate::http::guard::{check_origin, require_origin};
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::identity::{workspace_oidc_context, Identity};
@@ -331,12 +331,8 @@ fn is_form(headers: &HeaderMap) -> bool {
 
 /// Invite mode links the browser's provider identity to the invited account
 /// and replaces its session, so, like link, it starts only from a same-origin
-/// POST. The invitation token and the consents come from the urlencoded body.
-///
-/// Unlike the shared [`check_origin`], a request without `Origin` is refused
-/// too: browsers send it on every POST (the invite page's `fetch` included),
-/// so only a client that strips it, such as some privacy extensions, would
-/// otherwise get a cross-site post through.
+/// POST ([`require_origin`]). The invitation token and the consents come from
+/// the urlencoded body.
 async fn start_invite(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
@@ -346,10 +342,7 @@ async fn start_invite(
     RawQuery(raw): RawQuery,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    if !headers.contains_key(header::ORIGIN) {
-        return Err(AppError::from_code(ProblemCode::OriginMismatch));
-    }
-    check_origin(&headers, &state.public_origin)?;
+    require_origin(&headers, &state.public_origin)?;
     let provider = provider_param(&provider)?;
     limit_ip(&state, peer).await?;
     strict_query(raw, &[])?;
@@ -534,6 +527,8 @@ async fn finish_callback(
     Ok(response)
 }
 
+/// Links a provider identity to the signed-in account: a same-origin POST
+/// only ([`require_origin`]), like invite.
 async fn link(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
@@ -543,7 +538,7 @@ async fn link(
     Path(provider): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
-    check_origin(&headers, &state.public_origin)?;
+    require_origin(&headers, &state.public_origin)?;
     let auth = session(&state, &headers, &jar).await?;
     let provider = provider_param(&provider)?;
     limit_ip(&state, peer).await?;

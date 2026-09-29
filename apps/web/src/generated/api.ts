@@ -7391,7 +7391,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description origin_mismatch */
+            /** @description origin_mismatch: another origin, or no `Origin` header at all */
             403: {
                 headers: {
                     [name: string]: unknown;

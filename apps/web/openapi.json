@@ -1932,7 +1932,7 @@
             }
           },
           "403": {
-            "description": "origin_mismatch",
+            "description": "origin_mismatch: another origin, or no `Origin` header at all",
             "content": {
               "application/json": {
                 "schema": {

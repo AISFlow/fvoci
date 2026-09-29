@@ -467,6 +467,29 @@ pub async fn form_post(
     respond(app, builder.body(Body::from(body)).unwrap(), from).await
 }
 
+/// A POST with a session cookie and exactly the `Origin` given (raw bytes,
+/// or none at all), as a browser, a stripping extension or a hand-built
+/// client would send it.
+pub async fn post_with_origin(
+    app: &axum::Router,
+    path: &str,
+    cookie: &str,
+    origin: Option<&[u8]>,
+    from: SocketAddr,
+) -> Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("cookie", format!("fvoci_session={cookie}"));
+    if let Some(origin) = origin {
+        builder = builder.header(
+            "origin",
+            axum::http::HeaderValue::from_bytes(origin).expect("header value"),
+        );
+    }
+    respond(app, builder.body(Body::empty()).unwrap(), from).await
+}
+
 pub async fn call(
     app: &axum::Router,
     method: &str,
@@ -4361,6 +4384,44 @@ async fn oidc_invitation_start_is_a_same_origin_post() {
             .map(|(_, issuer)| issuer),
         Some(Some(fake.base.clone()))
     );
+    h.finish().await;
+}
+
+/// Link binds a provider identity to the signed-in account, so like invite
+/// it starts only from a same-origin POST: another origin, `null`, no
+/// `Origin` at all and an unreadable one are refused before any state is
+/// issued or any provider is contacted.
+#[tokio::test]
+async fn oidc_link_start_is_a_same_origin_post() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;
+    let h = oidc_harness(&fake, &[ProviderKey::Generic]).await;
+    let (_user_id, _email, cookie) = h.member("linker").await;
+    let link = "/api/v1/auth/oidc/generic/link";
+    for origin in [
+        Some(&b"https://evil.example"[..]),
+        Some(b"null"),
+        None,
+        Some(b"http://localhost\xff"),
+    ] {
+        let label = origin.map(String::from_utf8_lossy);
+        let res = post_with_origin(&h.app, link, &cookie, origin, peer(175)).await;
+        assert_eq!(
+            res.status,
+            StatusCode::FORBIDDEN,
+            "{label:?}: {:?}",
+            res.json
+        );
+        assert_eq!(res.code(), "origin_mismatch", "{label:?}");
+        assert!(res.cookie_named("fvoci_oidc_state").is_none(), "{label:?}");
+    }
+    assert_eq!(oidc_state_rows(&h).await, 0);
+    assert_eq!(fake.discovery_hits.load(Ordering::SeqCst), 0);
+
+    // The settings page's same-origin fetch.
+    let res = post_with_origin(&h.app, link, &cookie, Some(b"http://localhost"), peer(176)).await;
+    authorization_url_json(link, &res);
+    state_cookie_of(link, &res);
+    assert_eq!(oidc_state_rows(&h).await, 1);
     h.finish().await;
 }
 

@@ -221,7 +221,7 @@ fn sso_callback() {}
         (status = 200, description = "Link started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script", body = OidcAuthorizationOutput),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
-        (status = 403, description = "origin_mismatch", body = ProblemResponse),
+        (status = 403, description = "origin_mismatch: another origin, or no `Origin` header at all", body = ProblemResponse),
         (status = 404, description = "provider_not_configured", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
     )
