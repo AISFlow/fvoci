@@ -426,7 +426,7 @@ snapshots and automatic retention in the hourly maintenance sweep):
 
 Capacity refusals close WebSocket clients with **1013** “try again later” (retryable).
 Per-child limits stay unchanged (AS 1 GiB, observed RSS kill 512 MiB, 8 s wall, 256-op recycle).
-Helpers try to set `oom_score_adj=1000` so cgroup OOM prefers a helper over `fvoci-server`; where the container profile denies it (e.g. AppArmor docker-default), the helper still starts without it.
+Collaboration helpers and document children (HWP, office, Markdown, image preview) try to set `oom_score_adj=1000` so cgroup OOM prefers them over `fvoci-server`; where the container profile denies it (e.g. AppArmor docker-default), they still start without it, and only a collaboration helper's denial is logged (once per server process).
 The server raises soft `RLIMIT_NOFILE` to the hard limit at startup.
 
 Heavy load probe (not in default CI; Linux + PostgreSQL via `scripts/start-test-postgres.sh`):
