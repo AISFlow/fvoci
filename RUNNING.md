@@ -646,7 +646,8 @@ API_PROXY_TARGET=http://127.0.0.1:8080 bun --bun run dev
 
 The React app and the Vue app (`src/vue`, Nuxt UI) share one `index.html`;
 `src/boot.ts` loads the Vue app for the paths in `src/app-boundary.ts` (the
-project Gantt, `/w/:slug/:ref/gantt`) and the React app for every other path.
+project Gantt, `/w/:slug/:ref/gantt`, and wiki documents, `/w/:slug/WIKI-<n>`)
+and the React app for every other path.
 
 Type checking runs both checkers under Bun (`build` runs them before `vite build`):
 
