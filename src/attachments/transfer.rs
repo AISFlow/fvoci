@@ -67,6 +67,8 @@ impl TransferUnavailable {
     }
 }
 
+// Keep in sync with the infra/rust/compose.s3.yml defaults (and the values
+// commented in infra/rust/.env.example).
 pub const DEFAULT_PRESIGN_PART_TTL: Duration = Duration::from_secs(900);
 pub const DEFAULT_PRESIGN_DOWNLOAD_TTL: Duration = Duration::from_secs(60);
 

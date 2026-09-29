@@ -262,10 +262,12 @@ Setting up `presigned`:
    by host, not port, and the storage origin cannot send the app's
    `nosniff`/sandbox headers (downloads are forced to
    `Content-Disposition: attachment` and `application/octet-stream` instead).
-2. Give the bucket this CORS configuration (AWS JSON form). No request to the
-   bucket carries credentials: part PUTs use credentials mode `omit`, and the
-   in-app viewers fetch the download with `same-origin`, so the session cookie
-   reaches the API but not the redirected storage request. The bucket
+2. Give the bucket this CORS configuration (AWS JSON form). No CORS request to
+   the bucket carries credentials: part PUTs use credentials mode `omit`, and
+   the in-app viewers fetch the download with `same-origin`, so the session
+   cookie reaches the API but not the redirected storage request. Image loads
+   and download navigations are not CORS requests, and they carry no FVOCI
+   cookie because the storage host differs from the app's. The bucket
    therefore needs no `Access-Control-Allow-Credentials`. Still list the exact
    `FVOCI_PUBLIC_ORIGIN` rather than `*`, so only the app's pages can read
    the responses:
