@@ -23,7 +23,8 @@ const refParam = computed(() => String(route.params.ref ?? ""));
 
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
-const { project, notFound } = useProjectRef(() => workspace.value?.id, refParam);
+const projectRef = useProjectRef(() => workspace.value?.id, refParam);
+const { project, notFound } = projectRef;
 useTaskStream(
   () => workspace.value?.id,
   () => project.value?.id,
@@ -82,6 +83,10 @@ function onOpenTask(displayId: string): void {
   </div>
   <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-name="workspace.name">
     <p v-if="notFound" role="alert" class="text-error">{{ t("project.notFound") }}</p>
+    <div v-else-if="projectRef.failed.value">
+      <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
+      <UButton size="sm" class="mt-2" @click="projectRef.retry()">{{ t("load.retry") }}</UButton>
+    </div>
     <div v-else-if="project" class="flex flex-col gap-3">
       <p class="text-sm">
         <a :href="projectsPath(slug)" class="underline underline-offset-2">{{ t("nav.projects") }}</a>

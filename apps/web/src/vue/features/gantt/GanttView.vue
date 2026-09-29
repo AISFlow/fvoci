@@ -10,7 +10,7 @@ import { formatDisplayId } from "@/lib/href";
 import type { IsoDate } from "@/lib/iso-date";
 import { problemMessage } from "@/lib/api";
 import { membersQuery } from "@/lib/queries";
-import type { ViewQuery } from "@/lib/view-query";
+import { EMPTY_VIEW_QUERY, withTitleFilter, type ViewQuery } from "@/lib/view-query";
 import GanttChart, { type GanttBarChange } from "./GanttChart.vue";
 import type { PackMode } from "./gantt-geometry";
 import { useGanttLayout } from "./useGanttLayout";
@@ -78,11 +78,21 @@ function onSelect(id: string): void {
 }
 
 // The search box writes the title filter to the URL a moment after typing
-// stops, so each keystroke does not load a layout.
+// stops, so each keystroke does not load a layout. A URL change that is the
+// echo of our own search is not written back into the box: the user may have
+// typed more since, and those characters would be lost.
 const title = ref(props.query.filters.title ?? "");
+/** Title filters sent with `search` that the URL has not shown yet, oldest first. */
+const echoes: string[] = [];
 watch(
   () => props.query.filters.title ?? "",
   (next) => {
+    const echo = echoes.indexOf(next);
+    if (echo >= 0) {
+      echoes.splice(0, echo + 1);
+      return;
+    }
+    echoes.length = 0;
     if (next !== title.value.trim()) title.value = next;
   },
 );
@@ -90,7 +100,13 @@ let searchTimer: number | undefined;
 function onTitleInput(value: string | number | null | undefined): void {
   title.value = String(value ?? "");
   window.clearTimeout(searchTimer);
-  searchTimer = window.setTimeout(() => emit("search", title.value), 300);
+  searchTimer = window.setTimeout(() => {
+    // The filter as the URL will hold it (trimmed, capped); an unchanged one
+    // changes no URL and has no echo.
+    const next = withTitleFilter(EMPTY_VIEW_QUERY, title.value).filters.title ?? "";
+    if (next !== (props.query.filters.title ?? "")) echoes.push(next);
+    emit("search", title.value);
+  }, 300);
 }
 onBeforeUnmount(() => window.clearTimeout(searchTimer));
 </script>

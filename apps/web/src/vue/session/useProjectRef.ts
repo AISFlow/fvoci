@@ -18,5 +18,7 @@ export function useProjectRef(workspaceId: MaybeRefOrGetter<string | undefined>,
       (projects.isSuccess.value && project.value === undefined) ||
       (projects.error.value instanceof ProblemError && projects.error.value.status === 404),
   );
-  return { projects, project, notFound };
+  /** The list failed for another reason (5xx, network): the page offers a retry. */
+  const failed = computed(() => projects.isError.value && !notFound.value);
+  return { projects, project, notFound, failed, retry: () => projects.refetch() };
 }
