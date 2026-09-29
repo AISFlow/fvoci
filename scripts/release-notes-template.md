@@ -55,7 +55,9 @@ their tests, CI and an independent review (feature table in
 - **Sharing and organizing:** public share links and pages, favorites, recent
   items, tags, collections and saved views, and calendar (ICS) feeds.
 - **Administration:** consent and legal documents, audit log, license and
-  quotas, admin settings and user management, branding.
+  quotas, admin settings and user management, branding. The audit log and
+  branding need an enterprise license, which a published build cannot
+  accept (the same as workspace SSO).
 - **Operations:** API documentation at `/api/docs` (signed-in users), `/health`,
   `/ready` and `/metrics` probes with a container healthcheck,
   `fvoci-migrate --secrets-audit` / `--secrets-rotate` for the encryption
@@ -93,8 +95,9 @@ their tests, CI and an independent review (feature table in
 - **Wiki share links.** Creating a public link to a wiki page now needs View
   on every page below it; a guest could publish child pages they could not
   read. The refusal is 404. The check is made only when a link is created,
-  not when it is served: links created before this release, and pages added
-  or restricted below a shared page later, are served as before.
+  not when it is served: a link serves its page's whole current subtree, so
+  links created before this release, and pages added or restricted below a
+  shared page later, are still exposed through the link.
 - **No SSO on personal workspaces** (licensed builds only). Saving an SSO
   configuration on a personal workspace answers 409
   `personal_workspace_is_immutable`, and one saved before no longer starts
@@ -292,18 +295,22 @@ stand-ins. Treat them as untested with a real provider:
   showed its text after 39.5 s in 0.1.0 and 3.0 s in 0.1.1 with 30 rooms
   (978 and 3 connection attempts), and 36.6 s and 0.44 s with 64 rooms. The
   3.0 s against 0.44 s comes from the 5 s a just-emptied room is kept for a
-  returning user plus that timing, not from the number of rooms. 30 rooms is
+  returning user plus that timing, not from the number of rooms (most
+  likely, from reading the code; not confirmed by instrumentation). 30 rooms is
   the image default; the release compose uses 64. With every room in use,
   a waiting document showed its text after an editor left in 34.7 s and
-  8.2 s (30 rooms), 30.6 s and 8.7 s (64 rooms); these include that 5 s.
+  8.2 s (30 rooms), 30.6 s and 8.7 s (64 rooms); the 0.1.1 figures include
+  that 5 s, while 0.1.0 never reclaims a room and waits for the 30 s idle
+  eviction.
   The 0.2.0 helper changes were not measured this way, nor under Docker's
   default AppArmor profile, nor with many real users.
 - **Upgrade from 0.1.1:** checked once by hand on amd64 with local storage,
   from the published 0.1.1 release files to a 0.2.0 image built locally from
   the release-prep commit `b2218c75` (not the published 0.2.0 image). A
   seeded account, workspace, project, task, comments, wiki body, HWPX
-  attachment and sealed two-factor secret were unchanged after the upgrade
-  (migration 044 applied; `--doctor`, `--verify-secrets` and sign-in passed).
+  attachment were unchanged after the upgrade, and a sealed two-factor secret
+  still opened (migration 044 applied; `--doctor`, `--verify-secrets` and
+  sign-in passed).
   0.1.1 then refused the migrated database without changing it (identical
   `pg_dump` before and after), and a backup taken with the 0.1.1
   `scripts/backup.sh` restored into a fresh 0.1.1 install with the 0.1.1
@@ -351,9 +358,10 @@ stand-ins. Treat them as untested with a real provider:
   (same as the original product; a decision is pending).
 - **Digest can stop at the same place every day.** If the same recipients
   fail every day (a lasting temporary refusal such as `452 4.2.2`, or a bare
-  `550` from a mail server that sends no enhanced status codes), the daily
-  run can stop at the same user each day, and users after it get no digest
-  while those failures last.
+  `550` from a mail server that sends no enhanced status codes), five such
+  temporary failures (or twenty such refusals) with no digest delivered and
+  no refusal of one mailbox between them stop the daily run at the same user
+  each day, and users after it get no digest while those failures last.
 - **Mail can be sent twice to one recipient** when the server restarts
   between retries of one mail event: the list of recipients already accepted
   is kept in memory only.

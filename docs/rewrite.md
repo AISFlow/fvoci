@@ -265,7 +265,7 @@ main push 대기 관측은 이미 수락된 PR의 취소가 아니다.
 | [#226](https://github.com/AISFlow/fvoci/pull/226) | `f4c8b8e5` | `a53074f74046af6e4e3c1e9e255fd5d23f29dd8b` | (검토 ACCEPT는 `de340d11`, 조건부 문구 수정 반영 `f4c8b8e5`) 문서: 2026-09-29 인계 체크포인트 |
 | [#228](https://github.com/AISFlow/fvoci/pull/228) | `66464864` | `b2ff90ccf5b09d15568d32d2f8a592be72facfd8` | outbox-reset 이전 이벤트/newest 조회의 xid8 text 정렬 결함 수정(digit 경계에서 잘못된 target·external replay floor), 테스트 pool `close_pool`(PG16 CI 실패 원인). 게시 버전 영향 없음 |
 | [#227](https://github.com/AISFlow/fvoci/pull/227) | `42b9e56a` | `df0b5921fe88298e71143799fd2dbf50b955311b` | 문서: 2026-09-29 역할(Claude Code Opus 5.5 코디네이터·내장 workflow) |
-| [#225](https://github.com/AISFlow/fvoci/pull/225) | `f5a09f2d` | `1367b05c1c431fa98be653784d66fdfb69d8a3bf` | 협업 room 상한에서 grace 지난 빈 room 회수(lease 원자 등록·동시 회수 재탐색·세션 리비전 보존), 단일 socket bounded backoff, 거부 시 '로드되지 않음+이유'. 성능 수치는 초기 head `4a68ee70` 작성자 측정(소스 빌드·단일 호스트)이다. 이후 room 상한 동작은 게시 0.1.0/0.1.1 이미지에서 꺼낸 binary로 측정했다(flow h, 모드당 n=10, 컨테이너 밖 단일 호스트; 원시 결과 `fvoci-evidence/perf-baseline/published-0.1.0-vs-0.1.1-collab`). 0.1.1 cap 30 idle은 2,989 ms로 작성자 측정 438 ms보다 긴데, 방금 비운 room의 5 s grace와 측정 시점 때문이다. 0.2.0과 다른 flow는 측정하지 않았다 |
+| [#225](https://github.com/AISFlow/fvoci/pull/225) | `f5a09f2d` | `1367b05c1c431fa98be653784d66fdfb69d8a3bf` | 협업 room 상한에서 grace 지난 빈 room 회수(lease 원자 등록·동시 회수 재탐색·세션 리비전 보존), 단일 socket bounded backoff, 거부 시 '로드되지 않음+이유'. 성능 수치는 초기 head `4a68ee70` 작성자 측정(소스 빌드·단일 호스트)이다. 이후 room 상한 동작은 게시 0.1.0/0.1.1 이미지에서 꺼낸 binary로 측정했다(flow h, 모드당 n=10, 컨테이너 밖 단일 호스트; 원시 결과 `fvoci-evidence/perf-baseline/published-0.1.0-vs-0.1.1-collab`). 0.1.1 cap 30 idle은 2,989 ms로 작성자 측정 438 ms보다 긴데, 방금 비운 room의 5 s grace와 측정 시점 때문으로 보인다(코드 판독, 계측 미확인). 0.2.0과 다른 flow는 측정하지 않았다 |
 
 2026-09-29 KST 추가 대조 지점(수락 제품 main): `e600047c1aef043357061f00fe735a3ce0d9e4ea`(#239 merge). v0.1.0 tag 이후 v0.1.1에 포함된
 #229·#223은 위 표에 없어 앞 두 행에 기록하고, 나머지는 v0.1.1 tag(`71d252a6`) 이후 수락분으로 0.2.0 준비 PR(마지막 행) merge의 `v0.2.0` 게시 대상이다.
@@ -341,7 +341,7 @@ provenance: 실행 source `0e3e95dd`의 frontend(`apps/web`·`packages`)는 수�
 - 성능 기준선(#214 도구, 측정 `opus-perf-baseline.md`, 검토 `opus-perf-baseline-review.md`): 소스 빌드 `1101e21b`, 단일 호스트.
   사용자 체감 상위 병목은 협업 room 상한 도달 시 새 본문 최대 ~30 s 정지와 빠른 재연결 반복, 첨부 viewer의 ~300 ms 유휴 구간,
   태스크 메타 원격 반영의 SSE 750 ms poll이다. 첨부 viewer 첫 표시는 #221, room 상한 동작은 #225로 개선했다. 첨부 viewer는 재측정하지
-  않았고, room 상한 동작은 게시 0.1.0/0.1.1 이미지에서 꺼낸 binary로 측정했다(flow h, 모드당 n=10, 컨테이너 밖 단일 호스트; 원시 결과 `fvoci-evidence/perf-baseline/published-0.1.0-vs-0.1.1-collab`). 0.1.1 cap 30 idle은 2,989 ms로 작성자 측정 438 ms보다 긴데, 방금 비운 room의 5 s grace와 측정 시점 때문이다. 0.2.0과 다른 flow는 측정하지 않았다. SSE 750 ms poll은 설계 결정 대기다.
+  않았고, room 상한 동작은 게시 0.1.0/0.1.1 이미지에서 꺼낸 binary로 측정했다(flow h, 모드당 n=10, 컨테이너 밖 단일 호스트; 원시 결과 `fvoci-evidence/perf-baseline/published-0.1.0-vs-0.1.1-collab`). 0.1.1 cap 30 idle은 2,989 ms로 작성자 측정 438 ms보다 긴데, 방금 비운 room의 5 s grace와 측정 시점 때문으로 보인다(코드 판독, 계측 미확인). 0.2.0과 다른 flow는 측정하지 않았다. SSE 750 ms poll은 설계 결정 대기다.
 - 실제 외부 IdP·인증 앱 스캔 F는 사용자 환경(계정·기기)이 필요한 실행 증거이며 코드 정책 선택 문제가 아니다.
 - 분류 근거·행별 종료 조건: `/home/kinesis/orca/fvoci-evidence/opus-decision-status-cleanup.md`.
 - 문서 변환의 정상 Rust 경로는 수락됐으며 Node 구현 복원은 필요 없다. 개발·CI의 Node/Python과 독립 reader는
@@ -513,7 +513,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   차면 새 본문 join이 1013으로 닫히고 클라이언트가 backoff 없이 재연결하며, room은 마지막 클라이언트 후 30 s에 해제되므로 새 본문이
   최대 ~30 s 비어 보인다(서버 로그 없음). 태스크 메타의 다른 브라우저 반영은 SSE 750 ms poll이 지배한다(p95 ~0.75 s).
   첨부 viewer는 첫 표시 전 ~300 ms 유휴 구간이 있다. 첨부 viewer 첫 표시는 #221, room 상한 동작은 #225로 개선했다. 첨부 viewer는 재측정하지 않았고,
-  room 상한 동작은 게시 0.1.0/0.1.1 이미지에서 꺼낸 binary로 측정했다(flow h, 모드당 n=10, 컨테이너 밖 단일 호스트; 원시 결과 `fvoci-evidence/perf-baseline/published-0.1.0-vs-0.1.1-collab`). 0.1.1 cap 30 idle은 2,989 ms로 작성자 측정 438 ms보다 긴데, 방금 비운 room의 5 s grace와 측정 시점 때문이다. 0.2.0과 다른 flow는 측정하지 않았다. SSE poll은 설계 결정 대기다.
+  room 상한 동작은 게시 0.1.0/0.1.1 이미지에서 꺼낸 binary로 측정했다(flow h, 모드당 n=10, 컨테이너 밖 단일 호스트; 원시 결과 `fvoci-evidence/perf-baseline/published-0.1.0-vs-0.1.1-collab`). 0.1.1 cap 30 idle은 2,989 ms로 작성자 측정 438 ms보다 긴데, 방금 비운 room의 5 s grace와 측정 시점 때문으로 보인다(코드 판독, 계측 미확인). 0.2.0과 다른 flow는 측정하지 않았다. SSE poll은 설계 결정 대기다.
 - 초대·공유·ICS 경로 토큰과 OIDC code/state가 요청 trace span의 원시 URI로 debug 로그에 남던 문제는 #178로 수정·수락했다
   (span에는 method·`MatchedPath` 템플릿 또는 고정 fallback·version만 기록). 임의 애플리케이션 로그 전체 감사는 아니다.
 - 첫 로드 빈 화면(#221 이후 CI 간헐): #229가 추가한 진단이 #233 PR head의 Web run 36472777008 attempt 1(`web-browser-shard-4`)에서
@@ -600,7 +600,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   Mac Docker Desktop·rootless·Podman.
 - **이전 체크포인트에서 유지**: 설치 방향(확정) — 사용자가 짧은 `.env`를 작성하고 `docker compose up -d`, 기본 서비스 fvoci·postgres·meilisearch,
   앱 시작 절차가 준비(검증·migrate·grant·검색 키) 담당, 정상 서버는 uid 1000·제한 앱 역할; 무설정 bootstrap 서비스·미배포 초안 호환 계층을
-  다시 만들지 않는다. 협업 room 상한 동작은 게시 0.1.0/0.1.1 이미지에서 꺼낸 binary로 측정했다(flow h, 모드당 n=10, 컨테이너 밖 단일 호스트; 원시 결과 `fvoci-evidence/perf-baseline/published-0.1.0-vs-0.1.1-collab`). 0.1.1 cap 30 idle은 2,989 ms로 작성자 측정 438 ms보다 긴데, 방금 비운 room의 5 s grace와 측정 시점 때문이다. 0.2.0과 다른 flow는 측정하지 않았다. 그 밖의 성능 수치는 소스 빌드의 로컬 측정이다. 보류: `flushDelay`
+  다시 만들지 않는다. 협업 room 상한 동작은 게시 0.1.0/0.1.1 이미지에서 꺼낸 binary로 측정했다(flow h, 모드당 n=10, 컨테이너 밖 단일 호스트; 원시 결과 `fvoci-evidence/perf-baseline/published-0.1.0-vs-0.1.1-collab`). 0.1.1 cap 30 idle은 2,989 ms로 작성자 측정 438 ms보다 긴데, 방금 비운 room의 5 s grace와 측정 시점 때문으로 보인다(코드 판독, 계측 미확인). 0.2.0과 다른 flow는 측정하지 않았다. 그 밖의 성능 수치는 소스 빌드의 로컬 측정이다. 보류: `flushDelay`
   50/100 실험, DocumentView 구독 분리, Svelte·Astro·Valkey·대규모 room 재설계.
 - **로컬 자료·자원**: `<TBD>`.
 - **자동 연결**: `<TBD>`. 진행 중 릴리스 `<TBD>`.
