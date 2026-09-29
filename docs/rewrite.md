@@ -782,7 +782,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Attach-view | `/w/:slug/a/:id/view` | 구현 중·로컬 WIP (연결 전) | #275 `9ec6c413` | `AttachmentViewPage.vue`. **boundary 없음** | regex + viewer e2e | Grok 임시 실행자 | 없음 | — |
 | FE-Attach-share | `/s/:token/attachments/:id/view` | 구현 중·로컬 WIP (연결 전) | #275 동일 | `ShareAttachmentViewPage.vue` | `share-attachment-view-flow` | Grok 임시 실행자 | FE-Attach-view와 같은 PR | — |
 | FE-Attach-upload | 문서/태스크 첨부 업로드·재개·A/B | 미확인 | React 문서/태스크 + #254 전송 | 기존 attachment e2e(React) | Vue 위키는 attachment-upload bridge가 WikiDocumentView에 있음. drop/paste e2e는 #261 잔여. 전송 모드 전용 메시지 미구현(§5) | Grok 임시 실행자 | #261 drop/paste | — |
-| FE-Share-public | `/s/:token` 문서 공유 읽기 | 구현 중·로컬 WIP | `fvoci/r11-vue-public-share` | 구현 중. PR 전. #275 첨부 뷰어와 별개 | **boundary 없음**. `/s/:token/attachments/` 제외 | Grok 임시 실행자 | 없음 | — |
+| FE-Share-public | `/s/:token` 문서 공유 읽기 | 구현 중·로컬 WIP (연결 전) | #281 제품 `a5fff966`; nit `beaa095c` (on main) | Vue 익명 읽기. tree/body는 meta 성공 뒤. href는 v-html 전에 고정. **boundary 불변** | regex `/^\/s\/[^/]+\/?$/i`가 attachments를 삼키면 안 됨 | Grok 임시 실행자 | 없음 | — |
 | FE-Wiki-chrome | 위키 페이지의 댓글·공유·별·리비전·보내기·태그 | 실제 라우트 연결 완료(위키 URL만) | #262 WikiDocumentView | 컴포넌트 존재. **대화상자 e2e 범위는 미확인**(wiki-vue-flow는 본문/협업 중심) | 각 컨트롤의 종단 검사. 태스크/프로젝트 문서 표면은 여전히 React | Grok 임시 실행자 | FE-Wiki-collab 수락 | — |
 | FE-Import-export | 가져오기/보내기·휴지통 복원(워크스페이스) | 미착수(워크스페이스 URL) | React trash/settings import | 기존 import/export e2e | Vue 위키 DocumentExportMenu는 문서 단위. 워크스페이스 import UI 없음 | Grok 임시 실행자 | 없음 | — |
 | FE-Settings-ws | `/w/:slug/settings` 멤버·권한·SSO·토큰 등 | 구현 중·로컬 WIP (연결 전) | #273 `c4c7d878` | 사용자 가능 섹션 Vue 이식. **app-boundary React** | boundary + e2e. 기능군 완료 아님 | Grok 임시 실행자 | 없음 | — |
@@ -804,7 +804,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 4. **#268** `83c01480` — **main 수락**. #258 닫힘.
 5. **#266** `ddce8bf2` — CI 후 머지(기능 전환과 별개).
 6. **#269** nit `79236b2e` **ACCEPT**, head `ef17b410` — CI(mfa-flow 샤드) 후 머지. 인증 기능군 전체 완료 아님.
-7. 미연결 Vue PR: #270–#279. boundary는 실행자가 순차. 기능군 완료로 세지 않음.
+7. 미연결 Vue PR: #270–#281. boundary는 실행자가 순차. 기능군 완료로 세지 않음.
 8. 협업 엔진 비교: #280 `b9d6cf30` 문서만. 코디네이터 기본안 **Yrs 유지**. 엔진 전환 PR 없음. #261을 닫지 않음.
 
 #### 전체 전환 종결까지 남은 필수
