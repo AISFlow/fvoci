@@ -340,8 +340,9 @@ stand-ins. Treat them as untested with a real provider:
   linking, invitation acceptance and sign-out were checked against a real
   Keycloak 26.7.4 on the same host, in headless Chromium 153, with a server
   built from source that contains the other 0.3.0 product changes (the
-  opt-in `scripts/keycloak-oidc-e2e.sh`, last run at `8ddd1486`; not in CI). Workspace SSO was checked
-  against Keycloak only in a Rust test under a test entitlement. Not tried:
+  opt-in `scripts/keycloak-oidc-e2e.sh`, last run at `8ddd1486`; not in
+  CI). Workspace SSO was checked against Keycloak only in a Rust test under
+  a test entitlement. Not tried:
   any external identity provider (Google, Microsoft, Naver, Kakao, or one on
   another site), HTTPS, a reverse proxy or Secure cookies, the container
   install, Keycloak production mode and key rotation, and browsers other
