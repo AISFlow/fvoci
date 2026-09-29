@@ -1,10 +1,12 @@
 //! Container startup of the Compose install (`fvoci-migrate --start`, the
 //! image entrypoint).
 //!
-//! Without the database owner password it only execs `fvoci-server` (the
-//! separate-`init` installs of `infra/rust/compose.yml`). With it
-//! (`infra/rust/compose.user.yml`: root-only Compose secret files under
-//! `/run/secrets`, named by `<VAR>_FILE`, see [`load_secret_files`]):
+//! It first refuses, with exit 2, the `<VAR>_FILE` secret settings of older
+//! `compose.yml` files ([`retired_secret_files`]), whether or not the owner
+//! password is given. Then, without the database owner password it only execs
+//! `fvoci-server` (the separate-`init` installs of `infra/rust/compose.yml`).
+//! With it (`infra/rust/compose.user.yml`, which passes the `.env` values as
+//! container environment):
 //!
 //! 1. validate the required settings (missing, placeholder, format), naming
 //!    variables only;
@@ -19,11 +21,13 @@
 //!    the raw app password ([`PREP_ONLY`]); it gets `DATABASE_APP_URL`.
 //!
 //! The server keeps the process id, so signals, shutdown and child reaping
-//! are the server's own. The boundary is the uid: the preparation and the
-//! secret files are root's, the server and its children run as uid 1000 and
-//! cannot read either. Same container, so root in it (`docker exec`, which
-//! defaults to the service's root user) can. Nothing here generates or
-//! stores keys.
+//! are the server's own. The boundary is the uid: the preparation is root's,
+//! the server and its children run as uid 1000. The [`PREP_ONLY`] filter
+//! shapes only the server's own environment: the values stay in the container
+//! configuration, so every `docker exec` and healthcheck process starts with
+//! them (by default as root, whose environment uid 1000 cannot read), and
+//! anyone with Docker access can read them. Nothing here generates or stores
+//! keys.
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -53,8 +57,7 @@ pub const DEFAULT_PREPARE_TIMEOUT_SECS: u64 = 120;
 pub const SERVER_UID: u32 = 1000;
 pub const SERVER_GID: u32 = 1000;
 
-/// Values only the preparation uses; never passed to `fvoci-server`, nor are
-/// their `<VAR>_FILE` forms.
+/// Values only the preparation uses; never passed to `fvoci-server`.
 pub const PREP_ONLY: &[&str] = &[
     "POSTGRES_PASSWORD",
     "DATABASE_URL",
@@ -189,74 +192,6 @@ pub fn install_env(
     Ok(out)
 }
 
-/// Secrets that may instead be read from a file named by `<VAR>_FILE`: the
-/// Compose install mounts them as root-only secret files. The preparation
-/// uses the first three; the keyrings reach the server only through its
-/// `exec` environment ([`exec_server`]), not the container configuration.
-pub const SECRET_FILE_VARS: &[&str] = &[
-    "POSTGRES_PASSWORD",
-    "FVOCI_APP_PASSWORD",
-    "MEILI_MASTER_KEY",
-    "PASSWORD_PEPPER_KEYS",
-    "ENCRYPTION_KEYS",
-];
-
-const SECRET_FILE_MAX_BYTES: u64 = 64 * 1024;
-
-/// Resolves every `<VAR>_FILE` in [`SECRET_FILE_VARS`]: the file must be
-/// UTF-8, at most 64 KiB and nonempty after one trailing newline is dropped.
-/// Setting both `<VAR>` and `<VAR>_FILE` is an error. Errors name the
-/// variable and path, never the contents.
-pub fn resolve_secret_files(
-    get: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> Result<Vec<(&'static str, String)>, String> {
-    let mut resolved = Vec::new();
-    for &name in SECRET_FILE_VARS {
-        let file_var = format!("{name}_FILE");
-        let Some(path) = get(&file_var) else { continue };
-        if get(name).is_some() {
-            return Err(format!("{name} and {file_var} are both set; set only one"));
-        }
-        let path = PathBuf::from(path);
-        let read = || -> std::io::Result<Vec<u8>> {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            std::fs::File::open(&path)?
-                .take(SECRET_FILE_MAX_BYTES + 1)
-                .read_to_end(&mut bytes)?;
-            Ok(bytes)
-        };
-        let bytes =
-            read().map_err(|e| format!("{file_var}: cannot read {}: {e}", path.display()))?;
-        if bytes.len() as u64 > SECRET_FILE_MAX_BYTES {
-            return Err(format!(
-                "{file_var}: {} is larger than 64 KiB",
-                path.display()
-            ));
-        }
-        let text = String::from_utf8(bytes)
-            .map_err(|_| format!("{file_var}: {} is not UTF-8", path.display()))?;
-        let value = text
-            .strip_suffix('\n')
-            .map(|v| v.strip_suffix('\r').unwrap_or(v))
-            .unwrap_or(&text);
-        if value.trim().is_empty() {
-            return Err(format!("{file_var}: {} is empty", path.display()));
-        }
-        resolved.push((name, value.to_string()));
-    }
-    Ok(resolved)
-}
-
-/// [`resolve_secret_files`] applied to the process environment. Call at the
-/// start of `main`, before a runtime or any other thread exists.
-pub fn load_secret_files() -> Result<(), String> {
-    for (name, value) in resolve_secret_files(|k| std::env::var_os(k))? {
-        std::env::set_var(name, value);
-    }
-    Ok(())
-}
-
 /// [`install_env`] applied to the process environment. Call before a
 /// runtime or any other thread exists.
 pub fn load_install_env() -> Result<(), String> {
@@ -332,6 +267,34 @@ pub fn validate(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
         problems.push(format!("FVOCI_PUBLIC_ORIGIN: {e}"));
     }
     problems
+}
+
+/// Values the Compose files of 0.2.0 and earlier passed as secret files named
+/// by `<VAR>_FILE`.
+const RETIRED_SECRET_FILE_VALUES: &[&str] = &[
+    "POSTGRES_PASSWORD",
+    "FVOCI_APP_PASSWORD",
+    "MEILI_MASTER_KEY",
+    "PASSWORD_PEPPER_KEYS",
+    "ENCRYPTION_KEYS",
+];
+
+/// One problem per `<VAR>_FILE` setting of such an older `compose.yml`, which
+/// nothing reads any more, naming the variable only. `--start` refuses them
+/// before anything else: with only those names set it would skip the
+/// preparation and the server would fail without naming the cause.
+pub fn retired_secret_files(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    RETIRED_SECRET_FILE_VALUES
+        .iter()
+        .filter_map(|name| {
+            let file = format!("{name}_FILE");
+            get(&file).map(|_| {
+                format!(
+                    "{file} is no longer read; use this release's compose.yml, which passes {name} from .env"
+                )
+            })
+        })
+        .collect()
 }
 
 /// Whether this start prepares the install (the owner password is given).
@@ -560,18 +523,16 @@ pub fn running_as_root() -> Result<bool, String> {
 /// Whether `exec_server` keeps the variable `name`.
 fn passed_to_server(name: &str) -> bool {
     !PREP_ONLY.contains(&name)
-        && !name
-            .strip_suffix("_FILE")
-            .is_some_and(|v| PREP_ONLY.contains(&v) || SECRET_FILE_VARS.contains(&v))
 }
 
 /// Replaces this process with `fvoci-server args`, its environment minus
-/// [`PREP_ONLY`] and the `<VAR>_FILE` forms of those and of
-/// [`SECRET_FILE_VARS`] (the keyrings read from files stay, as values). Started as root (the Compose
-/// install, whose secret files only root can read), it first becomes
+/// [`PREP_ONLY`]. Started as root (the Compose install), it first becomes
 /// [`SERVER_UID`]:[`SERVER_GID`] with no supplementary groups, so the server
-/// and its children hold no capability and cannot read those files. Every
-/// descriptor std opens is close-on-exec. Returns only on failure.
+/// and its children hold no capability. The server keeps the keyrings and
+/// `DATABASE_APP_URL` in its environment; its same-uid helpers cannot read
+/// them only because `server_main` makes the server non-dumpable before it
+/// starts any helper, and each helper starts with a cleared environment.
+/// Every descriptor std opens is close-on-exec. Returns only on failure.
 pub fn exec_server(args: &[String]) -> String {
     let path = match server_path() {
         Ok(path) => path,
@@ -744,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn server_env_keeps_keyrings_but_no_prep_value_or_file_path() {
+    fn server_env_keeps_keyrings_but_no_prep_value() {
         for kept in [
             "PASSWORD_PEPPER_KEYS",
             "ENCRYPTION_KEYS",
@@ -759,81 +720,40 @@ mod tests {
         }
         for dropped in [
             "POSTGRES_PASSWORD",
-            "POSTGRES_PASSWORD_FILE",
-            "FVOCI_APP_PASSWORD_FILE",
+            "FVOCI_APP_PASSWORD",
             "MEILI_MASTER_KEY",
+            "FVOCI_MEILI_MASTER_KEY",
             "DATABASE_URL",
-            "PASSWORD_PEPPER_KEYS_FILE",
-            "ENCRYPTION_KEYS_FILE",
+            "FVOCI_MIGRATION_URL",
         ] {
             assert!(!passed_to_server(dropped), "{dropped}");
         }
     }
 
     #[test]
-    fn secret_files_resolve_and_refuse_ambiguity() {
-        let dir = std::env::temp_dir().join(format!("fvoci-secret-file-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = |name: &str, body: &[u8]| {
-            let path = dir.join(name);
-            std::fs::write(&path, body).unwrap();
-            path.into_os_string()
-        };
-        let owner = file("owner", b"p@ss/w:rd-0123456789\n");
-        let key = file("key", b"k".repeat(32).as_slice());
-        let empty = file("empty", b"\n");
-        let big = file("big", &vec![b'a'; 64 * 1024 + 1]);
-        let lookup = |pairs: Vec<(&'static str, std::ffi::OsString)>| {
-            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
-        };
-
-        let keyring = file("keyring", b"{\"install\":\"00\"}\n");
-        let got = resolve_secret_files(lookup(vec![
-            ("POSTGRES_PASSWORD_FILE", owner.clone()),
-            ("MEILI_MASTER_KEY_FILE", key.clone()),
-            ("ENCRYPTION_KEYS_FILE", keyring.clone()),
-            // Not a preparation secret: ignored, never read.
-            ("DATABASE_URL_FILE", "/nonexistent".into()),
-        ]))
-        .unwrap();
+    fn refuses_retired_secret_file_settings_by_name() {
+        let mut env = valid();
+        assert!(retired_secret_files(get(&env)).is_empty());
+        env.push((
+            "PASSWORD_PEPPER_KEYS_FILE",
+            "/run/secrets/secret-path".into(),
+        ));
+        env.push(("POSTGRES_PASSWORD_FILE", String::new()));
+        let problems = retired_secret_files(get(&env));
         assert_eq!(
-            got,
-            vec![
-                ("POSTGRES_PASSWORD", "p@ss/w:rd-0123456789".to_string()),
-                ("MEILI_MASTER_KEY", "k".repeat(32)),
-                ("ENCRYPTION_KEYS", r#"{"install":"00"}"#.to_string()),
+            problems,
+            [
+                "POSTGRES_PASSWORD_FILE is no longer read; use this release's compose.yml, which passes POSTGRES_PASSWORD from .env",
+                "PASSWORD_PEPPER_KEYS_FILE is no longer read; use this release's compose.yml, which passes PASSWORD_PEPPER_KEYS from .env",
             ]
         );
-        let both = resolve_secret_files(lookup(vec![
-            ("PASSWORD_PEPPER_KEYS", "{}".into()),
-            ("PASSWORD_PEPPER_KEYS_FILE", keyring),
-        ]))
-        .unwrap_err();
-        assert!(
-            both.starts_with("PASSWORD_PEPPER_KEYS and PASSWORD_PEPPER_KEYS_FILE are both set"),
-            "{both}"
-        );
-
-        let both = resolve_secret_files(lookup(vec![
-            ("FVOCI_APP_PASSWORD", "x".into()),
-            ("FVOCI_APP_PASSWORD_FILE", key.clone()),
-        ]))
-        .unwrap_err();
-        assert!(both.contains("both set"), "{both}");
-        let err =
-            resolve_secret_files(lookup(vec![("FVOCI_APP_PASSWORD_FILE", empty)])).unwrap_err();
-        assert!(err.contains("is empty"), "{err}");
-        let err = resolve_secret_files(lookup(vec![("MEILI_MASTER_KEY_FILE", big)])).unwrap_err();
-        assert!(err.contains("64 KiB"), "{err}");
-        let err = resolve_secret_files(lookup(vec![(
-            "POSTGRES_PASSWORD_FILE",
-            dir.join("missing").into_os_string(),
+        assert!(problems.iter().all(|p| !p.contains("secret-path")));
+        // FVOCI_MEILI_KEY_FILE (the scoped key the preparation writes) is a
+        // current setting, not a retired one.
+        assert!(retired_secret_files(lookup(&[(
+            "FVOCI_MEILI_KEY_FILE",
+            "/run/fvoci/meili/api_key"
         )]))
-        .unwrap_err();
-        assert!(
-            err.starts_with("POSTGRES_PASSWORD_FILE: cannot read"),
-            "{err}"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
+        .is_empty());
     }
 }

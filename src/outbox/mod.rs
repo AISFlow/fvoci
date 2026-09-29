@@ -29,10 +29,11 @@
 //! [`DeliveryMode::External`]), any order across consumers, and redelivery
 //! of a dead letter. An event that fails `OUTBOX_MAX_ATTEMPTS` times (with
 //! the default backoff about 15 s plus attempt time after its first failure)
-//! is dead-lettered and passed. It is delivered again only after a manual
-//! SQL call to `fvoci.app_outbox_requeue` (there is no CLI or UI), and then
-//! out of order, or when `--recover-outbox`, which deletes every failure
-//! row, replays a window that contains it.
+//! is dead-lettered and passed. It is delivered again in only two cases.
+//! After a manual SQL call to `fvoci.app_outbox_requeue` (there is no CLI
+//! or UI), it is retried out of order. When `--recover-outbox`, which
+//! deletes every failure row, replays a window that contains it, it is
+//! delivered in `(xact, seq)` order with the rest of that window.
 
 mod dispatcher;
 

@@ -11,6 +11,8 @@ use std::io::Read;
 
 use flate2::read::DeflateDecoder;
 
+use crate::export_zip::{zip_entry_name, zip_safe_name};
+
 pub const ZIP_MAX_ENTRIES: usize = 10_000;
 pub const ZIP_MAX_UNCOMPRESSED_BYTES: u64 = 200 * 1024 * 1024;
 
@@ -119,34 +121,6 @@ fn assert_no_traversal(raw: &str) -> Result<(), ZipImportError> {
         return Err(ZipImportError::Traversal);
     }
     Ok(())
-}
-
-/// Source `zipEntryName`.
-pub fn zip_entry_name(raw: &str) -> String {
-    let normalized = raw.replace('\\', "/").replace('\0', "");
-    let joined = normalized
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
-        .collect::<Vec<_>>()
-        .join("/");
-    if joined.is_empty() {
-        "file".to_string()
-    } else {
-        joined
-    }
-}
-
-/// Source `zipSafeName`: the last path segment only.
-pub fn zip_safe_name(raw: &str) -> String {
-    let entry = zip_entry_name(raw);
-    let last = entry.rsplit('/').next().unwrap_or("file");
-    let cleaned = last.replace('\0', "");
-    let cleaned = cleaned.trim();
-    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
-        "file".to_string()
-    } else {
-        cleaned.to_string()
-    }
 }
 
 /// Source `titleFromFileName`: strips one extension of 1..=12 characters.

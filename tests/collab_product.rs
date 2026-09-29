@@ -31,7 +31,8 @@ use fvoci_server::collab::room::{
     arm_teardown_barrier, disarm_append_in_tx_reject_barrier, disarm_append_revoke_barrier,
     disarm_force_primary_apply_fail, disarm_force_primary_load_fail,
     disarm_session_revision_persist_barrier, disarm_spawn_room_block, disarm_teardown_barrier,
-    AuthenticatedConnection, CollabSession, ConnectionLease, JoinError, RoomClientEvent, RoomJoin,
+    spawn_room_block_reached, AuthenticatedConnection, CollabSession, ConnectionLease, JoinError,
+    RoomClientEvent, RoomJoin,
 };
 use fvoci_server::collab::transport::take_data_frame_send_budget;
 use fvoci_server::collab::wire::{
@@ -2951,6 +2952,99 @@ async fn collab_memory_budget_uses_persisted_factor_not_floor_only() {
             collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES < tight_budget,
             "20 MiB budget would admit the 16 MiB floor alone; denial must come from 14× persisted"
         );
+            hub.shutdown().await;
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// A room's helper does not exist until its first load, so overlapping starts
+/// for different documents must be admitted against the memory already promised
+/// to rooms still starting, not only against live helper RSS. With a budget of
+/// two reservations, at most two of four concurrent starts may pass. Only that
+/// bound is asserted: live helper RSS is process-wide, so helpers of parallel
+/// tests can only make admission refuse more.
+#[tokio::test]
+async fn collab_memory_budget_counts_rooms_admitted_before_their_first_load() {
+    run_lifecycle_test(
+        "collab_memory_budget_counts_rooms_admitted_before_their_first_load",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 4).await;
+            let mut cfg = test_collab_config(4, 30_000);
+            cfg.memory_budget_bytes =
+                2 * collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES + 1024 * 1024;
+            let (hub, _helper_capacity) =
+                new_test_collab_hub_arc(cfg, docs[0].session.pool.clone(), 4).await;
+            let mut releases = Vec::new();
+            for doc in &docs {
+                releases.push(arm_spawn_room_block(doc.document_id).await);
+            }
+            let joins = docs
+                .iter()
+                .zip(1u32..)
+                .map(|(doc, client_id)| {
+                    let hub = hub.clone();
+                    let doc = doc.clone_fixture();
+                    tokio::spawn(async move {
+                        hub_join_document(&hub, &doc, doc.document_id, client_id).await
+                    })
+                })
+                .collect::<Vec<_>>();
+            // Each start is either refused or admitted and parked before its
+            // bridge (and so its helper) exists.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let mut settled = 0;
+                    for (join, doc) in joins.iter().zip(&docs) {
+                        if join.is_finished() || spawn_room_block_reached(doc.document_id).await {
+                            settled += 1;
+                        }
+                    }
+                    if settled == docs.len() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("every start was admitted or refused");
+
+            let mut refused = 0usize;
+            let mut admitted = Vec::new();
+            for ((join, release), doc) in joins.into_iter().zip(releases).zip(&docs) {
+                if join.is_finished() {
+                    let outcome = join.await.expect("join task");
+                    assert!(
+                        matches!(outcome, Err(JoinError::CapacityRetry)),
+                        "a start that did not reach its spawn must be a capacity refusal: {:?}",
+                        outcome.map(|(conn_id, _)| conn_id)
+                    );
+                    refused += 1;
+                    disarm_spawn_room_block(doc.document_id).await;
+                } else {
+                    let _ = release.send(());
+                    admitted.push(join);
+                }
+            }
+            assert!(
+                refused >= 2,
+                "only two reservations fit the budget; {refused} of 4 overlapping starts were refused"
+            );
+            assert_eq!(
+                hub.available_room_slots(),
+                4 - admitted.len(),
+                "refused starts must free their room slots"
+            );
+            let mut leases = DirectHubLeases::new();
+            for join in admitted {
+                let (_, lease) = join
+                    .await
+                    .expect("join task")
+                    .expect("an admitted start joins once its spawn proceeds");
+                leases.retain(lease);
+            }
             hub.shutdown().await;
             harness.cleanup().await;
         },

@@ -1,6 +1,8 @@
 //! The office child (`fvoci-server --internal-office-extract`) as the server
 //! runs it: real process, real rlimits, hostile inputs.
 
+#[path = "support/child_oom.rs"]
+mod child_oom;
 #[path = "support/office_fixtures.rs"]
 mod office_fixtures;
 
@@ -242,4 +244,28 @@ async fn cancel_returns_cancelled_instead_of_a_result() {
     )
     .await;
     assert_eq!(out, Err(OfficeCancelled));
+}
+
+/// The office child raises its own `oom_score_adj` to 1000 before it reads
+/// input, so a cgroup OOM kill picks the parser before the server or a
+/// collaboration helper.
+#[cfg(target_os = "linux")]
+#[test]
+fn office_child_raises_own_oom_score_adj() {
+    let adj = child_oom::oom_score_adj_of_child(&[
+        fvoci_server::documents::office::OFFICE_HELPER_ARG,
+        "--kind",
+        "docx",
+        "--mode",
+        "text",
+        "--max-input",
+        "1024",
+        "--max-output",
+        "1024",
+        "--max-as",
+        &OfficeLimits::attachment().address_space.to_string(),
+        "--cpu-secs",
+        "5",
+    ]);
+    assert_eq!(adj, Some(1000));
 }

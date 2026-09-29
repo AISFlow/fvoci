@@ -164,8 +164,6 @@ release asset, which is never committed back. Rendering fails if:
 - no service uses `*fvoci-image`;
 - any other interpolation is not `${VAR:?message}` (`$$` is a literal), so an
   unfilled `.env` stops Compose before any container exists;
-- a top-level secret reads a variable (`secrets: <name>: environment: VAR`)
-  that no `${VAR:?message}` requires;
 - `<compose>.env.example` does not assign exactly the variables the compose
   reads, or assigns one twice;
 - any service has an `env_file`.
@@ -174,8 +172,10 @@ The preflight renders the files and, in an empty directory with an empty
 environment, requires `docker compose config` to refuse the unfilled
 `env.example` as `.env` and to accept a filled one. In the filled config,
 exactly one service publishes container port 8080 and uses the product image,
-a `postgres` service exists, no service environment holds a value Compose
-passes as a secret, and every secret the app mounts is uid 0, mode `0400`.
+a `postgres` service exists, and each value generated into `.env` (its empty
+entries) appears only in a service's `environment`, never on a command line,
+and outside the app only where that service needs it (`postgres` the owner
+password, `meilisearch` the master key).
 
 The smoke fills `env.example` as a user would (a fresh value for each empty
 entry) in an empty directory, finds the app as the service publishing 8080 (no
@@ -185,11 +185,13 @@ service names are assumed), and expects:
   before any container exists; a placeholder value to be refused by the app;
 - the app's pid 1 to be `fvoci-server` with uid and gid 1000, no supplementary
   groups, no capabilities and `NoNewPrivs: 1`, and no setuid/setgid file in the
-  image; `/run/secrets/*` (the three passwords and the two keyrings) root-only
-  and unreadable to uid 1000; neither the database owner password nor the
-  Meilisearch master key in the server's process tree or `/run`; the keyrings
-  in the server's environment only; no secret or keyring in a `docker exec`
-  (and so healthcheck) environment or in `docker inspect`;
+  image; each service's container environment to hold only its `.env` values
+  (outside the app, `postgres` the owner password and any other service at
+  most the master key; no `*_FILE` setting); neither the database owner
+  password nor the Meilisearch master key in the server's process tree or
+  `/run`; the keyrings in the server's environment; a root `docker exec`
+  (as the healthcheck) to start with the configured values, and nothing uid
+  1000 can read under `/proc` to hold any of them;
 - a failed preparation (a read-only database) to keep the server down, and a
   restart after the fix to recover;
 - the keys and data to survive a second `up` and `down`/`up`;

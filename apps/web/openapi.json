@@ -1932,7 +1932,7 @@
             }
           },
           "403": {
-            "description": "origin_mismatch",
+            "description": "origin_mismatch: another origin, or no `Origin` header at all",
             "content": {
               "application/json": {
                 "schema": {
@@ -2382,37 +2382,7 @@
         ],
         "responses": {
           "302": {
-            "description": "Redirect to the workspace identity provider; sets fvoci_oidc_state"
-          },
-          "400": {
-            "description": "Invalid input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "provider_not_configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemResponse"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemResponse"
-                }
-              }
-            }
+            "description": "A browser navigation, answered only by redirects. Success: to the workspace identity provider, setting fvoci_oidc_state. Any refusal: to `/login?error=<problem code>` without state, e.g. `provider_not_configured` (unknown slug, a workspace without SSO, a personal workspace, or a build without the `workspaceSso` license feature), `invalid_input`, `rate_limit_exceeded`, `encryption_unavailable` or `internal_error`"
           }
         }
       }

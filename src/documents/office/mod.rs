@@ -274,6 +274,8 @@ pub fn maybe_run_helper() -> Option<i32> {
     if let Err(err) = document_extract_client::process::apply_rlimits_now(address_space, cpu_secs) {
         return Some(child_fail(&format!("rlimit: {err}")));
     }
+    // Best effort; a container profile may deny it.
+    let _ = document_extract_client::process::raise_own_oom_score_adj();
     crate::alloc_guard::abort_panics_after_allocation_failure();
     let mut source = Vec::new();
     if let Err(err) = std::io::stdin()

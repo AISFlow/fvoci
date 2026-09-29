@@ -2,9 +2,18 @@
 //!
 //! The source keeps a per-process cache invalidated over Redis. This server
 //! has no Redis, so every read resolves the (tiny) `instance_settings` table:
-//! a write is visible to the next request in every process. The first
-//! resolution in a process is kept as the boot snapshot, which answers "which
-//! restart-required keys changed since this process started".
+//! a write is visible to the next request in every process.
+//!
+//! The boot snapshot is recorded once per process, by whichever of two calls
+//! first resolves the settings: [`load`] (`GET /api/v1/instance` and
+//! `GET /api/v1/admin/instance-settings`) records the values it resolved, and
+//! [`apply_change`] (the admin settings PATCH and branding asset upload and
+//! removal) records the values it resolved before the change; a change
+//! refused before that point (admin-session or licence check) records
+//! nothing. The other readers here never record it. The admin output's `restartRequired` lists
+//! the restart-required keys whose current value differs from that snapshot:
+//! changes since this process's first recording call, not since it started, so
+//! a change another process committed before that call is not listed.
 
 pub mod catalog;
 pub mod messages;
@@ -173,7 +182,7 @@ where
         .await
 }
 
-/// Current settings; records the boot snapshot on the first call.
+/// Current settings; records them as the boot snapshot if none is recorded.
 pub async fn load(
     pool: &PgPool,
     boot: &SettingsBoot,
@@ -309,16 +318,18 @@ fn without_env_leaves(key: SettingsKey, mut value: Value, base: &Value, env: &[S
 /// instance-admin status are rechecked under row locks, writers serialize on
 /// the settings revision row, and the rows, revision and
 /// `instance_settings.updated` event + audit commit together. Audit payloads
-/// carry key paths only, never the values (source spec §10).
-pub async fn apply_change_with_license(
+/// carry key paths only, never the values (source spec §10). The values read
+/// before the change become the boot snapshot if none is recorded yet.
+pub async fn apply_change(
     pool: &PgPool,
     actor: Uuid,
     session_id: Uuid,
     ip: Option<&str>,
     brand_default: &str,
     change: SettingsChange,
-    license: &crate::license::Entitlements,
+    boot: &SettingsBoot,
 ) -> Result<Result<SettingsWriteOutcome, SettingsWriteError>, sqlx::Error> {
+    let license = &*boot.license;
     let mut tx = pool.begin().await?;
     if !require_admin_session(&mut tx, actor, session_id).await? {
         tx.rollback().await?;
@@ -339,6 +350,9 @@ pub async fn apply_change_with_license(
     .fetch_one(&mut *tx)
     .await?;
     let current = resolve(load_rows(&mut *tx).await?, revision, brand_default, license);
+    // A write can be this process's first settings call; without this the
+    // next read would record the post-change values and hide the restart.
+    let _ = boot.values.get_or_init(|| current.values.clone());
 
     let mut previous_asset = None;
     let mut extra = Map::new();

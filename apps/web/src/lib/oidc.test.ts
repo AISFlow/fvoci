@@ -20,13 +20,18 @@ import {
   workspaceSsoHref,
 } from "./oidc.ts";
 
-test("oidcErrorMessage maps each callback code to its catalog message", () => {
+test("oidcErrorMessage maps each redirect code to its catalog message", () => {
   for (const code of OIDC_ERROR_CODES) {
     const message = oidcErrorMessage(code);
     assert.equal(message, t(code));
     assert.notEqual(message, t("oidc_fallback"));
   }
   assert.equal(oidcErrorMessage("oidc_last_method"), "마지막 로그인 수단은 해제할 수 없습니다.");
+  // The workspace SSO start sends an unknown slug back to /login with this.
+  assert.equal(
+    oidcErrorMessage("provider_not_configured"),
+    "SSO로 로그인할 수 없는 워크스페이스입니다. 워크스페이스 주소를 확인해 주세요.",
+  );
 });
 
 test("oidcErrorMessage falls back for unknown codes and stays silent without one", () => {
@@ -91,6 +96,16 @@ function json(status: number, body: unknown): Response {
 
 const AUTHORIZE = "https://idp.example/authorize?client_id=c&state=s";
 
+/**
+ * The server refuses a POST start whose `Origin` is not the app's. A `fetch`
+ * sends the page's origin only in mode `cors` (the default); any other mode
+ * falls back to the referrer policy, and the app's `no-referrer` turns
+ * `Origin` into `null`.
+ */
+function assertCorsMode(init: RequestInit) {
+  assert.ok(init.mode === undefined || init.mode === "cors", `mode ${init.mode}`);
+}
+
 test("startOidcInvite posts the fields by fetch, then navigates to the provider", async () => {
   const fake = fakeStart(() => json(200, { authorizationUrl: AUTHORIZE }));
   await startOidcInvite(
@@ -104,6 +119,7 @@ test("startOidcInvite posts the fields by fetch, then navigates to the provider"
   assert.equal(init.method, "POST");
   // Same-origin only: the state cookie must be stored, nothing is sent elsewhere.
   assert.equal(init.credentials, "same-origin");
+  assertCorsMode(init);
   assert.ok(init.body instanceof URLSearchParams);
   const body = init.body as URLSearchParams;
   assert.deepEqual([...body.keys()], ["invitation", "consents"]);
@@ -122,6 +138,8 @@ test("startOidcLink posts without a body and navigates", async () => {
   await startOidcLink("a/b", fake.deps);
   assert.equal(fake.sent[0]!.input, "/api/v1/auth/oidc/a%2Fb/link");
   assert.equal(fake.sent[0]!.init.method, "POST");
+  assert.equal(fake.sent[0]!.init.credentials, "same-origin");
+  assertCorsMode(fake.sent[0]!.init);
   assert.equal(fake.sent[0]!.init.body, undefined);
   assert.deepEqual(fake.navigated, [AUTHORIZE]);
 });
@@ -247,4 +265,19 @@ test("the login page's SSO form submits through startWorkspaceSso, never to the 
   assert.doesNotMatch(form, /\b(method|action|formAction)=/);
   // Nor does any other form on the login page.
   assert.doesNotMatch(login, /\b(method|action)=/);
+});
+
+test("the invite and account pages start OIDC by script, never by a native form", () => {
+  for (const [file, start] of [
+    ["../features/auth/invite.tsx", "startOidcInvite"],
+    ["../features/settings/settings-account.tsx", "startOidcLink"],
+  ] as const) {
+    const page = readFileSync(path.join(import.meta.dirname, file), "utf8");
+    // The provider button posts by fetch, then navigates by script.
+    assert.match(page, new RegExp(`clickOidcStart\\([^;]*?\\b${start}\\(`), file);
+    // No native submission on the page: a form post carries `Origin: null`
+    // under the app's `no-referrer` (refused), and its redirect to the
+    // provider is blocked by the CSP `form-action 'self'`.
+    assert.doesNotMatch(page, /\b(method|action|formAction|formMethod)=/, file);
+  }
 });

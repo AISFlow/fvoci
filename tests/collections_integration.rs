@@ -2270,6 +2270,23 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StatementRouter {
     }
 }
 
+/// Statements finished since the last take that belong to the request. The
+/// process-wide time zone name cache (db::dashboard) fills once, on whichever
+/// query comes first; it is not part of the request's own work. Neither is the
+/// app pool's acquire check (db::pool): it runs only when an idle connection is
+/// reused, not on a newly opened one, so how often it appears depends on the
+/// pool's state, not on the request.
+fn request_statements(counter: &StatementCounter) -> Vec<String> {
+    use fvoci_server::db::pool::ACQUIRE_CHECK_SQL;
+
+    counter
+        .take_statements()
+        .into_iter()
+        .filter(|sql| !sql.contains("pg_catalog.pg_timezone_names"))
+        .filter(|sql| !sql.contains(ACQUIRE_CHECK_SQL))
+        .collect()
+}
+
 /// Runs the guest's wiki collection query, checks every row's canEdit against
 /// the single-document lookup and returns (rows, statements the query issued).
 async fn guest_query_checked(
@@ -2282,7 +2299,6 @@ async fn guest_query_checked(
 ) -> (usize, Vec<String>) {
     use fvoci_server::db::context::set_tenant;
     use fvoci_server::db::documents::document_permission;
-    use fvoci_server::db::pool::ACQUIRE_CHECK_SQL;
     use fvoci_server::projects::ProjectPermission;
 
     counter.take();
@@ -2294,17 +2310,7 @@ async fn guest_query_checked(
         json!({"config": {"query": {"sort": [{"field": "title", "direction": "asc"}]}}, "limit": 100}),
     )
     .await;
-    // The process-wide time zone name cache (db::dashboard) fills once, on
-    // whichever query comes first; it is not part of the query's own work.
-    // Neither is the app pool's acquire check (db::pool): it runs only when an
-    // idle connection is reused, not on a newly opened one, so how often it
-    // appears depends on the pool's state, not on the query.
-    let statements: Vec<String> = counter
-        .take_statements()
-        .into_iter()
-        .filter(|sql| !sql.contains("pg_catalog.pg_timezone_names"))
-        .filter(|sql| !sql.contains(ACQUIRE_CHECK_SQL))
-        .collect();
+    let statements = request_statements(counter);
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!(result["nextCursor"], Value::Null, "{result}");
     let rows = result["items"].as_array().unwrap();
@@ -2553,6 +2559,550 @@ async fn wiki_collection_can_edit_uses_one_set_based_permission_lookup() {
 
     drop(_guard);
     app_db.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+async fn create_group(
+    app: &axum::Router,
+    owner: &str,
+    ws: Uuid,
+    name: &str,
+    users: &[Uuid],
+) -> Uuid {
+    let (status, group) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/groups"),
+        Some(json!({"name": name})),
+        owner,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group}");
+    let group_id: Uuid = group["id"].as_str().unwrap().parse().unwrap();
+    for user in users {
+        let (status, body) = call(
+            app,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/groups/{group_id}/members"),
+            Some(json!({"userId": user.to_string()})),
+            owner,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    group_id
+}
+
+async fn grant_project_user(admin: &PgPool, ws: Uuid, project: Uuid, user: Uuid, role: &str) {
+    sqlx::query(
+        "INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) \
+         VALUES (gen_random_uuid(), $1, $2, $3, $4)",
+    )
+    .bind(ws)
+    .bind(project)
+    .bind(user)
+    .bind(role)
+    .execute(admin)
+    .await
+    .expect("grant project user");
+}
+
+async fn grant_project_group(admin: &PgPool, ws: Uuid, project: Uuid, group: Uuid, role: &str) {
+    sqlx::query(
+        "INSERT INTO fvoci.project_members (id, workspace_id, project_id, group_id, role) \
+         VALUES (gen_random_uuid(), $1, $2, $3, $4)",
+    )
+    .bind(ws)
+    .bind(project)
+    .bind(group)
+    .bind(role)
+    .execute(admin)
+    .await
+    .expect("grant project group");
+}
+
+/// Project ids the actor's workspace ACL (`load_search_acl`) yields, through
+/// two of its consumers: the dashboard project list and the project ids of the
+/// task collections in the collection list.
+async fn acl_project_ids(
+    app: &axum::Router,
+    cookie: &str,
+    ws: Uuid,
+) -> (
+    std::collections::BTreeSet<Uuid>,
+    std::collections::BTreeSet<Uuid>,
+) {
+    let (status, dashboard) = call(app, "GET", "/api/v1/me/dashboard", None, cookie).await;
+    assert_eq!(status, StatusCode::OK, "{dashboard}");
+    let from_dashboard = dashboard["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap().parse().unwrap())
+        .collect();
+    let (status, list) = call(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/collections"),
+        None,
+        cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let from_collections = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "task")
+        .map(|c| c["projectId"].as_str().unwrap().parse().unwrap())
+        .collect();
+    (from_dashboard, from_collections)
+}
+
+/// One project of the ACL matrix: visibility, direct rows, a group grant and
+/// its archive/trash state.
+struct MatrixProject {
+    key: &'static str,
+    visibility: &'static str,
+    users: Vec<(Uuid, &'static str)>,
+    group_role: Option<&'static str>,
+    archived: bool,
+    trashed: bool,
+}
+
+impl MatrixProject {
+    fn new(key: &'static str, visibility: &'static str) -> Self {
+        Self {
+            key,
+            visibility,
+            users: Vec::new(),
+            group_role: None,
+            archived: false,
+            trashed: false,
+        }
+    }
+
+    fn user(mut self, user: Uuid, role: &'static str) -> Self {
+        self.users.push((user, role));
+        self
+    }
+
+    fn group(mut self, role: &'static str) -> Self {
+        self.group_role = Some(role);
+        self
+    }
+
+    fn archived(mut self) -> Self {
+        self.archived = true;
+        self
+    }
+
+    fn trashed(mut self) -> Self {
+        self.trashed = true;
+        self
+    }
+}
+
+/// The set-based workspace ACL grants exactly the projects the single-project
+/// check grants (GET project: `load_live_project` + `project_permission`, the
+/// per-project rule the ACL used to loop over), for owner, admin, member and
+/// guest actors with direct rows, group grants, private, archived and trashed
+/// projects.
+#[tokio::test]
+async fn search_acl_matches_the_single_project_check() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let ws_admin = add_workspace_user(&admin, ws, "admin", "acl-admin").await;
+    let member = add_workspace_user(&admin, ws, "member", "acl-member").await;
+    let member_group = add_workspace_user(&admin, ws, "member", "acl-member-group").await;
+    let guest_direct = add_workspace_user(&admin, ws, "guest", "acl-guest-direct").await;
+    let guest_group = add_workspace_user(&admin, ws, "guest", "acl-guest-group").await;
+    let group = create_group(
+        &app,
+        &owner,
+        ws,
+        "acl-matrix",
+        &[member_group.user_id, guest_group.user_id],
+    )
+    .await;
+
+    let matrix = [
+        MatrixProject::new("WSV", "workspace"),
+        MatrixProject::new("WSD", "workspace").user(guest_direct.user_id, "viewer"),
+        MatrixProject::new("PRV", "private").user(owner_id, "lead"),
+        MatrixProject::new("PRD", "private")
+            .user(member.user_id, "viewer")
+            .user(guest_direct.user_id, "member"),
+        MatrixProject::new("PRG", "private").group("viewer"),
+        MatrixProject::new("ARC", "private")
+            .user(member.user_id, "lead")
+            .group("member")
+            .archived(),
+        MatrixProject::new("ARW", "workspace").archived(),
+        MatrixProject::new("TRS", "workspace")
+            .user(owner_id, "lead")
+            .user(member.user_id, "viewer")
+            .user(guest_direct.user_id, "viewer")
+            .group("viewer")
+            .trashed(),
+    ];
+    let mut key_of = std::collections::BTreeMap::new();
+    for project in &matrix {
+        let id = Uuid::now_v7();
+        project_harness::insert_minimal_project(
+            &admin,
+            ws,
+            id,
+            project.key,
+            owner_id,
+            project.visibility,
+        )
+        .await;
+        for (user, role) in &project.users {
+            grant_project_user(&admin, ws, id, *user, role).await;
+        }
+        if let Some(role) = project.group_role {
+            grant_project_group(&admin, ws, id, group, role).await;
+        }
+        if project.archived {
+            sqlx::query("UPDATE fvoci.projects SET status = 'archived' WHERE id = $1")
+                .bind(id)
+                .execute(&admin)
+                .await
+                .unwrap();
+        }
+        if project.trashed {
+            // The project's task collection stays live, so the collection
+            // list shows it only if the ACL wrongly admits a trashed project.
+            sqlx::query("UPDATE fvoci.projects SET deleted_at = now() WHERE id = $1")
+                .bind(id)
+                .execute(&admin)
+                .await
+                .unwrap();
+        }
+        key_of.insert(id, project.key);
+    }
+
+    let actors: [(&str, &str, &[&str]); 6] = [
+        ("owner", owner.as_str(), &["ARW", "PRV", "WSD", "WSV"]),
+        ("admin", ws_admin.cookie.as_str(), &["ARW", "WSD", "WSV"]),
+        (
+            "member",
+            member.cookie.as_str(),
+            &["ARC", "ARW", "PRD", "WSD", "WSV"],
+        ),
+        (
+            "member in group",
+            member_group.cookie.as_str(),
+            &["ARC", "ARW", "PRG", "WSD", "WSV"],
+        ),
+        (
+            "guest with rows",
+            guest_direct.cookie.as_str(),
+            &["PRD", "WSD"],
+        ),
+        (
+            "guest in group",
+            guest_group.cookie.as_str(),
+            &["ARC", "PRG"],
+        ),
+    ];
+    for (label, cookie, expected) in actors {
+        let mut single = std::collections::BTreeSet::new();
+        for id in key_of.keys() {
+            let (status, body) = call(
+                &app,
+                "GET",
+                &format!("/api/v1/workspaces/{ws}/projects/{id}"),
+                None,
+                cookie,
+            )
+            .await;
+            match status {
+                StatusCode::OK => {
+                    single.insert(*id);
+                }
+                StatusCode::NOT_FOUND => {}
+                other => panic!("{label} GET project {}: {other} {body}", key_of[id]),
+            }
+        }
+        let keys = |ids: &std::collections::BTreeSet<Uuid>| {
+            let mut keys: Vec<&str> = ids.iter().map(|id| key_of[id]).collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys(&single), expected, "{label}: single-project check");
+        let (dashboard, collections) = acl_project_ids(&app, cookie, ws).await;
+        assert_eq!(dashboard, single, "{label}: dashboard projects");
+        assert_eq!(collections, single, "{label}: task collections");
+    }
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Adds projects `range` with mixed visibility and grants: even numbers are
+/// workspace-visible, odd ones private; `member` gets a direct viewer row when
+/// `i % 3 == 1` and `group` a viewer grant when `i % 4 == 1`, so both see at
+/// least one project (P001) in every range that starts at 0.
+async fn seed_mixed_projects(
+    admin: &PgPool,
+    ws: Uuid,
+    owner_id: Uuid,
+    member: Uuid,
+    group: Uuid,
+    range: std::ops::Range<usize>,
+) {
+    for i in range {
+        let id = Uuid::now_v7();
+        let visibility = if i % 2 == 0 { "workspace" } else { "private" };
+        project_harness::insert_minimal_project(
+            admin,
+            ws,
+            id,
+            &format!("P{i:03}"),
+            owner_id,
+            visibility,
+        )
+        .await;
+        if i % 3 == 1 {
+            grant_project_user(admin, ws, id, member, "viewer").await;
+        }
+        if i % 4 == 1 {
+            grant_project_group(admin, ws, id, group, "viewer").await;
+        }
+    }
+}
+
+/// Statements each ACL-backed page issues, by page label.
+async fn acl_page_statements(
+    app: &axum::Router,
+    counter: &StatementCounter,
+    member: &project_harness::TestUser,
+    guest: &project_harness::TestUser,
+    ws: Uuid,
+    cid: &str,
+) -> Vec<(&'static str, Vec<String>)> {
+    let pages: [(&str, &str, &str, Option<Value>, &str); 4] = [
+        (
+            "member dashboard",
+            "GET",
+            "/api/v1/me/dashboard",
+            None,
+            &member.cookie,
+        ),
+        (
+            "guest dashboard",
+            "GET",
+            "/api/v1/me/dashboard",
+            None,
+            &guest.cookie,
+        ),
+        (
+            "member collection list",
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/collections"),
+            None,
+            &member.cookie,
+        ),
+        (
+            "member collection query",
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/collections/{cid}/query"),
+            Some(json!({"config": {}, "limit": 50})),
+            &member.cookie,
+        ),
+    ];
+    let mut statements = Vec::new();
+    for (label, method, path, body, cookie) in pages {
+        counter.take();
+        let (status, result) = call(app, method, path, body, cookie).await;
+        assert_eq!(status, StatusCode::OK, "{label}: {result}");
+        statements.push((label, request_statements(counter)));
+    }
+    statements
+}
+
+/// `load_search_acl` reads the actor's visible projects in one statement, so
+/// the pages built on it issue as many statements with 30 projects as with 3
+/// (it used to run two statements per project).
+#[tokio::test]
+async fn search_acl_statements_do_not_grow_with_project_count() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, ws, "member", "acl-count-member").await;
+    let guest = add_workspace_user(&admin, ws, "guest", "acl-count-guest").await;
+    let group = create_group(&app, &owner, ws, "acl-count", &[guest.user_id]).await;
+    seed_mixed_projects(&admin, ws, owner_id, member.user_id, group, 0..3).await;
+    let base: Uuid = sqlx::query_scalar("SELECT id FROM fvoci.projects WHERE key = 'P000'")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    let cid = project_collection(&app, &member.cookie, ws, &base.to_string()).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Warm-up: each actor's first request slides the session expiry (one
+    // UPDATE), so the counted requests differ only by the project count.
+    let counter = StatementCounter::default();
+    acl_page_statements(&app, &counter, &member, &guest, ws, &cid).await;
+    let _guard = counter.activate();
+    let small = acl_page_statements(&app, &counter, &member, &guest, ws, &cid).await;
+    seed_mixed_projects(&admin, ws, owner_id, member.user_id, group, 3..30).await;
+    let large = acl_page_statements(&app, &counter, &member, &guest, ws, &cid).await;
+    for ((label, at_3), (_, at_30)) in small.iter().zip(&large) {
+        eprintln!(
+            "acl statements, {label}: 3 projects {}, 30 projects {}",
+            at_3.len(),
+            at_30.len()
+        );
+    }
+    for ((label, at_3), (_, at_30)) in small.iter().zip(&large) {
+        assert_eq!(
+            at_30.len(),
+            at_3.len(),
+            "{label}: 3 projects {at_3:#?}\n30 projects {at_30:#?}"
+        );
+    }
+
+    drop(_guard);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Adds wiki collection `i` holding one new wiki document, readable by
+/// `group` when it is given; returns the collection id.
+async fn add_wiki_collection(
+    app: &axum::Router,
+    owner: &str,
+    ws: Uuid,
+    i: usize,
+    group: Option<Uuid>,
+) -> String {
+    let (status, collection) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/collections"),
+        Some(json!({"name": format!("wiki {i}"), "kind": "document", "projectId": null})),
+        owner,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{collection}");
+    let cid = collection["id"].as_str().unwrap().to_string();
+    let doc = create_wiki_doc(app, owner, ws, &format!("wiki doc {i}")).await;
+    if let Some(group) = group {
+        let (status, body) = call(
+            app,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/documents/{doc}/groups"),
+            Some(json!({"groupId": group, "role": "viewer"})),
+            owner,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, body) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/collections/{cid}/items"),
+        Some(json!({"documentId": doc})),
+        owner,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    cid
+}
+
+/// The guest's collection list: (visible collection ids, statements issued).
+async fn guest_collection_list(
+    app: &axum::Router,
+    guest: &project_harness::TestUser,
+    ws: Uuid,
+    counter: &StatementCounter,
+) -> (std::collections::BTreeSet<String>, Vec<String>) {
+    counter.take();
+    let (status, list) = call(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/collections"),
+        None,
+        &guest.cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let ids = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_string())
+        .collect();
+    (ids, request_statements(counter))
+}
+
+/// A guest sees a wiki collection only through an item document it can read.
+/// The list reads the workspace ACL once and checks each wiki collection with
+/// one statement, so every extra wiki collection costs exactly one statement.
+#[tokio::test]
+async fn guest_collection_list_reads_the_acl_once() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let guest = add_workspace_user(&admin, ws, "guest", "wiki-list-guest").await;
+    let group = create_group(&app, &owner, ws, "wiki-list", &[guest.user_id]).await;
+    let project = Uuid::now_v7();
+    project_harness::insert_minimal_project(&admin, ws, project, "WLP", owner_id, "private").await;
+    grant_project_group(&admin, ws, project, group, "viewer").await;
+    let project_cid: String = sqlx::query_scalar(
+        "SELECT id::text FROM fvoci.collections WHERE project_id = $1 AND kind = 'task'",
+    )
+    .bind(project)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+
+    // Collection i's document is readable by the guest's group for even i.
+    let mut readable = vec![add_wiki_collection(&app, &owner, ws, 0, Some(group)).await];
+    // Warm-up: the guest's first request slides the session expiry.
+    let counter = StatementCounter::default();
+    guest_collection_list(&app, &guest, ws, &counter).await;
+    let _guard = counter.activate();
+    let (one_ids, one) = guest_collection_list(&app, &guest, ws, &counter).await;
+    for i in 1..5 {
+        let cid = add_wiki_collection(&app, &owner, ws, i, (i % 2 == 0).then_some(group)).await;
+        if i % 2 == 0 {
+            readable.push(cid);
+        }
+    }
+    let (five_ids, five) = guest_collection_list(&app, &guest, ws, &counter).await;
+
+    let expected = |wiki: &[String]| {
+        let mut ids: std::collections::BTreeSet<String> = wiki.iter().cloned().collect();
+        ids.insert(project_cid.clone());
+        ids
+    };
+    assert_eq!(one_ids, expected(&readable[..1]));
+    assert_eq!(five_ids, expected(&readable));
+    let acl_reads = |statements: &[String]| {
+        statements
+            .iter()
+            .filter(|sql| sql.contains("FROM fvoci.projects p"))
+            .count()
+    };
+    eprintln!(
+        "guest collection list statements: 1 wiki collection {} (ACL project reads {}), 5 wiki collections {} (ACL project reads {})",
+        one.len(),
+        acl_reads(&one),
+        five.len(),
+        acl_reads(&five)
+    );
+    assert_eq!(acl_reads(&one), 1, "{one:#?}");
+    assert_eq!(acl_reads(&five), 1, "{five:#?}");
+    assert_eq!(five.len(), one.len() + 4, "1: {one:#?}\n5: {five:#?}");
+
+    drop(_guard);
     admin.close().await;
     harness.cleanup().await;
 }
