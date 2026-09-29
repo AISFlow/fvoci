@@ -5,6 +5,7 @@ import { AuthLayout, AuthPanel } from "@/features/auth/auth-layout";
 import {
   filledOperatorFields,
   hasOperatorInfo,
+  LEGAL_DOCS,
   operatorFieldHref,
   type OperatorInfo,
 } from "./operator-fields";
@@ -13,6 +14,7 @@ export type { OperatorInfo } from "./operator-fields";
 export {
   filledOperatorFields,
   hasOperatorInfo,
+  LEGAL_DOCS,
   operatorFieldHref,
 } from "./operator-fields";
 
@@ -61,11 +63,6 @@ export function OperatorInfoView({ operator }: { operator: OperatorInfo | null }
     </AuthLayout>
   );
 }
-
-export const LEGAL_DOCS = [
-  { kind: "terms", label: t("legal.terms") },
-  { kind: "privacy", label: t("legal.privacy") },
-] as const;
 
 export function ServiceInfoFooter({
   operator,
