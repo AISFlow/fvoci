@@ -26646,7 +26646,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "RFC 3339 UTC with milliseconds, or microseconds when the stored value\nhas finer precision; send it back unchanged as `expectedDates.dueAt`."
           },
           "dueDate": {
             "oneOf": [

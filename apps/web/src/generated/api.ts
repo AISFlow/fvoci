@@ -4569,6 +4569,10 @@ export interface components {
         };
         GanttLayoutItemOutput: {
             assigneeIds: string[];
+            /**
+             * @description RFC 3339 UTC with milliseconds, or microseconds when the stored value
+             *     has finer precision; send it back unchanged as `expectedDates.dueAt`.
+             */
             dueAt?: string | null;
             dueDate?: components["schemas"]["String"] | null;
             end: components["schemas"]["String"];

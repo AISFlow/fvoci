@@ -4400,6 +4400,71 @@ async fn task_patch_gantt_reschedule_through_expected_dates() {
     harness.cleanup().await;
 }
 
+/// `expectedDates.dueAt` must equal the stored value exactly, so the layout
+/// has to return every stored digit: an API client may set a `dueAt` with
+/// sub-millisecond precision, which a millisecond rendering would turn into a
+/// permanent 409 for the Gantt.
+#[tokio::test]
+async fn task_layout_due_at_round_trips_as_expected_dates() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let month = "year=2026&month=9";
+    let mut tasks = Vec::new();
+    for (title, due_at, shown, moved) in [
+        (
+            "Micros",
+            "2026-09-15T09:30:00.123456Z",
+            "2026-09-15T09:30:00.123456Z",
+            "2026-09-16T09:30:00.123456Z",
+        ),
+        (
+            "Millis",
+            "2026-09-15T09:30:00.123Z",
+            "2026-09-15T09:30:00.123Z",
+            "2026-09-16T09:30:00.123Z",
+        ),
+    ] {
+        let task = create_task_with_title(
+            app.clone(),
+            &cookie,
+            ws,
+            &project_id,
+            json!({"title": title, "startDate": "2026-09-14"}),
+        )
+        .await;
+        let id = task["id"].as_str().unwrap().to_string();
+        let (status, body) =
+            patch_task(app.clone(), ws, &id, json!({"dueAt": due_at}), &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        tasks.push((title, id, shown, moved));
+    }
+
+    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    for (title, id, shown, moved) in tasks {
+        let item = layout_item(&layout, &id);
+        let (status, body) = patch_task(
+            app.clone(),
+            ws,
+            &id,
+            json!({
+                "dueAt": moved,
+                "expectedDates": {
+                    "startDate": item["startDate"],
+                    "dueDate": item["dueDate"],
+                    "dueAt": item["dueAt"],
+                },
+            }),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{title}: {body}");
+        // Millisecond values keep the form the web UI already reads.
+        assert_eq!(item["dueAt"], shown, "{title}");
+    }
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 async fn wait_for_hub_active(hub: &StreamHub, expected: usize, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     while Instant::now() < deadline {
