@@ -1,4 +1,5 @@
 import { queryOptions } from "@tanstack/react-query";
+import { queryOptions as sharedQueryOptions } from "@/lib/query-options";
 import type { components } from "@/generated/api";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { shareDownloadName, triggerDownload } from "@/lib/share";
@@ -9,7 +10,7 @@ export type ShareLink = components["schemas"]["ShareLinkOutput"];
 export type ShareTreeNode = components["schemas"]["TreeNodeResponse"];
 
 export function starsQuery(workspaceId: string) {
-  return queryOptions({
+  return sharedQueryOptions({
     queryKey: ["stars", workspaceId] as const,
     queryFn: async () =>
       ensureOk(
@@ -23,7 +24,7 @@ export function starsQuery(workspaceId: string) {
 }
 
 export function recentQuery(workspaceId: string, limit = 8) {
-  return queryOptions({
+  return sharedQueryOptions({
     queryKey: ["recent", workspaceId, limit] as const,
     queryFn: async () =>
       ensureOk(
@@ -39,7 +40,7 @@ export function recentQuery(workspaceId: string, limit = 8) {
 export type ShareDocumentTarget = { documentId: string; projectId: string | null };
 
 export function documentShareLinksQuery(workspaceId: string, target: ShareDocumentTarget) {
-  return queryOptions({
+  return sharedQueryOptions({
     queryKey: ["share-links", workspaceId, target.documentId] as const,
     queryFn: async () =>
       ensureOk(

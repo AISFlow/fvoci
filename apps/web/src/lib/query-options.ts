@@ -1,4 +1,4 @@
-import type { DataTag, DefaultError, QueryKey } from "@tanstack/query-core";
+import type { DataTag, DefaultError, InfiniteData, QueryKey } from "@tanstack/query-core";
 
 /**
  * Options for a query both web apps run while React and Vue coexist, limited
@@ -27,5 +27,30 @@ export function queryOptions<TQueryFnData, const TQueryKey extends QueryKey>(
 ): SharedQueryOptions<TQueryFnData, TQueryKey> & { queryKey: DataTag<TQueryKey, TQueryFnData, DefaultError> } {
   return options as SharedQueryOptions<TQueryFnData, TQueryKey> & {
     queryKey: DataTag<TQueryKey, TQueryFnData, DefaultError>;
+  };
+}
+
+/** An infinite (paged) query both web apps run; same limits as {@link SharedQueryOptions}. */
+export interface SharedInfiniteQueryOptions<TQueryFnData, TQueryKey extends QueryKey, TPageParam> {
+  queryKey: TQueryKey;
+  queryFn: (context: { signal: AbortSignal; pageParam: TPageParam }) => Promise<TQueryFnData>;
+  initialPageParam: TPageParam;
+  getNextPageParam: (lastPage: TQueryFnData) => TPageParam | undefined | null;
+  enabled?: boolean;
+  retry?: boolean | number;
+  staleTime?: number;
+}
+
+/**
+ * Same as the adapters' `infiniteQueryOptions`: returns `options` unchanged,
+ * with `queryKey` tagged with the paged data the query caches.
+ */
+export function infiniteQueryOptions<TQueryFnData, const TQueryKey extends QueryKey, TPageParam>(
+  options: SharedInfiniteQueryOptions<TQueryFnData, TQueryKey, TPageParam>,
+): SharedInfiniteQueryOptions<TQueryFnData, TQueryKey, TPageParam> & {
+  queryKey: DataTag<TQueryKey, InfiniteData<TQueryFnData, TPageParam>, DefaultError>;
+} {
+  return options as SharedInfiniteQueryOptions<TQueryFnData, TQueryKey, TPageParam> & {
+    queryKey: DataTag<TQueryKey, InfiniteData<TQueryFnData, TPageParam>, DefaultError>;
   };
 }

@@ -1,4 +1,5 @@
-import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
+import { infiniteQueryOptions } from "@tanstack/react-query";
+import { queryOptions } from "@/lib/query-options";
 import { api, ensureOk } from "@/lib/api";
 
 export function unfurlQueryOptions(workspaceId: string | null, url: string) {

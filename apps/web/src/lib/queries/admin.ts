@@ -1,6 +1,8 @@
 // Adapted from source apps/web/src/lib/queries/admin.ts and the legal queries
 // in apps/web/src/lib/queries/auth.ts.
-import { queryOptions, type QueryClient } from "@tanstack/react-query";
+import type { QueryClient } from "@tanstack/query-core";
+import { queryOptions } from "@tanstack/react-query";
+import { queryOptions as sharedQueryOptions } from "@/lib/query-options";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 
 export const adminUsersQuery = queryOptions({
@@ -34,7 +36,7 @@ export const adminAuditQuery = queryOptions({
     !(error instanceof ProblemError && error.status === 404) && failureCount < 3,
 });
 
-export const publicInstanceQuery = queryOptions({
+export const publicInstanceQuery = sharedQueryOptions({
   queryKey: ["instance"] as const,
   // Server sends Cache-Control max-age=60 + ETag; after admin updates, the browser
   // can reuse a pre-patch empty body within that window (see service-info-flow e2e).
