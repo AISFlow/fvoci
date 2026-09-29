@@ -36,6 +36,11 @@ pub async fn connect_app_with_max(url: &str, max_connections: u32) -> Result<PgP
 const OUTSIDE_TRANSACTION_SQL: &str =
     "SELECT pg_catalog.now() OPERATOR(pg_catalog.=) pg_catalog.statement_timestamp()";
 
+/// The acquire check's statement text, for tests that leave it out of a
+/// statement log (it appears only when an idle connection is reused).
+#[cfg(feature = "db-tests")]
+pub const ACQUIRE_CHECK_SQL: &str = OUTSIDE_TRANSACTION_SQL;
+
 /// Event for a connection closed because it was idle inside a transaction.
 const RELEASE_IN_TRANSACTION: &str = "db.pool.release_in_transaction";
 
