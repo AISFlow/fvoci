@@ -221,15 +221,34 @@ function barHeight(): number {
   return props.laneHeight * (props.pack === "overlap" ? 0.52 : 0.58);
 }
 
-function labelPlacement(bar: DisplayBar): "inner" | "outer" | "none" {
-  if (!bar.milestone && bar.width >= 56) return "inner";
-  const start = bar.x + bar.width + 8;
-  const end = start + Math.min(title(bar.id).length * CHAR_PX, 96);
-  const hits = bars.value.some(
-    (other) => other.id !== bar.id && other.lane === bar.lane && other.x < end && other.x + other.width > start,
-  );
-  if (hits) return !bar.milestone && bar.width >= 32 ? "inner" : "none";
-  return "outer";
+type LabelPlacement = "inner" | "outer" | "none";
+
+/** Where each bar's title goes: inside a wide bar, else after it unless a bar in its lane is in the way. */
+const labelPlacements = computed(() => {
+  const byLane = new Map<number, DisplayBar[]>();
+  for (const bar of bars.value) {
+    const lane = byLane.get(bar.lane);
+    if (lane) lane.push(bar);
+    else byLane.set(bar.lane, [bar]);
+  }
+  const out = new Map<string, LabelPlacement>();
+  for (const bar of bars.value) {
+    if (!bar.milestone && bar.width >= 56) {
+      out.set(bar.id, "inner");
+      continue;
+    }
+    const start = bar.x + bar.width + 8;
+    const end = start + Math.min(title(bar.id).length * CHAR_PX, 96);
+    const hits = (byLane.get(bar.lane) ?? []).some(
+      (other) => other.id !== bar.id && other.x < end && other.x + other.width > start,
+    );
+    out.set(bar.id, hits ? (!bar.milestone && bar.width >= 32 ? "inner" : "none") : "outer");
+  }
+  return out;
+});
+
+function labelPlacement(bar: DisplayBar): LabelPlacement {
+  return labelPlacements.value.get(bar.id) ?? "none";
 }
 
 function diamond(cx: number, cy: number, r: number): string {
@@ -270,7 +289,7 @@ const railRows = computed(() =>
         <slot name="rail-row" :item="item">{{ item.title }}</slot>
       </button>
     </div>
-    <section class="fvoci-gantt__board" aria-label="Gantt" tabindex="0">
+    <section class="fvoci-gantt__board" :aria-label="t('view.gantt')" tabindex="0">
       <div class="fvoci-gantt__header" :style="{ width: `${width}px`, height: `${laneHeight * 1.4}px` }">
         <span
           v-for="band in months"
