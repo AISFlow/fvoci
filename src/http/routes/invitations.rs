@@ -24,6 +24,15 @@ use crate::http::state::AppState;
 use crate::settings::messages::Message;
 use crate::validate::{normalize_email, validate_family_name, validate_given_name};
 
+/// Anonymous accept requests per address (5 minutes), checked before the
+/// per-token key so a client cannot mint a limiter key per made-up token.
+const INVITE_ACCEPT_PER_IP: u32 = 60;
+const INVITE_ACCEPT_PER_TOKEN: u32 = 30;
+/// `routes::auth::login`'s buckets: accepting for an existing account checks
+/// its password, so it draws on the same `login:*` keys and limits.
+const LOGIN_PER_IP: u32 = 30;
+const LOGIN_PER_EMAIL: u32 = 10;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
@@ -165,10 +174,20 @@ async fn accept_invitation(
         return Err(AppError::from_code(ProblemCode::NotFound));
     }
     let ip = peer_ip(peer.ip());
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow(&format!("invite-accept-ip:{ip}"), INVITE_ACCEPT_PER_IP)
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
     let hash_prefix: String = hash_token(&token).chars().take(8).collect();
     if let Err(retry_after) = state
         .rate_limiter
-        .allow(&format!("invite-accept:{ip}:{hash_prefix}"), 30)
+        .allow(
+            &format!("invite-accept:{ip}:{hash_prefix}"),
+            INVITE_ACCEPT_PER_TOKEN,
+        )
         .await
     {
         return Err(AppError::rate_limited(retry_after));
@@ -213,6 +232,18 @@ async fn accept_invitation(
             client_ip: Some(&ip),
             consents: &consents,
             defaults: &settings.defaults_user,
+        },
+        {
+            let limiter = state.rate_limiter.clone();
+            let ip = ip.clone();
+            move |email: String| async move {
+                limiter
+                    .allow(&format!("login:ip:{ip}"), LOGIN_PER_IP)
+                    .await?;
+                limiter
+                    .allow(&format!("login:email:{ip}:{email}"), LOGIN_PER_EMAIL)
+                    .await
+            }
         },
     )
     .await
@@ -267,6 +298,7 @@ fn map_accept_error(err: InvitationDbError) -> AppError {
         InvitationDbError::PersonalImmutable | InvitationDbError::RoleCap => {
             AppError::from_code(ProblemCode::NotFound)
         }
+        InvitationDbError::RateLimited(retry_after) => AppError::rate_limited(retry_after),
     }
 }
 

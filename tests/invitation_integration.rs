@@ -1291,3 +1291,104 @@ async fn personal_workspace_creation_is_rejected_at_instance_seat_limit() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+fn peer_n(n: u8) -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([198, 51, 100, n], 42424))
+}
+
+/// Accepting for an existing account checks its password: it shares login's
+/// per-IP and per-email budget, however many invitations name the account.
+#[tokio::test]
+async fn existing_account_accept_shares_the_login_password_budget() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let admin = harness.admin().await;
+    let ws = acme_id(&admin).await;
+    let (_victim, _) = create_second_user_session(&harness, "victim@example.com", "Victim").await;
+    let mut tokens = Vec::new();
+    for _ in 0..3 {
+        let (status, body) =
+            create_invite(app.clone(), &cookie, ws, "victim@example.com", "member").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        tokens.push(invite_token(body["acceptUrl"].as_str().unwrap()));
+    }
+    let accept = |token: &str, password: &str, peer| {
+        let app = app.clone();
+        let path = format!("/api/v1/invitations/{token}/accept");
+        let body = json!({ "password": password });
+        async move {
+            let (status, body, _, _) =
+                json_request(app, "POST", &path, Some(body), None, &[], Some(peer)).await;
+            (status, body)
+        }
+    };
+    // Wrong passwords round-robin across the tokens from one peer.
+    for i in 0..10 {
+        let (status, body) =
+            accept(&tokens[i % 3], &format!("wrong-password-{i}"), peer_n(1)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "attempt {i}: {body}");
+        assert_eq!(body["code"], "cannot_accept_invitation");
+    }
+    let (status, body) = accept(&tokens[1], "wrong-password-x", peer_n(1)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    // The right password is refused too while the budget is spent, and login
+    // for that email from the same peer shares it.
+    let (status, _) = accept(&tokens[2], "supersecret1", peer_n(1)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/login",
+        Some(json!({ "email": "victim@example.com", "password": "supersecret1" })),
+        None,
+        &[],
+        Some(peer_n(1)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // Another peer is not affected, and nothing was granted meanwhile.
+    let members: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.memberships m JOIN fvoci.users u ON u.id = m.user_id WHERE u.email = 'victim@example.com'",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(members, 0);
+    let (status, body) = accept(&tokens[0], "supersecret1", peer_n(2)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Anonymous accept requests carry the token in the path: a per-IP bound comes
+/// before the per-token key so one client cannot mint limiter keys at will.
+#[tokio::test]
+async fn invitation_accept_is_bounded_per_ip_before_per_token() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _cookie, _) = setup_session(&harness).await;
+    let random_accept = |peer| {
+        let app = app.clone();
+        let path = format!(
+            "/api/v1/invitations/{}/accept",
+            fvoci_server::auth::token::new_token().token
+        );
+        async move {
+            let (status, _, _, _) =
+                json_request(app, "POST", &path, Some(json!({})), None, &[], Some(peer)).await;
+            status
+        }
+    };
+    for i in 0..60 {
+        assert_eq!(
+            random_accept(peer_n(3)).await,
+            StatusCode::NOT_FOUND,
+            "request {i}"
+        );
+    }
+    assert_eq!(
+        random_accept(peer_n(3)).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(random_accept(peer_n(4)).await, StatusCode::NOT_FOUND);
+    harness.cleanup().await;
+}

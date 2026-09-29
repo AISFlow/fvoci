@@ -88,6 +88,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/043_events_index_outbox_lag.sql"),
         43,
     ),
+    (
+        include_str!("../../migrations/044_email_change_auth_generation.sql"),
+        44,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -724,6 +728,10 @@ mod tests {
         (
             43,
             "a513c4f1c24e1c0c65c49e78e12131cc82931036c59c377956b5348fe8ce22c8",
+        ),
+        (
+            44,
+            "bfabdbe0270e7275212aa45489405d2651526b34108c6d50ff718e243c363d5d",
         ),
     ];
 

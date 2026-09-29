@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ProblemError, problemMessage } from "@/lib/api";
-import { oidcErrorMessage, oidcLinkAction } from "@/lib/oidc";
+import { clickOidcStart, oidcErrorMessage, startOidcLink } from "@/lib/oidc";
 import type {
   IdentityOutput,
   PasswordChangeInput,
@@ -339,9 +339,10 @@ export function PasswordSection({
   );
 }
 
-// Source "social accounts" block: link is a plain form POST (the server answers
-// 303 to the IdP and the callback returns to `?linked=1` or `?error=`), unlink
-// is an API call that refuses the last login method.
+// Source "social accounts" block: link is a same-origin POST by fetch that
+// answers the IdP URL, then a script navigation there (not a form: see
+// startOidcPost); the callback returns to `?linked=1` or `?error=`. Unlink is
+// an API call that refuses the last login method.
 export function LoginMethodsSection({
   providers,
   identities,
@@ -352,16 +353,17 @@ export function LoginMethodsSection({
   onUnlink: (provider: string) => Promise<void>;
 }) {
   const [unlinkPending, setUnlinkPending] = useState<string | null>(null);
-  const [unlinkError, setUnlinkError] = useState<string | null>(null);
+  const [methodError, setMethodError] = useState<string | null>(null);
+  const [linkPending, setLinkPending] = useState<string | null>(null);
   const linkedByProvider = new Map(identities.map((i) => [i.provider, i]));
 
   async function handleUnlink(provider: string) {
-    setUnlinkError(null);
+    setMethodError(null);
     setUnlinkPending(provider);
     try {
       await onUnlink(provider);
     } catch (err) {
-      setUnlinkError(
+      setMethodError(
         err instanceof ProblemError
           ? err.code === "oidc_last_method"
             ? oidcErrorMessage(err.code)
@@ -405,18 +407,30 @@ export function LoginMethodsSection({
                 {t("common.unlink")}
               </ConfirmActionButton>
             ) : (
-              <form method="post" action={oidcLinkAction(p.provider)}>
-                <Button type="submit" variant="outline" size="sm">
-                  {t("common.link")}
-                </Button>
-              </form>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={linkPending !== null}
+                aria-busy={linkPending === p.provider ? true : undefined}
+                onClick={() =>
+                  void clickOidcStart(
+                    p.provider,
+                    () => startOidcLink(p.provider),
+                    { setPending: setLinkPending, setError: setMethodError },
+                    "error.link",
+                  )
+                }
+              >
+                {t("common.link")}
+              </Button>
             )}
           </div>
         );
       })}
-      {unlinkError ? (
+      {methodError ? (
         <p role="alert" className="text-ui text-destructive">
-          {unlinkError}
+          {methodError}
         </p>
       ) : null}
     </div>

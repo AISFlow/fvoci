@@ -1469,6 +1469,7 @@ fn get_invitation() {}
         (status = 404, description = "Not found", body = ProblemResponse),
         (status = 410, description = "Expired or already accepted", body = ProblemResponse),
         (status = 428, description = "Consent required", body = ProblemResponse),
+        (status = 429, description = "Rate limited: per address, per address and token, or (existing account) the login password budget", body = ProblemResponse),
     )
 )]
 fn accept_invitation() {}

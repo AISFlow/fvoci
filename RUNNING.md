@@ -1322,6 +1322,22 @@ a 2048 to 4096 bit modulus; shorter keys are dropped from the key set) or ES256,
 eligible key, name only this client in `aud`, and send `email_verified` as a
 JSON boolean; anything else fails the sign-in with `oidc_provider_error`.
 
+Redirect URIs to register at the provider: an instance provider
+(`OIDC_<KEY>_*`) uses `<FVOCI_PUBLIC_ORIGIN>/api/v1/auth/oidc/<key>/callback`
+(`google`, `microsoft`, `kakao`, `naver`, `generic`). A workspace SSO provider
+(enterprise `workspaceSso`) uses its own
+`<FVOCI_PUBLIC_ORIGIN>/api/v1/auth/sso/<workspace id>/callback`, where the
+workspace id is the `id` from `GET /api/v1/me/workspaces`. A callback only
+completes a sign-in or link started for the same workspace (the instance path
+only instance flows), so a response from one provider cannot finish another
+provider's flow; anything else ends with `oidc_state_mismatch` before a token
+request is made. **Upgrading:** a workspace SSO configuration made before this
+release was registered with the instance `/api/v1/auth/oidc/generic/callback`
+URI. Add the workspace URI at that provider (the provider refuses an
+unregistered redirect URI) and remove the old one once no instance `generic`
+provider shares that client. Sign-ins started before the upgrade fail once
+with `oidc_state_mismatch`. Instance providers keep their URIs.
+
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
 project/task, a document comment, an MFA secret sealed with `ENCRYPTION_KEYS`),

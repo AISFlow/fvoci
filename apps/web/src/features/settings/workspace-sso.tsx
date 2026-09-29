@@ -2,7 +2,9 @@
 // routes/w.$slug.settings.sso.tsx. The source keeps SSO on its own settings
 // tab; this app keeps workspace settings as sections of one page, so the view
 // is a collapsed disclosure (like API tokens) shown to owners/admins only.
-// A 404 from the configuration route is the enterprise-license gate.
+// A 404 from the configuration route is the enterprise-license gate. Unlike
+// the source, each workspace has its own redirect URI, shown above the form
+// as the server returns it.
 import { t } from "@fvoci/i18n";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -16,6 +18,12 @@ import { Label } from "@/components/ui/label";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import type { components } from "@/generated/api";
 import { formFieldMessage } from "@/lib/form-issues";
+import {
+  copyText,
+  displayedRedirectUri,
+  type RedirectCopyStatus,
+  WorkspaceSsoRedirectUri,
+} from "./workspace-sso-redirect";
 import "./settings-shell.css";
 
 type WorkspaceOidcGetOutput = components["schemas"]["WorkspaceOidcGetOutput"];
@@ -156,6 +164,7 @@ function SsoForm({
 export function WorkspaceSsoSection({ workspaceId }: { workspaceId: string }) {
   const queryClient = useQueryClient();
   const [actionError, setActionError] = useState<string | null>(null);
+  const [copyStatus, setCopyStatus] = useState<RedirectCopyStatus>(null);
   const queryKey = workspaceOidcQueryKey(workspaceId);
 
   const oidc = useQuery({
@@ -168,6 +177,11 @@ export function WorkspaceSsoSection({ workspaceId }: { workspaceId: string }) {
       ),
     retry: false,
   });
+  const redirectUri = displayedRedirectUri(
+    oidc.data?.redirectUri,
+    window.location.origin,
+    workspaceId,
+  );
 
   const save = useMutation({
     mutationFn: async (input: WorkspaceOidcInput) =>
@@ -208,17 +222,29 @@ export function WorkspaceSsoSection({ workspaceId }: { workspaceId: string }) {
       <summary className="settings-disclosure__summary">{t("auth.sso.title")}</summary>
       <div className="settings-disclosure__body flex flex-col gap-4">
         {!oidc.isLoading && !oidc.isError ? (
-          <SsoForm
-            key={current?.issuer ?? "empty"}
-            current={current}
-            pending={pending}
-            onSave={async (input) => {
-              await save.mutateAsync(input);
-            }}
-            onRemove={async () => {
-              await remove.mutateAsync().catch(() => undefined);
-            }}
-          />
+          <>
+            <WorkspaceSsoRedirectUri
+              uri={redirectUri}
+              copyStatus={copyStatus}
+              onCopy={() => {
+                void copyText(redirectUri).then(
+                  () => setCopyStatus("copied"),
+                  () => setCopyStatus("failed"),
+                );
+              }}
+            />
+            <SsoForm
+              key={current?.issuer ?? "empty"}
+              current={current}
+              pending={pending}
+              onSave={async (input) => {
+                await save.mutateAsync(input);
+              }}
+              onRemove={async () => {
+                await remove.mutateAsync().catch(() => undefined);
+              }}
+            />
+          </>
         ) : null}
         {eeRequired ? (
           <p className="text-ui text-muted-foreground">{t("ee.required")}</p>

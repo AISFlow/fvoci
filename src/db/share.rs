@@ -20,7 +20,9 @@ use crate::collab::derived_body::extract_text;
 use crate::db::context::{
     lock_membership_users, recheck_session, restore_system, session_is_live, set_system, set_tenant,
 };
-use crate::db::documents::{document_permission, membership_role, workspace_is_live};
+use crate::db::documents::{
+    document_permission, document_permissions, membership_role, workspace_is_live,
+};
 use crate::db::projects::project_permission_by_id;
 use crate::db::workspace::WorkspaceRole;
 use crate::projects::ProjectPermission;
@@ -199,8 +201,40 @@ async fn document_access(
     }
 }
 
-/// Source `createShareLink`: edit permission on the target document or project.
-/// `affiliation` is set for the document-scoped routes.
+/// A link serves its root's whole live subtree ([`visible_document_ids`]), but a
+/// wiki grant is not inherited: edit on a page is not view on its subpages.
+/// True when `actor` can view every document a link on the wiki `root` would
+/// expose. Project documents take the project's permission, which the root
+/// check already covers.
+async fn sees_whole_wiki_subtree(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    root: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let project: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT project_id FROM fvoci.documents
+         WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(workspace_id)
+    .bind(root)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if !matches!(project, Some((None,))) {
+        return Ok(true);
+    }
+    let exposed = live_subtree_ids(tx, workspace_id, root).await?;
+    let levels = document_permissions(tx, workspace_id, actor_user_id, &exposed, true).await?;
+    Ok(exposed.iter().all(|id| {
+        levels
+            .get(id)
+            .is_some_and(|level| level.at_least(ProjectPermission::View))
+    }))
+}
+
+/// Source `createShareLink`: edit permission on the target document or project,
+/// and (FVOCI, not in the source) view on every wiki page the link would
+/// expose. `affiliation` is set for the document-scoped routes.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_share_link(
     pool: &PgPool,
@@ -251,6 +285,15 @@ pub async fn create_share_link(
     if !permission.at_least(ProjectPermission::Edit) {
         tx.rollback().await?;
         return Ok(Err(ShareDbError::Forbidden));
+    }
+    // Same answer as a missing edit right, so which pages are hidden is not
+    // revealed. An actor who knows they hold edit on the root does learn that
+    // some page below it is hidden; any refusal tells that much.
+    if let ShareTarget::Document(root) = target {
+        if !sees_whole_wiki_subtree(&mut tx, workspace_id, actor_user_id, root).await? {
+            tx.rollback().await?;
+            return Ok(Err(ShareDbError::Forbidden));
+        }
     }
     let (document_id, project_id) = match target {
         ShareTarget::Document(id) => (Some(id), None),
@@ -512,6 +555,17 @@ pub async fn visible_document_ids(
     let Some(root) = share_root(tx, share).await? else {
         return Ok(Vec::new());
     };
+    live_subtree_ids(tx, share.workspace_id, root).await
+}
+
+/// The live subtree under `root` (inclusive, when `root` is live) in the root's
+/// project scope, minus documents under a trashed ancestor inside the subtree:
+/// exactly what a share rooted at `root` serves.
+async fn live_subtree_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    root: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
         r#"
         WITH root AS (
@@ -536,7 +590,7 @@ pub async fn visible_document_ids(
         ORDER BY d.sort_key COLLATE "C", d.id
         "#,
     )
-    .bind(share.workspace_id)
+    .bind(workspace_id)
     .bind(root)
     .fetch_all(&mut **tx)
     .await

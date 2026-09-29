@@ -338,18 +338,22 @@ async fn workspace_oidc_in_tx(
     }))
 }
 
-/// Sign-in side: the row of a live workspace, tenant-scoped.
+/// Sign-in side: the row of a live team workspace, tenant-scoped. A personal
+/// workspace never signs anyone in: any user can create one, so its IdP
+/// would be one they chose. A row saved there before that rule stays
+/// readable and removable by its owner but starts no flow and completes none.
 pub async fn workspace_oidc_for_sign_in(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> Result<Option<WorkspaceOidcRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let live: Option<(bool,)> =
-        sqlx::query_as("SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let live: Option<(bool,)> = sqlx::query_as(
+        "SELECT deleted_at IS NULL AND kind <> 'personal' FROM fvoci.workspaces WHERE id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *tx)
+    .await?;
     let row = if live == Some((true,)) {
         workspace_oidc_in_tx(&mut tx, workspace_id).await?
     } else {
@@ -366,7 +370,8 @@ pub async fn sso_workspace_by_slug(pool: &PgPool, slug: &str) -> Result<Option<U
         .await
 }
 
-/// Source `anyWorkspaceOidcConfigured` (live workspaces only).
+/// Source `anyWorkspaceOidcConfigured` (live team workspaces only: a
+/// personal workspace's row signs no one in).
 pub async fn any_workspace_oidc(pool: &PgPool) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_system(&mut tx).await?;
@@ -375,7 +380,7 @@ pub async fn any_workspace_oidc(pool: &PgPool) -> Result<bool, sqlx::Error> {
         SELECT EXISTS (
             SELECT 1 FROM fvoci.workspace_oidc o
             JOIN fvoci.workspaces w ON w.id = o.workspace_id
-            WHERE w.deleted_at IS NULL
+            WHERE w.deleted_at IS NULL AND w.kind <> 'personal'
         )
         "#,
     )
@@ -390,6 +395,8 @@ pub enum ManageError {
     NotFound,
     Forbidden,
     SessionGone,
+    /// Saving a configuration on a personal workspace.
+    PersonalWorkspace,
 }
 
 /// Source `requirePermission(workspace, "manage")` under the tenant context:
@@ -452,6 +459,10 @@ pub struct WorkspaceOidcInput<'a> {
 
 /// Existing identity links are left alone: they keep the issuer that
 /// verified them, so a new issuer's same `sub` does not reach old accounts.
+///
+/// A personal workspace takes no configuration: any user can create one and
+/// would choose its IdP (see [`workspace_oidc_for_sign_in`]). Reading and
+/// removing stay open so an owner can clear a row saved before this rule.
 pub async fn upsert_workspace_oidc(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -463,6 +474,15 @@ pub async fn upsert_workspace_oidc(
     if let Err(err) = require_manage(&mut tx, workspace_id, actor, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(err));
+    }
+    let personal: bool =
+        sqlx::query_scalar("SELECT kind = 'personal' FROM fvoci.workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if personal {
+        tx.rollback().await?;
+        return Ok(Err(ManageError::PersonalWorkspace));
     }
     sqlx::query(
         r#"

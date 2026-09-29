@@ -418,13 +418,17 @@ pub async fn call_with(
     for (name, value) in extra {
         builder = builder.header(*name, *value);
     }
-    let mut request = match body {
+    let request = match body {
         Some(body) => builder
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap(),
         None => builder.body(Body::empty()).unwrap(),
     };
+    respond(app, request, from).await
+}
+
+pub async fn respond(app: &axum::Router, mut request: Request<Body>, from: SocketAddr) -> Response {
     request
         .extensions_mut()
         .insert(axum::extract::ConnectInfo(from));
@@ -440,6 +444,27 @@ pub async fn call_with(
         json,
         headers,
     }
+}
+
+/// A browser form submission (`application/x-www-form-urlencoded`).
+pub async fn form_post(
+    app: &axum::Router,
+    path: &str,
+    fields: &[(&str, &str)],
+    origin: Option<&str>,
+    from: SocketAddr,
+) -> Response {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(fields)
+        .finish();
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/x-www-form-urlencoded");
+    if let Some(origin) = origin {
+        builder = builder.header("origin", origin);
+    }
+    respond(app, builder.body(Body::from(body)).unwrap(), from).await
 }
 
 pub async fn call(
@@ -1277,6 +1302,51 @@ async fn oidc_start_on(
     call(app, method, path, None, cookie, from).await
 }
 
+/// A POST start (invite, link) answers `200 {authorizationUrl}` for the page
+/// to navigate to by script, never a redirect: the SPA's `form-action 'self'`
+/// blocks a form submission redirected to the provider.
+fn authorization_url_json(path: &str, res: &Response) -> String {
+    assert_eq!(res.status, StatusCode::OK, "{path}: {:?}", res.json);
+    assert!(res.headers.get("location").is_none(), "{path}");
+    assert!(
+        res.headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/json")),
+        "{path}: {:?}",
+        res.headers
+    );
+    let object = res.json.as_object().expect("json object");
+    assert_eq!(object.len(), 1, "{path}: {:?}", res.json);
+    let url = object["authorizationUrl"]
+        .as_str()
+        .expect("authorizationUrl")
+        .to_string();
+    let parsed = url::Url::parse(&url).expect("absolute authorization url");
+    assert!(matches!(parsed.scheme(), "http" | "https"), "{url}");
+    url
+}
+
+/// The state cookie a start sets: HttpOnly, Lax, ten minutes.
+fn state_cookie_of(path: &str, res: &Response) -> String {
+    let set = res
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("fvoci_oidc_state="))
+        .unwrap_or_else(|| panic!("{path}: state cookie"))
+        .to_string();
+    assert!(
+        set.contains("HttpOnly")
+            && set.contains("Path=/")
+            && set.contains("SameSite=Lax")
+            && set.contains("Max-Age=600"),
+        "{set}"
+    );
+    res.cookie_named("fvoci_oidc_state").unwrap()
+}
+
 async fn begin_on(
     app: &axum::Router,
     path: &str,
@@ -1284,32 +1354,40 @@ async fn begin_on(
     from: SocketAddr,
 ) -> Started {
     let res = oidc_start_on(app, path, cookie, from).await;
-    assert!(
-        res.status == StatusCode::FOUND || res.status == StatusCode::SEE_OTHER,
-        "{path}: {} {:?}",
-        res.status,
-        res.json
-    );
-    let set = res
-        .headers
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .find(|v| v.starts_with("fvoci_oidc_state="))
-        .expect("state cookie")
-        .to_string();
-    assert!(
-        set.contains("HttpOnly") && set.contains("SameSite=Lax") && set.contains("Max-Age=600")
-    );
+    let location = if path.contains("/link") {
+        authorization_url_json(path, &res)
+    } else {
+        assert_eq!(res.status, StatusCode::FOUND, "{path}: {:?}", res.json);
+        res.location()
+    };
     Started {
-        location: res.location(),
-        state_cookie: res.cookie_named("fvoci_oidc_state").unwrap(),
+        location,
+        state_cookie: state_cookie_of(path, &res),
     }
 }
 
 async fn callback_on(
     app: &axum::Router,
     provider: &str,
+    query: &str,
+    state_cookie: Option<&str>,
+    session: Option<&str>,
+    from: SocketAddr,
+) -> Response {
+    callback_at(
+        app,
+        &format!("/api/v1/auth/oidc/{provider}/callback"),
+        query,
+        state_cookie,
+        session,
+        from,
+    )
+    .await
+}
+
+async fn callback_at(
+    app: &axum::Router,
+    path: &str,
     query: &str,
     state_cookie: Option<&str>,
     session: Option<&str>,
@@ -1325,7 +1403,7 @@ async fn callback_on(
     call_with(
         app,
         "GET",
-        &format!("/api/v1/auth/oidc/{provider}/callback?{query}"),
+        &format!("{path}?{query}"),
         None,
         &cookies,
         from,
@@ -1334,7 +1412,48 @@ async fn callback_on(
     .await
 }
 
-/// start → provider authorize → callback, all for `profile`.
+/// Path of the `redirect_uri` the server put in an authorization URL: where
+/// the provider sends the browser back.
+fn redirect_path(authorization_url: &str) -> String {
+    let url = url::Url::parse(authorization_url).expect("authorization url");
+    let redirect = url
+        .query_pairs()
+        .find(|(k, _)| k == "redirect_uri")
+        .expect("redirect_uri")
+        .1
+        .into_owned();
+    let redirect = url::Url::parse(&redirect).expect("redirect uri");
+    assert_eq!(redirect.origin().ascii_serialization(), "http://localhost");
+    assert!(redirect.query().is_none(), "{redirect}");
+    redirect.path().to_string()
+}
+
+/// The invite page's same-origin POST → provider → callback.
+async fn oidc_invite_round(
+    h: &Harness,
+    fake: &FakeOidc,
+    provider: &str,
+    invitation: &str,
+    consents: Option<&str>,
+    profile: Profile,
+    from: SocketAddr,
+) -> Response {
+    let mut fields = vec![("invitation", invitation)];
+    if let Some(consents) = consents {
+        fields.push(("consents", consents));
+    }
+    let start = format!("/api/v1/auth/oidc/{provider}/start");
+    let res = form_post(&h.app, &start, &fields, Some("http://localhost"), from).await;
+    let location = authorization_url_json(&start, &res);
+    let state_cookie = state_cookie_of(&start, &res);
+    let path = redirect_path(&location);
+    assert_eq!(path, format!("/api/v1/auth/oidc/{provider}/callback"));
+    let query = fake.authorize(&location, profile);
+    callback_at(&h.app, &path, &query, Some(&state_cookie), None, from).await
+}
+
+/// start → provider authorize → callback, all for `profile`. Like a real
+/// provider, the fake sends the browser to the `redirect_uri` of the request.
 async fn oidc_round_on(
     app: &axum::Router,
     fake: &FakeOidc,
@@ -1345,10 +1464,16 @@ async fn oidc_round_on(
     from: SocketAddr,
 ) -> Response {
     let started = begin_on(app, start_path, session, from).await;
+    let path = redirect_path(&started.location);
+    assert!(
+        path == format!("/api/v1/auth/oidc/{provider}/callback")
+            || (provider == "generic" && path.starts_with("/api/v1/auth/sso/")),
+        "{provider}: {path}"
+    );
     let query = fake.authorize(&started.location, profile);
-    callback_on(
+    callback_at(
         app,
-        provider,
+        &path,
         &query,
         Some(&started.state_cookie),
         session,
@@ -1807,12 +1932,11 @@ async fn oidc_state_is_single_use_and_bound_to_the_browser() {
     )
     .await;
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
-    let res = call(
+    let res = form_post(
         &h.app,
-        "GET",
-        "/api/v1/auth/oidc/generic/start?invitation=x&consents=nope",
-        None,
-        None,
+        "/api/v1/auth/oidc/generic/start",
+        &[("invitation", "x"), ("consents", "nope")],
+        Some("http://localhost"),
         peer(64),
     )
     .await;
@@ -2193,10 +2317,15 @@ async fn workspace_oidc_config_is_admin_only_and_sealed() {
     let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::ec("ec-1")).await;
     let h = oidc_harness(&fake, &[]).await;
     let path = format!("/api/v1/workspaces/{}/oidc", h.workspace_id);
+    let redirect_uri = format!(
+        "http://localhost/api/v1/auth/sso/{}/callback",
+        h.workspace_id
+    );
     let res = call(&h.app, "GET", &path, None, Some(&h.owner_cookie), peer(110)).await;
+    // The redirect URI to register comes with the form, before any save.
     assert_eq!(
         res.json,
-        json!({"issuer": null, "clientId": null, "label": null})
+        json!({"issuer": null, "clientId": null, "label": null, "redirectUri": redirect_uri})
     );
 
     let bad = call(
@@ -2240,7 +2369,42 @@ async fn workspace_oidc_config_is_admin_only_and_sealed() {
     assert!(stored.starts_with("enc:v2:k1:") && !stored.contains(CLIENT_SECRET));
     let res = call(&h.app, "GET", &path, None, Some(&h.owner_cookie), peer(110)).await;
     assert_eq!(res.json["clientId"], "fvoci-client");
+    assert_eq!(res.json["redirectUri"], redirect_uri.as_str());
     assert!(res.json.get("clientSecret").is_none());
+    // It is the exact redirect_uri the server sends that provider.
+    let sso = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/sso?slug=acme",
+        None,
+        None,
+        peer(110),
+    )
+    .await;
+    assert_eq!(sso.status, StatusCode::FOUND, "{:?}", sso.json);
+    assert_eq!(query_param(&sso.location(), "redirect_uri"), redirect_uri);
+    // Built from the server's public origin, whatever host the admin's
+    // browser is on.
+    let elsewhere = h.app_with_oidc(OidcSettings {
+        public_origin: "https://sso.example".into(),
+        ..oidc_settings(Vec::new(), true)
+    });
+    let res = call(
+        &elsewhere,
+        "GET",
+        &path,
+        None,
+        Some(&h.owner_cookie),
+        peer(110),
+    )
+    .await;
+    assert_eq!(
+        res.json["redirectUri"],
+        format!(
+            "https://sso.example/api/v1/auth/sso/{}/callback",
+            h.workspace_id
+        )
+    );
     let providers = call(
         &h.app,
         "GET",
@@ -2299,6 +2463,170 @@ async fn workspace_oidc_config_is_admin_only_and_sealed() {
     .await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);
     assert_eq!(res.code(), "provider_not_configured");
+    h.finish().await;
+}
+
+/// Any user can create a personal workspace, so an IdP configured there is
+/// one they chose (login CSRF into their own account through a plain GET
+/// start). A personal workspace takes no configuration, and a row saved
+/// before that rule is not advertised, starts nothing and completes nothing,
+/// while its owner can still read and remove it.
+#[tokio::test]
+async fn personal_workspaces_take_no_sso() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;
+    let h = oidc_harness(&fake, &[]).await;
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&h.owner_cookie),
+        peer(180),
+    )
+    .await;
+    assert!(res.status.is_success(), "{:?}", res.json);
+    let ws: Uuid = res.json["id"].as_str().unwrap().parse().unwrap();
+    let slug = res.json["slug"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/workspaces/{ws}/oidc");
+    let config =
+        json!({"issuer": &fake.base, "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET});
+
+    let res = call(
+        &h.app,
+        "PUT",
+        &path,
+        Some(config.clone()),
+        Some(&h.owner_cookie),
+        peer(180),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::CONFLICT, "{:?}", res.json);
+    assert_eq!(res.code(), "personal_workspace_is_immutable");
+    let rows = "SELECT count(*) FROM fvoci.workspace_oidc WHERE workspace_id = $1";
+    assert_eq!(h.count(rows, ws).await, 0);
+    // The team workspace still takes one.
+    let res = call(
+        &h.app,
+        "PUT",
+        &format!("/api/v1/workspaces/{}/oidc", h.workspace_id),
+        Some(config),
+        Some(&h.owner_cookie),
+        peer(180),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    sqlx::query("DELETE FROM fvoci.workspace_oidc")
+        .execute(&h.admin)
+        .await
+        .unwrap();
+
+    // A row saved on the personal workspace before the rule.
+    let sealed = fvoci_server::secret_box::seal(
+        &encryption_keys(),
+        CLIENT_SECRET,
+        &fvoci_server::identity::workspace_oidc_context(ws),
+    )
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.workspace_oidc (id, workspace_id, issuer, client_id, client_secret, label) \
+         VALUES ($1, $2, $3, $4, $5, 'SSO')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws)
+    .bind(&fake.base)
+    .bind(CLIENT_ID)
+    .bind(&sealed)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+
+    let providers = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/providers",
+        None,
+        None,
+        peer(181),
+    )
+    .await;
+    assert_eq!(providers.json["workspaceSso"], false);
+    for (method, start, cookie) in [
+        (
+            "GET",
+            format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
+            None,
+        ),
+        ("GET", format!("/api/v1/auth/sso?slug={slug}"), None),
+        (
+            "POST",
+            format!("/api/v1/auth/oidc/generic/link?workspaceId={ws}"),
+            Some(h.owner_cookie.as_str()),
+        ),
+    ] {
+        let res = call(&h.app, method, &start, None, cookie, peer(181)).await;
+        assert_eq!(res.status, StatusCode::NOT_FOUND, "{start}: {:?}", res.json);
+        assert_eq!(res.code(), "provider_not_configured", "{start}");
+        assert!(res.cookie_named("fvoci_oidc_state").is_none(), "{start}");
+    }
+    assert_eq!(oidc_state_rows(&h).await, 0);
+    assert_eq!(fake.discovery_hits.load(Ordering::SeqCst), 0);
+
+    // A flow begun while the row still signed in completes nothing once the
+    // workspace is personal: no token request reaches its IdP.
+    let set_kind = "UPDATE fvoci.workspaces SET kind = $2 WHERE id = $1";
+    sqlx::query(set_kind)
+        .bind(ws)
+        .bind("team")
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let started = h
+        .begin(
+            &format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
+            None,
+            peer(182),
+        )
+        .await;
+    sqlx::query(set_kind)
+        .bind(ws)
+        .bind("personal")
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let path_back = redirect_path(&started.location);
+    assert_eq!(path_back, format!("/api/v1/auth/sso/{ws}/callback"));
+    let query = fake.authorize(&started.location, Profile::new("p-sub", OWNER_EMAIL, true));
+    let res = callback_at(
+        &h.app,
+        &path_back,
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(182),
+    )
+    .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/login?error=oidc_provider_error"
+    );
+    assert!(res.cookie().is_none());
+    assert_eq!(token_hits(&fake), 0);
+
+    // Its owner still reads and removes it.
+    let res = call(&h.app, "GET", &path, None, Some(&h.owner_cookie), peer(183)).await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    assert_eq!(res.json["clientId"], CLIENT_ID);
+    let res = call(
+        &h.app,
+        "DELETE",
+        &path,
+        None,
+        Some(&h.owner_cookie),
+        peer(183),
+    )
+    .await;
+    assert_eq!(res.json, json!({"ok": true}));
+    assert_eq!(h.count(rows, ws).await, 0);
     h.finish().await;
 }
 
@@ -2508,16 +2836,16 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
 
     // New account through Google.
     let token = invite("guest1@example.com").await;
-    let res = h
-        .oidc_round(
-            &fake,
-            &format!("/api/v1/auth/oidc/google/start?invitation={token}&consents=%5B%5D"),
-            "google",
-            Profile::new("g-1", "someone@gmail.test", true),
-            None,
-            peer(131),
-        )
-        .await;
+    let res = oidc_invite_round(
+        &h,
+        &fake,
+        "google",
+        &token,
+        Some("[]"),
+        Profile::new("g-1", "someone@gmail.test", true),
+        peer(131),
+    )
+    .await;
     assert_eq!(res.location(), "http://localhost/", "{:?}", res.headers);
     let (user_id, has_password): (Uuid, bool) = sqlx::query_as(
         "SELECT id, password_hash IS NOT NULL FROM fvoci.users WHERE email = 'guest1@example.com'",
@@ -2544,16 +2872,16 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
     );
     assert_eq!(h.login_methods(user_id).await, vec!["oidc:google"]);
     // The invitation is spent.
-    let res = h
-        .oidc_round(
-            &fake,
-            &format!("/api/v1/auth/oidc/google/start?invitation={token}"),
-            "google",
-            Profile::new("g-1", "someone@gmail.test", true),
-            None,
-            peer(132),
-        )
-        .await;
+    let res = oidc_invite_round(
+        &h,
+        &fake,
+        "google",
+        &token,
+        None,
+        Profile::new("g-1", "someone@gmail.test", true),
+        peer(132),
+    )
+    .await;
     assert_eq!(
         res.location(),
         "http://localhost/login?error=oidc_invitation_invalid"
@@ -2562,16 +2890,16 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
     // Existing account without that identity: refused (no takeover by email).
     let (_kim, kim_email, _c) = h.member("kim").await;
     let token = invite(Box::leak(kim_email.clone().into_boxed_str())).await;
-    let res = h
-        .oidc_round(
-            &fake,
-            &format!("/api/v1/auth/oidc/google/start?invitation={token}"),
-            "google",
-            Profile::new("g-kim", &kim_email, true),
-            None,
-            peer(133),
-        )
-        .await;
+    let res = oidc_invite_round(
+        &h,
+        &fake,
+        "google",
+        &token,
+        None,
+        Profile::new("g-kim", &kim_email, true),
+        peer(133),
+    )
+    .await;
     assert_eq!(
         res.location(),
         "http://localhost/login?error=oidc_invitation_invalid"
@@ -2579,16 +2907,16 @@ async fn oidc_invitation_accept_creates_or_requires_the_linked_account() {
 
     // An identity already linked to someone cannot open a new account.
     let token = invite("guest2@example.com").await;
-    let res = h
-        .oidc_round(
-            &fake,
-            &format!("/api/v1/auth/oidc/google/start?invitation={token}"),
-            "google",
-            Profile::new("g-1", "someone@gmail.test", true),
-            None,
-            peer(134),
-        )
-        .await;
+    let res = oidc_invite_round(
+        &h,
+        &fake,
+        "google",
+        &token,
+        None,
+        Profile::new("g-1", "someone@gmail.test", true),
+        peer(134),
+    )
+    .await;
     assert_eq!(
         res.location(),
         "http://localhost/login?error=oidc_already_linked"
@@ -3688,5 +4016,714 @@ async fn verify_secrets_opens_every_sealed_value_and_fails_on_a_bad_one() {
         output.contains("1 sealed secret(s) do not open"),
         "{output}"
     );
+    h.finish().await;
+}
+
+// ---------------------------------------------------------------------------
+// Identity hardening (WP7)
+
+fn query_param(url: &str, key: &str) -> String {
+    url::Url::parse(url)
+        .expect("url")
+        .query_pairs()
+        .find(|(k, _)| k == key)
+        .unwrap_or_else(|| panic!("{key} in {url}"))
+        .1
+        .into_owned()
+}
+
+fn with_query_param(url: &str, key: &str, value: &str) -> String {
+    let mut parsed = url::Url::parse(url).expect("url");
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(k, v)| {
+            let v = if k == key {
+                value.to_string()
+            } else {
+                v.into_owned()
+            };
+            (k.into_owned(), v)
+        })
+        .collect();
+    parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    parsed.to_string()
+}
+
+fn token_hits(fake: &FakeOidc) -> usize {
+    fake.token_hits.load(Ordering::SeqCst)
+}
+
+/// Any workspace admin can register a workspace SSO provider, so its flows
+/// must not share a redirect URI with the instance provider or with another
+/// workspace (RFC 9700 §4.4 mix-up). Neither fake sends RFC 9207 `iss`.
+#[tokio::test]
+async fn workspace_sso_callback_is_bound_to_its_workspace() {
+    let honest = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-h")).await;
+    let evil = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::ec("ec-e")).await;
+    let h = oidc_harness(&honest, &[ProviderKey::Generic]).await;
+    let ws = h.workspace_id;
+    let res = call(
+        &h.app,
+        "PUT",
+        &format!("/api/v1/workspaces/{ws}/oidc"),
+        Some(json!({"issuer": &evil.base, "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET})),
+        Some(&h.owner_cookie),
+        peer(160),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    // The victim signs in through the instance generic provider.
+    let (victim_id, _email, victim_cookie) = h.member("victim").await;
+    let res = h
+        .oidc_round(
+            &honest,
+            "/api/v1/auth/oidc/generic/link",
+            "generic",
+            Profile::new("victim-sub", "victim@example.com", true),
+            Some(&victim_cookie),
+            peer(161),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
+    let mismatch = "http://localhost/login?error=oidc_state_mismatch";
+    let (honest_hits, evil_hits) = (token_hits(&honest), token_hits(&evil));
+
+    // 1. The victim's browser is sent into a flow bound to the workspace IdP.
+    let victim = h
+        .begin(
+            &format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
+            None,
+            peer(162),
+        )
+        .await;
+    // 2. That IdP forwards the browser to the honest IdP with a request copied
+    //    from its own instance-generic flow, keeping the victim's state.
+    let attacker = h
+        .begin("/api/v1/auth/oidc/generic/start", None, peer(163))
+        .await;
+    let forwarded = with_query_param(
+        &attacker.location,
+        "state",
+        &query_param(&victim.location, "state"),
+    );
+    // 3. The honest IdP answers on the redirect URI of that request.
+    let query = honest.authorize(
+        &forwarded,
+        Profile::new("victim-sub", "victim@example.com", true),
+    );
+    let res = callback_at(
+        &h.app,
+        &redirect_path(&forwarded),
+        &query,
+        Some(&victim.state_cookie),
+        None,
+        peer(162),
+    )
+    .await;
+    // The honest code never reaches the workspace IdP's token endpoint.
+    assert_eq!(
+        token_hits(&evil),
+        evil_hits,
+        "code sent to the workspace IdP"
+    );
+    assert_eq!(token_hits(&honest), honest_hits);
+    assert_eq!(res.location(), mismatch);
+    assert!(res.cookie().is_none());
+
+    // An instance flow answered on a workspace callback is refused too.
+    let started = h
+        .begin("/api/v1/auth/oidc/generic/start", None, peer(164))
+        .await;
+    let query = honest.authorize(
+        &started.location,
+        Profile::new("victim-sub", "victim@example.com", true),
+    );
+    let res = callback_at(
+        &h.app,
+        &format!("/api/v1/auth/sso/{ws}/callback"),
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(164),
+    )
+    .await;
+    assert_eq!(res.location(), mismatch);
+    // So is a workspace flow answered on another workspace's callback.
+    let started = h
+        .begin(
+            &format!("/api/v1/auth/oidc/generic/start?workspaceId={ws}"),
+            None,
+            peer(165),
+        )
+        .await;
+    let query = evil.authorize(
+        &started.location,
+        Profile::new("ws-sub", "ws@example.com", true),
+    );
+    let res = callback_at(
+        &h.app,
+        &format!("/api/v1/auth/sso/{}/callback", Uuid::now_v7()),
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(165),
+    )
+    .await;
+    assert_eq!(res.location(), mismatch);
+    assert_eq!(token_hits(&evil), evil_hits);
+    assert_eq!(token_hits(&honest), honest_hits);
+    let res = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/sso/not-a-uuid/callback?code=c&state=s",
+        None,
+        None,
+        peer(165),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    // No session was issued for the victim through any of these.
+    assert_eq!(h.login_methods(victim_id).await, vec!["password"]);
+
+    // Redirect URIs: the instance provider keeps its path; every workspace
+    // flow (slug SSO, workspace start, link) uses the workspace's own path.
+    assert_eq!(
+        redirect_path(&attacker.location),
+        "/api/v1/auth/oidc/generic/callback"
+    );
+    let workspace_path = format!("/api/v1/auth/sso/{ws}/callback");
+    assert_eq!(redirect_path(&victim.location), workspace_path);
+    let sso = h.begin("/api/v1/auth/sso?slug=acme", None, peer(166)).await;
+    assert_eq!(redirect_path(&sso.location), workspace_path);
+    // A workspace link (another account: one link per provider) completes
+    // on the workspace path.
+    let res = h
+        .oidc_round(
+            &evil,
+            &format!("/api/v1/auth/oidc/generic/link?workspaceId={ws}"),
+            "generic",
+            Profile::new("ws-sub", OWNER_EMAIL, true),
+            Some(&h.owner_cookie),
+            peer(167),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
+    assert_eq!(
+        link_row(&h, "generic", &format!("{ws}:ws-sub")).await,
+        Some((h.owner_id, Some(evil.base.clone())))
+    );
+    h.finish().await;
+}
+
+async fn invite_token_for(h: &Harness, email: &str, from: SocketAddr) -> String {
+    let res = call(
+        &h.app,
+        "POST",
+        &format!("/api/v1/workspaces/{}/invitations", h.workspace_id),
+        Some(json!({ "email": email, "role": "member" })),
+        Some(&h.owner_cookie),
+        from,
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::CREATED, "{:?}", res.json);
+    res.json["acceptUrl"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+async fn oidc_state_rows(h: &Harness) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM fvoci.oidc_states")
+        .fetch_one(&h.admin)
+        .await
+        .unwrap()
+}
+
+/// Invite mode binds the browser's IdP identity to the invited account, so
+/// only a same-origin POST may start it (like link); consents come from the
+/// body, never from a URL another site can build. The answer is JSON for the
+/// page to navigate by script, not a redirect.
+#[tokio::test]
+async fn oidc_invitation_start_is_a_same_origin_post() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;
+    let h = oidc_harness(&fake, &[ProviderKey::Google]).await;
+    let token = invite_token_for(&h, "post@example.com", peer(170)).await;
+    let start = "/api/v1/auth/oidc/google/start";
+
+    // GET start is plain login only.
+    for query in [
+        format!("invitation={token}"),
+        format!("invitation={token}&consents=%5B%5D"),
+        "consents=%5B%5D".to_string(),
+    ] {
+        let res = call(
+            &h.app,
+            "GET",
+            &format!("{start}?{query}"),
+            None,
+            None,
+            peer(170),
+        )
+        .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{query}");
+    }
+    assert_eq!(oidc_state_rows(&h).await, 0);
+    // A cross-site form post is refused before any state is issued.
+    let res = form_post(
+        &h.app,
+        start,
+        &[("invitation", &token), ("consents", "[]")],
+        Some("https://evil.example"),
+        peer(170),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(res.code(), "origin_mismatch");
+    // So is a post without any Origin: browsers always send one on a POST,
+    // so only a client that strips it (e.g. an extension) lacks it.
+    let res = form_post(
+        &h.app,
+        start,
+        &[("invitation", &token), ("consents", "[]")],
+        None,
+        peer(170),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(res.code(), "origin_mismatch");
+    assert!(res.cookie_named("fvoci_oidc_state").is_none());
+    assert_eq!(oidc_state_rows(&h).await, 0);
+    // Body shape: an invitation, optional JSON consents, nothing else.
+    for (fields, code) in [
+        (vec![], "invalid_input"),
+        (vec![("invitation", "")], "invalid_input"),
+        (
+            vec![("invitation", token.as_str()), ("consents", "nope")],
+            "invalid_consents_query",
+        ),
+        (
+            vec![("invitation", token.as_str()), ("workspaceId", "x")],
+            "invalid_input",
+        ),
+        (
+            vec![("invitation", token.as_str()), ("invitation", "again")],
+            "invalid_input",
+        ),
+    ] {
+        let res = form_post(&h.app, start, &fields, Some("http://localhost"), peer(170)).await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{fields:?}");
+        assert_eq!(res.code(), code, "{fields:?}");
+    }
+    let res = form_post(
+        &h.app,
+        &format!("{start}?invitation={token}"),
+        &[("invitation", &token)],
+        Some("http://localhost"),
+        peer(170),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert_eq!(oidc_state_rows(&h).await, 0);
+
+    // A same-origin post (the invite page's fetch) answers 200 with only
+    // the authorization URL and sets the state cookie; the page navigates
+    // there by script, so the SPA's form-action 'self' is not involved.
+    let res = form_post(
+        &h.app,
+        start,
+        &[("invitation", &token), ("consents", "[]")],
+        Some("http://localhost"),
+        peer(171),
+    )
+    .await;
+    let location = authorization_url_json(start, &res);
+    let state_cookie = state_cookie_of(start, &res);
+    assert!(
+        location.starts_with(&format!("{}/authorize?", fake.base)),
+        "{location}"
+    );
+    assert_eq!(oidc_state_rows(&h).await, 1);
+    assert_eq!(
+        redirect_path(&location),
+        "/api/v1/auth/oidc/google/callback"
+    );
+    let query = fake.authorize(&location, Profile::new("g-post", "post@example.com", true));
+    let res = h
+        .callback("google", &query, Some(&state_cookie), None, peer(171))
+        .await;
+    assert_eq!(res.location(), "http://localhost/", "{:?}", res.headers);
+    assert_eq!(
+        link_row(&h, "google", "g-post")
+            .await
+            .map(|(_, issuer)| issuer),
+        Some(Some(fake.base.clone()))
+    );
+    h.finish().await;
+}
+
+// RFC 6238 appendix secret: steps 910737 and 910738 share one code.
+const RFC_SECRET: &[u8] = b"12345678901234567890";
+
+async fn insert_enabled_mfa(h: &Harness, user_id: Uuid, secret: &[u8]) {
+    let sealed = fvoci_server::secret_box::seal(
+        &encryption_keys(),
+        &hex::encode(secret),
+        &fvoci_server::identity::user_mfa_context(user_id),
+    )
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.user_mfa (user_id, totp_secret, enabled_at) VALUES ($1, $2, now())",
+    )
+    .bind(user_id)
+    .bind(sealed)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+}
+
+async fn mfa_challenge(h: &Harness, email: &str, from: SocketAddr) -> String {
+    let res = h.login(email, PASSWORD, from).await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    res.json["mfaToken"]
+        .as_str()
+        .expect("mfa token")
+        .to_string()
+}
+
+/// RFC 6238 §5.2: a code is accepted once. When two adjacent steps share a
+/// code, the newest one is the replay floor.
+#[tokio::test]
+async fn totp_code_shared_by_adjacent_steps_is_accepted_once() {
+    let h = Harness::start().await;
+    let (user_id, email, _cookie) = h.member("shared").await;
+    insert_enabled_mfa(&h, user_id, RFC_SECRET).await;
+    let code = totp::totp_code(RFC_SECRET, 910_738);
+    assert_eq!(code, totp::totp_code(RFC_SECRET, 910_737));
+    h.clock.store(910_738 * 30_000, Ordering::SeqCst);
+
+    let token = mfa_challenge(&h, &email, peer(180)).await;
+    let res = h.verify(&token, &code, peer(180)).await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    // One step later the same code (still in the window) is a replay.
+    h.advance_steps(1);
+    let token = mfa_challenge(&h, &email, peer(181)).await;
+    let res = h.verify(&token, &code, peer(181)).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{:?}", res.json);
+    assert_eq!(res.code(), "mfa_invalid");
+    let floor: Option<i32> =
+        sqlx::query_scalar("SELECT last_used_step FROM fvoci.user_mfa WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(floor, Some(910_738));
+    assert_eq!(h.login_methods(user_id).await, vec!["password", "totp"]);
+    h.finish().await;
+}
+
+/// What happens to the MFA row while a request waits on the user's row.
+enum Swap {
+    /// `--secrets-rotate`: the same secret, a new ciphertext (fresh nonce
+    /// under the active key).
+    Reseal,
+    /// Another secret: a new setup for a pending row, disable + setup +
+    /// enable (a new `enabled_at`) for an enabled one.
+    Replace(Vec<u8>),
+}
+
+async fn swap_mfa(conn: &mut sqlx::PgConnection, user_id: Uuid, swap: &Swap) {
+    let stored: String =
+        sqlx::query_scalar("SELECT totp_secret FROM fvoci.user_mfa WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    let keys = encryption_keys();
+    let context = fvoci_server::identity::user_mfa_context(user_id);
+    let plain = match swap {
+        Swap::Reseal => fvoci_server::secret_box::open(&keys, &stored, &context).unwrap(),
+        Swap::Replace(secret) => hex::encode(secret),
+    };
+    let again = fvoci_server::secret_box::seal(&keys, &plain, &context).unwrap();
+    assert_ne!(again, stored);
+    let sql = match swap {
+        Swap::Reseal => {
+            "UPDATE fvoci.user_mfa SET totp_secret = $3, updated_at = now() WHERE user_id = $1 AND totp_secret = $2"
+        }
+        Swap::Replace(_) => {
+            "UPDATE fvoci.user_mfa SET totp_secret = $3, last_used_step = NULL, updated_at = now(),
+                 enabled_at = CASE WHEN enabled_at IS NULL THEN NULL ELSE clock_timestamp() END
+             WHERE user_id = $1 AND totp_secret = $2"
+        }
+    };
+    let updated = sqlx::query(sql)
+        .bind(user_id)
+        .bind(&stored)
+        .bind(&again)
+        .execute(&mut *conn)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(updated, 1);
+}
+
+/// Holds the user's row (the sign-in / session-recheck lock) while `request`
+/// runs up to it, swaps the MFA row, then lets the request finish.
+async fn swap_during(
+    h: &Harness,
+    user_id: Uuid,
+    swap: Swap,
+    request: impl std::future::Future<Output = Response> + Send + 'static,
+) -> Response {
+    let mut lock = h.admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(user_id)
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let task = tokio::spawn(request);
+    wait_for_lock_waiter(h).await;
+    swap_mfa(&mut lock, user_id, &swap).await;
+    lock.commit().await.unwrap();
+    task.await.unwrap()
+}
+
+fn enable_request(
+    h: &Harness,
+    cookie: &str,
+    code: String,
+) -> impl std::future::Future<Output = Response> + Send + 'static {
+    let app = h.app.clone();
+    let cookie = cookie.to_string();
+    async move {
+        call(
+            &app,
+            "POST",
+            "/api/v1/auth/mfa/enable",
+            Some(json!({ "code": code })),
+            Some(&cookie),
+            peer(190),
+        )
+        .await
+    }
+}
+
+fn verify_request(
+    h: &Harness,
+    token: String,
+    code: String,
+) -> impl std::future::Future<Output = Response> + Send + 'static {
+    let app = h.app.clone();
+    async move {
+        call(
+            &app,
+            "POST",
+            "/api/v1/auth/mfa/verify",
+            Some(json!({ "mfaToken": token, "code": code })),
+            None,
+            peer(191),
+        )
+        .await
+    }
+}
+
+/// `--secrets-rotate` runs against a live server: re-sealing the same secret
+/// between the code check and the write must not reject a valid code, while
+/// a secret replaced meanwhile still must.
+#[tokio::test]
+async fn mfa_enable_survives_a_concurrent_reseal() {
+    let h = Harness::start().await;
+    let (user_id, _email, cookie) = h.member("reseal-enable").await;
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/mfa/setup",
+        Some(json!({ "currentPassword": PASSWORD })),
+        Some(&cookie),
+        peer(190),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    let first = decode_base32(res.json["secret"].as_str().unwrap());
+
+    // A concurrent setup replaced the secret: the code was for the old one.
+    let second = totp::new_secret().to_vec();
+    let request = enable_request(&h, &cookie, h.code_now(&first));
+    let res = swap_during(&h, user_id, Swap::Replace(second.clone()), request).await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "{:?}", res.json);
+    assert_eq!(res.code(), "mfa_not_setup");
+
+    // The same secret re-sealed meanwhile: enabled.
+    let request = enable_request(&h, &cookie, h.code_now(&second));
+    let res = swap_during(&h, user_id, Swap::Reseal, request).await;
+    assert_eq!(res.status, StatusCode::OK, "enable: {:?}", res.json);
+    let enabled: bool =
+        sqlx::query_scalar("SELECT enabled_at IS NOT NULL FROM fvoci.user_mfa WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    assert!(enabled);
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn mfa_verify_survives_a_concurrent_reseal() {
+    let h = Harness::start().await;
+    let (user_id, email, cookie) = h.member("reseal-verify").await;
+    let (first, _codes) = h.enable_mfa(&cookie, Some(PASSWORD)).await;
+
+    // Disabled and enabled again with another secret meanwhile: refused.
+    h.advance_steps(1);
+    let second = totp::new_secret().to_vec();
+    let token = mfa_challenge(&h, &email, peer(191)).await;
+    let request = verify_request(&h, token, h.code_now(&first));
+    let res = swap_during(&h, user_id, Swap::Replace(second.clone()), request).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{:?}", res.json);
+    assert_eq!(res.code(), "mfa_invalid");
+
+    // The same secret re-sealed meanwhile: signed in.
+    h.advance_steps(1);
+    sqlx::query("UPDATE fvoci.user_mfa SET verify_count = 0 WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let token = mfa_challenge(&h, &email, peer(192)).await;
+    let request = verify_request(&h, token, h.code_now(&second));
+    let res = swap_during(&h, user_id, Swap::Reseal, request).await;
+    assert_eq!(res.status, StatusCode::OK, "verify: {:?}", res.json);
+    assert!(res.cookie().is_some());
+    // The re-seal cost no extra attempt.
+    let attempts: i32 =
+        sqlx::query_scalar("SELECT verify_count FROM fvoci.user_mfa WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(attempts, 1);
+    h.finish().await;
+}
+
+/// Changing the email cuts off the previous mailbox: reset, login and other
+/// pending email-change links mailed before the change stop working.
+#[tokio::test]
+async fn email_change_invalidates_links_mailed_before_it() {
+    use fvoci_server::db::account::{issue_email_change_token, issue_login_token, LoginLinkUser};
+    use fvoci_server::db::magic::{issue_password_reset_token, magic_expires_at};
+
+    let h = Harness::start().await;
+    let (user_id, _email, cookie) = h.member("mover").await;
+    let generation: i32 =
+        sqlx::query_scalar("SELECT auth_generation FROM fvoci.users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    let expires = magic_expires_at(chrono::Utc::now());
+    let pool = &h.app_pool;
+    let reset = new_token();
+    issue_password_reset_token(pool, user_id, generation, &reset.hash, expires)
+        .await
+        .unwrap();
+    let login = new_token();
+    issue_login_token(
+        pool,
+        &LoginLinkUser {
+            user_id,
+            generation,
+        },
+        &login.hash,
+        expires,
+    )
+    .await
+    .unwrap();
+    let typo = new_token();
+    issue_email_change_token(
+        pool,
+        user_id,
+        generation,
+        "typo@example.com",
+        &typo.hash,
+        expires,
+    )
+    .await
+    .unwrap();
+    let change = new_token();
+    issue_email_change_token(
+        pool,
+        user_id,
+        generation,
+        "moved@example.com",
+        &change.hash,
+        expires,
+    )
+    .await
+    .unwrap();
+
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/email/confirm",
+        Some(json!({ "token": change.token })),
+        None,
+        peer(200),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/password-reset/confirm",
+        Some(json!({ "token": reset.token, "newPassword": "takeover-secret1" })),
+        None,
+        peer(200),
+    )
+    .await;
+    assert_eq!(res.code(), "magic_invalid", "reset: {:?}", res.json);
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/magic-link/consume",
+        Some(json!({ "token": login.token })),
+        None,
+        peer(200),
+    )
+    .await;
+    assert_eq!(res.code(), "magic_invalid", "login: {:?}", res.json);
+    assert!(res.cookie().is_none());
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/email/confirm",
+        Some(json!({ "token": typo.token })),
+        None,
+        peer(200),
+    )
+    .await;
+    assert_eq!(res.code(), "magic_invalid", "email: {:?}", res.json);
+
+    // The change itself stands; the password and live sessions are kept.
+    let email: String = sqlx::query_scalar("SELECT email FROM fvoci.users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&h.admin)
+        .await
+        .unwrap();
+    assert_eq!(email, "moved@example.com");
+    let me = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/me",
+        None,
+        Some(&cookie),
+        peer(200),
+    )
+    .await;
+    assert_eq!(me.status, StatusCode::OK);
+    let res = h.login("moved@example.com", PASSWORD, peer(201)).await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
     h.finish().await;
 }

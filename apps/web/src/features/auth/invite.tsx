@@ -8,7 +8,7 @@ import type {
   InvitationPublicOutput,
   ProviderOutput,
 } from "@/lib/contracts";
-import { oidcStartHref } from "@/lib/oidc";
+import { clickOidcStart, startOidcInvite } from "@/lib/oidc";
 import { invitationAcceptInput } from "@/lib/validators";
 import {
   AuthAlert,
@@ -16,7 +16,6 @@ import {
   AuthInput,
   AuthStatus,
   authOutlineButtonClass,
-  authOutlineLinkClass,
   authPrimaryButtonClass,
 } from "./auth-form";
 import { AuthLayout, AuthPanel } from "./auth-layout";
@@ -68,6 +67,8 @@ export function InviteAcceptForm({
   });
   const errors = form.formState.errors;
   const [consentChecked, setConsentChecked] = useState<Record<string, boolean>>({});
+  // The provider whose start is in flight: the page is about to leave.
+  const [startingProvider, setStartingProvider] = useState<string | null>(null);
   const consentItems = invitation.requiredLegal.map((d) => ({ kind: d.kind, version: d.version }));
   const allConsented = invitation.requiredLegal.every(
     (d) => consentChecked[`${d.kind}:${d.version}`] === true,
@@ -222,28 +223,30 @@ export function InviteAcceptForm({
             <hr className="my-1 border-border" />
             <p className="text-ui font-medium text-muted-foreground">{t("auth.invite.social")}</p>
             <div className="auth-shell__stack">
-              {providers.map((p) =>
-                allConsented ? (
-                  <a
-                    key={p.provider}
-                    href={oidcStartHref(p.provider, { token, consents: consentItems })}
-                    className={authOutlineLinkClass}
-                  >
-                    {p.label}
-                  </a>
-                ) : (
-                  <Button
-                    key={p.provider}
-                    type="button"
-                    variant="outline"
-                    size="lg"
-                    disabled
-                    className={authOutlineButtonClass}
-                  >
-                    {p.label}
-                  </Button>
-                ),
-              )}
+              {providers.map((p) => (
+                // A same-origin POST (the server refuses an invite start from
+                // a GET or another origin) by fetch, then a script navigation
+                // to the provider. Not a form: see startOidcPost.
+                <Button
+                  key={p.provider}
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  disabled={!allConsented || startingProvider !== null}
+                  aria-busy={startingProvider === p.provider ? true : undefined}
+                  className={authOutlineButtonClass}
+                  onClick={() =>
+                    void clickOidcStart(
+                      p.provider,
+                      () => startOidcInvite(p.provider, { token, consents: consentItems }),
+                      { setPending: setStartingProvider, setError: setServerError },
+                      "error.auth.invite",
+                    )
+                  }
+                >
+                  {p.label}
+                </Button>
+              ))}
             </div>
           </>
         ) : null}
