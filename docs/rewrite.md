@@ -1278,3 +1278,15 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
 - 보관 문서의 직접 upload201 재현은 서버 계약 조사 대상으로 분리했다. 새 worktree archived-attachment-guard
   (base a1d19b6e)의 Sol6.1 high가 원본/현재 계약과 실제 DB를 대조한다. 화면 읽기 전용만으로 새 정책을 추론하지 않는다.
   해당 tree만 추가되어 현재 worktree63개; 기존 정리9개와 보존 근거는 유지.
+
+- #271 최종 nit 정리 `9d8ac2e2d4c1bfd7303c86b6e23a8037f37a7e7b`: TOTP helper EOF 빈 줄1개 제거만 추가.
+  271fb507 독립 최종 delta ACCEPT(보고서 `/tmp/fvoci-invite-final-review-sol61.txt`), push 후 CI 시작.
+- #267 현재 후보 Web36644692476의 vue-shell-flow 알림 이동 검사에서 timeout. 2통과/1실패/3미실행이며
+  기존 옛 SHA6통과로 대체하지 않는다. `shell_ci_recovery` Sol6.1 high가 같은 tree에서 원인 재현·수정을 소유한다.
+- 보관 문서 upload 조사 결론: 원본3937952의 attachment/create·문서 본문·revision은 문서 status archived를
+  막지 않는다. Rust collab의 별도 읽기 전용과 REST 허용은 현재 서로 다른 계약이므로 직접201만으로 결함 확정 불가.
+  새409 정책을 추가하지 않고 Vue 읽기 전용/native drop 차단 검증을 유지한다. archived_attachment_guard는 제품 수정 없음.
+
+- #271 `9d8ac2e2` 최종 whitespace delta도 별도 Sol6.1 ACCEPT, 전체 diff 검사 통과. 추가 런타임 재실행 없음.
+- archive 조사 tree는 제품/WIP 없음·소유 shell 외 프로세스 없음 확인 후 Orca 비강제 정리.
+  브랜치 a1d19b6e와 조사 보고서 takeover-evidence/fvoci-archived-attachment-sol61.txt 보존, worktree 수62개로 복귀.
