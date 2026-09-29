@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isVueAppPath } from "@/app-boundary";
 import { createMemoryHistory } from "vue-router";
 import { createAppRouter, routes } from "./router.ts";
 
@@ -43,6 +44,45 @@ test("the login route is declared (the boundary regex sends /login to Vue)", () 
     true,
   );
 });
+
+const AUTH_REST = [
+  { name: "reset-password", path: "/reset-password" },
+  { name: "magic-link", path: "/magic-link" },
+  { name: "confirm-email", path: "/confirm-email" },
+  { name: "cancel-withdraw", path: "/cancel-withdraw" },
+  { name: "consent", path: "/consent" },
+] as const;
+
+test("the remaining auth routes are declared (boot still needs the boundary regex)", () => {
+  for (const { name, path } of AUTH_REST) {
+    assert.equal(
+      routes.some((route) => route.name === name && route.path === path),
+      true,
+      name,
+    );
+    // Boot still loads the React app for these URLs (src/app-boundary.ts).
+    assert.equal(isVueAppPath(path), false, path);
+    assert.equal(isVueAppPath(`${path}/`), false, `${path}/`);
+    assert.equal(isVueAppPath(path.toUpperCase()), false, path.toUpperCase());
+  }
+});
+
+test(
+  "a completed navigation to a remaining auth page is a full page load (boot is still React)",
+  withLocation(async (loads) => {
+    for (const path of [
+      "/reset-password?token=tok",
+      "/magic-link?token=tok",
+      "/confirm-email?token=tok",
+      "/cancel-withdraw",
+      "/consent?returnTo=%2F",
+    ]) {
+      const router = createAppRouter(createMemoryHistory());
+      await router.push(path);
+      assert.deepEqual(loads.splice(0), [path], path);
+    }
+  }),
+);
 
 test(
   "a failed or superseded navigation to a React page loads nothing",

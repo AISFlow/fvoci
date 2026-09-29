@@ -10,6 +10,14 @@ export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
   { path: VUE_ROUTE_PATHS.login, name: "login", component: () => import("./pages/LoginPage.vue") },
+  // Remaining auth pages. apps/web/src/app-boundary.ts is owned elsewhere;
+  // boot still sends these paths to React until that file includes the regexes
+  // in src/vue/route-paths.ts (pair each with VUE_ROUTE_PATHS; app-boundary.test.ts).
+  { path: "/reset-password", name: "reset-password", component: () => import("./pages/ResetPasswordPage.vue") },
+  { path: "/magic-link", name: "magic-link", component: () => import("./pages/MagicLinkPage.vue") },
+  { path: "/confirm-email", name: "confirm-email", component: () => import("./pages/ConfirmEmailPage.vue") },
+  { path: "/cancel-withdraw", name: "cancel-withdraw", component: () => import("./pages/CancelWithdrawPage.vue") },
+  { path: "/consent", name: "consent", component: () => import("./pages/ConsentPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {
