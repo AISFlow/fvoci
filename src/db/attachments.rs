@@ -196,8 +196,10 @@ impl AttachmentSessionLock {
         // Fail-safe: close_on_drop before try-lock so cancellation during
         // acquisition cannot return a lock-holding connection to the pool.
         // Moving this after a successful lock would leak a session advisory lock
-        // if the task is cancelled between acquire and the flag. Connection churn
-        // while losers poll is a tracked follow-up (review N3), not this change.
+        // if the task is cancelled between acquire and the flag. The cost: every
+        // try_acquire, winner or loser, closes its connection on drop, and
+        // complete's loser repeats that every ASSEMBLE_POLL (100 ms) for up to
+        // ASSEMBLE_WAIT.
         conn.close_on_drop();
         let lock_key = lock_key_from_uuid(attachment_id);
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
@@ -459,7 +461,14 @@ async fn require_view_access(
     Ok(Ok(access))
 }
 
-async fn recheck_upload_write_access(
+/// Upload write access for one attachment, in the write-fence order: the
+/// membership advisory lock, the session row `FOR UPDATE` (the revocation
+/// fence), a live workspace, the row, then edit access and "the actor is the
+/// uploader". The part, resume and losing-complete entry points call it
+/// without the upload lock; writers take `with_upload_xact_lock` first and
+/// call it again right before they publish, so a revocation in between is
+/// seen. Callers check the status they need on the returned row.
+async fn check_upload_write_access(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -818,29 +827,21 @@ pub async fn authorize_upload_part(
 ) -> Result<Result<(String, u64, Option<String>), AttachmentDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::Forbidden));
-    }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::NotFound));
-    }
-    let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
-        Some(att) => att,
-        None => {
-            tx.rollback().await?;
-            return Ok(Err(AttachmentDbError::NotFound));
-        }
-    };
-    match require_upload_access(&mut tx, workspace_id, actor_user_id, &att).await? {
-        Ok(()) => {}
+    let att = match check_upload_write_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        attachment_id,
+    )
+    .await?
+    {
+        Ok(att) => att,
         Err(err) => {
             tx.rollback().await?;
             return Ok(Err(err));
         }
-    }
+    };
     if att.status != "uploading" {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::UploadState));
@@ -883,7 +884,7 @@ pub async fn commit_upload_part(
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
-    let att = match recheck_upload_write_access(
+    let att = match check_upload_write_access(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -895,20 +896,20 @@ pub async fn commit_upload_part(
         Ok(att) => att,
         Err(err) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Ok(Err(err));
         }
     };
     if att.status != "uploading" {
         tx.rollback().await?;
-        ObjectStorage::discard_staged_part(staged).await;
+        staged.discard().await;
         return Ok(Err(AttachmentDbError::UploadState));
     }
     let meta = parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&json!({})))
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     if part_number > meta.part_count {
         tx.rollback().await?;
-        ObjectStorage::discard_staged_part(staged).await;
+        staged.discard().await;
         return Ok(Err(AttachmentDbError::InvalidInput));
     }
     let storage_key = att.storage_key.clone();
@@ -919,17 +920,17 @@ pub async fn commit_upload_part(
         Ok(part) => part,
         Err(StorageError::UploadGone) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Ok(Err(AttachmentDbError::UploadState));
         }
         Err(StorageError::PartTooLarge) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Ok(Err(AttachmentDbError::PartTooLarge));
         }
         Err(err) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
         }
     };
@@ -950,29 +951,21 @@ pub async fn resume_upload(
 > {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::Forbidden));
-    }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::NotFound));
-    }
-    let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
-        Some(att) => att,
-        None => {
-            tx.rollback().await?;
-            return Ok(Err(AttachmentDbError::NotFound));
-        }
-    };
-    match require_upload_access(&mut tx, workspace_id, actor_user_id, &att).await? {
-        Ok(()) => {}
+    let att = match check_upload_write_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        attachment_id,
+    )
+    .await?
+    {
+        Ok(att) => att,
         Err(err) => {
             tx.rollback().await?;
             return Ok(Err(err));
         }
-    }
+    };
     if att.status != "uploading" {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::UploadState));
@@ -1069,29 +1062,21 @@ async fn try_complete_owned(
     let Some(mut lock) = AttachmentSessionLock::try_acquire(pool, attachment_id).await? else {
         let mut tx = pool.begin().await?;
         set_tenant(&mut tx, workspace_id).await?;
-        lock_membership_users(&mut tx, &[actor_user_id]).await?;
-        if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-            tx.rollback().await?;
-            return Ok(CompleteAttempt::Denied(AttachmentDbError::Forbidden));
-        }
-        if !workspace_is_live(&mut tx, workspace_id).await? {
-            tx.rollback().await?;
-            return Ok(CompleteAttempt::Denied(AttachmentDbError::NotFound));
-        }
-        let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
-            Some(att) => att,
-            None => {
-                tx.rollback().await?;
-                return Ok(CompleteAttempt::Denied(AttachmentDbError::NotFound));
-            }
-        };
-        match require_upload_access(&mut tx, workspace_id, actor_user_id, &att).await? {
-            Ok(()) => {}
+        let att = match check_upload_write_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            attachment_id,
+        )
+        .await?
+        {
+            Ok(att) => att,
             Err(err) => {
                 tx.rollback().await?;
                 return Ok(CompleteAttempt::Denied(err));
             }
-        }
+        };
         if att.status == "stored" {
             tx.commit().await?;
             return Ok(CompleteAttempt::Done(att));
@@ -1129,7 +1114,7 @@ async fn complete_owned_inner(
     let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
-    let att = match recheck_upload_write_access(
+    let att = match check_upload_write_access(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -1266,7 +1251,7 @@ async fn complete_owned_inner(
     let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
-    let att = match recheck_upload_write_access(
+    let att = match check_upload_write_access(
         &mut tx,
         workspace_id,
         actor_user_id,

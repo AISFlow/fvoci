@@ -611,14 +611,14 @@ async fn patch_instance_settings(
         ));
     }
     let ip = peer_ip(peer.ip());
-    let outcome = settings::apply_change_with_license(
+    let outcome = settings::apply_change(
         &state.auth.db.pool,
         auth.user_id,
         auth.credential_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::Patch(items),
-        &state.auth.db.license,
+        &state.auth.db.settings_boot,
     )
     .await
     .map_err(internal)?
@@ -760,7 +760,7 @@ async fn upload_branding_asset(
         mime: mime.to_string(),
     };
     let ip = peer_ip(peer.ip());
-    let outcome = settings::apply_change_with_license(
+    let outcome = settings::apply_change(
         &state.auth.db.pool,
         auth.user_id,
         auth.credential_id,
@@ -770,7 +770,7 @@ async fn upload_branding_asset(
             kind,
             asset: Some(record.clone()),
         },
-        &state.auth.db.license,
+        &state.auth.db.settings_boot,
     )
     .await;
     let outcome = match outcome {
@@ -805,14 +805,14 @@ async fn remove_branding_asset(
     }
     let kind = parse_asset_kind(&asset)?;
     let ip = peer_ip(peer.ip());
-    let outcome = settings::apply_change_with_license(
+    let outcome = settings::apply_change(
         &state.auth.db.pool,
         auth.user_id,
         auth.credential_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::BrandingAsset { kind, asset: None },
-        &state.auth.db.license,
+        &state.auth.db.settings_boot,
     )
     .await
     .map_err(internal)?

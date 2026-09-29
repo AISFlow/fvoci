@@ -9,9 +9,13 @@ static EMAIL_RE: LazyLock<Regex> =
 static SLUG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9-]{2,32}$").expect("slug regex"));
 
+/// `[0-9]`, not `\d`: zod's `\d` is ASCII only, and the regex crate's `\d`
+/// would also match other Unicode decimal digits.
 static ZOD_DATETIME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(\d{4}-\d{2}-\d{2})T((?:[01]\d|2[0-3]):[0-5]\d)(?::([0-5]\d)(?:\.(\d+))?)?Z$")
-        .expect("iso datetime regex")
+    Regex::new(
+        r"^([0-9]{4}-[0-9]{2}-[0-9]{2})T([01][0-9]|2[0-3]):([0-5][0-9])(?::([0-5][0-9])(?:\.([0-9]+))?)?Z$",
+    )
+    .expect("iso datetime regex")
 });
 
 /// zod v4 `z.iso.datetime()`: UTC `Z` only, seconds and any fraction
@@ -19,11 +23,10 @@ static ZOD_DATETIME_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub fn parse_iso_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let caps = ZOD_DATETIME_RE.captures(value)?;
     let date = crate::tasks::parse_iso_date(caps.get(1)?.as_str())?;
-    let hm = caps.get(2)?.as_str();
-    let hour: u32 = hm[..2].parse().ok()?;
-    let minute: u32 = hm[3..5].parse().ok()?;
-    let second: u32 = caps.get(3).map_or(Some(0), |m| m.as_str().parse().ok())?;
-    let millis: u32 = caps.get(4).map_or(Some(0), |m| {
+    let hour: u32 = caps.get(2)?.as_str().parse().ok()?;
+    let minute: u32 = caps.get(3)?.as_str().parse().ok()?;
+    let second: u32 = caps.get(4).map_or(Some(0), |m| m.as_str().parse().ok())?;
+    let millis: u32 = caps.get(5).map_or(Some(0), |m| {
         let digits: String = m.as_str().chars().chain("000".chars()).take(3).collect();
         digits.parse().ok()
     })?;
@@ -205,6 +208,36 @@ mod iso_datetime_tests {
                 .unwrap()
                 .timestamp_subsec_millis(),
             456
+        );
+    }
+
+    /// zod's `\d` is ASCII only. A non-ASCII decimal digit (here U+0661/2,
+    /// Arabic-Indic) is refused in every field, without a panic.
+    #[test]
+    fn refuses_non_ascii_digits_without_panicking() {
+        let wrong: Vec<String> = [
+            "2026-09-26T0\u{0661}:00Z",
+            "2026-09-26T00:0\u{0661}Z",
+            "2026-09-26T00:00:0\u{0661}Z",
+            "\u{0662}026-09-26T00:00Z",
+            "2026-09-26T00:00:00.123\u{0661}Z",
+            "2026-09-26T23:59:60Z",
+        ]
+        .into_iter()
+        .filter_map(
+            |bad| match std::panic::catch_unwind(|| parse_iso_datetime(bad)) {
+                Ok(None) => None,
+                Ok(Some(at)) => Some(format!("{bad:?} accepted as {at}")),
+                Err(_) => Some(format!("{bad:?} panicked")),
+            },
+        )
+        .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        assert_eq!(
+            parse_iso_datetime("2026-09-26T01:02:03.1234567890Z")
+                .unwrap()
+                .timestamp_subsec_millis(),
+            123
         );
     }
 }

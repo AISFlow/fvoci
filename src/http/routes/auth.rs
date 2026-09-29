@@ -23,7 +23,7 @@ use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::cookie::{clear_session_cookie, set_session_cookie};
 use crate::http::guard::check_origin;
 use crate::http::json_input::parse_patch_me;
-use crate::http::rate_limit::peer_ip;
+use crate::http::rate_limit::{peer_ip, RateLimiter};
 use crate::http::state::AppState;
 use crate::mail::{equalize_magic_response_timing, MAGIC_PER_EMAIL, MAGIC_PER_IP};
 use crate::validate::{
@@ -43,6 +43,30 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+/// Password-check budget per 5 minutes: per client address, and per address
+/// and account. Accepting an invitation for an existing account checks that
+/// account's password, so it charges the same two keys (`routes::invitations`)
+/// and both paths draw on one counter.
+const LOGIN_PER_IP: u32 = 30;
+const LOGIN_PER_EMAIL: u32 = 10;
+
+/// Charges `login:ip:{ip}`; `Err` is the Retry-After seconds.
+pub(crate) async fn charge_login_ip(limiter: &RateLimiter, ip: &str) -> Result<(), u32> {
+    limiter.allow(&format!("login:ip:{ip}"), LOGIN_PER_IP).await
+}
+
+/// Charges `login:email:{ip}:{email}` (`email` normalized); `Err` is the
+/// Retry-After seconds.
+pub(crate) async fn charge_login_email(
+    limiter: &RateLimiter,
+    ip: &str,
+    email: &str,
+) -> Result<(), u32> {
+    limiter
+        .allow(&format!("login:email:{ip}:{email}"), LOGIN_PER_EMAIL)
+        .await
+}
+
 async fn login(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -52,22 +76,14 @@ async fn login(
     let Json(body) = body.map_err(AppError::from)?;
     check_origin(&headers, &state.public_origin)?;
     let ip = peer_ip(peer.ip());
-    if let Err(retry_after) = state
-        .rate_limiter
-        .allow(&format!("login:ip:{ip}"), 30)
-        .await
-    {
+    if let Err(retry_after) = charge_login_ip(&state.rate_limiter, &ip).await {
         return Err(AppError::rate_limited(retry_after));
     }
     if body.password.is_empty() {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
     let email = normalize_email(&body.email)?;
-    if let Err(retry_after) = state
-        .rate_limiter
-        .allow(&format!("login:email:{ip}:{email}"), 10)
-        .await
-    {
+    if let Err(retry_after) = charge_login_email(&state.rate_limiter, &ip, &email).await {
         return Err(AppError::rate_limited(retry_after));
     }
     let result = state

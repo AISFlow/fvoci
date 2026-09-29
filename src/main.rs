@@ -138,8 +138,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::main]
 async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
     // Before any helper exists: the helpers run as this uid, and without this
-    // any of them (or a uid-1000 `docker exec`) could read this process's
-    // environ (keyrings, DATABASE_APP_URL), memory and fds through /proc.
+    // any of them could read this process's environ (keyrings,
+    // DATABASE_APP_URL), memory and fds through /proc. A uid-1000 `docker exec`
+    // is kept out of memory and fds too; its own environment already holds
+    // every value of the container configuration.
     collab_engine::process::make_process_non_dumpable()
         .map_err(|err| format!("cannot make fvoci-server non-dumpable: {err}"))?;
     collab_engine::process::raise_nofile_to_hard_limit();
@@ -151,7 +153,13 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
     // A typo must not silently open or close the scrape surface: refuse to
     // start (source `MetricsAllowListError`).
     let metrics_allow = MetricsAllowList::from_env()?;
-    let app_pool_max = CollabConfig::from_env()
+    // Read once: the pool size, the hub and the revision engine follow it.
+    let collab_config = CollabConfig::from_env();
+    if collab_config.is_none() {
+        log_collab_disabled();
+    }
+    let app_pool_max = collab_config
+        .as_ref()
         .map(|cfg| fvoci_server::collab::config::derive_app_pool_max_connections(cfg.max_rooms))
         .unwrap_or(fvoci_server::collab::config::APP_POOL_MAX_CONNECTIONS);
     let pool = pool::connect_app_with_max(&config.app_database_url, app_pool_max).await?;
@@ -184,7 +192,25 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!("meilisearch disabled (FVOCI_MEILI_URL unset)");
     }
-    run_server(config, metrics_allow, pool).await
+    run_server(config, metrics_allow, pool, collab_config).await
+}
+
+/// A disabled collaboration engine must be visible at startup: `/ready` still
+/// answers 200 while collaboration and the features that need the helper
+/// (seeding, duplicate, revision restore, imports) are unavailable.
+fn log_collab_disabled() {
+    match std::env::var("FVOCI_COLLAB_ENGINE") {
+        Ok(raw) if !raw.trim().is_empty() => tracing::error!(
+            event = "collab.disabled",
+            path = raw.trim(),
+            "FVOCI_COLLAB_ENGINE is not an existing regular file; collaboration disabled"
+        ),
+        Err(std::env::VarError::NotUnicode(_)) => tracing::error!(
+            event = "collab.disabled",
+            "FVOCI_COLLAB_ENGINE is not valid UTF-8; collaboration disabled"
+        ),
+        _ => tracing::info!("collaboration disabled (FVOCI_COLLAB_ENGINE unset)"),
+    }
 }
 
 struct InstalledShutdownSignals {
@@ -261,6 +287,7 @@ async fn run_server(
     config: Config,
     metrics_allow: MetricsAllowList,
     pool: sqlx::PgPool,
+    collab_config: Option<CollabConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let license = Arc::new(fvoci_server::license::from_env());
     // Replace the default SIGTERM/SIGINT handlers before bind or any readiness
@@ -272,7 +299,7 @@ async fn run_server(
     let public_origin =
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
 
-    let collab = match CollabConfig::from_env() {
+    let collab = match collab_config {
         Some(mut cfg) => {
             cfg.revision_session_snapshot = config.revision.session_snapshot_enabled;
             if let Err(message) =
@@ -426,12 +453,6 @@ async fn run_server(
         engine_bin: hub.engine_bin(),
         limits: hub.limits(),
     });
-    let revision_engine = revision_engine.or_else(|| {
-        CollabConfig::from_env().map(|cfg| RevisionMaintenanceEngine {
-            engine_bin: cfg.engine_bin,
-            limits: cfg.limits,
-        })
-    });
     let maintenance_settings = MaintenanceSettings::from_env(
         config.upload_incomplete_ttl,
         RevisionMaintenanceParams {
@@ -463,9 +484,8 @@ async fn run_server(
             None
         }
     };
-    // Imports no longer need the Node helper: parsing runs in the markdown
-    // child and the Yjs seed in the collab-engine child. The worker starts
-    // whenever the seed engine is configured.
+    // Imports parse in the markdown child and seed Yjs in the collab-engine
+    // child, so the worker runs only when the seed engine is configured.
     let import_settings = {
         let settings = ImportJobSettings::from_env_with_license(license.clone());
         if settings.seed.is_some() {

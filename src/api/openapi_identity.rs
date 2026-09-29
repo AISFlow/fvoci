@@ -123,10 +123,7 @@ fn mfa_verify() {}
     tag = "auth",
     params(("slug" = String, Query, description = "Workspace slug")),
     responses(
-        (status = 302, description = "Redirect to the workspace identity provider; sets fvoci_oidc_state"),
-        (status = 400, description = "Invalid input", body = ProblemResponse),
-        (status = 404, description = "provider_not_configured", body = ProblemResponse),
-        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 302, description = "A browser navigation, answered only by redirects. Success: to the workspace identity provider, setting fvoci_oidc_state. Any refusal: to `/login?error=<problem code>` without state, e.g. `provider_not_configured` (unknown slug, a workspace without SSO, a personal workspace, or a build without the `workspaceSso` license feature), `invalid_input`, `rate_limit_exceeded`, `encryption_unavailable` or `internal_error`"),
     )
 )]
 fn auth_sso() {}
@@ -221,7 +218,7 @@ fn sso_callback() {}
         (status = 200, description = "Link started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script", body = OidcAuthorizationOutput),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
-        (status = 403, description = "origin_mismatch", body = ProblemResponse),
+        (status = 403, description = "origin_mismatch: another origin, or no `Origin` header at all", body = ProblemResponse),
         (status = 404, description = "provider_not_configured", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
     )

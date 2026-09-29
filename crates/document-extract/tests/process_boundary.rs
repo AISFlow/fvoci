@@ -525,6 +525,137 @@ fn cancel_while_waiting_slot_then_next_extract_works() {
     }
 }
 
+/// A request that waited for the single child slot still gives its child the
+/// full `timeout_ms`: the watchdog window starts at slot admission.
+#[cfg(feature = "test-hang")]
+#[test]
+fn slot_wait_does_not_shorten_the_child_watchdog() {
+    use document_extract::process::{is_slot_waiter, take_last_spawn};
+    let _g = SPAWN_TEST.lock().expect("spawn test lock");
+    let _ = take_last_spawn();
+    let extractor = bin();
+    let preexisting = extractor_children(&extractor);
+
+    // The holder keeps the only slot for about 2 s, then extracts normally.
+    let holder_req = ExtractRequest {
+        bytes: hwp5_known_body(),
+        name: "hold.hwp".into(),
+        limits: Limits::for_tests(),
+        extractor_bin: extractor.clone(),
+        test_hang_ms: Some(2_000),
+    };
+    let (holder_tx, holder_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = holder_tx.send(extract_killable(holder_req));
+    });
+    wait_owned_helper(
+        &extractor,
+        &preexisting,
+        Instant::now() + Duration::from_secs(5),
+    );
+
+    // The waiter's child needs 1.5 s of its 3 s window. Counted from the call
+    // instead of admission, the ~2 s slot wait would leave it about 1 s.
+    let mut limits = Limits::for_tests();
+    limits.timeout_ms = 3_000;
+    let waiter_req = ExtractRequest {
+        bytes: hwp5_known_body(),
+        name: "품의서.hwp".into(),
+        limits,
+        extractor_bin: extractor.clone(),
+        test_hang_ms: Some(1_500),
+    };
+    let waiter_cancel = Arc::new(AtomicBool::new(false));
+    let waiter_flag = Arc::clone(&waiter_cancel);
+    let (waiter_tx, waiter_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = waiter_tx.send(extract_killable_with_cancel(
+            waiter_req,
+            waiter_flag.as_ref(),
+        ));
+    });
+    wait_until(
+        Instant::now() + Duration::from_secs(1),
+        || is_slot_waiter(waiter_cancel.as_ref()),
+        "waiter in slot wait while the holder runs",
+    );
+
+    let holder = recv_bounded(holder_rx, Duration::from_secs(10), "holder report");
+    assert!(
+        matches!(holder.outcome, ExtractStatus::Ok { .. }),
+        "{:?}",
+        holder.outcome
+    );
+    let waiter = match recv_bounded(waiter_rx, Duration::from_secs(10), "waiter report") {
+        Ok(report) => report,
+        Err(cancelled) => panic!("nothing cancelled the waiter: {cancelled:?}"),
+    };
+    assert!(
+        matches!(waiter.outcome, ExtractStatus::Ok { .. }),
+        "{:?}",
+        waiter.outcome
+    );
+    for pid in [holder.child_pid, waiter.child_pid].into_iter().flatten() {
+        assert_fully_reaped(pid);
+    }
+}
+
+/// The helper raises its own `oom_score_adj` to 1000 after exec, before it
+/// reads input, so a cgroup OOM kill picks the parser before the server or a
+/// collaboration helper. The same check as collab-engine's
+/// `child_sets_oom_score_adj`.
+#[cfg(feature = "test-hang")]
+#[test]
+fn helper_raises_own_oom_score_adj() {
+    use document_extract::process::take_last_spawn;
+    let _g = SPAWN_TEST.lock().expect("spawn test lock");
+    let _ = take_last_spawn();
+    let extractor = bin();
+    let preexisting = extractor_children(&extractor);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let req = ExtractRequest {
+        bytes: hwp5_known_body(),
+        name: "hang.hwp".into(),
+        limits: Limits::for_tests(),
+        extractor_bin: extractor.clone(),
+        test_hang_ms: Some(20_000),
+    };
+    let flag = Arc::clone(&cancel);
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(extract_killable_with_cancel(req, flag.as_ref()));
+    });
+    let pid = wait_owned_helper(
+        &extractor,
+        &preexisting,
+        Instant::now() + Duration::from_secs(5),
+    );
+    // The helper writes the value right after exec; give that write time.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let adj = loop {
+        let adj = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok());
+        if adj == Some(1000) || Instant::now() >= deadline {
+            break adj;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    cancel.store(true, std::sync::atomic::Ordering::Release);
+    match recv_bounded(rx, Duration::from_secs(5), "cancel after oom check") {
+        Err(Cancelled {
+            child_pid: Some(got),
+        }) => assert_eq!(got, pid),
+        other => panic!("expected Cancelled with helper pid, got {other:?}"),
+    }
+    assert_fully_reaped(pid);
+    assert_eq!(
+        adj,
+        Some(1000),
+        "helper must raise oom_score_adj so cgroup OOM prefers it"
+    );
+}
+
 #[cfg(feature = "test-hang")]
 #[test]
 fn cancel_running_hanging_helper_reaps_and_joins() {

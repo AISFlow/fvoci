@@ -44,11 +44,12 @@ use crate::documents::import_body::{
     apply_imported_markdown, create_fenced_wiki_document, create_imported_wiki_document,
     ImportBodyError,
 };
-use crate::documents::import_zip::{title_from_file_name, unzip_bounded, zip_safe_name, ZipEntry};
+use crate::documents::import_zip::{title_from_file_name, unzip_bounded, ZipEntry};
 use crate::documents::markdown_helper::MarkdownHelper;
 use crate::documents::office::{
     run_office_helper, OfficeCancelled, OfficeKind, OfficeLimits, OfficeMode, OfficeOutcome,
 };
+use crate::export_zip::zip_safe_name;
 
 const DEFAULT_POLL: Duration = Duration::from_secs(5);
 

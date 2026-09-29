@@ -5,15 +5,25 @@ set -euo pipefail
 : "${ROOT:?ROOT is required}"
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR is required}"
 
+# The label names the spec arguments; Playwright options (arguments that
+# start with "-", such as --config=... after the spec; give option values in
+# the same argument) are passed on but not named.
+LABEL_SPECS=()
+for arg in "$@"; do
+  if [[ "$arg" != -* ]]; then
+    LABEL_SPECS+=("$arg")
+  fi
+done
+
 GROUP_LABEL="default-suite"
-if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]] && (($# < 1)); then
+if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]] && ((${#LABEL_SPECS[@]} < 1)); then
   GROUP_LABEL="collaboration-pending"
 fi
 
-if (($# >= 1)); then
-  GROUP_LABEL="$(basename -- "${1%.spec.ts}")"
-  if (($# > 1)); then
-    GROUP_LABEL="${GROUP_LABEL}+$(basename -- "${2%.spec.ts}")"
+if ((${#LABEL_SPECS[@]} >= 1)); then
+  GROUP_LABEL="$(basename -- "${LABEL_SPECS[0]%.spec.ts}")"
+  if ((${#LABEL_SPECS[@]} > 1)); then
+    GROUP_LABEL="${GROUP_LABEL}+$(basename -- "${LABEL_SPECS[1]%.spec.ts}")"
   fi
 fi
 
@@ -77,8 +87,13 @@ summarize_trace() {
 
 retain_failure_artifacts() {
   local retain_dir log dest trace
-  retain_dir="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-collab-e2e-fail.XXXXXX")"
+  retain_dir="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-collab-e2e-fail.XXXXXX")" || return 1
   chmod 700 "$retain_dir"
+  # Named first, so a caller finds the directory even if this is cut short.
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf 'failure-artifacts=%s\n' "$retain_dir" >>"$GITHUB_OUTPUT"
+    printf 'failure-group=%s\n' "$GROUP_LABEL" >>"$GITHUB_OUTPUT"
+  fi
   if [[ -d "$RUN_DIR/playwright-output" ]] && [[ -n "$(ls -A "$RUN_DIR/playwright-output" 2>/dev/null || true)" ]]; then
     cp -a "$RUN_DIR/playwright-output" "$retain_dir/playwright-output"
   fi
@@ -111,14 +126,13 @@ retain_failure_artifacts() {
     fi
   done < <(find "$retain_dir" -name trace.zip -type f -print0 2>/dev/null || true)
   echo "retained failure artifacts for group ${GROUP_LABEL} in $retain_dir" >&2
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    printf 'failure-artifacts=%s\n' "$retain_dir" >>"$GITHUB_OUTPUT"
-    printf 'failure-group=%s\n' "$GROUP_LABEL" >>"$GITHUB_OUTPUT"
-  fi
 }
 
 cleanup() {
   local status=$?
+  # After an interrupt the reader of stderr may be gone: a write must not
+  # end this cleanup (SIGPIPE) before the retention and the removal below.
+  trap '' PIPE
   stop_net_monitor
   net_mark "group exiting with status ${status}" 2>/dev/null || true
   if (( status != 0 )); then

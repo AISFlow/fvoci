@@ -2,7 +2,8 @@
 //! `extract_in_process` stays on this parser crate.
 
 pub use document_extract_client::process::{
-    apply_rlimits_now, extract_killable, extract_killable_with_cancel, Cancelled, ExtractRequest,
+    apply_rlimits_now, extract_killable, extract_killable_with_cancel, raise_own_oom_score_adj,
+    Cancelled, ExtractRequest,
 };
 #[cfg(feature = "test-hang")]
 pub use document_extract_client::process::{

@@ -231,6 +231,8 @@ pub fn maybe_run_helper() -> Option<i32> {
     ) {
         return Some(child_fail(&format!("rlimit: {err}")));
     }
+    // Best effort; a container profile may deny it.
+    let _ = document_extract_client::process::raise_own_oom_score_adj();
     let mut source = Vec::new();
     let read = std::io::stdin()
         .take(limits.input_bytes.saturating_add(1))

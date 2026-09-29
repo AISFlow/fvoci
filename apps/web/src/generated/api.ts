@@ -7461,7 +7461,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description origin_mismatch */
+            /** @description origin_mismatch: another origin, or no `Origin` header at all */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -7822,39 +7822,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Redirect to the workspace identity provider; sets fvoci_oidc_state */
+            /** @description A browser navigation, answered only by redirects. Success: to the workspace identity provider, setting fvoci_oidc_state. Any refusal: to `/login?error=<problem code>` without state, e.g. `provider_not_configured` (unknown slug, a workspace without SSO, a personal workspace, or a build without the `workspaceSso` license feature), `invalid_input`, `rate_limit_exceeded`, `encryption_unavailable` or `internal_error` */
             302: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Invalid input */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProblemResponse"];
-                };
-            };
-            /** @description provider_not_configured */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProblemResponse"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProblemResponse"];
-                };
             };
         };
     };

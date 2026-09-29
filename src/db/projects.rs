@@ -210,8 +210,11 @@ pub(crate) fn visible_project_sql(
     visible_project_predicate(project_alias, &format!("${guest_param}"), actor_param)
 }
 
-/// `visible_project_sql` with the actor's guest flag inlined (a server-computed
-/// boolean, never request text) for queries whose binds are all text.
+/// `visible_project_sql` with the actor's guest flag inlined as a SQL literal
+/// (a server-computed boolean, never request text), for queries that have no
+/// boolean bind for it, such as the task list, whose trailing binds are a text
+/// list. The caller still binds the actor's user id (a `uuid`) at
+/// `actor_param`.
 pub(crate) fn visible_project_sql_for_guest(
     project_alias: &str,
     guest: bool,

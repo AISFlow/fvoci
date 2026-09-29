@@ -14,6 +14,8 @@ export const OIDC_ERROR_CODES = [
   "oidc_already_linked",
   "oidc_invitation_invalid",
   "oidc_last_method",
+  // Workspace SSO start (`/api/v1/auth/sso`): no SSO for that slug.
+  "provider_not_configured",
 ] as const;
 
 export type OidcErrorCode = (typeof OIDC_ERROR_CODES)[number];
@@ -22,7 +24,10 @@ export function isOidcErrorCode(code: string): code is OidcErrorCode {
   return (OIDC_ERROR_CODES as readonly string[]).includes(code);
 }
 
-/** Callback redirect `?error=` code → message. The wire code is the catalog key. */
+/**
+ * `?error=` code of an OIDC redirect (the callbacks, the workspace SSO start)
+ * → message. The wire code is the catalog key; other codes get the fallback.
+ */
 export function oidcErrorMessage(code: string | null | undefined): string | null {
   if (!code) return null;
   return isOidcErrorCode(code) ? t(code) : t("oidc_fallback");
@@ -196,10 +201,11 @@ export type WorkspaceSsoSlugIssue = "form.too_small" | "form.invalid";
 
 /**
  * Login page "SSO로 로그인": the server resolves the workspace slug and
- * answers 302 to that workspace's IdP. The page navigates there by script, a
- * top-level navigation: a form submission's redirect to the IdP's origin is
- * blocked by the CSP `form-action 'self'` (Chromium). Returns the field
- * problem and stays put, or navigates and returns null.
+ * answers 302 to that workspace's IdP, or back to `/login?error=<code>`. The
+ * page navigates there by script, a top-level navigation: a form
+ * submission's redirect to the IdP's origin is blocked by the CSP
+ * `form-action 'self'` (Chromium). Returns the field problem and stays put,
+ * or navigates and returns null.
  */
 export function startWorkspaceSso(
   input: string,

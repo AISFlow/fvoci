@@ -1,22 +1,27 @@
 use sqlx::pool::PoolConnection;
-use sqlx::postgres::{PgConnection, PgPool};
+use sqlx::postgres::PgConnection;
 use sqlx::Postgres;
 use uuid::Uuid;
 
 use crate::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
 use crate::db::context::lock_key_from_uuid;
 
-/// Detached session-level advisory lock for one document room.
+/// Detached session-level advisory lock for one document room (the room
+/// fence). The lock lives with the dedicated connection: [`Self::release`]
+/// unlocks it, and dropping the guard closes the connection, which releases it
+/// too. The fence-lost path drops the guard for exactly that reason.
 pub struct RoomGuard {
     conn: PgConnection,
     document_id: Uuid,
-    held: bool,
 }
 
 impl RoomGuard {
     /// Try to acquire the room fence without blocking. Returns None if another room holds it.
+    /// Tests only: production takes the fence through [`Self::try_lock_pooled`]
+    /// after a cancellable pool acquire.
+    #[cfg(feature = "db-tests")]
     pub async fn try_acquire(
-        pool: &PgPool,
+        pool: &sqlx::PgPool,
         document_id: Uuid,
     ) -> Result<Option<Self>, sqlx::Error> {
         let pooled = pool.acquire().await?;
@@ -36,11 +41,7 @@ impl RoomGuard {
             .fetch_one(&mut conn)
             .await?;
         if acquired.0 {
-            Ok(Some(Self {
-                conn,
-                document_id,
-                held: true,
-            }))
+            Ok(Some(Self { conn, document_id }))
         } else {
             Ok(None)
         }
@@ -51,23 +52,10 @@ impl RoomGuard {
     }
 
     pub async fn release(mut self) {
-        if self.held {
-            let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
-                .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)
-                .bind(lock_key_from_uuid(self.document_id))
-                .execute(&mut self.conn)
-                .await;
-            self.held = false;
-        }
-    }
-}
-
-impl Drop for RoomGuard {
-    fn drop(&mut self) {
-        if self.held {
-            // Session advisory locks are released when the dedicated connection closes.
-            // Drop must not spawn an unpolled async unlock future.
-            self.held = false;
-        }
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+            .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)
+            .bind(lock_key_from_uuid(self.document_id))
+            .execute(&mut self.conn)
+            .await;
     }
 }

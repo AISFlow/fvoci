@@ -1608,6 +1608,36 @@ async fn contract_display_id_lookup_respects_acl() {
     assert_eq!(status, StatusCode::OK);
     assert!(lookup["items"].as_array().unwrap().is_empty());
 
+    // A project filter keeps a project-prefix hit only in that project.
+    let (status, lookup) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/lookup/LAB-{task_number}?projectId={project_id}"
+        ),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = lookup["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{lookup}");
+    assert_eq!(items[0]["kind"], "task");
+    let ops = create_project(app.clone(), &owner_cookie, workspace_id, "OPS", "workspace").await;
+    let other_project_id = ops["id"].as_str().unwrap();
+    let (status, lookup) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/lookup/LAB-{task_number}?projectId={other_project_id}"
+        ),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(lookup["items"].as_array().unwrap().is_empty(), "{lookup}");
+
     let outsider = add_workspace_user(&admin, workspace_id, "guest", "outsider").await;
     sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
         .bind(workspace_id)

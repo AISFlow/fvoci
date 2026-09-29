@@ -82,6 +82,9 @@ async fn consent_gate(
     }
 }
 
+/// A request with a `Bearer` Authorization header whose path breaks the
+/// Bearer path rule ([`canonicalize_api_token_path`]) gets 404 before its
+/// handler runs. As an api-router layer it runs after route matching.
 async fn canonicalize_bearer_path(req: Request, next: Next) -> Response {
     let has_bearer = req
         .headers()
@@ -199,6 +202,11 @@ pub fn router_with_observability(
         .merge(routes::streams::router())
         .merge(routes::task_layout::router())
         .merge(collab)
+        // Layer order, outermost first: request_trace, record_http and the
+        // security headers (added below, around every route), then, on the
+        // routes above only, canonicalize_bearer_path and consent_gate. A
+        // layer wraps only the routes already added, so the probes merged
+        // next, the static assets and the fallback get neither api layer.
         .layer(middleware::from_fn_with_state(state.clone(), consent_gate))
         .layer(middleware::from_fn(canonicalize_bearer_path))
         .with_state(state.clone())

@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::local::{LocalStorage, PartInfo, StorageError};
-use super::sniff_mime_from_bytes;
 use super::transfer::{PresignTtls, PresignedUrl};
 use crate::config::S3Settings;
 
@@ -635,16 +634,6 @@ impl S3Storage {
             ))));
         }
         Ok(res)
-    }
-
-    pub async fn sniff_mime(&self, key: &str) -> Result<String, StorageError> {
-        let size = self.head(key).await?.unwrap_or(0);
-        if size == 0 {
-            return Ok("application/octet-stream".to_string());
-        }
-        let end = (size - 1).min(4095);
-        let sample = self.read_range(key, 0, end).await?;
-        Ok(sniff_mime_from_bytes(&sample))
     }
 
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<Response, StorageError> {
