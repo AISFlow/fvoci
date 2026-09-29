@@ -9,6 +9,10 @@ import { VUE_ROUTE_PATHS } from "./route-paths";
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
+  { path: VUE_ROUTE_PATHS.accountSettings, name: "account-settings", component: () => import("./pages/AccountSettingsPage.vue") },
+  { path: VUE_ROUTE_PATHS.admin, name: "admin", component: () => import("./pages/AdminPage.vue") },
+  { path: VUE_ROUTE_PATHS.adminAudit, name: "admin-audit", component: () => import("./pages/AdminAuditPage.vue") },
+  { path: VUE_ROUTE_PATHS.adminLegal, name: "admin-legal", component: () => import("./pages/AdminLegalPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

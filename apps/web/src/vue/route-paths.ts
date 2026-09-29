@@ -7,4 +7,8 @@ export const VUE_ROUTE_PATHS = {
   // The wiki document refs of lib/href.ts parseWikiRef; route paths match
   // case-insensitively, as the boundary does.
   wikiDocument: "/w/:slug/:ref(wiki-[1-9]\\d{0,8})",
+  accountSettings: "/settings/account",
+  admin: "/settings/admin",
+  adminAudit: "/settings/audit",
+  adminLegal: "/settings/legal",
 } as const;
