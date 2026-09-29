@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::limits::{Limits, MAX_CHILD_CONCURRENCY, MAX_CHILD_STDOUT_BYTES, RSS_POLL_MS};
+use crate::limits::{Limits, CHILD_WAIT_POLL_MS, MAX_CHILD_CONCURRENCY, MAX_CHILD_STDOUT_BYTES};
 use crate::outcome::{ExtractReport, ExtractStatus, LimitKind, WorkerFailureReason};
 
 static CHILD_SLOTS: OnceLock<Mutex<usize>> = OnceLock::new();
@@ -386,14 +386,13 @@ fn spawn_child(
                     kill_and_reap(&mut child);
                     break;
                 }
-                if let Some(rss) = child_rss_bytes(pid) {
-                    if rss > req.limits.max_child_rss_bytes {
-                        limit = Some(LimitKind::Memory);
-                        kill_and_reap(&mut child);
-                        break;
-                    }
-                }
-                thread::sleep(Duration::from_millis(RSS_POLL_MS));
+                // No RSS poll: RLIMIT_AS, set before exec, already bounds
+                // RSS, and an allocation failure is classified from the exit.
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(CHILD_WAIT_POLL_MS)),
+                );
             }
             Err(err) => {
                 kill_and_reap(&mut child);
@@ -576,17 +575,6 @@ fn allocation_failure_stderr(stderr: &str) -> bool {
 fn kill_and_reap(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
-}
-
-fn child_rss_bytes(pid: u32) -> Option<u64> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
-            return Some(kb.saturating_mul(1024));
-        }
-    }
-    None
 }
 
 fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), String> {
