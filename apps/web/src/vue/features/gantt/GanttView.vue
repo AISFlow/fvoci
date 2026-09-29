@@ -141,6 +141,7 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer));
       close
       @update:open="reschedule.dismissError()"
     />
+    <p role="status" class="sr-only">{{ reschedule.savingId.value ? t("gantt.bar.saving") : "" }}</p>
     <p v-if="layout?.truncated" role="status" class="text-muted">{{ t("gantt.truncated") }}</p>
     <p v-if="layout && layout.linkTotal > layout.links.length" role="status" class="text-muted">
       {{ t("gantt.paths.truncated", { shown: layout.links.length, total: layout.linkTotal }) }}

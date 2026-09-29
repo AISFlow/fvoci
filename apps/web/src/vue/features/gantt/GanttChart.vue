@@ -373,7 +373,7 @@ const railRows = computed(() =>
           }"
           role="button"
           tabindex="0"
-          :aria-label="title(bar.id)"
+          :aria-label="t('gantt.bar.aria', { title: title(bar.id), start: bar.start, end: bar.end })"
           :aria-busy="savingId === bar.id ? 'true' : undefined"
           :aria-keyshortcuts="editable ? 'Enter ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight' : 'Enter'"
           :data-task-id="bar.id"
