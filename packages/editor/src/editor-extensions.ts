@@ -42,7 +42,11 @@ import { createFvociExtensions, type EmojiMenuItem } from "./tiptap-schema.js";
 /* The collaborative editor's extension list without a UI framework. Hosts
  * (react/fvoci-editor.tsx) supply the framework-rendered node views, the
  * loaders and the upload hooks; the schema comes only from
- * createFvociExtensions, so every host edits the same Yjs content. */
+ * createFvociExtensions, so every host edits the same Yjs content.
+ * The helpers imported from react/ (and overlay-owner behind suggestion-menu)
+ * are plain DOM/ProseMirror code despite their directory; the import-graph
+ * test in test/editor-extensions.test.ts fails if any of them pulls in a UI
+ * framework. */
 
 /** WHY: #749 — at textblock edges, block insertion happens outside the paragraph. */
 export function uploadAnchor(
