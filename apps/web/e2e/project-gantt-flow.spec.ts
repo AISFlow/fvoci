@@ -605,6 +605,35 @@ test("an archived project's Gantt is read-only", async ({ page }) => {
   await expect(chart.locator(".fvoci-gantt__handle")).toHaveCount(0);
 });
 
+test("the Gantt page loads none of the wiki editor's code or styles", async ({ page }) => {
+  await ensureSetup(page);
+  const wsId = await workspaceId(page.request, admin.workspaceSlug);
+  const project = await createProject(page.request, wsId, "GLD");
+  const task = await createTask(page.request, wsId, project.id, { title: "Gantt load", startDate: day(3), dueDate: day(4) });
+  await page.goto(ganttUrl(project.key));
+  await expect(bar(page, task.id)).toBeVisible();
+  // Every script and stylesheet this document loaded (the boot module, the
+  // Vue app, the Gantt page chunk and what they import). The wiki editor
+  // (Tiptap/ProseMirror, Yjs, the collab provider) and its .fvoci-editor
+  // styles are the wiki page's chunk only.
+  const assets = await page.evaluate(() =>
+    performance
+      .getEntriesByType("resource")
+      .map((entry) => new URL(entry.name).pathname)
+      .filter((path) => /^\/assets\/[^/]+\.(js|css)$/.test(path)),
+  );
+  expect(assets.some((path) => path.endsWith(".js"))).toBe(true);
+  expect(assets.some((path) => path.endsWith(".css"))).toBe(true);
+  const withEditor: string[] = [];
+  for (const path of assets) {
+    const res = await page.request.get(path);
+    expect(res.ok()).toBe(true);
+    const body = await res.text();
+    if (body.includes("ProseMirror") || body.includes("fvoci-editor")) withEditor.push(path);
+  }
+  expect(withEditor).toEqual([]);
+});
+
 test("a project list that fails to load offers a retry", async ({ page }) => {
   await ensureSetup(page);
   const wsId = await workspaceId(page.request, admin.workspaceSlug);

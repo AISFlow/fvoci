@@ -57,3 +57,36 @@ test("the Vue app's module graph imports no React module", () => {
   assert.ok(seen.size > 100, `walked ${seen.size} modules`);
   assert.deepEqual(found, []);
 });
+
+// What the Vue entry imports statically is loaded on the first load of every
+// Vue page; each page is a lazy route chunk (router.ts). The wiki editor
+// stack (Tiptap, ProseMirror, Yjs, the collab provider, KaTeX) and its
+// stylesheets belong to the wiki page's chunk: the Gantt page must not load
+// them. Type-only imports and import() calls are not static loads.
+const STATIC_IMPORT = /^\s*(?:import|export)\s+(?!type\s)(?:[^;'"]*?\sfrom\s*)?["']([^"']+)["']/gm;
+const EDITOR_STACK = /^(@fvoci\/editor|@tiptap\/|@hocuspocus\/|yjs|y-protocols|y-prosemirror|prosemirror-|katex)(\/|$)/;
+const EDITOR_FILES = [path.join(packages, "editor") + path.sep, path.join(web, "src/features/documents") + path.sep];
+
+test("the Vue entry's static graph leaves the wiki editor to the wiki page's chunk", () => {
+  const seen = new Set<string>();
+  const found: string[] = [];
+  const walk = (file: string) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = readFileSync(file, "utf8");
+    for (const [, spec] of source.matchAll(STATIC_IMPORT)) {
+      if (!spec) continue;
+      if (EDITOR_STACK.test(spec)) found.push(`${spec} in ${path.relative(web, file)}`);
+      const next = resolve(spec, file);
+      if (!next) continue;
+      if (EDITOR_FILES.some((dir) => next.startsWith(dir))) found.push(`${path.relative(web, next)} from ${path.relative(web, file)}`);
+      if (!next.endsWith(".css")) walk(next);
+    }
+  };
+  walk(path.join(web, "src/vue/main.ts"));
+  assert.ok(seen.has(path.join(web, "src/vue/router.ts")), "the walk reaches the router");
+  for (const page of ["WikiDocumentPage.vue", "ProjectGanttPage.vue"]) {
+    assert.equal(seen.has(path.join(web, "src/vue/pages", page)), false, `${page} is a lazy route chunk`);
+  }
+  assert.deepEqual(found, []);
+});

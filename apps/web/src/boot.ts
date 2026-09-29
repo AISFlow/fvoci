@@ -10,6 +10,13 @@ import { isVueAppPath } from "@/app-boundary";
 // 150 ms at a 150 ms RTT, a few ms locally). Preloading React from index.html
 // would load React's JavaScript on the Vue pages too, and its stylesheet would
 // apply there; the cost goes away with this module once React is removed.
-const apps = import.meta.glob(["./main.tsx", "./vue/main.ts"]);
+//
+// Each app exports start() and this module calls it. Importing the module
+// namespace instead would make the bundler build a namespace object for an
+// entry chunk that also exports shared code to its lazy pages; its helper
+// then comes from whichever chunk hosts the bundler runtime, which for the
+// Vue app was the editor chunk (e2e/project-gantt-flow.spec.ts checks the
+// Gantt page loads no editor code).
+const apps = import.meta.glob<() => void>(["./main.tsx", "./vue/main.ts"], { import: "start" });
 const entry = isVueAppPath(window.location.pathname) ? "./vue/main.ts" : "./main.tsx";
-void apps[entry]!();
+void apps[entry]!().then((start) => start());
