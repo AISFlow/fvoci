@@ -764,7 +764,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-IME | 한글 첫 자모 (#258), React·Vue 공통 편집기 | 독립 검토·CI 중 | #268 제품 `d5093efd` | UniqueID composition skip. editor unit 26/26. CDP 7 (워커). OS IME 미실행(이 세션) | 검토+CI 후 main. #259/#260 아님 | 검토 Grok | 없음 | 출시 차단(#258) |
 | FE-Math-draft | 인라인 수식 원격 변경 시 초안 (#259) | 미착수 | issue #259 | #262에 관련 고정 테스트·이슈 주석 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
 | FE-Undo-IME | 조합 중 undo 단위 (#260) | 미착수 | issue #260 | 없음 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
-| FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` **ACCEPT_WITH_NITS**; nit `79236b2e` (스택 on #262 `73bf4a22`) | 제품 SHA 검토: setup-error 시 `#mfa=` 조기 소거, 죽은 React `login.tsx` 소스 검사, `mfa-flow` 미실행. nit: `takeMfaFragment`를 setup 성공 후로 미룸·`login.tsx` 삭제. 단위 20(oidc+login-form). e2e `login-vue-flow` 3/3. **`mfa-flow.spec.ts`는 CI web-browser에 포함, 로컬 미실행** | delta 검토+CI. #262 머지 선행. 기능군(setup/초대/동의) 완료 아님 | Grok 임시 실행자 | #262 | 미포함 |
+| FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` ACCEPT_WITH_NITS; nit `79236b2e` vs `e33b6013` **ACCEPT** | 단위 20. e2e `login-vue-flow` 3/3. **`mfa-flow`는 원격 web-browser 필수**(로컬 미실행). 기능군(setup/초대/동의) 완료 아님 | #262 머지 + `79236b2e` CI(mfa-flow 샤드 포함). **머지하지 않음** | Grok 임시 실행자 | #262 | 미포함 |
 | FE-Auth-setup | `/setup` | 미착수 | React `SetupPage` | 기존 React e2e | Vue 페이지 없음. 로그인 연결 후 이어서 | Grok 임시 실행자 | FE-Auth-login 권장 | — |
 | FE-Auth-invite | `/invite/:token` | 미착수 | React `InvitePage` | 기존 `workspace-invite-flow` | Vue 없음 | Grok 임시 실행자 | 없음 | — |
 | FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 미착수 | React 각 페이지 | 미확인(기존 React e2e 범위는 흐름별 상이) | Vue 없음. 매직/리셋 **요청**은 로그인 폼 하위 | Grok 임시 실행자 | 없음 | — |
@@ -790,7 +790,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Home | `/` 워크스페이스 선택 | 미착수 | React `HomePage` | 기존 홈 e2e | Vue 없음 | Grok 임시 실행자 | FE-Auth-login 이후가 자연스러움 | — |
 | FE-Legal | `/legal/:kind` `/service-info` | 미착수 | React | 미확인 | Vue 없음. 로그인 푸터 링크는 풀 로드 | Grok 임시 실행자 | 없음 | — |
 | FE-Dispose | collab socket retire/dispose | main 수락 완료 | merge `9e4f3af3` ← `bf3387ec` #264 | 검토 ACCEPT_WITH_NITS×2. CI 24 success·6 skip | 없음. #262 `web-checks`가 이 계약을 재실행 | 수락됨 | 없음 | 제품 UI 전환 아님 |
-| FE-Compat | `compat/` 폐기, fixture를 `tests/fixtures`로 | 독립 검토·CI 중 | `fvoci/retire-compat-probes` `6dd4bff9` #266 | 로컬 관련 테스트 통과. 검토 ACCEPT_WITH_NITS. 원격 CI 진행 | CI green 후 merge. **프론트엔드 기능군 완료가 아님** | Grok 임시 실행자 | CI | 아님 |
+| FE-Compat | `compat/` 폐기, fixture를 `tests/fixtures`로 | 독립 검토·CI 중 | #266 제품 `6dd4bff9` ACCEPT_WITH_NITS; main merge `9fdba423` | 제품 CI는 `6dd4bff9`에서 전부 성공. `9e4f3af3` 합친 뒤 CI 재실행 | `9fdba423` CI green 후 merge. **프론트엔드 기능군 완료가 아님** | Grok 임시 실행자 | CI | 아님 |
 | FE-Docs-ops | 운영·역할 문서 | 독립 검토·CI 중 | `fvoci/docs-0-3-0-record` `bdd72e1b` #263 | 문서 PR | 제품 전환 수에 미포함 | Grok 임시 실행자 | 없음 | 아님 |
 
 공통 파일(`app-boundary.ts`, vue `router.ts`/`route-paths.ts`, i18n, manifest/lockfile, OpenAPI) 소유: 임시 실행자. 워커는 regex·경로 추가를 요청하고 실행자가 작은 단위로 넣는다. 이 때문에 모든 Vue 페이지를 한 줄로 세우지 않는다.
@@ -802,7 +802,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 3. **#267** 제품 `ea8bd1c9` **ACCEPT** — CI 후 #262 위에 머지. 검사: `vue-shell-flow.spec.ts`.
 4. **#268** `d5093efd` — ACCEPT_WITH_NITS. CI green 후 main (위키 스택과 독립).
 5. **#266** — CI 남은 job 후 머지(기능 전환과 별개).
-6. **#269** 제품 `dcf3ca77` **ACCEPT_WITH_NITS**, nit `79236b2e` — `/login` Vue boot. **머지하지 않음**. delta 검토+CI. `mfa-flow`는 원격 web-browser. 인증 기능군 전체 완료 아님.
+6. **#269** 제품 `dcf3ca77` ACCEPT_WITH_NITS, nit `79236b2e` **ACCEPT**. **머지하지 않음** — #262 + CI(mfa-flow 샤드). 인증 기능군 전체 완료 아님.
 7. 그다음 연결(서로 다른 URL, boundary는 실행자가 순차 통합): workspace home/projects, viewers, project-views, account-admin.
 8. 협업 엔진 비교는 **#262 main 수락 뒤** 고정 SHA에서 시작(순서 유지). 지금 예광탄을 늘려 비교를 미루지 않는다.
 
