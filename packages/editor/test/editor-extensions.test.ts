@@ -149,7 +149,13 @@ test("the factory and its neutral modules import no UI framework", () => {
       walk(target);
     }
   };
-  for (const root of ["editor-extensions.ts", "entities.ts", "math-ml.ts"]) {
+  for (const root of [
+    "editor-extensions.ts",
+    "entities.ts",
+    "math-ml.ts",
+    "embed-model.ts",
+    "attachment-model.ts",
+  ]) {
     walk(new URL(`../src/${root}`, import.meta.url));
   }
   assert.deepEqual(

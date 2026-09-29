@@ -5,6 +5,7 @@
   "exports": {
     "./json": "./src/json.ts",
     "./sanitize": "./src/sanitize.ts",
+    "./attachment-model": "./src/attachment-model.ts",
     "./react": "./src/react/schema.tsx",
     "./fvoci-editor": "./src/react/fvoci-editor.tsx",
     "./block-menu": "./src/react/block-menu.tsx",
