@@ -110,12 +110,17 @@ _BROADEN_EXACT: frozenset[str] = frozenset(
         "rust-toolchain.toml",
         "Dockerfile",
         ".dockerignore",
+        # The Bun workspace root: apps/web, packages/* and scripts/document-convert.
+        "package.json",
+        "bun.lock",
+        ".bun-version",
     }
 )
 
 _MANIFEST_MARKERS: tuple[str, ...] = (
     "/package.json",
     "/package-lock.json",
+    "/bun.lock",
     "/Cargo.toml",
     "/Cargo.lock",
     "/pnpm-lock.yaml",
@@ -140,7 +145,6 @@ _WEB_BROADEN_PREFIXES: tuple[str, ...] = (
     "apps/web/openapi.json",
     "apps/web/src/generated/",
     "apps/web/package.json",
-    "apps/web/package-lock.json",
     "apps/web/playwright.config.ts",
     "apps/web/e2e/",
     "apps/web/e2e-pending/",
