@@ -1,4 +1,6 @@
-export type IsoDate = string;
+import type { IsoDate } from "@/lib/iso-date";
+
+export type { IsoDate };
 
 export interface GanttTask {
 	readonly id: string;

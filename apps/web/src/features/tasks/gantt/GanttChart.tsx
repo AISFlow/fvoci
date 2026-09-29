@@ -3,7 +3,7 @@
 import { t } from "@fvoci/i18n";
 import type React from "react";
 import { useId, useRef, useState } from "react";
-import { addDays, daysBetween } from "./date";
+import { addDays, daysBetween } from "@/lib/iso-date";
 import { barRect, laneCenterY } from "./layout";
 import type { components } from "@/generated/api";
 import { dateToX, xToDate } from "./scale";

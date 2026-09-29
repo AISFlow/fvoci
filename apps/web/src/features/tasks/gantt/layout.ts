@@ -1,4 +1,4 @@
-import { daysBetween } from "./date";
+import { daysBetween } from "@/lib/iso-date";
 import { dateToX } from "./scale";
 import type {
 	GanttLink,

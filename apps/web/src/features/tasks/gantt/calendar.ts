@@ -1,4 +1,4 @@
-import { addDays, dayOfWeek, eachDay } from "./date";
+import { addDays, dayOfWeek, eachDay } from "@/lib/iso-date";
 import type { IsoDate, WorkCalendar } from "./types";
 
 export const DEFAULT_CALENDAR: WorkCalendar = {

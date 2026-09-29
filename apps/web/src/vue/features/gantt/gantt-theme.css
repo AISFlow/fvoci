@@ -1,4 +1,4 @@
-/* packages/gantt/src/theme.css */
+/* Gantt chart theme (was features/tasks/gantt/theme.css; originally packages/gantt/src/theme.css) */
 
 :where(.fvoci-gantt) {
 	--fvoci-gantt-font-family: var(

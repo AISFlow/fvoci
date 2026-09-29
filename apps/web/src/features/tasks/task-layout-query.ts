@@ -2,7 +2,7 @@ import { queryOptions } from "@tanstack/react-query";
 import type { components } from "@/generated/api";
 import { api, ensureOk } from "@/lib/api";
 import { encodeViewQueryParam, type ViewQuery } from "@/lib/view-query";
-import { shiftMonth } from "./month-view-query";
+import { shiftMonth } from "@/lib/year-month";
 
 export type GanttLayoutOutput = components["schemas"]["GanttLayoutOutput"];
 
