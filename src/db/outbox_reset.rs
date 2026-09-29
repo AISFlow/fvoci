@@ -24,17 +24,26 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use super::outbox_recover::RESET_SCAN_WINDOW_DAYS;
+use crate::integrations::github::GITHUB_CONSUMER;
+use crate::integrations::webhooks::WEBHOOKS_CONSUMER;
+use crate::mail::MAIL_CONSUMER;
+use crate::notifications::NOTIFICATIONS_CONSUMER;
+use crate::push::consumer::PUSH_CONSUMER;
+use crate::search::index::SEARCH_INDEX_CONSUMER;
 
 /// Consumers of this build that mark every event they pass in
 /// `processed_events`, so their marks show how far they really got.
-pub const MARKING_CONSUMERS: &[&str] =
-    &["notifications", "mail", "push", "webhooks", "search-index"];
-const SEARCH_INDEX_CONSUMER: &str = "search-index";
+const MARKING_CONSUMERS: &[&str] = &[
+    NOTIFICATIONS_CONSUMER,
+    MAIL_CONSUMER,
+    PUSH_CONSUMER,
+    WEBHOOKS_CONSUMER,
+    SEARCH_INDEX_CONSUMER,
+];
 /// Consumers whose effects stay in this database. Every other consumer
 /// (mail, push, webhooks, github or one this build does not know) reaches
 /// devices or endpoints outside it.
-const INTERNAL_CONSUMERS: &[&str] = &["notifications", SEARCH_INDEX_CONSUMER];
-const GITHUB_CONSUMER: &str = "github";
+const INTERNAL_CONSUMERS: &[&str] = &[NOTIFICATIONS_CONSUMER, SEARCH_INDEX_CONSUMER];
 const SKIP_SAMPLE_LIMIT: i64 = 100;
 
 #[derive(Debug, Clone, Default)]
