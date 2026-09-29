@@ -691,15 +691,23 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
     return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
   });
   if (already?.[0] !== target.position || already[1] !== target.position) {
-    // Only correct the other side of the clicked glyph. An unrelated selection
-    // is an input defect and must fail rather than be repaired by this helper.
-    await expect.poll(() => locator.evaluate((root) => {
-      const editor = (root as HTMLElement & {
-        editor?: { state: { selection: { from: number; to: number } } };
-      }).editor;
-      return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
-    })).toEqual([target.adjacentPosition, target.adjacentPosition]);
-    await page.keyboard.press(where === "start" ? "ArrowLeft" : "ArrowRight");
+    // The initial observation can arrive before the native click settles.
+    // Accept either side of this glyph, then correct only an adjacent sample.
+    // Unrelated or non-collapsed selections must still fail here.
+    let settled = already;
+    await expect.poll(async () => {
+      settled = await locator.evaluate((root) => {
+        const editor = (root as HTMLElement & {
+          editor?: { state: { selection: { from: number; to: number } } };
+        }).editor;
+        return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
+      });
+      return settled?.[0] === settled?.[1] &&
+        (settled?.[0] === target.position || settled?.[0] === target.adjacentPosition);
+    }).toBe(true);
+    if (settled?.[0] === target.adjacentPosition) {
+      await page.keyboard.press(where === "start" ? "ArrowLeft" : "ArrowRight");
+    }
   }
   await expect.poll(() => locator.evaluate((root) => {
     const editor = (root as HTMLElement & {
