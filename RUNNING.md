@@ -652,7 +652,12 @@ Type checking runs both checkers under Bun (`build` runs them before `vite build
 
 ```sh
 cd apps/web && bun --bun run typecheck   # tsc -b (React) and vue-tsc -b tsconfig.vue.json (Vue)
+cd packages/editor && bun --bun run typecheck   # tsc, and vue-tsc for the Vue editor host (src/vue)
 ```
+
+The editor package's tests load the Vue editor's single-file components
+through `test/setup/vue-sfc.ts` (a `bun test --preload` plugin that compiles
+them with Vue's own compiler, as the build does).
 
 vue-tsc under Bun needs `patches/@volar%2Ftypescript@2.4.28.patch` (Bun
 `patchedDependencies` in the root `package.json`, applied by `bun ci`/`bun

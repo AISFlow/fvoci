@@ -3,37 +3,20 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { getSchema } from "@tiptap/core";
 import * as Y from "yjs";
-import {
-  createFvociEditorExtensions,
-  type FvociNodeViewName,
-  type FvociNodeViews,
-} from "../src/editor-extensions.ts";
+import { createFvociEditorExtensions, type FvociNodeViewName } from "../src/editor-extensions.ts";
 import { Attachment } from "../src/nodes/attachment.ts";
 import { Embed } from "../src/nodes/embed.ts";
 import { MathBlock, MathInline } from "../src/nodes/math.ts";
 import { Mermaid } from "../src/nodes/mermaid.ts";
+import { VUE_NODE_VIEWS } from "../src/vue/node-views.ts";
 import { dumpSchema, editorSchemaFixture } from "./schema-dump.ts";
 
-// Never called: getSchema does not build views. Distinct functions let the
-// wiring test check that each node gets its own entry. The React host's real
-// map is built in a component module (react/fvoci-editor.tsx), which node:test
-// cannot load; the addNodeView-only test below is what keeps any map
-// schema-neutral. The Vue host's real map is tested in vue-node-views.test.ts,
-// and apps/web/e2e/workspace-wiki-flow.spec.ts checks the schema of the editor
-// the web app mounts.
-const stubView = () => () => ({ dom: {} as HTMLElement });
-const nodeViews: FvociNodeViews = {
-  mermaid: stubView,
-  math: () => stubView(),
-  mathInline: () => stubView(),
-  embed: () => stubView(),
-  attachment: () => stubView(),
-};
-
+// The Vue host's real node-view map (its .vue modules compiled by
+// test/setup/vue-sfc.ts), through the shared extension factory.
 function extensions() {
   return createFvociEditorExtensions({
     ydoc: new Y.Doc({ gc: false }),
-    nodeViews,
+    nodeViews: VUE_NODE_VIEWS,
     mentionItems: () => undefined,
     entityResolver: () => null,
     workspaceSlug: () => null,
@@ -41,11 +24,11 @@ function extensions() {
   });
 }
 
-test("editor schema matches the server's yjs seed schema contract", () => {
+test("the Vue node views give exactly the server's yjs seed schema", () => {
   assert.deepEqual(dumpSchema(getSchema(extensions())), editorSchemaFixture());
 });
 
-test("host node views are applied only as addNodeView", () => {
+test("the Vue node views change only addNodeView; mermaid keeps its plain view", () => {
   const list = extensions();
   const bases = {
     mermaid: Mermaid,
@@ -62,20 +45,25 @@ test("host node views are applied only as addNodeView", () => {
     assert.ok(ext, name);
     assert.equal(ext.parent, base, name);
     const { addNodeView, ...config } = { ...ext.config } as Record<string, unknown>;
-    const { addNodeView: _baseView, ...baseConfig } = {
-      ...base.config,
-    } as Record<string, unknown>;
-    assert.equal(addNodeView, nodeViews[name], name);
+    const { addNodeView: _baseView, ...baseConfig } = { ...base.config } as Record<string, unknown>;
+    assert.equal(addNodeView, VUE_NODE_VIEWS[name], name);
     assert.deepEqual(Object.keys(config).sort(), Object.keys(baseConfig).sort());
     for (const key of Object.keys(baseConfig)) {
       assert.equal(config[key], baseConfig[key], `${name}.${key}`);
     }
   }
+  assert.equal(VUE_NODE_VIEWS.mermaid, undefined);
+  const mermaid = list.find((candidate) => candidate.name === "mermaid");
+  assert.equal(
+    (mermaid?.config as { addNodeView?: unknown } | undefined)?.addNodeView,
+    undefined,
+    "falls back to Mermaid's own view",
+  );
 });
 
-test("the factory and its neutral modules import no UI framework", () => {
-  const framework =
-    /^(react|react-dom|vue|@tiptap\/react|@tiptap\/vue-3|@tiptap\/extension-drag-handle-react|@tiptap\/extension-drag-handle-vue-3|@hocuspocus\/provider-react|@radix-ui\/.*|@nuxt\/.*)(\/.*)?$/;
+test("the Vue editor imports no React module", () => {
+  const react =
+    /^(react|react-dom|@tiptap\/react|@tiptap\/extension-drag-handle-react|@hocuspocus\/provider-react|@radix-ui\/.*)(\/.*)?$/;
   const seen = new Set<string>();
   const bare = new Set<string>();
   const walk = (url: URL): void => {
@@ -87,23 +75,13 @@ test("the factory and its neutral modules import no UI framework", () => {
         if (spec) bare.add(spec);
         continue;
       }
-      // A .tsx module would pull in the React JSX runtime.
+      assert.equal(spec.endsWith(".tsx"), false, `${spec} imported by ${url.pathname}`);
       const target = new URL(spec.replace(/\.js$/, ".ts"), url);
       assert.ok(existsSync(target), `${spec} imported by ${url.pathname}`);
       walk(target);
     }
   };
-  for (const root of [
-    "editor-extensions.ts",
-    "entities.ts",
-    "math-ml.ts",
-    "embed-model.ts",
-    "attachment-model.ts",
-  ]) {
-    walk(new URL(`../src/${root}`, import.meta.url));
-  }
-  assert.deepEqual(
-    [...bare].filter((spec) => framework.test(spec)),
-    [],
-  );
+  walk(new URL("../src/vue/index.ts", import.meta.url));
+  assert.deepEqual([...bare].filter((spec) => react.test(spec)), []);
+  assert.ok(bare.has("@tiptap/vue-3"));
 });
