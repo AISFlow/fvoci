@@ -16,9 +16,12 @@
 //! Module-specific tails are documented in `db::collab`, `db::task_ops` and
 //! `db::project_documents`.
 //!
-//! Reads check the credential and permission in the same transaction as the
-//! data. Whether they take row locks depends on the check they reuse, not on
-//! being a read:
+//! Most workspace-scoped reads check the credential and permission in the
+//! same transaction as the data. Some rely on their route's session check,
+//! run in a separate transaction (for example `db::oidc::list_links` and
+//! `db::legal::workspace_consents`), and a task stream rechecks project
+//! access for each delivered item in a transaction of its own. Whether a read
+//! takes row locks depends on the check it reuses, not on being a read:
 //! - [`session_is_live`] (the usual read check) and [`begin_read`] (one
 //!   REPEATABLE READ, READ ONLY snapshot, used by most project-scoped reads)
 //!   take no row locks. Stream access checks use a plain transaction with the

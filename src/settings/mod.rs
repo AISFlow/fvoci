@@ -9,8 +9,8 @@
 //! `GET /api/v1/admin/instance-settings`) records the values it resolved, and
 //! [`apply_change`] (the admin settings PATCH and branding asset upload and
 //! removal) records the values it resolved before the change; a change
-//! refused before that point (session or licence check) records nothing.
-//! The other readers here never record it. The admin output's `restartRequired` lists
+//! refused before that point (admin-session or licence check) records
+//! nothing. The other readers here never record it. The admin output's `restartRequired` lists
 //! the restart-required keys whose current value differs from that snapshot:
 //! changes since this process's first recording call, not since it started, so
 //! a change another process committed before that call is not listed.
