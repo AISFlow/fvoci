@@ -19,6 +19,14 @@ import {
   VITE_LICENSE_DATA_FILE,
 } from "./vite-plugin-fvoci-web-licenses.ts";
 
+// GitHub runners also have Node on PATH. `bun --bun` runs Vite's
+// `#!/usr/bin/env node` binary through a node -> bun shim in
+// /tmp/bun-node-<revision> and silently skips the shim when that directory is
+// unusable, so CI fails here rather than building on Node.
+if (process.env.CI && !process.versions.bun) {
+  throw new Error("Vite must run under Bun in CI (bun --bun run build)");
+}
+
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 const browserLicenseManifest = path.join(
   repoRoot,
