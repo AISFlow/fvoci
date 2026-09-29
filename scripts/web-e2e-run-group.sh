@@ -11,9 +11,9 @@ if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]] && (($# < 1)); then
 fi
 
 if (($# >= 1)); then
-  GROUP_LABEL="$(basename "${1%.spec.ts}")"
+  GROUP_LABEL="$(basename -- "${1%.spec.ts}")"
   if (($# > 1)); then
-    GROUP_LABEL="${GROUP_LABEL}+$(basename "${2%.spec.ts}")"
+    GROUP_LABEL="${GROUP_LABEL}+$(basename -- "${2%.spec.ts}")"
   fi
 fi
 
