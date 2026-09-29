@@ -12,7 +12,8 @@ import { useSearchPalette } from "./useSearchPalette";
 // The header search palette (features/workspace/search-command.tsx): Ctrl+K
 // or Cmd+K or the button opens it, results follow the typing, Enter or "see
 // all" opens the search page (a React page, full load). A modal <dialog>:
-// Escape or a click on the backdrop closes it and focus returns.
+// Escape, the close control, or a press on the backdrop closes it and focus
+// returns.
 const props = defineProps<{ slug: string; workspaceId: string }>();
 const dialogId = useId();
 const { open, draft, q, results, items } = useSearchPalette({
@@ -60,7 +61,18 @@ function submit(): void {
     @close="open = false"
   >
     <div class="flex flex-col gap-3 p-4">
-      <h2 :id="`${dialogId}-title`" class="m-0 text-lg font-semibold break-keep">{{ t("search.command") }}</h2>
+      <div class="flex items-start justify-between gap-2">
+        <h2 :id="`${dialogId}-title`" class="m-0 text-lg font-semibold break-keep">{{ t("search.command") }}</h2>
+        <UButton
+          size="sm"
+          variant="ghost"
+          color="neutral"
+          square
+          icon="i-lucide-x"
+          :aria-label="t('search.close')"
+          @click="open = false"
+        />
+      </div>
       <form class="flex gap-2" @submit.prevent="submit">
         <label class="sr-only" :for="`${dialogId}-q`">{{ t("search.query") }}</label>
         <UInput

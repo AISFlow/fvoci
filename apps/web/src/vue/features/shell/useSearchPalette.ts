@@ -17,6 +17,7 @@ export function useSearchShortcut(open: Ref<boolean>, target: KeyTarget): void {
   const onKey = (event: Event) => {
     const key = event as KeyboardEvent;
     if ((key.metaKey || key.ctrlKey) && key.key.toLowerCase() === "k") {
+      if (key.defaultPrevented) return;
       key.preventDefault();
       open.value = true;
     }

@@ -25,10 +25,11 @@ const { open, count, items, label, badge } = bell;
 const { isPending: listPending, isError: listFailed, error: listError } = bell.list;
 
 // An in-app navigation (to another wiki document) keeps the shell mounted;
-// the panel closes with it, as on a new page.
+// the panel closes with it, as on a new page. Query-only replaces (the
+// Gantt month) stay on this page, so they leave the panel open.
 const route = useRoute();
 watch(
-  () => route.fullPath,
+  () => route.path,
   () => {
     open.value = false;
   },
@@ -69,7 +70,7 @@ function onReadAll(): void {
       :id="panelId"
       role="region"
       :aria-label="t('notif.bell.title')"
-      class="absolute top-full right-0 z-20 mt-1.5 w-[min(22rem,calc(100vw-1.5rem))] rounded-xl border border-default bg-default shadow-lg"
+      class="z-20 mt-1.5 w-[min(22rem,calc(100vw-1.5rem))] rounded-xl border border-default bg-default shadow-lg max-sm:fixed max-sm:inset-x-3 max-sm:top-14 max-sm:mt-0 max-sm:w-auto sm:absolute sm:top-full sm:right-0"
     >
       <div class="flex items-center justify-between gap-2 border-b border-default px-3 py-2">
         <p class="m-0 text-sm font-semibold">{{ t("notif.bell.title") }}</p>

@@ -282,6 +282,13 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   await expect(trigger).toBeFocused();
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
 
+  await trigger.click();
+  await expect(palette).toBeVisible();
+  await palette.getByRole("button", { name: "검색 닫기" }).click();
+  await expect(palette).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+
   // Ctrl+K from inside the editor; another wiki document keeps this page
   // (the shell stays mounted) and the palette, like the bell's open panel,
   // closes with the navigation.
@@ -310,10 +317,19 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   expect(await sameDocument(page), "task result is a full load").toBe(false);
 
   // Enter opens the search page (React) with the query, from either Vue page;
-  // a click on the backdrop closes the palette.
+  // a click on the backdrop closes the palette. A drag that started in the
+  // query field does not.
   for (const open of [openGantt, (p: Page) => openWiki(p, first)]) {
     await open(page);
     await page.getByRole("button", { name: "검색", exact: true }).click();
+    await expect(palette).toBeVisible();
+    const inputBox = await palette.getByLabel("검색어").boundingBox();
+    expect(inputBox).toBeTruthy();
+    await page.mouse.move(inputBox!.x + inputBox!.width / 2, inputBox!.y + inputBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(5, 5);
+    await page.mouse.up();
+    await expect(palette).toBeVisible();
     await page.mouse.click(5, 5);
     await expect(palette).toHaveCount(0);
     await page.keyboard.press("Control+k");
@@ -453,11 +469,16 @@ test("the bell shows a notification created through the API and opens it from bo
     await expect(m.page.getByText(secondMessage, { exact: true }).first()).toBeVisible();
     expect(await sameDocument(m.page)).toBe(false);
 
-    // The toggle closes the panel again.
+    // The toggle closes the panel again. On a 390px viewport the panel stays
+    // on-screen (it is not clipped by absolute right-0).
+    await m.page.setViewportSize({ width: 390, height: 844 });
     await openGantt(m.page);
     const readBell = m.page.getByRole("button", { name: "알림", exact: true });
     await readBell.click();
     await expect(panel).toBeVisible();
+    const panelBox = await panel.boundingBox();
+    expect(panelBox).toBeTruthy();
+    expect(panelBox!.x).toBeGreaterThanOrEqual(0);
     await readBell.click();
     await expect(panel).toHaveCount(0);
     expect(seen.csp).toEqual([]);

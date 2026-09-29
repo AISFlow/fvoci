@@ -40,8 +40,11 @@ const { error: logoutError, logout } = useLogout();
 usePushSessionRebind(() => props.workspaceId);
 
 function onSwitch(event: Event): void {
-  const next = items.value.find((item) => item.id === (event.target as HTMLSelectElement).value);
+  const select = event.target as HTMLSelectElement;
+  const next = items.value.find((item) => item.id === select.value);
   if (next) window.location.assign(landingPath(next.slug, props.active));
+  // Keep the current workspace selected until the next page actually loads.
+  select.value = props.workspaceId;
 }
 </script>
 

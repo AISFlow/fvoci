@@ -83,9 +83,9 @@ test("logout: a refused logout says so, and a retry that succeeds clears it", as
 
 // ---- search palette ----
 
-type Key = Event & { key: string; ctrlKey?: boolean; metaKey?: boolean };
+type Key = Event & { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean };
 
-function key(init: { key: string; ctrlKey?: boolean; metaKey?: boolean }): Key {
+function key(init: { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean }): Key {
   return Object.assign(new Event("keydown", { cancelable: true }), init) as Key;
 }
 
@@ -104,6 +104,11 @@ test("search shortcut: Ctrl+K or Cmd+K opens, Escape closes an open palette", ()
     target.dispatchEvent(escapeClosed);
     assert.equal(escapeClosed.defaultPrevented, false, "Escape is left alone while the palette is closed");
 
+    const alreadyHandled = key({ key: "k", ctrlKey: true });
+    alreadyHandled.preventDefault();
+    target.dispatchEvent(alreadyHandled);
+    assert.equal(open.value, false, "an already-handled Mod-K is left alone");
+
     const ctrl = key({ key: "k", ctrlKey: true });
     target.dispatchEvent(ctrl);
     assert.equal(open.value, true);
@@ -114,7 +119,7 @@ test("search shortcut: Ctrl+K or Cmd+K opens, Escape closes an open palette", ()
     assert.equal(open.value, false);
     assert.equal(escape.defaultPrevented, true);
 
-    target.dispatchEvent(key({ key: "K", metaKey: true }));
+    target.dispatchEvent(key({ key: "K", metaKey: true, shiftKey: true }));
     assert.equal(open.value, true, "Cmd+Shift+K too");
   } finally {
     scope.stop();

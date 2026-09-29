@@ -4,8 +4,9 @@ import { nextTick, useTemplateRef, watch } from "vue";
 // A modal <dialog> opened with showModal() (features/projects/native-modal.tsx):
 // the browser traps focus and Escape asks to close; focus returns to the
 // element that had it when the dialog opened. `dialogClass` replaces the
-// project dialog look; with `closeOnBackdrop` a click on the backdrop (the
-// dialog element itself, outside its content) asks to close too.
+// project dialog look; with `closeOnBackdrop` a press that both starts and
+// ends on the dialog itself (the backdrop, outside its content) asks to
+// close too. A drag that starts inside the content does not.
 const props = withDefaults(
   defineProps<{ open: boolean; labelledBy: string; dialogClass?: string; closeOnBackdrop?: boolean }>(),
   { dialogClass: "project-dialog", closeOnBackdrop: false },
@@ -13,6 +14,7 @@ const props = withDefaults(
 const emit = defineEmits<{ close: [] }>();
 const dialog = useTemplateRef<HTMLDialogElement>("dialog");
 let opener: HTMLElement | null = null;
+let pressStartedOnDialog = false;
 
 watch(
   () => props.open,
@@ -37,8 +39,13 @@ function onCancel(event: Event): void {
   emit("close");
 }
 
+function onPointerDown(event: PointerEvent): void {
+  pressStartedOnDialog = event.target === dialog.value;
+}
+
 function onClick(event: MouseEvent): void {
-  if (props.closeOnBackdrop && event.target === dialog.value) emit("close");
+  if (props.closeOnBackdrop && pressStartedOnDialog && event.target === dialog.value) emit("close");
+  pressStartedOnDialog = false;
 }
 </script>
 
@@ -50,6 +57,7 @@ function onClick(event: MouseEvent): void {
     :aria-labelledby="labelledBy"
     aria-modal="true"
     @cancel="onCancel"
+    @pointerdown="onPointerDown"
     @click="onClick"
   >
     <slot />
