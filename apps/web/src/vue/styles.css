@@ -1,0 +1,22 @@
+/* The Vue app's stylesheet: Tailwind and Nuxt UI, scanning only the Vue
+   sources (the React stylesheet, src/styles/app.css, scans the rest). */
+@import "tailwindcss" source(none);
+@import "@nuxt/ui";
+@import "../styles/tokens.css";
+
+@source "./";
+
+@theme {
+  --font-sans: "Noto Sans KR", system-ui, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+
+/* FVOCI's primary colour (styles/tokens.css) for Nuxt UI's primary. */
+:root {
+  --ui-primary: var(--primary);
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--ui-bg);
+  color: var(--ui-text);
+}

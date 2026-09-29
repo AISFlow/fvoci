@@ -1,13 +1,15 @@
 import { t } from "@fvoci/i18n";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ComponentType } from "react";
+import { useEffect, type ComponentType } from "react";
 import {
   createBrowserRouter,
   createRoutesFromElements,
   Navigate,
   Route,
   RouterProvider,
+  useLocation,
 } from "react-router-dom";
+import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
 import { HomePage } from "@/pages/HomePage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -46,6 +48,20 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+/**
+ * Paths no React route renders. A Vue app path (src/app-boundary.ts) reached
+ * by an in-app navigation is loaded as a new page, so the boot module starts
+ * the Vue app for it; anything else goes home as before.
+ */
+function NoRoute() {
+  const { pathname, search, hash } = useLocation();
+  const vuePage = isVueAppPath(pathname);
+  useEffect(() => {
+    if (vuePage) window.location.assign(`${pathname}${search}${hash}`);
+  }, [vuePage, pathname, search, hash]);
+  return vuePage ? null : <Navigate to="/" replace />;
+}
 
 function RouteLoading() {
   return <p role="status">{t("load.loading")}</p>;
@@ -199,7 +215,7 @@ const router = createBrowserRouter(
         <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
         <Route path=":ref" element={<WorkspaceRefPage />} />
       </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<NoRoute />} />
     </>,
   ),
 );

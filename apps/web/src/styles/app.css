@@ -2,6 +2,9 @@
 @import "@fvoci/editor/styles.css";
 @import "./tokens.css";
 
+/* src/vue has its own stylesheet (src/vue/styles.css). */
+@source not "../vue";
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

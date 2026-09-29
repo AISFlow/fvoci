@@ -16,6 +16,8 @@ export const nuxtUiUserOptions = {
       neutral: "slate",
     },
   },
+  // Theme CSS only for the components the sources use (and their dependencies).
+  experimental: { componentDetection: true },
   icon: {
     clientBundle: {
       scan: { globInclude: ["src/vue/**/*.{vue,ts}"], globExclude: ["**/*.test.ts"] },
