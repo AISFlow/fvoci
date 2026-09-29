@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --configLoader native",
-    "build": "tsc -b && vite build --configLoader native",
+    "dev": "vite",
+    "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "test": "bun test --parallel ./src",
     "test:e2e": "playwright test"

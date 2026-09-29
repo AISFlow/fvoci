@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
@@ -108,29 +107,29 @@ function rhwpWasmNotice() {
  * LICENSE, so the sidecar is added here.
  */
 function officeKitXlsxNotice() {
-  // The package exports no ./package.json; walk up from an exported entry.
-  // import.meta.resolve is why the scripts pass `--configLoader native`: Vite
-  // 8.3's default bundle loader serves it through Node's module resolve hooks,
-  // which Bun 1.4 lacks (oven-sh/bun#27369), and the Bun build then fails with
-  // "Cannot find package 'vite-module-runner:import-meta-resolve'". The flag can
-  // go when Bun implements Module.registerHooks.
-  let dir = path.dirname(fileURLToPath(import.meta.resolve("@office-kit/xlsx/cell")));
-  let manifest: { name?: string; version: string };
-  for (;;) {
-    const file = path.join(dir, "package.json");
-    if (fs.existsSync(file)) {
-      manifest = JSON.parse(fs.readFileSync(file, "utf8")) as typeof manifest;
-      if (manifest.name === "@office-kit/xlsx") break;
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) throw new Error("@office-kit/xlsx package.json not found");
-    dir = parent;
-  }
-  const { version } = manifest;
+  const dir = installedPackageDir("@office-kit/xlsx");
+  const { version } = JSON.parse(
+    fs.readFileSync(path.join(dir, "package.json"), "utf8"),
+  ) as { version: string };
   return {
     title: `@office-kit/xlsx ${version}: THIRD_PARTY_NOTICES.md`,
     text: fs.readFileSync(path.join(dir, "THIRD_PARTY_NOTICES.md"), "utf8").trim(),
   };
+}
+
+/**
+ * The directory `name` is installed in for this app: the first
+ * node_modules/`name` up from apps/web, where the bundle resolves it from. For
+ * packages that export no ./package.json (createRequire cannot resolve them);
+ * import.meta.resolve is avoided because Vite 8.3's default config loader
+ * serves it through Node module hooks that Bun 1.4 lacks (oven-sh/bun#27369).
+ */
+function installedPackageDir(name: string): string {
+  for (let dir = import.meta.dirname; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, "node_modules", name);
+    if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
+    if (path.dirname(dir) === dir) throw new Error(`${name} is not installed`);
+  }
 }
 
 /** Modules of every web-worker bundle, for the license notice. */
