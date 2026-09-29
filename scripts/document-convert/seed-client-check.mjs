@@ -4,18 +4,25 @@
 // with the editor schema, and the result must equal the TS seed's.
 //   bun seed-client-check.mjs <collab-engine bin> <case.json>...
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
 import { createFvociExtensions } from "@fvoci/editor/tiptap-schema";
 
-const ROOT = dirname(fileURLToPath(import.meta.url));
-// The ESM entry the editor package itself loads (one Yjs instance).
+const EDITOR = join(dirname(fileURLToPath(import.meta.url)), "../../packages/editor");
+// The copy the editor package itself imports, so there is one Yjs instance:
+// the first node_modules/<pkg> up from packages/editor, at its ESM entry.
 const esm = (pkg) => {
-	const dir = join(ROOT, "../../packages/editor/node_modules", pkg);
-	const entry = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).exports["."].import;
-	return import(pathToFileURL(join(dir, entry)).href);
+	for (let dir = EDITOR; ; dir = dirname(dir)) {
+		const pkgDir = join(dir, "node_modules", pkg);
+		const manifest = join(pkgDir, "package.json");
+		if (existsSync(manifest)) {
+			const entry = JSON.parse(readFileSync(manifest, "utf8")).exports["."].import;
+			return import(pathToFileURL(join(pkgDir, entry)).href);
+		}
+		if (dirname(dir) === dir) throw new Error(`${pkg} is not installed for packages/editor`);
+	}
 };
 const Y = await esm("yjs");
 const { yXmlFragmentToProseMirrorRootNode } = await esm("@tiptap/y-tiptap");
