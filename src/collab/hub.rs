@@ -651,20 +651,13 @@ impl CollabHub {
         };
         let live = {
             let mut phase = slot.phase.lock().await;
-            let RoomPhase::Live(live) = &*phase else {
+            let Some(live) = Self::take_idle_evictable(&mut phase, self.config.idle_evict_ms)
+            else {
                 return false;
-            };
-            if Self::idle_evict_decision_for(live, self.config.idle_evict_ms)
-                != IdleEvictDecision::WouldEvict
-            {
-                return false;
-            }
-            let RoomPhase::Live(live) = std::mem::replace(&mut *phase, RoomPhase::Closing) else {
-                unreachable!()
             };
             live
         };
-        complete_idle_eviction(
+        complete_owned_room_cleanup(
             self.rooms.clone(),
             key,
             slot,
@@ -673,6 +666,23 @@ impl CollabHub {
         )
         .await;
         true
+    }
+
+    /// Take the actor of a Live room that idle eviction may close, publishing
+    /// Closing atomically with the idle observation. The caller owns the room
+    /// from here and must finish it with [`complete_owned_room_cleanup`]; the
+    /// slot never shows Failed before this exact actor and guard have finished.
+    fn take_idle_evictable(phase: &mut RoomPhase, idle_ms: u64) -> Option<LiveRoom> {
+        let RoomPhase::Live(live) = &*phase else {
+            return None;
+        };
+        if Self::idle_evict_decision_for(live, idle_ms) != IdleEvictDecision::WouldEvict {
+            return None;
+        }
+        match std::mem::replace(phase, RoomPhase::Closing) {
+            RoomPhase::Live(live) => Some(live),
+            _ => unreachable!("checked Live under the same lock"),
+        }
     }
 
     fn idle_evict_decision_for(live: &LiveRoom, idle_ms: u64) -> IdleEvictDecision {
@@ -991,23 +1001,17 @@ impl CollabHub {
             }
             failures
         };
-        let abnormal_actor_completions = self.abnormal_actor_completions.clone();
         let rooms_join = async {
-            join_all(live_rooms.into_iter().map(|(key, live)| {
-                let hub = self.clone();
-                let abnormal_actor_completions = abnormal_actor_completions.clone();
-                async move {
-                    live.handle.shutdown().await;
-                    note_abnormal_actor_completion(
-                        &abnormal_actor_completions,
-                        key.1,
-                        live.finished.await,
-                    );
-                    drop(live.permit);
-                    // Drop the slot as soon as this actor finished so a sibling
-                    // blocked on persist cannot keep this room visible as Closing.
-                    hub.forget_closed_room(key).await;
-                }
+            // Each room leaves the map as soon as its own actor finished, so a
+            // sibling blocked on persist cannot keep this room visible as Closing.
+            join_all(live_rooms.into_iter().map(|(key, slot, live)| {
+                complete_owned_room_cleanup(
+                    self.rooms.clone(),
+                    key,
+                    slot,
+                    live,
+                    self.abnormal_actor_completions.clone(),
+                )
             }))
             .await;
         };
@@ -1420,7 +1424,7 @@ impl CollabHub {
         }
 
         if self.shutting_down.load(Ordering::Acquire) {
-            self.fail_starting(key, &slot).await;
+            self.cleanup_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
         }
 
@@ -1430,18 +1434,18 @@ impl CollabHub {
                 Ok(pooled) => pooled,
                 Err(err) => {
                     warn_join_db_error("hub.start_room.acquire", key.0, key.1, &err);
-                    self.fail_starting(key, &slot).await;
+                    self.cleanup_starting(key, &slot).await;
                     return Err(JoinError::DbError);
                 }
             },
             () = self.wait_if_shutting_down() => {
-                self.fail_starting(key, &slot).await;
+                self.cleanup_starting(key, &slot).await;
                 return Err(JoinError::EngineUnavailable);
             }
         };
         if self.shutting_down.load(Ordering::Acquire) {
             drop(pooled);
-            self.fail_starting(key, &slot).await;
+            self.cleanup_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
         }
         let persisted_bytes =
@@ -1450,30 +1454,30 @@ impl CollabHub {
                 Err(err) => {
                     warn_join_db_error("hub.start_room.estimate_bytes", key.0, key.1, &err);
                     drop(pooled);
-                    self.fail_starting(key, &slot).await;
+                    self.cleanup_starting(key, &slot).await;
                     return Err(JoinError::DbError);
                 }
             };
         let Some(memory_reservation) = self.memory_ledger.try_reserve(persisted_bytes) else {
             drop(pooled);
-            self.fail_starting(key, &slot).await;
+            self.cleanup_starting(key, &slot).await;
             return Err(JoinError::CapacityRetry);
         };
         let guard = match RoomGuard::try_lock_pooled(pooled, key.1).await {
             Ok(Some(guard)) => guard,
             Ok(None) => {
-                self.fail_starting(key, &slot).await;
+                self.cleanup_starting(key, &slot).await;
                 return Err(JoinError::WriterStale);
             }
             Err(err) => {
                 warn_join_db_error("hub.start_room.room_guard", key.0, key.1, &err);
-                self.fail_starting(key, &slot).await;
+                self.cleanup_starting(key, &slot).await;
                 return Err(JoinError::DbError);
             }
         };
         if self.shutting_down.load(Ordering::Acquire) {
             guard.release().await;
-            self.fail_starting(key, &slot).await;
+            self.cleanup_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
         }
 
@@ -1493,7 +1497,7 @@ impl CollabHub {
                 handle.shutdown().await;
                 let _ = finished.await;
             }
-            self.fail_starting(key, &slot).await;
+            self.cleanup_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
         }
 
@@ -1525,12 +1529,14 @@ impl CollabHub {
                 })
             }
             Err(err) => {
-                self.fail_starting(key, &slot).await;
+                self.cleanup_starting(key, &slot).await;
                 Err(err)
             }
         }
     }
 
+    /// Abandon a start that has not published Live: fail the slot, free its
+    /// permit and remove it. A no-op once the slot has left Starting/Booting.
     async fn cleanup_starting(&self, key: RoomKey, slot: &Arc<RoomSlot>) {
         let permit = {
             let mut phase = slot.phase.lock().await;
@@ -1544,37 +1550,7 @@ impl CollabHub {
             }
         };
         drop(permit);
-        let mut rooms = self.rooms.write().await;
-        if rooms
-            .get(&key)
-            .is_some_and(|existing| Arc::ptr_eq(existing, slot))
-        {
-            rooms.remove(&key);
-        }
-        slot.ready.notify_waiters();
-    }
-
-    async fn fail_starting(&self, key: RoomKey, slot: &Arc<RoomSlot>) {
-        let permit = {
-            let mut phase = slot.phase.lock().await;
-            match std::mem::replace(&mut *phase, RoomPhase::Failed) {
-                RoomPhase::Starting => None,
-                RoomPhase::Booting(permit) => Some(permit),
-                other => {
-                    *phase = other;
-                    return;
-                }
-            }
-        };
-        drop(permit);
-        let mut rooms = self.rooms.write().await;
-        if rooms
-            .get(&key)
-            .is_some_and(|existing| Arc::ptr_eq(existing, slot))
-        {
-            rooms.remove(&key);
-        }
-        slot.ready.notify_waiters();
+        retire_slot(&self.rooms, key, slot).await;
     }
 
     async fn force_close_slot(&self, key: RoomKey, slot: Arc<RoomSlot>) {
@@ -1589,42 +1565,22 @@ impl CollabHub {
                 RoomPhase::Starting | RoomPhase::Failed | RoomPhase::Closing => None,
             }
         };
-        if let Some(live) = live {
-            live.handle.shutdown().await;
-            note_abnormal_actor_completion(
-                &self.abnormal_actor_completions,
-                key.1,
-                live.finished.await,
-            );
-            drop(live.permit);
+        match live {
+            Some(live) => {
+                complete_owned_room_cleanup(
+                    self.rooms.clone(),
+                    key,
+                    slot,
+                    live,
+                    self.abnormal_actor_completions.clone(),
+                )
+                .await;
+            }
+            None => retire_slot(&self.rooms, key, &slot).await,
         }
-        *slot.phase.lock().await = RoomPhase::Failed;
-        let mut rooms = self.rooms.write().await;
-        if rooms
-            .get(&key)
-            .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
-        {
-            rooms.remove(&key);
-        }
-        slot.ready.notify_waiters();
     }
 
-    async fn forget_closed_room(&self, key: RoomKey) {
-        let Some(slot) = self.rooms.read().await.get(&key).cloned() else {
-            return;
-        };
-        *slot.phase.lock().await = RoomPhase::Failed;
-        let mut rooms = self.rooms.write().await;
-        if rooms
-            .get(&key)
-            .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
-        {
-            rooms.remove(&key);
-        }
-        slot.ready.notify_waiters();
-    }
-
-    async fn take_live_rooms_for_shutdown(&self) -> Vec<(RoomKey, LiveRoom)> {
+    async fn take_live_rooms_for_shutdown(&self) -> Vec<(RoomKey, Arc<RoomSlot>, LiveRoom)> {
         let entries = self
             .rooms
             .read()
@@ -1637,7 +1593,8 @@ impl CollabHub {
             let mut phase = slot.phase.lock().await;
             if matches!(*phase, RoomPhase::Live(_)) {
                 if let RoomPhase::Live(room) = std::mem::replace(&mut *phase, RoomPhase::Closing) {
-                    live.push((key, room));
+                    drop(phase);
+                    live.push((key, slot, room));
                 }
             }
         }
@@ -1695,16 +1652,6 @@ fn note_abnormal_actor_completion(
     }
 }
 
-async fn complete_idle_eviction(
-    rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
-    key: RoomKey,
-    slot: Arc<RoomSlot>,
-    live: LiveRoom,
-    abnormal_actor_completions: Arc<AtomicUsize>,
-) {
-    complete_owned_room_cleanup(rooms, key, slot, live, abnormal_actor_completions).await;
-}
-
 async fn complete_owned_room_cleanup(
     rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
     key: RoomKey,
@@ -1726,11 +1673,22 @@ async fn finish_owned_room_cleanup(
 ) {
     note_abnormal_actor_completion(&abnormal_actor_completions, key.1, live.finished.await);
     drop(live.permit);
+    retire_slot(&rooms, key, &slot).await;
+}
+
+/// The last step of every room close: mark the slot Failed (terminal, so
+/// setting it again is harmless), remove it from the map only if the map still
+/// holds this slot, and wake its waiters. Callers free the room permit first.
+async fn retire_slot(
+    rooms: &RwLock<HashMap<RoomKey, Arc<RoomSlot>>>,
+    key: RoomKey,
+    slot: &Arc<RoomSlot>,
+) {
     *slot.phase.lock().await = RoomPhase::Failed;
     let mut map = rooms.write().await;
     if map
         .get(&key)
-        .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
+        .is_some_and(|existing| Arc::ptr_eq(existing, slot))
     {
         map.remove(&key);
     }
@@ -1770,23 +1728,12 @@ async fn idle_eviction_loop(
             }
             let live = {
                 let mut phase = slot.phase.lock().await;
-                let RoomPhase::Live(live) = &*phase else {
+                let Some(live) = CollabHub::take_idle_evictable(&mut phase, idle_ms) else {
                     continue;
-                };
-                if CollabHub::idle_evict_decision_for(live, idle_ms)
-                    != IdleEvictDecision::WouldEvict
-                {
-                    continue;
-                }
-                // Publish Closing atomically with the idle observation. Never
-                // expose Failed until this exact actor and guard have finished.
-                let RoomPhase::Live(live) = std::mem::replace(&mut *phase, RoomPhase::Closing)
-                else {
-                    unreachable!()
                 };
                 live
             };
-            complete_idle_eviction(
+            complete_owned_room_cleanup(
                 rooms.clone(),
                 key,
                 slot,
