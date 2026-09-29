@@ -184,8 +184,13 @@ fn cancelled(flag: &AtomicBool) -> bool {
 /// Run extraction in a killable child. This call is **synchronous**. The wait
 /// for the single child slot is bounded by `limits.timeout_ms` from the call,
 /// and the child's watchdog gets `limits.timeout_ms` from slot admission, so
-/// one call takes at most twice `timeout_ms`. There is no external cancel
-/// token; use [`extract_killable_with_cancel`] for an `AtomicBool`.
+/// one call takes up to about twice `timeout_ms` (plus spawn and reap). The
+/// trade-off: a request admitted late in its wait can then hold the only slot
+/// for a full `timeout_ms` when its document runs that long, so with three
+/// contenders the third one's slot wait can expire. That expiry is still
+/// `ResourceLimit { kind: Time }` ("timed out waiting for extract child
+/// slot"); a separate slot-busy outcome is deferred. There is no external
+/// cancel token; use [`extract_killable_with_cancel`] for an `AtomicBool`.
 /// Dropping a `JoinHandle` that wraps this function does **not** terminate
 /// the child; only the watchdog kill+reap path or Linux parent-death SIGKILL
 /// does. `PR_SET_PDEATHSIG` is delivered when the **spawning thread** dies,
