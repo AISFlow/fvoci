@@ -43,3 +43,17 @@ test("bun.lock resolves one copy of each shared editor, collab, Vue and query ru
     assert.equal(found.length, 1, `${name} resolves to ${found.length} versions: ${found.join(", ")}`);
   }
 });
+
+test("every Tiptap package bun.lock resolves is pinned by a root override", () => {
+  // @fvoci/editor pins Tiptap exactly while Nuxt UI asks for ^ ranges; without
+  // an override a lock refresh could give Nuxt UI a second, newer copy.
+  const { overrides = {} } = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+    overrides?: Record<string, string>;
+  };
+  const versions = resolvedVersions(lock);
+  const tiptap = [...versions.keys()].filter((name) => name.startsWith("@tiptap/"));
+  assert.ok(tiptap.length > 10, "bun.lock Tiptap entries were not recognised");
+  for (const name of tiptap) {
+    assert.deepEqual([...versions.get(name)!], [overrides[name]], `${name}: root override must pin the resolved version`);
+  }
+});
