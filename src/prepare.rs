@@ -266,6 +266,34 @@ pub fn validate(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
     problems
 }
 
+/// Values the Compose files of 0.2.0 and earlier passed as root-only secret
+/// files named by `<VAR>_FILE`.
+const RETIRED_SECRET_FILE_VALUES: &[&str] = &[
+    "POSTGRES_PASSWORD",
+    "FVOCI_APP_PASSWORD",
+    "MEILI_MASTER_KEY",
+    "PASSWORD_PEPPER_KEYS",
+    "ENCRYPTION_KEYS",
+];
+
+/// One problem per `<VAR>_FILE` setting of such an older `compose.yml`, which
+/// nothing reads any more, naming the variable only. `--start` refuses them
+/// before anything else: with only those names set it would skip the
+/// preparation and the server would fail without naming the cause.
+pub fn retired_secret_files(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    RETIRED_SECRET_FILE_VALUES
+        .iter()
+        .filter_map(|name| {
+            let file = format!("{name}_FILE");
+            get(&file).map(|_| {
+                format!(
+                    "{file} is no longer read; use this release's compose.yml, which passes {name} from .env"
+                )
+            })
+        })
+        .collect()
+}
+
 /// Whether this start prepares the install (the owner password is given).
 pub fn wants_prepare() -> bool {
     std::env::var_os("POSTGRES_PASSWORD").is_some()
@@ -697,5 +725,32 @@ mod tests {
         ] {
             assert!(!passed_to_server(dropped), "{dropped}");
         }
+    }
+
+    #[test]
+    fn refuses_retired_secret_file_settings_by_name() {
+        let mut env = valid();
+        assert!(retired_secret_files(get(&env)).is_empty());
+        env.push((
+            "PASSWORD_PEPPER_KEYS_FILE",
+            "/run/secrets/secret-path".into(),
+        ));
+        env.push(("POSTGRES_PASSWORD_FILE", String::new()));
+        let problems = retired_secret_files(get(&env));
+        assert_eq!(
+            problems,
+            [
+                "POSTGRES_PASSWORD_FILE is no longer read; use this release's compose.yml, which passes POSTGRES_PASSWORD from .env",
+                "PASSWORD_PEPPER_KEYS_FILE is no longer read; use this release's compose.yml, which passes PASSWORD_PEPPER_KEYS from .env",
+            ]
+        );
+        assert!(problems.iter().all(|p| !p.contains("secret-path")));
+        // FVOCI_MEILI_KEY_FILE (the scoped key the preparation writes) is a
+        // current setting, not a retired one.
+        assert!(retired_secret_files(lookup(&[(
+            "FVOCI_MEILI_KEY_FILE",
+            "/run/fvoci/meili/api_key"
+        )]))
+        .is_empty());
     }
 }

@@ -32,6 +32,14 @@ fn main() {
 /// `fvoci-server` with the preparation-only values removed.
 fn start(server_args: &[String]) -> ! {
     use fvoci_server::prepare;
+    let retired = prepare::retired_secret_files(|k| std::env::var(k).ok());
+    if !retired.is_empty() {
+        for problem in retired {
+            eprintln!("fvoci: {problem}");
+        }
+        eprintln!("fvoci: not starting");
+        std::process::exit(2);
+    }
     if prepare::wants_prepare() {
         let problems = prepare::validate(|k| std::env::var(k).ok());
         if !problems.is_empty() {
