@@ -17,7 +17,8 @@ pub const MAIL_CONSUMER: &str = "mail";
 const MAIL_VERBS: &[&str] = &["comment.created", "identity.linked", "identity.unlinked"];
 
 /// Sends the mail of `comment.created` and `identity.*` events, at least
-/// once per recipient (see `AcceptedRecipients` for when one gets it twice).
+/// once per recipient the relay accepts (see `AcceptedRecipients` for when
+/// one gets it twice); a skipped address or a refused mailbox gets none.
 ///
 /// The unit of delivery is the recipient. An address that does not parse as
 /// a mailbox is skipped without asking the relay. A permanent refusal of the

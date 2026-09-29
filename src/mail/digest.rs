@@ -64,9 +64,12 @@ type DigestClaim = (Uuid, Uuid, Option<DateTime<Utc>>);
 /// Recipients are claimed with `FOR UPDATE SKIP LOCKED` and `last_digest_at`
 /// advances as the claim, so two processes cannot send the same digest and a
 /// failed recipient backs off until the next daily sweep instead of retrying
-/// every tick. A digest is sent at most once per window: a crash, or a
-/// failed hand-back (`restore_claim`), leaves the claimed rows unsent until
-/// the next day's sweep, whose count window then starts at the claim.
+/// every tick. A send whose acceptance was not seen (the session timeout, a
+/// connection dropped after DATA) is handed back like any failed send, so its
+/// window is counted again the next day and the recipient may be told about
+/// it twice. A crash, or a failed hand-back (`restore_claim`), leaves the
+/// claimed rows unsent until the next day's sweep, whose count window then
+/// starts at the claim.
 ///
 /// The sweep walks the due rows in `(workspace_id, user_id)` order, one claim
 /// batch after another, so every due row is served, not only the first

@@ -3,8 +3,10 @@
 //! SMTP env is the source trio SMTP_HOST/SMTP_PORT/SMTP_FROM (all or none),
 //! with no TLS or AUTH env: STARTTLS is used whenever the server offers it
 //! (see `smtp`). Invitation mail is sent inline after the invite row commits.
-//! Notification mail goes through the outbox, delivered at least once per
-//! recipient (see `consumer::MailConsumer` and the `crate::outbox` doc).
+//! Immediate notification mail (`comment.created`, `identity.*`) goes through
+//! the outbox, at least once per recipient the relay accepts (see
+//! `consumer::MailConsumer` and the `crate::outbox` doc); the daily digest is
+//! sent by the maintenance scheduler (see `digest`).
 
 pub mod consumer;
 pub mod digest;
