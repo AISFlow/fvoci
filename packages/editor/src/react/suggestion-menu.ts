@@ -5,7 +5,7 @@ import type {
 	SuggestionKeyDownProps,
 	SuggestionProps,
 } from "@tiptap/suggestion";
-import { overlayOwner } from "./overlay-owner.js";
+import { overlayOwner } from "../overlay-owner.js";
 
 export type SlashItem = {
 	title: string;

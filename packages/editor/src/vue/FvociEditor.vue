@@ -17,8 +17,8 @@ import {
   uploadAnchor,
 } from "../editor-extensions.js";
 import type { EntityResolver } from "../entities.js";
-import { overlayOwner } from "../react/overlay-owner.js";
-import { selectAllEscape, selectAllStep } from "../react/table-actions.js";
+import { overlayOwner } from "../overlay-owner.js";
+import { selectAllEscape, selectAllStep } from "../table-actions.js";
 import AttachmentBlock from "./AttachmentBlock.vue";
 import { attachmentBridgeKey, entityResolverKey, type UrlEmbedComponent, urlEmbedKey } from "./keys.js";
 import { VUE_NODE_VIEWS } from "./node-views.js";

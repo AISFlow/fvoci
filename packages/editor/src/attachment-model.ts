@@ -1,4 +1,4 @@
-import { formatBytes } from "./react/format-bytes.js";
+import { formatBytes } from "./format-bytes.js";
 import { uuid } from "./uuid.js";
 
 /* The attachment block's contract with its host (upload, download link,

@@ -27,7 +27,7 @@ import {
 	tablePosOf,
 	toggleTableHeaderColumn,
 	toggleTableHeaderRow,
-} from "./table-actions.js";
+} from "../table-actions.js";
 import { Button } from "./tiptap-ui-primitive/button.js";
 import { Separator } from "./tiptap-ui-primitive/separator.js";
 
