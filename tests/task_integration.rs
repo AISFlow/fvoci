@@ -3898,6 +3898,644 @@ async fn task_layout_year_one_month_one_and_due_at_window() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+async fn get_task_layout(
+    app: axum::Router,
+    workspace_id: Uuid,
+    project_id: &str,
+    query: &str,
+    cookie: &str,
+) -> serde_json::Value {
+    let (status, layout) = json_request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout?{query}"),
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{layout}");
+    layout
+}
+
+fn layout_item<'a>(layout: &'a serde_json::Value, task_id: &str) -> &'a serde_json::Value {
+    layout["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == task_id)
+        .unwrap_or_else(|| panic!("task {task_id} missing from layout {layout}"))
+}
+
+fn layout_links(layout: &serde_json::Value) -> Vec<(String, String, String, i64)> {
+    let mut links: Vec<_> = layout["links"]
+        .as_array()
+        .unwrap_or_else(|| panic!("links missing from layout {layout}"))
+        .iter()
+        .map(|link| {
+            (
+                link["blockerId"].as_str().unwrap().to_string(),
+                link["blockedId"].as_str().unwrap().to_string(),
+                link["type"].as_str().unwrap().to_string(),
+                link["lagDays"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    links.sort();
+    links
+}
+
+#[tokio::test]
+async fn task_layout_can_edit_follows_project_permission_and_archive() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let viewer = add_workspace_user(&admin, workspace_id, "member", "viewer").await;
+    let editor = add_workspace_user(&admin, workspace_id, "member", "editor").await;
+    let prv = create_project(app.clone(), &owner_cookie, workspace_id, "PRV", "private").await;
+    let project_id = prv["id"].as_str().unwrap();
+    for (user, role) in [(&viewer, "viewer"), (&editor, "member")] {
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/members"),
+            Some(json!({"userId": user.user_id.to_string(), "role": role})),
+            Some(&owner_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let task = create_task_with_title(
+        app.clone(),
+        &owner_cookie,
+        workspace_id,
+        project_id,
+        json!({"title": "Gate", "dueDate": "2026-09-10"}),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap();
+    let month = "year=2026&month=9";
+
+    for (who, cookie, can_edit) in [
+        ("lead", &owner_cookie, true),
+        ("member", &editor.cookie, true),
+        ("viewer", &viewer.cookie, false),
+    ] {
+        let layout = get_task_layout(app.clone(), workspace_id, project_id, month, cookie).await;
+        assert_eq!(layout["canEdit"], can_edit, "{who}");
+        assert_eq!(layout["items"].as_array().unwrap().len(), 1, "{who}");
+    }
+    // `false` matches what PATCH does for the same actor.
+    let (status, _) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({"dueDate": "2026-09-11"}),
+        &viewer.cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The hint ignores API-token scopes: a tasks.read token of the lead sees
+    // `true` although PATCH also needs tasks.write.
+    let (status, token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "read", "scopes": ["tasks.read"]})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{token}");
+    let (status, layout) = json_request_bearer(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout?{month}"),
+        token["token"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{layout}");
+    assert_eq!(layout["canEdit"], true);
+
+    // On a workspace-visibility project the workspace role decides for
+    // non-guests: the workspace member who only views PRV may edit here. A
+    // guest added as a project viewer may not.
+    let guest = add_workspace_user(&admin, workspace_id, "guest", "guest").await;
+    let wsp = create_project(app.clone(), &owner_cookie, workspace_id, "WSP", "workspace").await;
+    let wsp_id = wsp["id"].as_str().unwrap();
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{wsp_id}/members"),
+        Some(json!({"userId": guest.user_id.to_string(), "role": "viewer"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for (who, cookie, can_edit) in [
+        ("workspace member", &viewer.cookie, true),
+        ("guest viewer", &guest.cookie, false),
+    ] {
+        let layout = get_task_layout(app.clone(), workspace_id, wsp_id, month, cookie).await;
+        assert_eq!(layout["canEdit"], can_edit, "{who}");
+    }
+
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/archive"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for (who, cookie) in [
+        ("lead", &owner_cookie),
+        ("member", &editor.cookie),
+        ("viewer", &viewer.cookie),
+    ] {
+        // Archived projects stay readable, but nobody may reschedule.
+        let layout = get_task_layout(app.clone(), workspace_id, project_id, month, cookie).await;
+        assert_eq!(layout["canEdit"], false, "{who}");
+        assert_eq!(layout["items"].as_array().unwrap().len(), 1, "{who}");
+    }
+    let (status, body) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({"dueDate": "2026-09-11"}),
+        &owner_cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "project_archived");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_links_are_limited_to_returned_items() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let mut ids = Vec::new();
+    for (title, start, due) in [
+        ("Link A", "2026-09-01", "2026-09-03"),
+        ("Link B", "2026-09-08", "2026-09-09"),
+        ("Other C", "2026-09-10", "2026-09-11"),
+        ("Link D", "2026-11-02", "2026-11-03"),
+    ] {
+        let task = create_task_with_title(
+            app.clone(),
+            &cookie,
+            ws,
+            &project_id,
+            json!({"title": title, "startDate": start, "dueDate": due}),
+        )
+        .await;
+        ids.push(task["id"].as_str().unwrap().to_string());
+    }
+    let (a, b, c, d) = (&ids[0], &ids[1], &ids[2], &ids[3]);
+    for (blocker, blocked, kind, lag) in [(a, b, "FS", 2), (a, c, "SS", 0), (b, d, "FF", 1)] {
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/tasks/{blocker}/dependencies"),
+            Some(json!({"blockedId": blocked, "type": kind, "lagDays": lag})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    // D lies outside September, so B -> D is not returned.
+    let month = get_task_layout(app.clone(), ws, &project_id, "year=2026&month=9", &cookie).await;
+    let mut expected = vec![
+        (a.clone(), b.clone(), "FS".to_string(), 2),
+        (a.clone(), c.clone(), "SS".to_string(), 0),
+    ];
+    expected.sort();
+    assert_eq!(layout_links(&month), expected);
+    assert_eq!(month["linkTotal"], 2);
+
+    // The title filter drops C, and with it A -> C.
+    let q = form_urlencoded::Serializer::new(String::new())
+        .append_pair("year", "2026")
+        .append_pair("month", "9")
+        .append_pair("query", r#"{"filters":{"title":"Link"},"sort":[]}"#)
+        .finish();
+    let filtered = get_task_layout(app.clone(), ws, &project_id, &q, &cookie).await;
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        layout_links(&filtered),
+        vec![(a.clone(), b.clone(), "FS".to_string(), 2)]
+    );
+    assert_eq!(filtered["linkTotal"], 1);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_links_cap_keeps_lowest_pairs_and_reports_total() {
+    let (harness, app, cookie, ws, admin, project_id, pid) = review_setup().await;
+    let (_, wf) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/workflow"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    let status_id = Uuid::parse_str(wf["statuses"][0]["id"].as_str().unwrap()).unwrap();
+    let owner_id: Uuid = sqlx::query_scalar("SELECT id FROM fvoci.users LIMIT 1")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    // 65 tasks with every forward pair linked: 65 * 64 / 2 = 2080 links, over
+    // the 2048 cap. Written directly: the API would take one request per link.
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.tasks (
+            id, workspace_id, project_id, number, title, type, priority, status_id,
+            content_json, created_by, start_date, due_date
+        )
+        SELECT gen_random_uuid(), $1, $2, n, 'cap ' || n, 'task', 'none', $3,
+               '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, $4,
+               '2026-09-07'::date, '2026-09-08'::date
+        FROM generate_series(1, 65) AS n
+        "#,
+    )
+    .bind(ws)
+    .bind(pid)
+    .bind(status_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.task_dependencies (workspace_id, blocker_id, blocked_id, type, lag_days)
+        SELECT $1, a.id, b.id, 'FS', 0
+        FROM fvoci.tasks a
+        JOIN fvoci.tasks b ON b.project_id = a.project_id AND a.number < b.number
+        WHERE a.project_id = $2
+        "#,
+    )
+    .bind(ws)
+    .bind(pid)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let lowest: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT blocker_id, blocked_id
+        FROM fvoci.task_dependencies
+        WHERE workspace_id = $1
+        ORDER BY blocker_id, blocked_id
+        LIMIT 2048
+        "#,
+    )
+    .bind(ws)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+
+    let layout = get_task_layout(app.clone(), ws, &project_id, "year=2026&month=9", &cookie).await;
+    assert_eq!(layout["items"].as_array().unwrap().len(), 65);
+    assert_eq!(layout["linkTotal"], 2080);
+    assert_eq!(layout["pathTotal"], 2080);
+    assert_eq!(layout["paths"].as_array().unwrap().len(), 2048);
+    let kept: Vec<(String, String)> = layout_links(&layout)
+        .into_iter()
+        .map(|(blocker, blocked, _, _)| (blocker, blocked))
+        .collect();
+    let mut lowest: Vec<(String, String)> = lowest
+        .into_iter()
+        .map(|(blocker, blocked)| (blocker.to_string(), blocked.to_string()))
+        .collect();
+    lowest.sort();
+    assert_eq!(kept, lowest);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_calendar_lists_workspace_holidays_within_scale() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    for date in [
+        "2026-08-29",
+        "2026-08-30",
+        "2026-09-02",
+        "2026-10-03",
+        "2026-10-04",
+    ] {
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/holidays"),
+            Some(json!({"date": date})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    // Another tenant's holiday inside the range must not leak in.
+    let other_ws = insert_other_workspace(&admin).await;
+    sqlx::query(
+        "INSERT INTO fvoci.workspace_holidays (workspace_id, date) VALUES ($1, '2026-09-10')",
+    )
+    .bind(other_ws)
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    // Sunday weeks: the scale is 2026-08-30..=2026-10-03, both ends included.
+    let sunday = get_task_layout(
+        app.clone(),
+        ws,
+        &project_id,
+        "year=2026&month=9&weekStartsOn=0",
+        &cookie,
+    )
+    .await;
+    assert_eq!(sunday["scale"]["start"], "2026-08-30");
+    assert_eq!(sunday["scale"]["end"], "2026-10-03");
+    assert_eq!(
+        sunday["calendar"],
+        json!({"weekend": [0, 6], "holidays": ["2026-08-30", "2026-09-02", "2026-10-03"]})
+    );
+
+    // Monday weeks shift the window to 2026-08-31..=2026-10-04.
+    let monday = get_task_layout(
+        app.clone(),
+        ws,
+        &project_id,
+        "year=2026&month=9&weekStartsOn=1",
+        &cookie,
+    )
+    .await;
+    assert_eq!(monday["scale"]["start"], "2026-08-31");
+    assert_eq!(monday["scale"]["end"], "2026-10-04");
+    assert_eq!(
+        monday["calendar"]["holidays"],
+        json!(["2026-09-02", "2026-10-03", "2026-10-04"])
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// The Gantt reschedules through PATCH /tasks/{id}, sending the layout item's
+/// dates back as `expectedDates`. Pins the rules it relies on: only the sent
+/// date fields change, a sent `dueAt` keeps the time of day the client chose,
+/// a stale snapshot is 409 and a dependency contradiction is 400, and neither
+/// refusal writes anything.
+#[tokio::test]
+async fn task_patch_gantt_reschedule_through_expected_dates() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let month = "year=2026&month=9";
+    let expected_of = |item: &serde_json::Value| {
+        json!({
+            "startDate": item["startDate"],
+            "dueDate": item["dueDate"],
+            "dueAt": item["dueAt"],
+        })
+    };
+    let due_only = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Due only", "dueDate": "2026-09-10"}),
+    )
+    .await;
+    let due_only = due_only["id"].as_str().unwrap().to_string();
+    let timed = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Timed", "startDate": "2026-09-14"}),
+    )
+    .await;
+    let timed = timed["id"].as_str().unwrap().to_string();
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &timed,
+        json!({"dueAt": "2026-09-15T09:30:00Z"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+
+    // (a) Moving a due-date-only bar by three days writes only dueDate.
+    let due_item = layout_item(&before, &due_only);
+    assert_eq!(due_item["inferred"], "from-due");
+    let stale_due_only = expected_of(due_item);
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &due_only,
+        json!({"dueDate": "2026-09-13", "expectedDates": stale_due_only}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["startDate"], serde_json::Value::Null);
+    assert_eq!(body["dueDate"], "2026-09-13");
+    assert_eq!(body["dueAt"], serde_json::Value::Null);
+
+    // (b) Moving a start + dueAt bar by three days: the client shifts dueAt by
+    // whole days, and the stored value keeps 09:30 UTC.
+    let timed_item = layout_item(&before, &timed);
+    assert_eq!(timed_item["dueAt"], "2026-09-15T09:30:00.000Z");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &timed,
+        json!({
+            "startDate": "2026-09-17",
+            "dueAt": "2026-09-18T09:30:00.000Z",
+            "expectedDates": expected_of(timed_item),
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["dueDate"], serde_json::Value::Null);
+
+    let after = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let due_item = layout_item(&after, &due_only);
+    assert_eq!(due_item["startDate"], serde_json::Value::Null);
+    assert_eq!(due_item["dueDate"], "2026-09-13");
+    assert_eq!(due_item["dueAt"], serde_json::Value::Null);
+    assert_eq!(due_item["start"], "2026-09-13");
+    assert_eq!(due_item["end"], "2026-09-13");
+    let timed_item = layout_item(&after, &timed);
+    assert_eq!(timed_item["startDate"], "2026-09-17");
+    assert_eq!(timed_item["dueDate"], serde_json::Value::Null);
+    assert_eq!(timed_item["dueAt"], "2026-09-18T09:30:00.000Z");
+    assert_eq!(timed_item["start"], "2026-09-17");
+    assert_eq!(timed_item["end"], "2026-09-18");
+
+    // (c) A stale snapshot is refused and writes nothing.
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &due_only,
+        json!({"dueDate": "2026-09-20", "expectedDates": stale_due_only}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "document_version_mismatch");
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+
+    // (d) Moving the blocked task before its blocker's due date is refused
+    // even with a current snapshot, and writes nothing.
+    let blocker = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Blocker", "startDate": "2026-09-01", "dueDate": "2026-09-10"}),
+    )
+    .await;
+    let blocker = blocker["id"].as_str().unwrap();
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{blocker}/dependencies"),
+        Some(json!({"blockedId": timed, "type": "FS"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &timed,
+        json!({
+            "startDate": "2026-09-08",
+            "dueAt": "2026-09-09T09:30:00.000Z",
+            "expectedDates": expected_of(timed_item),
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "dependency_contradiction");
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+    let unchanged = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let timed_item = layout_item(&unchanged, &timed);
+    assert_eq!(timed_item["startDate"], "2026-09-17");
+    assert_eq!(timed_item["dueAt"], "2026-09-18T09:30:00.000Z");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// PATCH compares `expectedDates.dueAt` with the stored value to the
+/// millisecond. Browsers hold `dueAt` in a JS `Date`, and the layout and
+/// collection rows render it with milliseconds, so a `dueAt` an API client set
+/// with sub-millisecond digits must not turn every reschedule into a 409; a
+/// different millisecond is still a stale snapshot and writes nothing.
+#[tokio::test]
+async fn task_patch_expected_due_at_compares_to_the_millisecond() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let month = "year=2026&month=9";
+    let task = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Micros", "startDate": "2026-09-14"}),
+    )
+    .await;
+    let id = task["id"].as_str().unwrap().to_string();
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({"dueAt": "2026-09-15T09:30:00.123456Z"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let expected =
+        |due_at: &str| json!({"startDate": "2026-09-14", "dueDate": null, "dueAt": due_at});
+
+    // A neighbouring millisecond is a stale snapshot and writes nothing.
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    for stale in ["2026-09-15T09:30:00.122Z", "2026-09-15T09:30:00.124Z"] {
+        let (status, body) = patch_task(
+            app.clone(),
+            ws,
+            &id,
+            json!({"title": "Stale", "expectedDates": expected(stale)}),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}: {body}");
+        assert_eq!(body["code"], "document_version_mismatch");
+    }
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+
+    // The same millisecond, as a browser sends it, matches.
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({
+            "dueAt": "2026-09-16T09:30:00.123456Z",
+            "expectedDates": expected("2026-09-15T09:30:00.123Z"),
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The layout keeps its millisecond form, and sending it back matches.
+    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let item = layout_item(&layout, &id);
+    assert_eq!(item["dueAt"], "2026-09-16T09:30:00.123Z");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({
+            "dueAt": "2026-09-17T09:30:00.123Z",
+            "expectedDates": {
+                "startDate": item["startDate"],
+                "dueDate": item["dueDate"],
+                "dueAt": item["dueAt"],
+            },
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    assert_eq!(
+        layout_item(&layout, &id)["dueAt"],
+        "2026-09-17T09:30:00.123Z"
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 async fn wait_for_hub_active(hub: &StreamHub, expected: usize, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     while Instant::now() < deadline {

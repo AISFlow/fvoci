@@ -1264,6 +1264,8 @@ pub struct ExpectedDatesBody {
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     #[serde(deserialize_with = "deserialize_nullable_date")]
     pub due_date: Option<NaiveDate>,
+    /// Compared with the stored `dueAt` to the millisecond; finer digits are
+    /// ignored.
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub due_at: Option<DateTime<Utc>>,
 }
