@@ -768,7 +768,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` ACCEPT_WITH_NITS; nit `79236b2e` **ACCEPT**; 스택+main `ef17b410` | 단위 20. e2e `login-vue-flow` 3/3. **`mfa-flow` 원격 필수** | CI on `ef17b410`(mfa-flow 샤드). 기능군 완료 아님 | Grok 임시 실행자 | CI | 미포함 |
 | FE-Auth-setup | `/setup` | 구현 중·로컬 WIP (연결 전) | #270 `2ac22248` (on #269) | Vue SetupPage. **app-boundary 불변**. 단위 24 | #269 머지 후 boundary + e2e | Grok 임시 실행자 | FE-Auth-login | — |
 | FE-Auth-invite | `/invite/:token` | 구현 중·로컬 WIP (연결 전) | #271 `d31d33a4` (on #269) | Vue invite. setup 성공 뒤에만 invitation/providers `enabled`. **app-boundary 불변** | boundary + `workspace-invite-flow` | Grok 임시 실행자 | FE-Auth-login | — |
-| FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 구현 중·로컬 WIP | `fvoci/r11-vue-auth-rest` (on #269) | 구현 중. PR 전 | Vue 페이지·라우트 선언 후 PR. **boundary 없음** | Grok 임시 실행자 | 없음 | — |
+| FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 구현 중·로컬 WIP (연결 전) | #278 `09b623d4` (on #269) | Vue 페이지·라우트 선언. setup 가드는 폼 표시만(consume는 클릭). **app-boundary 불변** | boundary + mail-reset/account-lifecycle e2e. 동의 청크 `@fvoci/editor/vue` barrel | Grok 임시 실행자 | FE-Auth-login | — |
 | FE-WS-home | `/w/:slug` 랜딩 | 구현 중·로컬 WIP (연결 전) | #274 `e18fdbbe` | `WorkspaceHomePage.vue`. **boundary 없음** | regex + e2e | Grok 임시 실행자 | app-boundary 소유 | — |
 | FE-WS-projects | `/w/:slug/projects` | 구현 중·로컬 WIP (연결 전) | #274 동일 | `ProjectsPage.vue` | `/^\/w\/[^/]+\/projects\/?$/i` + 목록 e2e | Grok 임시 실행자 | FE-WS-home과 같은 PR | — |
 | FE-WS-wiki-list | `/w/:slug/wiki` 트리/목록 | 구현 중·로컬 WIP | `fvoci/r11-vue-wiki-search` (on #274) | 구현 중. PR 전. 문서 페이지(#262)와 별개 | 라우트 선언·단위 후 PR. **boundary 없음** | Grok 임시 실행자 | 없음 | — |
@@ -804,7 +804,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 4. **#268** `83c01480` — **main 수락**. #258 닫힘.
 5. **#266** `ddce8bf2` — CI 후 머지(기능 전환과 별개).
 6. **#269** nit `79236b2e` **ACCEPT**, head `ef17b410` — CI(mfa-flow 샤드) 후 머지. 인증 기능군 전체 완료 아님.
-7. 미연결 Vue PR: #270–#277. boundary는 실행자가 순차. 기능군 완료로 세지 않음.
+7. 미연결 Vue PR: #270–#278. boundary는 실행자가 순차. 기능군 완료로 세지 않음.
 8. 협업 엔진 비교: 문서 초안 브랜치 `fvoci/collab-engine-comparison` (제품 코드 없음). 예광탄 CI와 병렬.
 
 #### 전체 전환 종결까지 남은 필수
