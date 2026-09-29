@@ -529,17 +529,3 @@ pub async fn complete_challenge(
     tx.commit().await?;
     Ok(Some((check.user_id, token)))
 }
-
-/// Maintenance GC of expired challenges and OIDC flow state.
-pub async fn purge_expired_ephemeral(
-    pool: &PgPool,
-    now: DateTime<Utc>,
-    limit: i32,
-) -> Result<u32, sqlx::Error> {
-    let deleted: i32 = sqlx::query_scalar("SELECT fvoci.app_auth_ephemeral_purge_expired($1, $2)")
-        .bind(now)
-        .bind(limit)
-        .fetch_one(pool)
-        .await?;
-    Ok(deleted.max(0) as u32)
-}
