@@ -2284,6 +2284,22 @@ async fn transfer_modes_upload_and_download_through_their_own_paths() {
         status["values"]["attachmentTransfer"],
         json!({"mode": "proxy"})
     );
+    let (status, share, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/share-links"),
+        Some(json!({})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{share:?}");
+    let share_token = share["url"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
 
     for mode in [TransferMode::Proxy, TransferMode::Presigned] {
         let (status, body) = patch_transfer(&app, &cookie, json!({"mode": mode_str(mode)})).await;
@@ -2390,6 +2406,12 @@ async fn transfer_modes_upload_and_download_through_their_own_paths() {
             payload.len().to_string().as_str()
         );
         assert_eq!(headers["content-security-policy"], "sandbox");
+        // Share-link downloads always stream through the API.
+        let shared = format!("/api/v1/share/{share_token}/attachments/{attachment_id}/download");
+        let (status, headers, bytes) = download_request(&app, &cookie, "GET", &shared, None).await;
+        assert_eq!(status, StatusCode::OK, "{mode:?}");
+        assert!(headers.get("location").is_none());
+        assert_eq!(bytes, payload, "{mode:?}");
     }
 
     // Both kinds of stored object pass the storage verification.
