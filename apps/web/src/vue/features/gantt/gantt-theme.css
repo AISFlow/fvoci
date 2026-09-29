@@ -307,6 +307,12 @@ svg.fvoci-gantt__canvas rect.fvoci-gantt__today-band {
 	touch-action: none;
 }
 
+/* The bar group spans its whole lane (the row hit area), so the browser's own
+   focus ring would outline the lane; focus is shown on the bar itself. */
+.fvoci-gantt__bar[role="button"]:focus {
+	outline: none;
+}
+
 .fvoci-gantt__bar[role="button"]:focus-visible .fvoci-gantt__bar-rect,
 .fvoci-gantt__bar[role="button"]:focus-visible .fvoci-gantt__milestone {
 	stroke: var(--fvoci-gantt-ring-contrast);
