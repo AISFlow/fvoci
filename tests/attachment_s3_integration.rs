@@ -2699,6 +2699,233 @@ async fn complete_after_revocation_is_refused_in_both_modes() {
     }
 }
 
+/// A second workspace member (role `member`) with its own browser session.
+async fn add_member_session(harness: &TestDb, email: &str, workspace_id: Uuid) -> (Uuid, String) {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let user_id = Uuid::now_v7();
+    let hash = fvoci_server::auth::password::hash_password(
+        "supersecret1",
+        &Keyring::parse(PEPPER, "test").unwrap(),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.users (id, email, password_hash, given_name) VALUES ($1, $2, $3, 'User')",
+    )
+    .bind(user_id)
+    .bind(email)
+    .bind(&hash)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    let pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let token = fvoci_server::auth::token::new_token();
+    let mut tx = pool.begin().await.unwrap();
+    fvoci_server::db::identity::create_session(
+        &mut tx,
+        Uuid::now_v7(),
+        user_id,
+        &token.hash,
+        Utc::now() + chrono::Duration::days(1),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    pool.close().await;
+    (user_id, token.token)
+}
+
+/// Creates a one-part upload as `cookie` at `uploads` and stages the part
+/// through the session's own path. Returns (attachment id, part URL, ETag).
+async fn staged_one_part_upload(
+    app: &axum::Router,
+    cookie: &str,
+    mode: TransferMode,
+    uploads: &str,
+    payload: &[u8],
+) -> (String, String, String) {
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        uploads,
+        Some(json!({ "name": "lost.bin", "sizeBytes": payload.len() })),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    assert_eq!(created["transfer"], mode_str(mode));
+    let url = created["parts"][0]["url"].as_str().unwrap().to_string();
+    let (status, etag) = put_via(app, cookie, mode, &url, payload).await;
+    assert_eq!(status, StatusCode::OK, "{mode:?}");
+    let id = created["attachmentId"].as_str().unwrap().to_string();
+    (id, url, etag)
+}
+
+/// After the uploader lost edit access to the parent: a part URL issued
+/// before still stages bytes in storage (`presigned`; it cannot be revoked)
+/// while the API refuses the part (`proxy`), and in both modes resume (the
+/// re-issue path) and complete with the right ETag are refused, the row stays
+/// `uploading`, and no object is published.
+#[allow(clippy::too_many_arguments)]
+async fn assert_refused_after_access_loss(
+    app: &axum::Router,
+    harness: &TestDb,
+    storage: &ObjectStorage,
+    cookie: &str,
+    mode: TransferMode,
+    workspace_id: Uuid,
+    id: &str,
+    part_url: &str,
+    etag: &str,
+    payload: &[u8],
+) {
+    let (status, again) = put_via(app, cookie, mode, part_url, payload).await;
+    match mode {
+        TransferMode::Proxy => assert_eq!(status, StatusCode::NOT_FOUND),
+        TransferMode::Presigned => assert_eq!((status, again.as_str()), (StatusCode::OK, etag)),
+    }
+    let (status, body) = resume_session(app, cookie, workspace_id, id).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{mode:?} resume: {body:?}");
+    let (status, body) = complete_parts(app, cookie, workspace_id, id, &[(1, etag)]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{mode:?} complete: {body:?}");
+    assert_eq!(
+        attachment_status(harness, id).await.as_deref(),
+        Some("uploading")
+    );
+    let (key, _) = upload_ref_of(harness, id).await;
+    assert_eq!(storage.head(&key).await.unwrap(), None, "{mode:?}");
+}
+
+#[tokio::test]
+async fn resume_and_complete_are_refused_after_the_uploader_loses_edit_in_both_modes() {
+    for mode in [TransferMode::Proxy, TransferMode::Presigned] {
+        let harness = TestDb::bootstrap().await;
+        let storage = presign_backend(PresignTtls::default()).await;
+        let (app, owner, workspace_id) = setup_session(&harness, storage.clone()).await;
+        let (status, _) = patch_transfer(&app, &owner, json!({"mode": mode_str(mode)})).await;
+        assert_eq!(status, StatusCode::OK);
+        let payload = patterned(2048, 3);
+        let ws = format!("/api/v1/workspaces/{workspace_id}");
+
+        // Lowered to view: a private project's member becomes a viewer.
+        let (viewer_id, viewer) =
+            add_member_session(&harness, "lowered@example.com", workspace_id).await;
+        let (status, project, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{ws}/projects"),
+            Some(json!({"key": "XFER", "name": "XFER", "visibility": "private"})),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{project:?}");
+        let project_id = project["id"].as_str().unwrap();
+        let (status, body, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{ws}/projects/{project_id}/members"),
+            Some(json!({"userId": viewer_id, "role": "member"})),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body:?}");
+        let (status, doc, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{ws}/projects/{project_id}/documents"),
+            Some(json!({"parentId": project["rootDocumentId"], "title": "Spec"})),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{doc:?}");
+        let doc_path = format!(
+            "{ws}/projects/{project_id}/documents/{}",
+            doc["id"].as_str().unwrap()
+        );
+        let (id, url, etag) = staged_one_part_upload(
+            &app,
+            &viewer,
+            mode,
+            &format!("{doc_path}/uploads"),
+            &payload,
+        )
+        .await;
+        let (status, body, _) = json_request(
+            app.clone(),
+            "PATCH",
+            &format!("{ws}/projects/{project_id}/members/{viewer_id}"),
+            Some(json!({"role": "viewer"})),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        let (status, _, _) = json_request(app.clone(), "GET", &doc_path, None, Some(&viewer)).await;
+        assert_eq!(status, StatusCode::OK, "the viewer still sees the document");
+        assert_refused_after_access_loss(
+            &app,
+            &harness,
+            &storage,
+            &viewer,
+            mode,
+            workspace_id,
+            &id,
+            &url,
+            &etag,
+            &payload,
+        )
+        .await;
+
+        // Removed from the workspace.
+        let (removed_id, removed) =
+            add_member_session(&harness, "removed@example.com", workspace_id).await;
+        let document_id = create_document(&app, &owner, workspace_id).await;
+        let (id, url, etag) = staged_one_part_upload(
+            &app,
+            &removed,
+            mode,
+            &format!("{ws}/documents/{document_id}/uploads"),
+            &payload,
+        )
+        .await;
+        let (status, body, _) = json_request(
+            app.clone(),
+            "DELETE",
+            &format!("{ws}/members/{removed_id}"),
+            None,
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_refused_after_access_loss(
+            &app,
+            &harness,
+            &storage,
+            &removed,
+            mode,
+            workspace_id,
+            &id,
+            &url,
+            &etag,
+            &payload,
+        )
+        .await;
+        harness.cleanup().await;
+    }
+}
+
 /// A request authenticated with an API token instead of the session cookie.
 async fn token_request(
     app: &axum::Router,
