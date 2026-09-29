@@ -16,9 +16,8 @@ use crate::auth::token::{hash_token, new_token, token_hashes_eq};
 use crate::db::context::{
     clear_self_user, lock_membership_users, recheck_session, set_self_user, set_system, set_tenant,
 };
-use crate::db::identity::{append_audit, lock_sign_in, AuditAppend, INSTANCE_ADMIN_LOCK_KEY};
+use crate::db::identity::{append_audit, lock_instance_admin_changes, lock_sign_in, AuditAppend};
 use crate::db::magic::{MagicPayload, MAGIC_KIND_EMAIL_CHANGE, MAGIC_KIND_LOGIN};
-use crate::db::quota::acquire_admission_lock;
 use crate::settings::messages::Message;
 use crate::validate::normalize_email;
 
@@ -102,11 +101,7 @@ async fn lock_account_for(
     actor_admin: Option<Uuid>,
     user_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    acquire_admission_lock(tx).await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(INSTANCE_ADMIN_LOCK_KEY)
-        .execute(&mut **tx)
-        .await?;
+    lock_instance_admin_changes(tx).await?;
     match actor_admin {
         Some(actor) => lock_membership_users(tx, &[actor, user_id]).await?,
         None => lock_membership_users(tx, &[user_id]).await?,

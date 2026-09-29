@@ -10,6 +10,7 @@ use crate::db::quota::acquire_admission_lock;
 
 const SESSION_SLIDE_THRESHOLD_SECS: i64 = 15 * 24 * 60 * 60;
 
+/// Taken only through [`lock_instance_admin_changes`].
 pub(crate) const INSTANCE_ADMIN_LOCK_KEY: i64 = 847_291_003_551;
 
 pub(crate) struct EventAppend {
@@ -232,11 +233,7 @@ pub async fn setup_first_owner(
     input: SetupFirstOwnerInput,
 ) -> Result<SetupFirstOwnerResult, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    acquire_admission_lock(&mut tx).await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(INSTANCE_ADMIN_LOCK_KEY)
-        .execute(&mut *tx)
-        .await?;
+    lock_instance_admin_changes(&mut tx).await?;
 
     let existing: (i64,) = sqlx::query_as("SELECT count(*) FROM fvoci.users")
         .fetch_one(&mut *tx)
@@ -375,6 +372,22 @@ pub async fn find_user_id_by_email(
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+/// Lock prologue shared by first-owner setup, `admin::patch_instance_user` and
+/// the account lifecycle (`account::lock_account_for`): the admission lock,
+/// then the instance-admin lock, both transaction-scoped. Callers then take
+/// `lock_membership_users` and [`lock_sign_in`]; one order in every caller
+/// keeps these transactions from deadlocking on each other.
+pub(crate) async fn lock_instance_admin_changes(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
+    acquire_admission_lock(tx).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(INSTANCE_ADMIN_LOCK_KEY)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 pub async fn lock_sign_in(
