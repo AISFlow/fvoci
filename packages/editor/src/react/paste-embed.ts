@@ -3,8 +3,8 @@
  * 슬러그로 식별되므로 대소문자 무시로 비교한다(캐노니컬은 소문자).
  */
 import { formatDisplayId, parseDisplayId } from "../display-id.js";
+import type { EntityResolver } from "../entities.js";
 import { uuid } from "../uuid.js";
-import type { EntityResolver } from "./blocks.js";
 
 const PATH = /^\/w\/([^/]+)\/([^/]+)/i;
 

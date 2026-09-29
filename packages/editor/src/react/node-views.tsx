@@ -4,10 +4,10 @@ import {
 	useEditorState,
 } from "@tiptap/react";
 import type { ReactNode } from "react";
+import { isEmbedEntity } from "../entities.js";
 import { AttachmentBlockView } from "./attachment-view.js";
 import {
 	EmbedBlockView,
-	isEmbedEntity,
 	MathBlockView,
 	MathInlineView,
 	MermaidBlockView,
