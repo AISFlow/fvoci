@@ -126,7 +126,7 @@ MIT여도 목록에 오르기 전에는 기본 엔진으로 넣지 않는다. �
 
 ### 전환 (다른 엔진 또는 in-process Yrs)
 
-구체적 차단 증거 없이 권고하지 않는다. 가상의 교체가 건드릴 경계만:
+기본 엔진 교체는 비교 결과에 대한 별도 채택 판단이다. 비교를 시작하는 데 현행으로 해결 불가능한 결함을 요구하지 않는다. 교체 시 검증할 경계는 다음과 같다:
 
 - 저장된 본문·리비전 스냅샷·import seed·duplicate.
 - `/collab` wire 또는 새 provider (Hocuspocus 클라이언트 전부).
@@ -139,20 +139,23 @@ in-process Yrs는 rewrite.md가 유지하는 격리를 풀어, helper OOM·stack
 
 ## 5. 다음 실험 (가장 작고 되돌릴 수 있는 것)
 
-**기본 엔진은 Yrs다.** 계약 팩은 회귀 확인이지 대안 비교 완료가 아니다. Vue 예광탄이
-수락된 뒤에 같은 고정 SHA에서 아래를 순서대로 한다.
+**현재 운영 경로는 Yrs다. 비교 결론은 아직 없다.** 계약 팩은 회귀 확인이지 대안 비교 완료가 아니다.
+현재 수락 차수는 위키 컨트롤·셸(#265/#267), 로그인·setup·초대(#269/#270/#271), 이를 막는 검사 수정(#287)으로 고정한다.
+이 차수 수락 후 고정 main SHA에서 아래 비교 기준선을 잡는다. 다른 미연결 페이지를 이 차수에 계속 추가하지 않는다.
+전체 Vue 전환·React 제거는 별도로 계속하며, 엔진 비교 결과를 React 제거의 선행 조건으로 삼지 않는다.
 
-1. **현행 비용 측정 (필수).** 제품 helper 경로에서 RSS·apply/encode 지연·room 상한을
-   기록한다. 계약 팩을 먼저 돌려 측정 SHA가 깨지지 않았음을 확인한다.
+1. **현행 비용·보존 측정 (필수).** 같은 문서·클라이언트·편집 이력을 고정하고 스키마 안전성, 로컬/원격 편집과
+   awareness의 처리 비용, 이력 증가에 따른 RSS·복원 비용, 단절·중복 전달·동시 편집의 작업 보존을 측정한다.
+   apply/encode 지연·room 상한과 환경·반복 수·분산도 기록한다. 기존 계약 근거는 재사용하고 관련 회귀로 측정 SHA를 확인한다.
    - `cargo test --locked --offline --test collab_wire`
    - `cargo test --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --test yjs_compat --test seed_compat`
    - db-tests: `collab_two_clients_update_persists_and_broadcasts`, 한글 fixture, reconnect Step1, 세션 철회, restore-after-restart
    - 브라우저: `workspace-wiki-collab` 한글·emoji와 Vue `workspace-wiki-vue-collab` / `workspace-wiki-vue-flow`
-2. **ProseMirror step 기반 Rust authority (필요 시).** 비용이 차단이거나 step
-   권위가 제품 요구를 더 잘 맞출 때만, **제품 `/collab`·Vue와 분리된** 실험으로
-   PM step 적용·권위 서버를 비교한다. 그 바이너리를 서버에 넣거나 저장 본문
-   encoding 1을 옮기지 않는다. 사용자 데이터 이전은 포함하지 않는다.
+2. **ProseMirror step 기반 Rust authority (비교 가치 확인 시).** 성능·복잡성·운영 비용에서 비교 가치가 확인되면,
+   **제품 `/collab`·현재 Vue 차수와 분리된 작은 종단 간 구현**으로 브라우저 편집→Rust authority→영속화→다른 클라이언트
+   반영·재접속을 비교한다. 현행의 해결 불가능한 결함이나 차단 수준 비용을 선행 조건으로 추가하지 않는다.
+   같은 실패 조건과 순이익을 비교하며 그 바이너리를 기본 서버에 넣거나 저장 encoding 1·사용자 데이터를 이전하지 않는다.
 3. **채택은 별도 판단.** 측정·실험 결과가 나와도 기본 엔진 교체 PR을 자동으로
    열지 않는다.
 
-코디네이터 결정 기본값: **Yrs 유지.** 이 초안은 #261을 닫지 않는다.
+현재 운영은 Yrs로 유지하고, **비교 결과에 따른 채택 판단은 열어 둔다.** 이 문서는 비교 계획이며 실행·비교 완료가 아니다. #261을 닫지 않는다.
