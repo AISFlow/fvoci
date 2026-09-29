@@ -9,6 +9,7 @@ import {
   sharePublicMetaQuery,
   sharePublicTreeQuery,
 } from "@/lib/queries/share";
+import { hardenShareFragmentHtml } from "./harden-share-html.ts";
 import { failMessage } from "./public-share-fail.ts";
 
 const dir = import.meta.dirname;
@@ -66,6 +67,23 @@ test("the public share view reuses share.css and keeps tree select and body retr
   assert.match(page, /@\/features\/share\/share\.css/);
   assert.match(page, /onSelectDocument/);
   assert.match(page, /body\.refetch\(\)/);
+});
+
+test("hardenShareFragmentHtml strips unsafe hrefs before v-html", () => {
+  const out = hardenShareFragmentHtml(
+    `<p><a href="javascript:alert(1)">x</a><a href="https://ok.example/a">y</a></p>`,
+  );
+  assert.doesNotMatch(
+    hardenShareFragmentHtml(`<a href='javascript:alert(1)'>x</a>`),
+    /javascript:/i,
+  );
+  assert.match(out, /https:\/\/ok\.example\/a/);
+  assert.match(out, /target="blank"|target="_blank"/);
+  assert.match(out, /noopener/);
+  const body = source("ShareBodyView.vue");
+  assert.match(body, /hardenShareFragmentHtml/);
+  assert.match(body, /v-html="hardened"/);
+  assert.doesNotMatch(body, /watchPostEffect/);
 });
 
 test("share attachment view is not this page", () => {
