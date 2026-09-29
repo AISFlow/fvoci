@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Dev/test only: prints the attrs (schema order, defaults) and mark
 // overlap of getSchema(createFvociExtensions()) — the schema
-// tiptapJsonToYUpdate seeds with. Read by compat/fixtures/yjs-seed tests.
+// tiptapJsonToYUpdate seeds with. Read by tests/fixtures/yjs-seed tests.
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

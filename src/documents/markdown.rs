@@ -836,7 +836,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn oracle_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("compat/fixtures/markdown-oracle")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/markdown-oracle")
     }
 
     /// `(name, markdown)` for every corpus input (`*.md`, not `*.roundtrip.md`).

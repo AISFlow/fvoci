@@ -1,12 +1,27 @@
+import fs from "node:fs";
+import path from "node:path";
 import { crc32, deflateRawSync, inflateRawSync } from "node:zlib";
 
 /**
- * Test-only HWPX builder (Node). It rewrites the body of an existing Hancom
- * HWPX package — the user-authored `compat/fixtures/sample.hwpx` — into one
- * paragraph per page, each after the first starting with a page break, and
- * keeps the package's header, styles and page setup. The result is a real
- * OWPML container that no HWP library produced.
+ * Test-only HWPX builder. It rewrites the body of the user-authored Hancom
+ * HWPX sample (`crates/document-extract/fixtures/user-hancom-12.30-안녕.hwpx`)
+ * into one paragraph per page, each after the first starting with a page
+ * break, and keeps the package's header, styles and page setup. The result
+ * is a real OWPML container that no HWP library produced.
  */
+
+const repoRoot = path.resolve(import.meta.dirname, "../../../../..");
+export const HANCOM_HWP_PATH = path.join(
+  repoRoot,
+  "crates/document-extract/fixtures/user-hancom-12.30-안녕.hwp",
+);
+export const HANCOM_HWPX_PATH = path.join(
+  repoRoot,
+  "crates/document-extract/fixtures/user-hancom-12.30-안녕.hwpx",
+);
+export function hancomBytes(kind: "hwp" | "hwpx"): Uint8Array {
+  return new Uint8Array(fs.readFileSync(kind === "hwp" ? HANCOM_HWP_PATH : HANCOM_HWPX_PATH));
+}
 
 /** `declaredSize` forges the recorded uncompressed size (test packages only). */
 type Entry = { name: string; data: Uint8Array; declaredSize?: number };

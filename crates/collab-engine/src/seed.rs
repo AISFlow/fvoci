@@ -22,7 +22,7 @@
 //! so that branch is unreachable here and not implemented.
 //!
 //! Byte equality with Yjs is not a goal (client ids and clocks differ); the decoded
-//! `prosemirror` tree is (compat/fixtures/yjs-seed).
+//! `prosemirror` tree is (tests/fixtures/yjs-seed).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,7 +55,7 @@ pub type AttrSpec = (&'static str, AttrDefault);
 use AttrDefault::{Bool as B, EmptyArray as EA, Int as I, Null as N, Str as S};
 
 /// `getSchema(createFvociExtensions())` node attrs in schema order
-/// (`compat/fixtures/yjs-seed/schema.json`).
+/// (`tests/fixtures/yjs-seed/schema.json`).
 pub const SCHEMA_NODES: &[(&str, &[AttrSpec])] = &[
     ("paragraph", &[("id", N), ("ychange", N), ("textAlign", N)]),
     ("blockquote", &[("id", N), ("ychange", N)]),

@@ -14,6 +14,9 @@ use extract_harness::{
 };
 use uuid::Uuid;
 
+const HANCOM_HWP: &str = "crates/document-extract/fixtures/user-hancom-12.30-안녕.hwp";
+const HANCOM_HWPX: &str = "crates/document-extract/fixtures/user-hancom-12.30-안녕.hwpx";
+
 #[test]
 fn validate_extractor_bin_rejects_nonexistent_path() {
     let err = fvoci_server::attachments::validate_extractor_bin(std::path::Path::new(
@@ -68,7 +71,7 @@ async fn server_process_starts_when_extractor_env_absent() {
 #[tokio::test]
 async fn authenticated_hwp_upload_extracts_안녕_and_download_matches() {
     let extractor = require_extractor_bin();
-    let fixture = std::fs::read("compat/fixtures/sample.hwp").expect("sample.hwp fixture");
+    let fixture = std::fs::read(HANCOM_HWP).expect("hancom hwp fixture");
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _owner, workspace_id, storage_root) = setup_session(&harness).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
@@ -110,7 +113,7 @@ async fn authenticated_hwp_upload_extracts_안녕_and_download_matches() {
 #[tokio::test]
 async fn authenticated_hwpx_upload_extracts_안녕_and_download_matches() {
     let extractor = require_extractor_bin();
-    let fixture = std::fs::read("compat/fixtures/sample.hwpx").expect("sample.hwpx fixture");
+    let fixture = std::fs::read(HANCOM_HWPX).expect("hancom hwpx fixture");
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _owner, workspace_id, storage_root) = setup_session(&harness).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
@@ -176,8 +179,8 @@ async fn authenticated_hwp_and_hwpx_preview_html_parse_on_demand_before_extract(
     .await
     .unwrap();
 
-    for name in ["sample.hwp", "sample.hwpx"] {
-        let fixture = std::fs::read(format!("compat/fixtures/{name}")).expect("fixture");
+    for (name, path) in [("sample.hwp", HANCOM_HWP), ("sample.hwpx", HANCOM_HWPX)] {
+        let fixture = std::fs::read(path).expect("hancom fixture");
         let uploaded = upload_bytes(
             &app,
             &cookie,
@@ -229,7 +232,7 @@ async fn authenticated_hwp_and_hwpx_preview_html_parse_on_demand_before_extract(
 #[tokio::test]
 async fn shutdown_before_claim_does_not_burn_attempt() {
     let extractor = require_extractor_bin();
-    let fixture = std::fs::read("compat/fixtures/sample.hwp").expect("sample.hwp fixture");
+    let fixture = std::fs::read(HANCOM_HWP).expect("hancom hwp fixture");
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _owner, workspace_id, storage_root) = setup_session(&harness).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
@@ -273,7 +276,7 @@ async fn shutdown_before_claim_does_not_burn_attempt() {
 #[tokio::test]
 async fn shutdown_during_active_parse_reaps_helper_and_releases_lease() {
     let extractor = require_extractor_bin();
-    let fixture = std::fs::read("compat/fixtures/sample.hwp").expect("sample.hwp fixture");
+    let fixture = std::fs::read(HANCOM_HWP).expect("hancom hwp fixture");
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _owner, workspace_id, storage_root) = setup_session(&harness).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
@@ -308,7 +311,7 @@ async fn shutdown_during_active_parse_reaps_helper_and_releases_lease() {
 #[tokio::test]
 async fn fresh_process_recovers_expired_lease_and_completes_extract() {
     let extractor = require_extractor_bin();
-    let fixture = std::fs::read("compat/fixtures/sample.hwp").expect("sample.hwp fixture");
+    let fixture = std::fs::read(HANCOM_HWP).expect("hancom hwp fixture");
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _owner, workspace_id, storage_root) = setup_session(&harness).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;

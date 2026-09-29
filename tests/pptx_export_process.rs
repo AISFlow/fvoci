@@ -19,7 +19,7 @@ fn helper() -> MarkdownHelper {
 }
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("compat/fixtures")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
 fn fixtures() -> Vec<(String, Value)> {

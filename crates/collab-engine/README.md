@@ -40,7 +40,7 @@ retained mark attrs stays).
 returns in `update_b64` the updateV1 of a fresh Doc seeded like source
 `tiptapJsonToYUpdate` (editor schema defaults, `null`/`ychange` attrs dropped,
 marks as text format attributes). Compared as decoded trees against the TS
-oracle in `compat/fixtures/yjs-seed` (`tests/seed_compat.rs`).
+oracle in `tests/fixtures/yjs-seed` (`tests/seed_compat.rs`).
 Yjs reserves the text attribute name `ychange`; fixtures `ychange_only.v1`
 and `ychange_retained_nested.v1` use hashed `ychange--xxxxxxxx` plus a
 surviving mark whose attrs contain `ychange`. Unsupported CRDT shape →

@@ -5,12 +5,10 @@ import path from "node:path";
 import test from "node:test";
 import { HwpDocument, initSync } from "@rhwp/core";
 import { createHwpSession, type HwpRequest, type RhwpApi } from "./hwp-worker-core.ts";
-import { buildFixtureHwpx, FIXTURE_PAGES, readZip, writeZip } from "./hwp-test-fixture.ts";
+import { buildFixtureHwpx, FIXTURE_PAGES, hancomBytes, readZip, writeZip } from "./hwp-test-fixture.ts";
 
 const require = createRequire(import.meta.url);
 const wasm = fs.readFileSync(path.join(path.dirname(require.resolve("@rhwp/core")), "rhwp_bg.wasm"));
-const repoRoot = path.resolve(import.meta.dirname, "../../../../..");
-const fixture = (name: string) => new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
 const module = new WebAssembly.Module(wasm);
 
 /** The worker's rhwp binding under Node, counting parses. */
@@ -32,7 +30,7 @@ const open = (id: number, bytes: Uint8Array): HwpRequest => ({ id, op: "open", b
 
 test("a session opens, finds the chunk's page and renders inert SVG blobs", async () => {
   const session = createHwpSession(realApi());
-  const hwpx = buildFixtureHwpx(fixture("sample.hwpx"), FIXTURE_PAGES);
+  const hwpx = buildFixtureHwpx(hancomBytes("hwpx"), FIXTURE_PAGES);
   assert.deepEqual(await session(open(1, hwpx)), { id: 1, ok: true, op: "open", pageCount: 3 });
   for (const chunk of [0, 1, 2]) {
     assert.deepEqual(await session({ id: 2, op: "startPage", chunk }), { id: 2, ok: true, op: "startPage", page: chunk });
@@ -51,13 +49,13 @@ test("a session opens, finds the chunk's page and renders inert SVG blobs", asyn
 
 test("binary HWP opens in a session", async () => {
   const session = createHwpSession(realApi());
-  assert.deepEqual(await session(open(1, fixture("sample.hwp"))), { id: 1, ok: true, op: "open", pageCount: 1 });
+  assert.deepEqual(await session(open(1, hancomBytes("hwp"))), { id: 1, ok: true, op: "open", pageCount: 1 });
 });
 
 test("an over-budget HWPX never reaches rhwp; undecodable bytes are invalid", async () => {
   const api = realApi();
   const bomb = writeZip([
-    ...readZip(fixture("sample.hwpx")),
+    ...readZip(hancomBytes("hwpx")),
     ...[0, 1, 2, 3].map((n) => ({ name: `Scripts/s${n}.js`, data: new Uint8Array(32 * 1024 * 1024) })),
   ]);
   assert.deepEqual(await createHwpSession(api)(open(1, bomb)), { id: 1, ok: false, error: "tooLarge" });
@@ -77,5 +75,5 @@ test("requests before a document and a failing wasm init report failed", async (
       throw new Error("unreachable");
     },
   });
-  assert.deepEqual(await broken(open(2, fixture("sample.hwp"))), { id: 2, ok: false, error: "failed" });
+  assert.deepEqual(await broken(open(2, hancomBytes("hwp"))), { id: 2, ok: false, error: "failed" });
 });

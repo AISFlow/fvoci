@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Regenerates compat/fixtures/yjs-seed/oracle/ from the document convert
+# Regenerates tests/fixtures/yjs-seed/oracle/ from the document convert
 # helper (the TS `tiptapJsonToYUpdate` oracle; dev/test only):
-#   md-<name>.yupdate  base64 updateV1 of compat/fixtures/markdown-oracle/<name>.json
-#   <case>.yupdate     base64 updateV1 of compat/fixtures/yjs-seed/cases/<case>.json
+#   md-<name>.yupdate  base64 updateV1 of tests/fixtures/markdown-oracle/<name>.json
+#   <case>.yupdate     base64 updateV1 of tests/fixtures/yjs-seed/cases/<case>.json
 #   <case>.error       helper refusal code when the TS side throws
 #   ../schema.json     editor schema attrs/defaults/mark overlap
 # Requires FVOCI_DOCUMENT_CONVERT_BIN (see scripts/prepare-document-convert.sh).
@@ -11,8 +11,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIR="$ROOT/compat/fixtures/yjs-seed"
+DIR="$ROOT/tests/fixtures/yjs-seed"
 OUT="$DIR/oracle"
+[[ -d "$DIR" ]] || { echo "missing yjs seed dir $DIR" >&2; exit 1; }
 BIN="${FVOCI_DOCUMENT_CONVERT_BIN:?set FVOCI_DOCUMENT_CONVERT_BIN (scripts/prepare-document-convert.sh)}"
 
 rm -rf "$OUT"
@@ -28,10 +29,17 @@ seed() {
   fi
 }
 
-for f in "$ROOT"/compat/fixtures/markdown-oracle/*.json; do
+shopt -s nullglob
+md_json=("$ROOT"/tests/fixtures/markdown-oracle/*.json)
+case_json=("$DIR"/cases/*.json)
+if ((${#md_json[@]} == 0 || ${#case_json[@]} == 0)); then
+  echo "missing yjs seed inputs (markdown-oracle json ${#md_json[@]}, cases ${#case_json[@]})" >&2
+  exit 1
+fi
+for f in "${md_json[@]}"; do
   seed "$f" "md-$(basename "${f%.json}")"
 done
-for f in "$DIR"/cases/*.json; do
+for f in "${case_json[@]}"; do
   seed "$f" "$(basename "${f%.json}")"
 done
 bun "$ROOT/scripts/document-convert/schema-dump.mjs" >"$DIR/schema.json"

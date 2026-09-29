@@ -47,7 +47,7 @@ fn roundtrip(frame: &WireFrame) {
 fn fixture_json() -> serde_json::Value {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/compat/fixtures/hocus-wire.json"
+        "/tests/fixtures/collab/hocus-wire.json"
     );
     serde_json::from_str(&fs::read_to_string(path).expect("read fixtures")).expect("json")
 }

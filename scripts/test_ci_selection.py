@@ -177,8 +177,11 @@ class ClassifyPathsTest(unittest.TestCase):
     def test_native_crate_broadens(self) -> None:
         self.assertEqual(SEL.classify_path("crates/collab-engine/src/x.rs"), "broaden")
 
-    def test_compat_fixtures_broaden(self) -> None:
-        self.assertEqual(SEL.classify_path("compat/fixtures/x"), "broaden")
+    def test_product_test_fixtures_broaden(self) -> None:
+        self.assertEqual(SEL.classify_path("tests/fixtures/yjs-seed/schema.json"), "broaden")
+
+    def test_retired_compat_prefix_is_unknown(self) -> None:
+        self.assertEqual(SEL.classify_path("compat/fixtures/x"), "unknown")
 
 
 class DiffParseTest(unittest.TestCase):
@@ -1585,7 +1588,8 @@ class AgentDocsSelectionTest(unittest.TestCase):
             self.assert_full([*AGENT_DOCS, extra], "FULL_PATH_BROADEN")
 
     def test_agent_docs_with_fixture_or_unknown_is_full(self) -> None:
-        self.assert_full([*AGENT_DOCS, "compat/fixtures/x.json"], "FULL_PATH_BROADEN")
+        self.assert_full([*AGENT_DOCS, "tests/fixtures/yjs-seed/schema.json"], "FULL_PATH_BROADEN")
+        self.assert_full([*AGENT_DOCS, "compat/js/probe.mjs"], "FULL_UNKNOWN_PATH")
         self.assert_full([*AGENT_DOCS, "scripts/fixtures/web-e2e/x.sh"], "FULL_PATH_BROADEN")
         self.assert_full([*AGENT_DOCS, "docs/other.md"], "FULL_PATH_BROADEN")
         for extra in (".gitignore", "LICENSE", "third-party/x.md", "apps/AGENTS.md", "notes.md"):

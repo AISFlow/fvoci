@@ -7,6 +7,8 @@ import { HwpDocument, initSync } from "@rhwp/core";
 import {
   buildFixtureHwpx,
   FIXTURE_PAGES,
+  HANCOM_HWP_PATH,
+  HANCOM_HWPX_PATH,
   readZip,
   writeZip,
 } from "../src/features/attachments/hwp-test-fixture";
@@ -21,9 +23,8 @@ const owner = {
   workspaceName: "HWP Viewer",
 };
 
-const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const hancomHwp = fs.readFileSync(path.join(repoRoot, "compat/fixtures/sample.hwp"));
-const hancomHwpx = fs.readFileSync(path.join(repoRoot, "compat/fixtures/sample.hwpx"));
+const hancomHwp = fs.readFileSync(HANCOM_HWP_PATH);
+const hancomHwpx = fs.readFileSync(HANCOM_HWPX_PATH);
 
 /** Three-page Korean HWPX rewritten from the Hancom sample package (no HWP library involved). */
 const threePageHwpx = Buffer.from(buildFixtureHwpx(new Uint8Array(hancomHwpx), FIXTURE_PAGES));

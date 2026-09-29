@@ -5,7 +5,7 @@ import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { HwpDocument, initSync } from "@rhwp/core";
 import { decodePageText } from "../src/features/attachments/hwp-page";
-import { buildFixtureHwpx, FIXTURE_PAGES } from "../src/features/attachments/hwp-test-fixture";
+import { buildFixtureHwpx, FIXTURE_PAGES, HANCOM_HWPX_PATH } from "../src/features/attachments/hwp-test-fixture";
 import { watchCspViolations } from "./helpers";
 
 const owner = {
@@ -17,8 +17,7 @@ const owner = {
   workspaceName: "HWP Edit",
 };
 
-const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const hancomHwpx = new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures/sample.hwpx")));
+const hancomHwpx = new Uint8Array(fs.readFileSync(HANCOM_HWPX_PATH));
 initSync({
   module: fs.readFileSync(path.join(path.dirname(createRequire(import.meta.url).resolve("@rhwp/core")), "rhwp_bg.wasm")),
 });

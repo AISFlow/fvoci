@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Golden Hocuspocus 4.6.0 wire fixtures for the Rust collab codec.
  *
@@ -9,7 +9,9 @@
  * @hocuspocus/common@4.6.0 writers. SyncStatus / CLOSE-with-reason have no
  * provider outgoing class; they follow MessageReceiver 4.6.0.
  *
- * Y.Doc clientIDs are fixed. Awareness and docs are destroyed so Node exits.
+ * Y.Doc clientIDs are fixed. Awareness and docs are destroyed so the process exits.
+ * Writes tests/fixtures/collab/hocus-wire.json. Do not run this to hide a
+ * codec regression; inspect the diff against the current product contract.
  */
 import {
   makeRoutingKey,
@@ -30,7 +32,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const OUT = join(__dirname, "..", "fixtures", "hocus-wire.json");
+const OUT = join(__dirname, "..", "tests", "fixtures", "collab", "hocus-wire.json");
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const DOCUMENT = "22222222-2222-4222-8222-222222222222";

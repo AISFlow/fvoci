@@ -538,7 +538,7 @@ mod tests {
 
     fn fixture_case_hex(id: &str) -> Vec<u8> {
         let json: serde_json::Value =
-            serde_json::from_str(include_str!("../../compat/fixtures/hocus-wire.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/collab/hocus-wire.json"))
                 .expect("fixture json");
         let cases = json.get("cases").and_then(|v| v.as_array()).expect("cases");
         let hex = cases

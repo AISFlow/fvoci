@@ -14,7 +14,7 @@ OWNER_PASSWORD="$(openssl rand -hex 16)"
 APP_PASSWORD="$(openssl rand -hex 16)"
 MEILI_MASTER_KEY="$(openssl rand -hex 16)"
 PEPPER="{\"install\":\"$(openssl rand -hex 32)\"}"
-FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
+FIXTURE_HWPX="$ROOT/crates/document-extract/fixtures/user-hancom-12.30-안녕.hwpx"
 DOCUMENT_STATE="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-documents.${RUN_ID}.XXXXXX")"
 ASSERT_LOG="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-assert.${RUN_ID}.XXXXXX")"
 

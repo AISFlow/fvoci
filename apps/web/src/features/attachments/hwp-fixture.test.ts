@@ -5,11 +5,10 @@ import path from "node:path";
 import test from "node:test";
 import { HwpDocument, initSync, version } from "@rhwp/core";
 import { decodePageText, pageOfChunk } from "./hwp-page.ts";
-import { buildFixtureHwpx, FIXTURE_PAGES, readZip } from "./hwp-test-fixture.ts";
+import { buildFixtureHwpx, FIXTURE_PAGES, hancomBytes, readZip } from "./hwp-test-fixture.ts";
 
 const require = createRequire(import.meta.url);
 const coreDir = path.dirname(require.resolve("@rhwp/core"));
-const repoRoot = path.resolve(import.meta.dirname, "../../../../..");
 initSync({ module: fs.readFileSync(path.join(coreDir, "rhwp_bg.wasm")) });
 
 function pagesOf(doc: HwpDocument): string[] {
@@ -29,11 +28,11 @@ test("pinned @rhwp/core is the source contract version", () => {
 });
 
 test("the user-authored Hancom HWP and HWPX samples lay out their Korean text", () => {
-  for (const name of ["sample.hwp", "sample.hwpx"]) {
-    const doc = new HwpDocument(new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name))));
+  for (const kind of ["hwp", "hwpx"] as const) {
+    const doc = new HwpDocument(hancomBytes(kind));
     try {
-      assert.equal(doc.pageCount(), 1, name);
-      assert.equal(pagesOf(doc)[0], "안녕\n", name);
+      assert.equal(doc.pageCount(), 1, kind);
+      assert.equal(pagesOf(doc)[0], "안녕\n", kind);
       assertInertSvg(doc.renderPageSvg(0));
     } finally {
       doc.free();
@@ -43,7 +42,7 @@ test("the user-authored Hancom HWP and HWPX samples lay out their Korean text", 
 
 test("synthetic HWPX has one page per fixture page and chunk N opens page N", () => {
   const hwpx = buildFixtureHwpx(
-    new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures/sample.hwpx"))),
+    hancomBytes("hwpx"),
     FIXTURE_PAGES,
   );
   assert.equal(readZip(hwpx)[0]?.name, "mimetype");

@@ -10,7 +10,7 @@
 //! (`Consolas`, as `@m2d/core`); nothing is embedded and no attachment bytes
 //! are read. Intentional differences from the TS output (D1–D16, e.g.
 //! underline/highlight are kept, unsafe link schemes are not turned into
-//! hyperlinks) are listed in `compat/fixtures/export-docx/README.md`.
+//! hyperlinks) are listed in `tests/fixtures/export-docx/README.md`.
 //!
 //! Runs in the `--internal-markdown` child only (`tiptap-to-docx`).
 

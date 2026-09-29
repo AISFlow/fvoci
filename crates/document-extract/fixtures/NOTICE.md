@@ -4,11 +4,14 @@ No private customer documents are stored here.
 
 ## User-authored Hancom 12.30 samples
 
-Copied from integration SHA `bea324300d133d0fa5b81880fef9ea50c132e451`
-`compat/fixtures/sample.hwp` and `sample.hwpx` after the user confirmed they
-personally opened the files in Hangul 12.30, checked them, and wrote the word
-`안녕`. Expected body: `안녕`. Real CFB/ZIP containers. HWP has
-`BodyText/Section0`. Default Scripts in the package must never be executed.
+Checked in at integration SHA `bea324300d133d0fa5b81880fef9ea50c132e451`
+(then named `sample.hwp` / `sample.hwpx`) after the user confirmed they
+personally opened the files in Hangul 12.30.0.6446, checked them, and wrote
+the word `안녕`. Expected body: `안녕`. Real CFB/ZIP containers. HWP has
+`BodyText/Section0`, preview data, and default Hancom script streams. Parsers
+must never execute embedded scripts. Font names are references, not bundled
+font programs. Embedded creator metadata is `kinesis`. These are test
+documents, not customer uploads.
 
 Filenames here: `user-hancom-12.30-안녕.hwp`, `user-hancom-12.30-안녕.hwpx`.
 

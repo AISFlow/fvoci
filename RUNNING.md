@@ -786,7 +786,7 @@ export's timeout and serializer errors). Exports share the two-per-process conve
 Markdown imports and body conversions and wait for a free one.
 
 Differences a user can notice against the Node export (full list with fixtures in
-`compat/fixtures/export-docx/README.md`): task items show a ☑/☐ glyph instead of a clickable Word
+`tests/fixtures/export-docx/README.md`): task items show a ☑/☐ glyph instead of a clickable Word
 checkbox, empty list items are kept as empty items, file attachments are their name without the
 in-app `attachment:` link, relative in-app links (`/docs/1`) are plain text, and underline and
 highlight are kept.
@@ -856,7 +856,7 @@ Contract as before for both: OOXML/Markdown content type, `Content-Disposition` 
 bytes is `413`, a body that is not a Tiptap doc `400`, a killed child or writer failure `500`.
 
 Differences a user can notice in the PPTX against the Node export (full list with fixtures in
-`compat/fixtures/export-pptx/README.md`): text that does not fit the rest of a slide continues on
+`tests/fixtures/export-pptx/README.md`): text that does not fit the rest of a slide continues on
 the next slide instead of being shrunk, and tables too long for a slide continue on the next with
 the header row repeated (the Node export drew them past the slide edge); nested list items are
 indented levels and ordered items are numbered 1, 2, 3 (the Node export flattened nesting and

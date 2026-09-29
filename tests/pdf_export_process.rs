@@ -15,7 +15,7 @@ fn helper() -> MarkdownHelper {
 }
 
 fn fixtures() -> Vec<(String, Value)> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("compat/fixtures");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut out = Vec::new();
     for dir in ["markdown-oracle", "export-docx"] {
         for entry in std::fs::read_dir(root.join(dir)).unwrap() {

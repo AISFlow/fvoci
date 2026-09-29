@@ -12,7 +12,6 @@ packages/editor/node_modules
 packages/i18n/node_modules
 crates/document-extract/.vendor-src
 crates/collab-engine/target
-compat/target
 **/*.md
 !crates/document-extract/README.md
 !crates/collab-engine/README.md
@@ -23,7 +22,6 @@ docs
 scripts/backup.sh
 scripts/restore.sh
 scripts/backup-restore-smoke.sh
-compat/target
 scripts/document-convert/node_modules
 .cargo-target
 

@@ -4,7 +4,7 @@ The PPTX writer (`src/documents/pptx.rs`) renders the shared export model with t
 `packages/editor/src/export/pptx.ts` (pptxgenjs): 10 × 5.625 in slides, boxes at x = 0.5 in,
 9 in wide, the `estimateH` line estimate, `MIN_H` slide breaks, a top-level horizontal rule opens a
 slide, the title as the first (28 pt) heading. It uses the same fixtures as the DOCX/PDF exports
-(`compat/fixtures/markdown-oracle/*.json`, `compat/fixtures/export-docx/*.json`, 65 in all); the
+(`tests/fixtures/markdown-oracle/*.json`, `tests/fixtures/export-docx/*.json`, 65 in all); the
 comparison against the Node helper is recorded in the export PPTX evidence report (slide count,
 per-slide text, table cells, list levels, well-formedness).
 

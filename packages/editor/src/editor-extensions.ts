@@ -354,7 +354,7 @@ export type FvociNodeViewName =
 /** One `addNodeView` per node, e.g. `() => ReactNodeViewRenderer(MathNodeView)`.
  * The factory applies each only as `.extend({ addNodeView })`, so a map cannot
  * change attributes or parse rules: the schema — the collab contract in
- * compat/fixtures/yjs-seed/schema.json — is the same for every host. */
+ * tests/fixtures/yjs-seed/schema.json — is the same for every host. */
 export type FvociNodeViews = Readonly<
 	Record<FvociNodeViewName, () => NodeViewRenderer>
 >;

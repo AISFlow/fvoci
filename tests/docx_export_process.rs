@@ -14,7 +14,7 @@ fn helper() -> MarkdownHelper {
 }
 
 fn fixtures() -> Vec<(String, Value)> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("compat/fixtures");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut out = Vec::new();
     for dir in ["markdown-oracle", "export-docx"] {
         for entry in std::fs::read_dir(root.join(dir)).unwrap() {
@@ -63,7 +63,7 @@ async fn structure_survives_a_reader_round_trip() {
     let doc: Value = serde_json::from_str(
         &std::fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("compat/fixtures/export-docx/h02-nested-lists.json"),
+                .join("tests/fixtures/export-docx/h02-nested-lists.json"),
         )
         .unwrap(),
     )
@@ -76,7 +76,7 @@ async fn structure_survives_a_reader_round_trip() {
     let table: Value = serde_json::from_str(
         &std::fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("compat/fixtures/export-docx/h04-table.json"),
+                .join("tests/fixtures/export-docx/h04-table.json"),
         )
         .unwrap(),
     )

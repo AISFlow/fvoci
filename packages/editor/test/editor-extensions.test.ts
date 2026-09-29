@@ -83,7 +83,7 @@ function extensions() {
 test("editor schema matches the server's yjs seed schema contract", () => {
   const fixture = JSON.parse(
     readFileSync(
-      new URL("../../../compat/fixtures/yjs-seed/schema.json", import.meta.url),
+      new URL("../../../tests/fixtures/yjs-seed/schema.json", import.meta.url),
       "utf8",
     ),
   ) as SchemaDump;

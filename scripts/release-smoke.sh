@@ -401,7 +401,7 @@ log_assert "server is pid 1 fvoci-server as uid/gid 1000 without capabilities, w
 ORIGIN="$BASE_URL"
 COOKIE_JAR="$WORK/cookies"
 : >"$COOKIE_JAR"
-FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
+FIXTURE_HWPX="$ROOT/crates/document-extract/fixtures/user-hancom-12.30-안녕.hwpx"
 DOCUMENT_STATE="$WORK/documents.json"
 EMAIL="owner@release.test"
 PASSWORD="release-$(openssl rand -hex 8)"

@@ -317,7 +317,7 @@ test("setup dataset", async ({ browser }) => {
   }
 
   const holder = await docsRes("첨부 보관 문서");
-  // compat/fixtures/sample.pdf is a blank page, so the PDF is the e2e text fixture.
+  // There is no checked-in PDF sample; the PDF is a generated multi-page fixture.
   const pdfPageCount = DATASET === "scaled" ? 100 : 5;
   const pdfPages: FixturePage[] = Array.from({ length: pdfPageCount }, (_, i) =>
     i % 2 === 0
@@ -328,7 +328,7 @@ test("setup dataset", async ({ browser }) => {
   const files: Record<string, { name: string; bytes: Uint8Array; source: string }> = {
     pdf: { name: "pages.pdf", bytes: buildFixturePdf(pdfPages), source: `pdf-test-fixture buildFixturePdf(${pdfPages.length} pages)` },
     docx: { name: "layout.docx", bytes: buildFixtureDocx(), source: "docx-test-fixture buildFixtureDocx()" },
-    hwp: { name: "sample.hwp", bytes: fs.readFileSync(path.join(REPO, "compat/fixtures/sample.hwp")), source: "compat/fixtures/sample.hwp" },
+    hwp: { name: "sample.hwp", bytes: fs.readFileSync(path.join(REPO, "crates/document-extract/fixtures/user-hancom-12.30-안녕.hwp")), source: "crates/document-extract/fixtures/user-hancom-12.30-안녕.hwp" },
     xlsx: {
       name: "grid.xlsx",
       bytes: await buildFixtureXlsx([gridSheet("시트1", xlsxRows, 20)]),
