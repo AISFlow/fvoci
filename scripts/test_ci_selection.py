@@ -1579,6 +1579,7 @@ class AgentDocsSelectionTest(unittest.TestCase):
             "bun.lock",
             "bunfig.toml",
             ".bun-version",
+            "patches/@volar%2Ftypescript@2.4.28.patch",
             "scripts/document-convert/package.json",
         ):
             self.assert_full([*AGENT_DOCS, extra], "FULL_PATH_BROADEN")

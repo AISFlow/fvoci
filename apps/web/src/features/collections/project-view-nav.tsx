@@ -1,6 +1,7 @@
 // Source `ProjectViewChrome` tabs: task list, collection views and field settings.
 import { t } from "@fvoci/i18n";
 import { Link } from "react-router-dom";
+import { isVueAppPath } from "@/app-boundary";
 import {
   projectCollectionPath,
   projectFieldsPath,
@@ -44,6 +45,8 @@ export function ProjectViewNav({
         <Link
           key={tab.id}
           to={tab.to}
+          // The Gantt is a page of the Vue app: open it with a full page load.
+          reloadDocument={isVueAppPath(tab.to)}
           className={tab.id === active ? "project-view-nav__link is-active" : "project-view-nav__link"}
           aria-current={tab.id === active ? "page" : undefined}
         >

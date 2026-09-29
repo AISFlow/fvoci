@@ -1,4 +1,4 @@
-import type { QueryClient, QueryKey } from "@tanstack/react-query";
+import type { QueryClient, QueryKey } from "@tanstack/query-core";
 
 /**
  * Refetch a paged list (the project task list, the collection board columns)

@@ -1,0 +1,74 @@
+diff --git a/lib/quickstart/runTsc.js b/lib/quickstart/runTsc.js
+index 9de27714a40531e5b1ade7e0686c937a327a8d38..603a96ccad21b43e9cf361dc6aa507b908853779 100644
+--- a/lib/quickstart/runTsc.js
++++ b/lib/quickstart/runTsc.js
+@@ -4,6 +4,7 @@ exports.getLanguagePlugins = void 0;
+ exports.runTsc = runTsc;
+ exports.transformTscContent = transformTscContent;
+ const fs = require("fs");
++const module_1 = require("module");
+ const path = require("path");
+ let getLanguagePlugins = () => [];
+ exports.getLanguagePlugins = getLanguagePlugins;
+@@ -20,35 +21,35 @@ function runTsc(tscPath, options, _getLanguagePlugins, typescriptObject) {
+         extraExtensionsToRemove = options.extraExtensionsToRemove;
+     }
+     const proxyApiPath = require.resolve('../node/proxyCreateProgram');
+-    const readFileSync = fs.readFileSync;
+-    fs.readFileSync = (...args) => {
+-        if (args[0] === tscPath) {
+-            let tsc = readFileSync(...args);
+-            try {
+-                return transformTscContent(tsc, proxyApiPath, extraSupportedExtensions, extraExtensionsToRemove, __filename, typescriptObject);
+-            }
+-            catch {
+-                // Support the tsc shim used in Typescript v5.7 and up
+-                const requireRegex = /module\.exports\s*=\s*require\((?:"|')(?<path>\.\/\w+\.js)(?:"|')\)/;
+-                const requirePath = requireRegex.exec(tsc)?.groups?.path;
+-                if (requirePath) {
+-                    tsc = readFileSync(path.join(path.dirname(tscPath), requirePath), 'utf8');
+-                    return transformTscContent(tsc, proxyApiPath, extraSupportedExtensions, extraExtensionsToRemove, __filename, typescriptObject);
+-                }
+-                else {
+-                    throw new Error('Failed to locate tsc module path from shim');
+-                }
+-            }
+-        }
+-        return readFileSync(...args);
+-    };
++    // Upstream fix volarjs/volar.js#310 (open): Bun's module loader reads
++    // sources natively, not through the JS `fs` API, so the former
++    // `fs.readFileSync` monkey-patch was silently ignored under Bun
++    // (oven-sh/bun#4754, vuejs/language-tools#4082) and tsc ran without the
++    // Vue language plugin. Read and transform tsc here and compile it with
++    // Module#_compile, which Node and Bun both honour.
+     try {
+-        return require(tscPath);
++        module_1.Module.enableCompileCache?.();
+     }
+-    finally {
+-        fs.readFileSync = readFileSync;
+-        delete require.cache[tscPath];
++    catch { }
++    // Detect the tsc shim used in TypeScript v5.7+: a tiny preamble that
++    // re-exports the actual compiler from a sibling file.
++    const shimRegex = /module\.exports\s*=\s*require\(["'](?<path>\.\/\w+\.js)["']\)/;
++    let compilePath = tscPath;
++    let tsc = fs.readFileSync(tscPath, 'utf8');
++    const shimMatch = shimRegex.exec(tsc);
++    if (shimMatch?.groups?.path) {
++        compilePath = path.join(path.dirname(tscPath), shimMatch.groups.path);
++        tsc = fs.readFileSync(compilePath, 'utf8');
+     }
++    let transformed = transformTscContent(tsc, proxyApiPath, extraSupportedExtensions, extraExtensionsToRemove, __filename, typescriptObject);
++    // Strip UTF-8 BOM, as Node's Module._extensions['.js'] does before compiling.
++    if (transformed.charCodeAt(0) === 0xFEFF) {
++        transformed = transformed.slice(1);
++    }
++    const m = new module_1.Module(compilePath);
++    m.filename = compilePath;
++    m.paths = module_1.Module._nodeModulePaths(path.dirname(compilePath));
++    m._compile(transformed, compilePath);
+ }
+ /**
+  * Replaces the code of typescript to add support for additional extensions and language plugins.

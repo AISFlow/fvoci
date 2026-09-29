@@ -196,6 +196,8 @@
 	"gantt.milestone": "마일스톤",
 	"gantt.kind.bar": "막대",
 	"gantt.month": "{{month}}월",
+	"gantt.bar.aria": "{{title}}, {{start}} ~ {{end}}",
+	"gantt.bar.saving": "일정을 저장하는 중…",
 	"cal.weekTasks": "주간 태스크 ({{start}} ~ {{end}})",
 	"cal.weekOverflow": "주간 태스크 {{count}}건 더 보기 ({{start}} ~ {{end}})",
 	"cal.prevMonth": "이전 달",

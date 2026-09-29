@@ -40,6 +40,8 @@ WORKDIR /src
 # spans apps/web, packages/* and scripts/document-convert; `bun ci` needs every
 # member manifest.
 COPY package.json bun.lock bunfig.toml .bun-version ./
+# `patchedDependencies` in package.json: bun ci applies these to the install.
+COPY patches ./patches
 COPY scripts/document-convert/package.json ./scripts/document-convert/
 COPY packages ./packages
 COPY LICENSE ./LICENSE

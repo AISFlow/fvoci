@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "typecheck": "tsc -b",
+    "build": "tsc -b && vue-tsc -b tsconfig.vue.json && vite build",
+    "typecheck": "tsc -b && vue-tsc -b tsconfig.vue.json",
     "test": "bun test --parallel --timeout=60000 ./src",
     "test:e2e": "playwright test"
   },
@@ -15,11 +15,14 @@
     "@hocuspocus/provider": "4.6.0",
     "@hocuspocus/provider-react": "4.6.0",
     "@hookform/resolvers": "^5.9.1",
+    "@nuxt/ui": "4.11.2",
     "@office-kit/pptx": "0.21.0",
     "@office-kit/pptx-preview": "0.11.0",
     "@office-kit/xlsx": "0.21.1",
     "@rhwp/core": "0.8.6",
-    "@tanstack/react-query": "^5.103.2",
+    "@tanstack/query-core": "5.104.0",
+    "@tanstack/react-query": "5.104.0",
+    "@tanstack/vue-query": "5.104.0",
     "clsx": "^2.1.1",
     "docx-preview": "0.4.1",
     "fflate": "0.8.3",
@@ -33,20 +36,24 @@
     "react-router-dom": "^7.9.1",
     "saxes": "6.0.0",
     "tailwind-merge": "^3.7.0",
+    "vue": "3.5.43",
+    "vue-router": "5.3.1",
     "yjs": "13.6.32",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@iconify-json/lucide": "1.2.137",
     "@playwright/test": "1.63.0",
-    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "@vitejs/plugin-vue": "6.0.9",
     "openapi-typescript": "7.13.0",
     "tailwindcss": "^4.3.3",
-    "typescript": "^5.9.2",
+    "typescript": "5.9.3",
     "vite": "^8.3.0",
+    "vue-tsc": "3.3.11",
     "y-protocols": "1.0.7"
   }
 }
