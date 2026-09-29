@@ -600,6 +600,62 @@ fn slot_wait_does_not_shorten_the_child_watchdog() {
     }
 }
 
+/// The helper raises its own `oom_score_adj` to 1000 after exec, before it
+/// reads input, so a cgroup OOM kill picks the parser before the server or a
+/// collaboration helper. The same check as collab-engine's
+/// `child_sets_oom_score_adj`.
+#[cfg(feature = "test-hang")]
+#[test]
+fn helper_raises_own_oom_score_adj() {
+    use document_extract::process::take_last_spawn;
+    let _g = SPAWN_TEST.lock().expect("spawn test lock");
+    let _ = take_last_spawn();
+    let extractor = bin();
+    let preexisting = extractor_children(&extractor);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let req = ExtractRequest {
+        bytes: hwp5_known_body(),
+        name: "hang.hwp".into(),
+        limits: Limits::for_tests(),
+        extractor_bin: extractor.clone(),
+        test_hang_ms: Some(20_000),
+    };
+    let flag = Arc::clone(&cancel);
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(extract_killable_with_cancel(req, flag.as_ref()));
+    });
+    let pid = wait_owned_helper(
+        &extractor,
+        &preexisting,
+        Instant::now() + Duration::from_secs(5),
+    );
+    // The helper writes the value right after exec; give that write time.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let adj = loop {
+        let adj = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok());
+        if adj == Some(1000) || Instant::now() >= deadline {
+            break adj;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    cancel.store(true, std::sync::atomic::Ordering::Release);
+    match recv_bounded(rx, Duration::from_secs(5), "cancel after oom check") {
+        Err(Cancelled {
+            child_pid: Some(got),
+        }) => assert_eq!(got, pid),
+        other => panic!("expected Cancelled with helper pid, got {other:?}"),
+    }
+    assert_fully_reaped(pid);
+    assert_eq!(
+        adj,
+        Some(1000),
+        "helper must raise oom_score_adj so cgroup OOM prefers it"
+    );
+}
+
 #[cfg(feature = "test-hang")]
 #[test]
 fn cancel_running_hanging_helper_reaps_and_joins() {

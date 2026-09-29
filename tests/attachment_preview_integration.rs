@@ -5,6 +5,8 @@
 //! child, the DB lease/journal/publish sequence, member and public-share
 //! `variant=preview` downloads, hostile inputs, and `preview-html`.
 
+#[path = "support/child_oom.rs"]
+mod child_oom;
 #[path = "support/office_fixtures.rs"]
 mod office_fixtures;
 #[path = "support/project_harness.rs"]
@@ -943,6 +945,24 @@ async fn preview_child_is_bounded_by_rlimit_timeout_and_pixel_limit() {
         .await
         .unwrap();
     assert_eq!((ok.width, ok.height), (1600, 1600));
+}
+
+/// The image preview child raises its own `oom_score_adj` to 1000 before it
+/// reads input, so a cgroup OOM kill picks the decoder before the server or a
+/// collaboration helper.
+#[cfg(target_os = "linux")]
+#[test]
+fn preview_child_raises_own_oom_score_adj() {
+    let adj = child_oom::oom_score_adj_of_child(&[
+        fvoci_server::attachments::preview::PREVIEW_HELPER_ARG,
+        "--max-input",
+        "1024",
+        "--max-as",
+        &PreviewLimits::default().child_address_space.to_string(),
+        "--cpu-secs",
+        "5",
+    ]);
+    assert_eq!(adj, Some(1000));
 }
 
 #[tokio::test]

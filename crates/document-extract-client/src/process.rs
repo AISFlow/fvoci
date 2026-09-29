@@ -658,6 +658,25 @@ pub fn apply_rlimits_now(as_bytes: u64, cpu_secs: u64) -> std::io::Result<()> {
     }
 }
 
+/// Raise this process's `oom_score_adj` to 1000, the collaboration helpers'
+/// value, so a cgroup or kernel OOM kill ranks document children with them
+/// by size and ahead of the server: a runaway parser goes first instead of
+/// every smaller live room. Each document child calls this itself after exec:
+/// before exec, a non-dumpable server's child still has root-owned
+/// `/proc/self` files and the write fails. Raising needs no capability, but a
+/// container profile (e.g. AppArmor docker-default) may deny it; callers
+/// ignore the error and run anyway.
+pub fn raise_own_oom_score_adj() -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::write("/proc/self/oom_score_adj", b"1000")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(())
+    }
+}
+
 /// Feature-gated parent-death fixture. Spawns a hanging helper through the
 /// production `pre_exec` path, writes the helper pid, then parks until SIGKILL.
 /// Production builds omit this (required-features / `test-hang` only).
