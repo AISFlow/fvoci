@@ -34,9 +34,12 @@ const pdfjsVersion = (
   }
 ).version;
 const pdfjsBase = pdfjsAssetBase(pdfjsVersion);
+// Sorted: readdir order varies by filesystem and installer, and the license
+// notices built from this list go into the public notice in this order.
 const pdfjsFiles = PDFJS_ASSET_DIRS.flatMap((dir) =>
   fs
     .readdirSync(path.join(pdfjsDir, dir))
+    .sort()
     .filter((name) => isPdfjsAsset(dir, name))
     .map((name) => `${dir}/${name}`),
 );
