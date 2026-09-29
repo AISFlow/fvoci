@@ -9,6 +9,21 @@ import { VUE_ROUTE_PATHS } from "./route-paths";
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
+  {
+    path: VUE_ROUTE_PATHS.documentTagsSettings,
+    name: "workspace-settings-document-tags",
+    component: () => import("./pages/DocumentTagsSettingsPage.vue"),
+  },
+  {
+    path: VUE_ROUTE_PATHS.templatesSettings,
+    name: "workspace-settings-templates",
+    component: () => import("./pages/TemplatesSettingsPage.vue"),
+  },
+  {
+    path: VUE_ROUTE_PATHS.workspaceSettings,
+    name: "workspace-settings",
+    component: () => import("./pages/WorkspaceSettingsPage.vue"),
+  },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

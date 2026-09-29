@@ -54,7 +54,12 @@ test("the Vue app's module graph imports no React module", () => {
     }
   };
   walk(path.join(web, "src/vue/main.ts"));
-  for (const extra of ["WorkspaceSettingsPage.vue", "AccountSettingsPage.vue"]) {
+  for (const extra of [
+    "WorkspaceSettingsPage.vue",
+    "AccountSettingsPage.vue",
+    "DocumentTagsSettingsPage.vue",
+    "TemplatesSettingsPage.vue",
+  ]) {
     walk(path.join(web, "src/vue/pages", extra));
   }
   assert.ok(seen.size > 100, `walked ${seen.size} modules`);
@@ -88,7 +93,13 @@ test("the Vue entry's static graph leaves the wiki editor to the wiki page's chu
   };
   walk(path.join(web, "src/vue/main.ts"));
   assert.ok(seen.has(path.join(web, "src/vue/router.ts")), "the walk reaches the router");
-  for (const page of ["WikiDocumentPage.vue", "ProjectGanttPage.vue"]) {
+  for (const page of [
+    "WikiDocumentPage.vue",
+    "ProjectGanttPage.vue",
+    "WorkspaceSettingsPage.vue",
+    "DocumentTagsSettingsPage.vue",
+    "TemplatesSettingsPage.vue",
+  ]) {
     assert.equal(seen.has(path.join(web, "src/vue/pages", page)), false, `${page} is a lazy route chunk`);
   }
   assert.deepEqual(found, []);

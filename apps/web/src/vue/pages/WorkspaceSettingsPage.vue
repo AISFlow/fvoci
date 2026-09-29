@@ -3,26 +3,40 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, watchEffect } from "vue";
-import { useRoute } from "vue-router";
+import { RouterLink, useRoute } from "vue-router";
+import { showsWorkspaceSso } from "@/features/settings/workspace-sso-scope";
 import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
 import { documentTagsSettingsPath, templatesSettingsPath } from "@/lib/href";
-import { meQuery, workspaceMetaQuery } from "@/lib/queries";
+import { workspaceMetaQuery } from "@/lib/queries";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
+import DeletedProjectsSection from "../features/settings/DeletedProjectsSection.vue";
 import NotificationPrefsSection from "../features/settings/NotificationPrefsSection.vue";
+import WorkspaceCalendarSection from "../features/settings/WorkspaceCalendarSection.vue";
+import WorkspaceEventsSection from "../features/settings/WorkspaceEventsSection.vue";
+import WorkspaceExportSection from "../features/settings/WorkspaceExportSection.vue";
+import WorkspaceGithubSection from "../features/settings/WorkspaceGithubSection.vue";
+import WorkspaceGroupsSection from "../features/settings/WorkspaceGroupsSection.vue";
 import WorkspaceIdentitySection from "../features/settings/WorkspaceIdentitySection.vue";
+import WorkspaceImportSection from "../features/settings/WorkspaceImportSection.vue";
+import WorkspaceMembersSection from "../features/settings/WorkspaceMembersSection.vue";
+import WorkspaceSsoSection from "../features/settings/WorkspaceSsoSection.vue";
+import WorkspaceTokensSection from "../features/settings/WorkspaceTokensSection.vue";
+import WorkspaceWebhooksSection from "../features/settings/WorkspaceWebhooksSection.vue";
 import { roleAtLeast } from "../features/settings/workspace-role";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
 import "@/features/settings/settings-shell.css";
 
-// Coordinator-owned src/app-boundary.ts still sends this path to React.
-// When accepting: /^\/w\/[^/]+\/settings\/?$/i plus VUE_ROUTE_PATHS.workspaceSettings.
+// Coordinator-owned src/app-boundary.ts still sends these paths to React.
+// When accepting, add to VUE_APP_PATHS:
+//   /^\/w\/[^/]+\/settings(?:\/(?:document-tags|templates))?\/?$/i
+// and keep VUE_ROUTE_PATHS.workspaceSettings / documentTagsSettings / templatesSettings.
+// Do not claim the settings route is live until that boundary change.
 
 const route = useRoute();
 const queryClient = useQueryClient();
 const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
-const me = useQuery(meQuery);
 const workspaceId = computed(() => workspace.value?.id ?? "");
 const meta = useQuery(() => ({
   ...workspaceMetaQuery(workspaceId.value),
@@ -39,6 +53,9 @@ watchEffect(() => {
 const canManage = computed(() => (workspace.value ? roleAtLeast(workspace.value.role, "admin") : false));
 const isOwner = computed(() => workspace.value?.role === "owner");
 const memberOrAbove = computed(() => (workspace.value ? roleAtLeast(workspace.value.role, "member") : false));
+const showSso = computed(() =>
+  workspace.value ? showsWorkspaceSso(workspace.value.kind, canManage.value) : false,
+);
 const nameError = ref<string | null>(null);
 const nameSaved = ref(false);
 const deleteError = ref<string | null>(null);
@@ -99,10 +116,12 @@ function onSaveName(name: string): void {
     </div>
     <div v-else class="settings-page">
       <nav :aria-label="t('nav.workspaceSettings')" class="mb-6 flex flex-wrap gap-3">
-        <a :href="documentTagsSettingsPath(slug)" class="underline underline-offset-2">{{
+        <RouterLink :to="documentTagsSettingsPath(slug)" class="underline underline-offset-2">{{
           t("settings.documentTags.nav")
-        }}</a>
-        <a :href="templatesSettingsPath(slug)" class="underline underline-offset-2">{{ t("settings.templates") }}</a>
+        }}</RouterLink>
+        <RouterLink :to="templatesSettingsPath(slug)" class="underline underline-offset-2">{{
+          t("settings.templates")
+        }}</RouterLink>
       </nav>
       <WorkspaceIdentitySection
         :workspace-name="meta.data.value?.name ?? workspace.name"
@@ -118,10 +137,23 @@ function onSaveName(name: string): void {
         @save-name="onSaveName"
         @delete="remove.mutate($event)"
       />
+      <WorkspaceMembersSection
+        v-if="memberOrAbove"
+        :workspace-id="workspace.id"
+        :current-user-id="session.me.value?.userId ?? null"
+        :current-user-role="workspace.role"
+      />
+      <WorkspaceGroupsSection v-if="memberOrAbove" :workspace-id="workspace.id" :can-manage="canManage" />
+      <WorkspaceExportSection :workspace-id="workspace.id" :can-manage="canManage" />
+      <WorkspaceImportSection :workspace-id="workspace.id" :can-manage="canManage" />
       <NotificationPrefsSection v-if="memberOrAbove" :workspace-id="workspace.id" />
-      <p v-if="me.data.value === undefined && me.isError.value" role="alert" class="settings-notice">
-        {{ loadErrorMessage(me.error.value) }}
-      </p>
+      <WorkspaceCalendarSection :workspace-id="workspace.id" />
+      <WorkspaceTokensSection v-if="canManage" :workspace-id="workspace.id" />
+      <WorkspaceSsoSection v-if="showSso" :workspace-id="workspace.id" />
+      <WorkspaceWebhooksSection v-if="canManage" :workspace-id="workspace.id" />
+      <WorkspaceGithubSection v-if="canManage" :workspace-id="workspace.id" />
+      <DeletedProjectsSection v-if="canManage && workspace.kind === 'team'" :workspace-id="workspace.id" />
+      <WorkspaceEventsSection v-if="canManage" :workspace-id="workspace.id" />
     </div>
   </WorkspaceShell>
 </template>
