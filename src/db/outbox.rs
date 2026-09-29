@@ -7,7 +7,8 @@ pub const OUTBOX_LEASE_SECS: i64 = 30;
 pub const OUTBOX_DEFAULT_BATCH: i32 = 100;
 /// Failed attempts after which an event is dead-lettered: the cursor passes
 /// it, and it is delivered again only after a manual SQL call to
-/// `fvoci.app_outbox_requeue` (see the `crate::outbox` module doc).
+/// `fvoci.app_outbox_requeue`, or when `--recover-outbox` replays a window
+/// that contains it (see the `crate::outbox` module doc).
 pub const OUTBOX_MAX_ATTEMPTS: i32 = 5;
 /// Delay before the first retry; `app_outbox_record_failure` doubles it
 /// after each further failure (up to 60 s). With the defaults the fifth
