@@ -327,6 +327,155 @@ test("dragging a bar saves it; the dates survive a reload and a dueAt keeps its 
   expect(iconFetches).toEqual([]);
 });
 
+test("handles write only the date of their own edge; a one-date bar has no handle on its date", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const csp = watchCspViolations(page);
+  await ensureSetup(page);
+  const wsId = await workspaceId(page.request, admin.workspaceSlug);
+  const project = await createProject(page.request, wsId, "GHD");
+  const ranged = await createTask(page.request, wsId, project.id, {
+    title: "Gantt start handle",
+    startDate: day(10),
+    dueDate: day(14),
+  });
+  const dueOnly = await createTask(page.request, wsId, project.id, { title: "Gantt due only", dueDate: day(20) });
+  const startOnly = await createTask(page.request, wsId, project.id, { title: "Gantt start only", startDate: day(8) });
+
+  await page.goto(ganttUrl(project.key));
+  await expect(page.locator('[data-slot="gantt"]')).toHaveAttribute("data-bar-edit", "1");
+  // A one-date bar offers only the handle of the edge it has no date for.
+  await expect(bar(page, dueOnly.id).locator('[data-handle="start"]')).toHaveCount(1);
+  await expect(bar(page, dueOnly.id).locator('[data-handle="end"]')).toHaveCount(0);
+  await expect(bar(page, startOnly.id).locator('[data-handle="start"]')).toHaveCount(0);
+  await expect(bar(page, startOnly.id).locator('[data-handle="end"]')).toHaveCount(1);
+
+  // The start handle of a two-date task writes only the start.
+  let patch = patchOf(page, ranged.id);
+  await dragBy(page, ranged.id, -2, "start");
+  let response = await patch;
+  expect(response.status()).toBe(200);
+  expect(response.request().postDataJSON()).toEqual({
+    startDate: day(8),
+    expectedDates: { startDate: day(10), dueDate: day(14), dueAt: null },
+  });
+  await expect(bar(page, ranged.id)).toHaveAttribute("data-start", day(8));
+  await expect(bar(page, ranged.id)).toHaveAttribute("data-end", day(14));
+  await expect(page.locator('[data-slot="gantt"]')).not.toHaveAttribute("aria-busy", "true");
+
+  // The start handle of a due-only task adds the start and nothing else.
+  patch = patchOf(page, dueOnly.id);
+  await dragBy(page, dueOnly.id, -3, "start");
+  response = await patch;
+  expect(response.status()).toBe(200);
+  expect(response.request().postDataJSON()).toEqual({
+    startDate: day(17),
+    expectedDates: { startDate: null, dueDate: day(20), dueAt: null },
+  });
+  await expect(bar(page, dueOnly.id)).toHaveAttribute("data-start", day(17));
+  await expect(bar(page, dueOnly.id)).toHaveAttribute("data-end", day(20));
+  await expect(page.locator('[data-slot="gantt"]')).not.toHaveAttribute("aria-busy", "true");
+
+  // The end handle of a start-only task adds the due date and nothing else.
+  patch = patchOf(page, startOnly.id);
+  await dragBy(page, startOnly.id, 2, "end");
+  response = await patch;
+  expect(response.status()).toBe(200);
+  expect(response.request().postDataJSON()).toEqual({
+    dueDate: day(10),
+    expectedDates: { startDate: day(8), dueDate: null, dueAt: null },
+  });
+  await expect(bar(page, startOnly.id)).toHaveAttribute("data-start", day(8));
+  await expect(bar(page, startOnly.id)).toHaveAttribute("data-end", day(10));
+
+  await page.reload();
+  await expect(bar(page, ranged.id)).toHaveAttribute("data-start", day(8));
+  const saved = await Promise.all([ranged, dueOnly, startOnly].map((task) => getTask(page.request, wsId, task.id)));
+  expect(saved.map((task) => [task.startDate, task.dueDate, task.dueAt])).toEqual([
+    [day(8), day(14), null],
+    [day(17), day(20), null],
+    [day(8), day(10), null],
+  ]);
+  expect(csp).toEqual([]);
+});
+
+test("a task spanning the month's edges moves by the day asked", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await ensureSetup(page);
+  const wsId = await workspaceId(page.request, admin.workspaceSlug);
+  const project = await createProject(page.request, wsId, "GSP");
+  // Starts in February, before the first day the March chart shows.
+  const early = await createTask(page.request, wsId, project.id, {
+    title: "Gantt spans the start",
+    startDate: `${Y}-02-10`,
+    dueDate: day(5),
+  });
+  // Ends in April, after the last day the March chart shows.
+  const late = await createTask(page.request, wsId, project.id, {
+    title: "Gantt spans the end",
+    startDate: day(28),
+    dueDate: `${Y}-04-10`,
+  });
+
+  await page.goto(ganttUrl(project.key));
+  const chart = page.locator('[data-slot="gantt"]');
+  await expect(chart).toHaveAttribute("data-bar-edit", "1");
+  await expect(bar(page, early.id)).toHaveAttribute("data-start", `${Y}-02-10`);
+  expect(Number(await bar(page, early.id).locator(".fvoci-gantt__bar-rect").getAttribute("x"))).toBeLessThan(0);
+  const layoutEnd = await chart
+    .locator(".fvoci-gantt__tick")
+    .last()
+    .getAttribute("data-date");
+  expect(layoutEnd! < `${Y}-04-10`).toBe(true);
+
+  // ArrowLeft moves it one day earlier, not to the first visible day.
+  let patch = patchOf(page, early.id);
+  await bar(page, early.id).focus();
+  await page.keyboard.press("ArrowLeft");
+  let response = await patch;
+  expect(response.status()).toBe(200);
+  expect(response.request().postDataJSON()).toEqual({
+    startDate: `${Y}-02-09`,
+    dueDate: day(4),
+    expectedDates: { startDate: `${Y}-02-10`, dueDate: day(5), dueAt: null },
+  });
+  await expect(bar(page, early.id)).toHaveAttribute("data-start", `${Y}-02-09`);
+  await expect(bar(page, early.id)).toHaveAttribute("data-end", day(4));
+  await expect(chart).not.toHaveAttribute("aria-busy", "true");
+
+  // ArrowRight on a bar past the last visible day moves it one day later.
+  patch = patchOf(page, late.id);
+  await bar(page, late.id).focus();
+  await page.keyboard.press("ArrowRight");
+  response = await patch;
+  expect(response.status()).toBe(200);
+  expect(response.request().postDataJSON()).toEqual({
+    startDate: day(29),
+    dueDate: `${Y}-04-11`,
+    expectedDates: { startDate: day(28), dueDate: `${Y}-04-10`, dueAt: null },
+  });
+  await expect(chart).not.toHaveAttribute("aria-busy", "true");
+
+  // Shift+ArrowRight extends its end by a day, beyond the visible range.
+  patch = patchOf(page, late.id);
+  await bar(page, late.id).focus();
+  await page.keyboard.press("Shift+ArrowRight");
+  response = await patch;
+  expect(response.status()).toBe(200);
+  expect(response.request().postDataJSON()).toEqual({
+    dueDate: `${Y}-04-12`,
+    expectedDates: { startDate: day(29), dueDate: `${Y}-04-11`, dueAt: null },
+  });
+  await expect(bar(page, late.id)).toHaveAttribute("data-end", `${Y}-04-12`);
+
+  const saved = await Promise.all([early, late].map((task) => getTask(page.request, wsId, task.id)));
+  expect(saved.map((task) => [task.startDate, task.dueDate])).toEqual([
+    [`${Y}-02-09`, day(4)],
+    [day(29), `${Y}-04-12`],
+  ]);
+});
+
 test("a task changed elsewhere is not overwritten, and a broken dependency snaps back", async ({ page }) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1600, height: 900 });

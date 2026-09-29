@@ -368,6 +368,12 @@ export function chartHeight(laneCount: number, laneHeight: number, paths: readon
 
 export type BarDragKind = "move" | "start" | "end";
 
+/** A bar's days, both ends included. */
+export interface DayRange {
+  readonly start: IsoDate;
+  readonly end: IsoDate;
+}
+
 export interface BarDragOrigin {
   readonly kind: BarDragKind;
   readonly originStart: IsoDate;
@@ -376,38 +382,57 @@ export interface BarDragOrigin {
   readonly originX: number;
 }
 
-/**
- * The bar's dates for pointer `x` during a drag. A move keeps the span and
- * stays inside the scale; a handle moves one end and never passes the other.
- */
-export function applyBarPointer(drag: BarDragOrigin, x: number, scale: GanttScale): { start: IsoDate; end: IsoDate } {
-  if (drag.kind === "move") {
-    const delta = daysBetween(xToDate(drag.originX, scale), xToDate(x, scale)) ?? 0;
-    const span = daysBetween(drag.originStart, drag.originEnd) ?? 0;
-    return shiftWithin(drag.originStart, span, delta, scale);
-  }
-  if (drag.kind === "start") {
-    const start = xToDate(x, scale);
-    return { start: start > drag.originEnd ? drag.originEnd : start, end: drag.originEnd };
-  }
-  const end = xToDate(x, scale);
-  return { start: drag.originStart, end: end < drag.originStart ? drag.originStart : end };
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.min(Math.max(n, lo), hi);
 }
 
-/** Moves a bar of `span` extra days by `delta` days, kept inside the scale when it fits. */
-export function shiftWithin(
-  start: IsoDate,
-  span: number,
+/**
+ * `range` changed by `delta` days: a move shifts both ends by the same days,
+ * a start or end handle moves that end and never passes the other.
+ *
+ * Only the delta is clamped, never a date, so a change keeps its direction
+ * and a move keeps its span (the reschedule body shifts the stored dates by
+ * the same days). The limits: an end inside the visible range stays inside
+ * it, an end already outside (a task spanning the month's edge) may move
+ * further out, and the bar keeps at least one day in view.
+ */
+export function applyBarDelta(
+  kind: BarDragKind,
+  range: DayRange,
   delta: number,
   scale: Pick<GanttScale, "start" | "end">,
-): { start: IsoDate; end: IsoDate } {
-  let next = addDays(start, delta) ?? start;
-  if (next < scale.start) next = scale.start;
-  let end = addDays(next, span) ?? next;
-  if (end > scale.end) {
-    end = scale.end;
-    next = addDays(end, -span) ?? scale.start;
-    if (next < scale.start) next = scale.start;
+): DayRange {
+  // Day offsets from the first visible day; `last` is the last visible one.
+  const s = daysBetween(scale.start, range.start);
+  const e = daysBetween(scale.start, range.end);
+  const last = daysBetween(scale.start, scale.end);
+  if (s === null || e === null || last === null || !Number.isFinite(delta)) return range;
+  let lo: number;
+  let hi: number;
+  if (kind === "move") {
+    lo = s >= 0 ? -s : -e;
+    hi = e <= last ? last - e : last - s;
+  } else if (kind === "start") {
+    lo = s >= 0 ? -s : -Infinity;
+    hi = Math.min(e - s, last - s);
+  } else {
+    lo = Math.max(s - e, -e);
+    hi = e <= last ? last - e : Infinity;
   }
-  return { start: next, end: end < next ? next : end };
+  const d = clamp(Math.trunc(delta), Math.min(0, lo), Math.max(0, hi));
+  if (d === 0) return range;
+  const shift = (date: IsoDate) => addDays(date, d) ?? date;
+  if (kind === "move") return { start: shift(range.start), end: shift(range.end) };
+  if (kind === "start") return { start: shift(range.start), end: range.end };
+  return { start: range.start, end: shift(range.end) };
+}
+
+/**
+ * The bar's dates for pointer `x` during a drag: the days the pointer moved
+ * since the drag started (both clamped to the visible range), applied as in
+ * {@link applyBarDelta}.
+ */
+export function applyBarPointer(drag: BarDragOrigin, x: number, scale: GanttScale): DayRange {
+  const delta = daysBetween(xToDate(drag.originX, scale), xToDate(x, scale)) ?? 0;
+  return applyBarDelta(drag.kind, { start: drag.originStart, end: drag.originEnd }, delta, scale);
 }

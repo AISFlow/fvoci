@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { daysBetween } from "@/lib/iso-date";
 import {
+  applyBarDelta,
   applyBarPointer,
   barRect,
   chartHeight,
@@ -10,7 +12,6 @@ import {
   monthBands,
   packFlow,
   scaleWidth,
-  shiftWithin,
   stackRows,
   xToDate,
   type BarBox,
@@ -202,5 +203,84 @@ test("dragging a bar: a move keeps the span inside the range, a handle never pas
     start: "2026-09-10",
     end: "2026-09-10",
   });
-  assert.deepEqual(shiftWithin("2026-09-10", 4, -1, SEPT), { start: "2026-09-09", end: "2026-09-13" });
+  assert.deepEqual(applyBarDelta("move", { start: "2026-09-10", end: "2026-09-14" }, -1, SEPT), {
+    start: "2026-09-09",
+    end: "2026-09-13",
+  });
+});
+
+/** Chart x of the middle of day `date` in SEPT. */
+function midX(date: string): number {
+  return dateToX(date, SEPT)! + 16;
+}
+
+test("a bar starting before the visible range moves by exactly the days asked, both ways", () => {
+  // SEPT shows 2026-08-30..2026-10-03; this task started on 08-20.
+  const early = { start: "2026-08-20", end: "2026-09-05" };
+  // Keyboard: one day earlier and one day later, span kept.
+  assert.deepEqual(applyBarDelta("move", early, -1, SEPT), { start: "2026-08-19", end: "2026-09-04" });
+  assert.deepEqual(applyBarDelta("move", early, 1, SEPT), { start: "2026-08-21", end: "2026-09-06" });
+  // Drag by one day either way from a visible day of the bar.
+  const drag = { kind: "move" as const, originStart: early.start, originEnd: early.end, originX: midX("2026-09-02") };
+  assert.deepEqual(applyBarPointer(drag, midX("2026-09-03"), SEPT), { start: "2026-08-21", end: "2026-09-06" });
+  assert.deepEqual(applyBarPointer(drag, midX("2026-09-01"), SEPT), { start: "2026-08-19", end: "2026-09-04" });
+  // Dragged to the left edge and past it: the grabbed day stops at the first visible day.
+  assert.deepEqual(applyBarPointer(drag, -500, SEPT), { start: "2026-08-17", end: "2026-09-02" });
+  // The bar keeps a day in view: its end stops at the first visible day.
+  assert.deepEqual(applyBarDelta("move", early, -20, SEPT), { start: "2026-08-14", end: "2026-08-30" });
+  // The start handle of such a bar moves its start by the days asked.
+  assert.deepEqual(applyBarDelta("start", early, 3, SEPT), { start: "2026-08-23", end: "2026-09-05" });
+  assert.deepEqual(applyBarDelta("start", early, -2, SEPT), { start: "2026-08-18", end: "2026-09-05" });
+});
+
+test("a bar ending after the visible range moves by the days asked and Shift+arrow extends its end", () => {
+  const late = { start: "2026-09-28", end: "2026-10-10" };
+  assert.deepEqual(applyBarDelta("move", late, 1, SEPT), { start: "2026-09-29", end: "2026-10-11" });
+  assert.deepEqual(applyBarDelta("move", late, -1, SEPT), { start: "2026-09-27", end: "2026-10-09" });
+  // Its start stays in view.
+  assert.deepEqual(applyBarDelta("move", late, 30, SEPT), { start: "2026-10-03", end: "2026-10-15" });
+  // The end is already past the visible range: it moves one day, not back to the edge.
+  assert.deepEqual(applyBarDelta("end", late, 1, SEPT), { start: "2026-09-28", end: "2026-10-11" });
+  assert.deepEqual(applyBarDelta("end", late, -1, SEPT), { start: "2026-09-28", end: "2026-10-09" });
+  // An end inside the visible range still stops at its last day, and never passes the start.
+  const inside = { start: "2026-09-28", end: "2026-10-02" };
+  assert.deepEqual(applyBarDelta("end", inside, 1, SEPT), { start: "2026-09-28", end: "2026-10-03" });
+  assert.deepEqual(applyBarDelta("end", inside, 2, SEPT), { start: "2026-09-28", end: "2026-10-03" });
+  assert.deepEqual(applyBarDelta("end", inside, -9, SEPT), { start: "2026-09-28", end: "2026-09-28" });
+  const drag = { kind: "end" as const, originStart: late.start, originEnd: late.end, originX: midX("2026-10-02") };
+  assert.deepEqual(applyBarPointer(drag, midX("2026-10-01"), SEPT), { start: "2026-09-28", end: "2026-10-09" });
+});
+
+test("a bar longer than the visible range moves by the days asked and stays in view", () => {
+  const long = { start: "2026-08-01", end: "2026-10-31" };
+  assert.deepEqual(applyBarDelta("move", long, 1, SEPT), { start: "2026-08-02", end: "2026-11-01" });
+  assert.deepEqual(applyBarDelta("move", long, -1, SEPT), { start: "2026-07-31", end: "2026-10-30" });
+  const drag = { kind: "move" as const, originStart: long.start, originEnd: long.end, originX: midX("2026-09-15") };
+  assert.deepEqual(applyBarPointer(drag, midX("2026-09-16"), SEPT), { start: "2026-08-02", end: "2026-11-01" });
+  assert.deepEqual(applyBarPointer(drag, midX("2026-09-12"), SEPT), { start: "2026-07-29", end: "2026-10-28" });
+  // Never pushed fully out of view: at most until its end is the first visible day.
+  assert.deepEqual(applyBarDelta("move", long, -200, SEPT), { start: "2026-05-31", end: "2026-08-30" });
+  assert.deepEqual(applyBarDelta("move", long, 200, SEPT), { start: "2026-10-03", end: "2027-01-02" });
+});
+
+test("a move never changes direction or span, whatever the bar and the delta", () => {
+  const ranges = [
+    { start: "2026-08-20", end: "2026-09-05" },
+    { start: "2026-09-10", end: "2026-09-14" },
+    { start: "2026-09-28", end: "2026-10-10" },
+    { start: "2026-08-01", end: "2026-10-31" },
+    { start: "2026-08-30", end: "2026-10-03" },
+    { start: "2026-09-12", end: "2026-09-12" },
+  ];
+  for (const range of ranges) {
+    const span = daysBetween(range.start, range.end);
+    for (let delta = -40; delta <= 40; delta++) {
+      const next = applyBarDelta("move", range, delta, SEPT);
+      const moved = daysBetween(range.start, next.start)!;
+      assert.equal(daysBetween(next.start, next.end), span, `${range.start} ${delta}`);
+      assert.ok(Math.sign(moved) === Math.sign(delta) || moved === 0, `${range.start} ${delta} -> ${moved}`);
+      assert.ok(Math.abs(moved) <= Math.abs(delta), `${range.start} ${delta} -> ${moved}`);
+      assert.ok(next.end >= SEPT.start && next.start <= SEPT.end, `${range.start} ${delta} leaves the view`);
+    }
+  }
 });

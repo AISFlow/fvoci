@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import { computed, ref, useId } from "vue";
-import { daysBetween, type IsoDate } from "@/lib/iso-date";
+import type { IsoDate } from "@/lib/iso-date";
 import {
+  applyBarDelta,
   applyBarPointer,
   barRect,
   chartHeight,
@@ -13,7 +14,6 @@ import {
   monthBands,
   packFlow,
   scaleWidth,
-  shiftWithin,
   stackRows,
   type BarBox,
   type BarDragKind,
@@ -187,7 +187,18 @@ function onBarClick(id: string): void {
   emit("select", id);
 }
 
-/** Enter/Space opens the task; arrows move the bar a day, Shift+arrows move its end. */
+/**
+ * The edges a bar offers a handle for. A task with one date (inferred
+ * from-start or from-due) has none on the edge its date is on: dragging that
+ * edge would only move the date (reschedule-body.ts writes no date the drag
+ * did not set), which a move of the bar already does.
+ */
+function hasHandle(bar: Pick<BarBox, "milestone" | "inferred">, edge: "start" | "end"): boolean {
+  if (bar.milestone) return false;
+  return edge === "start" ? bar.inferred !== "from-start" : bar.inferred !== "from-due";
+}
+
+/** Enter/Space opens the task; arrows move the bar a day, Shift+arrows move its end handle. */
 function onBarKeydown(event: KeyboardEvent, bar: DisplayBar): void {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
@@ -197,20 +208,8 @@ function onBarKeydown(event: KeyboardEvent, bar: DisplayBar): void {
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
   if (locked.value) return;
   event.preventDefault();
-  const step = event.key === "ArrowLeft" ? -1 : 1;
-  let next: { start: IsoDate; end: IsoDate };
-  let kind: BarDragKind;
-  if (event.shiftKey && !bar.milestone) {
-    kind = "end";
-    next = applyBarPointer(
-      { kind, originStart: bar.start, originEnd: bar.end, originX: 0 },
-      (dateToX(bar.end, scale.value) ?? 0) + step * props.pxPerDay,
-      scale.value,
-    );
-  } else {
-    kind = "move";
-    next = shiftWithin(bar.start, daysBetween(bar.start, bar.end) ?? 0, step, scale.value);
-  }
+  const kind: BarDragKind = event.shiftKey && hasHandle(bar, "end") ? "end" : "move";
+  const next = applyBarDelta(kind, bar, event.key === "ArrowLeft" ? -1 : 1, scale.value);
   if (next.start !== bar.start || next.end !== bar.end) emit("change", { id: bar.id, kind, ...next });
 }
 
@@ -375,7 +374,13 @@ const railRows = computed(() =>
           tabindex="0"
           :aria-label="t('gantt.bar.aria', { title: title(bar.id), start: bar.start, end: bar.end })"
           :aria-busy="savingId === bar.id ? 'true' : undefined"
-          :aria-keyshortcuts="editable ? 'Enter ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight' : 'Enter'"
+          :aria-keyshortcuts="
+            !editable
+              ? 'Enter'
+              : hasHandle(bar, 'end')
+                ? 'Enter ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight'
+                : 'Enter ArrowLeft ArrowRight'
+          "
           :data-task-id="bar.id"
           :data-start="bar.start"
           :data-end="bar.end"
@@ -418,8 +423,9 @@ const railRows = computed(() =>
             :rx="barHeight() / 2"
             @pointerdown="beginDrag($event, bar, 'move')"
           />
-          <template v-if="editable && !bar.milestone">
+          <template v-if="editable">
             <rect
+              v-if="hasHandle(bar, 'start')"
               class="fvoci-gantt__handle"
               data-handle="start"
               :x="bar.x"
@@ -429,6 +435,7 @@ const railRows = computed(() =>
               @pointerdown="beginDrag($event, bar, 'start')"
             />
             <rect
+              v-if="hasHandle(bar, 'end')"
               class="fvoci-gantt__handle"
               data-handle="end"
               :x="bar.x + Math.max(bar.width, 2) - HANDLE_PX"
