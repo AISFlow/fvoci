@@ -7,5 +7,16 @@
     "packages/i18n",
     "scripts/document-convert"
   ],
-  "trustedDependencies": []
+  "trustedDependencies": [],
+  "overrides": {
+    "@hocuspocus/provider": "4.6.0",
+    "@tiptap/core": "3.31.3",
+    "@tiptap/pm": "3.31.3",
+    "vue": "3.5.43",
+    "y-protocols": "1.0.7",
+    "yjs": "13.6.32"
+  },
+  "patchedDependencies": {
+    "@volar/typescript@2.4.28": "patches/@volar%2Ftypescript@2.4.28.patch"
+  }
 }

@@ -1,9 +1,12 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import tailwindcss from "@tailwindcss/vite";
+import ui from "@nuxt/ui/vite";
 import react from "@vitejs/plugin-react";
+import vue from "@vitejs/plugin-vue";
 import { defineConfig, type Plugin } from "vite";
+import { nuxtUiAppConfig, nuxtUiColorsCss } from "./src/build/nuxt-ui-colors.ts";
+import { nuxtUiUserOptions } from "./src/build/nuxt-ui-options.ts";
 import {
   isPdfjsAsset,
   PDFJS_ASSET_DIRS,
@@ -143,16 +146,49 @@ function installedPackageDir(name: string): string {
   }
 }
 
+/**
+ * Writes Nuxt UI's runtime colors style into index.html, byte-identical, so
+ * the server's CSP (style-src 'self' plus hashes of the inline styles in
+ * index.html, src/http/security_headers.rs) allows the copies the colors
+ * plugin injects when the Vue app starts. See src/build/nuxt-ui-colors.ts.
+ */
+function nuxtUiColorsStyle(uiPlugins: readonly Plugin[]): Plugin {
+  let css: Promise<string> | undefined;
+  return {
+    name: "fvoci-nuxt-ui-colors-style",
+    transformIndexHtml: {
+      order: "post",
+      async handler() {
+        css ??= nuxtUiAppConfig(uiPlugins).then(nuxtUiColorsCss);
+        return [
+          {
+            tag: "style",
+            attrs: { "data-fvoci-ui-colors": "" },
+            children: await css,
+            injectTo: "head",
+          },
+        ];
+      },
+    },
+  };
+}
+
 /** Modules of every web-worker bundle, for the license notice. */
 const workerModuleIds = new Set<string>();
 
 const apiProxyTarget =
   process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
 
+// Nuxt UI's plugin set registers @tailwindcss/vite itself; it is the only
+// Tailwind registration and also compiles the React app's stylesheet.
+const uiPlugins = ui(nuxtUiUserOptions).flat() as Plugin[];
+
 export default defineConfig({
   plugins: [
     react(),
-    tailwindcss(),
+    vue(),
+    ...uiPlugins,
+    nuxtUiColorsStyle(uiPlugins),
     fvociWebLicenseAdapt({
       repoRoot,
       manifestPath: browserLicenseManifest,
@@ -168,7 +204,11 @@ export default defineConfig({
     dedupe: [
       "react",
       "react-dom",
+      "vue",
       "yjs",
+      "y-protocols",
+      "@tiptap/core",
+      "@tiptap/pm",
       "@hocuspocus/provider",
       "@hocuspocus/provider-react",
     ],
