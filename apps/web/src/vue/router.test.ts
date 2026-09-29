@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createMemoryHistory } from "vue-router";
-import { createAppRouter } from "./router.ts";
+import { isVueAppPath } from "@/app-boundary";
+import { createAppRouter, routes } from "./router.ts";
+import { VUE_NAV_ROUTE_PATHS } from "./route-paths.ts";
 
 // A navigation to a React page leaves the Vue app with a full load; one that
 // failed or was superseded never happened and loads nothing.
@@ -59,3 +61,45 @@ test("the workspace landing and project list resolve as Vue routes", () => {
   assert.equal(router.resolve("/w/acme/wiki").name, "react-app");
   assert.equal(router.resolve("/w/acme/WIKI-1").name, "wiki-document");
 });
+
+test("my-tasks, notifications, and trash are declared but not live Vue paths", () => {
+  assert.equal(
+    routes.some((route) => route.name === "my-tasks" && route.path === VUE_NAV_ROUTE_PATHS.myTasks),
+    true,
+  );
+  assert.equal(
+    routes.some((route) => route.name === "notifications" && route.path === VUE_NAV_ROUTE_PATHS.notifications),
+    true,
+  );
+  assert.equal(
+    routes.some((route) => route.name === "trash" && route.path === VUE_NAV_ROUTE_PATHS.trash),
+    true,
+  );
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/my-tasks").name, "my-tasks");
+  assert.equal(router.resolve("/w/acme/my-tasks/").name, "my-tasks");
+  assert.equal(router.resolve("/w/acme/notifications").name, "notifications");
+  assert.equal(router.resolve("/w/acme/trash").name, "trash");
+  assert.equal(isVueAppPath("/w/acme/my-tasks"), false);
+  assert.equal(isVueAppPath("/w/acme/notifications"), false);
+  assert.equal(isVueAppPath("/w/acme/trash"), false);
+});
+
+test(
+  "navigating to my-tasks, notifications, or trash is a full page load (boot is still React)",
+  withLocation(async (loads) => {
+    const router = createAppRouter(createMemoryHistory());
+    // bun test does not compile .vue lazy chunks; the afterEach guard is
+    // what we need, and it runs after a completed navigation.
+    const dummy = { render: () => null };
+    for (const record of router.getRoutes()) {
+      if (record.name === "my-tasks" || record.name === "notifications" || record.name === "trash") {
+        record.components = { default: dummy };
+      }
+    }
+    await router.push("/w/acme/my-tasks");
+    await router.push("/w/acme/notifications");
+    await router.push("/w/acme/trash");
+    assert.deepEqual(loads, ["/w/acme/my-tasks", "/w/acme/notifications", "/w/acme/trash"]);
+  }),
+);

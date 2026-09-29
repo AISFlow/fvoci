@@ -16,7 +16,7 @@ withDefaults(
     slug: string;
     workspaceName: string;
     /** The section the page belongs to. */
-    active?: "wiki" | "projects";
+    active?: "wiki" | "projects" | "myTasks" | "notifications";
   }>(),
   { active: "projects" },
 );
@@ -41,7 +41,12 @@ withDefaults(
             :aria-current="active === 'projects' ? 'page' : undefined"
             >{{ t("nav.projects") }}</a
           >
-          <a :href="myTasksPath(slug)">{{ t("task.mine") }}</a>
+          <a
+            :href="myTasksPath(slug)"
+            :class="active === 'myTasks' ? 'font-medium text-highlighted' : undefined"
+            :aria-current="active === 'myTasks' ? 'page' : undefined"
+            >{{ t("task.mine") }}</a
+          >
           <a :href="searchPath(slug)">{{ t("nav.search") }}</a>
           <a :href="settingsPath(slug)">{{ t("nav.settings") }}</a>
         </nav>

@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { isVueAppPath } from "@/app-boundary";
-import { VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
+import { VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
 
 /** The Vue app's pages; src/app-boundary.ts sends exactly these paths here.
  * Each page is its own chunk, so the Gantt page does not load the wiki
@@ -12,6 +12,15 @@ export const routes: RouteRecordRaw[] = [
   // More specific than `/w/:slug`. Coordinator-owned app-boundary.ts still
   // boots the React app for these until its regexes include them.
   { path: VUE_WORKSPACE_ROUTE_PATHS.projects, name: "projects", component: () => import("./pages/ProjectsPage.vue") },
+  // More specific than `/w/:slug`. Boot still loads React until the
+  // coordinator regexes in route-paths.ts (VUE_NAV_ROUTE_PATHS) land.
+  { path: VUE_NAV_ROUTE_PATHS.myTasks, name: "my-tasks", component: () => import("./pages/MyTasksPage.vue") },
+  {
+    path: VUE_NAV_ROUTE_PATHS.notifications,
+    name: "notifications",
+    component: () => import("./pages/NotificationsPage.vue"),
+  },
+  { path: VUE_NAV_ROUTE_PATHS.trash, name: "trash", component: () => import("./pages/TrashPage.vue") },
   {
     path: VUE_WORKSPACE_ROUTE_PATHS.workspaceHome,
     name: "workspace-home",

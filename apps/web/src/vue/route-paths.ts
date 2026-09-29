@@ -10,7 +10,7 @@
  * Fold them into this object in the same change as those regexes, and extend
  * app-boundary.test.ts SAMPLES (`/w/acme`, `/w/acme/projects`, trailing slashes
  * and mixed case). `/w/:slug/wiki`, settings, search, my-tasks and the rest
- * stay React pages.
+ * stay React pages until their own objects move here with the boundary.
  */
 export const VUE_ROUTE_PATHS = {
   projectGantt: "/w/:slug/:ref/gantt",
@@ -28,4 +28,19 @@ export const VUE_ROUTE_PATHS = {
 export const VUE_WORKSPACE_ROUTE_PATHS = {
   workspaceHome: "/w/:slug",
   projects: "/w/:slug/projects",
+} as const;
+
+/**
+ * Vue pages for workspace nav (my-tasks, notifications, trash). Declared as
+ * lazy chunks so the Vue app can render them once boot moves; until then
+ * src/app-boundary.ts still sends these paths to React, so afterEach full-loads.
+ * Coordinator regexes to add later (do not put these on VUE_ROUTE_PATHS yet):
+ *   /^\/w\/[^/]+\/my-tasks\/?$/i
+ *   /^\/w\/[^/]+\/notifications\/?$/i
+ *   /^\/w\/[^/]+\/trash\/?$/i
+ */
+export const VUE_NAV_ROUTE_PATHS = {
+  myTasks: "/w/:slug/my-tasks",
+  notifications: "/w/:slug/notifications",
+  trash: "/w/:slug/trash",
 } as const;
