@@ -54,6 +54,9 @@ test("the Vue app's module graph imports no React module", () => {
     }
   };
   walk(path.join(web, "src/vue/main.ts"));
+  for (const extra of ["WorkspaceSettingsPage.vue", "AccountSettingsPage.vue"]) {
+    walk(path.join(web, "src/vue/pages", extra));
+  }
   assert.ok(seen.size > 100, `walked ${seen.size} modules`);
   assert.deepEqual(found, []);
 });

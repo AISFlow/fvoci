@@ -8,18 +8,24 @@ import {
   wikiPath,
   workspaceHomePath,
 } from "@/lib/href";
+import { usePushSessionRebind } from "../composables/usePushSessionRebind";
+import LegalNav from "./LegalNav.vue";
 
 // The workspace header of the React app's WorkspaceShell, reduced to links:
 // every target is a React page, so each is a plain anchor (a full page load).
-withDefaults(
+const props = withDefaults(
   defineProps<{
     slug: string;
     workspaceName: string;
+    /** Needed to re-bind this browser's Web Push to the live session. */
+    workspaceId?: string;
     /** The section the page belongs to. */
-    active?: "wiki" | "projects";
+    active?: "wiki" | "projects" | "settings";
   }>(),
   { active: "projects" },
 );
+
+usePushSessionRebind(() => props.workspaceId);
 </script>
 
 <template>
@@ -43,7 +49,12 @@ withDefaults(
           >
           <a :href="myTasksPath(slug)">{{ t("task.mine") }}</a>
           <a :href="searchPath(slug)">{{ t("nav.search") }}</a>
-          <a :href="settingsPath(slug)">{{ t("nav.settings") }}</a>
+          <a
+            :href="settingsPath(slug)"
+            :class="active === 'settings' ? 'font-medium text-highlighted' : undefined"
+            :aria-current="active === 'settings' ? 'page' : undefined"
+            >{{ t("nav.settings") }}</a
+          >
         </nav>
       </div>
       <div class="flex items-center gap-3">
@@ -56,5 +67,8 @@ withDefaults(
     <main class="flex-1 p-4">
       <slot />
     </main>
+    <footer class="border-t border-default px-4 py-3">
+      <LegalNav />
+    </footer>
   </div>
 </template>
