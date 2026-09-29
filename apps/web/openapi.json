@@ -6007,7 +6007,7 @@
             }
           },
           "302": {
-            "description": "Presigned transfer mode, original only: `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here.",
+            "description": "Presigned transfer mode, browser sessions and the original only (API-token requests always get the bytes here): `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here.",
             "headers": {
               "Location": {
                 "schema": {
@@ -11446,7 +11446,7 @@
         },
         "responses": {
           "201": {
-            "description": "Upload session created, bound to the transfer mode in effect now",
+            "description": "Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request",
             "content": {
               "application/json": {
                 "schema": {
@@ -17240,7 +17240,7 @@
         },
         "responses": {
           "201": {
-            "description": "Upload session created, bound to the transfer mode in effect now",
+            "description": "Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request",
             "content": {
               "application/json": {
                 "schema": {
@@ -22299,7 +22299,7 @@
         },
         "responses": {
           "201": {
-            "description": "Upload session created, bound to the transfer mode in effect now",
+            "description": "Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request",
             "content": {
               "application/json": {
                 "schema": {
@@ -23674,7 +23674,7 @@
           },
           "effective": {
             "$ref": "#/components/schemas/TransferMode",
-            "description": "Mode for new upload sessions and original downloads."
+            "description": "Mode for new upload sessions and original downloads of browser\nsessions; API-token requests always use `proxy`."
           },
           "presignedAvailable": {
             "type": "boolean",
@@ -25832,7 +25832,7 @@
           },
           "transfer": {
             "$ref": "#/components/schemas/TransferMode",
-            "description": "Transfer mode of this upload session, fixed for its whole life."
+            "description": "Transfer mode of this upload session, fixed for its whole life:\nthe mode in effect now for a browser session, always `proxy` for an\nAPI-token request."
           }
         }
       },

@@ -3794,7 +3794,10 @@ export interface components {
         AdminAttachmentTransferOutput: {
             /** @description A stored `presigned` that cannot apply here, so `proxy` is in effect. */
             blocked: boolean;
-            /** @description Mode for new upload sessions and original downloads. */
+            /**
+             * @description Mode for new upload sessions and original downloads of browser
+             *     sessions; API-token requests always use `proxy`.
+             */
             effective: components["schemas"]["TransferMode"];
             /** @description Whether this server's storage can serve `presigned`. */
             presignedAvailable: boolean;
@@ -4364,7 +4367,11 @@ export interface components {
              */
             partUrlsExpireAt: string | null;
             parts: components["schemas"]["AttachmentPartUrlResponse"][];
-            /** @description Transfer mode of this upload session, fixed for its whole life. */
+            /**
+             * @description Transfer mode of this upload session, fixed for its whole life:
+             *     the mode in effect now for a browser session, always `proxy` for an
+             *     API-token request.
+             */
             transfer: components["schemas"]["TransferMode"];
         };
         CreateCommentBody: {
@@ -10570,7 +10577,7 @@ export interface operations {
                     "application/octet-stream": unknown;
                 };
             };
-            /** @description Presigned transfer mode, original only: `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here. */
+            /** @description Presigned transfer mode, browser sessions and the original only (API-token requests always get the bytes here): `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here. */
             302: {
                 headers: {
                     /** @description Signed storage URL */
@@ -14202,7 +14209,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Upload session created, bound to the transfer mode in effect now */
+            /** @description Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -17973,7 +17980,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Upload session created, bound to the transfer mode in effect now */
+            /** @description Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -21165,7 +21172,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Upload session created, bound to the transfer mode in effect now */
+            /** @description Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request */
             201: {
                 headers: {
                     [name: string]: unknown;
