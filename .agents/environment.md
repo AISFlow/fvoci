@@ -343,3 +343,9 @@ Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key�
 - 디스크 정리(2026-09-29 13:56–14:12 KST): `df -h /` 사용량 913G → 299G(약 614 GiB 회수; 단계별 df 차이는 Docker volume 262.50,
   worktree build·오래된 cargo target 디렉터리 272.80, 완료 worktree 73.60, image·build cache 8.81 GiB). 대상·검사·결과는
   `/home/kinesis/orca/fvoci-evidence/space-reclaim-2026-09-29/`(단계별 TSV, `before.txt`, `after.txt`).
+- Ultracode 수량 면제(2026-09-29 사용자 지시 "ultracode는 수량 면제야. 편하게 사용해"):
+  - 이 세션은 Claude Code 주 세션 Opus 5.5(`claude-opus-5-5`)이며 Ultracode(xhigh + 내장 Dynamic Workflows)로 동작한다.
+  - 동시 쓰기·독립 검토·무거운 검증의 수량 제한을 적용하지 않는다(`AGENTS.md` "소유권과 자원").
+  - 실제 배정은 workflow 단위로 기록한다. 구현은 `general-purpose` agent, 독립 검토는 편집 도구가 없는 `Plan` agent이며, 둘 다 주 세션 모델을 상속한다.
+  - 호스트 자원: 32 core, 62 GB RAM. 메모리(가용 5 GB 미만)와 디스크(여유 15 GB 미만) 감시를 켠다.
+  - frontend 전용 e2e는 `prebuilt-8adaf1b8` backend 바이너리를 읽기 전용으로 공유한다.
