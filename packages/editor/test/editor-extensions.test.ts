@@ -12,47 +12,7 @@ import { Attachment } from "../src/nodes/attachment.ts";
 import { Embed } from "../src/nodes/embed.ts";
 import { MathBlock, MathInline } from "../src/nodes/math.ts";
 import { Mermaid } from "../src/nodes/mermaid.ts";
-
-type AttrDump = {
-  name: string;
-  hasDefault: boolean;
-  default: unknown;
-  validate: string | null;
-};
-type NodeDump = { name: string; attrs: AttrDump[] };
-type MarkDump = NodeDump & { rank: number; overlapping: boolean };
-type SchemaDump = { nodes: NodeDump[]; marks: MarkDump[] };
-
-type AttrSpec = { hasDefault: boolean; default: unknown; validate?: unknown };
-// NodeType/MarkType fields that prosemirror-model's .d.ts leaves out.
-type TypeInternals = { attrs: Readonly<Record<string, AttrSpec>>; rank: number };
-const internals = (type: object) => type as unknown as TypeInternals;
-
-// Same projection as scripts/document-convert/schema-dump.mjs, which writes
-// the fixture the Rust seed tables are tested against.
-function attrsOf(attrs: Readonly<Record<string, AttrSpec>>): AttrDump[] {
-  return Object.entries(attrs).map(([name, a]) => ({
-    name,
-    hasDefault: a.hasDefault,
-    default: a.default,
-    validate: a.validate ? String(a.validate) : null,
-  }));
-}
-
-function dumpSchema(schema: ReturnType<typeof getSchema>): SchemaDump {
-  return {
-    nodes: Object.entries(schema.nodes).map(([name, type]) => ({
-      name,
-      attrs: attrsOf(internals(type).attrs),
-    })),
-    marks: Object.entries(schema.marks).map(([name, type]) => ({
-      name,
-      rank: internals(type).rank,
-      overlapping: !type.excludes(type),
-      attrs: attrsOf(internals(type).attrs),
-    })),
-  };
-}
+import { dumpSchema, editorSchemaFixture } from "./schema-dump.ts";
 
 // Never called: getSchema does not build views. Distinct functions let the
 // wiring test check that each node gets its own entry. A host's real map is
@@ -81,24 +41,7 @@ function extensions() {
 }
 
 test("editor schema matches the server's yjs seed schema contract", () => {
-  const fixture = JSON.parse(
-    readFileSync(
-      new URL("../../../compat/fixtures/yjs-seed/schema.json", import.meta.url),
-      "utf8",
-    ),
-  ) as SchemaDump;
-  const mention = fixture.nodes.find((node) => node.name === "mention");
-  assert.ok(mention);
-  // The fixture is getSchema(createFvociExtensions()). The editor has always
-  // re-added Mention (with its label view) after that list, so mention is its
-  // last node. The server looks nodes up by name and ranks marks by order
-  // (crates/collab-engine/src/seed.rs); the node order is pinned here so the
-  // editor's own order only changes on purpose.
-  const expected: SchemaDump = {
-    nodes: [...fixture.nodes.filter((node) => node !== mention), mention],
-    marks: fixture.marks,
-  };
-  assert.deepEqual(dumpSchema(getSchema(extensions())), expected);
+  assert.deepEqual(dumpSchema(getSchema(extensions())), editorSchemaFixture());
 });
 
 test("host node views are applied only as addNodeView", () => {
