@@ -846,20 +846,20 @@ pub async fn commit_upload_part(
         Ok(att) => att,
         Err(err) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Ok(Err(err));
         }
     };
     if att.status != "uploading" {
         tx.rollback().await?;
-        ObjectStorage::discard_staged_part(staged).await;
+        staged.discard().await;
         return Ok(Err(AttachmentDbError::UploadState));
     }
     let meta = parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&json!({})))
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     if part_number > meta.part_count {
         tx.rollback().await?;
-        ObjectStorage::discard_staged_part(staged).await;
+        staged.discard().await;
         return Ok(Err(AttachmentDbError::InvalidInput));
     }
     let storage_key = att.storage_key.clone();
@@ -870,17 +870,17 @@ pub async fn commit_upload_part(
         Ok(part) => part,
         Err(StorageError::UploadGone) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Ok(Err(AttachmentDbError::UploadState));
         }
         Err(StorageError::PartTooLarge) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Ok(Err(AttachmentDbError::PartTooLarge));
         }
         Err(err) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
         }
     };
