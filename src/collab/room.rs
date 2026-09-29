@@ -22,7 +22,7 @@ use sqlx::postgres::PgPool;
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
-use crate::collab::admission::warn_join_db_error;
+use crate::collab::admission::{warn_join_db_error, MemoryReservation};
 use crate::collab::awareness::{decode_awareness, AwarenessRegistry};
 use crate::collab::config::CollabConfig;
 use crate::collab::derived_body::prepare_derived_body;
@@ -81,6 +81,13 @@ pub async fn arm_spawn_room_block(document_id: Uuid) -> tokio::sync::oneshot::Se
 #[cfg(feature = "db-tests")]
 pub async fn disarm_spawn_room_block(document_id: Uuid) {
     SPAWN_ROOM_BLOCKS.lock().await.remove(&document_id);
+}
+
+/// Whether a start armed with [`arm_spawn_room_block`] has reached the block
+/// (it was admitted and now waits before its bridge exists).
+#[cfg(feature = "db-tests")]
+pub async fn spawn_room_block_reached(document_id: Uuid) -> bool {
+    !SPAWN_ROOM_BLOCKS.lock().await.contains_key(&document_id)
 }
 
 #[cfg(feature = "db-tests")]
@@ -1181,6 +1188,9 @@ struct RoomActor {
     session_cancel_rx: watch::Receiver<bool>,
     /// Last-disconnect session snapshot (`captured` set after durable reload + primary capture).
     session_revision: Option<SessionRevisionState>,
+    /// Hub memory admission for this room, held until the first helper load
+    /// makes the helper's RSS visible to later admissions.
+    admission_reservation: Option<MemoryReservation>,
 }
 
 struct SessionRevisionState {
@@ -1191,14 +1201,14 @@ struct SessionRevisionState {
 }
 
 pub async fn spawn_room(
-    workspace_id: Uuid,
-    document_id: Uuid,
-    kind: CollabKind,
+    key: RoomKey,
     config: CollabConfig,
     pool: PgPool,
     room_guard: RoomGuard,
     live_conns: Arc<AtomicUsize>,
+    admission_reservation: MemoryReservation,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
+    let RoomKey(workspace_id, document_id, kind) = key;
     wait_spawn_room_block(document_id).await;
     // Starts only the bridge thread (it fails only if the OS refuses a thread);
     // the helper spawns on the actor's first reload.
@@ -1240,6 +1250,7 @@ pub async fn spawn_room(
         user_reject_budgets: HashMap::new(),
         session_cancel_rx,
         session_revision: None,
+        admission_reservation: Some(admission_reservation),
     };
     tokio::spawn(async move {
         let mut actor = actor;
@@ -3347,6 +3358,8 @@ impl RoomActor {
             Ok(()) => {
                 self.primary_loaded = true;
                 self.primary_dirty = false;
+                // The loaded helper's RSS is now in the live-child sum.
+                self.admission_reservation = None;
                 Ok(())
             }
             Err(err) => {

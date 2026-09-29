@@ -14,7 +14,7 @@ use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore}
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::collab::admission::{memory_budget_exceeded, warn_join_db_error};
+use crate::collab::admission::{warn_join_db_error, MemoryLedger};
 use crate::collab::config::CollabConfig;
 use crate::collab::guard::RoomGuard;
 use crate::collab::room::{
@@ -308,6 +308,7 @@ pub struct CollabHub {
     starts: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
     shutdown_lock: Arc<Mutex<()>>,
     abnormal_actor_completions: Arc<AtomicUsize>,
+    memory_ledger: Arc<MemoryLedger>,
     #[cfg(feature = "db-tests")]
     shutdown_drain_witness: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
@@ -331,6 +332,7 @@ impl CollabHub {
         let idle_task = tokio::spawn(async move {
             idle_eviction_loop(idle_rooms, idle_ms, stopped, idle_failures).await;
         });
+        let memory_ledger = MemoryLedger::new(config.memory_budget_bytes);
         Self {
             config,
             pool,
@@ -344,6 +346,7 @@ impl CollabHub {
             starts: Arc::new(std::sync::Mutex::new(Vec::new())),
             shutdown_lock: Arc::new(Mutex::new(())),
             abnormal_actor_completions,
+            memory_ledger,
             #[cfg(feature = "db-tests")]
             shutdown_drain_witness: Arc::new(Mutex::new(None)),
         }
@@ -1439,11 +1442,11 @@ impl CollabHub {
                     return Err(JoinError::DbError);
                 }
             };
-        if memory_budget_exceeded(self.config.memory_budget_bytes, persisted_bytes) {
+        let Some(memory_reservation) = self.memory_ledger.try_reserve(persisted_bytes) else {
             drop(pooled);
             self.fail_starting(key, &slot).await;
             return Err(JoinError::CapacityRetry);
-        }
+        };
         let guard = match RoomGuard::try_lock_pooled(pooled, key.1).await {
             Ok(Some(guard)) => guard,
             Ok(None) => {
@@ -1462,16 +1465,14 @@ impl CollabHub {
             return Err(JoinError::EngineUnavailable);
         }
 
-        let RoomKey(workspace_id, document_id, kind) = key;
         let live_conns = Arc::new(AtomicUsize::new(0));
         let spawn = crate::collab::room::spawn_room(
-            workspace_id,
-            document_id,
-            kind,
+            key,
             self.config.clone(),
             self.pool.clone(),
             guard,
             live_conns.clone(),
+            memory_reservation,
         )
         .await;
 
