@@ -42,24 +42,14 @@ pub fn prepare_gantt(input: PrepareInput) -> GanttLayoutOutput {
         PackMode::Rows => stack_rows(&scheduled, &scale),
     };
     let bar_ids: std::collections::HashSet<Uuid> = bars.iter().map(|b| b.id).collect();
-    let drawable: Vec<GanttLinkInput> = input
-        .links
-        .iter()
-        .filter(|l| bar_ids.contains(&l.blocker_id) && bar_ids.contains(&l.blocked_id))
-        .cloned()
-        .collect();
-    let shown: Vec<GanttLinkInput> = if drawable.len() <= MAX_DISPLAY_PATHS {
-        drawable.clone()
-    } else {
-        let mut sorted = drawable.clone();
-        sorted.sort_by(|a, b| {
-            a.blocker_id
-                .cmp(&b.blocker_id)
-                .then(a.blocked_id.cmp(&b.blocked_id))
-        });
-        sorted.truncate(MAX_DISPLAY_PATHS);
-        sorted
-    };
+    let (shown, path_total) = cap_links(
+        input
+            .links
+            .iter()
+            .filter(|l| bar_ids.contains(&l.blocker_id) && bar_ids.contains(&l.blocked_id))
+            .cloned()
+            .collect(),
+    );
     let path_points = link_paths(&shown, &bars, input.lane_height, scale.px_per_day);
     let item_index: HashMap<Uuid, usize> = scheduled
         .iter()
@@ -118,7 +108,7 @@ pub fn prepare_gantt(input: PrepareInput) -> GanttLayoutOutput {
         lane_count,
         pack: input.pack.as_str().to_string(),
         bars: bars_sorted,
-        path_total: drawable.len() as i32,
+        path_total: path_total as i32,
         paths,
         columns,
         month_bands,
@@ -127,6 +117,23 @@ pub fn prepare_gantt(input: PrepareInput) -> GanttLayoutOutput {
         overflow: overflow.iter().map(|id| id.to_string()).collect(),
         dropped: dropped.iter().map(|id| id.to_string()).collect(),
     }
+}
+
+/// At most [`MAX_DISPLAY_PATHS`] of `links`, plus how many there were. 500
+/// tasks can carry far more dependency rows than a response should hold. Under
+/// the cap the order is kept; over it the lowest `(blocker, blocked)` pairs are
+/// kept, so the subset does not depend on the row order of the query.
+fn cap_links(mut links: Vec<GanttLinkInput>) -> (Vec<GanttLinkInput>, usize) {
+    let total = links.len();
+    if total > MAX_DISPLAY_PATHS {
+        links.sort_by(|a, b| {
+            a.blocker_id
+                .cmp(&b.blocker_id)
+                .then(a.blocked_id.cmp(&b.blocked_id))
+        });
+        links.truncate(MAX_DISPLAY_PATHS);
+    }
+    (links, total)
 }
 
 fn merge_items(
