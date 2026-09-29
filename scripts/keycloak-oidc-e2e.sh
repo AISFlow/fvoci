@@ -101,7 +101,7 @@ if [[ "$BUILT" != *"(${SOURCE_SHA})"* ]]; then
   echo "target/release/fvoci-server is not the build of HEAD ${SOURCE_SHA} (${BUILT}); run without --skip-build" >&2
   exit 1
 fi
-if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]]; then
   echo "warning: uncommitted changes; the binaries report ${SOURCE_SHA} and --skip-build reuses apps/web/dist as is" >&2
 fi
 
@@ -307,7 +307,7 @@ browsers = json.load(open("$ROOT/apps/web/node_modules/playwright-core/browsers.
 shell = next(b for b in browsers["browsers"] if b["name"] == "chromium-headless-shell")
 info = {
     "sourceSha": "$SOURCE_SHA",
-    "sourceTreeClean": run("git", "-C", "$ROOT", "status", "--porcelain") == "",
+    "sourceTreeClean": run("git", "-C", "$ROOT", "status", "--porcelain", "--untracked-files=no") == "",
     "fvociServer": run("$CARGO_TARGET_DIR/release/fvoci-server", "--version"),
     "fvociServerBinary": "$CARGO_TARGET_DIR/release/fvoci-server (cargo build --release from source)",
     "rustc": run("rustc", "-V"),
