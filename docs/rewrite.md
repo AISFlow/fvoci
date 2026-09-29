@@ -758,9 +758,9 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 | ID | 사용자 흐름·라우트 | 단계 | 브랜치/HEAD·PR | 검증 근거 | 남은 작업·선행 | 담당 | 차단 | 배포 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | FE-Gantt | `/w/:slug/:ref/gantt` | main 수락 완료 | main `d265b426` #255 | e2e `project-gantt-flow`·웹 단위·CI 39/1 skip | DST/`dueAt`·overlap rail은 §5 한계. pixel layout 필드 제거는 #253 contract | 수락됨 | 없음 | v0.3.0 |
-| FE-Wiki-collab | `/w/:slug/WIKI-<n>` 열기·편집·저장·재접속 | 독립 검토·CI 중 | `fvoci/r6-vue-wiki` 제품 `8adaf1b8`, head `350ae5e6` #262 | 제품 SHA 검토 ACCEPT_WITH_NITS. #264를 merge한 새 head에서 `web-checks` 재실행 중 | `web-checks` green 후 main 수락. React 위키 문서는 이 브랜치에서 제거됨 | Grok 임시 실행자 | CI 재실행 | 미포함. 0.4.0 전 #261 필수 |
+| FE-Wiki-collab | `/w/:slug/WIKI-<n>` 열기·편집·저장·재접속 | 독립 검토·CI 중 | `fvoci/r6-vue-wiki` 제품 `8adaf1b8`, typefix `73bf4a22` #262 | #264 merge 후 Vue `useCollabRoom`이 `retire` 없는 소켓 타입이라 install-smoke 웹 빌드 실패 → `RefusalAwareSocket`로 맞춤. 제품 검토는 `8adaf1b8` | 새 head CI. `web-checks`+install-smoke | Grok 임시 실행자 | CI | 미포함. 0.4.0 전 #261 필수 |
 | FE-Wiki-editor | 위키 거터·표 손잡이·코드 크롬·버블·모바일 툴바 | 독립 검토·CI 중 | #265 제품 `6eb0380d`, 스택 merge `4b927f98` | 제품 SHA 검토 ACCEPT_WITH_NITS×2. 로컬 e2e controls 6/6. 백엔드 무변경 vs `8adaf1b8` | drop/paste e2e는 #261 잔여. 6/6 ≠ 전체 편집기. #262 머지 선행. merge SHA는 #264 재기반뿐 | 검토는 `6eb0380d` | #262 | 미포함 |
-| FE-Wiki-shell | Vue 셸: 로그아웃·벨·검색·푸터·전환 | 독립 검토·CI 중 | #267 제품 `ea8bd1c9`, 스택 merge `460e1813` | e2e `vue-shell-flow.spec.ts`. 제품 검토 진행 | app-boundary 불변. #262 머지 선행 | 검토 Grok | #262 | 미포함 |
+| FE-Wiki-shell | Vue 셸: 로그아웃·벨·검색·푸터·전환 | 독립 검토·CI 중 | #267 제품 `ea8bd1c9` | 제품 SHA **ACCEPT**. app-boundary 불변. e2e `vue-shell-flow` 미재실행(검토자) | #262 머지 선행. 스택에 typefix `73bf4a22` 반영 | 수락 대기(#262) | #262 | 미포함 |
 | FE-IME | 한글 첫 자모 (#258), React·Vue 공통 편집기 | 독립 검토·CI 중 | #268 제품 `d5093efd` | UniqueID composition skip. editor unit 26/26. CDP 7 (워커). OS IME 미실행(이 세션) | 검토+CI 후 main. #259/#260 아님 | 검토 Grok | 없음 | 출시 차단(#258) |
 | FE-Math-draft | 인라인 수식 원격 변경 시 초안 (#259) | 미착수 | issue #259 | #262에 관련 고정 테스트·이슈 주석 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
 | FE-Undo-IME | 조합 중 undo 단위 (#260) | 미착수 | issue #260 | 없음 | #261 A·#258 수락 뒤 | Grok 임시 실행자 | FE-Wiki-editor, FE-IME | 출시 차단 |
@@ -802,7 +802,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 3. **#267** 제품 `ea8bd1c9` — 검토+CI 후 #262 위에 머지. 검사: `vue-shell-flow.spec.ts`.
 4. **#268** `d5093efd` — 검토+CI 후 main (위키 스택과 독립).
 5. **#266** — CI 남은 job 후 머지(기능 전환과 별개).
-6. **`/login` 연결** — r11-vue-auth WIP (boundary 작업 중). 검사: login Vue spec + `mfa-flow`.
+6. **#269** 제품 `dcf3ca77` — `/login` Vue boot. 검토+CI. **`mfa-flow.spec.ts`는 구현자가 안 돌림** → CI 또는 수락 전 그룹 실행. 인증 기능군 전체 완료 아님.
 7. 그다음 연결(서로 다른 URL, boundary는 실행자가 순차 통합): workspace home/projects, viewers, project-views, account-admin.
 8. 협업 엔진 비교는 **#262 main 수락 뒤** 고정 SHA에서 시작(순서 유지). 지금 예광탄을 늘려 비교를 미루지 않는다.
 
