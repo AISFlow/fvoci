@@ -43,7 +43,7 @@ exact rev here only if compile requires the patch.
 | --- | --- |
 | Input | 20 MiB |
 | Output chars | 500_000 |
-| Child timeout | 120 s default (tests use 8 s / 500 ms) |
+| Child timeout | 120 s default (tests use 8 s / 500 ms), counted from slot admission; the slot wait before it has the same bound, so one call takes at most twice the timeout |
 | Child parent-death | Linux `PR_SET_PDEATHSIG(SIGKILL)` in `pre_exec`, with `getppid` vs expected-parent race check. The kernel delivers this when the **spawning thread** dies (stricter than whole-process death). `extract_killable` keeps that thread in its wait loop until return. Sudden parent SIGKILL therefore **terminates** a sleeping helper; the dead parent cannot reap it. |
 | Child address space | Linux `RLIMIT_AS` via `pre_exec` + child `setrlimit`, same number as the RSS ceiling (default 1536 MiB). This is virtual size, not RSS. |
 | Child CPU | Linux `RLIMIT_CPU` = `timeout_ms/1000` (min 1s) as backup to wall-clock kill |

@@ -525,6 +525,81 @@ fn cancel_while_waiting_slot_then_next_extract_works() {
     }
 }
 
+/// A request that waited for the single child slot still gives its child the
+/// full `timeout_ms`: the watchdog window starts at slot admission.
+#[cfg(feature = "test-hang")]
+#[test]
+fn slot_wait_does_not_shorten_the_child_watchdog() {
+    use document_extract::process::{is_slot_waiter, take_last_spawn};
+    let _g = SPAWN_TEST.lock().expect("spawn test lock");
+    let _ = take_last_spawn();
+    let extractor = bin();
+    let preexisting = extractor_children(&extractor);
+
+    // The holder keeps the only slot for about 2 s, then extracts normally.
+    let holder_req = ExtractRequest {
+        bytes: hwp5_known_body(),
+        name: "hold.hwp".into(),
+        limits: Limits::for_tests(),
+        extractor_bin: extractor.clone(),
+        test_hang_ms: Some(2_000),
+    };
+    let (holder_tx, holder_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = holder_tx.send(extract_killable(holder_req));
+    });
+    wait_owned_helper(
+        &extractor,
+        &preexisting,
+        Instant::now() + Duration::from_secs(5),
+    );
+
+    // The waiter's child needs 1.5 s of its 3 s window. Counted from the call
+    // instead of admission, the ~2 s slot wait would leave it about 1 s.
+    let mut limits = Limits::for_tests();
+    limits.timeout_ms = 3_000;
+    let waiter_req = ExtractRequest {
+        bytes: hwp5_known_body(),
+        name: "품의서.hwp".into(),
+        limits,
+        extractor_bin: extractor.clone(),
+        test_hang_ms: Some(1_500),
+    };
+    let waiter_cancel = Arc::new(AtomicBool::new(false));
+    let waiter_flag = Arc::clone(&waiter_cancel);
+    let (waiter_tx, waiter_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = waiter_tx.send(extract_killable_with_cancel(
+            waiter_req,
+            waiter_flag.as_ref(),
+        ));
+    });
+    wait_until(
+        Instant::now() + Duration::from_secs(1),
+        || is_slot_waiter(waiter_cancel.as_ref()),
+        "waiter in slot wait while the holder runs",
+    );
+
+    let holder = recv_bounded(holder_rx, Duration::from_secs(10), "holder report");
+    assert!(
+        matches!(holder.outcome, ExtractStatus::Ok { .. }),
+        "{:?}",
+        holder.outcome
+    );
+    let waiter = match recv_bounded(waiter_rx, Duration::from_secs(10), "waiter report") {
+        Ok(report) => report,
+        Err(cancelled) => panic!("nothing cancelled the waiter: {cancelled:?}"),
+    };
+    assert!(
+        matches!(waiter.outcome, ExtractStatus::Ok { .. }),
+        "{:?}",
+        waiter.outcome
+    );
+    for pid in [holder.child_pid, waiter.child_pid].into_iter().flatten() {
+        assert_fully_reaped(pid);
+    }
+}
+
 #[cfg(feature = "test-hang")]
 #[test]
 fn cancel_running_hanging_helper_reaps_and_joins() {

@@ -181,9 +181,11 @@ fn cancelled(flag: &AtomicBool) -> bool {
     flag.load(Ordering::Acquire)
 }
 
-/// Run extraction in a killable child. This call is **synchronous**: the
-/// deadline is `limits.timeout_ms` from admission. There is no external
-/// cancel token; use [`extract_killable_with_cancel`] for an `AtomicBool`.
+/// Run extraction in a killable child. This call is **synchronous**. The wait
+/// for the single child slot is bounded by `limits.timeout_ms` from the call,
+/// and the child's watchdog gets `limits.timeout_ms` from slot admission, so
+/// one call takes at most twice `timeout_ms`. There is no external cancel
+/// token; use [`extract_killable_with_cancel`] for an `AtomicBool`.
 /// Dropping a `JoinHandle` that wraps this function does **not** terminate
 /// the child; only the watchdog kill+reap path or Linux parent-death SIGKILL
 /// does. `PR_SET_PDEATHSIG` is delivered when the **spawning thread** dies,
@@ -246,8 +248,8 @@ pub fn extract_killable_with_cancel(
         if cancelled(cancel) {
             return Err(Cancelled { child_pid: None });
         }
-        let deadline = Instant::now() + Duration::from_millis(req.limits.timeout_ms);
-        let _slot = match SlotGuard::acquire(deadline, cancel) {
+        let timeout = Duration::from_millis(req.limits.timeout_ms);
+        let _slot = match SlotGuard::acquire(Instant::now() + timeout, cancel) {
             SlotWait::Ready(slot) => slot,
             SlotWait::Cancelled => return Err(Cancelled { child_pid: None }),
             SlotWait::Failed(report) => return Ok(report),
@@ -255,7 +257,9 @@ pub fn extract_killable_with_cancel(
         if cancelled(cancel) {
             return Err(Cancelled { child_pid: None });
         }
-        spawn_child(req, deadline, cancel)
+        // A fresh window from admission: time spent queued behind another
+        // extraction must not turn into a `Time` limit for this document.
+        spawn_child(req, Instant::now() + timeout, cancel)
     }
 }
 
