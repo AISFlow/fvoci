@@ -40,7 +40,8 @@ pub fn normalize_public_origin(origin: &str) -> Result<String, String> {
 /// treated as absent. A present value must equal `public_origin` once both
 /// are normalized (scheme, host, non-default port); `null` or an unparsable
 /// value is a mismatch. The session cookie's `SameSite=Lax` is the second
-/// layer. A route with no session cookie to lean on uses [`require_origin`].
+/// layer. The OIDC POST starts (invite, link), which bind a provider
+/// identity, use [`require_origin`].
 ///
 /// # Errors
 ///
@@ -66,7 +67,8 @@ pub fn check_origin(headers: &HeaderMap, public_origin: &str) -> Result<(), AppE
 
 /// [`check_origin`], except that an absent or unreadable `Origin` is also
 /// `origin_mismatch`. For the POST starts of OIDC invite and link, which end
-/// by binding a provider identity to an account and replacing the session.
+/// by binding a provider identity to an account (invite also replaces the
+/// session).
 /// Browsers send `Origin` on every POST (the SPA's `fetch` included), so only
 /// a client that strips it, such as some privacy extensions, lacks one;
 /// passing it would let such a cross-site post start the flow. Invite has no
