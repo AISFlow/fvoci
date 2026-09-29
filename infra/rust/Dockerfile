@@ -86,12 +86,14 @@ ENV FVOCI_EXPORT_FONT_DIR=/opt/fvoci/share/fonts \
     FVOCI_STORAGE_DIR=/data/storage \
     FVOCI_BIND=0.0.0.0:8080
 # The image runs as fvoci (uid 1000) by default. The Compose install
-# (compose.user.yml) starts it as root instead so the entrypoint can read the
-# root-only secret files; it then runs the server as this uid/gid.
+# (compose.user.yml) starts it as root instead, so the preparation owns the
+# search key directory and docker exec / healthcheck processes (which start
+# with the passwords from the container configuration) are root's; it then
+# runs the server as this uid/gid.
 USER fvoci
 EXPOSE 8080
 # `fvoci-migrate --start` execs fvoci-server (same pid, arguments passed on).
-# Given the database owner password (the Compose install: POSTGRES_PASSWORD_FILE)
+# Given the database owner password (the Compose install: POSTGRES_PASSWORD)
 # it first validates the settings, waits for PostgreSQL and Meilisearch, creates
 # the app role, migrates, grants and writes the scoped search key; the server
 # starts without the owner password or master key and, if this ran as root, as
