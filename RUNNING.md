@@ -636,6 +636,13 @@ repository root for the locked `bun.lock`, and `--bun` so package binaries run
 on Bun even where Node is installed. `bunfig.toml` keeps the hoisted linker (one
 root `node_modules`), which the type paths and scripts rely on.
 
+A checkout last installed with npm (before the Bun switch) still has npm's
+`node_modules` in `apps/web`, `packages/editor` and `scripts/document-convert`.
+Delete those three before the first `bun ci`: npm's `install-links` copied
+`@fvoci/editor` and `@fvoci/i18n` into `apps/web/node_modules`, and imports
+from `apps/web` would resolve to those stale copies instead of the workspace
+packages.
+
 Development (Vite proxy to a running `fvoci-server` API):
 
 ```sh
@@ -1533,16 +1540,21 @@ Local check against a real Keycloak (opt-in, not in CI): the official image
 in `start-dev` with one imported test realm (`scripts/keycloak/`), published on
 `127.0.0.1` only, as the instance `generic` provider of the release server built
 from the checkout, driven by Playwright Chromium through the web UI
-(`apps/web/e2e-keycloak/`). Secrets are generated per run; the Keycloak compose
-project is removed on exit. It does not cover external providers, HTTPS or a
+(`apps/web/e2e-keycloak/`; its pages, sign-in included, are React pages, since
+the Vue app only renders the paths in `src/app-boundary.ts`). Secrets are
+generated per run; the Keycloak compose project is removed on exit. It does not cover external providers, HTTPS or a
 reverse proxy, or the container deployment path. Workspace SSO needs a
 `workspaceSso` license, which published builds cannot load; `--workspace-sso`
 adds two workspace realms and runs the ignored Rust test
 `keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
 license, not the release server) against them.
 
-Needs docker with compose, openssl, python3, git, cargo, node/npm, setsid
-(util-linux) and access to quay.io for the first image pull. The script exits non-zero when a group
+Needs docker with compose, openssl, python3, git, cargo, bun, setsid
+(util-linux), the web dependencies and Chromium from
+`scripts/prepare-web-e2e.sh` (`bun ci`), and access to quay.io for the first
+image pull. As in the web e2e harness, the web build (`bun --bun run build`)
+and Playwright (`bun --bun x --no-install playwright test`) run under Bun;
+node and npm are not used. The script exits non-zero when a group
 fails or when its compose project `fvoci-kc-e2e-<run id>` could not be removed
 completely; the last command below removes a leftover one (the two variables
 only satisfy the compose file). A failing group's
