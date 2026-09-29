@@ -426,6 +426,69 @@ pub(crate) async fn project_permission_by_id(
     )))
 }
 
+/// Read check for rows owned by a project (labels, milestones): a live
+/// credential ([`session_is_live`]), a live workspace and at least View on the
+/// live project. Takes no row lock; callers run it in a [`begin_read`]
+/// transaction so the check and the rows they return share one snapshot.
+/// `Forbidden` for a dead credential, `NotFound` for everything else.
+/// (Unrelated to the private `project_views::require_project_view`.)
+pub(crate) async fn require_project_view(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    project_id: Uuid,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if !session_is_live(tx, actor_user_id, session_id).await? {
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !workspace_is_live(tx, workspace_id).await? {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let Some(locked) = load_live_project(tx, workspace_id, project_id).await? else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+    if !permission.at_least(ProjectPermission::View) {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    Ok(Ok(()))
+}
+
+/// Write check for rows owned by a project (labels, milestones): the actor's
+/// membership advisory lock, [`recheck_session`] under row locks, a live
+/// workspace, then the project row under [`lock_project`], so a revocation,
+/// archive or visibility change cannot commit between this check and the
+/// caller's write. `Forbidden` for a dead credential, `Archived` for an
+/// archived project, `NotFound` for a gone workspace or project or less than
+/// Edit.
+pub(crate) async fn require_project_edit(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    project_id: Uuid,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    lock_membership_users(tx, &[actor_user_id]).await?;
+    if !recheck_session(tx, actor_user_id, session_id).await? {
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !workspace_is_live(tx, workspace_id).await? {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let Some(locked) = lock_project(tx, workspace_id, project_id).await? else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    if locked.status == "archived" {
+        return Ok(Err(ProjectDbError::Archived));
+    }
+    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+    if !permission.at_least(ProjectPermission::Edit) {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    Ok(Ok(()))
+}
+
 /// Effective permission on a live project under a `FOR SHARE` row lock, plus
 /// whether the project is archived. Collab writers on sibling documents share
 /// the lock; project mutations that take `FOR NO KEY UPDATE` (visibility,
