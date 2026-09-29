@@ -1246,6 +1246,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Publishes the upload after re-checking the session and permissions (again right before the row is marked stored). For a `presigned` session storage must first list exactly parts 1..N, each of its exact length, with the submitted ETags; otherwise nothing is published and the session stays open. */
         post: operations["complete_attachment_upload"];
         delete?: never;
         options?: never;
@@ -1341,6 +1342,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Re-checks the session, workspace, edit permission, uploader and writable parent, lists the parts storage holds, and returns targets for the rest in the session's own transfer mode. For a `presigned` session every call signs fresh part URLs (the re-issue path after expiry). */
         get: operations["resume_attachment_upload"];
         put?: never;
         post?: never;
@@ -3785,6 +3787,24 @@ export interface components {
             /** Format: uuid */
             userId: string;
         };
+        /**
+         * @description The attachment transfer mode this process applies, next to the configured
+         *     `values.attachmentTransfer.mode`.
+         */
+        AdminAttachmentTransferOutput: {
+            /** @description A stored `presigned` that cannot apply here, so `proxy` is in effect. */
+            blocked: boolean;
+            /**
+             * @description Mode for new upload sessions and original downloads of browser
+             *     sessions; API-token requests always use `proxy`.
+             */
+            effective: components["schemas"]["TransferMode"];
+            /** @description Whether this server's storage can serve `presigned`. */
+            presignedAvailable: boolean;
+            /** @description Where the configured mode comes from; `env` cannot be changed here. */
+            source: components["schemas"]["TransferSource"];
+            unavailableReason: components["schemas"]["TransferUnavailable"] | null;
+        };
         /** @description Source `adminEraseInput` (strict object). */
         AdminEraseBody: {
             /** Format: uuid */
@@ -3801,6 +3821,7 @@ export interface components {
             ok: boolean;
         };
         AdminInstanceSettingsOutput: {
+            attachmentTransfer: components["schemas"]["AdminAttachmentTransferOutput"];
             eeFeatures: string[];
             envApplied: string[];
             overridden: string[];
@@ -3954,6 +3975,12 @@ export interface components {
         AttachmentPartUrlResponse: {
             /** Format: int32 */
             partNumber: number;
+            /**
+             * @description `proxy`: the same-origin API path (PUT with the session). `presigned`:
+             *     an absolute signed storage URL for one PUT of exactly this part's
+             *     bytes, sent without cookies, `Authorization` or `Content-Type`; it
+             *     stops working at `partUrlsExpireAt`.
+             */
             url: string;
         };
         AttachmentPreviewHtmlOutput: {
@@ -3967,6 +3994,15 @@ export interface components {
         };
         AttachmentPreviewSettings: {
             mode: string;
+        };
+        /**
+         * @description How attachment part uploads and original downloads travel: `proxy` through
+         *     the API, `presigned` directly between the browser and S3. The stored value
+         *     is what the admin chose; the admin output's `attachmentTransfer` reports
+         *     whether this server's storage lets it apply.
+         */
+        AttachmentTransferSettings: {
+            mode: components["schemas"]["TransferMode"];
         };
         AttachmentUploadedPartResponse: {
             etag: string;
@@ -4324,7 +4360,19 @@ export interface components {
             attachmentId: string;
             /** Format: int64 */
             partSizeBytes: number;
+            /**
+             * Format: date-time
+             * @description When the presigned part URLs expire (resume re-issues them); null for
+             *     `proxy`.
+             */
+            partUrlsExpireAt: string | null;
             parts: components["schemas"]["AttachmentPartUrlResponse"][];
+            /**
+             * @description Transfer mode of this upload session, fixed for its whole life:
+             *     the mode in effect now for a browser session, always `proxy` for an
+             *     API-token request.
+             */
+            transfer: components["schemas"]["TransferMode"];
         };
         CreateCommentBody: {
             body: string;
@@ -4747,6 +4795,7 @@ export interface components {
          */
         InstanceSettingsPatchInput: {
             attachmentPreview?: components["schemas"]["AttachmentPreviewSettings"] | null;
+            attachmentTransfer?: components["schemas"]["AttachmentTransferSettings"] | null;
             auth?: components["schemas"]["AuthSettings"] | null;
             branding?: components["schemas"]["BrandingPatchInput"] | null;
             "defaults.user"?: components["schemas"]["DefaultsUserSettings"] | null;
@@ -5299,7 +5348,14 @@ export interface components {
             attachmentId: string;
             /** Format: int64 */
             partSizeBytes: number;
+            /**
+             * Format: date-time
+             * @description When the freshly issued presigned part URLs expire; null for `proxy`.
+             */
+            partUrlsExpireAt: string | null;
             parts: components["schemas"]["AttachmentPartUrlResponse"][];
+            /** @description The session's own transfer mode (not the current setting). */
+            transfer: components["schemas"]["TransferMode"];
             uploadedParts: components["schemas"]["AttachmentUploadedPartResponse"][];
         };
         RevisionCreateResponse: {
@@ -5398,6 +5454,7 @@ export interface components {
         /** @description The effective value of every key (serialized as the admin `values`). */
         SettingsValues: {
             attachmentPreview: components["schemas"]["AttachmentPreviewSettings"];
+            attachmentTransfer: components["schemas"]["AttachmentTransferSettings"];
             auth: components["schemas"]["AuthSettings"];
             branding: components["schemas"]["BrandingSettings"];
             "defaults.user": components["schemas"]["DefaultsUserSettings"];
@@ -5718,6 +5775,19 @@ export interface components {
         TokenBody: {
             token: string;
         };
+        /** @enum {string} */
+        TransferMode: "proxy" | "presigned";
+        /**
+         * @description Where the configured attachment transfer mode comes from.
+         * @enum {string}
+         */
+        TransferSource: "env" | "stored" | "default";
+        /**
+         * @description Why this process cannot hand out presigned URLs. Fixed for the life of the
+         *     process: it follows `STORAGE_DRIVER` and `S3_PUBLIC_ENDPOINT`.
+         * @enum {string}
+         */
+        TransferUnavailable: "storage_local" | "public_endpoint_missing";
         TrashItemResponse: {
             /** Format: date-time */
             deletedAt: string;
@@ -6233,7 +6303,7 @@ export interface operations {
                     "application/json": components["schemas"]["AdminInstanceSettingsOutput"];
                 };
             };
-            /** @description Invalid input */
+            /** @description Invalid input, or `attachment_transfer_unavailable`: `attachmentTransfer.mode` = `presigned` on a server whose storage cannot presign (local driver, or S3 without `S3_PUBLIC_ENDPOINT`) */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -10455,7 +10525,7 @@ export interface operations {
                     "application/json": components["schemas"]["AttachmentOutput"];
                 };
             };
-            /** @description Invalid parts */
+            /** @description Invalid parts (`submitted_parts_do_not_match_uploaded_parts` when storage holds other parts than submitted) */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -10536,6 +10606,15 @@ export interface operations {
                 content: {
                     "application/octet-stream": unknown;
                 };
+            };
+            /** @description Presigned transfer mode, browser sessions and the original only (API-token requests always get the bytes here): `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here. */
+            302: {
+                headers: {
+                    /** @description Signed storage URL */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Preview not modified (If-None-Match) */
             304: {
@@ -10805,7 +10884,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description Upload is not in the required state */
+            /** @description Upload is not in the required state, or a `presigned` session (its parts go to the signed storage URLs only) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -10945,8 +11024,17 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description Upload is not in the required state */
+            /** @description Upload is not in the required state, or `attachment_transfer_unavailable`: a `presigned` session on a server that can no longer presign (it is never moved to the proxy path) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Presigned URL re-issue rate limited */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14151,7 +14239,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Upload session created */
+            /** @description Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -17922,7 +18010,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Upload session created */
+            /** @description Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -21114,7 +21202,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Upload session created */
+            /** @description Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request */
             201: {
                 headers: {
                     [name: string]: unknown;

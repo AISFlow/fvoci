@@ -33,7 +33,10 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `S3_BUCKET` | Bucket name. Required when `STORAGE_DRIVER=s3`. The server probes with HeadBucket at startup and does not create the bucket. |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | Credentials. Required when `STORAGE_DRIVER=s3`. Never logged. |
 | `S3_FORCE_PATH_STYLE` | Path-style URLs unless set to `0` (default matches the source: on). |
-| `S3_PUBLIC_ENDPOINT` | Optional; validated (HTTP(S), no credentials/query/fragment) but **currently unused**. Only the proxied mode is implemented: parts and downloads go through the API, so no bucket CORS or public S3 endpoint is needed. **Not done** (source parity, tracked separately): presigned direct part PUT, 302 presigned download signed against `S3_PUBLIC_ENDPOINT`, the matching CSP `connect-src` and bucket CORS. |
+| `S3_PUBLIC_ENDPOINT` | Optional browser-facing origin of the same bucket; enables the `presigned` attachment transfer mode (see "Attachment transfer modes"). HTTP(S), no credentials/query/fragment; it must be https when `FVOCI_PUBLIC_ORIGIN` is https and must not use the host of `FVOCI_PUBLIC_ORIGIN` (any port), or startup is refused. When set, its origin is added to the page CSP `connect-src` and `img-src`. The server never sends its own requests there. |
+| `FVOCI_ATTACHMENT_TRANSFER_MODE` | Optional `proxy` or `presigned` (exact, lower case; empty = unset). Wins over the admin setting `attachmentTransfer.mode`, which the admin page then shows as fixed. `presigned` requires `STORAGE_DRIVER=s3` and `S3_PUBLIC_ENDPOINT`; any other value, or `presigned` without them, refuses startup. |
+| `FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS` | Lifetime of presigned part PUT URLs, 5–3600 s (default 900). An issued URL works until it expires; resume issues fresh ones. |
+| `FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS` | Lifetime of the presigned download URL behind a `302`, 5–300 s (default 60). |
 | `UPLOAD_INCOMPLETE_TTL_HOURS` | Abandoned `uploading`/`assembling` rows older than this are removed by the maintenance scheduler's upload-cleanup job: every open multipart upload for the key is aborted, any object deleted, then the row removed (default 24). A row whose storage cleanup fails is kept for the next run. Must be a positive integer. |
 | `FVOCI_UPLOAD_GC_INTERVAL_SECS` | Cadence of that upload-cleanup job (default 600). Each run takes its own cluster-wide advisory claim, examines at most 200 rows, and stops early on shutdown; leftovers wait for the next run. Runs walk the stale rows in global `(created_at, id)` order, each resuming after the previous batch and wrapping at the end, so rows that are skipped or fail every time cannot starve the rest. |
 | `FVOCI_UPLOAD_MAX_CONCURRENT_PARTS` | Part PUTs in flight per server process (default 64, positive). Each holds an inbound connection and, with S3, an outbound one while the client streams its body. When no slot is free, a part PUT is refused before its body is read with `503` problem `upload_capacity_exceeded` and `Retry-After: 2`; the web client waits out `Retry-After` (up to 2 minutes per part) without using its transport retries. On every driver a part body must arrive within 95 s plus its length at 64 KiB/s (35 s more than the S3 driver's own deadline), or its slot is released: with the local driver the PUT fails with `400`; with S3 the driver's own deadline fires first and the PUT fails with a logged `500`, which the web client retries. |
@@ -187,6 +190,135 @@ The app pool is closed explicitly on shutdown and before exiting on startup gate
 
 Rate limits use the direct socket peer. Forwarded headers are ignored; behind a reverse proxy, clients share the proxy's IP bucket. Trusted-proxy configuration and distributed limits are not implemented yet.
 
+## Attachment transfer modes
+
+Two ways for attachment bytes to travel; exactly one is in effect at a time:
+
+- `proxy` (default): part uploads and original downloads go through the API,
+  which authorizes every request and streams to or from storage. Works with
+  every storage driver and needs no bucket CORS or public endpoint.
+- `presigned`: after the same authorization the API signs short-lived S3 URLs.
+  The browser PUTs each part straight to the bucket and follows a `302` from
+  `GET .../download` to a signed GET of the original. Only `STORAGE_DRIVER=s3`
+  with `S3_PUBLIC_ENDPOINT` can do this.
+
+`HEAD .../download`, an unsatisfiable `Range` (`416`), `variant=preview`, the
+preview route, share-link downloads, `--verify-storage` and restore always stay
+on the API. So do upload sessions created and original downloads requested
+with an API token: token clients keep the API part paths and streamed
+downloads whatever the mode. (A token that resumes a session a browser
+created still gets that session's own mode.)
+
+Choosing the mode: `FVOCI_ATTACHMENT_TRANSFER_MODE` wins over the admin
+setting `attachmentTransfer.mode` (Instance settings → 첨부 전송 방식), which
+wins over the `proxy` default. An admin change is recorded in the audit log
+(key path only) and reaches every server process on its next request; Reset
+deletes the stored value. Saving `presigned` on a server whose storage cannot
+presign is refused (`400 attachment_transfer_unavailable`). A stored
+`presigned` that can no longer apply (the driver changed to local, or
+`S3_PUBLIC_ENDPOINT` was removed) falls back to `proxy`: startup logs
+`attachment.transfer_mode_unavailable` and the admin page says why.
+
+Each upload session keeps the mode it was created with. A switch affects new
+sessions and new downloads only; a presigned session refuses API part PUTs
+(`409`), and a presigned session on a server that can no longer presign
+cannot be resumed (`409 attachment_transfer_unavailable`): it is never moved to
+the proxy path. The browser never retries a failed presigned transfer through
+the API, and never sends FVOCI cookies, `Authorization` or `Content-Type` to
+the bucket. Rolling back to a server version without this feature is not
+supported while presigned sessions are open: an older binary does not know the
+binding.
+
+What the server still checks in `presigned` mode: create, resume (the re-issue
+path for expired URLs) and complete re-check the session, workspace, edit
+permission, uploader and writable parent, and complete checks them again right
+before the attachment is marked stored. Before `CompleteMultipartUpload`, the
+bucket must list exactly parts 1..N, each of its exact length, with the
+submitted ETags; otherwise nothing is published and the session stays open.
+Each part URL signs the part's exact `content-length`, and the final object
+size must equal the declared size. Every download request is authorized
+before a URL is signed.
+
+What cannot be revoked: an issued part URL works until it expires
+(`FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS`, default 15 minutes); its holder can
+stage bytes into that upload but cannot publish them. An issued download URL
+works until it expires (`FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS`, default
+60 s), even after the session or permission is revoked, the mode is switched
+back, or the attachment is deleted (until the object is reclaimed). The
+emergency lever is rotating the S3 access key, which invalidates every
+outstanding URL at once. Keep the server clock NTP-synchronized: URLs are
+signed with the server's time. Signed URLs appear only in the create/resume
+response bodies and the `302` `Location`; the server does not log them, and
+audit and event payloads never contain them. Browser traces or HAR files of
+presigned transfers contain them; treat those as secrets.
+
+Setting up `presigned`:
+
+1. Serve the bucket to browsers under its own host, for example
+   `https://files.example.com`, and set `S3_PUBLIC_ENDPOINT` to it. It must
+   reach the same S3 service with the `Host` header and path unchanged (a
+   reverse proxy must not rewrite either, or signatures fail). Do not let a CDN
+   cache signed URLs. The host must differ from the app's: cookies are scoped
+   by host, not port, and the storage origin cannot send the app's
+   `nosniff`/sandbox headers (downloads are forced to
+   `Content-Disposition: attachment` and `application/octet-stream` instead).
+2. Give the bucket this CORS configuration (AWS JSON form). No CORS request to
+   the bucket carries credentials: part PUTs use credentials mode `omit`, and
+   the in-app viewers fetch the download with `same-origin`, so the session
+   cookie reaches the API but not the redirected storage request. Image loads
+   and download navigations are not CORS requests, and they carry no FVOCI
+   cookie because the storage host differs from the app's. The bucket
+   therefore needs no `Access-Control-Allow-Credentials`. Still list the exact
+   `FVOCI_PUBLIC_ORIGIN` rather than `*`, so only the app's pages can read
+   the responses:
+
+   ```json
+   [{
+     "AllowedOrigins": ["https://fvoci.example.com"],
+     "AllowedMethods": ["PUT", "GET"],
+     "AllowedHeaders": ["range"],
+     "ExposeHeaders": ["ETag", "Content-Range", "Accept-Ranges", "Content-Length"],
+     "MaxAgeSeconds": 3600
+   }]
+   ```
+
+   `ETag` must be exposed: the browser reads it from each part response, and
+   an upload whose ETag is hidden fails (it is not retried through the API).
+   Community MinIO has no per-bucket CORS; it answers CORS for every origin
+   unless `MINIO_API_CORS_ALLOW_ORIGIN` narrows it.
+3. Add a lifecycle rule that aborts incomplete multipart uploads (AWS
+   `AbortIncompleteMultipartUpload`, `DaysAfterInitiation` at least 2, longer
+   than `UPLOAD_INCOMPLETE_TTL_HOURS`). The server's upload cleanup aborts every
+   upload of an abandoned key, but a part PUT still in flight during an abort
+   can land afterwards.
+4. Keep the access key least-privilege and Block Public Access on; the bucket
+   needs no public ACL or policy.
+5. Switch the mode on the admin page, or pin it with
+   `FVOCI_ATTACHMENT_TRANSFER_MODE=presigned`. An empty
+   `FVOCI_ATTACHMENT_TRANSFER_MODE` counts as unset; an empty TTL refuses
+   startup. Compose passes the server only the variables its files name:
+   - Developer stack: the S3 overlay (`infra/rust/compose.s3.yml`) passes
+     `FVOCI_ATTACHMENT_TRANSFER_MODE` and the two TTL variables from `.env`
+     (commented in `infra/rust/.env.example`). Left out, the mode is unset, so
+     the admin page decides, and the TTLs are 900 and 60 s.
+   - User install: list them in `compose.override.yml` beside the other S3
+     settings, only the ones you set ("Optional settings"). Leave the mode
+     out to choose it on the admin page.
+
+Upgrading: earlier versions validated `S3_PUBLIC_ENDPOINT` but did not use
+it. A value left set from then now makes `presigned` available (the mode stays
+`proxy` until chosen) and adds its origin to the CSP, and startup is refused
+when it is plain http under an https `FVOCI_PUBLIC_ORIGIN` or uses the app's
+host. Correct or remove it before upgrading.
+
+Verified against the pinned MinIO-compatible silo (Rust integration tests and
+Chromium cross-origin checks, `scripts/run-web-e2e-s3.sh` with and without
+`--narrow-cors`). Not run: real AWS S3
+(CORS on the redirected fetch, enforcement of the signed `content-length`, virtual-host style,
+`response-*` overrides, lifecycle rules), other S3-compatible services,
+reverse proxies or CDNs in front of the bucket, Firefox and Safari, and clock
+skew.
+
 ## Tests
 
 Pure unit tests:
@@ -214,6 +346,18 @@ S3 driver + abandoned-upload GC against a pinned MinIO-compatible silo (loopback
 
 ```sh
 scripts/start-test-minio.sh scripts/start-test-postgres.sh cargo test --locked --offline --no-fail-fast --features db-tests --test attachment_s3_integration
+```
+
+The presigned transfer mode in Chromium, with MinIO as a separate storage
+origin (after `scripts/prepare-web-e2e.sh`; not part of the normal e2e shards,
+which have no MinIO). The first run covers presigned and proxy transfers and
+the viewers without `Access-Control-Allow-Credentials`; the second starts MinIO
+with CORS for another origin only and expects the presigned upload to fail with
+no fallback to the API:
+
+```sh
+scripts/run-web-e2e-s3.sh
+scripts/run-web-e2e-s3.sh --narrow-cors
 ```
 
 Integration tests always create and drop their own UUID database and app role; they never reuse or drop an externally supplied database.
@@ -929,7 +1073,7 @@ services:
 | Topic | Variables (details in this file) |
 | --- | --- |
 | Domain, HTTPS, proxy | `FVOCI_PUBLIC_ORIGIN=https://…` in `.env` (also turns on secure cookies) and the published address; see "Developer stack (compose.yml with init)" below for the proxy rules, which apply to both stacks |
-| S3 storage | `STORAGE_DRIVER=s3`, `S3_*` ("S3 storage backup") |
+| S3 storage | `STORAGE_DRIVER=s3`, `S3_*` ("S3 storage backup"); for direct browser transfer `S3_PUBLIC_ENDPOINT` and optionally `FVOCI_ATTACHMENT_TRANSFER_MODE`, `FVOCI_ATTACHMENT_PRESIGN_*_TTL_SECS` ("Attachment transfer modes") |
 | Mail | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` |
 | OIDC sign-in | providers are set up in the app, sealed with `ENCRYPTION_KEYS`; `OIDC_ALLOW_INSECURE=1` only for a local http provider |
 | GitHub integration | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_STATE_SECRET` |
@@ -1170,7 +1314,7 @@ migration, not an interrupted migrate or a crash). It does not compare search
 indexes or doctor output with the old install. The S3 mode proves that restore
 works from versions of the same local silo bucket. It does not cover
 replication, a second region, a cloud provider's versioning or backup service,
-lifecycle rules, or the presigned direct mode, which is not implemented.
+lifecycle rules, or the presigned transfer mode.
 `--verify-storage` compares attachment sizes only, so a same-size overwrite is
 not detected before start. Ordinary PR and main CI does not run this smoke. A manual dispatch of the
 Container install workflow with `run_upgrade_smoke_arm=true`

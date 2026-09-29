@@ -11,7 +11,7 @@ use crate::attachments::{
     initial_extract_status, is_hwp_attachment, is_image_mime, StagedPart, UploadLimits,
     ATTACHMENT_LOCK_NAMESPACE, MAX_PART_COUNT, STORAGE_LOCK_NAMESPACE,
 };
-use crate::attachments::{ObjectStorage, StorageError};
+use crate::attachments::{ObjectStorage, PartInfo, StorageError, TransferMode};
 use crate::db::context::{
     lock_key_from_uuid, lock_membership_users, recheck_session, restore_system, session_is_live,
     set_system, set_tenant,
@@ -31,6 +31,50 @@ pub struct UploadMeta {
     pub declared_size_bytes: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_ref: Option<String>,
+    /// The transfer mode fixed when the session was created. Rows written
+    /// before #149 have no field and are proxy sessions. Nothing rewrites it,
+    /// so the session never changes path (the jsonb column has no CHECK and
+    /// is cleared when the row is stored, so this needs no migration).
+    #[serde(default)]
+    pub transfer: TransferMode,
+}
+
+impl UploadMeta {
+    /// Exact byte length of part `n` (1-based): `part_size_bytes` for every
+    /// part but the last, which carries the remainder.
+    pub fn part_len(&self, n: i32) -> u64 {
+        if n < self.part_count {
+            self.part_size_bytes as u64
+        } else {
+            (self.declared_size_bytes - self.part_size_bytes * (self.part_count as i64 - 1)) as u64
+        }
+    }
+
+    /// Whether storage holds exactly the parts a presigned session must have
+    /// before `CompleteMultipartUpload`: numbers `1..=part_count`, each of its
+    /// exact length, and `submitted` naming each one once with the ETag
+    /// storage reports. The server never saw these bytes, so this is checked
+    /// before anything is published rather than after.
+    pub fn listed_parts_match(&self, submitted: &[(i32, String)], listed: &[PartInfo]) -> bool {
+        if listed.len() != self.part_count as usize || submitted.len() != listed.len() {
+            return false;
+        }
+        let mut submitted: Vec<(i32, &str)> = submitted
+            .iter()
+            .map(|(n, etag)| (*n, etag.trim().trim_matches('"')))
+            .collect();
+        submitted.sort_by_key(|(n, _)| *n);
+        listed
+            .iter()
+            .zip(submitted)
+            .zip(1..)
+            .all(|((part, (n, etag)), expected)| {
+                part.part_number == expected
+                    && n == expected
+                    && part.size_bytes == self.part_len(expected)
+                    && part.etag == etag
+            })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -597,6 +641,7 @@ pub async fn create_upload(
     actor_user_id: Uuid,
     session_id: Uuid,
     input: CreateUploadInput,
+    transfer: TransferMode,
     _client_ip: Option<&str>,
 ) -> Result<Result<(AttachmentRow, UploadMeta), AttachmentDbError>, sqlx::Error> {
     if input.size_bytes > limits.max_file_size_bytes {
@@ -614,6 +659,7 @@ pub async fn create_upload(
         part_count,
         declared_size_bytes: input.size_bytes,
         upload_ref: None,
+        transfer,
     };
 
     let mut tx = pool.begin().await?;
@@ -807,15 +853,17 @@ pub async fn authorize_upload_part(
             return Ok(Err(err));
         }
     };
+    // A presigned session's parts go to storage directly; taking one here too
+    // would open a second path for the same part.
+    if meta.transfer != TransferMode::Proxy {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::UploadState));
+    }
     if part_number > meta.part_count {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::InvalidInput));
     }
-    let max_bytes = if part_number < meta.part_count {
-        meta.part_size_bytes as u64
-    } else {
-        (meta.declared_size_bytes - meta.part_size_bytes * (meta.part_count as i64 - 1)) as u64
-    };
+    let max_bytes = meta.part_len(part_number);
     let storage_key = att.storage_key.clone();
     let upload_ref = meta.upload_ref.clone();
     tx.commit().await?;
@@ -936,6 +984,11 @@ pub async fn resume_upload(
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     let done = uploaded
         .iter()
+        // A presigned part of the wrong length (storage that did not enforce
+        // the signed length) is sent again rather than reported as done.
+        .filter(|p| {
+            meta.transfer == TransferMode::Proxy || p.size_bytes == meta.part_len(p.part_number)
+        })
         .map(|p| (p.part_number, p.etag.clone()))
         .collect::<Vec<_>>();
     let done_set = done
@@ -1119,6 +1172,27 @@ async fn complete_owned_inner(
         return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
     };
     tx.commit().await?;
+
+    if needs_assembly && meta.transfer == TransferMode::Presigned {
+        match storage
+            .list_parts(&storage_key, meta.upload_ref.as_deref())
+            .await
+        {
+            Ok(listed) if meta.listed_parts_match(parts, &listed) => {}
+            Ok(_) => {
+                revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
+                return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
+            }
+            // Gone: an earlier attempt verified the parts and completed the
+            // upload before it could mark the row stored. Complete below
+            // reports the published object, or `UploadGone` if there is none.
+            Err(StorageError::UploadGone) => {}
+            Err(err) => {
+                revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
+                return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
+            }
+        }
+    }
 
     if needs_assembly {
         let assemble = storage
@@ -2208,4 +2282,62 @@ pub async fn mark_import_attachment_stored(
     .await?;
     tx.commit().await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod upload_meta_tests {
+    use super::*;
+
+    fn meta(part_size: i64, part_count: i32, declared: i64) -> UploadMeta {
+        UploadMeta {
+            part_size_bytes: part_size,
+            part_count,
+            declared_size_bytes: declared,
+            upload_ref: Some("u".into()),
+            transfer: TransferMode::Presigned,
+        }
+    }
+
+    fn part(n: i32, etag: &str, size: u64) -> PartInfo {
+        PartInfo {
+            part_number: n,
+            etag: etag.into(),
+            size_bytes: size,
+        }
+    }
+
+    #[test]
+    fn rows_without_a_transfer_field_are_proxy_sessions() {
+        let legacy: UploadMeta = serde_json::from_value(json!({
+            "part_size_bytes": 5, "part_count": 1, "declared_size_bytes": 5, "upload_ref": "u"
+        }))
+        .unwrap();
+        assert_eq!(legacy.transfer, TransferMode::Proxy);
+        let bound = serde_json::to_value(meta(5, 1, 5)).unwrap();
+        assert_eq!(bound["transfer"], json!("presigned"));
+    }
+
+    #[test]
+    fn part_len_gives_the_remainder_to_the_last_part() {
+        let m = meta(10, 3, 25);
+        assert_eq!((m.part_len(1), m.part_len(2), m.part_len(3)), (10, 10, 5));
+        assert_eq!(meta(10, 2, 20).part_len(2), 10);
+    }
+
+    #[test]
+    fn listed_parts_must_match_numbers_lengths_and_etags() {
+        let m = meta(10, 2, 15);
+        let listed = [part(1, "a", 10), part(2, "b", 5)];
+        let ok = [(2, "\"b\"".to_string()), (1, "a".to_string())];
+        assert!(m.listed_parts_match(&ok, &listed));
+        // Wrong ETag, duplicate or missing numbers, wrong lengths, extra parts.
+        assert!(!m.listed_parts_match(&[(1, "a".into()), (2, "x".into())], &listed));
+        assert!(!m.listed_parts_match(&[(1, "a".into()), (1, "a".into())], &listed));
+        assert!(!m.listed_parts_match(&[(1, "a".into())], &listed));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10), part(2, "b", 6)]));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 9), part(2, "b", 5)]));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10)]));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10), part(2, "b", 5), part(3, "c", 1)]));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10), part(3, "b", 5)]));
+    }
 }

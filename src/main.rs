@@ -314,8 +314,17 @@ async fn run_server(
         None => None,
     };
     fvoci_server::config::ensure_storage_root(&config.storage)?;
-    let storage = ObjectStorage::from_settings(&config.storage)?;
+    let storage = ObjectStorage::from_settings(&config.storage)?
+        .with_presign_ttls(config.attachment_transfer.ttls);
     storage.probe().await?;
+    match fvoci_server::settings::attachment_transfer(&pool, storage.presign_unavailable()).await {
+        Ok(transfer) if transfer.blocked => tracing::warn!(
+            reason = transfer.unavailable.map(|r| r.as_str()),
+            "attachment.transfer_mode_unavailable: stored presigned mode cannot apply; using proxy"
+        ),
+        Ok(transfer) => tracing::info!(mode = transfer.mode.as_str(), "attachment transfer mode"),
+        Err(err) => tracing::warn!(%err, "attachment transfer mode not read at startup"),
+    }
     let search_embedder = fvoci_server::search::embed::Embedder::from_env()?;
     match search_embedder.as_ref() {
         Some(embedder) => tracing::info!(

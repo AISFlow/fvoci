@@ -894,6 +894,10 @@ pub struct CreateAttachmentUploadBody {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct AttachmentPartUrlResponse {
     pub part_number: i32,
+    /// `proxy`: the same-origin API path (PUT with the session). `presigned`:
+    /// an absolute signed storage URL for one PUT of exactly this part's
+    /// bytes, sent without cookies, `Authorization` or `Content-Type`; it
+    /// stops working at `partUrlsExpireAt`.
     pub url: String,
 }
 
@@ -903,6 +907,14 @@ pub struct AttachmentPartUrlResponse {
 pub struct CreateAttachmentUploadResponse {
     pub attachment_id: String,
     pub part_size_bytes: i64,
+    /// Transfer mode of this upload session, fixed for its whole life:
+    /// the mode in effect now for a browser session, always `proxy` for an
+    /// API-token request.
+    pub transfer: crate::attachments::TransferMode,
+    /// When the presigned part URLs expire (resume re-issues them); null for
+    /// `proxy`.
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub part_urls_expire_at: Option<DateTime<Utc>>,
     pub parts: Vec<AttachmentPartUrlResponse>,
 }
 
@@ -920,6 +932,11 @@ pub struct AttachmentUploadedPartResponse {
 pub struct ResumeAttachmentUploadResponse {
     pub attachment_id: String,
     pub part_size_bytes: i64,
+    /// The session's own transfer mode (not the current setting).
+    pub transfer: crate::attachments::TransferMode,
+    /// When the freshly issued presigned part URLs expire; null for `proxy`.
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub part_urls_expire_at: Option<DateTime<Utc>>,
     pub uploaded_parts: Vec<AttachmentUploadedPartResponse>,
     pub parts: Vec<AttachmentPartUrlResponse>,
 }
@@ -2462,6 +2479,26 @@ pub struct AdminInstanceSettingsOutput {
     pub restart_required: Vec<String>,
     pub env_applied: Vec<String>,
     pub ee_features: Vec<String>,
+    pub attachment_transfer: AdminAttachmentTransferOutput,
+}
+
+/// The attachment transfer mode this process applies, next to the configured
+/// `values.attachmentTransfer.mode`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminAttachmentTransferOutput {
+    /// Mode for new upload sessions and original downloads of browser
+    /// sessions; API-token requests always use `proxy`.
+    pub effective: crate::attachments::TransferMode,
+    /// Where the configured mode comes from; `env` cannot be changed here.
+    pub source: crate::settings::TransferSource,
+    /// Whether this server's storage can serve `presigned`.
+    pub presigned_available: bool,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub unavailable_reason: Option<crate::attachments::TransferUnavailable>,
+    /// A stored `presigned` that cannot apply here, so `proxy` is in effect.
+    pub blocked: bool,
 }
 
 /// Public branding: asset delivery paths, never storage keys.
@@ -2533,6 +2570,9 @@ pub struct InstanceSettingsPatchSchema {
     #[serde(rename = "attachmentPreview")]
     #[schema(nullable = true)]
     pub attachment_preview: Option<crate::settings::catalog::AttachmentPreviewSettings>,
+    #[serde(rename = "attachmentTransfer")]
+    #[schema(nullable = true)]
+    pub attachment_transfer: Option<crate::settings::catalog::AttachmentTransferSettings>,
     #[schema(nullable = true)]
     pub i18n: Option<crate::settings::catalog::I18nSettings>,
     #[schema(nullable = true)]

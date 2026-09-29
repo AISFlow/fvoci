@@ -2,7 +2,9 @@
 // restricted to what the admin form draws: widgets per leaf, labels, safety and
 // the draft schema that enables the save button. The Rust server
 // (src/settings/catalog.rs) stays the authority; a rejected PATCH is a 400.
+import type { I18nKey } from "@fvoci/i18n";
 import { z } from "zod";
+import type { components } from "@/generated/api";
 
 export type SettingsWidget =
   | "boolean"
@@ -195,6 +197,15 @@ export const SETTINGS_CATALOG = {
     helpKey: "settings.attachmentPreview.help",
     confirmDestructive: false,
   },
+  attachmentTransfer: {
+    schema: z.object({ mode: z.enum(["proxy", "presigned"]) }).strict(),
+    safety: "live",
+    widgets: { mode: "enum" },
+    group: "settings.group.attachment",
+    labelKey: "settings.attachmentTransfer.label",
+    helpKey: "settings.attachmentTransfer.help",
+    confirmDestructive: false,
+  },
   i18n: {
     schema: z.object({ overrides: messageOverrides }).strict(),
     safety: "live",
@@ -256,6 +267,7 @@ export const SETTING_ENUM_OPTIONS: Readonly<Record<string, readonly string[]>> =
   "defaults.user.weekStartsOn": ["0", "1"],
   "defaults.user.textScale": ["16", "18", "20"],
   "attachmentPreview.mode": ["auto", "client", "server"],
+  "attachmentTransfer.mode": ["proxy", "presigned"],
 };
 
 /** Source `optionKey`: the i18n key of an enum option label. */
@@ -274,4 +286,31 @@ export function withoutAssets(key: SettingsKey, doc: unknown): unknown {
     if (widget === "asset") delete out[leaf];
   }
   return out;
+}
+
+type AdminAttachmentTransfer = components["schemas"]["AdminAttachmentTransferOutput"];
+
+/**
+ * What the `attachmentTransfer` card adds to the generic form: the mode this
+ * server applies, `presigned` disabled with the reason when its storage cannot
+ * presign, and a stored `presigned` that cannot apply here (blocked). The
+ * environment lock and Reset come from `envApplied` and `overridden` as for
+ * every key.
+ */
+export function attachmentTransferView(status: AdminAttachmentTransfer | undefined): {
+  effectiveOptionKey: string | null;
+  disabledOptions: ReadonlySet<string>;
+  unavailableKey: I18nKey | null;
+  blocked: boolean;
+} {
+  if (!status) {
+    return { effectiveOptionKey: null, disabledOptions: new Set(), unavailableKey: null, blocked: false };
+  }
+  const reason = status.presignedAvailable ? null : status.unavailableReason;
+  return {
+    effectiveOptionKey: optionKey("attachmentTransfer", "mode", status.effective),
+    disabledOptions: new Set(reason ? ["presigned"] : []),
+    unavailableKey: reason ? `settings.attachmentTransfer.unavailable.${reason}` : null,
+    blocked: status.blocked,
+  };
 }

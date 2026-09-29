@@ -26,6 +26,11 @@ SECRET_KEY="$(openssl rand -hex 24)"
 ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/fvoci-minio-env.XXXXXX")"
 chmod 600 "$ENV_FILE"
 printf 'MINIO_ROOT_USER=%s\nMINIO_ROOT_PASSWORD=%s\n' "$ACCESS_KEY" "$SECRET_KEY" >"$ENV_FILE"
+# Optional: answer CORS only for these origins (comma list) instead of MinIO's
+# default of every origin.
+if [[ -n "${FVOCI_TEST_MINIO_CORS_ALLOW_ORIGIN:-}" ]]; then
+  printf 'MINIO_API_CORS_ALLOW_ORIGIN=%s\n' "$FVOCI_TEST_MINIO_CORS_ALLOW_ORIGIN" >>"$ENV_FILE"
+fi
 
 cleanup() {
   # -v: the image declares a VOLUME (/data, the uploaded test objects); without

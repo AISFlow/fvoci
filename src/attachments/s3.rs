@@ -8,6 +8,10 @@
 //! from configuration and are never logged: signed URLs carry the access key
 //! id and a signature, so transport errors are stripped of their URL and S3
 //! error bodies are reduced to the operation, HTTP status and error code.
+//!
+//! The presigned transfer mode (#149) signs browser-facing `UploadPart` and
+//! `GetObject` URLs with the same `rusty-s3` actions against
+//! `S3_PUBLIC_ENDPOINT`; this process never sends those requests itself.
 
 use std::io;
 use std::pin::Pin;
@@ -25,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::local::{LocalStorage, PartInfo, StorageError};
+use super::transfer::{PresignTtls, PresignedUrl};
 use crate::config::S3Settings;
 
 /// Pinned MinIO-compatible image used by source S3 tests (`pgsty/silo`).
@@ -57,6 +62,10 @@ pub struct S3Storage {
     upload_client: Client,
     upload_timeouts: UploadTimeouts,
     bucket: Bucket,
+    /// The same bucket addressed through `S3_PUBLIC_ENDPOINT`, used only to
+    /// sign browser-facing URLs; `None` disables the presigned mode.
+    public_bucket: Option<Bucket>,
+    presign_ttls: PresignTtls,
     credentials: Credentials,
     endpoint: String,
 }
@@ -74,21 +83,8 @@ impl std::fmt::Debug for S3Storage {
 
 impl S3Storage {
     pub fn new(settings: S3Settings) -> Result<Self, String> {
-        let mut endpoint =
-            Url::parse(&settings.endpoint).map_err(|e| format!("invalid S3_ENDPOINT: {e}"))?;
-        // `Bucket` joins the bucket name onto the endpoint path; without a
-        // trailing slash a path prefix such as `/s3` would be replaced.
-        if !endpoint.path().ends_with('/') {
-            let path = format!("{}/", endpoint.path());
-            endpoint.set_path(&path);
-        }
-        let style = if settings.force_path_style {
-            UrlStyle::Path
-        } else {
-            UrlStyle::VirtualHost
-        };
-        let bucket = Bucket::new(endpoint, style, settings.bucket, settings.region)
-            .map_err(|e| format!("invalid S3 bucket configuration: {e:?}"))?;
+        let bucket = bucket_at("S3_ENDPOINT", &settings.endpoint, &settings)?;
+        let public_bucket = public_bucket(&settings)?;
         let client = client_builder()
             .read_timeout(READ_TIMEOUT)
             .build()
@@ -101,9 +97,81 @@ impl S3Storage {
             upload_client,
             upload_timeouts: UploadTimeouts::default(),
             bucket,
+            public_bucket,
+            presign_ttls: PresignTtls::default(),
             credentials: Credentials::new(settings.access_key_id, settings.secret_access_key),
             endpoint: settings.endpoint,
         })
+    }
+
+    /// Overrides the browser URL lifetimes (configuration and tests).
+    pub fn with_presign_ttls(mut self, ttls: PresignTtls) -> Self {
+        self.presign_ttls = ttls;
+        self
+    }
+
+    /// Browser-facing storage origin (scheme, host, port) the presigned mode
+    /// sends browsers to; `None` without `S3_PUBLIC_ENDPOINT`.
+    pub fn presign_origin(&self) -> Option<String> {
+        self.public_bucket
+            .as_ref()
+            .map(|bucket| bucket.base_url().origin().ascii_serialization())
+    }
+
+    /// Signs a browser `PUT` of one part. The signature binds the method, key,
+    /// `uploadId`, `partNumber`, the exact `content-length` (a signed header,
+    /// so S3 refuses a body of any other length) and the expiry.
+    ///
+    /// A leftover URL cannot overwrite a published object: `UploadPart` only
+    /// stages bytes inside its multipart upload, publishing the key takes
+    /// `CompleteMultipartUpload` (signed only by this server, with the exact
+    /// part ETags, so a part replaced before complete fails it), and once the
+    /// upload is completed or aborted S3 answers `NoSuchUpload`. Keys are fresh
+    /// UUIDs that are never reused.
+    pub fn presign_upload_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: i32,
+        content_length: u64,
+    ) -> Result<PresignedUrl, StorageError> {
+        assert_key(key)?;
+        let number = part_number_u16(part_number)?;
+        if upload_id.is_empty() {
+            return Err(StorageError::UploadGone);
+        }
+        let bucket = self
+            .public_bucket
+            .as_ref()
+            .ok_or(StorageError::PresignUnavailable)?;
+        let mut action = bucket.upload_part(Some(&self.credentials), key, number, upload_id);
+        action
+            .headers_mut()
+            .insert("content-length", content_length.to_string());
+        Ok(signed_until(&action, self.presign_ttls.part))
+    }
+
+    /// Signs a browser `GET` of a stored original. S3 cannot send `nosniff` or
+    /// a sandbox CSP, so the signed `response-*` overrides force a download
+    /// (`attachment` disposition, `application/octet-stream`) that is never
+    /// cached; the separate storage origin keeps it away from the app origin.
+    /// `Range` is not signed: the browser forwards it and S3 answers `206`.
+    pub fn presign_download(
+        &self,
+        key: &str,
+        content_disposition: &str,
+    ) -> Result<PresignedUrl, StorageError> {
+        assert_key(key)?;
+        let bucket = self
+            .public_bucket
+            .as_ref()
+            .ok_or(StorageError::PresignUnavailable)?;
+        let mut action = bucket.get_object(Some(&self.credentials), key);
+        let query = action.query_mut();
+        query.insert("response-content-disposition", content_disposition);
+        query.insert("response-content-type", "application/octet-stream");
+        query.insert("response-cache-control", "private, no-store");
+        Ok(signed_until(&action, self.presign_ttls.download))
     }
 
     /// Overrides the streamed part deadlines (tests use short ones).
@@ -573,6 +641,63 @@ impl S3Storage {
     }
 }
 
+/// Parses `endpoint` (named `var` in errors) and addresses the configured
+/// bucket through it with the configured URL style.
+fn bucket_at(var: &str, endpoint: &str, settings: &S3Settings) -> Result<Bucket, String> {
+    let mut endpoint = Url::parse(endpoint).map_err(|e| format!("invalid {var}: {e}"))?;
+    // `Bucket` joins the bucket name onto the endpoint path; without a
+    // trailing slash a path prefix such as `/s3` would be replaced.
+    if !endpoint.path().ends_with('/') {
+        let path = format!("{}/", endpoint.path());
+        endpoint.set_path(&path);
+    }
+    let style = if settings.force_path_style {
+        UrlStyle::Path
+    } else {
+        UrlStyle::VirtualHost
+    };
+    Bucket::new(
+        endpoint,
+        style,
+        settings.bucket.clone(),
+        settings.region.clone(),
+    )
+    .map_err(|e| format!("invalid S3 bucket configuration for {var}: {e:?}"))
+}
+
+/// The bucket as browsers address it, when `S3_PUBLIC_ENDPOINT` is set.
+fn public_bucket(settings: &S3Settings) -> Result<Option<Bucket>, String> {
+    settings
+        .public_endpoint
+        .as_deref()
+        .map(|endpoint| bucket_at("S3_PUBLIC_ENDPOINT", endpoint, settings))
+        .transpose()
+}
+
+/// Browser-facing storage origin for `settings`, computed exactly as
+/// [`S3Storage::presign_origin`] does (startup checks it against the app
+/// origin before any URL is signed).
+pub fn presign_origin_for(settings: &S3Settings) -> Result<Option<Url>, String> {
+    Ok(public_bucket(settings)?.map(|bucket| {
+        let mut origin = bucket.base_url().clone();
+        origin.set_path("/");
+        origin
+    }))
+}
+
+/// Signs `action` now and reports when the URL stops working.
+fn signed_until<'a, A: S3Action<'a>>(action: &A, ttl: Duration) -> PresignedUrl {
+    let now = jiff::Timestamp::now();
+    let url = action.sign_with_time(ttl, &now);
+    let expires_at = chrono::DateTime::from_timestamp(now.as_second(), 0)
+        .unwrap_or_else(chrono::Utc::now)
+        + chrono::Duration::from_std(ttl).unwrap_or_default();
+    PresignedUrl {
+        url: url.into(),
+        expires_at,
+    }
+}
+
 /// No redirects (a redirect would replay a signed PUT body elsewhere) and no
 /// implicit `HTTP(S)_PROXY`: signed URLs go only to the configured endpoint.
 /// TCP keepalive detects a peer that vanished without closing.
@@ -867,6 +992,97 @@ mod tests {
             )
             .sign(SIGN_TTL);
         assert_eq!(url.host_str(), Some("fvoci.s3.example.test"));
+    }
+
+    fn query(url: &str) -> std::collections::HashMap<String, String> {
+        Url::parse(url)
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect()
+    }
+
+    #[test]
+    fn presigned_urls_use_the_public_endpoint_and_bind_the_part() {
+        let mut with_public = settings("http://minio.internal:9000", true);
+        with_public.public_endpoint = Some("https://files.example.test/s3".into());
+        let storage = S3Storage::new(with_public)
+            .unwrap()
+            .with_presign_ttls(PresignTtls {
+                part: Duration::from_secs(900),
+                download: Duration::from_secs(60),
+            });
+        assert_eq!(
+            storage.presign_origin().as_deref(),
+            Some("https://files.example.test")
+        );
+        let before = chrono::Utc::now();
+        let signed = storage
+            .presign_upload_part(KEY, "up-1", 3, 5_242_880)
+            .unwrap();
+        let url = Url::parse(&signed.url).unwrap();
+        assert_eq!(url.host_str(), Some("files.example.test"));
+        assert_eq!(url.path(), format!("/s3/fvoci/{KEY}"));
+        let q = query(&signed.url);
+        assert_eq!(q["partNumber"], "3");
+        assert_eq!(q["uploadId"], "up-1");
+        assert_eq!(q["X-Amz-SignedHeaders"], "content-length;host");
+        assert_eq!(q["X-Amz-Expires"], "900");
+        assert!(q["X-Amz-Credential"].starts_with("AKIDSECRETID/"));
+        assert!(!signed.url.contains("very-secret-key"));
+        let ttl = (signed.expires_at - before).num_seconds();
+        assert!((899..=900).contains(&ttl), "{ttl}");
+        // Another length or part number is another signature.
+        let other = storage
+            .presign_upload_part(KEY, "up-1", 3, 5_242_881)
+            .unwrap();
+        assert_ne!(query(&other.url)["X-Amz-Signature"], q["X-Amz-Signature"]);
+
+        let download = storage
+            .presign_download(KEY, "attachment; filename=\"a b.txt\"")
+            .unwrap();
+        let q = query(&download.url);
+        assert_eq!(
+            q["response-content-disposition"],
+            "attachment; filename=\"a b.txt\""
+        );
+        assert_eq!(q["response-content-type"], "application/octet-stream");
+        assert_eq!(q["response-cache-control"], "private, no-store");
+        assert_eq!(q["X-Amz-SignedHeaders"], "host");
+        assert_eq!(q["X-Amz-Expires"], "60");
+
+        assert!(matches!(
+            storage.presign_upload_part("../x", "up-1", 1, 1),
+            Err(StorageError::InvalidKey)
+        ));
+        assert!(matches!(
+            storage.presign_upload_part(KEY, "", 1, 1),
+            Err(StorageError::UploadGone)
+        ));
+    }
+
+    #[test]
+    fn presigning_needs_a_public_endpoint_and_follows_the_url_style() {
+        let internal_only = S3Storage::new(settings("http://minio.internal:9000", true)).unwrap();
+        assert_eq!(internal_only.presign_origin(), None);
+        assert!(matches!(
+            internal_only.presign_upload_part(KEY, "up", 1, 1),
+            Err(StorageError::PresignUnavailable)
+        ));
+        assert!(matches!(
+            internal_only.presign_download(KEY, "attachment"),
+            Err(StorageError::PresignUnavailable)
+        ));
+        let mut vhost = settings("https://s3.internal", false);
+        vhost.public_endpoint = Some("https://s3.example.test".into());
+        assert_eq!(
+            presign_origin_for(&vhost).unwrap().unwrap().as_str(),
+            "https://fvoci.s3.example.test/"
+        );
+        assert_eq!(
+            S3Storage::new(vhost).unwrap().presign_origin().as_deref(),
+            Some("https://fvoci.s3.example.test")
+        );
     }
 
     #[test]

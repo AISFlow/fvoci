@@ -79,6 +79,7 @@ const PROBLEM_TITLES: Record<string, I18nKey> = {
   oidc_last_method: "oidc_last_method",
   identity_link_not_found: "identity link not found",
   encryption_unavailable: "encryption_unavailable",
+  attachment_transfer_unavailable: "attachment transfer mode unavailable",
 };
 
 export function tProblemTitle(
