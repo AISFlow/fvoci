@@ -44,6 +44,22 @@ test("the login route is declared (the boundary regex sends /login to Vue)", () 
   );
 });
 
+test("the invite route is declared (boot still needs the boundary regex)", () => {
+  assert.equal(
+    routes.some((route) => route.name === "invite" && route.path === "/invite/:token"),
+    true,
+  );
+});
+
+test(
+  "a completed navigation to /invite is a full page load (boot is still React)",
+  withLocation(async (loads) => {
+    const router = createAppRouter(createMemoryHistory());
+    await router.push("/invite/tok");
+    assert.deepEqual(loads, ["/invite/tok"]);
+  }),
+);
+
 test(
   "a failed or superseded navigation to a React page loads nothing",
   withLocation(async (loads) => {

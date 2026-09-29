@@ -18,7 +18,7 @@ test("the Vue SSO slug form submits through startWorkspaceSso, never to the serv
 });
 
 test("the Vue login forms do not set method or action", () => {
-  for (const file of ["LoginForm.vue", "EmailActionForm.vue", "SsoSlugForm.vue", "MfaStep.vue"]) {
+  for (const file of ["LoginForm.vue", "EmailActionForm.vue", "SsoSlugForm.vue", "MfaStep.vue", "InviteAcceptForm.vue"]) {
     assert.doesNotMatch(source(file), /\b(method|action)=/, file);
   }
 });
