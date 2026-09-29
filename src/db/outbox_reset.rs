@@ -10,10 +10,13 @@
 //! move. Events older than the window that the move would pass unprocessed
 //! are a forward skip and need `--override-reason`.
 //!
-//! Migrations 027/040/041 seed later consumers at the tail, so they hold no
-//! marks for older events. A consumer with external effects is therefore not
-//! rewound past its own first mark (nor behind its cursor when it has none)
-//! unless `--ack-external-replay` accepts delivering that history again.
+//! The migrations that add a consumer (018, 020, 027, 040, with missing rows
+//! repaired by 041) seed it after the events already present, so it holds no
+//! marks for older events. A consumer with external effects is therefore
+//! not rewound past its own first mark (nor behind its cursor when it has
+//! none) unless `--ack-external-replay` accepts delivering that history
+//! again. On a fresh database the seeds insert nothing, and every consumer,
+//! like search-index (which has no seed), starts at the origin.
 //!
 //! The app role has no access to the cursor tables (grant-app-role.sql), so
 //! this runs as the owner like `--recover-outbox`, in system context because
@@ -24,17 +27,28 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use super::outbox_recover::RESET_SCAN_WINDOW_DAYS;
+use crate::integrations::github::GITHUB_CONSUMER;
+use crate::integrations::webhooks::WEBHOOKS_CONSUMER;
+use crate::mail::MAIL_CONSUMER;
+use crate::notifications::NOTIFICATIONS_CONSUMER;
+use crate::push::consumer::PUSH_CONSUMER;
+use crate::search::index::SEARCH_INDEX_CONSUMER;
 
 /// Consumers of this build that mark every event they pass in
 /// `processed_events`, so their marks show how far they really got.
-pub const MARKING_CONSUMERS: &[&str] =
-    &["notifications", "mail", "push", "webhooks", "search-index"];
-const SEARCH_INDEX_CONSUMER: &str = "search-index";
-/// Consumers whose effects stay in this database. Every other consumer
-/// (mail, push, webhooks, github or one this build does not know) reaches
-/// devices or endpoints outside it.
-const INTERNAL_CONSUMERS: &[&str] = &["notifications", SEARCH_INDEX_CONSUMER];
-const GITHUB_CONSUMER: &str = "github";
+const MARKING_CONSUMERS: &[&str] = &[
+    NOTIFICATIONS_CONSUMER,
+    MAIL_CONSUMER,
+    PUSH_CONSUMER,
+    WEBHOOKS_CONSUMER,
+    SEARCH_INDEX_CONSUMER,
+];
+/// Consumers whose replay re-derives the same state (in-app rows
+/// deduplicated by the processed mark; search documents re-upserted from
+/// current rows into this install's own index) and reaches no person or
+/// third party. Every other consumer (mail, push, webhooks, github or one
+/// this build does not know) reaches people or endpoints outside it.
+const INTERNAL_CONSUMERS: &[&str] = &[NOTIFICATIONS_CONSUMER, SEARCH_INDEX_CONSUMER];
 const SKIP_SAMPLE_LIMIT: i64 = 100;
 
 #[derive(Debug, Clone, Default)]
@@ -75,6 +89,27 @@ pub struct ResetSkip {
     pub sample: Vec<SkippedEvent>,
 }
 
+/// Where the target lies from the current cursor, by `(xact, seq)`.
+/// Serialized as `forward`, `backward` or `unchanged`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Forward,
+    Backward,
+    Unchanged,
+}
+
+impl Direction {
+    /// The serialized name, for the log line.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::Backward => "backward",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsumerReset {
@@ -82,8 +117,7 @@ pub struct ConsumerReset {
     pub lease_active: bool,
     pub before: CursorPos,
     pub target: CursorPos,
-    /// `forward`, `backward` or `unchanged`.
-    pub direction: &'static str,
+    pub direction: Direction,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub noop_reason: Option<String>,
     /// Events between the target and the current cursor without a mark: the
@@ -372,7 +406,10 @@ async fn outbox_reset_on(
                 .fetch_one(&mut *tx)
                 .await?;
         let xmin = parse_xid(&xmin)?;
-        for plan in plans.iter().filter(|plan| plan.direction == "forward") {
+        for plan in plans
+            .iter()
+            .filter(|plan| plan.direction == Direction::Forward)
+        {
             if parse_xid(&plan.target.last_xact)? >= xmin {
                 return Err(rejected(format!(
                     "forward target {}:{} for consumer {} is not below snapshot xmin {xmin}; a transaction that may still commit an earlier event is running (pg_stat_activity, pg_prepared_xacts); retry after it ends",
@@ -380,7 +417,10 @@ async fn outbox_reset_on(
                 )));
             }
         }
-        for plan in plans.iter().filter(|plan| plan.direction != "unchanged") {
+        for plan in plans
+            .iter()
+            .filter(|plan| plan.direction != Direction::Unchanged)
+        {
             sqlx::query(
                 r#"
                 UPDATE fvoci.outbox_consumers
@@ -399,7 +439,7 @@ async fn outbox_reset_on(
             tracing::warn!(
                 event = "outbox.reset",
                 consumer = %plan.consumer,
-                direction = plan.direction,
+                direction = plan.direction.as_str(),
                 reason = opts.reason.as_deref().unwrap_or(""),
                 override_reason = opts.override_reason.as_deref().unwrap_or(""),
                 skipped_count = plan.skip.as_ref().map_or(0, |skip| skip.skipped_count),
@@ -487,7 +527,7 @@ async fn plan_consumer(
     let mut target = rule_target.clone();
     if external_effects {
         let floor = replay_floor(tx, consumer, &cursor.pos).await?;
-        if compare(&rule_target, &floor)? == "backward" {
+        if compare(&rule_target, &floor)? == Direction::Backward {
             let (redelivered, dead_lettered) =
                 count_redelivered(tx, consumer, &rule_target, &cursor.pos).await?;
             if !ack_external_replay {
@@ -504,7 +544,7 @@ async fn plan_consumer(
     }
 
     let direction = compare(&target, &cursor.pos)?;
-    let (redelivered, dead_lettered) = if direction == "backward" {
+    let (redelivered, dead_lettered) = if direction == Direction::Backward {
         count_redelivered(tx, consumer, &target, &cursor.pos).await?
     } else {
         (0, 0)
@@ -533,7 +573,7 @@ async fn rule_target_above(
     cursor: &CursorPos,
 ) -> Result<CursorPos, OutboxResetError> {
     let (target, _) = rule_target(tx, consumer, lower, cursor).await?;
-    Ok(if compare(&target, lower)? == "backward" {
+    Ok(if compare(&target, lower)? == Direction::Backward {
         lower.clone()
     } else {
         target
@@ -667,7 +707,7 @@ async fn replay_floor(
         },
     )
     .await?;
-    Ok(if compare(&before_mark, cursor)? == "forward" {
+    Ok(if compare(&before_mark, cursor)? == Direction::Forward {
         cursor.clone()
     } else {
         before_mark
@@ -710,13 +750,13 @@ fn parse_xid(xact: &str) -> Result<u64, OutboxResetError> {
         .map_err(|_| rejected(format!("invalid xid8 {xact:?}")))
 }
 
-fn compare(target: &CursorPos, current: &CursorPos) -> Result<&'static str, OutboxResetError> {
+fn compare(target: &CursorPos, current: &CursorPos) -> Result<Direction, OutboxResetError> {
     let target_key = (parse_xid(&target.last_xact)?, target.last_seq);
     let current_key = (parse_xid(&current.last_xact)?, current.last_seq);
     Ok(match target_key.cmp(&current_key) {
-        std::cmp::Ordering::Greater => "forward",
-        std::cmp::Ordering::Less => "backward",
-        std::cmp::Ordering::Equal => "unchanged",
+        std::cmp::Ordering::Greater => Direction::Forward,
+        std::cmp::Ordering::Less => Direction::Backward,
+        std::cmp::Ordering::Equal => Direction::Unchanged,
     })
 }
 
@@ -857,8 +897,35 @@ mod tests {
             last_xact: x.into(),
             last_seq: s,
         };
-        assert_eq!(compare(&pos("10", 1), &pos("9", 5)).unwrap(), "forward");
-        assert_eq!(compare(&pos("10", 1), &pos("10", 2)).unwrap(), "backward");
-        assert_eq!(compare(&pos("10", 2), &pos("10", 2)).unwrap(), "unchanged");
+        assert_eq!(
+            compare(&pos("10", 1), &pos("9", 5)).unwrap(),
+            Direction::Forward
+        );
+        assert_eq!(
+            compare(&pos("10", 1), &pos("10", 2)).unwrap(),
+            Direction::Backward
+        );
+        assert_eq!(
+            compare(&pos("10", 2), &pos("10", 2)).unwrap(),
+            Direction::Unchanged
+        );
+    }
+
+    /// The report's JSON and the log line keep the lowercase names.
+    #[test]
+    fn direction_serializes_to_its_log_name() {
+        for direction in [
+            Direction::Forward,
+            Direction::Backward,
+            Direction::Unchanged,
+        ] {
+            assert_eq!(
+                serde_json::to_value(direction).unwrap(),
+                serde_json::Value::from(direction.as_str())
+            );
+        }
+        assert_eq!(Direction::Forward.as_str(), "forward");
+        assert_eq!(Direction::Backward.as_str(), "backward");
+        assert_eq!(Direction::Unchanged.as_str(), "unchanged");
     }
 }

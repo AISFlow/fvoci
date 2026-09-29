@@ -11,14 +11,20 @@ const DIGEST_BATCH: i64 = 100;
 /// Wall-clock bound for one sweep. Sends run one after another in the
 /// maintenance task, which also runs the upload GC and revision sweeps; the
 /// rows a sweep does not reach stay due for the next daily sweep.
+///
+/// Known limitation: every sweep walks from the first key, and the rows it
+/// served are due again the next day, so a sweep that runs out of budget
+/// ends at about the same row every day; the rows after it are not served
+/// while that lasts, like the streak stops below.
 const DIGEST_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 /// Sends that failed with a 4xx, a timeout, a connection failure or a local
 /// error, counted across batches, after which the sweep takes SMTP to be
 /// down and stops. A 5xx does not count here: the relay answered (see
 /// `DIGEST_REFUSAL_STREAK`). A sent digest or a refusal final for one
-/// recipient (`smtp::is_final_for_recipient`: an enhanced X.1/X.2 mailbox
-/// code, a bare 551, an address that does not parse) resets the count, as
-/// both show the relay is up and serving. A row with nothing to send and a
+/// recipient (`smtp::is_final_for_recipient`) resets the count: a mailbox
+/// refusal (an enhanced X.1/X.2 mailbox code, a bare 551) shows the relay is
+/// up and serving like a sent digest; an address that does not parse never
+/// reaches the relay and also resets it. A row with nothing to send and a
 /// 5xx leave it as it is.
 ///
 /// Known limitation: five recipients whose sends fail every day with a
@@ -58,7 +64,12 @@ type DigestClaim = (Uuid, Uuid, Option<DateTime<Utc>>);
 /// Recipients are claimed with `FOR UPDATE SKIP LOCKED` and `last_digest_at`
 /// advances as the claim, so two processes cannot send the same digest and a
 /// failed recipient backs off until the next daily sweep instead of retrying
-/// every tick.
+/// every tick. A send whose acceptance was not seen (the session timeout, a
+/// connection dropped after DATA) is handed back like any failed send, so its
+/// window is counted again the next day and the recipient may be told about
+/// it twice. A crash, or a failed hand-back (`restore_claim`), leaves the
+/// claimed rows unsent until the next day's sweep, whose count window then
+/// starts at the claim.
 ///
 /// The sweep walks the due rows in `(workspace_id, user_id)` order, one claim
 /// batch after another, so every due row is served, not only the first

@@ -16,22 +16,31 @@ pub const MAIL_CONSUMER: &str = "mail";
 
 const MAIL_VERBS: &[&str] = &["comment.created", "identity.linked", "identity.unlinked"];
 
-/// Sends the mail of `comment.created` and `identity.*` events. The unit of
-/// delivery is the recipient: a permanent refusal of the recipient's mailbox
-/// is final for that recipient only. Any other 5xx may refuse one recipient
-/// (a policy refusal at `RCPT`) or every recipient (a relay limit, a refused
-/// sender), so the send goes on to the next recipient and the refusal
-/// becomes final for its recipient only once a later send in the same
-/// attempt is accepted, which shows the relay still serves. The event fails
-/// when such refusals are left with no acceptance after them, or at once on
-/// a 4xx, timeout or connection failure; the retry skips the recipients SMTP
-/// already accepted (see `AcceptedRecipients`). A skipped recipient proves
-/// nothing about the relay now, so a refusal the classifier cannot tie to
-/// the recipient (any 5xx outside the X.1/X.2 mailbox codes, including a
-/// bare 550 or 553 from relays that send no enhanced status codes, such as
-/// Exim by default or qmail, for an unknown user) of the last recipient
-/// still to send looks like a relay-wide one: that event retries and
-/// dead-letters, after the recipients before it got their mail.
+/// Sends the mail of `comment.created` and `identity.*` events, at least
+/// once per recipient the relay accepts (see `AcceptedRecipients` for when
+/// one gets it twice); a skipped address or a refused mailbox gets none.
+///
+/// The unit of delivery is the recipient. An address that does not parse as
+/// a mailbox is skipped without asking the relay. A permanent refusal of the
+/// recipient's mailbox is final for that recipient. Any other 5xx may refuse
+/// one recipient (a policy refusal at `RCPT`) or every recipient (a relay
+/// limit, a refused sender), so the send goes on to the next recipient and
+/// the refusal becomes final for its recipient only once a later send in the
+/// same attempt is accepted, which shows the relay still serves.
+///
+/// The event fails (it is retried, then dead-lettered where it is visible)
+/// at once on a 4xx, timeout or connection failure; when such refusals are
+/// left with no acceptance after them; and when the relay refused the
+/// mailbox of every recipient it was asked about and none was accepted in
+/// this attempt or an earlier one, as a relay that refuses everyone that
+/// way would. The retry skips the recipients SMTP already accepted (see
+/// `AcceptedRecipients`). A skipped recipient proves nothing about the relay
+/// now, so a refusal the classifier cannot tie to the recipient (any 5xx
+/// outside the X.1/X.2 mailbox codes, including a bare 550 or 553 from
+/// relays that send no enhanced status codes, such as Exim by default or
+/// qmail, for an unknown user) of the last recipient still to send looks
+/// like a relay-wide one: that event retries and dead-letters, after the
+/// recipients before it got their mail.
 pub struct MailConsumer {
     mailer: Arc<Mailer>,
     accepted: Mutex<AcceptedRecipients>,
@@ -49,18 +58,24 @@ impl MailConsumer {
 /// Events whose accepted recipients are kept at most, oldest pushed out
 /// first. The consumer sends one mail event per call and the dispatcher
 /// retries an event before it passes it, so an event is redelivered long
-/// before 64 newer mail events push it out.
+/// before 64 newer mail events push it out. A dead letter requeued by hand
+/// (`fvoci.app_outbox_requeue`, SQL only) is the exception: it is delivered
+/// again after the cursor passed it, possibly after more newer mail events,
+/// and its accepted recipients may then get the mail again.
 const ACCEPTED_EVENTS_KEPT: usize = 64;
 
 /// Recipients SMTP accepted, per event. An entry is kept after its event
 /// completes too: the dispatcher marks the event processed only after
-/// `deliver` returns, and when that mark (or the lease renewal next to it)
-/// fails, the event is delivered again and must skip these recipients. An
-/// entry is only ever a recipient SMTP really accepted, so keeping it can
-/// never suppress a send that failed. This lives in memory only: a restart,
-/// or another replica taking over the lease, starts empty and may send an
-/// accepted recipient's mail again (the documented at-least-once edge, like
-/// a crash between SMTP and the processed mark).
+/// `deliver` returns, and when that mark fails, the event is delivered again
+/// and must skip these recipients. An entry is only ever a recipient SMTP
+/// really accepted, so keeping it can never suppress a send that failed.
+///
+/// A recipient gets the mail twice when its entry is missing: a send whose
+/// acceptance was not seen (the session timeout, a connection dropped after
+/// DATA, or the dispatcher dropping the call at its lease timeout) is not
+/// recorded and the retry sends it again; and the entries live in memory
+/// only, so a restart, or another replica taking over the lease, starts
+/// empty and may send an accepted recipient's mail again.
 #[derive(Default)]
 struct AcceptedRecipients {
     events: VecDeque<(Uuid, HashSet<String>)>,
@@ -199,6 +214,17 @@ async fn deliver_mail(
                 rejected += unproven;
                 unproven = 0;
             }
+            Err(err) if smtp::is_unsendable_address(&err.code) => {
+                // The relay was never asked and no retry can send it: skip
+                // the recipient. It proves nothing about the relay, so it
+                // counts neither as refused nor as accepted. The error
+                // carries no address.
+                tracing::warn!(
+                    event_id = %event.id,
+                    code = %err.code,
+                    "mail.recipient_rejected"
+                );
+            }
             Err(err) if smtp::is_final_for_recipient(&err.code) => {
                 // Final for this recipient only. The error carries no address.
                 rejected += 1;
@@ -234,8 +260,8 @@ async fn deliver_mail(
         )));
     }
     if rejected > 0 && !any_accepted {
-        // Nobody accepted, which is what a relay-wide refusal looks like: fail
-        // so the event is retried and then dead-lettered where it is visible.
+        // The relay refused the mailbox of every recipient it was asked
+        // about and accepted none: the same relay-wide case as above.
         return Err(OutboxProcessError::Delivery(format!(
             "mailer: every recipient rejected ({rejected})"
         )));

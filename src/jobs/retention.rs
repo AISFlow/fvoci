@@ -2,6 +2,12 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::context::set_system;
+use crate::integrations::github::GITHUB_CONSUMER;
+use crate::integrations::webhooks::WEBHOOKS_CONSUMER;
+use crate::mail::MAIL_CONSUMER;
+use crate::notifications::NOTIFICATIONS_CONSUMER;
+use crate::push::consumer::PUSH_CONSUMER;
+use crate::search::index::SEARCH_INDEX_CONSUMER;
 
 pub const NOTIFICATION_READ_RETENTION_DAYS: i32 = 90;
 pub const NOTIFICATION_ARCHIVED_RETENTION_DAYS: i32 = 90;
@@ -9,13 +15,15 @@ pub const PROCESSED_GC_WINDOW_DAYS: i32 = 30;
 pub const GC_DELETE_BATCH: i32 = 5_000;
 pub const GC_DELETE_ROUNDS: u32 = 30;
 
+/// Every consumer that writes processed marks (github only while
+/// configured). The marks of a consumer missing here are never deleted.
 const PROCESSED_GC_CONSUMERS: &[&str] = &[
-    "notifications",
-    "mail",
-    "push",
-    "search-index",
-    "webhooks",
-    "github",
+    NOTIFICATIONS_CONSUMER,
+    MAIL_CONSUMER,
+    PUSH_CONSUMER,
+    SEARCH_INDEX_CONSUMER,
+    WEBHOOKS_CONSUMER,
+    GITHUB_CONSUMER,
 ];
 
 /// Source sweep.ts notification + processed_events GC. events, audit_log, and

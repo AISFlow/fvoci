@@ -12,7 +12,10 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use super::{MailSendError, SmtpConfig};
 
 const SMTP_TIMEOUT: Duration = Duration::from_secs(15);
-/// Whole-session bound, kept below the 30 s outbox lease.
+/// Whole-session bound. One session must finish inside the outbox
+/// dispatcher's per-call timeout (the lease minus 0.5 s) with room left for
+/// collecting the recipients, so every mail attempt settles at least its
+/// first unsent recipient before the call can be dropped.
 const SMTP_SESSION_TIMEOUT: Duration = Duration::from_secs(20);
 
 // `MailSendError::code` values from `send_mail_op`. They never carry server
@@ -48,6 +51,13 @@ const CODE_CONNECTION: &str = "connection";
 /// alike, or (other 5xx, see `is_unclassified_refusal`) may be either.
 pub(super) fn is_final_for_recipient(code: &str) -> bool {
     code == CODE_RECIPIENT_REJECTED || code == CODE_INVALID_RECIPIENT
+}
+
+/// Whether the recipient address does not parse as a mailbox. The send
+/// fails before any contact with the relay, so this says nothing about the
+/// relay, and no retry can send it.
+pub(super) fn is_unsendable_address(code: &str) -> bool {
+    code == CODE_INVALID_RECIPIENT
 }
 
 /// Whether a send failure is a permanent (5xx) refusal that does not say
@@ -134,12 +144,7 @@ async fn send_mail_inner(
         .body(text.to_string())
         .map_err(|_| CODE_INVALID_MESSAGE.to_string())?;
 
-    let tls = TlsParameters::new(smtp.host.clone()).map_err(|_| CODE_TLS_CONFIG.to_string())?;
-    let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(smtp.host.as_str())
-        .port(smtp.port)
-        .tls(Tls::Opportunistic(tls))
-        .timeout(Some(SMTP_TIMEOUT))
-        .build();
+    let transport = build_transport(smtp).map_err(str::to_string)?;
     let sent = tokio::time::timeout(SMTP_SESSION_TIMEOUT, transport.send(message))
         .await
         .map_err(|_| CODE_TIMEOUT.to_string())?;
@@ -166,17 +171,25 @@ async fn send_mail_inner(
     })
 }
 
-/// Connection check for `fvoci-migrate --doctor`: connect, EHLO and STARTTLS
-/// when offered (the same transport settings as sending), then QUIT. Sends no
-/// mail. The error is a short code without server text.
-pub async fn probe_smtp(smtp: &SmtpConfig) -> Result<(), String> {
-    let tls = TlsParameters::new(smtp.host.clone()).map_err(|_| "tls_config".to_string())?;
-    let transport: AsyncSmtpTransport<Tokio1Executor> =
+/// The transport of every send and of the doctor probe: STARTTLS whenever
+/// the server offers it, with the certificate verified for `smtp.host`, and
+/// `SMTP_TIMEOUT` per command. The error is `CODE_TLS_CONFIG`.
+fn build_transport(smtp: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>, &'static str> {
+    let tls = TlsParameters::new(smtp.host.clone()).map_err(|_| CODE_TLS_CONFIG)?;
+    Ok(
         AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(smtp.host.as_str())
             .port(smtp.port)
             .tls(Tls::Opportunistic(tls))
             .timeout(Some(SMTP_TIMEOUT))
-            .build();
+            .build(),
+    )
+}
+
+/// Connection check for `fvoci-migrate --doctor`: connect, EHLO and STARTTLS
+/// when offered (`build_transport`, as for sending), then QUIT. Sends no
+/// mail. The error is a short code without server text.
+pub async fn probe_smtp(smtp: &SmtpConfig) -> Result<(), String> {
+    let transport = build_transport(smtp).map_err(str::to_string)?;
     match tokio::time::timeout(SMTP_SESSION_TIMEOUT, transport.test_connection()).await {
         Ok(Ok(true)) => Ok(()),
         Ok(Ok(false)) => Err("smtp_not_ready".into()),
@@ -298,5 +311,55 @@ mod tests {
         ] {
             assert!(!is_unclassified_refusal(code), "{code}");
         }
+        assert!(is_unsendable_address(CODE_INVALID_RECIPIENT));
+        for code in [
+            CODE_RECIPIENT_REJECTED,
+            CODE_PERMANENT,
+            CODE_TRANSIENT,
+            CODE_TIMEOUT,
+            CODE_CONNECTION,
+        ] {
+            assert!(!is_unsendable_address(code), "{code}");
+        }
+    }
+
+    /// `users.email` only has to pass `normalize_email`, whose pattern is
+    /// broader than lettre's mailbox parser: these addresses can be stored
+    /// but not sent to.
+    #[test]
+    fn stored_addresses_can_fail_to_parse_as_a_mailbox() {
+        for address in ["a..b@example.com", "bob@example.com."] {
+            assert!(
+                crate::validate::normalize_email(address).is_ok(),
+                "{address}"
+            );
+            assert!(address.parse::<Mailbox>().is_err(), "{address}");
+        }
+    }
+
+    /// The recipient is parsed before the transport is built or the relay is
+    /// contacted, so `invalid_recipient` never follows a session.
+    #[tokio::test]
+    async fn an_unsendable_address_fails_before_any_connection() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("free port")
+            .port();
+        let smtp = SmtpConfig {
+            host: "127.0.0.1".into(),
+            port,
+            from: "noreply@example.com".into(),
+        };
+        let code = send_mail_inner(
+            &smtp,
+            "noreply@example.com",
+            "noreply@example.com",
+            "a..b@example.com",
+            "subject",
+            "text",
+        )
+        .await
+        .expect_err("unsendable");
+        assert_eq!(code, CODE_INVALID_RECIPIENT);
     }
 }
