@@ -3,7 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { projectGroupGrantsQuery } from "@/features/projects/queries";
 import { api, ensureOk, ProblemError } from "@/lib/api";
+import { groupsQuery as workspaceGroupsQuery } from "@/lib/queries";
 import "../settings/settings-shell.css";
 
 const ROLES = ["lead", "member", "viewer"] as const;
@@ -26,26 +28,8 @@ export function ProjectGroupsSection({
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
 
-  const groupsQuery = useQuery({
-    queryKey: ["workspaces", workspaceId, "groups"],
-    queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/groups", {
-          params: { path: { workspace_id: workspaceId } },
-        }),
-      ),
-    retry: false,
-  });
-  const grantsQuery = useQuery({
-    queryKey: ["project-group-grants", workspaceId, projectId],
-    queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups", {
-          params: { path: { workspace_id: workspaceId, project_id: projectId } },
-        }),
-      ),
-    retry: false,
-  });
+  const groupsQuery = useQuery(workspaceGroupsQuery(workspaceId));
+  const grantsQuery = useQuery(projectGroupGrantsQuery(workspaceId, projectId));
 
   const groups = groupsQuery.data?.items ?? [];
   const grants = grantsQuery.data?.items ?? [];
