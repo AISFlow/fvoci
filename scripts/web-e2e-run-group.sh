@@ -89,6 +89,11 @@ retain_failure_artifacts() {
   local retain_dir log dest trace
   retain_dir="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-collab-e2e-fail.XXXXXX")"
   chmod 700 "$retain_dir"
+  # Named first, so a caller finds the directory even if this is cut short.
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf 'failure-artifacts=%s\n' "$retain_dir" >>"$GITHUB_OUTPUT"
+    printf 'failure-group=%s\n' "$GROUP_LABEL" >>"$GITHUB_OUTPUT"
+  fi
   if [[ -d "$RUN_DIR/playwright-output" ]] && [[ -n "$(ls -A "$RUN_DIR/playwright-output" 2>/dev/null || true)" ]]; then
     cp -a "$RUN_DIR/playwright-output" "$retain_dir/playwright-output"
   fi
@@ -121,14 +126,13 @@ retain_failure_artifacts() {
     fi
   done < <(find "$retain_dir" -name trace.zip -type f -print0 2>/dev/null || true)
   echo "retained failure artifacts for group ${GROUP_LABEL} in $retain_dir" >&2
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    printf 'failure-artifacts=%s\n' "$retain_dir" >>"$GITHUB_OUTPUT"
-    printf 'failure-group=%s\n' "$GROUP_LABEL" >>"$GITHUB_OUTPUT"
-  fi
 }
 
 cleanup() {
   local status=$?
+  # After an interrupt the reader of stderr may be gone: a write must not
+  # end this cleanup (SIGPIPE) before the retention and the removal below.
+  trap '' PIPE
   stop_net_monitor
   net_mark "group exiting with status ${status}" 2>/dev/null || true
   if (( status != 0 )); then
