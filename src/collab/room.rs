@@ -1123,7 +1123,6 @@ struct ConnectionState {
     poisoned: bool,
     pending_persist: VecDeque<PersistBarrier>,
     in_flight: bool,
-    revoked: bool,
 }
 
 struct PersistBarrier {
@@ -1179,7 +1178,6 @@ struct RoomActor {
     committed_loaded: bool,
     primary_dirty: bool,
     client_id_owner: HashMap<u32, (Uuid, Instant)>,
-    shutting_down: bool,
     pending_awareness: VecDeque<Vec<u8>>,
     flushing_awareness: bool,
     /// Set when the dedicated fence connection is lost; actor exits once empty.
@@ -1243,7 +1241,6 @@ pub async fn spawn_room(
         committed_loaded: false,
         primary_dirty: false,
         client_id_owner: HashMap::new(),
-        shutting_down: false,
         pending_awareness: VecDeque::new(),
         flushing_awareness: false,
         fence_lost: false,
@@ -1289,6 +1286,17 @@ enum LockingAuth {
     Allow,
     Deny,
     DbError,
+}
+
+/// How a server-side close is queued relative to frames already queued for
+/// the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseOrder {
+    /// Signal the transport's cancel watch at once, ahead of queued data.
+    Preempt,
+    /// Queue Close behind queued data so a committed ack is delivered first
+    /// (see [`RoomActor::enqueue_close_ordered`]).
+    AfterQueued,
 }
 
 impl RoomActor {
@@ -1400,7 +1408,6 @@ impl RoomActor {
                                 .send(self.handle_project_live(actor_user_id, session_id).await);
                         }
                         Some(RoomCommand::Shutdown) => {
-                            self.shutting_down = true;
                             self.abort_session_revision_work();
                             break;
                         }
@@ -1427,7 +1434,7 @@ impl RoomActor {
             // Shutdown queued behind it (admission reclaim) must not drop a
             // revision that only waits for its head retry.
             for _ in 0..SYSTEM_REVISION_HEAD_RETRIES {
-                if self.session_revision.is_none() || self.shutting_down {
+                if self.session_revision.is_none() {
                     break;
                 }
                 if self.advance_session_revision().await {
@@ -1435,9 +1442,6 @@ impl RoomActor {
                 }
             }
             if self.fence_lost && self.connections.is_empty() {
-                break;
-            }
-            if self.connections.is_empty() && self.shutting_down {
                 break;
             }
         }
@@ -1546,15 +1550,15 @@ impl RoomActor {
         }
     }
 
+    /// Remove the connection and queue its Close; returns its awareness
+    /// tombstone for the caller's flush.
     async fn evict_connection(
         &mut self,
         conn_id: Uuid,
         code: u16,
         reason: &str,
+        order: CloseOrder,
     ) -> Option<Vec<u8>> {
-        if let Some(conn) = self.connections.get_mut(&conn_id) {
-            conn.revoked = true;
-        }
         let tombstone = if let Some(conn) = self.connections.get(&conn_id) {
             self.awareness
                 .remove_client(conn.client_id, conn.conn_generation)
@@ -1562,42 +1566,36 @@ impl RoomActor {
             None
         };
         if let Some(conn) = self.connections.remove(&conn_id) {
-            Self::enqueue_close(&conn.events, &conn.cancel, code, reason);
-        }
-        tombstone
-    }
-
-    async fn evict_connection_ordered(
-        &mut self,
-        conn_id: Uuid,
-        code: u16,
-        reason: &str,
-    ) -> Option<Vec<u8>> {
-        if let Some(conn) = self.connections.get_mut(&conn_id) {
-            conn.revoked = true;
-        }
-        let tombstone = if let Some(conn) = self.connections.get(&conn_id) {
-            self.awareness
-                .remove_client(conn.client_id, conn.conn_generation)
-        } else {
-            None
-        };
-        if let Some(conn) = self.connections.remove(&conn_id) {
-            Self::enqueue_close_ordered(&conn.events, &conn.cancel, code, reason);
+            match order {
+                CloseOrder::Preempt => {
+                    Self::enqueue_close(&conn.events, &conn.cancel, code, reason);
+                }
+                CloseOrder::AfterQueued => {
+                    Self::enqueue_close_ordered(&conn.events, &conn.cancel, code, reason);
+                }
+            }
         }
         tombstone
     }
 
     async fn close_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
-        if let Some(encoded) = self.evict_connection(conn_id, code, reason).await {
-            self.pending_awareness.push_back(encoded);
-        }
-        self.flush_pending_awareness().await;
-        self.try_schedule_session_revision();
+        self.close_connection_in_order(conn_id, code, reason, CloseOrder::Preempt)
+            .await;
     }
 
     async fn close_connection_ordered(&mut self, conn_id: Uuid, code: u16, reason: &str) {
-        if let Some(encoded) = self.evict_connection_ordered(conn_id, code, reason).await {
+        self.close_connection_in_order(conn_id, code, reason, CloseOrder::AfterQueued)
+            .await;
+    }
+
+    async fn close_connection_in_order(
+        &mut self,
+        conn_id: Uuid,
+        code: u16,
+        reason: &str,
+        order: CloseOrder,
+    ) {
+        if let Some(encoded) = self.evict_connection(conn_id, code, reason, order).await {
             self.pending_awareness.push_back(encoded);
         }
         self.flush_pending_awareness().await;
@@ -1612,14 +1610,11 @@ impl RoomActor {
     }
 
     fn session_revision_scheduling_blocked(&self) -> bool {
-        self.shutting_down
-            || self.fence_lost
-            || !self.connections.is_empty()
-            || !self.committed_loaded
+        self.fence_lost || !self.connections.is_empty() || !self.committed_loaded
     }
 
     fn session_revision_cancelled(&self) -> bool {
-        self.shutting_down || self.fence_lost || *self.session_cancel_rx.borrow()
+        self.fence_lost || *self.session_cancel_rx.borrow()
     }
 
     fn abort_session_revision_work(&mut self) {
@@ -1932,9 +1927,6 @@ impl RoomActor {
     }
 
     async fn handle_join(&mut self, join: RoomJoin) -> Result<JoinAdmission, JoinError> {
-        if self.shutting_down {
-            return Err(JoinError::EngineUnavailable);
-        }
         if self.fence_lost {
             return Err(JoinError::EngineUnavailable);
         }
@@ -2078,7 +2070,6 @@ impl RoomActor {
                 poisoned: false,
                 pending_persist: VecDeque::new(),
                 in_flight: false,
-                revoked: false,
             },
         );
         // Published before the join reply lets the hub drop its joining lease,
@@ -2665,7 +2656,7 @@ impl RoomActor {
                 let committed = match append {
                     Ok(result) => result,
                     Err(CollabDbError::StaleWriter) => {
-                        self.fatal_writer_stale().await;
+                        self.fatal_writer_stale(CloseOrder::Preempt).await;
                         self.reject_candidate(conn_id, routing_key).await;
                         return;
                     }
@@ -2761,7 +2752,7 @@ impl RoomActor {
                     .await
                 {
                     ProjectDerivedOutcome::StaleWriter => {
-                        self.fatal_writer_stale_ordered().await;
+                        self.fatal_writer_stale(CloseOrder::AfterQueued).await;
                         return;
                     }
                     _ if !self.primary_loaded => {
@@ -2884,21 +2875,13 @@ impl RoomActor {
         }
     }
 
-    async fn fatal_writer_stale(&mut self) {
+    async fn fatal_writer_stale(&mut self, order: CloseOrder) {
         self.writer_generation = None;
         // A newer writer owns durable state; `committed` may lag it, so the next
         // capture/join must reload instead of trusting the in-memory bundle.
         self.committed_loaded = false;
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
-            self.close_connection(conn_id, 1008, "writer stale").await;
-        }
-    }
-
-    async fn fatal_writer_stale_ordered(&mut self) {
-        self.writer_generation = None;
-        self.committed_loaded = false;
-        for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
-            self.close_connection_ordered(conn_id, 1008, "writer stale")
+            self.close_connection_in_order(conn_id, 1008, "writer stale", order)
                 .await;
         }
     }
@@ -3211,7 +3194,7 @@ impl RoomActor {
             Ok(Ok(ProjectDerivedBodyResult::SkippedSeed)) => ProjectDerivedOutcome::SkippedSeed,
             Ok(Err(CollabDbError::StaleWriter)) => {
                 if preemptive_stale_close {
-                    self.fatal_writer_stale().await;
+                    self.fatal_writer_stale(CloseOrder::Preempt).await;
                 }
                 ProjectDerivedOutcome::StaleWriter
             }
@@ -3947,7 +3930,7 @@ impl RoomActor {
         let committed = match append {
             Ok(Ok(result)) => result,
             Ok(Err(CollabDbError::StaleWriter)) => {
-                self.fatal_writer_stale().await;
+                self.fatal_writer_stale(CloseOrder::Preempt).await;
                 return Err(ForwardWriteError::Unavailable);
             }
             Ok(Err(CollabDbError::PayloadTooLarge | CollabDbError::StateBudgetExceeded)) => {
@@ -4060,7 +4043,7 @@ impl RoomActor {
     /// flush (this runs inside it); the session revision is scheduled like any other close.
     async fn evict_for_backpressure(&mut self, conn_id: Uuid) {
         if let Some(tombstone) = self
-            .evict_connection(conn_id, 1009, "outbound queue full")
+            .evict_connection(conn_id, 1009, "outbound queue full", CloseOrder::Preempt)
             .await
         {
             self.pending_awareness.push_back(tombstone);
@@ -4069,13 +4052,6 @@ impl RoomActor {
     }
 
     async fn deliver_outbound(&mut self, conn_id: Uuid, bytes: Vec<u8>, kind: OutboundKind) {
-        if self
-            .connections
-            .get(&conn_id)
-            .is_none_or(|conn| conn.revoked)
-        {
-            return;
-        }
         let accounted_bytes = bytes.len().saturating_add(OUTBOUND_FRAME_OVERHEAD);
         let budget = self
             .connections
