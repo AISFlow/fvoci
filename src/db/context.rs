@@ -282,8 +282,8 @@ mod tests {
                 ),
             ],
         );
-        // MIGRATION_LOCK_KEY (db::migrate) and PREPARE_LOCK_KEY (prepare) are
-        // private to their modules and not listed here.
+        // db::legal also takes one-bigint locks, keyed by an int4
+        // hashtext('fvoci.legal:' || kind); they cannot be listed here.
         assert_unique(
             "one-bigint",
             &[
@@ -293,6 +293,11 @@ mod tests {
                     "instance admin",
                     crate::db::identity::INSTANCE_ADMIN_LOCK_KEY,
                 ),
+                // prepare holds its session lock while migrate takes the
+                // migration lock on other connections: equal values would
+                // deadlock prepare.
+                ("migration", crate::db::migrate::MIGRATION_LOCK_KEY),
+                ("prepare", crate::prepare::PREPARE_LOCK_KEY),
             ],
         );
     }

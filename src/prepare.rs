@@ -81,7 +81,7 @@ const REQUIRED: &[&str] = &[
 const MIN_SECRET_LEN: usize = 16;
 
 /// Serializes concurrent preparations (e.g. `docker compose run` next to `up`).
-const PREPARE_LOCK_KEY: i64 = 0x6676_6f63_7072_6570;
+pub(crate) const PREPARE_LOCK_KEY: i64 = 0x6676_6f63_7072_6570;
 
 /// Database names; restricted so they need no quoting in URLs.
 #[derive(Debug, PartialEq)]

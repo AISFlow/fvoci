@@ -94,7 +94,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
     ),
 ];
 
-const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
+pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
 
 const APP_ROLE_GRANTS: &str = include_str!("../../scripts/grant-app-role.sql");
 const APP_ROLE_PLACEHOLDER: &str = ":\"app_role\"";
