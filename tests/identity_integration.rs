@@ -4915,3 +4915,500 @@ async fn email_change_invalidates_links_mailed_before_it() {
     assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
     h.finish().await;
 }
+
+// ---------------------------------------------------------------------------
+// Workspace SSO against a real Keycloak (opt-in, `--ignored`).
+//
+// Test entitlement environment: the harness state carries
+// `license_fixture::signed_license()`, signed by a key generated in this
+// process and trusted only by this app state. Release builds trust no license
+// key (src/license-trust.json is empty), so this is not a release-server run.
+// `scripts/keycloak-oidc-e2e.sh --workspace-sso` starts Keycloak with two
+// realms (two issuers, one confidential client each) and names their settings
+// in FVOCI_KC_SSO_E2E_CONFIG.
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KcAdmin {
+    username: String,
+    password: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KcRealm {
+    realm: String,
+    issuer: String,
+    client_id: String,
+    client_secret: String,
+    username: String,
+    password: String,
+    email: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KcSso {
+    keycloak_origin: String,
+    admin: KcAdmin,
+    realms: Vec<KcRealm>,
+}
+
+fn kc_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("http client")
+}
+
+impl KcSso {
+    fn from_env() -> Self {
+        let path = std::env::var("FVOCI_KC_SSO_E2E_CONFIG")
+            .expect("FVOCI_KC_SSO_E2E_CONFIG: run scripts/keycloak-oidc-e2e.sh --workspace-sso");
+        serde_json::from_str(&std::fs::read_to_string(path).expect("config")).expect("config json")
+    }
+
+    async fn admin(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Value {
+        let http = kc_http();
+        let token: Value = http
+            .post(format!(
+                "{}/realms/master/protocol/openid-connect/token",
+                self.keycloak_origin
+            ))
+            .form(&[
+                ("grant_type", "password"),
+                ("client_id", "admin-cli"),
+                ("username", self.admin.username.as_str()),
+                ("password", self.admin.password.as_str()),
+            ])
+            .send()
+            .await
+            .expect("admin token")
+            .json()
+            .await
+            .expect("admin token json");
+        let mut request = http
+            .request(
+                method,
+                format!("{}/admin/realms{path}", self.keycloak_origin),
+            )
+            .bearer_auth(token["access_token"].as_str().expect("access token"));
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.expect("admin request");
+        assert!(
+            response.status().is_success(),
+            "admin {path}: {}",
+            response.status()
+        );
+        response.json().await.unwrap_or(Value::Null)
+    }
+
+    async fn client(&self, realm: &KcRealm) -> Value {
+        let clients = self
+            .admin(
+                reqwest::Method::GET,
+                &format!("/{}/clients?clientId={}", realm.realm, realm.client_id),
+                None,
+            )
+            .await;
+        assert_eq!(clients.as_array().map(Vec::len), Some(1), "{}", realm.realm);
+        clients[0].clone()
+    }
+
+    /// Registers exactly `redirect_uri`, the one the server reports for the
+    /// workspace, on the realm's client, and reads it back.
+    async fn register_redirect(&self, realm: &KcRealm, redirect_uri: &str) {
+        let mut client = self.client(realm).await;
+        client["redirectUris"] = json!([redirect_uri]);
+        client["webOrigins"] = json!([]);
+        let id = client["id"].as_str().expect("client id").to_string();
+        self.admin(
+            reqwest::Method::PUT,
+            &format!("/{}/clients/{id}", realm.realm),
+            Some(client),
+        )
+        .await;
+        let stored = self.client(realm).await;
+        assert_eq!(
+            stored["redirectUris"],
+            json!([redirect_uri]),
+            "{}",
+            realm.realm
+        );
+        assert_eq!(stored["webOrigins"], json!([]), "{}", realm.realm);
+    }
+
+    async fn user_id(&self, realm: &KcRealm) -> String {
+        let users = self
+            .admin(
+                reqwest::Method::GET,
+                &format!(
+                    "/{}/users?exact=true&username={}",
+                    realm.realm, realm.username
+                ),
+                None,
+            )
+            .await;
+        users[0]["id"].as_str().expect("user id").to_string()
+    }
+
+    /// Code exchanges Keycloak recorded for the realm, successful or not.
+    async fn token_events(&self, realm: &KcRealm) -> usize {
+        self.admin(
+            reqwest::Method::GET,
+            &format!(
+                "/{}/events?type=CODE_TO_TOKEN&type=CODE_TO_TOKEN_ERROR&max=1000",
+                realm.realm
+            ),
+            None,
+        )
+        .await
+        .as_array()
+        .map_or(0, Vec::len)
+    }
+}
+
+/// A browser for Keycloak's side of the flow: its own cookie jar, redirects
+/// not followed, so the answer to the redirect URI is handed to the app.
+struct KcBrowser {
+    http: reqwest::Client,
+}
+
+/// The `action` of Keycloak's sign-in form (`<form id="kc-form-login" ...>`).
+fn kc_login_form_action(html: &str) -> Option<String> {
+    let id = html.find("id=\"kc-form-login\"")?;
+    let start = html[..id].rfind("<form")?;
+    let tag = &html[start..start + html[start..].find('>')?];
+    let from = tag.find("action=\"")? + "action=\"".len();
+    let to = from + tag[from..].find('"')?;
+    Some(tag[from..to].replace("&amp;", "&"))
+}
+
+impl KcBrowser {
+    fn new() -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .cookie_store(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("http client"),
+        }
+    }
+
+    /// Follows the authorization URL through the sign-in form (unless the
+    /// realm's own session answers at once) and returns the query Keycloak
+    /// sends to `redirect_uri`, and whether the form was shown.
+    async fn authorize(&self, url: &str, realm: &KcRealm, redirect_uri: &str) -> (String, bool) {
+        let location = |response: &reqwest::Response| {
+            response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .expect("redirect location")
+                .to_string()
+        };
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .expect("authorization request");
+        let (target, form) = if response.status().is_redirection() {
+            (location(&response), false)
+        } else {
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "sign-in page");
+            let html = response.text().await.expect("sign-in page");
+            let action = kc_login_form_action(&html).expect("Keycloak sign-in form");
+            let response = self
+                .http
+                .post(action)
+                .form(&[
+                    ("username", realm.username.as_str()),
+                    ("password", realm.password.as_str()),
+                    ("credentialId", ""),
+                ])
+                .send()
+                .await
+                .expect("sign-in");
+            assert!(
+                response.status().is_redirection(),
+                "sign-in: {}",
+                response.status()
+            );
+            (location(&response), true)
+        };
+        let (to, query) = target.split_once('?').expect("answer with a query");
+        assert_eq!(to, redirect_uri);
+        (query.to_string(), form)
+    }
+}
+
+fn form_param(query: &str, key: &str) -> Option<String> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.into_owned())
+}
+
+/// The authorization request goes to this realm's endpoint for this
+/// workspace's callback, with PKCE S256 (values are not printed).
+fn assert_workspace_authorization(url: &str, realm: &KcRealm, workspace: Uuid) {
+    let prefix = format!("{}/protocol/openid-connect/auth?", realm.issuer);
+    assert!(
+        url.starts_with(&prefix),
+        "authorization endpoint of {}",
+        realm.realm
+    );
+    let query = &url[prefix.len()..];
+    let redirect = format!("http://localhost/api/v1/auth/sso/{workspace}/callback");
+    assert_eq!(
+        form_param(query, "client_id").as_deref(),
+        Some(realm.client_id.as_str())
+    );
+    assert_eq!(
+        form_param(query, "redirect_uri").as_deref(),
+        Some(redirect.as_str())
+    );
+    assert_eq!(form_param(query, "response_type").as_deref(), Some("code"));
+    assert_eq!(
+        form_param(query, "code_challenge_method").as_deref(),
+        Some("S256")
+    );
+    assert_eq!(
+        form_param(query, "scope").as_deref(),
+        Some("openid email profile")
+    );
+    for key in ["state", "nonce", "code_challenge"] {
+        assert!(
+            form_param(query, key).is_some_and(|v| v.len() == 43),
+            "{key} present"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a real Keycloak: scripts/keycloak-oidc-e2e.sh --workspace-sso"]
+async fn keycloak_workspace_sso_with_a_test_entitlement() {
+    let kc = KcSso::from_env();
+    let [realm_a, realm_b] = &kc.realms[..] else {
+        panic!("two workspace realms");
+    };
+    let h = Harness::start_with(Options {
+        encryption: true,
+        oidc: oidc_settings(Vec::new(), true),
+        license: license_fixture::signed_license(),
+    })
+    .await;
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({"name": "Beta", "slug": "beta"})),
+        Some(&h.owner_cookie),
+        peer(210),
+    )
+    .await;
+    assert!(res.status.is_success(), "{:?}", res.json);
+    let ws_a = h.workspace_id;
+    let ws_b: Uuid = sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'beta'")
+        .fetch_one(&h.admin)
+        .await
+        .unwrap();
+    for (ws, realm) in [(ws_a, realm_a), (ws_b, realm_b)] {
+        let res = call(
+            &h.app,
+            "PUT",
+            &format!("/api/v1/workspaces/{ws}/oidc"),
+            Some(json!({
+                "issuer": realm.issuer,
+                "clientId": realm.client_id,
+                "clientSecret": realm.client_secret,
+                "label": realm.realm,
+            })),
+            Some(&h.owner_cookie),
+            peer(211),
+        )
+        .await;
+        assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+        let res = call(
+            &h.app,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/oidc"),
+            None,
+            Some(&h.owner_cookie),
+            peer(211),
+        )
+        .await;
+        let redirect = res.json["redirectUri"].as_str().expect("redirectUri");
+        assert_eq!(
+            redirect,
+            format!("http://localhost/api/v1/auth/sso/{ws}/callback")
+        );
+        kc.register_redirect(realm, redirect).await;
+    }
+    // Both realms' users are on example.com: verified addresses there join.
+    sqlx::query(
+        "UPDATE fvoci.workspaces SET auto_join_domains = ARRAY['example.com'] WHERE id = ANY($1)",
+    )
+    .bind(vec![ws_a, ws_b])
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    let providers = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/providers",
+        None,
+        None,
+        peer(212),
+    )
+    .await;
+    assert_eq!(providers.json["workspaceSso"], true);
+    let callback_a = format!("/api/v1/auth/sso/{ws_a}/callback");
+    let callback_b = format!("/api/v1/auth/sso/{ws_b}/callback");
+    let redirect_a = format!("http://localhost{callback_a}");
+    let redirect_b = format!("http://localhost{callback_b}");
+    let mismatch = "http://localhost/login?error=oidc_state_mismatch";
+
+    // 1. Workspace A: slug sign-in, realm A's form, A's callback: a JIT member.
+    let browser_a = KcBrowser::new();
+    let started = h.begin("/api/v1/auth/sso?slug=acme", None, peer(213)).await;
+    assert_workspace_authorization(&started.location, realm_a, ws_a);
+    let (query, form) = browser_a
+        .authorize(&started.location, realm_a, &redirect_a)
+        .await;
+    assert!(form, "realm A showed its sign-in form");
+    assert_eq!(
+        form_param(&query, "iss").as_deref(),
+        Some(realm_a.issuer.as_str())
+    );
+    let res = callback_at(
+        &h.app,
+        &callback_a,
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(213),
+    )
+    .await;
+    assert_eq!(res.location(), "http://localhost/");
+    let session = res.cookie().expect("session");
+    let me = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/me",
+        None,
+        Some(&session),
+        peer(213),
+    )
+    .await;
+    assert_eq!(me.json["email"], realm_a.email.as_str());
+    let (user_a, subject, issuer): (Uuid, String, Option<String>) = sqlx::query_as(
+        "SELECT u.id, l.provider_user_id, l.issuer FROM fvoci.identity_links l
+         JOIN fvoci.users u ON u.id = l.user_id WHERE u.email = $1",
+    )
+    .bind(&realm_a.email)
+    .fetch_one(&h.admin)
+    .await
+    .unwrap();
+    assert_eq!(subject, format!("{ws_a}:{}", kc.user_id(realm_a).await));
+    assert_eq!(issuer.as_deref(), Some(realm_a.issuer.as_str()));
+    let roles: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT workspace_id, role FROM fvoci.memberships WHERE user_id = $1")
+            .bind(user_a)
+            .fetch_all(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(roles, vec![(ws_a, "member".to_string())]);
+
+    // 2. Mix-up: realm A's answer for workspace A's flow on workspace B's
+    //    callback, and realm B's answer for B's flow on A's callback, are
+    //    refused before either code reaches a token endpoint.
+    let tokens = (
+        kc.token_events(realm_a).await,
+        kc.token_events(realm_b).await,
+    );
+    let started = h.begin("/api/v1/auth/sso?slug=acme", None, peer(214)).await;
+    let (query, form) = browser_a
+        .authorize(&started.location, realm_a, &redirect_a)
+        .await;
+    assert!(!form, "realm A answered from its own session");
+    let res = callback_at(
+        &h.app,
+        &callback_b,
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(214),
+    )
+    .await;
+    assert_eq!(res.location(), mismatch);
+    assert!(res.cookie().is_none());
+    let browser_b = KcBrowser::new();
+    let started = h.begin("/api/v1/auth/sso?slug=beta", None, peer(215)).await;
+    assert_workspace_authorization(&started.location, realm_b, ws_b);
+    let (query, form) = browser_b
+        .authorize(&started.location, realm_b, &redirect_b)
+        .await;
+    assert!(form, "realm B showed its sign-in form");
+    let res = callback_at(
+        &h.app,
+        &callback_a,
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(215),
+    )
+    .await;
+    assert_eq!(res.location(), mismatch);
+    assert!(res.cookie().is_none());
+    assert_eq!(
+        (
+            kc.token_events(realm_a).await,
+            kc.token_events(realm_b).await
+        ),
+        tokens,
+        "no code reached a token endpoint"
+    );
+
+    // 3. Workspace B's own flow completes with realm B only.
+    let started = h.begin("/api/v1/auth/sso?slug=beta", None, peer(216)).await;
+    let (query, _) = browser_b
+        .authorize(&started.location, realm_b, &redirect_b)
+        .await;
+    let res = callback_at(
+        &h.app,
+        &callback_b,
+        &query,
+        Some(&started.state_cookie),
+        None,
+        peer(216),
+    )
+    .await;
+    assert_eq!(res.location(), "http://localhost/");
+    let session = res.cookie().expect("session");
+    let me = call(
+        &h.app,
+        "GET",
+        "/api/v1/auth/me",
+        None,
+        Some(&session),
+        peer(216),
+    )
+    .await;
+    assert_eq!(me.json["email"], realm_b.email.as_str());
+    let roles: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT m.workspace_id, m.role FROM fvoci.memberships m
+         JOIN fvoci.users u ON u.id = m.user_id WHERE u.email = $1",
+    )
+    .bind(&realm_b.email)
+    .fetch_all(&h.admin)
+    .await
+    .unwrap();
+    assert_eq!(roles, vec![(ws_b, "member".to_string())]);
+    assert_eq!(kc.token_events(realm_b).await, tokens.1 + 1);
+    h.finish().await;
+}
