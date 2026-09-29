@@ -23,7 +23,11 @@ pub struct GanttLinkInput {
     pub lag_days: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Dependency type: finish-to-start, start-to-start or finish-to-finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+#[cfg_attr(feature = "api-schema", schema(as = GanttLinkType))]
+#[serde(rename_all = "UPPERCASE")]
 pub enum LinkType {
     Fs,
     Ss,
@@ -193,11 +197,40 @@ pub struct GanttLayoutItemOutput {
     pub assignee_ids: Vec<String>,
     pub start_date: Option<IsoDate>,
     pub due_date: Option<IsoDate>,
+    /// RFC 3339 UTC with milliseconds; send it back unchanged as
+    /// `expectedDates.dueAt`, which PATCH compares to the millisecond.
     pub due_at: Option<String>,
     pub start: IsoDate,
     pub end: IsoDate,
     pub milestone: bool,
     pub inferred: ScheduleInference,
+}
+
+/// A dependency between two returned items. The server alone enforces it: a
+/// PATCH that breaks it is refused with `dependency_contradiction`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct GanttLinkOutput {
+    pub blocker_id: String,
+    pub blocked_id: String,
+    #[serde(rename = "type")]
+    pub link_type: LinkType,
+    /// Working days the blocked task's date must trail the blocker's date by;
+    /// weekends and workspace holidays do not count.
+    pub lag_days: i32,
+}
+
+/// Non-working days, as the server applies them to `columns[].offDuty` and
+/// to dependency lag.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct GanttCalendarOutput {
+    /// Weekdays that are never working days, 0 = Sunday .. 6 = Saturday.
+    pub weekend: Vec<u8>,
+    /// Workspace holidays within `scale.start..=scale.end`, ascending.
+    pub holidays: Vec<IsoDate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +239,18 @@ pub struct GanttLayoutItemOutput {
 pub struct GanttLayoutOutput {
     pub truncated: bool,
     pub items: Vec<GanttLayoutItemOutput>,
+    /// At least Edit on the project and the project not archived, read in the
+    /// same snapshot as `items`. A display hint: PATCH re-checks both under
+    /// the project row lock. Ignores API-token scopes; PATCH also needs
+    /// `tasks.write`.
+    pub can_edit: bool,
+    /// Dependencies whose both ends are in `items`, ascending
+    /// `(blockerId, blockedId)` and capped at 2048 (over the cap, the lowest
+    /// pairs).
+    pub links: Vec<GanttLinkOutput>,
+    /// Dependencies among `items` before the cap.
+    pub link_total: i32,
+    pub calendar: GanttCalendarOutput,
     pub scale: GanttScaleOutput,
     pub lane_height: i32,
     pub lane_count: i32,
