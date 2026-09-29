@@ -673,7 +673,7 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 - **열린 PR**(2026-09-30 01:50 KST 대조):
   - **main**: `f3f53c90` = #262. `83c01480` = #268. `9e4f3af3` = #264. v0.3.0 태그는 `6f64febc`에 고정.
   - 제품(연결 예정): #265 `1ee57935`, #267 `e257a434`, #269 `ef17b410`, #266 `ddce8bf2`.
-  - 후보에서 연결됨(main 아님): #270 `/setup` `b601ef64` (on #269). IME CI 수정 `485d118e` (main 직전).
+  - 후보에서 연결됨(main 아님): #270 `/setup` `b601ef64` (on #269). IME CI 수정 #287 `485d118e` (main 직전).
   - Vue 미연결 WIP: #271–#279, #281–#283, #285–#286. 모두 **live 아님**. #280은 문서(`ffeacb19`). #284는 live 위키 크롬 e2e.
   - 문서: #263 (`fb082853`).
   - Dependabot(비게이트): #152 #153 #155 #156 #157 #158 #160 #191.
@@ -813,7 +813,7 @@ React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/inv
 
 | 경로 | PR/HEAD | 담당 | 다음 수락 행동 |
 | --- | --- | --- | --- |
-| Hangul composition 회귀 (같은 단언, `test.fail` 제거) | `485d118e` on main | Grok 임시 실행자 | 독립 검토 + Web CI 후 머지. skip 없음 |
+| Hangul composition 회귀 (같은 단언, `test.fail` 제거) | #287 `485d118e` | Grok 임시 실행자 | 독립 검토 + Web CI 후 머지. skip 없음 |
 | `/login` | #269 `ef17b410` | Grok 임시 실행자 | IME PR 머지 후 CI(mfa-flow 포함). 같은 wiki IME `test.fail`이 샤드 실패 |
 | `/setup` | #270 `b601ef64` | Grok 임시 실행자 | 로컬 `workspace-flow` 7/7. #269 뒤 독립 검토·CI |
 
@@ -851,7 +851,7 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 #### 바로 수락할 후보
 
-1. **IME e2e** `485d118e` — 독립 검토 + Web CI 후 main. #269 차단을 푼다.
+1. **#287** `485d118e` — 독립 검토 + Web CI 후 main. #269 차단을 푼다.
 2. **#265** `1ee57935` / **#267** `e257a434` / **#266** `ddce8bf2` — 각 CI CLEAN + 기존 독립 검토.
 3. **#269** `ef17b410` — IME 후 CI. 인증 기능군 완료 아님.
 4. **#270** `b601ef64` — #269 뒤. 로컬 연결 검증됨.
