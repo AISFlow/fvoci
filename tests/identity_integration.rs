@@ -2839,6 +2839,8 @@ async fn workspace_sso_login_and_jit_join() {
 
     // Unknown slug, and a slug the server refuses: the login page shows
     // the problem instead of a raw problem+json page.
+    let states = oidc_state_rows(&h).await;
+    let discovery = fake.discovery_hits.load(Ordering::SeqCst);
     let res = call(
         &h.app,
         "GET",
@@ -2882,6 +2884,9 @@ async fn workspace_sso_login_and_jit_join() {
     )
     .await;
     assert_sso_refused(&res, "rate_limit_exceeded");
+    // No refusal issues a state row or asks the provider.
+    assert_eq!(oidc_state_rows(&h).await, states);
+    assert_eq!(fake.discovery_hits.load(Ordering::SeqCst), discovery);
     h.finish().await;
 }
 
