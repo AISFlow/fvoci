@@ -19,7 +19,7 @@ use crate::db::context::{
 };
 use crate::db::documents::document_permission;
 use crate::db::projects::{
-    load_live_project, lock_project, project_permission, project_permission_by_id, LockedProject,
+    load_live_project, lock_project, project_permission, project_permission_by_id, LiveProject,
     ProjectDbError,
 };
 use crate::db::task_activity::record_task_activity;
@@ -36,7 +36,7 @@ use crate::tasks::activity::ActivitySnapshot;
 
 /// A task the actor can currently view, with its project row.
 struct ViewableTask {
-    project: LockedProject,
+    project: LiveProject,
     archived_at: Option<DateTime<Utc>>,
     permission: ProjectPermission,
 }

@@ -329,11 +329,11 @@ pub async fn list_task_activity(
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     };
-    let Some(locked) = load_live_project(&mut tx, workspace_id, project_id).await? else {
+    let Some(project) = load_live_project(&mut tx, workspace_id, project_id).await? else {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     };
-    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));

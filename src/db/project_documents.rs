@@ -44,13 +44,13 @@ pub(crate) async fn require_project_document_access(
     } else {
         load_live_project(tx, workspace_id, project_id).await?
     };
-    let Some(locked) = project else {
+    let Some(project) = project else {
         return Ok(Err(DocumentDbError::NotFound));
     };
-    if locked.status == "archived" && min >= ProjectPermission::Edit {
+    if project.status == "archived" && min >= ProjectPermission::Edit {
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(min) {
         return Ok(Err(DocumentDbError::NotFound));
     }

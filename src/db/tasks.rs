@@ -1227,12 +1227,12 @@ pub async fn get_task(
     .fetch_one(&mut *tx)
     .await?;
     let project_id = task_row.project_id;
-    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
+    let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+    let Some(project) = project else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
@@ -1349,12 +1349,12 @@ async fn list_tasks_in_scope(
     }
     let scope_condition = match project_id {
         Some(project_id) => {
-            let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
-            let Some(locked) = locked else {
+            let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+            let Some(project) = project else {
                 tx.rollback().await?;
                 return Ok(Err(ProjectDbError::NotFound));
             };
-            if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+            if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
                 .await?
                 .at_least(ProjectPermission::View)
             {
@@ -3338,11 +3338,11 @@ pub async fn list_project_dependencies(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let Some(locked) = load_live_project(&mut tx, workspace_id, project_id).await? else {
+    let Some(project) = load_live_project(&mut tx, workspace_id, project_id).await? else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+    if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
         .await?
         .at_least(ProjectPermission::View)
     {

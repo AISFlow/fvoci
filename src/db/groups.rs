@@ -513,12 +513,12 @@ pub async fn list_project_group_grants(
         tx.rollback().await?;
         return Ok(Err(GroupDbError::NotFound));
     }
-    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
+    let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+    let Some(project) = project else {
         tx.rollback().await?;
         return Ok(Err(GroupDbError::NotFound));
     };
-    if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+    if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
         .await?
         .at_least(ProjectPermission::View)
     {

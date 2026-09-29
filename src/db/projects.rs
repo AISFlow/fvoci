@@ -140,7 +140,7 @@ struct ProjectChangeRecord<'a> {
 
 /// A live project row: [`lock_project`] returns it under a row lock,
 /// [`load_live_project`] without one.
-pub(crate) struct LockedProject {
+pub(crate) struct LiveProject {
     pub id: Uuid,
     pub key: String,
     pub name: String,
@@ -304,7 +304,7 @@ macro_rules! live_project_select {
     };
 }
 
-type LiveProjectRow = (
+type LiveProjectColumns = (
     Uuid,
     String,
     String,
@@ -323,8 +323,8 @@ async fn fetch_live_project(
     sql: &'static str,
     workspace_id: Uuid,
     project_id: Uuid,
-) -> Result<Option<LockedProject>, sqlx::Error> {
-    let row = sqlx::query_as::<_, LiveProjectRow>(sql)
+) -> Result<Option<LiveProject>, sqlx::Error> {
+    let row = sqlx::query_as::<_, LiveProjectColumns>(sql)
         .bind(workspace_id)
         .bind(project_id)
         .fetch_optional(&mut **tx)
@@ -342,7 +342,7 @@ async fn fetch_live_project(
             created_by,
             created_at,
             updated_at,
-        )| LockedProject {
+        )| LiveProject {
             id,
             key,
             name,
@@ -364,7 +364,7 @@ pub(crate) async fn lock_project(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,
-) -> Result<Option<LockedProject>, sqlx::Error> {
+) -> Result<Option<LiveProject>, sqlx::Error> {
     const SQL: &str = concat!(live_project_select!(), "FOR NO KEY UPDATE");
     fetch_live_project(tx, SQL, workspace_id, project_id).await
 }
@@ -375,7 +375,7 @@ pub(crate) async fn load_live_project(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,
-) -> Result<Option<LockedProject>, sqlx::Error> {
+) -> Result<Option<LiveProject>, sqlx::Error> {
     const SQL: &str = live_project_select!();
     fetch_live_project(tx, SQL, workspace_id, project_id).await
 }
@@ -384,7 +384,7 @@ pub(crate) async fn project_permission(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
-    project: &LockedProject,
+    project: &LiveProject,
 ) -> Result<ProjectPermission, sqlx::Error> {
     let workspace_role = membership_role(tx, workspace_id, actor_user_id)
         .await?
@@ -445,10 +445,10 @@ pub(crate) async fn require_project_view(
     if !workspace_is_live(tx, workspace_id).await? {
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let Some(locked) = load_live_project(tx, workspace_id, project_id).await? else {
+    let Some(project) = load_live_project(tx, workspace_id, project_id).await? else {
         return Ok(Err(ProjectDbError::NotFound));
     };
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(ProjectPermission::View) {
         return Ok(Err(ProjectDbError::NotFound));
     }
@@ -1241,7 +1241,7 @@ pub async fn list_projects(
         .fetch_one(&mut *tx)
         .await?;
 
-        let locked = LockedProject {
+        let project = LiveProject {
             id: project_id,
             key: row.1.clone(),
             name: row.2.clone(),
@@ -1254,7 +1254,7 @@ pub async fn list_projects(
             created_at: row.9,
             updated_at: row.10,
         };
-        let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+        let permission = project_permission(&mut tx, workspace_id, actor_user_id, &project).await?;
         let can_edit = permission.at_least(ProjectPermission::Edit);
         let can_manage = permission.at_least(ProjectPermission::Manage);
 
@@ -1300,29 +1300,29 @@ pub async fn get_project(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
+    let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+    let Some(project) = project else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    if project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+    if project_permission(&mut tx, workspace_id, actor_user_id, &project)
         .await?
         .at_least(ProjectPermission::View)
     {
         tx.commit().await?;
         Ok(Ok(ProjectRow {
-            id: locked.id,
+            id: project.id,
             workspace_id,
-            key: locked.key,
-            name: locked.name,
-            description: locked.description,
-            icon: locked.icon,
-            visibility: locked.visibility,
-            root_document_id: locked.root_document_id,
-            status: locked.status,
-            created_by: locked.created_by,
-            created_at: locked.created_at,
-            updated_at: locked.updated_at,
+            key: project.key,
+            name: project.name,
+            description: project.description,
+            icon: project.icon,
+            visibility: project.visibility,
+            root_document_id: project.root_document_id,
+            status: project.status,
+            created_by: project.created_by,
+            created_at: project.created_at,
+            updated_at: project.updated_at,
         }))
     } else {
         tx.rollback().await?;
@@ -1534,12 +1534,12 @@ pub async fn list_project_members(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
+    let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+    let Some(project) = project else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+    if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
         .await?
         .at_least(ProjectPermission::View)
     {
@@ -1878,12 +1878,12 @@ pub async fn get_project_workflow(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let locked = load_live_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
+    let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+    let Some(project) = project else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+    if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
         .await?
         .at_least(ProjectPermission::View)
     {
@@ -1936,7 +1936,7 @@ pub async fn get_project_workflow(
     }))
 }
 
-fn row_from_locked(workspace_id: Uuid, locked: LockedProject) -> ProjectRow {
+fn row_from_locked(workspace_id: Uuid, locked: LiveProject) -> ProjectRow {
     ProjectRow {
         id: locked.id,
         workspace_id,
@@ -1960,7 +1960,7 @@ async fn begin_project_manage(
     actor_user_id: Uuid,
     session_id: Uuid,
     tree_lock: bool,
-) -> Result<Result<LockedProject, ProjectDbError>, sqlx::Error> {
+) -> Result<Result<LiveProject, ProjectDbError>, sqlx::Error> {
     set_tenant(tx, workspace_id).await?;
     lock_membership_users(tx, &[actor_user_id]).await?;
     if !recheck_session(tx, actor_user_id, session_id).await? {
