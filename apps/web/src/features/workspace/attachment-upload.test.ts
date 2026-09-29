@@ -817,7 +817,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     const bridge = await loadBridge({ fetchImpl, delay: () => Promise.resolve() });
     await assert.rejects(
       bridge.upload(new File([new Uint8Array(10)], "f.bin"), () => undefined),
-      /presigned URL expired/,
+      /part 1: storage refused the signed URL \(HTTP 403\)/,
     );
     assert.equal(state.resumes, 1);
     assert.equal(state.puts.length, 2);

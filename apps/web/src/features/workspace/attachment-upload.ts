@@ -92,10 +92,19 @@ class PartUploadError extends Error {
   }
 }
 
-/** Presigned URLs expired or are about to: resume signs fresh ones. */
+/**
+ * The presigned URLs need re-issuing: they are about to expire (`status`
+ * null), or storage refused one with 403. A 403 is usually expiry but may be
+ * a signature storage does not accept (a proxy rewrote `Host`, a wrong key),
+ * so the message names the refusal rather than guessing.
+ */
 class PartUrlsExpiredError extends Error {
-  constructor(partNumber: number) {
-    super(`part ${partNumber}: presigned URL expired`);
+  constructor(partNumber: number, status: number | null) {
+    super(
+      status === null
+        ? `part ${partNumber}: presigned URL about to expire`
+        : `part ${partNumber}: storage refused the signed URL (HTTP ${status})`,
+    );
     this.name = "PartUrlsExpiredError";
   }
 }
@@ -174,7 +183,7 @@ async function putPresignedPart(
     }
     if (attempt > 0) await abortableDelay(300 * 2 ** (attempt - 1), signal, deps.delay);
     if (refreshAfter !== null && deps.now() >= refreshAfter) {
-      throw new PartUrlsExpiredError(target.partNumber);
+      throw new PartUrlsExpiredError(target.partNumber, null);
     }
     try {
       const res = await deps.fetchImpl(target.url, {
@@ -188,7 +197,7 @@ async function putPresignedPart(
         if (!etag) throw new MissingEtagError(target.partNumber);
         return { partNumber: target.partNumber, etag };
       }
-      if (res.status === 403) throw new PartUrlsExpiredError(target.partNumber);
+      if (res.status === 403) throw new PartUrlsExpiredError(target.partNumber, res.status);
       lastError = new PartUploadError(target.partNumber, res.status);
       if (res.status < 500) break;
     } catch (err) {
