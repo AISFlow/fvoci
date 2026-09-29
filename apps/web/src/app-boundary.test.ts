@@ -25,6 +25,8 @@ const SAMPLES = [
   "/",
   "/login",
   "/login/",
+  "/setup",
+  "/setup/",
   "/w/acme",
   "/w/acme/a/123/view",
   "/w/acme/WIKI-1",
@@ -76,6 +78,13 @@ test("the boot module sends /login, and only that path, to the Vue app", () => {
   assert.equal(isVueAppPath("/LOGIN"), true);
   assert.equal(isVueAppPath("/login/extra"), false);
   assert.equal(isVueAppPath("/logins"), false);
+});
+
+test("the boot module still sends /setup to the React app", () => {
+  assert.equal(isVueAppPath("/setup"), false);
+  assert.equal(isVueAppPath("/setup/"), false);
+  assert.equal(isVueAppPath("/SETUP"), false);
+  assert.equal(isVueAppPath("/setups"), false);
 });
 
 test("every wiki path the boundary sends parses as the React app's wiki ref", () => {

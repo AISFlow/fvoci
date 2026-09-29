@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isVueAppPath } from "@/app-boundary";
 import { createMemoryHistory } from "vue-router";
 import { createAppRouter, routes } from "./router.ts";
 
@@ -42,6 +43,17 @@ test("the login route is declared (the boundary regex sends /login to Vue)", () 
     routes.some((route) => route.name === "login" && route.path === "/login"),
     true,
   );
+});
+
+test("the setup route is declared (boot still needs the boundary regex)", () => {
+  assert.equal(
+    routes.some((route) => route.name === "setup" && route.path === "/setup"),
+    true,
+  );
+  // Boot still loads the React app for /setup (src/app-boundary.ts).
+  assert.equal(isVueAppPath("/setup"), false);
+  assert.equal(isVueAppPath("/setup/"), false);
+  assert.equal(isVueAppPath("/SETUP"), false);
 });
 
 test(
