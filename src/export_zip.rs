@@ -33,7 +33,8 @@ pub fn crc32(data: &[u8]) -> u32 {
 }
 
 /// Source `zipEntryName`: backslashes to `/`, drop NUL, empty, `.` and `..`
-/// segments.
+/// segments. Imports use the same rules (`documents::import_zip`), after
+/// rejecting traversal names instead of rewriting them.
 pub fn zip_entry_name(raw: &str) -> String {
     let normalized = raw.replace('\\', "/").replace('\0', "");
     let joined = normalized
