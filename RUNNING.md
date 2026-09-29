@@ -636,6 +636,13 @@ repository root for the locked `bun.lock`, and `--bun` so package binaries run
 on Bun even where Node is installed. `bunfig.toml` keeps the hoisted linker (one
 root `node_modules`), which the type paths and scripts rely on.
 
+A checkout last installed with npm (before the Bun switch) still has npm's
+`node_modules` in `apps/web`, `packages/editor` and `scripts/document-convert`.
+Delete those three before the first `bun ci`: npm's `install-links` copied
+`@fvoci/editor` and `@fvoci/i18n` into `apps/web/node_modules`, and imports
+from `apps/web` would resolve to those stale copies instead of the workspace
+packages.
+
 Development (Vite proxy to a running `fvoci-server` API):
 
 ```sh
