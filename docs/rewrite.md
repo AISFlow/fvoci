@@ -1241,3 +1241,40 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   남아 원본 verdict 미발견이며 유효 원본을 찾거나 해당 미검토 delta를 확인해야 한다. 한도 종료·undefined HEAD 검토는 인정하지 않는다.
 - 구현/검토 상세: 같은 takeover-evidence의 ci287/auth 보고서, 독립287/270 보고서. native agent ID는 `/root/ci287`,
   `/root/auth_acceptance`, `/root/review287_setup`, `/root/review_ci_auth_delta`; 각 실제 모델/effort는 보고서와 환경 기록.
+
+
+#### 인수 실행 결과 갱신 (2026-09-30, 수락 후보 고정)
+
+- #287 `15ed8e0b`: 원격 Web36643827183, Native documents36643827195, Native collaboration36643827187 성공.
+  Container36643827184 설치·복구 양 아키텍처 성공; upgrade-smoke-arm64는 기존 계획상 skip이며 성공 검사로 세지 않는다.
+  Rust36643827185의 실제 DB/협업 검사 성공, 최종 gate 대기. 아직 main 통합 아님.
+- #269 `3fdd194b08bc71ad2ad1268bf68a0c21e6e5b557`: setup 오류를 spinner보다 먼저 표시해 F1 수정.
+  기존 제품에서 새 회귀 실패를 확인한 뒤 실제 production 로그인5/5 통과. 별도 Sol6.1 high가 전체 login ACCEPT,
+  이전 F1 요청은 과거 SHA에만 해당. 최신 후보 push 후 CI 진행. f29b8b8의 5개 CI는 이 결함 발견 후 코디네이터가
+  취소했으며 성공으로 세지 않는다. `/tmp/fvoci-auth-guard-sol61.txt`, `/tmp/fvoci-delta-review-sol61.txt`.
+- #270 `ef7d2b1f9cf7b74350f493c4252f547ad0bfe693`: 원래 setup ACCEPT와 31bf3a99의 unit19/실제workspace7+login3
+  성공 근거 유지. 최신 auth 수정 병합은 제품·회귀의 동일 delta임을 독립 검토했으며 push 후 최신 CI 진행.
+- #271 `271fb507edc30090aa9a78887c4e27f97242931d`: 실제 `/invite/:token` Vue 연결과 전용 React 페이지·폼 제거.
+  기존 47f61214 구현 독립 검토 ACCEPT. 최종 auth 병합 후 실제 Rust/DB invite3(가입·기존계정·약관/MFA),
+  기존 MFA1, 관련 unit40 및 production build 통과. 기존 TOTP helper의 변경 없는 추출과 추가 회귀는
+  별도 `review_invite_final` Sol6.1 high 검토 중. 외부 IdP callback은 이 후보에서 미실행. 아직 push/수락 아님.
+- #267 `a446a7c3e4a5aef19e591b4d7eefce9b9eb70e7c`: 셸 코드 독립 ACCEPT_WITH_NITS, #287 병합 mapping 확인,
+  push 후 해당 후보 원격 CI 진행. 옛 79fa166e 실제 셸6/위키7/간트10은 원래 SHA 근거로만 보존.
+- #265: `wiki_controls_complete` Sol6.1 high가 `042cdc25`에서 실제 파일 drop/paste와 native drag를 검증 중.
+  기존 controls6 통과; 새 native drag에서 dragstart가 발생하지 않는 경로를 조사 중이며 미수락. #261은 계속 열림.
+- #149 이슈를 현재 승인 상태로 정정했다. A/B는 이미 승인·#254 수락이며 외부 제공자/브라우저/프록시 검증만 잔여.
+- #280 `62e40fc5`: 현재 차수를 #265/#267/#269/#270/#271 + #287로 고정하고 비교를 불가능한 결함 조건으로
+  제한하지 않는 사용자 지시 반영. 별도 Sol6.1 검토 중, 아직 push 안 함.
+- 현재 작성자: 위키 컨트롤 tree는 wiki_controls_complete; 초대 tree는 구현 완료 후 검토 고정;
+  공통 기록 docs-0-3-0-record는 Astra. 나머지 기존 작성자는 체크포인트를 반환했으며 같은 파일 중복 쓰기 없음.
+  최신 모델/effort 대응표는 기존 recovery의 takeover-evidence/runtime-map.json에 실제 session_meta 기준으로 보존.
+
+- #287 최종 수락: 위 다섯 workflow gate 모두 성공 후 기대 HEAD15ed8e0b를 지정해 merge.
+  main `a1d19b6e03c13ce94c642129b9cc5bc573be3764`, 로컬 main도 clean fast-forward 완료.
+  merge SHA의 원격 CI36645650952/36645651166/36645651179/36645651109/36645651163 진행 중.
+  배포는 여전히 v0.3.0이며 이 변경이 배포됐다고 표시하지 않는다. 최종 check snapshot은 takeover-evidence/ci-287/final-checks.json.
+- #280 정책 모순 한 곳의 추가 지적을 `769b39b323e054bbe488721b381f428197f7f2ab`에서 수정했고
+  별도 Sol6.1 delta ACCEPT 후 push. 최신 CI 대기; 기존62e40fc5 REQUEST_CHANGES는 과거 근거로 보존.
+- 보관 문서의 직접 upload201 재현은 서버 계약 조사 대상으로 분리했다. 새 worktree archived-attachment-guard
+  (base a1d19b6e)의 Sol6.1 high가 원본/현재 계약과 실제 DB를 대조한다. 화면 읽기 전용만으로 새 정책을 추론하지 않는다.
+  해당 tree만 추가되어 현재 worktree63개; 기존 정리9개와 보존 근거는 유지.
