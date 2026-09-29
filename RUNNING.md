@@ -1344,13 +1344,17 @@ in `start-dev` with one imported test realm (`scripts/keycloak/`), published on
 from the checkout, driven by Playwright Chromium through the web UI
 (`apps/web/e2e-keycloak/`). Secrets are generated per run; the Keycloak compose
 project is removed on exit. It does not cover external providers, HTTPS or a
-reverse proxy, the container deployment path, or workspace SSO (needs a
-`workspaceSso` license, which published builds cannot load).
+reverse proxy, or the container deployment path. Workspace SSO needs a
+`workspaceSso` license, which published builds cannot load; `--workspace-sso`
+adds two workspace realms and runs the ignored Rust test
+`keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
+license, not the release server) against them.
 
 ```sh
 bash scripts/prepare-web-e2e.sh    # once
 TMPDIR=/tmp FVOCI_KC_E2E_EVIDENCE_DIR=/tmp/kc-evidence bash scripts/keycloak-oidc-e2e.sh
 bash scripts/keycloak-oidc-e2e.sh --skip-build    # reuse target/release and apps/web/dist
+bash scripts/keycloak-oidc-e2e.sh --workspace-sso    # also the workspace SSO test
 ```
 
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated

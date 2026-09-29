@@ -4,8 +4,10 @@
 Subcommands:
   render <template> <out>               realm file from the per-run secrets
                                         in the environment
+  render-sso <template> <out-dir>       the two workspace SSO realm files
   config <issuer> <out>                 the spec's mode-600 config
-  ready <issuer>                        exit 0 once discovery and JWKS answer
+  sso-config <keycloak-origin> <out>    the Rust workspace SSO test's config
+  ready <issuer>...                     exit 0 once discovery and JWKS answer
   verify <config>                       imported realm/client read back via the
                                         admin API and token endpoint behaviour
   events <config>                       Keycloak event summary (no ids/tokens)
@@ -37,6 +39,13 @@ USERS = {
     "erin": ("kc-erin@example.com", False, []),
     "tina": ("kc-tina@example.com", True, ["TERMS_AND_CONDITIONS"]),
 }
+# Workspace SSO (opt-in Rust test): two realms, i.e. two issuers, one client
+# and one user each.
+SSO_REALMS = {
+    "A": {"realm": "fvoci-e2e-ws-a", "username": "ws-a", "email": "kc-ws-a@example.com"},
+    "B": {"realm": "fvoci-e2e-ws-b", "username": "ws-b", "email": "kc-ws-b@example.com"},
+}
+SSO_CLIENT_ID = "fvoci-ws"
 PLACEHOLDER = re.compile(r"@@([A-Z_]+)@@")
 
 
@@ -58,11 +67,7 @@ def http(method: str, url: str, *, form: dict | None = None, token: str | None =
         return error.code, error.read(), dict(error.headers)
 
 
-def render(template: str, out: str) -> None:
-    values = {
-        "CLIENT_SECRET": os.environ["KC_E2E_CLIENT_SECRET"],
-        **{f"PASSWORD_{name.upper()}": os.environ[f"KC_E2E_PASSWORD_{name.upper()}"] for name in USERS},
-    }
+def render_file(template: str, out: str, values: dict) -> None:
     with open(template, encoding="utf-8") as handle:
         text = handle.read()
     missing = sorted({m.group(1) for m in PLACEHOLDER.finditer(text)} - set(values))
@@ -70,10 +75,54 @@ def render(template: str, out: str) -> None:
         fail(f"template placeholders without a value: {missing}")
     rendered = PLACEHOLDER.sub(lambda m: values[m.group(1)], text)
     json.loads(rendered)
-    # Readable by the container's keycloak user; the directory above is 0700.
+    # Readable by the container's keycloak user; the run directory is 0700.
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(rendered)
+
+
+def render(template: str, out: str) -> None:
+    render_file(template, out, {
+        "CLIENT_SECRET": os.environ["KC_E2E_CLIENT_SECRET"],
+        **{f"PASSWORD_{name.upper()}": os.environ[f"KC_E2E_PASSWORD_{name.upper()}"] for name in USERS},
+    })
+
+
+def sso_secret(key: str, what: str) -> str:
+    return os.environ[f"KC_E2E_SSO_{key}_{what}"]
+
+
+def render_sso(template: str, out_dir: str) -> None:
+    for key, realm in SSO_REALMS.items():
+        render_file(template, os.path.join(out_dir, f"{realm['realm']}-realm.json"), {
+            "REALM": realm["realm"],
+            "CLIENT_SECRET": sso_secret(key, "CLIENT_SECRET"),
+            "USERNAME": realm["username"],
+            "EMAIL": realm["email"],
+            "PASSWORD": sso_secret(key, "PASSWORD"),
+        })
+
+
+def write_sso_config(keycloak_origin: str, out: str) -> None:
+    config = {
+        "keycloakOrigin": keycloak_origin,
+        "admin": {"username": "admin", "password": os.environ["KC_BOOTSTRAP_ADMIN_PASSWORD"]},
+        "realms": [
+            {
+                "realm": realm["realm"],
+                "issuer": f"{keycloak_origin}/realms/{realm['realm']}",
+                "clientId": SSO_CLIENT_ID,
+                "clientSecret": sso_secret(key, "CLIENT_SECRET"),
+                "username": realm["username"],
+                "password": sso_secret(key, "PASSWORD"),
+                "email": realm["email"],
+            }
+            for key, realm in SSO_REALMS.items()
+        ],
+    }
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(config, handle)
 
 
 def write_config(issuer: str, out: str) -> None:
@@ -90,7 +139,9 @@ def write_config(issuer: str, out: str) -> None:
             for name, (email, _verified, _actions) in USERS.items()
         },
         "secrets": [os.environ["KC_E2E_CLIENT_SECRET"], os.environ["KC_E2E_WRONG_SECRET"],
-                    os.environ["KC_BOOTSTRAP_ADMIN_PASSWORD"]],
+                    os.environ["KC_BOOTSTRAP_ADMIN_PASSWORD"],
+                    *(sso_secret(key, what) for key in SSO_REALMS
+                      for what in ("CLIENT_SECRET", "PASSWORD"))],
     }
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -234,26 +285,29 @@ def verify(path: str) -> None:
         fail("imported settings differ:\n  " + "\n  ".join(problems))
 
 
-def events(path: str) -> None:
+def events(path: str, realms: list[str]) -> None:
     config = load_config(path)
     token = admin_token(config)
-    raw = admin_get(config, token, f"/{REALM}/events?max=1000")
     keep = ("grant_type", "client_auth_method", "auth_method", "redirect_uri", "response_type",
             "scope", "username", "custom_required_action", "reason")
-    rows = []
-    for event in sorted(raw, key=lambda e: e.get("time", 0)):
-        details = event.get("details") or {}
-        rows.append({
-            "type": event.get("type"),
-            "clientId": event.get("clientId"),
-            "error": event.get("error"),
-            "details": {k: details[k] for k in keep if k in details},
-        })
-    counts: dict[str, int] = {}
-    for row in rows:
-        key = f"{row['type']} {row['error'] or ''}".strip()
-        counts[key] = counts.get(key, 0) + 1
-    print(json.dumps({"counts": dict(sorted(counts.items())), "events": rows}, indent=2))
+    report = {}
+    for realm in realms or [REALM]:
+        raw = admin_get(config, token, f"/{realm}/events?max=1000")
+        rows = []
+        for event in sorted(raw, key=lambda e: e.get("time", 0)):
+            details = event.get("details") or {}
+            rows.append({
+                "type": event.get("type"),
+                "clientId": event.get("clientId"),
+                "error": event.get("error"),
+                "details": {k: details[k] for k in keep if k in details},
+            })
+        counts: dict[str, int] = {}
+        for row in rows:
+            key = f"{row['type']} {row['error'] or ''}".strip()
+            counts[key] = counts.get(key, 0) + 1
+        report[realm] = {"counts": dict(sorted(counts.items())), "events": rows}
+    print(json.dumps(report, indent=2))
 
 
 URL_PARAMS = re.compile(
@@ -294,14 +348,19 @@ def main() -> None:
     command, args = sys.argv[1], sys.argv[2:]
     if command == "render" and len(args) == 2:
         render(*args)
+    elif command == "render-sso" and len(args) == 2:
+        render_sso(*args)
     elif command == "config" and len(args) == 2:
         write_config(*args)
-    elif command == "ready" and len(args) == 1:
-        ready(args[0])
+    elif command == "sso-config" and len(args) == 2:
+        write_sso_config(*args)
+    elif command == "ready" and args:
+        for issuer in args:
+            ready(issuer)
     elif command == "verify" and len(args) == 1:
         verify(args[0])
-    elif command == "events" and len(args) == 1:
-        events(args[0])
+    elif command == "events" and args:
+        events(args[0], args[1:])
     elif command == "redact" and len(args) <= 1:
         redact(args[0] if args else "")
     else:

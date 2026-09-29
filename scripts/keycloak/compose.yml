@@ -1,10 +1,10 @@
 # Local, opt-in Keycloak for scripts/keycloak-oidc-e2e.sh only. Not part of
 # the product stack (infra/rust/compose.yml) and not a deployment example:
-# start-dev (plain HTTP, in-container dev database, no cluster), one realm
-# imported from the rendered template, published on loopback only.
+# start-dev (plain HTTP, in-container dev database, no cluster), the realms
+# rendered from the templates here, published on loopback only.
 #
 # The runner passes the project name (-p fvoci-kc-e2e-<run id>), the rendered
-# realm file and the per-run admin password; nothing here is a secret.
+# realm directory and the per-run admin password; nothing here is a secret.
 services:
   keycloak:
     # Official image, current stable release when this file was written,
@@ -26,7 +26,8 @@ services:
       # `docker compose port keycloak 8080`.
       - "127.0.0.1::8080"
     volumes:
-      - ${FVOCI_KC_REALM_FILE:?set by scripts/keycloak-oidc-e2e.sh}:/opt/keycloak/data/import/fvoci-e2e-realm.json:ro
+      # The rendered realm files of this run (--import-realm reads them all).
+      - ${FVOCI_KC_REALM_DIR:?set by scripts/keycloak-oidc-e2e.sh}:/opt/keycloak/data/import:ro
     mem_limit: 1536m
     cpus: 2
     pids_limit: 1024

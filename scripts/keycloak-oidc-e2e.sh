@@ -9,7 +9,12 @@
 # does not check external providers, HTTPS or a reverse proxy, or the
 # container deployment path.
 #
-# Usage: scripts/keycloak-oidc-e2e.sh [--skip-build]
+# --workspace-sso also imports two workspace realms and runs the ignored
+# Rust test keycloak_workspace_sso_with_a_test_entitlement (in-process app
+# with a test license; not the release server, whose builds trust no license
+# key) against them.
+#
+# Usage: scripts/keycloak-oidc-e2e.sh [--skip-build] [--workspace-sso]
 #   FVOCI_KC_E2E_EVIDENCE_DIR=<dir>  also keep redacted evidence there
 # Needs docker (compose), openssl, python3 and scripts/prepare-web-e2e.sh.
 set -euo pipefail
@@ -29,12 +34,18 @@ READY_LIMIT_S=240
 # memory) cannot take every flow on one server.
 MODES=(flows failures wrong-secret)
 
+# The workspace SSO test binary is built without debug info or incremental
+# state (about 1.7 GiB of target/debug instead of 5).
+SSO_TEST=(env CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --locked --offline
+  --features db-tests --test identity_integration)
 SKIP_BUILD=0
+WORKSPACE_SSO=0
 for arg in "$@"; do
   case "$arg" in
     --skip-build) SKIP_BUILD=1 ;;
+    --workspace-sso) WORKSPACE_SSO=1 ;;
     *)
-      echo "usage: $0 [--skip-build]" >&2
+      echo "usage: $0 [--skip-build] [--workspace-sso]" >&2
       exit 2
       ;;
   esac
@@ -63,6 +74,9 @@ if [[ "$SKIP_BUILD" == 0 ]]; then
   (cd "$ROOT" && FVOCI_BUILD_SHA="$SOURCE_SHA" cargo build --locked --offline --release \
     --bin fvoci-server --bin fvoci-migrate)
   (cd "$ROOT/apps/web" && npm run build)
+  if [[ "$WORKSPACE_SSO" == 1 ]]; then
+    (cd "$ROOT" && "${SSO_TEST[@]}" --no-run)
+  fi
 fi
 for bin in fvoci-server fvoci-migrate; do
   [[ -x "$CARGO_TARGET_DIR/release/$bin" ]] || {
@@ -76,8 +90,11 @@ PROJECT="fvoci-kc-e2e-${RUN_ID}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-kc-e2e.XXXXXX")"
 chmod 700 "$WORK"
 mkdir -p "$WORK/out" "$WORK/realm"
+# Listed by the container's keycloak user; $WORK above stays 0700.
+chmod 755 "$WORK/realm"
 CONFIG="$WORK/kc-e2e.json"
-REALM_FILE="$WORK/realm/fvoci-e2e-realm.json"
+SSO_CONFIG="$WORK/kc-sso.json"
+REALM_DIR="$WORK/realm"
 EVIDENCE="${FVOCI_KC_E2E_EVIDENCE_DIR:-}"
 if [[ -n "$EVIDENCE" ]]; then
   mkdir -p "$EVIDENCE"
@@ -92,20 +109,24 @@ ADMIN_PASSWORD="$(openssl rand -hex 24)"
 CLIENT_SECRET="$(openssl rand -hex 32)"
 WRONG_SECRET="$(openssl rand -hex 32)"
 declare -A USER_PASSWORD=()
-for user in ALICE BOB CAROL MALLORY ERIN TINA; do
+for user in ALICE BOB CAROL MALLORY ERIN TINA SSO_A SSO_B; do
   USER_PASSWORD[$user]="$(openssl rand -hex 16)"
 done
+SSO_A_SECRET="$(openssl rand -hex 32)"
+SSO_B_SECRET="$(openssl rand -hex 32)"
 
 with_secrets() {
   KC_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASSWORD" KC_E2E_CLIENT_SECRET="$CLIENT_SECRET" \
     KC_E2E_WRONG_SECRET="$WRONG_SECRET" \
     KC_E2E_PASSWORD_ALICE="${USER_PASSWORD[ALICE]}" KC_E2E_PASSWORD_BOB="${USER_PASSWORD[BOB]}" \
     KC_E2E_PASSWORD_CAROL="${USER_PASSWORD[CAROL]}" KC_E2E_PASSWORD_MALLORY="${USER_PASSWORD[MALLORY]}" \
-    KC_E2E_PASSWORD_ERIN="${USER_PASSWORD[ERIN]}" KC_E2E_PASSWORD_TINA="${USER_PASSWORD[TINA]}" "$@"
+    KC_E2E_PASSWORD_ERIN="${USER_PASSWORD[ERIN]}" KC_E2E_PASSWORD_TINA="${USER_PASSWORD[TINA]}" \
+    KC_E2E_SSO_A_CLIENT_SECRET="$SSO_A_SECRET" KC_E2E_SSO_A_PASSWORD="${USER_PASSWORD[SSO_A]}" \
+    KC_E2E_SSO_B_CLIENT_SECRET="$SSO_B_SECRET" KC_E2E_SSO_B_PASSWORD="${USER_PASSWORD[SSO_B]}" "$@"
 }
 
 compose() {
-  KC_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASSWORD" FVOCI_KC_REALM_FILE="$REALM_FILE" \
+  KC_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASSWORD" FVOCI_KC_REALM_DIR="$REALM_DIR" \
     docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"
 }
 
@@ -149,7 +170,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "=== keycloak: compose project ${PROJECT} ===" >&2
-with_secrets python3 "$HELPER" render "$KC_DIR/realm.template.json" "$REALM_FILE"
+with_secrets python3 "$HELPER" render "$KC_DIR/realm.template.json" "$REALM_DIR/fvoci-e2e-realm.json"
+if [[ "$WORKSPACE_SSO" == 1 ]]; then
+  with_secrets python3 "$HELPER" render-sso "$KC_DIR/workspace-sso-realm.template.json" "$REALM_DIR"
+fi
 KC_IMAGE="$(compose config --images)"
 compose up -d --quiet-pull >&2
 HOST_PORT="$(compose port keycloak 8080)"
@@ -160,12 +184,17 @@ fi
 KEYCLOAK_ORIGIN="http://${HOST_PORT}"
 ISSUER="${KEYCLOAK_ORIGIN}/realms/${REALM}"
 with_secrets python3 "$HELPER" config "$ISSUER" "$CONFIG"
+READY_ISSUERS=("$ISSUER")
+if [[ "$WORKSPACE_SSO" == 1 ]]; then
+  with_secrets python3 "$HELPER" sso-config "$KEYCLOAK_ORIGIN" "$SSO_CONFIG"
+  READY_ISSUERS+=("${KEYCLOAK_ORIGIN}/realms/fvoci-e2e-ws-a" "${KEYCLOAK_ORIGIN}/realms/fvoci-e2e-ws-b")
+fi
 
-# Ready means: the test realm's discovery answers 200 with exactly $ISSUER
+# Ready means: each realm's discovery answers 200 with exactly its issuer
 # and its JWKS has a signing key (polled from this host, bounded).
 started=$SECONDS
 last_reason=""
-until last_reason="$(python3 "$HELPER" ready "$ISSUER" 2>&1)"; do
+until last_reason="$(python3 "$HELPER" ready "${READY_ISSUERS[@]}" 2>&1)"; do
   if [[ -z "$(compose ps --status running --quiet keycloak)" ]]; then
     echo "keycloak exited before it was ready" >&2
     compose logs --no-color --tail 40 keycloak 2>&1 | redact >&2
@@ -177,7 +206,7 @@ until last_reason="$(python3 "$HELPER" ready "$ISSUER" 2>&1)"; do
   fi
   sleep 1
 done
-echo "keycloak ready after $((SECONDS - started))s: ${ISSUER}" >&2
+echo "keycloak ready after $((SECONDS - started))s: ${READY_ISSUERS[*]}" >&2
 
 python3 "$HELPER" verify "$CONFIG" >"$WORK/keycloak-setup.json"
 keep keycloak-setup.json <"$WORK/keycloak-setup.json"
@@ -242,7 +271,22 @@ for mode in "${MODES[@]}"; do
   GROUP_STATUS[$mode]=$status
 done
 
-python3 "$HELPER" events "$CONFIG" | keep keycloak-events.json
+if [[ "$WORKSPACE_SSO" == 1 ]]; then
+  echo "=== workspace SSO: ignored Rust test, test entitlement environment ===" >&2
+  status=0
+  (cd "$ROOT" && FVOCI_KC_SSO_E2E_CONFIG="$SSO_CONFIG" bash "$ROOT/scripts/start-test-postgres.sh" \
+    "${SSO_TEST[@]}" keycloak_workspace_sso_with_a_test_entitlement -- --ignored --nocapture) \
+    </dev/null 2>&1 |
+    redact | tee -a "$WORK/run.log" "$WORK/out/workspace-sso.log" || status=$?
+  GROUP_STATUS[workspace-sso]=$status
+  MODES+=(workspace-sso)
+fi
+
+EVENT_REALMS=("$REALM")
+if [[ "$WORKSPACE_SSO" == 1 ]]; then
+  EVENT_REALMS+=(fvoci-e2e-ws-a fvoci-e2e-ws-b)
+fi
+python3 "$HELPER" events "$CONFIG" "${EVENT_REALMS[@]}" | keep keycloak-events.json
 if [[ -n "$EVIDENCE" ]]; then
   redact <"$WORK/run.log" >"$EVIDENCE/run.log"
   for file in "$WORK"/out/*; do
@@ -255,12 +299,16 @@ fi
 echo "=== summary (Keycloak ${KC_IMAGE}, issuer ${ISSUER}) ===" >&2
 failed=0
 for mode in "${MODES[@]}"; do
-  summary="$(python3 - "$WORK/out/playwright-${mode}.json" <<'PY'
+  summary="$(python3 - "$WORK/out/playwright-${mode}.json" "$WORK/out/${mode}.log" <<'PY'
 import json, sys
 try:
     report = json.load(open(sys.argv[1]))
 except OSError:
-    print("no report")
+    try:
+        results = [l.strip() for l in open(sys.argv[2]) if l.startswith("test result:")]
+        print(results[-1] if results else "no report")
+    except OSError:
+        print("no report")
     sys.exit(0)
 stats = report.get("stats", {})
 print(f"passed {stats.get('expected', 0)}, failed {stats.get('unexpected', 0)}, "
