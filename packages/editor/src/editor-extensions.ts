@@ -58,7 +58,7 @@ export function uploadAnchor(
 }
 
 /* WHY: #633 — CollaborationCaret 은 이 객체를 awareness 의 user 필드에 통째로 덮어쓴다.
- * 서버는 user.id 가 접속자와 다른 상태를 버리므로(apps/server/src/collab.ts) id 는 필수다. */
+ * 서버는 user.id 가 접속자와 다른 상태를 버리므로(src/collab/awareness.rs sanitize_user_state) id 는 필수다. */
 export type FvociCollabUser = { id: string; name: string; color: string };
 
 /*
