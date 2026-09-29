@@ -26,6 +26,15 @@ const SAMPLES = [
   "/login",
   "/w/acme",
   "/w/acme/a/123/view",
+  "/w/acme/a/123/view/",
+  "/w/acme/A/123/VIEW",
+  "/w/acme/a/123",
+  "/w/acme/a/123/view/extra",
+  "/s/tok/attachments/123/view",
+  "/s/tok/attachments/123/view/",
+  "/S/tok/attachments/123/View",
+  "/s/tok/attachments/123",
+  "/s/tok/attachments/123/view/extra",
   "/w/acme/WIKI-1",
   "/w/acme/WIKI-12/",
   "/w/acme/wiki-7",
@@ -80,6 +89,10 @@ test("every wiki path the boundary sends parses as the React app's wiki ref", ()
 });
 
 test("the Vue router matches exactly the paths the boundary sends it", () => {
+  // Attachment viewer paths live in VUE_ROUTE_PATHS. src/app-boundary.ts
+  // (coordinator-owned) still needs:
+  //   /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i
+  //   /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [

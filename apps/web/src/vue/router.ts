@@ -9,6 +9,16 @@ import { VUE_ROUTE_PATHS } from "./route-paths";
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
+  {
+    path: VUE_ROUTE_PATHS.attachmentView,
+    name: "attachment-view",
+    component: () => import("./pages/AttachmentViewPage.vue"),
+  },
+  {
+    path: VUE_ROUTE_PATHS.shareAttachmentView,
+    name: "share-attachment-view",
+    component: () => import("./pages/ShareAttachmentViewPage.vue"),
+  },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {
