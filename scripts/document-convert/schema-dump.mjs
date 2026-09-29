@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Dev/test only: prints the attrs (schema order, defaults) and mark
 // overlap of getSchema(createFvociExtensions()) — the schema
 // tiptapJsonToYUpdate seeds with. Read by compat/fixtures/yjs-seed tests.

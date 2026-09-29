@@ -73,7 +73,7 @@ PY
 cd "$ROOT/apps/web"
 set +e
 PLAYWRIGHT_BASE_URL="$BASE_URL" FVOCI_PERF_RUN_DIR="$RUN_DIR" CARGO_TARGET_DIR="$RUN_DIR/fixture-target" \
-  "$ROOT/apps/web/node_modules/.bin/playwright" test --config=e2e/perf/perf.config.ts "${GREP_ARGS[@]}"
+  bun --bun x --no-install playwright test --config=e2e/perf/perf.config.ts "${GREP_ARGS[@]}"
 status=$?
 set -e
 # Keep only the count of server warnings/errors; the log itself stays in the run dir

@@ -1,0 +1,6 @@
+[install]
+# Hoisted, as bun.lock was written: one root node_modules, which
+# apps/web/tsconfig.app.json pins shared types to and repository scripts read.
+# Without this setting a regenerated lockfile (configVersion 1) switches the
+# workspace to the isolated linker.
+linker = "hoisted"

@@ -18,7 +18,7 @@
 #   cargo build --release --locked --bin fvoci-e2e-fixture --features db-tests
 #   collab-engine release build (FVOCI_PERF_COLLAB_ENGINE, default
 #     $CARGO_TARGET_DIR/collab-engine/release/collab-engine)
-#   (cd apps/web && npm ci && npm run build)
+#   bun ci && (cd apps/web && bun --bun run build)
 # Every run gets its own PostgreSQL 18 + Meilisearch container, database,
 # storage and browser contexts; all are removed on exit.
 set -euo pipefail
@@ -37,8 +37,9 @@ COLLAB_ENGINE="${FVOCI_PERF_COLLAB_ENGINE:-$CARGO_TARGET_DIR/collab-engine/relea
 for bin in "$RELEASE/fvoci-server" "$RELEASE/fvoci-migrate" "$RELEASE/fvoci-e2e-fixture" "$COLLAB_ENGINE"; do
   [[ -x "$bin" ]] || { echo "missing release artifact: $bin" >&2; exit 1; }
 done
-[[ -d "$ROOT/apps/web/dist" ]] || { echo "missing apps/web/dist (npm run build)" >&2; exit 1; }
-[[ -x "$ROOT/apps/web/node_modules/.bin/playwright" ]] || { echo "missing apps/web node_modules" >&2; exit 1; }
+[[ -d "$ROOT/apps/web/dist" ]] || { echo "missing apps/web/dist (bun --bun run build)" >&2; exit 1; }
+(cd "$ROOT/apps/web" && bun --bun x --no-install playwright --version) >/dev/null 2>&1 \
+  || { echo "missing web dependencies (bun ci)" >&2; exit 1; }
 
 DATASETS=("$@")
 ((${#DATASETS[@]} > 0)) || DATASETS=(minimal scaled)

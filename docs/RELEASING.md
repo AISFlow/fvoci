@@ -96,7 +96,7 @@ smoke still tests only the tagged product: it pulls the index digest from the
 `release-dist` record, installs from the `compose.yml` and `env.example` that
 `dist` rendered at the tag, and takes the expected version and OCI revision
 from `release.json` (`sourceSha`), never from its own checkout. The test
-clients, browser specs, fixtures and npm lockfiles come from the workflow ref.
+clients, browser specs, fixtures and the Bun lockfile come from the workflow ref.
 
 `dist` records both commits: `release.json` keeps `sourceSha` (product) and
 gains `toolingSha` and `toolingRef`; `RELEASE-NOTES.md` ends with a Provenance

@@ -57,13 +57,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          node-version: '24.21.0'
-          cache: npm
-          cache-dependency-path: |
-            apps/web/package-lock.json
-            packages/editor/package-lock.json
+          bun-version-file: .bun-version
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -81,8 +77,7 @@ jobs:
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
-          npm ci --prefix apps/web --no-audit --no-fund
-          npm ci --prefix packages/editor --ignore-scripts --no-audit --no-fund
+          bun ci
       - name: Generate and verify the API contract
         run: |
           bash scripts/generate-api.sh
@@ -94,9 +89,8 @@ jobs:
           cargo test --locked --offline --lib --features api-schema api::openapi::tests
       - name: Web and editor unit regressions
         run: |
-          npm test --prefix apps/web
-          npm run typecheck --prefix packages/editor
-          npm test --prefix packages/editor
+          (cd apps/web && bun run test)
+          (cd packages/editor && bun --bun run typecheck && bun run test)
       - name: Verify normal web e2e shard plan
         run: bash scripts/test-web-e2e-groups.sh
 
@@ -112,13 +106,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          node-version: '24.21.0'
-          cache: npm
-          cache-dependency-path: |
-            apps/web/package-lock.json
-            packages/editor/package-lock.json
+          bun-version-file: .bun-version
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -143,11 +133,10 @@ jobs:
         run: |
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
-          npm ci --prefix apps/web --no-audit --no-fund
-          npm ci --prefix packages/editor --ignore-scripts --no-audit --no-fund
+          bun ci
       - name: Prepare Chromium and system libraries
         working-directory: apps/web
-        run: npm exec --no -- playwright install --with-deps chromium
+        run: bun --bun x --no-install playwright install --with-deps chromium
       - name: Real React browser shard ${{ matrix.shard }} with PostgreSQL app role
         id: browser
         run: bash scripts/run-web-e2e.sh --ci-shard ${{ matrix.shard }}
@@ -175,13 +164,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          node-version: '24.21.0'
-          cache: npm
-          cache-dependency-path: |
-            apps/web/package-lock.json
-            packages/editor/package-lock.json
+          bun-version-file: .bun-version
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -206,16 +191,16 @@ jobs:
         run: |
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
-          npm ci --prefix apps/web --no-audit --no-fund
-          npm ci --prefix packages/editor --ignore-scripts --no-audit --no-fund
+          bun ci
       - name: Prepare Chromium and system libraries
         working-directory: apps/web
-        run: npm exec --no -- playwright install --with-deps chromium
+        run: bun --bun x --no-install playwright install --with-deps chromium
       - name: Check collaborative browser fixtures
+        # Same per-test bound as the web and editor test scripts (node --test had none).
         run: |
-          node --experimental-strip-types --test apps/web/e2e-pending/collab-wire.test.ts apps/web/e2e-pending/collab-restart.test.ts
-          node --experimental-strip-types --test apps/web/e2e-pending/collab-helpers.test.ts
-          apps/web/node_modules/.bin/tsc -p apps/web/e2e-pending/collab-tsconfig.json
+          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
+          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
+          (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
       - name: Real React collaborative editing with PostgreSQL app role
         id: browser
         env:

@@ -15,10 +15,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GROUPS_PY = ROOT / "scripts" / "web-e2e-groups.py"
-PLAYWRIGHT_INDEX = (
-    ROOT / "apps" / "web" / "node_modules" / "playwright" / "lib" / "common" / "index.js"
-)
-PLAYWRIGHT_UTIL = ROOT / "apps" / "web" / "node_modules" / "playwright" / "lib" / "util.js"
+
+
+def playwright_file(*parts: str) -> Path:
+    """A file of the playwright package the web app resolves (its own or a workspace ancestor's node_modules)."""
+    web = ROOT / "apps" / "web"
+    for directory in (web, *web.parents):
+        package = directory / "node_modules" / "playwright"
+        if (package / "package.json").is_file():
+            return package.joinpath(*parts)
+    raise RuntimeError("playwright is not installed; run bun ci")
 
 
 def load_groups_module():
@@ -52,13 +58,14 @@ def playwright_default_suffixes() -> list[str]:
 
 
 def read_pinned_playwright_test_match() -> str:
-    text = PLAYWRIGHT_INDEX.read_text(encoding="utf-8")
+    index = playwright_file("lib", "common", "index.js")
+    text = index.read_text(encoding="utf-8")
     match = re.search(
         r'testMatch:\s*takeFirst\([^,]+,\s*[^,]+,\s*"([^"]+)"\)',
         text,
     )
     if match is None:
-        raise RuntimeError(f"default testMatch not found in {PLAYWRIGHT_INDEX}")
+        raise RuntimeError(f"default testMatch not found in {index}")
     return match.group(1)
 
 
@@ -72,12 +79,12 @@ const matcher = createFileMatcher(pattern);
 process.stdout.write(JSON.stringify(rels.filter((rel) => matcher(rel))));
 """
     proc = subprocess.run(
-        ["node", "-e", script],
+        ["bun", "-e", script],
         input=payload,
         capture_output=True,
         text=True,
         check=True,
-        env={**os.environ, "PW_UTIL": str(PLAYWRIGHT_UTIL)},
+        env={**os.environ, "PW_UTIL": str(playwright_file("lib", "util.js"))},
     )
     return json.loads(proc.stdout)
 

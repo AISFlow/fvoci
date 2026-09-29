@@ -284,20 +284,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          node-version: '24.21.0'
-          cache: npm
-          cache-dependency-path: |
-            apps/web/package-lock.json
-            packages/editor/package-lock.json
+          bun-version-file: .bun-version
       - name: Prepare locked browser test dependencies
-        run: |
-          npm ci --prefix apps/web --no-audit --no-fund
-          npm ci --prefix packages/editor --ignore-scripts --no-audit --no-fund
+        run: bun ci
       - name: Prepare Chromium and system libraries
         working-directory: apps/web
-        run: npm exec --no -- playwright install --with-deps chromium
+        run: bun --bun x --no-install playwright install --with-deps chromium
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-dist
