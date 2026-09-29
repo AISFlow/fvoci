@@ -7,8 +7,8 @@
 # and fvoci in pg_dump custom format as the owner role, then archives the
 # storage volume.
 #
-# Meilisearch data is not included. The index is derived; restore recreates a
-# scoped key and index settings. Product search-rebuild is not in this slice.
+# Meilisearch data is not included. The index is derived; restore creates a
+# new scoped key and rebuilds the index from PostgreSQL (--rebuild-search).
 # Pepper keys, ENCRYPTION_KEYS, DB passwords, and the Meili master key stay in
 # the operator env file (`.env` of the standalone compose.user.yml) — they are
 # not copied into the archive (beyond whatever the database dump already

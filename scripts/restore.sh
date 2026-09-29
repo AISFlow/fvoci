@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Restore a logical backup into a FRESH infra/rust Compose project.
-#
-# Target volumes must not already exist. Restores PostgreSQL, restores the
-# storage volume, then starts init (fvoci-migrate, --grant-app-role,
-# --ensure-meili-key), checks every stored attachment exists in storage
-# (fvoci-migrate --verify-storage) and starts the server. Meilisearch data is not in the backup;
-# init creates a scoped key and empty index with the required settings.
-#
-# The standalone compose.user.yml has no init service: its fvoci service runs
-# the same steps with `fvoci-migrate --prepare` (and the owner commands) from
-# the owner password in its environment.
+# Restore a logical backup into a FRESH infra/rust Compose project whose
+# volumes do not exist yet, in this order:
+#   1. offline keyring preflight against the manifest (fvoci-migrate
+#      --restore-preflight in the product image, no network), before any
+#      target volume exists;
+#   2. storage volume restore, then the app role and pg_restore;
+#   3. preparation: the developer stack's init service (fvoci-migrate,
+#      --grant-app-role, --ensure-meili-key), or `fvoci-migrate --prepare` in
+#      the app service of the user install (compose.user.yml has no init);
+#   4. --recover-outbox: rebase the outbox cursors onto this cluster's xids;
+#   5. --rebuild-search: reindex from PostgreSQL (Meilisearch data is not in
+#      the backup);
+#   6. --verify-storage: every stored attachment and published preview exists
+#      with its recorded size, and every branding asset with its digest;
+#   7. --verify-secrets: every sealed secret (MFA, workspace SSO, webhooks, the
+#      VAPID key) opens with the configured ENCRYPTION_KEYS;
+#   8. server start.
 #
 # Keep POSTGRES_USER, POSTGRES_DB, and FVOCI_APP_ROLE names the same as the
 # backed-up install. Database and Meili passwords may be new. PASSWORD_PEPPER_KEYS
 # must match the original or existing passwords will not verify. ENCRYPTION_KEYS
 # must hold every key id of the original with the same key (a rotated superset
-# is fine); both are checked against the manifest before any volume exists.
-# After the database is restored, fvoci-migrate --verify-secrets opens every
-# sealed secret (MFA, workspace SSO, webhooks) before the server starts.
+# is fine); step 1 checks both.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
