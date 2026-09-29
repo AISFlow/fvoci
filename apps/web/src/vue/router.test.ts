@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createMemoryHistory } from "vue-router";
-import { createAppRouter } from "./router.ts";
+import { createAppRouter, routes } from "./router.ts";
 
 // A navigation to a React page leaves the Vue app with a full load; one that
 // failed or was superseded never happened and loads nothing.
@@ -23,10 +23,17 @@ test(
   "a completed navigation to a React page is a full page load",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
-    await router.push("/login?next=%2Fw%2Facme");
-    assert.deepEqual(loads, ["/login?next=%2Fw%2Facme"]);
+    await router.push("/setup?next=%2Fw%2Facme");
+    assert.deepEqual(loads, ["/setup?next=%2Fw%2Facme"]);
   }),
 );
+
+test("the login route is declared (boot still needs the boundary regex)", () => {
+  assert.equal(
+    routes.some((route) => route.name === "login" && route.path === "/login"),
+    true,
+  );
+});
 
 test(
   "a failed or superseded navigation to a React page loads nothing",

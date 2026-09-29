@@ -1,0 +1,122 @@
+<script setup lang="ts">
+import { t } from "@fvoci/i18n";
+import UButton from "@nuxt/ui/components/Button.vue";
+import { useQuery } from "@tanstack/vue-query";
+import { computed, ref, watchEffect } from "vue";
+import { useRoute } from "vue-router";
+import { api, ensureOk } from "@/lib/api";
+import { safeReturnTo } from "@/lib/consent";
+import { oidcErrorMessage, takeMfaFragment } from "@/lib/oidc";
+import { meQuery, providersQuery, setupStatusQuery } from "@/lib/queries";
+import { publicInstanceQuery } from "@/lib/queries/instance";
+import type { LoginInput } from "@/lib/contracts";
+import { redirectTo } from "../session/navigation";
+import LoginForm from "../features/auth/LoginForm.vue";
+import MfaStep from "../features/auth/MfaStep.vue";
+
+// /login (and the logout landing). Boot still sends this path to the React
+// app until apps/web/src/app-boundary.ts includes:
+//   /^\/login\/?$/i
+// Pair that with VUE_ROUTE_PATHS.login = "/login" (app-boundary.test.ts).
+
+const route = useRoute();
+const setup = useQuery(setupStatusQuery);
+const instance = useQuery(publicInstanceQuery);
+const me = useQuery(meQuery);
+const providers = useQuery(providersQuery);
+
+const mfaToken = ref<string | null>(takeMfaFragment());
+const brandingName = computed(() => setup.data.value?.branding.name);
+const operator = computed(() => instance.data.value?.values.operator ?? null);
+const returnTo = computed(() =>
+  safeReturnTo(typeof route.query.returnTo === "string" ? route.query.returnTo : null, window.location.origin),
+);
+const resetNotice = computed(() => route.query.reset === "1");
+const withdrawnNotice = computed(() => route.query.withdrawn === "1");
+const notice = computed(() =>
+  oidcErrorMessage(typeof route.query.error === "string" ? route.query.error : null),
+);
+
+const leaving = computed(
+  () => setup.data.value?.needed === true || me.data.value !== undefined,
+);
+
+watchEffect(() => {
+  if (setup.data.value?.needed) {
+    redirectTo("/setup");
+    return;
+  }
+  if (me.data.value) {
+    // Home and every other non-login page are the React app: a full load.
+    window.location.replace(returnTo.value);
+  }
+});
+
+async function enterApp(): Promise<void> {
+  if (returnTo.value !== "/") {
+    window.location.assign(returnTo.value);
+    return;
+  }
+  window.location.replace("/");
+}
+
+async function onLogin(input: LoginInput): Promise<void> {
+  const result = await ensureOk(
+    await api.POST("/api/v1/auth/login", {
+      body: input,
+    }),
+  );
+  if (result.mfaToken) {
+    mfaToken.value = result.mfaToken;
+    return;
+  }
+  await enterApp();
+}
+
+async function onMagicLink(email: string): Promise<void> {
+  await ensureOk(
+    await api.POST("/api/v1/auth/magic-link", {
+      body: { email },
+    }),
+  );
+}
+
+async function onPasswordReset(email: string): Promise<void> {
+  await ensureOk(
+    await api.POST("/api/v1/auth/password-reset", {
+      body: { email },
+    }),
+  );
+}
+</script>
+
+<template>
+  <p v-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <div v-else-if="setup.isError.value" class="p-8">
+    <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
+    <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>
+  </div>
+  <MfaStep
+    v-else-if="mfaToken !== null"
+    :mfa-token="mfaToken"
+    :branding-name="brandingName"
+    @back="mfaToken = null"
+    @verified="enterApp"
+  />
+  <LoginForm
+    v-else
+    :branding-name="brandingName"
+    :operator="operator"
+    :mail-enabled="setup.data.value?.mailEnabled === true"
+    :reset-notice="resetNotice"
+    :withdrawn-notice="withdrawnNotice"
+    :notice="notice"
+    :magic-link="providers.data.value?.magicLink"
+    :providers="providers.data.value?.providers"
+    :providers-loading="providers.isLoading.value"
+    :workspace-sso="providers.data.value?.workspaceSso"
+    :submit-login="onLogin"
+    :send-magic-link="onMagicLink"
+    :send-password-reset="onPasswordReset"
+  />
+</template>

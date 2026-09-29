@@ -9,6 +9,11 @@ import { VUE_ROUTE_PATHS } from "./route-paths";
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
+  // Login (logout landing). apps/web/src/app-boundary.ts is owned elsewhere;
+  // boot still sends /login to React until that file includes:
+  //   /^\/login\/?$/i
+  // Pair it with VUE_ROUTE_PATHS.login = "/login" (app-boundary.test.ts).
+  { path: "/login", name: "login", component: () => import("./pages/LoginPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {
