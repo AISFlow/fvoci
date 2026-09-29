@@ -262,9 +262,13 @@ Setting up `presigned`:
    by host, not port, and the storage origin cannot send the app's
    `nosniff`/sandbox headers (downloads are forced to
    `Content-Disposition: attachment` and `application/octet-stream` instead).
-2. Give the bucket this CORS configuration (AWS JSON form); use the exact
-   `FVOCI_PUBLIC_ORIGIN`, not `*`, because the in-app viewers fetch the
-   redirected download with credentials mode `include`:
+2. Give the bucket this CORS configuration (AWS JSON form). No request to the
+   bucket carries credentials: part PUTs use credentials mode `omit`, and the
+   in-app viewers fetch the download with `same-origin`, so the session cookie
+   reaches the API but not the redirected storage request. The bucket
+   therefore needs no `Access-Control-Allow-Credentials`. Still list the exact
+   `FVOCI_PUBLIC_ORIGIN` rather than `*`, so only the app's pages can read
+   the responses:
 
    ```json
    [{
@@ -307,8 +311,7 @@ host. Correct or remove it before upgrading.
 
 Verified against the pinned MinIO-compatible silo (Rust integration tests and a
 Chromium cross-origin check, `scripts/run-web-e2e-s3.sh`). Not run: real AWS S3
-(CORS on the redirected fetch, `Access-Control-Allow-Credentials` for the
-viewers, enforcement of the signed `content-length`, virtual-host style,
+(CORS on the redirected fetch, enforcement of the signed `content-length`, virtual-host style,
 `response-*` overrides, lifecycle rules), other S3-compatible services,
 reverse proxies or CDNs in front of the bucket, Firefox and Safari, and clock
 skew.
