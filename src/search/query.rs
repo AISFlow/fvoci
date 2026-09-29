@@ -4,8 +4,10 @@
 //! `packages/search/src/query.ts` (RRF) and `packages/search/src/snippet.ts` at
 //! source SHA `393795261322b916e588043cf94feca999175843`.
 //!
-//! Scope uses `project_permission` / `document_permission`. The Meili filter
-//! is recall only; hydrate re-checks the current DB state.
+//! The scope (`load_search_acl`) uses the SQL project visibility predicate
+//! shared with the project list. The Meili filter is recall only; hydrate
+//! re-checks every hit with `project_permission` / `document_permission`
+//! against the current DB state.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -21,7 +23,7 @@ use uuid::Uuid;
 use crate::db::context::{session_is_live, set_tenant};
 use crate::db::documents::document_permission;
 use crate::db::group_grants::guest_wiki_document_ids_select_sql;
-use crate::db::projects::{load_live_project, project_permission, LiveProject};
+use crate::db::projects::{load_live_project, project_permission, visible_project_sql_for_guest};
 use crate::db::workspace::{
     list_workspaces_for_user, membership_role, workspace_is_live, WorkspaceRole,
 };
@@ -455,6 +457,12 @@ fn prepare_query(
     }))
 }
 
+/// Loads the [`SearchAcl`] in the caller's `set_tenant` transaction; `role` is
+/// the actor's membership role read in that transaction. The projects come
+/// from one statement on the visibility predicate the project list uses
+/// (`visible_project_sql`): archived projects are in, trashed ones are not.
+/// `project_filter` narrows the scope to that one project without wiki, or to
+/// nothing when that project is not visible.
 pub(crate) async fn load_search_acl(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -462,54 +470,20 @@ pub(crate) async fn load_search_acl(
     role: WorkspaceRole,
     project_filter: Option<Uuid>,
 ) -> Result<SearchAcl, sqlx::Error> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<Uuid>,
-            String,
-            Uuid,
-            DateTime<Utc>,
-            DateTime<Utc>,
-        ),
-    >(
+    let project_ids: Vec<Uuid> = sqlx::query_scalar(&format!(
         r#"
-        SELECT id, key, name, description, icon, visibility, root_document_id, status,
-               created_by, created_at, updated_at
-        FROM fvoci.projects
-        WHERE workspace_id = $1 AND deleted_at IS NULL
-        ORDER BY key COLLATE "C"
+        SELECT p.id
+        FROM fvoci.projects p
+        WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
+          AND {visible}
+        ORDER BY p.key COLLATE "C"
         "#,
-    )
+        visible = visible_project_sql_for_guest("p", role == WorkspaceRole::Guest, 2),
+    ))
     .bind(workspace_id)
+    .bind(actor_user_id)
     .fetch_all(&mut **tx)
     .await?;
-
-    let mut project_ids = Vec::new();
-    for row in rows {
-        let project = LiveProject {
-            id: row.0,
-            key: row.1,
-            name: row.2,
-            description: row.3,
-            icon: row.4,
-            visibility: row.5,
-            root_document_id: row.6,
-            status: row.7,
-            created_by: row.8,
-            created_at: row.9,
-            updated_at: row.10,
-        };
-        let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
-        if permission.at_least(ProjectPermission::View) {
-            project_ids.push(project.id);
-        }
-    }
     let wiki_document_ids = if role == WorkspaceRole::Guest {
         sqlx::query_as::<_, (Uuid,)>(&guest_wiki_document_ids_select_sql(1, 2))
             .bind(workspace_id)
