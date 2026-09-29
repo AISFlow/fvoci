@@ -87,7 +87,7 @@ summarize_trace() {
 
 retain_failure_artifacts() {
   local retain_dir log dest trace
-  retain_dir="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-collab-e2e-fail.XXXXXX")"
+  retain_dir="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-collab-e2e-fail.XXXXXX")" || return 1
   chmod 700 "$retain_dir"
   # Named first, so a caller finds the directory even if this is cut short.
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
