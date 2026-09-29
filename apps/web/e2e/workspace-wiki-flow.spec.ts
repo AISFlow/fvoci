@@ -1,5 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
 import { expect, test, type Page, type Response, type Route } from "@playwright/test";
 import { createE2eUser, login, logout } from "./helpers";
+
+const repoRoot = path.resolve(import.meta.dirname, "../../..");
 
 test.describe.configure({ mode: "serial" });
 
@@ -145,6 +149,58 @@ test("member creates wiki document and edits title metadata", async ({ page }) =
 
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("link", { name: renamed })).toBeVisible();
+});
+
+type SchemaDump = { nodes: { name: string }[]; marks: unknown[] };
+
+test("the mounted wiki editor has the server's yjs seed schema", async ({ page }) => {
+  await login(page, member.email, member.password);
+  await page.goto("/w/acme/wiki");
+  await page.getByRole("link", { name: "연구 노트" }).click();
+  const root = page.locator(".fvoci-editor .ProseMirror");
+  await expect(root).toBeVisible();
+
+  // Tiptap keeps the editor on its root element. Same projection as
+  // scripts/document-convert/schema-dump.mjs, applied to the editor the page
+  // built with its real node views.
+  const mounted = JSON.parse(
+    await root.evaluate((dom) => {
+      type AttrSpec = { hasDefault: boolean; default: unknown; validate?: unknown };
+      type SchemaType = { attrs: Record<string, AttrSpec> };
+      type MarkType = SchemaType & { rank: number; excludes(other: MarkType): boolean };
+      type Schema = { nodes: Record<string, SchemaType>; marks: Record<string, MarkType> };
+      const { schema } = (dom as unknown as { editor: { schema: Schema } }).editor;
+      const attrs = (type: SchemaType) =>
+        Object.entries(type.attrs).map(([name, a]) => ({
+          name,
+          hasDefault: a.hasDefault,
+          default: a.default,
+          validate: a.validate ? String(a.validate) : null,
+        }));
+      return JSON.stringify({
+        nodes: Object.entries(schema.nodes).map(([name, type]) => ({ name, attrs: attrs(type) })),
+        marks: Object.entries(schema.marks).map(([name, type]) => ({
+          name,
+          rank: type.rank,
+          overlapping: !type.excludes(type),
+          attrs: attrs(type),
+        })),
+      });
+    }),
+  ) as SchemaDump;
+
+  // The fixture is getSchema(createFvociExtensions()), the table the Rust seed
+  // writer is tested against. The editor re-adds Mention after that list, so
+  // mention is its last node.
+  const fixture = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "compat/fixtures/yjs-seed/schema.json"), "utf8"),
+  ) as SchemaDump;
+  const mention = fixture.nodes.find((node) => node.name === "mention");
+  expect(mention).toBeTruthy();
+  expect(mounted).toEqual({
+    nodes: [...fixture.nodes.filter((node) => node !== mention), mention],
+    marks: fixture.marks,
+  });
 });
 
 test("document metadata supports icon set/clear and status changes", async ({ page }) => {
