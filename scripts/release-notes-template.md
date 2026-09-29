@@ -269,11 +269,17 @@ stand-ins. Treat them as untested with a real provider:
   not tried.
 - **Korean input (IME):** checked with a real Linux (IBus) input method in
   Chromium only. Windows, macOS and mobile input methods were not tried.
-<!-- COORDINATOR: collab-capacity -->
 - **Collaboration capacity:** the room-limit behaviour (new in 0.1.1) was
-  measured on a source build of an earlier revision of that change on one
-  host, not on this image or with many real users. The helper changes in
-  this release were not measured under Docker's default AppArmor profile.
+  measured with the server, collaboration engine and web app taken from the
+  published 0.1.0 and 0.1.1 images, run on one host outside the container
+  with one headless Chromium and synthetic users, 10 opens per case (median).
+  With every room taken, a newly opened document showed its text after 39.5 s
+  in 0.1.0 and 3.0 s in 0.1.1 at the 30-room default (978 and 3 connection
+  attempts), and 36.6 s and 0.44 s at 64 rooms. When an editor left, a
+  waiting document showed its text after 34.7 s and 8.2 s (30 rooms), 30.6 s
+  and 8.7 s (64 rooms); the 5 s a just-emptied room is kept for a returning
+  user is part of that. The 0.2.0 helper changes were not measured this way,
+  nor under Docker's default AppArmor profile, nor with many real users.
 <!-- COORDINATOR: upgrade-test -->
 - **`/metrics` and `--outbox-reset`** are not part of the release smoke, and
   there is no automated upgrade test from the published 0.1.1 files to
