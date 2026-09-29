@@ -329,7 +329,7 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
 }) => {
   // Not inline math: a peer's change to an inline node rebuilds its
   // paragraph and the node view with it, in the React editor as well, so
-  // the open field closes there (a separate, pre-existing issue).
+  // the open field closes there (a separate, pre-existing issue: #259).
   const a = await newSignedInPage(browser, baseURL, admin);
   const b = await newSignedInPage(browser, baseURL, member);
   try {
@@ -478,8 +478,8 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
 // committed on its own and the syllable is then composed after it:
 // "첫 문단" + 한글 gives "첫 문단ㅎ한글". A peer is not needed. The OS IME
 // witness (e2e-pending/workspace-wiki-vue-os-ime.spec.ts) shows the same on
-// the real input path. Suspected cause, to be confirmed in the follow-up:
-// ProseMirror writes the DOM selection (selectionToDOM) on the first
+// the real input path. Tracked in #258. Suspected cause, to be confirmed
+// there: ProseMirror writes the DOM selection (selectionToDOM) on the first
 // composition update, which restarts the IME's composition. Expected to fail
 // until that is fixed; when it passes, drop test.fail.
 test.fail("Korean composition with the caret after the marked text leaves no stray jamo (known bug)", async ({ page }) => {

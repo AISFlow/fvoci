@@ -101,7 +101,7 @@ test("control: the IME composes Korean in a plain contenteditable of the same br
 // caret is placed keeps its first jamo on its own ("ㅎ한글" for 한글), at the
 // end of a text or in an empty paragraph, with or without a peer. The
 // synthetic counterpart is the test.fail in e2e/workspace-wiki-vue-flow.spec.ts.
-// Expected to fail until fixed; when it passes, drop test.fail.
+// Tracked in #258. Expected to fail until fixed; when it passes, drop test.fail.
 test.fail("the first composition after placing the caret leaves no stray jamo (known bug)", async ({ collabApp }) => {
   const a = await headedPage(collabApp.baseUrl);
   try {
