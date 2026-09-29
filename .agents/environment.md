@@ -338,3 +338,8 @@ Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key�
 - CodeGraph 1.6.0(`/home/kinesis/.local/bin/codegraph`), MCP `codegraph serve --mcp`(env `CODEGRAPH_TELEMETRY=0`,
   `DO_NOT_TRACK=1`, `~/.claude.json`의 프로젝트 설정). worktree별 `.codegraph/` 인덱스를 쓰고, 통합 worktree 인덱스에서
   #220의 `src/db/outbox_reset.rs` 최신 소스가 반환됨을 확인했다. 인덱스는 `.gitignore` 대상이며 제품 산출물에 들어가지 않는다.
+- `/advisor`(2026-09-29): Fable advisor는 켜지 않았다. 켜려면 다른 세션에도 적용되는 전역 설정 키가 필요하고 Fable 사용 크레딧
+  동의가 필요할 수 있다. 사용자는 `/advisor`로 직접 켤 수 있다. advisor 호출은 하지 않았다.
+- 디스크 정리(2026-09-29 13:56–14:12 KST): `df -h /` 사용량 913G → 299G(약 614 GiB 회수; 단계별 df 차이는 Docker volume 262.50,
+  worktree build·오래된 cargo target 디렉터리 272.80, 완료 worktree 73.60, image·build cache 8.81 GiB). 대상·검사·결과는
+  `/home/kinesis/orca/fvoci-evidence/space-reclaim-2026-09-29/`(단계별 TSV, `before.txt`, `after.txt`).

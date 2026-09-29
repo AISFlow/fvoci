@@ -1,6 +1,6 @@
 # FVOCI @VERSION@ (trial pre-release)
 
-<!-- notes-for: 0.2.0 -->
+<!-- notes-for: 0.3.0 -->
 
 This is a 0.x trial release. It is not covered by any compatibility promise:
 a later 0.y release may change configuration, data layout or behaviour.
@@ -11,24 +11,29 @@ Installs are never updated automatically.
   - linux/amd64: `@AMD64_DIGEST@`
   - linux/arm64: `@ARM64_DIGEST@`
 - Release smoke (pulled the digest above anonymously on native amd64 and arm64
-  runners, fresh install from env.example, first admin, core flows, restart,
-  rejected settings, preparation failure):
+  runners, fresh install from env.example, the uid and environment boundary,
+  first admin, core flows, restart, rejected settings, preparation failure):
   @RUN_URL@
 
 ## Accepted in this release
 
-FVOCI 0.2.0 is a minor release on top of 0.1.1 (`71d252a6`). It adds one
-database migration (044) and gives workspace SSO a per-workspace redirect
-URI. Workspace SSO needs an enterprise license (`workspaceSso`), and a
-published build trusts no license key (`src/license-trust.json` is empty), so
-a published install cannot turn it on; the workspace SSO items below apply
-only to a build that accepts such a license. The install files
-(`compose.yml`, `env.example`, `INSTALL.md`) change only in the version,
-source commit and image digest they name, and there is no new `.env` value.
-It is still a 0.x trial with no compatibility promise. The fixes are listed
-under "Changes since 0.1.1". The features below were accepted on `main` with
-their tests, CI and an independent review (feature table in
-`docs/rewrite.md` at `@SHA@`):
+FVOCI 0.3.0 is a minor release on top of 0.2.0 (`d560ac8f`). It changes the
+install files: `compose.yml` now passes the `.env` values to each service as
+container environment instead of Compose secret files, and the new image
+refuses to start with a `compose.yml` of an earlier release (see "Upgrading
+from 0.2.0"). It also adds an optional way to move attachment bytes directly
+between the browser and S3 storage, off by default and chosen by an
+environment variable or an admin setting. There is no database migration
+(the newest is still 044, from 0.2.0) and no new or changed `.env` value.
+Workspace SSO needs an enterprise license (`workspaceSso`), and a published
+build trusts no license key (`src/license-trust.json` is empty), so a
+published install cannot turn it on; the workspace SSO items below apply
+only to a build that accepts such a license, except the change to the SSO
+start endpoint's refusals, which applies to every build. It is still a 0.x
+trial with no compatibility promise. The changes are listed under "Changes
+since 0.2.0". The features below were accepted on `main` with their tests,
+CI and an independent review (feature table in `docs/rewrite.md` at
+`@SHA@`):
 
 - **Accounts:** first-admin setup, sign-in and sessions, profile, password
   reset, email and password change, account deletion and export, magic links,
@@ -44,9 +49,10 @@ their tests, CI and an independent review (feature table in
 - **Tasks:** lists, board, Gantt and calendar views, workflows, WIP
   limits, recurring tasks, labels and assignees, task bodies, activity and
   comments, live updates between browsers.
-- **Attachments:** uploads with quotas; viewers for PDF, DOCX, XLSX, PPTX and
-  HWP/HWPX; editing an HWP/HWPX attachment and saving an authorized copy; text
-  extraction for search.
+- **Attachments:** uploads with quotas, through the API or (optional, S3
+  only) directly to storage with short-lived signed URLs; viewers for PDF,
+  DOCX, XLSX, PPTX and HWP/HWPX; editing an HWP/HWPX attachment and saving an
+  authorized copy; text extraction for search.
 - **Search:** workspace and global search with Meilisearch, including
   comments and attachment text; results are checked against current
   permissions.
@@ -66,199 +72,261 @@ their tests, CI and an independent review (feature table in
   `scripts/restore.sh`) that verify keys, stored files and sealed secrets
   before the server starts.
 
-## Changes since 0.1.1
+## Changes since 0.2.0
 
-### Security
+### Install files
 
-- **Workspace SSO has its own callback** (licensed builds only). Every
-  workspace SSO provider shared the instance `generic` callback, so an
-  authorization response from one identity provider could complete a
-  sign-in started with another (IdP mix-up). Each workspace now uses
-  `/api/v1/auth/sso/{workspace_id}/callback`; a response on another
-  workspace's or an instance provider's callback ends with
-  `oidc_state_mismatch` before any request to the provider. The new URI must
-  be registered at the provider (see "Upgrading from 0.1.1").
-- **Invitation sign-in with a provider** could be started by a cross-site GET
-  (login CSRF). It is now a same-origin
-  `POST /api/v1/auth/oidc/{provider}/start`, refused with 403
-  `origin_mismatch` from another origin or without an `Origin` header.
-- **Invitation accept limits.** Accepting an invitation for an existing
-  account checks its password against the sign-in limits, and anonymous
-  accepts are limited to 60 per 5 minutes per client address.
-- **A two-factor code is accepted once.** A code matching two adjacent time
-  steps recorded the older one, so the same code could be used again.
-  Verifying or enabling two-factor no longer rejects a valid code while
-  `fvoci-migrate --secrets-rotate` runs.
-- **Changing an email address ends every pending link** (migration 044):
-  all password reset, sign-in and email-change links issued before the
-  change, not only those mailed to the old address, and pending two-factor
-  challenges stop working. Sessions stay signed in.
-- **Wiki share links.** Creating a public link to a wiki page now needs View
-  on every page below it; a guest could publish child pages they could not
-  read. The refusal is 404. The check is made only when a link is created,
-  not when it is served: a link serves its page's whole current subtree, so
-  pages under links created before this release, and pages added or
-  restricted below a shared page later, are still served through the link.
-- **No SSO on personal workspaces** (licensed builds only). Saving an SSO
-  configuration on a personal workspace answers 409
-  `personal_workspace_is_immutable`, and one saved before no longer starts
-  or completes any sign-in.
-- **Rate limits.** A client creating many new keys could fill the limiter's
-  table and reset every other limit (sign-in, two-factor re-authentication,
-  setup, share). Each key now keeps its own window, and a full table evicts
-  the least-used key of the kind (namespace) that holds the most keys: a
-  flood first shrinks any namespace larger than its own, then evicts its own
-  keys. The existing limit values and windows are unchanged (the invitation
-  accept limit above is new).
-- **Revoked sessions during writes.** An instance-admin change (users,
-  admins, erase and its cancellation, legal documents, settings, branding)
-  that was waiting when its session was revoked was still applied; it now
-  answers 404 and writes nothing. Creating a manual revision is likewise
-  refused with 404 when, while it waited, the session was revoked, the
-  token's owner suspended or the member removed.
-- **Server process is non-dumpable.** The helpers the server starts
-  (collaboration, document extraction, preview, Office and Markdown
-  conversion, all uid 1000) and a uid-1000 `docker compose exec` session can
-  no longer read the server's environment (the keyrings,
-  `DATABASE_APP_URL`), memory or open descriptors, or attach to it. The
-  server refuses to start if the kernel does not allow this, and it writes no
-  core dump at all, whatever `fs.suid_dumpable` is set to.
-- **`scripts/restore.sh`** passes the app database password through the
-  environment instead of the `docker` and `psql` command lines.
+- **`.env` values are container environment.** `compose.yml` no longer turns
+  the passwords and keyrings into Compose secret files (`/run/secrets`,
+  `<VAR>_FILE` settings). Each service gets only the `.env` values it uses,
+  as environment: `fvoci` all of them except the published port, `postgres`
+  only `POSTGRES_PASSWORD`, `meilisearch` only `MEILI_MASTER_KEY`. `.env`
+  keeps the same nine variables and values; nothing is regenerated.
+- **What this exposes.** Anyone who can run Docker commands on the host can
+  read every value with `docker inspect`, `docker compose config` or
+  `docker compose exec`, as they could already read `.env`; in 0.2.0
+  `docker inspect` showed only the secret file paths. A root
+  `docker compose exec fvoci …` session and the healthcheck start with every
+  value the `fvoci` service gets, the owner password and master key included.
+- **What stays the same.** The server still runs as uid 1000 without the
+  database owner password or the Meilisearch master key in its environment
+  (it holds the app password only inside `DATABASE_APP_URL`), and uid 1000
+  cannot read a root process's environment. The exception is a session you
+  start as uid 1000 (`docker compose exec -u 1000:1000`): it holds every
+  value, and the server's uid can read it while it runs. The start step still
+  checks the settings and prepares the database and search as root, then runs
+  the server as uid 1000; variable names, the project name and the volumes
+  are unchanged.
+- **Retired `<VAR>_FILE` settings are refused.** The image entrypoint
+  (`fvoci-migrate --start`) exits 2 when any of `POSTGRES_PASSWORD_FILE`,
+  `FVOCI_APP_PASSWORD_FILE`, `MEILI_MASTER_KEY_FILE`,
+  `PASSWORD_PEPPER_KEYS_FILE` or `ENCRYPTION_KEYS_FILE` is set, naming each
+  one. An old `compose.yml` with only its image line changed therefore does
+  not start.
+- **Backup and restore.** `scripts/backup.sh` and `scripts/restore.sh` read
+  the keys from the container configuration or `docker compose config`, and
+  refuse an install whose `compose.yml` still uses secret files (0.1.x,
+  0.2.0), pointing to the scripts of the release it runs.
+- **Changing a setting.** A container keeps the environment it was created
+  with: after editing `.env`, run `docker compose up -d`, which recreates the
+  containers whose values changed; `docker compose restart` keeps the old
+  values. Editing `.env` does not change a password or key already in use;
+  rotation keeps its documented procedure (`RUNNING.md`).
+- `INSTALL.md` now says to `chmod 600 .env` and to keep its copy apart from
+  the database backups.
 
-### Sign-in in the browser
+### Attachments
 
-- In 0.1.x, linking a sign-in provider in account settings was refused (403:
-  the form sent `Origin: null`), and in Chromium the page's content security
-  policy also blocked it. It now starts by script and reaches the provider.
-  `POST /api/v1/auth/oidc/{provider}/link` answers 200
-  `{"authorizationUrl": …}` instead of a 303. Workspace SSO sign-in by slug
-  on the login page (licensed builds only) had the same Chromium block and
-  now starts the same way.
-- The workspace SSO settings (licensed builds only) show the exact redirect
-  URI to register (from the server, with a copy button), only for team
-  workspaces.
+- **Two transfer modes.** `proxy`, the default and the only mode before,
+  streams part uploads and original downloads through the API. `presigned`
+  (S3 storage with `S3_PUBLIC_ENDPOINT` only) lets the browser, after the
+  same authorization, PUT each part straight to the bucket and follow a `302`
+  from `GET …/download` to a short-lived signed GET. Choose it with
+  `FVOCI_ATTACHMENT_TRANSFER_MODE`, which wins over the admin setting
+  `attachmentTransfer.mode` (Instance settings → 첨부 전송 방식), which wins
+  over `proxy`. Local storage and API-token requests always use the proxy;
+  `HEAD`, previews, share-link downloads, `--verify-storage` and restore stay
+  on the API. Each upload session keeps the mode it was created with.
+- **Refusals, not fallbacks.** Startup is refused for an invalid mode,
+  `presigned` without S3 or `S3_PUBLIC_ENDPOINT`, a plain `http` endpoint
+  under an `https` `FVOCI_PUBLIC_ORIGIN`, or an endpoint on the app's host.
+  Saving `presigned` where storage cannot presign answers 400
+  `attachment_transfer_unavailable`; a stored `presigned` that can no longer
+  apply falls back to `proxy` for new transfers, with a startup warning and a
+  notice on the admin page. A failed presigned transfer is never retried
+  through the API.
+- **Setup:** the public bucket host, the bucket CORS rule (the exact
+  `FVOCI_PUBLIC_ORIGIN`, exposing `ETag`), a lifecycle rule for incomplete
+  multipart uploads, and the URL lifetimes
+  (`FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS`, default 900 s;
+  `FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS`, default 60 s) are described
+  under "Attachment transfer modes" in `RUNNING.md` at `@SHA@`.
+- **Issued URLs cannot be revoked.** A signed download URL works until it
+  expires, even after the permission is revoked, the mode is switched back or
+  the attachment is deleted (until the object is reclaimed). A part URL can
+  stage bytes into its upload, though not publish them, until it expires or
+  the multipart upload is completed or aborted. Rotating the S3 access key
+  invalidates all of them at once. The server does not log signed URLs;
+  browser traces and HAR files of presigned transfers contain them.
 
-### Mail and outbox delivery
+### Tasks: Gantt
 
-- **Mail is sent per recipient.** A permanent refusal of one mailbox is final
-  for that recipient only; the others are still sent. A retry skips
-  recipients the mail server already accepted (remembered in memory for the
-  last 64 mail events). Before, one failed recipient stopped the rest of that
-  mail, a retry sent it again to recipients already served, and a failure
-  could be charged to another event delivered in the same batch.
-- **Digests reach every user.** The daily digest served the same first 100
-  users every day. It now pages through all due users. A run stops early on
-  shutdown, after 15 minutes, after 5 sends fail with no answer from the
-  mail server or a temporary refusal, or after 20 permanent refusals that do
-  not name the recipient (a sent digest or a refusal of one mailbox restarts
-  both counts). Users a run did not reach stay due for the next day's run.
-- **Shutdown and slow batches.** Mail, search-index and GitHub (when the
-  GitHub app is configured) delivery stop between batches at shutdown or when
-  their lease runs out, instead of delivering everything pending first, and
-  record what a slow batch delivered before moving on, so it is not lost or
-  sent twice.
-- **`fvoci-migrate --recover-outbox`** (run by `restore.sh`) keeps the
-  processed marks its replay still needs.
+- **New page.** The project Gantt is a new page built with Vue 3 and Nuxt
+  UI; moving between it and any other page is a full page load. The React
+  Gantt is removed. The page saves through the existing task `PATCH` with
+  `expectedDates` as the layout returned them, so permissions, dependency
+  checks and conflicts stay on the server.
+- **What a change writes.** Moving a bar writes only the date fields the task
+  has. The start handle writes only the start date and the end handle only
+  the due side. A moved `dueAt` keeps its time of day.
+- **Keyboard and errors.** Arrow keys move a bar by a day and Shift+Arrow
+  moves its end. A 409 conflict shows a message and refetches; a 400
+  dependency contradiction shows a message and snaps the bar back.
+- Today and the default month use the user's time zone.
+- The React login page now honours `returnTo`: after signing in it opens the
+  same-site page that sent you there, such as the Gantt.
+- **Limitations:** a `dueAt` moved across a daylight-saving change can land
+  one day off the drawn bar; in overlap mode the rail rows do not line up
+  with the lanes; only Chromium was tested.
 
-### Data
+### Security and defect fixes
 
-- **Account export** fails instead of silently leaving out an attachment
-  whose storage check failed.
-- **Markdown ZIP imports** left pending by a cancelled or crashed request are
-  marked failed by the daily sweep after 24 hours.
-- A database error while checking comment permissions answers 500 instead of
-  404.
+- **Linking a sign-in provider needs an `Origin` header.**
+  `POST /api/v1/auth/oidc/{provider}/link` without an `Origin` header, or
+  with one that cannot be read, is refused with 403 `origin_mismatch` and
+  issues no state, as the invitation start already was. The web app always
+  sends it.
+- **Workspace SSO start refusals return to the login page** (every build).
+  `GET /api/v1/auth/sso` answered a refusal with a raw JSON error page. Every
+  refusal is now a 302 to `/login?error=<code>`. A published build, which
+  cannot turn workspace SSO on, refuses every request: it now answers a 302
+  to `/login?error=provider_not_configured` where it answered 404
+  problem+json, and over the per-address limit a 302 to
+  `/login?error=rate_limit_exceeded` where it answered 429 with
+  `Retry-After`. Refusals no longer carry `Retry-After` and no longer count
+  as 429 or 5xx in the HTTP metrics. Only the login page's workspace SSO
+  form is limited to licensed builds.
+- **Date-times with non-ASCII digits.** A Unicode digit in a date-time (for
+  example `effectiveAt` in `POST /api/v1/admin/legal`) made the parser panic
+  and dropped the connection, and one in the fraction was accepted. Only
+  ASCII digits are accepted now; such a request gets 400 `invalid_input`.
+- **An unsendable address no longer stalls mail.** An event whose only
+  recipient's address passed the app's email check but not the mail
+  library's mailbox parser (for example `a..b@example.com`) failed about five
+  times and dead-lettered, holding back every later mail event for about 15 s
+  meanwhile. Such a recipient is now skipped and logged as
+  `mail.recipient_rejected` with `code=invalid_recipient` (without the
+  address), and the event completes. An event all of whose recipients the
+  mail server refuses still dead-letters.
+- **Collaboration memory admission.** Rooms starting at the same time could
+  all be admitted past `FVOCI_COLLAB_MEMORY_BUDGET`, because each read the
+  same helper memory use. Each start's estimate is now checked and recorded
+  under one lock and held until the room's first successful load.
+- **Dead collaboration rooms are reclaimed on HTTP use.** A revision restore,
+  body write or live read over HTTP on a room whose actor had died answered
+  503 until the idle sweep ran; it now reclaims the room and starts a new
+  one, as opening the document already did.
+- **HWP extraction deadline.** Time spent waiting for the single HWP helper
+  slot was taken out of the helper's own parse time. The helper now gets its
+  full timeout from admission; the wait is still bounded by the same timeout,
+  so one HWP extraction can take up to about twice the timeout.
+- **Document helpers first in an out-of-memory kill.** The HWP helper and the
+  preview, Office and Markdown conversion children now set
+  `oom_score_adj=1000` on themselves, as collaboration helpers have since
+  0.2.0, so a cgroup out-of-memory kill prefers them to the server.
+- **Restart-required list.** If a server process's first settings request
+  was a change, the admin settings' list of changes that need a restart
+  (`restartRequired`) stayed empty for the life of that process. The start
+  snapshot is now also taken at the first change.
+- **Task reschedule conflicts.**
+  `PATCH /api/v1/workspaces/{workspace_id}/tasks/{task_id}` compared
+  `expectedDates.dueAt` to the microsecond, while the Gantt layout,
+  collections and browsers work in milliseconds, so rescheduling a task
+  whose stored `dueAt` had sub-millisecond digits answered 409
+  `document_version_mismatch`. `dueAt` is now compared to the millisecond
+  (the stored value truncated); start and due dates are still compared
+  exactly.
 
-### Reliability and performance
+### Performance
 
-- **Reads no longer lock projects.** Task, project, comment, document and
-  revision reads take no project row lock and no transaction id, so a
-  View-only user's reads cannot delay saves and writes, or hold back live
-  updates and outbox delivery for every workspace.
-- **Pooled database connections are checked at reuse.** A request cancelled
-  while its transaction was starting could return its connection with the
-  transaction still open (a defect in sqlx 0.8.6). The pool now closes such a
-  connection instead of reusing it.
-- **Resuming a large upload** on local storage no longer re-reads every stored
-  part (1 GiB: about 24 s of CPU before, 12 ms after, in the author's local
-  measurement).
-- Backlink lookups stop after 15 s.
+Each figure is the author's local measurement from the change's pull
+request, not a measurement of the published image.
 
-### Collaboration and live updates
+- **Search permissions in one statement.** Building a user's project
+  permissions for search, dashboards and collections ran two statements per
+  project; it is now one statement whatever the number of projects, and the
+  guest collection list reads it once instead of once per wiki collection.
+  Statements per request with 3 and 30 projects, before → after (one test
+  run each, wall time not measured): member dashboard 32 and 86 → 26 and 26;
+  guest dashboard 26 and 80 → 20 and 20; member collection list 15 and 69 →
+  9 and 9; member collection query 26 and 80 → 20 and 20. Guest collection
+  list with 1 and 5 wiki collections: 13 and 25 → 11 and 15.
+- **Collaborative edits read less.** Saving each client update no longer
+  reads the stored snapshot and body to lock the document. Bytes read from
+  PostgreSQL per update: 1,006 → 852 (small document), 486,983 → 852 (about
+  475 KiB body), 4,681,285 → 852 (4 MiB snapshot and that body); statements
+  20 → 18 (debug build, PostgreSQL 18.3, 300 updates per document; byte and
+  statement counts are exact).
+- **HWP/HWPX text extraction** no longer waits out a 250 ms poll after the
+  helper has finished: p50 251.1 → 11.1 ms and p95 251.2–251.3 → 11.3 ms per
+  extract call (release build, one HWP fixture, 3 × 50 calls; a
+  microbenchmark of the call, not of the server).
 
-- **Live-update streams recover.** A stream the browser gave up on reopens
-  with a jittered backoff (1 s, doubling to 30 s). Access checks run in one
-  transaction per poll, a poll no longer rescans events it already passed,
-  and collection boards and panels recover from an expired cursor.
-- **Losing access closes the workspace stream** when the user is removed
-  from the workspace, their role changes, or the workspace is moved to
-  trash.
-- **Collaboration helpers.** Opening a document or task body starts one
-  helper instead of two, and a helper that failed to start no longer leaves
-  that room unable to recover. When the helpers are at capacity, a newly
-  opened body is refused as busy (close code 1013, as at the room limit)
-  instead of unavailable (1011): it shows "not loaded yet" with that reason
-  and retries with backoff. A helper no longer outlives the server: it is
-  killed when the thread that started it exits.
+### For developers
 
-### Operations
+- The web workspace is installed, built and tested with Bun 1.4.2 and one
+  `bun.lock`, including the image's web build stage; the runtime image still
+  contains no JavaScript runtime. An existing checkout must delete its npm
+  `node_modules` before `bun ci` (`RUNNING.md`, "Web UI").
+- The web app now has a Vue 3 + Nuxt UI app beside the React one, sharing one
+  `index.html`: `src/boot.ts` starts Vue for the project Gantt and React for
+  every other path (`RUNNING.md`, "Web UI (React and Vue)"). Type checking
+  runs `tsc` and `vue-tsc` under Bun, which needs a Bun `patchedDependencies`
+  patch of `@volar/typescript` 2.4.28 (the open upstream fix
+  volarjs/volar.js#310) until a Volar release contains it; the image's web
+  build stage copies `patches/` for it.
+- An opt-in check of instance OIDC against a local Keycloak was added
+  (`scripts/keycloak-oidc-e2e.sh`, run with Bun).
 
-- To inspect the server process (`/proc/1/environ`, `gdb -p`, `strace -p`,
-  `lsof`), use `docker compose exec --privileged fvoci …` (root with
-  `CAP_SYS_PTRACE`; the image ships none of these tools, so install them in
-  the container first or attach from the host). A uid-1000 session
-  (`docker compose exec -u 1000:1000`, which the 0.1.1 `RUNNING.md`
-  suggested) can no longer read it; root without `CAP_SYS_PTRACE` could not
-  before either. `perf -p` also needs a container created with
-  `CAP_PERFMON` or `CAP_SYS_ADMIN`.
-- No new or changed `.env` value.
+## Upgrading from 0.2.0
 
-## Upgrading from 0.1.1
+Upgrading directly from 0.1.x? Read the 0.2.0 notes too
+(https://github.com/@REPOSITORY@/releases/tag/v0.2.0): the steps below then
+also apply migration 044, after which 0.1.x no longer starts on the database.
 
-Upgrading directly from 0.1.0? Read the 0.1.1 changes too
-(https://github.com/@REPOSITORY@/releases/tag/v0.1.1); 0.1.1 added no
-migration, so the steps below apply with 0.1.0 in place of 0.1.1.
-
-1. Back up first (see "Data, keys and upgrades" below). Migration 044 runs
-   when the new `fvoci` container starts. There is no downgrade: 0.1.1 does
-   not start on the migrated database, so going back to 0.1.1 means
-   restoring the backup taken before the upgrade. Started on it, the 0.1.1
-   `fvoci` container keeps restarting with `database schema has migrations
-   [44] newer than this binary (43)`, and `docker compose up -d` without
-   `--wait` still exits 0: check with `--wait` or `docker compose logs fvoci`.
-2. Download the 0.2.0 `compose.yml` and `SHA256SUMS` into an empty directory
-   and run `sha256sum --ignore-missing -c SHA256SUMS` there (the install
-   directory still holds the 0.1.1 `INSTALL.md`, which no longer matches),
-   then copy `compose.yml` over the old one, keep `.env`, and run
-   `docker compose up -d --wait --wait-timeout 900` in the install
-   directory; Compose stops the old `fvoci` container before the new one
-   migrates. `docker compose exec fvoci /opt/fvoci/bin/fvoci-server --version`
-   then shows `@VERSION@` and the source commit. Reload open browser tabs.
-3. **Workspace SSO** (only a build that accepts a workspace SSO license; not
-   a published install): register each workspace's new redirect URI,
-   `<FVOCI_PUBLIC_ORIGIN>/api/v1/auth/sso/<workspace id>/callback` (shown in
-   the workspace's SSO settings), at its provider before users sign in; until
-   then the provider refuses the sign-in. Remove the old
-   `/api/v1/auth/oidc/generic/callback` URI there once no instance `generic`
-   provider shares that client. A sign-in started before the upgrade fails
-   once with `oidc_state_mismatch`. Instance providers (`OIDC_<KEY>_*`) keep
-   their URIs. See "Redirect URIs to register at the provider" in
-   `RUNNING.md` at `@SHA@`.
-4. **SSO saved on a personal workspace** (same builds only) stops working:
-   users who signed in through it must use another method. The settings page
-   no longer shows the section there; remove the row with
-   `DELETE /api/v1/workspaces/{id}/oidc`.
-5. **After an email change**, password reset, sign-in and email-change links
-   and two-factor challenges must be started again. Sessions are kept.
-6. **API clients:** `POST /api/v1/auth/oidc/{provider}/link` answers 200
-   `{"authorizationUrl": …}` instead of a 303. Invitation sign-in with a
-   provider is `POST /api/v1/auth/oidc/{provider}/start` (urlencoded
-   `invitation`, `consents`); `GET …/start` with `invitation` or `consents`
-   answers 400.
-7. **Behind a reverse proxy**, every client shares the proxy's address for
-   rate limits, so bulk onboarding can reach the 60 invitation accepts per 5
-   minutes.
+1. Back up first, with `scripts/backup.sh` from the source at `v0.2.0` while
+   0.2.0 runs (the 0.3.0 script refuses a container started from the 0.2.0
+   `compose.yml`), and keep the copy of `.env` apart from it (see "Data, keys
+   and upgrades" below). With S3 storage `backup.sh` refuses; follow
+   "S3 storage backup" in `RUNNING.md` instead. From 0.1.x, use that
+   release's scripts.
+2. Download the 0.3.0 `compose.yml` and `SHA256SUMS` into an empty directory
+   and run `sha256sum --ignore-missing -c SHA256SUMS` there. Copy
+   `compose.yml` over the old one and keep `.env` as it is: the variables and
+   values are the same, and nothing is regenerated. Run
+   `docker compose up -d --wait --wait-timeout 900` in the install directory.
+   Compose recreates all three containers on the same volumes; there is no
+   database migration.
+   `docker compose exec fvoci /opt/fvoci/bin/fvoci-server --version` then
+   shows `@VERSION@` and the source commit. Reload open browser tabs.
+3. **Replace the whole file.** A 0.2.0 `compose.yml` with only its image line
+   changed does not start: the `fvoci` container exits 2 naming each retired
+   `<VAR>_FILE` setting, and keeps restarting. `docker compose up -d` without
+   `--wait` does not report this; check with `--wait` or
+   `docker compose logs fvoci`.
+4. **Values are now visible to Docker users.** `docker inspect`,
+   `docker compose config` and `docker compose exec` show the `.env` values;
+   do not paste their raw output into logs, issues or reviews. The 0.2.0
+   secret files existed only inside the old containers.
+5. **S3 storage** (settings in `compose.override.yml`): transfers stay on the
+   API unless you choose `presigned`. The new optional variables are
+   `FVOCI_ATTACHMENT_TRANSFER_MODE`, `FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS`
+   and `FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS`; list only those you set
+   (leave the mode out to choose it on the admin page; an empty TTL refuses
+   startup). `S3_PUBLIC_ENDPOINT` was checked but not used before: a value
+   left set now makes `presigned` available, adds its origin to the content
+   security policy (`connect-src`, `img-src`), and refuses startup when it is
+   plain `http` under an `https` `FVOCI_PUBLIC_ORIGIN` or uses the app's
+   host. Correct or remove it before upgrading. The developer stack's S3
+   overlay (`infra/rust/compose.s3.yml`) passes the three variables from
+   `.env`.
+6. **API clients:** linking a provider without an `Origin` header gets 403
+   `origin_mismatch`; `GET /api/v1/auth/sso` answers every refusal, in every
+   build, with a 302 to `/login?error=<code>` instead of a 404 or 429
+   problem+json (a published build refuses every request, with
+   `provider_not_configured`, or `rate_limit_exceeded` over the limit);
+   `GET …/projects/{project_id}/task-layout` also returns `canEdit`, `links`,
+   `linkTotal` and `calendar` (nothing removed); with `presigned` on, browser
+   uploads and original downloads use signed storage URLs (`GET …/download`
+   answers 302), while API-token requests keep the API paths.
+7. **Going back to 0.2.0** is not supported. The documented way back is
+   restoring the pre-upgrade backup with the 0.2.0 `restore.sh` and
+   `compose.yml`, which loses the writes made since. 0.3.0 adds no
+   migration, and in the upgrade check the 0.2.0 image, started with its
+   `compose.yml` and the same `.env` on the upgraded database (local
+   storage, no presigned upload sessions), passed its schema check and served
+   the same data. Doing so is unsafe while upload sessions opened in
+   `presigned` mode are unfinished: 0.2.0 does not know their mode.
 
 ## Not verified or optional
 
@@ -268,18 +336,32 @@ stand-ins. Treat them as untested with a real provider:
 - **Mail (SMTP):** tested against a local test relay only, including scripted
   per-recipient refusals. Without SMTP, invitation links are shown in the
   app instead of mailed.
-- **OIDC sign-in and workspace SSO:** tested with local test providers, not
-  a real external identity provider. The browser starts changed in this
-  release (invitation, account linking, workspace SSO by slug) were checked
-  in Chromium 153 only, in one uncommitted run against a test provider on
-  another origin; other browsers were not tried, and there is no automated
-  browser test for them.
+- **OIDC sign-in and workspace SSO:** instance OIDC sign-in, account
+  linking, invitation acceptance and sign-out were checked against a real
+  Keycloak 26.7.4 on the same host, in headless Chromium 153, with a server
+  built from source that contains the other 0.3.0 product changes (the
+  opt-in `scripts/keycloak-oidc-e2e.sh`, last run at `8ddd1486`; not in
+  CI). Workspace SSO was checked against Keycloak only in a Rust test under
+  a test entitlement. Not tried:
+  any external identity provider (Google, Microsoft, Naver, Kakao, or one on
+  another site), HTTPS, a reverse proxy or Secure cookies, the container
+  install, Keycloak production mode and key rotation, and browsers other
+  than Chromium. Other tests use local test providers.
 - **GitHub app:** tested against a local fake of the GitHub API.
 - **AI actions and semantic search:** optional, and need an
   OpenAI-compatible embeddings endpoint that you provide. No real provider
   was used.
-- **S3 storage:** checked against a local S3-compatible store only, including
-  the documented upgrade and rollback steps. No cloud provider was used.
+- **S3 storage:** checked against a local S3-compatible store only; an image
+  upgrade and versioned rollback were checked in an earlier release (#190).
+  The 0.2.0 → 0.3.0 upgrade was not tried on S3. No cloud provider was used.
+- **Presigned attachment transfer:** Rust integration tests against the same
+  local store, and a manual Chromium check across origins (upload, download,
+  range, image viewer, switching back, and a narrowed CORS rule that must
+  fail) that is not part of CI. Not run: real AWS S3 (CORS on the redirected
+  download, enforcement of the signed length, virtual-host style addressing,
+  the `response-*` overrides, lifecycle rules), other S3-compatible services,
+  a CDN or reverse proxy in front of the bucket, Firefox and Safari, and
+  clock skew.
 - **Two-factor sign-in:** codes and QR enrolment are tested, but no real
   authenticator app has scanned the QR code.
 - **Web Push:** one real delivery was observed, with Chrome for Testing on
@@ -287,58 +369,52 @@ stand-ins. Treat them as untested with a real provider:
   not tried.
 - **Korean input (IME):** checked with a real Linux (IBus) input method in
   Chromium only. Windows, macOS and mobile input methods were not tried.
-- **Collaboration capacity:** the room-limit behaviour (new in 0.1.1) was
-  measured with the server, collaboration engine and web app taken from the
-  published 0.1.0 and 0.1.1 images, run on one host outside the container
-  with one headless Chromium and synthetic users, 10 opens per case (median).
-  With every room held by a document whose users had just left it (about
-  3 s earlier with 30 rooms, about 6 s with 64), a newly opened document
-  showed its text after 39.5 s in 0.1.0 and 3.0 s in 0.1.1 with 30 rooms
-  (978 and 3 connection attempts), and 36.6 s and 0.44 s with 64 rooms. The
-  3.0 s against 0.44 s comes from the 5 s a just-emptied room is kept for a
-  returning user plus that timing, not from the number of rooms (most
-  likely, from reading the code; not confirmed by instrumentation). 30 rooms is
-  the image default; the release compose uses 64. With every room in use,
-  a waiting document showed its text after an editor left in 34.7 s and
-  8.2 s (30 rooms), 30.6 s and 8.7 s (64 rooms); the 0.1.1 figures include
-  that 5 s, while 0.1.0 never reclaims a room at the limit and waits for the 30 s idle
-  eviction.
-  The 0.2.0 helper changes were not measured this way, nor under Docker's
-  default AppArmor profile, nor with many real users.
-- **Upgrade from 0.1.1:** checked once by hand on amd64 with local storage,
-  from the published 0.1.1 release files to a 0.2.0 image built locally from
-  the release-prep commit `b2218c75` (not the published 0.2.0 image). A
-  seeded account, workspace, project, task, comments, wiki body and HWPX
-  attachment were unchanged after the upgrade, and a sealed two-factor secret
-  still opened (migration 044 applied; `--doctor`, `--verify-secrets` and
-  sign-in passed).
-  0.1.1 then refused the migrated database without changing it (identical
-  `pg_dump` before and after), and a backup taken with the 0.1.1
-  `scripts/backup.sh` restored into a fresh 0.1.1 install with the 0.1.1
-  `restore.sh`. There is no automated upgrade test; arm64 and S3 storage
-  were not tried.
+- **Collaboration capacity:** the room-limit behaviour was measured for 0.1.1
+  (see the 0.2.0 notes). The collaboration changes of 0.2.0 and 0.3.0
+  (helpers, memory admission, saving updates) were not measured that way,
+  nor under Docker's default AppArmor profile, nor with many real users.
+- **Upgrade from 0.2.0:** checked by hand once, on amd64 with local storage
+  and no presigned upload sessions, from an install made with the published
+  0.2.0 release files and backed up with the v0.2.0 `backup.sh`. The new
+  image was built from the release-preparation commit `04f61092`, not the
+  published image; that commit predates the Gantt change (#255), which
+  changes only the web build (web code and the Dockerfile line that copies
+  `patches/`). An old `compose.yml` with only its image line changed exited
+  2 naming the five retired `<VAR>_FILE` settings and changed nothing (the
+  database dump was byte-identical). The documented upgrade applied no
+  migration (still 044) and kept all seeded data with 0 differences
+  (sign-in, a document and its body, comments, attachment bytes, task dates
+  and a sealed two-factor secret); each service got the documented `.env`
+  names, and the server's environment had none of the preparation-only
+  values such as the owner password or the master key. The 0.2.0 image then
+  started again on the upgraded database with the same data (step 7), and
+  the 0.2.0 backup restored with the 0.3.0 `restore.sh` into a new project.
+  Not tried: arm64, S3 storage, presigned upload sessions, and an automated
+  upgrade test.
 - **`/metrics` and `--outbox-reset`** are not part of the release smoke.
 
 ## Known limitations
 
 - **No compatibility promise.** 0.x releases may change settings, data
   layout or behaviour between versions. Nothing updates an install on its own.
-- **Secret boundary is within one container.** The `fvoci` container prepares
-  the database and search as root, then runs the server as uid 1000. The
-  server cannot read the secret files, the database owner password or the
-  Meilisearch master key. Root
-  in the container (`docker compose exec fvoci …`) can read them, and anyone
-  who can run Docker commands on the host can read `.env` and the secrets.
-  `docker inspect` shows the secret file paths, not their values. The server
-  makes itself non-dumpable and refuses to start if the kernel does not
-  allow it; the helpers still share uid 1000 file access with it (stored
-  files and the scoped search key). The helpers themselves stay dumpable, so
-  where the host allows same-uid ptrace one helper can attach to another.
-- **Collaboration helper memory.** Helpers set `oom_score_adj=1000` so an
-  out-of-memory kill prefers a helper over the server; where the container
-  profile denies it (for example AppArmor docker-default), the helper still
-  starts without it and the server logs a warning once. This was not
-  re-measured for 0.2.0 under that profile.
+- **Settings are container environment.** Anyone who can run Docker
+  commands on the host can read every `.env` value (`docker inspect`,
+  `docker compose config`, `docker compose exec`), and root in the `fvoci`
+  container (`docker compose exec fvoci …`, the healthcheck) starts with all
+  of them. The server runs as uid 1000 without the owner password or the
+  Meilisearch master key and cannot read root's processes, but a session you
+  start as uid 1000 (`docker compose exec -u 1000:1000`) holds every value,
+  readable by the server's uid while it runs. The server makes itself
+  non-dumpable and refuses to start if the kernel does not allow it; the
+  helpers still share uid 1000 file access with it (stored files and the
+  scoped search key). The helpers themselves stay dumpable, so where the host
+  allows same-uid ptrace one helper can attach to another.
+- **Helper memory.** Collaboration helpers and document helpers (HWP,
+  Office, Markdown, image preview) set `oom_score_adj=1000` so an
+  out-of-memory kill prefers them over the server; where the container
+  profile denies it (for example AppArmor docker-default), they still start
+  without it, and only a collaboration helper's denial is logged (once).
+  This was not measured under that profile.
 - **Local HTTP by default.** The app is published on `127.0.0.1` over plain
   HTTP. For other users or a domain, put a TLS reverse proxy in front and
   set an `https://` `FVOCI_PUBLIC_ORIGIN` (see `RUNNING.md`).
@@ -353,10 +429,19 @@ stand-ins. Treat them as untested with a real provider:
 - **Invitations accepted through a provider.** A new account opened this
   way gets the invited address and is linked to whatever identity the
   provider returns; the provider's email does not have to match or be
-  verified (same as the original product; Naver never sends
-  `email_verified` and Kakao often omits it). A decision is pending.
+  verified (same as the original product, and also seen with a real
+  Keycloak; Naver never sends `email_verified` and Kakao often omits it). A
+  decision is pending.
 - **Share links outlive their creator's access** until someone revokes them
   (same as the original product; a decision is pending).
+- **Presigned URLs** (`presigned` mode only). An issued download URL works
+  until it expires (default 60 s), even after the permission is revoked or
+  the attachment is deleted, until the object is reclaimed. A part URL
+  (default 15 minutes) can still stage bytes into its upload, though not
+  publish them, until it expires or the multipart upload is completed or
+  aborted. Only rotating the S3 access key revokes them all. Signed URLs use
+  the server's clock, so keep it synchronized. After its retries, a
+  storage connection failure shows the generic network error.
 - **Digest can stop at the same place every day.** If the same recipients
   fail every day (a lasting temporary refusal such as `452 4.2.2`, or a bare
   `550` from a mail server that sends no enhanced status codes), five such
@@ -392,9 +477,10 @@ stand-ins. Treat them as untested with a real provider:
   written unquoted or wholly in single or double quotes, as Compose reads
   them (inside single quotes `$` and backslashes are literal). It refuses
   other forms (escapes outside quotes, `$` outside single quotes, inline
-  comments, `export`) instead of guessing. Keep the values unquoted, as `env.example` writes them.
-  With PostgreSQL `log_statement` set to `ddl` or `all` (off by default),
-  the app role password that `restore.sh` sets reaches the PostgreSQL log.
+  comments, `export`) instead of guessing. Keep the values unquoted, as
+  `env.example` writes them. With PostgreSQL `log_statement` set to `ddl`
+  or `all` (off by default), the app role password that `restore.sh` sets
+  reaches the PostgreSQL log.
 - **Upgrades only as documented.** Back up first, then replace
   `compose.yml` (see below). Rolling upgrades, running two servers against
   one database, and downgrades are not supported.
@@ -414,6 +500,7 @@ for f in compose.yml env.example INSTALL.md SHA256SUMS; do
 done
 sha256sum --ignore-missing -c SHA256SUMS
 cp env.example .env   # fill in each empty value with the command shown above it
+chmod 600 .env
 docker compose up -d --wait
 ```
 
@@ -421,14 +508,16 @@ docker compose up -d --wait
 existing install. Compose refuses to start while a value in `.env` is empty,
 and the `fvoci` container checks the values before it prepares the database
 and starts the server. Open the published address and create the first
-administrator on the setup page. Keep `.env` private and with your backups.
+administrator on the setup page. Keep `.env` private and back it up apart
+from the database backups; Compose passes its values to the containers as
+environment (see "Known limitations").
 
 ## Start, stop, restart
 
 ```sh
 docker compose stop            # stop, keep everything
-docker compose up -d --wait    # start again
-docker compose restart fvoci   # restart the application only
+docker compose up -d --wait    # start again; after editing .env, applies it
+docker compose restart fvoci   # restart the application only, same settings
 docker compose down            # remove containers, keep volumes (data and keys)
 ```
 
