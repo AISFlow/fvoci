@@ -2021,3 +2021,1322 @@ async fn s3_preview_html_parses_a_not_yet_extracted_office_file_on_demand() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+// ------------------------------------------------ transfer modes (#149 A/B)
+//
+// The same scenarios run in `proxy` (bytes through the API) and `presigned`
+// (browser <-> MinIO with signed URLs) modes. A plain reqwest client with no
+// cookie store and no redirect following plays the browser, so every storage
+// request it makes carries only what the signed URL grants.
+
+use fvoci_server::attachments::{PresignTtls, TransferMode};
+
+/// Browsers reach MinIO under another host name than the server's internal
+/// `S3_ENDPOINT`, as with a dedicated `files.example.com`: the signed `Host`
+/// must be the public one.
+fn public_endpoint() -> String {
+    let mut url = url::Url::parse(&nonempty_env("S3_ENDPOINT")).unwrap();
+    url.set_host(Some("localhost")).unwrap();
+    url.as_str().trim_end_matches('/').to_string()
+}
+
+fn presign_s3_settings() -> S3Settings {
+    S3Settings {
+        public_endpoint: Some(public_endpoint()),
+        ..s3_settings()
+    }
+}
+
+async fn presign_backend(ttls: PresignTtls) -> ObjectStorage {
+    let s3 = S3Storage::new(presign_s3_settings())
+        .expect("s3 settings")
+        .with_presign_ttls(ttls);
+    s3.ensure_bucket().await.expect("ensure bucket");
+    ObjectStorage::from(s3)
+}
+
+fn browser() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .unwrap()
+}
+
+fn mode_str(mode: TransferMode) -> &'static str {
+    mode.as_str()
+}
+
+async fn patch_transfer(app: &axum::Router, cookie: &str, value: Value) -> (StatusCode, Value) {
+    let (status, body, _) = json_request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        Some(json!({ "attachmentTransfer": value })),
+        Some(cookie),
+    )
+    .await;
+    (status, body)
+}
+
+async fn admin_transfer_status(app: &axum::Router, cookie: &str) -> Value {
+    let (status, body, _) = json_request(
+        app.clone(),
+        "GET",
+        "/api/v1/admin/instance-settings",
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    body
+}
+
+async fn create_upload_session(
+    app: &axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    document_id: &str,
+    name: &str,
+    size: usize,
+) -> Value {
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads"),
+        Some(json!({ "name": name, "sizeBytes": size })),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create: {created:?}");
+    created
+}
+
+/// PUTs one part through the session's own path: the API with the session
+/// cookie for `proxy`, the signed storage URL with nothing else for
+/// `presigned` (no cookie, no `Authorization`, no `Content-Type`).
+async fn put_via(
+    app: &axum::Router,
+    cookie: &str,
+    mode: TransferMode,
+    url: &str,
+    body: &[u8],
+) -> (StatusCode, String) {
+    match mode {
+        TransferMode::Proxy => put_part(app, cookie, url, body).await,
+        TransferMode::Presigned => {
+            let res = browser().put(url).body(body.to_vec()).send().await.unwrap();
+            let status = StatusCode::from_u16(res.status().as_u16()).unwrap();
+            let etag = res
+                .headers()
+                .get("etag")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            (status, etag)
+        }
+    }
+}
+
+async fn complete_parts(
+    app: &axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    attachment_id: &str,
+    parts: &[(i32, &str)],
+) -> (StatusCode, Value) {
+    let parts: Vec<Value> = parts
+        .iter()
+        .map(|(n, etag)| json!({ "partNumber": n, "etag": etag }))
+        .collect();
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": parts })),
+        Some(cookie),
+    )
+    .await;
+    (status, body)
+}
+
+async fn resume_session(
+    app: &axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    attachment_id: &str,
+) -> (StatusCode, Value) {
+    let (status, body, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload"),
+        None,
+        Some(cookie),
+    )
+    .await;
+    (status, body)
+}
+
+async fn download_request(
+    app: &axum::Router,
+    cookie: &str,
+    method: &str,
+    path: &str,
+    range: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("cookie", format!("fvoci_session={cookie}"));
+    if let Some(range) = range {
+        builder = builder.header("range", range);
+    }
+    let mut req = builder.body(axum::body::Body::empty()).unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(test_peer()));
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, headers, bytes.to_vec())
+}
+
+/// Original bytes (optionally a range) through the mode's own path: the API
+/// streams them for `proxy`; for `presigned` the API answers a `302` that the
+/// browser follows to storage, forwarding `Range`.
+async fn fetch_original(
+    app: &axum::Router,
+    cookie: &str,
+    mode: TransferMode,
+    path: &str,
+    range: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let (status, headers, body) = download_request(app, cookie, "GET", path, range).await;
+    match mode {
+        TransferMode::Proxy => {
+            assert!(status.is_success(), "{status}");
+            (status, headers, body)
+        }
+        TransferMode::Presigned => {
+            assert_eq!(
+                status,
+                StatusCode::FOUND,
+                "{:?}",
+                String::from_utf8_lossy(&body)
+            );
+            assert_eq!(headers["cache-control"], "no-store");
+            let location = headers["location"].to_str().unwrap().to_string();
+            assert!(
+                location.starts_with(&format!("{}/", public_endpoint())),
+                "{location}"
+            );
+            let mut req = browser().get(&location);
+            if let Some(range) = range {
+                req = req.header("range", range);
+            }
+            let res = req.send().await.unwrap();
+            let status = StatusCode::from_u16(res.status().as_u16()).unwrap();
+            let mut out = HeaderMap::new();
+            for (name, value) in res.headers() {
+                out.insert(
+                    axum::http::HeaderName::from_bytes(name.as_str().as_bytes()).unwrap(),
+                    axum::http::HeaderValue::from_bytes(value.as_bytes()).unwrap(),
+                );
+            }
+            (status, out, res.bytes().await.unwrap().to_vec())
+        }
+    }
+}
+
+async fn attachment_status(harness: &TestDb, attachment_id: &str) -> Option<String> {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM fvoci.attachments WHERE id = $1")
+            .bind(Uuid::parse_str(attachment_id).unwrap())
+            .fetch_optional(&admin)
+            .await
+            .unwrap();
+    admin.close().await;
+    status
+}
+
+#[tokio::test]
+async fn transfer_modes_upload_and_download_through_their_own_paths() {
+    let harness = TestDb::bootstrap().await;
+    let storage = presign_backend(PresignTtls::default()).await;
+    let part_size = 5 * MIB;
+    let (app, cookie, workspace_id) =
+        setup_session_with_part_size(&harness, storage.clone(), part_size as i64).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let status = admin_transfer_status(&app, &cookie).await;
+    assert_eq!(
+        status["attachmentTransfer"],
+        json!({"effective": "proxy", "source": "default", "presignedAvailable": true,
+               "unavailableReason": null, "blocked": false})
+    );
+    assert_eq!(
+        status["values"]["attachmentTransfer"],
+        json!({"mode": "proxy"})
+    );
+
+    for mode in [TransferMode::Proxy, TransferMode::Presigned] {
+        let (status, body) = patch_transfer(&app, &cookie, json!({"mode": mode_str(mode)})).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["attachmentTransfer"]["effective"], mode_str(mode));
+        assert_eq!(body["attachmentTransfer"]["source"], "stored");
+
+        let name = format!("보고서 {} v1.bin", mode_str(mode));
+        let payload = patterned(part_size + 1000, 7);
+        let created = create_upload_session(
+            &app,
+            &cookie,
+            workspace_id,
+            &document_id,
+            &name,
+            payload.len(),
+        )
+        .await;
+        assert_eq!(created["transfer"], mode_str(mode));
+        let parts = created["parts"].as_array().unwrap().clone();
+        assert_eq!(parts.len(), 2);
+        match mode {
+            TransferMode::Proxy => {
+                assert_eq!(created["partUrlsExpireAt"], Value::Null);
+                assert!(parts[0]["url"].as_str().unwrap().starts_with("/api/v1/"));
+            }
+            TransferMode::Presigned => {
+                let expires: chrono::DateTime<Utc> =
+                    serde_json::from_value(created["partUrlsExpireAt"].clone()).unwrap();
+                let left = (expires - Utc::now()).num_seconds();
+                assert!((890..=900).contains(&left), "{left}");
+                for part in &parts {
+                    let url = part["url"].as_str().unwrap();
+                    assert!(url.starts_with(&format!("{}/", public_endpoint())), "{url}");
+                    assert!(
+                        url.contains("X-Amz-SignedHeaders=content-length%3Bhost"),
+                        "{url}"
+                    );
+                }
+            }
+        }
+        let attachment_id = created["attachmentId"].as_str().unwrap().to_string();
+        let (s1, etag1) = put_via(
+            &app,
+            &cookie,
+            mode,
+            parts[0]["url"].as_str().unwrap(),
+            &payload[..part_size],
+        )
+        .await;
+        let (s2, etag2) = put_via(
+            &app,
+            &cookie,
+            mode,
+            parts[1]["url"].as_str().unwrap(),
+            &payload[part_size..],
+        )
+        .await;
+        assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK), "{mode:?}");
+        assert!(!etag1.is_empty() && !etag2.is_empty(), "ETag exposed");
+        let (status, completed) = complete_parts(
+            &app,
+            &cookie,
+            workspace_id,
+            &attachment_id,
+            &[(1, &etag1), (2, &etag2)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{mode:?} complete: {completed:?}");
+
+        let path =
+            format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download");
+        let (status, headers, bytes) = fetch_original(&app, &cookie, mode, &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{mode:?}");
+        assert_eq!(bytes, payload, "{mode:?}");
+        assert_eq!(headers["content-type"], "application/octet-stream");
+        assert_eq!(
+            headers["content-disposition"].to_str().unwrap(),
+            fvoci_server::attachments::content_disposition_attachment(&name)
+        );
+        assert_eq!(headers["cache-control"], "private, no-store");
+
+        let (start, end) = (part_size - 10, part_size + 10);
+        let range = format!("bytes={start}-{end}");
+        let (status, headers, bytes) =
+            fetch_original(&app, &cookie, mode, &path, Some(&range)).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT, "{mode:?}");
+        assert_eq!(
+            headers["content-range"],
+            format!("bytes {start}-{end}/{}", payload.len()).as_str()
+        );
+        assert_eq!(&bytes[..], &payload[start..=end]);
+
+        // An unsatisfiable range and HEAD are answered by the API itself.
+        let (status, headers, _) =
+            download_request(&app, &cookie, "GET", &path, Some("bytes=99999999-")).await;
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE, "{mode:?}");
+        assert!(headers.get("location").is_none());
+        let (status, headers, body) = download_request(&app, &cookie, "HEAD", &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{mode:?}");
+        assert!(body.is_empty());
+        assert_eq!(
+            headers["content-length"],
+            payload.len().to_string().as_str()
+        );
+        assert_eq!(headers["content-security-policy"], "sandbox");
+    }
+
+    // Both kinds of stored object pass the storage verification.
+    let pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let report = fvoci_server::attachments::verify_stored_objects(&pool, &storage)
+        .await
+        .unwrap();
+    assert_eq!(report.checked, 2);
+    assert!(report.is_complete(), "{report:?}");
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn transfer_mode_switch_keeps_each_session_on_its_bound_path() {
+    let harness = TestDb::bootstrap().await;
+    let storage = presign_backend(PresignTtls::default()).await;
+    let (app, cookie, workspace_id) = setup_session(&harness, storage.clone()).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = patterned(3000, 3);
+
+    // Session A starts in proxy mode, then the admin switches to presigned.
+    let a = create_upload_session(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "a.bin",
+        payload.len(),
+    )
+    .await;
+    assert_eq!(a["transfer"], "proxy");
+    let (status, _) = patch_transfer(&app, &cookie, json!({"mode": "presigned"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let b = create_upload_session(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "b.bin",
+        payload.len(),
+    )
+    .await;
+    assert_eq!(b["transfer"], "presigned");
+
+    // A keeps the API path after the switch.
+    let (status, etag_a) = put_via(
+        &app,
+        &cookie,
+        TransferMode::Proxy,
+        a["parts"][0]["url"].as_str().unwrap(),
+        &payload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let a_id = a["attachmentId"].as_str().unwrap();
+    let (status, body) = complete_parts(&app, &cookie, workspace_id, a_id, &[(1, &etag_a)]).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    // B never takes a part through the API: no second path for its bytes.
+    let b_id = b["attachmentId"].as_str().unwrap().to_string();
+    let proxy_path = format!("/api/v1/workspaces/{workspace_id}/attachments/{b_id}/parts/1");
+    let (status, problem, _) = json_request(
+        app.clone(),
+        "PUT",
+        &proxy_path,
+        Some(json!("x")),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{problem:?}");
+    assert_eq!(problem["code"], "upload_is_not_in_the_required_state");
+    let (key_b, upload_b) = upload_ref_of(&harness, &b_id).await;
+    assert!(
+        storage
+            .list_parts(&key_b, upload_b.as_deref())
+            .await
+            .unwrap()
+            .is_empty(),
+        "the refused PUT reached no storage"
+    );
+
+    // Switching back does not move B either: resume still signs storage URLs.
+    let (status, _) = patch_transfer(&app, &cookie, json!({"mode": "proxy"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, resumed) = resume_session(&app, &cookie, workspace_id, &b_id).await;
+    assert_eq!(status, StatusCode::OK, "{resumed:?}");
+    assert_eq!(resumed["transfer"], "presigned");
+    let url = resumed["parts"][0]["url"].as_str().unwrap();
+    assert!(url.starts_with(&public_endpoint()), "{url}");
+    let (status, etag_b) = put_via(&app, &cookie, TransferMode::Presigned, url, &payload).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = complete_parts(&app, &cookie, workspace_id, &b_id, &[(1, &etag_b)]).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    // New sessions follow the current mode; the switch also changes how
+    // stored originals are served, whatever session uploaded them.
+    let c = create_upload_session(&app, &cookie, workspace_id, &document_id, "c.bin", 10).await;
+    assert_eq!(c["transfer"], "proxy");
+    let path = format!("/api/v1/workspaces/{workspace_id}/attachments/{b_id}/download");
+    let (status, _, bytes) = download_request(&app, &cookie, "GET", &path, None).await;
+    assert_eq!((status, bytes), (StatusCode::OK, payload.clone()));
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn presigned_part_urls_expire_and_resume_issues_fresh_ones() {
+    let harness = TestDb::bootstrap().await;
+    let ttl = Duration::from_secs(3);
+    let storage = presign_backend(PresignTtls {
+        part: ttl,
+        download: Duration::from_secs(60),
+    })
+    .await;
+    let part_size = 5 * MIB;
+    let (app, cookie, workspace_id) =
+        setup_session_with_part_size(&harness, storage.clone(), part_size as i64).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = patterned(part_size + 500, 11);
+
+    for mode in [TransferMode::Proxy, TransferMode::Presigned] {
+        let (status, _) = patch_transfer(&app, &cookie, json!({"mode": mode_str(mode)})).await;
+        assert_eq!(status, StatusCode::OK);
+        let created = create_upload_session(
+            &app,
+            &cookie,
+            workspace_id,
+            &document_id,
+            "exp.bin",
+            payload.len(),
+        )
+        .await;
+        let id = created["attachmentId"].as_str().unwrap().to_string();
+        let (status, etag1) = put_via(
+            &app,
+            &cookie,
+            mode,
+            created["parts"][0]["url"].as_str().unwrap(),
+            &payload[..part_size],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{mode:?}");
+        tokio::time::sleep(ttl + Duration::from_secs(2)).await;
+        let late = created["parts"][1]["url"].as_str().unwrap();
+        let (status, _) = put_via(&app, &cookie, mode, late, &payload[part_size..]).await;
+        match mode {
+            // API paths do not expire; the session itself is checked instead.
+            TransferMode::Proxy => {
+                assert_eq!(status, StatusCode::OK);
+                let (status, resumed) = resume_session(&app, &cookie, workspace_id, &id).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(resumed["partUrlsExpireAt"], Value::Null);
+                assert_eq!(resumed["uploadedParts"].as_array().unwrap().len(), 2);
+                let etag2 = resumed["uploadedParts"][1]["etag"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                let (status, body) = complete_parts(
+                    &app,
+                    &cookie,
+                    workspace_id,
+                    &id,
+                    &[(1, &etag1), (2, &etag2)],
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body:?}");
+            }
+            TransferMode::Presigned => {
+                assert_eq!(status, StatusCode::FORBIDDEN, "expired URL must be refused");
+                let (status, resumed) = resume_session(&app, &cookie, workspace_id, &id).await;
+                assert_eq!(status, StatusCode::OK, "{resumed:?}");
+                assert_eq!(resumed["uploadedParts"].as_array().unwrap().len(), 1);
+                let fresh = resumed["parts"].as_array().unwrap();
+                assert_eq!(fresh.len(), 1);
+                assert_eq!(fresh[0]["partNumber"], 2);
+                assert_ne!(fresh[0]["url"].as_str().unwrap(), late);
+                let expires: chrono::DateTime<Utc> =
+                    serde_json::from_value(resumed["partUrlsExpireAt"].clone()).unwrap();
+                assert!(expires > Utc::now());
+                let (status, etag2) = put_via(
+                    &app,
+                    &cookie,
+                    mode,
+                    fresh[0]["url"].as_str().unwrap(),
+                    &payload[part_size..],
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                let (status, body) = complete_parts(
+                    &app,
+                    &cookie,
+                    workspace_id,
+                    &id,
+                    &[(1, &etag1), (2, &etag2)],
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body:?}");
+            }
+        }
+        let path = format!("/api/v1/workspaces/{workspace_id}/attachments/{id}/download");
+        let (_, _, bytes) = fetch_original(&app, &cookie, mode, &path, None).await;
+        assert_eq!(bytes, payload, "{mode:?}");
+    }
+    harness.cleanup().await;
+}
+
+/// All parts reach storage, then the session is revoked while complete is
+/// between assembly and marking the row stored: the final re-check refuses
+/// it in both modes and nothing becomes a stored attachment.
+#[tokio::test]
+async fn complete_after_revocation_is_refused_in_both_modes() {
+    use fvoci_server::db::attachments::test_barrier;
+
+    for mode in [TransferMode::Proxy, TransferMode::Presigned] {
+        let harness = TestDb::bootstrap().await;
+        let storage = presign_backend(PresignTtls::default()).await;
+        let (app, cookie, workspace_id) = setup_session(&harness, storage.clone()).await;
+        let document_id = create_document(&app, &cookie, workspace_id).await;
+        let (status, _) = patch_transfer(&app, &cookie, json!({"mode": mode_str(mode)})).await;
+        assert_eq!(status, StatusCode::OK);
+        let payload = patterned(2048, 1);
+        let created = create_upload_session(
+            &app,
+            &cookie,
+            workspace_id,
+            &document_id,
+            "r.bin",
+            payload.len(),
+        )
+        .await;
+        let id = created["attachmentId"].as_str().unwrap().to_string();
+        let (status, etag) = put_via(
+            &app,
+            &cookie,
+            mode,
+            created["parts"][0]["url"].as_str().unwrap(),
+            &payload,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{mode:?}");
+
+        let mut barrier = test_barrier::arm_pre_mark_stored(Uuid::parse_str(&id).unwrap());
+        let complete = tokio::spawn({
+            let (app, cookie, id, etag) = (app.clone(), cookie.clone(), id.clone(), etag.clone());
+            async move { complete_parts(&app, &cookie, workspace_id, &id, &[(1, &etag)]).await }
+        });
+        tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
+            .await
+            .expect("complete should reach the pre-mark-stored barrier")
+            .expect("barrier entered");
+        let (status, _, _) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/logout",
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        barrier.proceed();
+        let (status, body) = complete.await.unwrap();
+        assert_eq!(status, StatusCode::NOT_FOUND, "{mode:?}: {body:?}");
+        assert_ne!(
+            attachment_status(&harness, &id).await.as_deref(),
+            Some("stored")
+        );
+
+        // The revoked session can neither resume (re-issue URLs) nor retry.
+        let (status, _) = resume_session(&app, &cookie, workspace_id, &id).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = complete_parts(&app, &cookie, workspace_id, &id, &[(1, &etag)]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // The abandoned upload is reclaimed with its assembled object.
+        let (key, _) = upload_ref_of(&harness, &id).await;
+        let pool = pool::connect_app(&harness.app_url).await.unwrap();
+        let purged = gc_stale_uploads(&pool, &storage, Utc::now() + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        assert_eq!(purged, 1, "{mode:?}");
+        assert_eq!(storage.head(&key).await.unwrap(), None, "{mode:?}");
+        assert_eq!(attachment_status(&harness, &id).await, None);
+        pool.close().await;
+        harness.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn mismatched_parts_are_refused_before_anything_is_published() {
+    let harness = TestDb::bootstrap().await;
+    let storage = presign_backend(PresignTtls::default()).await;
+    let part_size = 5 * MIB;
+    let (app, cookie, workspace_id) =
+        setup_session_with_part_size(&harness, storage.clone(), part_size as i64).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = patterned(part_size + 1000, 21);
+
+    // Proxy: the API measures every part and S3 checks the named ETags.
+    let (status, _) = patch_transfer(&app, &cookie, json!({"mode": "proxy"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let created = create_upload_session(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "p.bin",
+        payload.len(),
+    )
+    .await;
+    let id = created["attachmentId"].as_str().unwrap().to_string();
+    let (status, _) = put_via(
+        &app,
+        &cookie,
+        TransferMode::Proxy,
+        created["parts"][1]["url"].as_str().unwrap(),
+        &payload[part_size - 1..],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a longer part is refused"
+    );
+    let mut etags = Vec::new();
+    for (i, range) in [(0, 0..part_size), (1, part_size..payload.len())] {
+        let (status, etag) = put_via(
+            &app,
+            &cookie,
+            TransferMode::Proxy,
+            created["parts"][i]["url"].as_str().unwrap(),
+            &payload[range],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        etags.push(etag);
+    }
+    let (status, problem) = complete_parts(
+        &app,
+        &cookie,
+        workspace_id,
+        &id,
+        &[(1, &etags[0]), (2, "bogus")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem:?}");
+    assert_eq!(
+        problem["code"],
+        "submitted_parts_do_not_match_uploaded_parts"
+    );
+    let (key, _) = upload_ref_of(&harness, &id).await;
+    assert_eq!(storage.head(&key).await.unwrap(), None);
+
+    // Presigned: the server never saw the bytes, so storage must list exactly
+    // the expected parts before `CompleteMultipartUpload` runs.
+    let (status, _) = patch_transfer(&app, &cookie, json!({"mode": "presigned"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let created = create_upload_session(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "s.bin",
+        payload.len(),
+    )
+    .await;
+    let id = created["attachmentId"].as_str().unwrap().to_string();
+    let (key, upload_id) = upload_ref_of(&harness, &id).await;
+    let upload_id = upload_id.unwrap();
+    let url2 = created["parts"][1]["url"].as_str().unwrap().to_string();
+    // The signed content-length refuses a body of another length.
+    for body in [&payload[part_size + 1..], &payload[part_size - 1..]] {
+        let (status, _) = put_via(&app, &cookie, TransferMode::Presigned, &url2, body).await;
+        assert!(
+            status.is_client_error(),
+            "{} bytes answered {status}",
+            body.len()
+        );
+    }
+    assert!(storage
+        .list_parts(&key, Some(&upload_id))
+        .await
+        .unwrap()
+        .is_empty());
+    let (status, etag1) = put_via(
+        &app,
+        &cookie,
+        TransferMode::Presigned,
+        created["parts"][0]["url"].as_str().unwrap(),
+        &payload[..part_size],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // A part of the wrong length that did reach the upload anyway (storage
+    // that ignores the signed length) is refused at complete.
+    let short = stage_and_publish(&storage, &key, &upload_id, 2, &payload[part_size + 1..]).await;
+    let (status, problem) = complete_parts(
+        &app,
+        &cookie,
+        workspace_id,
+        &id,
+        &[(1, &etag1), (2, &short.etag)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem:?}");
+    assert_eq!(
+        problem["code"],
+        "submitted_parts_do_not_match_uploaded_parts"
+    );
+    assert_eq!(
+        attachment_status(&harness, &id).await.as_deref(),
+        Some("uploading")
+    );
+    assert_eq!(storage.head(&key).await.unwrap(), None, "nothing published");
+
+    // Resume treats the wrong-length part as missing and signs a new URL.
+    let (status, resumed) = resume_session(&app, &cookie, workspace_id, &id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resumed["uploadedParts"].as_array().unwrap().len(), 1);
+    assert_eq!(resumed["parts"][0]["partNumber"], 2);
+    let (status, etag2) = put_via(
+        &app,
+        &cookie,
+        TransferMode::Presigned,
+        resumed["parts"][0]["url"].as_str().unwrap(),
+        &payload[part_size..],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for bad in [
+        vec![(1, etag1.as_str()), (2, "\"0000\"")],
+        vec![(1, etag2.as_str()), (2, etag1.as_str())],
+        vec![(1, etag1.as_str()), (1, etag1.as_str())],
+    ] {
+        let (status, problem) = complete_parts(&app, &cookie, workspace_id, &id, &bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {problem:?}");
+        assert_eq!(storage.head(&key).await.unwrap(), None, "{bad:?}");
+    }
+    let (status, problem) = complete_parts(&app, &cookie, workspace_id, &id, &[(1, &etag1)]).await;
+    assert_eq!(
+        (status, &problem["code"]),
+        (StatusCode::BAD_REQUEST, &json!("invalid_input"))
+    );
+    let (status, body) = complete_parts(
+        &app,
+        &cookie,
+        workspace_id,
+        &id,
+        &[(1, &etag1), (2, &etag2)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    // Leftover part URLs cannot touch the published object: UploadPart only
+    // writes into its (now completed) multipart upload, which S3 no longer
+    // knows, and only the server can complete an upload.
+    let (status, _) = put_via(
+        &app,
+        &cookie,
+        TransferMode::Presigned,
+        created["parts"][0]["url"].as_str().unwrap(),
+        &patterned(part_size, 99),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "NoSuchUpload");
+    let stored = storage
+        .read_range(&key, 0, payload.len() as u64 - 1)
+        .await
+        .unwrap();
+    assert_eq!(stored, payload);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn presigned_mode_needs_presign_capable_storage() {
+    let harness = TestDb::bootstrap().await;
+    let capable = presign_backend(PresignTtls::default()).await;
+    let (app, cookie, workspace_id) = setup_session(&harness, capable.clone()).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let (status, _) = patch_transfer(&app, &cookie, json!({"mode": "presigned"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let bound = create_upload_session(&app, &cookie, workspace_id, &document_id, "b.bin", 64).await;
+    assert_eq!(bound["transfer"], "presigned");
+    let bound_id = bound["attachmentId"].as_str().unwrap().to_string();
+
+    // The same database behind servers whose storage cannot presign.
+    let local_root = std::env::temp_dir().join(format!("fvoci-transfer-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&local_root).unwrap();
+    for (storage, reason) in [
+        (s3_backend().await, "public_endpoint_missing"),
+        (ObjectStorage::local(local_root.clone()), "storage_local"),
+    ] {
+        let local = storage.presign_unavailable()
+            == Some(fvoci_server::attachments::TransferUnavailable::StorageLocal);
+        let app = app_router(
+            app_state_with_part_size(
+                &harness.app_url,
+                storage,
+                fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+            )
+            .await,
+        );
+        // The stored `presigned` stays, blocked: proxy applies and says why.
+        let status = admin_transfer_status(&app, &cookie).await;
+        assert_eq!(
+            status["attachmentTransfer"],
+            json!({"effective": "proxy", "source": "stored", "presignedAvailable": false,
+                   "unavailableReason": reason, "blocked": true}),
+            "{reason}"
+        );
+        assert_eq!(status["values"]["attachmentTransfer"]["mode"], "presigned");
+        if !local {
+            let created =
+                create_upload_session(&app, &cookie, workspace_id, &document_id, "p.bin", 64).await;
+            assert_eq!(created["transfer"], "proxy", "{reason}");
+            // A session bound to presigned is never moved to the proxy path.
+            let (status, problem) = resume_session(&app, &cookie, workspace_id, &bound_id).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{problem:?}");
+            assert_eq!(problem["code"], "attachment_transfer_unavailable");
+        }
+        // Explicitly choosing presigned here is refused.
+        let (status, problem) = patch_transfer(&app, &cookie, json!({"mode": "presigned"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{reason}: {problem:?}");
+        assert_eq!(problem["code"], "attachment_transfer_unavailable");
+    }
+    // Reset through the existing mechanism deletes the row.
+    let (status, body) = patch_transfer(&app, &cookie, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["attachmentTransfer"]["source"], "default");
+    assert_eq!(body["attachmentTransfer"]["effective"], "proxy");
+    assert!(!body["overridden"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("attachmentTransfer")));
+    let _ = std::fs::remove_dir_all(&local_root);
+    harness.cleanup().await;
+}
+
+/// A real `fvoci-server` process on this suite's database and MinIO: the
+/// environment variables, restart persistence and startup refusals can only
+/// be seen on a process, and its output is the log the operator gets.
+struct TransferServer {
+    child: std::process::Child,
+    base: String,
+    logs: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Drop for TransferServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn transfer_server_command(harness: &TestDb, env: &[(&str, &str)]) -> std::process::Command {
+    let s3 = s3_settings();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_fvoci-server"));
+    command
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("DATABASE_APP_URL", &harness.app_url)
+        .env("PASSWORD_PEPPER_KEYS", PEPPER)
+        .env("PASSWORD_PEPPER_ACTIVE_KEY_ID", "test")
+        .env("FVOCI_BIND", "127.0.0.1:0")
+        .env("FVOCI_PUBLIC_ORIGIN", "http://127.0.0.1:0")
+        .env("FVOCI_COOKIE_SECURE", "0")
+        .env("FVOCI_SHUTDOWN_DEADLINE_MS", "5000")
+        .env("STORAGE_DRIVER", "s3")
+        .env("S3_ENDPOINT", &s3.endpoint)
+        .env("S3_REGION", &s3.region)
+        .env("S3_BUCKET", &s3.bucket)
+        .env("S3_ACCESS_KEY_ID", &s3.access_key_id)
+        .env("S3_SECRET_ACCESS_KEY", &s3.secret_access_key)
+        .env(
+            "S3_FORCE_PATH_STYLE",
+            if s3.force_path_style { "1" } else { "0" },
+        )
+        .env("S3_PUBLIC_ENDPOINT", public_endpoint())
+        // Everything this crate and its HTTP stack log at debug.
+        .env("RUST_LOG", "debug")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (name, value) in env {
+        if value.is_empty() {
+            command.env_remove(name);
+        } else {
+            command.env(name, value);
+        }
+    }
+    command
+}
+
+fn spawn_transfer_server(mut command: std::process::Command) -> TransferServer {
+    use std::io::{BufRead, BufReader};
+    let mut child = command.spawn().expect("spawn fvoci-server");
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    for stream in [
+        Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>,
+        Box::new(child.stderr.take().unwrap()),
+    ] {
+        let (logs, tx) = (logs.clone(), tx.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                logs.lock().unwrap().push(line.clone());
+                let _ = tx.send(line);
+            }
+        });
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut base = None;
+    while base.is_none() && std::time::Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(line) => {
+                if let Some(rest) = line.split("fvoci-server listening on ").nth(1) {
+                    base = Some(rest.trim().trim_end_matches('/').to_string());
+                }
+            }
+            Err(_) if child.try_wait().ok().flatten().is_some() => break,
+            Err(_) => {}
+        }
+    }
+    let mut server = TransferServer {
+        child,
+        base: String::new(),
+        logs,
+    };
+    server.base =
+        base.unwrap_or_else(|| panic!("server did not start: {:?}", server.logs.lock().unwrap()));
+    server
+}
+
+/// Runs a server that must refuse to start and returns its output.
+fn refused_startup(mut command: std::process::Command) -> String {
+    let mut child = command.spawn().expect("spawn fvoci-server");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "server kept running: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+struct Api {
+    base: String,
+    cookie: String,
+}
+
+impl Api {
+    async fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> (u16, Value, reqwest::header::HeaderMap) {
+        let mut req = browser()
+            .request(method, format!("{}{path}", self.base))
+            .header("cookie", format!("fvoci_session={}", self.cookie));
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        let res = req.send().await.unwrap();
+        let status = res.status().as_u16();
+        let headers = res.headers().clone();
+        let body = res.json::<Value>().await.unwrap_or(Value::Null);
+        (status, body, headers)
+    }
+
+    async fn transfer(&self) -> Value {
+        let (status, body, _) = self
+            .call(
+                reqwest::Method::GET,
+                "/api/v1/admin/instance-settings",
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{body:?}");
+        body
+    }
+}
+
+#[tokio::test]
+async fn transfer_mode_env_lock_restart_and_startup_refusals() {
+    let harness = TestDb::bootstrap().await;
+    // Startup refuses every setting that could never take effect, naming it.
+    for (env, needle) in [
+        (
+            vec![("FVOCI_ATTACHMENT_TRANSFER_MODE", "direct")],
+            "FVOCI_ATTACHMENT_TRANSFER_MODE",
+        ),
+        (
+            vec![
+                ("FVOCI_ATTACHMENT_TRANSFER_MODE", "presigned"),
+                ("S3_PUBLIC_ENDPOINT", ""),
+            ],
+            "requires S3_PUBLIC_ENDPOINT",
+        ),
+        (
+            vec![
+                ("FVOCI_ATTACHMENT_TRANSFER_MODE", "presigned"),
+                ("STORAGE_DRIVER", "local"),
+                ("FVOCI_STORAGE_DIR", "/nonexistent-fvoci-storage"),
+            ],
+            "requires STORAGE_DRIVER=s3",
+        ),
+        (
+            vec![("FVOCI_PUBLIC_ORIGIN", "http://localhost:0")],
+            "S3_PUBLIC_ENDPOINT must use a host other than",
+        ),
+        (
+            vec![("FVOCI_PUBLIC_ORIGIN", "https://127.0.0.1:0")],
+            "S3_PUBLIC_ENDPOINT must be https",
+        ),
+        (
+            vec![("FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS", "3601")],
+            "FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS",
+        ),
+        (
+            vec![("FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS", "4")],
+            "FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS",
+        ),
+    ] {
+        let output = refused_startup(transfer_server_command(&harness, &env));
+        assert!(output.contains(needle), "{env:?}: {output}");
+    }
+
+    let server = spawn_transfer_server(transfer_server_command(&harness, &[]));
+    let setup = browser()
+        .post(format!("{}/api/v1/setup", server.base))
+        .json(&json!({
+            "email": "s3owner@example.com", "password": "supersecret1", "givenName": "Owner",
+            "workspaceSlug": "s3ws", "workspaceName": "S3"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(setup.status().is_success(), "{}", setup.status());
+    let mut cookie_headers = HeaderMap::new();
+    for value in setup.headers().get_all("set-cookie") {
+        cookie_headers.append("set-cookie", value.to_str().unwrap().parse().unwrap());
+    }
+    let cookie = extract_session_cookie(&cookie_headers);
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 's3ws'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    admin.close().await;
+    let api = Api {
+        base: server.base.clone(),
+        cookie: cookie.clone(),
+    };
+    let (status, doc, _) = api
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/v1/workspaces/{workspace_id}/documents"),
+            Some(json!({"parentId": null, "title": "Doc"})),
+        )
+        .await;
+    assert_eq!(status, 201, "{doc:?}");
+    let document_id = doc["id"].as_str().unwrap().to_string();
+    let uploads = format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads");
+
+    // Admin chooses presigned; a whole upload and download goes through MinIO.
+    let (status, body, _) = api
+        .call(
+            reqwest::Method::PATCH,
+            "/api/v1/admin/instance-settings",
+            Some(json!({"attachmentTransfer": {"mode": "presigned"}})),
+        )
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+    assert_eq!(body["attachmentTransfer"]["effective"], "presigned");
+    let payload = patterned(4096, 17);
+    let (status, created, _) = api
+        .call(
+            reqwest::Method::POST,
+            &uploads,
+            Some(json!({"name": "log.bin", "sizeBytes": payload.len()})),
+        )
+        .await;
+    assert_eq!(status, 201, "{created:?}");
+    assert_eq!(created["transfer"], "presigned");
+    let id = created["attachmentId"].as_str().unwrap().to_string();
+    let put = browser()
+        .put(created["parts"][0]["url"].as_str().unwrap())
+        .body(payload.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status().as_u16(), 200);
+    let etag = put.headers()["etag"].to_str().unwrap().to_string();
+    let (status, body, _) = api
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/v1/workspaces/{workspace_id}/attachments/{id}/complete"),
+            Some(json!({"parts": [{"partNumber": 1, "etag": etag}]})),
+        )
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+    let (status, _, headers) = api
+        .call(
+            reqwest::Method::GET,
+            &format!("/api/v1/workspaces/{workspace_id}/attachments/{id}/download"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 302);
+    let location = headers["location"].to_str().unwrap().to_string();
+    // The storage origin is allowed by the page CSP.
+    let csp = headers["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        csp.contains(&format!("connect-src 'self' {};", public_endpoint())),
+        "{csp}"
+    );
+    let got = browser().get(&location).send().await.unwrap();
+    assert_eq!(got.bytes().await.unwrap().to_vec(), payload);
+    let mut logs = server.logs.lock().unwrap().clone();
+    drop(server);
+
+    // Restarted with the variable set: the environment wins over the stored
+    // row, and admin writes cannot change the locked leaf.
+    let server = spawn_transfer_server(transfer_server_command(
+        &harness,
+        &[("FVOCI_ATTACHMENT_TRANSFER_MODE", "proxy")],
+    ));
+    let api = Api {
+        base: server.base.clone(),
+        cookie: cookie.clone(),
+    };
+    let body = api.transfer().await;
+    assert!(body["envApplied"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("attachmentTransfer.mode")));
+    assert_eq!(body["values"]["attachmentTransfer"]["mode"], "proxy");
+    assert_eq!(body["attachmentTransfer"]["effective"], "proxy");
+    assert_eq!(body["attachmentTransfer"]["source"], "env");
+    let (status, body, _) = api
+        .call(
+            reqwest::Method::PATCH,
+            "/api/v1/admin/instance-settings",
+            Some(json!({"attachmentTransfer": {"mode": "presigned"}})),
+        )
+        .await;
+    assert_eq!(status, 200, "{body:?}");
+    assert_eq!(body["attachmentTransfer"]["effective"], "proxy");
+    let (status, created, _) = api
+        .call(
+            reqwest::Method::POST,
+            &uploads,
+            Some(json!({"name": "env.bin", "sizeBytes": 10})),
+        )
+        .await;
+    assert_eq!(status, 201);
+    assert_eq!(created["transfer"], "proxy");
+    logs.extend(server.logs.lock().unwrap().clone());
+    drop(server);
+
+    // Without the variable the admin's stored value is back after restart.
+    let server = spawn_transfer_server(transfer_server_command(&harness, &[]));
+    let api = Api {
+        base: server.base.clone(),
+        cookie: cookie.clone(),
+    };
+    let body = api.transfer().await;
+    assert_eq!(body["attachmentTransfer"]["effective"], "presigned");
+    assert_eq!(body["attachmentTransfer"]["source"], "stored");
+    logs.extend(server.logs.lock().unwrap().clone());
+    drop(server);
+
+    // Restarted without the public endpoint the stored value cannot apply:
+    // startup warns, the admin sees why, uploads use the proxy.
+    let server = spawn_transfer_server(transfer_server_command(
+        &harness,
+        &[("S3_PUBLIC_ENDPOINT", "")],
+    ));
+    let api = Api {
+        base: server.base.clone(),
+        cookie: cookie.clone(),
+    };
+    let body = api.transfer().await;
+    assert_eq!(
+        body["attachmentTransfer"],
+        json!({"effective": "proxy", "source": "stored", "presignedAvailable": false,
+               "unavailableReason": "public_endpoint_missing", "blocked": true})
+    );
+    let (status, created, headers) = api
+        .call(
+            reqwest::Method::POST,
+            &uploads,
+            Some(json!({"name": "blocked.bin", "sizeBytes": 10})),
+        )
+        .await;
+    assert_eq!(status, 201);
+    assert_eq!(created["transfer"], "proxy");
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains("connect-src 'self';"), "{csp}");
+    let server_logs = server.logs.lock().unwrap().clone();
+    assert!(
+        server_logs
+            .iter()
+            .any(|l| l.contains("attachment.transfer_mode_unavailable")
+                && l.contains("public_endpoint_missing")),
+        "{server_logs:?}"
+    );
+    logs.extend(server_logs);
+    drop(server);
+
+    // No signed URL, signature or credential reached any log line.
+    let s3 = s3_settings();
+    for line in &logs {
+        for secret in [
+            "X-Amz-Signature",
+            "X-Amz-Credential",
+            "x-amz-signature",
+            s3.access_key_id.as_str(),
+            s3.secret_access_key.as_str(),
+        ] {
+            assert!(!line.contains(secret), "log leaks {secret}: {line}");
+        }
+    }
+    assert!(
+        logs.len() > 20,
+        "the servers logged at debug: {}",
+        logs.len()
+    );
+    harness.cleanup().await;
+}
