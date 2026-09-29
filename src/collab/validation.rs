@@ -4,7 +4,9 @@ use std::time::Duration;
 use collab_engine::b64;
 use collab_engine::limits::{Limits, MAX_OUTPUT_BYTES};
 use collab_engine::outcome::{EngineStatus, LimitKind};
-use collab_engine::process::{ChildSlotKind, EngineSession, SpawnPhaseTimings, SpawnRequest};
+use collab_engine::process::{
+    is_slot_cap_refusal, ChildSlotKind, EngineSession, SpawnPhaseTimings, SpawnRequest,
+};
 use collab_engine::protocol::Request;
 use std::time::Instant;
 
@@ -93,17 +95,7 @@ fn spawn_validator(
         test_exit_after_write: None,
     }) {
         Ok(pair) => Ok(pair),
-        Err(report)
-            if matches!(
-                report.outcome,
-                EngineStatus::ResourceLimit {
-                    kind: LimitKind::Ops,
-                    ..
-                }
-            ) =>
-        {
-            Err(BundleValidation::CapacityPressure)
-        }
+        Err(report) if is_slot_cap_refusal(&report) => Err(BundleValidation::CapacityPressure),
         Err(_) => Err(BundleValidation::EngineUnavailable),
     }
 }

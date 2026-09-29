@@ -1837,6 +1837,71 @@ async fn collab_lifecycle_idle_timer_reclaims_dead_slot_after_hold_release() {
     .await;
 }
 
+/// An HTTP borrow (here `project_live`) that finds its room's actor dead while
+/// the slot is still Live reclaims the slot and starts a successor, as a join
+/// does, instead of failing until the idle timer clears the dead room.
+#[tokio::test]
+async fn collab_lifecycle_http_borrow_reclaims_dead_actor() {
+    run_lifecycle_test("collab_lifecycle_http_borrow_reclaims_dead_actor", |run| {
+        Box::pin(async {
+            let wiki = setup_wiki_doc(&run.inner.harness).await;
+            let hub = run
+                .register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 30_000),
+                    wiki.session.pool.clone(),
+                )))
+                .await;
+            let key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
+
+            let (conn_id, lease, mut events_rx) =
+                hub_join_with_events(&hub, &wiki, 1).await.expect("join");
+            run.retain_lease(lease);
+            assert_eq!(room_start_count(wiki.document_id).await, 1);
+
+            arm_actor_panic_on_next_frame(wiki.document_id).await;
+            hub.send_frame(
+                key,
+                conn_id,
+                sync_update_frame(
+                    &routing_key(wiki.session.workspace_id, wiki.document_id),
+                    &sample_hi_update(),
+                ),
+            )
+            .await;
+            wait_for_close(&mut events_rx, 1011).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while hub.idle_evict_decision(key).await != IdleEvictDecision::WouldEvict {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the slot holds the exited actor");
+            assert_eq!(
+                hub.room_lifecycle_phase(key).await,
+                RoomLifecyclePhase::Live,
+                "the dead actor stays Live until an owner reclaims it"
+            );
+
+            let projection = hub
+                .project_live(key, wiki.session.user_id, wiki.session.session_id)
+                .await;
+            assert!(
+                projection.is_ok(),
+                "a borrow must reclaim the dead room instead of failing: {:?}",
+                projection.err()
+            );
+            assert_eq!(
+                room_start_count(wiki.document_id).await,
+                2,
+                "the borrow must run on a successor actor"
+            );
+            disarm_actor_panic_on_next_frame(wiki.document_id).await;
+        })
+    })
+    .await;
+}
+
 /// A helper path in a fresh temp directory that holds no helper yet, removed
 /// on drop (also when the test fails). `link` makes it the real helper through
 /// a symlink, never a copied file, which a concurrent fork could hold open for
