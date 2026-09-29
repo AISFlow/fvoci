@@ -596,6 +596,30 @@ async fn fetch_state_fence_for_update(
     .await
 }
 
+/// The fields an append checks, from the locked state row: the snapshot's
+/// stored size (`octet_length` reads the length without detoasting, so the
+/// snapshot bytes never leave the server), `writer_generation`,
+/// `snapshot_cutoff_seq` and `tail_seq`.
+async fn fetch_append_fence_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<Option<(i64, i64, i64, i64)>, sqlx::Error> {
+    sqlx::query_as(&t.sql(
+        r#"
+        SELECT octet_length(state)::bigint, writer_generation, snapshot_cutoff_seq, tail_seq
+        FROM {states}
+        WHERE workspace_id = $1 AND {id} = $2
+        FOR UPDATE
+        "#,
+    ))
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
 async fn fetch_state_for_update(
     tx: &mut Transaction<'_, Postgres>,
     t: &CollabTables,
@@ -1142,22 +1166,27 @@ async fn append_collab_update_in_tx(
         return Ok((Err(err), timings));
     }
     let state_started = Instant::now();
-    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
-    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
-        Ok(()) => {}
-        Err(err) => {
+    let mut fence = fetch_append_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
+    if fence.is_none() {
+        // Claim creates the state row, so only a row that never existed gets
+        // here. Seed it the way claim does (NotFound unless the body is still
+        // the empty seed); only this path reads content_json.
+        let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
+        if let Err(err) =
+            ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await?
+        {
             tx.rollback().await?;
             return Ok((Err(err), timings));
         }
+        fence = fetch_append_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
     }
-    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
     timings.row_lock_us += state_started.elapsed().as_micros() as u64;
     let stmt_started = Instant::now();
-    let Some(state) = state else {
+    let Some((snapshot_len, current_generation, snapshot_cutoff_seq, tail_seq)) = fence else {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::NotFound), timings));
     };
-    if state.2 != writer_generation {
+    if current_generation != writer_generation {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::StaleWriter), timings));
     }
@@ -1190,7 +1219,7 @@ async fn append_collab_update_in_tx(
         tx.rollback().await?;
         return Ok((Err(CollabDbError::OpIdConflict), timings));
     }
-    if state.4 != expected_tail_seq {
+    if tail_seq != expected_tail_seq {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::StaleCutoff), timings));
     }
@@ -1200,8 +1229,8 @@ async fn append_collab_update_in_tx(
         t,
         workspace_id,
         document_id,
-        state.3,
-        state.0.len() as i64,
+        snapshot_cutoff_seq,
+        snapshot_len,
         payload.len() as i64,
     )
     .await?
