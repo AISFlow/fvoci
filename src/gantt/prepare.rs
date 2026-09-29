@@ -1,13 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use super::date::to_epoch_day;
 use super::layout::{pack_flow, stack_rows};
 use super::links::link_paths;
 use super::scale::{make_scale, month_bands, scale_width, ticks};
 use super::schedule::schedule_tasks;
 use super::types::{
-    GanttBarOutput, GanttLayoutItemOutput, GanttLayoutOutput, GanttLinkInput, GanttScaleOutput,
-    GanttTaskInput, PackMode, ScheduledTask, ZoomLevel,
+    GanttBarOutput, GanttCalendarOutput, GanttLayoutItemOutput, GanttLayoutOutput, GanttLinkInput,
+    GanttLinkOutput, GanttScaleOutput, GanttTaskInput, IsoDate, PackMode, ScheduledTask, TimeScale,
+    WorkCalendar, ZoomLevel,
 };
 
 const MAX_DISPLAY_PATHS: usize = 2048;
@@ -25,6 +27,7 @@ pub struct PrepareInput {
     pub max_lanes: Option<i32>,
     pub truncated: bool,
     pub item_meta: Vec<GanttLayoutItemOutput>,
+    pub can_edit: bool,
 }
 
 pub fn prepare_gantt(input: PrepareInput) -> GanttLayoutOutput {
@@ -41,7 +44,18 @@ pub fn prepare_gantt(input: PrepareInput) -> GanttLayoutOutput {
         PackMode::Overlap => pack_flow(&scheduled, &scale, &input.links, max_lanes),
         PackMode::Rows => stack_rows(&scheduled, &scale),
     };
-    let bar_ids: std::collections::HashSet<Uuid> = bars.iter().map(|b| b.id).collect();
+    // `links` follows `items`, not `bars`: overlap packing can leave an item
+    // without a bar, and a client that lays out its own bars needs them all.
+    let item_ids: HashSet<Uuid> = scheduled.iter().map(|t| t.id).collect();
+    let (item_links, link_total) = cap_links(
+        input
+            .links
+            .iter()
+            .filter(|l| item_ids.contains(&l.blocker_id) && item_ids.contains(&l.blocked_id))
+            .cloned()
+            .collect(),
+    );
+    let bar_ids: HashSet<Uuid> = bars.iter().map(|b| b.id).collect();
     let (shown, path_total) = cap_links(
         input
             .links
@@ -95,9 +109,25 @@ pub fn prepare_gantt(input: PrepareInput) -> GanttLayoutOutput {
             .cmp(&b.lane)
             .then(a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
     });
+    let calendar = GanttCalendarOutput {
+        weekend: cal.weekend.clone(),
+        holidays: holidays_in_scale(&cal, &scale),
+    };
     GanttLayoutOutput {
         truncated: input.truncated,
         items,
+        can_edit: input.can_edit,
+        links: item_links
+            .into_iter()
+            .map(|l| GanttLinkOutput {
+                blocker_id: l.blocker_id.to_string(),
+                blocked_id: l.blocked_id.to_string(),
+                link_type: l.link_type,
+                lag_days: l.lag_days,
+            })
+            .collect(),
+        link_total: link_total as i32,
+        calendar,
         scale: GanttScaleOutput {
             zoom: scale.zoom.as_str().to_string(),
             start: scale.start.clone(),
@@ -136,6 +166,22 @@ fn cap_links(mut links: Vec<GanttLinkInput>) -> (Vec<GanttLinkInput>, usize) {
     (links, total)
 }
 
+/// The holidays of `cal` within `scale.start..=scale.end`, ascending. Every
+/// kept date parsed as `YYYY-MM-DD`, so string order is date order.
+fn holidays_in_scale(cal: &WorkCalendar, scale: &TimeScale) -> Vec<IsoDate> {
+    let (Some(start), Some(end)) = (to_epoch_day(&scale.start), to_epoch_day(&scale.end)) else {
+        return Vec::new();
+    };
+    let mut days: Vec<IsoDate> = cal
+        .holidays
+        .iter()
+        .filter(|d| to_epoch_day(d).is_some_and(|day| (start..=end).contains(&day)))
+        .cloned()
+        .collect();
+    days.sort();
+    days
+}
+
 fn merge_items(
     scheduled: &[ScheduledTask],
     meta: &[GanttLayoutItemOutput],
@@ -172,34 +218,24 @@ fn merge_items(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gantt::types::{GanttTaskInput, ScheduleInference};
+    use crate::gantt::types::{GanttTaskInput, LinkType, ScheduleInference};
 
-    #[test]
-    fn one_fs_path_between_two_tasks() {
-        let a = Uuid::from_u128(1);
-        let b = Uuid::from_u128(2);
-        let tasks = vec![
-            GanttTaskInput {
-                id: a,
-                title: "A".into(),
-                start: Some("2026-09-01".into()),
-                due: Some("2026-09-03".into()),
-                milestone: false,
-            },
-            GanttTaskInput {
-                id: b,
-                title: "B".into(),
-                start: Some("2026-09-04".into()),
-                due: Some("2026-09-04".into()),
-                milestone: false,
-            },
-        ];
-        let links = vec![GanttLinkInput {
-            blocker_id: a,
-            blocked_id: b,
-            link_type: super::super::types::LinkType::Fs,
-            lag_days: 0,
-        }];
+    fn task(id: Uuid, start: &str, due: &str) -> GanttTaskInput {
+        GanttTaskInput {
+            id,
+            title: id.to_string(),
+            start: Some(start.into()),
+            due: Some(due.into()),
+            milestone: false,
+        }
+    }
+
+    fn september(
+        tasks: Vec<GanttTaskInput>,
+        links: Vec<GanttLinkInput>,
+        pack: PackMode,
+        max_lanes: Option<i32>,
+    ) -> GanttLayoutOutput {
         let meta = tasks
             .iter()
             .map(|t| GanttLayoutItemOutput {
@@ -218,7 +254,7 @@ mod tests {
                 inferred: ScheduleInference::None,
             })
             .collect();
-        let out = prepare_gantt(PrepareInput {
+        prepare_gantt(PrepareInput {
             tasks,
             links,
             holidays: vec![],
@@ -227,12 +263,58 @@ mod tests {
             zoom: ZoomLevel::Day,
             px_per_day: None,
             lane_height: 36,
-            pack: PackMode::Rows,
-            max_lanes: None,
+            pack,
+            max_lanes,
             truncated: false,
             item_meta: meta,
-        });
+            can_edit: true,
+        })
+    }
+
+    fn fs(blocker_id: Uuid, blocked_id: Uuid) -> GanttLinkInput {
+        GanttLinkInput {
+            blocker_id,
+            blocked_id,
+            link_type: LinkType::Fs,
+            lag_days: 0,
+        }
+    }
+
+    #[test]
+    fn one_fs_path_between_two_tasks() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let out = september(
+            vec![
+                task(a, "2026-09-01", "2026-09-03"),
+                task(b, "2026-09-04", "2026-09-04"),
+            ],
+            vec![fs(a, b)],
+            PackMode::Rows,
+            None,
+        );
         assert_eq!(out.path_total, 1);
         assert_eq!(out.paths.len(), 1);
+    }
+
+    #[test]
+    fn links_keep_items_that_overlap_packing_left_without_a_bar() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let out = september(
+            vec![
+                task(a, "2026-09-01", "2026-09-03"),
+                task(b, "2026-09-02", "2026-09-04"),
+            ],
+            vec![fs(a, b)],
+            PackMode::Overlap,
+            Some(1),
+        );
+        assert_eq!(out.overflow, vec![b.to_string()]);
+        assert_eq!(out.items.len(), 2);
+        assert_eq!(out.path_total, 0);
+        assert_eq!(out.link_total, 1);
+        assert_eq!(out.links.len(), 1);
+        assert_eq!(out.links[0].blocked_id, b.to_string());
     }
 }
