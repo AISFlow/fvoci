@@ -1139,8 +1139,9 @@ async fn append_to_unclaimed_document_seeds_like_claim_and_rolls_back() {
     assert_eq!(missing, Err(CollabDbError::NotFound));
     assert_eq!(collab_rows(typed_doc).await, (0, 0, 0));
 
-    // Nothing leaked from the rolled-back seed: a claim still starts at
-    // generation 1 from the empty Yjs state.
+    // The document stays claimable: a claim starts at generation 1 from the
+    // empty Yjs state. The collab_rows checks above show the rollback; this
+    // claim cannot, since a leaked generation-0 seed would claim the same way.
     let claim = claim_writer_and_load(
         &session.pool,
         session.workspace_id,
