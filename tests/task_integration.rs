@@ -4532,6 +4532,77 @@ async fn task_patch_expected_due_at_compares_to_the_millisecond() {
         "2026-09-17T09:30:00.123Z"
     );
 
+    // Finer digits of .5 ms or more are truncated, not rounded, on both sides:
+    // a stored .123756 is .123 in the layout and in the comparison, and .124
+    // is a stale snapshot.
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({"dueAt": "2026-09-18T09:30:00.123756Z"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (pool, task_id) = (&admin, id.as_str());
+    let stored_due_at = move || async move {
+        sqlx::query_scalar::<_, String>(
+            r#"SELECT to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US')
+               FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2::uuid"#,
+        )
+        .bind(ws)
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(stored_due_at().await, "2026-09-18T09:30:00.123756");
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({"title": "Stale", "expectedDates": expected("2026-09-18T09:30:00.124Z")}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "document_version_mismatch");
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+
+    // Neither match below changes dueAt, so both compare with .123756.
+    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let item = layout_item(&layout, &id);
+    assert_eq!(item["dueAt"], "2026-09-18T09:30:00.123Z");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({
+            "title": "Layout",
+            "expectedDates": {
+                "startDate": item["startDate"],
+                "dueDate": item["dueDate"],
+                "dueAt": item["dueAt"],
+            },
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({"title": "Browser", "expectedDates": expected("2026-09-18T09:30:00.123Z")}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(stored_due_at().await, "2026-09-18T09:30:00.123756");
+
     admin.close().await;
     harness.cleanup().await;
 }
