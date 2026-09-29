@@ -44,8 +44,10 @@ COPY packages ./packages
 COPY LICENSE ./LICENSE
 COPY third-party/browser-licenses ./third-party/browser-licenses
 COPY apps/web/package.json ./apps/web/
-# One pinned Bun: this image's must be the .bun-version CI uses.
-RUN test "$(bun --version)" = "$(cat .bun-version)" \
+# One pinned Bun: this image's, packageManager and the .bun-version CI uses.
+RUN bun -e 'const v = (await Bun.file(".bun-version").text()).trim(); \
+  const pm = (await Bun.file("package.json").json()).packageManager; \
+  if (Bun.version !== v || pm !== `bun@${v}`) throw new Error(`Bun ${Bun.version}, packageManager ${pm}, .bun-version ${v}`)' \
  && bun ci
 # The committed openapi.json / generated api.ts are kept in sync with the Rust
 # DTOs by the Web workflow's generate-api drift check, so this stage does not
