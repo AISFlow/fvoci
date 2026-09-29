@@ -11,10 +11,13 @@ export interface SharedQueryOptions<TQueryFnData, TQueryKey extends QueryKey> {
   queryKey: TQueryKey;
   queryFn: (context: { signal: AbortSignal }) => Promise<TQueryFnData>;
   enabled?: boolean;
-  retry?: boolean | number;
+  retry?: SharedRetry;
   staleTime?: number;
   refetchInterval?: number | false;
 }
+
+/** Retry count, switch, or predicate: the same query-core type in both adapters. */
+export type SharedRetry = boolean | number | ((failureCount: number, error: DefaultError) => boolean);
 
 /**
  * Same as @tanstack/react-query's and @tanstack/vue-query's `queryOptions`:
@@ -37,7 +40,7 @@ export interface SharedInfiniteQueryOptions<TQueryFnData, TQueryKey extends Quer
   initialPageParam: TPageParam;
   getNextPageParam: (lastPage: TQueryFnData) => TPageParam | undefined | null;
   enabled?: boolean;
-  retry?: boolean | number;
+  retry?: SharedRetry;
   staleTime?: number;
 }
 

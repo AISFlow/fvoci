@@ -1,5 +1,4 @@
-import { queryOptions } from "@tanstack/react-query";
-import { queryOptions as sharedQueryOptions } from "@/lib/query-options";
+import { queryOptions } from "@/lib/query-options";
 import type { components } from "@/generated/api";
 import { api, ensureOk } from "@/lib/api";
 import type { ViewQuery } from "@/lib/view-query";
@@ -56,7 +55,7 @@ export type CollectionQueryBody = {
 };
 
 export function documentTagPoolQuery(workspaceId: string, q = "") {
-  return sharedQueryOptions({
+  return queryOptions({
     queryKey: ["document-tags", workspaceId, "pool", q] as const,
     queryFn: async () =>
       ensureOk(
@@ -77,7 +76,7 @@ export function documentAssignedTagsQuery(
   documentId: string,
   projectId: string | null,
 ) {
-  return sharedQueryOptions({
+  return queryOptions({
     queryKey: ["document-tags", workspaceId, "assigned", documentId] as const,
     queryFn: async () => {
       const result = projectId
