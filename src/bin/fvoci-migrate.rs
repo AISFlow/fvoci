@@ -27,7 +27,8 @@ fn main() {
     async_main();
 }
 
-/// `--start [server args]`, the image entrypoint: prepare the install when the
+/// `--start [server args]`, the image entrypoint: refuse the retired
+/// `<VAR>_FILE` settings of older compose files, prepare the install when the
 /// owner password is given (`fvoci_server::prepare`), then become
 /// `fvoci-server` with the preparation-only values removed.
 fn start(server_args: &[String]) -> ! {

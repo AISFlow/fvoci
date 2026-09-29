@@ -93,6 +93,7 @@ ENV FVOCI_EXPORT_FONT_DIR=/opt/fvoci/share/fonts \
 USER fvoci
 EXPOSE 8080
 # `fvoci-migrate --start` execs fvoci-server (same pid, arguments passed on).
+# It first refuses the retired <VAR>_FILE settings of older compose files.
 # Given the database owner password (the Compose install: POSTGRES_PASSWORD)
 # it first validates the settings, waits for PostgreSQL and Meilisearch, creates
 # the app role, migrates, grants and writes the scoped search key; the server
