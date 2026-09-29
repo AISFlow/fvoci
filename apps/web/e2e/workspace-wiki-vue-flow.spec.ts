@@ -425,7 +425,9 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
     // Chromium's IME input path over CDP: composition events with marked
     // text, each step replacing the syllable being composed, then a commit.
     // The composing syllable is the selected block, as Korean IMEs show it.
-    // Synthetic events: this is not the OS IME witness.
+    // Synthetic events: this is not the OS IME witness. With the caret at
+    // the end of the marked text instead, the first jamo stays behind (the
+    // known bug the next test pins); the real IBus witness shows that too.
     const ime = await a.context.newCDPSession(a.page);
     const setComposition = (text: string) =>
       ime.send("Input.imeSetComposition", { text, selectionStart: 0, selectionEnd: text.length });
@@ -468,6 +470,34 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
     await a.context.close();
     await b.context.close();
   }
+});
+
+// Known bug, in the React editor as well (it predates the Vue page): when
+// the IME reports the caret at the end of the marked text, as Chromium does
+// for the IBus Hangul engine on Linux, the first composition step's jamo is
+// committed on its own and the syllable is then composed after it:
+// "첫 문단" + 한글 gives "첫 문단ㅎ한글". A peer is not needed. The OS IME
+// witness (e2e-pending/workspace-wiki-vue-os-ime.spec.ts) shows the same on
+// the real input path. Suspected cause, to be confirmed in the follow-up:
+// ProseMirror writes the DOM selection (selectionToDOM) on the first
+// composition update, which restarts the IME's composition. Expected to fail
+// until that is fixed; when it passes, drop test.fail.
+test.fail("Korean composition with the caret after the marked text leaves no stray jamo (known bug)", async ({ page }) => {
+  await login(page, admin.email, admin.password);
+  const wsId = await workspaceId(page.request);
+  const doc = await createDoc(page.request, wsId, "한글 조합 캐럿", "첫 문단\n");
+  await openDoc(page, doc.path);
+  await caretAtEndOf(page, 0);
+  const ime = await page.context().newCDPSession(page);
+  const compose = async (steps: string[], commit: string) => {
+    for (const text of steps) {
+      await ime.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+    }
+    await ime.send("Input.insertText", { text: commit });
+  };
+  await compose(["ㅎ", "하", "한"], "한");
+  await compose(["ㄱ", "그", "글"], "글");
+  await expect.poll(() => blockTexts(page), { timeout: 5_000 }).toEqual(["첫 문단한글"]);
 });
 
 test("moving between five documents in the app keeps one room socket and every edit", async ({ page }) => {
