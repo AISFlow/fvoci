@@ -1,5 +1,29 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const documentTreeSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          number: z.number(),
+          parentId: z.string().nullable(),
+          projectId: z.string().nullable(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const originListSchema = z
+  .object({ items: z.array(z.object({ taskId: z.string() }).passthrough()), count: z.number() })
+  .passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -42,22 +66,25 @@ async function ensureSetup(page: Page): Promise<void> {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspace = (await workspacesRes.json()).items.find(
-    (item: { slug: string }) => item.slug === slug,
-  );
+  const workspace = workspaceListSchema
+    .parse(await workspacesRes.json())
+    .items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
 async function documentIdFromOpenWikiPage(page: Page, wsId: string): Promise<string> {
   const match = /\/WIKI-(\d+)$/.exec(new URL(page.url()).pathname);
   expect(match).toBeTruthy();
+  assert(match);
   const treeRes = await page.request.get(`/api/v1/workspaces/${wsId}/tree`);
   expect(treeRes.ok()).toBe(true);
-  const document = (await treeRes.json()).items.find(
-    (item: { number: number }) => item.number === Number(match![1]),
-  );
+  const document = documentTreeSchema
+    .parse(await treeRes.json())
+    .items.find((item: { number: number }) => item.number === Number(required(match)[1]));
   expect(document).toBeTruthy();
+  assert(document);
   return document.id;
 }
 
@@ -97,9 +124,9 @@ test("document create form makes a task origin visible on both screens", async (
     `/api/v1/workspaces/${wsId}/documents/${documentId}/task-origins`,
   );
   expect(listRes.ok()).toBe(true);
-  const listed = (await listRes.json()) as { items: { taskId: string }[]; count: number };
+  const listed = originListSchema.parse(await listRes.json());
   expect(listed.count).toBe(1);
-  const taskId = listed.items[0].taskId;
+  const taskId = required(listed.items[0]).taskId;
   const trashRes = await page.request.post(`/api/v1/workspaces/${wsId}/tasks/${taskId}/trash`);
   expect(trashRes.ok()).toBe(true);
 
@@ -113,5 +140,12 @@ test("document create form makes a task origin visible on both screens", async (
   await page.reload();
   const afterRestore = page.getByRole("region", { name: "연결 태스크" });
   await expect(afterRestore.getByRole("heading", { name: /연결 태스크 \(1\)/ })).toBeVisible();
-  await expect(afterRestore.getByRole("link", { name: /TORI-\d+ · 문서에서 만든 연결/ })).toBeVisible();
+  await expect(
+    afterRestore.getByRole("link", { name: /TORI-\d+ · 문서에서 만든 연결/ }),
+  ).toBeVisible();
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}

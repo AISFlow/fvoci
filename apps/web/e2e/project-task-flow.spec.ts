@@ -1,5 +1,63 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { createE2eUser, createTasksViaApi, login, logout } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const workspaceSlugListSchema = z
+  .object({ items: z.array(z.object({ slug: z.string() }).passthrough()) })
+  .passthrough();
+const lookupSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          kind: z.string(),
+          displayId: z.string(),
+          projectId: z.string().nullable(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const projectListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          rootDocumentId: z.string().nullable(),
+          taskCount: z.number(),
+          openTaskCount: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const meSchema = z.object({ userId: z.string(), timezone: z.string() }).passthrough();
+const projectSchema = z
+  .object({ id: z.string(), key: z.string(), rootDocumentId: z.string().nullable() })
+  .passthrough();
+const workflowSchema = z
+  .object({
+    id: z.string(),
+    statuses: z.array(
+      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const taskPageSchema = z
+  .object({
+    items: z.array(z.object({ id: z.string() }).passthrough()),
+    nextCursor: z.string().nullable(),
+    statusCounts: z.array(z.object({ statusId: z.string(), count: z.number() }).passthrough()),
+  })
+  .passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -36,9 +94,10 @@ const other = {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = workspaceListSchema.parse(await workspacesRes.json());
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
@@ -59,15 +118,20 @@ async function ensureSetup(page: Page): Promise<void> {
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
     await expect(page).toHaveURL(/\/$/);
-    await expect.poll(async () => {
-      const res = await page.request.get("/api/v1/me/workspaces");
-      if (!res.ok()) return [];
-      const body = (await res.json()) as { items: { slug: string }[] };
-      return body.items.map((item) => item.slug);
-    }).toContain(admin.workspaceSlug);
+    await expect
+      .poll(async () => {
+        const res = await page.request.get("/api/v1/me/workspaces");
+        if (!res.ok()) return [];
+        const body = workspaceSlugListSchema.parse(await res.json());
+        return body.items.map((item) => item.slug);
+      })
+      .toContain(admin.workspaceSlug);
     return;
   }
-  if (page.url().includes("/login") || (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0) {
+  if (
+    page.url().includes("/login") ||
+    (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
+  ) {
     await login(page, admin.email, admin.password);
   }
 }
@@ -104,11 +168,9 @@ test("member creates a workspace project, task, and sees counts after reload", a
 
   await expect(page).toHaveURL(/\/w\/acme\/LAB-2$/);
   const idAfterCreate = await workspaceId(page, "acme");
-  const labLookup = await page.request.get(
-    `/api/v1/workspaces/${idAfterCreate}/lookup/LAB-2`,
-  );
+  const labLookup = await page.request.get(`/api/v1/workspaces/${idAfterCreate}/lookup/LAB-2`);
   expect(labLookup.status()).toBe(200);
-  const labLookupBody = await labLookup.json();
+  const labLookupBody = lookupSchema.parse(await labLookup.json());
   expect(
     labLookupBody.items.some(
       (entry: { kind: string; displayId: string }) =>
@@ -119,11 +181,9 @@ test("member creates a workspace project, task, and sees counts after reload", a
   await expect(page.getByText("LAB-2")).toBeVisible();
 
   await page.goto("/w/acme/LAB-1");
-  const labRootLookup = await page.request.get(
-    `/api/v1/workspaces/${idAfterCreate}/lookup/LAB-1`,
-  );
+  const labRootLookup = await page.request.get(`/api/v1/workspaces/${idAfterCreate}/lookup/LAB-1`);
   expect(labRootLookup.status()).toBe(200);
-  const labRootBody = await labRootLookup.json();
+  const labRootBody = lookupSchema.parse(await labRootLookup.json());
   expect(
     labRootBody.items.some(
       (entry: { kind: string; displayId: string; projectId: string | null }) =>
@@ -154,8 +214,11 @@ test("member creates a workspace project, task, and sees counts after reload", a
   const id = await workspaceId(page, "acme");
   const listRes = await page.request.get(`/api/v1/workspaces/${id}/projects`);
   expect(listRes.ok()).toBe(true);
-  const lab = (await listRes.json()).items.find((item: { key: string }) => item.key === "LAB");
+  const lab = projectListSchema
+    .parse(await listRes.json())
+    .items.find((item: { key: string }) => item.key === "LAB");
   expect(lab).toBeTruthy();
+  assert(lab);
   expect(lab.taskCount).toBe(1);
   expect(lab.openTaskCount).toBe(1);
 
@@ -186,7 +249,9 @@ test("guest create is rejected with a visible error and wiki still loads", async
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
 });
 
-test("private project is absent for non-members and viewer writes fail visibly", async ({ page }) => {
+test("private project is absent for non-members and viewer writes fail visibly", async ({
+  page,
+}) => {
   createE2eUser(other.email, other.password, other.givenName, {
     familyName: other.familyName,
     workspaceSlug: admin.workspaceSlug,
@@ -213,13 +278,13 @@ test("private project is absent for non-members and viewer writes fail visibly",
   await login(page, admin.email, admin.password);
   const maskedLookup = await page.request.get(`/api/v1/workspaces/${id}/lookup/HID-2`);
   expect(maskedLookup.status()).toBe(200);
-  expect((await maskedLookup.json()).items).toEqual([]);
+  expect(lookupSchema.parse(await maskedLookup.json()).items).toEqual([]);
   await page.goto("/w/acme/HID-2");
   await expect(page.getByRole("alert")).toContainText("태스크를 찾을 수 없습니다");
   await expect(page.getByRole("heading", { name: "비밀 초안" })).toHaveCount(0);
   const adminMe = await page.request.get("/api/v1/auth/me");
   expect(adminMe.ok()).toBe(true);
-  const adminId = (await adminMe.json()).userId;
+  const adminId = meSchema.parse(await adminMe.json()).userId;
 
   await page.goto("/w/acme/projects");
   await expect(page.getByRole("heading", { name: "프로젝트" })).toBeVisible();
@@ -235,8 +300,11 @@ test("private project is absent for non-members and viewer writes fail visibly",
   await logout(page);
   await login(page, member.email, member.password);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${id}/projects`);
-  const hid = (await projectsRes.json()).items.find((item: { key: string }) => item.key === "HID");
+  const hid = projectListSchema
+    .parse(await projectsRes.json())
+    .items.find((item: { key: string }) => item.key === "HID");
   expect(hid).toBeTruthy();
+  assert(hid);
   const addRes = await page.request.post(`/api/v1/workspaces/${id}/projects/${hid.id}/members`, {
     data: { userId: adminId, role: "viewer" },
   });
@@ -318,38 +386,36 @@ test("task list uses server statusCounts and paginates without duplicate rows", 
   });
   expect(
     createProject.status(),
-    `create PAG project failed: ${createProject.status()} ${await createProject.text()}`,
+    `create PAG project failed: ${String(createProject.status())} ${await createProject.text()}`,
   ).toBe(201);
-  const project = await createProject.json();
+  const project = projectSchema.parse(await createProject.json());
 
   const workflowRes = await page.request.get(
     `/api/v1/workspaces/${id}/projects/${project.id}/workflow`,
   );
   expect(
     workflowRes.ok(),
-    `workflow failed: ${workflowRes.status()} ${await workflowRes.text()}`,
+    `workflow failed: ${String(workflowRes.status())} ${await workflowRes.text()}`,
   ).toBe(true);
-  const workflow = await workflowRes.json();
+  const workflow = workflowSchema.parse(await workflowRes.json());
   const backlog =
     workflow.statuses.find((status: { category: string }) => status.category === "backlog") ??
     workflow.statuses[0];
   expect(backlog).toBeTruthy();
+  assert(backlog);
 
   const created = 55;
-  const titles = Array.from({ length: created }, (_, index) => `페이지 일 ${index + 1}`);
+  const titles = Array.from({ length: created }, (_, index) => `페이지 일 ${String(index + 1)}`);
   await createTasksViaApi(page, id, project.id, titles, backlog.id);
 
   const listUrl = `/api/v1/workspaces/${id}/projects/${project.id}/tasks`;
   const listRes = await page.request.get(listUrl);
   const listText = await listRes.text();
-  expect(listRes.ok(), `list tasks failed: ${listRes.status()} ${listText}`).toBe(true);
-  const firstPage = JSON.parse(listText) as {
-    items: { id: string }[];
-    nextCursor: string | null;
-    statusCounts: { statusId: string; count: number }[];
-  };
+  expect(listRes.ok(), `list tasks failed: ${String(listRes.status())} ${listText}`).toBe(true);
+  const firstPage = taskPageSchema.parse(JSON.parse(listText));
   expect(firstPage.items.length).toBeGreaterThan(0);
   expect(firstPage.nextCursor).toBeTruthy();
+  assert(firstPage.nextCursor);
   const serverCount = firstPage.statusCounts.find((row) => row.statusId === backlog.id)?.count;
   expect(serverCount).toBe(created);
 
@@ -357,14 +423,14 @@ test("task list uses server statusCounts and paginates without duplicate rows", 
   // until the stream has opened, so the stream's `open` resync lands while the
   // page loads: the order that dropped the requested page in CI.
   const streamPath = `/api/v1/workspaces/${id}/projects/${project.id}/stream`;
-  let loadMoreSent!: () => void;
-  const loadMoreInFlight = new Promise<void>((resolve) => {
-    loadMoreSent = resolve;
-  });
-  await page.route((url) => url.pathname === streamPath, async (route) => {
-    await loadMoreInFlight;
-    await route.continue();
-  });
+  const { promise: loadMoreInFlight, resolve: loadMoreSent } = deferred();
+  await page.route(
+    (url) => url.pathname === streamPath,
+    async (route) => {
+      await loadMoreInFlight;
+      await route.continue();
+    },
+  );
   let secondPageHeld = false;
   await page.route(
     (url) => url.pathname === listUrl && url.searchParams.has("cursor"),
@@ -392,3 +458,12 @@ test("task list uses server statusCounts and paginates without duplicate rows", 
   expect(new Set(ids).size).toBe(ids.length);
   expect(ids).toHaveLength(created);
 });
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: (() => void) | undefined;
+  const promise = new Promise<void>((fulfill) => {
+    resolve = fulfill;
+  });
+  assert(resolve, "Promise executor must initialize its resolver");
+  return { promise, resolve };
+}

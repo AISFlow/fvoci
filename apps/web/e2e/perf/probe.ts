@@ -50,7 +50,7 @@ type ProbeState = {
   el: ElementEntry[];
   paint: { n: string; s: number }[];
   inputs: InputMark[];
-  hits: Record<string, Hit>;
+  hits: Partial<Record<string, Hit>>;
   watch: (id: string, spec: WatchSpec) => void;
 };
 
@@ -71,14 +71,16 @@ declare global {
 // Runs in the page before app scripts. Must stay self-contained.
 function installProbe(): void {
   if (window.__fp) return;
-  const st = {
+  const st: ProbeState = {
     lt: [] as { s: number; d: number }[],
     ev: [] as EventEntry[],
     el: [] as ElementEntry[],
     paint: [] as { n: string; s: number }[],
     inputs: [] as InputMark[],
-    hits: {} as Record<string, Hit>,
-    watch: (_id: string, _spec: WatchSpec) => {},
+    hits: {},
+    watch: () => {
+      throw new Error("Performance probe watch is not initialized");
+    },
   };
   window.__fp = st;
   // The default 250-entry Resource Timing buffer drops entries on long-lived pages.
@@ -87,13 +89,19 @@ function installProbe(): void {
   } catch {
     /* unsupported */
   }
-  const observe = (type: string, opts: Record<string, unknown>, fn: (e: PerformanceEntry) => void) => {
+  const observe = (
+    type: string,
+    opts: Record<string, unknown>,
+    fn: (e: PerformanceEntry) => void,
+  ) => {
     try {
-      new PerformanceObserver((list) => list.getEntries().forEach(fn)).observe({
+      new PerformanceObserver((list) => {
+        list.getEntries().forEach(fn);
+      }).observe({
         type,
         buffered: true,
         ...opts,
-      } as PerformanceObserverInit);
+      });
     } catch {
       /* entry type unsupported: absence is reported, not faked */
     }
@@ -110,7 +118,11 @@ function installProbe(): void {
     });
   });
   observe("element", {}, (raw) => {
-    const e = raw as PerformanceEntry & { identifier: string; renderTime: number; loadTime: number };
+    const e = raw as PerformanceEntry & {
+      identifier: string;
+      renderTime: number;
+      loadTime: number;
+    };
     st.el.push({ id: e.identifier, r: e.renderTime, l: e.loadTime });
   });
   observe("paint", {}, (e) => st.paint.push({ n: e.name, s: e.startTime }));
@@ -177,10 +189,10 @@ function installProbe(): void {
   };
 
   st.watch = (id, spec) => {
-    delete st.hits[id];
+    Reflect.deleteProperty(st.hits, id);
     const match = (): Element | null => {
       for (const el of document.querySelectorAll(spec.selector)) {
-        if (spec.text && !(el.textContent ?? "").includes(spec.text)) continue;
+        if (spec.text && !el.textContent.includes(spec.text)) continue;
         if (spec.attr && el.getAttribute(spec.attr[0]) !== spec.attr[1]) continue;
         if (spec.canvas && !canvasPainted(el)) continue;
         return el;
@@ -189,7 +201,11 @@ function installProbe(): void {
     };
     const hit = (el: Element, pre: boolean) => {
       const now = performance.now();
-      const rec: Hit = { dom: now, abs: performance.timeOrigin + now, tag: el.tagName.toLowerCase() };
+      const rec: Hit = {
+        dom: now,
+        abs: performance.timeOrigin + now,
+        tag: el.tagName.toLowerCase(),
+      };
       if (pre) rec.pre = true;
       st.hits[id] = rec;
       const target = timingTarget(el, spec.text);
@@ -252,11 +268,18 @@ export async function calibrate(page: Page, rounds = 15): Promise<Calibration> {
     const rtt = t1 - t0;
     if (!best || rtt < best.rtt) best = { offset: p - (t0 + t1) / 2, rtt, at: t1 };
   }
-  return best!;
+  if (best === null) throw new Error("Calibration requires at least one round");
+  return best;
 }
 
 export async function watch(page: Page, id: string, spec: WatchSpec): Promise<void> {
-  await page.evaluate(([i, s]) => window.__fp!.watch(i, s), [id, spec] as const);
+  await page.evaluate(
+    ([i, s]) => {
+      if (!window.__fp) throw new Error("Performance probe is not installed");
+      window.__fp.watch(i, s);
+    },
+    [id, spec] as const,
+  );
 }
 
 /** Waits for a watch to fire. The timeout bounds a failure; it is never a result. */
@@ -269,39 +292,71 @@ export async function waitHit(page: Page, id: string, timeoutMs: number): Promis
   } catch {
     return null;
   }
-  return (await page.evaluate((i) => window.__fp!.hits[i], id)) ?? null;
+  return (
+    (await page.evaluate((i) => {
+      if (!window.__fp) throw new Error("Performance probe is not installed");
+      return window.__fp.hits[i];
+    }, id)) ?? null
+  );
 }
 
 /** Waits (bounded) for the Element Timing entry of a watch; null when none arrives. */
-export async function elementPaint(page: Page, id: string, timeoutMs = 1000): Promise<number | null> {
+export async function elementPaint(
+  page: Page,
+  id: string,
+  timeoutMs = 1000,
+): Promise<number | null> {
   try {
-    await page.waitForFunction((i) => window.__fp!.el.some((e) => e.id === i), id, {
-      timeout: timeoutMs,
-      polling: 16,
-    });
+    await page.waitForFunction(
+      (i) => {
+        if (!window.__fp) throw new Error("Performance probe is not installed");
+        return window.__fp.el.some((e) => e.id === i);
+      },
+      id,
+      {
+        timeout: timeoutMs,
+        polling: 16,
+      },
+    );
   } catch {
     return null;
   }
   return page.evaluate((i) => {
-    const e = window.__fp!.el.find((x) => x.id === i)!;
+    if (!window.__fp) throw new Error("Performance probe is not installed");
+    const e = window.__fp.el.find((x) => x.id === i);
+    if (!e) throw new Error("Observed element timing entry disappeared");
     return e.r || e.l || null;
   }, id);
 }
 
 /** Main-thread long tasks (>50 ms) that started in [from, to). */
-export async function longTasks(page: Page, from: number, to: number): Promise<{ count: number; totalMs: number }> {
+export async function longTasks(
+  page: Page,
+  from: number,
+  to: number,
+): Promise<{ count: number; totalMs: number }> {
   return page.evaluate(
     ([f, t]) => {
-      const hits = window.__fp!.lt.filter((x) => x.s >= f && x.s < t);
+      if (!window.__fp) throw new Error("Performance probe is not installed");
+      const hits = window.__fp.lt.filter((x) => x.s >= f && x.s < t);
       return { count: hits.length, totalMs: Math.round(hits.reduce((a, x) => a + x.d, 0)) };
     },
     [from, to] as const,
   );
 }
 
-export function waterfall(res: ResourceEntry[]): { n: string; t: string; s: number; w: number; e: number; b: number }[] {
+export function waterfall(
+  res: ResourceEntry[],
+): { n: string; t: string; s: number; w: number; e: number; b: number }[] {
   const r1 = (v: number) => Math.round(v * 10) / 10;
-  return res.map((r) => ({ n: r.name, t: r.type, s: r1(r.start), w: r1(r.respStart), e: r1(r.end), b: r.bytes }));
+  return res.map((r) => ({
+    n: r.name,
+    t: r.type,
+    s: r1(r.start),
+    w: r1(r.respStart),
+    e: r1(r.end),
+    b: r.bytes,
+  }));
 }
 
 export async function pageNow(page: Page): Promise<number> {
@@ -309,25 +364,37 @@ export async function pageNow(page: Page): Promise<number> {
 }
 
 export async function inputsSince(page: Page, since: number): Promise<InputMark[]> {
-  return page.evaluate((s) => window.__fp!.inputs.filter((x) => x.ts >= s), since);
+  return page.evaluate((s) => {
+    if (!window.__fp) throw new Error("Performance probe is not installed");
+    return window.__fp.inputs.filter((x) => x.ts >= s);
+  }, since);
 }
 
 export async function eventsSince(page: Page, since: number): Promise<EventEntry[]> {
-  return page.evaluate((s) => window.__fp!.ev.filter((x) => x.s >= s), since);
+  return page.evaluate((s) => {
+    if (!window.__fp) throw new Error("Performance probe is not installed");
+    return window.__fp.ev.filter((x) => x.s >= s);
+  }, since);
 }
 
 export async function paints(page: Page): Promise<{ n: string; s: number }[]> {
   // Read the timeline buffer directly: observer callbacks may not have run yet.
-  return page.evaluate(() => performance.getEntriesByType("paint").map((e) => ({ n: e.name, s: e.startTime })));
+  return page.evaluate(() =>
+    performance.getEntriesByType("paint").map((e) => ({ n: e.name, s: e.startTime })),
+  );
 }
 
 /** Waits (bounded) for the first-contentful-paint entry; null when none arrives. */
 export async function firstContentfulPaint(page: Page, timeoutMs = 1000): Promise<number | null> {
   try {
-    await page.waitForFunction(() => performance.getEntriesByName("first-contentful-paint", "paint").length > 0, undefined, {
-      timeout: timeoutMs,
-      polling: 16,
-    });
+    await page.waitForFunction(
+      () => performance.getEntriesByName("first-contentful-paint", "paint").length > 0,
+      undefined,
+      {
+        timeout: timeoutMs,
+        polling: 16,
+      },
+    );
   } catch {
     return null;
   }
@@ -366,7 +433,9 @@ export function sanitizeUrl(url: string): string {
 }
 
 /** INP-style duration per interaction: max Event Timing duration per interactionId. */
-export function interactions(entries: EventEntry[]): { id: number; duration: number; inputDelay: number }[] {
+export function interactions(
+  entries: EventEntry[],
+): { id: number; duration: number; inputDelay: number }[] {
   const byId = new Map<number, { duration: number; inputDelay: number }>();
   for (const e of entries) {
     if (!e.i) continue;
@@ -377,12 +446,21 @@ export function interactions(entries: EventEntry[]): { id: number; duration: num
   return [...byId.entries()].map(([id, v]) => ({ id, ...v }));
 }
 
-export type Stats = { n: number; failures: number; median: number | null; p95: number | null; max: number | null };
+export type Stats = {
+  n: number;
+  failures: number;
+  median: number | null;
+  p95: number | null;
+  max: number | null;
+};
 
 export function stats(values: (number | null | undefined)[]): Stats {
-  const ok = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v)).sort((a, b) => a - b);
+  const ok = values
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+    .sort((a, b) => a - b);
   const failures = values.length - ok.length;
-  const q = (p: number) => (ok.length ? ok[Math.min(ok.length - 1, Math.ceil(p * ok.length) - 1)] : null);
+  const q = (p: number) =>
+    ok.length ? ok[Math.min(ok.length - 1, Math.ceil(p * ok.length) - 1)] : null;
   return {
     n: values.length,
     failures,
@@ -408,7 +486,7 @@ const STALE_CARGO_S = 6 * 3600;
 
 /** Active build work on this host; a cargo client older than 6 h (hung, idle) is reported as stale. */
 function busyBuilds(): string[] {
-  let out = "";
+  let out: string;
   try {
     out = execFileSync("ps", ["-eo", "pid=,etimes=,args="], { encoding: "utf8" });
   } catch {
@@ -455,7 +533,7 @@ export async function quietWindow(label: string, log: LoadWindow[]): Promise<Loa
     quiet: active(busy).length === 0 && load1 < cores,
     load1: Number(load1.toFixed(2)),
     load5: Number(load5.toFixed(2)),
-    busy: [...counts.entries()].map(([k, v]) => `${k}x${v}`),
+    busy: [...counts.entries()].map(([k, v]) => `${k}x${String(v)}`),
   };
   log.push(entry);
   return entry;

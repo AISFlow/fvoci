@@ -1,5 +1,27 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const bodySchema = z
+  .object({ id: z.string(), contentJson: z.unknown(), archivedAt: z.string().nullable() })
+  .passthrough();
+const documentBodySchema = z
+  .object({
+    content: z
+      .array(
+        z.object({ attrs: z.object({ id: z.unknown() }).passthrough().optional() }).passthrough(),
+      )
+      .optional(),
+  })
+  .passthrough();
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const idSchema = z.object({ id: z.string() }).passthrough();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
+const errorSchema = z.object({ code: z.string() }).passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -44,11 +66,13 @@ type TaskJson = { id: string; contentJson: unknown; archivedAt: string | null };
 async function taskJson(page: Page, wsId: string, taskId: string): Promise<TaskJson> {
   const res = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
   expect(res.ok()).toBe(true);
-  return res.json();
+  const task = bodySchema.parse(await res.json());
+  assert(Object.hasOwn(task, "contentJson"), "Task response must include contentJson");
+  return { id: task.id, contentJson: task.contentJson, archivedAt: task.archivedAt };
 }
 
 function firstBlockId(content: unknown): string | null {
-  const doc = content as { content?: { attrs?: { id?: unknown } }[] };
+  const doc = documentBodySchema.parse(content);
   const id = doc.content?.[0]?.attrs?.id;
   return typeof id === "string" ? id : null;
 }
@@ -58,24 +82,26 @@ test("task body is a collaborative room with revisions, block patch and restore"
 }) => {
   await ensureSetup(page);
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
-  const wsId = (await workspacesRes.json()).items.find(
-    (item: { slug: string }) => item.slug === admin.workspaceSlug,
-  ).id as string;
+  const wsId = required(
+    workspaceListSchema
+      .parse(await workspacesRes.json())
+      .items.find((item: { slug: string }) => item.slug === admin.workspaceSlug),
+  ).id;
 
   const projectRes = await page.request.post(`/api/v1/workspaces/${wsId}/projects`, {
     data: { key: "TBF", name: "Task Body", visibility: "workspace" },
   });
   expect(projectRes.status()).toBe(201);
-  const project = (await projectRes.json()) as { id: string };
+  const project = idSchema.parse(await projectRes.json());
   const taskRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/tasks`,
     { data: { title: "본문 있는 태스크" } },
   );
   expect(taskRes.status()).toBe(201);
-  const task = (await taskRes.json()) as { id: string; number: number };
+  const task = taskSchema.parse(await taskRes.json());
 
   // 1. The task detail page joins `${ws}:task:${id}` and edits the body.
-  await page.goto(`/w/${admin.workspaceSlug}/TBF-${task.number}`);
+  await page.goto(`/w/${admin.workspaceSlug}/TBF-${String(task.number)}`);
   const body = page.getByTestId("task-body");
   await expect(body.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
   const editor = body.locator(".fvoci-editor .ProseMirror");
@@ -97,6 +123,7 @@ test("task body is a collaborative room with revisions, block patch and restore"
   // 3. A block patch through the API reaches the open editor live.
   const blockId = firstBlockId((await taskJson(page, wsId, task.id)).contentJson);
   expect(blockId).toBeTruthy();
+  assert(blockId);
   const patch = await page.request.patch(
     `/api/v1/workspaces/${wsId}/tasks/${task.id}/blocks/${blockId}`,
     { data: { type: "paragraph", content: [{ type: "text", text: "API로 바꾼 문단" }] } },
@@ -131,5 +158,10 @@ test("task body is a collaborative room with revisions, block patch and restore"
     { data: { type: "paragraph" } },
   );
   expect(refused.status()).toBe(409);
-  expect((await refused.json()).code).toBe("task_archived");
+  expect(errorSchema.parse(await refused.json()).code).toBe("task_archived");
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}
