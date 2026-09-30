@@ -4,6 +4,145 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+/// Renumbering a wiki subtree must move each number into the project namespace
+/// atomically, even when another wiki row already uses the allocated number.
+#[tokio::test]
+async fn wiki_subtree_move_renumbers_affiliation_atomically() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let harness = project_harness::TestDb::bootstrap().await;
+    let (app, cookie, owner, ws) = project_harness::setup_session(&harness).await;
+    let admin = project_harness::admin_pool(&harness).await;
+    let pool = project_harness::app_pool(&harness).await;
+    let (superuser, bypass): (bool, bool) =
+        sqlx::query_as("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!superuser && !bypass);
+    let project =
+        project_harness::create_project(app.clone(), &cookie, ws, "MOVE", "private").await;
+    let mut docs = Vec::new();
+    for parent in [None, Some(0), Some(1), None] {
+        let (status, body) = project_harness::json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/documents"),
+            Some(serde_json::json!({"title": "Wiki move", "parentId": parent.map(|i| &docs[i])})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED, "{body}");
+        docs.push(body["id"].as_str().unwrap().to_string());
+    }
+    let project_id: Uuid = project["id"].as_str().unwrap().parse().unwrap();
+    let root: Uuid = project["rootDocumentId"].as_str().unwrap().parse().unwrap();
+    let move_path = format!("/api/v1/workspaces/{ws}/documents/{}/move", docs[0]);
+    let destination = serde_json::json!({"newParentId": root});
+    // Denied destination access must not consume numbers or partially move rows.
+    let denied = project_harness::add_workspace_user(&admin, ws, "member", "move-denied").await;
+    let before: i32 = sqlx::query_scalar("SELECT next_number FROM fvoci.projects WHERE id = $1")
+        .bind(project_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    let (status, _) = project_harness::json_request(
+        app.clone(),
+        "POST",
+        &move_path,
+        Some(destination.clone()),
+        Some(&denied.cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    let after: i32 = sqlx::query_scalar("SELECT next_number FROM fvoci.projects WHERE id = $1")
+        .bind(project_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    // Failure after renumber/path writes must roll back the entire affiliation
+    // and allocator transition, not strand a partially moved subtree.
+    project_harness::install_insert_fail_trigger(&admin, "events", "move_event_failure").await;
+    let (status, _) = project_harness::json_request(
+        app.clone(),
+        "POST",
+        &move_path,
+        Some(destination.clone()),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    project_harness::drop_insert_fail_trigger(&admin, "events", "move_event_failure").await;
+    let original: Vec<(Option<Uuid>, i32)> = sqlx::query_as(
+        "SELECT project_id, number FROM fvoci.documents WHERE id=ANY($1) ORDER BY number",
+    )
+    .bind(
+        docs[..3]
+            .iter()
+            .map(|id| id.parse::<Uuid>().unwrap())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(original, vec![(None, 1), (None, 2), (None, 3)]);
+    let after_failure: i32 =
+        sqlx::query_scalar("SELECT next_number FROM fvoci.projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(before, after_failure);
+    let (status, body) = project_harness::json_request(
+        app.clone(),
+        "POST",
+        &move_path,
+        Some(destination),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["projectId"], project_id.to_string());
+    let moved: Vec<(Uuid, Option<Uuid>, Option<Uuid>, i32, String)> = sqlx::query_as(
+        "SELECT id, project_id, parent_id, number, path FROM fvoci.documents WHERE workspace_id=$1 AND id=ANY($2) ORDER BY number"
+    ).bind(ws).bind(docs[..3].iter().map(|id| id.parse::<Uuid>().unwrap()).collect::<Vec<_>>())
+        .fetch_all(&admin).await.unwrap();
+    assert_eq!(moved.len(), 3);
+    assert_eq!(moved.iter().map(|r| r.3).collect::<Vec<_>>(), vec![2, 3, 4]);
+    assert!(moved.iter().all(|r| r.1 == Some(project_id)));
+    let by_id = |id: &str| moved.iter().find(|r| r.0.to_string() == id).unwrap();
+    let moved_root = by_id(&docs[0]);
+    let moved_child = by_id(&docs[1]);
+    let moved_grandchild = by_id(&docs[2]);
+    assert_eq!(moved_root.2, Some(root));
+    assert_eq!(moved_child.2, Some(moved_root.0));
+    assert_eq!(moved_grandchild.2, Some(moved_child.0));
+    assert!(moved_child.4.starts_with(&(moved_root.4.clone() + ".")));
+    assert!(moved_grandchild
+        .4
+        .starts_with(&(moved_child.4.clone() + ".")));
+    let unaffected: (Option<Uuid>, i32) =
+        sqlx::query_as("SELECT project_id, number FROM fvoci.documents WHERE id=$1")
+            .bind(docs[3].parse::<Uuid>().unwrap())
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(unaffected, (None, 4));
+    let next: i32 = sqlx::query_scalar("SELECT next_number FROM fvoci.projects WHERE id=$1")
+        .bind(project_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(next, 5);
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.events WHERE workspace_id=$1 AND verb='document.moved' AND payload->>'documentId'=$2")
+        .bind(ws).bind(&docs[0]).fetch_one(&admin).await.unwrap();
+    assert_eq!(events, 1);
+    assert_ne!(owner, denied.user_id);
+    pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 use std::sync::Arc;
 use std::time::Duration;
 

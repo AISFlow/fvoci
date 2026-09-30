@@ -1286,16 +1286,20 @@ async fn renumber_subtree_for_project(
         .bind(project_id)
         .fetch_one(&mut **tx)
         .await?;
+        // Number and affiliation form one unique namespace. Applying the new
+        // number while still in the wiki can collide with another subtree row.
+        // The tree/project locks and transaction cover the subsequent path move.
         sqlx::query(
             r#"
             UPDATE fvoci.documents
-            SET number = $3, updated_at = now()
+            SET number = $3, project_id = $4, updated_at = now()
             WHERE workspace_id = $1 AND id = $2
             "#,
         )
         .bind(workspace_id)
         .bind(document_id)
         .bind(number.0)
+        .bind(project_id)
         .execute(&mut **tx)
         .await?;
     }
