@@ -548,6 +548,8 @@ async function watchPosts(page: Page, urls: readonly string[]) {
   const urlById = new Map<string, string>();
   const byId = new Map<string, SentPost>();
   const order: string[] = [];
+  const pending = new Set<Promise<void>>();
+  const failures: unknown[] = [];
   const entry = (id: string): SentPost => {
     const found = byId.get(id) ?? {};
     byId.set(id, found);
@@ -572,8 +574,8 @@ async function watchPosts(page: Page, urls: readonly string[]) {
     const setCookie = event.headers["Set-Cookie"] ?? event.headers["set-cookie"] ?? "";
     sent.setsStateCookie = setCookie.includes("fvoci_oidc_state");
   });
-  cdp.on("Fetch.requestPaused", (event) => {
-    void (async () => {
+  const onPaused: Parameters<typeof cdp.on<"Fetch.requestPaused">>[1] = (event) => {
+    const operation = (async () => {
       if (event.networkId && event.responseStatusCode !== undefined) {
         const sent = entry(event.networkId);
         try {
@@ -586,23 +588,50 @@ async function watchPosts(page: Page, urls: readonly string[]) {
           sent.code = null;
         }
       }
-      await cdp
-        .send("Fetch.continueRequest", { requestId: event.requestId })
-        .catch(() => undefined);
+      await cdp.send("Fetch.continueRequest", { requestId: event.requestId });
     })();
-  });
-  await cdp.send("Network.enable");
-  await cdp.send("Fetch.enable", {
-    patterns: urls.map((url) => ({ urlPattern: url, requestStage: "Response" as const })),
-  });
+    pending.add(operation);
+    operation.then(
+      () => {
+        pending.delete(operation);
+      },
+      (error: unknown) => {
+        failures.push(error);
+        pending.delete(operation);
+      },
+    );
+  };
+  cdp.on("Fetch.requestPaused", onPaused);
+  try {
+    await cdp.send("Network.enable");
+    await cdp.send("Fetch.enable", {
+      patterns: urls.map((url) => ({ urlPattern: url, requestStage: "Response" as const })),
+    });
+  } catch (error) {
+    failures.push(error);
+    cdp.off("Fetch.requestPaused", onPaused);
+    await cdp.detach().catch((cleanupError: unknown) => {
+      failures.push(cleanupError);
+    });
+    while (pending.size > 0) await Promise.allSettled([...pending]);
+    throw new AggregateError(failures, "CDP POST observer initialization failed", { cause: error });
+  }
   return {
     last(url: string): SentPost | undefined {
       const id = [...order].reverse().find((candidate) => urlById.get(candidate) === url);
       return id ? byId.get(id) : undefined;
     },
     stop: async () => {
-      await cdp.send("Fetch.disable").catch(() => undefined);
-      await cdp.detach();
+      // Finish continuations before disabling Fetch invalidates their interception IDs.
+      while (pending.size > 0) await Promise.allSettled([...pending]);
+      cdp.off("Fetch.requestPaused", onPaused);
+      await cdp.send("Fetch.disable").catch((error: unknown) => {
+        failures.push(error);
+      });
+      await cdp.detach().catch((error: unknown) => {
+        failures.push(error);
+      });
+      if (failures.length > 0) throw new AggregateError(failures, "CDP POST observation failed");
     },
   };
 }
@@ -1311,8 +1340,10 @@ window.post = async (url, body) => {
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const otherOrigin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
-    const network = await watchPosts(page, [linkUrl, startUrl]);
+    let network: Awaited<ReturnType<typeof watchPosts>> | undefined;
     try {
+      const observer = await watchPosts(page, [linkUrl, startUrl]);
+      network = observer;
       await page.goto(`${otherOrigin}/`);
       const refused: Record<string, unknown> = {};
       // Script requests: the page cannot read the answer (no CORS headers);
@@ -1329,9 +1360,9 @@ window.post = async (url, body) => {
           [url, body] as const,
         );
         expect(pageSees).toBe("unreadable (TypeError)");
-        await expect.poll(() => network.last(url)?.status).toBe(403);
-        await expect.poll(() => network.last(url)?.code).toBe("origin_mismatch");
-        const sent = network.last(url);
+        await expect.poll(() => observer.last(url)?.status).toBe(403);
+        await expect.poll(() => observer.last(url)?.code).toBe("origin_mismatch");
+        const sent = observer.last(url);
         expect(sent?.origin).toBe(otherOrigin);
         expect(sent?.sessionCookieSent).toBe(true);
         expect(sent?.setsStateCookie).toBe(false);
@@ -1354,9 +1385,9 @@ window.post = async (url, body) => {
         const answered = await response;
         expect(answered.status()).toBe(403);
         expect(await problemCode(answered)).toBe("origin_mismatch");
-        await expect.poll(() => network.last(url)?.status).toBe(403);
-        await expect.poll(() => network.last(url)?.code).toBe("origin_mismatch");
-        const sent = network.last(url);
+        await expect.poll(() => observer.last(url)?.status).toBe(403);
+        await expect.poll(() => observer.last(url)?.code).toBe("origin_mismatch");
+        const sent = observer.last(url);
         expect(sent?.origin).toBe(otherOrigin);
         expect(sent?.sessionCookieSent).toBe(true);
         expect(sent?.setsStateCookie).toBe(false);
@@ -1382,13 +1413,19 @@ window.post = async (url, body) => {
       expect((await me(page))?.userId).toBe(ownerId);
       observe("F_cross_origin", { otherOrigin, sameSite: true, ...refused, statesIssued: 0 });
     } finally {
-      await network.stop();
-      await new Promise<void>((resolve) =>
-        server.close(() => {
-          resolve();
-        }),
-      );
-      await context.close();
+      try {
+        if (network) await network.stop();
+      } finally {
+        try {
+          await new Promise<void>((resolve) =>
+            server.close(() => {
+              resolve();
+            }),
+          );
+        } finally {
+          await context.close();
+        }
+      }
     }
   });
 });
