@@ -74,27 +74,27 @@ function onSwitch(event: Event): void {
     <div v-if="logoutError" role="alert" class="border-b border-default bg-muted px-4 py-2 text-sm text-muted">
       {{ logoutError }}
     </div>
-    <UDashboardNavbar as="header" :toggle="false" :ui="{ root: 'h-auto flex-wrap py-3', left: 'flex-wrap', right: 'flex-wrap gap-3' }">
+    <UDashboardNavbar as="header" :toggle="false" :ui="{ root: 'h-auto flex-wrap py-3', left: 'min-w-0 max-w-full flex-wrap', right: 'min-w-0 max-w-full flex-wrap gap-3' }">
       <template #left>
-      <div class="flex flex-wrap items-center gap-4">
+      <div class="flex min-w-0 max-w-full flex-wrap items-center gap-4">
         <AppLink to="/" class="underline underline-offset-2">{{ t("nav.backHome") }}</AppLink>
         <UNavigationMenu :items="navigation" :aria-label="t('nav.workspace')" :ui="{ list: 'flex-wrap' }" />
       </div>
       </template>
       <template #right>
-      <div class="flex flex-wrap items-center gap-3">
-        <div v-if="items.length > 1">
+      <div class="flex min-w-0 max-w-full flex-wrap items-center gap-3">
+        <div v-if="items.length > 1" class="min-w-0 max-w-full">
           <label for="workspace-switch" class="sr-only">{{ t("workspace.switch") }}</label>
           <select
             id="workspace-switch"
-            class="rounded-md border border-default bg-default px-2 py-1 text-sm"
+            class="max-w-full rounded-md border border-default bg-default px-2 py-1 text-sm"
             :value="workspaceId"
             @change="onSwitch"
           >
             <option v-for="item in items" :key="item.id" :value="item.id">{{ item.name }}</option>
           </select>
         </div>
-        <span v-else class="font-medium" data-slot="workspace-name">{{ workspaceName }}</span>
+        <span v-else class="min-w-0 max-w-full break-words font-medium" data-slot="workspace-name">{{ workspaceName }}</span>
         <SearchPalette :slug="slug" :workspace-id="workspaceId" />
         <NotificationBell :slug="slug" :workspace-id="workspaceId" />
         <AppLink to="/settings/account" class="underline underline-offset-2">

@@ -215,6 +215,9 @@
   line-height: var(--text-title-leading);
   font-weight: 650;
   word-break: keep-all;
+  overflow-wrap: anywhere;
+  resize: none;
+  overflow: hidden;
 }
 
 .document-page__title:focus-visible {
@@ -224,8 +227,42 @@
 }
 
 .document-page__fields {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem 0.75rem;
+}
+
+.document-page__fields > .document-page__field {
+  min-width: 0;
+  flex: 1 1 8rem;
+  max-width: 12rem;
+}
+
+.document-page__lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.document-page__lifecycle > .document-page__field {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.document-page__lifecycle .document-page__field-select {
+  max-width: min(16rem, 100%);
+}
+
+.document-page__options-content {
+  display: flex;
+  flex-direction: column;
   gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 .document-page__field {

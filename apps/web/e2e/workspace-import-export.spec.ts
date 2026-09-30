@@ -138,6 +138,7 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
   await expect(page.getByLabel("문서 제목")).toHaveValue("e2e-note");
 
   const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
   await page.getByRole("button", { name: "Markdown" }).click();
   const download = await downloadPromise;
   const suggested = download.suggestedFilename();

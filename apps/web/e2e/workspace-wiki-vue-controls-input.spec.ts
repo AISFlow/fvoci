@@ -225,6 +225,7 @@ test("an archived read-only wiki refuses file input and body mutation", async ({
     const ws = await workspaceId(a.page.request);
     const doc = await createDoc(a.page.request, ws, "읽기 전용 입력", { markdown: "보관 본문\n" });
     await openDoc(a.page, doc.path);
+    await a.page.getByRole("button", { name: "문서 옵션", exact: true }).click();
     await a.page.getByLabel("문서 상태").selectOption("archived");
     await expect(editorOf(a.page)).toHaveAttribute("contenteditable", "false");
     await expect(a.page.getByRole("button", { name: "저장", exact: true })).toBeDisabled();

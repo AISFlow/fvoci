@@ -3,8 +3,9 @@ import { FvociEditor, type TiptapEditor } from "@fvoci/editor/vue";
 import "@fvoci/editor/styles.css";
 import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
+import UCollapsible from "@nuxt/ui/components/Collapsible.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, type FunctionalComponent, h, markRaw, onScopeDispose, ref, shallowRef, watch } from "vue";
+import { computed, type FunctionalComponent, h, markRaw, nextTick, onScopeDispose, ref, shallowRef, watch } from "vue";
 import { RouterLink } from "vue-router";
 import { bindBlockPresence, isBlockPresenceAwareness } from "@/features/documents/block-presence";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
@@ -77,7 +78,36 @@ const { mentionItems, entityResolver } = useEditorEntities(
   () => `${props.documentId}:${session.value?.generation ?? ""}:${collabUser.value?.id ?? ""}:${session.value?.status === "unauthorized"}`,
 );
 
+const optionsOpen = ref(false);
+const optionsButton = ref<InstanceType<typeof UButton> | null>(null);
+function onOptionsKeydown(event: KeyboardEvent): void {
+  if (event.key !== "Escape" || !optionsOpen.value) return;
+  event.preventDefault();
+  optionsOpen.value = false;
+  optionsButton.value?.$el.focus();
+}
+
 const title = ref("");
+const titleInput = ref<HTMLTextAreaElement | null>(null);
+// Keep long titles readable at the current width, including readonly titles.
+watch([titleInput, title], async ([input], _previous, onCleanup) => {
+  if (!input) return;
+  let width = 0;
+  const resize = () => {
+    input.style.height = "auto";
+    input.style.height = `${input.scrollHeight + 2}px`;
+  };
+  const observer = new ResizeObserver(([entry]) => {
+    if (entry && entry.contentRect.width !== width) {
+      width = entry.contentRect.width;
+      resize();
+    }
+  });
+  observer.observe(input);
+  onCleanup(() => observer.disconnect());
+  await nextTick();
+  if (titleInput.value === input) resize();
+}, { flush: "post" });
 const icon = ref("");
 const status = ref<string>("draft");
 const saveError = ref<string | null>(null);
@@ -200,7 +230,6 @@ const patchMeta = useMutation({
 const notFound = computed(() => metaQuery.error.value instanceof ProblemError && metaQuery.error.value.status === 404);
 const meta = computed(() => metaQuery.data.value);
 const displayRef = computed(() => (meta.value ? wikiDisplayId(meta.value.number) : ""));
-const treeNode = computed(() => tree.data.value?.items.find((node) => node.id === props.documentId));
 const saving = computed(() => patchMeta.isPending.value);
 const archived = computed(() => meta.value?.status === "archived");
 const readOnly = computed(() => archived.value || (session.value?.readOnly ?? false));
@@ -300,8 +329,18 @@ function onTitleBlur(): void {
   void saveTitle();
 }
 
+function onTitleInput(event: Event): void {
+  const input = event.target as HTMLTextAreaElement & { composing?: boolean };
+  if (input.composing || (event as InputEvent).isComposing) return;
+  // Match the previous single-line input's paste behavior.
+  title.value = input.value.replace(/[\r\n]/g, "");
+}
+
 function onTitleKeydown(event: KeyboardEvent): void {
-  if (event.key === "Enter" && !event.isComposing) (event.target as HTMLInputElement).blur();
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    (event.target as HTMLTextAreaElement).blur();
+  }
 }
 
 function trash(): void {
@@ -336,8 +375,10 @@ function flashBlock(id: string): void {
         <span>{{ displayRef }}</span>
       </nav>
       <div class="document-page__meta">
-        <input
+        <textarea
+          ref="titleInput"
           v-model="title"
+          rows="1"
           class="document-page__title"
           :aria-label="t('doc.title')"
           :maxlength="TITLE_MAX"
@@ -345,80 +386,16 @@ function flashBlock(id: string): void {
           @focus="onTitleFocus"
           @blur="onTitleBlur"
           @keydown="onTitleKeydown"
+          @input="onTitleInput"
         />
         <div class="document-page__fields">
-          <div class="document-page__field">
-            <label for="document-icon" class="text-sm font-medium">{{ t("project.icon") }}</label>
-            <input
-              id="document-icon"
-              v-model="icon"
-              class="document-page__field-input"
-              :maxlength="ICON_MAX"
-              :disabled="saving || readOnly"
-              @blur="saveIcon"
-            />
-          </div>
-          <div class="document-page__field">
-            <label for="document-status" class="text-sm font-medium">{{ t("doc.status.a11y") }}</label>
-            <select
-              id="document-status"
-              class="document-page__field-select"
-              :value="status"
-              :aria-label="t('doc.status.a11y')"
-              :disabled="saving || readOnly"
-              @change="onStatusChange"
-            >
-              <option v-for="value in STATUSES" :key="value" :value="value">{{ t(STATUS_LABEL[value]) }}</option>
-            </select>
-          </div>
           <span class="document-page__badge">{{ displayRef }}</span>
-          <span v-if="treeNode?.status === 'draft'" class="document-page__badge">{{ t("doc.status.draft") }}</span>
+          <span class="document-page__badge">{{ t(status === "published" ? "doc.status.published" : status === "archived" ? "doc.status.archived" : "doc.status.draft") }}</span>
           <span v-if="readOnly" class="document-page__badge">{{ t("doc.readOnly") }}</span>
           <StarToggle :workspace-id="workspaceId" type="document" :target-id="documentId" />
           <ShareDialog v-if="!readOnly" :workspace-id="workspaceId" :target="{ documentId, projectId: null }" />
         </div>
         <DocumentTagsBar :workspace-id="workspaceId" :document-id="documentId" :project-id="null" :read-only="readOnly" />
-        <DocumentExportMenu
-          :workspace-id="workspaceId"
-          :document-id="documentId"
-          :title="title"
-          :project-id="null"
-          :persist-now="canPersist ? persistBody : undefined"
-        />
-        <div v-if="!readOnly" class="document-page__lifecycle" :aria-label="t('doc.move.title')">
-          <label class="document-page__field">
-            <span class="sr-only">{{ t("doc.move.parentLabel") }}</span>
-            <select
-              v-model="moveParentId"
-              class="document-page__field-select"
-              :aria-label="t('doc.move.parentLabel')"
-              :disabled="moveDoc.isPending.value || trashDoc.isPending.value"
-            >
-              <option value="">{{ t("doc.move.parentLabel") }}</option>
-              <option v-for="node in moveTargets" :key="node.id" :value="node.id">{{ node.title }}</option>
-            </select>
-          </label>
-          <UButton
-            size="sm"
-            variant="outline"
-            color="neutral"
-            :disabled="!moveParentId || moveDoc.isPending.value || trashDoc.isPending.value"
-            @click="moveParentId && move(moveParentId)"
-          >
-            {{ moveDoc.isPending.value ? t("doc.move.pending") : t("doc.move.submit") }}
-          </UButton>
-          <UButton
-            size="sm"
-            variant="outline"
-            color="neutral"
-            :disabled="trashDoc.isPending.value || moveDoc.isPending.value"
-            :aria-label="t('doc.trash.action')"
-            @click="trash"
-          >
-            {{ trashDoc.isPending.value ? t("doc.trash.pending") : t("doc.trash.action") }}
-          </UButton>
-        </div>
-        <p v-if="lifecycleError" role="alert" class="document-page__error">{{ lifecycleError }}</p>
         <div class="document-page__collab">
           <span
             v-if="badge"
@@ -444,6 +421,92 @@ function flashBlock(id: string): void {
             :persist-now="canPersist ? persistBody : undefined"
           />
         </div>
+        <UCollapsible
+          v-model:open="optionsOpen"
+          :unmount-on-hide="false"
+          class="document-page__options"
+          :ui="{ content: 'data-[state=open]:animate-none data-[state=closed]:animate-none' }"
+          @keydown="onOptionsKeydown"
+        >
+          <UButton
+            ref="optionsButton"
+            size="sm"
+            variant="outline"
+            color="neutral"
+            :trailing-icon="optionsOpen ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'"
+          >{{ t("doc.options") }}</UButton>
+          <template #content>
+            <div class="document-page__options-content">
+              <div class="document-page__fields">
+                <div class="document-page__field">
+                  <label for="document-icon" class="text-sm font-medium">{{ t("project.icon") }}</label>
+                  <input
+                    id="document-icon"
+                    v-model="icon"
+                    class="document-page__field-input"
+                    :maxlength="ICON_MAX"
+                    :disabled="saving || readOnly"
+                    @blur="saveIcon"
+                  />
+                </div>
+                <div class="document-page__field">
+                  <label for="document-status" class="text-sm font-medium">{{ t("doc.status.a11y") }}</label>
+                  <select
+                    id="document-status"
+                    class="document-page__field-select"
+                    :value="status"
+                    :aria-label="t('doc.status.a11y')"
+                    :disabled="saving || readOnly"
+                    @change="onStatusChange"
+                  >
+                    <option v-for="value in STATUSES" :key="value" :value="value">{{ t(STATUS_LABEL[value]) }}</option>
+                  </select>
+                </div>
+              </div>
+              <DocumentExportMenu
+                :workspace-id="workspaceId"
+                :document-id="documentId"
+                :title="title"
+                :project-id="null"
+                :persist-now="canPersist ? persistBody : undefined"
+              />
+              <div v-if="!readOnly" class="document-page__lifecycle" :aria-label="t('doc.move.title')">
+                <label class="document-page__field">
+                  <span class="sr-only">{{ t("doc.move.parentLabel") }}</span>
+                  <select
+                    v-model="moveParentId"
+                    class="document-page__field-select"
+                    :aria-label="t('doc.move.parentLabel')"
+                    :disabled="moveDoc.isPending.value || trashDoc.isPending.value"
+                  >
+                    <option value="">{{ t("doc.move.parentLabel") }}</option>
+                    <option v-for="node in moveTargets" :key="node.id" :value="node.id">{{ node.title }}</option>
+                  </select>
+                </label>
+                <UButton
+                  size="sm"
+                  variant="outline"
+                  color="neutral"
+                  :disabled="!moveParentId || moveDoc.isPending.value || trashDoc.isPending.value"
+                  @click="moveParentId && move(moveParentId)"
+                >
+                  {{ moveDoc.isPending.value ? t("doc.move.pending") : t("doc.move.submit") }}
+                </UButton>
+                <UButton
+                  size="sm"
+                  variant="outline"
+                  color="neutral"
+                  :disabled="trashDoc.isPending.value || moveDoc.isPending.value"
+                  :aria-label="t('doc.trash.action')"
+                  @click="trash"
+                >
+                  {{ trashDoc.isPending.value ? t("doc.trash.pending") : t("doc.trash.action") }}
+                </UButton>
+              </div>
+            </div>
+          </template>
+        </UCollapsible>
+        <p v-if="lifecycleError" role="alert" class="document-page__error">{{ lifecycleError }}</p>
         <p v-if="saveError" role="alert" class="document-page__error">{{ saveError }}</p>
         <p v-if="persistError" role="alert" class="document-page__error">{{ persistError }}</p>
       </div>

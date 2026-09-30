@@ -79,6 +79,7 @@ function submit(): void {
           :id="`${dialogId}-q`"
           v-model="draft"
           class="w-full"
+          :ui="{ base: 'placeholder:text-muted' }"
           autofocus
           :placeholder="t('search.queryPlaceholder')"
           autocomplete="off"

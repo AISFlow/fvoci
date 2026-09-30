@@ -214,6 +214,7 @@ test("document metadata supports icon set/clear and status changes", async ({ pa
   const iconSaved = page.waitForResponse((response) =>
     isMatchingDocumentPatch(response, wsId, docId, { icon: "📚" }),
   );
+  await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
   await page.getByLabel("아이콘").fill("📚");
   await page.getByLabel("아이콘").blur();
   await expect(page.getByLabel("아이콘")).toHaveValue("📚");
@@ -242,6 +243,7 @@ test("document metadata supports icon set/clear and status changes", async ({ pa
 
   await page.reload();
   await expect(page.getByLabel("문서 제목")).toHaveValue("연구 노트");
+  await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
   await expect(page.getByLabel("아이콘")).toHaveValue("");
   await expect(page.getByLabel("문서 상태")).toHaveValue("published");
 });
@@ -263,6 +265,7 @@ test("document metadata save failure keeps the previous status", async ({ page }
     await route.continue();
   });
 
+  await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
   await page.getByLabel("문서 상태").selectOption("archived");
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page.getByLabel("문서 상태")).toHaveValue("published");
