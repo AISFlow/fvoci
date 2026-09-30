@@ -936,7 +936,20 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
-#### 최신 전량 인수·통합 체크포인트 (2026-09-30 17:25 KST)
+#### 최신 전량 인수·통합 체크포인트 (2026-09-30 18:17 KST)
+
+현재 로컬 통합은 `a39fd72452a14739809ffdbff049e5ff34b145a0`이며 workspace 후보 `8e7352559a7373385fa682603b3bd95054a323c5`와 Git tree `920d27550f60271fc8bc69f5cdcc5ddbe0fee9fd`가 같다. 원격은 재조회에서도 `b0d258586e935977f683fd151b44e6d74785501c`, base `50d95df1a98c2d88d28f09222c2985fbdb585623`, Draft·auto-merge 없음이다. 현재 로컬 변경의 원격 CI는 아직 없으며 main 수락·배포가 아니다.
+
+- 17:25 뒤 독립 검토된 Vue-only boot/common·React dependency `a5220da5`를 `cf168112`로, discovery cache `0a4da5fa`와 restore-dialog/Gantt fixture 수정이 포함된 workspace `92254987`을 `a39fd724`로 ordinary merge했다. generic React host·boot·router·전용 의존성은 제품 브라우저 경로에서 제거됐다. 개발용 PDF 비교 oracle의 React/devDependencies는 별도이며 문서 변환 기능을 삭제하지 않았다.
+- 현재 8e의 **명시적 Bun 실행**으로 741 web unit/type/production build가 통과했다. final dist343파일·123chunks·고유1168modules에 React 모듈0, 실제 cold home/legal/Gantt 로딩에 editor 모듈0이며 wiki에서는 editor 로딩·저장·reload를 확인했다. fallback6/project-trash1/Gantt1/wiki-navigation1/shell3/direct4/discovery3의 실제 Rust/app-role DB 검사가 통과했다. 이전 plain `bun run`이 Node로 Vite를 실행한 기록을 Bun-only 근거로 쓰지 않는다. dependency a522의 별도 Node 없는 고정 Bun 컨테이너 검증(editor58/web724 등)은 그 SHA 범위로 유지한다.
+- Editor/Calendar visual 후보 a522의 선택한9개 시나리오(성공 실행10회), desktop·390px narrow·readonly·keyboard·calendar drag/resize/409 경계와 36 screenshots를 회수했다. 공식 template SHA/LICENSE와 NOTICE 출처를 확인했고 코디네이터도 화면4장을 직접 확인했다. DOM/pixel 동일성·물리적 touch·성능 개선을 주장하지 않는다. 근거: `fvoci-front272-editor-calendar-visual-sol61.txt` 및 `takeover-evidence/editor-calendar-visual-a522`.
+- 실제 clean Git archive c7b7c921의 unmodified Dockerfile로 Bun frontend·Rust server/migrate/collab/extractor를 빌드했다. 로컬 이미지 `fvoci-front272-candidate:c7b7c921-ctx-ced013b76277`의 source/version은 **c7**이고 a39와 제품 입력은 같지만 전체 archive가 같지는 않다(E2E3파일·문서 차이). 실제 install/direct-env 기본3서비스/backup-restore 검사와 HTTP asset·NOTICE·제한된 app-role 추가15검사는 통과 보고를 회수했고 독립 ctx_5d5263458f3a 검토 중이다. 첫 임시 evidence parser 중복 출력/cleanup race 실패는 보존한다. 최종 누적 후보의 ARM/원격 CI 성공으로 확대하지 않는다.
+- 입력: 진단 observer가 있던 2ba/209의 실제 성공은 해당 관측 조건의 근거만이다. observer를 제거한 현재 제품 후보 `4548b48fa564250cc119e031a9552b7b92da0fb1`의 실제 OS IBus/XTest4cases(Playwright1test)는 통과했고 독립 검토자가 source·343asset·REST/reload를 확인했다. 원래 wiki9/빠른 입력·4회 뒤로가기 검사는 ctx_37987a1e7663가 실행 중이며 독립 ctx_f8a3fcec56bc가 수락한다. 과거03ca 마지막 숫자 소실의 정확한 원인·제품 수정은 아직 입증하지 않았다. CDP와 OS IME를 구분한다.
+- 검색: 최종8e parity는5pass/1fail이며 실패는 새 target POST 전 준비 데이터 검색이다. 추가 per-resource helper `bbdf11f5`는 Due3의 실제5초 poll에서 실패(0pass/1fail/5미실행)하여 **미수락·미통합**이다. global30초 종료가 원인이라는 가설은 독립 trace 확인에서 지지되지 않았다. 기존 index 조사에서 준비 backlog 완료와 새 target5초 검사를 분리한 근거를 재사용해 ctx_4bc48944e4ac가 fixture를 수정하고 ctx_20e3fad27570가 검토한다. target POST/정확한 결과/권한/UI/URL/5초 단언은 유지하며 timeout만 늘려 녹색으로 만들지 않는다. 원래 실패와 이후 미실행을 성공으로 바꾸지 않는다.
+
+원본 Vue7PR은 아래 ledger의 B 인수 이력과 고유 커밋·검토 지적을 보존하며 모두 원격 회수 전 **closure HOLD**다. #273/#277의 실제 Vue Keycloak과 settings 보완, #274/#279/#283의 lifecycle·discovery 보완 및 React 제거는 위 a39에 로컬 반영됐다. #284 검증 회수는 기존 exact spec/후속 fixture 근거를 유지한다. 현재 담당은 workspace ctx_4bc48944e4ac, native ctx_37987a1e7663, image ctx_ced013b76277와 각 별도 reviewer이며 아래 16:46/17:25 소유권 표는 과거 기록이다. 다음은 남은 검색/입력 고정 후보 수락 → 로컬 합본·필요한 경계 검사 → 한 묶음 원격 push → 안정된 HEAD의 누적 CI·최종 검토 → 사용자 머지 승인 대기다. 별도 D 작업과 외부 검증 한계는 유지한다.
+
+#### 이전 전량 인수·통합 체크포인트 (2026-09-30 17:25 KST)
 
 17:25 후속 갱신(아래 16:46 inventory·실패 이력은 당시 근거로 유지): 로컬 통합 HEAD는 `98a4a73bd3ca6910b606e32441ae119d8b80dfa5`이며 원격은 재조회에서도 `b0d25858`, Draft·auto-merge 없음이다. 44f6 합본은 별도 Sol ctx_af3c9a687568의 106 unit/type/build 및 실제 Rust/app-role DB browser14(entity6/settings4/project-settings4)로 수락됐다. 이어 독립 검토된 viewer a64→e58b3161, editor React host ebc→b60c2c92, Vue Keycloak fixture502→98a4를 충돌 없이 로컬 통합했다. 98a4 전체 검증·원격 제출은 아직 하지 않았다.
 
