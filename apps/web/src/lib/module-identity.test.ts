@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
-import * as React from "react";
 import * as Vue from "vue";
 import * as Y from "yjs";
 
@@ -42,11 +41,11 @@ test("web, Vue editor, and provider share Vue, Tiptap, and Yjs identities", asyn
   assert.equal(Vue.createVNode("div").type, "div");
 });
 
-test("the retained PDF converter and renderer resolve one React", () => {
+test("the retained PDF converter and renderer share their development React", async () => {
   const pdfReq = createRequire(webRequire.resolve("@fvoci/editor/export/pdf"));
   const rendererReq = createRequire(pdfReq.resolve("@react-pdf/renderer"));
-  const webReact = resolved(webRequire, "react");
-  assert.equal(resolved(pdfReq, "react"), webReact);
-  assert.equal(resolved(rendererReq, "react"), webReact);
+  const pdfReact = resolved(pdfReq, "react");
+  assert.equal(resolved(rendererReq, "react"), pdfReact);
+  const React = await import(pdfReact);
   assert.equal(React.createElement("div").type, "div");
 });
