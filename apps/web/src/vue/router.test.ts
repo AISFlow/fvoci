@@ -294,3 +294,14 @@ test("workspace-item is more specific than project-home; wiki stays wiki", () =>
   assert.equal(isVueAppPath("/w/acme/GNT-1"), true);
   assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
 });
+
+test("workspace settings routes exist but the boundary still sends them to React", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/settings").name, "workspace-settings");
+  assert.equal(router.resolve("/w/acme/settings/document-tags").name, "workspace-settings-document-tags");
+  assert.equal(router.resolve("/w/acme/settings/templates").name, "workspace-settings-templates");
+  // Boot still loads the React app for these paths (src/app-boundary.ts).
+  assert.equal(isVueAppPath("/w/acme/settings"), false);
+  assert.equal(isVueAppPath("/w/acme/settings/document-tags"), false);
+  assert.equal(isVueAppPath("/w/acme/settings/templates"), false);
+});

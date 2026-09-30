@@ -24,3 +24,12 @@ test("the workspace settings page renders the SSO section behind that rule", () 
     /\{showsWorkspaceSso\(workspace\.kind, canManage\) \? \(\s*<WorkspaceSsoSection\b/,
   );
 });
+
+test("the Vue workspace settings page renders the SSO section behind that rule", () => {
+  const page = readFileSync(
+    path.join(import.meta.dirname, "../../vue/pages/WorkspaceSettingsPage.vue"),
+    "utf8",
+  );
+  assert.match(page, /showsWorkspaceSso\(/);
+  assert.match(page, /<WorkspaceSsoSection\b/);
+});

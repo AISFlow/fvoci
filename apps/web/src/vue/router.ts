@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { isVueAppPath } from "@/app-boundary";
-import { VUE_ACCOUNT_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
+import { VUE_SETTINGS_ROUTE_PATHS, VUE_ACCOUNT_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
 
 /** The Vue app's pages; src/app-boundary.ts sends exactly the live paths
  * (VUE_ROUTE_PATHS) here. Each page is its own chunk, so the Gantt page does not load the wiki
@@ -61,6 +61,21 @@ export const routes: RouteRecordRaw[] = [
   { path: VUE_ACCOUNT_ROUTE_PATHS.admin, name: "admin", component: () => import("./pages/AdminPage.vue") },
   { path: VUE_ACCOUNT_ROUTE_PATHS.adminAudit, name: "admin-audit", component: () => import("./pages/AdminAuditPage.vue") },
   { path: VUE_ACCOUNT_ROUTE_PATHS.adminLegal, name: "admin-legal", component: () => import("./pages/AdminLegalPage.vue") },
+  {
+    path: VUE_SETTINGS_ROUTE_PATHS.documentTagsSettings,
+    name: "workspace-settings-document-tags",
+    component: () => import("./pages/DocumentTagsSettingsPage.vue"),
+  },
+  {
+    path: VUE_SETTINGS_ROUTE_PATHS.templatesSettings,
+    name: "workspace-settings-templates",
+    component: () => import("./pages/TemplatesSettingsPage.vue"),
+  },
+  {
+    path: VUE_SETTINGS_ROUTE_PATHS.workspaceSettings,
+    name: "workspace-settings",
+    component: () => import("./pages/WorkspaceSettingsPage.vue"),
+  },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

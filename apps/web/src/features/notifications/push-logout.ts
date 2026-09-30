@@ -1,23 +1,10 @@
 import { api } from "@/lib/api";
-import {
-  logoutWithPushDisconnect,
-  SW_URL,
-  withTimeout,
-  writePushOwner,
-} from "@/features/notifications/push-subscription";
-
-function localStore(): Storage | null {
-  try {
-    return typeof localStorage === "undefined" ? null : localStorage;
-  } catch {
-    return null;
-  }
-}
+import { currentSubscription, localStore } from "@/features/notifications/push-browser";
+import { logoutWithPushDisconnect, withTimeout, writePushOwner } from "@/features/notifications/push-subscription";
 
 async function browserSubscription(): Promise<PushSubscription | null> {
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return null;
-  const registration = await navigator.serviceWorker.getRegistration(SW_URL);
-  return (await registration?.pushManager.getSubscription()) ?? null;
+  return currentSubscription();
 }
 
 /** `POST /auth/logout` that also disconnects this browser's Web Push. */
