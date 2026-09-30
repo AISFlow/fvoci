@@ -22,7 +22,6 @@ const failed = computed(() => current.isError.value && !none.value);
 <template>
   <AdminShell active="legal">
     <SettingsLegalView
-      :key="kind"
       :kind="kind"
       :on-kind-change="(next) => (kind = next)"
       :current="current.isError.value ? null : (current.data.value ?? null)"

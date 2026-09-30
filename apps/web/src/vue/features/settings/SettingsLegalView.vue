@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UPageCard from "@nuxt/ui/components/PageCard.vue";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
 import { inputChecked, inputText, useZodForm } from "../../composables/useZodForm";
@@ -40,6 +40,14 @@ const form = useZodForm({
 const serverError = ref<string | null>(null);
 const fieldError = ref<string | null>(null);
 const published = ref(false);
+
+// Keep the kind input mounted while dropping the previous kind's draft/notices.
+watch(() => props.kind, () => {
+  form.reset();
+  fieldError.value = null;
+  serverError.value = null;
+  published.value = false;
+});
 
 async function submit(): Promise<void> {
   form.values.kind = props.kind;

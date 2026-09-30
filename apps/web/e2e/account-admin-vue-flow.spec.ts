@@ -229,8 +229,41 @@ test("Vue admin legal editor publishes versions and public legal stays read only
   await page.goto("/settings/legal");
   await expectVueAuth(page);
   await page.getByLabel("법적 문서 제목").fill("다른 종류의 초안");
+  await page.getByLabel("본문(마크다운)").fill("이전 종류의 본문");
+  await page.getByLabel("발효일").fill("2026-01-01");
+  await page.getByLabel("필수 법적 문서").uncheck();
+  const kind = page.locator("#legal-kind");
+  await kind.fill("");
+  let typed = "";
+  for (const character of "custom-policy") {
+    // Real keyboard input must retain the same focused input on every update.
+    await page.keyboard.type(character);
+    typed += character;
+    await expect(kind).toHaveValue(typed);
+    await expect(kind).toBeFocused();
+  }
+  await expect(page.getByLabel("법적 문서 제목")).toHaveValue("");
+  await expect(page.getByLabel("본문(마크다운)")).toHaveValue("");
+  await expect(page.getByLabel("발효일")).toHaveValue("");
+  await expect(page.getByLabel("필수 법적 문서")).toBeChecked();
+  await page.getByLabel("법적 문서 제목").fill("사용자 지정 정책");
+  await page.getByLabel("본문(마크다운)").fill("사용자 지정 정책의 본문");
+  await page.getByLabel("발효일").fill("2026-01-01");
+  await page.getByLabel("필수 법적 문서").uncheck();
+  const customPublished = page.waitForResponse((res) => res.url().endsWith("/api/v1/admin/legal") && res.request().method() === "POST");
+  await page.getByRole("button", { name: "발행", exact: true }).click();
+  const customResponse = await customPublished;
+  expect(customResponse.status()).toBe(201);
+  expect(await customResponse.json()).toMatchObject({ kind: "custom-policy", title: "사용자 지정 정책" });
+  await expect(page.getByRole("list", { name: "현재 발행본" })).toContainText("사용자 지정 정책");
+  await expect(page.getByRole("status")).toBeVisible();
+  await page.getByLabel("법적 문서 제목").fill("사용자 지정 종류의 미발행 초안");
   await page.getByRole("button", { name: "개인정보처리방침(privacy)", exact: true }).click();
   await expect(page.getByLabel("법적 문서 제목")).toHaveValue("");
+  await expect(page.getByRole("status")).toHaveCount(0);
+  await kind.fill("custom-policy");
+  await expect(page.getByLabel("법적 문서 제목")).toHaveValue("");
+  await expect(page.getByRole("list", { name: "현재 발행본" })).toContainText("사용자 지정 정책");
   await page.getByRole("button", { name: "이용약관(terms)", exact: true }).click();
   await page.getByLabel("법적 문서 제목").fill("Vue 콘솔 약관");
   await page.getByLabel("본문(마크다운)").fill("## 적용 범위\n\n관리자가 **발행한** 문서입니다.\n\n<script>window.legalInjection=true</script>");
