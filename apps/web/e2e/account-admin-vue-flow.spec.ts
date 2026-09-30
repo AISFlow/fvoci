@@ -174,7 +174,7 @@ test("Vue personal API tokens show a secret once, persist metadata, and revoke a
     const row = page.getByTestId("account-token-row").filter({ hasText: "콘솔 개인 토큰" });
     await expect(row).toBeVisible();
     await row.getByRole("button", { name: "폐기", exact: true }).click();
-    const dialog = page.getByRole("alertdialog");
+    const dialog = page.locator("dialog[open]");
     const revoked = page.waitForResponse((res) => res.url().endsWith(`/api/v1/me/api-tokens/${output.id}`) && res.request().method() === "DELETE");
     await dialog.getByRole("button", { name: "폐기", exact: true }).click();
     expect((await revoked).status()).toBe(200);
@@ -267,7 +267,7 @@ test("Vue global admin direct URLs deny non-admins before privileged loads and R
   for (const path of ["system", "users", "audit", "instance-settings"]) {
     expect((await page.request.get(`/api/v1/admin/${path}`)).status()).toBe(404);
   }
-  expect((await page.request.patch("/api/v1/admin/instance-settings", { data: { share: { defaultExpiresDays: 1 } } })).status()).toBe(404);
+  expect((await page.request.patch("/api/v1/admin/instance-settings", { data: { share: { enabled: true, defaultExpiresDays: 1, maxExpiresDays: 365 } } })).status()).toBe(404);
   expect((await page.request.post("/api/v1/admin/legal", { data: { kind: "terms", title: "Denied", bodyMarkdown: "Denied", effectiveAt: "2026-01-01T00:00:00Z", required: false } })).status()).toBe(404);
   const anonymous = await browser.newPage({ baseURL: process.env.PLAYWRIGHT_BASE_URL });
   try {
