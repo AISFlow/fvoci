@@ -343,3 +343,74 @@ Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key�
 - 디스크 정리(2026-09-29 13:56–14:12 KST): `df -h /` 사용량 913G → 299G(약 614 GiB 회수; 단계별 df 차이는 Docker volume 262.50,
   worktree build·오래된 cargo target 디렉터리 272.80, 완료 worktree 73.60, image·build cache 8.81 GiB). 대상·검사·결과는
   `/home/kinesis/orca/fvoci-evidence/space-reclaim-2026-09-29/`(단계별 TSV, `before.txt`, `after.txt`).
+- Ultracode 수량 면제(2026-09-29 사용자 지시 "ultracode는 수량 면제야. 편하게 사용해"):
+  - 이 세션은 Claude Code 주 세션 Opus 5.5(`claude-opus-5-5`)이며 Ultracode(xhigh + 내장 Dynamic Workflows)로 동작한다.
+  - 동시 쓰기·독립 검토·무거운 검증의 수량 제한을 적용하지 않는다(`AGENTS.md` "소유권과 자원").
+  - 실제 배정은 workflow 단위로 기록한다. 구현은 `general-purpose` agent, 독립 검토는 편집 도구가 없는 `Plan` agent이며, 둘 다 주 세션 모델을 상속한다.
+  - 호스트 자원: 32 core, 62 GB RAM. 메모리(가용 5 GB 미만)와 디스크(여유 15 GB 미만) 감시를 켠다.
+  - frontend 전용 e2e는 `prebuilt-8adaf1b8` backend 바이너리를 읽기 전용으로 공유한다.
+
+## 2026-09-29 임시 Grok 주 실행 (Opus 주간 한도)
+
+사용자 직접 승인(2026-09-29 23:24 KST): Claude Code Opus 5.5 Ultracode가 주간 한도
+("You've hit your weekly limit · resets Oct 1, 12pm (Asia/Seoul)")에 도달해 신규 Claude dispatch가
+거부된다. 한도 세션을 재시작해 복구를 기다리지 않는다.
+
+- 임시 주 실행: Cursor `cursor-grok-4.6-high`(별도 effort 인자 없음; 기존 검증 ID).
+  이 세션은 Cursor Grok 4.6이며 Ultracode 모드·effort CLI 옵션을 만들지 않는다.
+- 코디네이터는 하나다. 기존 Opus 컨트롤러와 같은 후보를 동시에 머지·릴리스하지 않는다.
+- Grok은 조사 전용이 아니다. 합의된 tracer의 구현·검증·독립 검토 조정·PR·통합·승인된 0.x를 수행한다.
+- 구현자와 다른 컨텍스트의 Grok 워커가 독립 검토를 할 수 있다. 같은 모델 여러 개의 찬성은 객관적 검증이 아니다.
+- 서브에이전트·쓰기·검토의 고정 수량 상한은 적용하지 않는다(AGENTS.md 수량 면제). 경로당 한 작성자와
+  공통 계약 소유권은 유지한다.
+- 실행 경로: Cursor 네이티브 `Task` 서브에이전트(`generalPurpose`, 모델 `cursor-grok-4.6-high`).
+  새 상주 오케스트레이터·Orca 자동 체인을 만들지 않는다.
+- 계정·결제·다른 API 키를 도입하지 않는다. Opus가 돌아와도 진행 중 소유권을 자동으로 뒤집지 않는다.
+- 기존 Opus 워커의 미커밋·미푸시 결과는 폐기하지 않고 회수한다. 한도 종료 시각은 세션
+  `e800da32-68b6-4e7a-a2da-5ad4517a542a`의 workflow output(23:09–23:10 KST)이다.
+
+## 2026-09-30 우선순위 교정 후 인계 (Cursor Grok 4.6)
+
+같은 임시 주 실행이 사용자 지시(신규 미연결 확대보다 기존 흐름 종결)를 적용했다.
+실제 모델은 Cursor Grok 4.6(설치 ID `cursor-grok-4.6-high`와 동일 계열; 이 세션은
+Ultracode/effort CLI를 쓰지 않음). daggertooth detached `a4662256`에는 제품 커밋 없음.
+
+인계 정본: `docs/rewrite.md` §6.2.1·§6.3. 다음 수락 후보는 #287 `485d118e`(독립 검토 +
+Web 36631118948 CLEAN). 자기 검토를 독립 검토로 세지 않음. worktree·WIP PR은 보존.
+
+
+## 2026-09-30 Astra 전면 인수 / Sol 6.1 실제 실행
+
+사용자 직접 지시가 이전 Grok/Opus 전용 배정을 대체했다. native Codex collaboration 도구를 사용하며 새 Orca Run·daemon을 만들지 않았다.
+- 코디네이터: `gpt-6-astra`, effort `medium`; session `01a0ef48-5c88-77f1-9f45-9008284a2deb`의 최신 `turn_context` 확인.
+- `/root/ci287`: `gpt-6.1-sol`, effort `low`; session `01a0ef62-400c-7192-b6db-8a99f6b99c54` 확인.
+- `/root/auth_acceptance`: `gpt-6.1-sol`, effort `low`; session `01a0ef62-70fb-7040-9e82-2144118ecbb0` 확인.
+- `/root/review287_setup`: 별도 컨텍스트의 `gpt-6.1-sol`, effort `low`; 완료 보고서의 turn_context 대조로 확인했다.
+- worker effort는 override하지 않은 실제 default이며 Ultracode를 사용했다고 주장하지 않는다. 과거 Sol6.1 요청 거부와
+  Sol6 대체 기록은 과거 사실로 보존하며 이번 실제 실행 성공과 구분한다.
+- 현재 서비스가 제공하는 native 동시 슬롯 4개는 도구 제한이다. 사용자 작업 수량 상한을 다시 도입한 것이 아니다.
+- 이전 Grok의 동결·쓰기 클레임 반납은 handoff-main.json과 Orca done 응답으로 확인했다. 기존 rust-oidc-ms Sol 터미널은
+  capacity 오류 후 입력 대기이며 유지했다. 이전 pending child를 새 작업으로 재실행하지 않았다.
+
+사용자의 후속 지시로 effort는 코디네이터가 작업별 자동 배정한다. `/root/review_ci_auth_delta`는 high,
+`/root/evidence_recovery`와 `/root/review_takeover_docs`는 medium(모두 transcript 확인). 구현 후속은
+invite_connect high, setup_integrate medium으로 요청했으며 실제 완료 보고의 runtime을 대조한다.
+
+## 2026-09-30 사용자 후속 지시: Orca 터미널 워커
+
+신규 워커는 Orca 터미널에서 실행하며 native subagent의 서비스 동시 슬롯4개를 Orca 워커 제한으로 적용하지 않는다.
+워커·작성자·검토자 고정 상한 없이 자원과 수락 처리량으로 배정한다. 과거 실행 기록은 당시 사실로 유지한다.
+설치 Orca1.4.207에서 requested/effective `gpt-6.1-sol`/`high` worker-start는 agent_readiness timeout으로
+작업 전달 전 실패했다. 해당 실패 터미널은 receipt의 worker-release로 정리했다. 기존 Run은 reset하지 않았다.
+후속은 Orca terminal create의 `codex exec`를 사용했고 supervised dispatch 성공으로 표시하지 않는다.
+- 홈 통합 session `01a0efc4-958a-78d2-a3eb-028e01a37de8`: 실제 gpt-6.1-sol/high, source exec.
+- 별도 검토 session `01a0efd3-77c8-7890-98f2-36b3ee8cb317`: 실제 gpt-6.1-sol/high, source exec.
+- 정리 조사 session `01a0efc4-15c9-7630-aaf6-d41631fc80d7`: 실제 gpt-6.1-sol/high, source exec.
+각 보고서에서 session_meta와 turn_context를 대조했다. 상세 후보/검사/잔존 자원은 docs/rewrite.md 및 연결 기록에 둔다.
+CLI connected는 화면 연결을 보장하지 않는다. 2026-09-30 `orca-ide open --json`은
+`desktop_activation_blocked`: persistent terminal provider unavailable로 headless 상태이며 앱 정상 종료/재시작을 안내했다.
+실행 결과를 회수·보존한 뒤 종료하며 활성 검사를 무차별 종료하거나 정상 표시로 주장하지 않는다.
+
+재개 확인 (2026-09-30): 사용자 Orca 재시작 뒤1.4.217 새 runtime73201137-ed1f-4a8a-bcde-302a44c54e4b에서
+desktop available, graph ready, connected 확인. worker-start가 visible terminal, requested/effective gpt-6.1-sol/high,
+input_accepted 및 turn_started observed를 반환했다. 이전 headless/준비 시간 초과와 구분한다. 상세 dispatch와 소유권은 진행 정본에 둔다.
