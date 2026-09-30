@@ -921,7 +921,16 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
   이 절은 로컬 미커밋 기록이며 기존 #263의 원격 HEAD `8777f372`에는 아직 없다.
 
 
-### 6.5 Astra / Sol 6.1 실행 TODO (2026-09-30 인수)
+### 6.5 Sol 6.1 코디네이터 / Sol 6.1 워커 실행 TODO (2026-09-30 인수)
+
+**인수 실행 확인:** 주 세션 `01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0` 실제 `gpt-6.1-sol/high`, 지정 터미널의
+`run-use` 성공으로 기존 `run_496803f4d94f` coordinator_handle을 `term_cc010fa2-f24c-4018-820f-16172de0e39f`,
+consumer_generation 2에 연결했다(14:42:01Z). 기존 일곱 활성 워커와 과거 retained/user-owned 자원을 보존했다.
+대기 질문 `msg_52bc13f75ccd`에는 features/settings/** 전체 소유, 제외는 기존 src/vue/pages 일곱 wrapper뿐이라고 공식 reply했다.
+공통 정확한 App.vue 선언 생성은 별도 `task_e45b35066f42 / ctx_d1702c3236dd`에 좁은 tooling/config 소유권을 부여했다.
+전체 Web emit의 기존 TS2742 실패·any shim 금지를 유지한다. `/tmp/f272-web-sfc-types-{spec.txt,dispatch.json}` 및 제출 보고서에 연결한다.
+통합 인수 base `3b6e11fb0fd9773f530e06790175ba650b6bd705` clean; 원격 #272는 조회 당시 `9ec790aa`, Draft/auto-merge 없음.
+최종 전체 lint/format·frontend·별도 검토·누적 통합·finalCI는 진행 중이며, **별도 사용자 승인 전 #272 머지·릴리스 금지**다.
 
 **2026-09-30 사용자 후속 지시: 코디네이터를 Sol 6.1 high로 전면 인계.** 새 Orca 터미널 `term_cc010fa2-f24c-4018-820f-16172de0e39f`는 기존 통합 worktree를 인수한다. 기존 코디네이터는 인계 prompt 수락 후 배정·통합·원격 쓰기를 중단한다. 기존 Run `run_496803f4d94f`와 #272 단일 후보·별도 승인 전 머지/릴리스 금지를 유지한다. Run 소유권 재바인딩은 새 터미널의 실제 권한으로 수행해야 하며 기존 세션의 대리 호출은 consumer_fenced로 거부돼 효과가 없었다. 실행 요청은 gpt-6.1-sol/high, 새 TUI 표시도 GPT-6.1-Sol high; 실제 turn_context는 수신자가 기록한다.
 

@@ -414,3 +414,18 @@ CLI connected는 화면 연결을 보장하지 않는다. 2026-09-30 `orca-ide o
 재개 확인 (2026-09-30): 사용자 Orca 재시작 뒤1.4.217 새 runtime73201137-ed1f-4a8a-bcde-302a44c54e4b에서
 desktop available, graph ready, connected 확인. worker-start가 visible terminal, requested/effective gpt-6.1-sol/high,
 input_accepted 및 turn_started observed를 반환했다. 이전 headless/준비 시간 초과와 구분한다. 상세 dispatch와 소유권은 진행 정본에 둔다.
+
+## 2026-09-30 Sol 6.1 high 코디네이터 전면 인수
+
+사용자 직접 지시로 단일 코디네이터를 Sol 6.1 high로 교체했다. 과거 모델·검토·수락 이력은 보존한다.
+- 실제 주 세션 `01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0`, source `cli`, cwd `f272-batch-integration`.
+  `/home/kinesis/.codex/sessions/2026/09/30/rollout-2026-09-30T23-38-52-01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0.jsonl`
+  최신 `turn_context`의 model `gpt-6.1-sol`, effort `high` 확인(요청값만으로 추정하지 않음).
+- 환경의 실제 `ORCA_TERMINAL_HANDLE=term_cc010fa2-f24c-4018-820f-16172de0e39f`에서 설치 Orca1.4.217의
+  `orchestration run-use --id run_496803f4d94f --json` 성공. 2026-09-30T14:42:01Z receipt의
+  coordinator_handle은 본인, consumer_generation은 2다. 기존 generation1의 대리 호출 실패와 구분한다.
+- 다른 Run 생성/reset·터미널 identity 대리 지정 없음. 기존 일곱 활성 워커·배정·근거 보존, 공식 @all로 소유권 변경 전달.
+- CodeGraph는 이 통합 worktree에서 별도 init: 1,119 files / 28,030 nodes / 122,755 edges. 타 worktree 인덱스 복사 없음.
+- 샌드박스의 일부 Orca 터미널/worker-start 호출은 runtime_unavailable로 거부돼 승인된 외부 실행으로 실제 runtime 연결을 확인했다.
+  강한 read-only 검토 sandbox는 적용했다고 주장하지 않으며, 별도 검토 prompt와 Git 변경 감시를 유지한다.
+- #272 별도 사용자 승인 전 main 머지·태그·릴리스·배포 금지. 실제 task/dispatch·검사·다음 실행은 docs/rewrite.md §6.5 정본에 둔다.
