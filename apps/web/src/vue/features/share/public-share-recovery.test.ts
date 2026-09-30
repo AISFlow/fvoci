@@ -140,6 +140,7 @@ function mountPage() {
     get readerMounts() { return readerMounts; },
     reader: () => descendants(root).find(el => el.type === "reader"),
     denied: () => descendants(root).some(el => el.props.role === "alert"),
+    refreshing: () => descendants(root).find(el => el.type === "button")?.props.loading,
     queue(kind: string, token = route.params.token) {
       const control = deferred<any>();
       (pending[`${token}:${kind}`] ??= []).push(control);
@@ -157,7 +158,7 @@ async function denyChild(page: ReturnType<typeof mountPage>) {
   assert.equal(page.reader(), undefined);
 }
 
-test("recovery cannot reveal cached chrome after reconnect denies the root while the earlier tree is pending", async () => {
+for (const recoversAgain of [false, true]) test(`older recovery stays gated after reconnect denial${recoversAgain ? " even when another reconnect succeeds" : " while its tree is pending"}`, async () => {
   onlineManager.setOnline(true);
   const page = mountPage();
   try {
@@ -177,10 +178,15 @@ test("recovery cannot reveal cached chrome after reconnect denies the root while
     newerBody.reject(new ProblemError(404));
     await until(() => page.client.getQueryState(["share-body", "share-a", null])?.status === "error", "the newer root denial");
     const mountsAfterDenial = page.readerMounts;
+    if (recoversAgain) {
+      onlineManager.setOnline(false);
+      onlineManager.setOnline(true);
+      await until(() => page.client.getQueryState(["share-body", "share-a", null])?.status === "success", "a subsequent reconnect body success");
+    }
     tree.resolve({ items: [{ id: "root", title: "formerly authorized tree" }] });
     await recovery;
     await Vue.nextTick();
-    assert.equal((page.client.getQueryState(["share-body", "share-a", null])?.error as ProblemError).status, 404);
+    if (!recoversAgain) assert.equal((page.client.getQueryState(["share-body", "share-a", null])?.error as ProblemError).status, 404);
     console.log("reconnect recovery state", { currentBodyStatus: page.client.getQueryState(["share-body", "share-a", null])?.status, denied: page.denied(), readerVisible: Boolean(page.reader()), readerMountsAfterDenial: page.readerMounts - mountsAfterDenial });
     assert.equal(page.denied(), true, "the latest denial must survive older recovery completion");
     assert.equal(page.reader(), undefined, "no cached tree/title/body is rendered");
@@ -189,4 +195,123 @@ test("recovery cannot reveal cached chrome after reconnect denies the root while
     page.stop();
     onlineManager.setOnline(true);
   }
+});
+
+test("current metadata still fetching prevents historical recovery results from reopening the reader", async () => {
+  const page = mountPage();
+  try {
+    await denyChild(page);
+    const tree = page.queue("tree");
+    const recovery = page.refresh();
+    await until(() => page.client.getQueryState(["share-body", "share-a", null])?.status === "success" && page.client.getQueryState(["share-tree", "share-a"])?.fetchStatus === "fetching", "recovery waiting only for tree");
+    const newerMeta = page.queue("meta");
+    onlineManager.setOnline(false);
+    onlineManager.setOnline(true);
+    await until(() => page.client.getQueryState(["share-public", "share-a"])?.fetchStatus === "fetching" && page.client.getQueryState(["share-body", "share-a", null])?.fetchStatus === "idle", "new metadata pending with successful body");
+    const mounts = page.readerMounts;
+    tree.resolve({ items: [] });
+    await recovery;
+    await Vue.nextTick();
+    assert.equal(page.denied(), true);
+    assert.equal(page.readerMounts, mounts);
+    newerMeta.resolve({ documentId: "root", title: "current title", expiresAt: null });
+    await until(() => page.client.getQueryState(["share-public", "share-a"])?.fetchStatus === "idle", "the new metadata success");
+    assert.equal(page.reader(), undefined, "automatic success does not clear the denial latch");
+    await page.refresh();
+    await until(() => Boolean(page.reader()), "explicit current recovery");
+  } finally {
+    page.stop();
+    onlineManager.setOnline(true);
+  }
+});
+
+test("old-token metadata completion cannot reset a new token's denied selection or its recovery spinner", async () => {
+  const page = mountPage();
+  try {
+    await denyChild(page);
+    const oldMeta = page.queue("meta");
+    const oldRecovery = page.refresh();
+    await until(() => page.client.getQueryState(["share-public", "share-a"])?.fetchStatus === "fetching", "old-token metadata request");
+    page.route.params.token = "share-b";
+    await denyChild(page);
+    const newMeta = page.queue("meta");
+    const newRecovery = page.refresh();
+    await until(() => page.client.getQueryState(["share-public", "share-b"])?.fetchStatus === "fetching", "new-token metadata request");
+    const rootRequests = page.requests.filter(r => r.token === "share-b" && r.kind === "body" && r.documentId === null).length;
+    oldMeta.resolve({ documentId: "root", title: "old title", expiresAt: null });
+    await oldRecovery;
+    await Vue.nextTick();
+    assert.equal(page.denied(), true);
+    assert.equal(page.reader(), undefined);
+    assert.equal(page.refreshing(), true, "old completion must not stop the current recovery spinner");
+    assert.equal(page.requests.filter(r => r.token === "share-b" && r.kind === "body" && r.documentId === null).length, rootRequests, "old continuation must not reset selection or refetch the new root");
+    newMeta.resolve({ documentId: "root", title: "new title", expiresAt: null });
+    await newRecovery;
+    await until(() => page.reader()?.props.token === "share-b", "the new token's authorized recovery");
+  } finally { page.stop(); }
+});
+
+for (const selection of ["child", "sibling"]) test(`selection changing to ${selection} during a normal metadata refresh invalidates its continuation`, async () => {
+  const page = mountPage();
+  try {
+    await until(() => Boolean(page.reader()?.props.body), "the initial reader");
+    const meta = page.queue("meta");
+    const refresh = page.reader()!.props.onRefresh() as Promise<void>;
+    await until(() => page.client.getQueryState(["share-public", "share-a"])?.fetchStatus === "fetching", "normal refresh metadata");
+    page.reader()!.props.onSelectDocument(selection);
+    await until(() => page.client.getQueryState(["share-body", "share-a", selection])?.fetchStatus === "idle", "the changed selection's request");
+    const requests = page.requests.length;
+    meta.resolve({ documentId: "root", title: "current title", expiresAt: null });
+    await refresh;
+    await Vue.nextTick();
+    assert.equal(page.denied(), selection === "child");
+    if (selection === "child") assert.equal(page.reader(), undefined);
+    else assert.equal(page.reader()?.props["active-document-id"], "sibling");
+    assert.equal(page.requests.length, requests, "the obsolete continuation starts no tree/body requests");
+  } finally { page.stop(); }
+});
+
+test("a superseded recovery cannot clear the gate or stop the newer recovery spinner", async () => {
+  const page = mountPage();
+  try {
+    await denyChild(page);
+    const tree = page.queue("tree");
+    const oldRecovery = page.refresh();
+    await until(() => page.client.getQueryState(["share-body", "share-a", null])?.status === "success" && page.client.getQueryState(["share-tree", "share-a"])?.fetchStatus === "fetching", "old recovery waiting for tree");
+    const meta = page.queue("meta");
+    const newRecovery = page.refresh();
+    await until(() => page.client.getQueryState(["share-public", "share-a"])?.fetchStatus === "fetching", "new recovery metadata");
+    tree.resolve({ items: [] });
+    await oldRecovery;
+    await Vue.nextTick();
+    assert.equal(page.denied(), true);
+    assert.equal(page.reader(), undefined);
+    assert.equal(page.refreshing(), true);
+    meta.resolve({ documentId: "root", title: "current title", expiresAt: null });
+    await newRecovery;
+    await until(() => Boolean(page.reader()), "new recovery success");
+    assert.equal(page.reader()!.props.refreshing, false);
+  } finally { page.stop(); }
+});
+
+test("sequential current recovery waits for both fresh tree and root body before mounting content", async () => {
+  const page = mountPage();
+  try {
+    await denyChild(page);
+    const tree = page.queue("tree");
+    const body = page.queue("body");
+    const recovery = page.refresh();
+    await until(() => page.client.getQueryState(["share-body", "share-a", null])?.fetchStatus === "fetching", "the recovery body");
+    const mounts = page.readerMounts;
+    tree.resolve({ items: [{ id: "root", title: "current tree" }] });
+    await until(() => page.client.getQueryState(["share-tree", "share-a"])?.fetchStatus === "idle", "fresh tree success");
+    assert.equal(page.reader(), undefined);
+    assert.equal(page.readerMounts, mounts);
+    body.resolve("<p>current authorized body</p>");
+    await recovery;
+    await until(() => Boolean(page.reader()), "successful full recovery");
+    assert.equal(page.reader()!.props.body, "<p>current authorized body</p>");
+    assert.deepEqual(page.reader()!.props.tree, [{ id: "root", title: "current tree" }]);
+    assert.equal(page.denied(), false);
+  } finally { page.stop(); }
 });

@@ -105,13 +105,19 @@ test("observed body denial gates cached share tree, heading and snippets; full r
 
         // Full retry keeps invalid tokens gated, but a moved child can return to the authorized root.
         if (scenario === "expired") {
+          const retryMeta = reader.waitForResponse(response => new URL(response.url()).pathname === `/api/v1/share/${token}`);
           await reader.getByRole("button", { name: "다시 시도", exact: true }).click();
+          expect((await retryMeta).status()).toBe(404);
+          await expect(reader.getByRole("button", { name: "다시 시도", exact: true })).toBeEnabled();
           await expect(reader.getByRole("alert")).toBeVisible();
           await expect(tree).toHaveCount(0);
           fixtureSql(`UPDATE fvoci.share_links SET expires_at = now() + interval '1 day' WHERE id = ${uuid(share.id)};`);
         }
+        const refreshedMeta = reader.waitForResponse(response => new URL(response.url()).pathname === `/api/v1/share/${token}`);
         await reader.getByRole("button", { name: "다시 시도", exact: true }).click();
+        expect((await refreshedMeta).status()).toBe(scenario === "revoked" ? 404 : 200);
         if (scenario === "revoked") {
+          await expect(reader.getByRole("button", { name: "다시 시도", exact: true })).toBeEnabled();
           await expect(reader.getByRole("alert")).toBeVisible();
           await expect(tree).toHaveCount(0);
           await expect(reader.getByTestId("share-search-results")).toHaveCount(0);
