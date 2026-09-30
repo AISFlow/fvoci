@@ -33,7 +33,11 @@ async function fixtures(request: APIRequestContext, key: string) {
 }
 
 async function nextParagraph(page: Page, editor: Locator) {
-  await editor.click(); await page.keyboard.press("Control+End"); await page.keyboard.press("Enter");
+  // Clicking the editor's center can open the previous embed's textarea.
+  // Target a paragraph so native typing/paste reaches the ProseMirror host.
+  await editor.locator(":scope > p").last().click();
+  await page.keyboard.press("End"); await page.keyboard.press("Enter");
+  await expect(editor).toBeFocused();
 }
 async function mention(page: Page, query: string, title: string) {
   await page.keyboard.type(`@${query}`);
