@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type Page, type Response, type Route } from "@playwright/test";
-import { createE2eUser, login, logout } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, logout } from "./helpers";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 
@@ -31,12 +31,16 @@ function documentResourcePath(workspaceId: string, documentId: string): string {
 }
 
 function patchBodyHas(
-  request: { postDataJSON: () => unknown },
+  request: {
+    postDataJSON: () => unknown;
+  },
   expected: Record<string, unknown>,
 ): boolean {
   try {
     const body = request.postDataJSON();
-    if (body === null || typeof body !== "object") return false;
+    if (body === null || typeof body !== "object") {
+      return false;
+    }
     const record = body as Record<string, unknown>;
     return Object.entries(expected).every(([key, value]) => Object.is(record[key], value));
   } catch {
@@ -63,17 +67,22 @@ async function persistedDocument(
   page: Page,
   workspaceId: string,
   documentId: string,
-): Promise<{ title: string; icon: string | null; status: string }> {
+): Promise<{
+  title: string;
+  icon: string | null;
+  status: string;
+}> {
   const res = await page.request.get(documentResourcePath(workspaceId, documentId));
   expect(res.ok()).toBe(true);
-  return res.json();
+  return readJson(res, flowSchemas.document);
 }
 
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = await readJson(workspacesRes, flowSchemas.workspaces);
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
+  if (workspace === undefined) throw new Error("Missing fixture value: workspace");
   expect(workspace).toBeTruthy();
   return workspace.id;
 }
@@ -83,9 +92,16 @@ async function documentIdFromOpenWikiPage(page: Page, wsId: string): Promise<str
   expect(match).toBeTruthy();
   const treeRes = await page.request.get(`/api/v1/workspaces/${wsId}/tree`);
   expect(treeRes.ok()).toBe(true);
-  const document = (await treeRes.json()).items.find(
-    (item: { number: number }) => item.number === Number(match![1]),
+  const document = (await readJson(treeRes, flowSchemas.documents)).items.find(
+    (item: { number: number }) => {
+      const required1 = match;
+      if (required1 === null) {
+        throw new Error("Missing fixture value: match");
+      }
+      return item.number === Number(required1[1]);
+    },
   );
+  if (document === undefined) throw new Error("Missing fixture value: document");
   expect(document).toBeTruthy();
   return document.id;
 }
@@ -93,7 +109,10 @@ async function documentIdFromOpenWikiPage(page: Page, wsId: string): Promise<str
 async function documentIdByTitle(page: Page, wsId: string, title: string): Promise<string> {
   const treeRes = await page.request.get(`/api/v1/workspaces/${wsId}/tree`);
   expect(treeRes.ok()).toBe(true);
-  const document = (await treeRes.json()).items.find((item: { title: string }) => item.title === title);
+  const document = (await readJson(treeRes, flowSchemas.documents)).items.find(
+    (item: { title: string }) => item.title === title,
+  );
+  if (document === undefined) throw new Error("Missing fixture value: document");
   expect(document).toBeTruthy();
   return document.id;
 }
@@ -142,7 +161,7 @@ test("member creates wiki document and edits title metadata", async ({ page }) =
   );
   releaseHold();
   const patch = await saved;
-  expect((await patch.json()).title).toBe(renamed);
+  expect((await readJson(patch, flowSchemas.document)).title).toBe(renamed);
   await page.unroute(matchUrl, holdPatch);
 
   expect((await persistedDocument(page, wsId, docId)).title).toBe(renamed);
@@ -150,9 +169,12 @@ test("member creates wiki document and edits title metadata", async ({ page }) =
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("link", { name: renamed })).toBeVisible();
 });
-
-type SchemaDump = { nodes: { name: string }[]; marks: unknown[] };
-
+type SchemaDump = {
+  nodes: {
+    name: string;
+  }[];
+  marks: unknown[];
+};
 test("the mounted wiki editor has the server's yjs seed schema", async ({ page }) => {
   await login(page, member.email, member.password);
   await page.goto("/w/acme/wiki");
@@ -165,11 +187,29 @@ test("the mounted wiki editor has the server's yjs seed schema", async ({ page }
   // built with its real node views.
   const mounted = JSON.parse(
     await root.evaluate((dom) => {
-      type AttrSpec = { hasDefault: boolean; default: unknown; validate?: unknown };
-      type SchemaType = { attrs: Record<string, AttrSpec> };
-      type MarkType = SchemaType & { rank: number; excludes(other: MarkType): boolean };
-      type Schema = { nodes: Record<string, SchemaType>; marks: Record<string, MarkType> };
-      const { schema } = (dom as unknown as { editor: { schema: Schema } }).editor;
+      type AttrSpec = {
+        hasDefault: boolean;
+        default: unknown;
+        validate?: string | ((value: unknown) => void);
+      };
+      type SchemaType = {
+        attrs: Record<string, AttrSpec>;
+      };
+      type MarkType = SchemaType & {
+        rank: number;
+        excludes(other: MarkType): boolean;
+      };
+      type Schema = {
+        nodes: Record<string, SchemaType>;
+        marks: Record<string, MarkType>;
+      };
+      const { schema } = (
+        dom as unknown as {
+          editor: {
+            schema: Schema;
+          };
+        }
+      ).editor;
       const attrs = (type: SchemaType) =>
         Object.entries(type.attrs).map(([name, a]) => ({
           name,
@@ -218,7 +258,7 @@ test("document metadata supports icon set/clear and status changes", async ({ pa
   await page.getByLabel("아이콘").fill("📚");
   await page.getByLabel("아이콘").blur();
   await expect(page.getByLabel("아이콘")).toHaveValue("📚");
-  expect((await (await iconSaved).json()).icon).toBe("📚");
+  expect((await readJson(await iconSaved, flowSchemas.document)).icon).toBe("📚");
   expect((await persistedDocument(page, wsId, docId)).icon).toBe("📚");
 
   const statusSaved = page.waitForResponse((response) =>
@@ -226,7 +266,7 @@ test("document metadata supports icon set/clear and status changes", async ({ pa
   );
   await page.getByLabel("문서 상태").selectOption("published");
   await expect(page.getByLabel("문서 상태")).toHaveValue("published");
-  expect((await (await statusSaved).json()).status).toBe("published");
+  expect((await readJson(await statusSaved, flowSchemas.document)).status).toBe("published");
   expect((await persistedDocument(page, wsId, docId)).status).toBe("published");
 
   const iconCleared = page.waitForResponse((response) =>
@@ -235,7 +275,7 @@ test("document metadata supports icon set/clear and status changes", async ({ pa
   await page.getByLabel("아이콘").fill("");
   await page.getByLabel("아이콘").blur();
   await expect(page.getByLabel("아이콘")).toHaveValue("");
-  expect((await (await iconCleared).json()).icon).toBeNull();
+  expect((await readJson(await iconCleared, flowSchemas.document)).icon).toBeNull();
   const persisted = await persistedDocument(page, wsId, docId);
   expect(persisted.title).toBe("연구 노트");
   expect(persisted.icon).toBeNull();
@@ -295,55 +335,58 @@ test("nested wiki tree preserves deep links and more than six children", async (
     data: { parentId: null, title: "루트 문서" },
   });
   expect(rootRes.ok()).toBe(true);
-  const root = await rootRes.json();
-
+  const root = await readJson(rootRes, flowSchemas.document);
   const childRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
     data: { parentId: root.id, title: "중간 문서" },
   });
   expect(childRes.ok()).toBe(true);
-  const child = await childRes.json();
-
+  const child = await readJson(childRes, flowSchemas.document);
   const grandchildRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
     data: { parentId: child.id, title: "하위 문서" },
   });
   expect(grandchildRes.ok()).toBe(true);
-  const grandchild = await grandchildRes.json();
+  const grandchild = await readJson(grandchildRes, flowSchemas.document);
   const descendantRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
     data: { parentId: grandchild.id, title: "최하위 문서" },
   });
   expect(descendantRes.ok()).toBe(true);
-  const descendant = await descendantRes.json();
+  const descendant = await readJson(descendantRes, flowSchemas.document);
   const levels = [root, child, grandchild, descendant];
   const siblings = [];
   for (let index = 1; index <= 6; index++) {
     const siblingRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
-      data: { parentId: root.id, title: `형제 문서 ${index}` },
+      data: { parentId: root.id, title: `형제 문서 ${String(index)}` },
     });
     expect(siblingRes.ok()).toBe(true);
-    siblings.push(await siblingRes.json());
+    siblings.push(await readJson(siblingRes, flowSchemas.document));
   }
   const documents = [...levels, ...siblings];
 
   await page.goto("/w/acme/wiki");
-  await expect(page.getByTestId(`wiki-doc-WIKI-${root.number}`).locator("..").locator(":scope > ul > li")).toHaveCount(7);
+  await expect(
+    page
+      .getByTestId(`wiki-doc-WIKI-${String(root.number)}`)
+      .locator("..")
+      .locator(":scope > ul > li"),
+  ).toHaveCount(7);
   for (const document of documents) {
-    const link = page.getByTestId(`wiki-doc-WIKI-${document.number}`);
+    const link = page.getByTestId(`wiki-doc-WIKI-${String(document.number)}`);
     await expect(link).toBeVisible();
     await expect(link).toContainText(document.title);
-    await expect(link).toHaveAttribute("href", `/w/acme/WIKI-${document.number}`);
+    await expect(link).toHaveAttribute("href", `/w/acme/WIKI-${String(document.number)}`);
   }
-  await page.getByTestId(`wiki-doc-WIKI-${descendant.number}`).click();
-  await expect(page).toHaveURL(new RegExp(`/w/acme/WIKI-${descendant.number}$`));
+  await page.getByTestId(`wiki-doc-WIKI-${String(descendant.number)}`).click();
+  await expect(page).toHaveURL(new RegExp(`/w/acme/WIKI-${String(descendant.number)}$`));
   await expect(page.getByLabel("문서 제목")).toHaveValue("최하위 문서");
   await page.reload();
   await expect(page.getByLabel("문서 제목")).toHaveValue("최하위 문서");
   await page.goto("/w/acme/wiki");
   await page.reload();
   for (const document of documents) {
-    await expect(page.getByTestId(`wiki-doc-WIKI-${document.number}`)).toBeVisible();
+    await expect(page.getByTestId(`wiki-doc-WIKI-${String(document.number)}`)).toBeVisible();
     const persisted = await page.request.get(documentResourcePath(id, document.id));
     expect(persisted.ok()).toBe(true);
-    expect((await persisted.json()).parentId).toBe(document.parentId);
+    expect((await readJson(persisted, flowSchemas.document)).parentId).toBe(document.parentId);
   }
 });
 
@@ -355,8 +398,9 @@ test("admin sees member document and guest cannot read wiki", async ({ page }) =
   const id = await workspaceId(page, "acme");
   const treeRes = await page.request.get(`/api/v1/workspaces/${id}/tree`);
   expect(treeRes.ok()).toBe(true);
-  const treeBody = await treeRes.json();
+  const treeBody = await readJson(treeRes, flowSchemas.documents);
   const document = treeBody.items.find((item: { title: string }) => item.title === "연구 노트");
+  if (document === undefined) throw new Error("Missing fixture value: document");
   expect(document).toBeTruthy();
 
   createE2eUser(guest.email, guest.password, guest.givenName, {
@@ -370,21 +414,16 @@ test("admin sees member document and guest cannot read wiki", async ({ page }) =
 
   const guestTreeRes = await page.request.get(`/api/v1/workspaces/${id}/tree`);
   expect(guestTreeRes.ok()).toBe(true);
-  expect((await guestTreeRes.json()).items).toEqual([]);
-
-  const guestDocRes = await page.request.get(
-    `/api/v1/workspaces/${id}/documents/${document.id}`,
-  );
+  expect((await readJson(guestTreeRes, flowSchemas.documents)).items).toEqual([]);
+  const guestDocRes = await page.request.get(`/api/v1/workspaces/${id}/documents/${document.id}`);
   expect(guestDocRes.status()).toBe(404);
-  expect((await guestDocRes.json()).code).toBe("not_found");
-
+  expect((await readJson(guestDocRes, flowSchemas.error)).code).toBe("not_found");
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
   await expect(page.getByText("현재 역할: 게스트")).toBeVisible();
   await expect(page.getByRole("button", { name: "새 문서" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "연구 노트" })).toHaveCount(0);
   await expect(page.getByText("문서가 없습니다")).toBeVisible();
-
-  await page.goto(`/w/acme/WIKI-${document.number}`);
+  await page.goto(`/w/acme/WIKI-${String(document.number)}`);
   await expect(page).toHaveURL(/\/w\/acme\/wiki$/);
 });

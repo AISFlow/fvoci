@@ -1,3 +1,4 @@
+import { readJson, flowSchemas } from "./helpers";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { expect, type Page } from "@playwright/test";
@@ -7,11 +8,27 @@ import { expect, type Page } from "@playwright/test";
 export function authSql(sql: string): string {
   const url = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  if (!url || !container) throw new Error("isolated PostgreSQL fixture is required");
-  return execFileSync("docker", [
-    "exec", container, "psql", "-U", "postgres", "-d", new URL(url).pathname.slice(1),
-    "-v", "ON_ERROR_STOP=1", "-At", "-c", sql,
-  ], { encoding: "utf8", stdio: "pipe" }).trim();
+  if (!url || !container) {
+    throw new Error("isolated PostgreSQL fixture is required");
+  }
+  return execFileSync(
+    "docker",
+    [
+      "exec",
+      container,
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      new URL(url).pathname.slice(1),
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-At",
+      "-c",
+      sql,
+    ],
+    { encoding: "utf8", stdio: "pipe" },
+  ).trim();
 }
 
 export function tokenHash(token: string): string {
@@ -27,7 +44,15 @@ export async function expectVueAuth(page: Page): Promise<void> {
 export async function navigateAuthQuery(page: Page, path: string): Promise<void> {
   await page.evaluate(async (target) => {
     const root = document.getElementById("root") as HTMLElement & {
-      __vue_app__: { config: { globalProperties: { $router: { push: (to: string) => Promise<unknown> } } } };
+      __vue_app__: {
+        config: {
+          globalProperties: {
+            $router: {
+              push: (to: string) => Promise<unknown>;
+            };
+          };
+        };
+      };
     };
     await root.__vue_app__.config.globalProperties.$router.push(target);
   }, path);
@@ -60,19 +85,25 @@ export async function rejectMagicVariants(
   await navigateAuthQuery(page, `${path}?token=${token}`);
   // A rejected previous token must not hide a new token's action.
   await expect(page.getByRole("alert")).toHaveCount(0);
-  authSql(`UPDATE fvoci.magic_tokens SET expires_at = now() - interval '1 second' WHERE token_hash = '${hash}'`);
+  authSql(
+    `UPDATE fvoci.magic_tokens SET expires_at = now() - interval '1 second' WHERE token_hash = '${hash}'`,
+  );
   try {
     await page.goto(`${path}?token=${token}`);
     await submit();
     await expect(page.getByRole("alert")).toContainText("링크가 만료되었거나 이미 사용되었습니다");
   } finally {
-    authSql(`UPDATE fvoci.magic_tokens SET expires_at = '${expiry}'::timestamptz WHERE token_hash = '${hash}'`);
+    authSql(
+      `UPDATE fvoci.magic_tokens SET expires_at = '${expiry}'::timestamptz WHERE token_hash = '${hash}'`,
+    );
   }
 }
 
 export async function expectSpentMagic(page: Page, endpoint: string, token: string): Promise<void> {
-  expect(authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${tokenHash(token)}'`)).toBe("0");
+  expect(
+    authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${tokenHash(token)}'`),
+  ).toBe("0");
   const response = await page.request.post(endpoint, { data: { token } });
   expect(response.status()).toBe(400);
-  expect((await response.json()).code).toBe("magic_invalid");
+  expect((await readJson(response, flowSchemas.error)).code).toBe("magic_invalid");
 }

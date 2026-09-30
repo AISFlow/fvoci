@@ -15,7 +15,13 @@ function bundledIconSets(): string[] {
   const prefixes = new Set<string>();
   for (const file of fs.readdirSync(distAssets).filter((name) => name.endsWith(".js"))) {
     const code = fs.readFileSync(path.join(distAssets, file), "utf8");
-    for (const m of code.matchAll(/"prefix":"([a-z0-9]+(?:-[a-z0-9]+)*)","icons":\{/g)) prefixes.add(m[1]!);
+    for (const match of code.matchAll(/"prefix":"([a-z0-9]+(?:-[a-z0-9]+)*)","icons":\{/g)) {
+      const prefix = match[1];
+      if (prefix === undefined) {
+        throw new Error("Bundled icon set must have a prefix");
+      }
+      prefixes.add(prefix);
+    }
   }
   return [...prefixes].sort();
 }
@@ -25,7 +31,7 @@ const FORBIDDEN_NOTICE_PACKAGE_HEADINGS = ["@m2d/", "@playwright/", "vite - "] a
 
 async function runSetup(page: Page): Promise<void> {
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill("김");
   await page.getByLabel("이름", { exact: true }).fill("관리자");
   await page.getByLabel("이메일").fill("Admin@Example.COM");
@@ -41,8 +47,7 @@ test("open-source-licenses.txt is discoverable, served verbatim, and linked from
   browser,
   request,
 }) => {
-  test.setTimeout(120_000);
-
+  test.setTimeout(120000);
   expect(fs.existsSync(distLicense), "production build must emit open-source-licenses.txt").toBe(
     true,
   );

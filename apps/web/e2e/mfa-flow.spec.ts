@@ -33,7 +33,7 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   page,
 }) => {
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -47,7 +47,9 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await page.getByRole("link", { name: "계정", exact: true }).click();
   await expect(page).toHaveURL(/\/settings\/account$/);
   const mfa = page.getByTestId("mfa-section");
-  await expect(mfa.getByTestId("mfa-status")).toHaveText("사용 안 함 — 로그인에 비밀번호만 씁니다.");
+  await expect(mfa.getByTestId("mfa-status")).toHaveText(
+    "사용 안 함 — 로그인에 비밀번호만 씁니다.",
+  );
   await mfa.locator("#settings-mfa-confirm").fill(owner.password);
   await mfa.getByRole("button", { name: "설정", exact: true }).click();
   const secretText = (await mfa.getByTestId("mfa-secret").textContent())?.trim() ?? "";
@@ -70,8 +72,9 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await mfa.locator("#settings-mfa-code").fill(totp(secretText, enableStep));
   await mfa.getByRole("button", { name: "켜기" }).click();
   await expect(mfa.getByRole("status").filter({ hasText: "2단계 인증을 켰습니다." })).toBeVisible();
-  const recoveryCodes = (await mfa.getByTestId("mfa-recovery-codes").locator("li").allTextContents())
-    .map((code) => code.trim());
+  const recoveryCodes = (
+    await mfa.getByTestId("mfa-recovery-codes").locator("li").allTextContents()
+  ).map((code) => code.trim());
   expect(recoveryCodes).toHaveLength(10);
   for (const code of recoveryCodes) expect(code).toMatch(/^\S{4}-\S{4}-\S{4}$/);
   await mfa.getByRole("button", { name: "보관했습니다" }).click();
@@ -88,7 +91,9 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   // A recovery code signs in once.
   await logout(page);
   await passwordStep(page);
-  await submitMfaCode(page, recoveryCodes[0]);
+  const firstRecoveryCode = recoveryCodes[0];
+  if (firstRecoveryCode === undefined) throw new Error("Missing first recovery code");
+  await submitMfaCode(page, firstRecoveryCode);
   await expect(page).toHaveURL(/\/$/);
   await page.goto("/settings/account");
   await expect(page.getByTestId("mfa-status")).toHaveText("사용 중 · 복구 코드 9개 남음");
@@ -97,7 +102,7 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await page.goto("/");
   await logout(page);
   await passwordStep(page);
-  await submitMfaCode(page, recoveryCodes[0]);
+  await submitMfaCode(page, firstRecoveryCode);
   await expect(
     page.getByRole("alert").filter({ hasText: "인증 코드가 맞지 않습니다. 다시 확인해 주세요." }),
   ).toBeVisible();
@@ -107,7 +112,9 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   // Back to the start, then another unused recovery code still works.
   await page.getByRole("button", { name: "처음부터 다시 로그인" }).click();
   await passwordStep(page);
-  await submitMfaCode(page, recoveryCodes[1]);
+  const secondRecoveryCode = recoveryCodes[1];
+  if (secondRecoveryCode === undefined) throw new Error("Missing second recovery code");
+  await submitMfaCode(page, secondRecoveryCode);
   await expect(page).toHaveURL(/\/$/);
 
   // Magic-link consumption must also stop at MFA without issuing a session.
@@ -115,10 +122,11 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await page.getByRole("button", { name: "이메일로 로그인 링크 받기" }).click();
   await page.locator("#magic-link-email").fill(owner.email);
   await page.getByRole("button", { name: "링크 받기", exact: true }).click();
-  const magicMail = await waitForCapturedMail((mail) =>
-    mail.to === owner.email && mail.text.includes("/magic-link?token="),
+  const magicMail = await waitForCapturedMail(
+    (mail) => mail.to === owner.email && mail.text.includes("/magic-link?token="),
   );
   const magicToken = magicMail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
+  if (magicToken === undefined) throw new Error("Missing fixture value: magicToken");
   expect(magicToken).toBeTruthy();
   await page.goto(`/magic-link?token=${magicToken}`);
   await expectVueAuth(page);
@@ -127,30 +135,43 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await expect(page.getByRole("heading", { name: "2단계 인증" })).toBeVisible();
   await expect(page).toHaveURL(/\/magic-link\?token=/);
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
-  await expectSpentMagic(page, "/api/v1/auth/magic-link/consume", magicToken!);
+  const required1 = magicToken;
+  await expectSpentMagic(page, "/api/v1/auth/magic-link/consume", required1);
   // Leaving this token query discards its challenge. A new link is still
   // consumed explicitly and receives its own MFA challenge.
   await navigateAuthQuery(page, "/magic-link?token=not-issued");
   await expect(page.getByRole("heading", { name: "2단계 인증" })).toHaveCount(0);
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
-  expect((await page.request.post("/api/v1/auth/magic-link", { data: { email: owner.email } })).status()).toBe(202);
-  const secondMail = await waitForCapturedMail((mail) =>
-    mail.to === owner.email && mail.text.includes("/magic-link?token=") && !mail.text.includes(magicToken!),
-  );
+  expect(
+    (await page.request.post("/api/v1/auth/magic-link", { data: { email: owner.email } })).status(),
+  ).toBe(202);
+  const secondMail = await waitForCapturedMail((mail) => {
+    const required2 = magicToken;
+    return (
+      mail.to === owner.email &&
+      mail.text.includes("/magic-link?token=") &&
+      !mail.text.includes(required2)
+    );
+  });
   const secondToken = secondMail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
+  if (secondToken === undefined) throw new Error("Missing fixture value: secondToken");
   expect(secondToken).toBeTruthy();
   await navigateAuthQuery(page, `/magic-link?token=${secondToken}`);
   await page.getByRole("button", { name: "로그인", exact: true }).click();
   await expect(page.getByRole("heading", { name: "2단계 인증" })).toBeVisible();
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
-  await submitMfaCode(page, recoveryCodes[2]);
+  const thirdRecoveryCode = recoveryCodes[2];
+  if (thirdRecoveryCode === undefined) throw new Error("Missing third recovery code");
+  await submitMfaCode(page, thirdRecoveryCode);
   await expect(page).toHaveURL(/\/$/);
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(200);
 });
 
 // The first flow exercises password-login recovery replay. This distinct
 // account isolates the magic-page bad-code path from that account's rate limit.
-test("magic-link MFA rejects a bad code without a session and accepts a recovery code", async ({ page }) => {
+test("magic-link MFA rejects a bad code without a session and accepts a recovery code", async ({
+  page,
+}) => {
   const email = "magic-mfa-negative@example.com";
   const password = "magicnegative1";
   createE2eUser(email, password, "매직 MFA");
@@ -164,15 +185,24 @@ test("magic-link MFA rejects a bad code without a session and accepts a recovery
   await mfa.locator("#settings-mfa-code").fill(totp(secret, currentStep()));
   await mfa.getByRole("button", { name: "켜기" }).click();
   await expect(mfa.getByTestId("mfa-recovery-codes")).toBeVisible();
-  const recovery = (await mfa.getByTestId("mfa-recovery-codes").locator("li").first().textContent())!.trim();
+  const required3 = await mfa.getByTestId("mfa-recovery-codes").locator("li").first().textContent();
+  if (required3 === null) {
+    throw new Error(
+      'Missing fixture value: (await mfa\n    .getByTestId("mfa-recovery-codes")\n    .locator("li")\n    .first()\n    .textContent())',
+    );
+  }
+  const recovery = required3.trim();
   await mfa.getByRole("button", { name: "보관했습니다" }).click();
   await page.goto("/");
   await logout(page);
   await page.getByRole("button", { name: "이메일로 로그인 링크 받기" }).click();
   await page.locator("#magic-link-email").fill(email);
   await page.getByRole("button", { name: "링크 받기", exact: true }).click();
-  const mail = await waitForCapturedMail((item) => item.to === email && item.text.includes("/magic-link?token="));
+  const mail = await waitForCapturedMail(
+    (item) => item.to === email && item.text.includes("/magic-link?token="),
+  );
   const token = mail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
+  if (token === undefined) throw new Error("Missing fixture value: token");
   expect(token).toBeTruthy();
   await page.goto(`/magic-link?token=${token}`);
   await expectVueAuth(page);
@@ -185,5 +215,6 @@ test("magic-link MFA rejects a bad code without a session and accepts a recovery
   await submitMfaCode(page, recovery);
   await expect(page).toHaveURL(/\/$/);
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(200);
-  await expectSpentMagic(page, "/api/v1/auth/magic-link/consume", token!);
+  const required4 = token;
+  await expectSpentMagic(page, "/api/v1/auth/magic-link/consume", required4);
 });

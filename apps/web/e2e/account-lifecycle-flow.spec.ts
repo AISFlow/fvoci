@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { authSql, expectSpentMagic, expectVueAuth, rejectMagicVariants } from "./auth-link-evidence";
+import {
+  authSql,
+  expectSpentMagic,
+  expectVueAuth,
+  rejectMagicVariants,
+} from "./auth-link-evidence";
 import { createE2eUser, login, logout, waitForCapturedMail } from "./helpers";
 
 const owner = {
@@ -22,16 +27,21 @@ const member = {
 function tokenFrom(text: string, pattern: RegExp): string {
   const match = text.match(pattern);
   expect(match?.[1]).toBeTruthy();
-  return match![1];
+  const required1 = match;
+  if (required1 === null) {
+    throw new Error("Missing fixture value: match");
+  }
+  const token = required1[1];
+  if (token === undefined) throw new Error("Missing token capture");
+  return token;
 }
 
 test("account settings: password, email change, magic link, withdraw and cancel", async ({
   page,
 }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(120000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
-
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -115,7 +125,9 @@ test("account settings: password, email change, magic link, withdraw and cancel"
   await page.locator("#withdraw-confirm").fill(owner.newPassword);
   await page.getByRole("button", { name: "탈퇴", exact: true }).click();
   await expect(
-    page.getByRole("alert").filter({ hasText: "워크스페이스 소유자는 이관 후 탈퇴할 수 있습니다." }),
+    page
+      .getByRole("alert")
+      .filter({ hasText: "워크스페이스 소유자는 이관 후 탈퇴할 수 있습니다." }),
   ).toBeVisible();
   await expect(page).toHaveURL(/\/settings\/account$/);
 
@@ -150,20 +162,26 @@ test("account settings: password, email change, magic link, withdraw and cancel"
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page).toHaveURL(/\/login/);
 
-  const deletedAt = authSql("SELECT deleted_at FROM fvoci.users WHERE email = 'leaver@example.com'");
+  const deletedAt = authSql(
+    "SELECT deleted_at FROM fvoci.users WHERE email = 'leaver@example.com'",
+  );
   expect(deletedAt).not.toBe("");
   const tamperedCancel = `${cancelToken.slice(0, -1)}${cancelToken.endsWith("A") ? "B" : "A"}`;
   await page.goto(`/cancel-withdraw#token=${tamperedCancel}`);
   await expectVueAuth(page);
   await page.getByRole("button", { name: "탈퇴 취소" }).click();
   await expect(page.getByRole("alert")).toContainText("이 링크로는 취소할 수 없습니다.");
-  authSql("UPDATE fvoci.users SET deleted_at = now() - interval '15 days' WHERE email = 'leaver@example.com'");
+  authSql(
+    "UPDATE fvoci.users SET deleted_at = now() - interval '15 days' WHERE email = 'leaver@example.com'",
+  );
   try {
     await page.goto(`/cancel-withdraw#token=${cancelToken}`);
     await page.getByRole("button", { name: "탈퇴 취소" }).click();
     await expect(page.getByRole("alert")).toContainText("이 링크로는 취소할 수 없습니다.");
   } finally {
-    authSql(`UPDATE fvoci.users SET deleted_at = '${deletedAt}'::timestamptz WHERE email = 'leaver@example.com'`);
+    authSql(
+      `UPDATE fvoci.users SET deleted_at = '${deletedAt}'::timestamptz WHERE email = 'leaver@example.com'`,
+    );
   }
 
   // Opening the link must not cancel by itself; only the button does.
@@ -171,15 +189,25 @@ test("account settings: password, email change, magic link, withdraw and cancel"
   await expect(page.getByRole("heading", { name: "탈퇴 예약" })).toBeVisible();
   await expectVueAuth(page);
   await expect(page.getByText("탈퇴 예약이 취소되었습니다.")).toHaveCount(0);
-  expect(authSql("SELECT deleted_at IS NOT NULL FROM fvoci.users WHERE email = 'leaver@example.com'")).toBe("t");
+  expect(
+    authSql("SELECT deleted_at IS NOT NULL FROM fvoci.users WHERE email = 'leaver@example.com'"),
+  ).toBe("t");
   await page.getByRole("button", { name: "탈퇴 취소" }).click();
   await expect(
     page.getByRole("status").filter({ hasText: "탈퇴 예약이 취소되었습니다." }),
   ).toBeVisible();
 
   await expect(page).toHaveURL(/\/cancel-withdraw$/);
-  expect(authSql("SELECT deleted_at IS NULL AND withdraw_cancel_token_hash IS NULL FROM fvoci.users WHERE email = 'leaver@example.com'")).toBe("t");
+  expect(
+    authSql(
+      "SELECT deleted_at IS NULL AND withdraw_cancel_token_hash IS NULL FROM fvoci.users WHERE email = 'leaver@example.com'",
+    ),
+  ).toBe("t");
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
-  expect((await page.request.post("/api/v1/auth/cancel-withdraw", { data: { token: cancelToken } })).status()).toBe(404);
+  expect(
+    (
+      await page.request.post("/api/v1/auth/cancel-withdraw", { data: { token: cancelToken } })
+    ).status(),
+  ).toBe(404);
   await login(page, member.email, member.password);
 });

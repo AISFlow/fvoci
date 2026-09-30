@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { authSql, expectVueAuth } from "./auth-link-evidence";
-import { createE2eUser, login, watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, watchCspViolations } from "./helpers";
 import { currentStep, totp } from "./mfa-helpers";
 
 const admin = { email: "vue-console-owner@example.com", password: "supersecret1" };
@@ -13,7 +13,7 @@ test.beforeAll(async ({ browser }) => {
   try {
     const status = await page.request.get("/api/v1/setup");
     expect(status.status()).toBe(200);
-    if ((await status.json()).needed) {
+    if ((await readJson(status, flowSchemas.setup)).needed) {
       await page.goto("/");
       await expect(page).toHaveURL(/\/setup$/);
       await page.getByLabel("이름", { exact: true }).fill("콘솔 관리자");
@@ -37,28 +37,57 @@ test.beforeAll(async ({ browser }) => {
 async function expectSecretsAbsent(page: Page, secrets: string[]): Promise<void> {
   const retained = await page.evaluate(() => {
     const root = document.getElementById("root") as HTMLElement & {
-      __vue_app__: { _context: { provides: Record<string, { getQueryCache: () => { getAll: () => unknown[] } }> } };
+      __vue_app__: {
+        _context: {
+          provides: Record<
+            string,
+            {
+              getQueryCache: () => {
+                getAll: () => unknown[];
+              };
+            }
+          >;
+        };
+      };
     };
+    const fixtureValue1 = root.__vue_app__._context.provides.VUE_QUERY_CLIENT;
+    if (fixtureValue1 === undefined)
+      throw new Error("Missing fixture value: root.__vue_app__._context.provides.VUE_QUERY_CLIENT");
     return JSON.stringify({
       href: location.href,
       local: Object.entries(localStorage),
       session: Object.entries(sessionStorage),
-      queries: root.__vue_app__._context.provides.VUE_QUERY_CLIENT.getQueryCache().getAll().map(
-        (query) => (query as { state: unknown }).state,
-      ),
+      queries: fixtureValue1
+        .getQueryCache()
+        .getAll()
+        .map(
+          (query) =>
+            (
+              query as {
+                state: unknown;
+              }
+            ).state,
+        ),
     });
   });
   for (const secret of secrets) expect(retained.includes(secret)).toBe(false);
 }
 
-test("Vue account saves profile and MFA preserves password whitespace without caching secrets", async ({ page }) => {
+test("Vue account saves profile and MFA preserves password whitespace without caching secrets", async ({
+  page,
+}) => {
   const violations = watchCspViolations(page);
   await login(page, member.email, member.password);
   await page.goto("/settings/account");
   await expectVueAuth(page);
   await page.locator("#settings-given-name").fill("재로드 멤버");
-  const nameSaved = page.waitForResponse((res) => res.url().endsWith("/api/v1/auth/me") && res.request().method() === "PATCH");
-  await page.getByRole("region", { name: "계정 설정", exact: true }).getByRole("button", { name: "저장", exact: true }).click();
+  const nameSaved = page.waitForResponse(
+    (res) => res.url().endsWith("/api/v1/auth/me") && res.request().method() === "PATCH",
+  );
+  await page
+    .getByRole("region", { name: "계정 설정", exact: true })
+    .getByRole("button", { name: "저장", exact: true })
+    .click();
   expect((await nameSaved).status()).toBe(200);
   await page.reload();
   await expect(page.locator("#settings-given-name")).toHaveValue("재로드 멤버");
@@ -69,9 +98,25 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
     await page.route(meRoute, (route) => route.abort("connectionfailed"));
     await page.evaluate(async () => {
       const root = document.getElementById("root") as HTMLElement & {
-        __vue_app__: { _context: { provides: Record<string, { invalidateQueries: (input: { queryKey: string[] }) => Promise<void> }> } };
+        __vue_app__: {
+          _context: {
+            provides: Record<
+              string,
+              {
+                invalidateQueries: (input: { queryKey: string[] }) => Promise<void>;
+              }
+            >;
+          };
+        };
       };
-      await root.__vue_app__._context.provides.VUE_QUERY_CLIENT.invalidateQueries({ queryKey: ["auth", "me"] });
+      const fixtureValue2 = root.__vue_app__._context.provides.VUE_QUERY_CLIENT;
+      if (fixtureValue2 === undefined)
+        throw new Error(
+          "Missing fixture value: root.__vue_app__._context.provides.VUE_QUERY_CLIENT",
+        );
+      await fixtureValue2.invalidateQueries({
+        queryKey: ["auth", "me"],
+      });
     });
     await expect(page.getByRole("alert")).toBeVisible();
     await expect(page).toHaveURL(/\/settings\/account$/);
@@ -87,10 +132,14 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   await page.getByRole("option", { name: "일요일", exact: true }).click();
   await preferences.getByLabel("글자 크기", { exact: true }).click();
   await page.getByRole("option", { name: "크게", exact: true }).click();
-  const preferenceSaved = page.waitForResponse((res) => res.url().endsWith("/api/v1/auth/me") && res.request().method() === "PATCH");
+  const preferenceSaved = page.waitForResponse(
+    (res) => res.url().endsWith("/api/v1/auth/me") && res.request().method() === "PATCH",
+  );
   await preferences.getByRole("button", { name: "저장", exact: true }).click();
   expect((await preferenceSaved).status()).toBe(200);
-  await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe("18px");
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize))
+    .toBe("18px");
   await preferences.getByLabel("테마", { exact: true }).click();
   await page.getByRole("option", { name: "다크", exact: true }).click();
   await expect(page.locator("html")).toHaveClass(/dark/);
@@ -99,11 +148,19 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   await expect(preferences.getByLabel("주 시작", { exact: true })).toContainText("일요일");
   await expect(preferences.getByLabel("글자 크기", { exact: true })).toContainText("크게");
   await expect(page.locator("html")).toHaveClass(/dark/);
-  const profile = await (await page.request.get("/api/v1/auth/me")).json();
-  expect(profile).toMatchObject({ givenName: "재로드 멤버", locale: "ko", timezone: "UTC", weekStartsOn: 0, textScale: 18 });
+  const profile = await readJson(await page.request.get("/api/v1/auth/me"), flowSchemas.user);
+  expect(profile).toMatchObject({
+    givenName: "재로드 멤버",
+    locale: "ko",
+    timezone: "UTC",
+    weekStartsOn: 0,
+    textScale: 18,
+  });
   await page.goto("/");
   await expect(page.locator("html")).toHaveClass(/dark/);
-  await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe("18px");
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize))
+    .toBe("18px");
   await page.goto("/settings/account");
 
   const mfa = page.getByTestId("mfa-section");
@@ -112,15 +169,27 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   await expect(mfa.getByRole("alert")).toBeVisible();
   await expect(mfa.locator("#settings-mfa-confirm")).toHaveValue("");
   await mfa.locator("#settings-mfa-confirm").fill(member.password);
-  const setupResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/auth/mfa/setup"));
+  const setupResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/api/v1/auth/mfa/setup"),
+  );
   await mfa.getByRole("button", { name: "설정", exact: true }).click();
   const response = await setupResponse;
   expect(response.status()).toBe(200);
-  expect(response.request().postDataJSON().currentPassword).toBe(member.password);
-  const secret = (await mfa.getByTestId("mfa-secret").textContent())!.trim();
+  expect(flowSchemas.password.parse(response.request().postDataJSON()).currentPassword).toBe(
+    member.password,
+  );
+  const required1 = await mfa.getByTestId("mfa-secret").textContent();
+  if (required1 === null) {
+    throw new Error('Missing fixture value: (await mfa.getByTestId("mfa-secret").textContent())');
+  }
+  const secret = required1.trim();
   expect(secret).toMatch(/^[A-Z2-7=]+$/i);
   await expectSecretsAbsent(page, [secret, member.password]);
-  expect(authSql(`SELECT bool_and(totp_secret LIKE 'enc:v2:%') FROM fvoci.user_mfa m JOIN fvoci.users u ON u.id = m.user_id WHERE u.email = '${member.email}'`)).toBe("t");
+  expect(
+    authSql(
+      `SELECT bool_and(totp_secret LIKE 'enc:v2:%') FROM fvoci.user_mfa m JOIN fvoci.users u ON u.id = m.user_id WHERE u.email = '${member.email}'`,
+    ),
+  ).toBe("t");
   await mfa.locator("#settings-mfa-code").fill(totp(secret, currentStep()));
   await mfa.getByRole("button", { name: "켜기", exact: true }).click();
   await expect(mfa.getByTestId("mfa-recovery-codes")).toBeVisible();
@@ -134,7 +203,10 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   await expectVueAuth(page);
   await expect(mfa.getByTestId("mfa-status")).toContainText("사용 중");
   const status = await page.request.get("/api/v1/auth/mfa");
-  expect(await status.json()).toEqual({ enabled: true, recoveryCodesLeft: 10 });
+  expect(await readJson(status, flowSchemas.unknown)).toEqual({
+    enabled: true,
+    recoveryCodesLeft: 10,
+  });
   await mfa.locator("#settings-mfa-confirm").fill(member.password);
   const disabled = page.waitForResponse((res) => res.url().endsWith("/api/v1/auth/mfa/disable"));
   await mfa.getByRole("button", { name: "해제", exact: true }).click();
@@ -146,10 +218,19 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   expect(violations).toEqual([]);
 });
 
-test("Vue personal API tokens show a secret once, persist metadata, and revoke actual Rust access", async ({ page, browser }) => {
+test("Vue personal API tokens show a secret once, persist metadata, and revoke actual Rust access", async ({
+  page,
+  browser,
+}) => {
   await login(page, admin.email, admin.password);
-  const me = await (await page.request.get("/api/v1/auth/me")).json();
-  expect((await page.request.patch("/api/v1/auth/me", { data: { givenName: me.givenName, timezone: "Asia/Seoul" } })).status()).toBe(200);
+  const me = await readJson(await page.request.get("/api/v1/auth/me"), flowSchemas.user);
+  expect(
+    (
+      await page.request.patch("/api/v1/auth/me", {
+        data: { givenName: me.givenName, timezone: "Asia/Seoul" },
+      })
+    ).status(),
+  ).toBe(200);
   await page.goto("/settings/account");
   await expectVueAuth(page);
   expect(await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe("UTC");
@@ -158,22 +239,37 @@ test("Vue personal API tokens show a secret once, persist metadata, and revoke a
   await page.getByRole("option", { name: "Vue Console", exact: true }).click();
   await tokenSection.getByLabel("이름", { exact: true }).fill("콘솔 개인 토큰");
   await tokenSection.getByLabel("프로젝트 조회", { exact: true }).check();
-  const createdResponse = page.waitForResponse((res) => res.url().endsWith("/api/v1/me/api-tokens") && res.request().method() === "POST");
+  const createdResponse = page.waitForResponse(
+    (res) => res.url().endsWith("/api/v1/me/api-tokens") && res.request().method() === "POST",
+  );
   await tokenSection.getByRole("button", { name: "발급", exact: true }).click();
   const created = await createdResponse;
   expect(created.status()).toBe(201);
-  const output = await created.json();
+  const output = await readJson(created, flowSchemas.token);
   const secret = page.getByTestId("account-token-secret");
   await expect(secret.getByRole("textbox")).toHaveValue(output.token);
   await expectSecretsAbsent(page, [output.token]);
-  const list = await (await page.request.get("/api/v1/me/api-tokens")).json();
-  expect(list.items.find((item: { id: string }) => item.id === output.id)).toMatchObject({ name: "콘솔 개인 토큰", workspaceId: output.workspaceId });
+  const list = await readJson(await page.request.get("/api/v1/me/api-tokens"), flowSchemas.tokens);
+  expect(list.items.find((item: { id: string }) => item.id === output.id)).toMatchObject({
+    name: "콘솔 개인 토큰",
+    workspaceId: output.workspaceId,
+  });
   expect(JSON.stringify(list)).not.toContain(output.token);
   const external = await browser.newContext({ baseURL: process.env.PLAYWRIGHT_BASE_URL });
   try {
     const path = `/api/v1/workspaces/${output.workspaceId}/projects`;
-    expect((await external.request.get(path, { headers: { Authorization: `Bearer ${output.token}` } })).status()).toBe(200);
-    expect((await external.request.get("/api/v1/me/api-tokens", { headers: { Authorization: `Bearer ${output.token}` } })).status()).toBe(404);
+    expect(
+      (
+        await external.request.get(path, { headers: { Authorization: `Bearer ${output.token}` } })
+      ).status(),
+    ).toBe(200);
+    expect(
+      (
+        await external.request.get("/api/v1/me/api-tokens", {
+          headers: { Authorization: `Bearer ${output.token}` },
+        })
+      ).status(),
+    ).toBe(404);
     // Bound expiry fixtures to this isolated DB; listing still uses real Rust.
     authSql(`UPDATE fvoci.api_tokens SET expires_at = NULL WHERE id = '${output.id}'::uuid`);
     await page.reload();
@@ -181,14 +277,18 @@ test("Vue personal API tokens show a secret once, persist metadata, and revoke a
     const row = page.getByTestId("account-token-row").filter({ hasText: "콘솔 개인 토큰" });
     await expect(row).toBeVisible();
     await expect(row).toContainText("만료 없음");
-    authSql(`UPDATE fvoci.api_tokens SET expires_at = '2026-10-01T20:00:00Z'::timestamptz WHERE id = '${output.id}'::uuid`);
+    authSql(
+      `UPDATE fvoci.api_tokens SET expires_at = '2026-10-01T20:00:00Z'::timestamptz WHERE id = '${output.id}'::uuid`,
+    );
     await page.reload();
     await expect(row).toContainText("2026년 10월 2일");
     // A committed profile change updates this component without a remount.
     const preferences = page.getByRole("region", { name: "설정", exact: true });
     await preferences.getByLabel("시간대", { exact: true }).click();
     await page.getByRole("option", { name: "UTC", exact: true }).click();
-    const savedTimezone = page.waitForResponse((res) => res.url().endsWith("/api/v1/auth/me") && res.request().method() === "PATCH");
+    const savedTimezone = page.waitForResponse(
+      (res) => res.url().endsWith("/api/v1/auth/me") && res.request().method() === "PATCH",
+    );
     await preferences.getByRole("button", { name: "저장", exact: true }).click();
     expect((await savedTimezone).status()).toBe(200);
     await expect(row).toContainText("2026년 10월 1일");
@@ -196,11 +296,19 @@ test("Vue personal API tokens show a secret once, persist metadata, and revoke a
     await expect(row).toContainText("2026년 10월 1일");
     await row.getByRole("button", { name: "폐기", exact: true }).click();
     const dialog = page.locator("dialog[open]");
-    const revoked = page.waitForResponse((res) => res.url().endsWith(`/api/v1/me/api-tokens/${output.id}`) && res.request().method() === "DELETE");
+    const revoked = page.waitForResponse(
+      (res) =>
+        res.url().endsWith(`/api/v1/me/api-tokens/${output.id}`) &&
+        res.request().method() === "DELETE",
+    );
     await dialog.getByRole("button", { name: "폐기", exact: true }).click();
     expect((await revoked).status()).toBe(200);
     await expect(row).toHaveCount(0);
-    expect((await external.request.get(path, { headers: { Authorization: `Bearer ${output.token}` } })).status()).toBe(401);
+    expect(
+      (
+        await external.request.get(path, { headers: { Authorization: `Bearer ${output.token}` } })
+      ).status(),
+    ).toBe(401);
     await page.reload();
     await expect(row).toHaveCount(0);
     await expectSecretsAbsent(page, [output.token]);
@@ -209,13 +317,18 @@ test("Vue personal API tokens show a secret once, persist metadata, and revoke a
   }
 });
 
-test("Vue instance settings persist and admin user actions enforce the last-admin invariant", async ({ page }) => {
+test("Vue instance settings persist and admin user actions enforce the last-admin invariant", async ({
+  page,
+}) => {
   await login(page, admin.email, admin.password);
   await page.goto("/settings/admin");
   await expectVueAuth(page);
   const share = page.getByRole("region", { name: "공유 링크", exact: true });
   await share.getByLabel("share.defaultExpiresDays").fill("17");
-  const saved = page.waitForResponse((res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH");
+  const saved = page.waitForResponse(
+    (res) =>
+      res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+  );
   await share.getByRole("button", { name: "저장", exact: true }).click();
   expect((await saved).status()).toBe(200);
   await page.reload();
@@ -225,7 +338,10 @@ test("Vue instance settings persist and admin user actions enforce the last-admi
 
   const users = page.getByRole("region", { name: "사용자", exact: true });
   const memberRow = users.getByRole("row").filter({ hasText: member.email });
-  const toggle = memberRow.getByRole("button", { name: `인스턴스 관리자: ${member.email}`, exact: true });
+  const toggle = memberRow.getByRole("button", {
+    name: `인스턴스 관리자: ${member.email}`,
+    exact: true,
+  });
   await expect(toggle).toHaveAttribute("aria-pressed", "false");
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-pressed", "true");
@@ -233,8 +349,13 @@ test("Vue instance settings persist and admin user actions enforce the last-admi
   await expect(toggle).toHaveAttribute("aria-pressed", "true");
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-pressed", "false");
-  const lastAdmin = users.getByRole("button", { name: `인스턴스 관리자: ${admin.email}`, exact: true });
-  const refused = page.waitForResponse((res) => res.url().endsWith("/api/v1/admin/users") && res.request().method() === "PATCH");
+  const lastAdmin = users.getByRole("button", {
+    name: `인스턴스 관리자: ${admin.email}`,
+    exact: true,
+  });
+  const refused = page.waitForResponse(
+    (res) => res.url().endsWith("/api/v1/admin/users") && res.request().method() === "PATCH",
+  );
   await lastAdmin.click();
   expect((await refused).status()).toBe(409);
   await expect(users.getByRole("alert")).toBeVisible();
@@ -244,7 +365,9 @@ test("Vue instance settings persist and admin user actions enforce the last-admi
   await expect(page.getByText("엔터프라이즈 기능 사용 권한이 필요합니다")).toBeVisible();
 });
 
-test("Vue admin legal editor publishes versions and public legal stays read only", async ({ page }) => {
+test("Vue admin legal editor publishes versions and public legal stays read only", async ({
+  page,
+}) => {
   const violations = watchCspViolations(page);
   await login(page, admin.email, admin.password);
   await page.goto("/settings/legal");
@@ -271,11 +394,16 @@ test("Vue admin legal editor publishes versions and public legal stays read only
   await page.getByLabel("본문(마크다운)").fill("사용자 지정 정책의 본문");
   await page.getByLabel("발효일").fill("2026-01-01");
   await page.getByLabel("필수 법적 문서").uncheck();
-  const customPublished = page.waitForResponse((res) => res.url().endsWith("/api/v1/admin/legal") && res.request().method() === "POST");
+  const customPublished = page.waitForResponse(
+    (res) => res.url().endsWith("/api/v1/admin/legal") && res.request().method() === "POST",
+  );
   await page.getByRole("button", { name: "발행", exact: true }).click();
   const customResponse = await customPublished;
   expect(customResponse.status()).toBe(201);
-  expect(await customResponse.json()).toMatchObject({ kind: "custom-policy", title: "사용자 지정 정책" });
+  expect(await readJson(customResponse, flowSchemas.unknown)).toMatchObject({
+    kind: "custom-policy",
+    title: "사용자 지정 정책",
+  });
   await expect(page.getByRole("list", { name: "현재 발행본" })).toContainText("사용자 지정 정책");
   await expect(page.getByRole("status")).toBeVisible();
   await page.getByLabel("법적 문서 제목").fill("사용자 지정 종류의 미발행 초안");
@@ -287,10 +415,16 @@ test("Vue admin legal editor publishes versions and public legal stays read only
   await expect(page.getByRole("list", { name: "현재 발행본" })).toContainText("사용자 지정 정책");
   await page.getByRole("button", { name: "이용약관(terms)", exact: true }).click();
   await page.getByLabel("법적 문서 제목").fill("Vue 콘솔 약관");
-  await page.getByLabel("본문(마크다운)").fill("## 적용 범위\n\n관리자가 **발행한** 문서입니다.\n\n<script>window.legalInjection=true</script>");
+  await page
+    .getByLabel("본문(마크다운)")
+    .fill(
+      "## 적용 범위\n\n관리자가 **발행한** 문서입니다.\n\n<script>window.legalInjection=true</script>",
+    );
   await page.getByLabel("발효일").fill("2026-01-01");
   await page.getByLabel("필수 법적 문서").uncheck();
-  const published = page.waitForResponse((res) => res.url().endsWith("/api/v1/admin/legal") && res.request().method() === "POST");
+  const published = page.waitForResponse(
+    (res) => res.url().endsWith("/api/v1/admin/legal") && res.request().method() === "POST",
+  );
   await page.getByRole("button", { name: "발행", exact: true }).click();
   expect((await published).status()).toBe(201);
   await expect(page.getByRole("list", { name: "현재 발행본" })).toContainText("v1");
@@ -302,15 +436,24 @@ test("Vue admin legal editor publishes versions and public legal stays read only
   await expect(page.getByRole("heading", { name: "Vue 콘솔 약관" })).toBeVisible();
   await expect(page.getByRole("button", { name: "발행", exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => "legalInjection" in window)).toBe(false);
-  expect(authSql("SELECT count(*) FROM fvoci.legal_documents WHERE kind = 'terms' AND title = 'Vue 콘솔 약관'")).toBe("1");
+  expect(
+    authSql(
+      "SELECT count(*) FROM fvoci.legal_documents WHERE kind = 'terms' AND title = 'Vue 콘솔 약관'",
+    ),
+  ).toBe("1");
   expect(violations).toEqual([]);
 });
 
-test("Vue global admin direct URLs deny non-admins before privileged loads and Rust denies writes", async ({ page, browser }) => {
+test("Vue global admin direct URLs deny non-admins before privileged loads and Rust denies writes", async ({
+  page,
+  browser,
+}) => {
   await login(page, member.email, member.password);
   const privileged: string[] = [];
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname.startsWith("/api/v1/admin/")) privileged.push(request.url());
+    if (new URL(request.url()).pathname.startsWith("/api/v1/admin/")) {
+      privileged.push(request.url());
+    }
   });
   for (const path of ["/settings/admin", "/settings/audit", "/settings/legal"]) {
     await page.goto(path);
@@ -321,8 +464,26 @@ test("Vue global admin direct URLs deny non-admins before privileged loads and R
   for (const path of ["system", "users", "audit", "instance-settings"]) {
     expect((await page.request.get(`/api/v1/admin/${path}`)).status()).toBe(404);
   }
-  expect((await page.request.patch("/api/v1/admin/instance-settings", { data: { share: { enabled: true, defaultExpiresDays: 1, maxExpiresDays: 365 } } })).status()).toBe(404);
-  expect((await page.request.post("/api/v1/admin/legal", { data: { kind: "terms", title: "Denied", bodyMarkdown: "Denied", effectiveAt: "2026-01-01T00:00:00Z", required: false } })).status()).toBe(404);
+  expect(
+    (
+      await page.request.patch("/api/v1/admin/instance-settings", {
+        data: { share: { enabled: true, defaultExpiresDays: 1, maxExpiresDays: 365 } },
+      })
+    ).status(),
+  ).toBe(404);
+  expect(
+    (
+      await page.request.post("/api/v1/admin/legal", {
+        data: {
+          kind: "terms",
+          title: "Denied",
+          bodyMarkdown: "Denied",
+          effectiveAt: "2026-01-01T00:00:00Z",
+          required: false,
+        },
+      })
+    ).status(),
+  ).toBe(404);
   const anonymous = await browser.newPage({ baseURL: process.env.PLAYWRIGHT_BASE_URL });
   try {
     await anonymous.goto("/settings/legal");

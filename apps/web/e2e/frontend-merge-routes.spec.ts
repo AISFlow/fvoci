@@ -1,3 +1,4 @@
+import { readJson, flowSchemas } from "./helpers";
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -18,7 +19,9 @@ async function linkTo(page: Page, href: string): Promise<void> {
   await page.locator("#merge-destination").click();
 }
 
-test("merged viewer guards auth, wiki and project destinations within the same Vue runtime", async ({ page }) => {
+test("merged viewer guards auth, wiki and project destinations within the same Vue runtime", async ({
+  page,
+}) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   // A Vue-to-Vue confirmation must never fall through to native unloading.
@@ -48,39 +51,77 @@ test("merged viewer guards auth, wiki and project destinations within the same V
   await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
   await expect(page.getByRole("heading", { name: "Merged task" })).toBeVisible();
   const taskPath = new URL(page.url()).pathname;
-  const workspaces = await (await page.request.get("/api/v1/me/workspaces")).json();
-  const wsId = workspaces.items.find((item: { slug: string }) => item.slug === "merged").id;
+  const workspaces = await readJson(
+    await page.request.get("/api/v1/me/workspaces"),
+    flowSchemas.workspaces,
+  );
+  const fixtureValue1 = workspaces.items.find((item: { slug: string }) => item.slug === "merged");
+  if (fixtureValue1 === undefined)
+    throw new Error(
+      'Missing fixture value: workspaces.items.find((item: { slug: string }) => item.slug === "merged")',
+    );
+  const wsId = fixtureValue1.id;
   const created = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: null, title: "Merged wiki" },
   });
   expect(created.ok(), await created.text()).toBe(true);
-  const document = await created.json();
-  const sample = fs.readFileSync(path.resolve(import.meta.dirname, "../../../compat/fixtures/sample.hwpx"));
+  const document = await readJson(created, flowSchemas.createdDocument);
+  const sample = fs.readFileSync(
+    path.resolve(import.meta.dirname, "../../../compat/fixtures/sample.hwpx"),
+  );
   const bytes = Buffer.from(buildFixtureHwpx(sample, FIXTURE_PAGES));
-  const reserved = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${document.id}/uploads`, {
-    data: { name: "merged.hwpx", sizeBytes: bytes.length },
-  });
+  const reserved = await page.request.post(
+    `/api/v1/workspaces/${wsId}/documents/${document.id}/uploads`,
+    {
+      data: { name: "merged.hwpx", sizeBytes: bytes.length },
+    },
+  );
   expect(reserved.ok(), await reserved.text()).toBe(true);
-  const upload = await reserved.json();
-  const parts: { partNumber: number; etag: string }[] = [];
+  const upload = await readJson(reserved, flowSchemas.upload);
+  const parts: {
+    partNumber: number;
+    etag: string;
+  }[] = [];
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
-      data: bytes.subarray((part.partNumber - 1) * upload.partSizeBytes, part.partNumber * upload.partSizeBytes),
+      data: bytes.subarray(
+        (part.partNumber - 1) * upload.partSizeBytes,
+        part.partNumber * upload.partSizeBytes,
+      ),
     });
     expect(put.ok(), await put.text()).toBe(true);
-    parts.push({ partNumber: part.partNumber, etag: put.headers()["etag"]! });
+    const required1 = put.headers()["etag"];
+    if (required1 === undefined) {
+      throw new Error('Missing fixture value: put.headers()["etag"]');
+    }
+    parts.push({ partNumber: part.partNumber, etag: required1 });
   }
-  const completed = await page.request.post(`/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`, {
-    data: { parts },
-  });
+  const completed = await page.request.post(
+    `/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`,
+    {
+      data: { parts },
+    },
+  );
   expect(completed.ok(), await completed.text()).toBe(true);
   const viewerPath = `/w/merged/a/${upload.attachmentId}/view`;
   const destinations = [
-    { href: "/reset-password?token=merge-only#form", ready: () => page.getByRole("button", { name: "비밀번호 변경", exact: true }) },
-    { href: `/w/merged/${document.displayId}?from=viewer#wiki`, ready: () => page.locator(".tiptap") },
-    { href: `${taskPath}?from=viewer#task-comments`, ready: () => page.getByRole("heading", { name: "Merged task" }) },
-    { href: "/w/merged/MERGE/tasks?from=viewer#list", ready: () => page.getByRole("heading", { name: "Merged project" }) },
+    {
+      href: "/reset-password?token=merge-only#form",
+      ready: () => page.getByRole("button", { name: "비밀번호 변경", exact: true }),
+    },
+    {
+      href: `/w/merged/${document.displayId}?from=viewer#wiki`,
+      ready: () => page.locator(".tiptap"),
+    },
+    {
+      href: `${taskPath}?from=viewer#task-comments`,
+      ready: () => page.getByRole("heading", { name: "Merged task" }),
+    },
+    {
+      href: "/w/merged/MERGE/tasks?from=viewer#list",
+      ready: () => page.getByRole("heading", { name: "Merged project" }),
+    },
   ];
   for (const { href, ready } of destinations) {
     await page.goto(viewerPath);
@@ -94,20 +135,39 @@ test("merged viewer guards auth, wiki and project destinations within the same V
     await bar.getByRole("button", { name: "모두 바꾸기" }).click();
     await expect(bar.getByRole("button", { name: "편집본 저장" })).toBeEnabled();
     const ink = await viewer.locator("img.hwp-viewer__page").getAttribute("src");
-    await page.evaluate(() => { (window as unknown as { mergeMarker: string }).mergeMarker = "same-runtime"; });
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          mergeMarker: string;
+        }
+      ).mergeMarker = "same-runtime";
+    });
     await linkTo(page, href);
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: "취소", exact: true }).click();
     expect(new URL(page.url()).pathname).toBe(viewerPath);
     await expect(bar.getByRole("button", { name: "편집본 저장" })).toBeEnabled();
-    await expect(viewer.locator("img.hwp-viewer__page")).toHaveAttribute("src", ink!);
+    const required2 = ink;
+    if (required2 === null) {
+      throw new Error("Missing fixture value: ink");
+    }
+    await expect(viewer.locator("img.hwp-viewer__page")).toHaveAttribute("src", required2);
     await page.locator("#merge-destination").click();
     await dialog.getByRole("button", { name: "나가기", exact: true }).click();
     await expect(page).toHaveURL(new URL(href, page.url()).href);
     await expect(ready()).toBeVisible();
     await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
-    expect(await page.evaluate(() => (window as unknown as { mergeMarker?: string }).mergeMarker)).toBe("same-runtime");
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              mergeMarker?: string;
+            }
+          ).mergeMarker,
+      ),
+    ).toBe("same-runtime");
     await expect(page.locator("[data-hwp-viewer]")).toHaveCount(0);
     await expect(dialog).toHaveCount(0);
   }

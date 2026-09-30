@@ -1,3 +1,4 @@
+import { readJson, flowSchemas } from "./helpers";
 import { expect, test, type Browser, type Page } from "@playwright/test";
 
 const admin = {
@@ -23,7 +24,7 @@ const fullOperator = {
 
 async function runSetup(page: Page): Promise<void> {
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(admin.familyName);
   await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
   await page.getByLabel("이메일").fill(admin.email);
@@ -34,14 +35,21 @@ async function runSetup(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/$/);
 }
 
-async function patchOperator(page: Page, operator: Record<string, string | null> | null): Promise<void> {
+async function patchOperator(
+  page: Page,
+  operator: Record<string, string | null> | null,
+): Promise<void> {
   const res = await page.request.patch("/api/v1/admin/instance-settings", {
     data: operator === null ? { operator: null } : { operator },
   });
   expect(res.status()).toBe(200);
   const publicRes = await page.request.get("/api/v1/instance");
   expect(publicRes.ok()).toBe(true);
-  const body = (await publicRes.json()) as { values: { operator: Record<string, string | null> } };
+  const body = (await readJson(publicRes, flowSchemas.instance)) as {
+    values: {
+      operator: Record<string, string | null>;
+    };
+  };
   if (operator === null) {
     expect(body.values.operator.businessName).toBeNull();
     return;
@@ -69,7 +77,7 @@ test("operator settings persist through admin API and surface on public service-
   page,
   browser,
 }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(120000);
   await runSetup(page);
 
   await withAnonymous(browser, async (anonEmpty) => {
@@ -78,7 +86,10 @@ test("operator settings persist through admin API and surface on public service-
     await expect(anonEmpty.getByText("등록된 서비스 운영 정보가 없습니다.")).toBeVisible();
     await anonEmpty.goto("/login");
     const emptyFooter = loginFooter(anonEmpty);
-    await expect(emptyFooter.getByRole("link", { name: "이용약관" })).toHaveAttribute("href", "/legal/terms");
+    await expect(emptyFooter.getByRole("link", { name: "이용약관" })).toHaveAttribute(
+      "href",
+      "/legal/terms",
+    );
     await expect(emptyFooter.getByRole("link", { name: "개인정보처리방침" })).toHaveAttribute(
       "href",
       "/legal/privacy",
@@ -94,16 +105,20 @@ test("operator settings persist through admin API and surface on public service-
 
   await page.goto("/settings/admin");
   const operatorSection = page.locator('section[aria-labelledby="setting-operator"]');
-  await expect(operatorSection.getByLabel("operator.businessName")).toHaveValue(fullOperator.businessName);
+  await expect(operatorSection.getByLabel("operator.businessName")).toHaveValue(
+    fullOperator.businessName,
+  );
   await operatorSection.getByLabel("operator.supportEmail").fill("ops@example.com");
   const saved = page.waitForResponse(
-    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+    (res) =>
+      res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
   );
   await operatorSection.getByRole("button", { name: "저장", exact: true }).click();
   expect((await saved).status()).toBe(200);
   const afterUi = await page.request.get("/api/v1/instance");
-  expect((await afterUi.json()).values.operator.supportEmail).toBe("ops@example.com");
-
+  expect((await readJson(afterUi, flowSchemas.instance)).values.operator.supportEmail).toBe(
+    "ops@example.com",
+  );
   await withAnonymous(browser, async (anonFull) => {
     await anonFull.goto("/service-info");
     await expect(anonFull.getByText("주식회사 에2이 테스트")).toBeVisible();
@@ -112,15 +127,17 @@ test("operator settings persist through admin API and surface on public service-
       "href",
       "mailto:ops@example.com",
     );
-    await expect(anonFull.getByRole("link", { name: fullOperator.businessInfoUrl })).toHaveAttribute(
-      "href",
-      fullOperator.businessInfoUrl,
-    );
+    await expect(
+      anonFull.getByRole("link", { name: fullOperator.businessInfoUrl }),
+    ).toHaveAttribute("href", fullOperator.businessInfoUrl);
     await expect(anonFull.getByText("javascript:")).toHaveCount(0);
 
     await anonFull.goto("/login");
     const fullFooter = loginFooter(anonFull);
-    await expect(fullFooter.getByRole("link", { name: "서비스 정보" })).toHaveAttribute("href", "/service-info");
+    await expect(fullFooter.getByRole("link", { name: "서비스 정보" })).toHaveAttribute(
+      "href",
+      "/service-info",
+    );
     await expect(fullFooter.getByRole("link", { name: "이용약관" })).toBeVisible();
   });
 
@@ -151,7 +168,7 @@ test("operator settings persist through admin API and surface on public service-
 });
 
 test("service-info shows loading while public instance is pending", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(60000);
   let release: (() => void) | undefined;
   const hold = new Promise<void>((resolve) => {
     release = resolve;
@@ -161,14 +178,18 @@ test("service-info shows loading while public instance is pending", async ({ pag
     await route.continue();
   });
   const navigation = page.goto("/service-info");
-  await expect(page.getByRole("status")).toContainText("불러오는 중", { timeout: 10_000 });
-  release!();
+  await expect(page.getByRole("status")).toContainText("불러오는 중", { timeout: 10000 });
+  const required1 = release;
+  if (required1 === undefined) {
+    throw new Error("Missing fixture value: release");
+  }
+  required1();
   await navigation;
   await expect(page.getByRole("heading", { name: "서비스 정보" })).toBeVisible();
 });
 
 test("service-info surfaces load failure for public instance errors", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(60000);
   await page.route("**/api/v1/instance", async (route) => {
     await route.fulfill({
       status: 500,
@@ -186,8 +207,10 @@ test("service-info surfaces load failure for public instance errors", async ({ p
   await expect(page.getByRole("button", { name: "다시 시도" })).toBeVisible();
 });
 
-test("service-info recovers after manual retry when instance fetch initially fails", async ({ page }) => {
-  test.setTimeout(60_000);
+test("service-info recovers after manual retry when instance fetch initially fails", async ({
+  page,
+}) => {
+  test.setTimeout(60000);
   let failRequests = true;
   await page.route("**/api/v1/instance", async (route) => {
     if (failRequests) {

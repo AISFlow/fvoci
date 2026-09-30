@@ -4,10 +4,8 @@
 // the real Rust API/DB/collab the way a user would, and does not require the
 // public /s/:token page to be Vue (that route is still a React boundary).
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
-import { login, watchCspViolations } from "./helpers";
-
-test.describe.configure({ mode: "serial", timeout: 90_000 });
-
+import { readJson, flowSchemas, login, watchCspViolations } from "./helpers";
+test.describe.configure({ mode: "serial", timeout: 90000 });
 const admin = {
   email: "Admin@Example.COM",
   password: "supersecret1",
@@ -47,30 +45,40 @@ async function ensureSetup(page: Page): Promise<void> {
 async function workspaceId(request: APIRequestContext): Promise<string> {
   const res = await request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const workspace = (await res.json()).items.find(
+  const workspace = (await readJson(res, flowSchemas.workspaces)).items.find(
     (item: { slug: string }) => item.slug === admin.workspaceSlug,
   );
+  if (workspace === undefined) throw new Error("Missing fixture value: workspace");
   expect(workspace).toBeTruthy();
   return workspace.id;
 }
-
-type WikiDoc = { id: string; number: number; path: string };
-
-async function createDoc(request: APIRequestContext, wsId: string, title: string): Promise<WikiDoc> {
+type WikiDoc = {
+  id: string;
+  number: number;
+  path: string;
+};
+async function createDoc(
+  request: APIRequestContext,
+  wsId: string,
+  title: string,
+): Promise<WikiDoc> {
   const res = await request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: null, title },
   });
   expect(res.status(), await res.text()).toBe(201);
-  const doc = (await res.json()) as { id: string; number: number };
-  return { ...doc, path: `/w/${admin.workspaceSlug}/WIKI-${doc.number}` };
+  const doc = (await readJson(res, flowSchemas.document)) as {
+    id: string;
+    number: number;
+  };
+  return { ...doc, path: `/w/${admin.workspaceSlug}/WIKI-${String(doc.number)}` };
 }
 
 async function openDoc(page: Page, doc: WikiDoc): Promise<void> {
   const navigation = await page.goto(doc.path);
   expect(navigation?.status()).toBe(200);
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
-  await expect(page.getByTestId(`document-WIKI-${doc.number}`)).toBeVisible();
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId(`document-WIKI-${String(doc.number)}`)).toBeVisible();
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -88,7 +96,13 @@ test("star toggle persists after reload", async ({ page }) => {
   const starred = await page.request.get(`/api/v1/workspaces/${wsId}/stars`);
   expect(starred.ok()).toBe(true);
   expect(
-    ((await starred.json()) as { items: { targetId: string }[] }).items.map((item) => item.targetId),
+    (
+      (await readJson(starred, flowSchemas.stars)) as {
+        items: {
+          targetId: string;
+        }[];
+      }
+    ).items.map((item) => item.targetId),
   ).toEqual([doc.id]);
 
   await page.reload();
@@ -96,7 +110,13 @@ test("star toggle persists after reload", async ({ page }) => {
   await expect(page.getByRole("button", { name: "즐겨찾기 해제" })).toBeVisible();
   const afterReload = await page.request.get(`/api/v1/workspaces/${wsId}/stars`);
   expect(
-    ((await afterReload.json()) as { items: { targetId: string }[] }).items.map((item) => item.targetId),
+    (
+      (await readJson(afterReload, flowSchemas.stars)) as {
+        items: {
+          targetId: string;
+        }[];
+      }
+    ).items.map((item) => item.targetId),
   ).toEqual([doc.id]);
   expect(csp).toEqual([]);
 });
@@ -131,12 +151,23 @@ test("share dialog creates, copies and revokes a link", async ({ page }) => {
   const sharePath = new URL(shareUrl).pathname;
   const shell = await page.request.get(sharePath);
   expect(shell.status()).toBe(200);
-
-  page.once("dialog", (confirm) => {
-    expect(confirm.message()).toContain("공유 링크를 해제할까요?");
-    void confirm.accept();
+  const confirmed = new Promise<void>((resolve, reject) => {
+    page.once("dialog", (confirm) => {
+      try {
+        expect(confirm.message()).toContain("공유 링크를 해제할까요?");
+      } catch (error) {
+        reject(
+          error instanceof Error
+            ? error
+            : new Error("Confirmation assertion failed", { cause: error }),
+        );
+        return;
+      }
+      confirm.accept().then(resolve, reject);
+    });
   });
   await dialog.getByRole("button", { name: "해제" }).click();
+  await confirmed;
   await expect(dialog.getByText("공유 링크가 없습니다")).toBeVisible();
   expect(csp).toEqual([]);
 });
@@ -169,7 +200,13 @@ test("tags bar: add and remove a tag", async ({ page }) => {
   await expect
     .poll(async () => {
       const res = await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}/tags`);
-      return ((await res.json()) as { items: { name: string }[] }).items.map((tag) => tag.name);
+      return (
+        (await readJson(res, flowSchemas.tags)) as {
+          items: {
+            name: string;
+          }[];
+        }
+      ).items.map((tag) => tag.name);
     })
     .toEqual(["크롬태그"]);
 
@@ -178,7 +215,13 @@ test("tags bar: add and remove a tag", async ({ page }) => {
   await expect
     .poll(async () => {
       const res = await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}/tags`);
-      return ((await res.json()) as { items: { name: string }[] }).items;
+      return (
+        (await readJson(res, flowSchemas.tags)) as {
+          items: {
+            name: string;
+          }[];
+        }
+      ).items;
     })
     .toEqual([]);
 });
@@ -192,8 +235,7 @@ test("export menu downloads markdown", async ({ page }) => {
   await editor.click();
   await page.keyboard.type("내보내는 본문");
   await page.getByRole("button", { name: "저장", exact: true }).click();
-  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
-
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15000 });
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
   await page.getByRole("button", { name: "Markdown" }).click();
@@ -201,7 +243,13 @@ test("export menu downloads markdown", async ({ page }) => {
   expect(download.suggestedFilename()).toBe("보내기 문서.md");
   const text = await download.createReadStream().then(async (stream) => {
     const chunks: Buffer[] = [];
-    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    for await (const chunk of stream) {
+      const bytes: unknown = chunk;
+      if (!(bytes instanceof Uint8Array) && typeof bytes !== "string") {
+        throw new Error("Unexpected download stream chunk");
+      }
+      chunks.push(Buffer.from(bytes));
+    }
     return Buffer.concat(chunks).toString("utf8");
   });
   expect(text).toContain("내보내는 본문");
@@ -217,8 +265,7 @@ test("revisions: save a revision and restore it", async ({ page }) => {
   await editor.click();
   await page.keyboard.type("첫 번째 버전");
   await page.getByRole("button", { name: "저장", exact: true }).click();
-  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
-
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15000 });
   const created = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -237,50 +284,121 @@ test("revisions: save a revision and restore it", async ({ page }) => {
   await page.keyboard.type("두 번째 버전");
   await page.getByRole("button", { name: "저장", exact: true }).click();
   await expect
-    .poll(async () => JSON.stringify((await (await page.request.get(bodyUrl)).json()).contentJson))
+    .poll(async () =>
+      JSON.stringify(
+        (await readJson(await page.request.get(bodyUrl), flowSchemas.body)).contentJson,
+      ),
+    )
     .toContain("두 번째 버전");
 
   await page.getByTestId("revision-history").click();
   await page.getByTestId("revision-restore").first().click();
   await page.getByTestId("revision-restore-confirm").click();
-  await expect(editor).toContainText("첫 번째 버전", { timeout: 15_000 });
+  await expect(editor).toContainText("첫 번째 버전", { timeout: 15000 });
   await expect
-    .poll(async () => JSON.stringify((await (await page.request.get(bodyUrl)).json()).contentJson))
+    .poll(async () =>
+      JSON.stringify(
+        (await readJson(await page.request.get(bodyUrl), flowSchemas.body)).contentJson,
+      ),
+    )
     .toContain("첫 번째 버전");
 });
 
-test("long Korean wiki title wraps, metadata leaves body visible and Enter keeps single-line title persistence", async ({ page }) => {
+test("long Korean wiki title wraps, metadata leaves body visible and Enter keeps single-line title persistence", async ({
+  page,
+}) => {
   const wsId = await workspaceId(page.request);
-  const title = "한국어 협업 문서 제목이 길어질 때 탐색과 편집 작업을 안정적으로 유지하는 주간 업무 기록 및 검토 결과";
+  const title =
+    "한국어 협업 문서 제목이 길어질 때 탐색과 편집 작업을 안정적으로 유지하는 주간 업무 기록 및 검토 결과";
   const doc = await createDoc(page.request, wsId, title);
   const bodyUrl = `/api/v1/workspaces/${wsId}/documents/${doc.id}/body`;
-  expect((await page.request.put(bodyUrl, { data: { contentMd: "첫 번째 업무 본문입니다.\n\n두 번째 업무 본문입니다.\n\n세 번째 업무 본문입니다." } })).ok()).toBe(true);
+  expect(
+    (
+      await page.request.put(bodyUrl, {
+        data: {
+          contentMd:
+            "첫 번째 업무 본문입니다.\n\n두 번째 업무 본문입니다.\n\n세 번째 업무 본문입니다.",
+        },
+      })
+    ).ok(),
+  ).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
   await openDoc(page, doc);
   const field = page.getByLabel("문서 제목");
   await expect(field).toHaveValue(title);
-  await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
-  expect(await field.evaluate((e) => e.scrollWidth)).toBeLessThanOrEqual(await field.evaluate((e) => e.clientWidth));
-  expect(await page.locator(".ProseMirror > p").nth(2).evaluate((e) => e.getBoundingClientRect().bottom)).toBeLessThan(844);
+  await expect
+    .poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1))
+    .toBe(true);
+  expect(await field.evaluate((e) => e.scrollWidth)).toBeLessThanOrEqual(
+    await field.evaluate((e) => e.clientWidth),
+  );
+  expect(
+    await page
+      .locator(".ProseMirror > p")
+      .nth(2)
+      .evaluate((e) => e.getBoundingClientRect().bottom),
+  ).toBeLessThan(844);
   await page.setViewportSize({ width: 1280, height: 720 });
-  await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
-  expect(await page.locator(".ProseMirror > p").nth(2).evaluate((e) => e.getBoundingClientRect().bottom)).toBeLessThan(720);
+  await expect
+    .poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1))
+    .toBe(true);
+  expect(
+    await page
+      .locator(".ProseMirror > p")
+      .nth(2)
+      .evaluate((e) => e.getBoundingClientRect().bottom),
+  ).toBeLessThan(720);
   const options = page.getByRole("button", { name: "문서 옵션", exact: true });
   await expect(options).toHaveAttribute("aria-expanded", "false");
-  await options.focus(); await options.press("Enter");
+  await options.focus();
+  await options.press("Enter");
   await expect(options).toHaveAttribute("aria-expanded", "true");
   const icon = page.getByLabel("아이콘");
-  await icon.fill("📚"); await icon.press("Tab");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json()).icon).toBe("📚");
+  await icon.fill("📚");
+  await icon.press("Tab");
+  await expect
+    .poll(
+      async () =>
+        (
+          await readJson(
+            await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`),
+            flowSchemas.document,
+          )
+        ).icon,
+    )
+    .toBe("📚");
   await page.getByLabel("문서 상태").selectOption("published");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json()).status).toBe("published");
+  await expect
+    .poll(
+      async () =>
+        (
+          await readJson(
+            await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`),
+            flowSchemas.document,
+          )
+        ).status,
+    )
+    .toBe("published");
   await expect(icon).toBeEnabled();
-  await icon.focus(); await icon.press("Escape");
-  await expect(options).toBeFocused(); await expect(options).toHaveAttribute("aria-expanded", "false");
+  await icon.focus();
+  await icon.press("Escape");
+  await expect(options).toBeFocused();
+  await expect(options).toHaveAttribute("aria-expanded", "false");
   await expect(icon).toBeHidden();
   await field.fill("한국어 제목\n붙여넣기");
   await expect(field).toHaveValue("한국어 제목붙여넣기");
   await field.press("Enter");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json()).title).toBe("한국어 제목붙여넣기");
-  await page.reload(); await expect(field).toHaveValue("한국어 제목붙여넣기");
+  await expect
+    .poll(
+      async () =>
+        (
+          await readJson(
+            await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`),
+            flowSchemas.document,
+          )
+        ).title,
+    )
+    .toBe("한국어 제목붙여넣기");
+  await page.reload();
+  await expect(field).toHaveValue("한국어 제목붙여넣기");
 });

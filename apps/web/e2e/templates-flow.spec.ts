@@ -51,7 +51,10 @@ test("workspace templates create list and apply document and task", async ({ pag
   await page.getByRole("button", { name: "추가" }).click();
   await expect(page.getByRole("cell", { name: "E2E 문서 템플릿" })).toBeVisible();
 
-  await page.getByRole("row", { name: /E2E 문서 템플릿/ }).getByRole("button", { name: "적용" }).click();
+  await page
+    .getByRole("row", { name: /E2E 문서 템플릿/ })
+    .getByRole("button", { name: "적용" })
+    .click();
   await expect(page).toHaveURL(new RegExp(`/w/${slug}/WIKI-\\d+$`));
   await expect(page.getByLabel("문서 제목")).toHaveValue("E2E 문서 템플릿");
 
@@ -76,7 +79,10 @@ test("workspace templates create list and apply document and task", async ({ pag
   await expect(page.getByRole("cell", { name: "E2E 태스크 템플릿" })).toBeVisible();
 
   await page.getByLabel("프로젝트").selectOption({ label: "Tpl" });
-  await page.getByRole("row", { name: /E2E 태스크 템플릿/ }).getByRole("button", { name: "적용" }).click();
+  await page
+    .getByRole("row", { name: /E2E 태스크 템플릿/ })
+    .getByRole("button", { name: "적용" })
+    .click();
   await expect(page).toHaveURL(new RegExp(`/w/${slug}/TPL-\\d+$`));
   await expect(page.getByRole("heading", { name: "E2E 태스크 템플릿" })).toBeVisible();
   await expect(page).not.toHaveURL(new RegExp(`/w/${slug}/settings/templates`));
