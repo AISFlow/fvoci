@@ -1,5 +1,5 @@
 import path from "node:path";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, request, test } from "@playwright/test";
 import { createE2eUser, login, logout, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
@@ -63,8 +63,9 @@ test("Vue settings commit identity, groups, tokens, holidays, preferences and re
   await expect(secretField).toBeVisible();
   const secret = await secretField.inputValue();
   const auth = { Authorization: `Bearer ${secret}` };
-  expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/documents`, { headers: auth })).ok()).toBe(true);
-  expect((await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, { headers: auth, data: { title: "Denied", parentId: null } })).ok()).toBe(false);
+  const tokenClient = await request.newContext({ baseURL: new URL(page.url()).origin, extraHTTPHeaders: auth });
+  expect((await tokenClient.get(`/api/v1/workspaces/${workspaceId}/tree`)).ok()).toBe(true);
+  expect((await tokenClient.post(`/api/v1/workspaces/${workspaceId}/documents`, { data: { title: "Denied", parentId: null } })).status()).toBe(404);
   const listedTokens = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/api-tokens`)).json();
   expect(JSON.stringify(listedTokens)).not.toContain(secret);
   await page.reload();
@@ -73,7 +74,8 @@ test("Vue settings commit identity, groups, tokens, holidays, preferences and re
   await tokens.getByRole("button", { name: "폐기" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "폐기" }).click();
   await expect(tokens.getByText("토큰이 없습니다")).toBeVisible();
-  expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/documents`, { headers: auth })).ok()).toBe(false);
+  expect((await tokenClient.get(`/api/v1/workspaces/${workspaceId}/tree`)).status()).toBe(401);
+  await tokenClient.dispose();
 
   const calendar = page.locator("details").filter({ has: page.locator("summary", { hasText: /달력 구독/ }) });
   await calendar.locator("summary").click();
@@ -112,7 +114,7 @@ test("Vue settings commit identity, groups, tokens, holidays, preferences and re
   await expect(importSection.getByRole("status")).toHaveCount(0);
   await page.locator('input[type="file"]').setInputFiles(path.resolve(import.meta.dirname, "fixtures/markdown-import.zip"));
   await expect(importSection.getByRole("status")).toHaveText("가져오기를 시작했습니다", { timeout: 30_000 });
-  const documents = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/documents`)).json();
+  const documents = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/tree`)).json();
   expect(documents.items.some((item: { title: string }) => item.title === "e2e-note")).toBe(true);
   // An interrupted status read resumes the existing durable job, without reuploading.
   const statusUrl = `**/api/v1/import/*?workspaceId=${workspaceId}`;
@@ -123,7 +125,7 @@ test("Vue settings commit identity, groups, tokens, holidays, preferences and re
   await page.unroute(statusUrl);
   await importSection.getByRole("button", { name: "상태 다시 확인" }).click();
   await expect(importSection.getByRole("status")).toHaveText("가져오기를 시작했습니다", { timeout: 30_000 });
-  const afterResume = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/documents`)).json();
+  const afterResume = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/tree`)).json();
   expect(afterResume.items.filter((item: { title: string }) => item.title === "resume-settings")).toHaveLength(1);
 
   const sso = page.locator("details").filter({ has: page.locator("summary", { hasText: /^싱글 사인온$/ }) });
