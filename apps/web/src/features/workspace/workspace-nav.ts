@@ -5,6 +5,7 @@ import {
   searchPath,
   settingsPath,
   wikiPath,
+  trashPath,
   workspaceHomePath,
 } from "@/lib/href";
 
@@ -16,7 +17,8 @@ export type WorkspaceNav =
   | "projects"
   | "myTasks"
   | "search"
-  | "notifications";
+  | "notifications"
+  | "trash";
 
 /** Where switching to another workspace lands: the same section there. */
 export function landingPath(slug: string, activeNav: WorkspaceNav): string {
@@ -25,6 +27,7 @@ export function landingPath(slug: string, activeNav: WorkspaceNav): string {
   if (activeNav === "myTasks") return myTasksPath(slug);
   if (activeNav === "search") return searchPath(slug);
   if (activeNav === "notifications") return notificationsPath(slug);
+  if (activeNav === "trash") return trashPath(slug);
   if (activeNav === "home") return workspaceHomePath(slug);
   return wikiPath(slug);
 }

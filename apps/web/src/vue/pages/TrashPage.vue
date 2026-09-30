@@ -89,7 +89,7 @@ function onRestore(item: { id: string; projectId?: string | null }): void {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="wiki">
+  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="trash">
     <div class="trash-page">
       <div class="trash-page__head">
         <h1 class="trash-page__title">{{ t("trash.title") }}</h1>
