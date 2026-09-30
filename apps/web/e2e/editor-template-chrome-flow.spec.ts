@@ -44,15 +44,15 @@ test("fixed insert and history use the existing room, selection and persisted do
     await expect(slash).toBeVisible();
     await expect(slash.getByRole("group", { name: "블록 유형" }).first()).toBeVisible();
     await page.keyboard.type("math");
-    await slash.getByRole("option", { name: "math", exact: true }).click();
-    await expect(editorOf(peer.page).locator(".afn-math-edit")).toHaveCount(1);
+    await slash.getByRole("option", { name: "수식", exact: true }).click();
+    await expect(editorOf(peer.page).locator(".afn-math")).toHaveCount(1);
     await save(page);
     const json = JSON.stringify(await savedBody(page.request, wsId, doc.id));
     expect(json).toContain('"type":"math"');
     expect(json).toContain("원격편집");
     await page.reload();
     await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
-    await expect(editorOf(page).locator(".afn-math-edit")).toHaveCount(1);
+    await expect(editorOf(page).locator(".afn-math")).toHaveCount(1);
     expect(csp).toEqual([]);
     expect(iconRequests).toEqual([]);
   } finally { await peer.context.close(); }
