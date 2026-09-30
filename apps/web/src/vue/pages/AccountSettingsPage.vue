@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, watchEffect } from "vue";
+import { computed, watch, watchEffect } from "vue";
 import { useRoute } from "vue-router";
 import {
   changePassword,
@@ -17,10 +17,13 @@ import {
   withdrawAccount,
 } from "@/features/settings/account-requests";
 import { oidcErrorMessage } from "@/lib/oidc";
+import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
+import { applyTextScale } from "@/lib/ui-preferences";
 import { identitiesQuery, meQuery, mfaStatusQuery, providersQuery } from "@/lib/queries";
 import QueryLoading from "../components/QueryLoading.vue";
 import AccountSettingsView from "../features/settings/AccountSettingsView.vue";
 import MfaSection from "../features/settings/MfaSection.vue";
+import AccountTokensSection from "../features/settings/AccountTokensSection.vue";
 import { loginPath, redirectTo } from "../session/navigation";
 import "@/features/settings/settings-shell.css";
 
@@ -30,6 +33,9 @@ const me = useQuery(meQuery);
 const identities = useQuery(identitiesQuery);
 const providers = useQuery(providersQuery);
 const mfa = useQuery(mfaStatusQuery);
+watch(() => me.data.value?.textScale, (scale) => {
+  if (scale !== undefined) applyTextScale(scale);
+}, { immediate: true });
 
 function queryString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
@@ -43,15 +49,17 @@ const successNotice = computed(() => {
 const errorNotice = computed(() => oidcErrorMessage(queryString(route.query.error)));
 
 watchEffect(() => {
-  if (me.isError.value) redirectTo(loginPath(window.location));
+  if (me.error.value instanceof ProblemError && me.error.value.status === 401) redirectTo(loginPath(window.location));
 });
 
-const failed = computed(() => identities.isError.value || providers.isError.value || mfa.isError.value);
+const failed = computed(() => me.isError.value || identities.isError.value || providers.isError.value || mfa.isError.value);
+const failure = computed(() => loadErrorMessage(me.error.value ?? identities.error.value ?? providers.error.value ?? mfa.error.value));
 const ready = computed(
   () => me.data.value && identities.data.value && providers.data.value && mfa.data.value,
 );
 
 function retry(): void {
+  void me.refetch();
   void identities.refetch();
   void providers.refetch();
   void mfa.refetch();
@@ -59,6 +67,16 @@ function retry(): void {
 
 async function onWithdraw(input: Parameters<typeof withdrawAccount>[0]): Promise<void> {
   window.location.assign(await withdrawAccount(input));
+}
+
+async function savePreferences(input: { locale: "ko"; timezone: string; weekStartsOn: number; textScale: number }): Promise<void> {
+  const current = me.data.value;
+  if (!current) return;
+  const committed = await ensureOk(await api.PATCH("/api/v1/auth/me", {
+    body: { givenName: current.givenName, ...input },
+  }));
+  queryClient.setQueryData(meQuery.queryKey, committed);
+  await queryClient.invalidateQueries({ queryKey: meQuery.queryKey });
 }
 </script>
 
@@ -70,7 +88,7 @@ async function onWithdraw(input: Parameters<typeof withdrawAccount>[0]): Promise
     <main class="flex-1 p-4">
       <div class="settings-page">
         <div v-if="failed">
-          <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
+          <p role="alert" class="text-muted">{{ failure }}</p>
           <UButton type="button" size="sm" class="mt-2" @click="retry">{{ t("load.retry") }}</UButton>
         </div>
         <QueryLoading v-else-if="!ready" />
@@ -83,6 +101,7 @@ async function onWithdraw(input: Parameters<typeof withdrawAccount>[0]): Promise
           :success-notice="successNotice"
           :error-notice="errorNotice"
           :on-save-name="(input) => saveProfileName(queryClient, input)"
+          :on-save-preferences="savePreferences"
           :on-send-verification="sendEmailVerification"
           :on-change-email="requestEmailChange"
           :on-change-password="(input) => changePassword(queryClient, input)"
@@ -100,6 +119,7 @@ async function onWithdraw(input: Parameters<typeof withdrawAccount>[0]): Promise
             />
           </template>
         </AccountSettingsView>
+        <AccountTokensSection v-if="ready && !failed && me.data.value" :timezone="me.data.value.timezone" class="mt-6" />
       </div>
     </main>
     <footer class="border-t border-default px-4 py-3">

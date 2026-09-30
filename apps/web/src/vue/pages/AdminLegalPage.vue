@@ -4,12 +4,17 @@ import { computed, ref } from "vue";
 import { publishLegalDocument } from "@/features/settings/admin-requests";
 import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { legalDocQuery } from "@/lib/queries/admin";
+import { meQuery } from "@/lib/queries";
 import AdminShell from "../components/AdminShell.vue";
 import SettingsLegalView from "../features/settings/SettingsLegalView.vue";
 
 const queryClient = useQueryClient();
 const kind = ref("terms");
-const current = useQuery(() => ({ ...legalDocQuery(kind.value), enabled: kind.value.length > 0 }));
+const me = useQuery(meQuery);
+const current = useQuery(() => ({
+  ...legalDocQuery(kind.value),
+  enabled: me.data.value?.isInstanceAdmin === true && /^[a-z0-9-]{1,50}$/.test(kind.value),
+}));
 const none = computed(() => current.error.value instanceof ProblemError && current.error.value.status === 404);
 const failed = computed(() => current.isError.value && !none.value);
 </script>

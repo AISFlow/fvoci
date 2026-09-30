@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
+import UPageCard from "@nuxt/ui/components/PageCard.vue";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
 import { inputChecked, inputText, useZodForm } from "../../composables/useZodForm";
@@ -40,6 +41,14 @@ const serverError = ref<string | null>(null);
 const fieldError = ref<string | null>(null);
 const published = ref(false);
 
+// Keep the kind input mounted while dropping the previous kind's draft/notices.
+watch(() => props.kind, () => {
+  form.reset();
+  fieldError.value = null;
+  serverError.value = null;
+  published.value = false;
+});
+
 async function submit(): Promise<void> {
   form.values.kind = props.kind;
   fieldError.value = null;
@@ -62,7 +71,7 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <section class="settings-section" aria-labelledby="legal-manage-title">
+  <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="legal-manage-title">
     <h2 class="settings-section__title text-title" id="legal-manage-title">{{ t("legal.manage") }}</h2>
     <div class="flex flex-col gap-6">
       <div class="flex flex-col gap-1.5">
@@ -75,12 +84,13 @@ async function submit(): Promise<void> {
             variant="outline"
             color="neutral"
             size="sm"
+            :disabled="form.submitting.value"
             @click="onKindChange(p.kind)"
           >
             {{ p.label }}({{ p.kind }})
           </UButton>
         </div>
-        <input id="legal-kind" :class="fieldClass" :value="kind" @input="onKindChange(inputText($event))" />
+        <input :disabled="form.submitting.value" id="legal-kind" :class="fieldClass" :value="kind" @input="onKindChange(inputText($event))" />
       </div>
 
       <div class="flex flex-col gap-1.5 border-t border-default pt-4">
@@ -145,5 +155,5 @@ async function submit(): Promise<void> {
         </UButton>
       </form>
     </div>
-  </section>
+  </UPageCard>
 </template>
