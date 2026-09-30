@@ -56,6 +56,7 @@ const create = useMutation({
     ),
   onSuccess: async () => {
     actionError.value = null;
+    title.value = "";
     await invalidate();
   },
   onError: (err: unknown) => {
@@ -99,14 +100,10 @@ function onCreate(): void {
     titleError.value = parsed.message;
     return;
   }
-  void create
-    .mutateAsync({
+  create.mutate({
       kind: parsed.data.kind,
       title: parsed.data.title,
       payload: { title: parsed.data.title },
-    })
-    .then(() => {
-      title.value = "";
     });
 }
 
@@ -180,7 +177,7 @@ function kindLabel(value: TemplateOutput["kind"]): string {
                     color="neutral"
                     :disabled="pending || (row.kind === 'task' && projectId === 'none')"
                     @click="
-                      apply.mutateAsync({
+                      apply.mutate({
                         id: row.id,
                         kind: row.kind,
                         projectId: row.kind === 'task' ? projectId : undefined,
