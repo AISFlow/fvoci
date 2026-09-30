@@ -12,6 +12,11 @@
 export const VUE_APP_PATHS: readonly RegExp[] = [
   // Project Gantt: /w/:slug/:ref/gantt
   /^\/w\/[^/]+\/[^/]+\/gantt\/?$/i,
+  // Wiki document: /w/:slug/WIKI-<n>, the refs parseWikiRef (lib/href.ts)
+  // accepts (1-9 digits, no leading zero, prefix in any case). Other spellings
+  // that the React router decodes to one of these (percent-encoded) reach
+  // WorkspaceRefPage, which reloads the canonical path.
+  /^\/w\/[^/]+\/wiki-[1-9]\d{0,8}\/?$/i,
 ];
 
 export function isVueAppPath(pathname: string): boolean {

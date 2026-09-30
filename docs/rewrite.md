@@ -744,6 +744,14 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 
 **금지**: #263 독립 검토 없이 머지. 자기 검토를 독립 검토로 셈. PR 일괄 폐기. 계약 팩 재실행을 #280 비교 완료로 보고. React 공통 기반을 경로 수락 전에 제거.
 
+CI 선택 범위 변경 후보(2026-09-30, base `a1d19b6e`, 아직 수락 전): 명시적 설명 문서와 웹 UI·브라우저 검사 변경을
+합집합으로 선택한다. UI·editor UI는 Web와 설치 검사, 브라우저 spec·검토한 UI helper·웹 단위 테스트는 Web 검사,
+설명 문서만 바뀌면 제품 잡을 제외한다. 서버·schema·직렬화·CRDT 계약·폰트·fixture·harness·manifest·CI·미지 경로는 전체 검사를 유지한다.
+5개 workflow와 항상 실행되는 gate 이름을 유지하며 workflow 수준 PR 경로 필터는 거부한다. PR head는 정확히 일치해야 하고,
+체크아웃은 GitHub의 event merge SHA에 묶는다. 첫 parent가 event base의 후손이면 누적 PR diff와 실제 merge 결과 diff를 모두 검사한다.
+고정 #263/#265/#267/#269/#270/#271/#280 경로 회귀는 `scripts/fixtures/ci-selection/candidates.json`에 있다.
+검증·제출 근거는 `/tmp/fvoci-ci-impact-implementation-sol61.txt`; 독립 검토와 원격 전체 CI 수락은 코디네이터가 이어간다.
+
 ### 6.2 재개 절차
 
 1. `AGENTS.md` → `.agents/environment.md` → 이 문서 → 열린 PR·`origin/main` CI → `git worktree list`·각 worktree `git status` 순으로 실제 상태를 확인한다.

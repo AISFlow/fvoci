@@ -1,4 +1,4 @@
-// packages/editor/src/react/format-bytes.ts
+// packages/editor/src/format-bytes.ts
 
 const UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
 

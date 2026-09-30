@@ -7,6 +7,19 @@ import { loginPath, redirectTo } from "./navigation";
 
 export type SessionStatus = "loading" | "error" | "ready";
 
+/** The browser pieces the session touches; tests pass their own. */
+export interface SessionEnvironment {
+  redirect(path: string): void;
+  location(): Pick<Location, "pathname" | "search" | "hash">;
+  watchAccess: typeof watchWorkspaceAccess;
+}
+
+const BROWSER: SessionEnvironment = {
+  redirect: redirectTo,
+  location: () => window.location,
+  watchAccess: watchWorkspaceAccess,
+};
+
 /**
  * The React app's guards for a workspace page (SetupGuard, WorkspaceLayout,
  * useWorkspaceAccessWatch), for the Vue app: an instance that still needs
@@ -18,7 +31,7 @@ export type SessionStatus = "loading" | "error" | "ready";
  * Unlike the React layout, only a 401 from /auth/me counts as signed out;
  * another failure (network, 5xx) shows a retry instead of the login page.
  */
-export function useWorkspaceSession(slug: MaybeRefOrGetter<string>) {
+export function useWorkspaceSession(slug: MaybeRefOrGetter<string>, env: SessionEnvironment = BROWSER) {
   const queryClient = useQueryClient();
   const setup = useQuery(setupStatusQuery);
   const me = useQuery(meQuery);
@@ -26,12 +39,16 @@ export function useWorkspaceSession(slug: MaybeRefOrGetter<string>) {
   const workspace = computed(() => workspaces.data.value?.items.find((item) => item.slug === toValue(slug)));
 
   const signedOut = computed(() => me.error.value instanceof ProblemError && me.error.value.status === 401);
-  const denied = computed(() => me.isSuccess.value && workspaces.isSuccess.value && workspace.value === undefined);
+  // Signed in (a cached `me` counts: a failed refetch keeps it) and a fresh
+  // list without this workspace: the user cannot see it.
+  const denied = computed(
+    () => me.data.value !== undefined && workspaces.isSuccess.value && workspace.value === undefined,
+  );
 
   watchEffect(() => {
-    if (setup.data.value?.needed) redirectTo("/setup");
-    else if (signedOut.value) redirectTo(loginPath(window.location));
-    else if (denied.value) redirectTo("/?denied=workspace");
+    if (setup.data.value?.needed) env.redirect("/setup");
+    else if (signedOut.value) env.redirect(loginPath(env.location()));
+    else if (denied.value) env.redirect("/?denied=workspace");
   });
 
   // The server closes the access stream when membership or the session may
@@ -40,11 +57,11 @@ export function useWorkspaceSession(slug: MaybeRefOrGetter<string>) {
     () => workspace.value?.id,
     (workspaceId, _previous, onCleanup) => {
       if (!workspaceId) return;
-      const subscription = watchWorkspaceAccess(workspaceId, {
+      const subscription = env.watchAccess(workspaceId, {
         onAccessChange: async () => {
           try {
             const list = await queryClient.fetchQuery({ ...workspacesQuery, staleTime: 0 });
-            if (!list.items.some((item) => item.id === workspaceId)) redirectTo("/?denied=workspace");
+            if (!list.items.some((item) => item.id === workspaceId)) env.redirect("/?denied=workspace");
           } catch {
             // A transport or list failure alone must not evict the page.
           }

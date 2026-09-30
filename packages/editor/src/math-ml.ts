@@ -19,13 +19,16 @@ const MAX_SIZE = 100;
  * \pmb(text-shadow) · \fcolorbox(border) · 그리고 렌더 전체가 중단되는 오류(`{`·`\frac{`)의
  * <span class="katex-error" style="color:#cc0000">. 식 내부 오류(\thisisnotacommand 등)는
  * <mstyle mathcolor> 즉 속성이라 애초에 CSP 밖이다. 간격·레이아웃도 전부 MathML 속성이라
- * 스트립에 안 무너진다. 파서로 걷어내고 오류 색은 .katex-error 규칙이 준다 — \pmb 의 굵기
- * 강조와 \fcolorbox 의 테두리는 style= 이 유일한 표현이라 이 정책 아래서는 지원하지 않는다. */
-function withoutStyleAttributes(html: string): string {
-	const parsed = new DOMParser().parseFromString(html, "text/html");
-	for (const el of parsed.body.querySelectorAll("[style]"))
-		el.removeAttribute("style");
-	return parsed.body.innerHTML;
+ * 스트립에 안 무너진다. 걷어내고 오류 색은 .katex-error 규칙이 준다 — \pmb 의 굵기
+ * 강조와 \fcolorbox 의 테두리는 style= 이 유일한 표현이라 이 정책 아래서는 지원하지 않는다.
+ * 걷어내기는 문자열로 한다. DOMParser·<template>·createHTMLDocument 로 페이지 안에서
+ * 파싱하면 그 문서도 페이지 CSP 를 물려받아, 지우기 전에 style= 을 만난 순간 위반 보고가 난다
+ * (`\frac{` 한 번에 한 건). katex 는 속성값과 텍스트의 `"` 를 전부 &quot; 로 이스케이프하므로
+ * (utils.escape) 따옴표 안의 ` style="…"` 는 속성으로만 나온다 — 이 정규식은 속성만 지운다. */
+const STYLE_ATTRIBUTE = /\sstyle="[^"]*"/g;
+
+export function withoutStyleAttributes(html: string): string {
+	return html.replace(STYLE_ATTRIBUTE, "");
 }
 
 export type MathRender = { html: SafeHtml | null; failed: boolean };

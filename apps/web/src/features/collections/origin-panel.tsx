@@ -5,8 +5,14 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { api, ensureOk, ProblemError } from "@/lib/api";
 import { itemPath } from "@/lib/href";
+import {
+  createOriginProject,
+  createTaskFromDocument,
+  documentTaskProjectsQuery,
+  originErrorText as errorText,
+  taskOriginsQuery,
+} from "./origin-api";
 import { originCreateSurface } from "./origin-create-surface";
 
 type OriginPanelProps = {
@@ -16,10 +22,6 @@ type OriginPanelProps = {
   taskId?: string;
   hideWhenEmpty?: boolean;
 };
-
-function errorText(error: unknown, fallback: string): string {
-  return error instanceof ProblemError ? error.title : fallback;
-}
 
 function preventImeSubmit(event: React.KeyboardEvent<HTMLFormElement>) {
   if (event.key === "Enter" && event.nativeEvent.isComposing) {
@@ -37,26 +39,8 @@ export function OriginPanel({ workspaceId, slug, documentId, taskId, hideWhenEmp
   const [projectName, setProjectName] = useState("");
   const [projectKey, setProjectKey] = useState("");
 
-  const origins = useQuery({
-    queryKey: ["task-origins", workspaceId, documentId ?? taskId, after],
-    enabled: Boolean(workspaceId && (documentId || taskId)),
-    retry: false,
-    queryFn: async () => documentId
-      ? ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins", {
-          params: { path: { workspace_id: workspaceId, document_id: documentId }, query: { after: after ?? undefined, limit: 50 } },
-        }))
-      : ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/origin", {
-          params: { path: { workspace_id: workspaceId, task_id: taskId! }, query: { after: after ?? undefined, limit: 50 } },
-        })),
-  });
-  const projects = useQuery({
-    queryKey: ["task-projects", workspaceId, documentId],
-    enabled: Boolean(documentId),
-    retry: false,
-    queryFn: async () => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-projects", {
-      params: { path: { workspace_id: workspaceId, document_id: documentId! } },
-    })),
-  });
+  const origins = useQuery(taskOriginsQuery(workspaceId, { documentId, taskId }, after));
+  const projects = useQuery(documentTaskProjectsQuery(workspaceId, documentId));
   useEffect(() => {
     if (!projects.data) return;
     if (!projects.data.items.some((item) => item.id === projectId)) {
@@ -65,10 +49,7 @@ export function OriginPanel({ workspaceId, slug, documentId, taskId, hideWhenEmp
   }, [projects.data, projectId]);
 
   const createTask = useMutation({
-    mutationFn: async () => ensureOk(await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/tasks", {
-      params: { path: { workspace_id: workspaceId, document_id: documentId! } },
-      body: { projectId, requestId, task: { title: title.trim() } },
-    })),
+    mutationFn: () => createTaskFromDocument(workspaceId, documentId!, { projectId, requestId, title: title.trim() }),
     onSuccess: async () => {
       setAfter(null);
       setTitle("");
@@ -78,10 +59,7 @@ export function OriginPanel({ workspaceId, slug, documentId, taskId, hideWhenEmp
     },
   });
   const createProject = useMutation({
-    mutationFn: async () => ensureOk(await api.POST("/api/v1/workspaces/{workspace_id}/projects", {
-      params: { path: { workspace_id: workspaceId } },
-      body: { key: projectKey.trim().toUpperCase(), name: projectName.trim(), visibility: "workspace" },
-    })),
+    mutationFn: () => createOriginProject(workspaceId, projectKey, projectName),
     onSuccess: async (project) => {
       setProjectId(project.id);
       setRequestId(crypto.randomUUID());

@@ -1,39 +1,25 @@
-import { formatPersonName, t } from "@fvoci/i18n";
+import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { loadErrorMessage } from "@/components/query-status";
-import { ensureOk, ProblemError, api } from "@/lib/api";
-import { groupsQuery, membersQuery } from "@/lib/queries";
+import { ProblemError } from "@/lib/api";
+import { groupsQuery } from "@/lib/queries";
 import type { CommentsTargetKind } from "@/lib/queries/comments";
+import {
+  appendGroupMention,
+  createComment,
+  deleteComment,
+  patchComment,
+  REACTIONS,
+  reactToComment,
+  resolveComment,
+  unresolveComment,
+} from "./comment-api";
 import { nextReplyTarget } from "./comment-drafts";
-import { mentionTargetsFromBody } from "./group-mentions";
 import type { CommentOutput } from "./comment-tree";
 
-const REACTIONS = ["👍", "❤️", "🎉"] as const;
 const NONE = "";
-
-type MentionGroup = { id: string; name: string };
-
-function commentPostBody(
-  text: string,
-  parentId: string | null | undefined,
-  members: ReadonlyArray<{ userId: string; name: string }>,
-  groups: ReadonlyArray<MentionGroup>,
-) {
-  const mentions = mentionTargetsFromBody(text, members, groups);
-  return {
-    body: text,
-    parentId: parentId ?? undefined,
-    mentionedUserIds: mentions.mentionedUserIds,
-    mentionedGroupIds: mentions.mentionedGroupIds,
-  };
-}
-
-function appendGroupMention(body: string, name: string): string {
-  const prefix = body.length === 0 || body.endsWith(" ") || body.endsWith("\n") ? "" : " ";
-  return `${body}${prefix}@${name} `;
-}
 
 /** Comment mutations and draft state shared by the comment panel and the task activity feed. */
 export function useCommentActions({
@@ -63,55 +49,8 @@ export function useCommentActions({
   const onError = (error: unknown) => setActionError(loadErrorMessage(error));
 
   const create = useMutation({
-    mutationFn: async (body: { text: string; parentId?: string | null }) => {
-      let members: ReadonlyArray<{ userId: string; name: string }> = [];
-      let mentionGroups: ReadonlyArray<MentionGroup> = [];
-      if (body.text.includes("@")) {
-        const [membersResult, groupsResult] = await Promise.allSettled([
-          queryClient.fetchQuery(membersQuery(workspaceId)),
-          queryClient.fetchQuery(groupsQuery(workspaceId)),
-        ]);
-        if (membersResult.status === "fulfilled") {
-          members = membersResult.value.items.map((member) => ({
-            userId: member.userId,
-            name: formatPersonName(member),
-          }));
-        } else if (!(membersResult.reason instanceof ProblemError)) {
-          throw membersResult.reason;
-        }
-        if (groupsResult.status === "fulfilled") {
-          mentionGroups = groupsResult.value.items;
-        } else if (!(groupsResult.reason instanceof ProblemError)) {
-          throw groupsResult.reason;
-        }
-      }
-      const payload = commentPostBody(body.text, body.parentId, members, mentionGroups);
-      return ensureOk(
-        kind === "document"
-          ? project
-            ? await api.POST(
-                "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments",
-                {
-                  params: {
-                    path: {
-                      workspace_id: workspaceId,
-                      project_id: project,
-                      document_id: targetId,
-                    },
-                  },
-                  body: payload,
-                },
-              )
-            : await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments", {
-                params: { path: { workspace_id: workspaceId, document_id: targetId } },
-                body: payload,
-              })
-          : await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments", {
-              params: { path: { workspace_id: workspaceId, task_id: targetId } },
-              body: payload,
-            }),
-      );
-    },
+    mutationFn: async (body: { text: string; parentId?: string | null }) =>
+      createComment(queryClient, { workspaceId, kind, targetId, projectId: project }, body),
     onSuccess: async () => {
       setDraft("");
       setReplyDraft("");
@@ -124,12 +63,7 @@ export function useCommentActions({
 
   const patch = useMutation({
     mutationFn: async ({ id, body }: { id: string; body: string }) =>
-      ensureOk(
-        await api.PATCH("/api/v1/workspaces/{workspace_id}/comments/{comment_id}", {
-          params: { path: { workspace_id: workspaceId, comment_id: id } },
-          body: { body },
-        }),
-      ),
+      patchComment(workspaceId, id, body),
     onSuccess: async () => {
       setEditingId(null);
       setEditDraft("");
@@ -140,12 +74,7 @@ export function useCommentActions({
   });
 
   const remove = useMutation({
-    mutationFn: async (id: string) =>
-      ensureOk(
-        await api.DELETE("/api/v1/workspaces/{workspace_id}/comments/{comment_id}", {
-          params: { path: { workspace_id: workspaceId, comment_id: id } },
-        }),
-      ),
+    mutationFn: async (id: string) => deleteComment(workspaceId, id),
     onSuccess: async () => {
       setActionError(null);
       await invalidate();
@@ -154,35 +83,20 @@ export function useCommentActions({
   });
 
   const resolve = useMutation({
-    mutationFn: async (id: string) =>
-      ensureOk(
-        await api.POST("/api/v1/workspaces/{workspace_id}/comments/{comment_id}/resolve", {
-          params: { path: { workspace_id: workspaceId, comment_id: id } },
-        }),
-      ),
+    mutationFn: async (id: string) => resolveComment(workspaceId, id),
     onSuccess: invalidate,
     onError,
   });
 
   const unresolve = useMutation({
-    mutationFn: async (id: string) =>
-      ensureOk(
-        await api.POST("/api/v1/workspaces/{workspace_id}/comments/{comment_id}/unresolve", {
-          params: { path: { workspace_id: workspaceId, comment_id: id } },
-        }),
-      ),
+    mutationFn: async (id: string) => unresolveComment(workspaceId, id),
     onSuccess: invalidate,
     onError,
   });
 
   const react = useMutation({
     mutationFn: async ({ id, emoji, on }: { id: string; emoji: string; on: boolean }) =>
-      ensureOk(
-        await api.POST("/api/v1/workspaces/{workspace_id}/comments/{comment_id}/reactions", {
-          params: { path: { workspace_id: workspaceId, comment_id: id } },
-          body: { emoji, on },
-        }),
-      ),
+      reactToComment(workspaceId, id, emoji, on),
     onSuccess: invalidate,
     onError,
   });
