@@ -1,10 +1,17 @@
 // Adapted from source apps/web/src/routes/settings.admin.tsx.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type AdminUserPatch,
+  cancelAdminUserErasure,
+  eraseAdminUser,
+  patchAdminUser,
+  patchInstanceSettings,
+  saveBrandingAsset,
+} from "@/features/settings/admin-requests";
+import { adminActionMessage } from "@/features/settings/admin-users";
 import { AdminShell } from "@/features/settings/admin-shell";
-import { AdminSettingsView, adminActionMessage, type AdminUserPatch } from "@/features/settings/settings-admin";
+import { AdminSettingsView } from "@/features/settings/settings-admin";
 import type { BrandingAssetKind } from "@/features/settings/settings-catalog";
-import type { components } from "@/generated/api";
-import { api, ensureOk } from "@/lib/api";
 import {
   adminInstanceSettingsQuery,
   adminSystemQuery,
@@ -12,8 +19,6 @@ import {
   adminWorkspacesQuery,
   invalidateInstanceWrites,
 } from "@/lib/queries/admin";
-
-type SettingsPatch = components["schemas"]["InstanceSettingsPatchInput"];
 
 function AdminConsole() {
   const queryClient = useQueryClient();
@@ -23,13 +28,7 @@ function AdminConsole() {
   const settingsQuery = useQuery(adminInstanceSettingsQuery);
 
   const saveSettings = useMutation({
-    mutationFn: async (patch: Record<string, unknown>) =>
-      ensureOk(
-        await api.PATCH("/api/v1/admin/instance-settings", {
-          // The catalog form builds the body key by key; the server checks it strictly.
-          body: patch as SettingsPatch,
-        }),
-      ),
+    mutationFn: patchInstanceSettings,
     onSuccess: (data) => {
       queryClient.setQueryData(adminInstanceSettingsQuery.queryKey, data);
       return invalidateInstanceWrites(queryClient);
@@ -38,21 +37,8 @@ function AdminConsole() {
 
   // Assets are not PATCH leaves: upload is a raw octet POST, clearing a DELETE.
   const saveAsset = useMutation({
-    mutationFn: async ({ kind, file }: { kind: BrandingAssetKind; file: File | null }) =>
-      file === null
-        ? ensureOk(
-            await api.DELETE("/api/v1/admin/branding/assets/{asset}", {
-              params: { path: { asset: kind } },
-            }),
-          )
-        : ensureOk(
-            await api.POST("/api/v1/admin/branding/assets/{asset}", {
-              params: { path: { asset: kind } },
-              body: file as unknown as number[],
-              bodySerializer: (body: unknown) => body as BodyInit,
-              headers: { "Content-Type": "application/octet-stream" },
-            }),
-          ),
+    mutationFn: ({ kind, file }: { kind: BrandingAssetKind; file: File | null }) =>
+      saveBrandingAsset(kind, file),
     onSuccess: (data) => {
       queryClient.setQueryData(adminInstanceSettingsQuery.queryKey, data);
       return invalidateInstanceWrites(queryClient);
@@ -60,20 +46,17 @@ function AdminConsole() {
   });
 
   const patchUser = useMutation({
-    mutationFn: async (input: { userId: string } & AdminUserPatch) =>
-      ensureOk(await api.PATCH("/api/v1/admin/users", { body: input })),
+    mutationFn: (input: { userId: string } & AdminUserPatch) => patchAdminUser(input),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin"] }),
   });
 
   // Source eraseUser / cancelEraseUser mutations.
   const eraseUser = useMutation({
-    mutationFn: async (userId: string) =>
-      ensureOk(await api.POST("/api/v1/admin/users/erase", { body: { userId } })),
+    mutationFn: eraseAdminUser,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin"] }),
   });
   const cancelEraseUser = useMutation({
-    mutationFn: async (userId: string) =>
-      ensureOk(await api.POST("/api/v1/admin/users/cancel-erase", { body: { userId } })),
+    mutationFn: cancelAdminUserErasure,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin"] }),
   });
 

@@ -2,10 +2,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { loadErrorMessage } from "@/components/query-status";
+import { publishLegalDocument } from "@/features/settings/admin-requests";
 import { AdminShell } from "@/features/settings/admin-shell";
 import { SettingsLegalView } from "@/features/settings/settings-legal";
-import { api, ensureOk, ProblemError } from "@/lib/api";
-import { legalDocQuery, legalVersionsQuery } from "@/lib/queries/admin";
+import { ProblemError } from "@/lib/api";
+import { legalDocQuery } from "@/lib/queries/admin";
 
 function LegalManager() {
   const queryClient = useQueryClient();
@@ -25,13 +26,7 @@ function LegalManager() {
       onRetry={() => {
         void current.refetch();
       }}
-      onPublish={async (input) => {
-        await ensureOk(await api.POST("/api/v1/admin/legal", { body: input }));
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: legalDocQuery(input.kind).queryKey }),
-          queryClient.invalidateQueries({ queryKey: legalVersionsQuery(input.kind).queryKey }),
-        ]);
-      }}
+      onPublish={(input) => publishLegalDocument(queryClient, input)}
     />
   );
 }

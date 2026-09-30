@@ -77,3 +77,11 @@ export const VUE_NAV_ROUTE_PATHS = {
   notifications: "/w/:slug/notifications",
   trash: "/w/:slug/trash",
 } as const;
+
+/** Staged account/admin pages; boot remains React until their owner verifies them. */
+export const VUE_ACCOUNT_ROUTE_PATHS = {
+  accountSettings: "/settings/account",
+  admin: "/settings/admin",
+  adminAudit: "/settings/audit",
+  adminLegal: "/settings/legal",
+} as const;

@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { isVueAppPath } from "@/app-boundary";
-import { VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
+import { VUE_ACCOUNT_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
 
 /** The Vue app's pages; src/app-boundary.ts sends exactly the live paths
  * (VUE_ROUTE_PATHS) here. Each page is its own chunk, so the Gantt page does not load the wiki
@@ -57,6 +57,10 @@ export const routes: RouteRecordRaw[] = [
     name: "share-attachment-view",
     component: () => import("./pages/ShareAttachmentViewPage.vue"),
   },
+  { path: VUE_ACCOUNT_ROUTE_PATHS.accountSettings, name: "account-settings", component: () => import("./pages/AccountSettingsPage.vue") },
+  { path: VUE_ACCOUNT_ROUTE_PATHS.admin, name: "admin", component: () => import("./pages/AdminPage.vue") },
+  { path: VUE_ACCOUNT_ROUTE_PATHS.adminAudit, name: "admin-audit", component: () => import("./pages/AdminAuditPage.vue") },
+  { path: VUE_ACCOUNT_ROUTE_PATHS.adminLegal, name: "admin-legal", component: () => import("./pages/AdminLegalPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {
