@@ -62,7 +62,9 @@ function submit(): void {
   >
     <div class="flex flex-col gap-3 p-4">
       <div class="flex items-start justify-between gap-2">
-        <h2 :id="`${dialogId}-title`" class="m-0 text-lg font-semibold break-keep">{{ t("search.command") }}</h2>
+        <h2 :id="`${dialogId}-title`" class="m-0 text-lg font-semibold break-keep">{{
+          t("search.command")
+        }}</h2>
         <UButton
           size="sm"
           variant="ghost"
@@ -79,6 +81,7 @@ function submit(): void {
           :id="`${dialogId}-q`"
           v-model="draft"
           class="w-full"
+          :ui="{ base: 'placeholder:text-muted' }"
           autofocus
           :placeholder="t('search.queryPlaceholder')"
           autocomplete="off"
@@ -91,9 +94,12 @@ function submit(): void {
         {{ t("search.empty") }}
       </p>
       <SearchResultList v-if="items.length > 0" :slug="slug" :items="items.slice(0, 8)" />
-      <a v-if="q" :href="searchPath(slug, { q })" class="w-fit text-sm underline underline-offset-2">{{
-        t("search.seeAll")
-      }}</a>
+      <a
+        v-if="q"
+        :href="searchPath(slug, { q })"
+        class="w-fit text-sm underline underline-offset-2"
+        >{{ t("search.seeAll") }}</a
+      >
       <p v-else class="m-0 text-sm text-muted break-keep">{{ t("search.hint") }}</p>
     </div>
   </NativeModal>

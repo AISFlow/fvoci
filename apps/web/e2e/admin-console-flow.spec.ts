@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser, waitForCapturedMail } from "./helpers";
+import { authSql, expectVueAuth, navigateAuthQuery } from "./auth-link-evidence";
+import { readJson, flowSchemas, createE2eUser, waitForCapturedMail } from "./helpers";
 
 const admin = {
   email: "Admin@Example.COM",
@@ -20,11 +21,10 @@ test("instance admin edits settings and publishes terms; members consent before 
   page,
   browser,
 }) => {
-  test.setTimeout(90_000);
-
+  test.setTimeout(90000);
   // Setup makes the first user the instance admin.
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(admin.familyName);
   await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
   await page.getByLabel("이메일").fill(admin.email);
@@ -45,7 +45,9 @@ test("instance admin edits settings and publishes terms; members consent before 
   const users = page.getByRole("region", { name: "사용자", exact: true });
   await expect(users.getByText("admin@example.com")).toBeVisible();
   await expect(users.getByText(member.email)).toBeVisible();
-  await expect(page.getByRole("region", { name: "워크스페이스", exact: true }).getByText(admin.workspaceName)).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "워크스페이스", exact: true }).getByText(admin.workspaceName),
+  ).toBeVisible();
 
   // The unlicensed instance keeps its default branding, and both UI and API
   // refuse branding changes without hiding ordinary admin settings.
@@ -58,28 +60,37 @@ test("instance admin edits settings and publishes terms; members consent before 
     data: { branding: { name: "Denied", smtpFromDisplay: null, loginBrandText: null } },
   });
   expect(deniedBranding.status()).toBe(403);
-  expect((await deniedBranding.json()).code).toBe("enterprise_license_required");
-
+  expect((await readJson(deniedBranding, flowSchemas.error)).code).toBe(
+    "enterprise_license_required",
+  );
   const share = page.getByRole("region", { name: "공유 링크", exact: true });
   await expect(share.getByLabel("share.defaultExpiresDays")).toBeEnabled();
   await share.getByLabel("share.defaultExpiresDays").fill("14");
   const saved = page.waitForResponse(
-    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+    (res) =>
+      res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
   );
   await share.getByRole("button", { name: "저장" }).click();
   expect((await saved).status()).toBe(200);
   await page.reload();
-  await expect(page.getByRole("region", { name: "공유 링크", exact: true }).getByLabel("share.defaultExpiresDays")).toHaveValue("14");
-  await expect(page.getByRole("region", { name: "브랜딩", exact: true }).getByLabel("branding.name")).toHaveValue("FVOCI");
+  await expect(
+    page
+      .getByRole("region", { name: "공유 링크", exact: true })
+      .getByLabel("share.defaultExpiresDays"),
+  ).toHaveValue("14");
+  await expect(
+    page.getByRole("region", { name: "브랜딩", exact: true }).getByLabel("branding.name"),
+  ).toHaveValue("FVOCI");
   const instance = await page.request.get("/api/v1/instance");
   expect(instance.ok()).toBe(true);
-  expect((await instance.json()).values.branding.name).toBe("FVOCI");
-
+  expect((await readJson(instance, flowSchemas.instance)).values.branding.name).toBe("FVOCI");
   await page.getByRole("link", { name: "활동", exact: true }).click();
   await expect(page).toHaveURL(/\/settings\/audit$/);
   await expect(page.getByText("엔터프라이즈 기능 사용 권한이 필요합니다")).toBeVisible();
   await page.goto(`/w/${admin.workspaceSlug}/settings`);
-  const sso = page.locator("details").filter({ has: page.getByText("싱글 사인온", { exact: true }) });
+  const sso = page
+    .locator("details")
+    .filter({ has: page.getByText("싱글 사인온", { exact: true }) });
   await sso.locator("summary").click();
   await expect(sso.getByText("엔터프라이즈 기능 사용 권한이 필요합니다")).toBeVisible();
   await expect(sso.locator("form")).toHaveCount(0);
@@ -90,7 +101,9 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(page).toHaveURL(/\/settings\/legal$/);
   await expect(page.getByLabel("문서 종류")).toHaveValue("terms");
   await page.getByLabel("법적 문서 제목").fill("서비스 이용약관");
-  await page.getByLabel("본문(마크다운)").fill("## 제1조\n\n이 약관은 **서비스** 이용 조건을 정합니다.");
+  await page
+    .getByLabel("본문(마크다운)")
+    .fill("## 제1조\n\n이 약관은 **서비스** 이용 조건을 정합니다.");
   await page.getByLabel("발효일").fill("2026-01-01");
   await expect(page.getByLabel("필수 법적 문서")).toBeChecked();
   await page.getByRole("button", { name: "발행", exact: true }).click();
@@ -101,6 +114,7 @@ test("instance admin edits settings and publishes terms; members consent before 
   await page.reload();
   await expect(page).toHaveURL(/\/consent\?returnTo=%2Fsettings%2Flegal$/);
   await expect(page.getByRole("heading", { name: "법적 문서 동의" })).toBeVisible();
+  await expectVueAuth(page);
   await page.getByRole("checkbox", { name: "동의합니다" }).check();
   await page.getByRole("button", { name: "동의하고 계속" }).click();
   await expect(page).toHaveURL(/\/settings\/legal$/);
@@ -109,23 +123,57 @@ test("instance admin edits settings and publishes terms; members consent before 
   // A member signing in is sent to the prompt on the first gated request.
   const memberContext = await browser.newContext();
   const memberPage = await memberContext.newPage();
-  await memberPage.goto("/login");
+  await memberPage.goto("/consent?returnTo=%2Fsettings%2Faccount");
+  await expect(memberPage).toHaveURL(/\/login$/);
+  expect((await memberPage.request.get("/api/v1/auth/consents/pending")).status()).toBe(401);
   await memberPage.getByLabel("이메일").fill(member.email);
   await memberPage.getByLabel("비밀번호").fill(member.password);
   await memberPage.getByRole("button", { name: "로그인", exact: true }).click();
   await expect(memberPage).toHaveURL(/\/consent\?returnTo=%2F$/);
   const gated = await memberPage.request.get("/api/v1/auth/me");
   expect(gated.status()).toBe(428);
-  expect((await gated.json()).code).toBe("consent_required");
+  expect((await readJson(gated, flowSchemas.error)).code).toBe("consent_required");
+  await expectVueAuth(memberPage);
+  const invalid = await memberPage.request.post("/api/v1/auth/consents", { data: { items: [] } });
+  expect(invalid.status()).toBe(400);
+  const stale = await memberPage.request.post("/api/v1/auth/consents", {
+    data: { items: [{ kind: "terms", version: 99999 }] },
+  });
+  expect(stale.status()).toBe(200);
+  expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(428);
   await expect(memberPage.getByRole("heading", { name: "서비스 이용약관" })).toBeVisible();
   await expect(memberPage.getByText("이 약관은")).toBeVisible();
   const submit = memberPage.getByRole("button", { name: "동의하고 계속" });
   await expect(submit).toBeDisabled();
+  // The current query controls the destination even when this page is reused.
+  await navigateAuthQuery(
+    memberPage,
+    "/consent?returnTo=%2Fsettings%2Faccount%3Fconfirmed%3D1%23profile",
+  );
   await memberPage.getByRole("checkbox", { name: "동의합니다" }).check();
   await submit.click();
+  await expect(memberPage).toHaveURL(/\/settings\/account\?confirmed=1#profile$/);
+  await expect(memberPage.getByRole("heading", { name: "계정 설정" })).toBeVisible();
+  await memberPage.goto("/");
   await expect(memberPage).toHaveURL(/\/$/);
   await expect(memberPage.getByText("소속 워크스페이스가 없습니다.")).toBeVisible();
   expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(200);
+  expect(
+    authSql(
+      "SELECT count(*) FROM fvoci.user_consents c JOIN fvoci.users u ON c.user_id = u.id WHERE u.email = 'console-member@example.com' AND c.kind = 'terms' AND c.version = 1",
+    ),
+  ).toBe("1");
+  // Empty pending lists continue safely; foreign and recursive targets go home.
+  for (const target of ["//evil.example/", "/consent", "/settings/account?confirmed=1#profile"]) {
+    await memberPage.goto(`/consent?returnTo=${encodeURIComponent(target)}`);
+    if (target.startsWith("/settings")) {
+      await expect(memberPage).toHaveURL(/\/settings\/account\?confirmed=1#profile$/);
+      await expect(memberPage.getByRole("heading", { name: "계정 설정" })).toBeVisible();
+    } else {
+      await expect(memberPage).toHaveURL(/\/$/);
+      await expect(memberPage.getByText("소속 워크스페이스가 없습니다.")).toBeVisible();
+    }
+  }
 
   // The member has no console: no entry, the route sends them home, the API is 404.
   await expect(memberPage.getByRole("link", { name: "인스턴스 관리" })).toHaveCount(0);
@@ -149,7 +197,10 @@ test("instance admin edits settings and publishes terms; members consent before 
   await eraseConfirm.getByRole("button", { name: "삭제 예약", exact: true }).click();
   const scheduledRes = await scheduled;
   expect(scheduledRes.status()).toBe(200);
-  const scheduledBody = (await scheduledRes.json()) as Record<string, unknown>;
+  const scheduledBody = (await readJson(scheduledRes, flowSchemas.unknown)) as Record<
+    string,
+    unknown
+  >;
   // The cancel link goes to the member by mail, never to the admin.
   expect(scheduledBody.mailSent).toBe(true);
   expect("cancelToken" in scheduledBody).toBe(false);
@@ -171,10 +222,23 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(cancelConfirm).toHaveCount(0);
   await expect(memberRow.getByRole("button", { name: "삭제 예약", exact: true })).toBeVisible();
   await expect(memberRow).not.toContainText("일 남음");
-  const listed = (await (await page.request.get("/api/v1/admin/users")).json()) as {
-    items: { email: string; deletedAt: string | null; eraseAt: string | null }[];
+  const listed = (await readJson(
+    await page.request.get("/api/v1/admin/users"),
+    flowSchemas.unknown,
+  )) as {
+    items: {
+      email: string;
+      deletedAt: string | null;
+      eraseAt: string | null;
+    }[];
   };
-  const restored = listed.items.find((item) => item.email === member.email)!;
+  const required1 = listed.items.find((item) => item.email === member.email);
+  if (required1 === undefined) {
+    throw new Error(
+      "Missing fixture value: listed.items.find((item) => item.email === member.email)",
+    );
+  }
+  const restored = required1;
   expect(restored.deletedAt).toBeNull();
   expect(restored.eraseAt).toBeNull();
   // The revoked session stays revoked; the member signs in again.

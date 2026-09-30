@@ -24,11 +24,16 @@ test("owner creates an API token, sees the secret once, then revokes it", async 
   await expect(page).toHaveURL(/\/$/);
 
   await page.goto("/w/acme/settings");
-  await page.locator("summary").filter({ hasText: /^토큰$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^토큰$/ })
+    .click();
   await page.getByRole("textbox", { name: "이름", exact: true }).fill("CI 연동");
   await page.getByLabel("문서 조회").check();
   await page.getByRole("button", { name: "발급" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "이 토큰 값은 지금만 보입니다" })).toBeVisible();
+  await expect(
+    page.getByRole("status").filter({ hasText: "이 토큰 값은 지금만 보입니다" }),
+  ).toBeVisible();
   const revealed = page.getByRole("textbox", { name: "이 토큰 값은 지금만 보입니다" });
   await expect(revealed).toBeVisible();
   const secret = await revealed.inputValue();
@@ -37,7 +42,7 @@ test("owner creates an API token, sees the secret once, then revokes it", async 
 
   await page.getByRole("button", { name: "폐기" }).click();
   await expect(page.getByRole("heading", { name: "토큰을 폐기할까요?" })).toBeVisible();
-  await page.getByRole("alertdialog").getByRole("button", { name: "폐기" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "폐기" }).click();
   await expect(page.getByText("토큰이 없습니다")).toBeVisible();
   await expect(page.getByText("CI 연동")).toHaveCount(0);
 });

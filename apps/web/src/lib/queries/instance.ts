@@ -13,8 +13,7 @@ export const publicInstanceQuery = queryOptions({
   queryKey: ["instance"] as const,
   // Server sends Cache-Control max-age=60 + ETag; after admin updates, the browser
   // can reuse a pre-patch empty body within that window (see service-info-flow e2e).
-  queryFn: async () =>
-    ensureOk(await api.GET("/api/v1/instance", { cache: "no-cache" })),
+  queryFn: async () => ensureOk(await api.GET("/api/v1/instance", { cache: "no-cache" })),
 });
 
 /**
@@ -23,7 +22,7 @@ export const publicInstanceQuery = queryOptions({
  * For screens that act on a policy an admin may just have changed.
  */
 export function refreshPublicInstance(queryClient: QueryClient) {
-  return queryClient.fetchQuery({
+  return queryClient.query({
     queryKey: publicInstanceQuery.queryKey,
     queryFn: async () => ensureOk(await api.GET("/api/v1/instance", { cache: "no-cache" })),
     staleTime: 0,
@@ -41,5 +40,7 @@ export async function invalidateInstanceWrites(queryClient: QueryClient): Promis
 
 /** Only an explicit `true` opens the AI menu; this is a UI gate, the AI routes still enforce access. */
 export function selectAiEnabled(data: PublicInstance): boolean {
-  return data.values.features.ai === true;
+  // HTTP payloads can be missing or malformed despite the generated wire type.
+  const ai: unknown = data.values.features.ai;
+  return ai === true;
 }

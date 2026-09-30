@@ -24,7 +24,8 @@ const query = useQuery(() => ({
 function parseUnfurl(data: unknown): UnfurlOutput | null {
   if (data === null || typeof data !== "object") return null;
   const value = data as Partial<UnfurlOutput>;
-  if (value.kind !== "github_issue" && value.kind !== "github_pull" && value.kind !== "og") return null;
+  if (value.kind !== "github_issue" && value.kind !== "github_pull" && value.kind !== "og")
+    return null;
   if (typeof value.url !== "string") return null;
   return value as UnfurlOutput;
 }
@@ -52,24 +53,52 @@ const openLinkClass =
 </script>
 
 <template>
-  <article v-if="state === 'loading'" class="w-full max-w-md rounded-lg border border-default py-4" data-entity="url">
+  <article
+    v-if="state === 'loading'"
+    class="w-full max-w-md rounded-lg border border-default py-4"
+    data-entity="url"
+  >
     <p class="px-4" role="status">{{ t("unfurl.loading") }}</p>
   </article>
-  <article v-else-if="state === 'failed'" class="w-full max-w-md rounded-lg border border-default py-4" data-entity="url">
+  <article
+    v-else-if="state === 'failed'"
+    class="w-full max-w-md rounded-lg border border-default py-4"
+    data-entity="url"
+  >
     <p class="px-4 break-keep">{{ t("unfurl.failed") }}</p>
     <div class="px-4 pt-2">
-      <a v-if="isHttpUrl(url)" :href="url" target="_blank" rel="noopener noreferrer" :class="openLinkClass">{{ t("unfurl.open") }}</a>
+      <a
+        v-if="isHttpUrl(url)"
+        :href="url"
+        target="_blank"
+        rel="noopener noreferrer"
+        :class="openLinkClass"
+        >{{ t("unfurl.open") }}</a
+      >
     </div>
   </article>
   <SafeHtml v-else-if="iframeHtml" class="fvoci-oembed" :html="iframeHtml" />
-  <article v-else class="w-full max-w-md overflow-hidden rounded-lg border border-default" data-entity="url">
+  <article
+    v-else
+    class="w-full max-w-md overflow-hidden rounded-lg border border-default"
+    data-entity="url"
+  >
     <img v-if="imageUrl" :src="imageUrl" alt="" class="aspect-video w-full object-cover" />
     <div class="px-4 pt-4">
       <h2 class="font-medium break-keep">{{ title }}</h2>
-      <p v-if="card && card.description !== ''" class="pt-1 text-sm text-muted break-keep">{{ card.description }}</p>
+      <p v-if="card && card.description !== ''" class="pt-1 text-sm text-muted break-keep">{{
+        card.description
+      }}</p>
     </div>
     <div class="px-4 pt-2 pb-4">
-      <a v-if="isHttpUrl(url)" :href="url" target="_blank" rel="noopener noreferrer" :class="openLinkClass">{{ t("unfurl.open") }}</a>
+      <a
+        v-if="isHttpUrl(url)"
+        :href="url"
+        target="_blank"
+        rel="noopener noreferrer"
+        :class="openLinkClass"
+        >{{ t("unfurl.open") }}</a
+      >
     </div>
   </article>
 </template>

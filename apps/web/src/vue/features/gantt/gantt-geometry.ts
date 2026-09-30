@@ -4,7 +4,14 @@
 // the server. Ported from the server's src/gantt (layout.rs, scale.rs,
 // calendar.rs, links.rs) and the former React Gantt's TypeScript copy.
 import { t } from "@fvoci/i18n";
-import { addDays, dayOfWeek, daysBetween, fromEpochDay, toEpochDay, type IsoDate } from "@/lib/iso-date";
+import {
+  addDays,
+  dayOfWeek,
+  daysBetween,
+  fromEpochDay,
+  toEpochDay,
+  type IsoDate,
+} from "@/lib/iso-date";
 
 export type LinkType = "FS" | "SS" | "FF";
 export type ScheduleInference = "none" | "from-due" | "from-start" | "swapped";
@@ -120,11 +127,21 @@ function comparePacking(a: ScheduledItem, b: ScheduledItem): number {
 }
 
 function box(item: ScheduledItem, lane: number, rect: { x: number; width: number }): BarBox {
-  return { id: item.id, lane, x: rect.x, width: rect.width, milestone: item.milestone, inferred: item.inferred };
+  return {
+    id: item.id,
+    lane,
+    x: rect.x,
+    width: rect.width,
+    milestone: item.milestone,
+    inferred: item.inferred,
+  };
 }
 
 /** One lane per item, ordered by (start, id). */
-export function stackRows(items: readonly ScheduledItem[], scale: GanttScale): { bars: BarBox[]; overflow: string[] } {
+export function stackRows(
+  items: readonly ScheduledItem[],
+  scale: GanttScale,
+): { bars: BarBox[]; overflow: string[] } {
   const bars: BarBox[] = [];
   const overflow: string[] = [];
   for (const item of [...items].sort(comparePacking)) {
@@ -142,25 +159,33 @@ function firstFreeLane(laneEnd: readonly number[], x: number, minLane: number): 
   return Math.max(laneEnd.length, minLane);
 }
 
-function orderByDependency(items: readonly ScheduledItem[], links: readonly GanttLinkInput[]): ScheduledItem[] {
+function orderByDependency(
+  items: readonly ScheduledItem[],
+  links: readonly GanttLinkInput[],
+): ScheduledItem[] {
   const byId = new Map(items.map((item) => [item.id, item]));
   const indegree = new Map(items.map((item) => [item.id, 0]));
   const next = new Map(items.map((item) => [item.id, [] as string[]]));
   for (const link of links) {
     if (!byId.has(link.blockerId) || !byId.has(link.blockedId)) continue;
-    next.get(link.blockerId)!.push(link.blockedId);
+    const successors = next.get(link.blockerId);
+    if (!successors) throw new Error("Gantt dependency source is missing");
+    successors.push(link.blockedId);
     indegree.set(link.blockedId, (indegree.get(link.blockedId) ?? 0) + 1);
   }
   const ready = items.filter((item) => indegree.get(item.id) === 0).sort(comparePacking);
   const out: ScheduledItem[] = [];
   while (ready.length > 0) {
-    const item = ready.shift()!;
+    const item = ready.shift();
+    if (!item) throw new Error("Gantt dependency queue is empty");
     out.push(item);
     for (const id of next.get(item.id) ?? []) {
       const left = (indegree.get(id) ?? 1) - 1;
       indegree.set(id, left);
       if (left === 0) {
-        ready.push(byId.get(id)!);
+        const target = byId.get(id);
+        if (!target) throw new Error("Gantt dependency target is missing");
+        ready.push(target);
         ready.sort(comparePacking);
       }
     }
@@ -249,12 +274,23 @@ export function monthBands(columns: readonly DayColumn[]): MonthBand[] {
       out[out.length - 1] = { ...last, width: last.width + column.width };
       continue;
     }
-    out.push({ key, label: t("gantt.month", { month: Number(key.slice(5, 7)) }), x: column.x, width: column.width });
+    out.push({
+      key,
+      label: t("gantt.month", { month: Number(key.slice(5, 7)) }),
+      x: column.x,
+      width: column.width,
+    });
   }
   return out;
 }
 
-function hitsLabel(y: number, left: number, right: number, bars: readonly BarBox[], laneHeight: number): boolean {
+function hitsLabel(
+  y: number,
+  left: number,
+  right: number,
+  bars: readonly BarBox[],
+  laneHeight: number,
+): boolean {
   const half = laneHeight * 0.32;
   return bars.some((bar) => {
     const cy = laneCenterY(bar.lane, laneHeight);
@@ -289,7 +325,10 @@ function pickGutter(
       const y = base + delta;
       if (y < 4) continue;
       if (hitsLabel(y, left, right, bars, laneHeight)) continue;
-      if (used.some(([uy, ul, ur]) => Math.abs(uy - y) < DETOUR_STEP - 1 && left < ur && right > ul)) continue;
+      if (
+        used.some(([uy, ul, ur]) => Math.abs(uy - y) < DETOUR_STEP - 1 && left < ur && right > ul)
+      )
+        continue;
       used.push([y, left, right]);
       return y;
     }
@@ -343,12 +382,18 @@ export function linkPaths(
       } else {
         const detour = pickGutter(x2 - ELBOW_PAD, x1 + ELBOW_PAD, y1, y2, bars, laneHeight, used);
         points = [
-          x1, y1,
-          x1 + ELBOW_PAD, y1,
-          x1 + ELBOW_PAD, detour,
-          x2 - ELBOW_PAD, detour,
-          x2 - ELBOW_PAD, y2,
-          x2, y2,
+          x1,
+          y1,
+          x1 + ELBOW_PAD,
+          y1,
+          x1 + ELBOW_PAD,
+          detour,
+          x2 - ELBOW_PAD,
+          detour,
+          x2 - ELBOW_PAD,
+          y2,
+          x2,
+          y2,
         ];
       }
     }
@@ -358,15 +403,28 @@ export function linkPaths(
 }
 
 /** Chart height: every lane, and any link detour below the last one. */
-export function chartHeight(laneCount: number, laneHeight: number, paths: readonly LinkPath[]): number {
+export function chartHeight(
+  laneCount: number,
+  laneHeight: number,
+  paths: readonly LinkPath[],
+): number {
   let maxY = 0;
   for (const path of paths) {
-    for (let i = 1; i < path.points.length; i += 2) maxY = Math.max(maxY, path.points[i]!);
+    for (const [i, point] of path.points.entries()) {
+      if (i % 2 === 1) maxY = Math.max(maxY, point);
+    }
   }
   return Math.max(laneCount * laneHeight, maxY + 12, laneHeight);
 }
 
 export type BarDragKind = "move" | "start" | "end";
+
+export interface GanttBarChange {
+  id: string;
+  kind: BarDragKind;
+  start: IsoDate;
+  end: IsoDate;
+}
 
 /** A bar's days, both ends included. */
 export interface DayRange {

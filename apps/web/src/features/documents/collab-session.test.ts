@@ -5,28 +5,25 @@ import test from "node:test";
 import { PRESENCE_COLORS, presenceColorOf } from "../../lib/presence.ts";
 import { collabStatusOf, collabUserOf } from "./collab-model.ts";
 
-const sessionPath = path.join(import.meta.dirname, "collab-session.tsx");
-const cssPath = path.join(import.meta.dirname, "../../styles/app.css");
+const sessionPath = path.join(import.meta.dirname, "../../vue/collab/useCollabRoom.ts");
+const cssPath = path.join(import.meta.dirname, "../../styles/presence.css");
 
-test("collab-session 은 provider-react 를 쓴다", () => {
+await test("Vue collab room binds the provider and preserves durable persist state", () => {
   const src = readFileSync(sessionPath, "utf8");
-  assert.equal(src.includes("@hocuspocus/provider-react"), true);
-  assert.equal(src.includes("new HocuspocusProvider"), false);
+  assert.equal(src.includes("@hocuspocus/provider-react"), false);
+  assert.equal(src.includes("new HocuspocusProvider"), true);
   assert.equal(src.includes("gc: false"), true);
   assert.equal(src.includes("durableSaved"), true);
   assert.equal(src.includes("syncPersistBind"), true);
   assert.equal(src.includes("scopedPersistObserver"), true);
 });
 
-test("collab-session 에 hex 리터럴이 없다", () => {
-  const src = readFileSync(sessionPath, "utf8").replace(
-    /\/\*[\s\S]*?\*\/|\/\/.*/g,
-    "",
-  );
+await test("collab-session 에 hex 리터럴이 없다", () => {
+  const src = readFileSync(sessionPath, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
   assert.equal(/#[0-9a-fA-F]{3,8}/.test(src), false);
 });
 
-test("collabUserOf 색은 .afn-label-* --afn-label-ink 이다", () => {
+await test("collabUserOf 색은 .afn-label-* --afn-label-ink 이다", () => {
   const user = collabUserOf("01a01f00-0000-7000-8000-000000000001", "김연구");
   assert.match(user.color, /^#[0-9a-fA-F]{6}$/);
   const css = readFileSync(cssPath, "utf8");
@@ -51,13 +48,12 @@ function oldClientIndex(userId: string): number {
 }
 
 function labelInk(css: string, key: string): string | undefined {
-  return new RegExp(
-    `^\\.afn-label-${key} \\{[^}]*--afn-label-ink: (#[0-9a-fA-F]{6})`,
-    "m",
-  ).exec(css)?.[1];
+  return new RegExp(`^\\.afn-label-${key} \\{[^}]*--afn-label-ink: (#[0-9a-fA-F]{6})`, "m").exec(
+    css,
+  )?.[1];
 }
 
-test("presenceColorOf 는 옛 클라이언트 인덱스와 같은 .afn-label-* 잉크를 고른다", () => {
+await test("presenceColorOf 는 옛 클라이언트 인덱스와 같은 .afn-label-* 잉크를 고른다", () => {
   const css = readFileSync(cssPath, "utf8");
   assert.equal(PRESENCE_COLORS.length, OLD_LABEL_KEYS.length);
   for (let i = 0; i < OLD_LABEL_KEYS.length; i += 1) {
@@ -69,7 +65,7 @@ test("presenceColorOf 는 옛 클라이언트 인덱스와 같은 .afn-label-* �
   }
 });
 
-test("다른 uuid 뒷자리는 다른 라벨 색을 고른다", () => {
+await test("다른 uuid 뒷자리는 다른 라벨 색을 고른다", () => {
   const a = collabUserOf("01a01f00-0000-7000-8000-000000000001", "김");
   const b = collabUserOf("01a01f00-0000-7000-8000-00000000000b", "박");
   assert.notEqual(a.color, b.color);
@@ -77,22 +73,26 @@ test("다른 uuid 뒷자리는 다른 라벨 색을 고른다", () => {
   assert.match(b.color, /^#[0-9a-fA-F]{6}$/);
 });
 
-test("collabStatusOf: unauthorized > 방 거절 > 연결 상태 순이다", () => {
+await test("collabStatusOf: unauthorized > 방 거절 > 연결 상태 순이다", () => {
   for (const connection of ["connecting", "connected", "disconnected"] as const) {
-    assert.equal(collabStatusOf(false, null, connection), connection, "no refusal: the raw connection state");
+    assert.equal(
+      collabStatusOf(false, null, connection),
+      connection,
+      "no refusal: the raw connection state",
+    );
     assert.equal(collabStatusOf(false, "capacity", connection), "busy");
     assert.equal(collabStatusOf(false, "unavailable", connection), "unavailable");
     for (const refusal of [null, "capacity", "unavailable"] as const) {
       assert.equal(
         collabStatusOf(true, refusal, connection),
         "unauthorized",
-        `a refusal must not hide the unauthorized note: ${refusal}/${connection}`,
+        `a refusal must not hide the unauthorized note: ${String(refusal)}/${connection}`,
       );
     }
   }
 });
 
-/* The repo has no DOM test setup; like the tests above, these read the React glue's source. */
+/* Retained generation/auth/teardown contracts inspect the actual Vue glue. */
 function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
 }
@@ -105,26 +105,42 @@ function between(src: string, start: string, end: string): string {
   return src.slice(from, to);
 }
 
-test("collab-session: 소켓 층은 재선언 세대에만 리마운트한다(거절로는 리마운트하지 않는다)", () => {
+await test("Vue collab room rebinds only socket generation, never refusal state", () => {
   const src = stripComments(readFileSync(sessionPath, "utf8"));
-  const tags = [...src.matchAll(/<HocuspocusProviderWebsocketComponent\b[^>]*>/g)];
-  assert.equal(tags.length, 1);
-  const keys = [...tags[0][0].matchAll(/\bkey=\{([^}]*)\}/g)].map((m) => m[1].trim());
-  assert.deepEqual(keys, ["room.generation"], "keyed on anything a refusal changes remounts the page per refusal");
-  assert.match(tags[0][0], /\bwebsocketProvider=\{room\.socket\}/);
+  const binding = between(src, "function bindGeneration(", "function retire(");
+  assert.equal(binding.match(/new HocuspocusProvider\(/g)?.length, 1);
+  assert.match(binding, /websocketProvider: state\.socket,/);
+  const watch = between(src, "bindGeneration(connection.state);", "onScopeDispose(() => {");
+  assert.match(watch, /\(\) => room\.value\.generation,/);
+  assert.match(watch, /if \(!disposed\) bindGeneration\(room\.value\);/);
+  assert.doesNotMatch(watch, /refusal/);
 });
 
-test("collab-session: 방의 인증 결과를 연결 상태 기계로 넘기고 거절 사유를 컨텍스트로 내린다", () => {
+await test("Vue collab room sends authentication results to the state machine and exposes refusal in session status", () => {
   const src = stripComments(readFileSync(sessionPath, "utf8"));
-  const room = between(src, "<HocuspocusRoom", "</HocuspocusRoom>");
-  assert.match(room, /\bonAuthenticated=\{\(\) => connection\.current\?\.authenticated\(\)\}/);
-  assert.match(room, /\bonAuthenticationFailed=\{\(\) => connection\.current\?\.reclaim\(\)\}/);
-  assert.match(room, /<CollabRefusalContext\.Provider value=\{room\.refusal\}>/);
+  const binding = between(src, "function bindGeneration(", "function retire(");
+  assert.match(binding, /onAuthenticated = \(\) => \{\s*connection\.authenticated\(\);\s*\};/);
+  assert.match(binding, /onAuthenticationFailed = \(\) => \{\s*connection\.reclaim\(\);\s*\};/);
+  assert.match(binding, /provider\.on\("authenticated", onAuthenticated\)/);
+  assert.match(binding, /provider\.on\("authenticationFailed", onAuthenticationFailed\)/);
+  assert.match(binding, /provider\.off\("authenticated", onAuthenticated\)/);
+  assert.match(binding, /provider\.off\("authenticationFailed", onAuthenticationFailed\)/);
+  assert.match(
+    src,
+    /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/,
+  );
 });
 
-test("collab-session: 세션 상태는 collabStatusOf 로만 정한다", () => {
+await test("Vue collab room computes status with collabStatusOf and releases its generation on teardown", () => {
   const src = stripComments(readFileSync(sessionPath, "utf8"));
-  const hook = between(src, "export function useCollabSession", "if (!user) return null;");
-  assert.match(hook, /\bstatus: collabStatusOf\(unauthorized, refusal, connectionStatus\),/);
-  assert.match(hook, /const refusal = useContext\(CollabRefusalContext\);/);
+  assert.match(src, /return computed<CollabRoomSession>\(\(\) => \(/);
+  assert.match(
+    src,
+    /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/,
+  );
+  const dispose = src.slice(src.indexOf("bindGeneration(connection.state);"));
+  assert.match(dispose, /disposed = true;/);
+  assert.match(dispose, /connection\.dispose\(\);/);
+  assert.match(dispose, /current\.value = null;/);
+  assert.match(dispose, /if \(last\) retire\(last\);/);
 });

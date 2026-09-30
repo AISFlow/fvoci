@@ -1,0 +1,226 @@
+// Official Nuxt UI editor chrome on FVOCI's existing Tiptap/Yjs host.
+// Real browser, Rust server, DB, peer and persisted ACK; no demo document/store.
+import { expect, test } from "@playwright/test";
+import { readJson, flowSchemas, login, watchCspViolations } from "./helpers";
+import {
+  admin,
+  member,
+  blockAt,
+  caretAtEndOf,
+  createDoc,
+  editorOf,
+  newSignedInPage,
+  expectBlocks,
+  openDoc,
+  save,
+  savedBody,
+  setupInstance,
+  watchIconRequests,
+  workspaceId,
+} from "./workspace-wiki-vue-editor";
+
+test.describe.configure({ mode: "serial" });
+test.beforeAll(async ({ browser, baseURL }) => {
+  await setupInstance(browser, baseURL);
+});
+
+test("non-editor Vue screens do not load the editor host or its collaboration plugins", async ({
+  page,
+}) => {
+  const assets = new Set<string>();
+  const captureAssets = async () => {
+    const paths = await page.evaluate(() =>
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => new URL(entry.name).pathname)
+        .filter((path) => /^\/assets\/[^/]+\.(js|css)$/.test(path)),
+    );
+    expect(paths.some((path) => path.endsWith(".js"))).toBe(true);
+    for (const path of paths) assets.add(path);
+  };
+  await login(page, admin.email, admin.password);
+  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+  await captureAssets();
+  // Workspace home is still React at this dispatched base; exercise the
+  // actual Vue HTML-sink route rather than attributing React CSS to Vue.
+  await page.goto("/legal/privacy");
+  await expect(page.getByRole("heading").first()).toBeVisible();
+  await expect(page.locator("#root")).toHaveClass(/isolate/);
+  await captureAssets();
+  const wsId = await workspaceId(page.request);
+  const project = await page.request.post(`/api/v1/workspaces/${wsId}/projects`, {
+    data: { key: "TCL", name: "Editor lazy boundary", visibility: "workspace" },
+  });
+  expect(project.status()).toBe(201);
+  const projectId = (await readJson(project, flowSchemas.project)).id;
+  const task = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, {
+    data: { title: "Lazy route witness", startDate: "2026-09-28", dueDate: "2026-09-30" },
+  });
+  expect(task.status()).toBe(201);
+  await page.goto(`/w/${admin.workspaceSlug}/TCL/gantt?y=2026&m=9`);
+  await expect(page.locator('[data-slot="gantt"]')).toBeVisible();
+  await captureAssets();
+  // The group serves an immutable copied build. Read the actual requested
+  // assets after navigation, as the existing Gantt boundary regression does.
+  const loaded = await Promise.all(
+    [...assets].map(async (path) => {
+      const response = await page.request.get(path);
+      expect(response.ok()).toBe(true);
+      return { path, text: await response.text() };
+    }),
+  );
+  const editorAssets = loaded.filter(({ text }) =>
+    /ProseMirror|fvoci-editor|fvociSlash|fvociMention/.test(text),
+  );
+  expect(editorAssets.map(({ path }) => path)).toEqual([]);
+  await expect(editorOf(page)).toHaveCount(0);
+});
+
+test("fixed insert and history use the existing room, selection and persisted document", async ({
+  browser,
+  baseURL,
+  page,
+}) => {
+  const csp = watchCspViolations(page);
+  const iconRequests = watchIconRequests(page);
+  await login(page, admin.email, admin.password);
+  const wsId = await workspaceId(page.request);
+  const doc = await createDoc(page.request, wsId, "템플릿 도구", { markdown: "시작\n\n동료\n" });
+  const peer = await newSignedInPage(browser, baseURL, member);
+  try {
+    await openDoc(page, doc.path);
+    await openDoc(peer.page, doc.path);
+    const plugins = await editorOf(page).evaluate((root) =>
+      (
+        root as HTMLElement & {
+          editor: {
+            state: {
+              plugins: Array<{
+                key: string;
+              }>;
+            };
+          };
+        }
+      ).editor.state.plugins.map((plugin) => plugin.key),
+    );
+    expect(plugins.filter((key) => key.startsWith("bubbleMenu$"))).toHaveLength(1);
+    expect(plugins.filter((key) => key.startsWith("dragHandle$"))).toHaveLength(1);
+    const toolbar = page.locator(".fvoci-template-toolbar--fixed");
+    await expect(toolbar.locator('[role="group"]')).toHaveCount(2);
+    await expect(toolbar.getByRole("button", { name: "실행 취소", exact: true })).toBeDisabled();
+    await caretAtEndOf(page, 0);
+    await page.keyboard.type(" 내편집");
+    await expectBlocks(peer.page, ["시작 내편집", "동료"]);
+    await caretAtEndOf(peer.page, 1);
+    await peer.page.keyboard.type(" 원격편집");
+    await expectBlocks(page, ["시작 내편집", "동료 원격편집"]);
+    await toolbar.getByRole("button", { name: "실행 취소", exact: true }).click();
+    await expectBlocks(page, ["시작", "동료 원격편집"]);
+    await expectBlocks(peer.page, ["시작", "동료 원격편집"]);
+    await toolbar.getByRole("button", { name: "다시 실행", exact: true }).click();
+    await expectBlocks(peer.page, ["시작 내편집", "동료 원격편집"]);
+
+    await caretAtEndOf(page, 1);
+    await toolbar.getByRole("button", { name: "삽입", exact: true }).click();
+    const insertMenu = page.getByRole("menu", { name: "삽입", exact: true });
+    await expect(insertMenu.getByRole("menuitem").first()).toBeFocused();
+    await insertMenu.getByRole("menuitem").first().click();
+    const slash = page.locator(".fvoci-suggestion");
+    await expect(slash).toBeVisible();
+    await expect(slash.getByRole("group", { name: "블록 유형" }).first()).toBeVisible();
+    await page.keyboard.type("math");
+    await slash.getByRole("option", { name: "수식", exact: true }).click();
+    await expect(editorOf(peer.page).locator(".afn-math")).toHaveCount(1);
+    await save(page);
+    const json = JSON.stringify(await savedBody(page.request, wsId, doc.id));
+    expect(json).toContain('"type":"math"');
+    expect(json).toContain("원격편집");
+    await page.reload();
+    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
+    await expect(editorOf(page).locator(".afn-math")).toHaveCount(1);
+    expect(csp).toEqual([]);
+    expect(iconRequests).toEqual([]);
+  } finally {
+    await peer.context.close();
+  }
+});
+
+test("link popup keeps native selection and composing Enter cannot apply the URL", async ({
+  page,
+}) => {
+  const csp = watchCspViolations(page);
+  await login(page, admin.email, admin.password);
+  const wsId = await workspaceId(page.request);
+  const doc = await createDoc(page.request, wsId, "템플릿 링크", { markdown: "한글과 😀 링크\n" });
+  await openDoc(page, doc.path);
+  await caretAtEndOf(page, 0);
+  await page.keyboard.press("Shift+Home");
+  const bubble = page.locator("[data-fvoci-bubble]");
+  const trigger = bubble.getByRole("button", { name: "링크", exact: true });
+  await expect(bubble).toBeVisible();
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "링크", exact: true });
+  const url = dialog.getByLabel("URL");
+  await expect(url).toBeFocused();
+  await url.fill("https://example.com/한글");
+  await url.dispatchEvent("compositionstart", { data: "한" });
+  await url.dispatchEvent("keydown", { key: "Enter", isComposing: true, keyCode: 229 });
+  await expect(dialog).toBeVisible();
+  await expect(blockAt(page, 0).locator("a")).toHaveCount(0);
+  await url.dispatchEvent("compositionend", { data: "한글" });
+  await page.keyboard.press("Escape");
+  await expect(trigger).toBeFocused();
+  expect(await editorOf(page).evaluate(() => window.getSelection()?.toString())).toBe(
+    "한글과 😀 링크",
+  );
+  await trigger.click();
+  await url.fill("https://example.com/한글");
+  await url.press("Enter");
+  await expect(dialog).toHaveCount(0);
+  await expect(blockAt(page, 0).locator("a")).toHaveText("한글과 😀 링크");
+  await save(page);
+  expect(JSON.stringify(await savedBody(page.request, wsId, doc.id))).toContain('"type":"link"');
+  expect(csp).toEqual([]);
+});
+
+test("emoji insertion and mobile groups remain keyboard usable without viewport overflow", async ({
+  page,
+}) => {
+  const iconRequests = watchIconRequests(page);
+  await login(page, admin.email, admin.password);
+  const wsId = await workspaceId(page.request);
+  const doc = await createDoc(page.request, wsId, "템플릿 이모지", { markdown: "문단\n" });
+  await openDoc(page, doc.path);
+  await caretAtEndOf(page, 0);
+  await page
+    .locator(".fvoci-template-toolbar--fixed")
+    .getByRole("button", { name: "삽입", exact: true })
+    .click();
+  await page
+    .getByRole("menu", { name: "삽입", exact: true })
+    .getByRole("menuitem", { name: ":", exact: true })
+    .click();
+  await page.keyboard.type("smile");
+  const suggestions = page.locator(".fvoci-suggestion");
+  await expect(suggestions).toBeVisible();
+  await expect(suggestions.getByRole("option").first()).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowDown");
+  await expect(suggestions.getByRole("option").nth(1)).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Enter");
+  await expect(suggestions).toHaveCount(0);
+  await save(page);
+  expect(JSON.stringify(await savedBody(page.request, wsId, doc.id))).toContain('"type":"emoji"');
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobile = page.locator("[data-mobile-toolbar]");
+  await expect(mobile).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  const bold = mobile.getByRole("button", { name: "굵게", exact: true });
+  const box = await bold.boundingBox();
+  expect(box?.height).toBeGreaterThanOrEqual(44);
+  await caretAtEndOf(page, 0);
+  await page.keyboard.press("Shift+Home");
+  await bold.click();
+  await expect(blockAt(page, 0).locator("strong")).toContainText("문단");
+  await expect(page.locator("[data-fvoci-bubble]")).toBeHidden();
+  expect(iconRequests).toEqual([]);
+});

@@ -23,7 +23,7 @@ function between(src: string, start: string, end: string): string {
   return src.slice(from, to);
 }
 
-test("useCollabRoom binds @hocuspocus/provider itself: one provider per socket generation", () => {
+await test("useCollabRoom binds @hocuspocus/provider itself: one provider per socket generation", () => {
   const src = source();
   assert.equal(src.includes("@hocuspocus/provider-react"), false);
   assert.equal(src.match(/new HocuspocusProvider\(/g)?.length, 1);
@@ -38,53 +38,71 @@ test("useCollabRoom binds @hocuspocus/provider itself: one provider per socket g
   assert.equal(src.includes("scopedPersistObserver"), true);
 });
 
-test("useCollabRoom keeps Yjs and provider objects raw, never reactive", () => {
+await test("useCollabRoom keeps Yjs and provider objects raw, never reactive", () => {
   const src = source();
   assert.equal(/\breactive\(/.test(src), false);
   assert.equal(/\bref\(/.test(src), false, "shallowRef only");
   assert.match(src, /const doc = markRaw\(new Y\.Doc\(\{ gc: false \}\)\);/);
-  assert.match(src, /open: \(onClosed\) => markRaw\(createRefusalAwareSocket\(\{ url \}, onClosed\)\),/);
+  assert.match(
+    src,
+    /open: \(onClosed\) => markRaw\(createRefusalAwareSocket\(\{ url \}, onClosed\)\),/,
+  );
   assert.match(src, /const provider = markRaw\(\s*new HocuspocusProvider\(/);
 });
 
-test("useCollabRoom has no hex literals", () => {
+await test("useCollabRoom has no hex literals", () => {
   assert.equal(/#[0-9a-fA-F]{3,8}/.test(source()), false);
 });
 
-test("useCollabRoom hands the room's auth results to the connection state machine", () => {
+await test("useCollabRoom hands the room's auth results to the connection state machine", () => {
   const bind = between(source(), "function bindGeneration(", "function retire(");
-  assert.match(bind, /const onAuthenticated = \(\) => connection\.authenticated\(\);/);
-  assert.match(bind, /const onAuthenticationFailed = \(\) => connection\.reclaim\(\);/);
+  assert.match(bind, /const onAuthenticated = \(\) => \{\s*connection\.authenticated\(\);\s*\};/);
+  assert.match(bind, /const onAuthenticationFailed = \(\) => \{\s*connection\.reclaim\(\);\s*\};/);
   assert.match(bind, /provider\.off\("authenticated", onAuthenticated\);/);
 });
 
-test("useCollabRoom re-binds only on a new socket generation, never on a refusal", () => {
+await test("useCollabRoom re-binds only on a new socket generation, never on a refusal", () => {
   const src = source();
-  const watches = [...src.matchAll(/watch\(\s*\(\) => room\.value\.([a-zA-Z]+),/g)].map((m) => m[1]);
-  assert.deepEqual(watches, ["generation"], "a watch on anything a refusal changes re-binds per refusal");
+  const watches = [...src.matchAll(/watch\(\s*\(\) => room\.value\.([a-zA-Z]+),/g)].map(
+    (m) => m[1],
+  );
+  assert.deepEqual(
+    watches,
+    ["generation"],
+    "a watch on anything a refusal changes re-binds per refusal",
+  );
   assert.match(src, /reclaimLimit: CLAIM_RETRY_LIMIT,/);
   assert.match(src, /doc\.clientID = new Y\.Doc\(\)\.clientID;/);
 });
 
-test("useCollabRoom decides the session status with collabStatusOf only", () => {
+await test("useCollabRoom decides the session status with collabStatusOf only", () => {
   const session = between(source(), "function bindSession(", "bindGeneration(connection.state);");
-  assert.match(session, /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/);
+  assert.match(
+    session,
+    /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/,
+  );
   assert.match(session, /pending: unsent\.value && !readOnly\.value,/);
   assert.match(session, /durableSaved: isDurablySaved\(bind\.value\.ack\),/);
 });
 
-test("useCollabRoom tears down: flush and socket first, then the provider after 0 ms", () => {
+await test("useCollabRoom tears down: flush and socket first, then the provider after 0 ms", () => {
   const src = source();
   const dispose = between(src, "onScopeDispose(() => {\n    disposed = true;", "return {");
   const flush = dispose.indexOf("connection.dispose();");
   const retire = dispose.indexOf("retire(last)");
-  assert.ok(flush !== -1 && retire !== -1 && flush < retire, "connection.dispose() runs before the provider is retired");
+  assert.ok(
+    flush !== -1 && retire !== -1 && flush < retire,
+    "connection.dispose() runs before the provider is retired",
+  );
   const retireFn = between(src, "function retire(", "function bindSession(");
   assert.match(retireFn, /generation\.scope\.stop\(\);/);
-  assert.match(retireFn, /window\.setTimeout\(\(\) => generation\.provider\.destroy\(\), 0\);/);
+  assert.match(
+    retireFn,
+    /window\.setTimeout\(\(\) => \{\s*generation\.provider\.destroy\(\);\s*\}, 0\);/,
+  );
 });
 
-test("useCollabRoom flushes on pagehide and re-asserts presence on pageshow", () => {
+await test("useCollabRoom flushes on pagehide and re-asserts presence on pageshow", () => {
   const session = between(source(), "function bindSession(", "bindGeneration(connection.state);");
   assert.match(session, /window\.addEventListener\("pagehide", onPageHide\);/);
   assert.match(session, /provider\.flushPendingUpdates\(\);/);

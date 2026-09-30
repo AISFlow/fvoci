@@ -4,7 +4,13 @@ import { OpenXmlContentLimitError, OpenXmlDecompressionBombError } from "@office
 import { getSheet, sheetNames, type Workbook } from "@office-kit/xlsx/workbook";
 import { getValueExtent, iterValues } from "@office-kit/xlsx/worksheet";
 import { unzipSync } from "fflate";
-import { XLSX_LIMITS, pageWindow, type CellBox, type PageWindow, type XlsxLimits } from "./xlsx-limits.ts";
+import {
+  XLSX_LIMITS,
+  pageWindow,
+  type CellBox,
+  type PageWindow,
+  type XlsxLimits,
+} from "./xlsx-limits.ts";
 
 /** A tab of the workbook: a worksheet, or a chartsheet/other slot shown as unavailable. */
 export type XlsxSheet = { name: string; kind: "worksheet" } | { name: string; kind: "unsupported" };
@@ -27,7 +33,7 @@ export type XlsxOpenResult =
   /** Not a readable XLSX package (corrupt, encrypted, legacy .xls, …). */
   | { status: "invalid" };
 
-const OVER_CAP = Symbol("xlsx package over cap");
+const OVER_CAP = new Error("xlsx package over cap");
 
 /**
  * Declared-metadata check that runs before @office-kit/xlsx sees the bytes.
@@ -52,7 +58,10 @@ const OVER_CAP = Symbol("xlsx package over cap");
  * even past the declared size (the extra output is dropped). The viewer
  * therefore parses in a worker with a wall-clock bound (`xlsx-client.ts`).
  */
-export function checkXlsxPackage(bytes: Uint8Array, limits: XlsxLimits = XLSX_LIMITS): "ok" | "tooLarge" | "invalid" {
+export function checkXlsxPackage(
+  bytes: Uint8Array,
+  limits: XlsxLimits = XLSX_LIMITS,
+): "ok" | "tooLarge" | "invalid" {
   let entries = 0;
   let declared = 0;
   try {
@@ -78,7 +87,10 @@ export function checkXlsxPackage(bytes: Uint8Array, limits: XlsxLimits = XLSX_LI
  * evaluated; VBA projects and external links stay opaque package parts that
  * are neither run nor fetched.
  */
-export async function openXlsx(bytes: Uint8Array, limits: XlsxLimits = XLSX_LIMITS): Promise<XlsxOpenResult> {
+export async function openXlsx(
+  bytes: Uint8Array,
+  limits: XlsxLimits = XLSX_LIMITS,
+): Promise<XlsxOpenResult> {
   const checked = checkXlsxPackage(bytes, limits);
   if (checked !== "ok") return { status: checked };
   let workbook: Workbook;
@@ -88,7 +100,10 @@ export async function openXlsx(bytes: Uint8Array, limits: XlsxLimits = XLSX_LIMI
       contentLimits: { maxCells: limits.maxCells, maxRows: limits.maxRows },
     });
   } catch (error) {
-    if (error instanceof OpenXmlDecompressionBombError || error instanceof OpenXmlContentLimitError) {
+    if (
+      error instanceof OpenXmlDecompressionBombError ||
+      error instanceof OpenXmlContentLimitError
+    ) {
       return { status: "tooLarge" };
     }
     return { status: "invalid" };
@@ -113,7 +128,9 @@ export async function openXlsx(bytes: Uint8Array, limits: XlsxLimits = XLSX_LIMI
         }
         if (extent === null) return null;
         const window = pageWindow(extent, rowPage, colPage);
-        const rows = [...iterValues(sheet, window.box)].map((row) => row.map((value) => cellValueAsString(value)));
+        const rows = [...iterValues(sheet, window.box)].map((row) =>
+          row.map((value) => cellValueAsString(value)),
+        );
         return { ...window, rows };
       },
     },

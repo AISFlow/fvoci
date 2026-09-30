@@ -1,0 +1,76 @@
+/* Adapted EventChip, MonthWeek and WeekView treatment from the pinned Nuxt UI calendar. */
+.calendar-month {
+  table-layout: fixed;
+}
+.calendar-month td {
+  height: 140px;
+  vertical-align: top;
+}
+.calendar-event-wrap {
+  min-width: 0;
+  margin: 3px 0;
+}
+.calendar-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 6px;
+  border-radius: 9999px;
+  background: var(--ui-bg-accented);
+  color: var(--ui-text);
+  font-size: 12px;
+  text-align: start;
+  user-select: none;
+}
+.calendar-chip:hover,
+.calendar-chip:focus-visible {
+  background: var(--ui-bg-elevated);
+  outline: 2px solid var(--ui-primary);
+}
+.calendar-chip--timed {
+  background: transparent;
+  border-inline-start: 3px solid var(--ui-primary);
+  border-radius: 4px;
+}
+.calendar-range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 10px;
+}
+.calendar-range button {
+  padding-inline: 5px;
+  border: 1px solid var(--ui-border);
+  border-radius: 3px;
+}
+.calendar-week {
+  display: grid;
+  max-height: 650px;
+  overflow: auto;
+}
+.calendar-slot {
+  border-inline-start: 1px solid var(--ui-border);
+  border-top: 1px solid var(--ui-border);
+  min-height: 44px;
+  padding: 4px;
+}
+@media (max-width: 640px) {
+  .calendar-sidebar {
+    position: absolute;
+    z-index: 20;
+    background: var(--ui-bg);
+    box-shadow: 0 8px 24px #0002;
+  }
+  .calendar-month td {
+    height: 100px;
+    padding: 2px;
+  }
+  .calendar-range {
+    display: none;
+  }
+  .calendar-chip time {
+    display: none;
+  }
+}

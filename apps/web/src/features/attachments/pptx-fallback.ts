@@ -47,14 +47,15 @@ class Unexpected extends Error {}
 function number(tag: SaxesTagNS, name: string): number {
   const value = tag.attributes[name]?.value ?? "";
   const parsed = Number(value);
-  if (!(NUMBER.test(value) && Number.isFinite(parsed))) throw new Unexpected(`${name}=${value.slice(0, 32)}`);
+  if (!(NUMBER.test(value) && Number.isFinite(parsed)))
+    throw new Unexpected(`${name}=${value.slice(0, 32)}`);
   return parsed;
 }
 
 function viewport(box: Box): string {
   if (!(box.width > 0 && box.height > 0)) return '<svg width="0" height="0">';
   const { x, y, width, height } = box;
-  return `<svg x="${x}" y="${y}" width="${width}" height="${height}" viewBox="${x} ${y} ${width} ${height}" overflow="hidden">`;
+  return `<svg x="${String(x)}" y="${String(y)}" width="${String(width)}" height="${String(height)}" viewBox="${String(x)} ${String(y)} ${String(width)} ${String(height)}" overflow="hidden">`;
 }
 
 /** `svg` with every renderer placeholder label clipped to its placeholder box. */
@@ -90,17 +91,26 @@ export function boundFallbackLabels(svg: string): BoundedLabels {
       }
     }
     const kind = tag.attributes[MARKER];
-    const labelled = svgTag && tag.local === "g" && kind !== undefined && kind.uri === "" && LABELLED.has(kind.value);
+    const labelled =
+      svgTag &&
+      tag.local === "g" &&
+      kind !== undefined &&
+      kind.uri === "" &&
+      LABELLED.has(kind.value);
     stack.push({
       ...(labelled ? { fallback: { box: null, label: "pending" as const } } : {}),
       ...(label ? { label: true as const } : {}),
     });
   });
   parser.on("closetag", () => {
-    const frame = stack.pop()!;
-    if (frame.fallback && frame.fallback.label !== "done") throw new Unexpected("fallback without a label");
+    const frame = stack.pop();
+    if (!frame) throw new Unexpected("closing tag without a frame");
+    if (frame.fallback && frame.fallback.label !== "done")
+      throw new Unexpected("fallback without a label");
     if (frame.label) {
-      stack[stack.length - 1]!.fallback!.label = "done";
+      const parent = stack[stack.length - 1]?.fallback;
+      if (!parent) throw new Unexpected("label without a fallback group");
+      parent.label = "done";
       inserts.push({ at: parser.position, text: "</svg>" });
     }
   });

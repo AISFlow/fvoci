@@ -33,7 +33,8 @@ function formatter(timeZone: string): Intl.DateTimeFormat {
 /** The wall-clock time at `utcMs` in `timeZone`, as a UTC-based millisecond count. */
 function wallMs(utcMs: number, timeZone: string): number {
   const parts = formatter(timeZone).formatToParts(new Date(utcMs));
-  const n = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((p) => p.type === type)?.value);
+  const n = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(parts.find((p) => p.type === type)?.value);
   const ms = ((utcMs % 1000) + 1000) % 1000;
   return Date.UTC(n("year"), n("month") - 1, n("day"), n("hour"), n("minute"), n("second"), ms);
 }
@@ -54,7 +55,9 @@ export function shiftInstantDays(iso: string, days: number, timeZone: string): s
   const utcMs = Date.parse(iso);
   if (Number.isNaN(utcMs)) throw new RangeError(`invalid instant: ${iso}`);
   const target = wallMs(utcMs, timeZone) + days * DAY_MS;
-  const offsets = [...new Set([-DAY_MS, 0, DAY_MS].map((d) => wallMs(target + d, timeZone) - (target + d)))];
+  const offsets = [
+    ...new Set([-DAY_MS, 0, DAY_MS].map((d) => wallMs(target + d, timeZone) - (target + d))),
+  ];
   const matches = offsets
     .map((offset) => target - offset)
     .filter((candidate) => wallMs(candidate, timeZone) === target)

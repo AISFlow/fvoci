@@ -111,7 +111,9 @@ const createTasks = useMutation({
     result.value = { ...current, states: outcome.states };
     notice.value = createdTotal > 0 ? t("ai.tasks.done", { count: createdTotal }) : null;
     error.value =
-      outcome.failure.kind === "unknown" ? t("error.network") : problemMessage(outcome.failure.error, "ai.tasks.failed");
+      outcome.failure.kind === "unknown"
+        ? t("error.network")
+        : problemMessage(outcome.failure.error, "ai.tasks.failed");
   },
   onError: (err: unknown) => {
     error.value = problemMessage(err, "ai.tasks.failed");
@@ -128,7 +130,10 @@ const links = computed(() => {
     return {
       id,
       label: title,
-      href: node && node.projectId === null ? documentPath(props.slug, wikiDisplayId(node.number)) : undefined,
+      href:
+        node && node.projectId === null
+          ? documentPath(props.slug, wikiDisplayId(node.number))
+          : undefined,
     };
   });
 });
@@ -136,11 +141,17 @@ const links = computed(() => {
 type Item = { key: string; label: string; href?: string; state?: TaskApplyState };
 const items = computed<Item[]>(() => {
   const current = result.value;
-  if (current?.action === "summarize") return current.lines.map((line, index) => ({ key: `${index}`, label: line }));
+  if (current?.action === "summarize")
+    return current.lines.map((line, index) => ({ key: String(index), label: line }));
   if (current?.action === "generateTasks") {
-    return current.titles.map((title, index) => ({ key: `${index}`, label: title, state: current.states[index] }));
+    return current.titles.map((title, index) => ({
+      key: String(index),
+      label: title,
+      state: current.states[index],
+    }));
   }
-  if (current?.action === "suggestLinks") return links.value.map((link) => ({ key: link.id, ...link }));
+  if (current?.action === "suggestLinks")
+    return links.value.map((link) => ({ key: link.id, ...link }));
   return [];
 });
 
@@ -182,9 +193,13 @@ function apply(): void {
   // WHY: after the last block, not at the caret — it never splits the sentence being edited.
   // A normal editor transaction, so Yjs syncs it like typing.
   applying = true;
-  let inserted = false;
+  let inserted: boolean;
   try {
-    inserted = editor.chain().insertContentAt(appendRange(editor.state.doc), content).focus("end").run();
+    inserted = editor
+      .chain()
+      .insertContentAt(appendRange(editor.state.doc), content)
+      .focus("end")
+      .run();
   } finally {
     applying = false;
   }
@@ -198,7 +213,11 @@ function apply(): void {
 </script>
 
 <template>
-  <section v-if="aiEnabled.data.value === true" class="document-ai-menu mt-6 flex flex-col gap-2" :aria-label="t('ai.menu')">
+  <section
+    v-if="aiEnabled.data.value === true"
+    class="document-ai-menu mt-6 flex flex-col gap-2"
+    :aria-label="t('ai.menu')"
+  >
     <div role="group" :aria-label="t('ai.menu')" class="flex flex-wrap items-center gap-2">
       <span class="text-sm font-medium">{{ t("ai.menu") }}</span>
       <UButton
@@ -208,7 +227,10 @@ function apply(): void {
         variant="outline"
         color="neutral"
         :disabled="
-          run.isPending.value || createTasks.isPending.value || unavailable || (action === 'generateTasks' && taskReason !== null)
+          run.isPending.value ||
+          createTasks.isPending.value ||
+          unavailable ||
+          (action === 'generateTasks' && taskReason !== null)
         "
         @click="run.mutate(action)"
       >
@@ -219,22 +241,47 @@ function apply(): void {
     <p v-if="run.isPending.value" role="status" class="text-sm text-muted">{{ t("ai.pending") }}</p>
     <p v-if="notice" role="status" class="text-sm text-muted break-keep">{{ notice }}</p>
     <p v-if="error" role="alert" class="text-sm text-error">{{ error }}</p>
-    <div v-if="result" class="rounded-md border border-default p-3" role="region" :aria-label="t('ai.preview.title')">
-      <h2 class="text-sm font-medium break-keep">{{ t("ai.preview.title") }} · {{ t(AI_MENU_LABEL[result.action]) }}</h2>
+    <div
+      v-if="result"
+      class="rounded-md border border-default p-3"
+      role="region"
+      :aria-label="t('ai.preview.title')"
+    >
+      <h2 class="text-sm font-medium break-keep"
+        >{{ t("ai.preview.title") }} · {{ t(AI_MENU_LABEL[result.action]) }}</h2
+      >
       <ul v-if="items.length > 0" class="mt-2 flex list-disc flex-col gap-1 pl-5 text-sm">
-        <li v-for="item in items" :key="item.key" class="break-keep" :data-ai-task-state="item.state">
+        <li
+          v-for="item in items"
+          :key="item.key"
+          class="break-keep"
+          :data-ai-task-state="item.state"
+        >
           <RouterLink v-if="item.href" :to="item.href">{{ item.label }}</RouterLink>
           <template v-else>{{ item.label }}</template>
           <span v-if="item.state === 'created'" class="text-muted"> · {{ t("common.saved") }}</span>
         </li>
       </ul>
       <p v-else class="mt-2 text-sm text-muted break-keep">{{ t("ai.preview.empty") }}</p>
-      <p v-if="applyReason && items.length > 0" class="mt-2 text-xs text-muted break-keep">{{ applyReason }}</p>
+      <p v-if="applyReason && items.length > 0" class="mt-2 text-xs text-muted break-keep">{{
+        applyReason
+      }}</p>
       <div class="mt-2 flex flex-wrap justify-end gap-2">
-        <UButton size="sm" variant="outline" color="neutral" :disabled="createTasks.isPending.value" @click="result = null">
+        <UButton
+          size="sm"
+          variant="outline"
+          color="neutral"
+          :disabled="createTasks.isPending.value"
+          @click="result = null"
+        >
           {{ t("ai.preview.cancel") }}
         </UButton>
-        <UButton v-if="items.length > 0" size="sm" :disabled="!canApply || createTasks.isPending.value" @click="apply">
+        <UButton
+          v-if="items.length > 0"
+          size="sm"
+          :disabled="!canApply || createTasks.isPending.value"
+          @click="apply"
+        >
           {{ t(AI_APPLY_LABEL[result.action]) }}
         </UButton>
       </div>

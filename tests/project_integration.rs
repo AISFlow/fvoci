@@ -4,6 +4,146 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+/// Renumbering a wiki subtree must move each number into the project namespace
+/// atomically, even when another wiki row already uses the allocated number.
+#[tokio::test]
+async fn wiki_subtree_move_renumbers_affiliation_atomically() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let harness = project_harness::TestDb::bootstrap().await;
+    let (app, cookie, owner, ws) = project_harness::setup_session(&harness).await;
+    let admin = project_harness::admin_pool(&harness).await;
+    let pool = project_harness::app_pool(&harness).await;
+    let (superuser, bypass): (bool, bool) =
+        sqlx::query_as("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!superuser && !bypass);
+    let project =
+        project_harness::create_project(app.clone(), &cookie, ws, "MOVE", "private").await;
+    let mut docs = Vec::new();
+    for parent in [None, Some(0), Some(1), None] {
+        let (status, body) = project_harness::json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/documents"),
+            Some(serde_json::json!({"title": "Wiki move", "parentId": parent.map(|i| &docs[i])})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED, "{body}");
+        docs.push(body["id"].as_str().unwrap().to_string());
+    }
+    let project_id: Uuid = project["id"].as_str().unwrap().parse().unwrap();
+    let root: Uuid = project["rootDocumentId"].as_str().unwrap().parse().unwrap();
+    let move_path = format!("/api/v1/workspaces/{ws}/documents/{}/move", docs[0]);
+    let destination = serde_json::json!({"newParentId": root});
+    // Denied destination access must not consume numbers or partially move rows.
+    let denied = project_harness::add_workspace_user(&admin, ws, "member", "move-denied").await;
+    let before: i32 = sqlx::query_scalar("SELECT next_number FROM fvoci.projects WHERE id = $1")
+        .bind(project_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    let (status, _) = project_harness::json_request(
+        app.clone(),
+        "POST",
+        &move_path,
+        Some(destination.clone()),
+        Some(&denied.cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    let after: i32 = sqlx::query_scalar("SELECT next_number FROM fvoci.projects WHERE id = $1")
+        .bind(project_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    // Failure after renumber/path writes must roll back the entire affiliation
+    // and allocator transition, not strand a partially moved subtree.
+    project_harness::install_insert_fail_trigger(&admin, "events", "move_event_failure").await;
+    let (status, _) = project_harness::json_request(
+        app.clone(),
+        "POST",
+        &move_path,
+        Some(destination.clone()),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    project_harness::drop_insert_fail_trigger(&admin, "events", "move_event_failure").await;
+    let original: Vec<(Option<Uuid>, i32)> = sqlx::query_as(
+        "SELECT project_id, number FROM fvoci.documents WHERE id=ANY($1) ORDER BY number",
+    )
+    .bind(
+        docs[..3]
+            .iter()
+            .map(|id| id.parse::<Uuid>().unwrap())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(original, vec![(None, 1), (None, 2), (None, 3)]);
+    let after_failure: i32 =
+        sqlx::query_scalar("SELECT next_number FROM fvoci.projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(before, after_failure);
+    let (status, body) = project_harness::json_request(
+        app.clone(),
+        "POST",
+        &move_path,
+        Some(destination),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["projectId"], project_id.to_string());
+    type MovedDocumentRow = (Uuid, Option<Uuid>, Option<Uuid>, i32, String);
+    let moved: Vec<MovedDocumentRow> = sqlx::query_as(
+        "SELECT id, project_id, parent_id, number, path FROM fvoci.documents WHERE workspace_id=$1 AND id=ANY($2) ORDER BY number"
+    ).bind(ws).bind(docs[..3].iter().map(|id| id.parse::<Uuid>().unwrap()).collect::<Vec<_>>())
+        .fetch_all(&admin).await.unwrap();
+    assert_eq!(moved.len(), 3);
+    assert_eq!(moved.iter().map(|r| r.3).collect::<Vec<_>>(), vec![2, 3, 4]);
+    assert!(moved.iter().all(|r| r.1 == Some(project_id)));
+    let by_id = |id: &str| moved.iter().find(|r| r.0.to_string() == id).unwrap();
+    let moved_root = by_id(&docs[0]);
+    let moved_child = by_id(&docs[1]);
+    let moved_grandchild = by_id(&docs[2]);
+    assert_eq!(moved_root.2, Some(root));
+    assert_eq!(moved_child.2, Some(moved_root.0));
+    assert_eq!(moved_grandchild.2, Some(moved_child.0));
+    assert!(moved_child.4.starts_with(&(moved_root.4.clone() + ".")));
+    assert!(moved_grandchild
+        .4
+        .starts_with(&(moved_child.4.clone() + ".")));
+    let unaffected: (Option<Uuid>, i32) =
+        sqlx::query_as("SELECT project_id, number FROM fvoci.documents WHERE id=$1")
+            .bind(docs[3].parse::<Uuid>().unwrap())
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(unaffected, (None, 4));
+    let next: i32 = sqlx::query_scalar("SELECT next_number FROM fvoci.projects WHERE id=$1")
+        .bind(project_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(next, 5);
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.events WHERE workspace_id=$1 AND verb='document.moved' AND payload->>'documentId'=$2")
+        .bind(ws).bind(&docs[0]).fetch_one(&admin).await.unwrap();
+    assert_eq!(events, 1);
+    assert_ne!(owner, denied.user_id);
+    pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -2877,6 +3017,7 @@ async fn project_reads_do_not_wait_on_project_row_locks() {
     let (project_id, task_id, root_id) = (&fx.project_id, &fx.task_id, &fx.root_id);
     let doc = format!("{ws}/projects/{project_id}/documents/{root_id}");
     let paths = vec![
+        format!("{ws}/projects"),
         format!("{ws}/projects/{project_id}"),
         format!("{ws}/projects/{project_id}/members"),
         format!("{ws}/projects/{project_id}/workflow"),
@@ -3033,6 +3174,643 @@ async fn backlink_scans_end_at_the_statement_timeout() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+// Project document cardinality is delivered with the authorized project list,
+// including root/all statuses, without querying each project's document tree.
+async fn count_list(app: &axum::Router, cookie: &str, ws: Uuid) -> Vec<Value> {
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects"),
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    body["items"].as_array().unwrap().clone()
+}
+
+fn count_item<'a>(items: &'a [Value], project: &Value) -> &'a Value {
+    items
+        .iter()
+        .find(|item| item["id"] == project["id"])
+        .expect("visible project")
+}
+
+async fn count_mutation(
+    app: &axum::Router,
+    cookie: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> Value {
+    let (status, result) = json_request(app.clone(), method, path, body, Some(cookie)).await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::CREATED,
+        "{method} {path}: {status} {result:?}"
+    );
+    result
+}
+
+async fn assert_document_count(
+    app: &axum::Router,
+    cookie: &str,
+    ws: Uuid,
+    project: &Value,
+    expected: i64,
+) {
+    let items = count_list(app, cookie, ws).await;
+    assert_eq!(count_item(&items, project)["documentCount"], expected);
+    let path = format!(
+        "/api/v1/workspaces/{ws}/projects/{}/documents",
+        project["id"].as_str().unwrap()
+    );
+    let (status, tree) = json_request(app.clone(), "GET", &path, None, Some(cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{tree:?}");
+    assert_eq!(tree["items"].as_array().unwrap().len() as i64, expected);
+}
+
+#[tokio::test]
+async fn project_document_count_root_statuses_lifecycle_affiliation_and_tenant() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    let (superuser, bypassrls): (bool, bool) =
+        sqlx::query_as("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        !superuser && !bypassrls,
+        "counts must execute as the restricted app role"
+    );
+    let a = create_project(app.clone(), &cookie, ws, "CNT", "workspace").await;
+    let b = create_project(app.clone(), &cookie, ws, "DST", "workspace").await;
+    let aid = a["id"].as_str().unwrap();
+    let bid = b["id"].as_str().unwrap();
+    let base = format!("/api/v1/workspaces/{ws}/projects/{aid}");
+    assert_document_count(&app, &cookie, ws, &a, 1).await;
+    let draft = count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        &format!("{base}/documents"),
+        Some(json!({"parentId": a["rootDocumentId"], "title": "Draft"})),
+    )
+    .await;
+    let published = count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        &format!("{base}/documents"),
+        Some(json!({"parentId": draft["id"], "title": "Published"})),
+    )
+    .await;
+    let archived = count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        &format!("{base}/documents"),
+        Some(json!({"parentId": published["id"], "title": "Archived"})),
+    )
+    .await;
+    for (doc, status) in [(&published, "published"), (&archived, "archived")] {
+        count_mutation(
+            &app,
+            &cookie,
+            "PATCH",
+            &format!("{base}/documents/{}", doc["id"].as_str().unwrap()),
+            Some(json!({"status": status})),
+        )
+        .await;
+    }
+    assert_document_count(&app, &cookie, ws, &a, 4).await;
+    count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        &format!("{base}/documents/{}/trash", draft["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_document_count(&app, &cookie, ws, &a, 1).await;
+    // Restore respects the existing parent-first contract and counts each live row.
+    for (doc, expected) in [(&draft, 2), (&published, 3), (&archived, 4)] {
+        count_mutation(
+            &app,
+            &cookie,
+            "POST",
+            &format!("{base}/documents/{}/restore", doc["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+        assert_document_count(&app, &cookie, ws, &a, expected).await;
+    }
+    // Same-project reparenting changes no cardinality.
+    count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        &format!("{base}/documents/{}/move", archived["id"].as_str().unwrap()),
+        Some(json!({"newParentId": a["rootDocumentId"]})),
+    )
+    .await;
+    assert_document_count(&app, &cookie, ws, &a, 4).await;
+    let wiki = count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/documents"),
+        Some(json!({"parentId": null, "title": "Wiki"})),
+    )
+    .await;
+    assert_document_count(&app, &cookie, ws, &a, 4).await;
+    assert_document_count(&app, &cookie, ws, &b, 1).await;
+    count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{ws}/documents/{}/move",
+            wiki["id"].as_str().unwrap()
+        ),
+        Some(json!({"newParentId": b["rootDocumentId"]})),
+    )
+    .await;
+    assert_document_count(&app, &cookie, ws, &a, 4).await;
+    assert_document_count(&app, &cookie, ws, &b, 2).await;
+    // Cross-project moves are not exposed by current product routes. Seed an
+    // actual committed affiliation transition to check both grouped counts.
+    sqlx::query("UPDATE fvoci.documents SET project_id = $1, parent_id = $2, path = (SELECT path FROM fvoci.documents WHERE id = $2) || '.' || replace(id::text, '-', '') WHERE id = $3")
+        .bind(Uuid::parse_str(bid).unwrap())
+        .bind(Uuid::parse_str(b["rootDocumentId"].as_str().unwrap()).unwrap())
+        .bind(Uuid::parse_str(archived["id"].as_str().unwrap()).unwrap())
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_document_count(&app, &cookie, ws, &a, 3).await;
+    assert_document_count(&app, &cookie, ws, &b, 3).await;
+    count_mutation(&app, &cookie, "POST", &format!("{base}/archive"), None).await;
+    let items = count_list(&app, &cookie, ws).await;
+    assert_eq!(count_item(&items, &a)["status"], "archived");
+    assert_eq!(count_item(&items, &a)["documentCount"], 3);
+    count_mutation(&app, &cookie, "POST", &format!("{base}/unarchive"), None).await;
+    count_mutation(&app, &cookie, "DELETE", &base, None).await;
+    assert!(!count_list(&app, &cookie, ws)
+        .await
+        .iter()
+        .any(|item| item["id"] == a["id"]));
+    let (status, deleted) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects?deleted=true"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted:?}");
+    let item = count_item(deleted["items"].as_array().unwrap(), &a);
+    assert!(item.as_object().unwrap().contains_key("documentCount"));
+    assert!(item["documentCount"].is_null());
+    assert_eq!(item["taskCount"], 0);
+    assert_eq!(item["openTaskCount"], 0);
+    assert_eq!(item["canEdit"], false);
+    assert_eq!(item["canManage"], false);
+    count_mutation(&app, &cookie, "POST", &format!("{base}/restore"), None).await;
+    assert_document_count(&app, &cookie, ws, &a, 3).await;
+    // An actual visible project with no document rows has a real zero.
+    let empty_id = Uuid::now_v7();
+    project_harness::insert_minimal_project(&admin, ws, empty_id, "EMP", owner, "workspace").await;
+    let other_ws = count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({"slug": "count-other", "name": "Other"})),
+    )
+    .await;
+    let other_ws = Uuid::parse_str(other_ws["id"].as_str().unwrap()).unwrap();
+    let foreign = create_project(app.clone(), &cookie, other_ws, "CNT", "workspace").await;
+    assert_document_count(&app, &cookie, other_ws, &foreign, 1).await;
+    let items = count_list(&app, &cookie, ws).await;
+    assert_eq!(
+        items
+            .iter()
+            .map(|row| row["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["CNT", "DST", "EMP"]
+    );
+    assert_eq!(items[2]["documentCount"], 0);
+    assert!(!items.iter().any(|item| item["id"] == foreign["id"]));
+    assert_document_count(&app, &cookie, ws, &a, 3).await;
+    assert_document_count(&app, &cookie, ws, &b, 3).await;
+    pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn project_document_count_visibility_grants_revoke_and_credentials() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lead = add_workspace_user(&admin, ws, "member", "count-lead").await;
+    let member = add_workspace_user(&admin, ws, "member", "count-member").await;
+    let guest = add_workspace_user(&admin, ws, "guest", "count-guest").await;
+    let workspace_admin = add_workspace_user(&admin, ws, "admin", "count-admin").await;
+    let public = create_project(app.clone(), &cookie, ws, "PUB", "workspace").await;
+    let private = create_project(app.clone(), &lead.cookie, ws, "PVT", "private").await;
+    let pid = private["id"].as_str().unwrap();
+    let base = format!("/api/v1/workspaces/{ws}");
+    for actor in [&cookie, &member.cookie, &workspace_admin.cookie] {
+        let items = count_list(&app, actor, ws).await;
+        assert_eq!(
+            items.len(),
+            1,
+            "private counts must not grant admin visibility"
+        );
+        assert_eq!(count_item(&items, &public)["documentCount"], 1);
+    }
+    assert!(
+        count_list(&app, &guest.cookie, ws).await.is_empty(),
+        "public projects still need guest grants"
+    );
+    count_mutation(
+        &app,
+        &lead.cookie,
+        "POST",
+        &format!("{base}/projects/{pid}/members"),
+        Some(json!({"userId": guest.user_id, "role": "viewer"})),
+    )
+    .await;
+    assert_document_count(&app, &guest.cookie, ws, &private, 1).await;
+    let mut groups = Vec::new();
+    for name in ["Count group one", "Count group two"] {
+        let group = count_mutation(
+            &app,
+            &cookie,
+            "POST",
+            &format!("{base}/groups"),
+            Some(json!({"name": name})),
+        )
+        .await;
+        let gid = group["id"].as_str().unwrap().to_string();
+        for actor in [&guest, &member] {
+            count_mutation(
+                &app,
+                &cookie,
+                "POST",
+                &format!("{base}/groups/{gid}/members"),
+                Some(json!({"userId": actor.user_id})),
+            )
+            .await;
+        }
+        count_mutation(
+            &app,
+            &lead.cookie,
+            "POST",
+            &format!("{base}/projects/{pid}/groups"),
+            Some(json!({"groupId": gid, "role": "viewer"})),
+        )
+        .await;
+        groups.push(gid);
+    }
+    let items = count_list(&app, &guest.cookie, ws).await;
+    assert_eq!(
+        items.len(),
+        1,
+        "multiple direct/group grants do not multiply projects"
+    );
+    assert_eq!(
+        items[0]["documentCount"], 1,
+        "multiple grants do not multiply documents"
+    );
+    assert_eq!(items[0]["canEdit"], false);
+    assert_eq!(items[0]["canManage"], false);
+    assert_document_count(&app, &member.cookie, ws, &private, 1).await;
+    count_mutation(
+        &app,
+        &lead.cookie,
+        "DELETE",
+        &format!("{base}/projects/{pid}/members/{}", guest.user_id),
+        None,
+    )
+    .await;
+    assert_document_count(&app, &guest.cookie, ws, &private, 1).await;
+    count_mutation(
+        &app,
+        &cookie,
+        "DELETE",
+        &format!("{base}/groups/{}/members", groups[0]),
+        Some(json!({"userId": guest.user_id})),
+    )
+    .await;
+    assert_document_count(&app, &guest.cookie, ws, &private, 1).await;
+    for gid in &groups {
+        count_mutation(
+            &app,
+            &cookie,
+            "DELETE",
+            &format!("{base}/groups/{gid}/members"),
+            Some(json!({"userId": member.user_id})),
+        )
+        .await;
+    }
+    assert_eq!(
+        count_list(&app, &member.cookie, ws).await.len(),
+        1,
+        "group membership removal hides private counts"
+    );
+    for gid in &groups {
+        count_mutation(
+            &app,
+            &lead.cookie,
+            "DELETE",
+            &format!("{base}/projects/{pid}/groups"),
+            Some(json!({"groupId": gid})),
+        )
+        .await;
+    }
+    assert!(
+        count_list(&app, &guest.cookie, ws).await.is_empty(),
+        "committed last grant revoke applies to next snapshot"
+    );
+    assert_eq!(count_list(&app, &member.cookie, ws).await.len(), 1);
+    count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        &format!("{base}/projects/{}/members", public["id"].as_str().unwrap()),
+        Some(json!({"userId": guest.user_id, "role": "viewer"})),
+    )
+    .await;
+    assert_document_count(&app, &guest.cookie, ws, &public, 1).await;
+    // Suspension, expiry and membership removal are committed before each read.
+    sqlx::query("UPDATE fvoci.users SET suspended_at = now() WHERE id = $1")
+        .bind(guest.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}/projects"),
+        None,
+        Some(&guest.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    sqlx::query("UPDATE fvoci.users SET suspended_at = NULL WHERE id = $1")
+        .bind(guest.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_document_count(&app, &guest.cookie, ws, &public, 1).await;
+    sqlx::query(
+        "UPDATE fvoci.sessions SET expires_at = now() - interval '1 second' WHERE user_id = $1",
+    )
+    .bind(guest.user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}/projects"),
+        None,
+        Some(&guest.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
+        .bind(ws)
+        .bind(member.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}/projects"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let other = count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({"slug": "counts-denied", "name": "Other"})),
+    )
+    .await;
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{}/projects",
+            other["id"].as_str().unwrap()
+        ),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn project_document_count_pat_scopes_workspace_binding_and_deleted() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let project = create_project(app.clone(), &cookie, ws, "PAT", "workspace").await;
+    let path = format!("/api/v1/workspaces/{ws}/projects");
+    let other = count_mutation(
+        &app,
+        &cookie,
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({"slug": "count-pat", "name": "Other"})),
+    )
+    .await;
+    let mut both = String::new();
+    let mut projects_only = String::new();
+    for (name, scopes, allowed, expected) in [
+        ("projects", vec!["projects.read"], true, Value::Null),
+        (
+            "both",
+            vec!["projects.read", "documents.read"],
+            true,
+            json!(1),
+        ),
+        ("documents", vec!["documents.read"], false, Value::Null),
+    ] {
+        let token = count_mutation(
+            &app,
+            &cookie,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/api-tokens"),
+            Some(json!({"name": name, "scopes": scopes})),
+        )
+        .await;
+        let secret = token["token"].as_str().unwrap();
+        let authorization = format!("Bearer {secret}");
+        let (status, body, _) = http_request(
+            app.clone(),
+            "GET",
+            &path,
+            None,
+            None,
+            None,
+            &[("authorization", &authorization)],
+        )
+        .await;
+        if allowed {
+            assert_eq!(status, StatusCode::OK, "{body:?}");
+            let item = &body["items"][0];
+            assert!(item.as_object().unwrap().contains_key("documentCount"));
+            assert_eq!(item["documentCount"], expected);
+            assert_eq!(item["taskCount"], 0);
+            assert_eq!(item["openTaskCount"], 0);
+            assert_eq!(item["canEdit"], true);
+            assert_eq!(item["canManage"], true);
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "missing ProjectsRead remains refused: {body:?}"
+            );
+        }
+        let foreign_path = format!(
+            "/api/v1/workspaces/{}/projects",
+            other["id"].as_str().unwrap()
+        );
+        let (status, _, _) = http_request(
+            app.clone(),
+            "GET",
+            &foreign_path,
+            None,
+            None,
+            None,
+            &[("authorization", &authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "token workspace binding");
+        if name == "both" {
+            both = secret.to_string();
+        }
+        if name == "projects" {
+            projects_only = secret.to_string();
+        }
+    }
+    count_mutation(
+        &app,
+        &cookie,
+        "DELETE",
+        &format!("{path}/{}", project["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    for secret in [&both, &projects_only] {
+        let authorization = format!("Bearer {secret}");
+        let (status, body, _) = http_request(
+            app.clone(),
+            "GET",
+            &format!("{path}?deleted=true"),
+            None,
+            None,
+            None,
+            &[("authorization", &authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert!(body["items"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("documentCount"));
+        assert!(body["items"][0]["documentCount"].is_null());
+    }
+    let authorization = format!("Bearer {both}");
+    sqlx::query("DELETE FROM fvoci.api_tokens WHERE token_hash = $1")
+        .bind(fvoci_server::auth::token::hash_token(&both))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, _, _) = http_request(
+        app.clone(),
+        "GET",
+        &path,
+        None,
+        None,
+        None,
+        &[("authorization", &authorization)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn project_document_count_snapshot_keeps_grants_counts_and_permissions_consistent() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, _, _) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let fx = project_read_fixture(&app, &admin).await;
+    let path = format!("/api/v1/workspaces/{}/projects", fx.workspace_id);
+    let mut pause = admin.begin().await.unwrap();
+    sqlx::query("LOCK TABLE fvoci.documents IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *pause)
+        .await
+        .unwrap();
+    let pause_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *pause)
+        .await
+        .unwrap();
+    let app_bg = app.clone();
+    let cookie = fx.viewer.cookie.clone();
+    let list =
+        tokio::spawn(async move { json_request(app_bg, "GET", &path, None, Some(&cookie)).await });
+    let waiting = wait_for_blocked_by_holder(&admin, pause_pid, Some("%document_count%"), 1).await;
+    let xid: Option<String> =
+        sqlx::query_scalar("SELECT backend_xid::text FROM pg_stat_activity WHERE pid = $1")
+            .bind(waiting[0])
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM fvoci.project_members WHERE workspace_id = $1 AND project_id = $2::uuid AND user_id = $3")
+        .bind(fx.workspace_id).bind(&fx.project_id).bind(fx.viewer.user_id).execute(&mut *pause).await.unwrap();
+    sqlx::query("UPDATE fvoci.documents SET deleted_at = now() WHERE workspace_id = $1 AND project_id = $2::uuid")
+        .bind(fx.workspace_id).bind(&fx.project_id).execute(&mut *pause).await.unwrap();
+    pause.commit().await.unwrap();
+    let (status, body) = tokio::time::timeout(Duration::from_secs(10), list)
+        .await
+        .expect("snapshot list finished")
+        .expect("join");
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        body["items"][0]["documentCount"], 1,
+        "initial live snapshot"
+    );
+    assert_eq!(body["items"][0]["taskCount"], 1);
+    assert_eq!(body["items"][0]["canEdit"], false);
+    assert_eq!(body["items"][0]["canManage"], false);
+    assert_eq!(xid, None, "list read allocates no transaction id");
+    assert!(
+        count_list(&app, &fx.viewer.cookie, fx.workspace_id)
+            .await
+            .is_empty(),
+        "next snapshot applies revoke"
+    );
     admin.close().await;
     harness.cleanup().await;
 }

@@ -2,7 +2,6 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import ui from "@nuxt/ui/vite";
-import react from "@vitejs/plugin-react";
 import vue from "@vitejs/plugin-vue";
 import { defineConfig, type Plugin } from "vite";
 import { nuxtUiAppConfig, nuxtUiColorsCss } from "./src/build/nuxt-ui-colors.ts";
@@ -31,14 +30,9 @@ if (process.env.CI && !process.versions.bun) {
 }
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const browserLicenseManifest = path.join(
-  repoRoot,
-  "third-party/browser-licenses/manifest.json",
-);
+const browserLicenseManifest = path.join(repoRoot, "third-party/browser-licenses/manifest.json");
 
-const pdfjsDir = path.dirname(
-  createRequire(import.meta.url).resolve("pdfjs-dist/package.json"),
-);
+const pdfjsDir = path.dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json"));
 const pdfjsVersion = (
   JSON.parse(fs.readFileSync(path.join(pdfjsDir, "package.json"), "utf8")) as {
     version: string;
@@ -77,12 +71,23 @@ function pdfjsAssets(): Plugin {
       server.middlewares.use(`/${pdfjsBase}`, (req, res, next) => {
         let rel: string;
         try {
-          rel = decodeURIComponent((req.url ?? "").split("?")[0]!.replace(/^\//, ""));
+          rel = decodeURIComponent((req.url ?? "").split("?")[0].replace(/^\//, ""));
         } catch {
-          return next();
+          next();
+          return;
         }
-        if (!shipped.has(rel)) return next();
-        res.setHeader("content-type", rel.endsWith(".wasm") ? "application/wasm" : rel.endsWith(".js") ? "text/javascript" : "application/octet-stream");
+        if (!shipped.has(rel)) {
+          next();
+          return;
+        }
+        res.setHeader(
+          "content-type",
+          rel.endsWith(".wasm")
+            ? "application/wasm"
+            : rel.endsWith(".js")
+              ? "text/javascript"
+              : "application/octet-stream",
+        );
         res.end(fs.readFileSync(path.join(pdfjsDir, rel)));
       });
     },
@@ -101,9 +106,9 @@ function pdfjsAssets(): Plugin {
 /** Pinned full license texts for the Rust dependencies of @rhwp/core's wasm. */
 function rhwpWasmNotice() {
   const coreDir = path.dirname(createRequire(import.meta.url).resolve("@rhwp/core"));
-  const { version } = JSON.parse(
-    fs.readFileSync(path.join(coreDir, "package.json"), "utf8"),
-  ) as { version: string };
+  const { version } = JSON.parse(fs.readFileSync(path.join(coreDir, "package.json"), "utf8")) as {
+    version: string;
+  };
   return {
     title: rhwpWasmNoticeTitle(version),
     text: fs
@@ -122,9 +127,9 @@ function rhwpWasmNotice() {
  */
 function officeKitXlsxNotice() {
   const dir = installedPackageDir("@office-kit/xlsx");
-  const { version } = JSON.parse(
-    fs.readFileSync(path.join(dir, "package.json"), "utf8"),
-  ) as { version: string };
+  const { version } = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as {
+    version: string;
+  };
   return {
     title: `@office-kit/xlsx ${version}: THIRD_PARTY_NOTICES.md`,
     text: fs.readFileSync(path.join(dir, "THIRD_PARTY_NOTICES.md"), "utf8").trim(),
@@ -176,16 +181,15 @@ function nuxtUiColorsStyle(uiPlugins: readonly Plugin[]): Plugin {
 /** Modules of every web-worker bundle, for the license notice. */
 const workerModuleIds = new Set<string>();
 
-const apiProxyTarget =
-  process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
+const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
 
 // Nuxt UI's plugin set registers @tailwindcss/vite itself; it is the only
-// Tailwind registration and also compiles the React app's stylesheet.
-const uiPlugins = ui(nuxtUiUserOptions).flat() as Plugin[];
+// Tailwind registration for the Vue app's stylesheets.
+const uiResult = ui(nuxtUiUserOptions);
+const uiPlugins: Plugin[] = Array.isArray(uiResult) ? uiResult.flat() : [uiResult];
 
 export default defineConfig({
   plugins: [
-    react(),
     vue(),
     ...uiPlugins,
     nuxtUiColorsStyle(uiPlugins),
@@ -202,17 +206,7 @@ export default defineConfig({
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),
     },
-    dedupe: [
-      "react",
-      "react-dom",
-      "vue",
-      "yjs",
-      "y-protocols",
-      "@tiptap/core",
-      "@tiptap/pm",
-      "@hocuspocus/provider",
-      "@hocuspocus/provider-react",
-    ],
+    dedupe: ["vue", "yjs", "y-protocols", "@tiptap/core", "@tiptap/pm", "@hocuspocus/provider"],
   },
   server: {
     port: 5173,

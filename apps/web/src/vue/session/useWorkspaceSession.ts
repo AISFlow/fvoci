@@ -31,24 +31,47 @@ const BROWSER: SessionEnvironment = {
  * Unlike the React layout, only a 401 from /auth/me counts as signed out;
  * another failure (network, 5xx) shows a retry instead of the login page.
  */
-export function useWorkspaceSession(slug: MaybeRefOrGetter<string>, env: SessionEnvironment = BROWSER) {
+export function useWorkspaceSession(
+  slug: MaybeRefOrGetter<string>,
+  env: SessionEnvironment = BROWSER,
+) {
   const queryClient = useQueryClient();
   const setup = useQuery(setupStatusQuery);
   const me = useQuery(meQuery);
   const workspaces = useQuery(workspacesQuery);
-  const workspace = computed(() => workspaces.data.value?.items.find((item) => item.slug === toValue(slug)));
+  const workspace = computed(() =>
+    workspaces.data.value?.items.find((item) => item.slug === toValue(slug)),
+  );
 
-  const signedOut = computed(() => me.error.value instanceof ProblemError && me.error.value.status === 401);
+  const signedOut = computed(
+    () => me.error.value instanceof ProblemError && me.error.value.status === 401,
+  );
   // Signed in (a cached `me` counts: a failed refetch keeps it) and a fresh
   // list without this workspace: the user cannot see it.
   const denied = computed(
-    () => me.data.value !== undefined && workspaces.isSuccess.value && workspace.value === undefined,
+    () =>
+      me.data.value !== undefined && workspaces.isSuccess.value && workspace.value === undefined,
   );
 
+  let requestedRedirect: string | undefined;
   watchEffect(() => {
-    if (setup.data.value?.needed) env.redirect("/setup");
-    else if (signedOut.value) env.redirect(loginPath(env.location()));
-    else if (denied.value) env.redirect("/?denied=workspace");
+    const path = setup.data.value?.needed
+      ? "/setup"
+      : signedOut.value
+        ? loginPath(env.location())
+        : denied.value
+          ? "/?denied=workspace"
+          : undefined;
+    // Queries settle independently. Restarting the same pending navigation
+    // (e.g. me 401, then setup completion) cancels its first document request.
+    // A different destination still applies the guard priority above.
+    if (path === undefined) {
+      requestedRedirect = undefined;
+      return;
+    }
+    if (path === requestedRedirect) return;
+    requestedRedirect = path;
+    env.redirect(path);
   });
 
   // The server closes the access stream when membership or the session may
@@ -57,19 +80,27 @@ export function useWorkspaceSession(slug: MaybeRefOrGetter<string>, env: Session
     () => workspace.value?.id,
     (workspaceId, _previous, onCleanup) => {
       if (!workspaceId) return;
+      let active = true;
       const subscription = env.watchAccess(workspaceId, {
-        onAccessChange: async () => {
-          try {
-            const list = await queryClient.fetchQuery({ ...workspacesQuery, staleTime: 0 });
-            if (!list.items.some((item) => item.id === workspaceId)) env.redirect("/?denied=workspace");
-          } catch {
-            // A transport or list failure alone must not evict the page.
-          }
+        onAccessChange: () => {
+          if (!active) return;
+          // The fresh list updates the reactive denied guard above. That guard
+          // belongs to the current slug/scope and preserves setup/401 priority;
+          // a retired subscription never redirects from its captured workspace.
+          queryClient.query({ ...workspacesQuery, staleTime: 0 }).catch((error: unknown) => {
+            // Query failures remain on the cache and must not evict the page.
+            // Unexpected failures with no query owner remain observable.
+            if (queryClient.getQueryState(workspacesQuery.queryKey)?.error !== error)
+              reportError(error);
+          });
         },
       });
-      onCleanup(() => subscription.close());
+      onCleanup(() => {
+        active = false;
+        subscription.close();
+      });
     },
-    { immediate: true },
+    { immediate: true, flush: "sync" },
   );
 
   const failedWithoutData = (query: { isError: { value: boolean }; data: { value: unknown } }) =>
@@ -89,9 +120,9 @@ export function useWorkspaceSession(slug: MaybeRefOrGetter<string>, env: Session
   });
 
   function retry(): void {
-    if (setup.isError.value) void setup.refetch();
-    if (me.isError.value) void me.refetch();
-    if (workspaces.isError.value) void workspaces.refetch();
+    if (setup.isError.value) setup.refetch().catch(reportError);
+    if (me.isError.value) me.refetch().catch(reportError);
+    if (workspaces.isError.value) workspaces.refetch().catch(reportError);
   }
 
   return { me: computed(() => me.data.value), workspace, status, retry };

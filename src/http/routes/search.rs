@@ -148,10 +148,7 @@ async fn global_search(
             return Err(AppError::from_code(ProblemCode::InvalidInput).into());
         }
     }
-    if query.tag.is_some() {
-        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-    }
-    let tag: Option<Uuid> = None;
+    let tag = crate::http::routes::documents::parse_tree_tag(query.tag.as_deref())?;
     let limit = match query.limit.as_deref() {
         None => 20u32,
         Some(raw) => {
@@ -249,11 +246,7 @@ async fn workspace_search(
             Some(Uuid::parse_str(raw).map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?)
         }
     };
-    // Tags are not ported yet; refuse the filter instead of silently ignoring it.
-    if query.tag.is_some() {
-        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-    }
-    let tag: Option<Uuid> = None;
+    let tag = crate::http::routes::documents::parse_tree_tag(query.tag.as_deref())?;
     let limit = match query.limit.as_deref() {
         None => 20u32,
         Some(raw) => {

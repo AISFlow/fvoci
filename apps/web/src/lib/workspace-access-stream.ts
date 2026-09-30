@@ -71,11 +71,17 @@ export function watchWorkspaceAccess(
       return;
     }
     refused = true;
-    void workspaceAccessGone(workspaceId).then((gone) => {
-      if (!gone || stopped) return;
-      stop();
-      handlers.onAccessChange();
-    });
+    workspaceAccessGone(workspaceId)
+      .then((gone) => {
+        if (!gone || stopped) return;
+        stop();
+        handlers.onAccessChange();
+      })
+      .catch((error: unknown) => {
+        // The probe already handles network failures. A consumer callback that
+        // throws remains observable through the browser's uncaught-error channel.
+        reportError(error);
+      });
   };
 
   source.addEventListener("error", onClose);

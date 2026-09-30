@@ -54,6 +54,22 @@ export class MockEventSource {
   }
 
   /**
+   * A named server event (`event: <type>`), such as the project task stream's
+   * `event: open` item (src/http/routes/streams.rs) or a `task` hint. The
+   * browser dispatches it as a MessageEvent to the listeners of `type`, the
+   * same listeners the native `open` of `open()` reaches.
+   */
+  message(type: string, data: string) {
+    this.emit(new MessageEvent(type, { data }));
+  }
+
+  /** A connect as the browser sees one on the project task stream. */
+  connect() {
+    this.open();
+    this.message("open", "{}");
+  }
+
+  /**
    * A failed connection. CONNECTING: the browser retries by itself (network
    * error, or a 200 stream ended). CLOSED: any other response; no retry.
    */
@@ -65,6 +81,6 @@ export class MockEventSource {
 
 export function installMockEventSource(): void {
   MockEventSource.instances = [];
-  // @ts-expect-error test shim
+  // @ts-expect-error The minimal test shim intentionally omits native EventSource static/prototype members.
   globalThis.EventSource = MockEventSource;
 }

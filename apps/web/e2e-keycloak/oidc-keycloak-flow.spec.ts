@@ -90,16 +90,20 @@ function config(): KcConfig {
 
 async function kcAdmin(path: string, init: RequestInit = {}): Promise<Response> {
   const c = config();
-  const tokenResponse = await fetch(`${c.keycloakOrigin}/realms/master/protocol/openid-connect/token`, {
-    method: "POST",
-    body: new URLSearchParams({
-      grant_type: "password",
-      client_id: "admin-cli",
-      username: c.admin.username,
-      password: c.admin.password,
-    }),
-  });
-  if (!tokenResponse.ok) throw new Error(`Keycloak admin token: HTTP ${tokenResponse.status}`);
+  const tokenResponse = await fetch(
+    `${c.keycloakOrigin}/realms/master/protocol/openid-connect/token`,
+    {
+      method: "POST",
+      body: new URLSearchParams({
+        grant_type: "password",
+        client_id: "admin-cli",
+        username: c.admin.username,
+        password: c.admin.password,
+      }),
+    },
+  );
+  if (!tokenResponse.ok)
+    throw new Error(`Keycloak admin token: HTTP ${String(tokenResponse.status)}`);
   const { access_token: token } = (await tokenResponse.json()) as { access_token: string };
   return fetch(`${c.keycloakOrigin}/admin/realms/${c.realm}${path}`, {
     ...init,
@@ -107,14 +111,20 @@ async function kcAdmin(path: string, init: RequestInit = {}): Promise<Response> 
   });
 }
 
-type KcClient = Record<string, unknown> & { id: string; redirectUris: string[]; webOrigins: string[] };
+type KcClient = Record<string, unknown> & {
+  id: string;
+  redirectUris: string[];
+  webOrigins: string[];
+};
 
 async function kcClient(): Promise<KcClient> {
   const response = await kcAdmin(`/clients?clientId=${encodeURIComponent(config().clientId)}`);
   expect(response.status).toBe(200);
   const clients = (await response.json()) as KcClient[];
   expect(clients).toHaveLength(1);
-  return clients[0];
+  const client = clients[0];
+  if (!client) throw new Error("expected Keycloak client fixture missing");
+  return client;
 }
 
 /** Registers the one redirect URI this server generates (its port is chosen at start). */
@@ -181,7 +191,10 @@ async function registerRedirectUri(): Promise<void> {
     expect(`${location.origin}${location.pathname}`).toBe(redirectUri);
     expect(answer.has("code")).toBe(false);
     expect(answer.get("error")).toBeTruthy();
-    refusals[name] = { error: answer.get("error"), error_description: answer.get("error_description") };
+    refusals[name] = {
+      error: answer.get("error"),
+      error_description: answer.get("error_description"),
+    };
   }
   observe("keycloakAuthorizationRefusals", refusals);
 }
@@ -190,7 +203,9 @@ async function kcUserId(username: string): Promise<string> {
   const response = await kcAdmin(`/users?exact=true&username=${encodeURIComponent(username)}`);
   const users = (await response.json()) as Array<{ id: string }>;
   expect(users).toHaveLength(1);
-  return users[0].id;
+  const user = users[0];
+  if (!user) throw new Error("expected Keycloak user fixture missing");
+  return user.id;
 }
 
 async function kcSessionCount(username: string): Promise<number> {
@@ -225,7 +240,21 @@ function sql(query: string): string {
   const database = new URL(adminUrl).pathname.slice(1);
   return execFileSync(
     "docker",
-    ["exec", "-i", container, "psql", "-U", "postgres", "-d", database, "-v", "ON_ERROR_STOP=1", "-tA", "-c", query],
+    [
+      "exec",
+      "-i",
+      container,
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      database,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-tA",
+      "-c",
+      query,
+    ],
     { encoding: "utf8" },
   ).trim();
 }
@@ -237,7 +266,13 @@ function count(query: string): number {
 const userCount = () => count("SELECT count(*) FROM fvoci.users");
 const stateCount = () => count("SELECT count(*) FROM fvoci.oidc_states");
 
-type LinkRow = { user: string; provider: string; subject: string; issuer: string | null; email: string | null };
+type LinkRow = {
+  user: string;
+  provider: string;
+  subject: string;
+  issuer: string | null;
+  email: string | null;
+};
 
 function links(): LinkRow[] {
   return JSON.parse(
@@ -286,9 +321,26 @@ async function workspaceSlugs(page: Page): Promise<string[]> {
   return body.items.filter((w) => w.kind === "team").map((w) => w.slug);
 }
 
+/** Vue's mount marker, observed on actual auth routes without recording tokens. */
+async function expectVueAuthRoute(page: Page, route: string): Promise<void> {
+  await expect(page.locator("#root.isolate[data-v-app]")).toHaveCount(1);
+  const pathname = new URL(page.url()).pathname;
+  expect(
+    route === "/invite/:token" ? pathname.startsWith("/invite/") : pathname === route,
+    `the mounted Vue auth route is ${route}`,
+  ).toBe(true);
+  observe(`vueRoute:${route}`, { mounted: true, root: "#root.isolate[data-v-app]" });
+}
+
+async function openInvitation(page: Page, token: string): Promise<void> {
+  await page.goto(`/invite/${token}`);
+  await expectVueAuthRoute(page, "/invite/:token");
+}
+
 async function setupOwner(page: Page): Promise<void> {
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expectVueAuthRoute(page, "/setup");
   await page.getByLabel("성").fill(OWNER.familyName);
   await page.getByLabel("이름", { exact: true }).fill(OWNER.givenName);
   await page.getByLabel("이메일").fill(OWNER.email);
@@ -302,7 +354,10 @@ async function setupOwner(page: Page): Promise<void> {
 /** Owner's members settings: creates an invitation and returns its token. */
 async function inviteViaUi(page: Page, email: string): Promise<string> {
   await page.goto(`/w/${WORKSPACE.slug}/settings`);
-  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^멤버$/ })
+    .click();
   await page.getByLabel("초대할 이메일").fill(email);
   await page.getByRole("button", { name: "초대", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "초대를 만들었습니다" })).toBeVisible();
@@ -312,7 +367,9 @@ async function inviteViaUi(page: Page, email: string): Promise<string> {
   return token;
 }
 
-async function newPage(browser: Browser): Promise<{ context: BrowserContext; page: Page; csp: string[] }> {
+async function newPage(
+  browser: Browser,
+): Promise<{ context: BrowserContext; page: Page; csp: string[] }> {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
   return { context, page, csp: watchCspViolations(page) };
@@ -325,10 +382,15 @@ async function newPage(browser: Browser): Promise<{ context: BrowserContext; pag
  */
 function keycloakLeg(page: Page) {
   const authorizationEndpoint = `${config().issuer}/protocol/openid-connect/auth`;
-  const authorization = page.waitForRequest((r) => r.url().startsWith(`${authorizationEndpoint}?`), {
-    timeout: 30_000,
+  const authorization = page.waitForRequest(
+    (r) => r.url().startsWith(`${authorizationEndpoint}?`),
+    {
+      timeout: 30_000,
+    },
+  );
+  const callback = page.waitForRequest((r) => r.url().startsWith(`${redirectUri}?`), {
+    timeout: 60_000,
   });
-  const callback = page.waitForRequest((r) => r.url().startsWith(`${redirectUri}?`), { timeout: 60_000 });
   authorization.catch(() => undefined);
   callback.catch(() => undefined);
   return {
@@ -369,8 +431,13 @@ async function callbackResult(request: Request): Promise<{ status: number; locat
   return { status: response.status(), location: `${target.pathname}${target.search}` };
 }
 
-async function visitCallback(page: Page, url: string): Promise<{ status: number; location: string }> {
-  const request = page.waitForRequest((r) => r.url().startsWith(`${redirectUri}?`), { timeout: 30_000 });
+async function visitCallback(
+  page: Page,
+  url: string,
+): Promise<{ status: number; location: string }> {
+  const request = page.waitForRequest((r) => r.url().startsWith(`${redirectUri}?`), {
+    timeout: 30_000,
+  });
   await page.goto(url);
   return callbackResult(await request);
 }
@@ -380,7 +447,9 @@ async function visitCallback(page: Page, url: string): Promise<{ status: number;
  * also sees the redirect hop Keycloak answers with; Playwright's route does
  * not) and answers it locally, so the code and state stay unused.
  */
-async function holdCallback(page: Page): Promise<{ url: Promise<string>; release: () => Promise<void> }> {
+async function holdCallback(
+  page: Page,
+): Promise<{ url: Promise<string>; release: () => Promise<void> }> {
   const cdp = await page.context().newCDPSession(page);
   let held = false;
   let resolveUrl: (url: string) => void = () => undefined;
@@ -403,7 +472,9 @@ async function holdCallback(page: Page): Promise<{ url: Promise<string>; release
       })
       .catch(() => undefined);
   });
-  await cdp.send("Fetch.enable", { patterns: [{ urlPattern: `${redirectUri}*`, requestStage: "Request" }] });
+  await cdp.send("Fetch.enable", {
+    patterns: [{ urlPattern: `${redirectUri}*`, requestStage: "Request" }],
+  });
   return {
     url,
     release: async () => {
@@ -420,11 +491,13 @@ async function clickProvider(page: Page): Promise<void> {
 async function openLogin(page: Page): Promise<void> {
   await page.goto("/login");
   await expect(page.getByRole("link", { name: config().label, exact: true })).toBeVisible();
+  await expectVueAuthRoute(page, "/login");
 }
 
 async function openAccountSettings(page: Page): Promise<void> {
   await page.goto("/settings/account");
   await expect(page.getByText("연결된 소셜 계정")).toBeVisible();
+  await expectVueAuthRoute(page, "/settings/account");
 }
 
 function linkButton(page: Page) {
@@ -432,7 +505,10 @@ function linkButton(page: Page) {
 }
 
 /** Signs in with the provider from the login page; returns the user info. */
-async function providerSignIn(page: Page, user: KcUser | null): Promise<{ via: "form" | "sso"; me: Me }> {
+async function providerSignIn(
+  page: Page,
+  user: KcUser | null,
+): Promise<{ via: "form" | "sso"; me: Me }> {
   await openLogin(page);
   const leg = keycloakLeg(page);
   await clickProvider(page);
@@ -472,6 +548,8 @@ async function watchPosts(page: Page, urls: readonly string[]) {
   const urlById = new Map<string, string>();
   const byId = new Map<string, SentPost>();
   const order: string[] = [];
+  const pending = new Set<Promise<void>>();
+  const failures: unknown[] = [];
   const entry = (id: string): SentPost => {
     const found = byId.get(id) ?? {};
     byId.set(id, found);
@@ -496,40 +574,73 @@ async function watchPosts(page: Page, urls: readonly string[]) {
     const setCookie = event.headers["Set-Cookie"] ?? event.headers["set-cookie"] ?? "";
     sent.setsStateCookie = setCookie.includes("fvoci_oidc_state");
   });
-  cdp.on("Fetch.requestPaused", (event) => {
-    void (async () => {
+  const onPaused: Parameters<typeof cdp.on<"Fetch.requestPaused">>[1] = (event) => {
+    const operation = (async () => {
       if (event.networkId && event.responseStatusCode !== undefined) {
         const sent = entry(event.networkId);
         try {
           const body = await cdp.send("Fetch.getResponseBody", { requestId: event.requestId });
-          const text = body.base64Encoded ? Buffer.from(body.body, "base64").toString("utf8") : body.body;
+          const text = body.base64Encoded
+            ? Buffer.from(body.body, "base64").toString("utf8")
+            : body.body;
           sent.code = (JSON.parse(text) as { code?: string }).code ?? null;
         } catch {
           sent.code = null;
         }
       }
-      await cdp.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => undefined);
+      await cdp.send("Fetch.continueRequest", { requestId: event.requestId });
     })();
-  });
-  await cdp.send("Network.enable");
-  await cdp.send("Fetch.enable", {
-    patterns: urls.map((url) => ({ urlPattern: url, requestStage: "Response" as const })),
-  });
+    pending.add(operation);
+    operation.then(
+      () => {
+        pending.delete(operation);
+      },
+      (error: unknown) => {
+        failures.push(error);
+        pending.delete(operation);
+      },
+    );
+  };
+  cdp.on("Fetch.requestPaused", onPaused);
+  try {
+    await cdp.send("Network.enable");
+    await cdp.send("Fetch.enable", {
+      patterns: urls.map((url) => ({ urlPattern: url, requestStage: "Response" as const })),
+    });
+  } catch (error) {
+    failures.push(error);
+    cdp.off("Fetch.requestPaused", onPaused);
+    await cdp.detach().catch((cleanupError: unknown) => {
+      failures.push(cleanupError);
+    });
+    while (pending.size > 0) await Promise.allSettled([...pending]);
+    throw new AggregateError(failures, "CDP POST observer initialization failed", { cause: error });
+  }
   return {
     last(url: string): SentPost | undefined {
       const id = [...order].reverse().find((candidate) => urlById.get(candidate) === url);
       return id ? byId.get(id) : undefined;
     },
     stop: async () => {
-      await cdp.send("Fetch.disable").catch(() => undefined);
-      await cdp.detach();
+      // Finish continuations before disabling Fetch invalidates their interception IDs.
+      while (pending.size > 0) await Promise.allSettled([...pending]);
+      cdp.off("Fetch.requestPaused", onPaused);
+      await cdp.send("Fetch.disable").catch((error: unknown) => {
+        failures.push(error);
+      });
+      await cdp.detach().catch((error: unknown) => {
+        failures.push(error);
+      });
+      if (failures.length > 0) throw new AggregateError(failures, "CDP POST observation failed");
     },
   };
 }
 
 /** The server log without terminal colour codes. */
 function serverLogLines(path: string): string[] {
-  return readFileSync(path, "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n");
+  return readFileSync(path, "utf8")
+    .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), "")
+    .split("\n");
 }
 
 function stateCookie(cookies: Cookie[]): Cookie | undefined {
@@ -557,7 +668,8 @@ async function prepareInstance(browser: Browser): Promise<void> {
     jwks_uri: doc.jwks_uri,
     token_endpoint_auth_methods_supported: doc.token_endpoint_auth_methods_supported,
     code_challenge_methods_supported: doc.code_challenge_methods_supported,
-    authorization_response_iss_parameter_supported: doc.authorization_response_iss_parameter_supported,
+    authorization_response_iss_parameter_supported:
+      doc.authorization_response_iss_parameter_supported,
   });
   observe("topology", {
     fvociOrigin,
@@ -573,9 +685,28 @@ async function prepareInstance(browser: Browser): Promise<void> {
   expect(providersResponse.status()).toBe(200);
   const providersText = await providersResponse.text();
   const secret = process.env.OIDC_GENERIC_CLIENT_SECRET ?? "";
-  expect(secret.length > 0 && providersText.includes(secret), "the client secret stays on the server").toBe(false);
-  const providers = JSON.parse(providersText) as { providers: unknown };
+  expect(
+    secret.length > 0 && providersText.includes(secret),
+    "the client secret stays on the server",
+  ).toBe(false);
+  const providers = JSON.parse(providersText) as { providers: unknown; workspaceSso: boolean };
   expect(providers.providers).toEqual([{ provider: "generic", label: c.label }]);
+  expect(providers.workspaceSso).toBe(false);
+  // A normal build trusts no entitlement issuer: local test-license SSO below
+  // must never be mistaken for enabling workspace SSO in this release server.
+  const sso = await page.request.get(`/api/v1/auth/sso?slug=${WORKSPACE.slug}`, {
+    maxRedirects: 0,
+  });
+  expect(sso.status()).toBe(302);
+  const location = sso.headers().location;
+  if (!location) throw new Error("workspace SSO redirect has no Location header");
+  expect(new URL(location, fvociOrigin).pathname).toBe("/login");
+  expect(new URL(location, fvociOrigin).searchParams.get("error")).toBe("provider_not_configured");
+  observe("unentitledWorkspaceSso", {
+    workspaceSso: false,
+    status: sso.status(),
+    error: "provider_not_configured",
+  });
   observe("providers", providers);
   observe("servedWebAssets", await servedAssetsWithout(page, secret));
   await context.close();
@@ -585,20 +716,26 @@ async function prepareInstance(browser: Browser): Promise<void> {
 async function servedAssetsWithout(page: Page, secret: string): Promise<Record<string, number>> {
   const root = process.env.FVOCI_STATIC_DIR ?? "";
   expect(root.length > 0, "the harness serves a static root").toBe(true);
-  const files = (readdirSync(root, { recursive: true, withFileTypes: true }) as Array<{
-    name: string;
-    parentPath: string;
-    isFile(): boolean;
-  }>)
+  const files = (
+    readdirSync(root, { recursive: true, withFileTypes: true }) as Array<{
+      name: string;
+      parentPath: string;
+      isFile(): boolean;
+    }>
+  )
     .filter((entry) => entry.isFile())
-    .map((entry) => path.relative(root, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"));
+    .map((entry) =>
+      path.relative(root, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"),
+    );
   const paths = ["/", "/login", "/settings/account", ...files.map((file) => `/${file}`)];
   let checked = 0;
   for (const asset of paths) {
     const response = await page.request.get(asset);
     expect(response.status(), asset).toBe(200);
     const body = await response.body();
-    expect(secret.length > 0 && body.includes(secret), `${asset} holds the client secret`).toBe(false);
+    expect(secret.length > 0 && body.includes(secret), `${asset} holds the client secret`).toBe(
+      false,
+    );
     checked += 1;
   }
   expect(files).toContain("index.html");
@@ -612,7 +749,10 @@ test.skip(!kc, "opt-in: set by scripts/keycloak-oidc-e2e.sh (real Keycloak)");
 
 test.afterAll(() => {
   if (!outDir || !kc) return;
-  writeFileSync(`${outDir}/observations-${mode}.json`, `${JSON.stringify(observations, null, 2)}\n`);
+  writeFileSync(
+    `${outDir}/observations-${mode}.json`,
+    `${JSON.stringify(observations, null, 2)}\n`,
+  );
   // Server log excerpt: OIDC outcomes and the auth routes' request events
   // (the request trace logs route templates, never URIs or headers).
   const log = process.env.SERVER_LOG ?? "";
@@ -635,7 +775,9 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     expect(ownerId.length).toBe(36);
   });
 
-  test("A: an unlinked Keycloak user is refused (oidc_not_linked); request shape", async ({ browser }) => {
+  test("A: an unlinked Keycloak user is refused (oidc_not_linked); request shape", async ({
+    browser,
+  }) => {
     const { context, page, csp } = await newPage(browser);
     const usersBefore = userCount();
     await openLogin(page);
@@ -662,7 +804,9 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     expect(params.get("client_id")).toBe(config().clientId);
     expect(params.get("redirect_uri")).toBe(redirectUri);
     expect(params.get("code_challenge_method")).toBe("S256");
-    expect(random43(params.get("code_challenge")), "S256 challenge is 43 base64url chars").toBe(true);
+    expect(random43(params.get("code_challenge")), "S256 challenge is 43 base64url chars").toBe(
+      true,
+    );
     expect(random43(params.get("state")), "state is 32 random bytes").toBe(true);
     expect(random43(params.get("nonce")), "nonce is 32 random bytes").toBe(true);
     expect(params.get("state") === params.get("nonce")).toBe(false);
@@ -715,8 +859,12 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     await expect(page.getByText(MSG.linked)).toBeVisible();
     await expect(page.getByText(`${config().label} — ${config().users.alice.email}`)).toBeVisible();
     const identities = await page.request.get("/api/v1/auth/identities");
-    const items = ((await identities.json()) as { items: Array<{ provider: string; email: string }> }).items;
-    expect(items.map((i) => [i.provider, i.email])).toEqual([["generic", config().users.alice.email]]);
+    const items = (
+      (await identities.json()) as { items: Array<{ provider: string; email: string }> }
+    ).items;
+    expect(items.map((i) => [i.provider, i.email])).toEqual([
+      ["generic", config().users.alice.email],
+    ]);
     const [link] = links();
     // The id_token `iss` the server verified is stored with the link.
     expect(link).toEqual({
@@ -728,6 +876,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     });
     expect(userCount()).toBe(1);
     expect(csp).toEqual([]);
+    if (!link) throw new Error("expected Keycloak identity link missing");
     observe("B_link", {
       callback: "/settings/account?linked=1",
       linkIssuerEqualsConfiguredIssuer: link.issuer === config().issuer,
@@ -737,7 +886,9 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     await context.close();
   });
 
-  test("B/D: sign out ends the app session; the provider signs in to the same account", async ({ browser }) => {
+  test("B/D: sign out ends the app session; the provider signs in to the same account", async ({
+    browser,
+  }) => {
     const { context, page, csp } = await newPage(browser);
     // The owner's browser signs in with the password first, then signs out.
     await login(page, OWNER.email, OWNER.password);
@@ -799,7 +950,9 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     await context.close();
   });
 
-  test("B: a second Keycloak user cannot be linked into the owner's account", async ({ browser }) => {
+  test("B: a second Keycloak user cannot be linked into the owner's account", async ({
+    browser,
+  }) => {
     const { context, page } = await newPage(browser);
     await login(page, OWNER.email, OWNER.password);
     await openAccountSettings(page);
@@ -816,7 +969,10 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       });
       const body = (await response.json()) as { authorizationUrl?: string };
       const target = body.authorizationUrl;
-      if (target) setTimeout(() => window.location.assign(target), 0);
+      if (target)
+        setTimeout(() => {
+          window.location.assign(target);
+        }, 0);
       return response.status;
     });
     expect(started).toBe(200);
@@ -828,7 +984,10 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     await expect(page.getByText(MSG.alreadyLinked)).toBeVisible();
     expect(linksOf(OWNER.email).map((l) => l.email)).toEqual([config().users.alice.email]);
     expect(userCount()).toBe(1);
-    observe("B_second_identity", { callback: "/settings/account?error=oidc_already_linked", ownerLinks: 1 });
+    observe("B_second_identity", {
+      callback: "/settings/account?error=oidc_already_linked",
+      ownerLinks: 1,
+    });
     await context.close();
   });
 
@@ -840,7 +999,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     const usersBefore = userCount();
 
     const { context, page, csp } = await newPage(browser);
-    await page.goto(`/invite/${token}`);
+    await openInvitation(page, token);
     await expect(page.getByRole("heading", { name: /초대 수락/ })).toBeVisible();
     const leg = keycloakLeg(page);
     await page.getByRole("button", { name: config().label, exact: true }).click();
@@ -863,7 +1022,10 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       },
     ]);
     await owner.page.goto(`/w/${WORKSPACE.slug}/settings`);
-    await owner.page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+    await owner.page
+      .locator("summary")
+      .filter({ hasText: /^멤버$/ })
+      .click();
     await expect(owner.page.getByText(carol.email)).toBeVisible();
     expect(csp).toEqual([]);
     observe("C_invite_match", {
@@ -893,14 +1055,16 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       const usersBefore = userCount();
 
       const { context, page } = await newPage(browser);
-      await page.goto(`/invite/${token}`);
+      await openInvitation(page, token);
       const leg = keycloakLeg(page);
       await page.getByRole("button", { name: config().label, exact: true }).click();
       expect(await leg.pass(idpUser)).toBe("form");
       const result = await callbackResult(await leg.callback);
       const current = result.location === "/" ? await me(page) : null;
       const accepted =
-        sql(`SELECT accepted_at IS NOT NULL FROM fvoci.invitations WHERE email = '${probe.invited}'`) === "t";
+        sql(
+          `SELECT accepted_at IS NOT NULL FROM fvoci.invitations WHERE email = '${probe.invited}'`,
+        ) === "t";
       const observed = {
         invitedEmail: probe.invited,
         idpEmail: idpUser.email,
@@ -951,7 +1115,7 @@ test.describe("failure boundaries", () => {
     await context.close();
 
     const pat = await newPage(browser);
-    await pat.page.goto(`/invite/${token}`);
+    await openInvitation(pat.page, token);
     await pat.page.getByLabel("이메일").fill(PAT.email);
     await pat.page.getByLabel("성").fill(PAT.familyName);
     await pat.page.getByLabel("이름", { exact: true }).fill(PAT.givenName);
@@ -993,7 +1157,9 @@ test.describe("failure boundaries", () => {
     await context.close();
   });
 
-  test("a replayed callback creates no session (with and without the state cookie)", async ({ browser }) => {
+  test("a replayed callback creates no session (with and without the state cookie)", async ({
+    browser,
+  }) => {
     const { context, page } = await newPage(browser);
     await openLogin(page);
     const leg = keycloakLeg(page);
@@ -1028,7 +1194,9 @@ test.describe("failure boundaries", () => {
     await context.close();
   });
 
-  test("a callback delivered to another browser context does not sign in or link", async ({ browser }) => {
+  test("a callback delivered to another browser context does not sign in or link", async ({
+    browser,
+  }) => {
     // Sign-in: context X starts, context Y receives X's callback.
     const x = await newPage(browser);
     await openLogin(x.page);
@@ -1086,7 +1254,10 @@ test.describe("failure boundaries", () => {
     await linkButton(page).click();
     expect(await leg.pass(config().users.alice)).toBe("form");
     const result = await callbackResult(await leg.callback);
-    expect(result).toEqual({ status: 302, location: "/settings/account?error=oidc_already_linked" });
+    expect(result).toEqual({
+      status: 302,
+      location: "/settings/account?error=oidc_already_linked",
+    });
     await expect(page.getByText(MSG.alreadyLinked)).toBeVisible();
     expect(linksOf(PAT.email)).toEqual([]);
     expect(linksOf(OWNER.email).map((l) => l.email)).toEqual([config().users.alice.email]);
@@ -1094,7 +1265,9 @@ test.describe("failure boundaries", () => {
     await context.close();
   });
 
-  test("access denied at Keycloak (declined terms) fails cleanly; a restart links", async ({ browser }) => {
+  test("access denied at Keycloak (declined terms) fails cleanly; a restart links", async ({
+    browser,
+  }) => {
     const { context, page, csp } = await newPage(browser);
     await login(page, PAT.email, PAT.password);
     await openAccountSettings(page);
@@ -1108,7 +1281,10 @@ test.describe("failure boundaries", () => {
     expect(deniedParams.get("error")).toBe("access_denied");
     expect(deniedParams.has("code")).toBe(false);
     const result = await callbackResult(denied);
-    expect(result).toEqual({ status: 302, location: "/settings/account?error=oidc_provider_error" });
+    expect(result).toEqual({
+      status: 302,
+      location: "/settings/account?error=oidc_provider_error",
+    });
     await expect(page.getByText(MSG.providerError)).toBeVisible();
     expect(linksOf(PAT.email)).toEqual([]);
 
@@ -1119,7 +1295,9 @@ test.describe("failure boundaries", () => {
     const linked = await callbackResult(await retry.callback);
     expect(linked).toEqual({ status: 302, location: "/settings/account?linked=1" });
     await expect(page.getByText(MSG.linked)).toBeVisible();
-    expect(linksOf(PAT.email).map((l) => [l.email, l.issuer])).toEqual([[tina.email, config().issuer]]);
+    expect(linksOf(PAT.email).map((l) => [l.email, l.issuer])).toEqual([
+      [tina.email, config().issuer],
+    ]);
     expect(csp).toEqual([]);
     observe("F_access_denied", {
       keycloakRedirect: {
@@ -1161,9 +1339,11 @@ window.post = async (url, body) => {
       response.end(html);
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const otherOrigin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    const network = await watchPosts(page, [linkUrl, startUrl]);
+    const otherOrigin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
+    let network: Awaited<ReturnType<typeof watchPosts>> | undefined;
     try {
+      const observer = await watchPosts(page, [linkUrl, startUrl]);
+      network = observer;
       await page.goto(`${otherOrigin}/`);
       const refused: Record<string, unknown> = {};
       // Script requests: the page cannot read the answer (no CORS headers);
@@ -1174,16 +1354,15 @@ window.post = async (url, body) => {
       ] as const) {
         const pageSees = await page.evaluate(
           ([target, form]) =>
-            (window as unknown as { post: (u: string, b?: URLSearchParams) => Promise<string> }).post(
-              target,
-              form === null ? undefined : new URLSearchParams(form),
-            ),
+            (
+              window as unknown as { post: (u: string, b?: URLSearchParams) => Promise<string> }
+            ).post(target, form === null ? undefined : new URLSearchParams(form)),
           [url, body] as const,
         );
         expect(pageSees).toBe("unreadable (TypeError)");
-        await expect.poll(() => network.last(url)?.status).toBe(403);
-        await expect.poll(() => network.last(url)?.code).toBe("origin_mismatch");
-        const sent = network.last(url);
+        await expect.poll(() => observer.last(url)?.status).toBe(403);
+        await expect.poll(() => observer.last(url)?.code).toBe("origin_mismatch");
+        const sent = observer.last(url);
         expect(sent?.origin).toBe(otherOrigin);
         expect(sent?.sessionCookieSent).toBe(true);
         expect(sent?.setsStateCookie).toBe(false);
@@ -1206,9 +1385,9 @@ window.post = async (url, body) => {
         const answered = await response;
         expect(answered.status()).toBe(403);
         expect(await problemCode(answered)).toBe("origin_mismatch");
-        await expect.poll(() => network.last(url)?.status).toBe(403);
-        await expect.poll(() => network.last(url)?.code).toBe("origin_mismatch");
-        const sent = network.last(url);
+        await expect.poll(() => observer.last(url)?.status).toBe(403);
+        await expect.poll(() => observer.last(url)?.code).toBe("origin_mismatch");
+        const sent = observer.last(url);
         expect(sent?.origin).toBe(otherOrigin);
         expect(sent?.sessionCookieSent).toBe(true);
         expect(sent?.setsStateCookie).toBe(false);
@@ -1226,15 +1405,27 @@ window.post = async (url, body) => {
       expect(stateCount()).toBe(statesBefore);
       expect(links()).toEqual(linksBefore);
       expect(
-        sql(`SELECT accepted_at IS NULL FROM fvoci.invitations WHERE email = 'kc-xorigin@example.com'`),
+        sql(
+          `SELECT accepted_at IS NULL FROM fvoci.invitations WHERE email = 'kc-xorigin@example.com'`,
+        ),
       ).toBe("t");
       // The owner's session was attached (same site, other origin) and is intact.
       expect((await me(page))?.userId).toBe(ownerId);
       observe("F_cross_origin", { otherOrigin, sameSite: true, ...refused, statesIssued: 0 });
     } finally {
-      await network.stop();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await context.close();
+      try {
+        if (network) await network.stop();
+      } finally {
+        try {
+          await new Promise<void>((resolve) =>
+            server.close(() => {
+              resolve();
+            }),
+          );
+        } finally {
+          await context.close();
+        }
+      }
     }
   });
 });
@@ -1242,7 +1433,9 @@ window.post = async (url, body) => {
 test.describe("wrong client secret on the server", () => {
   test.skip(mode !== "wrong-secret", "FVOCI_KC_E2E_MODE=wrong-secret");
 
-  test("the token exchange fails clearly: error shown, no session, reason logged", async ({ browser }) => {
+  test("the token exchange fails clearly: error shown, no session, reason logged", async ({
+    browser,
+  }) => {
     await prepareInstance(browser);
     const { context, page } = await newPage(browser);
     await openLogin(page);
@@ -1263,7 +1456,9 @@ test.describe("wrong client secret on the server", () => {
     expect(failures.length).toBe(1);
     expect(failures[0]).toContain("provider response: token error");
     const secret = process.env.OIDC_GENERIC_CLIENT_SECRET ?? "";
-    expect(secret.length > 0 && log.includes(secret), "the server log never holds the secret").toBe(false);
+    expect(secret.length > 0 && log.includes(secret), "the server log never holds the secret").toBe(
+      false,
+    );
     const events = await kcAdmin(`/events?type=CODE_TO_TOKEN_ERROR&client=${config().clientId}`);
     const errors = ((await events.json()) as Array<{ error?: string }>).map((e) => e.error);
     expect(errors).toContain("invalid_client_credentials");

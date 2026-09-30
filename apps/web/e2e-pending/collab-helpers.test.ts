@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { attachmentNodesFromDocument } from "./collab-attachment-oracle.ts";
 
-test("attachmentNodesFromDocument extracts stored attachment id, name, and image flag", () => {
+await test("attachmentNodesFromDocument extracts stored attachment id, name, and image flag", () => {
   assert.deepEqual(
     attachmentNodesFromDocument({
       type: "doc",

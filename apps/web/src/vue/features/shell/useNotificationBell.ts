@@ -1,6 +1,6 @@
 import { notificationMessage, t } from "@fvoci/i18n";
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref, toValue, type MaybeRefOrGetter } from "vue";
+import { computed, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter } from "vue";
 import {
   markAllNotificationsRead,
   markNotificationRead,
@@ -10,6 +10,7 @@ import {
   payloadRecord,
   type NotificationItem,
 } from "@/features/notifications/notification-target";
+import { problemMessage } from "@/lib/api";
 import { notificationListQuery, notificationUnreadCountQuery } from "@/lib/queries";
 
 /**
@@ -25,6 +26,21 @@ export function useNotificationBell(options: {
 }) {
   const queryClient = useQueryClient();
   const open = ref(false);
+  const actionError = ref<string | null>(null);
+  let attempt = 0;
+  let active = true;
+  watch(
+    [() => toValue(options.workspaceId), () => toValue(options.slug)],
+    () => {
+      attempt += 1;
+      actionError.value = null;
+    },
+    { flush: "sync" },
+  );
+  onScopeDispose(() => {
+    active = false;
+    attempt += 1;
+  });
   const unread = useQuery(() => notificationUnreadCountQuery(toValue(options.workspaceId)));
   const list = useQuery(() => ({
     ...notificationListQuery(toValue(options.workspaceId), "all"),
@@ -57,5 +73,30 @@ export function useNotificationBell(options: {
     return markAllNotificationsRead(queryClient, toValue(options.workspaceId));
   }
 
-  return { open, unread, list, count, items, label, badge, message, openItem, readAll };
+  /** UI write owner: failed writes stay in the panel, and the next attempt clears them. */
+  async function perform(action: () => Promise<void>): Promise<void> {
+    const currentAttempt = ++attempt;
+    actionError.value = null;
+    try {
+      await action();
+    } catch (error: unknown) {
+      if (active && currentAttempt === attempt)
+        actionError.value = problemMessage(error, "error.http.fallback");
+    }
+  }
+
+  return {
+    open,
+    unread,
+    list,
+    count,
+    items,
+    label,
+    badge,
+    message,
+    openItem,
+    readAll,
+    actionError,
+    perform,
+  };
 }

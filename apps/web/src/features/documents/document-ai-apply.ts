@@ -82,10 +82,10 @@ export async function applyTaskTitles(
 ): Promise<{ states: TaskApplyState[]; created: number; failure: TaskApplyFailure | null }> {
   const next = titles.map((_, index) => states[index] ?? "pending");
   let created = 0;
-  for (let index = 0; index < titles.length; index += 1) {
+  for (const [index, title] of titles.entries()) {
     if (next[index] !== "pending") continue;
     try {
-      await create(titles[index]!);
+      await create(title);
     } catch (error) {
       const definite = isDefiniteRejection(error);
       if (!definite) next[index] = "unknown";

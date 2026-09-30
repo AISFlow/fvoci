@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.vue.json",
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": true,
+    "rootDirs": ["../..", "../../node_modules/.cache/fvoci-vue-lint/types"]
+  },
+  "include": ["**/*.ts", "**/*.tsx", "**/*.vue"],
+  "exclude": ["node_modules", "src/generated/api.ts"]
+}

@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import { computed } from "vue";
-import { searchHitTypeLabel, searchItemHref, type SearchResult } from "@/features/workspace/search-target";
+import {
+  searchHitTypeLabel,
+  searchItemHref,
+  type SearchResult,
+} from "@/features/workspace/search-target";
 import AppLink from "../../components/AppLink.vue";
 
 // Search result rows (features/workspace/search-results.tsx): kind, display
@@ -9,7 +13,9 @@ import AppLink from "../../components/AppLink.vue";
 // A row links to its target (a wiki document in the app, anything else with
 // a full load); a hit without one is shown without a link.
 const props = defineProps<{ slug: string; items: readonly SearchResult[] }>();
-const rows = computed(() => props.items.map((item) => ({ item, href: searchItemHref(props.slug, item) })));
+const rows = computed(() =>
+  props.items.map((item) => ({ item, href: searchItemHref(props.slug, item) })),
+);
 </script>
 
 <template>

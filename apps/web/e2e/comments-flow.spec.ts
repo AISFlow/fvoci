@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser, login, logout } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, logout } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -18,10 +18,9 @@ const member = {
 };
 
 test("member adds and resolves a wiki document comment", async ({ page }) => {
-  test.setTimeout(90_000);
-
+  test.setTimeout(90000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -39,13 +38,14 @@ test("member adds and resolves a wiki document comment", async ({ page }) => {
 
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspace = (await workspacesRes.json()).items.find(
+  const workspace = (await readJson(workspacesRes, flowSchemas.workspaces)).items.find(
     (item: { slug: string }) => item.slug === owner.workspaceSlug,
   );
+  if (workspace === undefined) throw new Error("Missing fixture value: workspace");
   expect(workspace).toBeTruthy();
   const membersRes = await page.request.get(`/api/v1/workspaces/${workspace.id}/members`);
   expect(membersRes.ok()).toBe(true);
-  const memberId = (await membersRes.json()).items.find(
+  const memberId = (await readJson(membersRes, flowSchemas.members)).items.find(
     (item: { email: string }) => item.email.toLowerCase() === member.email.toLowerCase(),
   )?.userId;
   expect(memberId).toBeTruthy();
@@ -53,7 +53,7 @@ test("member adds and resolves a wiki document comment", async ({ page }) => {
     data: { name: "랩팀" },
   });
   expect(groupRes.status(), await groupRes.text()).toBe(201);
-  const groupId = (await groupRes.json()).id;
+  const groupId = (await readJson(groupRes, flowSchemas.tag)).id;
   const addRes = await page.request.post(
     `/api/v1/workspaces/${workspace.id}/groups/${groupId}/members`,
     { data: { userId: memberId } },
@@ -93,7 +93,7 @@ test("member adds and resolves a wiki document comment", async ({ page }) => {
 
   await page.goto("/w/acme/PDC-1");
   // Project documents open in the full editor view; its title is an input.
-  await expect(page.getByLabel("문서 제목")).toHaveValue("문서댓글", { timeout: 15_000 });
+  await expect(page.getByLabel("문서 제목")).toHaveValue("문서댓글", { timeout: 15000 });
   const projectPanel = page.getByTestId("document-comments");
   await expect(projectPanel.getByRole("heading", { name: "댓글" })).toBeVisible();
   const projectCompose = projectPanel.locator("[data-comment-compose] textarea");

@@ -3,6 +3,7 @@ import test from "node:test";
 import { t } from "@fvoci/i18n";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import { createApp, effectScope, ref } from "vue";
+import { ProblemError, problemMessage } from "@/lib/api";
 import type { NotificationItem } from "@/features/notifications/notification-target";
 import { useLogout, type LogoutEnvironment } from "./useLogout.ts";
 import { useNotificationBell } from "./useNotificationBell.ts";
@@ -49,27 +50,35 @@ function logoutEnvironment(answer: () => Promise<{ response: { ok: boolean; stat
   return { env, redirects };
 }
 
-test("logout: a signed-out session leaves for the login page", async () => {
-  const { env, redirects } = logoutEnvironment(async () => ({ response: { ok: true, status: 200 } }));
+await test("logout: a signed-out session leaves for the login page", async () => {
+  const { env, redirects } = logoutEnvironment(() =>
+    Promise.resolve({
+      response: { ok: true, status: 200 },
+    }),
+  );
   const { error, logout } = useLogout(env);
   await logout();
   assert.equal(error.value, null);
   assert.deepEqual(redirects, ["/login"]);
 });
 
-test("logout: a transport failure stays on the page with the network message", async () => {
-  const { env, redirects } = logoutEnvironment(async () => {
-    throw new TypeError("Failed to fetch");
-  });
+await test("logout: a transport failure stays on the page with the network message", async () => {
+  const { env, redirects } = logoutEnvironment(() =>
+    Promise.reject(new TypeError("Failed to fetch")),
+  );
   const { error, logout } = useLogout(env);
   await logout();
   assert.equal(error.value, t("error.network"));
   assert.deepEqual(redirects, []);
 });
 
-test("logout: a refused logout says so, and a retry that succeeds clears it", async () => {
+await test("logout: a refused logout says so, and a retry that succeeds clears it", async () => {
   let ok = false;
-  const { env, redirects } = logoutEnvironment(async () => ({ response: { ok, status: ok ? 200 : 500 } }));
+  const { env, redirects } = logoutEnvironment(() =>
+    Promise.resolve({
+      response: { ok, status: ok ? 200 : 500 },
+    }),
+  );
   const { error, logout } = useLogout(env);
   await logout();
   assert.equal(error.value, t("error.auth.logout"));
@@ -86,14 +95,16 @@ test("logout: a refused logout says so, and a retry that succeeds clears it", as
 type Key = Event & { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean };
 
 function key(init: { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean }): Key {
-  return Object.assign(new Event("keydown", { cancelable: true }), init) as Key;
+  return Object.assign(new Event("keydown", { cancelable: true }), init);
 }
 
-test("search shortcut: Ctrl+K or Cmd+K opens, Escape closes an open palette", () => {
+await test("search shortcut: Ctrl+K or Cmd+K opens, Escape closes an open palette", () => {
   const target = new EventTarget();
   const open = ref(false);
   const scope = effectScope();
-  scope.run(() => useSearchShortcut(open, target));
+  scope.run(() => {
+    useSearchShortcut(open, target);
+  });
   try {
     const plain = key({ key: "k" });
     target.dispatchEvent(plain);
@@ -102,7 +113,11 @@ test("search shortcut: Ctrl+K or Cmd+K opens, Escape closes an open palette", ()
 
     const escapeClosed = key({ key: "Escape" });
     target.dispatchEvent(escapeClosed);
-    assert.equal(escapeClosed.defaultPrevented, false, "Escape is left alone while the palette is closed");
+    assert.equal(
+      escapeClosed.defaultPrevented,
+      false,
+      "Escape is left alone while the palette is closed",
+    );
 
     const alreadyHandled = key({ key: "k", ctrlKey: true });
     alreadyHandled.preventDefault();
@@ -129,10 +144,11 @@ test("search shortcut: Ctrl+K or Cmd+K opens, Escape closes an open palette", ()
   assert.equal(open.value, false, "the listener goes with the scope");
 });
 
-test("search palette: the query settles, trimmed, once typing pauses", async () => {
+await test("search palette: the query settles, trimmed, once typing pauses", async () => {
   const source = ref("");
   const scope = effectScope();
-  const settled = scope.run(() => useDebouncedTrim(source, 30))!;
+  const settled = scope.run(() => useDebouncedTrim(source, 30));
+  assert.ok(settled, "the active scope runs the debounce composable");
   try {
     source.value = "문";
     await sleep(10);
@@ -148,7 +164,7 @@ test("search palette: the query settles, trimmed, once typing pauses", async () 
 
 const WORKSPACE_ID = "11111111-1111-7111-8111-111111111111";
 
-test("search palette: searches every kind in hybrid mode, and nothing for an empty query", async () => {
+await test("search palette: searches every kind in hybrid mode, and nothing for an empty query", async () => {
   const client = queryClient();
   const { result, stop } = mount(client, () =>
     useSearchPalette({ workspaceId: WORKSPACE_ID, keyTarget: new EventTarget(), debounceMs: 10 }),
@@ -158,7 +174,10 @@ test("search palette: searches every kind in hybrid mode, and nothing for an emp
     result.draft.value = "  계획  ";
     await until(() => result.q.value === "계획", "the query to settle");
     const key = ["search", WORKSPACE_ID, "계획", "all", "", "", "hybrid"];
-    await until(() => client.getQueryCache().find({ queryKey: key, exact: true }) !== undefined, "the search");
+    await until(
+      () => client.getQueryCache().find({ queryKey: key, exact: true }) !== undefined,
+      "the search",
+    );
     await until(() => result.results.isError.value, "the search to fail without a server");
     assert.deepEqual(result.items.value, []);
   } finally {
@@ -193,12 +212,16 @@ function notification(overrides: Partial<NotificationItem>): NotificationItem {
 function mountBell(client: QueryClient) {
   const navigations: string[] = [];
   const mounted = mount(client, () =>
-    useNotificationBell({ workspaceId: WORKSPACE_ID, slug: SLUG, navigate: (path) => navigations.push(path) }),
+    useNotificationBell({
+      workspaceId: WORKSPACE_ID,
+      slug: SLUG,
+      navigate: (path) => navigations.push(path),
+    }),
   );
   return { ...mounted, navigations };
 }
 
-test("bell: named by the unread count, with a capped badge", async () => {
+await test("bell: named by the unread count, with a capped badge", async () => {
   const client = queryClient();
   client.setQueryData(["notifications-unread", WORKSPACE_ID], { count: 3 });
   const { result, stop } = mountBell(client);
@@ -216,7 +239,7 @@ test("bell: named by the unread count, with a capped badge", async () => {
   }
 });
 
-test("bell: the list loads only while the panel is open", async () => {
+await test("bell: the list loads only while the panel is open", async () => {
   const client = queryClient();
   client.setQueryData(["notifications-unread", WORKSPACE_ID], { count: 1 });
   const { result, stop } = mountBell(client);
@@ -231,7 +254,7 @@ test("bell: the list loads only while the panel is open", async () => {
   }
 });
 
-test("bell: a read notification closes the panel and opens its item", async () => {
+await test("bell: a read notification closes the panel and opens its item", async () => {
   const client = queryClient();
   client.setQueryData(["notifications-unread", WORKSPACE_ID], { count: 0 });
   const { result, stop, navigations } = mountBell(client);
@@ -250,7 +273,7 @@ test("bell: a read notification closes the panel and opens its item", async () =
   }
 });
 
-test("bell: an unread notification is marked read first; a failed write goes nowhere", async () => {
+await test("bell: an unread notification is marked read first; a failed write goes nowhere", async () => {
   const client = queryClient();
   client.setQueryData(["notifications-unread", WORKSPACE_ID], { count: 1 });
   const { result, stop, navigations } = mountBell(client);
@@ -265,7 +288,7 @@ test("bell: an unread notification is marked read first; a failed write goes now
   }
 });
 
-test("bell: an item reads as its notification message", () => {
+await test("bell: an item reads as its notification message", () => {
   const client = queryClient();
   const { result, stop } = mountBell(client);
   try {
@@ -282,3 +305,86 @@ test("bell: an item reads as its notification message", () => {
     stop();
   }
 });
+
+await test("bell: failed mark/read-all writes own an in-place error and the next attempt clears it", async () => {
+  const client = queryClient();
+  const { result, stop, navigations } = mountBell(client);
+  try {
+    result.open.value = true;
+    await result.perform(() => result.openItem(notification({})));
+    assert.equal(result.actionError.value, t("error.network"));
+    assert.equal(result.open.value, true);
+    assert.deepEqual(navigations, []);
+    await result.perform(() => result.readAll());
+    assert.equal(result.actionError.value, t("error.network"));
+    const success = result.perform(() =>
+      result.openItem(notification({ readAt: "2031-03-02T00:00:00Z", displayId: "WIKI-4" })),
+    );
+    assert.equal(
+      result.actionError.value,
+      null,
+      "the old error clears when the new attempt starts",
+    );
+    await success;
+    assert.equal(result.actionError.value, null);
+    assert.equal(result.open.value, false);
+    assert.deepEqual(navigations, ["/w/acme/WIKI-4"]);
+  } finally {
+    stop();
+  }
+});
+
+await test("bell: an older failed attempt cannot overwrite a newer attempt's error", async () => {
+  const client = queryClient();
+  const { result, stop } = mountBell(client);
+  let fail: ((error: Error) => void) | undefined;
+  const pending = new Promise<void>((_resolve, reject) => {
+    fail = reject;
+  });
+  try {
+    const first = result.perform(() => pending);
+    const secondFailure = new ProblemError(500);
+    await result.perform(() => Promise.reject(secondFailure));
+    assert.equal(result.actionError.value, problemMessage(secondFailure, "error.http.fallback"));
+    assert.ok(fail);
+    fail(new Error("older network failure"));
+    await first;
+    assert.equal(result.actionError.value, problemMessage(secondFailure, "error.http.fallback"));
+  } finally {
+    stop();
+  }
+});
+
+for (const change of ["workspace", "dispose"]) {
+  await test(`bell: late write failure after ${change} retirement does not set the current panel error`, async () => {
+    const client = queryClient();
+    const workspace = ref(WORKSPACE_ID);
+    const slug = ref(SLUG);
+    const { result, stop } = mount(client, () =>
+      useNotificationBell({
+        workspaceId: workspace,
+        slug,
+        navigate: () => {
+          assert.fail("no navigation is expected");
+        },
+      }),
+    );
+    let fail: ((error: Error) => void) | undefined;
+    const pending = new Promise<void>((_resolve, reject) => {
+      fail = reject;
+    });
+    try {
+      const done = result.perform(() => pending);
+      if (change === "workspace") {
+        workspace.value = "other-workspace";
+        slug.value = "other";
+      } else stop();
+      assert.ok(fail);
+      fail(new Error("retired write failure"));
+      await done;
+      assert.equal(result.actionError.value, null);
+    } finally {
+      stop();
+    }
+  });
+}

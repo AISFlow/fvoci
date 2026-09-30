@@ -155,6 +155,22 @@ async fn pause_for_join_barrier(document_id: Uuid) {
     }
 }
 
+// Choose the legal lease-first select outcome deterministically after an actor barrier.
+#[cfg(feature = "db-tests")]
+static LEASE_DROP_PRIORITY: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashSet<Uuid>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_lease_drop_priority(document_id: Uuid) {
+    assert!(LEASE_DROP_PRIORITY.lock().await.insert(document_id));
+}
+
+#[cfg(feature = "db-tests")]
+async fn consume_lease_drop_priority(document_id: Uuid) -> bool {
+    LEASE_DROP_PRIORITY.lock().await.remove(&document_id)
+}
+
 #[cfg(feature = "db-tests")]
 static JOIN_REPLY_BARRIERS: std::sync::LazyLock<
     tokio::sync::Mutex<HashMap<Uuid, AppendRevokeBarrier>>,
@@ -765,6 +781,12 @@ struct JoinAdmission {
     conn_generation: u64,
 }
 
+struct PendingLeaseDrop {
+    conn_id: Uuid,
+    generation: u64,
+    queued_commands: usize,
+}
+
 struct ConnectionLeaseDrop {
     conn_id: Uuid,
     generation: u64,
@@ -1175,6 +1197,7 @@ struct RoomActor {
     committed: CommittedBundle,
     connections: HashMap<Uuid, ConnectionState>,
     connection_lease_drops: FuturesUnordered<ConnectionLeaseDrop>,
+    pending_lease_drops: Vec<PendingLeaseDrop>,
     live_conns: Arc<AtomicUsize>,
     awareness: AwarenessRegistry,
     fifo_seq: u64,
@@ -1243,6 +1266,7 @@ pub async fn spawn_room(
         },
         connections: HashMap::new(),
         connection_lease_drops: FuturesUnordered::new(),
+        pending_lease_drops: Vec::new(),
         live_conns,
         awareness: AwarenessRegistry::new(),
         fifo_seq: 0,
@@ -1317,15 +1341,45 @@ impl RoomActor {
     }
 
     #[cfg(feature = "db-tests")]
-    async fn drain_ready_lease_drops(&mut self) {
+    async fn drain_ready_lease_drops(&mut self, queued_commands: usize) {
         while let Some(Some((conn_id, generation))) =
             self.connection_lease_drops.next().now_or_never()
         {
-            self.handle_lease_drop(conn_id, generation).await;
+            self.handle_lease_drop(conn_id, generation, queued_commands)
+                .await;
         }
     }
 
-    async fn handle_lease_drop(&mut self, conn_id: Uuid, generation: u64) {
+    async fn handle_lease_drop(&mut self, conn_id: Uuid, generation: u64, queued_commands: usize) {
+        // Frames accepted before socket cleanup must run before lease retirement.
+        // A separate drop future can win select ahead of both Frame and Leave.
+        // Freeze the current mailbox prefix: later arrivals cannot extend it,
+        // and a full mailbox needs no extra cleanup slot. Each frame still uses
+        // the normal current-permission check and durable append path.
+        if queued_commands == 0 {
+            self.close_dropped_connection(conn_id, generation).await;
+        } else {
+            self.pending_lease_drops.push(PendingLeaseDrop {
+                conn_id,
+                generation,
+                queued_commands,
+            });
+        }
+    }
+
+    async fn finish_pending_lease_drops(&mut self) {
+        while let Some(index) = self
+            .pending_lease_drops
+            .iter()
+            .position(|drop| drop.queued_commands == 0)
+        {
+            let drop = self.pending_lease_drops.swap_remove(index);
+            self.close_dropped_connection(drop.conn_id, drop.generation)
+                .await;
+        }
+    }
+
+    async fn close_dropped_connection(&mut self, conn_id: Uuid, generation: u64) {
         if self
             .connections
             .get(&conn_id)
@@ -1352,8 +1406,18 @@ impl RoomActor {
         let mut acl_tick = tokio::time::interval(Duration::from_millis(self.config.revoke_poll_ms));
         acl_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
+            #[cfg(feature = "db-tests")]
+            if consume_lease_drop_priority(self.document_id).await {
+                self.drain_ready_lease_drops(rx.len()).await;
+            }
             tokio::select! {
                 cmd = rx.recv() => {
+                    // Only commands in the frozen prefix count toward retirement.
+                    // Decrement before dispatch so drops observed by Probe below
+                    // start at the remaining mailbox, not at this command.
+                    for drop in &mut self.pending_lease_drops {
+                        drop.queued_commands = drop.queued_commands.saturating_sub(1);
+                    }
                     match cmd {
                         Some(RoomCommand::Join(join, reply)) => {
                             match self.handle_join(join).await {
@@ -1424,7 +1488,7 @@ impl RoomActor {
                         }
                         #[cfg(feature = "db-tests")]
                         Some(RoomCommand::Probe(reply)) => {
-                            self.drain_ready_lease_drops().await;
+                            self.drain_ready_lease_drops(rx.len()).await;
                             let _ = reply.send(ActorProbe {
                                 connections: self.connections.len(),
                                 awareness_clients: self.awareness.tracked_client_count(),
@@ -1434,12 +1498,13 @@ impl RoomActor {
                     }
                 }
                 Some((conn_id, generation)) = self.connection_lease_drops.next(), if !self.connection_lease_drops.is_empty() => {
-                    self.handle_lease_drop(conn_id, generation).await;
+                    self.handle_lease_drop(conn_id, generation, rx.len()).await;
                 }
                 _ = acl_tick.tick() => {
                     self.poll_acl().await;
                 }
             }
+            self.finish_pending_lease_drops().await;
             self.publish_live_conns();
             // Finish the bounded `StaleRevisionHead` retries in this iteration: a
             // Shutdown queued behind it (admission reclaim) must not drop a
@@ -4055,6 +4120,16 @@ impl RoomActor {
     }
 
     async fn deliver_outbound(&mut self, conn_id: Uuid, bytes: Vec<u8>, kind: OutboundKind) {
+        let Some(events) = self.connections.get(&conn_id).map(|c| c.events.clone()) else {
+            return;
+        };
+        // Transport teardown closes this receiver before the actor drains its
+        // admitted input prefix. It is not a slow peer: Leave/lease retirement
+        // already orders cleanup after that prefix. Evicting here during an
+        // earlier update's broadcast would discard the queued final edit.
+        if events.is_closed() {
+            return;
+        }
         let accounted_bytes = bytes.len().saturating_add(OUTBOUND_FRAME_OVERHEAD);
         let budget = self
             .connections
@@ -4087,16 +4162,16 @@ impl RoomActor {
             accounted_bytes,
             budget,
         };
-        let events = self.connections.get(&conn_id).map(|c| c.events.clone());
-        let Some(events) = events else {
-            return;
-        };
         let frame = OutboundFrame {
             bytes,
             kind,
             permit: Some(delivery_permit),
         };
-        if events.try_send(RoomClientEvent::Outbound(frame)).is_err() {
+        // The receiver can close after the check above. A full live channel
+        // still enforces the outbound budget and preempts the slow peer.
+        if let Err(mpsc::error::TrySendError::Full(_)) =
+            events.try_send(RoomClientEvent::Outbound(frame))
+        {
             self.evict_for_backpressure(conn_id).await;
         }
     }

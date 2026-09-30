@@ -2,5 +2,5 @@
 export type SafeHtml = string & { readonly __brand: "SafeHtml" };
 
 export function asSafeHtml(html: string): SafeHtml {
-	return html as SafeHtml;
+  return html as SafeHtml;
 }

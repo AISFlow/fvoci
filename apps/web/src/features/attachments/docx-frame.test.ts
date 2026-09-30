@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DOCX_FRAME_CSP, isSafeDataImageUrl, neutralizeCssUrls } from "./docx-frame.ts";
 
-test("the frame CSP allows no script, no network and only data: images and fonts", () => {
+await test("the frame CSP allows no script, no network and only data: images and fonts", () => {
   assert.match(DOCX_FRAME_CSP, /default-src 'none'/);
   assert.match(DOCX_FRAME_CSP, /script-src 'none'/);
   assert.match(DOCX_FRAME_CSP, /img-src data:;/);
@@ -10,7 +10,7 @@ test("the frame CSP allows no script, no network and only data: images and fonts
   assert.doesNotMatch(DOCX_FRAME_CSP, /'self'|https?:|blob:/);
 });
 
-test("only embedded data: images are kept as resource URLs", () => {
+await test("only embedded data: images are kept as resource URLs", () => {
   assert.equal(isSafeDataImageUrl("data:image/png;base64,AAAA"), true);
   assert.equal(isSafeDataImageUrl(" data:image/svg+xml;base64,AAAA"), true);
   for (const url of [
@@ -26,7 +26,7 @@ test("only embedded data: images are kept as resource URLs", () => {
   }
 });
 
-test("CSS url() targets other than embedded images or fonts become none", () => {
+await test("CSS url() targets other than embedded images or fonts become none", () => {
   const css = [
     "@import url(https://evil.example/x.css);",
     ".a{background:url(https://evil.example/p.png)}",

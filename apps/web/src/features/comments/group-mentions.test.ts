@@ -13,14 +13,14 @@ const namedGroups = [
   { id: "g-short", name: "랩" },
 ];
 
-test("mentionTargetsFromBody maps group @ to id and user @ to userId", () => {
+await test("mentionTargetsFromBody maps group @ to id and user @ to userId", () => {
   assert.deepEqual(mentionTargetsFromBody("@랩팀 그리고 @박분석", members, namedGroups), {
     mentionedUserIds: ["u-3"],
     mentionedGroupIds: ["g-lab"],
   });
 });
 
-test("mentionTargetsFromBody matches a short group name only as a whole token", () => {
+await test("mentionTargetsFromBody matches a short group name only as a whole token", () => {
   assert.deepEqual(mentionTargetsFromBody("hi @랩", members, namedGroups), {
     mentionedUserIds: [],
     mentionedGroupIds: ["g-short"],

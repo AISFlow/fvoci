@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInThisContext } from "node:vm";
 
 const SOURCE = readFileSync(new URL("../../../public/sw.js", import.meta.url), "utf8");
 
@@ -41,7 +42,9 @@ function loadWorker(windows: FakeClient[] = []) {
       },
     },
   };
-  new Function("self", SOURCE)(self);
+  const execute: unknown = runInThisContext(`(function(self) {${SOURCE}\n})`);
+  assert.equal(typeof execute, "function");
+  Reflect.apply(execute as (worker: typeof self) => void, undefined, [self]);
   const fire = async (type: string, event: object): Promise<void> => {
     const pending: Promise<unknown>[] = [];
     listeners.get(type)?.({
@@ -53,7 +56,7 @@ function loadWorker(windows: FakeClient[] = []) {
   return { fire, shown, opened, listeners };
 }
 
-test("registers install/activate/push/click handlers", () => {
+await test("registers install/activate/push/click handlers", () => {
   const worker = loadWorker();
   assert.deepEqual([...worker.listeners.keys()].sort(), [
     "activate",
@@ -63,7 +66,7 @@ test("registers install/activate/push/click handlers", () => {
   ]);
 });
 
-test("shows the push payload title, body and url", async () => {
+await test("shows the push payload title, body and url", async () => {
   const worker = loadWorker();
   await worker.fire("push", {
     data: { json: () => ({ title: "홍길동", body: "새 댓글", url: "/w/acme/OPS-1" }) },
@@ -73,7 +76,7 @@ test("shows the push payload title, body and url", async () => {
   ]);
 });
 
-test("a broken payload still shows a notification", async () => {
+await test("a broken payload still shows a notification", async () => {
   const worker = loadWorker();
   await worker.fire("push", {
     data: {
@@ -83,10 +86,10 @@ test("a broken payload still shows a notification", async () => {
     },
   });
   assert.equal(worker.shown[0]?.title, "FVOCI");
-  assert.deepEqual(worker.shown[0]?.options, { body: "", data: { url: "/" } });
+  assert.deepEqual(worker.shown[0].options, { body: "", data: { url: "/" } });
 });
 
-test("focuses a tab already at the target url", async () => {
+await test("focuses a tab already at the target url", async () => {
   const focused: string[] = [];
   const client = (url: string): FakeClient => ({
     url,
@@ -103,7 +106,7 @@ test("focuses a tab already at the target url", async () => {
   assert.deepEqual(worker.opened, []);
 });
 
-test("moves an open window instead of opening a tab", async () => {
+await test("moves an open window instead of opening a tab", async () => {
   const moved: string[] = [];
   let focused = false;
   const open: FakeClient = {
@@ -126,7 +129,7 @@ test("moves an open window instead of opening a tab", async () => {
   assert.deepEqual(worker.opened, []);
 });
 
-test("opens an absolute url when no window is open", async () => {
+await test("opens an absolute url when no window is open", async () => {
   const worker = loadWorker();
   await worker.fire("notificationclick", {
     notification: { close: () => undefined, data: { url: "/w/acme/OPS-1" } },
@@ -134,7 +137,7 @@ test("opens an absolute url when no window is open", async () => {
   assert.deepEqual(worker.opened, [`${ORIGIN}/w/acme/OPS-1`]);
 });
 
-test("a notification without url opens the root", async () => {
+await test("a notification without url opens the root", async () => {
   const worker = loadWorker();
   await worker.fire("notificationclick", {
     notification: { close: () => undefined, data: {} },

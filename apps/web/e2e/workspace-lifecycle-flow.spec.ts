@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser, login, logout } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, logout } from "./helpers";
 
 const admin = {
   email: "Admin@Example.COM",
@@ -18,10 +18,9 @@ const member = {
 };
 
 test("home counts and owner deletes a team workspace", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(90000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
-
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(admin.familyName);
   await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
   await page.getByLabel("이메일").fill(admin.email);
@@ -36,10 +35,11 @@ test("home counts and owner deletes a team workspace", async ({ page }) => {
 
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = await readJson(workspacesRes, flowSchemas.workspaces);
   const acme = workspacesBody.items.find(
     (item: { slug: string }) => item.slug === admin.workspaceSlug,
   );
+  if (acme === undefined) throw new Error("Missing fixture value: acme");
   expect(acme).toBeTruthy();
   const created = await page.request.post(`/api/v1/workspaces/${acme.id}/documents`, {
     data: { title: "수명주기 문서", parentId: null },
@@ -59,7 +59,10 @@ test("home counts and owner deletes a team workspace", async ({ page }) => {
   await page.getByRole("link", { name: "Beta 팀" }).click();
   await expect(page).toHaveURL(/\/w\/beta-team\/wiki$/);
   await page.goto("/w/beta-team/settings");
-  await page.locator("summary").filter({ hasText: /^워크스페이스 삭제$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^워크스페이스 삭제$/ })
+    .click();
   await page.getByLabel("확인을 위해 주소(영문)를 입력하세요.").fill("beta-team");
   await page.getByRole("button", { name: "워크스페이스 삭제" }).click();
   await expect(page).toHaveURL(/\/$/);

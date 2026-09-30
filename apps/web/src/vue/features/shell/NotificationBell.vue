@@ -19,9 +19,11 @@ const bell = useNotificationBell({
   slug: () => props.slug,
   // A task or document is a React page (the router loads it) or a wiki
   // document of this app.
-  navigate: (path) => void router.push(path),
+  navigate: (path) => {
+    router.push(path).catch(reportError);
+  },
 });
-const { open, count, items, label, badge } = bell;
+const { open, count, items, label, badge, actionError } = bell;
 const { isPending: listPending, isError: listFailed, error: listError } = bell.list;
 
 // An in-app navigation (to another wiki document) keeps the shell mounted;
@@ -36,12 +38,12 @@ watch(
 );
 
 // As in the React bell, a failed write leaves the panel as it was.
-function onItem(item: NotificationItem): void {
-  bell.openItem(item).catch(() => undefined);
+function onItem(item: NotificationItem): Promise<void> {
+  return bell.perform(() => bell.openItem(item));
 }
 
-function onReadAll(): void {
-  bell.readAll().catch(() => undefined);
+function onReadAll(): Promise<void> {
+  return bell.perform(() => bell.readAll());
 }
 </script>
 
@@ -79,14 +81,21 @@ function onReadAll(): void {
           t("notif.readAll")
         }}</UButton>
       </div>
+      <p v-if="actionError" role="alert" class="m-0 p-3 text-sm text-error">{{ actionError }}</p>
       <p v-if="listPending" class="m-0 p-3 text-sm text-muted">{{ t("load.loading") }}</p>
       <div v-if="listFailed" class="p-3">
         <QueryError :message="loadErrorMessage(listError)" @retry="bell.list.refetch()" />
       </div>
-      <p v-if="!listPending && !listFailed && items.length === 0" class="m-0 p-3 text-sm text-muted">
+      <p
+        v-if="!listPending && !listFailed && items.length === 0"
+        class="m-0 p-3 text-sm text-muted"
+      >
         {{ t("notif.empty") }}
       </p>
-      <ul v-if="items.length > 0" class="m-0 max-h-[min(24rem,60vh)] list-none overflow-auto px-0 py-1">
+      <ul
+        v-if="items.length > 0"
+        class="m-0 max-h-[min(24rem,60vh)] list-none overflow-auto px-0 py-1"
+      >
         <li v-for="item in items" :key="item.id">
           <button
             type="button"
@@ -95,14 +104,19 @@ function onReadAll(): void {
           >
             <span
               aria-hidden="true"
-              :class="['mt-1.5 size-1.5 shrink-0 rounded-full', item.readAt ? 'bg-transparent' : 'bg-primary']"
+              :class="[
+                'mt-1.5 size-1.5 shrink-0 rounded-full',
+                item.readAt ? 'bg-transparent' : 'bg-primary',
+              ]"
             />
             <span>{{ bell.message(item) }}</span>
           </button>
         </li>
       </ul>
       <div class="flex items-center gap-2 border-t border-default px-3 py-2 text-sm">
-        <a :href="notificationsPath(slug)" class="underline underline-offset-2">{{ t("notif.viewAll") }}</a>
+        <a :href="notificationsPath(slug)" class="underline underline-offset-2">{{
+          t("notif.viewAll")
+        }}</a>
       </div>
     </div>
   </div>

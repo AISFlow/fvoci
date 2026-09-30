@@ -8,16 +8,14 @@ import type { EntityResolver } from "../entities.js";
 
 /** Upload, download link and metadata of attachment blocks; null disables uploads. */
 export const attachmentBridgeKey: InjectionKey<AttachmentBlockBridge | null> =
-	Symbol("fvociAttachmentBridge");
+  Symbol("fvociAttachmentBridge");
 
 /** Renders a URL embed (the web app's unfurl card); null shows the plain link card. */
 export type UrlEmbedComponent = Component<{ url: string }>;
-export const urlEmbedKey: InjectionKey<UrlEmbedComponent | null> =
-	Symbol("fvociUrlEmbed");
+export const urlEmbedKey: InjectionKey<UrlEmbedComponent | null> = Symbol("fvociUrlEmbed");
 
 /** Labels document, task and project embeds; null shows the stored reference. */
-export const entityResolverKey: InjectionKey<EntityResolver | null> =
-	Symbol("fvociEntityResolver");
+export const entityResolverKey: InjectionKey<EntityResolver | null> = Symbol("fvociEntityResolver");
 
 /**
  * The code-block chrome's wrap/fold view options on the editor host
@@ -25,6 +23,4 @@ export const entityResolverKey: InjectionKey<EntityResolver | null> =
  * in a code block, so the attributes are omitted (react/code-block-chrome.tsx).
  */
 export type CodeChromeHost = { wrap: boolean | null; folded: boolean | null };
-export const codeChromeHostKey: InjectionKey<CodeChromeHost> = Symbol(
-	"fvociCodeChromeHost",
-);
+export const codeChromeHostKey: InjectionKey<CodeChromeHost> = Symbol("fvociCodeChromeHost");

@@ -12,7 +12,7 @@ export type PushAttempted = "blocked" | "failed";
 /** `applicationServerKey` takes raw bytes; `/instance` gives unpadded base64url. */
 export function decodeKey(base64url: string): Uint8Array<ArrayBuffer> {
   const binary = atob(base64url.replace(/-/g, "+").replace(/_/g, "/"));
-  return new Uint8Array([...binary].map((char) => char.charCodeAt(0)));
+  return Uint8Array.from({ length: binary.length }, (_, index) => binary.charCodeAt(index));
 }
 
 /**
@@ -24,9 +24,7 @@ export function boundTo(key: ArrayBuffer | null | undefined, publicKey: string):
   if (!key) return false;
   const expected = decodeKey(publicKey);
   const actual = new Uint8Array(key);
-  return (
-    actual.length === expected.length && actual.every((byte, at) => byte === expected[at])
-  );
+  return actual.length === expected.length && actual.every((byte, at) => byte === expected[at]);
 }
 
 export interface PushSubscriptionPayload {
@@ -123,7 +121,9 @@ export async function logoutWithPushDisconnect<R>(deps: LogoutPushDeps<R>): Prom
 /** Resolves `fallback` when `promise` does not settle within `ms`. */
 export function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fallback), ms);
+    const timer = setTimeout(() => {
+      resolve(fallback);
+    }, ms);
     promise.then(
       (value) => {
         clearTimeout(timer);

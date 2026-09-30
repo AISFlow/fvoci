@@ -3,7 +3,7 @@ import test from "node:test";
 import { notificationMessage } from "@fvoci/i18n";
 import { notificationHref, payloadRecord } from "./notification-target.ts";
 
-test("assignment message includes task number and title", () => {
+await test("assignment message includes task number and title", () => {
   assert.equal(
     notificationMessage({
       verb: "task.updated",
@@ -13,7 +13,7 @@ test("assignment message includes task number and title", () => {
   );
 });
 
-test("notificationHref uses the display id path", () => {
+await test("notificationHref uses the display id path", () => {
   assert.equal(
     notificationHref("acme", {
       id: "00000000-0000-0000-0000-000000000001",

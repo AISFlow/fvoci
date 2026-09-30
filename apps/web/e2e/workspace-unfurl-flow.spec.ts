@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { login } from "./helpers";
+import { readJson, flowSchemas, login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -63,18 +63,25 @@ test("editor URL embed shows authenticated unfurl card", async ({ page }) => {
   await ensureSetup(page);
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const wsId = (await workspacesRes.json()).items.find(
+  const fixtureValue1 = (await readJson(workspacesRes, flowSchemas.workspaces)).items.find(
     (item: { slug: string }) => item.slug === admin.workspaceSlug,
-  ).id as string;
-
+  );
+  if (fixtureValue1 === undefined)
+    throw new Error(
+      "Missing fixture value: (await readJson(workspacesRes, flowSchemas.workspaces)).items.find(\n    (item: { slug: string }) => item.slug === admin.workspaceSlug,\n  )",
+    );
+  const wsId = fixtureValue1.id;
   const created = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: null, title: "링크 미리보기" },
   });
   expect(created.status()).toBe(201);
-  const document = (await created.json()) as { id: string; number: number };
-  await page.goto(`/w/${admin.workspaceSlug}/WIKI-${document.number}`);
+  const document = (await readJson(created, flowSchemas.document)) as {
+    id: string;
+    number: number;
+  };
+  await page.goto(`/w/${admin.workspaceSlug}/WIKI-${String(document.number)}`);
   const editor = page.locator('[contenteditable="true"]').first();
-  await expect(editor).toBeVisible({ timeout: 15_000 });
+  await expect(editor).toBeVisible({ timeout: 15000 });
   await editor.click();
   await editor.pressSequentially("/https://example.com/preview", { delay: 20 });
   await page.getByRole("option", { name: "URL 임베드" }).click();

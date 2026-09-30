@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser, login, logout } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, logout } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -16,26 +16,38 @@ const outsider = {
   givenName: "외부",
   familyName: "검색",
 };
-
-type SearchHit = { type: string; id: string; title: string };
-
+type SearchHit = {
+  type: string;
+  id: string;
+  title: string;
+};
 async function searchItems(
-  page: { request: { get: (url: string) => Promise<{ ok: () => boolean; json: () => Promise<unknown> }> } },
+  page: {
+    request: {
+      get: (url: string) => Promise<{
+        ok: () => boolean;
+        json: () => Promise<unknown>;
+      }>;
+    };
+  },
   url: string,
 ): Promise<SearchHit[]> {
   const res = await page.request.get(url);
-  if (!res.ok()) return [];
-  const body = (await res.json()) as { items?: SearchHit[] };
+  if (!res.ok()) {
+    return [];
+  }
+  const body = (await readJson(res, flowSchemas.unknown)) as {
+    items?: SearchHit[];
+  };
   return body.items ?? [];
 }
 
 test("workspace and global search find a document, task, comment, and attachment", async ({
   page,
 }) => {
-  test.setTimeout(90_000);
-
+  test.setTimeout(90000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -51,13 +63,21 @@ test("workspace and global search find a document, task, comment, and attachment
 
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspaces = (await workspacesRes.json()) as { items: { id: string; slug: string }[] };
+  const workspaces = (await readJson(workspacesRes, flowSchemas.workspaces)) as {
+    items: {
+      id: string;
+      slug: string;
+    }[];
+  };
   const workspace = workspaces.items.find((item) => item.slug === owner.workspaceSlug);
   expect(workspace).toBeTruthy();
-  const wsId = workspace!.id;
-
+  const required1 = workspace;
+  if (required1 === undefined) {
+    throw new Error("Missing fixture value: workspace");
+  }
+  const wsId = required1.id;
   const stamp = Date.now();
-  const token = `srch${stamp}`;
+  const token = `srch${String(stamp)}`;
   const documentTitle = `${token} 문서`;
   const taskTitle = `${token} 태스크`;
   const commentBody = `${token} 댓글본문`;
@@ -67,7 +87,10 @@ test("workspace and global search find a document, task, comment, and attachment
     data: { parentId: null, title: documentTitle },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
-  const createdDoc = (await docRes.json()) as { id: string; displayId: string };
+  const createdDoc = (await readJson(docRes, flowSchemas.createdDocument)) as {
+    id: string;
+    displayId: string;
+  };
   const documentId = createdDoc.id;
 
   await page.goto("/w/acme/projects");
@@ -80,16 +103,24 @@ test("workspace and global search find a document, task, comment, and attachment
 
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
   expect(projectsRes.ok()).toBe(true);
-  const projects = (await projectsRes.json()) as { items: Array<{ id: string; key: string }> };
+  const projects = (await readJson(projectsRes, flowSchemas.projects)) as {
+    items: Array<{
+      id: string;
+      key: string;
+    }>;
+  };
   const projectId = projects.items.find((item) => item.key === "SRC")?.id;
+  if (projectId === undefined) throw new Error("Missing fixture value: projectId");
   expect(projectId).toBeTruthy();
 
-  const taskRes = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, {
-    data: { title: taskTitle },
-  });
+  const taskRes = await page.request.post(
+    `/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`,
+    {
+      data: { title: taskTitle },
+    },
+  );
   expect(taskRes.status()).toBe(201);
-  await taskRes.json();
-
+  await readJson(taskRes, flowSchemas.item);
   const commentRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/documents/${documentId}/comments`,
     { data: { body: commentBody } },
@@ -102,12 +133,18 @@ test("workspace and global search find a document, task, comment, and attachment
     { data: { name: attachmentName, sizeBytes: bytes.length } },
   );
   expect(uploadRes.ok(), await uploadRes.text()).toBeTruthy();
-  const upload = (await uploadRes.json()) as {
+  const upload = (await readJson(uploadRes, flowSchemas.upload)) as {
     attachmentId: string;
     partSizeBytes: number;
-    parts: Array<{ partNumber: number; url: string }>;
+    parts: Array<{
+      partNumber: number;
+      url: string;
+    }>;
   };
-  const parts: { partNumber: number; etag: string }[] = [];
+  const parts: {
+    partNumber: number;
+    etag: string;
+  }[] = [];
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
@@ -119,7 +156,11 @@ test("workspace and global search find a document, task, comment, and attachment
     expect(put.ok(), await put.text()).toBeTruthy();
     const etag = put.headers()["etag"] ?? put.headers()["ETag"];
     expect(etag).toBeTruthy();
-    parts.push({ partNumber: part.partNumber, etag: etag! });
+    const required2 = etag;
+    if (required2 === undefined) {
+      throw new Error("Missing fixture value: etag");
+    }
+    parts.push({ partNumber: part.partNumber, etag: required2 });
   }
   const completeRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`,
@@ -134,7 +175,7 @@ test("workspace and global search find a document, task, comment, and attachment
           const items = await searchItems(page, url);
           return items.some((item) => item.type === type && item.title === title);
         },
-        { timeout: 30_000 },
+        { timeout: 30000 },
       )
       .toBe(true);
   };
@@ -165,17 +206,19 @@ test("workspace and global search find a document, task, comment, and attachment
   const paletteUrl = new URL((await paletteRequest).url());
   expect(paletteUrl.searchParams.get("mode")).toBe("hybrid");
   expect(paletteUrl.searchParams.get("type")).toBe("all");
-  await expect(palette.getByText(documentTitle).first()).toBeVisible({ timeout: 10_000 });
+  await expect(palette.getByText(documentTitle).first()).toBeVisible({ timeout: 10000 });
   await page.keyboard.press("Escape");
   await expect(palette).toBeHidden();
 
   await page.goto(`/w/acme/search?q=${encodeURIComponent(token)}`);
   const results = page.getByRole("region", { name: "검색" });
-  await expect(results.getByText(documentTitle).first()).toBeVisible({ timeout: 10_000 });
+  await expect(results.getByText(documentTitle).first()).toBeVisible({ timeout: 10000 });
   await expect(results.getByText(taskTitle)).toBeVisible();
   await expect(results.getByText(attachmentName)).toBeVisible();
   await results.getByRole("link", { name: new RegExp(attachmentName) }).click();
-  await expect(page).toHaveURL(new RegExp(`/w/acme/a/${upload.attachmentId}/view(?:\\?chunk=\\d+)?$`));
+  await expect(page).toHaveURL(
+    new RegExp(`/w/acme/a/${upload.attachmentId}/view(?:\\?chunk=\\d+)?$`),
+  );
   await expect(page.locator("[data-attachment-viewer]")).toBeVisible();
   await expect(page.getByText(attachmentName, { exact: true })).toBeVisible();
 

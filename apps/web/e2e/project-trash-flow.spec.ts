@@ -1,5 +1,34 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const projectSchema = z
+  .object({ id: z.string(), key: z.string(), rootDocumentId: z.string().nullable() })
+  .passthrough();
+const projectListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          rootDocumentId: z.string().nullable(),
+          taskCount: z.number(),
+          openTaskCount: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const taskSchema = z
+  .object({ id: z.string(), number: z.number(), displayId: z.string() })
+  .passthrough();
+const bodySchema = z.object({ contentJson: z.unknown() }).passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -39,10 +68,11 @@ async function ensureSetup(page: Page): Promise<void> {
 async function workspaceId(page: Page): Promise<string> {
   const res = await page.request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const workspace = (await res.json()).items.find(
-    (item: { slug: string }) => item.slug === admin.workspaceSlug,
-  );
+  const workspace = workspaceListSchema
+    .parse(await res.json())
+    .items.find((item: { slug: string }) => item.slug === admin.workspaceSlug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
@@ -55,18 +85,18 @@ test("project document: edit, trash, restore; project delete and admin restore",
     data: { key: "TRSH", name: "휴지통 프로젝트", visibility: "workspace" },
   });
   expect(projectRes.status()).toBe(201);
-  const project = await projectRes.json();
+  const project = projectSchema.parse(await projectRes.json());
   const listRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
-  const listed = (await listRes.json()).items.find(
-    (item: { id: string }) => item.id === project.id,
-  );
+  const listed = projectListSchema
+    .parse(await listRes.json())
+    .items.find((item: { id: string }) => item.id === project.id);
   expect(listed).toMatchObject({ canEdit: true, canManage: true });
   const docRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/documents`,
     { data: { parentId: project.rootDocumentId, title: "프로젝트 기획서" } },
   );
   expect(docRes.status()).toBe(201);
-  const doc = await docRes.json();
+  const doc = taskSchema.parse(await docRes.json());
 
   // The project document opens in the collaborative editor.
   await page.goto(`/w/${admin.workspaceSlug}/${doc.displayId}`);
@@ -89,6 +119,7 @@ test("project document: edit, trash, restore; project delete and admin restore",
       response.url().includes(`/projects/${project.id}/documents/${doc.id}/trash`) &&
       response.ok(),
   );
+  await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
   await page.getByRole("button", { name: "휴지통으로 이동" }).click();
   await trashed;
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/trash$`));
@@ -102,7 +133,7 @@ test("project document: edit, trash, restore; project delete and admin restore",
   const body = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}/body`,
   );
-  expect(JSON.stringify((await body.json()).contentJson)).toContain("기획 본문");
+  expect(JSON.stringify(bodySchema.parse(await body.json()).contentJson)).toContain("기획 본문");
 
   // Archive makes the project read-only; unarchive restores writes.
   await page.evaluate(() => {
@@ -110,16 +141,16 @@ test("project document: edit, trash, restore; project delete and admin restore",
   });
   await page.getByTestId("project-lifecycle").getByRole("button", { name: "보관" }).click();
   await expect(page.getByText("보관됨").first()).toBeVisible();
-  await page
-    .getByTestId("project-lifecycle")
-    .getByRole("button", { name: "보관 해제" })
-    .click();
+  await page.getByTestId("project-lifecycle").getByRole("button", { name: "보관 해제" }).click();
   await expect(
     page.getByTestId("project-lifecycle").getByRole("button", { name: "보관", exact: true }),
   ).toBeVisible();
 
   // Delete the project, then an admin restores it with its documents.
-  await page.getByTestId("project-lifecycle").getByRole("button", { name: "프로젝트 삭제" }).click();
+  await page
+    .getByTestId("project-lifecycle")
+    .getByRole("button", { name: "프로젝트 삭제" })
+    .click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/projects$`));
   await expect(page.getByRole("link", { name: /휴지통 프로젝트/ })).toHaveCount(0);
 
@@ -130,6 +161,7 @@ test("project document: edit, trash, restore; project delete and admin restore",
   const deleted = page.getByTestId("deleted-projects");
   await expect(deleted).toContainText("TRSH");
   await deleted.getByRole("button", { name: "복원 휴지통 프로젝트" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "복원", exact: true }).click();
   await expect(page.getByText("삭제된 프로젝트가 없습니다")).toBeVisible();
 
   await page.goto(`/w/${admin.workspaceSlug}/TRSH`);

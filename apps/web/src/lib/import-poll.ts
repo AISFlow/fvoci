@@ -8,10 +8,7 @@ export const IMPORT_POLL_TRIES = 40;
 export type ImportJobStatus = "pending" | "running" | "completed" | "failed";
 
 export type ImportPollOutcome =
-  | { kind: "completed" }
-  | { kind: "failed" }
-  | { kind: "cancelled" }
-  | { kind: "budget" };
+  { kind: "completed" } | { kind: "failed" } | { kind: "cancelled" } | { kind: "budget" };
 
 export function isImportActive(status: string): boolean {
   return status === "pending" || status === "running";
@@ -34,8 +31,12 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<"ok" |
       signal?.removeEventListener("abort", onAbort);
       resolve(kind);
     };
-    const onAbort = () => finish("cancelled");
-    const timer = setTimeout(() => finish(signal?.aborted ? "cancelled" : "ok"), ms);
+    const onAbort = () => {
+      finish("cancelled");
+    };
+    const timer = setTimeout(() => {
+      finish(signal?.aborted ? "cancelled" : "ok");
+    }, ms);
     signal?.addEventListener("abort", onAbort);
   });
 }
@@ -78,7 +79,7 @@ export async function fetchImportStatus(
     `/api/v1/import/${encodeURIComponent(importJobId)}?workspaceId=${encodeURIComponent(workspaceId)}`,
     { credentials: "include", signal },
   );
-  if (!response.ok) throw new Error(`import status failed: ${response.status}`);
+  if (!response.ok) throw new Error(`import status failed: ${String(response.status)}`);
   const data = (await response.json()) as { status?: unknown };
   if (typeof data.status !== "string") throw new Error("import status missing");
   return { status: data.status };

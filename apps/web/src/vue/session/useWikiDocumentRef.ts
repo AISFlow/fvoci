@@ -17,7 +17,9 @@ export function useWikiDocumentRef(
   const node = computed(() =>
     number.value === null
       ? undefined
-      : tree.data.value?.items.find((item) => item.projectId === null && item.number === number.value),
+      : tree.data.value?.items.find(
+          (item) => item.projectId === null && item.number === number.value,
+        ),
   );
   /** The ref names no wiki document the user can see: the page goes to the wiki list. */
   const notFound = computed(
@@ -30,7 +32,8 @@ export function useWikiDocumentRef(
    * the page shows loading instead.
    */
   const failed = computed(
-    () => tree.isError.value && node.value === undefined && !notFound.value && !tree.isFetching.value,
+    () =>
+      tree.isError.value && node.value === undefined && !notFound.value && !tree.isFetching.value,
   );
   return { tree, node, notFound, failed, retry: () => tree.refetch() };
 }

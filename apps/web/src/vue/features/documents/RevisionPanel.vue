@@ -21,13 +21,18 @@ import { meQuery, membersQuery } from "@/lib/queries";
 // The document's revisions: save one (after persisting the live body),
 // preview and restore (features/documents/revision-panel.tsx). A restore is
 // applied to the room by the server, so every editor sees it.
-const props = defineProps<{
-  workspaceId: string;
-  documentId: string;
-  projectId: string | null;
-  readOnly: boolean;
-  persistNow?: () => Promise<void>;
-}>();
+const props = withDefaults(
+  defineProps<{
+    workspaceId: string;
+    documentId: string;
+    projectId: string | null;
+    /** Documents (default) or the task body room. */
+    targetKind?: "document" | "task";
+    readOnly: boolean;
+    persistNow?: (() => Promise<void>) | undefined;
+  }>(),
+  { targetKind: "document", persistNow: undefined },
+);
 const queryClient = useQueryClient();
 const me = useQuery(meQuery);
 const timeZone = computed(() => me.data.value?.timezone || "Asia/Seoul");
@@ -39,19 +44,31 @@ const correlations = new Map<string, string>();
 const cancelButton = useTemplateRef<{ $el?: Element }>("cancelButton");
 const confirmButton = useTemplateRef<{ $el?: Element }>("confirmButton");
 let opener: HTMLElement | null = null;
+const scopeProjectId = computed(() => (props.targetKind === "document" ? props.projectId : null));
 const queryKey = computed(
-  () => ["revisions", props.workspaceId, "document", props.documentId, props.projectId] as const,
+  () =>
+    [
+      "revisions",
+      props.workspaceId,
+      props.targetKind,
+      props.documentId,
+      scopeProjectId.value,
+    ] as const,
 );
 
 const listQuery = useQuery(() => ({
   queryKey: queryKey.value,
-  queryFn: () => listRevisions("document", props.workspaceId, props.documentId, props.projectId),
+  queryFn: () =>
+    listRevisions(props.targetKind, props.workspaceId, props.documentId, scopeProjectId.value),
   enabled: open.value,
 }));
 const members = useQuery(() => ({ ...membersQuery(props.workspaceId), enabled: open.value }));
 const authorById = computed<Record<string, string>>(() =>
   Object.fromEntries(
-    (members.data.value?.items ?? []).map((member) => [member.userId, formatPersonName(member, me.data.value?.locale)]),
+    (members.data.value?.items ?? []).map((member) => [
+      member.userId,
+      formatPersonName(member, me.data.value?.locale),
+    ]),
   ),
 );
 const items = computed(() => listQuery.data.value?.items ?? []);
@@ -73,7 +90,8 @@ watch(pendingRestoreId, async (id) => {
 });
 
 const saveRevision = useMutation({
-  mutationFn: () => createRevision("document", props.workspaceId, props.documentId, props.projectId),
+  mutationFn: () =>
+    createRevision(props.targetKind, props.workspaceId, props.documentId, scopeProjectId.value),
   onSuccess: async () => {
     notice.value = null;
     await queryClient.invalidateQueries({ queryKey: queryKey.value });
@@ -90,7 +108,14 @@ const restore = useMutation({
       correlationId = crypto.randomUUID();
       correlations.set(revisionId, correlationId);
     }
-    return restoreRevision("document", props.workspaceId, props.documentId, props.projectId, revisionId, correlationId);
+    return restoreRevision(
+      props.targetKind,
+      props.workspaceId,
+      props.documentId,
+      scopeProjectId.value,
+      revisionId,
+      correlationId,
+    );
   },
   onSuccess: async (_data, revisionId) => {
     correlations.delete(revisionId);
@@ -98,33 +123,49 @@ const restore = useMutation({
     notice.value = t("version.restore.done");
     await queryClient.invalidateQueries({ queryKey: queryKey.value });
   },
-  onError: (err: unknown) => {
+  onError: async (err: unknown) => {
     const timedOut = err instanceof ProblemError && err.status === 504;
-    if (timedOut) {
-      void queryClient.invalidateQueries({ queryKey: queryKey.value });
-      if (props.projectId) {
-        void queryClient.invalidateQueries({
-          queryKey: ["project-document", props.workspaceId, props.projectId, props.documentId],
-        });
-      } else {
-        void queryClient.invalidateQueries({ queryKey: ["document", props.workspaceId, props.documentId] });
-        void queryClient.invalidateQueries({ queryKey: ["document-body", props.workspaceId, props.documentId] });
-      }
-    }
     notice.value = timedOut ? t("version.restore.timeout") : t("version.restore.failed");
+    if (!timedOut) return;
+    const invalidations = [queryClient.invalidateQueries({ queryKey: queryKey.value })];
+    if (scopeProjectId.value) {
+      invalidations.push(
+        queryClient.invalidateQueries({
+          queryKey: ["project-document", props.workspaceId, scopeProjectId.value, props.documentId],
+        }),
+      );
+    } else if (props.targetKind === "document") {
+      invalidations.push(
+        queryClient.invalidateQueries({
+          queryKey: ["document", props.workspaceId, props.documentId],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["document-body", props.workspaceId, props.documentId],
+        }),
+      );
+    }
+    await Promise.all(invalidations);
   },
 });
 
 async function showPreview(id: string): Promise<void> {
   try {
-    preview.value = await getRevision("document", props.workspaceId, props.documentId, props.projectId, id);
+    preview.value = await getRevision(
+      props.targetKind,
+      props.workspaceId,
+      props.documentId,
+      scopeProjectId.value,
+      id,
+    );
   } catch {
     notice.value = t("version.list.failed");
   }
 }
 
 function save(): void {
-  void persistThenCreate(props.persistNow, () => saveRevision.mutate()).catch(() => {
+  persistThenCreate(props.persistNow, () => {
+    saveRevision.mutate();
+  }).catch(() => {
     notice.value = t("version.save.failed");
   });
 }
@@ -162,16 +203,31 @@ function onDialogKeydown(event: KeyboardEvent): void {
     >
       {{ t("version.history") }}
     </UButton>
-    <aside v-if="open" id="document-revision-panel" class="document-revision-panel" :aria-label="t('version.historyTitle')">
+    <aside
+      v-if="open"
+      id="document-revision-panel"
+      class="document-revision-panel"
+      :aria-label="t('version.historyTitle')"
+    >
       <header class="document-revision-panel__head">
         <h2>{{ t("version.historyTitle") }}</h2>
-        <UButton v-if="!readOnly" size="sm" :disabled="saveRevision.isPending.value" data-testid="revision-save" @click="save">
+        <UButton
+          v-if="!readOnly"
+          size="sm"
+          :disabled="saveRevision.isPending.value"
+          data-testid="revision-save"
+          @click="save"
+        >
           {{ saveRevision.isPending.value ? t("version.saving") : t("version.save") }}
         </UButton>
       </header>
       <p v-if="notice" role="status" class="document-revision-panel__notice">{{ notice }}</p>
-      <p v-if="listQuery.isLoading.value" class="document-revision-panel__notice">{{ t("load.loading") }}</p>
-      <p v-if="listQuery.isError.value" role="alert" class="document-page__error">{{ t("version.list.failed") }}</p>
+      <p v-if="listQuery.isLoading.value" class="document-revision-panel__notice">{{
+        t("load.loading")
+      }}</p>
+      <p v-if="listQuery.isError.value" role="alert" class="document-page__error">{{
+        t("version.list.failed")
+      }}</p>
       <p
         v-if="!listQuery.isLoading.value && !listQuery.isError.value && items.length === 0"
         class="document-revision-panel__notice"
@@ -179,11 +235,18 @@ function onDialogKeydown(event: KeyboardEvent): void {
         {{ t("version.empty") }}
       </p>
       <ul class="document-revision">
-        <li v-for="item in items" :key="item.id" class="document-revision__item" data-testid="revision-item">
+        <li
+          v-for="item in items"
+          :key="item.id"
+          class="document-revision__item"
+          data-testid="revision-item"
+        >
           <button type="button" class="document-revision__meta" @click="showPreview(item.id)">
             <span class="document-revision__when">{{ formatAt(item.createdAt, timeZone) }}</span>
             <span class="document-revision__who">
-              <span>{{ REASON_LABEL[item.reason] ?? item.reason }}</span> <span>{{ authorLabel(item, authorById) }}</span>
+              <span>{{ REASON_LABEL[item.reason] ?? item.reason }}</span
+              >{{ " " }}
+              <span>{{ authorLabel(item, authorById) }}</span>
             </span>
           </button>
           <UButton
@@ -213,9 +276,16 @@ function onDialogKeydown(event: KeyboardEvent): void {
         @keydown="onDialogKeydown"
       >
         <h3 id="revision-restore-title">{{ t("version.dialog.title") }}</h3>
-        <p id="revision-restore-body" class="document-revision-dialog__body">{{ t("version.dialog.body") }}</p>
+        <p id="revision-restore-body" class="document-revision-dialog__body">{{
+          t("version.dialog.body")
+        }}</p>
         <div class="document-revision-dialog__actions">
-          <UButton ref="cancelButton" variant="outline" color="neutral" @click="pendingRestoreId = null">
+          <UButton
+            ref="cancelButton"
+            variant="outline"
+            color="neutral"
+            @click="pendingRestoreId = null"
+          >
             {{ t("version.dialog.cancel") }}
           </UButton>
           <UButton

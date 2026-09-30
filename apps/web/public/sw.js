@@ -6,31 +6,31 @@
 
 /* WHY: 새 워커가 옛 워커의 종료를 기다리면 배포 뒤 첫 푸시가 옛 코드로 처리된다. */
 self.addEventListener("install", () => {
-	self.skipWaiting();
+  self.skipWaiting();
 });
 self.addEventListener("activate", (event) => {
-	event.waitUntil(self.clients.claim());
+  event.waitUntil(self.clients.claim());
 });
 
 /** WHY: 페이로드는 서버가 만든 JSON 이지만, 깨진 프레임 하나로 워커가 죽으면 안 된다. */
 function readPayload(data) {
-	try {
-		const parsed = data ? data.json() : null;
-		if (parsed && typeof parsed.title === "string") return parsed;
-	} catch {
-		/* 아래 기본값으로 떨어진다 */
-	}
-	return { title: "FVOCI", body: "", url: "/" };
+  try {
+    const parsed = data ? data.json() : null;
+    if (parsed && typeof parsed.title === "string") return parsed;
+  } catch {
+    /* 아래 기본값으로 떨어진다 */
+  }
+  return { title: "FVOCI", body: "", url: "/" };
 }
 
 self.addEventListener("push", (event) => {
-	const { title, body, url } = readPayload(event.data);
-	event.waitUntil(
-		self.registration.showNotification(title, {
-			body,
-			data: { url },
-		}),
-	);
+  const { title, body, url } = readPayload(event.data);
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body,
+      data: { url },
+    }),
+  );
 });
 
 /*
@@ -38,25 +38,22 @@ self.addEventListener("push", (event) => {
  * 옮기고, 아무것도 없을 때만 새 창을 연다. 클릭마다 탭이 늘어나는 게 가장 흔한 불만이다.
  */
 self.addEventListener("notificationclick", (event) => {
-	event.notification.close();
-	const target = new URL(
-		event.notification.data?.url ?? "/",
-		self.location.origin,
-	).href;
-	event.waitUntil(
-		(async () => {
-			const windows = await self.clients.matchAll({
-				type: "window",
-				includeUncontrolled: true,
-			});
-			const same = windows.find((client) => client.url === target);
-			if (same) return same.focus();
-			const open = windows[0];
-			if (open && typeof open.navigate === "function") {
-				const moved = await open.navigate(target);
-				return (moved ?? open).focus();
-			}
-			return self.clients.openWindow(target);
-		})(),
-	);
+  event.notification.close();
+  const target = new URL(event.notification.data?.url ?? "/", self.location.origin).href;
+  event.waitUntil(
+    (async () => {
+      const windows = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+      const same = windows.find((client) => client.url === target);
+      if (same) return same.focus();
+      const open = windows[0];
+      if (open && typeof open.navigate === "function") {
+        const moved = await open.navigate(target);
+        return (moved ?? open).focus();
+      }
+      return self.clients.openWindow(target);
+    })(),
+  );
 });

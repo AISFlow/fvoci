@@ -9,7 +9,11 @@ const emit = defineEmits<{ jump: [blockId: string] }>();
 </script>
 
 <template>
-  <ul v-if="peers.length > 0" class="document-page__presence" :aria-label="t('presence.count', { n: peers.length })">
+  <ul
+    v-if="peers.length > 0"
+    class="document-page__presence"
+    :aria-label="t('presence.count', { n: peers.length })"
+  >
     <li v-for="peer in peers" :key="peer.clientId">
       <UButton
         size="sm"

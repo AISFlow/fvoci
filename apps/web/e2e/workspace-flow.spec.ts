@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser, login, logout } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, logout } from "./helpers";
 
 const admin = {
   email: "Admin@Example.COM",
@@ -26,7 +26,8 @@ const readonlyMember = {
 
 test("setup → home → rename → logout → login → denied workspace", async ({ page }) => {
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
+  await expect(page.locator("#root.isolate")).toHaveCount(1);
 
   await page.getByLabel("성").fill(admin.familyName);
   await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
@@ -42,7 +43,7 @@ test("setup → home → rename → logout → login → denied workspace", asyn
 
   const me = await page.request.get("/api/v1/auth/me");
   expect(me.ok()).toBe(true);
-  const meBody = await me.json();
+  const meBody = await readJson(me, flowSchemas.user);
   expect(meBody.email).toBe("admin@example.com");
 
   await page.getByRole("link", { name: admin.workspaceName }).click();
@@ -93,11 +94,15 @@ test("instance admin creates a team workspace from home dialog", async ({ page }
   await page.getByRole("link", { name: betaName }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${betaSlug}/wiki$`));
   await page.goto(`/w/${betaSlug}/settings`);
-  await expect(page.getByRole("heading", { level: 1, name: "워크스페이스", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "워크스페이스", exact: true }),
+  ).toBeVisible();
   await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveValue(betaName);
 });
 
-test("readonly member sees read-only settings and refreshed name after admin edit", async ({ page }) => {
+test("readonly member sees read-only settings and refreshed name after admin edit", async ({
+  page,
+}) => {
   createE2eUser(readonlyMember.email, readonlyMember.password, readonlyMember.givenName, {
     familyName: readonlyMember.familyName,
     workspaceSlug: admin.workspaceSlug,
@@ -109,8 +114,7 @@ test("readonly member sees read-only settings and refreshed name after admin edi
   await expect(page.getByText("설정을 변경하려면 관리자 권한이 필요합니다")).toBeVisible();
   await expect(page.getByRole("button", { name: "저장" })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
-  await expect(page).toHaveURL(/\/login$/);
+  await logout(page);
   await login(page, admin.email, admin.password);
   await page.goto("/w/acme/settings");
   const memberVisibleName = "멤버에게 보이는 이름";
@@ -124,7 +128,6 @@ test("readonly member sees read-only settings and refreshed name after admin edi
   await expect(page.getByRole("main").getByText(memberVisibleName)).toBeVisible();
   await expect(page.getByText("설정을 변경하려면 관리자 권한이 필요합니다")).toBeVisible();
 });
-
 
 test("logout transport failure keeps the current session visible", async ({ page }) => {
   await page.goto("/login");
@@ -150,8 +153,9 @@ test("wiki shell logout transport failure keeps the current session visible", as
   expect((await page.request.get("/api/v1/auth/me")).ok()).toBe(true);
 });
 
-
-test("settings with revoked session redirects without a React hook crash", async ({ page }) => {
+test("settings with revoked session preserves its login return destination without a page error", async ({
+  page,
+}) => {
   await login(page, admin.email, admin.password);
   await page.goto("/w/acme/settings");
   await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toBeVisible();
@@ -163,7 +167,7 @@ test("settings with revoked session redirects without a React hook crash", async
   expect(result.ok()).toBe(true);
   await page.context().addCookies(cookies);
   await page.reload();
-  await expect(page).toHaveURL(/\/login$/);
+  await expect(page).toHaveURL(/\/login\?returnTo=%2Fw%2Facme%2Fsettings$/);
   await expect(page.getByRole("button", { name: "로그인", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });

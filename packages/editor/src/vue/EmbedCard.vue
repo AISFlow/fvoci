@@ -21,7 +21,9 @@ const refText = computed(() => {
   if (state.state === "inaccessible") return t("editor.embed.inaccessible", { kind: kind.value });
   return state.snapshot.label;
 });
-const status = computed(() => (props.state.state === "resolved" ? props.state.snapshot.status : undefined));
+const status = computed(() =>
+  props.state.state === "resolved" ? props.state.snapshot.status : undefined,
+);
 </script>
 
 <template>

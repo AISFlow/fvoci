@@ -17,8 +17,12 @@ let deck: PptxDeck | null = null;
 
 scope.onmessage = ({ data }) => {
   void handle(data).then(
-    (response) => scope.postMessage(response),
-    () => scope.postMessage({ type: "failed" }),
+    (response) => {
+      scope.postMessage(response);
+    },
+    () => {
+      scope.postMessage({ type: "failed" });
+    },
   );
 };
 

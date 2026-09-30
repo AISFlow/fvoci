@@ -1,3 +1,4 @@
+import type { components } from "../src/generated/api";
 /**
  * The Vue wiki page's collab room against the owned server
  * (collab-restart.ts): across a restart, where it stops gracefully and comes
@@ -73,7 +74,9 @@ test("after a collab restart the same editor reconnects with its unsent edits", 
     await waitConnected(pageA);
     await waitConnected(pageB);
     expect(
-      await editorLocator(pageA).evaluate((root) => (root as HTMLElement & { fvociProbe?: string }).fvociProbe),
+      await editorLocator(pageA).evaluate(
+        (root) => (root as HTMLElement & { fvociProbe?: string }).fvociProbe,
+      ),
     ).toBe("same editor");
     await expectTokens(pageB, ["재시작 전 문장", "끊긴 동안 쓴 문장"]);
     await expectConverged(pageA, pageB);
@@ -85,7 +88,9 @@ test("after a collab restart the same editor reconnects with its unsent edits", 
       `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`,
     );
     expect(body.ok()).toBe(true);
-    expect(JSON.stringify((await body.json()).contentJson)).toContain("끊긴 동안 쓴 문장");
+    expect(
+      JSON.stringify(((await body.json()) as components["schemas"]["BodyResponse"]).contentJson),
+    ).toContain("끊긴 동안 쓴 문장");
 
     await pageB.reload();
     await waitConnected(pageB);
@@ -133,7 +138,9 @@ test("a room refused at the room cap says so, mounts no editor, and opens once a
     await pageB.goto(refused.url);
     const bodyB = pageB.locator(".document-page__body");
     await expect(pageB.locator('[data-collab-status="busy"]')).toBeVisible({ timeout: 15_000 });
-    await expect(pageB.locator('[data-collab-status="busy"]')).toHaveText("서버 혼잡 · 자동 재시도");
+    await expect(pageB.locator('[data-collab-status="busy"]')).toHaveText(
+      "서버 혼잡 · 자동 재시도",
+    );
     await expect(bodyB.getByRole("status")).toHaveCount(1);
     await expect(bodyB.getByRole("status")).toContainText("동시에 열린 문서가 많아");
     await expect(pageB.locator(".fvoci-editor")).toHaveCount(0);
@@ -143,7 +150,9 @@ test("a room refused at the room cap says so, mounts no editor, and opens once a
 
     // A leaves; the room it held is idle and reclaimed for B's next retry.
     await pageA.close();
-    await expect(pageB.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 45_000 });
+    await expect(pageB.locator('[data-collab-status="connected"]')).toBeVisible({
+      timeout: 45_000,
+    });
     await expect(editorLocator(pageB)).toContainText("자리가 나면 열리는 본문");
     await expect(bodyB.getByRole("status")).toHaveCount(0);
     await editorLocator(pageB).click();

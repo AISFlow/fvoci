@@ -380,3 +380,28 @@ dialog.project-dialog::backdrop {
   padding: 0.75rem 1rem;
   background: color-mix(in oklab, var(--muted) 45%, transparent);
 }
+
+.project-list__counts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: end;
+  gap: 0.25rem 0.75rem;
+}
+
+.project-list__row {
+  grid-template-columns: 4rem minmax(0, 1fr) auto auto;
+}
+
+@media (max-width: 40rem) {
+  .project-list__row {
+    grid-template-columns: 4rem minmax(0, 1fr) auto;
+  }
+  .project-list__counts {
+    grid-column: 2;
+    justify-content: start;
+  }
+  .project-list__clone {
+    grid-column: 3;
+    grid-row: 1 / 3;
+  }
+}

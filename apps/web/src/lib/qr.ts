@@ -17,7 +17,7 @@ export function qrModules(text: string): QrModules {
   let path = "";
   for (let row = 0; row < size; row++) {
     for (let col = 0; col < size; col++) {
-      if (qr.isDark(row, col)) path += `M${col} ${row}h1v1h-1z`;
+      if (qr.isDark(row, col)) path += `M${String(col)} ${String(row)}h1v1h-1z`;
     }
   }
   return { size, path };

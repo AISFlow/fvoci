@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { CollabSession, CollabUser } from "@/features/documents/collab-session";
+import type { CollabSession, CollabUser } from "@/features/documents/collab-model";
 import { persistTaskBodyBeforeArchive, runArchiveWithBodyPersist } from "./task-archive-persist.ts";
 
 const collabUser: CollabUser = { id: "u1", name: "Tester", color: "#000" };
@@ -21,7 +21,7 @@ function fakeSession(overrides: Partial<CollabSession> = {}): CollabSession {
   };
 }
 
-test("runArchiveWithBodyPersist calls archive only after persist succeeds", async () => {
+await test("runArchiveWithBodyPersist calls archive only after persist succeeds", async () => {
   const order: string[] = [];
   let releasePersist!: () => void;
   const persistGate = new Promise<void>((resolve) => {
@@ -37,8 +37,10 @@ test("runArchiveWithBodyPersist calls archive only after persist succeeds", asyn
       },
     }),
     collabUser,
-    archive: async () => {
+    archive: () => {
       order.push("archive");
+
+      return Promise.resolve();
     },
   });
   assert.deepEqual(order, ["persist-start"]);
@@ -47,19 +49,21 @@ test("runArchiveWithBodyPersist calls archive only after persist succeeds", asyn
   assert.deepEqual(order, ["persist-start", "persist-end", "archive"]);
 });
 
-test("failed persist prevents archive PATCH", async () => {
+await test("failed persist prevents archive PATCH", async () => {
   let archived = false;
   await assert.rejects(
     runArchiveWithBodyPersist({
       pageEditable: true,
       session: fakeSession({
-        persistNow: async () => {
-          throw new Error("collab unavailable");
+        persistNow: () => {
+          return Promise.reject(new Error("collab unavailable"));
         },
       }),
       collabUser,
-      archive: async () => {
+      archive: () => {
         archived = true;
+
+        return Promise.resolve();
       },
     }),
     /collab unavailable/,
@@ -67,20 +71,24 @@ test("failed persist prevents archive PATCH", async () => {
   assert.equal(archived, false);
 });
 
-test("retry after failed persist can reach archive", async () => {
+await test("retry after failed persist can reach archive", async () => {
   let fails = true;
   let archived = false;
   await assert.rejects(
     runArchiveWithBodyPersist({
       pageEditable: true,
       session: fakeSession({
-        persistNow: async () => {
-          if (fails) throw new Error("collab unavailable");
+        persistNow: () => {
+          if (fails) return Promise.reject(new Error("collab unavailable"));
+
+          return Promise.resolve();
         },
       }),
       collabUser,
-      archive: async () => {
+      archive: () => {
         archived = true;
+
+        return Promise.resolve();
       },
     }),
     /collab unavailable/,
@@ -92,45 +100,58 @@ test("retry after failed persist can reach archive", async () => {
       persistNow: async () => {},
     }),
     collabUser,
-    archive: async () => {
+    archive: () => {
       archived = true;
+
+      return Promise.resolve();
     },
   });
   assert.equal(archived, true);
 });
 
-test("read-only page skips persist but still archives", async () => {
+await test("read-only page skips persist but still archives", async () => {
   let persisted = false;
   let archived = false;
   await runArchiveWithBodyPersist({
     pageEditable: false,
     session: fakeSession({
-      persistNow: async () => {
+      persistNow: () => {
         persisted = true;
+
+        return Promise.resolve();
       },
     }),
     collabUser,
-    archive: async () => {
+    archive: () => {
       archived = true;
+
+      return Promise.resolve();
     },
   });
   assert.equal(persisted, false);
   assert.equal(archived, true);
 });
 
-test("never-synced body room skips persist (still connecting)", async () => {
+await test("never-synced body room skips persist (still connecting)", async () => {
   let persisted = false;
   await runArchiveWithBodyPersist({
     pageEditable: true,
-    session: fakeSession({ synced: false, persistNow: async () => { persisted = true; } }),
+    session: fakeSession({
+      synced: false,
+      persistNow: () => {
+        persisted = true;
+
+        return Promise.resolve();
+      },
+    }),
     collabUser,
     archive: async () => {},
   });
   assert.equal(persisted, false);
 });
 
-test("disconnected after initial sync blocks archive", async () => {
-  let archived = false;
+await test("disconnected after initial sync blocks archive", async () => {
+  const archived = false;
   await assert.rejects(
     persistTaskBodyBeforeArchive({
       pageEditable: true,

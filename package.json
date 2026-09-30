@@ -23,7 +23,6 @@
     "@tiptap/extension-details": "3.31.3",
     "@tiptap/extension-document": "3.31.3",
     "@tiptap/extension-drag-handle": "3.31.3",
-    "@tiptap/extension-drag-handle-react": "3.31.3",
     "@tiptap/extension-drag-handle-vue-3": "3.31.3",
     "@tiptap/extension-dropcursor": "3.31.3",
     "@tiptap/extension-emoji": "3.31.3",
@@ -56,7 +55,6 @@
     "@tiptap/extensions": "3.31.3",
     "@tiptap/markdown": "3.31.3",
     "@tiptap/pm": "3.31.3",
-    "@tiptap/react": "3.31.3",
     "@tiptap/starter-kit": "3.31.3",
     "@tiptap/suggestion": "3.31.3",
     "@tiptap/vue-3": "3.31.3",
@@ -67,5 +65,23 @@
   },
   "patchedDependencies": {
     "@volar/typescript@2.4.28": "patches/@volar%2Ftypescript@2.4.28.patch"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/bun": "1.4.2",
+    "@typescript-eslint/parser": "8.71.0",
+    "eslint": "10.11.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-vue": "10.11.1",
+    "globals": "17.12.0",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0",
+    "vue-eslint-parser": "10.4.1"
+  },
+  "scripts": {
+    "lint": "bash scripts/lint-web.sh",
+    "lint:fixtures": "python3 scripts/test_eslint.py",
+    "format:check": "bash scripts/format-web.sh"
   }
 }

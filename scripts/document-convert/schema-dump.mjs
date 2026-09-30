@@ -12,14 +12,15 @@ const require = createRequire(join(ROOT, "../../packages/editor/package.json"));
 const { getSchema } = await import(require.resolve("@tiptap/core"));
 const schema = getSchema(createFvociExtensions());
 const attrs = (type) =>
-	Object.entries(type.attrs).map(([name, a]) => ({
-		name,
-		hasDefault: a.hasDefault,
-		default: a.default,
-		validate: a.validate ? String(a.validate) : null,
-	}));
+  Object.entries(type.attrs).map(([name, a]) => ({
+    name,
+    hasDefault: a.hasDefault,
+    default: a.default,
+    validate: a.validate ? String(a.validate) : null,
+  }));
 const out = { nodes: [], marks: [] };
-for (const [name, type] of Object.entries(schema.nodes)) out.nodes.push({ name, attrs: attrs(type) });
+for (const [name, type] of Object.entries(schema.nodes))
+  out.nodes.push({ name, attrs: attrs(type) });
 for (const [name, type] of Object.entries(schema.marks))
-	out.marks.push({ name, rank: type.rank, overlapping: !type.excludes(type), attrs: attrs(type) });
+  out.marks.push({ name, rank: type.rank, overlapping: !type.excludes(type), attrs: attrs(type) });
 process.stdout.write(JSON.stringify(out, null, 1) + "\n");

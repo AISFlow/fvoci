@@ -17,9 +17,7 @@ export const HWPX_MAX_EXPANDED_BYTES = 128 * 1024 * 1024;
 export const HWPX_MAX_ENTRIES = 10_000;
 
 export type HwpBytesCheck =
-  | { status: "ok"; bytes: Uint8Array }
-  | { status: "tooLarge" }
-  | { status: "invalid" };
+  { status: "ok"; bytes: Uint8Array } | { status: "tooLarge" } | { status: "invalid" };
 
 /** rhwp treats only a local-file-header ZIP as an HWPX candidate (`detect_format`). */
 function isZip(bytes: Uint8Array): boolean {

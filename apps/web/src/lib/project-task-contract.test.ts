@@ -12,7 +12,7 @@ import {
   taskListHasMore,
 } from "../features/tasks/task-list-page.ts";
 
-test("generated OpenAPI includes lookup and required list nextCursor/statusCounts", () => {
+await test("generated OpenAPI includes lookup and required list nextCursor/statusCounts", () => {
   const lookupPath: keyof paths = "/api/v1/workspaces/{workspace_id}/lookup/{display_id}";
   assert.equal(lookupPath, "/api/v1/workspaces/{workspace_id}/lookup/{display_id}");
   const searchPath: keyof paths = "/api/v1/workspaces/{workspace_id}/search";
@@ -28,7 +28,7 @@ test("generated OpenAPI includes lookup and required list nextCursor/statusCount
   assert.equal(page.statusCounts[0]?.count, 1);
 });
 
-test("project create payload matches source NFKC, reserved, KEY-n, and blank-to-null", () => {
+await test("project create payload matches source NFKC, reserved, KEY-n, and blank-to-null", () => {
   const fullwidth = projectCreatePayload({
     key: "ｌａｂ",
     name: "  Lab  ",
@@ -55,14 +55,14 @@ test("project create payload matches source NFKC, reserved, KEY-n, and blank-to-
   });
   assert.equal(withLead.ok && withLead.body.leadUserId, "0199a1c2-3b4d-7e8f-9012-3456789abcdf");
 
-  assert.deepEqual(
-    projectCreatePayload({ key: "WIKI", name: "Wiki", visibility: "private" }),
-    { ok: false, issue: { field: "key", code: "reserved" } },
-  );
-  assert.deepEqual(
-    projectCreatePayload({ key: "OPS-5", name: "Ops", visibility: "workspace" }),
-    { ok: false, issue: { field: "key", code: "pattern" } },
-  );
+  assert.deepEqual(projectCreatePayload({ key: "WIKI", name: "Wiki", visibility: "private" }), {
+    ok: false,
+    issue: { field: "key", code: "reserved" },
+  });
+  assert.deepEqual(projectCreatePayload({ key: "OPS-5", name: "Ops", visibility: "workspace" }), {
+    ok: false,
+    issue: { field: "key", code: "pattern" },
+  });
   assert.equal(
     projectCreatePayload({
       key: "LAB",
@@ -100,12 +100,15 @@ test("project create payload matches source NFKC, reserved, KEY-n, and blank-to-
   );
 });
 
-test("task create payload trims title, defaults type, and never sends parentId", () => {
+await test("task create payload trims title, defaults type, and never sends parentId", () => {
   const created = taskCreatePayload({ title: "  첫 일  ", type: "task" });
   assert.deepEqual(created, { ok: true, body: { title: "첫 일", type: "task" } });
-  assert.equal(created.ok && "parentId" in created.body, false);
+  assert.equal("parentId" in created.body, false);
   assert.equal(taskCreatePayload({ title: "   ", type: "bug" }).ok, false);
-  assert.equal(taskCreatePayload({ title: "x".repeat(TASK_TITLE_MAX + 1), type: "task" }).ok, false);
+  assert.equal(
+    taskCreatePayload({ title: "x".repeat(TASK_TITLE_MAX + 1), type: "task" }).ok,
+    false,
+  );
   assert.deepEqual(taskCreatePayload({ title: "하위", type: "subtask" }), {
     ok: false,
     issue: "parent",
@@ -128,7 +131,7 @@ const task: LookupItem = {
   projectId: "p1",
 };
 
-test("lookup branches project documents, tasks, and empty misses", () => {
+await test("lookup branches project documents, tasks, and empty misses", () => {
   assert.deepEqual(resolveLookupTarget([], "LAB-1"), { kind: "miss" });
   assert.deepEqual(resolveLookupTarget([doc], "LAB-1"), {
     kind: "project-document",
@@ -145,7 +148,7 @@ test("lookup branches project documents, tasks, and empty misses", () => {
   assert.deepEqual(resolveLookupTarget([{ ...doc, projectId: null }], "LAB-1"), { kind: "miss" });
 });
 
-test("appendTaskListPage concatenates items, keeps first statusCounts, and uses page cursor", () => {
+await test("appendTaskListPage concatenates items, keeps first statusCounts, and uses page cursor", () => {
   const first = {
     items: [{ id: "t1" }],
     nextCursor: "c1",
@@ -171,7 +174,7 @@ test("appendTaskListPage concatenates items, keeps first statusCounts, and uses 
   assert.deepEqual(fromPages, merged);
 });
 
-test("visibleTaskStatusSections keeps zero-count loaded items and unknown statuses", () => {
+await test("visibleTaskStatusSections keeps zero-count loaded items and unknown statuses", () => {
   const items = [
     { id: "t1", statusId: "s-backlog" },
     { id: "t2", statusId: "s-gone" },

@@ -15,21 +15,29 @@ const STREAM = `/api/v1/workspaces/${WS}/access-stream`;
 const restoreNodeRequest = installNodeRelativeRequestShim();
 const { watchWorkspaceAccess } = await import("./workspace-access-stream.ts");
 const originalFetch = globalThis.fetch;
+const originalReportError = globalThis.reportError;
 let probes: string[] = [];
 
 /** The workspace endpoint the watcher probes answers `status`. */
 function serveWorkspace(status: number) {
-  globalThis.fetch = async (input: RequestInfo | URL) => {
+  globalThis.fetch = (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : new Request(input);
     probes.push(`${request.method} ${new URL(request.url).pathname}`);
     const body =
       status === 200
         ? { id: WS, slug: "acme", name: "Acme" }
-        : { type: "about:blank", title: "x", status, code: status === 401 ? "authentication_required" : "not_found" };
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
+        : {
+            type: "about:blank",
+            title: "x",
+            status,
+            code: status === 401 ? "authentication_required" : "not_found",
+          };
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
   };
 }
 
@@ -53,13 +61,14 @@ test.afterEach(() => {
   mock.timers.reset();
   mock.restoreAll();
   globalThis.fetch = originalFetch;
+  globalThis.reportError = originalReportError;
 });
 
 test.after(() => {
   restoreNodeRequest();
 });
 
-test("an ended stream asks for a reconcile and leaves the reconnect to the browser", async () => {
+await test("an ended stream asks for a reconcile and leaves the reconnect to the browser", async () => {
   serveWorkspace(200);
   let changes = 0;
   watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
@@ -75,7 +84,7 @@ test("an ended stream asks for a reconcile and leaves the reconnect to the brows
   assert.equal(MockEventSource.instances.length, 1);
 });
 
-test("a refused stream whose access is gone (404) stops and reconciles once", async () => {
+await test("a refused stream whose access is gone (404) stops and reconciles once", async () => {
   serveWorkspace(404);
   let changes = 0;
   const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
@@ -92,7 +101,7 @@ test("a refused stream whose access is gone (404) stops and reconciles once", as
   assert.equal(changes, 1);
 });
 
-test("a refused stream whose session is gone (401) keeps reopening and leaves the session to the app", async () => {
+await test("a refused stream whose session is gone (401) keeps reopening and leaves the session to the app", async () => {
   serveWorkspace(401);
   let changes = 0;
   const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
@@ -110,7 +119,7 @@ test("a refused stream whose session is gone (401) keeps reopening and leaves th
   assert.equal(MockEventSource.latest().closed, true);
 });
 
-test("a refused stream of a current member reconciles once when its reopen opens", async () => {
+await test("a refused stream of a current member reconciles once when its reopen opens", async () => {
   serveWorkspace(200);
   let changes = 0;
   const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
@@ -136,7 +145,7 @@ test("a refused stream of a current member reconciles once when its reopen opens
   assert.equal(MockEventSource.latest().closed, true);
 });
 
-test("a reopen that opens before the probe answers still reconciles once", async () => {
+await test("a reopen that opens before the probe answers still reconciles once", async () => {
   globalThis.fetch = () => new Promise<Response>(() => {});
   let changes = 0;
   const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
@@ -151,10 +160,8 @@ test("a reopen that opens before the probe answers still reconciles once", async
   sub.close();
 });
 
-test("a probe that fails on the network keeps reopening", async () => {
-  globalThis.fetch = async () => {
-    throw new TypeError("network down");
-  };
+await test("a probe that fails on the network keeps reopening", async () => {
+  globalThis.fetch = () => Promise.reject(new TypeError("network down"));
   let changes = 0;
   watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
   MockEventSource.latest().fail(MockEventSource.CLOSED);
@@ -166,7 +173,7 @@ test("a probe that fails on the network keeps reopening", async () => {
   assert.equal(changes, 1);
 });
 
-test("a closed watcher does not reconcile when a shared reopen opens", async () => {
+await test("a closed watcher does not reconcile when a shared reopen opens", async () => {
   serveWorkspace(200);
   let changes = 0;
   const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
@@ -187,7 +194,7 @@ test("a closed watcher does not reconcile when a shared reopen opens", async () 
   other.close();
 });
 
-test("closing the watcher before the probe answers skips the reconcile", async () => {
+await test("closing the watcher before the probe answers skips the reconcile", async () => {
   serveWorkspace(404);
   let changes = 0;
   const sub = watchWorkspaceAccess(WS, { onAccessChange: () => (changes += 1) });
@@ -195,4 +202,27 @@ test("closing the watcher before the probe answers skips the reconcile", async (
   sub.close();
   await settle();
   assert.equal(changes, 0);
+});
+
+await test("a throwing reconcile callback is reported after revoked access closes the watcher", async () => {
+  serveWorkspace(404);
+  const failure = new Error("reconcile callback failed");
+  const reported: unknown[] = [];
+  globalThis.reportError = (error: unknown) => {
+    reported.push(error);
+  };
+  watchWorkspaceAccess(WS, {
+    onAccessChange: () => {
+      throw failure;
+    },
+  });
+  const source = MockEventSource.latest();
+  source.fail(MockEventSource.CLOSED);
+  await settle();
+  assert.deepEqual(reported, [failure]);
+  assert.deepEqual(probes, [`GET /api/v1/workspaces/${WS}`]);
+  assert.equal(source.closed, true);
+  assert.equal(sharedEventSourceRefCount(STREAM), 0);
+  mock.timers.tick(60_000);
+  assert.equal(MockEventSource.instances.length, 1);
 });

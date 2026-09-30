@@ -13,21 +13,21 @@ function resolvedVersions(text: string): Map<string, Set<string>> {
   // name, or `<parent>/<name>` for a nested copy).
   for (const m of text.matchAll(/^ {4}"[^"]+": \["((?:@[^@/"]+\/)?[^@"]+)@([^"]+)"/gm)) {
     const [, name, version] = m;
-    const set = versions.get(name!) ?? new Set<string>();
-    set.add(version!);
-    versions.set(name!, set);
+    const set = versions.get(name) ?? new Set<string>();
+    set.add(version);
+    versions.set(name, set);
   }
   return versions;
 }
 
-test("bun.lock pulls nothing from Tiptap's paid registry", () => {
+await test("bun.lock pulls nothing from Tiptap's paid registry", () => {
   // Tiptap Pro packages live under @tiptap-pro/ on registry.tiptap.dev and
   // need a subscription token; FVOCI ships MIT packages only.
   assert.equal(lock.includes("@tiptap-pro/"), false, "bun.lock names a @tiptap-pro/ package");
   assert.equal(lock.includes("registry.tiptap.dev"), false, "bun.lock names registry.tiptap.dev");
 });
 
-test("bun.lock resolves one copy of each shared editor, collab, Vue and query runtime", () => {
+await test("bun.lock resolves one copy of each shared editor, collab, Vue and query runtime", () => {
   const versions = resolvedVersions(lock);
   assert.ok(versions.size > 100, "bun.lock package entries were not recognised");
   const single = [
@@ -40,20 +40,32 @@ test("bun.lock resolves one copy of each shared editor, collab, Vue and query ru
   ];
   for (const name of single) {
     const found = [...(versions.get(name) ?? [])];
-    assert.equal(found.length, 1, `${name} resolves to ${found.length} versions: ${found.join(", ")}`);
+    assert.equal(
+      found.length,
+      1,
+      `${name} resolves to ${String(found.length)} versions: ${found.join(", ")}`,
+    );
   }
 });
 
-test("every Tiptap package bun.lock resolves is pinned by a root override", () => {
+await test("every Tiptap package bun.lock resolves is pinned by a root override", () => {
   // @fvoci/editor pins Tiptap exactly while Nuxt UI asks for ^ ranges; without
   // an override a lock refresh could give Nuxt UI a second, newer copy.
-  const { overrides = {} } = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+  const { overrides = {} } = JSON.parse(
+    readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+  ) as {
     overrides?: Record<string, string>;
   };
   const versions = resolvedVersions(lock);
   const tiptap = [...versions.keys()].filter((name) => name.startsWith("@tiptap/"));
   assert.ok(tiptap.length > 10, "bun.lock Tiptap entries were not recognised");
   for (const name of tiptap) {
-    assert.deepEqual([...versions.get(name)!], [overrides[name]], `${name}: root override must pin the resolved version`);
+    const resolved = versions.get(name);
+    assert.ok(resolved, `${name}: resolved package entry is missing`);
+    assert.deepEqual(
+      [...resolved],
+      [overrides[name]],
+      `${name}: root override must pin the resolved version`,
+    );
   }
 });

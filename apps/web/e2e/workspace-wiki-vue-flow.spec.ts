@@ -10,9 +10,11 @@ import {
   type BrowserContext,
   type Locator,
   type Page,
-  type WebSocket,
+  type WebSocket as PlaywrightWebSocket,
 } from "@playwright/test";
-import { createE2eUser, login, watchCspViolations } from "./helpers";
+import type { EditorView } from "@tiptap/pm/view";
+import { decodeHocuspocusFrame } from "../e2e-pending/collab-wire";
+import { readJson, flowSchemas, createE2eUser, login, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -39,17 +41,24 @@ function watchIconRequests(page: Page): string[] {
   const hits: string[] = [];
   page.on("request", (request) => {
     const host = new URL(request.url()).hostname;
-    if (ICON_API_HOSTS.includes(host)) hits.push(request.url());
+    if (ICON_API_HOSTS.includes(host)) {
+      hits.push(request.url());
+    }
   });
   return hits;
 }
 
 /** The page's /collab sockets that are open now. */
-function watchCollabSockets(page: Page): { open: Set<WebSocket>; opened: () => number } {
-  const open = new Set<WebSocket>();
+function watchCollabSockets(page: Page): {
+  open: Set<PlaywrightWebSocket>;
+  opened: () => number;
+} {
+  const open = new Set<PlaywrightWebSocket>();
   let opened = 0;
   page.on("websocket", (socket) => {
-    if (!new URL(socket.url()).pathname.endsWith("/collab")) return;
+    if (!new URL(socket.url()).pathname.endsWith("/collab")) {
+      return;
+    }
     opened += 1;
     open.add(socket);
     socket.on("close", () => open.delete(socket));
@@ -73,29 +82,35 @@ async function ensureSetup(page: Page): Promise<void> {
     await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
-    await expect(page).toHaveURL(/\/$/);
-    return;
+  } else {
+    if (
+      page.url().includes("/login") ||
+      (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
+    ) {
+      await login(page, admin.email, admin.password);
+    }
   }
-  if (
-    page.url().includes("/login") ||
-    (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
-  ) {
-    await login(page, admin.email, admin.password);
-  }
+  // Setup starts at '/', then may cross Vue /login before returning home.
+  // The URL alone can match before that redirect and interrupt a direct wiki goto.
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
 }
 
 async function workspaceId(request: APIRequestContext): Promise<string> {
   const res = await request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const workspace = (await res.json()).items.find(
+  const workspace = (await readJson(res, flowSchemas.workspaces)).items.find(
     (item: { slug: string }) => item.slug === admin.workspaceSlug,
   );
+  if (workspace === undefined) throw new Error("Missing fixture value: workspace");
   expect(workspace).toBeTruthy();
   return workspace.id;
 }
-
-type WikiDoc = { id: string; number: number; path: string };
-
+type WikiDoc = {
+  id: string;
+  number: number;
+  path: string;
+};
 async function createDoc(
   request: APIRequestContext,
   wsId: string,
@@ -106,20 +121,23 @@ async function createDoc(
     data: { parentId: null, title },
   });
   expect(res.status(), await res.text()).toBe(201);
-  const doc = (await res.json()) as { id: string; number: number };
+  const doc = (await readJson(res, flowSchemas.document)) as {
+    id: string;
+    number: number;
+  };
   if (markdown !== undefined) {
     const body = await request.put(`/api/v1/workspaces/${wsId}/documents/${doc.id}/body`, {
       data: { contentMd: markdown },
     });
     expect(body.ok(), await body.text()).toBe(true);
   }
-  return { ...doc, path: `/w/${admin.workspaceSlug}/WIKI-${doc.number}` };
+  return { ...doc, path: `/w/${admin.workspaceSlug}/WIKI-${String(doc.number)}` };
 }
 
 async function bodyJson(request: APIRequestContext, wsId: string, docId: string): Promise<string> {
   const res = await request.get(`/api/v1/workspaces/${wsId}/documents/${docId}/body`);
   expect(res.ok()).toBe(true);
-  return JSON.stringify((await res.json()).contentJson);
+  return JSON.stringify((await readJson(res, flowSchemas.body)).contentJson);
 }
 
 function editorOf(page: Page): Locator {
@@ -129,7 +147,7 @@ function editorOf(page: Page): Locator {
 async function openDoc(page: Page, path: string): Promise<Locator> {
   const navigation = await page.goto(path);
   expect(navigation?.status()).toBe(200);
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   const editor = editorOf(page);
   await expect(editor).toBeVisible();
   return editor;
@@ -153,7 +171,7 @@ async function blockTexts(page: Page): Promise<string[]> {
 }
 
 async function expectBlocks(page: Page, expected: string[]): Promise<void> {
-  await expect.poll(() => blockTexts(page), { timeout: 15_000 }).toEqual(expected);
+  await expect.poll(() => blockTexts(page), { timeout: 15000 }).toEqual(expected);
 }
 
 /** Puts the caret at the end of top-level block `index` with a real click and End key. */
@@ -164,10 +182,20 @@ async function caretAtEndOf(page: Page, index: number): Promise<void> {
 
 async function save(page: Page): Promise<void> {
   await page.getByRole("button", { name: "저장", exact: true }).click();
-  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15000 });
 }
 
-async function newSignedInPage(browser: Browser, baseURL: string | undefined, who: { email: string; password: string }): Promise<{ context: BrowserContext; page: Page }> {
+async function newSignedInPage(
+  browser: Browser,
+  baseURL: string | undefined,
+  who: {
+    email: string;
+    password: string;
+  },
+): Promise<{
+  context: BrowserContext;
+  page: Page;
+}> {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
   await login(page, who.email, who.password);
@@ -189,7 +217,7 @@ test("direct URL and refresh serve the Vue page with the saved body", async ({ p
   const editor = await openDoc(page, doc.path);
   // The Vue app mounted #root (Vue marks its container), not the React app.
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
-  await expect(page.getByTestId(`document-WIKI-${doc.number}`)).toBeVisible();
+  await expect(page.getByTestId(`document-WIKI-${String(doc.number)}`)).toBeVisible();
   await expect(page.getByLabel("문서 제목")).toHaveValue("Vue 직접 주소");
   await editor.click();
   await page.keyboard.type("새로 고쳐도 남는 본문");
@@ -197,45 +225,179 @@ test("direct URL and refresh serve the Vue page with the saved body", async ({ p
   expect(await bodyJson(page.request, wsId, doc.id)).toContain("새로 고쳐도 남는 본문");
 
   await page.reload();
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   await expectBlocks(page, ["새로 고쳐도 남는 본문"]);
   // One tab: no peer (a second provider of this tab would show as "나 (다른 탭)").
   await expect(page.locator(".document-page__presence")).toHaveCount(0);
 
   // A lower-case ref is the same document; the page stays on the Vue app.
-  await openDoc(page, `/w/${admin.workspaceSlug}/wiki-${doc.number}`);
+  await openDoc(page, `/w/${admin.workspaceSlug}/wiki-${String(doc.number)}`);
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   await expectBlocks(page, ["새로 고쳐도 남는 본문"]);
 
-  // Leaving for a React page is a full page load.
-  await page.getByRole("navigation", { name: "상위 경로" }).getByRole("link", { name: "위키", exact: true }).click();
+  // The wiki list stays inside the Vue app.
+  await page
+    .getByRole("navigation", { name: "상위 경로" })
+    .getByRole("link", { name: "위키", exact: true })
+    .click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/wiki$`));
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
-  await expect(page.locator("#root[data-v-app]")).toHaveCount(0);
-  // ...and the React wiki list's link comes back to the Vue page.
+  await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
+  // ...and the wiki list's link comes back to the Vue page.
   await page.getByRole("link", { name: "Vue 직접 주소" }).click();
   await expect(page).toHaveURL(new RegExp(`${doc.path}$`));
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
 
   expect(csp).toEqual([]);
   expect(icons).toEqual([]);
 });
+type ClickCaret = {
+  nativeBlock: number;
+  parent: string;
+  from: number;
+  to: number;
+};
+type RemoteClickGate = {
+  hold: boolean;
+  pending: {
+    socket: WebSocket;
+    data: ArrayBuffer;
+  }[];
+  before?: ClickCaret;
+  after?: ClickCaret;
+};
 
-test("undo and redo take back only this editor's own edits, on both peers", async ({ browser, baseURL }) => {
+/** Delay real incoming /collab payloads, then deliver them in the native click
+ * task, before selectionchange. This pins the caret/remote-update scheduling
+ * boundary without a sleep, mocked document, or a replacement Yjs update. */
+async function installRemoteClickGate(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const gate: RemoteClickGate = { hold: false, pending: [] };
+    (
+      window as unknown as {
+        __fvociRemoteClickGate: RemoteClickGate;
+      }
+    ).__fvociRemoteClickGate = gate;
+    const NativeSocket = window.WebSocket;
+    window.WebSocket = class extends NativeSocket {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        if (!new URL(url, location.href).pathname.endsWith("/collab")) {
+          return;
+        }
+        // Registered before the provider's listeners. Redispatch preserves the
+        // real server payload; only its delivery time is controlled by the test.
+        this.addEventListener("message", (event: MessageEvent<ArrayBuffer>) => {
+          if (!gate.hold) {
+            return;
+          }
+          event.stopImmediatePropagation();
+          if (gate.pending.length >= 32) {
+            throw new Error("remote click gate exceeded 32 frames");
+          }
+          gate.pending.push({ socket: this, data: event.data });
+        });
+      }
+    };
+  });
+}
+
+test("undo and redo take back only this editor's own edits, on both peers", async ({
+  browser,
+  baseURL,
+}, testInfo) => {
   const a = await newSignedInPage(browser, baseURL, admin);
   const b = await newSignedInPage(browser, baseURL, member);
   const csp = watchCspViolations(a.page);
   try {
     const wsId = await workspaceId(a.page.request);
     const doc = await createDoc(a.page.request, wsId, "되돌리기", "첫 문단\n\n둘째 문단\n");
+    await installRemoteClickGate(b.page);
     await openDoc(a.page, doc.path);
     await openDoc(b.page, doc.path);
     await expectBlocks(a.page, ["첫 문단", "둘째 문단"]);
+    await expectBlocks(b.page, ["첫 문단", "둘째 문단"]);
+    await b.page.evaluate(() => {
+      (
+        window as unknown as {
+          __fvociRemoteClickGate: RemoteClickGate;
+        }
+      ).__fvociRemoteClickGate.hold = true;
+    });
 
     await caretAtEndOf(a.page, 0);
     await a.page.keyboard.type(" 에이");
+    // Wait for an actual sync payload, not just a peer-awareness frame. Use
+    // the existing bounded Hocuspocus observer, rather than a second codec.
+    await expect
+      .poll(async () => {
+        const frames = await b.page.evaluate(() =>
+          (
+            window as unknown as {
+              __fvociRemoteClickGate: RemoteClickGate;
+            }
+          ).__fvociRemoteClickGate.pending.map(({ data }) => [...new Uint8Array(data)]),
+        );
+        return frames.some((bytes) => {
+          const frame = decodeHocuspocusFrame(new Uint8Array(bytes));
+          return frame?.kind === "other" && frame.type === 0;
+        });
+      })
+      .toBe(true);
+    await b.page.evaluate(() => {
+      const gate = (
+        window as unknown as {
+          __fvociRemoteClickGate: RemoteClickGate;
+        }
+      ).__fvociRemoteClickGate;
+      const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
+        editor: {
+          view: EditorView;
+        };
+      };
+      const snapshot = (): ClickCaret => {
+        const native = document.getSelection();
+        const selection = root.editor.view.state.selection;
+        return {
+          nativeBlock: [...root.children].findIndex((block) =>
+            block.contains(native?.anchorNode ?? null),
+          ),
+          parent: selection.$from.parent.textContent,
+          from: selection.from,
+          to: selection.to,
+        };
+      };
+      document.addEventListener(
+        "click",
+        () => {
+          gate.before = snapshot();
+          gate.hold = false;
+          for (const { socket, data } of gate.pending.splice(0)) {
+            socket.dispatchEvent(new MessageEvent("message", { data }));
+          }
+          gate.after = snapshot();
+        },
+        { capture: true, once: true },
+      );
+    });
     await caretAtEndOf(b.page, 1);
+    const boundary = await b.page.evaluate(() => {
+      const { before, after } = (
+        window as unknown as {
+          __fvociRemoteClickGate: RemoteClickGate;
+        }
+      ).__fvociRemoteClickGate;
+      return { before, after };
+    });
+    await testInfo.attach("native-click-remote-boundary", {
+      body: JSON.stringify(boundary),
+      contentType: "application/json",
+    });
+    expect(boundary.before).toMatchObject({ nativeBlock: 1, parent: "둘째 문단" });
+    expect(boundary.after).toMatchObject({ nativeBlock: 1, parent: "둘째 문단" });
+    expect(boundary.before?.from).toBe(boundary.before?.to);
+    expect(boundary.after?.from).toBe(boundary.after?.to);
     await b.page.keyboard.type(" 비");
     await expectBlocks(a.page, ["첫 문단 에이", "둘째 문단 비"]);
     await expectBlocks(b.page, ["첫 문단 에이", "둘째 문단 비"]);
@@ -304,7 +466,9 @@ test("a math block inserted with /math reaches the peer, the saved body and a re
 
     await expect(a.page.locator(".fvoci-editor .afn-math math mfrac")).toBeVisible();
     // The peer's editor renders the attribute it received through Yjs as MathML.
-    await expect(b.page.locator(".fvoci-editor .afn-math math mfrac")).toBeVisible({ timeout: 15_000 });
+    await expect(b.page.locator(".fvoci-editor .afn-math math mfrac")).toBeVisible({
+      timeout: 15000,
+    });
     await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("\\frac{a}{b}");
 
     await save(a.page);
@@ -313,7 +477,9 @@ test("a math block inserted with /math reaches the peer, the saved body and a re
     expect(saved).toContain("\\\\frac{a}{b}");
 
     await a.page.reload();
-    await expect(a.page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+    await expect(a.page.locator('[data-collab-status="connected"]')).toBeVisible({
+      timeout: 15000,
+    });
     await expect(a.page.locator(".fvoci-editor .afn-math math mfrac")).toBeVisible();
     expect(csp).toEqual([]);
     expect(cspPeer).toEqual([]);
@@ -335,6 +501,9 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
   try {
     const wsId = await workspaceId(a.page.request);
     const doc = await createDoc(a.page.request, wsId, "편집 중 원격 변경");
+    const referenceTitle = "실제 참조 대상";
+    const reference = await createDoc(a.page.request, wsId, referenceTitle);
+    const referenceRef = `WIKI-${String(reference.number)}`;
     const paragraph = (text: string) => ({ type: "paragraph", content: [{ type: "text", text }] });
     const put = await a.page.request.put(`/api/v1/workspaces/${wsId}/documents/${doc.id}/body`, {
       data: {
@@ -352,27 +521,37 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     expect(put.ok(), await put.text()).toBe(true);
     await openDoc(a.page, doc.path);
     await openDoc(b.page, doc.path);
+    // The invented initial reference is intentionally missing; do not leak it
+    // as an authorized identity. The positive draft below uses a real resource.
+    for (const page of [a.page, b.page]) {
+      await expect(page.locator(".fvoci-editor .afn-embed-inaccessible .afn-embed-ref")).toHaveText(
+        "접근할 수 없는 문서",
+      );
+    }
 
     // Embed: A types a new reference; meanwhile B changes the embed's kind.
     await a.page.getByRole("button", { name: "참조 편집" }).click();
     const refA = a.page.getByLabel("참조", { exact: true });
     await expect(refA).toBeFocused();
-    await refA.fill("WIKI-1234");
+    await refA.fill(referenceRef);
     await b.page.getByRole("button", { name: "참조 편집" }).click();
     await b.page.getByLabel("참조 종류").selectOption("task");
     await caretAtEndOf(b.page, 3);
     // A's form follows the node (its kind attribute is now B's)...
-    await expect(a.page.locator(".fvoci-editor .afn-embed-edit")).toHaveAttribute("data-entity", "task");
+    await expect(a.page.locator(".fvoci-editor .afn-embed-edit")).toHaveAttribute(
+      "data-entity",
+      "task",
+    );
     // ...and keeps what A typed and chose, as the React view's uncontrolled fields do.
     await expect(refA).toBeFocused();
-    await expect(refA).toHaveValue("WIKI-1234");
+    await expect(refA).toHaveValue(referenceRef);
     await expect(a.page.getByLabel("참조 종류")).toHaveValue("document");
     // Leaving the form commits A's form: the last writer wins, on both peers.
     await caretAtEndOf(a.page, 0);
     for (const page of [a.page, b.page]) {
       const card = page.locator(".fvoci-editor .afn-embed-host .afn-embed");
       await expect(card).toHaveAttribute("data-entity", "document");
-      await expect(card.locator(".afn-embed-ref")).toHaveText("WIKI-1234");
+      await expect(card.locator(".afn-embed-ref")).toHaveText(referenceTitle);
     }
 
     // Block math: A types a new source while B commits another one.
@@ -387,22 +566,121 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     // B's later text edit reaches A after B's latex (one socket, in order).
     await caretAtEndOf(b.page, 3);
     await b.page.keyboard.type(" 끝");
-    await expect.poll(async () => (await blockTexts(a.page)).at(-1), { timeout: 15_000 }).toBe("뒤 끝");
+    await expect
+      .poll(async () => (await blockTexts(a.page)).at(-1), { timeout: 15000 })
+      .toBe("뒤 끝");
     await expect(sourceA).toBeFocused();
     await expect(sourceA).toHaveValue("a+b");
     await sourceA.blur();
     await expect(a.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b");
-    await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b", { timeout: 15_000 });
+    await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b", {
+      timeout: 15000,
+    });
 
     await save(a.page);
     const saved = JSON.parse(await bodyJson(a.page.request, wsId, doc.id)) as {
-      content: { type: string; attrs?: Record<string, unknown> }[];
+      content: {
+        type: string;
+        attrs?: Record<string, unknown>;
+      }[];
     };
     expect(saved.content.find((node) => node.type === "embed")?.attrs).toMatchObject({
       entity: "document",
-      ref: "WIKI-1234",
+      ref: referenceRef,
     });
-    expect(saved.content.find((node) => node.type === "math")?.attrs).toMatchObject({ latex: "a+b" });
+    expect(saved.content.find((node) => node.type === "math")?.attrs).toMatchObject({
+      latex: "a+b",
+    });
+  } finally {
+    await a.context.close();
+    await b.context.close();
+  }
+});
+
+test("a peer's change to the same inline math preserves the focused draft until commit", async ({
+  browser,
+  baseURL,
+}) => {
+  const a = await newSignedInPage(browser, baseURL, admin);
+  const b = await newSignedInPage(browser, baseURL, member);
+  try {
+    const wsId = await workspaceId(a.page.request);
+    const doc = await createDoc(a.page.request, wsId, "인라인 수식 초안", "앞 $x$ 뒤 $q$\n\n끝\n");
+    await openDoc(a.page, doc.path);
+    await openDoc(b.page, doc.path);
+    await a.page.locator("button.afn-math-inline").first().click();
+    const draft = a.page.getByLabel("수식 LaTeX");
+    await draft.fill("a+b");
+    for (const remote of ["y", "z"]) {
+      await b.page.locator("button.afn-math-inline").first().click();
+      await b.page.getByLabel("수식 LaTeX").fill(remote);
+      await b.page.getByLabel("수식 LaTeX").press("Enter");
+      await expect(b.page.locator(".afn-math-inline annotation").first()).toHaveText(remote);
+      // Changing text before the atom shifts its position and its left boundary.
+      await caretAtEndOf(b.page, 0);
+      await b.page.keyboard.press("Home");
+      await b.page.keyboard.type(remote);
+      // The subsequent text travels on the same socket after the math update.
+      await caretAtEndOf(b.page, 1);
+      await b.page.keyboard.type(remote);
+      await expect
+        .poll(async () => (await blockTexts(a.page))[1])
+        .toBe(remote === "y" ? "끝y" : "끝yz");
+      await expect(draft).toBeFocused();
+      await expect(draft).toHaveValue("a+b");
+    }
+    await draft.press("Enter");
+    await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("a+b");
+    await expect(b.page.locator(".afn-math-inline annotation").first()).toHaveText("a+b");
+    await expect(a.page.locator(".afn-math-inline annotation").last()).toHaveText("q");
+    await save(a.page);
+    expect(await bodyJson(a.page.request, wsId, doc.id)).toContain('"latex":"a+b"');
+    await a.page.reload();
+    await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("a+b");
+
+    // Deletion and insertion at the very same position are a different atom.
+    await a.page.locator("button.afn-math-inline").first().click();
+    await draft.fill("must-not-resurrect");
+    const removedAt = await editorOf(b.page).evaluate((root) => {
+      const view = (
+        root as HTMLElement & {
+          editor: {
+            view: EditorView;
+          };
+        }
+      ).editor.view;
+      let pos = -1;
+      view.state.doc.descendants((node, at) => {
+        if (pos < 0 && node.type.name === "mathInline") {
+          pos = at;
+        }
+      });
+      if (pos < 0) {
+        throw new Error("inline math missing");
+      }
+      view.dispatch(view.state.tr.delete(pos, pos + 1));
+      return pos;
+    });
+    await expect(draft).toHaveCount(0);
+    await expect(a.page.locator(".afn-math-inline annotation")).toHaveText(["q"]);
+    await editorOf(b.page).evaluate((root, pos) => {
+      const view = (
+        root as HTMLElement & {
+          editor: {
+            view: EditorView;
+          };
+        }
+      ).editor.view;
+      const required1 = view.state.schema.nodes.mathInline;
+      if (required1 === undefined) {
+        throw new Error("Missing fixture value: view.state.schema.nodes.mathInline");
+      }
+      view.dispatch(view.state.tr.insert(pos, required1.create({ latex: "replacement" })));
+    }, removedAt);
+    await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("replacement");
+    await expect(draft).toHaveCount(0);
+    await save(a.page);
+    expect(await bodyJson(a.page.request, wsId, doc.id)).not.toContain("must-not-resurrect");
   } finally {
     await a.context.close();
     await b.context.close();
@@ -472,13 +750,204 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
   }
 });
 
+test("one Korean composition is one undo step despite pauses and a concurrent peer edit", async ({
+  browser,
+  baseURL,
+}, testInfo) => {
+  const a = await newSignedInPage(browser, baseURL, admin);
+  const b = await newSignedInPage(browser, baseURL, member);
+  try {
+    const wsId = await workspaceId(a.page.request);
+    const doc = await createDoc(
+      a.page.request,
+      wsId,
+      "조합 실행 취소 단위",
+      "첫 문단\n\n둘째 문단\n",
+    );
+    await openDoc(a.page, doc.path);
+    await openDoc(b.page, doc.path);
+    await caretAtEndOf(a.page, 0);
+    await editorOf(a.page).evaluate((root) => {
+      const editor = (
+        root as HTMLElement & {
+          editor: {
+            view: EditorView;
+            on: (
+              event: string,
+              callback: (props: { transaction: import("@tiptap/pm/state").Transaction }) => void,
+            ) => void;
+          };
+        }
+      ).editor;
+      const log: unknown[] = [];
+      (
+        root as HTMLElement & {
+          compositionLog: unknown[];
+        }
+      ).compositionLog = log;
+      type TransactionProbe = {
+        origin: {
+          key?: string;
+        } | null;
+      };
+      type UndoProbe = {
+        doc: {
+          on(event: string, listener: (transaction: TransactionProbe) => void): void;
+        };
+        captureTimeout: number;
+        lastChange: number;
+        undoStack: unknown[];
+      };
+      function isUndoState(value: unknown): value is {
+        undoManager: UndoProbe;
+      } {
+        if (value === null || typeof value !== "object" || !("undoManager" in value)) {
+          return false;
+        }
+        const manager = value.undoManager;
+        return (
+          manager !== null &&
+          typeof manager === "object" &&
+          "captureTimeout" in manager &&
+          typeof manager.captureTimeout === "number" &&
+          "lastChange" in manager &&
+          typeof manager.lastChange === "number" &&
+          "undoStack" in manager &&
+          Array.isArray(manager.undoStack) &&
+          "doc" in manager &&
+          manager.doc !== null &&
+          typeof manager.doc === "object" &&
+          "on" in manager.doc &&
+          typeof manager.doc.on === "function"
+        );
+      }
+      function keyOf(plugin: import("@tiptap/pm/state").Plugin<unknown>): string {
+        if (!("key" in plugin) || typeof plugin.key !== "string") {
+          throw new Error("Editor plugin must expose its runtime key");
+        }
+        return plugin.key;
+      }
+      function undoManager(): UndoProbe {
+        const plugin = editor.view.state.plugins.find((plugin) =>
+          keyOf(plugin).startsWith("y-undo$"),
+        );
+        if (!plugin) {
+          throw new Error("Missing Yjs undo plugin");
+        }
+        const state: unknown = plugin.getState(editor.view.state);
+        if (!isUndoState(state)) {
+          throw new Error("Invalid Yjs undo state");
+        }
+        return state.undoManager;
+      }
+      const manager = undoManager();
+      manager.doc.on("beforeTransaction", (transaction) => {
+        const policy = editor.view.state.plugins.find((plugin) =>
+          keyOf(plugin).startsWith("fvociCompositionUndo$"),
+        );
+        const composition: unknown = policy?.getState(editor.view.state);
+        log.push({
+          type: "y-before",
+          origin: transaction.origin?.key,
+          composition,
+          captureTimeout: manager.captureTimeout,
+          lastChange: manager.lastChange,
+          undo: manager.undoStack.length,
+        });
+      });
+      manager.doc.on("afterTransaction", () => {
+        log.push({
+          type: "y-after",
+          captureTimeout: manager.captureTimeout,
+          lastChange: manager.lastChange,
+          undo: manager.undoStack.length,
+        });
+      });
+      for (const name of ["compositionstart", "compositionupdate", "compositionend"]) {
+        root.addEventListener(name, (event) =>
+          log.push({
+            type: name,
+            data: (event as CompositionEvent).data,
+            composing: editor.view.composing,
+          }),
+        );
+      }
+      editor.on("transaction", ({ transaction }) => {
+        const manager = undoManager();
+        const composition: unknown = transaction.getMeta("composition");
+        log.push({
+          type: "transaction",
+          composition,
+          changed: transaction.docChanged,
+          text: editor.view.state.doc.textContent,
+          undo: manager.undoStack.length,
+          captureTimeout: manager.captureTimeout,
+        });
+      });
+    });
+    const ime = await a.context.newCDPSession(a.page);
+    // Chromium's synthetic CDP composition path, not an actual OS IME witness.
+    const preedit = async (text: string) => {
+      await ime.send("Input.imeSetComposition", {
+        text,
+        selectionStart: text.length,
+        selectionEnd: text.length,
+      });
+      await expectBlocks(a.page, [`첫 문단${text}`, "둘째 문단 원격"]);
+    };
+    await ime.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
+    await expectBlocks(a.page, ["첫 문단ㅎ", "둘째 문단"]);
+    await caretAtEndOf(b.page, 1);
+    await b.page.keyboard.type(" 원격");
+    await expectBlocks(a.page, ["첫 문단ㅎ", "둘째 문단 원격"]);
+    // Deliberate pauses exceed Yjs's normal 500 ms capture window (#260).
+    await a.page.waitForTimeout(650);
+    await preedit("하");
+    await a.page.waitForTimeout(650);
+    await preedit("한");
+    await ime.send("Input.insertText", { text: "한" });
+    await expectBlocks(b.page, ["첫 문단한", "둘째 문단 원격"]);
+    await testInfo.attach("paused-composition-transactions", {
+      body: JSON.stringify(
+        await editorOf(a.page).evaluate(
+          (root) =>
+            (
+              root as HTMLElement & {
+                compositionLog: unknown[];
+              }
+            ).compositionLog,
+        ),
+      ),
+      contentType: "application/json",
+    });
+    await a.page.keyboard.press("Control+z");
+    const afterUndo = await blockTexts(a.page);
+    await testInfo.attach("paused-composition-after-one-undo", {
+      body: JSON.stringify(afterUndo),
+      contentType: "application/json",
+    });
+    await expectBlocks(a.page, ["첫 문단", "둘째 문단 원격"]);
+    await expectBlocks(b.page, ["첫 문단", "둘째 문단 원격"]);
+    await a.page.keyboard.press("Control+Shift+z");
+    await expectBlocks(a.page, ["첫 문단한", "둘째 문단 원격"]);
+    await expectBlocks(b.page, ["첫 문단한", "둘째 문단 원격"]);
+    await save(a.page);
+    expect(await bodyJson(a.page.request, wsId, doc.id)).toContain("첫 문단한");
+  } finally {
+    await a.context.close();
+    await b.context.close();
+  }
+});
+
 // #268 (`83c01480`) skips UniqueID setNodeMarkup while a transaction has
 // composition meta, so Chromium/IBus no longer restarts the first Hangul
 // step. #258 is closed. This used to be test.fail; CI on main f3f53c90
 // (Web 36599369890 shard 5) failed with "Expected to fail, but passed".
 // Keep the assertion as a regression: "첫 문단" + 한글 must be "첫 문단한글",
 // not "첫 문단ㅎ한글".
-test("Korean composition with the caret after the marked text leaves no stray jamo", async ({ page }) => {
+test("Korean composition with the caret after the marked text leaves no stray jamo", async ({
+  page,
+}) => {
   await login(page, admin.email, admin.password);
   const wsId = await workspaceId(page.request);
   const doc = await createDoc(page.request, wsId, "한글 조합 캐럿", "첫 문단\n");
@@ -487,16 +956,22 @@ test("Korean composition with the caret after the marked text leaves no stray ja
   const ime = await page.context().newCDPSession(page);
   const compose = async (steps: string[], commit: string) => {
     for (const text of steps) {
-      await ime.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+      await ime.send("Input.imeSetComposition", {
+        text,
+        selectionStart: text.length,
+        selectionEnd: text.length,
+      });
     }
     await ime.send("Input.insertText", { text: commit });
   };
   await compose(["ㅎ", "하", "한"], "한");
   await compose(["ㄱ", "그", "글"], "글");
-  await expect.poll(() => blockTexts(page), { timeout: 5_000 }).toEqual(["첫 문단한글"]);
+  await expect.poll(() => blockTexts(page), { timeout: 5000 }).toEqual(["첫 문단한글"]);
 });
 
-test("moving between five documents in the app keeps one room socket and every edit", async ({ page }) => {
+test("moving between five documents in the app keeps one room socket and every edit", async ({
+  page,
+}, testInfo) => {
   await login(page, admin.email, admin.password);
   const csp = watchCspViolations(page);
   const sockets = watchCollabSockets(page);
@@ -504,60 +979,274 @@ test("moving between five documents in the app keeps one room socket and every e
   // WIKI numbers ascend with creation; each later document becomes the parent
   // of the one before it, so every page links to the next through its breadcrumb.
   const docs: WikiDoc[] = [];
-  for (let i = 1; i <= 5; i += 1) docs.push(await createDoc(page.request, wsId, `이동 ${i}`));
+  for (let i = 1; i <= 5; i += 1)
+    docs.push(await createDoc(page.request, wsId, `이동 ${String(i)}`));
   for (let i = 0; i < 4; i += 1) {
-    const moved = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${docs[i]!.id}/move`, {
-      data: { newParentId: docs[i + 1]!.id },
-    });
+    const required2 = docs[i];
+    if (required2 === undefined) {
+      throw new Error("Missing fixture value: docs[i]");
+    }
+    const required3 = docs[i + 1];
+    if (required3 === undefined) {
+      throw new Error("Missing fixture value: docs[i + 1]");
+    }
+    const moved = await page.request.post(
+      `/api/v1/workspaces/${wsId}/documents/${required2.id}/move`,
+      {
+        data: { newParentId: required3.id },
+      },
+    );
     expect(moved.ok(), await moved.text()).toBe(true);
   }
 
   const expectRoom = async (doc: WikiDoc) => {
     await expect(page).toHaveURL(new RegExp(`${doc.path}$`));
-    await expect(page.getByTestId(`document-WIKI-${doc.number}`)).toBeVisible();
-    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId(`document-WIKI-${String(doc.number)}`)).toBeVisible();
+    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
     await expect(editorOf(page)).toBeVisible();
     // The previous room's socket is flushed and closed; only this room's is open.
-    await expect.poll(() => sockets.open.size, { timeout: 5_000 }).toBe(1);
+    await expect.poll(() => sockets.open.size, { timeout: 5000 }).toBe(1);
   };
-
-  await openDoc(page, docs[0]!.path);
-  await expectRoom(docs[0]!);
+  const required4 = docs[0];
+  if (required4 === undefined) {
+    throw new Error("Missing fixture value: docs[0]");
+  }
+  await openDoc(page, required4.path);
+  const required5 = docs[0];
+  if (required5 === undefined) {
+    throw new Error("Missing fixture value: docs[0]");
+  }
+  await expectRoom(required5);
+  await testInfo.attach("rapid-documents", {
+    body: JSON.stringify({ wsId, docs }),
+    contentType: "application/json",
+  });
+  type NativeReceipt = {
+    kind: string;
+    at: number;
+    trusted: boolean;
+    key?: string;
+    data?: string | null;
+    inEditor: boolean;
+    href?: string;
+  };
   // When the last keystroke and the link click reached the page.
   await page.evaluate(() => {
-    const marks = window as unknown as { lastKeyAt: number; lastLinkAt: number };
-    addEventListener("keydown", () => (marks.lastKeyAt = performance.now()), true);
-    addEventListener("click", (event) => {
-      if ((event.target as Element | null)?.closest("a")) marks.lastLinkAt = performance.now();
-    }, true);
+    const marks = window as unknown as {
+      lastKeyAt: number;
+      lastLinkAt: number;
+      lastKeyTrusted: boolean;
+      lastLinkTrusted: boolean;
+      lastLinkHref: string;
+      nativeEvents: NativeReceipt[];
+    };
+    marks.nativeEvents = [];
+    for (const kind of [
+      "keydown",
+      "beforeinput",
+      "input",
+      "keyup",
+      "mousedown",
+      "mouseup",
+      "click",
+    ]) {
+      addEventListener(
+        kind,
+        (event) => {
+          const target = event.target as Element | null;
+          const inEditor = !!target?.closest(".fvoci-editor .ProseMirror");
+          const link = target?.closest("a");
+          const at = performance.now();
+          if (kind === "keydown") {
+            marks.lastKeyAt = at;
+            marks.lastKeyTrusted = event.isTrusted;
+          }
+          if (kind === "click" && link) {
+            marks.lastLinkAt = at;
+            marks.lastLinkTrusted = event.isTrusted;
+            marks.lastLinkHref = link.getAttribute("href") ?? "";
+          }
+          if (inEditor || link) {
+            marks.nativeEvents.push({
+              kind,
+              at,
+              trusted: event.isTrusted,
+              key: (event as KeyboardEvent).key,
+              data: (event as InputEvent).data,
+              inEditor,
+              href: link?.getAttribute("href") ?? undefined,
+            });
+          }
+        },
+        true,
+      );
+    }
   });
+  const native = await page.context().newCDPSession(page);
+  const frames: unknown[] = [];
+  for (const event of [
+    "Network.webSocketCreated",
+    "Network.webSocketFrameSent",
+    "Network.webSocketFrameReceived",
+    "Network.webSocketClosed",
+  ] as const) {
+    native.on(event, (data) => frames.push({ event, ...data }));
+  }
+  await native.send("Network.enable");
   const gaps: number[] = [];
-  for (let i = 0; i < 4; i += 1) {
-    const next = docs[i + 1]!;
-    await editorOf(page).click();
-    await page.keyboard.type(`떠나기 직전 ${i + 1}`);
-    // An in-app move (a router link) inside the editor's 200 ms update batch.
-    await page
-      .getByRole("navigation", { name: "상위 경로" })
-      .getByRole("link", { name: `이동 ${i + 2}`, exact: true })
-      .click();
-    gaps.push(
+  const gestures: unknown[] = [];
+  try {
+    for (let i = 0; i < 4; i += 1) {
+      const required6 = docs[i + 1];
+      if (required6 === undefined) {
+        throw new Error("Missing fixture value: docs[i + 1]");
+      }
+      const next = required6;
+      const editor = editorOf(page);
+      const link = page
+        .getByRole("navigation", { name: "상위 경로" })
+        .getByRole("link", { name: `이동 ${String(i + 2)}`, exact: true });
+      await editor.click();
+      await page.keyboard.type("떠나기 직전 ");
+      // Prepare the real target before the final edit. The digit below must still
+      // reach the editor immediately before native activation of its router link.
+      await expect(link).toHaveAttribute("href", next.path);
+      await link.click({ trial: true });
+      const { root } = await native.send("DOM.getDocument");
+      const { nodeId } = await native.send("DOM.querySelector", {
+        nodeId: root.nodeId,
+        selector: `[aria-label="상위 경로"] a[href="${next.path}"]`,
+      });
+      expect(nodeId).not.toBe(0);
+      await expect(editor).toBeFocused();
       await page.evaluate(() => {
-        const marks = window as unknown as { lastKeyAt: number; lastLinkAt: number };
-        return marks.lastLinkAt - marks.lastKeyAt;
-      }),
-    );
-    await expectRoom(next);
-  }
-  // The fifth room connected: no socket leaked against the per-session cap.
-  expect(sockets.opened()).toBe(5);
-  for (const gap of gaps) expect(gap).toBeLessThan(200);
+        (
+          window as unknown as {
+            nativeEvents: NativeReceipt[];
+          }
+        ).nativeEvents = [];
+      });
+      // An in-app move (a router link) inside the editor's 200 ms update batch.
+      // Sequential Chromium input is the same native path as Playwright keyboard
+      // and mouse actions, without intervening actionability/DOM snapshots. Trace
+      // stays enabled and records these commands plus the ordered DOM receipts.
+      const digit = String(i + 1);
+      const key = { key: digit, code: `Digit${digit}`, windowsVirtualKeyCode: 49 + i };
+      await native.send("Input.dispatchKeyEvent", {
+        ...key,
+        type: "keyDown",
+        text: digit,
+        unmodifiedText: digit,
+      });
+      await native.send("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
+      // Editing may scroll the focused editor. Read live geometry of the already
+      // prepared anchor, rather than reuse a point measured before that edit.
+      await native.send("DOM.scrollIntoViewIfNeeded", { nodeId });
+      const { quads } = await native.send("DOM.getContentQuads", { nodeId });
+      const required7 = quads[0];
+      if (required7 === undefined) {
+        throw new Error("Missing fixture value: quads[0]");
+      }
+      const quad = required7;
+      const [x1, y1, x2, y2, x3, y3, x4, y4] = quad;
+      if (
+        x1 === undefined ||
+        y1 === undefined ||
+        x2 === undefined ||
+        y2 === undefined ||
+        x3 === undefined ||
+        y3 === undefined ||
+        x4 === undefined ||
+        y4 === undefined
+      ) {
+        throw new Error("Incomplete content quad");
+      }
+      const point = {
+        x: (x1 + x2 + x3 + x4) / 4,
+        y: (y1 + y2 + y3 + y4) / 4,
+      };
+      await native.send("Input.dispatchMouseEvent", { ...point, type: "mouseMoved" });
+      await native.send("Input.dispatchMouseEvent", {
+        ...point,
+        type: "mousePressed",
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+      });
+      await native.send("Input.dispatchMouseEvent", {
+        ...point,
+        type: "mouseReleased",
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+      });
+      const gesture = await page.evaluate(() => {
+        const marks = window as unknown as {
+          lastKeyAt: number;
+          lastLinkAt: number;
+          lastKeyTrusted: boolean;
+          lastLinkTrusted: boolean;
+          lastLinkHref: string;
+          nativeEvents: NativeReceipt[];
+        };
+        return {
+          keyAt: marks.lastKeyAt,
+          clickAt: marks.lastLinkAt,
+          gap: marks.lastLinkAt - marks.lastKeyAt,
+          keyTrusted: marks.lastKeyTrusted,
+          clickTrusted: marks.lastLinkTrusted,
+          href: marks.lastLinkHref,
+          events: marks.nativeEvents,
+        };
+      });
+      gestures.push(gesture);
+      gaps.push(gesture.gap);
+      expect(gesture.keyTrusted).toBe(true);
+      expect(gesture.clickTrusted).toBe(true);
+      expect(gesture.href).toBe(next.path);
+      expect(gesture.events.map((event) => event.kind)).toEqual([
+        "keydown",
+        "beforeinput",
+        "input",
+        "keyup",
+        "mousedown",
+        "mouseup",
+        "click",
+      ]);
+      for (const event of gesture.events) expect(event.trusted).toBe(true);
+      expect(gesture.events[0]).toMatchObject({ key: digit, inEditor: true });
+      expect(gesture.events[1]).toMatchObject({ data: digit, inEditor: true });
+      expect(gesture.events[2]).toMatchObject({ data: digit, inEditor: true });
+      await expectRoom(next);
+    }
+    await testInfo.attach("rapid-navigation-input", {
+      body: JSON.stringify(gestures),
+      contentType: "application/json",
+    });
+    // The fifth room connected: no socket leaked against the per-session cap.
+    expect(sockets.opened()).toBe(5);
+    for (const gap of gaps) expect(gap).toBeLessThan(200);
 
-  for (let i = 3; i >= 0; i -= 1) {
-    await page.goBack();
-    await expectRoom(docs[i]!);
-    await expectBlocks(page, [`떠나기 직전 ${i + 1}`]);
+    for (let i = 3; i >= 0; i -= 1) {
+      await page.goBack();
+      const required8 = docs[i];
+      if (required8 === undefined) {
+        throw new Error("Missing fixture value: docs[i]");
+      }
+      await expectRoom(required8);
+      await expectBlocks(page, [`떠나기 직전 ${String(i + 1)}`]);
+    }
+    const required9 = docs[0];
+    if (required9 === undefined) {
+      throw new Error("Missing fixture value: docs[0]");
+    }
+    expect(await bodyJson(page.request, wsId, required9.id)).toContain("떠나기 직전 1");
+    expect(csp).toEqual([]);
+  } finally {
+    await testInfo.attach("rapid-wire-frames", {
+      body: JSON.stringify(frames),
+      contentType: "application/json",
+    });
+    await native.detach();
   }
-  expect(await bodyJson(page.request, wsId, docs[0]!.id)).toContain("떠나기 직전 1");
-  expect(csp).toEqual([]);
 });

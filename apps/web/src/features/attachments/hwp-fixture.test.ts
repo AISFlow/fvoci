@@ -24,13 +24,15 @@ function assertInertSvg(svg: string): void {
   assert.doesNotMatch(svg, /url\((?!#|["']?data:)/i);
 }
 
-test("pinned @rhwp/core is the source contract version", () => {
+await test("pinned @rhwp/core is the source contract version", () => {
   assert.equal(version(), "0.8.6");
 });
 
-test("the user-authored Hancom HWP and HWPX samples lay out their Korean text", () => {
+await test("the user-authored Hancom HWP and HWPX samples lay out their Korean text", () => {
   for (const name of ["sample.hwp", "sample.hwpx"]) {
-    const doc = new HwpDocument(new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name))));
+    const doc = new HwpDocument(
+      new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name))),
+    );
     try {
       assert.equal(doc.pageCount(), 1, name);
       assert.equal(pagesOf(doc)[0], "안녕\n", name);
@@ -41,7 +43,7 @@ test("the user-authored Hancom HWP and HWPX samples lay out their Korean text", 
   }
 });
 
-test("synthetic HWPX has one page per fixture page and chunk N opens page N", () => {
+await test("synthetic HWPX has one page per fixture page and chunk N opens page N", () => {
   const hwpx = buildFixtureHwpx(
     new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures/sample.hwpx"))),
     FIXTURE_PAGES,
@@ -50,8 +52,14 @@ test("synthetic HWPX has one page per fixture page and chunk N opens page N", ()
   const doc = new HwpDocument(hwpx);
   try {
     const pages = pagesOf(doc);
-    assert.deepEqual(pages, FIXTURE_PAGES.map((text) => `${text}\n`));
-    assert.deepEqual([0, 1, 2].map((chunk) => pageOfChunk(pages, chunk)), [0, 1, 2]);
+    assert.deepEqual(
+      pages,
+      FIXTURE_PAGES.map((text) => `${text}\n`),
+    );
+    assert.deepEqual(
+      [0, 1, 2].map((chunk) => pageOfChunk(pages, chunk)),
+      [0, 1, 2],
+    );
     for (let page = 0; page < pages.length; page += 1) assertInertSvg(doc.renderPageSvg(page));
     // The binary HWP 5.0 form of the same document keeps the pages.
     const hwp = new HwpDocument(doc.exportHwp());

@@ -1,3 +1,4 @@
+import { expectVueViewer } from "./viewer-app";
 import fs from "node:fs";
 import path from "node:path";
 import { crc32 as zlibCrc32, deflateRawSync } from "node:zlib";
@@ -8,7 +9,7 @@ import {
   FIXTURE_DOCX_PAGE_W,
   writeZip,
 } from "../src/features/attachments/docx-test-fixture";
-import { watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, watchCspViolations } from "./helpers";
 
 const owner = {
   email: "docx-viewer@example.com",
@@ -31,12 +32,18 @@ async function uploadAttachment(
     { data: { name, sizeBytes: bytes.length } },
   );
   expect(uploadRes.ok(), await uploadRes.text()).toBeTruthy();
-  const upload = (await uploadRes.json()) as {
+  const upload = (await readJson(uploadRes, flowSchemas.upload)) as {
     attachmentId: string;
     partSizeBytes: number;
-    parts: Array<{ partNumber: number; url: string }>;
+    parts: Array<{
+      partNumber: number;
+      url: string;
+    }>;
   };
-  const parts: { partNumber: number; etag: string }[] = [];
+  const parts: {
+    partNumber: number;
+    etag: string;
+  }[] = [];
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
@@ -49,7 +56,11 @@ async function uploadAttachment(
     expect(put.ok(), await put.text()).toBeTruthy();
     const etag = put.headers()["etag"];
     expect(etag).toBeTruthy();
-    parts.push({ partNumber: part.partNumber, etag: etag! });
+    const required1 = etag;
+    if (required1 === undefined) {
+      throw new Error("Missing fixture value: etag");
+    }
+    parts.push({ partNumber: part.partNumber, etag: required1 });
   }
   const completeRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`,
@@ -71,13 +82,22 @@ type LayoutProbe = {
   visibleText: string;
   sectionWidth: number;
   boldWeight: number;
-  link: { href: string | null; color: string; decoration: string } | null;
+  link: {
+    href: string | null;
+    color: string;
+    decoration: string;
+  } | null;
   listIndent: number[];
   listMarkers: string[];
   cells: number;
   redCell: string;
   cellBorder: string;
-  images: { src: string; width: number; height: number; natural: number }[];
+  images: {
+    src: string;
+    width: number;
+    height: number;
+    natural: number;
+  }[];
   styleElements: number;
   boxSizing: string;
 };
@@ -85,41 +105,89 @@ type LayoutProbe = {
 async function probeLayout(page: Page, text: typeof DEFAULT_DOCX_TEXT): Promise<LayoutProbe> {
   return page.locator("[data-docx-viewer] iframe").evaluate((node, text) => {
     const frame = node as HTMLIFrameElement;
-    const doc = frame.contentDocument!;
-    const win = frame.contentWindow!;
+    const required2 = frame.contentDocument;
+    if (required2 === null) {
+      throw new Error("Missing fixture value: frame.contentDocument");
+    }
+    const doc = required2;
+    const required3 = frame.contentWindow;
+    if (required3 === null) {
+      throw new Error("Missing fixture value: frame.contentWindow");
+    }
+    const win = required3;
     const sections = [...doc.querySelectorAll<HTMLElement>(".docx-wrapper > section.docx")];
-    const visible = sections.flatMap((s, i) => (win.getComputedStyle(s).display === "none" ? [] : [i]));
-    const shown = sections[visible[0] ?? 0]!;
+    const visible = sections.flatMap((s, i) =>
+      win.getComputedStyle(s).display === "none" ? [] : [i],
+    );
+    const required4 = sections[visible[0] ?? 0];
+    if (required4 === undefined) {
+      throw new Error("Missing fixture value: sections[visible[0] ?? 0]");
+    }
+    const shown = required4;
     const byText = (value: string) =>
-      [...doc.querySelectorAll<HTMLElement>("span, a, p, td")].find((el) => el.textContent?.trim() === value.trim());
-    const link = [...doc.querySelectorAll("a")].find((a) => a.textContent?.includes(text.link));
+      [...doc.querySelectorAll<HTMLElement>("span, a, p, td")].find(
+        (el) => el.textContent.trim() === value.trim(),
+      );
+    const link = [...doc.querySelectorAll("a")].find((a) => a.textContent.includes(text.link));
     // Paragraph content-box start: OOXML w:ind/@w:left as laid out (marker width excluded).
     const textLeft = (value: string) => {
-      const p = [...doc.querySelectorAll("p")].find((el) => el.textContent?.includes(value))!;
+      const required5 = [...doc.querySelectorAll("p")].find((el) => el.textContent.includes(value));
+      if (required5 === undefined) {
+        throw new Error(
+          'Missing fixture value: [...doc.querySelectorAll("p")].find((el) => el.textContent.includes(value))',
+        );
+      }
+      const p = required5;
       const css = win.getComputedStyle(p);
-      return p.getBoundingClientRect().left + parseFloat(css.borderLeftWidth) + parseFloat(css.paddingLeft);
+      return (
+        p.getBoundingClientRect().left +
+        parseFloat(css.borderLeftWidth) +
+        parseFloat(css.paddingLeft)
+      );
     };
-    const listParagraph = (value: string) => [...doc.querySelectorAll("p")].find((el) => el.textContent?.includes(value))!;
-    const firstCell = doc.querySelector("td")!;
+    const listParagraph = (value: string) => {
+      const required6 = [...doc.querySelectorAll("p")].find((el) => el.textContent.includes(value));
+      if (required6 === undefined) {
+        throw new Error(
+          'Missing fixture value: [...doc.querySelectorAll("p")].find((el) => el.textContent.includes(value))',
+        );
+      }
+      return required6;
+    };
+    const required7 = doc.querySelector("td");
+    if (required7 === null) {
+      throw new Error('Missing fixture value: doc.querySelector("td")');
+    }
+    const firstCell = required7;
     const nonDataUrls: string[] = [];
     for (const el of doc.querySelectorAll("*")) {
       for (const attr of ["src", "href", "xlink:href"]) {
         const value = el.getAttribute(attr);
-        if (value !== null && !value.startsWith("data:image/")) nonDataUrls.push(`${el.localName}[${attr}]=${value}`);
+        if (value !== null && !value.startsWith("data:image/")) {
+          nonDataUrls.push(`${el.localName}[${attr}]=${value}`);
+        }
       }
+    }
+    const required8 = byText(text.bold);
+    if (required8 === undefined) {
+      throw new Error("Missing fixture value: byText(text.bold)");
     }
     return {
       sandbox: frame.getAttribute("sandbox"),
-      csp: doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content") ?? null,
+      csp:
+        doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content") ??
+        null,
       scripts: doc.querySelectorAll("script, iframe, object, embed, form, base").length,
       hrefs: doc.querySelectorAll("a[href]").length,
-      handlers: [...doc.querySelectorAll("*")].filter((el) => [...el.attributes].some((a) => a.name.startsWith("on"))).length,
+      handlers: [...doc.querySelectorAll("*")].filter((el) =>
+        [...el.attributes].some((a) => a.name.startsWith("on")),
+      ).length,
       nonDataUrls,
       pages: sections.length,
       visible,
-      visibleText: shown.textContent ?? "",
+      visibleText: shown.textContent,
       sectionWidth: shown.getBoundingClientRect().width,
-      boldWeight: Number(win.getComputedStyle(byText(text.bold)!).fontWeight),
+      boldWeight: Number(win.getComputedStyle(required8).fontWeight),
       link: link
         ? {
             href: link.getAttribute("href"),
@@ -128,7 +196,9 @@ async function probeLayout(page: Page, text: typeof DEFAULT_DOCX_TEXT): Promise<
           }
         : null,
       listIndent: text.list.map(textLeft),
-      listMarkers: text.list.map((value) => win.getComputedStyle(listParagraph(value), "::before").content),
+      listMarkers: text.list.map(
+        (value) => win.getComputedStyle(listParagraph(value), "::before").content,
+      ),
       cells: doc.querySelectorAll("table td").length,
       redCell: win.getComputedStyle(firstCell).backgroundColor,
       cellBorder: `${win.getComputedStyle(firstCell).borderTopStyle} ${win.getComputedStyle(firstCell).borderTopWidth}`,
@@ -147,7 +217,9 @@ async function probeLayout(page: Page, text: typeof DEFAULT_DOCX_TEXT): Promise<
 function evidence(name: string, body: Buffer | string): void {
   // Opt-in durable copy for review evidence; runner output is removed on success.
   const dir = process.env.FVOCI_DOCX_EVIDENCE_DIR;
-  if (!dir) return;
+  if (!dir) {
+    return;
+  }
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, name), body);
 }
@@ -155,20 +227,26 @@ function evidence(name: string, body: Buffer | string): void {
 test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk supplement, limits", async ({
   page,
 }) => {
-  test.setTimeout(150_000);
+  test.setTimeout(150000);
   const csp = watchCspViolations(page);
   const baseOrigin = new URL(test.info().project.use.baseURL ?? "http://127.0.0.1:5173").origin;
   const foreign: string[] = [];
   const nullRequests: string[] = [];
   page.on("request", (request) => {
     const url = request.url();
-    if (url.startsWith("data:") || url.startsWith("blob:") || url === "about:srcdoc") return;
-    if (new URL(url).origin !== baseOrigin) foreign.push(url);
-    if (/\/null(?:[?#]|$)/.test(url)) nullRequests.push(url);
+    if (url.startsWith("data:") || url.startsWith("blob:") || url === "about:srcdoc") {
+      return;
+    }
+    if (new URL(url).origin !== baseOrigin) {
+      foreign.push(url);
+    }
+    if (/\/null(?:[?#]|$)/.test(url)) {
+      nullRequests.push(url);
+    }
   });
 
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -177,30 +255,51 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
-
-  const workspaces = (await (await page.request.get("/api/v1/me/workspaces")).json()) as {
-    items: { id: string; slug: string }[];
+  const workspaces = (await readJson(
+    await page.request.get("/api/v1/me/workspaces"),
+    flowSchemas.workspaces,
+  )) as {
+    items: {
+      id: string;
+      slug: string;
+    }[];
   };
-  const wsId = workspaces.items.find((item) => item.slug === owner.workspaceSlug)!.id;
+  const required9 = workspaces.items.find((item) => item.slug === owner.workspaceSlug);
+  if (required9 === undefined) {
+    throw new Error(
+      "Missing fixture value: workspaces.items.find((item) => item.slug === owner.workspaceSlug)",
+    );
+  }
+  const wsId = required9.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: null, title: "DOCX 첨부" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
-  const documentId = ((await docRes.json()) as { id: string }).id;
-
-  const token = `docx${Date.now()}`;
+  const documentId = (
+    (await readJson(docRes, flowSchemas.document)) as {
+      id: string;
+    }
+  ).id;
+  const token = `docx${String(Date.now())}`;
   const text = { ...DEFAULT_DOCX_TEXT, heading: `${DEFAULT_DOCX_TEXT.heading} ${token}` };
   const docxBytes = buildFixtureDocx(text);
   const docxName = `${token}-layout.docx`;
   const docxId = await uploadAttachment(page, wsId, documentId, docxName, docxBytes);
   const textName = "notes.txt";
-  const textId = await uploadAttachment(page, wsId, documentId, textName, Buffer.from("plain attachment body\n", "utf8"));
+  const textId = await uploadAttachment(
+    page,
+    wsId,
+    documentId,
+    textName,
+    Buffer.from("plain attachment body\n", "utf8"),
+  );
   const downloadPath = `/api/v1/workspaces/${wsId}/attachments/${docxId}/download`;
 
   // --- Layout of page 1 -------------------------------------------------------
   await page.goto(`/w/acme/a/${docxId}/view`);
+  await expectVueViewer(page);
   const viewer = page.locator('[data-docx-viewer][data-docx-state="ready"]');
-  await expect(viewer).toBeVisible({ timeout: 20_000 });
+  await expect(viewer).toBeVisible({ timeout: 20000 });
   await expect(page.locator("[data-chunk-supplement]")).toHaveCount(0);
   await expect(viewer.getByText("1 / 2")).toBeVisible();
   await expect(viewer.getByRole("button", { name: "이전 쪽" })).toBeDisabled();
@@ -221,16 +320,39 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   expect(first.nonDataUrls).toEqual([]);
   expect(first.pages).toBe(2);
   expect(first.visible).toEqual([0]);
-  for (const part of [text.heading, text.body.trim(), text.bold, text.link, ...text.list, ...text.table]) {
+  for (const part of [
+    text.heading,
+    text.body.trim(),
+    text.bold,
+    text.link,
+    ...text.list,
+    ...text.table,
+  ]) {
     expect(first.visibleText).toContain(part);
   }
   expect(first.visibleText).not.toContain(text.secondPage);
   expect(Math.round(first.sectionWidth)).toBe(FIXTURE_DOCX_PAGE_W);
   expect(first.boldWeight).toBeGreaterThanOrEqual(700);
   expect(first.link).toEqual({ href: null, color: "rgb(5, 99, 193)", decoration: "underline" });
+  const required10 = first.listIndent[1];
+  if (required10 === undefined) {
+    throw new Error("Missing fixture value: first.listIndent[1]");
+  }
+  const required11 = first.listIndent[0];
+  if (required11 === undefined) {
+    throw new Error("Missing fixture value: first.listIndent[0]");
+  }
   // 720 twips per list level = 0.5 in = 48 CSS px; the second top-level item is back at level 0.
-  expect(Math.round(first.listIndent[1]! - first.listIndent[0]!)).toBe(48);
-  expect(Math.round(first.listIndent[2]! - first.listIndent[0]!)).toBe(0);
+  expect(Math.round(required10 - required11)).toBe(48);
+  const required12 = first.listIndent[2];
+  if (required12 === undefined) {
+    throw new Error("Missing fixture value: first.listIndent[2]");
+  }
+  const required13 = first.listIndent[0];
+  if (required13 === undefined) {
+    throw new Error("Missing fixture value: first.listIndent[0]");
+  }
+  expect(Math.round(required12 - required13)).toBe(0);
   for (const marker of first.listMarkers) expect(marker).toContain("counter(");
   expect(first.cells).toBe(4);
   expect(first.redCell).toBe("rgb(255, 0, 0)");
@@ -257,12 +379,19 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   expect(second.visibleText).not.toContain(text.heading);
   const page2Png = await frame.screenshot();
   evidence("docx-page-2.png", page2Png);
-
-  const frameBox = async () => (await frame.boundingBox())!;
+  const frameBox = async () => {
+    const required14 = await frame.boundingBox();
+    if (required14 === null) {
+      throw new Error("Missing fixture value: (await frame.boundingBox())");
+    }
+    return required14;
+  };
   const height100 = (await frameBox()).height;
   await viewer.getByRole("button", { name: "확대" }).click();
   await expect(viewer.getByText("125%")).toBeVisible();
-  await expect.poll(async () => Math.round((await frameBox()).height)).toBeGreaterThan(Math.round(height100 * 1.2));
+  await expect
+    .poll(async () => Math.round((await frameBox()).height))
+    .toBeGreaterThan(Math.round(height100 * 1.2));
   await viewer.getByRole("button", { name: "원래 크기" }).click();
   await expect(viewer.getByText("100%")).toBeVisible();
   await expect.poll(async () => Math.round((await frameBox()).height)).toBe(Math.round(height100));
@@ -283,23 +412,31 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
         const res = await page.request.get(
           `/api/v1/workspaces/${wsId}/search?q=${encodeURIComponent(token)}&type=attachment`,
         );
-        const body = (await res.json()) as { items?: { type: string; title: string }[] };
-        return (body.items ?? []).some((item) => item.type === "attachment" && item.title === docxName);
+        const body = (await readJson(res, flowSchemas.search)) as {
+          items?: {
+            type: string;
+            title: string;
+          }[];
+        };
+        return (body.items ?? []).some(
+          (item) => item.type === "attachment" && item.title === docxName,
+        );
       },
-      { timeout: 30_000 },
+      { timeout: 30000 },
     )
     .toBe(true);
   await page.goto(`/w/acme/search?q=${encodeURIComponent(token)}`);
   const results = page.getByRole("region", { name: "검색" });
   await results.getByRole("link", { name: new RegExp(docxName) }).click();
   await expect(page).toHaveURL(new RegExp(`/w/acme/a/${docxId}/view(?:\\?chunk=\\d+)?$`));
-  await expect(viewer).toBeVisible({ timeout: 20_000 });
+  await expect(viewer).toBeVisible({ timeout: 20000 });
+  await expectVueViewer(page);
 
   await page.goto(`/w/acme/a/${docxId}/view?chunk=0`);
   const supplement = page.locator("[data-chunk-supplement]");
   await expect(supplement.getByText("레이아웃 없음")).toBeVisible();
-  await expect(supplement.locator("mark")).toContainText(token, { timeout: 20_000 });
-  await expect(viewer).toBeVisible({ timeout: 20_000 });
+  await expect(supplement.locator("mark")).toContainText(token, { timeout: 20000 });
+  await expect(viewer).toBeVisible({ timeout: 20000 });
   const chunkPng = await page.locator("[data-attachment-viewer]").screenshot();
   evidence("docx-chunk-supplement.png", chunkPng);
 
@@ -314,7 +451,7 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
     );
     await page.goto(`/w/acme/a/${docxId}/view?chunk=0`);
     await expect(supplement.getByText(message)).toBeVisible();
-    await expect(viewer).toBeVisible({ timeout: 20_000 });
+    await expect(viewer).toBeVisible({ timeout: 20000 });
     await page.unroute(previewPath);
   }
 
@@ -322,14 +459,13 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   const downloadRoute = `**${downloadPath}`;
   await page.route(downloadRoute, (route) => route.fulfill({ status: 403, body: "" }));
   await page.goto(`/w/acme/a/${docxId}/view`);
-  await expect(page.locator('[data-docx-viewer][data-docx-state="error"]').getByRole("alert")).toHaveText(
-    "불러오지 못했습니다.",
-  );
+  await expect(
+    page.locator('[data-docx-viewer][data-docx-state="error"]').getByRole("alert"),
+  ).toHaveText("불러오지 못했습니다.");
   await expect(page.locator("[data-docx-viewer] iframe")).toHaveCount(0);
   await page.unroute(downloadRoute);
   await page.getByRole("button", { name: "다시 시도" }).click();
-  await expect(viewer).toBeVisible({ timeout: 20_000 });
-
+  await expect(viewer).toBeVisible({ timeout: 20000 });
   // --- Switch files while the DOCX bytes are in flight ---------------------
   let release!: () => void;
   const held = new Promise<void>((resolve) => {
@@ -346,7 +482,9 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   });
   const settled = new Promise<void>((resolve) => {
     const done = (request: { url: () => string }) => {
-      if (request.url().endsWith(downloadPath)) resolve();
+      if (request.url().endsWith(downloadPath)) {
+        resolve();
+      }
     };
     page.on("requestfinished", done);
     page.on("requestfailed", done);
@@ -360,7 +498,9 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   await expect(page.getByText("plain attachment body")).toBeVisible();
   release();
   await settled;
-  await expect(page.locator("[data-attachment-viewer]").getByText(textName, { exact: true })).toBeVisible();
+  await expect(
+    page.locator("[data-attachment-viewer]").getByText(textName, { exact: true }),
+  ).toBeVisible();
   await expect(page.locator("[data-docx-viewer]")).toHaveCount(0);
   await expect(page.locator("iframe")).toHaveCount(0);
   await page.unroute(downloadRoute);
@@ -374,21 +514,27 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
     "bomb.docx",
     writeZip([
       { name: "[Content_Types].xml", bytes: new TextEncoder().encode("<Types/>") },
-      { name: "word/document.xml", deflated: deflateRawSync(inflated), crc: zlibCrc32(inflated), size: inflated.byteLength },
+      {
+        name: "word/document.xml",
+        deflated: deflateRawSync(inflated),
+        crc: zlibCrc32(inflated),
+        size: inflated.byteLength,
+      },
     ]),
   );
   await page.goto(`/w/acme/a/${bombId}/view`);
-  await expect(page.locator('[data-docx-viewer][data-docx-state="error"]').getByRole("alert")).toHaveText(
-    "이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.",
-    { timeout: 30_000 },
-  );
+  await expect(
+    page.locator('[data-docx-viewer][data-docx-state="error"]').getByRole("alert"),
+  ).toHaveText("이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.", { timeout: 30000 });
   await expect(page.locator("[data-docx-viewer] iframe")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "다시 시도" })).toHaveCount(0);
 
   // --- Other Office kinds still have no layout viewer here -----------------
   const pptxId = await uploadAttachment(page, wsId, documentId, "deck.pptx", docxBytes);
   await page.goto(`/w/acme/a/${pptxId}/view`);
-  await expect(page.getByText("이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.")).toBeVisible();
+  await expect(
+    page.getByText("이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요."),
+  ).toBeVisible();
   await expect(page.locator("[data-docx-viewer]")).toHaveCount(0);
 
   // --- Unknown (or unauthorized) attachment --------------------------------

@@ -21,7 +21,10 @@ export function isPdfjsAsset(dir: PdfjsAssetDir, name: string): boolean {
     case "standard_fonts":
       return /\.(pfb|ttf)$/.test(name);
     case "wasm":
-      return /^(jbig2|openjpeg|qcms_bg)\.wasm$/.test(name) || /^(jbig2|openjpeg)_nowasm_fallback\.js$/.test(name);
+      return (
+        /^(jbig2|openjpeg|qcms_bg)\.wasm$/.test(name) ||
+        /^(jbig2|openjpeg)_nowasm_fallback\.js$/.test(name)
+      );
     case "iccs":
       return name.endsWith(".icc");
   }

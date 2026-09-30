@@ -9,13 +9,11 @@ import { login, watchCspViolations } from "./helpers";
 import {
   admin,
   blockAt,
-  blockTexts,
   caretAtEndOf,
   createDoc,
   editorOf,
   expectBlocks,
   focused,
-  newSignedInPage,
   openDoc,
   save,
   savedBody,
@@ -57,7 +55,9 @@ async function openBlockMenu(page: Page, index: number): Promise<void> {
 async function keyboardCaretAtEndOf(page: Page, index: number): Promise<void> {
   await blockAt(page, index).click();
   await page.mouse.move(1, 1);
-  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  await page.evaluate(
+    () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+  );
   await page.keyboard.press("End");
   await expect(page.locator(".fvoci-gutter")).toBeHidden();
 }
@@ -66,7 +66,9 @@ function blockMenu(page: Page) {
   return page.getByRole("menu", { name: "블록" });
 }
 
-test("the block gutter adds, converts, duplicates, moves, colours and deletes blocks", async ({ page }) => {
+test("the block gutter adds, converts, duplicates, moves, colours and deletes blocks", async ({
+  page,
+}) => {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   const csp = watchCspViolations(page);
   const icons = watchIconRequests(page);
@@ -80,8 +82,8 @@ test("the block gutter adds, converts, duplicates, moves, colours and deletes bl
   await hoverBlock(page, 1);
   await expect(page.locator('[data-gutter="plus"]')).toBeVisible();
   await expect(page.locator('[data-gutter="drag"]')).toBeVisible();
-  await expect(page.locator('[data-gutter="plus"]')).toHaveText("+");
-  await expect(page.locator('[data-gutter="drag"]')).toHaveText("⠿");
+  await expect(page.locator('[data-gutter="plus"]')).toHaveAccessibleName("블록 추가");
+  await expect(page.locator('[data-gutter="drag"]')).toHaveAccessibleName("블록 이동");
 
   // "+" on a filled block adds an empty block below it with the slash menu open.
   await page.locator('[data-gutter="plus"]').click();
@@ -99,7 +101,11 @@ test("the block gutter adds, converts, duplicates, moves, colours and deletes bl
   const items = menu.getByRole("menuitem");
   await expect(items).toHaveCount(17);
   await expect(page.locator('[data-gutter="drag"]')).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator('[data-gutter="drag"]')).toHaveAttribute("aria-controls", (await menu.getAttribute("id"))!);
+  const required1 = await menu.getAttribute("id");
+  if (required1 === null) {
+    throw new Error('Missing fixture value: (await menu.getAttribute("id"))');
+  }
+  await expect(page.locator('[data-gutter="drag"]')).toHaveAttribute("aria-controls", required1);
   await expect(items.first()).toBeFocused();
   await page.keyboard.press("ArrowDown");
   await expect(items.nth(1)).toBeFocused();
@@ -142,14 +148,17 @@ test("the block gutter adds, converts, duplicates, moves, colours and deletes bl
   await openBlockMenu(page, 1);
   await blockMenu(page).getByRole("menuitem", { name: "색", exact: true }).click();
   await expect(blockAt(page, 1).locator("span")).toHaveCSS("color", /rgb/);
-  expect(await blockAt(page, 1).locator("span").evaluate((span) => (span as HTMLElement).style.color)).toBe(
-    "var(--destructive)",
-  );
+  expect(
+    await blockAt(page, 1)
+      .locator("span")
+      .evaluate((span) => (span as HTMLElement).style.color),
+  ).toBe("var(--destructive)");
 
   // Copy link: "#<block id>" on the clipboard, and the menu closes. (Seeded
   // blocks get an id once edited; the converted heading has one.)
   await expect(blockAt(page, 0)).toHaveAttribute("data-id", /\S+/);
   const blockId = await blockAt(page, 0).getAttribute("data-id");
+  if (blockId === null) throw new Error("Missing fixture value: blockId");
   await openBlockMenu(page, 0);
   await blockMenu(page).getByRole("menuitem", { name: "블록 링크 복사" }).click();
   await expect(blockMenu(page)).toHaveCount(0);
@@ -192,14 +201,21 @@ test("the block gutter adds, converts, duplicates, moves, colours and deletes bl
   await expectBlocks(page, ["첫째", "둘째", "셋째", ""]);
   await save(page);
   const body = await savedBody(page.request, wsId, doc.id);
-  expect(body.content?.map((node) => node.type)).toEqual(["heading", "heading", "blockquote", "paragraph"]);
+  expect(body.content?.map((node) => node.type)).toEqual([
+    "heading",
+    "heading",
+    "blockquote",
+    "paragraph",
+  ]);
   expect(JSON.stringify(body)).toContain('"color":"var(--destructive)"');
   expect(csp).toEqual([]);
   expect(icons).toEqual([]);
 });
 
 const paragraph = (text: string) =>
-  text.length > 0 ? { type: "paragraph", content: [{ type: "text", text }] } : { type: "paragraph" };
+  text.length > 0
+    ? { type: "paragraph", content: [{ type: "text", text }] }
+    : { type: "paragraph" };
 const tableCell = (type: "tableCell" | "tableHeader", text: string, colwidth?: number[]) => ({
   type,
   attrs: colwidth ? { colwidth } : {},
@@ -212,7 +228,7 @@ async function tableShape(page: Page): Promise<string[][]> {
     .locator("table")
     .evaluate((table) =>
       [...table.querySelectorAll("tr")].map((row) =>
-        [...row.children].map((cell) => `${cell.tagName.toLowerCase()}:${cell.textContent ?? ""}`),
+        [...row.children].map((cell) => `${cell.tagName.toLowerCase()}:${cell.textContent}`),
       ),
     );
 }
@@ -226,7 +242,9 @@ async function openTableMenu(page: Page, handle: "table" | "col" | "row"): Promi
   await expect(tableMenu(page)).toBeVisible();
 }
 
-test("the table handles insert, delete, move, format, merge and delete through the table menu", async ({ page }) => {
+test("the table handles insert, delete, move, format, merge and delete through the table menu", async ({
+  page,
+}) => {
   const csp = watchCspViolations(page);
   const icons = watchIconRequests(page);
   await login(page, admin.email, admin.password);
@@ -239,8 +257,14 @@ test("the table handles insert, delete, move, format, merge and delete through t
         {
           type: "table",
           content: [
-            { type: "tableRow", content: [tableCell("tableHeader", "A", [120]), tableCell("tableHeader", "B", [80])] },
-            { type: "tableRow", content: [tableCell("tableCell", "1", [120]), tableCell("tableCell", "2", [80])] },
+            {
+              type: "tableRow",
+              content: [tableCell("tableHeader", "A", [120]), tableCell("tableHeader", "B", [80])],
+            },
+            {
+              type: "tableRow",
+              content: [tableCell("tableCell", "1", [120]), tableCell("tableCell", "2", [80])],
+            },
           ],
         },
         paragraph("뒤"),
@@ -250,7 +274,10 @@ test("the table handles insert, delete, move, format, merge and delete through t
   const seeded = JSON.stringify(await savedBody(page.request, wsId, doc.id));
   expect(seeded).toContain('"colwidth":[120]');
   await openDoc(page, doc.path);
-  const cellText = (text: string) => editorOf(page).locator("td, th").filter({ hasText: new RegExp(`^${text}$`) });
+  const cellText = (text: string) =>
+    editorOf(page)
+      .locator("td, th")
+      .filter({ hasText: new RegExp(`^${text}$`) });
 
   // No handles while the caret is outside a table.
   await caretAtEndOf(page, 0);
@@ -268,10 +295,12 @@ test("the table handles insert, delete, move, format, merge and delete through t
 
   // "+" adds a column after the caret's and a row after the caret's.
   await handles.getByRole("button", { name: "열 추가" }).click();
-  await expect.poll(() => tableShape(page)).toEqual([
-    ["th:A", "th:", "th:B"],
-    ["td:1", "td:", "td:2"],
-  ]);
+  await expect
+    .poll(() => tableShape(page))
+    .toEqual([
+      ["th:A", "th:", "th:B"],
+      ["td:1", "td:", "td:2"],
+    ]);
   await cellText("1").click();
   await handles.getByRole("button", { name: "행 추가" }).click();
   await expect.poll(async () => (await tableShape(page)).length).toBe(3);
@@ -282,9 +311,13 @@ test("the table handles insert, delete, move, format, merge and delete through t
   await openTableMenu(page, "col");
   await expect(tableMenu(page).getByRole("menuitem")).toHaveCount(19);
   await expect(tableMenu(page).getByRole("menuitem").first()).toBeFocused();
+  const required2 = await tableMenu(page).getAttribute("id");
+  if (required2 === null) {
+    throw new Error('Missing fixture value: (await tableMenu(page).getAttribute("id"))');
+  }
   await expect(page.locator('[data-table-handle="col"]')).toHaveAttribute(
     "aria-controls",
-    (await tableMenu(page).getAttribute("id"))!,
+    required2,
   );
   await tableMenu(page).getByRole("menuitem", { name: "열 삭제" }).click();
   await expect(tableMenu(page)).toHaveCount(0);
@@ -292,27 +325,33 @@ test("the table handles insert, delete, move, format, merge and delete through t
   await editorOf(page).locator("tr").nth(2).locator("td").first().click();
   await openTableMenu(page, "row");
   await tableMenu(page).getByRole("menuitem", { name: "행 삭제" }).click();
-  await expect.poll(() => tableShape(page)).toEqual([
-    ["th:A", "th:B"],
-    ["td:1", "td:2"],
-  ]);
+  await expect
+    .poll(() => tableShape(page))
+    .toEqual([
+      ["th:A", "th:B"],
+      ["td:1", "td:2"],
+    ]);
 
   // Header row off and on; header column on.
   await cellText("1").click();
   await openTableMenu(page, "table");
   await tableMenu(page).getByRole("menuitem", { name: "헤더 행" }).click();
-  await expect.poll(() => tableShape(page)).toEqual([
-    ["td:A", "td:B"],
-    ["td:1", "td:2"],
-  ]);
+  await expect
+    .poll(() => tableShape(page))
+    .toEqual([
+      ["td:A", "td:B"],
+      ["td:1", "td:2"],
+    ]);
   await openTableMenu(page, "table");
   await tableMenu(page).getByRole("menuitem", { name: "헤더 행" }).click();
   await openTableMenu(page, "table");
   await tableMenu(page).getByRole("menuitem", { name: "헤더 열" }).click();
-  await expect.poll(() => tableShape(page)).toEqual([
-    ["th:A", "th:B"],
-    ["th:1", "td:2"],
-  ]);
+  await expect
+    .poll(() => tableShape(page))
+    .toEqual([
+      ["th:A", "th:B"],
+      ["th:1", "td:2"],
+    ]);
 
   // Cell alignment and background.
   await cellText("2").click();
@@ -357,7 +396,12 @@ test("the table handles insert, delete, move, format, merge and delete through t
   const body = await savedBody(page.request, wsId, doc.id);
   const table = body.content?.find((node) => node.type === "table");
   const cells = table?.content?.flatMap((row) => row.content ?? []) ?? [];
-  expect(cells.map((cell) => cell.type)).toEqual(["tableHeader", "tableHeader", "tableHeader", "tableCell"]);
+  expect(cells.map((cell) => cell.type)).toEqual([
+    "tableHeader",
+    "tableHeader",
+    "tableHeader",
+    "tableCell",
+  ]);
   expect(cells[3]?.attrs).toMatchObject({ background: "var(--accent)" });
   expect(cells[3]?.content?.[0]?.attrs).toMatchObject({ textAlign: "center" });
   // Equal widths: no cell keeps the stored widths (a null width is left out).
@@ -385,8 +429,16 @@ test("the code-block chrome sets the language, copies, and shows line numbers, w
       type: "doc",
       content: [
         paragraph("앞"),
-        { type: "codeBlock", attrs: { language: "typescript", highlightLines: [1] }, content: [{ type: "text", text: "one\ntwo\nthree" }] },
-        { type: "codeBlock", attrs: { language: "diff" }, content: [{ type: "text", text: "-old\n+new" }] },
+        {
+          type: "codeBlock",
+          attrs: { language: "typescript", highlightLines: [1] },
+          content: [{ type: "text", text: "one\ntwo\nthree" }],
+        },
+        {
+          type: "codeBlock",
+          attrs: { language: "diff" },
+          content: [{ type: "text", text: "-old\n+new" }],
+        },
         paragraph(""),
       ],
     },
@@ -403,7 +455,10 @@ test("the code-block chrome sets the language, copies, and shows line numbers, w
   // its grammar loads lazily and paints tokens.
   await blockAt(page, 3).click();
   await page.keyboard.type("```ts ");
-  const code = editorOf(page).locator("pre").filter({ has: page.locator("code.language-typescript") }).last();
+  const code = editorOf(page)
+    .locator("pre")
+    .filter({ has: page.locator("code.language-typescript") })
+    .last();
   await expect(code).toBeVisible();
   await code.click();
   await page.keyboard.type("const a = 1;");
@@ -419,7 +474,8 @@ test("the code-block chrome sets the language, copies, and shows line numbers, w
   await chrome.getByRole("button", { name: "복사" }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("const a = 1;");
   await page.evaluate(() => {
-    navigator.clipboard.writeText = () => Promise.reject(new DOMException("denied", "NotAllowedError"));
+    navigator.clipboard.writeText = () =>
+      Promise.reject(new DOMException("denied", "NotAllowedError"));
   });
   await chrome.getByRole("button", { name: "복사" }).click();
   await expect(chrome.getByRole("alert")).toHaveText("복사하지 못했습니다. 다시 시도해 주세요.");
@@ -439,7 +495,7 @@ test("the code-block chrome sets the language, copies, and shows line numbers, w
   await expect(chrome.getByRole("button", { name: "접기" })).toHaveCount(0);
   for (let i = 2; i <= 9; i += 1) {
     await page.keyboard.press("Enter");
-    await page.keyboard.type(`line ${i}`);
+    await page.keyboard.type(`line ${String(i)}`);
   }
   const fold = chrome.getByRole("button", { name: "접기" });
   await fold.click();
@@ -455,13 +511,19 @@ test("the code-block chrome sets the language, copies, and shows line numbers, w
   // Highlighted lines ({1}) and diff lines get line backgrounds.
   await editorOf(page).locator("pre").nth(0).click();
   await expect(chrome.locator('[data-hl="meta"]')).toHaveCount(1);
-  await expect(chrome.getByRole("button", { name: "줄번호" })).toHaveAttribute("aria-pressed", "false");
+  await expect(chrome.getByRole("button", { name: "줄번호" })).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
   await editorOf(page).locator("pre").nth(1).click();
   await expect(chrome.locator('[data-hl="del"]')).toHaveCount(1);
   await expect(chrome.locator('[data-hl="add"]')).toHaveCount(1);
   // The typed block kept its own options.
   await editorOf(page).locator("pre").nth(2).click();
-  await expect(chrome.getByRole("button", { name: "줄번호" })).toHaveAttribute("aria-pressed", "true");
+  await expect(chrome.getByRole("button", { name: "줄번호" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 
   await save(page);
   const body = await savedBody(page.request, wsId, doc.id);
@@ -477,12 +539,16 @@ async function selectBlockText(page: Page, index: number): Promise<void> {
   await page.keyboard.press("Shift+Home");
 }
 
-test("the selection bubble formats text and its menus and popovers follow the menu keyboard model", async ({ page }) => {
+test("the selection bubble formats text and its menus and popovers follow the menu keyboard model", async ({
+  page,
+}) => {
   const csp = watchCspViolations(page);
   const icons = watchIconRequests(page);
   await login(page, admin.email, admin.password);
   const wsId = await workspaceId(page.request);
-  const doc = await createDoc(page.request, wsId, "서식", { markdown: "첫 문단 글자\n\n둘째 문단\n\n셋째 문단\n" });
+  const doc = await createDoc(page.request, wsId, "서식", {
+    markdown: "첫 문단 글자\n\n둘째 문단\n\n셋째 문단\n",
+  });
   await openDoc(page, doc.path);
   const bubble = page.locator("[data-fvoci-bubble]");
 
@@ -511,12 +577,16 @@ test("the selection bubble formats text and its menus and popovers follow the me
 
   // Block type menu: enters at its first item (paragraph, checked), Escape
   // closes it and returns focus to its trigger, the trigger toggles it.
-  const typeTrigger = toolbar.getByRole("button", { name: "본문▾" });
+  const typeTrigger = toolbar.getByRole("button", { name: "본문", exact: true });
   await typeTrigger.click();
   const typeMenu = page.getByRole("menu", { name: "블록 유형" });
   await expect(typeMenu).toBeVisible();
   await expect(typeTrigger).toHaveAttribute("aria-expanded", "true");
-  await expect(typeTrigger).toHaveAttribute("aria-controls", (await typeMenu.getAttribute("id"))!);
+  const required3 = await typeMenu.getAttribute("id");
+  if (required3 === null) {
+    throw new Error('Missing fixture value: (await typeMenu.getAttribute("id"))');
+  }
+  await expect(typeTrigger).toHaveAttribute("aria-controls", required3);
   const typeItems = typeMenu.getByRole("menuitemradio");
   await expect(typeItems).toHaveText(["본문", "H1", "H2", "H3"]);
   await expect(typeItems.first()).toBeFocused();
@@ -534,7 +604,7 @@ test("the selection bubble formats text and its menus and popovers follow the me
   await typeMenu.getByRole("menuitemradio", { name: "H2" }).click();
   await expect(typeMenu).toHaveCount(0);
   await expect(editorOf(page).locator(":scope > h2")).toHaveText("첫 문단 글자");
-  await expect(toolbar.getByRole("button", { name: "H2▾" })).toBeVisible();
+  await expect(toolbar.getByRole("button", { name: "H2", exact: true })).toBeVisible();
 
   // Link: the field takes focus; Escape closes it and returns to the
   // trigger without touching the selection; Apply links the selection.
@@ -545,11 +615,15 @@ test("the selection bubble formats text and its menus and popovers follow the me
   await page.keyboard.press("Escape");
   await expect(linkDialog).toHaveCount(0);
   await expect(linkTrigger).toBeFocused();
-  expect(await editorOf(page).evaluate(() => window.getSelection()?.toString())).toBe("첫 문단 글자");
+  expect(await editorOf(page).evaluate(() => window.getSelection()?.toString())).toBe(
+    "첫 문단 글자",
+  );
   await linkTrigger.click();
   await page.getByLabel("URL").fill("https://example.com/doc");
   await page.getByRole("button", { name: "적용" }).click();
-  await expect(blockAt(page, 0).locator('a[href="https://example.com/doc"]')).toHaveText("첫 문단 글자");
+  await expect(blockAt(page, 0).locator('a[href="https://example.com/doc"]')).toHaveText(
+    "첫 문단 글자",
+  );
 
   // Highlight colours.
   await selectBlockText(page, 1);
@@ -568,12 +642,133 @@ test("the selection bubble formats text and its menus and popovers follow the me
   await expect(listMenu.getByRole("menuitemcheckbox")).toHaveText(["글머리", "번호", "할 일"]);
   await listMenu.getByRole("menuitemcheckbox", { name: "번호" }).click();
   await expect(editorOf(page).locator(":scope > ol")).toHaveText("둘째 문단");
-  await expect(listMenu.getByRole("menuitemcheckbox", { name: "번호" })).toHaveAttribute("aria-checked", "true");
+  await expect(listMenu.getByRole("menuitemcheckbox", { name: "번호" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
   await page.keyboard.press("Escape");
   await expect(listMenu).toHaveCount(0);
 
+  // Reproduce the focus-repair task arriving after native Shift+Home but before
+  // the browser delivers selectionchange. Keep the actual PM callback and native
+  // keyboard input; only control when that pending task runs.
+  await page.evaluate(() => {
+    const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
+      editor: {
+        state: {
+          selection: {
+            from: number;
+            to: number;
+            $from: {
+              parent: {
+                textContent: string;
+              };
+            };
+          };
+        };
+      };
+    };
+    const snapshot = () => {
+      const native = document.getSelection();
+      const pm = root.editor.state.selection;
+      return {
+        text: native?.toString(),
+        from: pm.from,
+        to: pm.to,
+        parent: pm.$from.parent.textContent,
+      };
+    };
+    const gate = { captured: false, delivered: false, before: snapshot(), after: snapshot() };
+    Object.assign(window, { __fvociKeyboardFocusRepair: gate });
+    const nativeTimeout = window.setTimeout.bind(window);
+    let focusing = false;
+    let repair: (() => void) | undefined;
+    let timer: number | undefined;
+    root.addEventListener(
+      "focus",
+      () => {
+        focusing = true;
+      },
+      { capture: true, once: true },
+    );
+    root.addEventListener(
+      "focusin",
+      () => {
+        focusing = false;
+      },
+      { once: true },
+    );
+    window.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+      // Installed prosemirror-view schedules its selection-to-DOM focus repair
+      // synchronously in the root focus handler with a 20ms delay.
+      if (focusing && delay === 20 && typeof callback === "function") {
+        if (repair) {
+          throw new Error("multiple editor focus-repair tasks");
+        }
+        gate.captured = true;
+        repair = () => {
+          Reflect.apply(callback, window, args);
+        };
+        timer = nativeTimeout(() => {}, delay);
+        return timer;
+      }
+      return nativeTimeout(callback, delay, ...args);
+    }) as typeof window.setTimeout;
+    const deliver = (event: KeyboardEvent) => {
+      if (event.key !== "Home" || !event.shiftKey) {
+        return;
+      }
+      window.setTimeout = nativeTimeout;
+      document.removeEventListener("keyup", deliver);
+      window.clearTimeout(timer);
+      if (!repair) {
+        throw new Error("missing pending editor focus repair");
+      }
+      gate.before = snapshot();
+      repair();
+      gate.delivered = true;
+      gate.after = snapshot();
+    };
+    // Bubble phase: the editor's supported keyup handler has completed, while
+    // the native selectionchange task has not yet run.
+    document.addEventListener("keyup", deliver);
+  });
   // The "⋮" menu: alignment (radio items that stay open) and clear formatting.
   await selectBlockText(page, 2);
+  const focusRepair = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __fvociKeyboardFocusRepair: {
+            captured: boolean;
+            delivered: boolean;
+            before: {
+              text?: string;
+              from: number;
+              to: number;
+              parent: string;
+            };
+            after: {
+              text?: string;
+              from: number;
+              to: number;
+              parent: string;
+            };
+          };
+        }
+      ).__fvociKeyboardFocusRepair,
+  );
+  await test.info().attach("keyboard-focus-repair", {
+    body: JSON.stringify(focusRepair),
+    contentType: "application/json",
+  });
+  expect(focusRepair.captured).toBe(true);
+  expect(focusRepair.delivered).toBe(true);
+  for (const boundary of [focusRepair.before, focusRepair.after]) {
+    expect(boundary.text).toBe("셋째 문단");
+    expect(boundary.parent).toBe("셋째 문단");
+    expect(boundary.to - boundary.from).toBe("셋째 문단".length);
+  }
   const more = toolbar.getByRole("button", { name: "서식", exact: true });
   await more.click();
   const moreMenu = page.getByRole("menu", { name: "서식" });
@@ -582,7 +777,10 @@ test("the selection bubble formats text and its menus and popovers follow the me
   await expect(aligns.first()).toBeFocused();
   await moreMenu.getByRole("menuitemradio", { name: "가운데" }).click();
   await expect(blockAt(page, 2)).toHaveCSS("text-align", "center");
-  await expect(moreMenu.getByRole("menuitemradio", { name: "가운데" })).toHaveAttribute("aria-checked", "true");
+  await expect(moreMenu.getByRole("menuitemradio", { name: "가운데" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
   // Tab leaves the menu from its trigger.
   await moreMenu.getByRole("menuitemradio", { name: "가운데" }).focus();
   await page.keyboard.press("Tab");
@@ -609,21 +807,34 @@ test("the selection bubble formats text and its menus and popovers follow the me
   expect(icons).toEqual([]);
 });
 
-test("a cell selection shows the bubble, and bold applies to every selected cell", async ({ page }) => {
+test("a cell selection shows the bubble, and bold applies to every selected cell", async ({
+  page,
+}) => {
   await login(page, admin.email, admin.password);
   const wsId = await workspaceId(page.request);
   const doc = await createDoc(page.request, wsId, "셀 서식", {
     json: {
       type: "doc",
       content: [
-        { type: "table", content: [{ type: "tableRow", content: [tableCell("tableCell", "가"), tableCell("tableCell", "나")] }] },
+        {
+          type: "table",
+          content: [
+            {
+              type: "tableRow",
+              content: [tableCell("tableCell", "가"), tableCell("tableCell", "나")],
+            },
+          ],
+        },
         paragraph(""),
       ],
     },
   });
   await openDoc(page, doc.path);
   await editorOf(page).locator("td").first().click();
-  await editorOf(page).locator("td").nth(1).click({ modifiers: ["Shift"] });
+  await editorOf(page)
+    .locator("td")
+    .nth(1)
+    .click({ modifiers: ["Shift"] });
   await expect(editorOf(page).locator(".selectedCell")).toHaveCount(2);
   const bubble = page.locator("[data-fvoci-bubble]");
   await expect(bubble).toBeVisible();
@@ -631,7 +842,9 @@ test("a cell selection shows the bubble, and bold applies to every selected cell
   await expect(editorOf(page).locator("td strong")).toHaveText(["가", "나"]);
 });
 
-test("on a narrow screen the gutter and bubble give way to the bottom toolbar", async ({ page }) => {
+test("on a narrow screen the gutter and bubble give way to the bottom toolbar", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const csp = watchCspViolations(page);
   await login(page, admin.email, admin.password);
@@ -653,7 +866,7 @@ test("on a narrow screen the gutter and bubble give way to the bottom toolbar", 
   await expect(blockAt(page, 0).locator("strong")).toHaveText("모바일 문단");
 
   // Its menus open upwards, above the bar.
-  await bar.getByRole("button", { name: "본문▾" }).click();
+  await bar.getByRole("button", { name: "본문", exact: true }).click();
   const typeMenu = page.getByRole("menu", { name: "블록 유형" });
   await expect(typeMenu).toBeVisible();
   await expect(typeMenu).toHaveAttribute("data-side", "top");
@@ -674,7 +887,7 @@ test("on a narrow screen the gutter and bubble give way to the bottom toolbar", 
 
   await save(page);
   await page.reload();
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   await expect(blockAt(page, 0).locator("strong")).toHaveText("모바일 문단");
 
   // Wide again: no bottom toolbar.

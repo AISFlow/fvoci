@@ -1,10 +1,19 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page, type Route } from "@playwright/test";
-import {
-  decodeHocuspocusFrame,
-  frameBytes,
-  persistParts,
-} from "../e2e-pending/collab-wire";
+import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
 import { login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const bodySchema = z
+  .object({ contentJson: z.unknown(), archivedAt: z.string().nullable() })
+  .passthrough();
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const idSchema = z.object({ id: z.string() }).passthrough();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
+const archivePatchSchema = z.object({ archived: z.boolean().optional() }).passthrough().nullable();
 
 test.describe.configure({ mode: "serial" });
 
@@ -50,10 +59,11 @@ function toFrameBytes(message: string | Buffer): Uint8Array {
 }
 
 /** Hold server `persisted:` ack frames until release() (archive persist barrier). */
-function installPersistAckHold(page: Page): { release: () => void } {
+async function installPersistAckHold(page: Page): Promise<{ release: () => Promise<void> }> {
   const gates: Array<() => void> = [];
+  const deliveries: Promise<PromiseSettledResult<void>>[] = [];
   let holdAcks = true;
-  page.routeWebSocket(/\/collab/, (ws) => {
+  await page.routeWebSocket(/\/collab/, (ws) => {
     const server = ws.connectToServer();
     ws.onMessage((message) => {
       server.send(message);
@@ -63,12 +73,18 @@ function installPersistAckHold(page: Page): { release: () => void } {
       if (decoded?.kind === "stateless") {
         const parts = persistParts(decoded.payload);
         if (holdAcks && parts?.kind === "done") {
-          let releaseGate!: () => void;
-          const gate = new Promise<void>((resolve) => {
-            releaseGate = resolve;
-          });
+          const { promise: gate, resolve: releaseGate } = deferred();
           gates.push(releaseGate);
-          void gate.then(() => ws.send(message));
+          deliveries.push(
+            gate
+              .then(() => {
+                ws.send(message);
+              })
+              .then(
+                () => ({ status: "fulfilled", value: undefined }),
+                (reason: unknown) => ({ status: "rejected", reason }),
+              ),
+          );
           return;
         }
       }
@@ -76,9 +92,12 @@ function installPersistAckHold(page: Page): { release: () => void } {
     });
   });
   return {
-    release: () => {
+    release: async () => {
       holdAcks = false;
       for (const open of gates.splice(0)) open();
+      for (const delivery of await Promise.all(deliveries)) {
+        if (delivery.status === "rejected") throw delivery.reason;
+      }
     },
   };
 }
@@ -113,7 +132,7 @@ async function ensureSetup(page: Page): Promise<void> {
 async function taskJson(page: Page, wsId: string, taskId: string) {
   const res = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
   expect(res.ok()).toBe(true);
-  return res.json() as Promise<{ contentJson: unknown; archivedAt: string | null }>;
+  return bodySchema.parse(await res.json());
 }
 
 async function openEditableTask(
@@ -122,57 +141,63 @@ async function openEditableTask(
   projectKey: string,
 ): Promise<{ wsId: string; task: { id: string; number: number }; bodyText: string }> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
-  const wsId = (await workspacesRes.json()).items.find(
-    (item: { slug: string }) => item.slug === admin.workspaceSlug,
-  ).id as string;
+  const wsId = required(
+    workspaceListSchema
+      .parse(await workspacesRes.json())
+      .items.find((item: { slug: string }) => item.slug === admin.workspaceSlug),
+  ).id;
 
   const projectRes = await page.request.post(`/api/v1/workspaces/${wsId}/projects`, {
     data: { key: projectKey, name: "Archive Persist", visibility: "workspace" },
   });
   expect(projectRes.status(), await projectRes.text()).toBe(201);
-  const project = (await projectRes.json()) as { id: string };
+  const project = idSchema.parse(await projectRes.json());
   const taskRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/tasks`,
     { data: { title: "보관 전 본문" } },
   );
   expect(taskRes.status()).toBe(201);
-  const task = (await taskRes.json()) as { id: string; number: number };
+  const task = taskSchema.parse(await taskRes.json());
 
-  await page.goto(`/w/${admin.workspaceSlug}/${projectKey}-${task.number}`);
-  await expect(page.getByRole("heading", { name: "보관 전 본문" })).toBeVisible({ timeout: 15_000 });
+  await page.goto(`/w/${admin.workspaceSlug}/${projectKey}-${String(task.number)}`);
+  await expect(page.getByRole("heading", { name: "보관 전 본문" })).toBeVisible({
+    timeout: 15_000,
+  });
   const body = page.getByTestId("task-body");
   await expect(body).toBeVisible({ timeout: 15_000 });
   await expect(body.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 30_000 });
   const editor = body.locator(".fvoci-editor .ProseMirror");
   await editor.click();
-  const bodyText = `한글 본문 🎯 보관 ${Date.now()}`;
+  const bodyText = `한글 본문 🎯 보관 ${String(Date.now())}`;
   await page.keyboard.type(bodyText);
   wire.sent.length = 0;
   return { wsId, task, bodyText };
 }
 
-function holdArchivePatch(page: Page, wsId: string, taskId: string): { release: () => void } {
-  let releaseHold!: () => void;
+async function holdArchivePatch(
+  page: Page,
+  wsId: string,
+  taskId: string,
+): Promise<{ release: () => void }> {
   let gateOpen = false;
-  const held = new Promise<void>((resolve) => {
-    releaseHold = () => {
-      gateOpen = true;
-      resolve();
-    };
-  });
+  const { promise: held, resolve } = deferred();
+  const releaseHold = () => {
+    gateOpen = true;
+    resolve();
+  };
   const matchUrl = `**/api/v1/workspaces/${wsId}/tasks/${taskId}`;
   const holdPatch = async (route: Route) => {
     const request = route.request();
     if (
       !gateOpen &&
       request.method() === "PATCH" &&
-      (request.postDataJSON() as { archived?: boolean } | null)?.archived === true
+      archivePatchSchema.parse(request.postDataJSON())?.archived === true
     ) {
       await held;
     }
     await route.continue();
   };
-  void page.route(matchUrl, holdPatch);
+  await page.route(matchUrl, holdPatch);
   return { release: releaseHold };
 }
 
@@ -190,7 +215,7 @@ test("archive persists collaborative body then restores after unarchive", async 
   await expect
     .poll(async () => {
       const res = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${task.id}`);
-      const json = await res.json();
+      const json = bodySchema.parse(await res.json());
       return JSON.stringify(json.contentJson);
     })
     .toContain("한글 본문");
@@ -218,7 +243,7 @@ test("archive holds editor read-only while persist and archive PATCH are in flig
   const wire = attachCollabWire(page);
   await ensureSetup(page);
   const { wsId, task, bodyText } = await openEditableTask(page, wire, "ZT702");
-  const patchHold = holdArchivePatch(page, wsId, task.id);
+  const patchHold = await holdArchivePatch(page, wsId, task.id);
   const editor = page.getByTestId("task-body").locator(".fvoci-editor .ProseMirror");
   const archiveButton = page.getByRole("button", { name: "보관", exact: true });
 
@@ -226,7 +251,7 @@ test("archive holds editor read-only while persist and archive PATCH are in flig
     (request) =>
       request.method() === "PATCH" &&
       request.url().includes(`/tasks/${task.id}`) &&
-      (request.postDataJSON() as { archived?: boolean } | null)?.archived === true,
+      archivePatchSchema.parse(request.postDataJSON())?.archived === true,
   );
   const archivePatchDone = page.waitForResponse(
     (response) =>
@@ -258,7 +283,7 @@ test("archive holds editor read-only while persist and archive PATCH are in flig
 test("failed archive persist shows error, keeps task active and restores editing", async ({
   page,
 }) => {
-  const persistHold = installPersistAckHold(page);
+  const persistHold = await installPersistAckHold(page);
   await ensureSetup(page);
   const wire = attachCollabWire(page);
   const { wsId, task, bodyText } = await openEditableTask(page, wire, "ZT703");
@@ -273,12 +298,28 @@ test("failed archive persist shows error, keeps task active and restores editing
   await expect(page.getByText("보관된 태스크입니다")).toHaveCount(0);
   expect((await taskJson(page, wsId, task.id)).archivedAt).toBeNull();
 
-  persistHold.release();
+  await persistHold.release();
   await page.reload();
-  await expect(page.getByTestId("task-body").locator('[data-collab-status="connected"]')).toBeVisible({
+  await expect(
+    page.getByTestId("task-body").locator('[data-collab-status="connected"]'),
+  ).toBeVisible({
     timeout: 30_000,
   });
   await archiveButton.click();
   await expect(page.getByText("보관된 태스크입니다")).toBeVisible({ timeout: 15_000 });
   await expect(editor).toContainText(bodyText);
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: (() => void) | undefined;
+  const promise = new Promise<void>((fulfill) => {
+    resolve = fulfill;
+  });
+  assert(resolve, "Promise executor must initialize its resolver");
+  return { promise, resolve };
+}

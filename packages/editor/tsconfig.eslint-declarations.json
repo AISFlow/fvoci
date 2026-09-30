@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.vue.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "incremental": false,
+    "composite": false
+  },
+  "include": ["src/vue/**/*.vue"],
+  "exclude": []
+}

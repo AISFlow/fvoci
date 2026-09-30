@@ -1,5 +1,11 @@
 import type { HwpExportFormat } from "./hwp-edit.ts";
-import { clampPage, decodePageText, HWP_MAX_BYTES, pageOfChunk, visiblePageCount } from "./hwp-page.ts";
+import {
+  clampPage,
+  decodePageText,
+  HWP_MAX_BYTES,
+  pageOfChunk,
+  visiblePageCount,
+} from "./hwp-page.ts";
 import { prepareHwpBytes } from "./hwp-package.ts";
 import { parseRhwpMutation, rhwpMutationChanged } from "./rhwp-mutation.ts";
 
@@ -94,7 +100,10 @@ export function createHwpSession(api: RhwpApi): (request: HwpRequest) => Promise
     if (request.op === "startPage") {
       let page = 0;
       try {
-        const pages = Array.from({ length: pageCount }, (_, index) => decodePageText(doc!.getPageText(index)));
+        const currentDoc = doc;
+        const pages = Array.from({ length: pageCount }, (_, index) =>
+          decodePageText(currentDoc.getPageText(index)),
+        );
         page = clampPage(pageOfChunk(pages, request.chunk), pageCount);
       } catch {
         // No page text: open the first page.
@@ -102,14 +111,16 @@ export function createHwpSession(api: RhwpApi): (request: HwpRequest) => Promise
       return { id, ok: true, op: "startPage", page };
     }
     if (request.op === "replace") {
-      if (request.find.length === 0) return { id, ok: true, op: "replace", outcome: "unchanged", pageCount };
+      if (request.find.length === 0)
+        return { id, ok: true, op: "replace", outcome: "unchanged", pageCount };
       try {
         const raw = request.all
           ? doc.replaceAll(request.find, request.replacement, false)
           : doc.replaceOne(request.find, request.replacement, false);
         const result = parseRhwpMutation(raw);
         if (!result.ok) return { id, ok: true, op: "replace", outcome: "rejected", pageCount };
-        if (!rhwpMutationChanged(result)) return { id, ok: true, op: "replace", outcome: "unchanged", pageCount };
+        if (!rhwpMutationChanged(result))
+          return { id, ok: true, op: "replace", outcome: "unchanged", pageCount };
         pageCount = visiblePageCount(doc.pageCount());
         return { id, ok: true, op: "replace", outcome: "changed", pageCount };
       } catch {

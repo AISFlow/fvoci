@@ -3,8 +3,19 @@ import { FvociEditor, type TiptapEditor } from "@fvoci/editor/vue";
 import "@fvoci/editor/styles.css";
 import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
+import UCollapsible from "@nuxt/ui/components/Collapsible.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, type FunctionalComponent, h, markRaw, ref, shallowRef, watch } from "vue";
+import {
+  computed,
+  type FunctionalComponent,
+  h,
+  markRaw,
+  nextTick,
+  onScopeDispose,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import { RouterLink } from "vue-router";
 import { bindBlockPresence, isBlockPresenceAwareness } from "@/features/documents/block-presence";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
@@ -25,9 +36,9 @@ import { collabRoomName, useCollabRoom } from "../../collab/useCollabRoom";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
 import CommentPanel from "../comments/CommentPanel.vue";
-import EditorBubble from "../editor/EditorBubble.vue";
 import EditorControls from "../editor/EditorControls.vue";
-import EditorToolbar from "../editor/EditorToolbar.vue";
+import TemplateToolbar from "../editor/TemplateToolbar.vue";
+import { useEditorEntities } from "../editor/useEditorEntities";
 import UnfurlCard from "../editor/UnfurlCard.vue";
 import CollabPresence from "./CollabPresence.vue";
 import DocumentAiMenu from "./DocumentAiMenu.vue";
@@ -60,8 +71,6 @@ const me = useQuery(meQuery);
 const metaQuery = useQuery(() => documentMetaQuery(props.workspaceId, props.documentId));
 const ancestors = useQuery(() => ancestorsQuery(props.workspaceId, props.documentId));
 const tree = useQuery(() => treeQuery(props.workspaceId));
-const metaKey = computed(() => ["document", props.workspaceId, props.documentId]);
-const treeKey = computed(() => ["tree", props.workspaceId]);
 const scope = computed<DocumentScope>(() => ({
   workspaceId: props.workspaceId,
   documentId: props.documentId,
@@ -72,10 +81,53 @@ const collabUser = computed(() => {
   const data = me.data.value;
   return data ? collabUserOf(data.userId, formatPersonName(data, data.locale)) : null;
 });
-const room = useCollabRoom(collabRoomName(props.workspaceId, "document", props.documentId), collabUser);
+const room = useCollabRoom(
+  collabRoomName(props.workspaceId, "document", props.documentId),
+  collabUser,
+);
 const session = room.session;
+const { mentionItems, entityResolver } = useEditorEntities(
+  () => props.workspaceId,
+  () =>
+    `${props.documentId}:${String(session.value?.generation ?? "")}:${collabUser.value?.id ?? ""}:${String(session.value?.status === "unauthorized")}`,
+);
+
+const optionsOpen = ref(false);
+const optionsButton = ref<{ $el: HTMLElement } | null>(null);
+function onOptionsKeydown(event: KeyboardEvent): void {
+  if (event.key !== "Escape" || !optionsOpen.value) return;
+  event.preventDefault();
+  optionsOpen.value = false;
+  optionsButton.value?.$el.focus();
+}
 
 const title = ref("");
+const titleInput = ref<HTMLTextAreaElement | null>(null);
+// Keep long titles readable at the current width, including readonly titles.
+watch(
+  [titleInput, title],
+  async ([input], _previous, onCleanup) => {
+    if (!input) return;
+    let width = 0;
+    const resize = () => {
+      input.style.height = "auto";
+      input.style.height = `${String(input.scrollHeight + 2)}px`;
+    };
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry && entry.contentRect.width !== width) {
+        width = entry.contentRect.width;
+        resize();
+      }
+    });
+    observer.observe(input);
+    onCleanup(() => {
+      observer.disconnect();
+    });
+    await nextTick();
+    if (titleInput.value === input) resize();
+  },
+  { flush: "post" },
+);
 const icon = ref("");
 const status = ref<string>("draft");
 const saveError = ref<string | null>(null);
@@ -111,50 +163,101 @@ watch(
   },
 );
 
-const trashDoc = useMutation({
-  mutationFn: () => trashDocument(scope.value),
-  onSuccess: () => {
-    lifecycleError.value = null;
-    // The trash list is the React app's page.
-    window.location.assign(trashPath(props.slug));
+type DocumentOperation = { scope: DocumentScope; slug: string; lifecycle: number };
+let operationLifecycle = 0;
+// The computed session is a snapshot: peers, pending and ACKs replace it.
+// Only the actual room/provider generation, actor and route retire operations.
+watch(
+  [
+    () => scope.value.workspaceId,
+    () => scope.value.documentId,
+    () => scope.value.projectId,
+    () => props.slug,
+    () => collabUser.value?.id,
+    () => session.value?.doc,
+    () => session.value?.provider,
+    () => session.value?.generation,
+  ],
+  () => {
+    operationLifecycle += 1;
   },
-  onError: (error: unknown) => {
-    lifecycleError.value = loadErrorMessage(error);
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  operationLifecycle += 1;
+});
+function captureOperation(): DocumentOperation {
+  return { scope: { ...scope.value }, slug: props.slug, lifecycle: operationLifecycle };
+}
+function currentOperation(operation: DocumentOperation): boolean {
+  return operation.lifecycle === operationLifecycle && session.value !== null;
+}
+
+const trashDoc = useMutation({
+  mutationFn: (operation: DocumentOperation) => trashDocument(operation.scope),
+  onSuccess: async (_result, operation) => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["projects", operation.scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", operation.scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+    ]);
+    if (!currentOperation(operation)) return;
+    lifecycleError.value = null;
+    window.location.assign(trashPath(operation.slug));
+  },
+  onError: (error: unknown, operation) => {
+    if (currentOperation(operation)) lifecycleError.value = loadErrorMessage(error);
   },
 });
 
 const moveDoc = useMutation({
-  mutationFn: (newParentId: string) => moveDocument(scope.value, newParentId),
-  onSuccess: async () => {
+  mutationFn: (operation: DocumentOperation & { newParentId: string }) =>
+    moveDocument(operation.scope, operation.newParentId),
+  onSuccess: async (_result, operation) => {
+    const { workspaceId, documentId } = operation.scope;
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["tree", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["document", workspaceId, documentId] }),
+      queryClient.invalidateQueries({ queryKey: ["ancestors", workspaceId, documentId] }),
+    ]);
+    if (!currentOperation(operation)) return;
     lifecycleError.value = null;
     moveParentId.value = "";
-    await queryClient.invalidateQueries({ queryKey: treeKey.value });
-    await queryClient.invalidateQueries({ queryKey: metaKey.value });
-    await queryClient.invalidateQueries({ queryKey: ["ancestors", props.workspaceId, props.documentId] });
   },
-  onError: (error: unknown) => {
-    lifecycleError.value = loadErrorMessage(error);
+  onError: (error: unknown, operation) => {
+    if (currentOperation(operation)) lifecycleError.value = loadErrorMessage(error);
   },
 });
+
+function move(newParentId: string): void {
+  moveDoc.mutate({ ...captureOperation(), newParentId });
+}
 
 const patchMeta = useMutation({
-  mutationFn: (body: PatchDocumentBody) => patchDocument(scope.value, body),
-  onSuccess: async () => {
-    saveError.value = null;
+  mutationFn: (operation: DocumentOperation & { body: PatchDocumentBody }) =>
+    patchDocument(operation.scope, operation.body),
+  onSuccess: async (_result, operation) => {
+    const { workspaceId, documentId } = operation.scope;
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: metaKey.value }),
-      queryClient.invalidateQueries({ queryKey: treeKey.value }),
+      queryClient.invalidateQueries({ queryKey: ["document", workspaceId, documentId] }),
+      queryClient.invalidateQueries({ queryKey: ["tree", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", workspaceId] }),
     ]);
+    if (currentOperation(operation)) saveError.value = null;
   },
-  onError: (error: unknown) => {
-    saveError.value = loadErrorMessage(error);
+  onError: (error: unknown, operation) => {
+    if (currentOperation(operation)) saveError.value = loadErrorMessage(error);
   },
 });
 
-const notFound = computed(() => metaQuery.error.value instanceof ProblemError && metaQuery.error.value.status === 404);
+const notFound = computed(
+  () => metaQuery.error.value instanceof ProblemError && metaQuery.error.value.status === 404,
+);
 const meta = computed(() => metaQuery.data.value);
 const displayRef = computed(() => (meta.value ? wikiDisplayId(meta.value.number) : ""));
-const treeNode = computed(() => tree.data.value?.items.find((node) => node.id === props.documentId));
 const saving = computed(() => patchMeta.isPending.value);
 const archived = computed(() => meta.value?.status === "archived");
 const readOnly = computed(() => archived.value || (session.value?.readOnly ?? false));
@@ -162,7 +265,11 @@ const ready = computed(() => Boolean(session.value?.synced && collabUser.value))
 const refusalNote = computed(() => collabRefusalNote(session.value?.status, ready.value));
 const badge = computed(() =>
   session.value
-    ? collabBadge(session.value.status, session.value.pending || persisting.value, session.value.durableSaved)
+    ? collabBadge(
+        session.value.status,
+        session.value.pending || persisting.value,
+        session.value.durableSaved,
+      )
     : null,
 );
 const canPersist = computed(
@@ -190,10 +297,11 @@ async function saveTitle(): Promise<void> {
   if (!current) return;
   const next = title.value.trim();
   if (!next || next === current.title) return;
+  const operation = { ...captureOperation(), body: { title: next } };
   try {
-    await patchMeta.mutateAsync({ title: next });
+    await patchMeta.mutateAsync(operation);
   } catch {
-    title.value = current.title;
+    if (currentOperation(operation)) title.value = current.title;
   }
 }
 
@@ -201,10 +309,11 @@ async function saveIcon(): Promise<void> {
   const current = meta.value?.icon ?? "";
   if (icon.value === current) return;
   const nextIcon = icon.value.trim() === "" ? null : icon.value.trim();
+  const operation = { ...captureOperation(), body: { icon: nextIcon } };
   try {
-    await patchMeta.mutateAsync({ icon: nextIcon });
+    await patchMeta.mutateAsync(operation);
   } catch {
-    icon.value = current;
+    if (currentOperation(operation)) icon.value = current;
   }
 }
 
@@ -212,17 +321,18 @@ async function saveStatus(next: string): Promise<void> {
   const current = meta.value;
   if (!current || next === current.status) return;
   const previous = current.status;
+  const operation = { ...captureOperation(), body: { status: next } };
   try {
-    await patchMeta.mutateAsync({ status: next });
+    await patchMeta.mutateAsync(operation);
   } catch {
-    status.value = previous;
+    if (currentOperation(operation)) status.value = previous;
   }
 }
 
-function onStatusChange(event: Event): void {
+async function onStatusChange(event: Event): Promise<void> {
   const next = (event.target as HTMLSelectElement).value;
   status.value = next;
-  void saveStatus(next);
+  await saveStatus(next);
 }
 
 /** The Save button: flush, then wait for the persist ACK that matches this edit prefix. */
@@ -243,28 +353,43 @@ async function persistBody(): Promise<void> {
 }
 
 function onTitleFocus(): void {
-  if (!readOnly.value && isBlockPresenceAwareness(awareness.value)) setTitleEditing(awareness.value, true);
+  if (!readOnly.value && isBlockPresenceAwareness(awareness.value))
+    setTitleEditing(awareness.value, true);
 }
 
-function onTitleBlur(): void {
+async function onTitleBlur(): Promise<void> {
   if (isBlockPresenceAwareness(awareness.value)) setTitleEditing(awareness.value, false);
-  void saveTitle();
+  await saveTitle();
+}
+
+function onTitleInput(event: Event): void {
+  const input = event.target as HTMLTextAreaElement & { composing?: boolean };
+  if (input.composing || (event as InputEvent).isComposing) return;
+  // Match the previous single-line input's paste behavior.
+  title.value = input.value.replace(/[\r\n]/g, "");
 }
 
 function onTitleKeydown(event: KeyboardEvent): void {
-  if (event.key === "Enter" && !event.isComposing) (event.target as HTMLInputElement).blur();
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    (event.target as HTMLTextAreaElement).blur();
+  }
 }
 
 function trash(): void {
   if (!window.confirm(`${t("doc.trash.confirm.title")}\n${t("doc.trash.confirm.body")}`)) return;
-  trashDoc.mutate();
+  trashDoc.mutate(captureOperation());
 }
 
 function flashBlock(id: string): void {
-  const element = document.querySelector<HTMLElement>(`.fvoci-editor [data-id="${CSS.escape(id)}"]`);
+  const element = document.querySelector<HTMLElement>(
+    `.fvoci-editor [data-id="${CSS.escape(id)}"]`,
+  );
   if (!element) return;
   element.setAttribute("data-afn-flash", "");
-  window.setTimeout(() => element.removeAttribute("data-afn-flash"), 800);
+  window.setTimeout(() => {
+    element.removeAttribute("data-afn-flash");
+  }, 800);
 }
 </script>
 
@@ -273,7 +398,11 @@ function flashBlock(id: string): void {
     <p>{{ t("doc.error.notFound") }}</p>
     <a :href="wikiPath(slug)">{{ t("nav.toWiki") }}</a>
   </div>
-  <QueryError v-else-if="metaQuery.isError.value" :message="loadErrorMessage(metaQuery.error.value)" @retry="metaQuery.refetch()" />
+  <QueryError
+    v-else-if="metaQuery.isError.value"
+    :message="loadErrorMessage(metaQuery.error.value)"
+    @retry="metaQuery.refetch()"
+  />
   <QueryLoading v-else-if="!meta" />
   <article v-else class="document-page" :data-testid="`document-${displayRef}`">
     <header class="document-page__head">
@@ -281,14 +410,18 @@ function flashBlock(id: string): void {
         <a :href="wikiPath(slug)">{{ t("nav.wiki") }}</a>
         <span v-for="item in ancestors.data.value?.items ?? []" :key="item.id">
           <span aria-hidden="true"> / </span>
-          <RouterLink :to="documentPath(slug, wikiDisplayId(item.number))">{{ item.title }}</RouterLink>
+          <RouterLink :to="documentPath(slug, wikiDisplayId(item.number))">{{
+            item.title
+          }}</RouterLink>
         </span>
         <span aria-hidden="true"> / </span>
         <span>{{ displayRef }}</span>
       </nav>
       <div class="document-page__meta">
-        <input
+        <textarea
+          ref="titleInput"
           v-model="title"
+          rows="1"
           class="document-page__title"
           :aria-label="t('doc.title')"
           :maxlength="TITLE_MAX"
@@ -296,80 +429,33 @@ function flashBlock(id: string): void {
           @focus="onTitleFocus"
           @blur="onTitleBlur"
           @keydown="onTitleKeydown"
+          @input="onTitleInput"
         />
         <div class="document-page__fields">
-          <div class="document-page__field">
-            <label for="document-icon" class="text-sm font-medium">{{ t("project.icon") }}</label>
-            <input
-              id="document-icon"
-              v-model="icon"
-              class="document-page__field-input"
-              :maxlength="ICON_MAX"
-              :disabled="saving || readOnly"
-              @blur="saveIcon"
-            />
-          </div>
-          <div class="document-page__field">
-            <label for="document-status" class="text-sm font-medium">{{ t("doc.status.a11y") }}</label>
-            <select
-              id="document-status"
-              class="document-page__field-select"
-              :value="status"
-              :aria-label="t('doc.status.a11y')"
-              :disabled="saving || readOnly"
-              @change="onStatusChange"
-            >
-              <option v-for="value in STATUSES" :key="value" :value="value">{{ t(STATUS_LABEL[value]) }}</option>
-            </select>
-          </div>
           <span class="document-page__badge">{{ displayRef }}</span>
-          <span v-if="treeNode?.status === 'draft'" class="document-page__badge">{{ t("doc.status.draft") }}</span>
+          <span class="document-page__badge">{{
+            t(
+              status === "published"
+                ? "doc.status.published"
+                : status === "archived"
+                  ? "doc.status.archived"
+                  : "doc.status.draft",
+            )
+          }}</span>
           <span v-if="readOnly" class="document-page__badge">{{ t("doc.readOnly") }}</span>
           <StarToggle :workspace-id="workspaceId" type="document" :target-id="documentId" />
-          <ShareDialog v-if="!readOnly" :workspace-id="workspaceId" :target="{ documentId, projectId: null }" />
+          <ShareDialog
+            v-if="!readOnly"
+            :workspace-id="workspaceId"
+            :target="{ documentId, projectId: null }"
+          />
         </div>
-        <DocumentTagsBar :workspace-id="workspaceId" :document-id="documentId" :project-id="null" :read-only="readOnly" />
-        <DocumentExportMenu
+        <DocumentTagsBar
           :workspace-id="workspaceId"
           :document-id="documentId"
-          :title="title"
           :project-id="null"
-          :persist-now="canPersist ? persistBody : undefined"
+          :read-only="readOnly"
         />
-        <div v-if="!readOnly" class="document-page__lifecycle" :aria-label="t('doc.move.title')">
-          <label class="document-page__field">
-            <span class="sr-only">{{ t("doc.move.parentLabel") }}</span>
-            <select
-              v-model="moveParentId"
-              class="document-page__field-select"
-              :aria-label="t('doc.move.parentLabel')"
-              :disabled="moveDoc.isPending.value || trashDoc.isPending.value"
-            >
-              <option value="">{{ t("doc.move.parentLabel") }}</option>
-              <option v-for="node in moveTargets" :key="node.id" :value="node.id">{{ node.title }}</option>
-            </select>
-          </label>
-          <UButton
-            size="sm"
-            variant="outline"
-            color="neutral"
-            :disabled="!moveParentId || moveDoc.isPending.value || trashDoc.isPending.value"
-            @click="moveParentId && moveDoc.mutate(moveParentId)"
-          >
-            {{ moveDoc.isPending.value ? t("doc.move.pending") : t("doc.move.submit") }}
-          </UButton>
-          <UButton
-            size="sm"
-            variant="outline"
-            color="neutral"
-            :disabled="trashDoc.isPending.value || moveDoc.isPending.value"
-            :aria-label="t('doc.trash.action')"
-            @click="trash"
-          >
-            {{ trashDoc.isPending.value ? t("doc.trash.pending") : t("doc.trash.action") }}
-          </UButton>
-        </div>
-        <p v-if="lifecycleError" role="alert" class="document-page__error">{{ lifecycleError }}</p>
         <div class="document-page__collab">
           <span
             v-if="badge"
@@ -380,7 +466,11 @@ function flashBlock(id: string): void {
           >
             {{ t(badge.label) }}
           </span>
-          <span v-else class="document-page__collab-status document-page__collab-status--wait" data-collab-persisted="false">
+          <span
+            v-else
+            class="document-page__collab-status document-page__collab-status--wait"
+            data-collab-persisted="false"
+          >
             {{ t("doc.collab.connecting") }}
           </span>
           <UButton size="sm" :disabled="!canPersist" @click="persistBody().catch(() => undefined)">
@@ -395,11 +485,113 @@ function flashBlock(id: string): void {
             :persist-now="canPersist ? persistBody : undefined"
           />
         </div>
+        <UCollapsible
+          v-model:open="optionsOpen"
+          :unmount-on-hide="false"
+          class="document-page__options"
+          :ui="{ content: 'data-[state=open]:animate-none data-[state=closed]:animate-none' }"
+          @keydown="onOptionsKeydown"
+        >
+          <UButton
+            ref="optionsButton"
+            size="sm"
+            variant="outline"
+            color="neutral"
+            :trailing-icon="optionsOpen ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'"
+            >{{ t("doc.options") }}</UButton
+          >
+          <template #content>
+            <div class="document-page__options-content">
+              <div class="document-page__fields">
+                <div class="document-page__field">
+                  <label for="document-icon" class="text-sm font-medium">{{
+                    t("project.icon")
+                  }}</label>
+                  <input
+                    id="document-icon"
+                    v-model="icon"
+                    class="document-page__field-input"
+                    :maxlength="ICON_MAX"
+                    :disabled="saving || readOnly"
+                    @blur="saveIcon"
+                  />
+                </div>
+                <div class="document-page__field">
+                  <label for="document-status" class="text-sm font-medium">{{
+                    t("doc.status.a11y")
+                  }}</label>
+                  <select
+                    id="document-status"
+                    class="document-page__field-select"
+                    :value="status"
+                    :aria-label="t('doc.status.a11y')"
+                    :disabled="saving || readOnly"
+                    @change="onStatusChange"
+                  >
+                    <option v-for="value in STATUSES" :key="value" :value="value">{{
+                      t(STATUS_LABEL[value])
+                    }}</option>
+                  </select>
+                </div>
+              </div>
+              <DocumentExportMenu
+                :workspace-id="workspaceId"
+                :document-id="documentId"
+                :title="title"
+                :project-id="null"
+                :persist-now="canPersist ? persistBody : undefined"
+              />
+              <div
+                v-if="!readOnly"
+                class="document-page__lifecycle"
+                :aria-label="t('doc.move.title')"
+              >
+                <label class="document-page__field">
+                  <span class="sr-only">{{ t("doc.move.parentLabel") }}</span>
+                  <select
+                    v-model="moveParentId"
+                    class="document-page__field-select"
+                    :aria-label="t('doc.move.parentLabel')"
+                    :disabled="moveDoc.isPending.value || trashDoc.isPending.value"
+                  >
+                    <option value="">{{ t("doc.move.parentLabel") }}</option>
+                    <option v-for="node in moveTargets" :key="node.id" :value="node.id">{{
+                      node.title
+                    }}</option>
+                  </select>
+                </label>
+                <UButton
+                  size="sm"
+                  variant="outline"
+                  color="neutral"
+                  :disabled="!moveParentId || moveDoc.isPending.value || trashDoc.isPending.value"
+                  @click="moveParentId && move(moveParentId)"
+                >
+                  {{ moveDoc.isPending.value ? t("doc.move.pending") : t("doc.move.submit") }}
+                </UButton>
+                <UButton
+                  size="sm"
+                  variant="outline"
+                  color="neutral"
+                  :disabled="trashDoc.isPending.value || moveDoc.isPending.value"
+                  :aria-label="t('doc.trash.action')"
+                  @click="trash"
+                >
+                  {{ trashDoc.isPending.value ? t("doc.trash.pending") : t("doc.trash.action") }}
+                </UButton>
+              </div>
+            </div>
+          </template>
+        </UCollapsible>
+        <p v-if="lifecycleError" role="alert" class="document-page__error">{{ lifecycleError }}</p>
         <p v-if="saveError" role="alert" class="document-page__error">{{ saveError }}</p>
         <p v-if="persistError" role="alert" class="document-page__error">{{ persistError }}</p>
       </div>
     </header>
-    <section class="document-page__body document-page__body--editor" :aria-label="t('doc.body.a11y')">
+    <section
+      class="document-page__body document-page__body--editor"
+      :aria-label="t('doc.body.a11y')"
+    >
       <p v-if="session?.status === 'unauthorized'" class="document-page__body-note" role="alert">
         {{ t("doc.collab.unauthorized") }}
       </p>
@@ -417,15 +609,17 @@ function flashBlock(id: string): void {
         :editable="!readOnly"
         :aria-label="t('doc.body.a11y')"
         :workspace-slug="slug"
+        :mention-items="mentionItems"
+        :entity-resolver="entityResolver"
         :attachment-bridge="attachmentBridge"
         :url-embed="UrlEmbed"
         @ready="editor = $event"
       >
         <template #toolbar="{ editor: live }">
-          <EditorToolbar :editor="live" :disabled="readOnly" />
+          <TemplateToolbar :editor="live" mode="fixed" />
         </template>
         <template #bubble="{ editor: live }">
-          <EditorBubble :editor="live" />
+          <TemplateToolbar :editor="live" mode="selection" />
         </template>
         <template #controls="{ editor: live, gutter, editable }">
           <EditorControls :editor="live" :gutter="gutter" :editable="editable" />
@@ -439,7 +633,11 @@ function flashBlock(id: string): void {
       :project="null"
       :editor="ready ? editor : null"
       :insert-blocked-reason="
-        readOnly ? t('doc.readOnly') : session?.status === 'connected' ? null : t('ai.document.loading')
+        readOnly
+          ? t('doc.readOnly')
+          : session?.status === 'connected'
+            ? null
+            : t('ai.document.loading')
       "
     />
     <OriginPanel :workspace-id="workspaceId" :slug="slug" :document-id="documentId" />

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.vue.json",
+  "compilerOptions": {
+    "types": ["node", "bun"],
+    "rootDirs": ["../..", "../../node_modules/.cache/fvoci-vue-lint/types"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue", "test/**/*.ts"],
+  "exclude": ["node_modules"]
+}

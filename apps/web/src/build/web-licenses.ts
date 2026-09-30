@@ -15,7 +15,7 @@ export type BrowserLicenseSupplement = {
   source: string;
 };
 
-export type BrowserLicenseManifest = Record<string, BrowserLicenseSupplement>;
+export type BrowserLicenseManifest = Readonly<Partial<Record<string, BrowserLicenseSupplement>>>;
 
 export function hasLicenseText(text: string | undefined): boolean {
   return (text?.trim() ?? "").length > 0;
@@ -115,6 +115,7 @@ export type BundledSourceNotice = {
 export function readBundledSourceNotices(repoRoot: string): BundledSourceNotice[] {
   const files = [
     "LICENSE",
+    "apps/web/NOTICE.md",
     "packages/editor/src/fonts/NotoSansKR-OFL.txt",
     "packages/editor/src/fonts/NotoSansCJK-OFL.txt",
     "packages/editor/src/fonts/NotoEmoji-OFL.txt",

@@ -1,3 +1,4 @@
+import type { components } from "../src/generated/api";
 /**
  * Project documents on the same /collab room, persist barrier and derived body
  * as wiki documents, under project permission. Runs in the collaboration-flow
@@ -45,13 +46,14 @@ async function createPrivateProjectDoc(page: Page, key: string): Promise<Project
     data: { key, name: `${key} 협업`, visibility: "private" },
   });
   expect(projectRes.status()).toBe(201);
-  const project = await projectRes.json();
+  const project = (await projectRes.json()) as components["schemas"]["ProjectOutput"];
   const docRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/documents`,
     { data: { parentId: project.rootDocumentId, title: "프로젝트 협업 문서" } },
   );
   expect(docRes.status()).toBe(201);
-  const doc = await docRes.json();
+  const doc = (await docRes.json()) as components["schemas"]["DocumentMetaResponse"];
+  if (!doc.displayId) throw new Error("project document fixture has no displayId");
   return {
     workspaceId: wsId,
     projectId: project.id,
@@ -63,10 +65,12 @@ async function createPrivateProjectDoc(page: Page, key: string): Promise<Project
 async function memberUserId(page: Page, wsId: string, email: string): Promise<string> {
   const res = await page.request.get(`/api/v1/workspaces/${wsId}/members`);
   expect(res.ok()).toBe(true);
-  const userId = (await res.json()).items.find(
-    (item: { email: string }) => item.email.toLowerCase() === email.toLowerCase(),
+  const members = (await res.json()) as components["schemas"]["MembersResponse"];
+  const userId = members.items.find(
+    (item) => item.email.toLowerCase() === email.toLowerCase(),
   )?.userId;
   expect(userId).toBeTruthy();
+  if (!userId) throw new Error(`member fixture missing: ${email}`);
   return userId;
 }
 
@@ -85,7 +89,9 @@ test("project document edits persist, project the body, and reload", async ({ pa
   );
   expect(bodyRes.ok()).toBe(true);
   // The derived Tiptap body keeps the text and stores the emoji as an emoji node.
-  const derived = JSON.stringify((await bodyRes.json()).contentJson);
+  const derived = JSON.stringify(
+    ((await bodyRes.json()) as components["schemas"]["BodyResponse"]).contentJson,
+  );
   expect(derived).toContain("프로젝트 본문 한글");
   expect(derived).toContain('"type":"emoji"');
 

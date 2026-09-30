@@ -1,5 +1,60 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const lookupSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          kind: z.string(),
+          displayId: z.string(),
+          projectId: z.string().nullable(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const taskSchema = z
+  .object({
+    title: z.string(),
+    type: z.string(),
+    parentId: z.string().nullable(),
+    priority: z.string(),
+    dueDate: z.string().nullable(),
+    dueAt: z.string().nullable(),
+    statusId: z.string(),
+  })
+  .passthrough();
+const workflowSchema = z
+  .object({
+    id: z.string(),
+    statuses: z.array(
+      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const projectListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          rootDocumentId: z.string().nullable(),
+          taskCount: z.number(),
+          openTaskCount: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -15,21 +70,31 @@ const admin = {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = workspaceListSchema.parse(await workspacesRes.json());
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
 async function taskIdFor(page: Page, wsId: string, displayId: string): Promise<string> {
   const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/${displayId}`);
   expect(lookup.ok()).toBe(true);
-  const taskId = (await lookup.json()).items.find((item: { kind: string }) => item.kind === "task")?.id;
+  const taskId = required(
+    lookupSchema
+      .parse(await lookup.json())
+      .items.find((item: { kind: string }) => item.kind === "task"),
+  ).id;
   expect(taskId).toBeTruthy();
+  assert(taskId);
   return taskId;
 }
 
-async function taskDetail(page: Page, wsId: string, taskId: string): Promise<{
+async function taskDetail(
+  page: Page,
+  wsId: string,
+  taskId: string,
+): Promise<{
   title: string;
   type: string;
   parentId: string | null;
@@ -40,7 +105,7 @@ async function taskDetail(page: Page, wsId: string, taskId: string): Promise<{
 }> {
   const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
   expect(detailRes.ok()).toBe(true);
-  return detailRes.json();
+  return taskSchema.parse(await detailRes.json());
 }
 
 async function ensureSetup(page: Page): Promise<void> {
@@ -80,9 +145,10 @@ async function workflowStatusId(
     `/api/v1/workspaces/${workspaceIdValue}/projects/${projectId}/workflow`,
   );
   expect(res.ok()).toBe(true);
-  const body = await res.json();
+  const body = workflowSchema.parse(await res.json());
   const status = body.statuses.find((item: { category: string }) => item.category === category);
   expect(status).toBeTruthy();
+  assert(status);
   return status.id;
 }
 
@@ -114,8 +180,11 @@ test("task edit flow covers fields, hierarchy, conflicts, trash and restore", as
 
   const wsId = await workspaceId(page, admin.workspaceSlug);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
-  const project = (await projectsRes.json()).items.find((item: { key: string }) => item.key === "EDT");
+  const project = projectListSchema
+    .parse(await projectsRes.json())
+    .items.find((item: { key: string }) => item.key === "EDT");
   expect(project).toBeTruthy();
+  assert(project);
   const doneStatusId = await workflowStatusId(page, wsId, project.id, "done");
   const todoStatusId = await workflowStatusId(page, wsId, project.id, "todo");
   const parentTaskId = await taskIdFor(page, wsId, "EDT-2");
@@ -131,30 +200,39 @@ test("task edit flow covers fields, hierarchy, conflicts, trash and restore", as
   await page.getByTestId("task-edit-due-date").fill("2026-01-31");
   await page.getByTestId("task-edit-due-date").blur();
 
-  await expect.poll(async () => {
-    const detail = await taskDetail(page, wsId, taskId);
-    return `${detail.priority}:${detail.dueDate}:${detail.dueAt}`;
-  }).toBe("high:2026-01-31:null");
+  await expect
+    .poll(async () => {
+      const detail = await taskDetail(page, wsId, taskId);
+      return `${detail.priority}:${String(detail.dueDate)}:${String(detail.dueAt)}`;
+    })
+    .toBe("high:2026-01-31:null");
 
   await page.getByTestId("task-edit-type").selectOption("subtask");
   await expect(page.getByTestId("task-edit-parent")).toContainText("상위 태스크 없음");
   await page.getByTestId("task-edit-parent").click();
   await page.getByTestId("task-edit-parent-search").fill("부모 일");
-  await page.locator(".task-parent-select__panel").getByRole("option", { name: /부모 일/ }).click();
+  await page
+    .locator(".task-parent-select__panel")
+    .getByRole("option", { name: /부모 일/ })
+    .click();
   await page.getByTestId("task-edit-hierarchy-save").click();
-  await expect.poll(async () => {
-    const detail = await taskDetail(page, wsId, taskId);
-    return `${detail.type}:${detail.parentId}`;
-  }).toBe(`subtask:${parentTaskId}`);
+  await expect
+    .poll(async () => {
+      const detail = await taskDetail(page, wsId, taskId);
+      return `${detail.type}:${String(detail.parentId)}`;
+    })
+    .toBe(`subtask:${parentTaskId}`);
   await expect(page.getByTestId("task-edit-type")).toHaveValue("subtask");
 
   await page.getByTestId("task-edit-type").selectOption("task");
   await expect(page.getByTestId("task-edit-parent")).toContainText("상위 태스크 없음");
   await page.getByTestId("task-edit-hierarchy-save").click();
-  await expect.poll(async () => {
-    const detail = await taskDetail(page, wsId, taskId);
-    return `${detail.type}:${detail.parentId}`;
-  }).toBe("task:null");
+  await expect
+    .poll(async () => {
+      const detail = await taskDetail(page, wsId, taskId);
+      return `${detail.type}:${String(detail.parentId)}`;
+    })
+    .toBe("task:null");
   await expect(page.getByTestId("task-edit-type")).toHaveValue("task");
 
   const initialStatusId = (await taskDetail(page, wsId, taskId)).statusId;
@@ -182,9 +260,7 @@ test("task edit flow covers fields, hierarchy, conflicts, trash and restore", as
   const trashedGet = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
   expect(trashedGet.status()).toBe(404);
 
-  const restoreRes = await page.request.post(
-    `/api/v1/workspaces/${wsId}/tasks/${taskId}/restore`,
-  );
+  const restoreRes = await page.request.post(`/api/v1/workspaces/${wsId}/tasks/${taskId}/restore`);
   expect(restoreRes.ok()).toBe(true);
 
   await page.goto(`/w/${admin.workspaceSlug}/EDT-3`);
@@ -197,4 +273,9 @@ async function openSecondTab(context: BrowserContext, url: string): Promise<Page
   await second.goto(url);
   await expect(second.getByTestId("task-edit-title")).toBeVisible();
   return second;
+}
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
 }

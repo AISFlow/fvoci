@@ -60,7 +60,9 @@ export function isoToDatetimeLocalInTimeZone(iso: string, timeZone: string): str
   try {
     parts = new Intl.DateTimeFormat("en-US", opts).formatToParts(date);
   } catch {
-    parts = new Intl.DateTimeFormat("en-US", { ...opts, timeZone: FALLBACK_TZ }).formatToParts(date);
+    parts = new Intl.DateTimeFormat("en-US", { ...opts, timeZone: FALLBACK_TZ }).formatToParts(
+      date,
+    );
   }
   const n = (type: Intl.DateTimeFormatPartTypes): string =>
     parts.find((p) => p.type === type)?.value ?? "";
@@ -74,7 +76,9 @@ export function datetimeLocalInTimeZoneToIso(local: string, timeZone: string): s
   if (!m) return "";
   const utcMs = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]));
   const candidates = [
-    ...new Set([-86400000, 0, 86400000].map((delta) => utcMs - tzOffsetMs(utcMs + delta, timeZone))),
+    ...new Set(
+      [-86400000, 0, 86400000].map((delta) => utcMs - tzOffsetMs(utcMs + delta, timeZone)),
+    ),
   ].sort((a, b) => a - b);
   const match = candidates.find(
     (ms) => isoToDatetimeLocalInTimeZone(new Date(ms).toISOString(), timeZone) === local,

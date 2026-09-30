@@ -51,7 +51,9 @@ function mention(event: Event): void {
         @change="mention"
       >
         <option value="">{{ t("group.mention") }}</option>
-        <option v-for="group in actions.groups.value" :key="group.id" :value="group.id">{{ group.name }}</option>
+        <option v-for="group in actions.groups.value" :key="group.id" :value="group.id">{{
+          group.name
+        }}</option>
       </select>
       <UButton type="submit" size="sm" :disabled="actions.pending.value || draft.trim() === ''">
         {{ t("comment.submit") }}

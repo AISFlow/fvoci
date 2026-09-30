@@ -545,6 +545,31 @@ async fn hybrid_ranks_embedded_attachment_chunks_and_keeps_acl() {
     let first = &both["items"][0];
     assert_eq!(first["id"], cat_wiki.to_string(), "{both}");
     assert!(first["chunkNo"].is_number(), "{first}");
+    // Document tags do not grant search access to a tagged parent's semantic
+    // attachment chunks. This exercises the real hybrid path, not fallback.
+    let tag = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.document_tags (id,workspace_id,name,color) VALUES ($1,$2,'hybrid','blue')")
+        .bind(tag).bind(workspace_id).execute(&admin).await.unwrap();
+    sqlx::query("INSERT INTO fvoci.document_tag_assignments (workspace_id,document_id,tag_id) VALUES ($1,$2,$3)")
+        .bind(workspace_id).bind(wiki_id).bind(tag).execute(&admin).await.unwrap();
+    let calls_before_tag = fake.calls().len();
+    let (status, tagged) = search(
+        &app,
+        &owner_cookie,
+        workspace_id,
+        "cat",
+        &format!("mode=hybrid&tag={tag}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tagged}");
+    assert!(
+        ids_of(&tagged).is_empty(),
+        "tagged parent attachment leaked: {tagged}"
+    );
+    assert!(
+        fake.calls().len() > calls_before_tag,
+        "must execute query embedding"
+    );
     // Lexical rank 0 plus a semantic rank (0 or 1: the two cat chunks tie on cosine).
     assert!(
         first["score"].as_f64().unwrap() > 1.0 / 61.0 + 1.0 / 63.0,

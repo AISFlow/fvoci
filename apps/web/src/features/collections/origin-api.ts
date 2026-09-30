@@ -19,24 +19,36 @@ export function taskOriginsQuery(
     queryKey: ["task-origins", workspaceId, documentId ?? taskId, after] as const,
     enabled: Boolean(workspaceId && (documentId || taskId)),
     retry: false,
-    queryFn: async () =>
-      documentId
+    queryFn: async () => {
+      if (!documentId && !taskId) throw new Error("origin target is missing");
+      return documentId
         ? ensureOk(
-            await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins", {
-              params: {
-                path: { workspace_id: workspaceId, document_id: documentId },
-                query: { after: after ?? undefined, limit: 50 },
+            await api.GET(
+              "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins",
+              {
+                params: {
+                  path: { workspace_id: workspaceId, document_id: documentId },
+                  query: { after: after ?? undefined, limit: 50 },
+                },
               },
-            }),
+            ),
           )
         : ensureOk(
             await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/origin", {
               params: {
-                path: { workspace_id: workspaceId, task_id: taskId! },
+                path: {
+                  workspace_id: workspaceId,
+                  task_id:
+                    taskId ??
+                    (() => {
+                      throw new Error("task target is missing");
+                    })(),
+                },
                 query: { after: after ?? undefined, limit: 50 },
               },
             }),
-          ),
+          );
+    },
   });
 }
 
@@ -45,12 +57,14 @@ export function documentTaskProjectsQuery(workspaceId: string, documentId: strin
     queryKey: ["task-projects", workspaceId, documentId] as const,
     enabled: Boolean(documentId),
     retry: false,
-    queryFn: async () =>
-      ensureOk(
+    queryFn: async () => {
+      if (!documentId) throw new Error("document target is missing");
+      return ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-projects", {
-          params: { path: { workspace_id: workspaceId, document_id: documentId! } },
+          params: { path: { workspace_id: workspaceId, document_id: documentId } },
         }),
-      ),
+      );
+    },
   });
 }
 

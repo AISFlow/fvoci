@@ -1,4 +1,10 @@
-import { getSlides, getSlideSize, loadPresentation, type PresentationData, type SlideData } from "@office-kit/pptx";
+import {
+  getSlides,
+  getSlideSize,
+  loadPresentation,
+  type PresentationData,
+  type SlideData,
+} from "@office-kit/pptx";
 import { renderSlideToSvg } from "@office-kit/pptx-preview";
 import { boundFallbackLabels } from "./pptx-fallback.ts";
 import { PPTX_MAX_SLIDE_SVG_BYTES, PPTX_MAX_SLIDES, repackPptx } from "./pptx-limits.ts";
@@ -17,7 +23,8 @@ export type PptxDeck = {
   height: number;
 };
 
-export type PptxOpen = { status: "ok"; deck: PptxDeck } | { status: "tooLarge" } | { status: "invalid" };
+export type PptxOpen =
+  { status: "ok"; deck: PptxDeck } | { status: "tooLarge" } | { status: "invalid" };
 
 export type PptxLimits = { maxSlides: number; maxSlideSvgBytes: number };
 
@@ -52,11 +59,13 @@ export async function openPptx(
   const size = getSlideSize(pres);
   const width = size ? size.width / EMU_PER_PX : DEFAULT_SIZE.width;
   const height = size ? size.height / EMU_PER_PX : DEFAULT_SIZE.height;
-  if (!(width > 0 && height > 0 && Number.isFinite(width) && Number.isFinite(height))) return { status: "invalid" };
+  if (!(width > 0 && height > 0 && Number.isFinite(width) && Number.isFinite(height)))
+    return { status: "invalid" };
   return { status: "ok", deck: { pres, slides, width, height } };
 }
 
-export type SlideSvg = { status: "ok"; svg: string } | { status: "tooLarge" } | { status: "failed" };
+export type SlideSvg =
+  { status: "ok"; svg: string } | { status: "tooLarge" } | { status: "failed" };
 
 /**
  * One slide as the renderer's SVG markup (source `renderSlideToSvg`, browser
@@ -66,7 +75,11 @@ export type SlideSvg = { status: "ok"; svg: string } | { status: "tooLarge" } | 
  * in a worker (`pptx-worker.ts`) with a wall-clock bound. Placeholder labels
  * are clipped to their own box (`pptx-fallback.ts`).
  */
-export function renderSlide(deck: PptxDeck, index: number, limits: PptxLimits = PPTX_LIMITS): SlideSvg {
+export function renderSlide(
+  deck: PptxDeck,
+  index: number,
+  limits: PptxLimits = PPTX_LIMITS,
+): SlideSvg {
   const slide = deck.slides[index];
   if (!slide) return { status: "failed" };
   let svg: string;
@@ -85,7 +98,11 @@ export function renderSlide(deck: PptxDeck, index: number, limits: PptxLimits = 
  * One slide as the page may show it: the renderer's SVG wrapped as an image
  * in the fixed outer template of `pptx-svg.ts`.
  */
-export function renderSlideImage(deck: PptxDeck, index: number, limits: PptxLimits = PPTX_LIMITS): SlideImageSvg {
+export function renderSlideImage(
+  deck: PptxDeck,
+  index: number,
+  limits: PptxLimits = PPTX_LIMITS,
+): SlideImageSvg {
   const rendered = renderSlide(deck, index, limits);
   if (rendered.status !== "ok") return rendered;
   return slideImageSvg(rendered.svg, deck.width, deck.height, limits.maxSlideSvgBytes);

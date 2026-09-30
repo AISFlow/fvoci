@@ -9,7 +9,7 @@ import {
   type Locator,
   type Page,
 } from "@playwright/test";
-import { createE2eUser, login } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login } from "./helpers";
 
 export const admin = {
   email: "Admin@Example.COM",
@@ -34,7 +34,9 @@ export function watchIconRequests(page: Page): string[] {
   const hits: string[] = [];
   page.on("request", (request) => {
     const host = new URL(request.url()).hostname;
-    if (ICON_API_HOSTS.includes(host)) hits.push(request.url());
+    if (ICON_API_HOSTS.includes(host)) {
+      hits.push(request.url());
+    }
   });
   return hits;
 }
@@ -42,6 +44,7 @@ export function watchIconRequests(page: Page): string[] {
 /** First run of the group: the setup form creates the admin and the workspace
  * (true); later runs sign in (false). */
 export async function ensureSetup(page: Page): Promise<boolean> {
+  let created = false;
   await page.goto("/");
   await expect(
     page
@@ -57,16 +60,20 @@ export async function ensureSetup(page: Page): Promise<boolean> {
     await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
-    await expect(page).toHaveURL(/\/$/);
-    return true;
+    created = true;
+  } else {
+    if (
+      page.url().includes("/login") ||
+      (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
+    ) {
+      await login(page, admin.email, admin.password);
+    }
   }
-  if (
-    page.url().includes("/login") ||
-    (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
-  ) {
-    await login(page, admin.email, admin.password);
-  }
-  return false;
+  // Setup starts at '/', then may cross Vue /login before returning home.
+  // Do not close the setup context until authenticated home has rendered.
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+  return created;
 }
 
 /** The instance, its admin and a workspace member, made on the group's
@@ -74,7 +81,9 @@ export async function ensureSetup(page: Page): Promise<boolean> {
 export async function setupInstance(browser: Browser, baseURL: string | undefined): Promise<void> {
   const context = await browser.newContext({ baseURL });
   try {
-    if (!(await ensureSetup(await context.newPage()))) return;
+    if (!(await ensureSetup(await context.newPage()))) {
+      return;
+    }
     createE2eUser(member.email, member.password, member.givenName, {
       familyName: member.familyName,
       workspaceSlug: admin.workspaceSlug,
@@ -88,9 +97,17 @@ export async function setupInstance(browser: Browser, baseURL: string | undefine
 export async function newSignedInPage(
   browser: Browser,
   baseURL: string | undefined,
-  who: { email: string; password: string },
-  options: { permissions?: string[] } = {},
-): Promise<{ context: BrowserContext; page: Page }> {
+  who: {
+    email: string;
+    password: string;
+  },
+  options: {
+    permissions?: string[];
+  } = {},
+): Promise<{
+  context: BrowserContext;
+  page: Page;
+}> {
   const context = await browser.newContext({ baseURL, permissions: options.permissions ?? [] });
   const page = await context.newPage();
   await login(page, who.email, who.password);
@@ -100,38 +117,56 @@ export async function newSignedInPage(
 export async function workspaceId(request: APIRequestContext): Promise<string> {
   const res = await request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const workspace = (await res.json()).items.find((item: { slug: string }) => item.slug === admin.workspaceSlug);
+  const workspace = (await readJson(res, flowSchemas.workspaces)).items.find(
+    (item: { slug: string }) => item.slug === admin.workspaceSlug,
+  );
+  if (workspace === undefined) throw new Error("Missing fixture value: workspace");
   expect(workspace).toBeTruthy();
   return workspace.id;
 }
-
-export type WikiDoc = { id: string; number: number; path: string };
-
+export type WikiDoc = {
+  id: string;
+  number: number;
+  path: string;
+};
 export async function createDoc(
   request: APIRequestContext,
   wsId: string,
   title: string,
-  body?: { markdown: string } | { json: unknown },
+  body?:
+    | {
+        markdown: string;
+      }
+    | {
+        json: unknown;
+      },
 ): Promise<WikiDoc> {
   const res = await request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: null, title },
   });
   expect(res.status(), await res.text()).toBe(201);
-  const doc = (await res.json()) as { id: string; number: number };
+  const doc = (await readJson(res, flowSchemas.document)) as {
+    id: string;
+    number: number;
+  };
   if (body !== undefined) {
     const put = await request.put(`/api/v1/workspaces/${wsId}/documents/${doc.id}/body`, {
       data: "markdown" in body ? { contentMd: body.markdown } : { contentJson: body.json },
     });
     expect(put.ok(), await put.text()).toBe(true);
   }
-  return { ...doc, path: `/w/${admin.workspaceSlug}/WIKI-${doc.number}` };
+  return { ...doc, path: `/w/${admin.workspaceSlug}/WIKI-${String(doc.number)}` };
 }
 
 /** The saved body (REST), as Tiptap JSON. */
-export async function savedBody(request: APIRequestContext, wsId: string, docId: string): Promise<TiptapNode> {
+export async function savedBody(
+  request: APIRequestContext,
+  wsId: string,
+  docId: string,
+): Promise<TiptapNode> {
   const res = await request.get(`/api/v1/workspaces/${wsId}/documents/${docId}/body`);
   expect(res.ok()).toBe(true);
-  return (await res.json()).contentJson as TiptapNode;
+  return (await readJson(res, flowSchemas.body)).contentJson as TiptapNode;
 }
 
 export type TiptapNode = {
@@ -139,7 +174,10 @@ export type TiptapNode = {
   attrs?: Record<string, unknown>;
   content?: TiptapNode[];
   text?: string;
-  marks?: { type: string; attrs?: Record<string, unknown> }[];
+  marks?: {
+    type: string;
+    attrs?: Record<string, unknown>;
+  }[];
 };
 
 export function editorOf(page: Page): Locator {
@@ -149,7 +187,7 @@ export function editorOf(page: Page): Locator {
 export async function openDoc(page: Page, path: string): Promise<Locator> {
   const navigation = await page.goto(path);
   expect(navigation?.status()).toBe(200);
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   const editor = editorOf(page);
   await expect(editor).toBeVisible();
   return editor;
@@ -166,14 +204,18 @@ export async function blockTexts(page: Page): Promise<string[]> {
             : NodeFilter.FILTER_ACCEPT,
       });
       let text = "";
-      while (walker.nextNode()) text += walker.currentNode.textContent ?? "";
+      while (walker.nextNode()) {
+        const content = walker.currentNode.textContent;
+        if (content === null) throw new Error("Text walker must visit text nodes");
+        text += content;
+      }
       return text;
     }),
   );
 }
 
 export async function expectBlocks(page: Page, expected: string[]): Promise<void> {
-  await expect.poll(() => blockTexts(page), { timeout: 15_000 }).toEqual(expected);
+  await expect.poll(() => blockTexts(page), { timeout: 15000 }).toEqual(expected);
 }
 
 /** Top-level block `index` of the editor. */
@@ -190,16 +232,20 @@ export async function caretAtEndOf(page: Page, index: number): Promise<void> {
 /** The Save button: flush, then the persist ACK. */
 export async function save(page: Page): Promise<void> {
   await page.getByRole("button", { name: "저장", exact: true }).click();
-  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15000 });
 }
 
 /** The element that has focus: its tag, role and accessible label, or "body". */
 export async function focused(page: Page): Promise<string> {
   return page.evaluate(() => {
     const active = document.activeElement;
-    if (!active || active === document.body) return "body";
-    if (active.closest(".ProseMirror")) return "editor";
-    const label = active.getAttribute("aria-label") ?? active.textContent?.trim() ?? "";
+    if (!active || active === document.body) {
+      return "body";
+    }
+    if (active.closest(".ProseMirror")) {
+      return "editor";
+    }
+    const label = active.getAttribute("aria-label") ?? active.textContent.trim();
     return `${active.getAttribute("role") ?? active.tagName.toLowerCase()}:${label}`;
   });
 }

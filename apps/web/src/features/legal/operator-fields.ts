@@ -39,3 +39,5 @@ export function operatorFieldHref(field: OperatorField, value: string): string |
 }
 
 export { FIELDS as OPERATOR_FIELDS };
+
+export { LEGAL_DOCS } from "./legal-docs";
