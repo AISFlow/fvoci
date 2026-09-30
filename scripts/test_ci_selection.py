@@ -168,8 +168,8 @@ class ClassifyPathsTest(unittest.TestCase):
     def test_generated_broadens(self) -> None:
         self.assertEqual(SEL.classify_path("apps/web/src/generated/api.ts"), "broaden")
 
-    def test_e2e_broadens(self) -> None:
-        self.assertEqual(SEL.classify_path("apps/web/e2e/foo.spec.ts"), "broaden")
+    def test_e2e_specs_select_web(self) -> None:
+        self.assertEqual(SEL.classify_path("apps/web/e2e/foo.spec.ts"), "web_tests")
 
     def test_packages_broaden(self) -> None:
         self.assertEqual(SEL.classify_path("packages/editor/x.ts"), "broaden")
@@ -460,7 +460,7 @@ class PrCheckoutBindingTest(unittest.TestCase):
         self.assertEqual(plan["reason_code"], "FULL_PR_MERGE_PARENTS_MISMATCH")
         self.assertTrue(plan["jobs"]["web-checks"]["selected"])
 
-    def test_base_advance_mismatch_cannot_narrow(self) -> None:
+    def test_base_advance_with_exact_head_can_narrow(self) -> None:
         fx = PrCheckoutFixture()
         docs_head = fx.commit_on_branch("docs-pr", "README.md", "docs only\n")
         git(fx.origin, "checkout", "main")
@@ -475,8 +475,10 @@ class PrCheckoutBindingTest(unittest.TestCase):
         proc = fx.plan_cli(tested_sha=tested, event_path=event, output=output)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         plan = json.loads(output.read_text(encoding="utf-8"))
-        self.assertEqual(plan["mode"], "full")
-        self.assertEqual(plan["reason_code"], "FULL_PR_MERGE_PARENTS_MISMATCH")
+        self.assertEqual(plan["mode"], "narrow")
+        self.assertEqual(plan["reason_code"], "NARROW_DOCS")
+        self.assertEqual(plan["base_sha"], fx.base_sha)
+        self.assertEqual(plan["tested_sha"], tested)
 
     def test_direct_head_checkout_cannot_narrow(self) -> None:
         fx = PrCheckoutFixture()
@@ -1204,6 +1206,29 @@ class RegistryMutationCliTest(unittest.TestCase):
         github_output = output.parent / "github-output.txt"
         self.assertFalse(github_output.exists(), "GITHUB_OUTPUT must stay empty after registry failure")
 
+    def test_pr_path_filters_cannot_leave_gate_pending(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github/workflows/web.yml"
+        path.write_text(path.read_text().replace("  pull_request:\n", "  pull_request:\n    paths: ['apps/web/**']\n", 1))
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "pull_request must be unfiltered")
+
+    def test_checkout_ref_and_repository_overrides_rejected(self) -> None:
+        for override in ("ref: attacker-head", "repository: attacker/repo", "fetch-depth: 1"):
+            with self.subTest(override=override):
+                root = self._mutated_root()
+                path = root / ".github/workflows/web.yml"
+                path.write_text(path.read_text().replace("          fetch-depth: 0", "          " + override, 1))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "ci-plan must checkout the event merge")
+
+    def test_runner_sha_yaml_override_rejected(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github/workflows/web.yml"
+        path.write_text(path.read_text().replace("          GITHUB_EVENT_NAME:", "          GITHUB_SHA: attacker-head\n          GITHUB_EVENT_NAME:", 1))
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "must not override trusted GITHUB_SHA")
+
     def test_new_job_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         web = root / ".github" / "workflows" / "web.yml"
@@ -1496,6 +1521,202 @@ def plan_all_workflows(paths: list[str] | None, event_name: str = "pull_request"
     }
 
 
+class ImpactUnionTest(unittest.TestCase):
+    def assert_selected_workflows(self, paths: list[str], selected: set[str]) -> None:
+        for workflow, plan in plan_all_workflows(paths).items():
+            self.assertEqual(plan["mode"], "narrow", paths)
+            for job, meta in plan["jobs"].items():
+                self.assertIs(meta["selected"], workflow in selected and not is_opt_in(workflow, job), (paths, workflow, job))
+
+    def test_browser_and_unit_tests_run_web_without_install(self) -> None:
+        for path in (
+            "apps/web/e2e/new-flow.spec.ts",
+            "apps/web/e2e-pending/workspace-wiki-vue-collab.spec.ts",
+            "apps/web/e2e/helpers.ts",
+            "apps/web/e2e/mfa-helpers.ts",
+            "apps/web/e2e/workspace-wiki-vue-editor.ts",
+            "apps/web/e2e-pending/collab-helpers.ts",
+            "apps/web/e2e-pending/collab-helpers.test.ts",
+            "apps/web/src/vue/router.test.ts",
+            "packages/editor/test/vue-menu-selection.test.ts",
+        ):
+            self.assert_selected_workflows([path], {"web"})
+            self.assert_selected_workflows(["docs/rewrite.md", path], {"web"})
+
+    def test_editor_ui_keeps_browser_and_install(self) -> None:
+        for path in (
+            "packages/editor/src/vue/FvociEditor.vue",
+            "packages/editor/src/react/block-menu.tsx",
+            "packages/editor/src/react/editor.css",
+            "packages/editor/src/clipboard.ts",
+            "packages/editor/src/gutter-actions.ts",
+            "packages/editor/src/menu-roving.ts",
+        ):
+            self.assert_selected_workflows([path], {"web", "install"})
+            self.assert_selected_workflows(["README.md", "apps/web/e2e/foo.spec.ts", path], {"web", "install"})
+
+    def test_new_explanatory_docs_are_exact(self) -> None:
+        self.assert_selected_workflows(["docs/RELEASING.md", "docs/collab-engine-comparison.md"], set())
+        for path in ("docs/fixtures/example.md", "docs/generated/api.md", "docs/other.md", "docs/collab-engine-comparison.md.bak"):
+            self.assertEqual(SEL.decide_from_paths([path]).mode, "full", path)
+
+    def test_backend_contracts_harness_and_unknown_stay_full(self) -> None:
+        for path in (
+            "packages/editor/src/tiptap-schema.ts",
+            "packages/editor/src/collab-tiptap.ts",
+            "packages/editor/src/json.ts",
+            "packages/editor/src/export/pdf.tsx",
+            "packages/editor/src/fonts/NotoSansKR.ttf",
+            "packages/editor/src/react/schema.tsx",
+            "packages/editor/src/vue/new.wasm",
+            "packages/editor/test/schema-dump.ts",
+            "packages/editor/test/setup/vue-sfc.ts",
+            "packages/editor/tsconfig.json",
+            "packages/i18n/src/locales/ko.json",
+            "apps/web/e2e/fixtures/markdown-import.zip",
+            "apps/web/e2e/nested/foo.spec.ts",
+            "apps/web/e2e/new-harness.ts",
+            "apps/web/e2e-pending/collab-restart.ts",
+            "apps/web/e2e-pending/collab-wire.ts",
+            "apps/web/e2e-pending/collab-attachment-oracle.ts",
+            "apps/web/e2e-pending/collab-playwright.config.ts",
+            "apps/web/src/generated/api.test.ts",
+            "apps/web/src/fixtures/backend.sql",
+            "apps/web/src/new-contract.json",
+            "scripts/run-web-e2e.sh",
+            "scripts/ci_selection.py",
+            "src/auth.rs",
+            "migrations/045.sql",
+            "new-unknown-file.ts",
+            "apps/web/src/../../src/main.rs",
+            "apps/web//src/test.ts",
+        ):
+            for workflow, plan in plan_all_workflows(["README.md", "apps/web/e2e/foo.spec.ts", path]).items():
+                self.assertEqual(plan["mode"], "full", path)
+                assert_full_selection(self, workflow, plan, path)
+
+    def test_candidate_golden_plans(self) -> None:
+        # Frozen GitHub API inventories are regression evidence, never planner
+        # input. Production derives its paths exclusively from verified Git.
+        snapshot = json.loads((ROOT / "scripts/fixtures/ci-selection/candidates.json").read_text())
+        self.assertEqual({item["number"] for item in snapshot["candidates"]}, {265, 267, 269, 270, 271, 263, 280})
+        for item in snapshot["candidates"]:
+            self.assertTrue(SEL.validate_sha(item["head_sha"]))
+            paths = item["paths"]
+            expected = set() if item["number"] in {263, 280} else {"web", "install"}
+            with self.subTest(pr=item["number"], head=item["head_sha"]):
+                self.assert_selected_workflows(paths, expected)
+
+
+class PrMergeImpactTest(unittest.TestCase):
+    def resolve(self, fx: PrCheckoutFixture, base: str, head: str, tested: str):
+        with mock.patch.dict(os.environ, {"GITHUB_SHA": tested}):
+            return SEL.resolve_selection_inputs(fx.work, {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}, "pull_request")
+
+    def test_exact_parents_merge_only_add_delete_rename_force_full(self) -> None:
+        for operation in ("add", "delete", "rename"):
+            with self.subTest(operation=operation), PrCheckoutFixture() as fx:
+                write_file(fx.origin, "src/keep.rs", "base backend\n")
+                git(fx.origin, "add", ".")
+                git(fx.origin, "commit", "-m", "backend base")
+                base = git_sha(fx.origin)
+                head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+                fx.clone_work()
+                fx.merge_checkout(base, head)
+                if operation == "add":
+                    write_file(fx.work, "src/injected.rs", "merge only\n")
+                elif operation == "delete":
+                    git(fx.work, "rm", "src/keep.rs")
+                else:
+                    (fx.work / "apps/web/src").mkdir(parents=True, exist_ok=True)
+                    git(fx.work, "mv", "src/keep.rs", "apps/web/src/disguised.ts")
+                git(fx.work, "add", ".")
+                git(fx.work, "commit", "--amend", "--no-edit")
+                tested = git_sha(fx.work)
+                inputs = self.resolve(fx, base, head, tested)
+                self.assertIsNone(inputs.fatal_error)
+                self.assertIsNone(inputs.force_full_reason)
+                self.assertIn("README.md", inputs.paths)
+                self.assertEqual(SEL.decide_from_paths(inputs.paths).mode, "full")
+
+    def test_advanced_base_merge_resolution_only_change_is_classified(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+            write_file(fx.origin, "src/advanced.rs", "base backend\n")
+            git(fx.origin, "add", ".")
+            git(fx.origin, "commit", "-m", "advanced base")
+            advanced = git_sha(fx.origin)
+            fx.clone_work()
+            fx.merge_checkout(advanced, head)
+            write_file(fx.work, "src/advanced.rs", "merge resolution\n")
+            git(fx.work, "add", ".")
+            git(fx.work, "commit", "--amend", "--no-edit")
+            inputs = self.resolve(fx, fx.base_sha, head, git_sha(fx.work))
+            self.assertIsNone(inputs.force_full_reason)
+            self.assertIn("src/advanced.rs", inputs.paths)
+            self.assertEqual(SEL.decide_from_paths(inputs.paths).mode, "full")
+
+    def test_cumulative_head_changes_survive_merge_tree_omission(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("backend", "src/new.rs", "backend change\n")
+            fx.clone_work()
+            fx.merge_checkout(fx.base_sha, head)
+            git(fx.work, "rm", "src/new.rs")
+            write_file(fx.work, "README.md", "merge omitted backend\n")
+            git(fx.work, "add", ".")
+            git(fx.work, "commit", "--amend", "--no-edit")
+            inputs = self.resolve(fx, fx.base_sha, head, git_sha(fx.work))
+            self.assertIn("src/new.rs", inputs.paths)
+            self.assertEqual(SEL.decide_from_paths(inputs.paths).mode, "full")
+
+    def test_unrelated_or_older_first_parent_cannot_narrow(self) -> None:
+        for kind in ("unrelated", "older"):
+            with self.subTest(kind=kind), PrCheckoutFixture() as fx:
+                head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+                write_file(fx.origin, "src/advanced.rs", "advance\n")
+                git(fx.origin, "add", ".")
+                git(fx.origin, "commit", "-m", "advance")
+                event_base = git_sha(fx.origin)
+                fx.clone_work()
+                if kind == "older":
+                    tested = fx.merge_checkout(fx.base_sha, head)
+                else:
+                    git(fx.work, "checkout", "--orphan", "unrelated")
+                    git(fx.work, "rm", "-rf", ".")
+                    write_file(fx.work, "unrelated", "x\n")
+                    git(fx.work, "add", ".")
+                    git(fx.work, "commit", "-m", "unrelated root")
+                    tree = git_sha(fx.work, f"{head}^{{tree}}")
+                    unrelated = git_sha(fx.work)
+                    tested = git(fx.work, "commit-tree", tree, "-p", unrelated, "-p", head, "-m", "spoofed merge").stdout.strip()
+                    git(fx.work, "checkout", "--detach", tested)
+                inputs = self.resolve(fx, event_base, head, tested)
+                self.assertEqual(inputs.force_full_reason, "FULL_PR_MERGE_PARENTS_MISMATCH")
+                self.assertIsNone(inputs.paths)
+
+    def test_missing_history_and_tested_sha_mismatch_fail_closed(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            inputs = self.resolve(fx, fx.base_sha, head, head)
+            self.assertEqual(inputs.fatal_error, "TESTED_SHA_MISMATCH")
+            with mock.patch.object(SEL, "git_fetch_origin", return_value="FETCH_FAILED"):
+                inputs = self.resolve(fx, "f" * 40, head, tested)
+            self.assertEqual(inputs.fatal_error, "FETCH_FAILED")
+            self.assertIsNone(inputs.paths)
+
+    def test_actual_merge_diff_failure_is_fatal(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            with mock.patch.object(SEL, "git_diff_paths", side_effect=[(["README.md"], None), ([], "GIT_DIFF_FAILED")]):
+                inputs = self.resolve(fx, fx.base_sha, head, tested)
+            self.assertEqual(inputs.fatal_error, "GIT_DIFF_FAILED")
+            self.assertIsNone(inputs.paths)
+
+
 class AgentDocsSelectionTest(unittest.TestCase):
     """AGENTS.md and .agents/environment.md are role/environment records only."""
 
@@ -1525,13 +1746,13 @@ class AgentDocsSelectionTest(unittest.TestCase):
             ".agents/environment.md.bak",
             ".agents/environment.mdx",
             ".agents/other.md",
-            ".agents/",
             ".agents/sub/environment.md",
         ):
             self.assertEqual(SEL.classify_path(path), "broaden", path)
         for path in ("agents/environment.md", "AGENTS.MD", "apps/AGENTS.md", "AGENTS.md.orig"):
             self.assertEqual(SEL.classify_path(path), "unknown", path)
         self.assertEqual(SEL.classify_path("docs/AGENTS.md"), "broaden")
+        self.assertEqual(SEL.classify_path(".agents/"), "unknown")
         self.assertEqual(SEL.classify_path("scripts/AGENTS.md"), "broaden")
 
     def test_explicit_docs_never_overlap_build_inputs(self) -> None:
@@ -1591,8 +1812,12 @@ class AgentDocsSelectionTest(unittest.TestCase):
         for extra in (".gitignore", "LICENSE", "third-party/x.md", "apps/AGENTS.md", "notes.md"):
             self.assert_full([*AGENT_DOCS, extra], "FULL_UNKNOWN_PATH")
 
-    def test_agent_docs_with_frontend_is_mixed_full(self) -> None:
-        self.assert_full([*AGENT_DOCS, "apps/web/src/x.ts"], "FULL_MIXED_NARROW")
+    def test_agent_docs_with_frontend_unions_impacts(self) -> None:
+        for workflow, plan in plan_all_workflows([*AGENT_DOCS, "apps/web/src/x.ts"]).items():
+            self.assertEqual(plan["mode"], "narrow")
+            self.assertEqual(plan["reason_code"], "NARROW_FRONTEND_WEB_INSTALL")
+            for job, meta in plan["jobs"].items():
+                self.assertIs(meta["selected"], workflow in {"web", "install"} and not is_opt_in(workflow, job))
 
     def test_always_full_events_ignore_agent_docs(self) -> None:
         for event_name, reason in (
