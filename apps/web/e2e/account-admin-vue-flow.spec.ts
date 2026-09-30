@@ -9,16 +9,24 @@ const member = { email: "vue-console-member@example.com", password: " membersecr
 test.beforeAll(async ({ browser }) => {
   const page = await browser.newPage({ baseURL: process.env.PLAYWRIGHT_BASE_URL });
   try {
-    await page.goto("/");
-    await expect(page).toHaveURL(/\/setup$/);
-    await page.getByLabel("이름", { exact: true }).fill("콘솔 관리자");
-    await page.getByLabel("이메일").fill(admin.email);
-    await page.getByLabel("비밀번호").fill(admin.password);
-    await page.getByLabel("워크스페이스 이름").fill("Vue Console");
-    await page.getByLabel("주소(영문)").fill("vue-console");
-    await page.getByRole("button", { name: "시작하기" }).click();
-    await expect(page).toHaveURL(/\/$/);
-    createE2eUser(member.email, member.password, "콘솔 멤버");
+    const status = await page.request.get("/api/v1/setup");
+    expect(status.status()).toBe(200);
+    if ((await status.json()).needed) {
+      await page.goto("/");
+      await expect(page).toHaveURL(/\/setup$/);
+      await page.getByLabel("이름", { exact: true }).fill("콘솔 관리자");
+      await page.getByLabel("이메일").fill(admin.email);
+      await page.getByLabel("비밀번호").fill(admin.password);
+      await page.getByLabel("워크스페이스 이름").fill("Vue Console");
+      await page.getByLabel("주소(영문)").fill("vue-console");
+      await page.getByRole("button", { name: "시작하기" }).click();
+      await expect(page).toHaveURL(/\/$/);
+    }
+    // A failed test replaces the Playwright worker; keep setup idempotent
+    // so later independent tests still execute against this group's DB.
+    if (authSql(`SELECT count(*) FROM fvoci.users WHERE email = '${member.email}'`) === "0") {
+      createE2eUser(member.email, member.password, "콘솔 멤버");
+    }
   } finally {
     await page.close();
   }
@@ -52,10 +60,11 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   expect((await nameSaved).status()).toBe(200);
   await page.reload();
   await expect(page.locator("#settings-given-name")).toHaveValue("재로드 멤버");
-  // Real transport failure leaves the account route recoverable, without
-  // fabricating an API answer or converting an outage into a logout.
+  // Inject a dropped transport connection, without supplying an API answer.
+  // Browser offline mode pauses TanStack queries before they hit transport.
+  const meRoute = "**/api/v1/auth/me";
   try {
-    await page.context().setOffline(true);
+    await page.route(meRoute, (route) => route.abort("connectionfailed"));
     await page.evaluate(async () => {
       const root = document.getElementById("root") as HTMLElement & {
         __vue_app__: { _context: { provides: Record<string, { invalidateQueries: (input: { queryKey: string[] }) => Promise<void> }> } };
@@ -65,7 +74,7 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
     await expect(page.getByRole("alert")).toBeVisible();
     await expect(page).toHaveURL(/\/settings\/account$/);
   } finally {
-    await page.context().setOffline(false);
+    await page.unroute(meRoute);
   }
   await page.getByRole("button", { name: "다시 시도", exact: true }).click();
   await expect(page.locator("#settings-given-name")).toHaveValue("재로드 멤버");
