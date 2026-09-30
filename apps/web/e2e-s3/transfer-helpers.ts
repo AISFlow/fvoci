@@ -47,13 +47,18 @@ export async function setUpOwnerTask(page: Page): Promise<string> {
   return page.url();
 }
 
-export async function setTransferMode(page: Page, mode: "proxy" | "presigned", label: string): Promise<void> {
+export async function setTransferMode(
+  page: Page,
+  mode: "proxy" | "presigned",
+  label: string,
+): Promise<void> {
   await page.goto("/settings/admin");
   const card = page.getByRole("region", { name: "첨부 전송 방식", exact: true });
   await expect(card.locator('option[value="presigned"]')).toBeEnabled();
   await card.getByLabel("attachmentTransfer.mode").selectOption(mode);
   const saved = page.waitForResponse(
-    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+    (res) =>
+      res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
   );
   await card.getByRole("button", { name: "저장" }).click();
   expect((await saved).status()).toBe(200);

@@ -68,13 +68,13 @@ export function ownedServerChildEnv(
     if (value !== undefined && value !== "") env[key] = value;
   }
   for (const key of CHILD_ENV_DENY) {
-    delete env[key];
+    Reflect.deleteProperty(env, key);
   }
   env.FVOCI_BIND = bind;
   env.FVOCI_PUBLIC_ORIGIN = `http://${bind}`;
   if (options.maxRooms !== undefined) {
     if (!Number.isInteger(options.maxRooms) || options.maxRooms < 1) {
-      throw new Error(`maxRooms must be a positive integer, got ${options.maxRooms}`);
+      throw new Error(`maxRooms must be a positive integer, got ${String(options.maxRooms)}`);
     }
     env.FVOCI_COLLAB_MAX_ROOMS = String(options.maxRooms);
   }
@@ -83,7 +83,7 @@ export function ownedServerChildEnv(
 
 export function readProcMember(pid: number): ProcMember | null {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
     const close = stat.lastIndexOf(")");
     if (close < 0) return null;
     const comm = stat.slice(stat.indexOf("(") + 1, close);
@@ -101,7 +101,7 @@ export function readProcMember(pid: number): ProcMember | null {
 
 export function processGroupMembers(pgid: number): ProcMember[] {
   const members: ProcMember[] = [];
-  let names: string[] = [];
+  let names: string[];
   try {
     names = readdirSync("/proc");
   } catch {
@@ -111,7 +111,7 @@ export function processGroupMembers(pgid: number): ProcMember[] {
     if (!/^\d+$/.test(name)) continue;
     const pid = Number(name);
     try {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
       const close = stat.lastIndexOf(")");
       if (close < 0) continue;
       const comm = stat.slice(stat.indexOf("(") + 1, close);
@@ -147,7 +147,7 @@ export function signalOwnedMember(member: ProcMember): void {
   const now = readProcMember(member.pid);
   if (now == null) return;
   if (now.starttime !== member.starttime) {
-    throw new Error(`cannot prove ownership of pid ${member.pid}`);
+    throw new Error(`cannot prove ownership of pid ${String(member.pid)}`);
   }
   try {
     process.kill(member.pid, "SIGKILL");
@@ -178,10 +178,15 @@ async function waitRecordedMembersGone(
 export function signalOwnedGroup(pgid: number, owners: readonly ProcMember[]): void {
   const current = processGroupMembers(pgid);
   if (current.length === 0) return;
-  if (!current.some((member) => owners.some((owner) =>
-    owner.pid === member.pid && owner.starttime === member.starttime && owner.pgrp === pgid,
-  ))) {
-    throw new Error(`cannot prove ownership of process group ${pgid}`);
+  if (
+    !current.some((member) =>
+      owners.some(
+        (owner) =>
+          owner.pid === member.pid && owner.starttime === member.starttime && owner.pgrp === pgid,
+      ),
+    )
+  ) {
+    throw new Error(`cannot prove ownership of process group ${String(pgid)}`);
   }
   try {
     process.kill(-pgid, "SIGKILL");
@@ -310,9 +315,7 @@ export class OwnedServer {
       await delay(200);
       leftovers = processGroupMembers(pgid);
       this.lastGracefulLeftovers = leftovers;
-      throw new Error(
-        `graceful SIGTERM left process group members: ${JSON.stringify(leftovers)}`,
-      );
+      throw new Error(`graceful SIGTERM left process group members: ${JSON.stringify(leftovers)}`);
     }
   }
 
@@ -325,8 +328,11 @@ export class OwnedServer {
   }
 
   private observeOwnedMembers(): ProcMember[] {
-    if (this.parentPid != null && this.pgid != null &&
-      sameIdentity(this.parentIdentity, this.parentPid)) {
+    if (
+      this.parentPid != null &&
+      this.pgid != null &&
+      sameIdentity(this.parentIdentity, this.parentPid)
+    ) {
       this.ownedMembers = processGroupMembers(this.pgid);
     }
     return this.ownedMembers;
@@ -351,7 +357,7 @@ export class OwnedServer {
       mkdirSync(root, { recursive: true });
       this.runDir = join(
         root,
-        `collab-server-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        `collab-server-${String(process.pid)}-${String(Date.now())}-${Math.random().toString(16).slice(2)}`,
       );
       mkdirSync(this.runDir, { recursive: true, mode: 0o700 });
       this.storageDir = join(this.runDir, "storage");
@@ -373,8 +379,12 @@ export class OwnedServer {
     this.child = child;
     this.pgid = child.pid;
     this.parentPid = child.pid;
-    child.stdout?.on("data", (chunk) => this.appendLog(chunk));
-    child.stderr?.on("data", (chunk) => this.appendLog(chunk));
+    child.stdout.on("data", (chunk: Buffer) => {
+      this.appendLog(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      this.appendLog(chunk);
+    });
     child.once("exit", () => {
       if (this.child === child) this.child = null;
     });
@@ -397,6 +407,7 @@ export class OwnedServer {
       const match = LISTEN_RE.exec(this.logs);
       if (match) {
         const url = match[1];
+        if (!url) throw new Error("listen regex matched without URL");
         const bound = url.replace("http://", "");
         if (expectedBind && bound !== expectedBind) {
           await this.killGroupObserved();
@@ -433,10 +444,7 @@ export class OwnedServer {
     if (child && child.exitCode == null && child.signalCode == null) {
       await Promise.race([once(child, "exit"), delay(5_000)]);
     }
-    await waitRecordedMembersGone(
-      helpersBefore,
-      "crash SIGKILL left collaboration helpers",
-    );
+    await waitRecordedMembersGone(helpersBefore, "crash SIGKILL left collaboration helpers");
     const deadline = Date.now() + 5_000;
     let leftovers = processGroupMembers(pgid);
     while (Date.now() < deadline && leftovers.length > 0) {
@@ -447,9 +455,7 @@ export class OwnedServer {
       leftovers = processGroupMembers(pgid);
     }
     if (leftovers.length > 0) {
-      throw new Error(
-        `crash SIGKILL left process group members: ${JSON.stringify(leftovers)}`,
-      );
+      throw new Error(`crash SIGKILL left process group members: ${JSON.stringify(leftovers)}`);
     }
   }
 }

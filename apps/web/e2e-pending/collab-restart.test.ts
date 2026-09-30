@@ -14,7 +14,7 @@ import {
   startOwnedServer,
 } from "./collab-restart.ts";
 
-test("owned server start requires the exact inner-script binary path", async () => {
+await test("owned server start requires the exact inner-script binary path", async () => {
   const previous = process.env.FVOCI_E2E_SERVER_BIN;
   delete process.env.FVOCI_E2E_SERVER_BIN;
   try {
@@ -25,33 +25,37 @@ test("owned server start requires the exact inner-script binary path", async () 
   }
 });
 
-test("cleanup refuses a stale group identity and reaps only its owned child", { timeout: 5_000 }, async () => {
-  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-    detached: true,
-    stdio: "ignore",
-  });
-  const exited = once(child, "exit");
-  await once(child, "spawn");
-  const member = readProcMember(child.pid!);
-  assert.ok(member);
-  try {
-    assert.throws(
-      () => signalOwnedGroup(member.pgrp, [{ ...member, starttime: "stale" }]),
-      /cannot prove ownership/,
-    );
-    assert.equal(readProcMember(member.pid)?.starttime, member.starttime);
-    signalOwnedGroup(member.pgrp, [member]);
-    await exited;
-    assert.equal(readProcMember(member.pid), null);
-  } finally {
-    if (readProcMember(member.pid)?.starttime === member.starttime) {
-      child.kill("SIGKILL");
+await test(
+  "cleanup refuses a stale group identity and reaps only its owned child",
+  { timeout: 5_000 },
+  async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    const exited = once(child, "exit");
+    await once(child, "spawn");
+    assert.ok(child.pid, "spawn must publish its PID");
+    const member = readProcMember(child.pid);
+    assert.ok(member);
+    try {
+      assert.throws(() => {
+        signalOwnedGroup(member.pgrp, [{ ...member, starttime: "stale" }]);
+      }, /cannot prove ownership/);
+      assert.equal(readProcMember(member.pid)?.starttime, member.starttime);
+      signalOwnedGroup(member.pgrp, [member]);
       await exited;
+      assert.equal(readProcMember(member.pid), null);
+    } finally {
+      if (readProcMember(member.pid)?.starttime === member.starttime) {
+        child.kill("SIGKILL");
+        await exited;
+      }
     }
-  }
-});
+  },
+);
 
-test("child env keeps DATABASE_APP_URL and strips owner/admin URLs", () => {
+await test("child env keeps DATABASE_APP_URL and strips owner/admin URLs", () => {
   const env = ownedServerChildEnv("127.0.0.1:4321", {
     PATH: "/bin",
     DATABASE_URL: "postgres://owner/db",
@@ -81,7 +85,7 @@ test("child env keeps DATABASE_APP_URL and strips owner/admin URLs", () => {
   assert.equal(env.FVOCI_STORAGE_DIR, undefined);
 });
 
-test("owned server child env forwards an explicit storage directory", () => {
+await test("owned server child env forwards an explicit storage directory", () => {
   const env = ownedServerChildEnv("127.0.0.1:4321", {
     PATH: "/bin",
     DATABASE_URL: "postgres://owner/db",
@@ -93,14 +97,24 @@ test("owned server child env forwards an explicit storage directory", () => {
   assert.equal(env.DATABASE_URL, undefined);
 });
 
-test("owned server child env takes the room cap only from the scenario's options", () => {
-  const source = { PATH: "/bin", DATABASE_APP_URL: "postgres://app/db", FVOCI_COLLAB_MAX_ROOMS: "7" };
+await test("owned server child env takes the room cap only from the scenario's options", () => {
+  const source = {
+    PATH: "/bin",
+    DATABASE_APP_URL: "postgres://app/db",
+    FVOCI_COLLAB_MAX_ROOMS: "7",
+  };
   assert.equal(ownedServerChildEnv("127.0.0.1:4321", source).FVOCI_COLLAB_MAX_ROOMS, undefined);
-  assert.equal(ownedServerChildEnv("127.0.0.1:4321", source, { maxRooms: 1 }).FVOCI_COLLAB_MAX_ROOMS, "1");
-  assert.throws(() => ownedServerChildEnv("127.0.0.1:4321", source, { maxRooms: 0 }), /positive integer/);
+  assert.equal(
+    ownedServerChildEnv("127.0.0.1:4321", source, { maxRooms: 1 }).FVOCI_COLLAB_MAX_ROOMS,
+    "1",
+  );
+  assert.throws(
+    () => ownedServerChildEnv("127.0.0.1:4321", source, { maxRooms: 0 }),
+    /positive integer/,
+  );
 });
 
-test("liveCollabHelpers selects collab-engine members from a group snapshot", () => {
+await test("liveCollabHelpers selects collab-engine members from a group snapshot", () => {
   const group = [
     { pid: 1, comm: "fvoci-server", starttime: "1", pgrp: 10 },
     { pid: 2, comm: "collab-engine", starttime: "2", pgrp: 10 },
@@ -108,41 +122,45 @@ test("liveCollabHelpers selects collab-engine members from a group snapshot", ()
   assert.deepEqual(liveCollabHelpers(group), [group[1]]);
 });
 
-test("signalOwnedMember refuses stale starttime and proves identity gone", { timeout: 5_000 }, async () => {
-  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-    detached: true,
-    stdio: "ignore",
-  });
-  const exited = once(child, "exit");
-  await once(child, "spawn");
-  const member = readProcMember(child.pid!);
-  assert.ok(member);
-  try {
-    assert.throws(
-      () => signalOwnedMember({ ...member, starttime: "stale" }),
-      /cannot prove ownership/,
-    );
-    signalOwnedMember(member);
-    await exited;
-    assert.equal(memberIdentityGone(member), true);
-    assert.equal(readProcMember(member.pid), null);
-  } finally {
-    if (!memberIdentityGone(member)) {
-      child.kill("SIGKILL");
+await test(
+  "signalOwnedMember refuses stale starttime and proves identity gone",
+  { timeout: 5_000 },
+  async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    const exited = once(child, "exit");
+    await once(child, "spawn");
+    assert.ok(child.pid, "spawn must publish its PID");
+    const member = readProcMember(child.pid);
+    assert.ok(member);
+    try {
+      assert.throws(() => {
+        signalOwnedMember({ ...member, starttime: "stale" });
+      }, /cannot prove ownership/);
+      signalOwnedMember(member);
       await exited;
+      assert.equal(memberIdentityGone(member), true);
+      assert.equal(readProcMember(member.pid), null);
+    } finally {
+      if (!memberIdentityGone(member)) {
+        child.kill("SIGKILL");
+        await exited;
+      }
     }
-  }
-});
+  },
+);
 
-test("process group observation reads this Node process without pid-file daemons", () => {
+await test("process group observation reads this Node process without pid-file daemons", () => {
   const self = readProcMember(process.pid);
   assert.ok(self);
-  assert.equal(self?.pid, process.pid);
-  assert.ok((self?.starttime ?? "").length > 0);
-  assert.ok((self?.pgrp ?? 0) > 0);
-  const group = processGroupMembers(self?.pgrp ?? 0);
+  assert.equal(self.pid, process.pid);
+  assert.ok(self.starttime.length > 0);
+  assert.ok(self.pgrp > 0);
+  const group = processGroupMembers(self.pgrp);
   assert.equal(
-    group.some((member) => member.pid === process.pid && member.starttime === self?.starttime),
+    group.some((member) => member.pid === process.pid && member.starttime === self.starttime),
     true,
   );
 });

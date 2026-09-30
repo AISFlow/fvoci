@@ -1,3 +1,4 @@
+import type { components } from "../src/generated/api";
 import {
   devices,
   expect,
@@ -7,10 +8,7 @@ import {
   type Page,
 } from "@playwright/test";
 import { createE2eUser } from "../e2e/helpers";
-import {
-  attachmentNodesFromDocument,
-  type AttachmentNodeShape,
-} from "./collab-attachment-oracle";
+import { attachmentNodesFromDocument, type AttachmentNodeShape } from "./collab-attachment-oracle";
 import { startOwnedServer, type OwnedServer } from "./collab-restart";
 import {
   COLLAB_PERSIST_DONE,
@@ -28,10 +26,12 @@ export { createE2eUser } from "../e2e/helpers";
 export { expect };
 
 export const test = base.extend<
-  { baseURL: string; recycleCollab: void },
+  { baseURL: string; recycleCollab: undefined },
   { collabApp: OwnedServer }
 >({
   collabApp: [
+    // Playwright parses this destructured parameter; the fixture has no dependencies.
+    // eslint-disable-next-line no-empty-pattern -- required dependency-free Playwright fixture syntax
     async ({}, use) => {
       const server = await startOwnedServer();
       try {
@@ -44,7 +44,7 @@ export const test = base.extend<
   ],
   recycleCollab: [
     async ({ collabApp }, use) => {
-      await use();
+      await use(undefined);
       await collabApp.recycle();
     },
     { auto: true },
@@ -54,10 +54,7 @@ export const test = base.extend<
   },
 });
 
-export async function newCollabContext(
-  browser: Browser,
-  baseUrl: string,
-): Promise<BrowserContext> {
+export async function newCollabContext(browser: Browser, baseUrl: string): Promise<BrowserContext> {
   return browser.newContext({
     ...devices["Desktop Chrome"],
     baseURL: baseUrl,
@@ -131,7 +128,7 @@ export function attachmentNodeCount(shape: EditorShape): number {
 
 export async function ensureCollabFixture(page: Page): Promise<void> {
   const setupRes = await page.request.get("/api/v1/setup");
-  expect(setupRes.ok(), `setup status failed: ${setupRes.status()}`).toBe(true);
+  expect(setupRes.ok(), `setup status failed: ${String(setupRes.status())}`).toBe(true);
   const setup = (await setupRes.json()) as { needed: boolean };
   if (setup.needed) {
     await page.goto("/setup");
@@ -234,9 +231,11 @@ export async function sessionCookie(context: BrowserContext): Promise<string> {
 export async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
-  const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
+  const workspacesBody =
+    (await workspacesRes.json()) as components["schemas"]["WorkspaceListResponse"];
+  const workspace = workspacesBody.items.find((item) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  if (!workspace) throw new Error(`workspace fixture missing: ${slug}`);
   return workspace.id;
 }
 
@@ -253,7 +252,8 @@ export async function createWikiDoc(page: Page, title: string): Promise<WikiDoc>
     data: { parentId: null, title },
   });
   expect(res.ok()).toBe(true);
-  const body = await res.json();
+  const body = (await res.json()) as components["schemas"]["DocumentMetaResponse"];
+  if (!body.displayId) throw new Error("document fixture response has no displayId");
   return {
     id: body.id,
     displayId: body.displayId,
@@ -272,9 +272,13 @@ export async function waitConnected(page: Page): Promise<void> {
       .first()
       .getAttribute("data-collab-status")
       .catch(() => null);
-    const collab = await page.locator(".document-page__collab").innerText().catch(() => "");
+    const collab = await page
+      .locator(".document-page__collab")
+      .innerText()
+      .catch(() => "");
     throw new Error(
-      `collab not connected url=${page.url()} status=${status} collab=${JSON.stringify(collab)} cause=${String(error)}`,
+      `collab not connected url=${page.url()} status=${String(status)} collab=${JSON.stringify(collab)} cause=${String(error)}`,
+      { cause: error },
     );
   }
 }
@@ -350,7 +354,7 @@ export async function editorShape(page: Page): Promise<EditorShape> {
     };
     visit(documentNode);
     const tableEl = root.querySelector("table");
-    if (Boolean(tableEl) !== (tableNodes.length > 0)) {
+    if (Boolean(tableEl) !== tableNodes.length > 0) {
       throw new Error("rendered table and live document structure disagree");
     }
     const table = tableEl
@@ -391,20 +395,20 @@ export type EditorSelectionSnapshot = {
 
 export async function readEditorSelection(page: Page): Promise<EditorSelectionSnapshot> {
   return editorLocator(page).evaluate((root) => {
-    const live = (root as HTMLElement & {
-      editor?: {
-        state: {
-          selection: { from: number; to: number };
-          doc: { textBetween(from: number, to: number): string };
+    const live = (
+      root as HTMLElement & {
+        editor?: {
+          state: {
+            selection: { from: number; to: number };
+            doc: { textBetween(from: number, to: number): string };
+          };
         };
-      };
-    }).editor;
+      }
+    ).editor;
     const selection = live?.state.selection;
     return {
       browser: window.getSelection()?.toString() ?? "",
-      editor: live && selection
-        ? live.state.doc.textBetween(selection.from, selection.to)
-        : null,
+      editor: live && selection ? live.state.doc.textBetween(selection.from, selection.to) : null,
       from: selection?.from ?? null,
       to: selection?.to ?? null,
     };
@@ -441,19 +445,22 @@ export async function installCaretProbe(page: Page): Promise<void> {
       log.push(event);
       if (log.length > 240) log.splice(0, log.length - 240);
     };
-    const initialRoot = document.querySelector(".fvoci-editor .ProseMirror") as
-      (HTMLElement & { editor?: unknown }) | null;
+    const initialRoot = document.querySelector<HTMLElement & { editor?: unknown }>(
+      ".fvoci-editor .ProseMirror",
+    );
     const initialEditor = initialRoot?.editor;
     const snap = (kind: string, extra: Record<string, unknown> = {}) => {
-      const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
-        editor?: {
-          view: { posAtDOM(node: Node, offset: number): number };
-          state: {
-            selection: { from: number; to: number; empty: boolean };
-            doc: { textContent: string; content: { size: number } };
+      const root = document.querySelector<
+        HTMLElement & {
+          editor?: {
+            view: { posAtDOM(node: Node, offset: number): number };
+            state: {
+              selection: { from: number; to: number; empty: boolean };
+              doc: { textContent: string; content: { size: number } };
+            };
           };
-        };
-      } | null;
+        }
+      >(".fvoci-editor .ProseMirror");
       const live = root?.editor;
       const native = window.getSelection();
       const anchor = native?.anchorNode ?? null;
@@ -490,56 +497,72 @@ export async function installCaretProbe(page: Page): Promise<void> {
       };
     };
     host.__fvociCaretSnapshot = () => snap("failure-snapshot");
-    document.addEventListener("input", () => {
-      push(snap("input"));
-      queueMicrotask(() => push(snap("input-microtask")));
-    }, true);
+    document.addEventListener(
+      "input",
+      () => {
+        push(snap("input"));
+        queueMicrotask(() => {
+          push(snap("input-microtask"));
+        });
+      },
+      true,
+    );
     document.addEventListener("selectionchange", () => {
       push(snap("selectionchange"));
     });
-    document.addEventListener("keydown", (event) => {
-      if (
-        event.key !== "Home" &&
-        event.key !== "Delete" &&
-        event.key !== "Backspace" &&
-        event.key !== "ArrowLeft"
-      ) {
-        return;
-      }
-      push(snap(`${event.key.toLowerCase()}-keydown`, {
-        shift: event.shiftKey,
-        prevented: event.defaultPrevented,
-      }));
-    }, true);
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (
+          event.key !== "Home" &&
+          event.key !== "Delete" &&
+          event.key !== "Backspace" &&
+          event.key !== "ArrowLeft"
+        ) {
+          return;
+        }
+        push(
+          snap(`${event.key.toLowerCase()}-keydown`, {
+            shift: event.shiftKey,
+            prevented: event.defaultPrevented,
+          }),
+        );
+      },
+      true,
+    );
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Delete" && event.key !== "Backspace") return;
-      push(snap(`${event.key.toLowerCase()}-keydown-bubble`, { prevented: event.defaultPrevented }));
+      push(
+        snap(`${event.key.toLowerCase()}-keydown-bubble`, { prevented: event.defaultPrevented }),
+      );
     });
     const attachEditor = () => {
-      const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
-        editor?: {
-          view: {
-            updateState: (state: unknown) => void;
-            posAtDOM(node: Node, offset: number): number;
-          };
-          on(
-            event: "transaction",
-            cb: (props: {
-              transaction: {
-                getMeta(key: string): unknown;
-                docChanged: boolean;
-                selectionSet: boolean;
-              };
-              editor: {
-                state: {
-                  selection: { from: number; to: number; empty: boolean };
-                  doc: { textContent: string; content: { size: number } };
+      const root = document.querySelector<
+        HTMLElement & {
+          editor?: {
+            view: {
+              updateState: (state: unknown) => void;
+              posAtDOM(node: Node, offset: number): number;
+            };
+            on(
+              event: "transaction",
+              cb: (props: {
+                transaction: {
+                  getMeta(key: string): unknown;
+                  docChanged: boolean;
+                  selectionSet: boolean;
                 };
-              };
-            }) => void,
-          ): void;
-        };
-      } | null;
+                editor: {
+                  state: {
+                    selection: { from: number; to: number; empty: boolean };
+                    doc: { textContent: string; content: { size: number } };
+                  };
+                };
+              }) => void,
+            ): void;
+          };
+        }
+      >(".fvoci-editor .ProseMirror");
       const live = root?.editor;
       if (!live) return;
       if (!host.__fvociCaretProbeView) {
@@ -569,8 +592,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
       host.__fvociCaretProbeEditor = true;
       live.on("transaction", ({ transaction, editor: current }) => {
         const cursorMeta = transaction.getMeta("yjs-cursor$") as
-          | { awarenessUpdated?: boolean }
-          | undefined;
+          { awarenessUpdated?: boolean } | undefined;
         const ySyncMeta = transaction.getMeta("y-sync$");
         push({
           ...snap("transaction"),
@@ -631,15 +653,18 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
     }
     const text = edge === "start" ? first : last;
     if (!text) throw new Error("content caret requires an existing text node");
-    const editor = (root as HTMLElement & {
-      editor?: { view: { posAtDOM(node: Node, offset: number): number } };
-    }).editor;
+    const editor = (
+      root as HTMLElement & {
+        editor?: { view: { posAtDOM(node: Node, offset: number): number } };
+      }
+    ).editor;
     if (!editor) throw new Error("missing live editor for caret inspection");
     const offset = edge === "start" ? 0 : text.length;
     const position = editor.view.posAtDOM(text, offset);
     // A click inside an edge glyph can land on either side of that glyph.
     // Keep the fallback inside this text; document Home/End can cross empty tables.
-    const glyph = edge === "start" ? Array.from(text.data)[0] : Array.from(text.data).at(-1)!;
+    const glyph = edge === "start" ? Array.from(text.data)[0] : Array.from(text.data).at(-1);
+    if (!glyph) throw new Error("content caret requires a nonempty edge glyph");
     const adjacentOffset = edge === "start" ? glyph.length : text.length - glyph.length;
     const adjacentPosition = editor.view.posAtDOM(text, adjacentOffset);
     text.parentElement?.scrollIntoView({ block: "center", inline: "nearest" });
@@ -677,17 +702,25 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
   // Click the first/last content glyph through the real PM pointer path.
   // Do not use locator.focus()+Range: that races PM's 20ms focus restore.
   await page.mouse.click(target.x, target.y);
-  await expect.poll(() => locator.evaluate((root) => {
-    const live = (root as HTMLElement & {
-      editor?: { view: { hasFocus(): boolean } };
-    }).editor;
-    const active = document.activeElement;
-    return (live?.view.hasFocus() ?? false) || (active != null && root.contains(active));
-  })).toBe(true);
+  await expect
+    .poll(() =>
+      locator.evaluate((root) => {
+        const live = (
+          root as HTMLElement & {
+            editor?: { view: { hasFocus(): boolean } };
+          }
+        ).editor;
+        const active = document.activeElement;
+        return (live?.view.hasFocus() ?? false) || (active != null && root.contains(active));
+      }),
+    )
+    .toBe(true);
   const already = await locator.evaluate((root) => {
-    const editor = (root as HTMLElement & {
-      editor?: { state: { selection: { from: number; to: number } } };
-    }).editor;
+    const editor = (
+      root as HTMLElement & {
+        editor?: { state: { selection: { from: number; to: number } } };
+      }
+    ).editor;
     return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
   });
   if (already?.[0] !== target.position || already[1] !== target.position) {
@@ -695,26 +728,38 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
     // Accept either side of this glyph, then correct only an adjacent sample.
     // Unrelated or non-collapsed selections must still fail here.
     let settled = already;
-    await expect.poll(async () => {
-      settled = await locator.evaluate((root) => {
-        const editor = (root as HTMLElement & {
-          editor?: { state: { selection: { from: number; to: number } } };
-        }).editor;
-        return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
-      });
-      return settled?.[0] === settled?.[1] &&
-        (settled?.[0] === target.position || settled?.[0] === target.adjacentPosition);
-    }).toBe(true);
+    await expect
+      .poll(async () => {
+        settled = await locator.evaluate((root) => {
+          const editor = (
+            root as HTMLElement & {
+              editor?: { state: { selection: { from: number; to: number } } };
+            }
+          ).editor;
+          return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
+        });
+        return (
+          settled?.[0] === settled?.[1] &&
+          (settled?.[0] === target.position || settled?.[0] === target.adjacentPosition)
+        );
+      })
+      .toBe(true);
     if (settled?.[0] === target.adjacentPosition) {
       await page.keyboard.press(where === "start" ? "ArrowLeft" : "ArrowRight");
     }
   }
-  await expect.poll(() => locator.evaluate((root) => {
-    const editor = (root as HTMLElement & {
-      editor?: { state: { selection: { from: number; to: number } } };
-    }).editor;
-    return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
-  })).toEqual([target.position, target.position]);
+  await expect
+    .poll(() =>
+      locator.evaluate((root) => {
+        const editor = (
+          root as HTMLElement & {
+            editor?: { state: { selection: { from: number; to: number } } };
+          }
+        ).editor;
+        return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
+      }),
+    )
+    .toEqual([target.position, target.position]);
 }
 
 export function uniqueBlockIds(shape: EditorShape): string[] {
@@ -737,7 +782,9 @@ export function uniqueBlockIds(shape: EditorShape): string[] {
 /** Read actual document text, excluding awareness decorations; structure is checked separately. */
 export async function expectTokens(page: Page, tokens: string[]): Promise<void> {
   for (const token of tokens) {
-    await expect.poll(async () => (await editorShape(page)).text, { timeout: 15_000 }).toContain(token);
+    await expect
+      .poll(async () => (await editorShape(page)).text, { timeout: 15_000 })
+      .toContain(token);
   }
 }
 
@@ -790,7 +837,9 @@ export function sentPersistRequests(log: CollabWireLog): string[] {
   });
 }
 
-export function receivedPersistAcks(log: CollabWireLog): Array<{ kind: "done" | "failed"; id: string }> {
+export function receivedPersistAcks(
+  log: CollabWireLog,
+): Array<{ kind: "done" | "failed"; id: string }> {
   return log.received.flatMap((frame) => {
     if (frame.kind !== "stateless") return [];
     const parts = persistParts(frame.payload);
@@ -808,12 +857,16 @@ export async function expectMatchingPersistAck(page: Page, log: CollabWireLog): 
   expect(
     receivedPersistAcks(log).some((ack) => ack.id === requestId && ack.kind === "failed"),
   ).toBe(false);
-  expect(log.sent.some((frame) => frame.kind === "stateless" && frame.payload === `${COLLAB_PERSIST_REQUEST}:${requestId}`)).toBe(
-    true,
-  );
+  expect(
+    log.sent.some(
+      (frame) =>
+        frame.kind === "stateless" && frame.payload === `${COLLAB_PERSIST_REQUEST}:${requestId}`,
+    ),
+  ).toBe(true);
   expect(
     log.received.some(
-      (frame) => frame.kind === "stateless" && frame.payload === `${COLLAB_PERSIST_DONE}:${requestId}`,
+      (frame) =>
+        frame.kind === "stateless" && frame.payload === `${COLLAB_PERSIST_DONE}:${requestId}`,
     ),
   ).toBe(true);
   await waitDurableSaved(page);
@@ -828,7 +881,7 @@ export async function expectAwarenessTokenNotSession(
     .poll(() => log.sent.find((frame) => frame.kind === "auth-token") ?? null)
     .not.toBeNull();
   const auth = log.sent.find((frame) => frame.kind === "auth-token");
-  if (!auth || auth.kind !== "auth-token") {
+  if (!auth) {
     throw new Error("missing auth-token frame");
   }
   expect(auth.token).toMatch(/^\d+$/);
@@ -845,9 +898,7 @@ export async function indexedDbNames(page: Page): Promise<string[]> {
   });
 }
 
-export type SlashAttachmentFixture =
-  | string
-  | { name: string; buffer: Buffer; mimeType?: string };
+export type SlashAttachmentFixture = string | { name: string; buffer: Buffer; mimeType?: string };
 
 async function focusEditorForSlash(page: Page): Promise<void> {
   const editor = editorLocator(page);
@@ -899,7 +950,8 @@ export async function insertSlashAttachment(
 export async function storedAttachmentDownloadBytes(page: Page): Promise<Buffer> {
   const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
   expect(href).toBeTruthy();
-  const response = await page.request.get(href!);
+  if (!href) throw new Error("stored attachment has no download href");
+  const response = await page.request.get(href);
   expect(response.ok()).toBe(true);
   return response.body();
 }

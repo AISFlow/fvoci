@@ -9,8 +9,7 @@ export const COLLAB_PERSIST_DONE = "persisted";
 export const COLLAB_PERSIST_FAILED = "persist-failed";
 export const PROVIDER_VERSION = "4.6.0";
 export const SESSION_COOKIE = "fvoci_session";
-export const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const PERSIST_ID_RE = new RegExp(
   `^(${COLLAB_PERSIST_REQUEST}|${COLLAB_PERSIST_DONE}|${COLLAB_PERSIST_FAILED}):(${UUID_RE.source.slice(1, -1)})$`,
   "i",
@@ -47,6 +46,7 @@ class Cursor {
   readByte(): number {
     if (this.pos >= this.input.length) throw new Error("truncated");
     const byte = this.input[this.pos];
+    if (byte === undefined) throw new Error("truncated");
     this.pos += 1;
     return byte;
   }
@@ -126,6 +126,8 @@ export function persistParts(
   if (!match) return null;
   const prefix = match[1];
   const id = match[2];
+  if (prefix === undefined || id === undefined)
+    throw new Error("persist regex matched without captures");
   if (prefix === COLLAB_PERSIST_REQUEST) return { kind: "request", id };
   if (prefix === COLLAB_PERSIST_DONE) return { kind: "done", id };
   return { kind: "failed", id };
