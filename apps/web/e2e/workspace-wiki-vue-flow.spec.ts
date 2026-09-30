@@ -623,6 +623,70 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
   }
 });
 
+test("one Korean composition is one undo step despite pauses and a concurrent peer edit", async ({ browser, baseURL }, testInfo) => {
+  const a = await newSignedInPage(browser, baseURL, admin);
+  const b = await newSignedInPage(browser, baseURL, member);
+  try {
+    const wsId = await workspaceId(a.page.request);
+    const doc = await createDoc(a.page.request, wsId, "조합 실행 취소 단위", "첫 문단\n\n둘째 문단\n");
+    await openDoc(a.page, doc.path);
+    await openDoc(b.page, doc.path);
+    await caretAtEndOf(a.page, 0);
+    await editorOf(a.page).evaluate((root) => {
+      const editor = (root as HTMLElement & { editor: { view: EditorView; on: (event: string, callback: (props: { transaction: import("@tiptap/pm/state").Transaction }) => void) => void } }).editor;
+      const log: unknown[] = [];
+      (root as HTMLElement & { compositionLog: unknown[] }).compositionLog = log;
+      const undoPlugin = editor.view.state.plugins.find((plugin) => plugin.key.startsWith("y-undo$"));
+      const manager = undoPlugin?.getState(editor.view.state).undoManager;
+      manager.doc.on("beforeTransaction", (transaction: { origin: { key?: string } | null }) => {
+        const policy = editor.view.state.plugins.find((plugin) => plugin.key.startsWith("fvociCompositionUndo$"));
+        log.push({ type: "y-before", origin: transaction.origin?.key, composition: policy?.getState(editor.view.state), captureTimeout: manager.captureTimeout, lastChange: manager.lastChange, undo: manager.undoStack.length });
+      });
+      manager.doc.on("afterTransaction", () => log.push({ type: "y-after", captureTimeout: manager.captureTimeout, lastChange: manager.lastChange, undo: manager.undoStack.length }));
+      for (const name of ["compositionstart", "compositionupdate", "compositionend"]) {
+        root.addEventListener(name, (event) => log.push({ type: name, data: (event as CompositionEvent).data, composing: editor.view.composing }));
+      }
+      editor.on("transaction", ({ transaction }) => {
+        const plugin = editor.view.state.plugins.find((plugin) => plugin.key.startsWith("y-undo$"));
+        const manager = plugin?.getState(editor.view.state).undoManager;
+        log.push({ type: "transaction", composition: transaction.getMeta("composition"), changed: transaction.docChanged, text: editor.view.state.doc.textContent, undo: manager?.undoStack.length, captureTimeout: manager?.captureTimeout });
+      });
+    });
+    const ime = await a.context.newCDPSession(a.page);
+    // Chromium's synthetic CDP composition path, not an actual OS IME witness.
+    const preedit = async (text: string) => {
+      await ime.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+      await expectBlocks(a.page, [`첫 문단${text}`, "둘째 문단 원격"]);
+    };
+    await ime.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
+    await expectBlocks(a.page, ["첫 문단ㅎ", "둘째 문단"]);
+    await caretAtEndOf(b.page, 1);
+    await b.page.keyboard.type(" 원격");
+    await expectBlocks(a.page, ["첫 문단ㅎ", "둘째 문단 원격"]);
+    // Deliberate pauses exceed Yjs's normal 500 ms capture window (#260).
+    await a.page.waitForTimeout(650);
+    await preedit("하");
+    await a.page.waitForTimeout(650);
+    await preedit("한");
+    await ime.send("Input.insertText", { text: "한" });
+    await expectBlocks(b.page, ["첫 문단한", "둘째 문단 원격"]);
+    await testInfo.attach("paused-composition-transactions", { body: JSON.stringify(await editorOf(a.page).evaluate((root) => (root as HTMLElement & { compositionLog: unknown[] }).compositionLog)), contentType: "application/json" });
+    await a.page.keyboard.press("Control+z");
+    const afterUndo = await blockTexts(a.page);
+    await testInfo.attach("paused-composition-after-one-undo", { body: JSON.stringify(afterUndo), contentType: "application/json" });
+    await expectBlocks(a.page, ["첫 문단", "둘째 문단 원격"]);
+    await expectBlocks(b.page, ["첫 문단", "둘째 문단 원격"]);
+    await a.page.keyboard.press("Control+Shift+z");
+    await expectBlocks(a.page, ["첫 문단한", "둘째 문단 원격"]);
+    await expectBlocks(b.page, ["첫 문단한", "둘째 문단 원격"]);
+    await save(a.page);
+    expect(await bodyJson(a.page.request, wsId, doc.id)).toContain("첫 문단한");
+  } finally {
+    await a.context.close();
+    await b.context.close();
+  }
+});
+
 // #268 (`83c01480`) skips UniqueID setNodeMarkup while a transaction has
 // composition meta, so Chromium/IBus no longer restarts the first Hangul
 // step. #258 is closed. This used to be test.fail; CI on main f3f53c90
