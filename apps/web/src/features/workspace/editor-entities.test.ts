@@ -29,7 +29,7 @@ const task = {
 const project = {
   id: projectId, key: "PRJ", name: "Real project", icon: "🪴", status: "archived",
   description: "", visibility: "workspace", taskCount: 1, openTaskCount: 1,
-  canEdit: false, canManage: false, rootDocumentId: docId, createdAt: "", updatedAt: "",
+  createdBy: userId, workspaceId: ws, canEdit: false, canManage: false, rootDocumentId: docId, createdAt: "", updatedAt: "",
 } satisfies Schema["ProjectListItemOutput"];
 const lookupItems = [
   { id: taskId, kind: "task", displayId: "PRJ-1", title: "task hit", projectId },
@@ -219,7 +219,8 @@ test("actual openapi transport forwards AbortSignals and both lexical limits=50 
   const original = globalThis.fetch;
   const originalGet = api.GET;
   // Browser Requests accept relative URLs; Bun needs a test origin.
-  api.GET = ((path, options) => originalGet(path, { ...options, baseUrl: "http://localhost" })) as typeof api.GET;
+  const get = originalGet as (path: string, options: object) => unknown;
+  api.GET = ((path: string, options: object) => get(path, { ...options, baseUrl: "http://localhost" })) as typeof api.GET;
   const requests: Request[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const request = input as Request; requests.push(request);
