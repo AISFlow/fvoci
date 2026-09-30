@@ -1,4 +1,4 @@
-import { queryOptions } from "@tanstack/react-query";
+import { queryOptions } from "@/lib/query-options";
 import type { components } from "@/generated/api";
 import { api, ensureOk } from "@/lib/api";
 

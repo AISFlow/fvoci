@@ -46,7 +46,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 const invalidations = [
   [
-    "stream open/reset resync",
+    "stream open resync",
     (client: QueryClient) => invalidateTaskStreamResyncCaches(client, WS, PROJECT),
   ],
   ["task hint", (client: QueryClient) => void invalidateTaskCaches(client, WS, PROJECT, "task-1")],

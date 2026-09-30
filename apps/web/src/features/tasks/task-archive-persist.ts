@@ -1,4 +1,4 @@
-import type { CollabSession, CollabUser } from "@/features/documents/collab-session";
+import type { CollabSession, CollabUser } from "@/features/documents/collab-model";
 
 /**
  * Source task-detail-screen: `if (archived && session) await session.persistNow()`.
@@ -8,7 +8,7 @@ import type { CollabSession, CollabUser } from "@/features/documents/collab-sess
  */
 export async function persistTaskBodyBeforeArchive(input: {
   pageEditable: boolean;
-  session: CollabSession | null;
+  session: Pick<CollabSession, "synced" | "status" | "persistNow"> | null;
   collabUser: CollabUser | null;
 }): Promise<void> {
   if (!input.pageEditable) return;
@@ -23,7 +23,7 @@ export async function persistTaskBodyBeforeArchive(input: {
 /** Persist (when required) then run the archive PATCH; used by UI and ordering tests. */
 export async function runArchiveWithBodyPersist(input: {
   pageEditable: boolean;
-  session: CollabSession | null;
+  session: Pick<CollabSession, "synced" | "status" | "persistNow"> | null;
   collabUser: CollabUser | null;
   archive: () => Promise<void>;
 }): Promise<void> {

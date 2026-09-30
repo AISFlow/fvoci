@@ -1,5 +1,6 @@
-import { queryOptions } from "@/lib/query-options";
+import { infiniteQueryOptions, queryOptions } from "@/lib/query-options";
 import type { components } from "@/generated/api";
+import { boardColumnBody } from "@/features/collections/board-model";
 import { api, ensureOk } from "@/lib/api";
 import type { ViewQuery } from "@/lib/view-query";
 
@@ -164,6 +165,34 @@ export function collectionRowsQuery(
         }),
       ),
     enabled: enabled && Boolean(workspaceId) && Boolean(collectionId),
+    retry: false,
+  });
+}
+
+/**
+ * One grouped board column (`group: null` is the unassigned column), paged by
+ * its own cursor. Under the collection prefix, so the task stream refreshes it
+ * without dropping a "load more" in flight (features/tasks/task-cache.ts).
+ */
+export function collectionBoardColumnQuery(
+  workspaceId: string,
+  collectionId: string,
+  config: CollectionConfig,
+  group: string | null,
+) {
+  return infiniteQueryOptions({
+    queryKey: [...collectionPrefix(workspaceId, collectionId), "board", config, group] as const,
+    queryFn: async ({ pageParam }) => {
+      const body = boardColumnBody(config, group, pageParam);
+      return ensureOk(
+        await api.POST("/api/v1/workspaces/{workspace_id}/collections/{collection_id}/query", {
+          params: { path: { workspace_id: workspaceId, collection_id: collectionId } },
+          body: { ...body, config: asJsonObject(body.config) },
+        }),
+      );
+    },
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.nextCursor ?? undefined,
     retry: false,
   });
 }

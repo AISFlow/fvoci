@@ -21,13 +21,18 @@ import { meQuery, membersQuery } from "@/lib/queries";
 // The document's revisions: save one (after persisting the live body),
 // preview and restore (features/documents/revision-panel.tsx). A restore is
 // applied to the room by the server, so every editor sees it.
-const props = defineProps<{
-  workspaceId: string;
-  documentId: string;
-  projectId: string | null;
-  readOnly: boolean;
-  persistNow?: () => Promise<void>;
-}>();
+const props = withDefaults(
+  defineProps<{
+    workspaceId: string;
+    documentId: string;
+    projectId: string | null;
+    /** Documents (default) or the task body room. */
+    targetKind?: "document" | "task";
+    readOnly: boolean;
+    persistNow?: () => Promise<void>;
+  }>(),
+  { targetKind: "document" },
+);
 const queryClient = useQueryClient();
 const me = useQuery(meQuery);
 const timeZone = computed(() => me.data.value?.timezone || "Asia/Seoul");
@@ -39,13 +44,14 @@ const correlations = new Map<string, string>();
 const cancelButton = useTemplateRef<{ $el?: Element }>("cancelButton");
 const confirmButton = useTemplateRef<{ $el?: Element }>("confirmButton");
 let opener: HTMLElement | null = null;
+const scopeProjectId = computed(() => (props.targetKind === "document" ? props.projectId : null));
 const queryKey = computed(
-  () => ["revisions", props.workspaceId, "document", props.documentId, props.projectId] as const,
+  () => ["revisions", props.workspaceId, props.targetKind, props.documentId, scopeProjectId.value] as const,
 );
 
 const listQuery = useQuery(() => ({
   queryKey: queryKey.value,
-  queryFn: () => listRevisions("document", props.workspaceId, props.documentId, props.projectId),
+  queryFn: () => listRevisions(props.targetKind, props.workspaceId, props.documentId, scopeProjectId.value),
   enabled: open.value,
 }));
 const members = useQuery(() => ({ ...membersQuery(props.workspaceId), enabled: open.value }));
@@ -73,7 +79,7 @@ watch(pendingRestoreId, async (id) => {
 });
 
 const saveRevision = useMutation({
-  mutationFn: () => createRevision("document", props.workspaceId, props.documentId, props.projectId),
+  mutationFn: () => createRevision(props.targetKind, props.workspaceId, props.documentId, scopeProjectId.value),
   onSuccess: async () => {
     notice.value = null;
     await queryClient.invalidateQueries({ queryKey: queryKey.value });
@@ -90,7 +96,14 @@ const restore = useMutation({
       correlationId = crypto.randomUUID();
       correlations.set(revisionId, correlationId);
     }
-    return restoreRevision("document", props.workspaceId, props.documentId, props.projectId, revisionId, correlationId);
+    return restoreRevision(
+      props.targetKind,
+      props.workspaceId,
+      props.documentId,
+      scopeProjectId.value,
+      revisionId,
+      correlationId,
+    );
   },
   onSuccess: async (_data, revisionId) => {
     correlations.delete(revisionId);
@@ -102,14 +115,14 @@ const restore = useMutation({
     const timedOut = err instanceof ProblemError && err.status === 504;
     if (timedOut) {
       void queryClient.invalidateQueries({ queryKey: queryKey.value });
-      if (props.projectId) {
-        void queryClient.invalidateQueries({
-          queryKey: ["project-document", props.workspaceId, props.projectId, props.documentId],
-        });
-      } else {
-        void queryClient.invalidateQueries({ queryKey: ["document", props.workspaceId, props.documentId] });
-        void queryClient.invalidateQueries({ queryKey: ["document-body", props.workspaceId, props.documentId] });
-      }
+        if (scopeProjectId.value) {
+          void queryClient.invalidateQueries({
+            queryKey: ["project-document", props.workspaceId, scopeProjectId.value, props.documentId],
+          });
+        } else if (props.targetKind === "document") {
+          void queryClient.invalidateQueries({ queryKey: ["document", props.workspaceId, props.documentId] });
+          void queryClient.invalidateQueries({ queryKey: ["document-body", props.workspaceId, props.documentId] });
+        }
     }
     notice.value = timedOut ? t("version.restore.timeout") : t("version.restore.failed");
   },
@@ -117,7 +130,13 @@ const restore = useMutation({
 
 async function showPreview(id: string): Promise<void> {
   try {
-    preview.value = await getRevision("document", props.workspaceId, props.documentId, props.projectId, id);
+    preview.value = await getRevision(
+      props.targetKind,
+      props.workspaceId,
+      props.documentId,
+      scopeProjectId.value,
+      id,
+    );
   } catch {
     notice.value = t("version.list.failed");
   }

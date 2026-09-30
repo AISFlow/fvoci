@@ -99,8 +99,45 @@ test("the Vue entry's static graph leaves the wiki editor to the wiki page's chu
     "ServiceInfoPage.vue",
     "InvitePage.vue",
     "SetupPage.vue",
+    "ProjectHomePage.vue",
+    "WorkspaceItemPage.vue",
   ]) {
     assert.equal(seen.has(path.join(web, "src/vue/pages", page)), false, `${page} is a lazy route chunk`);
   }
   assert.deepEqual(found, []);
+});
+
+function walkStatic(start: string): { seen: Set<string>; found: string[] } {
+  const seen = new Set<string>();
+  const found: string[] = [];
+  const walk = (file: string) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = readFileSync(file, "utf8");
+    for (const [, spec] of source.matchAll(STATIC_IMPORT)) {
+      if (!spec) continue;
+      if (EDITOR_STACK.test(spec)) found.push(`${spec} in ${path.relative(web, file)}`);
+      const next = resolve(spec, file);
+      if (!next) continue;
+      if (EDITOR_FILES.some((dir) => next.startsWith(dir))) {
+        found.push(`${path.relative(web, next)} from ${path.relative(web, file)}`);
+      }
+      if (!next.endsWith(".css")) walk(next);
+    }
+  };
+  walk(start);
+  return { seen, found };
+}
+
+test("the Gantt chunk still does not load the wiki editor", () => {
+  const { found } = walkStatic(path.join(web, "src/vue/pages/ProjectGanttPage.vue"));
+  assert.deepEqual(found, []);
+});
+
+test("the workspace-item chunk may load the collab editor (the React page does)", () => {
+  const { found } = walkStatic(path.join(web, "src/vue/pages/WorkspaceItemPage.vue"));
+  assert.ok(
+    found.some((entry) => entry.includes("@fvoci/editor") || entry.includes("editor/")),
+    `expected the task/document item page to load the editor, got ${JSON.stringify(found)}`,
+  );
 });

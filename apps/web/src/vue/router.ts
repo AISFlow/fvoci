@@ -8,7 +8,15 @@ import { VUE_ROUTE_PATHS } from "./route-paths";
  * (import-graph.test.ts and e2e/project-gantt-flow.spec.ts check this). */
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
+  // Wiki refs are more specific than project home's `/w/:slug/:ref` and must
+  // stay listed first so `/w/acme/wiki-3` is never the project overview.
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectTasks, name: "project-tasks", component: () => import("./pages/ProjectTasksPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectTable, name: "project-table", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectBoard, name: "project-board", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectCalendar, name: "project-calendar", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: VUE_ROUTE_PATHS.workspaceItem, name: "workspace-item", component: () => import("./pages/WorkspaceItemPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectHome, name: "project-home", component: () => import("./pages/ProjectHomePage.vue") },
   { path: VUE_ROUTE_PATHS.login, name: "login", component: () => import("./pages/LoginPage.vue") },
   { path: VUE_ROUTE_PATHS.resetPassword, name: "reset-password", component: () => import("./pages/ResetPasswordPage.vue") },
   { path: VUE_ROUTE_PATHS.magicLink, name: "magic-link", component: () => import("./pages/MagicLinkPage.vue") },

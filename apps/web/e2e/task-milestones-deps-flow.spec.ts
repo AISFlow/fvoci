@@ -125,4 +125,22 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
         edge.blockerId === blockerId && edge.blockedId === blockedId && edge.type === "FS",
     );
   }).toBe(true);
+  await page.goto(`/w/${admin.workspaceSlug}/TMD/tasks`);
+  const renamed = page.waitForResponse(response => response.request().method() === "PATCH" && response.url().endsWith(`/milestones/${milestoneId}`));
+  await page.getByTestId(`project-milestone-name-${milestoneId}`).fill("최종 출시");
+  await page.getByTestId(`project-milestone-name-${milestoneId}`).blur();
+  expect((await renamed).ok()).toBe(true);
+  await page.reload();
+  await expect(page.getByTestId(`project-milestone-name-${milestoneId}`)).toHaveValue("최종 출시");
+  await page.getByTestId(`project-milestone-delete-${milestoneId}`).click();
+  await expect(page.getByTestId(`project-milestone-name-${milestoneId}`)).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByTestId(`project-milestone-name-${milestoneId}`)).toHaveCount(0);
+  const finalMilestones = await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/milestones`);
+  expect(finalMilestones.ok()).toBe(true);
+  expect((await finalMilestones.json()).items).toEqual([]);
+  const finalTask = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${blockerId}`);
+  expect(finalTask.ok()).toBe(true);
+  expect((await finalTask.json()).milestoneId).toBeNull();
+
 });

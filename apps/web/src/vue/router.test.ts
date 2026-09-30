@@ -180,3 +180,31 @@ test(
     }
   }),
 );
+
+test("wiki documents stay wiki; project keys are project-home; gantt stays gantt", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/wiki-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/WIKI-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/GNT").name, "project-home");
+  assert.equal(router.resolve("/w/acme/gnt").name, "project-home");
+  assert.equal(router.resolve("/w/acme/GNT/gantt").name, "project-gantt");
+  assert.equal(router.resolve("/w/acme/GNT/tasks").name, "project-tasks");
+  assert.equal(router.resolve("/w/acme/GNT/board").name, "project-board");
+  // These resource routes now stay within Vue.
+  assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
+  assert.equal(isVueAppPath("/w/acme/GNT"), true);
+  assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
+});
+
+test("workspace-item is more specific than project-home; wiki stays wiki", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/GNT-1").name, "workspace-item");
+  assert.equal(router.resolve("/w/acme/gnt-12").name, "workspace-item");
+  assert.equal(router.resolve("/w/acme/wiki-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/WIKI-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/GNT").name, "project-home");
+  assert.equal(router.resolve("/w/acme/GNT/tasks").name, "project-tasks");
+  // These resource routes now stay within Vue.
+  assert.equal(isVueAppPath("/w/acme/GNT-1"), true);
+  assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
+});

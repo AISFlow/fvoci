@@ -67,6 +67,20 @@ export function workflowQuery(workspaceId: string, projectId: string) {
   });
 }
 
+/** The workspace groups granted a role on the project. */
+export function projectGroupGrantsQuery(workspaceId: string, projectId: string) {
+  return queryOptions({
+    queryKey: ["project-group-grants", workspaceId, projectId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups", {
+          params: { path: { workspace_id: workspaceId, project_id: projectId } },
+        }),
+      ),
+    retry: false,
+  });
+}
+
 export function findProjectByKey(
   items: readonly ProjectListItem[] | undefined,
   key: string,
