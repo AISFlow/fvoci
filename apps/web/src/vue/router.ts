@@ -28,13 +28,11 @@ export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.serviceInfo, name: "service-info", component: () => import("./pages/ServiceInfoPage.vue") },
   { path: VUE_ROUTE_PATHS.invite, name: "invite", component: () => import("./pages/InvitePage.vue") },
   { path: VUE_ROUTE_PATHS.setup, name: "setup", component: () => import("./pages/SetupPage.vue") },
-  // More specific than `/w/:slug`. Coordinator-owned app-boundary.ts still
-  // boots the React app for these until its regexes include them.
+  // Exact section routes stay separate from project and item refs.
   { path: VUE_WORKSPACE_ROUTE_PATHS.projects, name: "projects", component: () => import("./pages/ProjectsPage.vue") },
   { path: VUE_WORKSPACE_ROUTE_PATHS.wikiList, name: "wiki-list", component: () => import("./pages/WikiPage.vue") },
   { path: VUE_WORKSPACE_ROUTE_PATHS.search, name: "search", component: () => import("./pages/SearchPage.vue") },
-  // More specific than `/w/:slug`. Boot still loads React until the
-  // coordinator regexes in route-paths.ts (VUE_NAV_ROUTE_PATHS) land.
+
   { path: VUE_NAV_ROUTE_PATHS.myTasks, name: "my-tasks", component: () => import("./pages/MyTasksPage.vue") },
   {
     path: VUE_NAV_ROUTE_PATHS.notifications,

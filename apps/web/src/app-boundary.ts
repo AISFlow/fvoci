@@ -15,6 +15,9 @@ export const WORKSPACE_ITEM_PATH =
   /^\/w\/[^/]+\/(?!wiki-[1-9]\d{0,8}\/?$)[A-Za-z0-9-]{2,32}-[1-9]\d{0,8}\/?$/i;
 
 export const VUE_APP_PATHS: readonly RegExp[] = [
+  // Workspace entrance and section lists, with no nested-path ownership.
+  /^\/w\/[^/]+\/?$/i,
+  /^\/w\/[^/]+\/(?:projects|wiki|search|my-tasks|notifications|trash)\/?$/i,
   // Home workspace picker and public policies/operator information.
   /^\/$/,
   /^\/legal\/[^/]+\/?$/i,

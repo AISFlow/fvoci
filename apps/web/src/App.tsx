@@ -11,21 +11,14 @@ import {
 } from "react-router-dom";
 import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
-import { SearchPage } from "@/pages/SearchPage";
-import { ProjectsPage } from "@/pages/ProjectsPage";
-import { TrashPage } from "@/pages/TrashPage";
-import { WikiPage } from "@/pages/WikiPage";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
 import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
 import { TemplatesSettingsPage } from "@/pages/TemplatesSettingsPage";
-import { MyTasksPage } from "@/pages/MyTasksPage";
 import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
 import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
-import { NotificationsPage } from "@/pages/NotificationsPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
-import { WorkspaceHomePage } from "@/pages/WorkspaceHomePage";
 import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
 
 const queryClient = new QueryClient({
@@ -115,16 +108,16 @@ const router = createBrowserRouter(
           </SetupGuard>
         }
       >
-        <Route index element={<WorkspaceHomePage />} />
-        <Route path="projects" element={<ProjectsPage />} />
-        <Route path="my-tasks" element={<MyTasksPage />} />
-        <Route path="wiki" element={<WikiPage />} />
-        <Route path="search" element={<SearchPage />} />
-        <Route path="trash" element={<TrashPage />} />
+        <Route index element={<NoRoute />} />
+        <Route path="projects" element={<NoRoute />} />
+        <Route path="my-tasks" element={<NoRoute />} />
+        <Route path="wiki" element={<NoRoute />} />
+        <Route path="search" element={<NoRoute />} />
+        <Route path="trash" element={<NoRoute />} />
         <Route path="settings" element={<WorkspaceSettingsPage />} />
         <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
         <Route path="settings/templates" element={<TemplatesSettingsPage />} />
-        <Route path="notifications" element={<NotificationsPage />} />
+        <Route path="notifications" element={<NoRoute />} />
         <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
         <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
         <Route path=":ref" element={<WorkspaceRefPage />} />

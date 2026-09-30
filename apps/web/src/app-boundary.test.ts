@@ -162,7 +162,7 @@ test("the boot module sends valid wiki and project items, to the Vue app", () =>
   assert.equal(isVueAppPath("/w/acme/PRJ-1"), true);
   assert.equal(isVueAppPath("/w/acme/GNT-1"), true);
   assert.equal(isVueAppPath("/w/acme/XWIKI-1"), true);
-  assert.equal(isVueAppPath("/w/acme/wiki"), false);
+  assert.equal(isVueAppPath("/w/acme/wiki"), true);
 });
 
 test("the boot module sends /login, and only that path, to the Vue app", () => {
@@ -193,13 +193,13 @@ test("the boot module sends /setup, and only that path, to the Vue app", () => {
   assert.equal(isVueAppPath("/setups"), false);
 });
 
-test("boot still sends the wiki list and workspace search to the React app", () => {
-  assert.equal(isVueAppPath("/w/acme/wiki"), false);
-  assert.equal(isVueAppPath("/w/acme/wiki/"), false);
-  assert.equal(isVueAppPath("/w/acme/WIKI"), false);
-  assert.equal(isVueAppPath("/w/acme/search"), false);
-  assert.equal(isVueAppPath("/w/acme/search/"), false);
-  assert.equal(isVueAppPath("/w/acme/Search"), false);
+test("wiki list and workspace search boot Vue", () => {
+  assert.equal(isVueAppPath("/w/acme/wiki"), true);
+  assert.equal(isVueAppPath("/w/acme/wiki/"), true);
+  assert.equal(isVueAppPath("/w/acme/WIKI"), true);
+  assert.equal(isVueAppPath("/w/acme/search"), true);
+  assert.equal(isVueAppPath("/w/acme/search/"), true);
+  assert.equal(isVueAppPath("/w/acme/Search"), true);
   // Wiki documents stay on the Vue app; the list path must not steal them.
   assert.equal(isVueAppPath("/w/acme/WIKI-1"), true);
   assert.equal(isVueAppPath("/w/acme/wiki-12"), true);
@@ -218,7 +218,8 @@ test("single-segment resource routes agree with the shared ref grammar", () => {
     const auth = /^\/(reset-password|magic-link|confirm-email|cancel-withdraw|consent)\/?$/i.test(path);
     const attachment = /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
       /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i.test(path);
-    if (!projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
+    const workspaceSection = /^\/w\/[^/]+(?:\/(?:projects|wiki|search|my-tasks|notifications|trash))?\/?$/i.test(path);
+    if (!workspaceSection && !projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
   }
 });
 
@@ -231,15 +232,15 @@ test("home and public pages enter Vue while admin policies remain React", () => 
   }
 });
 
-test("workspace nav pages stay on the React boot until the coordinator regexes land", () => {
-  assert.equal(isVueAppPath("/w/acme/my-tasks"), false);
-  assert.equal(isVueAppPath("/w/acme/my-tasks/"), false);
-  assert.equal(isVueAppPath("/w/acme/notifications"), false);
-  assert.equal(isVueAppPath("/w/acme/trash"), false);
-  const boundary = readFileSync(new URL("./app-boundary.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/my-tasks/);
-  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/notifications/);
-  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/trash/);
+test("workspace navigation owns exact section paths and excludes nested private flows", () => {
+  for (const section of ["", "/projects", "/wiki", "/search", "/my-tasks", "/notifications", "/trash"]) {
+    const path = `/w/acme${section}`;
+    assert.equal(isVueAppPath(path), true, path);
+    assert.equal(isVueAppPath(`${path}/`.toUpperCase()), true, path);
+  }
+  for (const path of ["/w", "/w//", "/w/acme/wiki/extra", "/w/acme/search/extra", "/w/acme/settings", "/settings/account"]) {
+    assert.equal(isVueAppPath(path), false, path);
+  }
 });
 
 test("attachment viewers boot Vue while public share and admin pages retain React", () => {
