@@ -59,10 +59,11 @@ function toFrameBytes(message: string | Buffer): Uint8Array {
 }
 
 /** Hold server `persisted:` ack frames until release() (archive persist barrier). */
-function installPersistAckHold(page: Page): { release: () => void } {
+async function installPersistAckHold(page: Page): Promise<{ release: () => Promise<void> }> {
   const gates: Array<() => void> = [];
+  const deliveries: Promise<PromiseSettledResult<void>>[] = [];
   let holdAcks = true;
-  page.routeWebSocket(/\/collab/, (ws) => {
+  await page.routeWebSocket(/\/collab/, (ws) => {
     const server = ws.connectToServer();
     ws.onMessage((message) => {
       server.send(message);
@@ -74,9 +75,16 @@ function installPersistAckHold(page: Page): { release: () => void } {
         if (holdAcks && parts?.kind === "done") {
           const { promise: gate, resolve: releaseGate } = deferred();
           gates.push(releaseGate);
-          void gate.then(() => {
-            ws.send(message);
-          });
+          deliveries.push(
+            gate
+              .then(() => {
+                ws.send(message);
+              })
+              .then(
+                () => ({ status: "fulfilled", value: undefined }),
+                (reason: unknown) => ({ status: "rejected", reason }),
+              ),
+          );
           return;
         }
       }
@@ -84,9 +92,12 @@ function installPersistAckHold(page: Page): { release: () => void } {
     });
   });
   return {
-    release: () => {
+    release: async () => {
       holdAcks = false;
       for (const open of gates.splice(0)) open();
+      for (const delivery of await Promise.all(deliveries)) {
+        if (delivery.status === "rejected") throw delivery.reason;
+      }
     },
   };
 }
@@ -163,7 +174,11 @@ async function openEditableTask(
   return { wsId, task, bodyText };
 }
 
-function holdArchivePatch(page: Page, wsId: string, taskId: string): { release: () => void } {
+async function holdArchivePatch(
+  page: Page,
+  wsId: string,
+  taskId: string,
+): Promise<{ release: () => void }> {
   let gateOpen = false;
   const { promise: held, resolve } = deferred();
   const releaseHold = () => {
@@ -182,7 +197,7 @@ function holdArchivePatch(page: Page, wsId: string, taskId: string): { release: 
     }
     await route.continue();
   };
-  void page.route(matchUrl, holdPatch);
+  await page.route(matchUrl, holdPatch);
   return { release: releaseHold };
 }
 
@@ -228,7 +243,7 @@ test("archive holds editor read-only while persist and archive PATCH are in flig
   const wire = attachCollabWire(page);
   await ensureSetup(page);
   const { wsId, task, bodyText } = await openEditableTask(page, wire, "ZT702");
-  const patchHold = holdArchivePatch(page, wsId, task.id);
+  const patchHold = await holdArchivePatch(page, wsId, task.id);
   const editor = page.getByTestId("task-body").locator(".fvoci-editor .ProseMirror");
   const archiveButton = page.getByRole("button", { name: "보관", exact: true });
 
@@ -268,7 +283,7 @@ test("archive holds editor read-only while persist and archive PATCH are in flig
 test("failed archive persist shows error, keeps task active and restores editing", async ({
   page,
 }) => {
-  const persistHold = installPersistAckHold(page);
+  const persistHold = await installPersistAckHold(page);
   await ensureSetup(page);
   const wire = attachCollabWire(page);
   const { wsId, task, bodyText } = await openEditableTask(page, wire, "ZT703");
@@ -283,7 +298,7 @@ test("failed archive persist shows error, keeps task active and restores editing
   await expect(page.getByText("보관된 태스크입니다")).toHaveCount(0);
   expect((await taskJson(page, wsId, task.id)).archivedAt).toBeNull();
 
-  persistHold.release();
+  await persistHold.release();
   await page.reload();
   await expect(
     page.getByTestId("task-body").locator('[data-collab-status="connected"]'),
