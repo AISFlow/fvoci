@@ -86,7 +86,9 @@ test("search draft commits after 300ms and project scope can clear and restore",
   await page.goto(`/w/parity/search?q=old&tab=task&projectId=${project.id}`);
   const input = page.locator("#workspace-search-q");
   await expect(input).toBeVisible();
-  await page.clock.install();
+  const start = Date.now();
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(start + 1000);
   await input.fill("Due");
   await page.clock.runFor(299);
   await expect(page).toHaveURL(/q=old/);
