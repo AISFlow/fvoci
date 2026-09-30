@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 bun --bun scripts/verify-web-tools.mjs
+bun --bun scripts/prepare-vue-lint-types.mjs
 if [[ $# == 0 || $1 == -* ]]; then
   set -- 'apps/web/**/*.{js,mjs,cjs,ts,tsx,vue}' \
     'packages/editor/**/*.{js,mjs,cjs,ts,tsx,vue}' 'packages/i18n/**/*.{js,mjs,cjs,ts,tsx,vue}' \
