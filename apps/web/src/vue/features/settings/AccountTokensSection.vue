@@ -9,6 +9,7 @@ import { useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref } from "vue";
 import { z } from "zod";
 import { api, ensureOk, loadErrorMessage, problemMessage } from "@/lib/api";
+import { formatDateKo } from "@/lib/datetime";
 import type { components } from "@/generated/api";
 import { workspacesQuery } from "@/lib/queries";
 import { apiTokenCreateInput, apiTokenScope } from "@/lib/validators";
@@ -17,9 +18,10 @@ import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
 import RevealedSecret from "./RevealedSecret.vue";
 import { parseForm } from "./form";
-import { formatExpiry, TOKEN_SCOPE_LABEL, tokenScopeLabels, type TokenScope } from "./token-display";
+import { TOKEN_SCOPE_LABEL, tokenScopeLabels, type TokenScope } from "./token-display";
 
 type ApiToken = components["schemas"]["ApiTokenOutput"];
+defineProps<{ timezone: string }>();
 const client = useQueryClient();
 const tokenKey = ["me", "api-tokens"] as const;
 const tokens = useQuery({ queryKey: tokenKey, queryFn: async () => ensureOk(await api.GET("/api/v1/me/api-tokens")), retry: false });
@@ -115,7 +117,7 @@ async function revoke(token: ApiToken): Promise<void> {
         <div class="min-w-0">
           <p class="font-medium break-all">{{ token.name }}</p>
           <p class="text-sm text-muted">{{ workspaceNames.get(token.workspaceId) ?? token.workspaceId }}</p>
-          <p class="text-sm text-muted">{{ tokenScopeLabels(token.scopes) }} · {{ formatExpiry(token.expiresAt) }}</p>
+          <p class="text-sm text-muted">{{ tokenScopeLabels(token.scopes) }} · {{ token.expiresAt === null ? t("token.unlimited") : formatDateKo(token.expiresAt, timezone) }}</p>
         </div>
         <ConfirmAction :title="t('token.revoke.confirm.title')" :description="t('token.revoke.confirm.body', { name: token.name })"
           :action-label="t('token.revoke')" :disabled="pending" :on-confirm="() => revoke(token)">

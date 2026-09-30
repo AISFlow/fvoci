@@ -6,6 +6,8 @@ import { currentStep, totp } from "./mfa-helpers";
 const admin = { email: "vue-console-owner@example.com", password: "supersecret1" };
 const member = { email: "vue-console-member@example.com", password: " membersecret1 " };
 
+test.use({ timezoneId: "UTC" });
+
 test.beforeAll(async ({ browser }) => {
   const page = await browser.newPage({ baseURL: process.env.PLAYWRIGHT_BASE_URL });
   try {
@@ -146,8 +148,11 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
 
 test("Vue personal API tokens show a secret once, persist metadata, and revoke actual Rust access", async ({ page, browser }) => {
   await login(page, admin.email, admin.password);
+  const me = await (await page.request.get("/api/v1/auth/me")).json();
+  expect((await page.request.patch("/api/v1/auth/me", { data: { givenName: me.givenName, timezone: "Asia/Seoul" } })).status()).toBe(200);
   await page.goto("/settings/account");
   await expectVueAuth(page);
+  expect(await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe("UTC");
   const tokenSection = page.getByRole("region", { name: "토큰", exact: true });
   await tokenSection.getByLabel("워크스페이스 이름", { exact: true }).click();
   await page.getByRole("option", { name: "Vue Console", exact: true }).click();
@@ -169,10 +174,26 @@ test("Vue personal API tokens show a secret once, persist metadata, and revoke a
     const path = `/api/v1/workspaces/${output.workspaceId}/projects`;
     expect((await external.request.get(path, { headers: { Authorization: `Bearer ${output.token}` } })).status()).toBe(200);
     expect((await external.request.get("/api/v1/me/api-tokens", { headers: { Authorization: `Bearer ${output.token}` } })).status()).toBe(404);
+    // Bound expiry fixtures to this isolated DB; listing still uses real Rust.
+    authSql(`UPDATE fvoci.api_tokens SET expires_at = NULL WHERE id = '${output.id}'::uuid`);
     await page.reload();
     await expect(secret).toHaveCount(0);
     const row = page.getByTestId("account-token-row").filter({ hasText: "콘솔 개인 토큰" });
     await expect(row).toBeVisible();
+    await expect(row).toContainText("만료 없음");
+    authSql(`UPDATE fvoci.api_tokens SET expires_at = '2026-10-01T20:00:00Z'::timestamptz WHERE id = '${output.id}'::uuid`);
+    await page.reload();
+    await expect(row).toContainText("2026년 10월 2일");
+    // A committed profile change updates this component without a remount.
+    const preferences = page.getByRole("region", { name: "설정", exact: true });
+    await preferences.getByLabel("시간대", { exact: true }).click();
+    await page.getByRole("option", { name: "UTC", exact: true }).click();
+    const savedTimezone = page.waitForResponse((res) => res.url().endsWith("/api/v1/auth/me") && res.request().method() === "PATCH");
+    await preferences.getByRole("button", { name: "저장", exact: true }).click();
+    expect((await savedTimezone).status()).toBe(200);
+    await expect(row).toContainText("2026년 10월 1일");
+    await page.reload();
+    await expect(row).toContainText("2026년 10월 1일");
     await row.getByRole("button", { name: "폐기", exact: true }).click();
     const dialog = page.locator("dialog[open]");
     const revoked = page.waitForResponse((res) => res.url().endsWith(`/api/v1/me/api-tokens/${output.id}`) && res.request().method() === "DELETE");

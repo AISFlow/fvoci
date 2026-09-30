@@ -119,7 +119,7 @@ async function savePreferences(input: { locale: "ko"; timezone: string; weekStar
             />
           </template>
         </AccountSettingsView>
-        <AccountTokensSection v-if="ready && !failed" class="mt-6" />
+        <AccountTokensSection v-if="ready && !failed && me.data.value" :timezone="me.data.value.timezone" class="mt-6" />
       </div>
     </main>
     <footer class="border-t border-default px-4 py-3">
