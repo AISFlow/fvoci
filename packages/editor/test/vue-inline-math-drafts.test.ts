@@ -53,7 +53,7 @@ function harness() {
   return { editor: host as unknown as Editor, host, ydoc, type, refresh, emit, listeners };
 }
 
-test("adjacent atoms and editors have independent drafts, including an atom at the paragraph start", () => {
+await test("adjacent atoms and editors have independent drafts, including an atom at the paragraph start", () => {
   const a = harness();
   const b = harness();
   const first = inlineMathDrafts(a.editor, () => 1);
@@ -68,7 +68,7 @@ test("adjacent atoms and editors have independent drafts, including an atom at t
   b.ydoc.destroy();
 });
 
-test("the same Yjs atom retains its draft after attributes and preceding text change", () => {
+await test("the same Yjs atom retains its draft after attributes and preceding text change", () => {
   const a = harness();
   const field = inlineMathDrafts(a.editor, () => 1);
   field.write(draft);
@@ -87,7 +87,7 @@ test("the same Yjs atom retains its draft after attributes and preceding text ch
   a.ydoc.destroy();
 });
 
-test("a deleted atom cannot write or commit into a reused view or a replacement at the same position", () => {
+await test("a deleted atom cannot write or commit into a reused view or a replacement at the same position", () => {
   const a = harness();
   const reused = inlineMathDrafts(a.editor, () => 1);
   reused.write(draft);
@@ -110,7 +110,7 @@ test("a deleted atom cannot write or commit into a reused view or a replacement 
   a.ydoc.destroy();
 });
 
-test("permission loss and editor destruction clear drafts and owned listeners", () => {
+await test("permission loss and editor destruction clear drafts and owned listeners", () => {
   const a = harness();
   const field = inlineMathDrafts(a.editor, () => 1);
   field.write(draft);

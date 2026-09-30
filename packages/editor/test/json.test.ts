@@ -7,7 +7,7 @@ import {
   tiptapDocSchema,
 } from "../src/json.ts";
 
-test("schema version 2 · empty doc", () => {
+await test("schema version 2 · empty doc", () => {
   assert.equal(DOCUMENT_SCHEMA_VERSION, 2);
   assert.deepEqual(emptyDocumentJson(), {
     type: "doc",

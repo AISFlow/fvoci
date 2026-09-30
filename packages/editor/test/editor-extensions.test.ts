@@ -40,11 +40,11 @@ function extensions() {
   });
 }
 
-test("editor schema matches the server's yjs seed schema contract", () => {
+await test("editor schema matches the server's yjs seed schema contract", () => {
   assert.deepEqual(dumpSchema(getSchema(extensions())), editorSchemaFixture());
 });
 
-test("host node views are applied only as addNodeView", () => {
+await test("host node views are applied only as addNodeView", () => {
   const list = extensions();
   const bases = {
     mermaid: Mermaid,
@@ -71,7 +71,7 @@ test("host node views are applied only as addNodeView", () => {
   }
 });
 
-test("the factory and its neutral modules import no UI framework", () => {
+await test("the factory and its neutral modules import no UI framework", () => {
   const framework =
     /^(react|react-dom|vue|@tiptap\/react|@tiptap\/vue-3|@tiptap\/extension-drag-handle-react|@tiptap\/extension-drag-handle-vue-3|@hocuspocus\/provider-react|@radix-ui\/.*|@nuxt\/.*)(\/.*)?$/;
   const seen = new Set<string>();

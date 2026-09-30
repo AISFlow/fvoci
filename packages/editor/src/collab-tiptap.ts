@@ -47,6 +47,9 @@ export function tiptapJsonToYUpdate(json: TiptapDoc): Uint8Array {
 }
 
 export function yDocToTiptapJson(doc: Y.Doc, fragment = FVOCI_YDOC_FRAGMENT): TiptapDoc {
+  // Keep schema-free JSON: the suggested replacement normalizes arbitrary stored nodes/attrs.
+  // Remove after a schema-free equivalent passes data, revision and converter compatibility.
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
   const json = withoutYChange(yDocToProsemirrorJSON(doc, fragment));
   if (isTiptapDoc(json)) return json;
   return { type: "doc", content: [] };

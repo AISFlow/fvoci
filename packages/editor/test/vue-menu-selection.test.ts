@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { restoreNativeSelection } from "../src/vue/menu.ts";
 
-test("selection failures restore the original contenteditable attribute", () => {
+await test("selection failures restore the original contenteditable attribute", () => {
   for (const original of [null, "true", "false"]) {
     for (const failing of ["removeAllRanges", "addRange"]) {
       let editable = original;

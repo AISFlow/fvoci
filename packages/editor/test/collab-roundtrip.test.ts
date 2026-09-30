@@ -7,7 +7,7 @@ import type { TiptapDoc } from "../src/json.ts";
 const roundtrip = (json: TiptapDoc): TiptapDoc =>
   yDocToTiptapJson(tiptapJsonToYDoc(json, FVOCI_YDOC_FRAGMENT));
 
-test("tiptapJsonToYDoc gc false", () => {
+await test("tiptapJsonToYDoc gc false", () => {
   const doc = tiptapJsonToYDoc({
     type: "doc",
     content: [{ type: "paragraph" }],
@@ -15,7 +15,7 @@ test("tiptapJsonToYDoc gc false", () => {
   assert.equal(doc.gc, false);
 });
 
-test("paragraph roundtrip keeps Korean", () => {
+await test("paragraph roundtrip keeps Korean", () => {
   const json: TiptapDoc = {
     type: "doc",
     content: [
@@ -28,7 +28,7 @@ test("paragraph roundtrip keeps Korean", () => {
   assert.equal(JSON.stringify(roundtrip(json)).includes("안녕"), true);
 });
 
-test("replaceYDocContent", () => {
+await test("replaceYDocContent", () => {
   const doc = tiptapJsonToYDoc({
     type: "doc",
     content: [{ type: "paragraph", content: [{ type: "text", text: "old" }] }],
@@ -42,7 +42,7 @@ test("replaceYDocContent", () => {
   assert.equal(JSON.stringify(back).includes("old"), false);
 });
 
-test("ychange 는 저장 JSON 에 안 남는다", () => {
+await test("ychange 는 저장 JSON 에 안 남는다", () => {
   const json = roundtrip({
     type: "doc",
     content: [

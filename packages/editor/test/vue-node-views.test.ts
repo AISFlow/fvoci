@@ -24,11 +24,11 @@ function extensions() {
   });
 }
 
-test("the Vue node views give exactly the server's yjs seed schema", () => {
+await test("the Vue node views give exactly the server's yjs seed schema", () => {
   assert.deepEqual(dumpSchema(getSchema(extensions())), editorSchemaFixture());
 });
 
-test("the Vue node views change only addNodeView; mermaid keeps its plain view", () => {
+await test("the Vue node views change only addNodeView; mermaid keeps its plain view", () => {
   const list = extensions();
   const bases = {
     mermaid: Mermaid,
@@ -62,7 +62,7 @@ test("the Vue node views change only addNodeView; mermaid keeps its plain view",
   );
 });
 
-test("the Vue editor imports no React module", () => {
+await test("the Vue editor imports no React module", () => {
   const react =
     /^(react|react-dom|@tiptap\/react|@tiptap\/extension-drag-handle-react|@hocuspocus\/provider-react|@radix-ui\/.*)(\/.*)?$/;
   const seen = new Set<string>();
@@ -95,7 +95,7 @@ test("the Vue editor imports no React module", () => {
 // bound field would drop what the user is typing. The fields are
 // uncontrolled (the React views' defaultValue) and get their value once,
 // when they open.
-test("the Vue node views never bind the value of a field being edited", () => {
+await test("the Vue node views never bind the value of a field being edited", () => {
   const dir = new URL("../src/vue/", import.meta.url);
   const bound: string[] = [];
   for (const name of readdirSync(dir).filter((file) => file.endsWith(".vue"))) {

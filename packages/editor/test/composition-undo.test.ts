@@ -13,7 +13,7 @@ import {
 import { createFvociEditorExtensions } from "../src/editor-extensions.ts";
 import { createFvociExtensions } from "../src/tiptap-schema.ts";
 
-test("a paused composition undoes and redoes as one operation while peer-origin changes survive", () => {
+await test("a paused composition undoes and redoes as one operation while peer-origin changes survive", () => {
   const doc = new Y.Doc();
   const text = doc.getText("local");
   const remote = doc.getText("remote");
@@ -38,16 +38,16 @@ test("a paused composition undoes and redoes as one operation while peer-origin 
     manager.stopCapturing();
   }
   manager.undo();
-  assert.equal(text.toString(), "");
-  assert.equal(remote.toString(), "peer!!!");
+  assert.equal(text.toJSON(), "");
+  assert.equal(remote.toJSON(), "peer!!!");
   manager.redo();
-  assert.equal(text.toString(), "한");
-  assert.equal(remote.toString(), "peer!!!");
+  assert.equal(text.toJSON(), "한");
+  assert.equal(remote.toJSON(), "peer!!!");
   manager.destroy();
   doc.destroy();
 });
 
-test("distinct compositions and normal time-based typing remain separate and custom timeout is restored", () => {
+await test("distinct compositions and normal time-based typing remain separate and custom timeout is restored", () => {
   const doc = new Y.Doc();
   const text = doc.getText("local");
   const manager = new Y.UndoManager(text, { captureTimeout: 37 });
@@ -69,11 +69,11 @@ test("distinct compositions and normal time-based typing remain separate and cus
   text.insert(text.length, "normal");
   assert.equal(manager.undoStack.length, 3);
   manager.undo();
-  assert.equal(text.toString(), "한글");
+  assert.equal(text.toJSON(), "한글");
   manager.undo();
-  assert.equal(text.toString(), "한");
+  assert.equal(text.toJSON(), "한");
   manager.undo();
-  assert.equal(text.toString(), "");
+  assert.equal(text.toJSON(), "");
   policy.capture(3);
   policy.release();
   assert.equal(manager.captureTimeout, 37);
@@ -81,7 +81,7 @@ test("distinct compositions and normal time-based typing remain separate and cus
   doc.destroy();
 });
 
-test("no-op writes do not absorb earlier typing, and another top item or undo breaks composition capture", () => {
+await test("no-op writes do not absorb earlier typing, and another top item or undo breaks composition capture", () => {
   const doc = new Y.Doc();
   const text = doc.getText("local");
   const manager = new Y.UndoManager(text);
@@ -101,19 +101,19 @@ test("no-op writes do not absorb earlier typing, and another top item or undo br
   policy.release();
   assert.equal(manager.undoStack.length, 4);
   manager.undo();
-  assert.equal(text.toString(), "prior한other");
+  assert.equal(text.toJSON(), "prior한other");
   policy.capture(1);
   text.insert(text.length, "새");
   policy.release();
   manager.undo();
-  assert.equal(text.toString(), "prior한other");
+  assert.equal(text.toJSON(), "prior한other");
   manager.undo();
-  assert.equal(text.toString(), "prior한");
+  assert.equal(text.toJSON(), "prior한");
   manager.destroy();
   doc.destroy();
 });
 
-test("undoing a newer ordinary item cannot reopen the earlier composition item", () => {
+await test("undoing a newer ordinary item cannot reopen the earlier composition item", () => {
   const doc = new Y.Doc();
   const text = doc.getText("text");
   const manager = new Y.UndoManager(text);
@@ -127,26 +127,26 @@ test("undoing a newer ordinary item cannot reopen the earlier composition item",
     text.insert(text.length, "ordinary");
     assert.equal(manager.undoStack.length, 2);
     manager.undo();
-    assert.equal(text.toString(), "한");
+    assert.equal(text.toJSON(), "한");
     assert.equal(manager.undoStack.at(-1), originalItem);
     policy.capture(1);
     text.insert(text.length, "글");
     policy.release();
     assert.equal(manager.undoStack.length, 2);
     manager.undo();
-    assert.equal(text.toString(), "한");
+    assert.equal(text.toJSON(), "한");
     manager.redo();
-    assert.equal(text.toString(), "한글");
+    assert.equal(text.toJSON(), "한글");
     manager.undo();
     manager.undo();
-    assert.equal(text.toString(), "");
+    assert.equal(text.toJSON(), "");
   } finally {
     manager.destroy();
     doc.destroy();
   }
 });
 
-test("the installed plugin respects historical undo even when the old item returns to the top", () => {
+await test("the installed plugin respects historical undo even when the old item returns to the top", () => {
   const doc = new Y.Doc();
   const text = doc.getText("text");
   const peer = doc.getText("peer");
@@ -197,11 +197,11 @@ test("the installed plugin respects historical undo even when the old item retur
     }, ySyncPluginKey);
     assert.equal(manager.undoStack.length, 2);
     manager.undo();
-    assert.equal(text.toString(), "한");
-    assert.equal(peer.toString(), "peer");
+    assert.equal(text.toJSON(), "한");
+    assert.equal(peer.toJSON(), "peer");
     manager.redo();
-    assert.equal(text.toString(), "한글");
-    assert.equal(peer.toString(), "peer");
+    assert.equal(text.toJSON(), "한글");
+    assert.equal(peer.toJSON(), "peer");
   } finally {
     assert.ok(view.destroy);
     view.destroy();
@@ -210,7 +210,7 @@ test("the installed plugin respects historical undo even when the old item retur
   }
 });
 
-test("a composition started after undo keeps grouping when Yjs clears the redo stack", () => {
+await test("a composition started after undo keeps grouping when Yjs clears the redo stack", () => {
   const doc = new Y.Doc();
   const text = doc.getText("text");
   const manager = new Y.UndoManager(text, { captureTimeout: 37 });
@@ -241,15 +241,15 @@ test("a composition started after undo keeps grouping when Yjs clears the redo s
     assert.equal(manager.undoStack.length, 2);
     assert.equal(manager.captureTimeout, 37);
     manager.undo();
-    assert.equal(text.toString(), "한");
+    assert.equal(text.toJSON(), "한");
     manager.redo();
-    assert.equal(text.toString(), "한글");
+    assert.equal(text.toJSON(), "한글");
     manager.clear();
     policy.capture(1);
     text.insert(text.length, "새");
     policy.release();
     manager.undo();
-    assert.equal(text.toString(), "한글");
+    assert.equal(text.toJSON(), "한글");
   } finally {
     policy.destroy();
     manager.destroy();
@@ -257,7 +257,7 @@ test("a composition started after undo keeps grouping when Yjs clears the redo s
   }
 });
 
-test("the plugin wraps actual local Yjs writes and ignores remote, unrecorded and ordinary edits", () => {
+await test("the plugin wraps actual local Yjs writes and ignores remote, unrecorded and ordinary edits", () => {
   const doc = new Y.Doc();
   const text = doc.getText("text");
   const manager = new Y.UndoManager(text, {
@@ -351,7 +351,7 @@ test("the plugin wraps actual local Yjs writes and ignores remote, unrecorded an
   doc.destroy();
 });
 
-test("both hosts' real extension list creates collaboration before the composition listener", () => {
+await test("both hosts' real extension list creates collaboration before the composition listener", () => {
   const ydoc = new Y.Doc();
   const stubView = () => () => ({ dom: {} as HTMLElement });
   const nodeViews = { math: stubView, mathInline: stubView, embed: stubView, attachment: stubView };

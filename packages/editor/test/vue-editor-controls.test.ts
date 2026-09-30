@@ -50,7 +50,7 @@ function posOfText(editor: Editor, value: string): number {
   return found;
 }
 
-test("sameValue compares plain values by structure and anything else by identity", () => {
+await test("sameValue compares plain values by structure and anything else by identity", () => {
   assert.equal(sameValue(1, 1), true);
   assert.equal(sameValue(Number.NaN, Number.NaN), true);
   assert.equal(sameValue({ a: [1, { b: "x" }] }, { a: [1, { b: "x" }] }), true);
@@ -66,7 +66,7 @@ test("sameValue compares plain values by structure and anything else by identity
   );
 });
 
-test("useEditorState follows transactions, keeps an equal value, and stops with its scope", () => {
+await test("useEditorState follows transactions, keeps an equal value, and stops with its scope", () => {
   const editor = editorWith([paragraph("abc"), paragraph("def")]);
   const scope = effectScope();
   const state = scope.run(() =>
@@ -86,17 +86,18 @@ test("useEditorState follows transactions, keeps an equal value, and stops with 
   assert.deepEqual(state.value, { block: "def" }, "no update after the scope stopped");
 });
 
-test("useEditorState follows setEditable, which emits no transaction", () => {
+await test("useEditorState follows setEditable, which emits no transaction", () => {
   const editor = editorWith([paragraph("abc")]);
   const scope = effectScope();
   const editable = scope.run(() => useEditorState(editor, (current) => current.isEditable));
-  assert.equal(editable?.value, true);
+  assert.ok(editable);
+  assert.equal(editable.value, true);
   editor.setEditable(false);
-  assert.equal(editable?.value, false);
+  assert.equal(editable.value, false);
   scope.stop();
 });
 
-test("the keyboard gutter button acts on the caret's block and never on a table", () => {
+await test("the keyboard gutter button acts on the caret's block and never on a table", () => {
   const editor = editorWith([
     paragraph("top"),
     table,
@@ -114,7 +115,7 @@ test("the keyboard gutter button acts on the caret's block and never on a table"
   assert.equal(editor.state.doc.nodeAt(item - 1)?.type.name, "paragraph");
 });
 
-test("the table caret is the table's position and the caret, or null outside tables", () => {
+await test("the table caret is the table's position and the caret, or null outside tables", () => {
   const editor = editorWith([paragraph("before"), table, paragraph("after")]);
   editor.commands.setTextSelection(posOfText(editor, "before") + 1);
   assert.equal(tableCaret(editor), null);
@@ -126,7 +127,7 @@ test("the table caret is the table's position and the caret, or null outside tab
   });
 });
 
-test("the table handles' box is the table's rectangle in the host's coordinates", () => {
+await test("the table handles' box is the table's rectangle in the host's coordinates", () => {
   assert.deepEqual(
     boxInHost(
       { left: 130, top: 260, width: 400, height: 90 },
@@ -137,7 +138,7 @@ test("the table handles' box is the table's rectangle in the host's coordinates"
   );
 });
 
-test("the table menu's up and down move a table past its sibling block", () => {
+await test("the table menu's up and down move a table past its sibling block", () => {
   const editor = editorWith([paragraph("before"), table, paragraph("after")]);
   const names = () => editor.state.doc.content.content.map((node) => node.textContent);
   const tablePos = editor.state.doc.child(0).nodeSize;
@@ -151,7 +152,7 @@ test("the table menu's up and down move a table past its sibling block", () => {
   assert.equal(moveBlock(editor, 0, -1), false, "the first block cannot move up");
 });
 
-test("the code-block chrome reads the block at the caret", () => {
+await test("the code-block chrome reads the block at the caret", () => {
   const editor = editorWith([
     paragraph("out"),
     {
@@ -172,7 +173,7 @@ test("the code-block chrome reads the block at the caret", () => {
   });
 });
 
-test("the code-block chrome's gutter numbers lines and paints highlighted and diff lines", () => {
+await test("the code-block chrome's gutter numbers lines and paints highlighted and diff lines", () => {
   const block = {
     id: "b",
     editable: true,
@@ -215,7 +216,7 @@ test("the code-block chrome's gutter numbers lines and paints highlighted and di
   assert.equal(codeChromeView(huge, DEFAULT_CODE_CHROME).lines, null);
 });
 
-test("the code-block chrome offers folding from nine lines on", () => {
+await test("the code-block chrome offers folding from nine lines on", () => {
   const lines = (count: number) =>
     Array.from({ length: count }, (_, i) => `line ${String(i + 1)}`).join("\n");
   const block = { id: "b", editable: true, language: "", highlightLines: [], text: lines(8) };
