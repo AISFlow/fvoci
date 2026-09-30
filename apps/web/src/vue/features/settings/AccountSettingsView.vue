@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
+import UPageCard from "@nuxt/ui/components/PageCard.vue";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { ref } from "vue";
 import ConfirmAction from "../../components/ConfirmAction.vue";
@@ -205,7 +206,7 @@ async function handleExport(): Promise<void> {
 
 <template>
   <div class="settings-stack">
-    <section class="settings-section">
+    <UPageCard as="section" variant="subtle" class="settings-section">
       <h1 class="settings-section__title text-title">{{ t("auth.account.title") }}</h1>
       <div class="flex flex-col gap-6">
         <p v-if="successNotice" role="status" class="text-sm text-muted">{{ successNotice }}</p>
@@ -388,8 +389,8 @@ async function handleExport(): Promise<void> {
           <p v-if="methodError" role="alert" class="text-sm text-error">{{ methodError }}</p>
         </div>
       </div>
-    </section>
-    <section class="settings-section">
+    </UPageCard>
+    <UPageCard as="section" variant="subtle" class="settings-section">
       <UButton
         type="button"
         variant="outline"
@@ -402,8 +403,8 @@ async function handleExport(): Promise<void> {
         {{ t("export.me") }}
       </UButton>
       <p v-if="exportError" role="alert" class="settings-notice settings-notice--danger">{{ exportError }}</p>
-    </section>
-    <section class="settings-section">
+    </UPageCard>
+    <UPageCard as="section" variant="subtle" class="settings-section">
       <h2 class="settings-section__title text-title">{{ t("auth.account.withdraw.title") }}</h2>
       <form class="flex flex-col gap-1.5" novalidate @submit.prevent="submitWithdraw">
         <label class="text-sm font-medium" for="withdraw-confirm">
@@ -426,6 +427,6 @@ async function handleExport(): Promise<void> {
           {{ withdrawForm.submitting.value ? t("auth.withdraw.pending") : t("auth.account.withdraw.submit") }}
         </UButton>
       </form>
-    </section>
+    </UPageCard>
   </div>
 </template>

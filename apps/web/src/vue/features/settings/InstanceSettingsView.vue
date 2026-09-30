@@ -120,9 +120,13 @@ function runAsset(kind: BrandingAssetKind, file: File | null): void {
   if (busy.value) return;
   saving.value = true;
   assetProblems.value = { ...assetProblems.value, [kind]: undefined };
-  void props.onAsset(kind, file).catch((err: unknown) => {
-    assetProblems.value = { ...assetProblems.value, [kind]: problemMessage(err, "error.network") };
-  }).finally(() => { saving.value = false; });
+  void props.onAsset(kind, file)
+    .catch((err: unknown) => {
+      assetProblems.value = { ...assetProblems.value, [kind]: problemMessage(err, "error.network") };
+    })
+    .finally(() => {
+      saving.value = false;
+    });
 }
 
 function pickAsset(kind: BrandingAssetKind, event: Event): void {

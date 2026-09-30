@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
+import UPageCard from "@nuxt/ui/components/PageCard.vue";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { ref } from "vue";
 import QueryError from "../../components/QueryError.vue";
@@ -62,7 +63,7 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <section class="settings-section" aria-labelledby="legal-manage-title">
+  <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="legal-manage-title">
     <h2 class="settings-section__title text-title" id="legal-manage-title">{{ t("legal.manage") }}</h2>
     <div class="flex flex-col gap-6">
       <div class="flex flex-col gap-1.5">
@@ -146,5 +147,5 @@ async function submit(): Promise<void> {
         </UButton>
       </form>
     </div>
-  </section>
+  </UPageCard>
 </template>
