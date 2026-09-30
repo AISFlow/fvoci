@@ -60,8 +60,6 @@ const me = useQuery(meQuery);
 const metaQuery = useQuery(() => documentMetaQuery(props.workspaceId, props.documentId));
 const ancestors = useQuery(() => ancestorsQuery(props.workspaceId, props.documentId));
 const tree = useQuery(() => treeQuery(props.workspaceId));
-const metaKey = computed(() => ["document", props.workspaceId, props.documentId]);
-const treeKey = computed(() => ["tree", props.workspaceId]);
 const scope = computed<DocumentScope>(() => ({
   workspaceId: props.workspaceId,
   documentId: props.documentId,
@@ -184,16 +182,18 @@ function move(newParentId: string): void {
 }
 
 const patchMeta = useMutation({
-  mutationFn: (body: PatchDocumentBody) => patchDocument(scope.value, body),
-  onSuccess: async () => {
-    saveError.value = null;
+  mutationFn: (operation: DocumentOperation & { body: PatchDocumentBody }) => patchDocument(operation.scope, operation.body),
+  onSuccess: async (_result, operation) => {
+    const { workspaceId, documentId } = operation.scope;
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: metaKey.value }),
-      queryClient.invalidateQueries({ queryKey: treeKey.value }),
+      queryClient.invalidateQueries({ queryKey: ["document", workspaceId, documentId] }),
+      queryClient.invalidateQueries({ queryKey: ["tree", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", workspaceId] }),
     ]);
+    if (currentOperation(operation)) saveError.value = null;
   },
-  onError: (error: unknown) => {
-    saveError.value = loadErrorMessage(error);
+  onError: (error: unknown, operation) => {
+    if (currentOperation(operation)) saveError.value = loadErrorMessage(error);
   },
 });
 
@@ -236,10 +236,11 @@ async function saveTitle(): Promise<void> {
   if (!current) return;
   const next = title.value.trim();
   if (!next || next === current.title) return;
+  const operation = { ...captureOperation(), body: { title: next } };
   try {
-    await patchMeta.mutateAsync({ title: next });
+    await patchMeta.mutateAsync(operation);
   } catch {
-    title.value = current.title;
+    if (currentOperation(operation)) title.value = current.title;
   }
 }
 
@@ -247,10 +248,11 @@ async function saveIcon(): Promise<void> {
   const current = meta.value?.icon ?? "";
   if (icon.value === current) return;
   const nextIcon = icon.value.trim() === "" ? null : icon.value.trim();
+  const operation = { ...captureOperation(), body: { icon: nextIcon } };
   try {
-    await patchMeta.mutateAsync({ icon: nextIcon });
+    await patchMeta.mutateAsync(operation);
   } catch {
-    icon.value = current;
+    if (currentOperation(operation)) icon.value = current;
   }
 }
 
@@ -258,10 +260,11 @@ async function saveStatus(next: string): Promise<void> {
   const current = meta.value;
   if (!current || next === current.status) return;
   const previous = current.status;
+  const operation = { ...captureOperation(), body: { status: next } };
   try {
-    await patchMeta.mutateAsync({ status: next });
+    await patchMeta.mutateAsync(operation);
   } catch {
-    status.value = previous;
+    if (currentOperation(operation)) status.value = previous;
   }
 }
 

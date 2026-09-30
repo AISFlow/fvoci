@@ -2,7 +2,8 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
+import { meQuery } from "@/lib/queries";
 import { api, ensureOk, loadErrorMessage } from "@/lib/api";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
@@ -11,6 +12,7 @@ import "@/features/settings/settings-shell.css";
 
 const props = defineProps<{ workspaceId: string }>();
 const client = useQueryClient();
+const me = useQuery(meQuery);
 const error = ref<string | null>(null);
 const restoreTarget = ref<string | null>(null);
 
@@ -25,23 +27,37 @@ const deleted = useQuery(() => ({
   retry: false as const,
 }));
 
+type RestoreOperation = { workspaceId: string; projectId: string; lifecycle: number };
+let operationLifecycle = 0;
+watch([() => props.workspaceId, () => me.data.value?.userId, () => me.data.value?.sessionId],
+  () => { operationLifecycle++; }, { flush: "sync" });
+onScopeDispose(() => { operationLifecycle++; });
+function captureOperation(projectId: string): RestoreOperation {
+  return { workspaceId: props.workspaceId, projectId, lifecycle: operationLifecycle };
+}
+function currentOperation(operation: RestoreOperation): boolean {
+  return operation.lifecycle === operationLifecycle;
+}
 const restore = useMutation({
-  mutationFn: async (projectId: string) =>
+  mutationFn: async (operation: RestoreOperation) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/projects/{project_id}/restore", {
-        params: { path: { workspace_id: props.workspaceId, project_id: projectId } },
+        params: { path: { workspace_id: operation.workspaceId, project_id: operation.projectId } },
       }),
     ),
-  onSuccess: async () => {
+  onSuccess: async (_result, operation) => {
+    await Promise.all([
+      client.invalidateQueries({ queryKey: ["projects", operation.workspaceId] }),
+      client.invalidateQueries({ queryKey: ["trash", operation.workspaceId] }),
+      client.invalidateQueries({ queryKey: ["wiki-discovery", operation.workspaceId] }),
+      client.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+    ]);
+    if (!currentOperation(operation)) return;
     error.value = null;
     restoreTarget.value = null;
-    await Promise.all([
-      client.invalidateQueries({ queryKey: ["projects", props.workspaceId] }),
-      client.invalidateQueries({ queryKey: ["trash", props.workspaceId] }),
-    ]);
   },
-  onError: (err: unknown) => {
-    error.value = loadErrorMessage(err);
+  onError: (err: unknown, operation) => {
+    if (currentOperation(operation)) error.value = loadErrorMessage(err);
   },
 });
 
@@ -90,7 +106,7 @@ function restoreProject(projectId: string): void {
       :pending="restore.isPending.value"
       :error="error"
       @close="restoreTarget = null"
-      @confirm="restoreTarget && restore.mutate(restoreTarget)"
+      @confirm="restoreTarget && restore.mutate(captureOperation(restoreTarget))"
     />
   </section>
 </template>
