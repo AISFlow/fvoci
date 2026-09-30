@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { formatPersonName, notificationMessage, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -33,13 +33,40 @@ const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
 const workspaceId = computed(() => workspace.value?.id ?? "");
 const tab = ref<NotificationFilter>("all");
-const extra = ref<NotificationItem[]>([]);
+const actionError = ref<string | null>(null);
+const actionPending = ref(false);
 
-const list = useQuery(() => ({
+const list = useInfiniteQuery(() => ({
   ...notificationListQuery(workspaceId.value, tab.value),
+  initialPageParam: undefined as string | undefined,
+  queryFn: async ({ pageParam }: { pageParam: string | undefined }) =>
+    ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {
+      params: { path: { workspace_id: workspaceId.value }, query: { filter: tab.value, cursor: pageParam } },
+    })),
+  getNextPageParam: (page: { nextCursor?: string | null }) => page.nextCursor ?? undefined,
   enabled: Boolean(workspaceId.value),
 }));
-const items = computed(() => [...(list.data.value?.items ?? []), ...extra.value]);
+const items = computed(() => {
+  const seen = new Set<string>();
+  return (list.data.value?.pages ?? []).flatMap((page) => page.items).filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+});
+
+async function perform(action: () => Promise<unknown>): Promise<void> {
+  if (actionPending.value) return;
+  actionError.value = null;
+  actionPending.value = true;
+  try {
+    await action();
+  } catch (error) {
+    actionError.value = loadErrorMessage(error);
+  } finally {
+    actionPending.value = false;
+  }
+}
 
 const readAll = useMutation({
   mutationFn: async () =>
@@ -49,7 +76,6 @@ const readAll = useMutation({
       }),
     ),
   onSuccess: async () => {
-    extra.value = [];
     await queryClient.invalidateQueries({ queryKey: ["notifications", workspaceId.value] });
     await queryClient.invalidateQueries({ queryKey: ["notifications-unread", workspaceId.value] });
   },
@@ -57,7 +83,6 @@ const readAll = useMutation({
 
 function selectTab(value: NotificationFilter): void {
   tab.value = value;
-  extra.value = [];
 }
 
 async function openItem(item: NotificationItem): Promise<void> {
@@ -86,25 +111,11 @@ async function toggleArchive(item: NotificationItem): Promise<void> {
       body: { archived: !item.archivedAt },
     }),
   );
-  extra.value = [];
   await queryClient.invalidateQueries({ queryKey: ["notifications", id] });
   await queryClient.invalidateQueries({ queryKey: ["notifications-unread", id] });
 }
 
-async function loadMore(): Promise<void> {
-  const cursor = list.data.value?.nextCursor;
-  const id = workspaceId.value;
-  if (!cursor || !id) return;
-  const page = await ensureOk(
-    await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {
-      params: {
-        path: { workspace_id: id },
-        query: { filter: tab.value, cursor },
-      },
-    }),
-  );
-  extra.value = [...extra.value, ...page.items];
-}
+
 </script>
 
 <template>
@@ -117,7 +128,7 @@ async function loadMore(): Promise<void> {
     <div class="notifications-page">
       <div class="notifications-page__head">
         <h1 class="notifications-page__title">{{ t("notif.list.title") }}</h1>
-        <UButton type="button" variant="outline" color="neutral" size="sm" @click="() => void readAll.mutateAsync()">
+        <UButton type="button" variant="outline" color="neutral" size="sm" :disabled="actionPending" @click="perform(() => readAll.mutateAsync())">
           {{ t("notif.readAllFull") }}
         </UButton>
       </div>
@@ -134,6 +145,7 @@ async function loadMore(): Promise<void> {
           {{ entry.label }}
         </button>
       </div>
+      <p v-if="actionError" role="alert">{{ actionError }}</p>
       <QueryLoading v-if="list.isPending.value" />
       <QueryError
         v-else-if="list.isError.value"
@@ -145,7 +157,7 @@ async function loadMore(): Promise<void> {
       </p>
       <ul v-if="items.length > 0" class="notifications-page__list">
         <li v-for="item in items" :key="item.id" class="notifications-page__row">
-          <button type="button" class="notifications-page__item" @click="() => void openItem(item)">
+          <button type="button" class="notifications-page__item" :disabled="actionPending" @click="perform(() => openItem(item))">
             <span class="notifications-page__actor">
               <span v-if="!item.readAt" class="sr-only">{{ t("notif.filter.unread") }}</span>
               {{
@@ -158,18 +170,18 @@ async function loadMore(): Promise<void> {
               {{ notificationMessage({ verb: item.verb, payload: payloadRecord(item.payload) }) }}
             </span>
           </button>
-          <UButton type="button" variant="outline" color="neutral" size="sm" @click="() => void toggleArchive(item)">
+          <UButton type="button" variant="outline" color="neutral" size="sm" :disabled="actionPending" @click="perform(() => toggleArchive(item))">
             {{ item.archivedAt ? t("notif.unarchive") : t("notif.archive") }}
           </UButton>
         </li>
       </ul>
       <UButton
-        v-if="list.data.value?.nextCursor && extra.length === 0"
+        v-if="list.hasNextPage.value"
         type="button"
         variant="outline"
         color="neutral"
         size="sm"
-        @click="() => void loadMore()"
+        :disabled="list.isFetchingNextPage.value" @click="perform(() => list.fetchNextPage())"
       >
         {{ t("notif.list.loadMore") }}
       </UButton>

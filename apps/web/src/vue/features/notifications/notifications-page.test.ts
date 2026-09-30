@@ -19,7 +19,7 @@ test("the Vue notifications page PATCHes read/archive, POSTs read-all, and follo
   assert.match(page, /api\.POST\("\/api\/v1\/workspaces\/\{workspace_id\}\/notifications\/read-all"/);
   assert.match(page, /notificationHref/);
   assert.match(page, /followAppHref\(href, router\)/);
-  assert.match(page, /query: \{ filter: tab\.value, cursor \}/);
+  assert.match(page, /query: \{ filter: tab\.value, cursor: pageParam \}/);
   assert.doesNotMatch(page, /from ["']react["']/);
   assert.doesNotMatch(page, /from ["']@tanstack\/react-query["']/);
 });
