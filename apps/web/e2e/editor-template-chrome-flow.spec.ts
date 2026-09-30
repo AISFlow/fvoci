@@ -22,8 +22,11 @@ test("non-editor Vue screens do not load the editor host or its collaboration pl
   await login(page, admin.email, admin.password);
   await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
   await captureAssets();
-  await page.goto(`/w/${admin.workspaceSlug}`);
-  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+  // Workspace home is still React at this dispatched base; exercise the
+  // actual Vue HTML-sink route rather than attributing React CSS to Vue.
+  await page.goto("/legal/privacy");
+  await expect(page.getByRole("heading").first()).toBeVisible();
+  await expect(page.locator("#root")).toHaveClass(/isolate/);
   await captureAssets();
   const wsId = await workspaceId(page.request);
   const project = await page.request.post(`/api/v1/workspaces/${wsId}/projects`, {
