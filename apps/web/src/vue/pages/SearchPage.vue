@@ -47,7 +47,7 @@ const moreError = ref<string | null>(null);
 const page = useQuery(() => searchQuery(workspaceId.value, q.value, tab.value, projectId.value));
 
 watch(
-  [q, tab, projectId, () => page.data.value?.nextCursor],
+  [workspaceId, q, tab, projectId, () => page.data.value?.nextCursor],
   () => {
     draft.value = q.value;
     extra.value = [];
@@ -77,7 +77,8 @@ function onSubmit(event: Event): void {
 async function loadMore(): Promise<void> {
   const cursor = nextCursor.value;
   const current = workspace.value;
-  if (!cursor || !current) return;
+  if (!cursor || !current || loadingMore.value) return;
+  const selection = JSON.stringify([current.id, q.value, tab.value, projectId.value]);
   loadingMore.value = true;
   moreError.value = null;
   try {
@@ -94,9 +95,11 @@ async function loadMore(): Promise<void> {
         },
       }),
     );
+    if (selection !== JSON.stringify([workspaceId.value, q.value, tab.value, projectId.value])) return;
     extra.value = [...extra.value, ...((fetched.items ?? []) as SearchHit[])];
     nextCursor.value = fetched.nextCursor ?? undefined;
   } catch {
+    if (selection !== JSON.stringify([workspaceId.value, q.value, tab.value, projectId.value])) return;
     moreError.value = t("search.loadMoreError");
   } finally {
     loadingMore.value = false;
