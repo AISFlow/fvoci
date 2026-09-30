@@ -1,5 +1,54 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { createE2eUser, login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const workspaceSlugListSchema = z
+  .object({ items: z.array(z.object({ slug: z.string() }).passthrough()) })
+  .passthrough();
+const projectListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          rootDocumentId: z.string().nullable(),
+          taskCount: z.number(),
+          openTaskCount: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const taskSchema = z.object({ id: z.string(), statusId: z.string() }).passthrough();
+const taskListSchema = z
+  .object({
+    items: z.array(
+      z.object({ id: z.string(), title: z.string(), statusId: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const idSchema = z.object({ id: z.string(), name: z.string() }).passthrough();
+const workflowSchema = z
+  .object({
+    id: z.string(),
+    statuses: z.array(
+      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const memberListSchema = z
+  .object({
+    items: z.array(
+      z.object({ email: z.string(), userId: z.string(), role: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
 
 const owner = {
   email: "tsr-owner@example.com",
@@ -20,9 +69,10 @@ const member = {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = workspaceListSchema.parse(await workspacesRes.json());
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
@@ -47,7 +97,7 @@ async function ensureOwnerWorkspace(page: Page): Promise<void> {
       .poll(async () => {
         const res = await page.request.get("/api/v1/me/workspaces");
         if (!res.ok()) return [];
-        const body = (await res.json()) as { items: { slug: string }[] };
+        const body = workspaceSlugListSchema.parse(await res.json());
         return body.items.map((item) => item.slug);
       })
       .toContain(owner.workspaceSlug);
@@ -88,11 +138,12 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   const wsId = await workspaceId(ownerPage, owner.workspaceSlug);
   const projectsRes = await ownerPage.request.get(`/api/v1/workspaces/${wsId}/projects`);
   expect(projectsRes.ok()).toBe(true);
-  const project = (await projectsRes.json()).items.find(
-    (item: { key: string }) => item.key === "TSR",
-  );
+  const project = projectListSchema
+    .parse(await projectsRes.json())
+    .items.find((item: { key: string }) => item.key === "TSR");
   expect(project).toBeTruthy();
-  const projectId = project.id as string;
+  assert(project);
+  const projectId = project.id;
 
   const viewerTab = await ownerContext.newPage();
   const streamWait = viewerTab.waitForResponse(
@@ -129,18 +180,24 @@ test("peer task create invalidates task list in another tab", async ({ browser }
     `/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`,
   );
   expect(tasksRes.ok()).toBe(true);
-  const peerTask = (await tasksRes.json()).items.find(
-    (item: { title: string }) => item.title === "다른 탭 반영",
-  ) as { id: string; statusId: string };
+  const peerTask = taskSchema.parse(
+    taskListSchema
+      .parse(await tasksRes.json())
+      .items.find((item: { title: string }) => item.title === "다른 탭 반영"),
+  );
   expect(peerTask).toBeTruthy();
+  assert(peerTask);
   const workflowRes = await memberPage.request.get(
     `/api/v1/workspaces/${wsId}/projects/${projectId}/workflow`,
   );
   expect(workflowRes.ok()).toBe(true);
-  const nextStatus = (await workflowRes.json()).statuses.find(
-    (status: { id: string }) => status.id !== peerTask.statusId,
-  ) as { id: string; name: string };
+  const nextStatus = idSchema.parse(
+    workflowSchema
+      .parse(await workflowRes.json())
+      .statuses.find((status: { id: string }) => status.id !== peerTask.statusId),
+  );
   expect(nextStatus).toBeTruthy();
+  assert(nextStatus);
 
   const metaRes = await memberPage.request.patch(
     `/api/v1/workspaces/${wsId}/tasks/${peerTask.id}`,
@@ -194,10 +251,13 @@ test("removed member is sent home after access stream closes", async ({ browser 
   const wsId = await workspaceId(ownerPage, owner.workspaceSlug);
   const membersRes = await ownerPage.request.get(`/api/v1/workspaces/${wsId}/members`);
   expect(membersRes.ok()).toBe(true);
-  const victimId = (await membersRes.json()).items.find(
-    (item: { email: string }) => item.email.toLowerCase() === victimEmail.toLowerCase(),
-  )?.userId;
+  const victimId = memberListSchema
+    .parse(await membersRes.json())
+    .items.find(
+      (item: { email: string }) => item.email.toLowerCase() === victimEmail.toLowerCase(),
+    )?.userId;
   expect(victimId).toBeTruthy();
+  assert(victimId);
 
   const removeRes = await ownerPage.request.delete(
     `/api/v1/workspaces/${wsId}/members/${victimId}`,

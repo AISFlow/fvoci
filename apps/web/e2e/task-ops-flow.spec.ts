@@ -1,5 +1,39 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const projectSchema = z
+  .object({ id: z.string(), key: z.string(), rootDocumentId: z.string().nullable() })
+  .passthrough();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
+const lookupSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          kind: z.string(),
+          displayId: z.string(),
+          projectId: z.string().nullable(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const workflowSchema = z
+  .object({
+    id: z.string(),
+    statuses: z.array(
+      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const meSchema = z.object({ userId: z.string(), timezone: z.string() }).passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -42,10 +76,11 @@ async function ensureSetup(page: Page): Promise<void> {
 async function workspaceId(page: Page): Promise<string> {
   const res = await page.request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const ws = (await res.json()).items.find(
-    (item: { slug: string }) => item.slug === admin.workspaceSlug,
-  );
+  const ws = workspaceListSchema
+    .parse(await res.json())
+    .items.find((item: { slug: string }) => item.slug === admin.workspaceSlug);
   expect(ws).toBeTruthy();
+  assert(ws);
   return ws.id;
 }
 
@@ -54,7 +89,7 @@ async function createProject(page: Page, wsId: string, key: string): Promise<str
     data: { key, name: `${key} Lab`, visibility: "workspace" },
   });
   expect(res.status(), await res.text()).toBe(201);
-  return (await res.json()).id;
+  return projectSchema.parse(await res.json()).id;
 }
 
 async function createTask(
@@ -67,7 +102,7 @@ async function createTask(
     data: body,
   });
   expect(res.status(), await res.text()).toBe(201);
-  return res.json();
+  return taskSchema.parse(await res.json());
 }
 
 test("time entries, clone and permanent delete from the task detail", async ({ page }) => {
@@ -106,7 +141,7 @@ test("time entries, clone and permanent delete from the task detail", async ({ p
   await page.getByRole("alertdialog").getByRole("button", { name: "태스크 삭제" }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/OPS/tasks$`));
   const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/OPS-3`);
-  const items = lookup.ok() ? (await lookup.json()).items : [];
+  const items = lookup.ok() ? lookupSchema.parse(await lookup.json()).items : [];
   expect(items.filter((item: { kind: string }) => item.kind === "task")).toHaveLength(0);
 });
 
@@ -148,15 +183,21 @@ test("workflow settings add, rename and delete statuses", async ({ page }) => {
       const res = await page.request.get(
         `/api/v1/workspaces/${wsId}/projects/${projectId}/workflow`,
       );
-      return (await res.json()).statuses.map((s: { name: string }) => s.name).at(-1);
+      return workflowSchema
+        .parse(await res.json())
+        .statuses.map((s: { name: string }) => s.name)
+        .at(-1);
     })
     .toBe("품질 확인");
 
   // A status in use cannot be deleted.
-  const workflow = await (
-    await page.request.get(`/api/v1/workspaces/${wsId}/projects/${projectId}/workflow`)
-  ).json();
+  const workflow = workflowSchema.parse(
+    await (
+      await page.request.get(`/api/v1/workspaces/${wsId}/projects/${projectId}/workflow`)
+    ).json(),
+  );
   const backlog = workflow.statuses[0];
+  assert(backlog, "Workflow backlog must exist");
   await createTask(page, wsId, projectId, { title: "사용 중", statusId: backlog.id });
   await section.getByRole("button", { name: "삭제" }).first().click();
   await expect(section.getByRole("alert")).toHaveText(
@@ -171,7 +212,7 @@ test("workflow settings add, rename and delete statuses", async ({ page }) => {
 test("my tasks lists open assigned tasks across projects", async ({ page }) => {
   await ensureSetup(page);
   const wsId = await workspaceId(page);
-  const me = await (await page.request.get("/api/v1/auth/me")).json();
+  const me = meSchema.parse(await (await page.request.get("/api/v1/auth/me")).json());
   const alpha = await createProject(page, wsId, "MYA");
   const beta = await createProject(page, wsId, "MYB");
   const mine = await createTask(page, wsId, alpha, { title: "내 일 하나", dueDate: "2026-10-01" });

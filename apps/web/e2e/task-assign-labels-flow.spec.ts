@@ -1,5 +1,46 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const lookupSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          kind: z.string(),
+          displayId: z.string(),
+          projectId: z.string().nullable(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const meSchema = z.object({ userId: z.string() }).passthrough();
+const projectListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          rootDocumentId: z.string().nullable(),
+          taskCount: z.number(),
+          openTaskCount: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const idSchema = z.object({ id: z.string() }).passthrough();
+const taskAssignmentSchema = z
+  .object({ assigneeIds: z.array(z.string()), labelIds: z.array(z.string()) })
+  .passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -15,19 +56,23 @@ const admin = {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = workspaceListSchema.parse(await workspacesRes.json());
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
 async function taskIdFor(page: Page, wsId: string, displayId: string): Promise<string> {
   const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/${displayId}`);
   expect(lookup.ok()).toBe(true);
-  const taskId = (await lookup.json()).items.find(
-    (item: { kind: string }) => item.kind === "task",
-  )?.id;
+  const taskId = required(
+    lookupSchema
+      .parse(await lookup.json())
+      .items.find((item: { kind: string }) => item.kind === "task"),
+  ).id;
   expect(taskId).toBeTruthy();
+  assert(taskId);
   return taskId;
 }
 
@@ -77,12 +122,13 @@ test("task assignee and label pickers round-trip through the edit UI", async ({ 
   const wsId = await workspaceId(page, admin.workspaceSlug);
   const meRes = await page.request.get("/api/v1/auth/me");
   expect(meRes.ok()).toBe(true);
-  const userId = (await meRes.json()).userId as string;
+  const userId = meSchema.parse(await meRes.json()).userId;
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
-  const project = (await projectsRes.json()).items.find(
-    (item: { key: string }) => item.key === "TAL",
-  );
+  const project = projectListSchema
+    .parse(await projectsRes.json())
+    .items.find((item: { key: string }) => item.key === "TAL");
   expect(project).toBeTruthy();
+  assert(project);
   const taskId = await taskIdFor(page, wsId, "TAL-2");
 
   const createLabel = await page.request.post(
@@ -90,7 +136,7 @@ test("task assignee and label pickers round-trip through the edit UI", async ({ 
     { data: { name: "긴급", color: "red" } },
   );
   expect(createLabel.status()).toBe(201);
-  const labelId = (await createLabel.json()).id as string;
+  const labelId = idSchema.parse(await createLabel.json()).id;
 
   await page.reload();
   await expect(page.getByTestId("task-edit-assignees")).toBeVisible();
@@ -102,8 +148,8 @@ test("task assignee and label pickers round-trip through the edit UI", async ({ 
     .poll(async () => {
       const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
       expect(detailRes.ok()).toBe(true);
-      const detail = await detailRes.json();
-      return `${(detail.assigneeIds ?? []).join(",")}:${(detail.labelIds ?? []).join(",")}`;
+      const detail = taskAssignmentSchema.parse(await detailRes.json());
+      return `${detail.assigneeIds.join(",")}:${detail.labelIds.join(",")}`;
     })
     .toBe(`${userId}:${labelId}`);
 
@@ -112,8 +158,13 @@ test("task assignee and label pickers round-trip through the edit UI", async ({ 
     .poll(async () => {
       const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
       expect(detailRes.ok()).toBe(true);
-      const detail = await detailRes.json();
-      return (detail.assigneeIds ?? []).length;
+      const detail = taskAssignmentSchema.parse(await detailRes.json());
+      return detail.assigneeIds.length;
     })
     .toBe(0);
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}

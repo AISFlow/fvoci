@@ -1,5 +1,15 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { crc32, deflateSync } from "node:zlib";
 import { expect, test, type Page } from "@playwright/test";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const attachmentSchema = z
+  .object({ preview: z.object({ width: z.number(), height: z.number() }).passthrough().nullable() })
+  .passthrough();
 
 const owner = {
   email: "owner@example.com",
@@ -44,8 +54,11 @@ function pngBytes(width: number, height: number): Buffer {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const res = await page.request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const ws = (await res.json()).items.find((item: { slug: string }) => item.slug === slug);
+  const ws = workspaceListSchema
+    .parse(await res.json())
+    .items.find((item: { slug: string }) => item.slug === slug);
   expect(ws).toBeTruthy();
+  assert(ws);
   return ws.id;
 }
 
@@ -87,21 +100,22 @@ test("task attachments: pick, preview thumbnail, download, delete", async ({ pag
   // The download link serves the original bytes.
   const href = await photo.getAttribute("href");
   expect(href).toBeTruthy();
-  const original = await page.request.get(href as string);
+  assert(href);
+  const original = await page.request.get(href);
   expect(original.status()).toBe(200);
   expect((await original.body()).subarray(1, 4).toString("ascii")).toBe("PNG");
 
   // The in-process preview job publishes a 1600px-wide WebP; the panel then
   // renders it from ?variant=preview.
-  const attachmentId = (href as string).split("/attachments/")[1]?.split("/")[0] ?? "";
+  const attachmentId = href.split("/attachments/")[1]?.split("/")[0] ?? "";
   const wsId = await workspaceId(page, owner.workspaceSlug);
   await expect
     .poll(
       async () =>
-        (
+        attachmentSchema.parse(
           await (
             await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${attachmentId}`)
-          ).json()
+          ).json(),
         ).preview,
       { timeout: 30_000 },
     )

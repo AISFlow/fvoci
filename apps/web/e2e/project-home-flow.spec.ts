@@ -1,5 +1,75 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { createE2eUser, login, logout } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const projectListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          rootDocumentId: z.string().nullable(),
+          taskCount: z.number(),
+          openTaskCount: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const memberListSchema = z
+  .object({
+    items: z.array(
+      z.object({ email: z.string(), userId: z.string(), role: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const documentTreeSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          parentId: z.string().nullable(),
+          projectId: z.string().nullable(),
+          number: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const numberedDocumentTreeSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          number: z.number(),
+          parentId: z.string().nullable(),
+          projectId: z.string().nullable(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const idSchema = z.object({ id: z.string() }).passthrough();
+const workflowSchema = z
+  .object({
+    id: z.string(),
+    statuses: z.array(
+      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const nameListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), name: z.string() }).passthrough()) })
+  .passthrough();
+const itemListSchema = z.object({ items: z.array(z.unknown()) }).passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -43,10 +113,11 @@ const outsider = {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspace = (await workspacesRes.json()).items.find(
-    (item: { slug: string }) => item.slug === slug,
-  );
+  const workspace = workspaceListSchema
+    .parse(await workspacesRes.json())
+    .items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
@@ -57,19 +128,26 @@ async function projectByKey(
 ): Promise<{ id: string; rootDocumentId: string }> {
   const res = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
   expect(res.ok()).toBe(true);
-  const project = (await res.json()).items.find((item: { key: string }) => item.key === key);
+  const project = projectListSchema
+    .parse(await res.json())
+    .items.find((item: { key: string }) => item.key === key);
   expect(project).toBeTruthy();
+  assert(project);
   expect(project.rootDocumentId).toBeTruthy();
+  assert(project.rootDocumentId);
   return { id: project.id, rootDocumentId: project.rootDocumentId };
 }
 
 async function memberUserId(page: Page, wsId: string, email: string): Promise<string> {
   const res = await page.request.get(`/api/v1/workspaces/${wsId}/members`);
   expect(res.ok()).toBe(true);
-  const userId = (await res.json()).items.find(
-    (item: { email: string }) => item.email.toLowerCase() === email.toLowerCase(),
-  )?.userId;
+  const userId = memberListSchema
+    .parse(await res.json())
+    .items.find(
+      (item: { email: string }) => item.email.toLowerCase() === email.toLowerCase(),
+    )?.userId;
   expect(userId).toBeTruthy();
+  assert(userId);
   return userId;
 }
 
@@ -82,12 +160,7 @@ async function projectDocRefs(
 ): Promise<string[]> {
   const res = await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents`);
   expect(res.ok()).toBe(true);
-  const items = (await res.json()).items as {
-    id: string;
-    parentId: string | null;
-    projectId: string | null;
-    number: number;
-  }[];
+  const items = documentTreeSchema.parse(await res.json()).items;
   const below = new Set([project.rootDocumentId]);
   let grew = true;
   while (grew) {
@@ -106,7 +179,7 @@ async function projectDocRefs(
   }
   return items
     .filter((item) => item.id !== project.rootDocumentId && below.has(item.id))
-    .map((item) => `${key}-${item.number}`)
+    .map((item) => `${key}-${String(item.number)}`)
     .sort();
 }
 
@@ -184,9 +257,9 @@ test("project home shows wiki, documents can be created and moved in the tree", 
     `/api/v1/workspaces/${wsId}/projects/${homeProject.id}/members`,
   );
   expect(membersRes.ok()).toBe(true);
-  const leadMember = (await membersRes.json()).items.find(
-    (row: { userId: string; role: string }) => row.userId === leadUserId,
-  );
+  const leadMember = memberListSchema
+    .parse(await membersRes.json())
+    .items.find((row: { userId: string; role: string }) => row.userId === leadUserId);
   expect(leadMember?.role).toBe("lead");
 
   const firstCreate = page.waitForResponse(
@@ -213,15 +286,17 @@ test("project home shows wiki, documents can be created and moved in the tree", 
     `/api/v1/workspaces/${wsId}/projects/${homeProject.id}/documents`,
   );
   expect(treeRes.ok()).toBe(true);
-  const treeItems = (await treeRes.json()).items as { id: string; number: number }[];
+  const treeItems = numberedDocumentTreeSchema.parse(await treeRes.json()).items;
   const parentDoc = treeItems.find((item) => item.number === 2);
   const childDoc = treeItems.find((item) => item.number === 3);
   expect(parentDoc).toBeTruthy();
+  assert(parentDoc);
   expect(childDoc).toBeTruthy();
+  assert(childDoc);
 
   const moveRes = await page.request.post(
-    `/api/v1/workspaces/${wsId}/projects/${homeProject.id}/documents/${childDoc!.id}/move`,
-    { data: { newParentId: parentDoc!.id } },
+    `/api/v1/workspaces/${wsId}/projects/${homeProject.id}/documents/${required(childDoc).id}/move`,
+    { data: { newParentId: required(parentDoc).id } },
   );
   expect(moveRes.ok()).toBe(true);
 
@@ -243,7 +318,7 @@ test("clone copies workflow labels and milestones but not tasks", async ({ page 
     { data: { name: "bug", color: "red" } },
   );
   expect(labelRes.status()).toBe(201);
-  const labelId = (await labelRes.json()).id as string;
+  const labelId = idSchema.parse(await labelRes.json()).id;
 
   await openProjectTasks(page, "HOME");
   await expect(page.getByTestId("project-milestones")).toBeVisible();
@@ -284,19 +359,23 @@ test("clone copies workflow labels and milestones but not tasks", async ({ page 
   );
   expect(sourceWorkflow.ok()).toBe(true);
   expect(cloneWorkflow.ok()).toBe(true);
-  const sourceNames = (await sourceWorkflow.json()).statuses.map(
-    (row: { name: string }) => row.name,
-  );
-  const cloneNames = (await cloneWorkflow.json()).statuses.map((row: { name: string }) => row.name);
+  const sourceNames = workflowSchema
+    .parse(await sourceWorkflow.json())
+    .statuses.map((row: { name: string }) => row.name);
+  const cloneNames = workflowSchema
+    .parse(await cloneWorkflow.json())
+    .statuses.map((row: { name: string }) => row.name);
   expect(cloneNames).toEqual(sourceNames);
 
   const cloneLabels = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${cpyProject.id}/labels`,
   );
   expect(cloneLabels.ok()).toBe(true);
-  expect((await cloneLabels.json()).items.some((row: { name: string }) => row.name === "bug")).toBe(
-    true,
-  );
+  expect(
+    nameListSchema
+      .parse(await cloneLabels.json())
+      .items.some((row: { name: string }) => row.name === "bug"),
+  ).toBe(true);
 
   const sourceTasks = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${homeProject.id}/tasks`,
@@ -304,8 +383,8 @@ test("clone copies workflow labels and milestones but not tasks", async ({ page 
   const cloneTasks = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${cpyProject.id}/tasks`,
   );
-  expect((await sourceTasks.json()).items.length).toBeGreaterThan(0);
-  expect((await cloneTasks.json()).items).toEqual([]);
+  expect(itemListSchema.parse(await sourceTasks.json()).items.length).toBeGreaterThan(0);
+  expect(itemListSchema.parse(await cloneTasks.json()).items).toEqual([]);
 
   await page.getByRole("button", { name: "새 태스크" }).click();
   await page.getByLabel("제목").fill("복제 검증");
@@ -316,10 +395,11 @@ test("clone copies workflow labels and milestones but not tasks", async ({ page 
     `/api/v1/workspaces/${wsId}/projects/${cpyProject.id}/labels`,
   );
   expect(cloneLabelsAfter.ok()).toBe(true);
-  const cloneLabel = (await cloneLabelsAfter.json()).items.find(
-    (row: { name: string }) => row.name === "bug",
-  );
+  const cloneLabel = nameListSchema
+    .parse(await cloneLabelsAfter.json())
+    .items.find((row: { name: string }) => row.name === "bug");
   expect(cloneLabel).toBeTruthy();
+  assert(cloneLabel);
   await expect(page.getByTestId(`task-edit-label-${cloneLabel.id}`)).toBeVisible();
 });
 
@@ -386,3 +466,8 @@ test("viewer and non-member cannot create project documents", async ({ page }) =
   );
   expect(outsiderCreate.status()).toBe(404);
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}

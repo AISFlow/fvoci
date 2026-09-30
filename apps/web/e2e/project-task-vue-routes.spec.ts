@@ -33,15 +33,13 @@ test("project and task URLs mount Vue across direct loads, links, reload and enc
 
   // Task breadcrumb and list links remain in one Vue runtime.
   await page.evaluate(() => {
-    (window as unknown as { routeMarker: string }).routeMarker = "same-runtime";
+    window.routeMarker = "same-runtime";
   });
   await page.locator(".task-home__crumb").getByRole("link", { name: "Route project" }).click();
   await expect(page).toHaveURL(/\/OPS-DEV\/tasks$/);
   await page.getByRole("link", { name: /Route task/ }).click();
   await expect(page.getByRole("heading", { name: "Route task" })).toBeVisible();
-  expect(
-    await page.evaluate(() => (window as unknown as { routeMarker?: string }).routeMarker),
-  ).toBe("same-runtime");
+  expect(await page.evaluate(() => window.routeMarker)).toBe("same-runtime");
   await page.reload();
   await expect(page.getByRole("heading", { name: "Route task" })).toBeVisible();
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
@@ -77,3 +75,9 @@ test("project and task URLs mount Vue across direct loads, links, reload and enc
   await expect(page.getByRole("heading", { name: "프로젝트", exact: true })).toBeVisible();
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
 });
+
+declare global {
+  interface Window {
+    routeMarker?: string;
+  }
+}

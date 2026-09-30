@@ -1,6 +1,74 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { FIELD_TYPES, fieldTakesOptions } from "../src/lib/collection-values";
 import { createE2eUser, login, logout, watchCspViolations } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const idSchema = z.object({ id: z.string() }).passthrough();
+const fieldListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          name: z.string(),
+          type: z.string(),
+          description: z.union([z.string(), z.null()]),
+          version: z.number(),
+          deletedAt: z.union([z.string(), z.null()]),
+          options: z.array(
+            z
+              .object({
+                id: z.string(),
+                label: z.string(),
+                deletedAt: z.union([z.string(), z.null()]),
+              })
+              .passthrough(),
+          ),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const workflowSchema = z
+  .object({
+    id: z.string(),
+    statuses: z.array(
+      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const fieldSchema = z
+  .object({
+    id: z.string(),
+    key: z.string(),
+    name: z.string(),
+    type: z.string(),
+    description: z.union([z.string(), z.null()]),
+    version: z.number(),
+    deletedAt: z.union([z.string(), z.null()]),
+    options: z.array(
+      z
+        .object({ id: z.string(), label: z.string(), deletedAt: z.union([z.string(), z.null()]) })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const workflowStatusIdsSchema = z
+  .object({ id: z.string(), statuses: z.array(z.object({ id: z.string() }).passthrough()) })
+  .passthrough();
+const memberListSchema = z
+  .object({
+    items: z.array(
+      z.object({ email: z.string(), userId: z.string(), role: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
 
 test.describe.configure({ mode: "serial" });
 const slug = "psvue";
@@ -28,10 +96,11 @@ async function setup(page: Page): Promise<string> {
   }
   const response = await page.request.get("/api/v1/me/workspaces");
   expect(response.ok()).toBe(true);
-  const workspace = (await response.json()).items.find(
-    (item: { slug: string }) => item.slug === slug,
-  );
+  const workspace = workspaceListSchema
+    .parse(await response.json())
+    .items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
@@ -45,13 +114,13 @@ async function createProject(
     data: { key, name: `Settings ${key}`, visibility },
   });
   expect(response.status()).toBe(201);
-  return (await response.json()) as { id: string };
+  return idSchema.parse(await response.json());
 }
 
 async function collectionId(page: Page, base: string, projectId: string): Promise<string> {
   const response = await page.request.get(`${base}/projects/${projectId}/collection`);
   expect(response.ok()).toBe(true);
-  return (await response.json()).id;
+  return idSchema.parse(await response.json()).id;
 }
 
 type Field = {
@@ -67,7 +136,7 @@ type Field = {
 async function fields(page: Page, base: string, collection: string): Promise<Field[]> {
   const response = await page.request.get(`${base}/collections/${collection}/fields`);
   expect(response.ok()).toBe(true);
-  return (await response.json()).items;
+  return fieldListSchema.parse(await response.json()).items;
 }
 
 test("field definitions, options, labels and milestones save and reload in the Vue settings route", async ({
@@ -81,7 +150,7 @@ test("field definitions, options, labels and milestones save and reload in the V
   await page.goto(`/w/${slug}/FIELD/tasks`);
   await expect(page.getByRole("heading", { name: "Settings FIELD" })).toBeVisible();
   await page.evaluate(() => {
-    (window as unknown as { settingsMarker: string }).settingsMarker = "same-runtime";
+    window.settingsMarker = "same-runtime";
   });
   await page
     .getByRole("navigation", { name: "프로젝트 관리 메뉴" })
@@ -89,9 +158,7 @@ test("field definitions, options, labels and milestones save and reload in the V
     .click();
   await expect(page).toHaveURL(/\/FIELD\/settings\/fields$/);
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
-  expect(
-    await page.evaluate(() => (window as unknown as { settingsMarker?: string }).settingsMarker),
-  ).toBe("same-runtime");
+  expect(await page.evaluate(() => window.settingsMarker)).toBe("same-runtime");
   const manager = page.getByTestId("collection-field-manager");
   const creation = manager.locator("form").first();
   await creation.getByLabel("속성 이름", { exact: true }).fill("단계");
@@ -119,10 +186,12 @@ test("field definitions, options, labels and milestones save and reload in the V
       async () => (await fields(page, base, collection)).find((item) => item.key === "stage")?.name,
     )
     .toBe("개발 단계");
-  let stored = (await fields(page, base, collection)).find((item) => item.key === "stage")!;
+  const stored = required(
+    (await fields(page, base, collection)).find((item) => item.key === "stage"),
+  );
   expect(stored.description).toBe("단계 설명");
   expect(stored.options.map((option) => option.label)).toEqual(["구현", "기획", "검증"]);
-  expect(stored.options[1]!.deletedAt).not.toBeNull();
+  expect(required(stored.options[1]).deletedAt).not.toBeNull();
   await page.reload();
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   field = page.getByTestId("field-settings-stage");
@@ -213,7 +282,9 @@ test("every existing field type and real version conflict are handled without lo
   const field = page.getByTestId("field-settings-text");
   await field.locator("summary").click();
   await field.getByLabel("속성 이름", { exact: true }).fill("Stale local draft");
-  const stored = (await fields(page, base, collection)).find((item) => item.key === "text")!;
+  const stored = required(
+    (await fields(page, base, collection)).find((item) => item.key === "text"),
+  );
   const response = await page.request.patch(
     `${base}/collections/${collection}/fields/${stored.id}`,
     { data: { expectedVersion: stored.version, name: "Remote field name" } },
@@ -242,7 +313,7 @@ test("workflow create, rename, all categories and delete persist; an occupied st
   await page.goto(`/w/${slug}/FLOW/settings/fields`);
   await expect(page.getByTestId("collection-field-manager")).toBeVisible();
   await page.evaluate(() => {
-    (window as unknown as { settingsMarker: string }).settingsMarker = "same-runtime";
+    window.settingsMarker = "same-runtime";
   });
   await page
     .getByRole("navigation", { name: "프로젝트 관리 메뉴" })
@@ -250,9 +321,7 @@ test("workflow create, rename, all categories and delete persist; an occupied st
     .click();
   await expect(page).toHaveURL(/\/FLOW\/settings\/workflow$/);
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
-  expect(
-    await page.evaluate(() => (window as unknown as { settingsMarker?: string }).settingsMarker),
-  ).toBe("same-runtime");
+  expect(await page.evaluate(() => window.settingsMarker)).toBe("same-runtime");
   const section = page.getByTestId("project-workflow");
   const creation = section.locator("form").last();
   await creation.getByRole("textbox").fill("검토");
@@ -261,15 +330,12 @@ test("workflow create, rename, all categories and delete persist; an occupied st
   const workflow = async () => {
     const response = await page.request.get(`${base}/projects/${project.id}/workflow`);
     expect(response.ok()).toBe(true);
-    return (await response.json()) as {
-      id: string;
-      statuses: { id: string; name: string; category: string }[];
-    };
+    return workflowSchema.parse(await response.json());
   };
   await expect
     .poll(async () => (await workflow()).statuses.some((status) => status.name === "검토"))
     .toBe(true);
-  const added = (await workflow()).statuses.find((status) => status.name === "검토")!;
+  const added = required((await workflow()).statuses.find((status) => status.name === "검토"));
   const row = page.getByTestId(`workflow-status-${added.id}`);
   await row.getByRole("textbox").fill("품질 검토");
   await row.locator("select").selectOption("done");
@@ -293,7 +359,7 @@ test("workflow create, rename, all categories and delete persist; an occupied st
     data: { title: "상태 사용", type: "task", statusId: added.id },
   });
   expect(task.status()).toBe(201);
-  const taskId = (await task.json()).id;
+  const taskId = idSchema.parse(await task.json()).id;
   const refused = page.waitForResponse(
     (res) => res.request().method() === "DELETE" && res.url().endsWith(`/statuses/${added.id}`),
   );
@@ -302,7 +368,7 @@ test("workflow create, rename, all categories and delete persist; an occupied st
   await expect(section.getByRole("alert")).toBeVisible();
   await expect(row).toBeVisible();
   expect((await workflow()).statuses.some((status) => status.id === added.id)).toBe(true);
-  const fallback = (await workflow()).statuses.find((status) => status.id !== added.id)!;
+  const fallback = required((await workflow()).statuses.find((status) => status.id !== added.id));
   expect(
     (await page.request.patch(`${base}/tasks/${taskId}`, { data: { statusId: fallback.id } })).ok(),
   ).toBe(true);
@@ -325,10 +391,10 @@ test("viewer, revoked private access and archived projects cannot change setting
     data: { key: "protected", name: "Protected", type: "text" },
   });
   expect(created.status()).toBe(201);
-  const field = (await created.json()) as Field;
+  const field = fieldSchema.parse(await created.json());
   const flowResponse = await page.request.get(`${base}/projects/${project.id}/workflow`);
   expect(flowResponse.ok()).toBe(true);
-  const workflow = (await flowResponse.json()) as { id: string; statuses: { id: string }[] };
+  const workflow = workflowStatusIdsSchema.parse(await flowResponse.json());
   const viewer = { email: "settings-viewer@example.com", password: "viewerpass123" };
   createE2eUser(viewer.email, viewer.password, "뷰어", {
     workspaceSlug: slug,
@@ -336,9 +402,11 @@ test("viewer, revoked private access and archived projects cannot change setting
   });
   const members = await page.request.get(`${base}/members`);
   expect(members.ok()).toBe(true);
-  const viewerId = (await members.json()).items.find(
-    (member: { email: string }) => member.email === viewer.email,
-  ).userId;
+  const viewerMember = memberListSchema
+    .parse(await members.json())
+    .items.find((member: { email: string }) => member.email === viewer.email);
+  assert(viewerMember, "Settings viewer must exist");
+  const viewerId = viewerMember.userId;
   expect(
     (
       await page.request.post(`${base}/projects/${project.id}/members`, {
@@ -395,13 +463,13 @@ test("viewer, revoked private access and archived projects cannot change setting
     ).toBe(404);
     expect(
       (
-        await denied.request.patch(`${statusesUrl}/${workflow.statuses[0]!.id}`, {
+        await denied.request.patch(`${statusesUrl}/${required(workflow.statuses[0]).id}`, {
           data: { name: "Denied" },
         })
       ).status(),
     ).toBe(404);
     expect(
-      (await denied.request.delete(`${statusesUrl}/${workflow.statuses[0]!.id}`)).status(),
+      (await denied.request.delete(`${statusesUrl}/${required(workflow.statuses[0]).id}`)).status(),
     ).toBe(404);
     expect(
       (await page.request.delete(`${base}/projects/${project.id}/members/${viewerId}`)).ok(),
@@ -447,3 +515,14 @@ test("viewer, revoked private access and archived projects cannot change setting
   );
   await logout(page);
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}
+
+declare global {
+  interface Window {
+    settingsMarker?: string;
+  }
+}

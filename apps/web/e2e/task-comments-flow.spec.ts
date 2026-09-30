@@ -1,5 +1,49 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { createE2eUser, login, logout } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const lookupSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          kind: z.string(),
+          displayId: z.string(),
+          projectId: z.string().nullable(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const projectListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          rootDocumentId: z.string().nullable(),
+          taskCount: z.number(),
+          openTaskCount: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const memberListSchema = z
+  .object({
+    items: z.array(
+      z.object({ email: z.string(), userId: z.string(), role: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const taskSchema = z.object({ type: z.string(), parentId: z.string().nullable() }).passthrough();
 
 const owner = {
   email: "Admin@Example.COM",
@@ -27,19 +71,23 @@ const viewer = {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = workspaceListSchema.parse(await workspacesRes.json());
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
 async function taskIdFor(page: Page, wsId: string, displayId: string): Promise<string> {
   const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/${displayId}`);
   expect(lookup.ok()).toBe(true);
-  const taskId = (await lookup.json()).items.find(
-    (item: { kind: string }) => item.kind === "task",
-  )?.id;
+  const taskId = required(
+    lookupSchema
+      .parse(await lookup.json())
+      .items.find((item: { kind: string }) => item.kind === "task"),
+  ).id;
   expect(taskId).toBeTruthy();
+  assert(taskId);
   return taskId;
 }
 
@@ -91,13 +139,14 @@ test("member comments on a task, viewer is read-only, parent picker searches", a
   const wsId = await workspaceId(page, owner.workspaceSlug);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
   expect(projectsRes.ok()).toBe(true);
-  const project = (await projectsRes.json()).items.find(
-    (item: { key: string }) => item.key === "TCU",
-  );
+  const project = projectListSchema
+    .parse(await projectsRes.json())
+    .items.find((item: { key: string }) => item.key === "TCU");
   expect(project).toBeTruthy();
+  assert(project);
   const membersRes = await page.request.get(`/api/v1/workspaces/${wsId}/members`);
   expect(membersRes.ok()).toBe(true);
-  const members = (await membersRes.json()).items as Array<{ email: string; userId: string }>;
+  const members = memberListSchema.parse(await membersRes.json()).items;
   const memberId = members.find(
     (item) => item.email.toLowerCase() === member.email.toLowerCase(),
   )?.userId;
@@ -105,7 +154,9 @@ test("member comments on a task, viewer is read-only, parent picker searches", a
     (item) => item.email.toLowerCase() === viewer.email.toLowerCase(),
   )?.userId;
   expect(memberId).toBeTruthy();
+  assert(memberId);
   expect(viewerId).toBeTruthy();
+  assert(viewerId);
   const memberGrant = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/members`,
     { data: { userId: memberId, role: "member" } },
@@ -159,8 +210,8 @@ test("member comments on a task, viewer is read-only, parent picker searches", a
     .poll(async () => {
       const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${childTaskId}`);
       expect(detailRes.ok()).toBe(true);
-      const detail = await detailRes.json();
-      return `${detail.type}:${detail.parentId}`;
+      const detail = taskSchema.parse(await detailRes.json());
+      return `${detail.type}:${String(detail.parentId)}`;
     })
     .toBe(`subtask:${parentTaskId}`);
 
@@ -176,3 +227,8 @@ test("member comments on a task, viewer is read-only, parent picker searches", a
   await expect(viewerPanel.getByRole("button", { name: "반응 👍" }).first()).toBeDisabled();
   await expect(page.getByTestId("task-edit-parent")).toBeDisabled();
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}

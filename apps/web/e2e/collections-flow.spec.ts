@@ -1,5 +1,87 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { createTasksViaApi, login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
+const nameListSchema = z
+  .object({ items: z.array(z.object({ name: z.string() }).passthrough()) })
+  .passthrough();
+const projectListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), key: z.string() }).passthrough()) })
+  .passthrough();
+const workflowSchema = z
+  .object({ statuses: z.array(z.object({ id: z.string(), category: z.string() }).passthrough()) })
+  .passthrough();
+const idSchema = z.object({ id: z.string() }).passthrough();
+const fieldListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          options: z.array(z.object({ id: z.string(), label: z.string() }).passthrough()),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const taskNumberSchema = z.object({ number: z.number() }).passthrough();
+const viewListSchema = z
+  .object({
+    items: z.array(z.object({ name: z.string(), config: z.unknown() }).passthrough()),
+  })
+  .passthrough();
+const viewConfigListSchema = z
+  .object({ items: z.array(z.object({ config: z.unknown() }).passthrough()) })
+  .passthrough();
+const namedWorkflowSchema = z
+  .object({
+    id: z.string(),
+    statuses: z.array(z.object({ id: z.string(), name: z.string() }).passthrough()),
+  })
+  .passthrough();
+const fieldSchema = z
+  .object({
+    id: z.string(),
+    version: z.number(),
+    options: z.array(z.object({ id: z.string(), label: z.string() }).passthrough()),
+  })
+  .passthrough();
+const collectionQuerySchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          displayId: z.string(),
+          statusId: z.string().nullable(),
+          dueDate: z.string().nullable(),
+          dueAt: z.string().nullable(),
+          values: z.record(z.unknown()),
+          version: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const queryBodySchema = z
+  .object({
+    group: z.string().nullable().optional(),
+    cursor: z.string().nullable().optional(),
+  })
+  .passthrough();
+const cursorBodySchema = z.object({ cursor: z.string().nullable().optional() }).passthrough();
+const meSchema = z.object({ timezone: z.string() }).passthrough();
+const statusIdListSchema = z
+  .object({ statuses: z.array(z.object({ id: z.string() }).passthrough()) })
+  .passthrough();
+const versionedSchema = z.object({ id: z.string(), version: z.number() }).passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -39,10 +121,11 @@ async function ensureSetup(page: Page): Promise<void> {
 async function workspaceId(page: Page): Promise<string> {
   const res = await page.request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const body = (await res.json()) as { items: { id: string; slug: string }[] };
+  const body = workspaceListSchema.parse(await res.json());
   const workspace = body.items.find((item) => item.slug === admin.workspaceSlug);
   expect(workspace).toBeTruthy();
-  return workspace!.id;
+  assert(workspace);
+  return required(workspace).id;
 }
 
 test("document tags, project collection fields/views and saved task views round-trip through the UI", async ({
@@ -57,7 +140,7 @@ test("document tags, project collection fields/views and saved task views round-
     data: { parentId: null, title: "태그 문서" },
   });
   expect(docRes.status()).toBe(201);
-  const doc = (await docRes.json()) as { id: string; number: number };
+  const doc = taskSchema.parse(await docRes.json());
 
   await page.goto(`/w/${slug}/settings`);
   await page.getByRole("link", { name: "문서 태그" }).click();
@@ -72,7 +155,7 @@ test("document tags, project collection fields/views and saved task views round-
   await expect(tagRow.getByRole("cell").nth(2)).toHaveText("0");
 
   // 2. Assign it on the wiki document through the tags bar.
-  await page.goto(`/w/${slug}/WIKI-${doc.number}`);
+  await page.goto(`/w/${slug}/WIKI-${String(doc.number)}`);
   await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
   const tagsBar = page.getByTestId("document-tags-bar");
   await tagsBar.getByRole("button", { name: "+ 태그" }).click();
@@ -81,7 +164,7 @@ test("document tags, project collection fields/views and saved task views round-
   await expect
     .poll(async () => {
       const res = await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}/tags`);
-      return ((await res.json()) as { items: { name: string }[] }).items.map((tag) => tag.name);
+      return nameListSchema.parse(await res.json()).items.map((tag) => tag.name);
     })
     .toEqual(["기획"]);
   await page.goto(`/w/${slug}/settings/document-tags`);
@@ -97,22 +180,21 @@ test("document tags, project collection fields/views and saved task views round-
   await expect(page).toHaveURL(new RegExp(`/w/${slug}/COL/tasks$`));
 
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
-  const project = (
-    (await projectsRes.json()) as { items: { id: string; key: string }[] }
-  ).items.find((item) => item.key === "COL")!;
+  const project = required(
+    projectListSchema.parse(await projectsRes.json()).items.find((item) => item.key === "COL"),
+  );
   const workflowRes = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/workflow`,
   );
-  const statuses = ((await workflowRes.json()) as { statuses: { id: string; category: string }[] })
-    .statuses;
-  const openStatus = statuses.find((status) => status.category !== "done")!;
+  const statuses = workflowSchema.parse(await workflowRes.json()).statuses;
+  const openStatus = required(statuses.find((status) => status.category !== "done"));
   const taskRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/tasks`,
     { data: { title: "속성 태스크", type: "task", statusId: openStatus.id } },
   );
   expect(taskRes.status()).toBe(201);
-  const task = (await taskRes.json()) as { id: string; number: number };
-  const displayId = `COL-${task.number}`;
+  const task = taskSchema.parse(await taskRes.json());
+  const displayId = `COL-${String(task.number)}`;
 
   await page.goto(`/w/${slug}/COL/tasks`);
   await page
@@ -131,16 +213,14 @@ test("document tags, project collection fields/views and saved task views round-
   const collectionRes = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/collection`,
   );
-  const collection = (await collectionRes.json()) as { id: string };
+  const collection = idSchema.parse(await collectionRes.json());
   const fieldsRes = await page.request.get(
     `/api/v1/workspaces/${wsId}/collections/${collection.id}/fields`,
   );
-  const field = (
-    (await fieldsRes.json()) as {
-      items: { id: string; key: string; options: { id: string; label: string }[] }[];
-    }
-  ).items.find((item) => item.key === "stage")!;
-  const buildOption = field.options.find((option) => option.label === "구현")!;
+  const field = required(
+    fieldListSchema.parse(await fieldsRes.json()).items.find((item) => item.key === "stage"),
+  );
+  const buildOption = required(field.options.find((option) => option.label === "구현"));
 
   // 4. Table: set the value inline; it survives a reload and shows on the task page.
   await page.getByRole("link", { name: "표", exact: true }).click();
@@ -180,7 +260,7 @@ test("document tags, project collection fields/views and saved task views round-
     },
   );
   expect(dueRes.status()).toBe(201);
-  const dueTask = (await dueRes.json()) as { number: number };
+  const dueTask = taskNumberSchema.parse(await dueRes.json());
   await page.getByRole("link", { name: "달력", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${slug}/COL/calendar$`));
   await page.locator('input[type="month"]').fill("2027-03");
@@ -189,7 +269,7 @@ test("document tags, project collection fields/views and saved task views round-
   await expect(calendar.getByRole("button", { name: "달력 태스크", exact: true })).toBeVisible();
   await calendar.getByRole("button", { name: "2027-03-15 · 전체 1개" }).click();
   await expect(page.getByRole("heading", { name: "2027-03-15 항목" })).toBeVisible();
-  await expect(page.getByTestId(`collection-row-COL-${dueTask.number}`)).toBeVisible();
+  await expect(page.getByTestId(`collection-row-COL-${String(dueTask.number)}`)).toBeVisible();
 
   await page.goto(`/w/${slug}/${displayId}`);
   const properties = page.getByTestId("task-properties");
@@ -211,7 +291,7 @@ test("document tags, project collection fields/views and saved task views round-
   await expect
     .poll(async () => {
       const res = await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/views`);
-      return ((await res.json()) as { items: { name: string; config: unknown }[] }).items;
+      return viewListSchema.parse(await res.json()).items;
     })
     .toEqual([
       expect.objectContaining({
@@ -235,7 +315,7 @@ test("document tags, project collection fields/views and saved task views round-
   await expect
     .poll(async () => {
       const res = await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/views`);
-      return ((await res.json()) as { items: { config: unknown }[] }).items[0]?.config;
+      return viewConfigListSchema.parse(await res.json()).items[0]?.config;
     })
     .toEqual({ filters: { openOnly: true }, sort: [{ field: "title", direction: "asc" }] });
 });
@@ -252,36 +332,35 @@ test("grouped board pages each column and moves cards by drag or select through 
     data: { key: "BRD", name: "보드 프로젝트", visibility: "workspace" },
   });
   expect(projectRes.status()).toBe(201);
-  const project = (await projectRes.json()) as { id: string };
-  const workflow = (await (
-    await page.request.get(`${base}/projects/${project.id}/workflow`)
-  ).json()) as {
-    id: string;
-    statuses: { id: string; name: string }[];
-  };
+  const project = idSchema.parse(await projectRes.json());
+  const workflow = namedWorkflowSchema.parse(
+    await (await page.request.get(`${base}/projects/${project.id}/workflow`)).json(),
+  );
   const [statusA, statusB] = workflow.statuses;
   expect(statusA && statusB).toBeTruthy();
   const titlesA = Array.from(
     { length: 60 },
     (_, index) => `보드 A ${String(index + 1).padStart(3, "0")}`,
   );
-  await createTasksViaApi(page, wsId, project.id, titlesA, statusA!.id);
-  await createTasksViaApi(page, wsId, project.id, ["보드 B 001", "보드 B 002"], statusB!.id);
+  await createTasksViaApi(page, wsId, project.id, titlesA, required(statusA).id);
+  await createTasksViaApi(
+    page,
+    wsId,
+    project.id,
+    ["보드 B 001", "보드 B 002"],
+    required(statusB).id,
+  );
 
-  const collection = (await (
-    await page.request.get(`${base}/projects/${project.id}/collection`)
-  ).json()) as { id: string };
+  const collection = idSchema.parse(
+    await (await page.request.get(`${base}/projects/${project.id}/collection`)).json(),
+  );
   const fieldRes = await page.request.post(`${base}/collections/${collection.id}/fields`, {
     data: { name: "단계", key: "stage", type: "select", options: ["설계", "구현"] },
   });
   expect(fieldRes.status()).toBe(201);
-  const field = (await fieldRes.json()) as {
-    id: string;
-    version: number;
-    options: { id: string; label: string }[];
-  };
-  const design = field.options.find((option) => option.label === "설계")!;
-  const build = field.options.find((option) => option.label === "구현")!;
+  const field = fieldSchema.parse(await fieldRes.json());
+  const design = required(field.options.find((option) => option.label === "설계"));
+  const build = required(field.options.find((option) => option.label === "구현"));
 
   type Row = {
     id: string;
@@ -298,11 +377,12 @@ test("grouped board pages each column and moves cards by drag or select through 
       },
     });
     expect(res.ok()).toBe(true);
-    const row = ((await res.json()) as { items: Row[] }).items.find(
-      (item) => item.displayId === displayId,
-    );
+    const row = collectionQuerySchema
+      .parse(await res.json())
+      .items.find((item) => item.displayId === displayId);
     expect(row).toBeTruthy();
-    return row!;
+    assert(row);
+    return required(row);
   }
   // Grab the card by its padding (its centre is the keyboard select) and drop on the column head.
   const dragPoints = { sourcePosition: { x: 4, y: 4 }, targetPosition: { x: 20, y: 10 } };
@@ -310,7 +390,13 @@ test("grouped board pages each column and moves cards by drag or select through 
     column.locator('[data-testid^="collection-card-"]');
   async function cardIds(column: ReturnType<Page["getByRole"]>): Promise<string[]> {
     return cards(column).evaluateAll((nodes) =>
-      nodes.map((node) => node.getAttribute("data-testid")!.replace("collection-card-", "")),
+      nodes.map((node) =>
+        (<T>(value: T | null | undefined): T => {
+          if (value === null || value === undefined)
+            throw new Error("Expected browser fixture value to exist");
+          return value;
+        })(node.getAttribute("data-testid")).replace("collection-card-", ""),
+      ),
     );
   }
   const querySpy: { group: unknown; cursor: boolean }[] = [];
@@ -319,7 +405,7 @@ test("grouped board pages each column and moves cards by drag or select through 
       request.method() === "POST" &&
       request.url().endsWith(`/collections/${collection.id}/query`)
     ) {
-      const body = request.postDataJSON() as { group?: unknown; cursor?: string };
+      const body = queryBodySchema.parse(request.postDataJSON());
       querySpy.push({
         group: "group" in body ? body.group : "(all)",
         cursor: Boolean(body.cursor),
@@ -331,10 +417,7 @@ test("grouped board pages each column and moves cards by drag or select through 
   // page until the stream has opened, so the stream's `open` resync lands while the
   // page loads: the order that dropped the requested page.
   const streamPath = `${base}/projects/${project.id}/stream`;
-  let loadMoreSent!: () => void;
-  const loadMoreInFlight = new Promise<void>((resolve) => {
-    loadMoreSent = resolve;
-  });
+  const { promise: loadMoreInFlight, resolve: loadMoreSent } = deferred();
   await page.route(
     (url) => url.pathname === streamPath,
     async (route) => {
@@ -346,7 +429,7 @@ test("grouped board pages each column and moves cards by drag or select through 
   await page.route(
     (url) => url.pathname === `${base}/collections/${collection.id}/query`,
     async (route) => {
-      const body = route.request().postDataJSON() as { cursor?: string };
+      const body = cursorBodySchema.parse(route.request().postDataJSON());
       if (nextPageHeld || !body.cursor) return route.continue();
       nextPageHeld = true;
       const streamOpened = page.waitForResponse(
@@ -362,32 +445,36 @@ test("grouped board pages each column and moves cards by drag or select through 
   // A viewport taller than a 60-card column keeps real mouse drags free of scrolling.
   await page.setViewportSize({ width: 1600, height: 7000 });
   await page.goto(`/w/${slug}/BRD/board`);
-  const columnA = page.getByRole("region", { name: statusA!.name, exact: true });
-  const columnB = page.getByRole("region", { name: statusB!.name, exact: true });
+  const columnA = page.getByRole("region", { name: required(statusA).name, exact: true });
+  const columnB = page.getByRole("region", { name: required(statusB).name, exact: true });
   await expect(cards(columnA)).toHaveCount(50);
   await expect(columnA.locator(".collection-board__head")).toContainText("60");
   await expect(cards(columnB)).toHaveCount(2);
-  await expect(columnB.getByRole("button", { name: `${statusB!.name} · 더 보기` })).toHaveCount(0);
-  await columnA.getByRole("button", { name: `${statusA!.name} · 더 보기` }).click();
+  await expect(
+    columnB.getByRole("button", { name: `${required(statusB).name} · 더 보기` }),
+  ).toHaveCount(0);
+  await columnA.getByRole("button", { name: `${required(statusA).name} · 더 보기` }).click();
   await expect(cards(columnA)).toHaveCount(60);
   expect(new Set(await cardIds(columnA)).size).toBe(60);
-  await expect(columnA.getByRole("button", { name: `${statusA!.name} · 더 보기` })).toHaveCount(0);
+  await expect(
+    columnA.getByRole("button", { name: `${required(statusA).name} · 더 보기` }),
+  ).toHaveCount(0);
   await expect(cards(columnB)).toHaveCount(2);
   // One catalog request without a group; every other request names its column.
   expect(
     querySpy.filter((entry) => entry.group === "(all)" && !entry.cursor).length,
   ).toBeGreaterThan(0);
   expect(
-    querySpy.filter((entry) => entry.cursor).every((entry) => entry.group === statusA!.id),
+    querySpy.filter((entry) => entry.cursor).every((entry) => entry.group === required(statusA).id),
   ).toBe(true);
 
   // 2. Drag a second-page card to another status; it persists and survives reload.
-  const movedId = (await cardIds(columnA)).at(-1)!;
+  const movedId = required((await cardIds(columnA)).at(-1));
   await columnA.getByTestId(`collection-card-${movedId}`).dragTo(columnB, dragPoints);
   await expect(columnB.getByTestId(`collection-card-${movedId}`)).toBeVisible();
   await expect(columnA.getByTestId(`collection-card-${movedId}`)).toHaveCount(0);
   await expect(cards(columnA)).toHaveCount(59);
-  await expect.poll(async () => (await itemRow(movedId)).statusId).toBe(statusB!.id);
+  await expect.poll(async () => (await itemRow(movedId)).statusId).toBe(required(statusB).id);
   await page.reload();
   await expect(cards(columnB)).toHaveCount(3);
   await expect(columnB.getByTestId(`collection-card-${movedId}`)).toBeVisible();
@@ -399,14 +486,14 @@ test("grouped board pages each column and moves cards by drag or select through 
   //     tallest one, so the target column is under the pointer without scrolling mid-drag.
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.reload();
-  await columnA.getByRole("button", { name: `${statusA!.name} · 더 보기` }).click();
+  await columnA.getByRole("button", { name: `${required(statusA).name} · 더 보기` }).click();
   await expect(cards(columnA)).toHaveCount(59);
-  const pointerId = (await cardIds(columnA))[55]!;
+  const pointerId = required((await cardIds(columnA))[55]);
   const pointerCard = columnA.getByTestId(`collection-card-${pointerId}`);
   await pointerCard.scrollIntoViewIfNeeded();
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
-  const from = (await pointerCard.boundingBox())!;
-  const to = (await columnB.boundingBox())!;
+  const from = required(await pointerCard.boundingBox());
+  const to = required(await columnB.boundingBox());
   expect(from.y + 4).toBeGreaterThanOrEqual(0);
   expect(from.y + 4).toBeLessThan(720);
   expect(to.y).toBeLessThan(from.y);
@@ -418,7 +505,7 @@ test("grouped board pages each column and moves cards by drag or select through 
   await page.mouse.up();
   await expect(columnB.getByTestId(`collection-card-${pointerId}`)).toBeVisible();
   await expect(cards(columnA)).toHaveCount(58);
-  await expect.poll(async () => (await itemRow(pointerId)).statusId).toBe(statusB!.id);
+  await expect.poll(async () => (await itemRow(pointerId)).statusId).toBe(required(statusB).id);
   await page.reload();
   await expect(columnB.getByTestId(`collection-card-${pointerId}`)).toBeVisible();
   await expect(page.getByTestId(`collection-card-${pointerId}`)).toHaveCount(1);
@@ -427,21 +514,24 @@ test("grouped board pages each column and moves cards by drag or select through 
 
   // 3. A rejected move (WIP limit) shows the server error and leaves the card in place.
   const wipRes = await page.request.patch(
-    `${base}/workflows/${workflow.id}/statuses/${statusB!.id}`,
+    `${base}/workflows/${workflow.id}/statuses/${required(statusB).id}`,
     { data: { wipLimit: 4 } },
   );
   expect(wipRes.ok()).toBe(true);
-  const blockedId = (await cardIds(columnA))[0]!;
+  const blockedId = required((await cardIds(columnA))[0]);
   await columnA.getByTestId(`collection-card-${blockedId}`).dragTo(columnB, dragPoints);
   await expect(page.getByRole("alert").filter({ hasText: "진행 중 제한" })).toBeVisible();
   await expect(columnA.getByTestId(`collection-card-${blockedId}`)).toBeVisible();
   await expect(columnB.getByTestId(`collection-card-${blockedId}`)).toHaveCount(0);
-  expect((await itemRow(blockedId)).statusId).toBe(statusA!.id);
+  expect((await itemRow(blockedId)).statusId).toBe(required(statusA).id);
   expect(
     (
-      await page.request.patch(`${base}/workflows/${workflow.id}/statuses/${statusB!.id}`, {
-        data: { wipLimit: null },
-      })
+      await page.request.patch(
+        `${base}/workflows/${workflow.id}/statuses/${required(statusB).id}`,
+        {
+          data: { wipLimit: null },
+        },
+      )
     ).ok(),
   ).toBe(true);
 
@@ -461,7 +551,7 @@ test("grouped board pages each column and moves cards by drag or select through 
   expect(new Set(await cardIds(noneColumn)).size).toBe(62);
 
   // Drag from the unassigned second page into an option.
-  const dragged = (await cardIds(noneColumn)).at(-1)!;
+  const dragged = required((await cardIds(noneColumn)).at(-1));
   await noneColumn.getByTestId(`collection-card-${dragged}`).dragTo(buildColumn, dragPoints);
   await expect(buildColumn.getByTestId(`collection-card-${dragged}`)).toBeVisible();
   await expect(cards(noneColumn)).toHaveCount(61);
@@ -470,7 +560,7 @@ test("grouped board pages each column and moves cards by drag or select through 
     .toEqual({ options: [build.id] });
 
   // Keyboard alternative: the per-card select moves into an option and back to unassigned.
-  const keyed = (await cardIds(noneColumn))[0]!;
+  const keyed = required((await cardIds(noneColumn))[0]);
   await noneColumn
     .getByLabel(`그룹 기준 · ${keyed}`, { exact: true })
     .selectOption({ label: "설계" });
@@ -524,10 +614,10 @@ test("grouped board pages each column and moves cards by drag or select through 
   await expect(cards(columnA)).toHaveCount(50);
   await expect(page.locator('[data-testid^="collection-card-"][draggable="true"]')).toHaveCount(0);
   await expect(page.getByLabel(/^그룹 기준 · BRD-/)).toHaveCount(0);
-  const frozen = (await cardIds(columnA))[0]!;
+  const frozen = required((await cardIds(columnA))[0]);
   await columnA.getByTestId(`collection-card-${frozen}`).dragTo(columnB, dragPoints);
   await expect(columnA.getByTestId(`collection-card-${frozen}`)).toBeVisible();
-  expect((await itemRow(frozen)).statusId).toBe(statusA!.id);
+  expect((await itemRow(frozen)).statusId).toBe(required(statusA).id);
 });
 
 test("calendar moves previews and day-list rows to another day or unassigned through the API", async ({
@@ -537,7 +627,7 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   const wsId = await workspaceId(page);
   const slug = admin.workspaceSlug;
   const base = `/api/v1/workspaces/${wsId}`;
-  const me = (await (await page.request.get("/api/v1/auth/me")).json()) as { timezone: string };
+  const me = meSchema.parse(await (await page.request.get("/api/v1/auth/me")).json());
   const dayIn = (iso: string) =>
     new Intl.DateTimeFormat("en-CA", { timeZone: me.timezone }).format(new Date(iso));
 
@@ -545,12 +635,10 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
     data: { key: "CAL", name: "달력 프로젝트", visibility: "workspace" },
   });
   expect(projectRes.status()).toBe(201);
-  const project = (await projectRes.json()) as { id: string };
-  const workflow = (await (
-    await page.request.get(`${base}/projects/${project.id}/workflow`)
-  ).json()) as {
-    statuses: { id: string }[];
-  };
+  const project = idSchema.parse(await projectRes.json());
+  const workflow = statusIdListSchema.parse(
+    await (await page.request.get(`${base}/projects/${project.id}/workflow`)).json(),
+  );
   async function createTask(
     title: string,
     dueDate: string | null,
@@ -560,13 +648,13 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
       data: {
         title,
         type: "task",
-        statusId: workflow.statuses[0]!.id,
+        statusId: required(workflow.statuses[0]).id,
         ...(dueDate ? { dueDate } : {}),
       },
     });
     expect(res.status()).toBe(201);
-    const body = (await res.json()) as { id: string; number: number };
-    return { id: body.id, displayId: `CAL-${body.number}` };
+    const body = taskSchema.parse(await res.json());
+    return { id: body.id, displayId: `CAL-${String(body.number)}` };
   }
   const previewed = await createTask("미리보기 이동", "2027-05-10");
   const listed = await createTask("목록 이동", "2027-05-11");
@@ -580,15 +668,15 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
     ).ok(),
   ).toBe(true);
 
-  const collection = (await (
-    await page.request.get(`${base}/projects/${project.id}/collection`)
-  ).json()) as { id: string };
+  const collection = idSchema.parse(
+    await (await page.request.get(`${base}/projects/${project.id}/collection`)).json(),
+  );
   async function createField(name: string, key: string, type: string) {
     const res = await page.request.post(`${base}/collections/${collection.id}/fields`, {
       data: { name, key, type },
     });
     expect(res.status()).toBe(201);
-    return (await res.json()) as { id: string; version: number };
+    return versionedSchema.parse(await res.json());
   }
   const dateField = await createField("기준일", "base_day", "date");
   const timeField = await createField("시각", "at_time", "datetime");
@@ -609,11 +697,12 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
       },
     });
     expect(res.ok()).toBe(true);
-    const row = ((await res.json()) as { items: Row[] }).items.find(
-      (item) => item.displayId === displayId,
-    );
+    const row = collectionQuerySchema
+      .parse(await res.json())
+      .items.find((item) => item.displayId === displayId);
     expect(row).toBeTruthy();
-    return row!;
+    assert(row);
+    return required(row);
   }
   async function putValue(
     displayId: string,
@@ -664,20 +753,16 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
     unassigned: await unassigned.boundingBox(),
   };
   expect(idleGeometry.month).toBeTruthy();
+  assert(idleGeometry.month);
   expect(idleGeometry.unassigned).toBeTruthy();
-  let releasePatch!: () => void;
-  const patchGate = new Promise<void>((resolve) => {
-    releasePatch = resolve;
-  });
-  let patchStarted = false;
-  let patchDelivered!: () => void;
-  const delivered = new Promise<void>((resolve) => {
-    patchDelivered = resolve;
-  });
+  assert(idleGeometry.unassigned);
+  const { promise: patchGate, resolve: releasePatch } = deferred();
+  const patchState = { started: false };
+  const { promise: delivered, resolve: patchDelivered } = deferred();
   const taskPath = `${base}/tasks/${previewed.id}`;
   const taskRoute = `**${taskPath}`;
   await page.route(taskRoute, async (route) => {
-    patchStarted = true;
+    patchState.started = true;
     try {
       const response = await route.fetch();
       await patchGate;
@@ -696,7 +781,7 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
     expect(await unassigned.boundingBox()).toEqual(idleGeometry.unassigned);
   } finally {
     releasePatch();
-    if (patchStarted) await delivered;
+    if (patchState.started) await delivered;
     await page.unroute(taskRoute);
   }
   const accepted = await acceptedMove;
@@ -753,8 +838,10 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
       res.request().method() === "PATCH" &&
       new URL(res.url()).pathname === `${base}/tasks/${listed.id}`,
   );
-  const from = (await page.getByTestId(`collection-drag-${listed.displayId}`).boundingBox())!;
-  const to = (await cell("2027-05-25").boundingBox())!;
+  const from = required(
+    await page.getByTestId(`collection-drag-${listed.displayId}`).boundingBox(),
+  );
+  const to = required(await cell("2027-05-25").boundingBox());
   await page.mouse.move(from.x + 4, from.y + 4);
   await page.mouse.down();
   await page.mouse.move(from.x + 40, from.y + 4, { steps: 4 });
@@ -791,8 +878,8 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   await expect(
     cell("2027-05-12").getByTestId(`collection-preview-${stale.displayId}`),
   ).toBeVisible();
-  const staleFrom = (await preview(stale.displayId).boundingBox())!;
-  const staleTo = (await cell("2027-05-15").boundingBox())!;
+  const staleFrom = required(await preview(stale.displayId).boundingBox());
+  const staleTo = required(await cell("2027-05-15").boundingBox());
   await page.mouse.move(staleFrom.x + staleFrom.width / 2, staleFrom.y + staleFrom.height / 2);
   await page.mouse.down();
   await page.mouse.move(
@@ -904,3 +991,17 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   await expect(page.getByTestId(`collection-row-${stale.displayId}`)).toBeVisible();
   await expect(page.locator('[data-testid^="collection-drag-"][draggable="true"]')).toHaveCount(0);
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: (() => void) | undefined;
+  const promise = new Promise<void>((fulfill) => {
+    resolve = fulfill;
+  });
+  assert(resolve, "Promise executor must initialize its resolver");
+  return { promise, resolve };
+}

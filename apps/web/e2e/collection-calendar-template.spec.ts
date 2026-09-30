@@ -1,7 +1,50 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page, type Response } from "@playwright/test";
 import { login } from "./helpers";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const projectSchema = z
+  .object({ id: z.string(), key: z.string(), rootDocumentId: z.string().nullable() })
+  .passthrough();
+const workflowSchema = z
+  .object({
+    id: z.string(),
+    statuses: z.array(
+      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
+const taskDatesSchema = z
+  .object({
+    id: z.string(),
+    startDate: z.string().nullable(),
+    dueDate: z.string().nullable(),
+    dueAt: z.string().nullable(),
+  })
+  .passthrough();
+const idSchema = z.object({ id: z.string() }).passthrough();
+const versionedSchema = z.object({ id: z.string(), version: z.number() }).passthrough();
+const collectionQuerySchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          taskId: z.string().nullable(),
+          version: z.number(),
+          values: z.record(z.unknown()),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
 
 test.describe.configure({ mode: "serial" });
 async function fixture(page: Page, key: string) {
@@ -10,12 +53,10 @@ async function fixture(page: Page, key: string) {
     const path = new URL(response.url()).pathname;
     if (path.startsWith("/assets/") && /\.(js|css)$/.test(path)) {
       served.push(
-        response
-          .body()
-          .then((body) => ({
-            path: path.slice(1),
-            sha256: createHash("sha256").update(body).digest("hex"),
-          })),
+        response.body().then((body) => ({
+          path: path.slice(1),
+          sha256: createHash("sha256").update(body).digest("hex"),
+        })),
       );
     }
   };
@@ -37,9 +78,10 @@ async function fixture(page: Page, key: string) {
     await expect(page).toHaveURL(/\/$/);
   } else if (await page.getByRole("button", { name: "로그인", exact: true }).count())
     await login(page, "calendar@example.com", "supersecret1");
-  const ws = (await (await page.request.get("/api/v1/me/workspaces")).json()).items.find(
-    (w: { slug: string }) => w.slug === "caltemplate",
-  );
+  const ws = workspaceListSchema
+    .parse(await (await page.request.get("/api/v1/me/workspaces")).json())
+    .items.find((w: { slug: string }) => w.slug === "caltemplate");
+  assert(ws, "Calendar workspace must exist");
   const base = `/api/v1/workspaces/${ws.id}`;
   expect(
     (
@@ -52,20 +94,22 @@ async function fixture(page: Page, key: string) {
     data: { key, name: key, visibility: "workspace" },
   });
   expect(res.status()).toBe(201);
-  const project = await res.json();
-  const wf = await (await page.request.get(`${base}/projects/${project.id}/workflow`)).json();
+  const project = projectSchema.parse(await res.json());
+  const wf = workflowSchema.parse(
+    await (await page.request.get(`${base}/projects/${project.id}/workflow`)).json(),
+  );
   async function task(title: string, dates: object) {
     const created = await page.request.post(`${base}/projects/${project.id}/tasks`, {
-      data: { title, type: "task", statusId: wf.statuses[0].id, ...dates },
+      data: { title, type: "task", statusId: required(wf.statuses[0]).id, ...dates },
     });
     expect(created.status()).toBe(201);
-    const row = await created.json();
-    return { ...row, displayId: `${key}-${row.number}` };
+    const row = taskSchema.parse(await created.json());
+    return { ...row, displayId: `${key}-${String(row.number)}` };
   }
   async function stored(id: string) {
     const res = await page.request.get(`${base}/tasks/${id}`);
     expect(res.ok()).toBe(true);
-    return res.json();
+    return taskDatesSchema.parse(await res.json());
   }
   async function open(month = "2027-05") {
     page.on("response", captureAsset);
@@ -149,10 +193,7 @@ test("real date interval resize and optimistic pending settle; failed concurrent
   const point = await f.task("Single date", { dueDate: "2027-05-08" });
   await f.open();
   await expect(page.getByRole("button", { name: "Resize end · Single date" })).toHaveCount(0);
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
+  const { promise: gate, resolve: release } = deferred();
   await page.route(`**${f.base}/tasks/${range.id}`, async (route) => {
     if (route.request().method() === "PATCH") await gate;
     await route.continue();
@@ -288,14 +329,14 @@ test("custom date editor retains stale item guard, rolls back conflict and prese
 }) => {
   const f = await fixture(page, "VALUE");
   const item = await f.task("Custom calendar date", {});
-  const collection = await (
-    await page.request.get(`${f.base}/projects/${f.project.id}/collection`)
-  ).json();
+  const collection = idSchema.parse(
+    await (await page.request.get(`${f.base}/projects/${f.project.id}/collection`)).json(),
+  );
   const created = await page.request.post(`${f.base}/collections/${collection.id}/fields`, {
     data: { name: "Custom date", key: "custom_date", type: "date" },
   });
   expect(created.status()).toBe(201);
-  const field = await created.json();
+  const field = versionedSchema.parse(await created.json());
   const query = async () => {
     const res = await page.request.post(`${f.base}/collections/${collection.id}/query`, {
       data: {
@@ -304,7 +345,10 @@ test("custom date editor retains stale item guard, rolls back conflict and prese
       },
     });
     expect(res.ok()).toBe(true);
-    return (await res.json()).items.find((r: { taskId: string }) => r.taskId === item.id);
+    const row = collectionQuerySchema
+      .parse(await res.json())
+      .items.find((r) => r.taskId === item.id);
+    return required(row);
   };
   const valuePath = `${f.base}/collections/${collection.id}/items/${(await query()).id}/values`;
   async function put(date: string) {
@@ -360,10 +404,7 @@ test("archive during pending calendar write is refused by real Rust permission g
   await page.getByTestId(`collection-preview-${item.displayId}`).click();
   const editor = page.getByRole("form", { name: "Calendar event editor" });
   await editor.locator('input[type="date"]').fill("2027-05-12");
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
+  const { promise: gate, resolve: release } = deferred();
   await page.route(`**${f.base}/tasks/${item.id}`, async (route) => {
     if (route.request().method() === "PATCH") await gate;
     await route.continue();
@@ -446,3 +487,17 @@ test("dual due fields keep Rust date precedence on unchanged edit; resize click 
   await date.press("Enter");
   await expect.poll(async () => (await f.stored(range.id)).startDate).toBe("2027-05-06");
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: (() => void) | undefined;
+  const promise = new Promise<void>((fulfill) => {
+    resolve = fulfill;
+  });
+  assert(resolve, "Promise executor must initialize its resolver");
+  return { promise, resolve };
+}

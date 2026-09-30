@@ -1,5 +1,21 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const projectSchema = z
+  .object({ id: z.string(), key: z.string(), rootDocumentId: z.string().nullable() })
+  .passthrough();
+const taskSchema = z
+  .object({ id: z.string(), number: z.number(), displayId: z.string() })
+  .passthrough();
+const bodySchema = z.object({ contentJson: z.unknown() }).passthrough();
+const errorSchema = z.object({ code: z.string() }).passthrough();
+const titleSchema = z.object({ title: z.string() }).passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -39,10 +55,11 @@ async function ensureSetup(page: Page): Promise<void> {
 async function workspaceId(page: Page): Promise<string> {
   const res = await page.request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const workspace = (await res.json()).items.find(
-    (item: { slug: string }) => item.slug === admin.workspaceSlug,
-  );
+  const workspace = workspaceListSchema
+    .parse(await res.json())
+    .items.find((item: { slug: string }) => item.slug === admin.workspaceSlug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
@@ -53,13 +70,13 @@ test("project document: save a revision, edit, restore through the room", async 
     data: { key: "PREV", name: "리비전 프로젝트", visibility: "private" },
   });
   expect(projectRes.status()).toBe(201);
-  const project = await projectRes.json();
+  const project = projectSchema.parse(await projectRes.json());
   const docRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/documents`,
     { data: { parentId: project.rootDocumentId, title: "리비전 문서" } },
   );
   expect(docRes.status()).toBe(201);
-  const doc = await docRes.json();
+  const doc = taskSchema.parse(await docRes.json());
   const bodyUrl = `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}/body`;
   const revisionsUrl = `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}/revisions`;
 
@@ -92,7 +109,9 @@ test("project document: save a revision, edit, restore through the room", async 
   await page.keyboard.type("두 번째 버전");
   await page.getByRole("button", { name: "저장", exact: true }).click();
   await expect
-    .poll(async () => JSON.stringify((await (await page.request.get(bodyUrl)).json()).contentJson))
+    .poll(async () =>
+      JSON.stringify(bodySchema.parse(await (await page.request.get(bodyUrl)).json()).contentJson),
+    )
     .toContain("두 번째 버전");
   await expect(editor).not.toContainText("첫 번째 버전");
 
@@ -103,7 +122,9 @@ test("project document: save a revision, edit, restore through the room", async 
   await page.getByTestId("revision-restore-confirm").click();
   await expect(editor).toContainText("첫 번째 버전 😀", { timeout: 15_000 });
   await expect
-    .poll(async () => JSON.stringify((await (await page.request.get(bodyUrl)).json()).contentJson))
+    .poll(async () =>
+      JSON.stringify(bodySchema.parse(await (await page.request.get(bodyUrl)).json()).contentJson),
+    )
     .toContain("첫 번째 버전");
 
   // 5. Reload: the restored body comes back from the persisted room.
@@ -122,7 +143,7 @@ test("project document: save a revision, edit, restore through the room", async 
   expect(archive.status()).toBe(200);
   const refused = await page.request.post(revisionsUrl);
   expect(refused.status()).toBe(409);
-  expect((await refused.json()).code).toBe("project_archived");
+  expect(errorSchema.parse(await refused.json()).code).toBe("project_archived");
   await page.reload();
   await page.getByTestId("revision-history").click();
   await expect(page.getByTestId("revision-item").first()).toBeVisible();
@@ -139,7 +160,7 @@ test("project long title wraps and remains readable after archive without hiding
     data: { key: "WRAP", name: "문서 제목 검토", visibility: "private" },
   });
   expect(created.status()).toBe(201);
-  const project = await created.json();
+  const project = projectSchema.parse(await created.json());
   const title =
     "한국어 협업 문서 제목이 길어질 때 탐색과 편집 작업을 안정적으로 유지하는 주간 업무 기록 및 검토 결과";
   const docRes = await page.request.post(
@@ -147,7 +168,7 @@ test("project long title wraps and remains readable after archive without hiding
     { data: { parentId: project.rootDocumentId, title } },
   );
   expect(docRes.status()).toBe(201);
-  const doc = await docRes.json();
+  const doc = taskSchema.parse(await docRes.json());
   expect(
     (
       await page.request.put(
@@ -183,12 +204,12 @@ test("project long title wraps and remains readable after archive without hiding
   await expect
     .poll(
       async () =>
-        (
+        titleSchema.parse(
           await (
             await page.request.get(
               `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}`,
             )
-          ).json()
+          ).json(),
         ).title,
     )
     .toBe("프로젝트 한국어 제목");
@@ -197,12 +218,12 @@ test("project long title wraps and remains readable after archive without hiding
   await expect
     .poll(
       async () =>
-        (
+        titleSchema.parse(
           await (
             await page.request.get(
               `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}`,
             )
-          ).json()
+          ).json(),
         ).title,
     )
     .toBe(title);

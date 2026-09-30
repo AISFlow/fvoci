@@ -1,5 +1,52 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { login } from "./helpers";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const lookupSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          kind: z.string(),
+          displayId: z.string(),
+          projectId: z.string().nullable(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const projectListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          rootDocumentId: z.string().nullable(),
+          taskCount: z.number(),
+          openTaskCount: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const milestoneListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), name: z.string() }).passthrough()) })
+  .passthrough();
+const taskDependencySchema = z
+  .object({
+    milestoneId: z.string().nullable(),
+    dependencies: z.array(
+      z.object({ blockerId: z.string(), blockedId: z.string(), type: z.string() }).passthrough(),
+    ),
+  })
+  .passthrough();
 
 test.describe.configure({ mode: "serial" });
 
@@ -15,19 +62,23 @@ const admin = {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = workspaceListSchema.parse(await workspacesRes.json());
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
 async function taskIdFor(page: Page, wsId: string, displayId: string): Promise<string> {
   const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/${displayId}`);
   expect(lookup.ok()).toBe(true);
-  const taskId = (await lookup.json()).items.find(
-    (item: { kind: string }) => item.kind === "task",
-  )?.id;
+  const taskId = required(
+    lookupSchema
+      .parse(await lookup.json())
+      .items.find((item: { kind: string }) => item.kind === "task"),
+  ).id;
   expect(taskId).toBeTruthy();
+  assert(taskId);
   return taskId;
 }
 
@@ -91,18 +142,22 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
 
   const wsId = await workspaceId(page, admin.workspaceSlug);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
-  const project = (await projectsRes.json()).items.find(
-    (item: { key: string }) => item.key === "TMD",
-  );
+  const project = projectListSchema
+    .parse(await projectsRes.json())
+    .items.find((item: { key: string }) => item.key === "TMD");
   expect(project).toBeTruthy();
+  assert(project);
   const milestonesRes = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/milestones`,
   );
   expect(milestonesRes.ok()).toBe(true);
-  const milestoneId = (await milestonesRes.json()).items.find(
-    (item: { name: string }) => item.name === "출시",
-  )?.id as string;
+  const milestoneId = required(
+    milestoneListSchema
+      .parse(await milestonesRes.json())
+      .items.find((item: { name: string }) => item.name === "출시"),
+  ).id;
   expect(milestoneId).toBeTruthy();
+  assert(milestoneId);
 
   const blockerId = await taskIdFor(page, wsId, blockerDisplay);
   const blockedId = await taskIdFor(page, wsId, blockedDisplay);
@@ -114,7 +169,7 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
     .poll(async () => {
       const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${blockerId}`);
       expect(detailRes.ok()).toBe(true);
-      return (await detailRes.json()).milestoneId;
+      return taskDependencySchema.parse(await detailRes.json()).milestoneId;
     })
     .toBe(milestoneId);
 
@@ -125,8 +180,8 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
     .poll(async () => {
       const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${blockerId}`);
       expect(detailRes.ok()).toBe(true);
-      const detail = await detailRes.json();
-      const deps = detail.dependencies ?? [];
+      const detail = taskDependencySchema.parse(await detailRes.json());
+      const deps = detail.dependencies;
       return deps.some(
         (edge: { blockerId: string; blockedId: string; type: string }) =>
           edge.blockerId === blockerId && edge.blockedId === blockedId && edge.type === "FS",
@@ -152,8 +207,13 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
     `/api/v1/workspaces/${wsId}/projects/${project.id}/milestones`,
   );
   expect(finalMilestones.ok()).toBe(true);
-  expect((await finalMilestones.json()).items).toEqual([]);
+  expect(milestoneListSchema.parse(await finalMilestones.json()).items).toEqual([]);
   const finalTask = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${blockerId}`);
   expect(finalTask.ok()).toBe(true);
-  expect((await finalTask.json()).milestoneId).toBeNull();
+  expect(taskDependencySchema.parse(await finalTask.json()).milestoneId).toBeNull();
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}

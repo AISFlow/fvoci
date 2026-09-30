@@ -1,4 +1,13 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const idSchema = z.object({ id: z.string() }).passthrough();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
 
 const owner = {
   email: "Admin@Example.COM",
@@ -12,9 +21,10 @@ const owner = {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = workspaceListSchema.parse(await workspacesRes.json());
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
@@ -38,12 +48,12 @@ test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시
     data: { key: "ACT", name: "태스크 활동 검증", visibility: "workspace" },
   });
   expect(projectResponse.ok()).toBeTruthy();
-  const project: { id: string } = await projectResponse.json();
+  const project = idSchema.parse(await projectResponse.json());
   const taskResponse = await page.request.post(`${base}/projects/${project.id}/tasks`, {
     data: { title: "배양 조건 확인", priority: "medium" },
   });
   expect(taskResponse.ok()).toBeTruthy();
-  const task: { id: string; number: number } = await taskResponse.json();
+  const task = taskSchema.parse(await taskResponse.json());
   const taskApi = `${base}/tasks/${task.id}`;
   const rootBody = "A/B 조건 결과를 정리했습니다.";
   const replyBody = "B 조건 재현성도 확인했습니다.";
@@ -52,7 +62,7 @@ test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시
     data: { body: rootBody },
   });
   expect(rootCommentResponse.ok()).toBeTruthy();
-  const rootComment: { id: string } = await rootCommentResponse.json();
+  const rootComment = idSchema.parse(await rootCommentResponse.json());
   const replyResponse = await page.request.post(`${taskApi}/comments`, {
     data: { body: replyBody, parentId: rootComment.id },
   });
@@ -68,7 +78,7 @@ test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시
     expect(response.ok()).toBeTruthy();
   }
 
-  const taskUrl = `/w/${owner.workspaceSlug}/ACT-${task.number}`;
+  const taskUrl = `/w/${owner.workspaceSlug}/ACT-${String(task.number)}`;
   await page.goto(taskUrl);
   const activity = page.locator("#fv-comments");
   await expect(activity.getByRole("heading", { name: "활동" })).toBeVisible();

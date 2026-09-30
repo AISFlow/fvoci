@@ -1,4 +1,30 @@
+import assert from "node:assert/strict";
+import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
+
+// Validate the response fields used by this flow; retain the complete payload.
+const workspaceListSchema = z
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
+  .passthrough();
+const projectListSchema = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          id: z.string(),
+          key: z.string(),
+          rootDocumentId: z.string().nullable(),
+          taskCount: z.number(),
+          openTaskCount: z.number(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+const idSchema = z.object({ id: z.string() }).passthrough();
+const meSchema = z.object({ userId: z.string() }).passthrough();
+const urlSchema = z.object({ url: z.string() }).passthrough();
+const itemListSchema = z.object({ canEdit: z.boolean(), items: z.array(z.string()) }).passthrough();
 
 const owner = {
   email: "Admin@Example.COM",
@@ -12,9 +38,10 @@ const owner = {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
+  const workspacesBody = workspaceListSchema.parse(await workspacesRes.json());
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  assert(workspace);
   return workspace.id;
 }
 
@@ -43,18 +70,21 @@ test("owner adds a holiday and copies an ICS feed that lists dated tasks", async
   const wsId = await workspaceId(page, owner.workspaceSlug);
   const projects = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
   expect(projects.ok()).toBe(true);
-  const projectId = (await projects.json()).items.find(
-    (item: { key: string }) => item.key === "CAL",
-  )?.id as string;
+  const projectId = required(
+    projectListSchema
+      .parse(await projects.json())
+      .items.find((item: { key: string }) => item.key === "CAL"),
+  ).id;
   expect(projectId).toBeTruthy();
+  assert(projectId);
   const createdTask = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`,
     { data: { title: "공개 일정", dueDate: "2026-08-26" } },
   );
   expect(createdTask.status()).toBe(201);
-  const taskId = ((await createdTask.json()) as { id: string }).id;
+  const taskId = idSchema.parse(await createdTask.json()).id;
   // The feed exports the owner's assigned tasks, as in the source.
-  const me = (await (await page.request.get("/api/v1/auth/me")).json()) as { userId: string };
+  const me = meSchema.parse(await (await page.request.get("/api/v1/auth/me")).json());
   const assigned = await page.request.patch(`/api/v1/workspaces/${wsId}/tasks/${taskId}`, {
     data: { assigneeIds: [me.userId] },
   });
@@ -83,7 +113,7 @@ test("owner adds a holiday and copies an ICS feed that lists dated tasks", async
   await page.getByRole("button", { name: "구독 URL 복사" }).click();
   const created = await tokenResp;
   expect(created.ok()).toBe(true);
-  const { url } = (await created.json()) as { url: string };
+  const { url } = urlSchema.parse(await created.json());
   expect(url).toContain("/api/v1/ics/");
 
   const feed = await page.request.get(new URL(url).pathname);
@@ -98,7 +128,12 @@ test("owner adds a holiday and copies an ICS feed that lists dated tasks", async
 
   const holidays = await page.request.get(`/api/v1/workspaces/${wsId}/holidays`);
   expect(holidays.ok()).toBe(true);
-  const body = await holidays.json();
+  const body = itemListSchema.parse(await holidays.json());
   expect(body.canEdit).toBe(true);
   expect(body.items).toContain("2026-09-01");
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert(value !== null && value !== undefined, "Expected fixture value to exist");
+  return value;
+}
