@@ -2080,7 +2080,7 @@ fn lookup_display_id() {}
     params(
         ("q" = String, Query, description = "Search query"),
         ("type" = Option<String>, Query, description = "Result kind filter"),
-        ("tag" = Option<String>, Query, description = "Optional tag filter"),
+        ("tag" = Option<String>, Query, description = "Optional document tag UUID: direct tagged documents and unchanged tasks; excludes comments and attachments"),
         ("cursor" = Option<String>, Query, description = "Pagination cursor"),
         ("limit" = Option<i32>, Query, description = "Page size 1-50"),
         ("mode" = Option<String>, Query, description = "lexical or hybrid; global search stays lexical"),
@@ -2106,7 +2106,7 @@ fn global_search() {}
         ("q" = String, Query, description = "Search query"),
         ("type" = Option<String>, Query, description = "Result kind filter"),
         ("projectId" = Option<String>, Query, description = "Optional project scope"),
-        ("tag" = Option<String>, Query, description = "Optional tag filter"),
+        ("tag" = Option<String>, Query, description = "Optional document tag UUID: direct tagged documents and unchanged tasks; excludes comments and attachments"),
         ("cursor" = Option<String>, Query, description = "Pagination cursor"),
         ("limit" = Option<i32>, Query, description = "Page size 1-50"),
         ("mode" = Option<String>, Query, description = "lexical or hybrid"),
