@@ -2,6 +2,7 @@ import { t } from "@fvoci/i18n";
 import { Link } from "react-router-dom";
 import { AuthStatus } from "@/features/auth/auth-form";
 import { AuthLayout, AuthPanel } from "@/features/auth/auth-layout";
+import { LEGAL_DOCS } from "./legal-docs";
 import {
   filledOperatorFields,
   hasOperatorInfo,
@@ -15,6 +16,7 @@ export {
   hasOperatorInfo,
   operatorFieldHref,
 } from "./operator-fields";
+export { LEGAL_DOCS } from "./legal-docs";
 
 function OperatorInfoList({ operator }: { operator: OperatorInfo | null | undefined }) {
   const rows = filledOperatorFields(operator);
@@ -61,11 +63,6 @@ export function OperatorInfoView({ operator }: { operator: OperatorInfo | null }
     </AuthLayout>
   );
 }
-
-export const LEGAL_DOCS = [
-  { kind: "terms", label: t("legal.terms") },
-  { kind: "privacy", label: t("legal.privacy") },
-] as const;
 
 export function ServiceInfoFooter({
   operator,
