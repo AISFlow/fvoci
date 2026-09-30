@@ -11,7 +11,7 @@ import {
   readZip,
   writeZip,
 } from "../src/features/attachments/hwp-test-fixture";
-import { watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, watchCspViolations } from "./helpers";
 
 const owner = {
   email: "hwp-viewer@example.com",
@@ -50,7 +50,7 @@ const scriptsBombHwpx = Buffer.from(
   writeZip([
     ...readZip(new Uint8Array(hancomHwpx)),
     ...[0, 1, 2, 3].map((n) => ({
-      name: `Scripts/s${n}.js`,
+      name: `Scripts/s${String(n)}.js`,
       data: new Uint8Array(32 * 1024 * 1024),
     })),
   ]),
@@ -64,8 +64,8 @@ const scriptsBombHwpx = Buffer.from(
 const slowHwpx = Buffer.from(
   buildFixtureHwpx(
     new Uint8Array(hancomHwpx),
-    Array.from({ length: 15_000 }, (_, n) =>
-      `${n + 1}쪽 ${"가나다라마바사아자차 ".repeat(90)}`.trim(),
+    Array.from({ length: 15000 }, (_, n) =>
+      `${String(n + 1)}쪽 ${"가나다라마바사아자차 ".repeat(90)}`.trim(),
     ),
   ),
 );
@@ -94,12 +94,18 @@ async function uploadAttachment(
     { data: { name, sizeBytes: bytes.length } },
   );
   expect(uploadRes.ok(), await uploadRes.text()).toBeTruthy();
-  const upload = (await uploadRes.json()) as {
+  const upload = (await readJson(uploadRes, flowSchemas.upload)) as {
     attachmentId: string;
     partSizeBytes: number;
-    parts: Array<{ partNumber: number; url: string }>;
+    parts: Array<{
+      partNumber: number;
+      url: string;
+    }>;
   };
-  const parts: { partNumber: number; etag: string }[] = [];
+  const parts: {
+    partNumber: number;
+    etag: string;
+  }[] = [];
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
@@ -111,7 +117,11 @@ async function uploadAttachment(
     expect(put.ok(), await put.text()).toBeTruthy();
     const etag = put.headers()["etag"];
     expect(etag).toBeTruthy();
-    parts.push({ partNumber: part.partNumber, etag: etag! });
+    const required1 = etag;
+    if (required1 === undefined) {
+      throw new Error("Missing fixture value: etag");
+    }
+    parts.push({ partNumber: part.partNumber, etag: required1 });
   }
   const completeRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`,
@@ -144,7 +154,11 @@ async function probePage(
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(el.naturalWidth * factor);
     canvas.height = Math.round(el.naturalHeight * factor);
-    const ctx = canvas.getContext("2d")!;
+    const required2 = canvas.getContext("2d");
+    if (required2 === null) {
+      throw new Error('Missing fixture value: canvas.getContext("2d")');
+    }
+    const ctx = required2;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
@@ -155,9 +169,29 @@ async function probePage(
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const at = (y * width + x) * 4;
-        if (data[at]! < 110 && data[at + 1]! < 110 && data[at + 2]! < 110) {
+        const required3 = data[at];
+        if (required3 === undefined) {
+          throw new Error("Missing fixture value: data[at]");
+        }
+        const required4 = data[at + 1];
+        if (required4 === undefined) {
+          throw new Error("Missing fixture value: data[at + 1]");
+        }
+        const required5 = data[at + 2];
+        if (required5 === undefined) {
+          throw new Error("Missing fixture value: data[at + 2]");
+        }
+        if (required3 < 110 && required4 < 110 && required5 < 110) {
           dark += 1;
-          cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)]! += 1;
+          const required6 =
+            cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)];
+          if (required6 === undefined) {
+            throw new Error(
+              "Missing fixture value: cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)]",
+            );
+          }
+          cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)] =
+            required6 + 1;
         }
       }
     }
@@ -177,8 +211,12 @@ async function blobLoads(page: Page, src: string): Promise<boolean> {
     (url) =>
       new Promise<boolean>((resolve) => {
         const probe = new Image();
-        probe.onload = () => resolve(true);
-        probe.onerror = () => resolve(false);
+        probe.onload = () => {
+          resolve(true);
+        };
+        probe.onerror = () => {
+          resolve(false);
+        };
         probe.src = url;
       }),
     src,
@@ -189,12 +227,17 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   page,
   browser,
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(180000);
   const csp = watchCspViolations(page);
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const requested: string[] = [];
-  const wasmResponses: { url: string; status: number; type: string; nosniff: string }[] = [];
+  const wasmResponses: {
+    url: string;
+    status: number;
+    type: string;
+    nosniff: string;
+  }[] = [];
   page.on("request", (request) => requested.push(request.url()));
   page.on("response", (response) => {
     if (/\/assets\/rhwp_bg-[^/]+\.wasm$/.test(new URL(response.url()).pathname)) {
@@ -209,7 +252,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   });
 
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -218,17 +261,31 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
-
-  const workspaces = (await (await page.request.get("/api/v1/me/workspaces")).json()) as {
-    items: { id: string; slug: string }[];
+  const workspaces = (await readJson(
+    await page.request.get("/api/v1/me/workspaces"),
+    flowSchemas.workspaces,
+  )) as {
+    items: {
+      id: string;
+      slug: string;
+    }[];
   };
-  const wsId = workspaces.items.find((item) => item.slug === owner.workspaceSlug)!.id;
+  const required7 = workspaces.items.find((item) => item.slug === owner.workspaceSlug);
+  if (required7 === undefined) {
+    throw new Error(
+      "Missing fixture value: workspaces.items.find((item) => item.slug === owner.workspaceSlug)",
+    );
+  }
+  const wsId = required7.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: null, title: "HWP 첨부" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
-  const documentId = ((await docRes.json()) as { id: string }).id;
-
+  const documentId = (
+    (await readJson(docRes, flowSchemas.document)) as {
+      id: string;
+    }
+  ).id;
   const hwpxId = await uploadAttachment(page, wsId, documentId, "품의서.hwpx", threePageHwpx);
   const binaryHwp = threePageHwp();
   const hwpId = await uploadAttachment(page, wsId, documentId, "보고서.hwp", binaryHwp);
@@ -242,8 +299,9 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   );
   const previewHtmlRequests: string[] = [];
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname.endsWith("/preview-html"))
+    if (new URL(request.url()).pathname.endsWith("/preview-html")) {
       previewHtmlRequests.push(request.url());
+    }
   });
 
   // HWPX: three laid-out pages with distinct Korean ink, page navigation and zoom.
@@ -251,7 +309,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   await expectVueViewer(page);
   const shell = page.locator("[data-attachment-viewer]");
   const viewer = page.locator("[data-hwp-viewer]");
-  await expect(viewer).toBeVisible({ timeout: 30_000 });
+  await expect(viewer).toBeVisible({ timeout: 30000 });
   await expect(shell.locator(".attachment-viewer__name")).toHaveText("품의서.hwpx");
   await expect(viewer.getByText("1 / 3")).toBeVisible();
   await expect(viewer.getByRole("button", { name: "이전 쪽" })).toBeDisabled();
@@ -260,14 +318,14 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   // rhwp runs in one module worker for this document.
   expect(hwpWorkers(page)).toBe(1);
   expect(first.naturalWidth).toBeGreaterThan(700);
-  expect(first.dark).toBeGreaterThan(2_000);
+  expect(first.dark).toBeGreaterThan(2000);
   expect(Math.round(first.cssWidth)).toBe(Math.round(first.naturalWidth));
 
   await viewer.getByRole("button", { name: "다음 쪽" }).click();
   await expect(viewer.getByText("2 / 3")).toBeVisible();
   await expect.poll(async () => (await probePage(page)).src).not.toBe(first.src);
   const second = await probePage(page);
-  expect(second.dark).toBeGreaterThan(2_000);
+  expect(second.dark).toBeGreaterThan(2000);
   expect(second.signature).not.toBe(first.signature);
   // The previous page's blob URL is released.
   expect(await blobLoads(page, second.src)).toBe(true);
@@ -319,8 +377,8 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
     [2, "3 / 3"],
     [9, "1 / 3"],
   ] as const) {
-    await page.goto(`/w/acme/a/${hwpxId}/view?chunk=${chunk}`);
-    await expect(viewer.getByText(label)).toBeVisible({ timeout: 30_000 });
+    await page.goto(`/w/acme/a/${hwpxId}/view?chunk=${String(chunk)}`);
+    await expect(viewer.getByText(label)).toBeVisible({ timeout: 30000 });
   }
   // Default (auto) preview mode: no search supplement and no preview-html call.
   await expect(page.locator("[data-chunk-supplement]")).toHaveCount(0);
@@ -328,9 +386,9 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
 
   // Binary HWP 5.0: the same three pages, chunk jump included.
   await page.goto(`/w/acme/a/${hwpId}/view?chunk=1`);
-  await expect(viewer.getByText("2 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("2 / 3")).toBeVisible({ timeout: 30000 });
   const hwpPage = await probePage(page);
-  expect(hwpPage.dark).toBeGreaterThan(2_000);
+  expect(hwpPage.dark).toBeGreaterThan(2000);
   expect(hwpPage.signature).not.toBe(first.signature);
   const hwpOriginal = await page.request.get(
     `/api/v1/workspaces/${wsId}/attachments/${hwpId}/download`,
@@ -339,7 +397,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
 
   // A Hancom-authored HWP (body "안녕").
   await page.goto(`/w/acme/a/${hancomId}/view`);
-  await expect(viewer.getByText("1 / 1")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("1 / 1")).toBeVisible({ timeout: 30000 });
   const hancomPng = await viewer.locator("img.hwp-viewer__page").screenshot();
   await test.info().attach("hancom-hwp-page", { body: hancomPng, contentType: "image/png" });
   // Two 10pt glyphs: rasterize at 3× so antialiased strokes register as ink.
@@ -353,7 +411,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
     fs.mkdirSync(evidenceDir, { recursive: true });
     fs.writeFileSync(path.join(evidenceDir, "hancom-hwp-page.png"), hancomPng);
     await page.goto(`/w/acme/a/${hwpxId}/view`);
-    await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+    await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
     fs.writeFileSync(
       path.join(evidenceDir, "fixture-hwpx-page1.png"),
       await viewer.locator("img.hwp-viewer__page").screenshot(),
@@ -368,8 +426,8 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   try {
     await page.goto(`/w/acme/a/${hwpxId}/view?chunk=1`);
     const supplement = page.locator("[data-chunk-supplement]");
-    await expect(supplement).toContainText("레이아웃 없음", { timeout: 30_000 });
-    await expect(viewer.getByText("2 / 3")).toBeVisible({ timeout: 30_000 });
+    await expect(supplement).toContainText("레이아웃 없음", { timeout: 30000 });
+    await expect(viewer.getByText("2 / 3")).toBeVisible({ timeout: 30000 });
     await expect(viewer.locator("img.hwp-viewer__page")).toBeVisible();
     const preview = await page.request.get(
       `/api/v1/workspaces/${wsId}/attachments/${hwpxId}/preview-html`,
@@ -378,7 +436,11 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
       // Native extract helper configured: the server parses the HWPX and the
       // supplement highlights the chunk's own text above the layout.
       expect(preview.status(), await preview.text()).toBe(200);
-      const html = ((await preview.json()) as { html: string }).html;
+      const html = (
+        (await readJson(preview, flowSchemas.unknown)) as {
+          html: string;
+        }
+      ).html;
       expect(html).toContain("둘째 쪽 검색 대상");
       // Chunk 1 covers page 2 whichever paragraph separators the extractor emits.
       await expect(supplement.locator("mark")).toContainText("하늘과 바람과 별과 시");
@@ -395,17 +457,15 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
       // No helper (the default CI job): no extract text, the supplement says so and the layout stays.
       expect([404, 413]).toContain(preview.status());
       await expect(supplement).toContainText("이 파일을 뷰어로 열 수 없습니다");
-      test
-        .info()
-        .annotations.push({
-          type: "supplement",
-          description: `no extractor, preview-html ${preview.status()}`,
-        });
+      test.info().annotations.push({
+        type: "supplement",
+        description: `no extractor, preview-html ${String(preview.status())}`,
+      });
     }
     // Without a chunk the server mode adds nothing.
     previewHtmlRequests.length = 0;
     await page.goto(`/w/acme/a/${hwpxId}/view`);
-    await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+    await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
     await expect(supplement).toHaveCount(0);
     expect(previewHtmlRequests).toEqual([]);
   } finally {
@@ -418,7 +478,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   // Switching attachments while the HWP bytes are in flight never paints the old file.
   // Leaving an open document terminates its worker (SPA navigation, same page).
   await page.goto(`/w/acme/a/${hwpxId}/view`);
-  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
   await expect.poll(() => hwpWorkers(page)).toBe(1);
   await page.evaluate((to) => {
     window.history.pushState({}, "", to);
@@ -458,14 +518,14 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   // Leaving mid-parse terminates the worker at once, not when the parse or its deadline ends.
   const slowId = await uploadAttachment(page, wsId, documentId, "긴문서.hwpx", slowHwpx);
   await page.goto(`/w/acme/a/${slowId}/view`);
-  await expect.poll(() => hwpWorkers(page), { timeout: 30_000 }).toBe(1);
+  await expect.poll(() => hwpWorkers(page), { timeout: 30000 }).toBe(1);
   await expect(viewer).toHaveCount(0);
   await page.evaluate((to) => {
     window.history.pushState({}, "", to);
     window.dispatchEvent(new PopStateEvent("popstate"));
   }, `/w/acme/a/${textId}/view`);
   await expect(page.getByText("plain attachment body")).toBeVisible();
-  await expect.poll(() => hwpWorkers(page), { timeout: 3_000 }).toBe(0);
+  await expect.poll(() => hwpWorkers(page), { timeout: 3000 }).toBe(0);
   await expect(page.locator("img.hwp-viewer__page")).toHaveCount(0);
 
   // Share: the anonymous reader gets the same layout from share URLs only.
@@ -474,22 +534,31 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
     { data: { expiresInDays: 7 } },
   );
   expect(shareRes.status(), await shareRes.text()).toBe(201);
-  const share = (await shareRes.json()) as { id: string; url: string };
+  const share = (await readJson(shareRes, flowSchemas.share)) as {
+    id: string;
+    url: string;
+  };
   const sharePath = new URL(share.url).pathname;
-  const token = sharePath.split("/")[2]!;
+  const required8 = sharePath.split("/")[2];
+  if (required8 === undefined) {
+    throw new Error('Missing fixture value: sharePath.split("/")[2]');
+  }
+  const token = required8;
   const anon = await browser.newContext();
   const reader = await anon.newPage();
   const readerCsp = watchCspViolations(reader);
   const readerApi: string[] = [];
   reader.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname.startsWith("/api/")) readerApi.push(url.pathname);
+    if (url.pathname.startsWith("/api/")) {
+      readerApi.push(url.pathname);
+    }
   });
   await reader.goto(`${sharePath}/attachments/${hwpxId}/view?chunk=2`);
   const readerViewer = reader.locator("[data-hwp-viewer]");
-  await expect(readerViewer.getByText("3 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(readerViewer.getByText("3 / 3")).toBeVisible({ timeout: 30000 });
   const shared = await probePage(reader, readerViewer);
-  expect(shared.dark).toBeGreaterThan(2_000);
+  expect(shared.dark).toBeGreaterThan(2000);
   await expect(reader.locator("[data-chunk-supplement]")).toHaveCount(0);
   await expect(reader.getByRole("button", { name: /편집/ })).toHaveCount(0);
   await expect(
@@ -516,7 +585,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   await expect(shell.getByRole("alert")).toHaveText(
     "이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.",
     {
-      timeout: 30_000,
+      timeout: 30000,
     },
   );
   await expect(page.locator("img.hwp-viewer__page")).toHaveCount(0);
@@ -543,7 +612,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   expect((await page.request.post("/api/v1/auth/logout")).ok()).toBe(true);
   await page.context().addCookies(cookies);
   releaseRevoked();
-  await expect(shell.getByRole("alert")).toHaveText("불러오지 못했습니다.", { timeout: 30_000 });
+  await expect(shell.getByRole("alert")).toHaveText("불러오지 못했습니다.", { timeout: 30000 });
   await expect(page.locator("img.hwp-viewer__page")).toHaveCount(0);
   await page.unroute(hwpxDownload);
   const denied = await page.request.get(
@@ -555,7 +624,9 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   const origin = new URL(page.url()).origin;
   for (const url of requested) {
     const parsed = new URL(url);
-    if (parsed.protocol === "blob:" || parsed.protocol === "data:") continue;
+    if (parsed.protocol === "blob:" || parsed.protocol === "data:") {
+      continue;
+    }
     expect(parsed.origin, url).toBe(origin);
   }
   expect(csp).toEqual([]);

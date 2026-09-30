@@ -1,3 +1,4 @@
+import { readJson, flowSchemas } from "./helpers";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { expect, type Page } from "@playwright/test";
@@ -7,7 +8,9 @@ import { expect, type Page } from "@playwright/test";
 export function authSql(sql: string): string {
   const url = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  if (!url || !container) throw new Error("isolated PostgreSQL fixture is required");
+  if (!url || !container) {
+    throw new Error("isolated PostgreSQL fixture is required");
+  }
   return execFileSync(
     "docker",
     [
@@ -42,7 +45,13 @@ export async function navigateAuthQuery(page: Page, path: string): Promise<void>
   await page.evaluate(async (target) => {
     const root = document.getElementById("root") as HTMLElement & {
       __vue_app__: {
-        config: { globalProperties: { $router: { push: (to: string) => Promise<unknown> } } };
+        config: {
+          globalProperties: {
+            $router: {
+              push: (to: string) => Promise<unknown>;
+            };
+          };
+        };
       };
     };
     await root.__vue_app__.config.globalProperties.$router.push(target);
@@ -96,5 +105,5 @@ export async function expectSpentMagic(page: Page, endpoint: string, token: stri
   ).toBe("0");
   const response = await page.request.post(endpoint, { data: { token } });
   expect(response.status()).toBe(400);
-  expect((await response.json()).code).toBe("magic_invalid");
+  expect((await readJson(response, flowSchemas.error)).code).toBe("magic_invalid");
 }

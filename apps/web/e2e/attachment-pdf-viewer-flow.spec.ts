@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { buildFixturePdf, FIXTURE_PAGE_W } from "../src/features/attachments/pdf-test-fixture";
-import { watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, watchCspViolations } from "./helpers";
 import { expectVueViewer } from "./viewer-app";
 
 const owner = {
@@ -29,12 +29,18 @@ async function uploadAttachment(
     { data: { name, sizeBytes: bytes.length } },
   );
   expect(uploadRes.ok(), await uploadRes.text()).toBeTruthy();
-  const upload = (await uploadRes.json()) as {
+  const upload = (await readJson(uploadRes, flowSchemas.upload)) as {
     attachmentId: string;
     partSizeBytes: number;
-    parts: Array<{ partNumber: number; url: string }>;
+    parts: Array<{
+      partNumber: number;
+      url: string;
+    }>;
   };
-  const parts: { partNumber: number; etag: string }[] = [];
+  const parts: {
+    partNumber: number;
+    etag: string;
+  }[] = [];
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
@@ -47,7 +53,11 @@ async function uploadAttachment(
     expect(put.ok(), await put.text()).toBeTruthy();
     const etag = put.headers()["etag"];
     expect(etag).toBeTruthy();
-    parts.push({ partNumber: part.partNumber, etag: etag! });
+    const required1 = etag;
+    if (required1 === undefined) {
+      throw new Error("Missing fixture value: etag");
+    }
+    parts.push({ partNumber: part.partNumber, etag: required1 });
   }
   const completeRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`,
@@ -69,25 +79,51 @@ type CanvasProbe = {
 async function probeCanvas(page: Page): Promise<CanvasProbe> {
   return page.locator("[data-pdf-viewer] canvas").evaluate((node) => {
     const canvas = node as HTMLCanvasElement;
-    const ctx = canvas.getContext("2d")!;
+    const required2 = canvas.getContext("2d");
+    if (required2 === null) {
+      throw new Error('Missing fixture value: canvas.getContext("2d")');
+    }
+    const ctx = required2;
     const { width, height } = canvas;
     const data = ctx.getImageData(0, 0, width, height).data;
     const px = (x: number, y: number) => {
       const i = (Math.floor(y) * width + Math.floor(x)) * 4;
-      return [data[i]!, data[i + 1]!, data[i + 2]!] as const;
+      const required3 = data[i];
+      if (required3 === undefined) {
+        throw new Error("Missing fixture value: data[i]");
+      }
+      const required4 = data[i + 1];
+      if (required4 === undefined) {
+        throw new Error("Missing fixture value: data[i + 1]");
+      }
+      const required5 = data[i + 2];
+      if (required5 === undefined) {
+        throw new Error("Missing fixture value: data[i + 2]");
+      }
+      return [required3, required4, required5] as const;
     };
     const classify = ([r, g, b]: readonly [number, number, number]) => {
-      if (r > 200 && g < 60 && b < 60) return "red" as const;
-      if (b > 200 && r < 60 && g < 60) return "blue" as const;
-      if (r > 230 && g > 230 && b > 230) return "white" as const;
-      if (r < 90 && g < 90 && b < 90) return "dark" as const;
+      if (r > 200 && g < 60 && b < 60) {
+        return "red" as const;
+      }
+      if (b > 200 && r < 60 && g < 60) {
+        return "blue" as const;
+      }
+      if (r > 230 && g > 230 && b > 230) {
+        return "white" as const;
+      }
+      if (r < 90 && g < 90 && b < 90) {
+        return "dark" as const;
+      }
       return "other" as const;
     };
     const dark = (top: number, bottom: number) => {
       let count = 0;
       for (let y = Math.floor(top * height); y < Math.floor(bottom * height); y += 1) {
         for (let x = 0; x < width; x += 1) {
-          if (classify(px(x, y)) === "dark") count += 1;
+          if (classify(px(x, y)) === "dark") {
+            count += 1;
+          }
         }
       }
       return count;
@@ -110,10 +146,19 @@ async function probeCanvas(page: Page): Promise<CanvasProbe> {
  * advances one 36pt em cell (DW 1000). Returns a coarse bitmap signature
  * per cell; fallback "tofu" boxes would make the Hangul cells identical.
  */
-async function hangulCells(page: Page): Promise<{ dark: number; signature: string }[]> {
+async function hangulCells(page: Page): Promise<
+  {
+    dark: number;
+    signature: string;
+  }[]
+> {
   return page.locator("[data-pdf-viewer] canvas").evaluate((node) => {
     const canvas = node as HTMLCanvasElement;
-    const ctx = canvas.getContext("2d")!;
+    const required6 = canvas.getContext("2d");
+    if (required6 === null) {
+      throw new Error('Missing fixture value: canvas.getContext("2d")');
+    }
+    const ctx = required6;
     const unit = canvas.width / 400;
     const top = Math.floor(canvas.height * (1 - 168 / 300));
     const bottom = Math.floor(canvas.height * (1 - 122 / 300));
@@ -139,7 +184,21 @@ async function hangulCells(page: Page): Promise<{ dark: number; signature: strin
               x += 1
             ) {
               const at = (y * width + x) * 4;
-              if (data[at]! < 90 && data[at + 1]! < 90 && data[at + 2]! < 90) cellDark += 1;
+              const required7 = data[at];
+              if (required7 === undefined) {
+                throw new Error("Missing fixture value: data[at]");
+              }
+              const required8 = data[at + 1];
+              if (required8 === undefined) {
+                throw new Error("Missing fixture value: data[at + 1]");
+              }
+              const required9 = data[at + 2];
+              if (required9 === undefined) {
+                throw new Error("Missing fixture value: data[at + 2]");
+              }
+              if (required7 < 90 && required8 < 90 && required9 < 90) {
+                cellDark += 1;
+              }
             }
           }
           dark += cellDark;
@@ -156,7 +215,7 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   page,
   browser,
 }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(90000);
   const csp = watchCspViolations(page);
   // pdf.js reports missing CMap/standard-font/wasm data as console warnings.
   const pdfjsDataWarnings: string[] = [];
@@ -167,7 +226,7 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   });
 
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -176,17 +235,31 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
-
-  const workspaces = (await (await page.request.get("/api/v1/me/workspaces")).json()) as {
-    items: { id: string; slug: string }[];
+  const workspaces = (await readJson(
+    await page.request.get("/api/v1/me/workspaces"),
+    flowSchemas.workspaces,
+  )) as {
+    items: {
+      id: string;
+      slug: string;
+    }[];
   };
-  const wsId = workspaces.items.find((item) => item.slug === owner.workspaceSlug)!.id;
+  const required10 = workspaces.items.find((item) => item.slug === owner.workspaceSlug);
+  if (required10 === undefined) {
+    throw new Error(
+      "Missing fixture value: workspaces.items.find((item) => item.slug === owner.workspaceSlug)",
+    );
+  }
+  const wsId = required10.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: null, title: "PDF 첨부" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
-  const documentId = ((await docRes.json()) as { id: string }).id;
-
+  const documentId = (
+    (await readJson(docRes, flowSchemas.document)) as {
+      id: string;
+    }
+  ).id;
   const pdfId = await uploadAttachment(
     page,
     wsId,
@@ -208,7 +281,7 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
 
   await page.goto(`/w/acme/a/${pdfId}/view`);
   const viewer = page.locator("[data-pdf-viewer]");
-  await expect(viewer).toBeVisible({ timeout: 20_000 });
+  await expect(viewer).toBeVisible({ timeout: 20000 });
   await expectVueViewer(page);
   // The candidate survives a direct URL refresh with the authenticated cookie.
   await page.reload();
@@ -325,7 +398,9 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   const pdfUrl = `/api/v1/workspaces/${wsId}/attachments/${pdfId}/download`;
   const pdfSettled = new Promise<void>((resolve) => {
     const done = (request: { url: () => string }) => {
-      if (request.url().endsWith(pdfUrl)) resolve();
+      if (request.url().endsWith(pdfUrl)) {
+        resolve();
+      }
     };
     page.on("requestfinished", done);
     page.on("requestfailed", done);
@@ -360,16 +435,36 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   );
   await page.goto(`/w/acme/a/${koreanId}/view`);
   expect((await cmapResponse).status()).toBe(200);
-  await expect(page.locator("[data-pdf-viewer]")).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("[data-pdf-viewer]")).toBeVisible({ timeout: 20000 });
   await expect.poll(async () => (await probeCanvas(page)).at.topBand).toBe("red");
   const korean = await probeCanvas(page);
   expect(korean.darkInTextBand).toBeGreaterThan(200);
   expect(korean.darkInEmptyBand).toBe(0);
   // 한, 글, (space), 문, 서: four inked, mutually distinct glyphs and an empty space cell.
   const cells = await hangulCells(page);
-  const glyphs = [cells[0]!, cells[1]!, cells[3]!, cells[4]!];
+  const required11 = cells[0];
+  if (required11 === undefined) {
+    throw new Error("Missing fixture value: cells[0]");
+  }
+  const required12 = cells[1];
+  if (required12 === undefined) {
+    throw new Error("Missing fixture value: cells[1]");
+  }
+  const required13 = cells[3];
+  if (required13 === undefined) {
+    throw new Error("Missing fixture value: cells[3]");
+  }
+  const required14 = cells[4];
+  if (required14 === undefined) {
+    throw new Error("Missing fixture value: cells[4]");
+  }
+  const glyphs = [required11, required12, required13, required14];
   for (const glyph of glyphs) expect(glyph.dark).toBeGreaterThan(40);
-  expect(cells[2]!.dark).toBe(0);
+  const required15 = cells[2];
+  if (required15 === undefined) {
+    throw new Error("Missing fixture value: cells[2]");
+  }
+  expect(required15.dark).toBe(0);
   expect(new Set(glyphs.map((glyph) => glyph.signature)).size).toBe(4);
   const koreanPng = await page.locator("[data-pdf-viewer] canvas").screenshot();
   await test.info().attach("korean-pdf-canvas", { body: koreanPng, contentType: "image/png" });
@@ -396,7 +491,9 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   ] as const) {
     const res = await page.request.get(`${PDFJS_ASSETS}${rel}`);
     expect(res.status(), rel).toBe(200);
-    if (type) expect(res.headers()["content-type"], rel).toContain(type);
+    if (type) {
+      expect(res.headers()["content-type"], rel).toContain(type);
+    }
     expect(res.headers()["x-content-type-options"], rel).toBe("nosniff");
   }
   expect((await page.request.get(`${PDFJS_ASSETS}wasm/quickjs-eval.wasm`)).status()).toBe(404);

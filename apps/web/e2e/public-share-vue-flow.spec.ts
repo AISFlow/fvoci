@@ -1,13 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
-import { watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
 function fixtureSql(sql: string): void {
   const admin = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  if (!admin || !container) throw new Error("isolated Rust/PostgreSQL fixture required");
+  if (!admin || !container) {
+    throw new Error("isolated Rust/PostgreSQL fixture required");
+  }
   execFileSync(
     "docker",
     [
@@ -27,7 +29,9 @@ function fixtureSql(sql: string): void {
 }
 
 function uuid(value: string): string {
-  if (!/^[0-9a-f-]{36}$/i.test(value)) throw new Error("invalid fixture UUID");
+  if (!/^[0-9a-f-]{36}$/i.test(value)) {
+    throw new Error("invalid fixture UUID");
+  }
   return `'${value}'`;
 }
 
@@ -39,7 +43,7 @@ function seedContent(id: string, content: unknown, table = "documents"): void {
 async function setup(page: Page): Promise<string> {
   const status = await page.request.get("/api/v1/setup");
   expect(status.ok()).toBe(true);
-  if ((await status.json()).needed) {
+  if ((await readJson(status, flowSchemas.setup)).needed) {
     await page.goto("/");
     await expect(page).toHaveURL(/\/setup$/);
     await page.getByLabel("성").fill("김");
@@ -58,15 +62,28 @@ async function setup(page: Page): Promise<string> {
   await expect(page).toHaveURL(/\/$/);
   const response = await page.request.get("/api/v1/me/workspaces");
   expect(response.ok()).toBe(true);
-  return (await response.json()).items.find((item: { slug: string }) => item.slug === "acme").id;
+  const fixtureValue1 = (await readJson(response, flowSchemas.workspaces)).items.find(
+    (item: { slug: string }) => item.slug === "acme",
+  );
+  if (fixtureValue1 === undefined)
+    throw new Error(
+      'Missing fixture value: (await readJson(response, flowSchemas.workspaces)).items.find(\n    (item: { slug: string }) => item.slug === "acme",\n  )',
+    );
+  return fixtureValue1.id;
 }
 
 async function expectReader(page: Page): Promise<void> {
   await expect(page.locator('[data-public-share="vue"]')).toBeVisible();
   expect(
-    await page
-      .locator("#root")
-      .evaluate((root) => Boolean((root as HTMLElement & { __vue_app__?: unknown }).__vue_app__)),
+    await page.locator("#root").evaluate((root) =>
+      Boolean(
+        (
+          root as HTMLElement & {
+            __vue_app__?: unknown;
+          }
+        ).__vue_app__,
+      ),
+    ),
   ).toBe(true);
   await expect(page.locator("[contenteditable], .ProseMirror, .fvoci-editor")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "저장", exact: true })).toHaveCount(0);
@@ -76,14 +93,14 @@ test("public Vue document URL renders readonly content, hands off attachments an
   page,
   browser,
 }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(90000);
   const ws = await setup(page);
   const create = async (title: string, parentId: string | null = null) => {
     const response = await page.request.post(`/api/v1/workspaces/${ws}/documents`, {
       data: { title, parentId },
     });
     expect(response.status()).toBe(201);
-    return (await response.json()).id as string;
+    return (await readJson(response, flowSchemas.document)).id;
   };
   const root = await create("공유 한글 루트");
   const child = await create("공유 하위 문서", root);
@@ -93,7 +110,7 @@ test("public Vue document URL renders readonly content, hands off attachments an
     data: { name: "memo.txt", sizeBytes: bytes.length },
   });
   expect(uploadRes.ok()).toBe(true);
-  const upload = await uploadRes.json();
+  const upload = await readJson(uploadRes, flowSchemas.upload);
   const parts = [];
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
@@ -116,9 +133,10 @@ test("public Vue document URL renders readonly content, hands off attachments an
     { data: { expiresInDays: 7 } },
   );
   expect(shareRes.status()).toBe(201);
-  const share = await shareRes.json();
+  const share = await readJson(shareRes, flowSchemas.share);
   const sharePath = new URL(share.url).pathname;
   const token = sharePath.split("/")[2];
+  if (token === undefined) throw new Error("Missing fixture value: token");
   const viewerPath = `${sharePath}/attachments/${upload.attachmentId}/view`;
   const content = {
     type: "doc",
@@ -161,7 +179,9 @@ test("public Vue document URL renders readonly content, hands off attachments an
   const sockets: string[] = [];
   reader.on("request", (request) => {
     const path = new URL(request.url()).pathname;
-    if (path.startsWith("/api/")) requests.push(path);
+    if (path.startsWith("/api/")) {
+      requests.push(path);
+    }
   });
   reader.on("websocket", (socket) => sockets.push(socket.url()));
   await reader.goto(sharePath);
@@ -233,18 +253,18 @@ test("public Vue project share presents task search excerpts and rechecks archiv
   page,
   browser,
 }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(90000);
   const ws = await setup(page);
   const projectRes = await page.request.post(`/api/v1/workspaces/${ws}/projects`, {
     data: { key: "SHR", name: "비공개 프로젝트 공유", visibility: "private" },
   });
   expect(projectRes.status()).toBe(201);
-  const project = await projectRes.json();
+  const project = await readJson(projectRes, flowSchemas.project);
   const taskRes = await page.request.post(`/api/v1/workspaces/${ws}/projects/${project.id}/tasks`, {
     data: { title: "sharemarker 공개 과제" },
   });
   expect(taskRes.status()).toBe(201);
-  const task = await taskRes.json();
+  const task = await readJson(taskRes, flowSchemas.item);
   seedContent(
     task.id,
     {
@@ -262,9 +282,10 @@ test("public Vue project share presents task search excerpts and rechecks archiv
     data: { projectId: project.id, expiresInDays: 7 },
   });
   expect(shareRes.status()).toBe(201);
-  const share = await shareRes.json();
+  const share = await readJson(shareRes, flowSchemas.share);
   const sharePath = new URL(share.url).pathname;
   const token = sharePath.split("/")[2];
+  if (token === undefined) throw new Error("Missing fixture value: token");
   const anon = await browser.newContext();
   const reader = await anon.newPage();
   const csp = watchCspViolations(reader);
@@ -275,9 +296,12 @@ test("public Vue project share presents task search excerpts and rechecks archiv
     .poll(
       async () =>
         (
-          await (await reader.request.get(`/api/v1/share/${token}/search?q=sharemarker`)).json()
-        ).items?.some((item: { id: string }) => item.id === task.id),
-      { timeout: 30_000 },
+          await readJson(
+            await reader.request.get(`/api/v1/share/${token}/search?q=sharemarker`),
+            flowSchemas.search,
+          )
+        ).items.some((item: { id: string }) => item.id === task.id),
+      { timeout: 30000 },
     )
     .toBe(true);
   const search = reader.getByRole("searchbox", { name: "검색" });

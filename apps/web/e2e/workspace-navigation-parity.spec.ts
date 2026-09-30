@@ -1,13 +1,20 @@
+import { z } from "zod";
 import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
-import { login } from "./helpers";
+import { readJson, flowSchemas, login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 const owner = { email: "parity@example.com", password: "paritypass123" };
 let workspaceId: string;
-let project: { id: string; key: string; rootDocumentId: string };
-let tasks: { id: string; title: string }[] = [];
-
+let project: {
+  id: string;
+  key: string;
+  rootDocumentId: string | null;
+};
+const tasks: {
+  id: string;
+  title: string;
+}[] = [];
 test("workspace landing has authorized projects, counts, and eight due-ordered assigned rows", async ({
   page,
 }) => {
@@ -20,8 +27,15 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
   await page.getByLabel("주소(영문)").fill("parity");
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
-  workspaceId = (await (await page.request.get("/api/v1/me/workspaces")).json()).items[0].id;
-  const me = await (await page.request.get("/api/v1/auth/me")).json();
+  const fixtureValue1 = (
+    await readJson(await page.request.get("/api/v1/me/workspaces"), flowSchemas.workspaces)
+  ).items[0];
+  if (fixtureValue1 === undefined)
+    throw new Error(
+      'Missing fixture value: (\n    await readJson(await page.request.get("/api/v1/me/workspaces"), flowSchemas.workspaces)\n  ).items[0]',
+    );
+  workspaceId = fixtureValue1.id;
+  const me = await readJson(await page.request.get("/api/v1/auth/me"), flowSchemas.user);
   expect(
     (
       await page.request.patch("/api/v1/auth/me", {
@@ -33,15 +47,15 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
     data: { key: "META", name: "Metadata project", visibility: "workspace" },
   });
   expect(created.status()).toBe(201);
-  project = await created.json();
+  project = await readJson(created, flowSchemas.project);
   const labels = [];
   for (let index = 0; index < 3; index++) {
     const response = await page.request.post(
       `/api/v1/workspaces/${workspaceId}/projects/${project.id}/labels`,
-      { data: { name: `Label ${index}`, color: "blue" } },
+      { data: { name: `Label ${String(index)}`, color: "blue" } },
     );
     expect(response.status(), await response.text()).toBe(201);
-    labels.push((await response.json()).id);
+    labels.push((await readJson(response, flowSchemas.id)).id);
   }
   // Reverse insertion order witnesses the actual server due-date ordering and limit.
   for (let index = 9; index >= 1; index--) {
@@ -49,7 +63,7 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
       `/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`,
       {
         data: {
-          title: `Due ${index}`,
+          title: `Due ${String(index)}`,
           dueDate: `2026-10-${String(index).padStart(2, "0")}`,
           type: "bug",
           priority: "high",
@@ -57,7 +71,7 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
       },
     );
     expect(response.status()).toBe(201);
-    const task = await response.json();
+    const task = await readJson(response, flowSchemas.item);
     tasks.push(task);
     expect(
       (
@@ -71,7 +85,7 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
     data: { key: "OLD", name: "Archived project", visibility: "workspace" },
   });
   expect(archived.status()).toBe(201);
-  const old = await archived.json();
+  const old = await readJson(archived, flowSchemas.project);
   expect(
     (await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${old.id}/archive`)).ok(),
   ).toBe(true);
@@ -95,9 +109,14 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
   await expect(rows.first()).toContainText("Label 1");
   await expect(rows.first()).toContainText("+1");
   await expect(rows.first().getByTitle("김동등")).toBeVisible();
-  const counts = await (await page.request.get("/api/v1/me/workspaces")).json();
+  const counts = await readJson(
+    await page.request.get("/api/v1/me/workspaces"),
+    flowSchemas.workspaces,
+  );
+  const fixtureValue2 = counts.items[0];
+  if (fixtureValue2 === undefined) throw new Error("Missing fixture value: counts.items[0]");
   await expect(page.getByTestId("workspace-totals")).toContainText(
-    `문서 ${counts.items[0].documentCount}개`,
+    `문서 ${String(fixtureValue2.documentCount)}개`,
   );
   await expect(page.getByTestId("workspace-totals")).toContainText("프로젝트 2개");
   await expect(page.getByRole("link", { name: /OLD Archived project/ })).toBeVisible();
@@ -110,7 +129,11 @@ test("full my-tasks keeps metadata and navigation after reload", async ({ page }
   await page.goto("/w/parity/my-tasks");
   const list = page.getByTestId("my-tasks");
   await expect(list.locator("a.task-row")).toHaveCount(9);
-  const task = tasks.find((task) => task.title === "Due 1")!;
+  const required1 = tasks.find((task) => task.title === "Due 1");
+  if (required1 === undefined) {
+    throw new Error('Missing fixture value: tasks.find((task) => task.title === "Due 1")');
+  }
+  const task = required1;
   const row = list.getByTestId(`my-task-${task.id}`);
   await expect(row).toContainText("Label 0");
   await expect(row).toContainText("높음");
@@ -155,7 +178,7 @@ test("trash timestamp follows the saved user zone instead of the browser zone", 
     data: { title: "Zone trash", parentId: null },
   });
   expect(response.status()).toBe(201);
-  const doc = await response.json();
+  const doc = await readJson(response, flowSchemas.document);
   expect(
     (await page.request.post(`/api/v1/workspaces/${workspaceId}/documents/${doc.id}/trash`)).ok(),
   ).toBe(true);
@@ -164,19 +187,21 @@ test("trash timestamp follows the saved user zone instead of the browser zone", 
   const time = row.locator("time");
   await expect(time).toBeVisible();
   const iso = await time.getAttribute("datetime");
-  const expected = await page.evaluate(
-    (value) =>
-      new Date(value!).toLocaleString("ko-KR", {
-        hour12: false,
-        timeZone: "Pacific/Honolulu",
-        year: "numeric",
-        month: "numeric",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    iso,
-  );
+  const expected = await page.evaluate((value) => {
+    const required2 = value;
+    if (required2 === null) {
+      throw new Error("Missing fixture value: value");
+    }
+    return new Date(required2).toLocaleString("ko-KR", {
+      hour12: false,
+      timeZone: "Pacific/Honolulu",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }, iso);
   await expect(time).toHaveText(expected);
   await page.reload();
   await expect(time).toHaveText(expected);
@@ -186,30 +211,35 @@ test("wiki tag URLs include child-only matches and project documents; unfiltered
   page,
 }) => {
   await login(page, owner.email, owner.password);
-  const wiki = [];
+  const wiki: {
+    id: string;
+    displayId: string;
+  }[] = [];
   for (const title of ["Wiki parent", "Wiki second", "Wiki third"]) {
     const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, {
       data: { title, parentId: null },
     });
     expect(response.status()).toBe(201);
-    wiki.push(await response.json());
+    wiki.push(await readJson(response, flowSchemas.createdDocument));
   }
+  const fixtureValue3 = wiki[0];
+  if (fixtureValue3 === undefined) throw new Error("Missing fixture value: wiki[0]");
   const childResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, {
-    data: { title: "Tagged child", parentId: wiki[0].id },
+    data: { title: "Tagged child", parentId: fixtureValue3.id },
   });
   expect(childResponse.status()).toBe(201);
-  const child = await childResponse.json();
+  const child = await readJson(childResponse, flowSchemas.document);
   const projectResponse = await page.request.post(
     `/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents`,
     { data: { title: "Tagged project child", parentId: project.rootDocumentId } },
   );
   expect(projectResponse.status()).toBe(201);
-  const projectChild = await projectResponse.json();
+  const projectChild = await readJson(projectResponse, flowSchemas.document);
   const tagResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/document-tags`, {
     data: { name: "Planning", color: "gray" },
   });
   expect(tagResponse.status()).toBe(201);
-  const tag = await tagResponse.json();
+  const tag = await readJson(tagResponse, flowSchemas.tag);
   for (const [doc, path] of [
     [child, `/api/v1/workspaces/${workspaceId}/documents/${child.id}/tags`],
     [
@@ -232,25 +262,37 @@ test("wiki tag URLs include child-only matches and project documents; unfiltered
   await expect(childLink).toBeVisible();
   await selected.click();
   await expect(page).toHaveURL(/\/w\/parity\/wiki$/);
-  const parent = page.getByTestId(`wiki-doc-${wiki[0].displayId}`);
-  const second = page.getByTestId(`wiki-doc-${wiki[1].displayId}`);
-  const third = page.getByTestId(`wiki-doc-${wiki[2].displayId}`);
-  const sorted = page.waitForResponse(
-    (response) =>
+  const fixtureValue4 = wiki[0];
+  if (fixtureValue4 === undefined) throw new Error("Missing fixture value: wiki[0]");
+  const parent = page.getByTestId(`wiki-doc-${fixtureValue4.displayId}`);
+  const fixtureValue5 = wiki[1];
+  if (fixtureValue5 === undefined) throw new Error("Missing fixture value: wiki[1]");
+  const second = page.getByTestId(`wiki-doc-${fixtureValue5.displayId}`);
+  const fixtureValue6 = wiki[2];
+  if (fixtureValue6 === undefined) throw new Error("Missing fixture value: wiki[2]");
+  const third = page.getByTestId(`wiki-doc-${fixtureValue6.displayId}`);
+  const sorted = page.waitForResponse((response) => {
+    const fixtureValue7 = wiki[2];
+    if (fixtureValue7 === undefined) throw new Error("Missing fixture value: wiki[2]");
+    return (
       new URL(response.url()).pathname ===
-        `/api/v1/workspaces/${workspaceId}/documents/${wiki[2].id}/sort` &&
-      response.request().method() === "POST",
-  );
+        `/api/v1/workspaces/${workspaceId}/documents/${fixtureValue7.id}/sort` &&
+      response.request().method() === "POST"
+    );
+  });
   await third.dragTo(parent, { targetPosition: { x: 25, y: 1 } });
   expect((await sorted).ok()).toBe(true);
   const roots = page.locator(".wiki-home__section > ul > li > a");
   await expect(roots.first()).toContainText("Wiki third");
-  const moved = page.waitForResponse(
-    (response) =>
+  const moved = page.waitForResponse((response) => {
+    const fixtureValue8 = wiki[1];
+    if (fixtureValue8 === undefined) throw new Error("Missing fixture value: wiki[1]");
+    return (
       new URL(response.url()).pathname ===
-        `/api/v1/workspaces/${workspaceId}/documents/${wiki[1].id}/move` &&
-      response.request().method() === "POST",
-  );
+        `/api/v1/workspaces/${workspaceId}/documents/${fixtureValue8.id}/move` &&
+      response.request().method() === "POST"
+    );
+  });
   await second.dragTo(parent);
   expect((await moved).ok()).toBe(true);
   const parentBranch = parent.locator("..");
@@ -258,13 +300,18 @@ test("wiki tag URLs include child-only matches and project documents; unfiltered
   await page.reload();
   await expect(roots.first()).toContainText("Wiki third");
   await expect(parentBranch.getByRole("link", { name: /Wiki second/ })).toBeVisible();
+  const fixtureValue9 = wiki[1];
+  if (fixtureValue9 === undefined) throw new Error("Missing fixture value: wiki[1]");
+  const fixtureValue10 = wiki[0];
+  if (fixtureValue10 === undefined) throw new Error("Missing fixture value: wiki[0]");
   expect(
     (
-      await (
-        await page.request.get(`/api/v1/workspaces/${workspaceId}/documents/${wiki[1].id}`)
-      ).json()
+      await readJson(
+        await page.request.get(`/api/v1/workspaces/${workspaceId}/documents/${fixtureValue9.id}`),
+        flowSchemas.document,
+      )
     ).parentId,
-  ).toBe(wiki[0].id);
+  ).toBe(fixtureValue10.id);
   await page.goto("/w/parity/wiki?tag=malformed");
   await expect(page.getByRole("alert")).toBeVisible();
 });
@@ -274,18 +321,24 @@ test("source tag:name search filters documents and leaves task hits in the real 
 }, testInfo) => {
   await login(page, owner.email, owner.password);
   const tag = (
-    await (await page.request.get(`/api/v1/workspaces/${workspaceId}/document-tags`)).json()
+    await readJson(
+      await page.request.get(`/api/v1/workspaces/${workspaceId}/document-tags`),
+      flowSchemas.tags,
+    )
   ).items.find((tag: { name: string }) => tag.name === "Planning");
+  if (tag === undefined) throw new Error("Missing fixture value: tag");
   expect(tag).toBeTruthy();
   // Complete only the already committed setup prefix through the actual
   // search worker before starting the fresh task's unchanged recall window.
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
   const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
-  if (!container || !adminUrl) throw new Error("isolated PostgreSQL fixture context is required");
+  if (!container || !adminUrl) {
+    throw new Error("isolated PostgreSQL fixture context is required");
+  }
   const fixtureContainer = container;
   const fixtureDatabase = new URL(adminUrl).pathname.slice(1);
   expect(workspaceId).toMatch(/^[0-9a-f-]{36}$/i);
-  function fixtureJson<T>(sql: string): T {
+  function fixtureJson<T>(sql: string, schema: z.ZodType<T>): T {
     const output = execFileSync(
       "docker",
       [
@@ -304,29 +357,37 @@ test("source tag:name search filters documents and leaves task hits in the real 
       {
         input: `BEGIN READ ONLY;\n${sql}\nCOMMIT;\n`,
         encoding: "utf8",
-        timeout: 5_000,
+        timeout: 5000,
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
-    return JSON.parse(output.trim());
+    return schema.parse(JSON.parse(output.trim()));
   }
-  const watermark = fixtureJson<{ id: string; xact: string; seq: string }>(`
+  const watermark = fixtureJson(
+    `
     SELECT row_to_json(w) FROM (
       SELECT id, xact::text AS xact, seq::text AS seq FROM fvoci.events
       WHERE workspace_id = '${workspaceId}'::uuid ORDER BY xact DESC, seq DESC LIMIT 1
     ) w;
-  `);
+  `,
+    z.object({ id: z.string(), xact: z.string(), seq: z.string() }),
+  );
   expect(watermark.id).toMatch(/^[0-9a-f-]{36}$/i);
   expect(watermark.xact).toMatch(/^\d+$/);
   expect(watermark.seq).toMatch(/^\d+$/);
   const setupStarted = Date.now();
-  const prefixSamples: { elapsedMs: number; total: number; pending: number; failures: number }[] =
-    [];
+  const prefixSamples: {
+    elapsedMs: number;
+    total: number;
+    pending: number;
+    failures: number;
+  }[] = [];
   try {
     await expect
       .poll(
         () => {
-          const state = fixtureJson<{ total: number; pending: number; failures: number }>(`
+          const state = fixtureJson(
+            `
         WITH prior AS (
           SELECT id FROM fvoci.events WHERE workspace_id = '${workspaceId}'::uuid
             AND (xact, seq) <= ('${watermark.xact}'::xid8, ${watermark.seq}::bigint)
@@ -338,14 +399,17 @@ test("source tag:name search filters documents and leaves task hits in the real 
           )),
           'failures', (SELECT count(*) FROM prior e JOIN fvoci.outbox_failures f ON f.event_id = e.id WHERE f.consumer = 'search-index')
         );
-      `);
+      `,
+            z.object({ total: z.number(), pending: z.number(), failures: z.number() }),
+          );
           prefixSamples.push({ elapsedMs: Date.now() - setupStarted, ...state });
           expect(state.total).toBeGreaterThan(0);
-          if (state.failures !== 0)
+          if (state.failures !== 0) {
             throw new Error("preceding search setup has failed or dead-letter events");
+          }
           return state.pending;
         },
-        { timeout: 15_000 },
+        { timeout: 15000 },
       )
       .toBe(0);
   } finally {
@@ -365,11 +429,15 @@ test("source tag:name search filters documents and leaves task hits in the real 
       ]);
       for (const response of responses) expect(response.ok()).toBe(true);
       const [documents, priorTasks] = await Promise.all(
-        responses.map((response) => response.json()),
+        responses.map((response) => readJson(response, flowSchemas.search)),
       );
+      const fixtureValue11 = documents;
+      if (fixtureValue11 === undefined) throw new Error("Missing fixture value: documents");
+      const fixtureValue12 = priorTasks;
+      if (fixtureValue12 === undefined) throw new Error("Missing fixture value: priorTasks");
       return {
-        documents: documents.items.map((item: { title: string }) => item.title).sort(),
-        tasks: priorTasks.items.map((item: { id: string }) => item.id).sort(),
+        documents: fixtureValue11.items.map((item: { title: string }) => item.title).sort(),
+        tasks: fixtureValue12.items.map((item: { id: string }) => item.id).sort(),
       };
     })
     .toEqual({
@@ -394,16 +462,24 @@ test("source tag:name search filters documents and leaves task hits in the real 
         ]);
         for (const response of responses) expect(response.ok()).toBe(true);
         const [tagged, untagged, taskOnly] = await Promise.all(
-          responses.map((response) => response.json()),
+          responses.map((response) => readJson(response, flowSchemas.search)),
         );
         samples.push({ at: new Date().toISOString(), tagged, untagged, taskOnly });
-        return tagged.items.map((item: { title: string }) => item.title).sort();
+        const fixtureValue13 = tagged;
+        if (fixtureValue13 === undefined) throw new Error("Missing fixture value: tagged");
+        return fixtureValue13.items.map((item: { title: string }) => item.title).sort();
       })
       .toEqual(["Tagged child", "Tagged project child", "Tagged task"]);
   } finally {
     await testInfo.attach("real-tag-and-untagged-recall", {
       body: JSON.stringify(
-        { createdTask: await created.json(), workspaceId, project, tag, samples },
+        {
+          createdTask: await readJson(created, flowSchemas.item),
+          workspaceId,
+          project,
+          tag,
+          samples,
+        },
         null,
         2,
       ),

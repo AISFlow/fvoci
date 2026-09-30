@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { authSql, expectVueAuth } from "./auth-link-evidence";
-import { createE2eUser, login, watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, watchCspViolations } from "./helpers";
 import { currentStep, totp } from "./mfa-helpers";
 
 const admin = { email: "vue-console-owner@example.com", password: "supersecret1" };
@@ -13,7 +13,7 @@ test.beforeAll(async ({ browser }) => {
   try {
     const status = await page.request.get("/api/v1/setup");
     expect(status.status()).toBe(200);
-    if ((await status.json()).needed) {
+    if ((await readJson(status, flowSchemas.setup)).needed) {
       await page.goto("/");
       await expect(page).toHaveURL(/\/setup$/);
       await page.getByLabel("이름", { exact: true }).fill("콘솔 관리자");
@@ -39,17 +39,35 @@ async function expectSecretsAbsent(page: Page, secrets: string[]): Promise<void>
     const root = document.getElementById("root") as HTMLElement & {
       __vue_app__: {
         _context: {
-          provides: Record<string, { getQueryCache: () => { getAll: () => unknown[] } }>;
+          provides: Record<
+            string,
+            {
+              getQueryCache: () => {
+                getAll: () => unknown[];
+              };
+            }
+          >;
         };
       };
     };
+    const fixtureValue1 = root.__vue_app__._context.provides.VUE_QUERY_CLIENT;
+    if (fixtureValue1 === undefined)
+      throw new Error("Missing fixture value: root.__vue_app__._context.provides.VUE_QUERY_CLIENT");
     return JSON.stringify({
       href: location.href,
       local: Object.entries(localStorage),
       session: Object.entries(sessionStorage),
-      queries: root.__vue_app__._context.provides.VUE_QUERY_CLIENT.getQueryCache()
+      queries: fixtureValue1
+        .getQueryCache()
         .getAll()
-        .map((query) => (query as { state: unknown }).state),
+        .map(
+          (query) =>
+            (
+              query as {
+                state: unknown;
+              }
+            ).state,
+        ),
     });
   });
   for (const secret of secrets) expect(retained.includes(secret)).toBe(false);
@@ -84,12 +102,19 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
           _context: {
             provides: Record<
               string,
-              { invalidateQueries: (input: { queryKey: string[] }) => Promise<void> }
+              {
+                invalidateQueries: (input: { queryKey: string[] }) => Promise<void>;
+              }
             >;
           };
         };
       };
-      await root.__vue_app__._context.provides.VUE_QUERY_CLIENT.invalidateQueries({
+      const fixtureValue2 = root.__vue_app__._context.provides.VUE_QUERY_CLIENT;
+      if (fixtureValue2 === undefined)
+        throw new Error(
+          "Missing fixture value: root.__vue_app__._context.provides.VUE_QUERY_CLIENT",
+        );
+      await fixtureValue2.invalidateQueries({
         queryKey: ["auth", "me"],
       });
     });
@@ -123,7 +148,7 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   await expect(preferences.getByLabel("주 시작", { exact: true })).toContainText("일요일");
   await expect(preferences.getByLabel("글자 크기", { exact: true })).toContainText("크게");
   await expect(page.locator("html")).toHaveClass(/dark/);
-  const profile = await (await page.request.get("/api/v1/auth/me")).json();
+  const profile = await readJson(await page.request.get("/api/v1/auth/me"), flowSchemas.user);
   expect(profile).toMatchObject({
     givenName: "재로드 멤버",
     locale: "ko",
@@ -150,8 +175,14 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   await mfa.getByRole("button", { name: "설정", exact: true }).click();
   const response = await setupResponse;
   expect(response.status()).toBe(200);
-  expect(response.request().postDataJSON().currentPassword).toBe(member.password);
-  const secret = (await mfa.getByTestId("mfa-secret").textContent())!.trim();
+  expect(flowSchemas.password.parse(response.request().postDataJSON()).currentPassword).toBe(
+    member.password,
+  );
+  const required1 = await mfa.getByTestId("mfa-secret").textContent();
+  if (required1 === null) {
+    throw new Error('Missing fixture value: (await mfa.getByTestId("mfa-secret").textContent())');
+  }
+  const secret = required1.trim();
   expect(secret).toMatch(/^[A-Z2-7=]+$/i);
   await expectSecretsAbsent(page, [secret, member.password]);
   expect(
@@ -172,7 +203,10 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   await expectVueAuth(page);
   await expect(mfa.getByTestId("mfa-status")).toContainText("사용 중");
   const status = await page.request.get("/api/v1/auth/mfa");
-  expect(await status.json()).toEqual({ enabled: true, recoveryCodesLeft: 10 });
+  expect(await readJson(status, flowSchemas.unknown)).toEqual({
+    enabled: true,
+    recoveryCodesLeft: 10,
+  });
   await mfa.locator("#settings-mfa-confirm").fill(member.password);
   const disabled = page.waitForResponse((res) => res.url().endsWith("/api/v1/auth/mfa/disable"));
   await mfa.getByRole("button", { name: "해제", exact: true }).click();
@@ -189,7 +223,7 @@ test("Vue personal API tokens show a secret once, persist metadata, and revoke a
   browser,
 }) => {
   await login(page, admin.email, admin.password);
-  const me = await (await page.request.get("/api/v1/auth/me")).json();
+  const me = await readJson(await page.request.get("/api/v1/auth/me"), flowSchemas.user);
   expect(
     (
       await page.request.patch("/api/v1/auth/me", {
@@ -211,11 +245,11 @@ test("Vue personal API tokens show a secret once, persist metadata, and revoke a
   await tokenSection.getByRole("button", { name: "발급", exact: true }).click();
   const created = await createdResponse;
   expect(created.status()).toBe(201);
-  const output = await created.json();
+  const output = await readJson(created, flowSchemas.token);
   const secret = page.getByTestId("account-token-secret");
   await expect(secret.getByRole("textbox")).toHaveValue(output.token);
   await expectSecretsAbsent(page, [output.token]);
-  const list = await (await page.request.get("/api/v1/me/api-tokens")).json();
+  const list = await readJson(await page.request.get("/api/v1/me/api-tokens"), flowSchemas.tokens);
   expect(list.items.find((item: { id: string }) => item.id === output.id)).toMatchObject({
     name: "콘솔 개인 토큰",
     workspaceId: output.workspaceId,
@@ -366,7 +400,7 @@ test("Vue admin legal editor publishes versions and public legal stays read only
   await page.getByRole("button", { name: "발행", exact: true }).click();
   const customResponse = await customPublished;
   expect(customResponse.status()).toBe(201);
-  expect(await customResponse.json()).toMatchObject({
+  expect(await readJson(customResponse, flowSchemas.unknown)).toMatchObject({
     kind: "custom-policy",
     title: "사용자 지정 정책",
   });
@@ -417,8 +451,9 @@ test("Vue global admin direct URLs deny non-admins before privileged loads and R
   await login(page, member.email, member.password);
   const privileged: string[] = [];
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname.startsWith("/api/v1/admin/"))
+    if (new URL(request.url()).pathname.startsWith("/api/v1/admin/")) {
       privileged.push(request.url());
+    }
   });
   for (const path of ["/settings/admin", "/settings/audit", "/settings/legal"]) {
     await page.goto(path);

@@ -7,7 +7,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { HwpDocument, initSync } from "@rhwp/core";
 import { decodePageText } from "../src/features/attachments/hwp-page";
 import { buildFixtureHwpx, FIXTURE_PAGES } from "../src/features/attachments/hwp-test-fixture";
-import { watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, watchCspViolations } from "./helpers";
 
 const owner = {
   email: "hwp-edit@example.com",
@@ -70,12 +70,18 @@ async function uploadAttachment(
     },
   );
   expect(created.ok(), await created.text()).toBeTruthy();
-  const upload = (await created.json()) as {
+  const upload = (await readJson(created, flowSchemas.upload)) as {
     attachmentId: string;
     partSizeBytes: number;
-    parts: { partNumber: number; url: string }[];
+    parts: {
+      partNumber: number;
+      url: string;
+    }[];
   };
-  const parts: { partNumber: number; etag: string }[] = [];
+  const parts: {
+    partNumber: number;
+    etag: string;
+  }[] = [];
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
@@ -85,7 +91,11 @@ async function uploadAttachment(
       ),
     });
     expect(put.ok(), await put.text()).toBeTruthy();
-    parts.push({ partNumber: part.partNumber, etag: put.headers()["etag"]! });
+    const required1 = put.headers()["etag"];
+    if (required1 === undefined) {
+      throw new Error('Missing fixture value: put.headers()["etag"]');
+    }
+    parts.push({ partNumber: part.partNumber, etag: required1 });
   }
   const complete = await page.request.post(
     `/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`,
@@ -106,7 +116,11 @@ async function pageInk(page: Page): Promise<string> {
     const canvas = document.createElement("canvas");
     canvas.width = el.naturalWidth;
     canvas.height = el.naturalHeight;
-    const ctx = canvas.getContext("2d")!;
+    const required2 = canvas.getContext("2d");
+    if (required2 === null) {
+      throw new Error('Missing fixture value: canvas.getContext("2d")');
+    }
+    const ctx = required2;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(el, 0, 0);
@@ -116,8 +130,21 @@ async function pageInk(page: Page): Promise<string> {
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const at = (y * width + x) * 4;
-        if (data[at]! < 110)
-          cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)]! += 1;
+        const required3 = data[at];
+        if (required3 === undefined) {
+          throw new Error("Missing fixture value: data[at]");
+        }
+        const required4 =
+          cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)];
+        if (required4 === undefined) {
+          throw new Error(
+            "Missing fixture value: cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)]",
+          );
+        }
+        if (required3 < 110) {
+          cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)] =
+            required4 + 1;
+        }
       }
     }
     return cells.join(",");
@@ -128,24 +155,31 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   page,
   browser,
 }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(240000);
   const csp = watchCspViolations(page);
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const editCopyCalls: string[] = [];
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname.endsWith("/edit-copy"))
+    if (new URL(request.url()).pathname.endsWith("/edit-copy")) {
       editCopyCalls.push(request.method());
+    }
   });
   const editCopies: string[] = [];
   page.on("response", async (response) => {
     if (new URL(response.url()).pathname.endsWith("/edit-copy") && response.status() === 201) {
-      editCopies.push(((await response.json()) as { attachmentId: string }).attachmentId);
+      editCopies.push(
+        (
+          (await readJson(response, flowSchemas.unknown)) as {
+            attachmentId: string;
+          }
+        ).attachmentId,
+      );
     }
   });
 
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -157,16 +191,31 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   // An unknown path still falls back to home under the data router.
   await page.goto("/no-such-route");
   await expect(page).toHaveURL(/\/$/);
-
-  const workspaces = (await (await page.request.get("/api/v1/me/workspaces")).json()) as {
-    items: { id: string; slug: string }[];
+  const workspaces = (await readJson(
+    await page.request.get("/api/v1/me/workspaces"),
+    flowSchemas.workspaces,
+  )) as {
+    items: {
+      id: string;
+      slug: string;
+    }[];
   };
-  const wsId = workspaces.items.find((item) => item.slug === owner.workspaceSlug)!.id;
+  const required5 = workspaces.items.find((item) => item.slug === owner.workspaceSlug);
+  if (required5 === undefined) {
+    throw new Error(
+      "Missing fixture value: workspaces.items.find((item) => item.slug === owner.workspaceSlug)",
+    );
+  }
+  const wsId = required5.id;
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: null, title: "HWP 편집" },
   });
   expect(docRes.ok(), await docRes.text()).toBeTruthy();
-  const documentId = ((await docRes.json()) as { id: string }).id;
+  const documentId = (
+    (await readJson(docRes, flowSchemas.document)) as {
+      id: string;
+    }
+  ).id;
   const hwpxId = await uploadAttachment(page, wsId, documentId, "품의서.hwpx", threePageHwpx);
   const hwpId = await uploadAttachment(page, wsId, documentId, "보고서.hwp", threePageHwp);
 
@@ -183,7 +232,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
 
   await page.goto(viewPath);
   await expectVueViewer(page);
-  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
   await viewer.getByRole("button", { name: "간단 편집" }).click();
   await expect(bar).toBeVisible();
   for (const name of ["원본으로 되돌리기", "편집본 저장", "편집본 다운로드"]) {
@@ -203,14 +252,13 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   // documents for native history protection; reloading SPA history is insufficient.
   await expect(viewer).toHaveCount(0);
   await page.goto(viewPath);
-  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
   await page.goto("/w/acme/search");
   await expect(page).toHaveURL(/\/w\/acme\/search/);
   await expect(page.locator("[data-v-app]")).toHaveCount(1);
   await page.goBack();
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
-  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
-
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
   // Replace all on page 2: the page is drawn again with the new text.
   await viewer.getByRole("button", { name: "다음 쪽" }).click();
   await expect(viewer.getByText("2 / 3")).toBeVisible();
@@ -230,7 +278,9 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await page.evaluate(() => {
     const anchor = document.createElement("a");
     anchor.href = "/w/acme/search";
-    anchor.addEventListener("click", (event) => event.preventDefault());
+    anchor.addEventListener("click", (event) => {
+      event.preventDefault();
+    });
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
@@ -241,13 +291,17 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   expect(await pageInk(page)).toBe(dirtyBeforeLinks);
 
   // Opening a new tab leaves this document and its dirty content intact.
-  await searchLink.evaluate((anchor) => anchor.setAttribute("target", "_blank"));
+  await searchLink.evaluate((anchor) => {
+    anchor.setAttribute("target", "_blank");
+  });
   const newTab = page.context().waitForEvent("page");
   await searchLink.click();
   const other = await newTab;
   await expect(other).toHaveURL(/\/w\/acme\/search/);
   await other.close();
-  await searchLink.evaluate((anchor) => anchor.removeAttribute("target"));
+  await searchLink.evaluate((anchor) => {
+    anchor.removeAttribute("target");
+  });
   await expect(dialog).toHaveCount(0);
   await expect(saveButton).toBeEnabled();
   expect(await pageInk(page)).toBe(dirtyBeforeLinks);
@@ -276,13 +330,17 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
       try {
         expect(prompt.type()).toBe("beforeunload");
       } catch (error) {
-        reject(error);
+        reject(
+          error instanceof Error ? error : new Error("Dialog assertion failed", { cause: error }),
+        );
         return;
       }
       void prompt.dismiss().then(resolve, reject);
     }),
   );
-  await page.evaluate(() => window.history.forward());
+  await page.evaluate(() => {
+    window.history.forward();
+  });
   await dismissed;
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(saveButton).toBeEnabled();
@@ -292,18 +350,22 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
       try {
         expect(prompt.type()).toBe("beforeunload");
       } catch (error) {
-        reject(error);
+        reject(
+          error instanceof Error ? error : new Error("Dialog assertion failed", { cause: error }),
+        );
         return;
       }
       void prompt.accept().then(resolve, reject);
     }),
   );
-  await page.evaluate(() => window.history.forward());
+  await page.evaluate(() => {
+    window.history.forward();
+  });
   await accepted;
   await expect(page).toHaveURL(/\/w\/acme\/search/);
   await expect(viewer).toHaveCount(0);
   await page.goBack();
-  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
   await expect(bar).toHaveCount(0);
 
   // Revert: the edited page returns to the original.
@@ -330,9 +392,13 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await bar.getByRole("button", { name: "편집본 다운로드" }).click();
   const download = await downloadEvent;
   expect(download.suggestedFilename()).toBe("품의서 (edited).hwpx");
-  const draft = new Uint8Array(fs.readFileSync((await download.path())!));
+  const draft = new Uint8Array(fs.readFileSync(await download.path()));
   expect([...draft.subarray(0, 4)]).toEqual([0x50, 0x4b, 0x03, 0x04]);
-  expect(readPages(draft)).toEqual([pages[0], pages[1]!.replace("둘째", "두번째"), pages[2]]);
+  const required6 = pages[1];
+  if (required6 === undefined) {
+    throw new Error("Missing fixture value: pages[1]");
+  }
+  expect(readPages(draft)).toEqual([pages[0], required6.replace("둘째", "두번째"), pages[2]]);
   expect(editCopyCalls).toEqual([]);
 
   // Access is checked again when the copy is written: the parent goes to the trash
@@ -355,7 +421,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   release();
   await expect(bar.getByRole("alert")).toHaveText(
     "편집본을 저장하지 못했습니다. 다시 시도하거나 편집본을 다운로드하세요.",
-    { timeout: 30_000 },
+    { timeout: 30000 },
   );
   await page.unroute("**/api/v1/workspaces/*/attachments/*/complete");
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
@@ -366,28 +432,42 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   expect(restored.ok(), await restored.text()).toBeTruthy();
   // The refused copy never became a stored attachment.
   expect(editCopies).toHaveLength(1);
+  const fixtureValue1 = editCopies[0];
+  if (fixtureValue1 === undefined) throw new Error("Missing fixture value: editCopies[0]");
   const refused = await page.request.get(
-    `/api/v1/workspaces/${wsId}/attachments/${editCopies[0]}/download`,
+    `/api/v1/workspaces/${wsId}/attachments/${fixtureValue1}/download`,
   );
   expect(refused.ok()).toBe(false);
 
   // Save copy: a new HWPX attachment beside the original, opened in its place, no guard prompt.
   await saveButton.click();
   // The original's URL has the same shape: wait until the save has left it.
-  await expect(page).not.toHaveURL(new RegExp(`${viewPath}$`), { timeout: 30_000 });
+  await expect(page).not.toHaveURL(new RegExp(`${viewPath}$`), { timeout: 30000 });
   await expect(page).toHaveURL(/\/w\/acme\/a\/[0-9a-f-]{36}\/view$/);
   expect(page.url()).not.toContain(hwpxId);
   await expect(dialog).toHaveCount(0);
-  const copyId = page.url().split("/a/")[1]!.split("/")[0]!;
+  const required7 = page.url().split("/a/")[1];
+  if (required7 === undefined) {
+    throw new Error('Missing fixture value: page.url().split("/a/")[1]');
+  }
+  const required8 = required7.split("/")[0];
+  if (required8 === undefined) {
+    throw new Error('Missing fixture value: page.url().split("/a/")[1]!.split("/")[0]');
+  }
+  const copyId = required8;
   await expect(page.locator(".attachment-viewer__name")).toHaveText("품의서 (edited).hwpx");
-  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
   await expect(viewer.getByRole("button", { name: "간단 편집" })).toBeVisible();
   const copy = new Uint8Array(
     await (
       await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${copyId}/download`)
     ).body(),
   );
-  expect(readPages(copy)).toEqual([pages[0], pages[1]!.replace("둘째", "두번째"), pages[2]]);
+  const required9 = pages[1];
+  if (required9 === undefined) {
+    throw new Error("Missing fixture value: pages[1]");
+  }
+  expect(readPages(copy)).toEqual([pages[0], required9.replace("둘째", "두번째"), pages[2]]);
   const original = new Uint8Array(
     await (
       await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`)
@@ -402,23 +482,27 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await replacement.fill("처음");
   await bar.getByRole("button", { name: "하나 바꾸기" }).click();
   await expect(saveButton).toBeEnabled();
-  await page.evaluate(() => window.history.back());
+  await page.evaluate(() => {
+    window.history.back();
+  });
   await expect(dialog).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`${copyPath}$`));
   await expect(saveButton).toBeEnabled();
-  await page.evaluate(() => window.history.back());
+  await page.evaluate(() => {
+    window.history.back();
+  });
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "나가기" }).click();
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(page.locator(".attachment-viewer__name")).toHaveText("품의서.hwpx");
-  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
   await expect(dialog).toHaveCount(0);
 
   // Binary HWP keeps its format: the copy is HWP 5.0 (OLE compound file).
   await page.goto(`/w/acme/a/${hwpId}/view`);
-  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
   await viewer.getByRole("button", { name: "간단 편집" }).click();
   await find.fill("백두산이");
   await replacement.fill("한라산이");
@@ -426,19 +510,31 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await expect(saveButton).toBeEnabled();
   await saveButton.click();
   await expect(page.locator(".attachment-viewer__name")).toHaveText("보고서 (edited).hwp", {
-    timeout: 30_000,
+    timeout: 30000,
   });
-  const hwpCopyId = page.url().split("/a/")[1]!.split("/")[0]!;
+  const required10 = page.url().split("/a/")[1];
+  if (required10 === undefined) {
+    throw new Error('Missing fixture value: page.url().split("/a/")[1]');
+  }
+  const required11 = required10.split("/")[0];
+  if (required11 === undefined) {
+    throw new Error('Missing fixture value: page.url().split("/a/")[1]!.split("/")[0]');
+  }
+  const hwpCopyId = required11;
   const hwpCopy = new Uint8Array(
     await (
       await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpCopyId}/download`)
     ).body(),
   );
   expect([...hwpCopy.subarray(0, 4)]).toEqual([0xd0, 0xcf, 0x11, 0xe0]);
+  const required12 = pages[2];
+  if (required12 === undefined) {
+    throw new Error("Missing fixture value: pages[2]");
+  }
   expect(readPages(hwpCopy)).toEqual([
     pages[0],
     pages[1],
-    pages[2]!.replaceAll("백두산이", "한라산이"),
+    required12.replaceAll("백두산이", "한라산이"),
   ]);
 
   // A share view lays the file out but never offers editing or calls the edit APIs.
@@ -449,17 +545,25 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
     },
   );
   expect(shareRes.status(), await shareRes.text()).toBe(201);
-  const sharePath = new URL(((await shareRes.json()) as { url: string }).url).pathname;
+  const sharePath = new URL(
+    (
+      (await readJson(shareRes, flowSchemas.share)) as {
+        url: string;
+      }
+    ).url,
+  ).pathname;
   const anon = await browser.newContext();
   const reader = await anon.newPage();
   const readerApi: string[] = [];
   reader.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname.startsWith("/api/")) readerApi.push(url.pathname);
+    if (url.pathname.startsWith("/api/")) {
+      readerApi.push(url.pathname);
+    }
   });
   await reader.goto(`${sharePath}/attachments/${hwpxId}/view`);
   await expect(reader.locator("[data-hwp-viewer]").getByText("1 / 3")).toBeVisible({
-    timeout: 30_000,
+    timeout: 30000,
   });
   await expect(reader.getByRole("button", { name: "간단 편집" })).toHaveCount(0);
   for (const apiPath of readerApi)
@@ -468,7 +572,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
 
   // With unsaved edits, closing the tab asks first (beforeunload).
   await page.goto(viewPath);
-  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30000 });
   await viewer.getByRole("button", { name: "간단 편집" }).click();
   await find.fill("첫째");
   await replacement.fill("처음");

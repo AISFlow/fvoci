@@ -3,7 +3,7 @@
 // The remaining auth links and consent prompt are Vue pages too.
 // These flows run against the production build served by the Rust server.
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
-import { login, logout, watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, login, logout, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -23,7 +23,9 @@ function watchIconRequests(page: Page): string[] {
   const hits: string[] = [];
   page.on("request", (request) => {
     const host = new URL(request.url()).hostname;
-    if (ICON_API_HOSTS.includes(host)) hits.push(request.url());
+    if (ICON_API_HOSTS.includes(host)) {
+      hits.push(request.url());
+    }
   });
   return hits;
 }
@@ -42,7 +44,10 @@ async function expectVueLogin(page: Page): Promise<void> {
 async function workspaceId(request: APIRequestContext, slug: string): Promise<string> {
   const res = await request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const workspace = (await res.json()).items.find((item: { slug: string }) => item.slug === slug);
+  const workspace = (await readJson(res, flowSchemas.workspaces)).items.find(
+    (item: { slug: string }) => item.slug === slug,
+  );
+  if (workspace === undefined) throw new Error("Missing fixture value: workspace");
   expect(workspace).toBeTruthy();
   return workspace.id;
 }
@@ -63,19 +68,22 @@ async function ensureSetup(page: Page): Promise<void> {
     await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
-  } else if (
-    page.url().includes("/login") ||
-    (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
-  ) {
-    await login(page, admin.email, admin.password);
+  } else {
+    if (
+      page.url().includes("/login") ||
+      (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
+    ) {
+      await login(page, admin.email, admin.password);
+    }
   }
   // Setup starts at '/', then may cross Vue /login before returning home.
   // Require the authenticated home to mount before the caller navigates again.
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
 }
-
-async function failSetupUntilRetry(page: Page): Promise<{ exhausted: Promise<unknown> }> {
+async function failSetupUntilRetry(page: Page): Promise<{
+  exhausted: Promise<unknown>;
+}> {
   await page.route("**/api/v1/setup", (route) =>
     route.fulfill({ status: 503, contentType: "application/json", body: '{"code":"unavailable"}' }),
   );
@@ -95,12 +103,15 @@ async function createProject(
   request: APIRequestContext,
   wsId: string,
   key: string,
-): Promise<{ id: string; key: string }> {
+): Promise<{
+  id: string;
+  key: string;
+}> {
   const res = await request.post(`/api/v1/workspaces/${wsId}/projects`, {
-    data: { key, name: `Login ${key} ${Date.now()}`, visibility: "workspace" },
+    data: { key, name: `Login ${key} ${String(Date.now())}`, visibility: "workspace" },
   });
   expect(res.status()).toBe(201);
-  return res.json();
+  return readJson(res, flowSchemas.project);
 }
 
 test("logout lands on the Vue login page; a refresh stays there", async ({ page }) => {
@@ -178,7 +189,7 @@ test("authenticated Vue login exposes setup failure and retries to home with its
   await ensureSetup(page);
   const before = await page.request.get("/api/v1/auth/me");
   expect(before.status()).toBe(200);
-  const user = await before.json();
+  const user = await readJson(before, flowSchemas.user);
   const { exhausted } = await failSetupUntilRetry(page);
   const me = page.waitForResponse(
     (response) =>
@@ -186,7 +197,7 @@ test("authenticated Vue login exposes setup failure and retries to home with its
   );
 
   await page.goto("/login#mfa=setup-error-fragment");
-  expect(await (await me).json()).toEqual(user);
+  expect(await readJson(await me, flowSchemas.user)).toEqual(user);
   await exhausted;
   await expect(vueRoot(page)).toHaveCount(1);
   await expect(page.getByRole("alert")).toHaveText("불러오지 못했습니다.");
@@ -205,10 +216,12 @@ test("authenticated Vue login exposes setup failure and retries to home with its
   await expect(page).toHaveURL(/\/$/);
   await expect(vueRoot(page)).toHaveCount(1);
   await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
-  expect((await (await page.request.get("/api/v1/setup")).json()).needed).toBe(false);
+  expect((await readJson(await page.request.get("/api/v1/setup"), flowSchemas.setup)).needed).toBe(
+    false,
+  );
   const after = await page.request.get("/api/v1/auth/me");
   expect(after.status()).toBe(200);
-  expect(await after.json()).toEqual(user);
+  expect(await readJson(after, flowSchemas.user)).toEqual(user);
 });
 
 test("signed-out setup failure preserves the MFA fragment until a real setup retry succeeds", async ({
@@ -244,6 +257,8 @@ test("signed-out setup failure preserves the MFA fragment until a real setup ret
   expect((await recovered).status()).toBe(200);
   await expect(page.getByLabel("인증 코드")).toBeVisible();
   expect(new URL(page.url()).hash).toBe("");
-  expect((await (await page.request.get("/api/v1/setup")).json()).needed).toBe(false);
+  expect((await readJson(await page.request.get("/api/v1/setup"), flowSchemas.setup)).needed).toBe(
+    false,
+  );
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
 });

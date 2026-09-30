@@ -1,3 +1,4 @@
+import { z } from "zod";
 // The Vue app's workspace shell (the header and footer around the Vue pages:
 // the project Gantt and wiki documents) against the React shell's contract:
 // logout, the notification bell, the search palette, the legal footer, the
@@ -14,7 +15,7 @@ import {
   type Request,
   type Response,
 } from "@playwright/test";
-import { createE2eUser, login, watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -45,13 +46,18 @@ function watchIconRequests(page: Page): string[] {
   const hits: string[] = [];
   page.on("request", (request) => {
     const host = new URL(request.url()).hostname;
-    if (ICON_API_HOSTS.includes(host)) hits.push(request.url());
+    if (ICON_API_HOSTS.includes(host)) {
+      hits.push(request.url());
+    }
   });
   return hits;
 }
 
 /** CSP reports and Iconify fetches of one page; both must stay empty. */
-function watchPage(page: Page): { csp: string[]; icons: string[] } {
+function watchPage(page: Page): {
+  csp: string[];
+  icons: string[];
+} {
   return { csp: watchCspViolations(page), icons: watchIconRequests(page) };
 }
 
@@ -85,28 +91,43 @@ async function ensureSetup(page: Page): Promise<void> {
 async function workspaceId(request: APIRequestContext): Promise<string> {
   const res = await request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const workspace = (await res.json()).items.find(
+  const workspace = (await readJson(res, flowSchemas.workspaces)).items.find(
     (item: { slug: string }) => item.slug === admin.workspaceSlug,
   );
+  if (workspace === undefined) throw new Error("Missing fixture value: workspace");
   expect(workspace).toBeTruthy();
   return workspace.id;
 }
-
-type Project = { id: string; key: string };
-type Task = { id: string; number: number; title: string };
-type WikiDoc = { id: string; number: number; title: string; path: string };
-
+type Project = {
+  id: string;
+  key: string;
+};
+type Task = {
+  id: string;
+  number: number;
+  title: string;
+};
+type WikiDoc = {
+  id: string;
+  number: number;
+  title: string;
+  path: string;
+};
 /** The Gantt project (created once; later tests find it). */
 async function ganttProject(request: APIRequestContext, wsId: string): Promise<Project> {
   const list = await request.get(`/api/v1/workspaces/${wsId}/projects`);
   expect(list.ok()).toBe(true);
-  const existing = (await list.json()).items.find((item: Project) => item.key === PROJECT_KEY);
-  if (existing) return existing;
+  const existing = (await readJson(list, flowSchemas.projects)).items.find(
+    (item: Project) => item.key === PROJECT_KEY,
+  );
+  if (existing) {
+    return existing;
+  }
   const res = await request.post(`/api/v1/workspaces/${wsId}/projects`, {
     data: { key: PROJECT_KEY, name: "셸 간트", visibility: "workspace" },
   });
   expect(res.status(), await res.text()).toBe(201);
-  const project = (await res.json()) as Project;
+  const project = (await readJson(res, flowSchemas.project)) as Project;
   // A bar in the Gantt's month, so the chart (not its empty state) shows.
   await createTask(request, wsId, project.id, {
     title: "셸 막대",
@@ -126,7 +147,7 @@ async function createTask(
     data,
   });
   expect(res.status(), await res.text()).toBe(201);
-  return res.json();
+  return readJson(res, flowSchemas.item);
 }
 
 async function createDoc(
@@ -138,8 +159,11 @@ async function createDoc(
     data: { parentId: null, title },
   });
   expect(res.status(), await res.text()).toBe(201);
-  const doc = (await res.json()) as { id: string; number: number };
-  return { ...doc, title, path: `/w/${admin.workspaceSlug}/WIKI-${doc.number}` };
+  const doc = (await readJson(res, flowSchemas.document)) as {
+    id: string;
+    number: number;
+  };
+  return { ...doc, title, path: `/w/${admin.workspaceSlug}/WIKI-${String(doc.number)}` };
 }
 
 const ganttPath = () => `/w/${admin.workspaceSlug}/${PROJECT_KEY}/gantt?${GANTT_QUERY}`;
@@ -147,28 +171,37 @@ const ganttPath = () => `/w/${admin.workspaceSlug}/${PROJECT_KEY}/gantt?${GANTT_
 async function openGantt(page: Page): Promise<void> {
   const navigation = await page.goto(ganttPath());
   expect(navigation?.status()).toBe(200);
-  await expect(page.locator('[data-slot="gantt"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-slot="gantt"]')).toBeVisible({ timeout: 15000 });
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
 }
 
 async function openWiki(page: Page, doc: WikiDoc): Promise<void> {
   const navigation = await page.goto(doc.path);
   expect(navigation?.status()).toBe(200);
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
 }
 
 /** A marker on this document: gone after a full page load, kept by an in-app navigation. */
 async function markDocument(page: Page): Promise<void> {
   await page.evaluate(() => {
-    (window as unknown as { __sameDocument?: boolean }).__sameDocument = true;
+    (
+      window as unknown as {
+        __sameDocument?: boolean;
+      }
+    ).__sameDocument = true;
   });
 }
 
 async function sameDocument(page: Page): Promise<boolean> {
   return (
     (await page.evaluate(
-      () => (window as unknown as { __sameDocument?: boolean }).__sameDocument,
+      () =>
+        (
+          window as unknown as {
+            __sameDocument?: boolean;
+          }
+        ).__sameDocument,
     )) === true
   );
 }
@@ -176,16 +209,23 @@ async function sameDocument(page: Page): Promise<boolean> {
 async function newSignedInPage(
   browser: Browser,
   baseURL: string | undefined,
-  who: { email: string; password: string },
-): Promise<{ context: BrowserContext; page: Page }> {
+  who: {
+    email: string;
+    password: string;
+  },
+): Promise<{
+  context: BrowserContext;
+  page: Page;
+}> {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
   await login(page, who.email, who.password);
   return { context, page };
 }
-
-type Opener = { name: string; open: (page: Page) => Promise<void> };
-
+type Opener = {
+  name: string;
+  open: (page: Page) => Promise<void>;
+};
 test("the footer's service information and policy links load their public Vue pages from both workspace pages", async ({
   page,
 }) => {
@@ -236,17 +276,16 @@ test("the footer's service information and policy links load their public Vue pa
 test("the search palette finds seeded documents and tasks and opens them from both Vue pages", async ({
   page,
 }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(120000);
   await ensureSetup(page);
   const seen = watchPage(page);
   const wsId = await workspaceId(page.request);
   const project = await ganttProject(page.request, wsId);
-  const token = `vshell${Date.now()}`;
+  const token = `vshell${String(Date.now())}`;
   const first = await createDoc(page.request, wsId, `${token} 첫 문서`);
   const second = await createDoc(page.request, wsId, `${token} 둘째 문서`);
   const task = await createTask(page.request, wsId, project.id, { title: `${token} 태스크` });
-  const taskRef = `${PROJECT_KEY}-${task.number}`;
-
+  const taskRef = `${PROJECT_KEY}-${String(task.number)}`;
   // Meilisearch indexes through the outbox; wait until all three are found.
   await expect
     .poll(
@@ -254,10 +293,18 @@ test("the search palette finds seeded documents and tasks and opens them from bo
         const res = await page.request.get(
           `/api/v1/workspaces/${wsId}/search?q=${encodeURIComponent(token)}&type=all`,
         );
-        if (!res.ok()) return [];
-        return ((await res.json()).items as { title: string }[]).map((item) => item.title).sort();
+        if (!res.ok()) {
+          return [];
+        }
+        return (
+          (await readJson(res, flowSchemas.search)).items as {
+            title: string;
+          }[]
+        )
+          .map((item) => item.title)
+          .sort();
       },
-      { timeout: 30_000 },
+      { timeout: 30000 },
     )
     .toEqual([task.title, first.title, second.title].sort());
 
@@ -287,7 +334,7 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   expect(url.searchParams.get("mode")).toBe("hybrid");
   expect(url.searchParams.get("type")).toBe("all");
   await expect(palette.getByRole("link", { name: new RegExp(first.title) })).toBeVisible({
-    timeout: 10_000,
+    timeout: 10000,
   });
   await expect(palette.getByRole("link", { name: new RegExp(task.title) })).toBeVisible();
   await expect(palette.getByRole("link", { name: "모든 결과 보기" })).toHaveAttribute(
@@ -296,7 +343,7 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   );
   await palette.getByRole("link", { name: new RegExp(first.title) }).click();
   await expect(page).toHaveURL(new RegExp(`${first.path}$`));
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   await expect(page.getByLabel("문서 제목")).toHaveValue(first.title);
   await expect(palette).toHaveCount(0);
   expect(await sameDocument(page), "Gantt → wiki document stays in the Vue app").toBe(true);
@@ -357,7 +404,23 @@ test("the search palette finds seeded documents and tasks and opens them from bo
     await expect(palette).toBeVisible();
     const inputBox = await palette.getByLabel("검색어").boundingBox();
     expect(inputBox).toBeTruthy();
-    await page.mouse.move(inputBox!.x + inputBox!.width / 2, inputBox!.y + inputBox!.height / 2);
+    const required1 = inputBox;
+    if (required1 === null) {
+      throw new Error("Missing fixture value: inputBox");
+    }
+    const required2 = inputBox;
+    if (required2 === null) {
+      throw new Error("Missing fixture value: inputBox");
+    }
+    const required3 = inputBox;
+    if (required3 === null) {
+      throw new Error("Missing fixture value: inputBox");
+    }
+    const required4 = inputBox;
+    if (required4 === null) {
+      throw new Error("Missing fixture value: inputBox");
+    }
+    await page.mouse.move(required1.x + required2.width / 2, required3.y + required4.height / 2);
     await page.mouse.down();
     await page.mouse.move(5, 5);
     await page.mouse.up();
@@ -370,7 +433,7 @@ test("the search palette finds seeded documents and tasks and opens them from bo
     await palette.getByLabel("검색어").press("Enter");
     await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/search\\?q=${token}$`));
     await expect(page.getByRole("region", { name: "검색" }).getByText(first.title)).toBeVisible({
-      timeout: 10_000,
+      timeout: 10000,
     });
     await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
     expect(
@@ -383,7 +446,7 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   await openGantt(page);
   await page.keyboard.press("Control+k");
   await palette.getByLabel("검색어").fill("qxzjvkwpfy");
-  await expect(palette.getByText("결과가 없습니다")).toBeVisible({ timeout: 10_000 });
+  await expect(palette.getByText("결과가 없습니다")).toBeVisible({ timeout: 10000 });
   expect(seen.csp).toEqual([]);
   expect(seen.icons).toEqual([]);
 });
@@ -393,7 +456,7 @@ test("the bell shows a notification created through the API and opens it from bo
   browser,
   baseURL,
 }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(120000);
   await ensureSetup(page);
   createE2eUser(member.email, member.password, member.givenName, {
     familyName: member.familyName,
@@ -405,7 +468,7 @@ test("the bell shows a notification created through the API and opens it from bo
   const doc = await createDoc(page.request, wsId, "셸 알림");
   const members = await page.request.get(`/api/v1/workspaces/${wsId}/members`);
   expect(members.ok()).toBe(true);
-  const memberId = (await members.json()).items.find(
+  const memberId = (await readJson(members, flowSchemas.members)).items.find(
     (item: { email: string }) => item.email.toLowerCase() === member.email,
   )?.userId;
   expect(memberId).toBeTruthy();
@@ -417,23 +480,30 @@ test("the bell shows a notification created through the API and opens it from bo
     verb: string;
     displayId: string | null;
     readAt: string | null;
-    payload: { title?: string } | null;
+    payload: {
+      title?: string;
+    } | null;
   };
   const notifications = async (): Promise<Item[]> => {
     const res = await m.page.request.get(`/api/v1/workspaces/${wsId}/notifications`);
     expect(res.ok()).toBe(true);
-    return (await res.json()).items;
+    return (await readJson(res, flowSchemas.notifications)).items;
   };
   const unreadCount = async (): Promise<number> => {
     const res = await m.page.request.get(`/api/v1/workspaces/${wsId}/notifications/unread-count`);
     expect(res.ok()).toBe(true);
-    return (await res.json()).count;
+    return (await readJson(res, flowSchemas.count)).count;
   };
   /**
    * Assigns a new task to the member and waits until the outbox delivered its
    * notification; the page loads after that (the badge polls every 30 s).
    */
-  const assign = async (title: string): Promise<{ task: Task; item: Item }> => {
+  const assign = async (
+    title: string,
+  ): Promise<{
+    task: Task;
+    item: Item;
+  }> => {
     const task = await createTask(page.request, wsId, project.id, { title });
     const res = await page.request.patch(`/api/v1/workspaces/${wsId}/tasks/${task.id}`, {
       data: { assigneeIds: [memberId] },
@@ -449,10 +519,14 @@ test("the bell shows a notification created through the API and opens it from bo
           );
           return item !== undefined;
         },
-        { timeout: 15_000 },
+        { timeout: 15000 },
       )
       .toBe(true);
-    return { task, item: item! };
+    const required5 = item;
+    if (required5 === undefined) {
+      throw new Error("Missing fixture value: item");
+    }
+    return { task, item: required5 };
   };
 
   try {
@@ -462,13 +536,13 @@ test("the bell shows a notification created through the API and opens it from bo
     const unread = await unreadCount();
     expect(unread).toBeGreaterThan(0);
     await openGantt(m.page);
-    const bell = m.page.getByRole("button", { name: `안 읽은 알림 ${unread}건` });
-    await expect(bell).toBeVisible({ timeout: 15_000 });
+    const bell = m.page.getByRole("button", { name: `안 읽은 알림 ${String(unread)}건` });
+    await expect(bell).toBeVisible({ timeout: 15000 });
     await expect(bell).toHaveAttribute("aria-expanded", "false");
     await bell.click();
     await expect(bell).toHaveAttribute("aria-expanded", "true");
     const panel = m.page.getByRole("region", { name: "알림" });
-    const message = `태스크 #${first.number} 「${first.title}」의 담당자로 지정되었습니다`;
+    const message = `태스크 #${String(first.number)} 「${first.title}」의 담당자로 지정되었습니다`;
     await expect(panel.getByRole("button", { name: message, exact: true })).toBeVisible();
     await expect(panel.getByRole("link", { name: "모두 보기" })).toHaveAttribute(
       "href",
@@ -482,7 +556,9 @@ test("the bell shows a notification created through the API and opens it from bo
     );
     await panel.getByRole("button", { name: message, exact: true }).click();
     expect((await patched).status()).toBe(200);
-    await expect(m.page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${firstItem.displayId}$`));
+    const fixtureValue1 = firstItem.displayId;
+    if (fixtureValue1 === null) throw new Error("Missing fixture value: firstItem.displayId");
+    await expect(m.page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${fixtureValue1}$`));
     await expect(m.page.getByRole("heading", { name: first.title })).toBeVisible();
     await expect(m.page.locator("#root[data-v-app]")).toHaveCount(1);
     await expect(panel).toHaveCount(0);
@@ -492,8 +568,10 @@ test("the bell shows a notification created through the API and opens it from bo
     // Wiki: read all clears the count; "see all" opens the inbox (React).
     const { task: second } = await assign("셸 알림 태스크 둘");
     await openWiki(m.page, doc);
-    await m.page.getByRole("button", { name: `안 읽은 알림 ${await unreadCount()}건` }).click();
-    const secondMessage = `태스크 #${second.number} 「${second.title}」의 담당자로 지정되었습니다`;
+    await m.page
+      .getByRole("button", { name: `안 읽은 알림 ${String(await unreadCount())}건` })
+      .click();
+    const secondMessage = `태스크 #${String(second.number)} 「${second.title}」의 담당자로 지정되었습니다`;
     await expect(panel.getByRole("button", { name: secondMessage, exact: true })).toBeVisible();
     const readAll = m.page.waitForResponse(
       (response: Response) =>
@@ -523,12 +601,36 @@ test("the bell shows a notification created through the API and opens it from bo
       const bellBox = await readBell.boundingBox();
       expect(panelBox).toBeTruthy();
       expect(bellBox).toBeTruthy();
-      expect(panelBox!.x).toBeGreaterThanOrEqual(0);
-      expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(390);
+      const required6 = panelBox;
+      if (required6 === null) {
+        throw new Error("Missing fixture value: panelBox");
+      }
+      expect(required6.x).toBeGreaterThanOrEqual(0);
+      const required7 = panelBox;
+      if (required7 === null) {
+        throw new Error("Missing fixture value: panelBox");
+      }
+      const required8 = panelBox;
+      if (required8 === null) {
+        throw new Error("Missing fixture value: panelBox");
+      }
+      expect(required7.x + required8.width).toBeLessThanOrEqual(390);
+      const required9 = panelBox;
+      if (required9 === null) {
+        throw new Error("Missing fixture value: panelBox");
+      }
+      const required10 = bellBox;
+      if (required10 === null) {
+        throw new Error("Missing fixture value: bellBox");
+      }
+      const required11 = bellBox;
+      if (required11 === null) {
+        throw new Error("Missing fixture value: bellBox");
+      }
       expect(
-        panelBox!.y,
+        required9.y,
         "the notification panel must not cover its toggle",
-      ).toBeGreaterThanOrEqual(bellBox!.y + bellBox!.height);
+      ).toBeGreaterThanOrEqual(required10.y + required11.height);
       await readBell.click();
       await expect(panel).toHaveCount(0);
     }
@@ -588,7 +690,7 @@ test("the Vue shell re-binds this browser's push subscription to a new session, 
   browser,
   baseURL,
 }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(120000);
   const context = await browser.newContext({ baseURL });
   await context.grantPermissions(["notifications"]);
   // Headless Chromium has no push service: PushManager.subscribe and
@@ -598,8 +700,31 @@ test("the Vue shell re-binds this browser's push subscription to a new session, 
   await context.addInitScript(() => {
     const KEY = "e2e-push-subscription";
     const LOG = "e2e-push-log";
+    const parseStored = (
+      raw: string,
+    ): {
+      endpoint: string;
+      key: string;
+    } => {
+      const value: unknown = JSON.parse(raw);
+      if (
+        value === null ||
+        typeof value !== "object" ||
+        !("endpoint" in value) ||
+        typeof value.endpoint !== "string" ||
+        !("key" in value) ||
+        typeof value.key !== "string"
+      ) {
+        throw new Error("Invalid stored push subscription");
+      }
+      return { endpoint: value.endpoint, key: value.key };
+    };
     const log = (entry: string) => {
-      const items: string[] = JSON.parse(sessionStorage.getItem(LOG) ?? "[]");
+      const value: unknown = JSON.parse(sessionStorage.getItem(LOG) ?? "[]");
+      if (!Array.isArray(value) || !value.every((item: unknown) => typeof item === "string")) {
+        throw new Error("Invalid push log");
+      }
+      const items: string[] = value;
       items.push(entry);
       sessionStorage.setItem(LOG, JSON.stringify(items));
     };
@@ -610,7 +735,15 @@ test("the Vue shell re-binds this browser's push subscription to a new session, 
         .replace(/=+$/, "");
     const fromBase64Url = (value: string) =>
       Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
-    const build = (stored: { endpoint: string; key: string }) => ({
+    const build = (stored: { endpoint: string; key: string }): PushSubscription => ({
+      getKey: (name) => {
+        const keys = {
+          p256dh:
+            "BLn9b-VR0ca83knDNZ32dCHGyjJp-1riX9ZTN40MqV8K_LpQmLqxC_DoHvqvFXO_nGdAB4W9dogZb_sM-uV4JbY",
+          auth: "EjRWeJCrze8SNFZ4kKvN7w",
+        };
+        return fromBase64Url(keys[name]).buffer;
+      },
       endpoint: stored.endpoint,
       expirationTime: null,
       options: { userVisibleOnly: true, applicationServerKey: fromBase64Url(stored.key).buffer },
@@ -623,26 +756,33 @@ test("the Vue shell re-binds this browser's push subscription to a new session, 
           auth: "EjRWeJCrze8SNFZ4kKvN7w",
         },
       }),
-      unsubscribe: async () => {
-        log("unsubscribe");
-        sessionStorage.removeItem(KEY);
-        return true;
-      },
+      unsubscribe: () =>
+        new Promise<boolean>((resolve) => {
+          log("unsubscribe");
+          sessionStorage.removeItem(KEY);
+          resolve(true);
+        }),
     });
-    PushManager.prototype.getSubscription = async function () {
-      const raw = sessionStorage.getItem(KEY);
-      return raw ? (build(JSON.parse(raw)) as unknown as PushSubscription) : null;
+    PushManager.prototype.getSubscription = function () {
+      return new Promise<PushSubscription | null>((resolve) => {
+        const raw = sessionStorage.getItem(KEY);
+        resolve(raw ? build(parseStored(raw)) : null);
+      });
     };
-    PushManager.prototype.subscribe = async function (options?: PushSubscriptionOptionsInit) {
-      const key = options?.applicationServerKey;
-      if (!(key instanceof Uint8Array)) throw new Error("expected raw applicationServerKey");
-      const stored = {
-        endpoint: `https://push.e2e.invalid/send/${crypto.randomUUID()}`,
-        key: toBase64Url(key),
-      };
-      log("subscribe");
-      sessionStorage.setItem(KEY, JSON.stringify(stored));
-      return build(stored) as unknown as PushSubscription;
+    PushManager.prototype.subscribe = function (options?: PushSubscriptionOptionsInit) {
+      return new Promise<PushSubscription>((resolve) => {
+        const key = options?.applicationServerKey;
+        if (!(key instanceof Uint8Array)) {
+          throw new Error("expected raw applicationServerKey");
+        }
+        const stored = {
+          endpoint: `https://push.e2e.invalid/send/${crypto.randomUUID()}`,
+          key: toBase64Url(key),
+        };
+        log("subscribe");
+        sessionStorage.setItem(KEY, JSON.stringify(stored));
+        resolve(build(stored));
+      });
     };
   });
   const page = await context.newPage();
@@ -656,15 +796,20 @@ test("the Vue shell re-binds this browser's push subscription to a new session, 
     const isPut = (response: Response) =>
       response.url().endsWith(putPath) && response.request().method() === "PUT";
     const pushLog = async (): Promise<string[]> =>
-      JSON.parse((await page.evaluate(() => sessionStorage.getItem("e2e-push-log"))) ?? "[]");
-
+      z
+        .array(z.string())
+        .parse(
+          JSON.parse((await page.evaluate(() => sessionStorage.getItem("e2e-push-log"))) ?? "[]"),
+        );
     // Push is switched on in the React settings (session one).
     await page.goto(`/w/${admin.workspaceSlug}/settings`);
     const toggle = page.getByLabel("브라우저 푸시");
-    await expect(toggle).toBeEnabled({ timeout: 15_000 });
+    await expect(toggle).toBeEnabled({ timeout: 15000 });
     const saved = page.waitForResponse(isPut);
     await toggle.click();
-    const endpoint: string = (await saved).request().postDataJSON().endpoint;
+    const endpoint: string = flowSchemas.push.parse(
+      (await saved).request().postDataJSON(),
+    ).endpoint;
     await expect(toggle).toBeChecked();
 
     // Each new session re-binds the subscription when a Vue page opens, once.
@@ -675,7 +820,7 @@ test("the Vue shell re-binds this browser's push subscription to a new session, 
       await open(page);
       const put = await rebound;
       expect(put.status()).toBe(200);
-      expect(put.request().postDataJSON().endpoint).toBe(endpoint);
+      expect(flowSchemas.push.parse(put.request().postDataJSON()).endpoint).toBe(endpoint);
     }
     expect(await pushLog()).toEqual(["subscribe"]);
 
@@ -736,7 +881,10 @@ test("long Korean workspace controls stay in the narrow viewport and search plac
 }) => {
   await ensureSetup(page);
   const wsId = await workspaceId(page.request);
-  const original = await (await page.request.get(`/api/v1/workspaces/${wsId}`)).json();
+  const original = await readJson(
+    await page.request.get(`/api/v1/workspaces/${wsId}`),
+    flowSchemas.workspace,
+  );
   const renamed = await page.request.patch(`/api/v1/workspaces/${wsId}`, {
     data: { name: "한국어 팀 업무 계획과 문서 검토 워크스페이스" },
   });
@@ -754,8 +902,20 @@ test("long Korean workspace controls stay in the narrow viewport and search plac
     ]) {
       const bounds = await control.boundingBox();
       expect(bounds).not.toBeNull();
-      expect(bounds!.x).toBeGreaterThanOrEqual(0);
-      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+      const required12 = bounds;
+      if (required12 === null) {
+        throw new Error("Missing fixture value: bounds");
+      }
+      expect(required12.x).toBeGreaterThanOrEqual(0);
+      const required13 = bounds;
+      if (required13 === null) {
+        throw new Error("Missing fixture value: bounds");
+      }
+      const required14 = bounds;
+      if (required14 === null) {
+        throw new Error("Missing fixture value: bounds");
+      }
+      expect(required13.x + required14.width).toBeLessThanOrEqual(390);
       await control.focus();
       expect(
         await page.locator(".document-page").evaluate((e) => e.getBoundingClientRect().left),
@@ -773,7 +933,11 @@ test("long Korean workspace controls stay in the narrow viewport and search plac
       );
       const ratio = await dialog.evaluate((root) => {
         const canvas = document.createElement("canvas");
-        const context = canvas.getContext("2d")!;
+        const required15 = canvas.getContext("2d");
+        if (required15 === null) {
+          throw new Error('Missing fixture value: canvas.getContext("2d")');
+        }
+        const context = required15;
         const luminance = (css: string) => {
           context.fillStyle = css;
           context.fillRect(0, 0, 1, 1);
@@ -781,15 +945,33 @@ test("long Korean workspace controls stay in the narrow viewport and search plac
             const n = v / 255;
             return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4;
           });
-          return 0.2126 * rgb[0]! + 0.7152 * rgb[1]! + 0.0722 * rgb[2]!;
+          const required16 = rgb[0];
+          if (required16 === undefined) {
+            throw new Error("Missing fixture value: rgb[0]");
+          }
+          const required17 = rgb[1];
+          if (required17 === undefined) {
+            throw new Error("Missing fixture value: rgb[1]");
+          }
+          const required18 = rgb[2];
+          if (required18 === undefined) {
+            throw new Error("Missing fixture value: rgb[2]");
+          }
+          return 0.2126 * required16 + 0.7152 * required17 + 0.0722 * required18;
         };
-        const fg = luminance(getComputedStyle(root.querySelector("input")!, "::placeholder").color);
+        const required19 = root.querySelector("input");
+        if (required19 === null) {
+          throw new Error('Missing fixture value: root.querySelector("input")');
+        }
+        const fg = luminance(getComputedStyle(required19, "::placeholder").color);
         const bg = luminance(getComputedStyle(root).backgroundColor);
         return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
       });
       expect(ratio, dark ? "dark placeholder" : "light placeholder").toBeGreaterThanOrEqual(4.5);
     }
-    await page.evaluate(() => document.documentElement.classList.remove("dark"));
+    await page.evaluate(() => {
+      document.documentElement.classList.remove("dark");
+    });
     await page.keyboard.press("Escape");
     await expect(search).toBeFocused();
   } finally {

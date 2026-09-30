@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { login } from "./helpers";
+import { readJson, flowSchemas, login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 const owner = { email: "fallback@example.com", password: "fallbackpass123" };
@@ -18,12 +18,19 @@ test("generic workspace refs keep the real setup gate before canonicalization", 
   await page.getByLabel("주소(영문)").fill("fallback");
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
-  workspaceId = (await (await page.request.get("/api/v1/me/workspaces")).json()).items[0].id;
+  const fixtureValue1 = (
+    await readJson(await page.request.get("/api/v1/me/workspaces"), flowSchemas.workspaces)
+  ).items[0];
+  if (fixtureValue1 === undefined)
+    throw new Error(
+      'Missing fixture value: (\n    await readJson(await page.request.get("/api/v1/me/workspaces"), flowSchemas.workspaces)\n  ).items[0]',
+    );
+  workspaceId = fixtureValue1.id;
   const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, {
     data: { key: "OPS", name: "Canonical project", visibility: "workspace" },
   });
   expect(response.status()).toBe(201);
-  const project = await response.json();
+  const project = await readJson(response, flowSchemas.project);
   expect(
     (
       await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`, {
@@ -45,11 +52,12 @@ test("encoded, trimmed and NFKC project refs canonicalize once inside Vue with q
 }) => {
   await login(page, owner.email, owner.password);
   await page.addInitScript(() => {
-    if (window.top === window)
+    if (window.top === window) {
       sessionStorage.setItem(
         "fallbackBoots",
         String(Number(sessionStorage.getItem("fallbackBoots") ?? 0) + 1),
       );
+    }
   });
   for (const ref of ["%4FPS", "%20ops%20", "%EF%BC%AF%EF%BC%B0%EF%BC%B3"]) {
     const before = await page.evaluate(() => Number(sessionStorage.getItem("fallbackBoots") ?? 0));
@@ -66,15 +74,18 @@ test("encoded, trimmed and NFKC project refs canonicalize once inside Vue with q
   for (const [ref, title, target] of [
     ["%4FPS-2", "Canonical task", "OPS-2"],
     ["%57IKI-1", "Canonical wiki", "WIKI-1"],
-  ]) {
+  ] as const) {
     const before = await page.evaluate(() => Number(sessionStorage.getItem("fallbackBoots")));
     await page.goto(`/w/fallback/${ref}?from=item#document-comments`);
     await expect(page).toHaveURL(new RegExp(`/${target}\\?from=item#document-comments$`));
-    if (target === "WIKI-1")
+    const required1 = title;
+    if (target === "WIKI-1") {
       await expect(page.getByRole("textbox", { name: "문서 제목", exact: true })).toHaveValue(
-        title!,
+        required1,
       );
-    else await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+    } else {
+      await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+    }
     expect(await page.evaluate(() => Number(sessionStorage.getItem("fallbackBoots")))).toBe(
       before + 1,
     );
@@ -135,7 +146,11 @@ test("cold home, legal and populated Gantt record their actual production asset 
     try {
       const cold = await context.newPage();
       const requests: string[] = [];
-      const responses: { url: string; status: number; contentType: string }[] = [];
+      const responses: {
+        url: string;
+        status: number;
+        contentType: string;
+      }[] = [];
       cold.on("request", (request) => {
         requests.push(request.url());
       });
@@ -155,11 +170,17 @@ test("cold home, legal and populated Gantt record their actual production asset 
             .getByRole("region", { name: "간트", exact: true })
             .getByText("Canonical task", { exact: true }),
         ).toBeVisible();
-      } else await expect(cold.locator("main")).toBeVisible();
+      } else {
+        await expect(cold.locator("main")).toBeVisible();
+      }
       await cold.evaluate(
         () =>
           new Promise<void>((resolve) =>
-            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                resolve();
+              }),
+            ),
           ),
       );
       witnesses.push({
@@ -167,12 +188,10 @@ test("cold home, legal and populated Gantt record their actual production asset 
         requests,
         responses,
         resources: await cold.evaluate(() =>
-          performance
-            .getEntriesByType("resource")
-            .map((entry) => ({
-              name: entry.name,
-              initiatorType: (entry as PerformanceResourceTiming).initiatorType,
-            })),
+          performance.getEntriesByType("resource").map((entry) => ({
+            name: entry.name,
+            initiatorType: (entry as PerformanceResourceTiming).initiatorType,
+          })),
         ),
       });
     } finally {

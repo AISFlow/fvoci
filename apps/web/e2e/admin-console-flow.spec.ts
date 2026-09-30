@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { authSql, expectVueAuth, navigateAuthQuery } from "./auth-link-evidence";
-import { createE2eUser, waitForCapturedMail } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, waitForCapturedMail } from "./helpers";
 
 const admin = {
   email: "Admin@Example.COM",
@@ -21,11 +21,10 @@ test("instance admin edits settings and publishes terms; members consent before 
   page,
   browser,
 }) => {
-  test.setTimeout(90_000);
-
+  test.setTimeout(90000);
   // Setup makes the first user the instance admin.
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(admin.familyName);
   await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
   await page.getByLabel("이메일").fill(admin.email);
@@ -61,8 +60,9 @@ test("instance admin edits settings and publishes terms; members consent before 
     data: { branding: { name: "Denied", smtpFromDisplay: null, loginBrandText: null } },
   });
   expect(deniedBranding.status()).toBe(403);
-  expect((await deniedBranding.json()).code).toBe("enterprise_license_required");
-
+  expect((await readJson(deniedBranding, flowSchemas.error)).code).toBe(
+    "enterprise_license_required",
+  );
   const share = page.getByRole("region", { name: "공유 링크", exact: true });
   await expect(share.getByLabel("share.defaultExpiresDays")).toBeEnabled();
   await share.getByLabel("share.defaultExpiresDays").fill("14");
@@ -83,8 +83,7 @@ test("instance admin edits settings and publishes terms; members consent before 
   ).toHaveValue("FVOCI");
   const instance = await page.request.get("/api/v1/instance");
   expect(instance.ok()).toBe(true);
-  expect((await instance.json()).values.branding.name).toBe("FVOCI");
-
+  expect((await readJson(instance, flowSchemas.instance)).values.branding.name).toBe("FVOCI");
   await page.getByRole("link", { name: "활동", exact: true }).click();
   await expect(page).toHaveURL(/\/settings\/audit$/);
   await expect(page.getByText("엔터프라이즈 기능 사용 권한이 필요합니다")).toBeVisible();
@@ -133,7 +132,7 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(memberPage).toHaveURL(/\/consent\?returnTo=%2F$/);
   const gated = await memberPage.request.get("/api/v1/auth/me");
   expect(gated.status()).toBe(428);
-  expect((await gated.json()).code).toBe("consent_required");
+  expect((await readJson(gated, flowSchemas.error)).code).toBe("consent_required");
   await expectVueAuth(memberPage);
   const invalid = await memberPage.request.post("/api/v1/auth/consents", { data: { items: [] } });
   expect(invalid.status()).toBe(400);
@@ -198,7 +197,10 @@ test("instance admin edits settings and publishes terms; members consent before 
   await eraseConfirm.getByRole("button", { name: "삭제 예약", exact: true }).click();
   const scheduledRes = await scheduled;
   expect(scheduledRes.status()).toBe(200);
-  const scheduledBody = (await scheduledRes.json()) as Record<string, unknown>;
+  const scheduledBody = (await readJson(scheduledRes, flowSchemas.unknown)) as Record<
+    string,
+    unknown
+  >;
   // The cancel link goes to the member by mail, never to the admin.
   expect(scheduledBody.mailSent).toBe(true);
   expect("cancelToken" in scheduledBody).toBe(false);
@@ -220,10 +222,23 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(cancelConfirm).toHaveCount(0);
   await expect(memberRow.getByRole("button", { name: "삭제 예약", exact: true })).toBeVisible();
   await expect(memberRow).not.toContainText("일 남음");
-  const listed = (await (await page.request.get("/api/v1/admin/users")).json()) as {
-    items: { email: string; deletedAt: string | null; eraseAt: string | null }[];
+  const listed = (await readJson(
+    await page.request.get("/api/v1/admin/users"),
+    flowSchemas.unknown,
+  )) as {
+    items: {
+      email: string;
+      deletedAt: string | null;
+      eraseAt: string | null;
+    }[];
   };
-  const restored = listed.items.find((item) => item.email === member.email)!;
+  const required1 = listed.items.find((item) => item.email === member.email);
+  if (required1 === undefined) {
+    throw new Error(
+      "Missing fixture value: listed.items.find((item) => item.email === member.email)",
+    );
+  }
+  const restored = required1;
   expect(restored.deletedAt).toBeNull();
   expect(restored.eraseAt).toBeNull();
   // The revoked session stays revoked; the member signs in again.

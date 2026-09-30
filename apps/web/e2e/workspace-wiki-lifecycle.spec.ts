@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser, login } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -22,16 +22,17 @@ const member = {
 async function workspaceId(page: import("@playwright/test").Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspace = (await workspacesRes.json()).items.find(
+  const workspace = (await readJson(workspacesRes, flowSchemas.workspaces)).items.find(
     (item: { slug: string }) => item.slug === slug,
   );
+  if (workspace === undefined) throw new Error("Missing fixture value: workspace");
   expect(workspace).toBeTruthy();
   return workspace.id;
 }
 
 test("instance setup", async ({ page }) => {
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(admin.familyName);
   await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
   await page.getByLabel("이메일").fill(admin.email);
@@ -57,7 +58,8 @@ test("rename, move, trash, and restore wiki documents", async ({ page }) => {
 
   const wsId = await workspaceId(page, "acme");
   const treeBefore = await page.request.get(`/api/v1/workspaces/${wsId}/tree`);
-  const doc = (await treeBefore.json()).items.at(-1);
+  const doc = (await readJson(treeBefore, flowSchemas.documents)).items.at(-1);
+  if (doc === undefined) throw new Error("Missing fixture value: doc");
   expect(doc).toBeTruthy();
 
   const renamed = page.waitForResponse(
@@ -75,17 +77,16 @@ test("rename, move, trash, and restore wiki documents", async ({ page }) => {
     data: { parentId: null, title: "이동 대상 부모" },
   });
   expect(parentRes.ok()).toBe(true);
-  const targetParent = await parentRes.json();
-
+  const targetParent = await readJson(parentRes, flowSchemas.document);
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("link", { name: "이동 대상 부모" })).toBeVisible();
-  await page.goto(`/w/acme/WIKI-${doc.number}`);
+  await page.goto(`/w/acme/WIKI-${String(doc.number)}`);
   await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
   const moveSelect = page.getByLabel("새 위치(부모 문서)");
   await expect(moveSelect).toBeVisible();
   await expect(moveSelect.locator('option[value=""]')).toHaveCount(1);
   await expect(moveSelect.locator(`option[value="${targetParent.id}"]`)).toHaveCount(1, {
-    timeout: 15_000,
+    timeout: 15000,
   });
   await moveSelect.selectOption(targetParent.id);
   const moveResponse = page.waitForResponse(
@@ -96,7 +97,9 @@ test("rename, move, trash, and restore wiki documents", async ({ page }) => {
   await moveResponse;
 
   const movedTree = await page.request.get(`/api/v1/workspaces/${wsId}/tree`);
-  const moved = (await movedTree.json()).items.find((item: { id: string }) => item.id === doc.id);
+  const moved = (await readJson(movedTree, flowSchemas.documents)).items.find(
+    (item: { id: string }) => item.id === doc.id,
+  );
   expect(moved?.parentId).toBe(targetParent.id);
 
   await page.evaluate(() => {
@@ -108,16 +111,15 @@ test("rename, move, trash, and restore wiki documents", async ({ page }) => {
   );
   await page.getByRole("button", { name: "휴지통으로 이동" }).click();
   await trashResponse;
-  await expect(page).toHaveURL(/\/w\/acme\/trash$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/w\/acme\/trash$/, { timeout: 15000 });
   const trashList = await page.request.get(`/api/v1/workspaces/${wsId}/trash`);
   expect(trashList.ok()).toBe(true);
   expect(
-    (await trashList.json()).items.some(
+    (await readJson(trashList, flowSchemas.trash)).items.some(
       (item: { title: string }) => item.title === "라이프사이클 문서",
     ),
   ).toBe(true);
-  await expect(page.getByText("라이프사이클 문서")).toBeVisible({ timeout: 15_000 });
-
+  await expect(page.getByText("라이프사이클 문서")).toBeVisible({ timeout: 15000 });
   await page.getByRole("button", { name: "복원 라이프사이클 문서" }).click();
   await expect(page.getByText("휴지통이 비었습니다")).toBeVisible();
 

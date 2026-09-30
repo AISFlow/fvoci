@@ -1,5 +1,6 @@
+import { z } from "zod";
 import { expect, type Page, type Response, test } from "@playwright/test";
-import { createE2eUser, login, logout } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, logout } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -18,10 +19,9 @@ const member = {
 };
 
 test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => {
-  test.setTimeout(90_000);
-
+  test.setTimeout(90000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -39,13 +39,14 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
 
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspace = (await workspacesRes.json()).items.find(
+  const workspace = (await readJson(workspacesRes, flowSchemas.workspaces)).items.find(
     (item: { slug: string }) => item.slug === owner.workspaceSlug,
   );
+  if (workspace === undefined) throw new Error("Missing fixture value: workspace");
   expect(workspace).toBeTruthy();
   const membersRes = await page.request.get(`/api/v1/workspaces/${workspace.id}/members`);
   expect(membersRes.ok()).toBe(true);
-  let memberId = (await membersRes.json()).items.find(
+  const memberId = (await readJson(membersRes, flowSchemas.members)).items.find(
     (item: { email: string }) => item.email.toLowerCase() === member.email.toLowerCase(),
   )?.userId;
   expect(memberId).toBeTruthy();
@@ -54,14 +55,14 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
     data: { key: "NTF", name: "알림", visibility: "workspace" },
   });
   expect(projRes.status()).toBe(201);
-  const project = await projRes.json();
+  const project = await readJson(projRes, flowSchemas.project);
   const projectId = project.id;
   const taskRes = await page.request.post(
     `/api/v1/workspaces/${workspace.id}/projects/${projectId}/tasks`,
     { data: { title: "알림 수신 확인 태스크" } },
   );
   expect(taskRes.status()).toBe(201);
-  const task = await taskRes.json();
+  const task = await readJson(taskRes, flowSchemas.item);
   const assignRes = await page.request.patch(
     `/api/v1/workspaces/${workspace.id}/tasks/${task.id}`,
     {
@@ -74,14 +75,16 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
     data: { name: "알림팀" },
   });
   expect(groupRes.status(), await groupRes.text()).toBe(201);
-  const groupId = (await groupRes.json()).id;
+  const groupId = (await readJson(groupRes, flowSchemas.tag)).id;
   const addRes = await page.request.post(
     `/api/v1/workspaces/${workspace.id}/groups/${groupId}/members`,
     { data: { userId: memberId } },
   );
   expect(addRes.status(), await addRes.text()).toBe(201);
+  const fixtureValue1 = project.rootDocumentId;
+  if (fixtureValue1 === null) throw new Error("Missing fixture value: project.rootDocumentId");
   const docCommentRes = await page.request.post(
-    `/api/v1/workspaces/${workspace.id}/projects/${projectId}/documents/${project.rootDocumentId}/comments`,
+    `/api/v1/workspaces/${workspace.id}/projects/${projectId}/documents/${fixtureValue1}/comments`,
     { data: { body: "@알림팀 확인", mentionedGroupIds: [groupId] } },
   );
   expect(docCommentRes.status(), await docCommentRes.text()).toBe(201);
@@ -95,24 +98,28 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
     .poll(
       async () => {
         const res = await page.request.get(`/api/v1/workspaces/${workspace.id}/notifications`);
-        if (!res.ok()) return false;
-        const items: { verb: string }[] = (await res.json()).items;
+        if (!res.ok()) {
+          return false;
+        }
+        const items: {
+          verb: string;
+        }[] = (await readJson(res, flowSchemas.notifications)).items;
         return items.some((item) => item.verb.startsWith("comment."));
       },
-      { timeout: 15_000 },
+      { timeout: 15000 },
     )
     .toBe(true);
   await page.goto(`/w/${owner.workspaceSlug}/wiki`);
   await expect(page.getByRole("button", { name: /안 읽은 알림 \d+건/ })).toBeVisible({
-    timeout: 15_000,
+    timeout: 15000,
   });
 
   await page.goto(`/w/${owner.workspaceSlug}/notifications`);
   const item = page.getByText(
-    `태스크 #${task.number} 「알림 수신 확인 태스크」의 담당자로 지정되었습니다`,
+    `태스크 #${String(task.number)} 「알림 수신 확인 태스크」의 담당자로 지정되었습니다`,
     { exact: true },
   );
-  await expect(item).toBeVisible({ timeout: 15_000 });
+  await expect(item).toBeVisible({ timeout: 15000 });
   await expect(page.getByText("문서에 새 댓글이 달렸습니다", { exact: true })).toBeVisible();
   await item.click();
   await expect(page).toHaveURL(new RegExp(`/w/${owner.workspaceSlug}/[A-Z0-9-]+-\\d+$`));
@@ -126,9 +133,9 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
   await page.getByRole("button", { name: "전체 읽음" }).click();
   expect((await readAll).status()).toBe(200);
   await page.getByRole("tab", { name: "안 읽음" }).click();
-  await expect(page.getByText("알림이 없습니다")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("알림이 없습니다")).toBeVisible({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "알림", exact: true })).toBeVisible({
-    timeout: 15_000,
+    timeout: 15000,
   });
 
   await browserPushToggle(page, workspace.id);
@@ -146,8 +153,31 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
   await page.addInitScript(() => {
     const KEY = "e2e-push-subscription";
     const LOG = "e2e-push-log";
+    const parseStored = (
+      raw: string,
+    ): {
+      endpoint: string;
+      key: string;
+    } => {
+      const value: unknown = JSON.parse(raw);
+      if (
+        value === null ||
+        typeof value !== "object" ||
+        !("endpoint" in value) ||
+        typeof value.endpoint !== "string" ||
+        !("key" in value) ||
+        typeof value.key !== "string"
+      ) {
+        throw new Error("Invalid stored push subscription");
+      }
+      return { endpoint: value.endpoint, key: value.key };
+    };
     const log = (entry: string) => {
-      const items: string[] = JSON.parse(sessionStorage.getItem(LOG) ?? "[]");
+      const value: unknown = JSON.parse(sessionStorage.getItem(LOG) ?? "[]");
+      if (!Array.isArray(value) || !value.every((item: unknown) => typeof item === "string")) {
+        throw new Error("Invalid push log");
+      }
+      const items: string[] = value;
       items.push(entry);
       sessionStorage.setItem(LOG, JSON.stringify(items));
     };
@@ -158,7 +188,15 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
         .replace(/=+$/, "");
     const fromBase64Url = (value: string) =>
       Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
-    const build = (stored: { endpoint: string; key: string }) => ({
+    const build = (stored: { endpoint: string; key: string }): PushSubscription => ({
+      getKey: (name) => {
+        const keys = {
+          p256dh:
+            "BLn9b-VR0ca83knDNZ32dCHGyjJp-1riX9ZTN40MqV8K_LpQmLqxC_DoHvqvFXO_nGdAB4W9dogZb_sM-uV4JbY",
+          auth: "EjRWeJCrze8SNFZ4kKvN7w",
+        };
+        return fromBase64Url(keys[name]).buffer;
+      },
       endpoint: stored.endpoint,
       expirationTime: null,
       options: { userVisibleOnly: true, applicationServerKey: fromBase64Url(stored.key).buffer },
@@ -171,54 +209,64 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
           auth: "EjRWeJCrze8SNFZ4kKvN7w",
         },
       }),
-      unsubscribe: async () => {
-        if (sessionStorage.getItem("e2e-push-fail-unsubscribe") === "1") {
-          sessionStorage.removeItem("e2e-push-fail-unsubscribe");
-          log("unsubscribe-failed");
-          throw new Error("push service unreachable");
-        }
-        log("unsubscribe");
-        sessionStorage.removeItem(KEY);
-        return true;
-      },
+      unsubscribe: () =>
+        new Promise<boolean>((resolve) => {
+          if (sessionStorage.getItem("e2e-push-fail-unsubscribe") === "1") {
+            sessionStorage.removeItem("e2e-push-fail-unsubscribe");
+            log("unsubscribe-failed");
+            throw new Error("push service unreachable");
+          }
+          log("unsubscribe");
+          sessionStorage.removeItem(KEY);
+          resolve(true);
+        }),
     });
-    PushManager.prototype.getSubscription = async function () {
-      const raw = sessionStorage.getItem(KEY);
-      return raw ? (build(JSON.parse(raw)) as unknown as PushSubscription) : null;
+    PushManager.prototype.getSubscription = function () {
+      return new Promise<PushSubscription | null>((resolve) => {
+        const raw = sessionStorage.getItem(KEY);
+        resolve(raw ? build(parseStored(raw)) : null);
+      });
     };
-    PushManager.prototype.subscribe = async function (options?: PushSubscriptionOptionsInit) {
-      const key = options?.applicationServerKey;
-      if (!(key instanceof Uint8Array)) throw new Error("expected raw applicationServerKey");
-      const stored = {
-        endpoint: `https://push.e2e.invalid/send/${crypto.randomUUID()}`,
-        key: toBase64Url(key),
-      };
-      log(`subscribe:${stored.key.length}`);
-      sessionStorage.setItem(KEY, JSON.stringify(stored));
-      return build(stored) as unknown as PushSubscription;
+    PushManager.prototype.subscribe = function (options?: PushSubscriptionOptionsInit) {
+      return new Promise<PushSubscription>((resolve) => {
+        const key = options?.applicationServerKey;
+        if (!(key instanceof Uint8Array)) {
+          throw new Error("expected raw applicationServerKey");
+        }
+        const stored = {
+          endpoint: `https://push.e2e.invalid/send/${crypto.randomUUID()}`,
+          key: toBase64Url(key),
+        };
+        log(`subscribe:${String(stored.key.length)}`);
+        sessionStorage.setItem(KEY, JSON.stringify(stored));
+        resolve(build(stored));
+      });
     };
   });
-
-  const instance = await (await page.request.get("/api/v1/instance")).json();
+  const instance = await readJson(await page.request.get("/api/v1/instance"), flowSchemas.instance);
   const publicKey: string | null = instance.values.webPushPublicKey;
   expect(publicKey, "server bootstraps VAPID with ENCRYPTION_KEYS").toMatch(/^B[A-Za-z0-9_-]{86}$/);
 
   const pushLog = async (): Promise<string[]> =>
-    JSON.parse((await page.evaluate(() => sessionStorage.getItem("e2e-push-log"))) ?? "[]");
+    z
+      .array(z.string())
+      .parse(
+        JSON.parse((await page.evaluate(() => sessionStorage.getItem("e2e-push-log"))) ?? "[]"),
+      );
   const putPath = `/api/v1/workspaces/${workspaceId}/push-subscriptions`;
   const isPut = (response: Response) =>
     response.url().endsWith(putPath) && response.request().method() === "PUT";
 
   await page.goto(`/w/${owner.workspaceSlug}/settings`);
   const toggle = page.getByLabel("브라우저 푸시");
-  await expect(toggle).toBeEnabled({ timeout: 15_000 });
+  await expect(toggle).toBeEnabled({ timeout: 15000 });
   await expect(toggle).not.toBeChecked();
 
   const saved = page.waitForResponse(isPut);
   await toggle.click();
   const put = await saved;
   expect(put.status()).toBe(200);
-  const body = put.request().postDataJSON();
+  const body = flowSchemas.push.parse(put.request().postDataJSON());
   expect(Object.keys(body).sort()).toEqual(["endpoint", "keys"]);
   expect(body.endpoint).toMatch(/^https:\/\/push\.e2e\.invalid\/send\//);
   await expect(toggle).toBeChecked();
@@ -234,20 +282,34 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
   // A subscription bound to an older VAPID key (after rotate-vapid) is
   // replaced on load and stored again.
   await page.evaluate(() => {
-    const stored = JSON.parse(sessionStorage.getItem("e2e-push-subscription") ?? "{}");
+    const raw = sessionStorage.getItem("e2e-push-subscription");
+    if (raw === null) {
+      throw new Error("Missing stored push subscription");
+    }
+    const stored: unknown = JSON.parse(raw);
+    if (
+      stored === null ||
+      typeof stored !== "object" ||
+      !("key" in stored) ||
+      typeof stored.key !== "string"
+    ) {
+      throw new Error("Invalid stored push subscription");
+    }
     stored.key = `B${"A".repeat(85)}E`;
     sessionStorage.setItem("e2e-push-subscription", JSON.stringify(stored));
   });
   const resaved = page.waitForResponse(isPut);
   await page.reload();
   expect((await resaved).status()).toBe(200);
-  await expect(page.getByLabel("브라우저 푸시")).toBeChecked({ timeout: 15_000 });
+  await expect(page.getByLabel("브라우저 푸시")).toBeChecked({ timeout: 15000 });
   expect(await pushLog()).toEqual(["subscribe:87", "unsubscribe", "subscribe:87"]);
 
   // Disabling only unsubscribes the browser: there is no delete route.
   const requests: string[] = [];
   page.on("request", (request) => {
-    if (request.url().endsWith(putPath)) requests.push(request.method());
+    if (request.url().endsWith(putPath)) {
+      requests.push(request.method());
+    }
   });
   await page.getByLabel("브라우저 푸시").click();
   await expect(page.getByLabel("브라우저 푸시")).not.toBeChecked();
@@ -261,10 +323,16 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
   await page.getByLabel("브라우저 푸시").click();
   expect((await reenabled).status()).toBe(200);
   await expect(page.getByLabel("브라우저 푸시")).toBeChecked();
-  const endpoint: string = JSON.parse(
-    (await page.evaluate(() => sessionStorage.getItem("e2e-push-subscription"))) ?? "{}",
-  ).endpoint;
-  await page.evaluate(() => sessionStorage.setItem("e2e-push-fail-unsubscribe", "1"));
+  const endpoint = z
+    .object({ endpoint: z.string() })
+    .parse(
+      JSON.parse(
+        (await page.evaluate(() => sessionStorage.getItem("e2e-push-subscription"))) ?? "{}",
+      ),
+    ).endpoint;
+  await page.evaluate(() => {
+    sessionStorage.setItem("e2e-push-fail-unsubscribe", "1");
+  });
   const logoutRequest = page.waitForRequest(
     (request) => request.url().endsWith("/api/v1/auth/logout") && request.method() === "POST",
   );
@@ -277,12 +345,12 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
   // replaces it with a new subscription instead of re-binding it.
   await login(page, owner.email, owner.password);
   await page.goto(`/w/${owner.workspaceSlug}/settings`);
-  await expect(page.getByLabel("브라우저 푸시")).toBeEnabled({ timeout: 15_000 });
+  await expect(page.getByLabel("브라우저 푸시")).toBeEnabled({ timeout: 15000 });
   await expect(page.getByLabel("브라우저 푸시")).not.toBeChecked();
   expect((await pushLog()).at(-1)).toBe("unsubscribe-failed");
   const ownerPut = page.waitForResponse(isPut);
   await page.getByLabel("브라우저 푸시").click();
-  const ownerBody = (await ownerPut).request().postDataJSON();
+  const ownerBody = flowSchemas.push.parse((await ownerPut).request().postDataJSON());
   expect(ownerBody.endpoint).not.toBe(endpoint);
   await expect(page.getByLabel("브라우저 푸시")).toBeChecked();
   expect((await pushLog()).slice(-2)).toEqual(["unsubscribe", "subscribe:87"]);

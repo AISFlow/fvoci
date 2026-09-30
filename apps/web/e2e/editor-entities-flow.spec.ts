@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
-import { createE2eUser } from "./helpers";
+import { readJson, flowSchemas, createE2eUser } from "./helpers";
 import {
   admin,
   createDoc,
@@ -26,15 +26,21 @@ test.beforeAll(async ({ browser, baseURL }) => {
     membershipRole: "guest",
   });
 });
-
-type Item = { id: string; number: number; title: string };
+type Item = {
+  id: string;
+  number: number;
+  title: string;
+};
 async function fixtures(request: APIRequestContext, key: string) {
   const ws = await workspaceId(request);
   const projectResponse = await request.post(`/api/v1/workspaces/${ws}/projects`, {
     data: { key, name: `${key} project`, visibility: "workspace" },
   });
   expect(projectResponse.status(), await projectResponse.text()).toBe(201);
-  const project = (await projectResponse.json()) as { id: string; rootDocumentId: string };
+  const project = (await readJson(projectResponse, flowSchemas.project)) as {
+    id: string;
+    rootDocumentId: string;
+  };
   const wiki = await createDoc(request, ws, `${key} wiki reference`);
   const documentResponse = await request.post(
     `/api/v1/workspaces/${ws}/projects/${project.id}/documents`,
@@ -43,12 +49,12 @@ async function fixtures(request: APIRequestContext, key: string) {
     },
   );
   expect(documentResponse.status(), await documentResponse.text()).toBe(201);
-  const document = (await documentResponse.json()) as Item;
+  const document = (await readJson(documentResponse, flowSchemas.document)) as Item;
   const taskResponse = await request.post(`/api/v1/workspaces/${ws}/projects/${project.id}/tasks`, {
     data: { title: `${key} task reference` },
   });
   expect(taskResponse.status(), await taskResponse.text()).toBe(201);
-  const task = (await taskResponse.json()) as Item;
+  const task = (await readJson(taskResponse, flowSchemas.item)) as Item;
   return { ws, project, wiki, document, task };
 }
 
@@ -86,7 +92,7 @@ function nodes(body: TiptapNode, type: string): TiptapNode[] {
 async function body(request: APIRequestContext, path: string): Promise<TiptapNode> {
   const response = await request.get(path);
   expect(response.ok(), await response.text()).toBe(true);
-  const data = await response.json();
+  const data = await readJson(response, flowSchemas.body);
   return data.contentJson as TiptapNode;
 }
 
@@ -111,15 +117,15 @@ for (const host of ["wiki", "project", "task"] as const) {
       const path =
         host === "wiki"
           ? f.wiki.path
-          : `/w/${admin.workspaceSlug}/${key}-${host === "project" ? f.document.number : f.task.number}`;
+          : `/w/${admin.workspaceSlug}/${key}-${String(host === "project" ? f.document.number : f.task.number)}`;
       const hostPath = path;
       const editor = await openDoc(page, hostPath);
       await expect(editor).toHaveAttribute("contenteditable", "true");
       await editor.click();
-      await mention(page, `WIKI-${f.wiki.number}`, `${key} wiki reference`);
+      await mention(page, `WIKI-${String(f.wiki.number)}`, `${key} wiki reference`);
       await expect(editor.locator("[data-mention]")).toHaveText(`@${key} wiki reference`);
       await nextParagraph(page, editor);
-      await slash(page, `${key}-${f.task.number}`);
+      await slash(page, `${key}-${String(f.task.number)}`);
       await expect(editor.locator('.afn-embed[data-entity="task"]')).toContainText(f.task.title);
       await nextParagraph(page, editor);
       await paste(page, f.document.id);
@@ -127,7 +133,7 @@ for (const host of ["wiki", "project", "task"] as const) {
         f.document.title,
       );
       await nextParagraph(page, editor);
-      await paste(page, `WIKI-${f.wiki.number}`);
+      await paste(page, `WIKI-${String(f.wiki.number)}`);
       await expect(editor.locator('.afn-embed[data-entity="document"]').last()).toContainText(
         `${key} wiki reference`,
       );
@@ -142,17 +148,31 @@ for (const host of ["wiki", "project", "task"] as const) {
         .poll(async () => nodes(await body(page.request, bodyPath), "embed").length)
         .toBe(3);
       const saved = await body(page.request, bodyPath);
-      expect(nodes(saved, "mention")[0]!.attrs).toMatchObject({
+      const required1 = nodes(saved, "mention")[0];
+      if (required1 === undefined) {
+        throw new Error('Missing fixture value: nodes(saved, "mention")[0]');
+      }
+      expect(required1.attrs).toMatchObject({
         entity: "document",
         id: f.wiki.id,
-        label: `WIKI-${f.wiki.number}`,
+        label: `WIKI-${String(f.wiki.number)}`,
       });
       expect(
-        nodes(saved, "embed").map((n) => ({ entity: n.attrs!.entity, ref: n.attrs!.ref })),
+        nodes(saved, "embed").map((n) => {
+          const required2 = n.attrs;
+          if (required2 === undefined) {
+            throw new Error("Missing fixture value: n.attrs");
+          }
+          const required3 = n.attrs;
+          if (required3 === undefined) {
+            throw new Error("Missing fixture value: n.attrs");
+          }
+          return { entity: required2.entity, ref: required3.ref };
+        }),
       ).toEqual([
         { entity: "task", ref: f.task.id },
         { entity: "document", ref: f.document.id },
-        { entity: "document", ref: `WIKI-${f.wiki.number}` },
+        { entity: "document", ref: `WIKI-${String(f.wiki.number)}` },
       ]);
       if (host === "wiki") {
         const peer = await newSignedInPage(browser, baseURL, admin);
@@ -161,7 +181,7 @@ for (const host of ["wiki", "project", "task"] as const) {
           await expect(peerEditor.locator("[data-mention]")).toHaveText(`@${key} wiki reference`);
           await expect(peerEditor.locator(".afn-embed")).toHaveCount(3);
           await nextParagraph(page, editor);
-          await mention(page, `${key}-${f.task.number}`, f.task.title);
+          await mention(page, `${key}-${String(f.task.number)}`, f.task.title);
           await expect(peerEditor.locator("[data-mention]").last()).toHaveText(`@${f.task.title}`);
           await nextParagraph(page, editor);
           await mention(page, "편집", "동료편집");
@@ -170,19 +190,22 @@ for (const host of ["wiki", "project", "task"] as const) {
           await expect(peerEditor.locator("[data-mention]").last()).toHaveText("@Entity Team");
           await save(page);
           const shared = await body(page.request, bodyPath);
-          expect(nodes(shared, "mention").map((node) => node.attrs!.entity)).toEqual([
-            "document",
-            "task",
-            "user",
-            "group",
-          ]);
+          expect(
+            nodes(shared, "mention").map((node) => {
+              const required4 = node.attrs;
+              if (required4 === undefined) {
+                throw new Error("Missing fixture value: node.attrs");
+              }
+              return required4.entity;
+            }),
+          ).toEqual(["document", "task", "user", "group"]);
         } finally {
           await peer.context.close();
         }
       }
       await page.reload();
       await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({
-        timeout: 15_000,
+        timeout: 15000,
       });
       await expect(editorOf(page).locator('.afn-embed[data-entity="task"]')).toContainText(
         f.task.title,
@@ -211,18 +234,26 @@ test("guest member denial keeps allowed entities; inaccessible refs and readonly
   try {
     const f = await fixtures(owner.page.request, "ENG");
     const members = await owner.page.request.get(`/api/v1/workspaces/${f.ws}/members`);
-    const guestId = (await members.json()).items.find(
+    const fixtureValue1 = (await readJson(members, flowSchemas.members)).items.find(
       (m: { email: string }) => m.email === guest.email,
-    ).userId;
+    );
+    if (fixtureValue1 === undefined)
+      throw new Error(
+        "Missing fixture value: (await readJson(members, flowSchemas.members)).items.find(\n      (m: { email: string }) => m.email === guest.email,\n    )",
+      );
+    const guestId = fixtureValue1.userId;
     const grant = `/api/v1/workspaces/${f.ws}/projects/${f.project.id}/members`;
     expect(
       (await owner.page.request.post(grant, { data: { userId: guestId, role: "member" } })).ok(),
     ).toBe(true);
     const page = visitor.page;
-    const editor = await openDoc(page, `/w/${admin.workspaceSlug}/ENG-${f.document.number}`);
+    const editor = await openDoc(
+      page,
+      `/w/${admin.workspaceSlug}/ENG-${String(f.document.number)}`,
+    );
     expect((await page.request.get(`/api/v1/workspaces/${f.ws}/members`)).status()).toBe(404);
     await editor.click();
-    await mention(page, `ENG-${f.task.number}`, f.task.title);
+    await mention(page, `ENG-${String(f.task.number)}`, f.task.title);
     await expect(editor.locator("[data-mention]")).toHaveText(`@${f.task.title}`);
     await nextParagraph(page, editor);
     await paste(page, f.wiki.id);
@@ -239,7 +270,7 @@ test("guest member denial keeps allowed entities; inaccessible refs and readonly
       (await owner.page.request.patch(`${grant}/${guestId}`, { data: { role: "viewer" } })).ok(),
     ).toBe(true);
     await page.reload();
-    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
     await expect(editorOf(page)).toHaveAttribute("contenteditable", "false");
     await expect(editorOf(page).locator(".afn-embed-inaccessible")).toBeVisible();
     const before = await body(
@@ -269,7 +300,9 @@ async function holdResponse(page: Page, path: string, deferRequest = false) {
   const requestGate = new Promise<void>((resolve) => {
     forward = resolve;
   });
-  if (!deferRequest) forward();
+  if (!deferRequest) {
+    forward();
+  }
   let release!: () => void;
   const wait = new Promise<void>((resolve) => {
     release = resolve;
@@ -301,33 +334,76 @@ async function holdResponse(page: Page, path: string, deferRequest = false) {
 
 async function retainedCounts(page: Page, ws: string, refresh = false) {
   // Inspect the existing app's actual QueryClient; no product test hook or
-  // replacement client. fetchQuery must honor the retained 30-second cache.
+  // replacement client. query must honor the retained 30-second cache.
   return page.evaluate(
     async ({ workspaceId, refresh }) => {
       type Client = import("@tanstack/vue-query").QueryClient;
       const root = document.getElementById("root") as HTMLElement & {
-        __vue_app__: { _context: { provides: Record<string, Client> } };
+        __vue_app__: {
+          _context: {
+            provides: Record<string, Client>;
+          };
+        };
       };
-      const client = root.__vue_app__._context.provides.VUE_QUERY_CLIENT!;
-      const counts = await client.fetchQuery({
+      const required5 = root.__vue_app__._context.provides.VUE_QUERY_CLIENT;
+      if (required5 === undefined) {
+        throw new Error(
+          "Missing fixture value: root.__vue_app__._context.provides.VUE_QUERY_CLIENT",
+        );
+      }
+      const client = required5;
+      const counts = await client.query({
         queryKey: ["me", "workspaces"],
-        staleTime: refresh ? 0 : 30_000,
+        staleTime: refresh ? 0 : 30000,
         queryFn: async () => {
           const response = await fetch("/api/v1/me/workspaces");
-          if (!response.ok) throw new Error(`workspace counts ${response.status}`);
-          return response.json() as Promise<{ items: { id: string; documentCount: number }[] }>;
+          if (!response.ok) {
+            throw new Error(`workspace counts ${String(response.status)}`);
+          }
+          const data: unknown = await response.json();
+          if (
+            data === null ||
+            typeof data !== "object" ||
+            !("items" in data) ||
+            !Array.isArray(data.items)
+          ) {
+            throw new Error("Invalid workspace counts response");
+          }
+          const items = data.items.map((item: unknown) => {
+            if (
+              item === null ||
+              typeof item !== "object" ||
+              !("id" in item) ||
+              typeof item.id !== "string" ||
+              !("documentCount" in item) ||
+              typeof item.documentCount !== "number"
+            ) {
+              throw new Error("Invalid workspace count item");
+            }
+            return { ...item, id: item.id, documentCount: item.documentCount };
+          });
+          return { ...data, items };
         },
       });
-      await client.fetchQuery({
+      await client.query({
         queryKey: ["projects", workspaceId],
-        staleTime: 30_000,
+        staleTime: 30000,
         queryFn: async () => {
           const response = await fetch(`/api/v1/workspaces/${workspaceId}/projects`);
-          if (!response.ok) throw new Error(`project counts ${response.status}`);
-          return response.json();
+          if (!response.ok) {
+            throw new Error(`project counts ${String(response.status)}`);
+          }
+          const data: unknown = await response.json();
+          return data;
         },
       });
-      return counts.items.find((item) => item.id === workspaceId)!.documentCount;
+      const required6 = counts.items.find((item) => item.id === workspaceId);
+      if (required6 === undefined) {
+        throw new Error(
+          "Missing fixture value: counts.items.find((item) => item.id === workspaceId)",
+        );
+      }
+      return required6.documentCount;
     },
     { workspaceId: ws, refresh },
   );
@@ -336,13 +412,19 @@ async function pushDocument(page: Page, path: string) {
   await page.evaluate(async (next) => {
     const root = document.getElementById("root") as HTMLElement & {
       __vue_app__: {
-        config: { globalProperties: { $router: { push: (path: string) => Promise<unknown> } } };
+        config: {
+          globalProperties: {
+            $router: {
+              push: (path: string) => Promise<unknown>;
+            };
+          };
+        };
       };
     };
     await root.__vue_app__.config.globalProperties.$router.push(next);
   }, path);
   await expect(page).toHaveURL(new RegExp(`${path}$`));
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   await expect(editorOf(page)).toBeVisible();
 }
 
@@ -354,12 +436,16 @@ for (const host of ["wiki", "project"] as const) {
     const signed = await newSignedInPage(browser, baseURL, admin);
     const peer = await newSignedInPage(browser, baseURL, admin);
     const page = signed.page;
-    const held: { release: () => void }[] = [];
+    const held: {
+      release: () => void;
+    }[] = [];
     try {
       const key = host === "wiki" ? "LCW" : "LCP";
       const f = await fixtures(page.request, key);
       async function extra(title: string) {
-        if (host === "wiki") return createDoc(page.request, f.ws, title);
+        if (host === "wiki") {
+          return createDoc(page.request, f.ws, title);
+        }
         const response = await page.request.post(
           `/api/v1/workspaces/${f.ws}/projects/${f.project.id}/documents`,
           {
@@ -367,8 +453,8 @@ for (const host of ["wiki", "project"] as const) {
           },
         );
         expect(response.status(), await response.text()).toBe(201);
-        const document = (await response.json()) as Item;
-        return { ...document, path: `/w/${admin.workspaceSlug}/${key}-${document.number}` };
+        const document = (await readJson(response, flowSchemas.document)) as Item;
+        return { ...document, path: `/w/${admin.workspaceSlug}/${key}-${String(document.number)}` };
       }
       const parent = await extra(`${key} parent`);
       const retired = await extra(`${key} retired parent`);
@@ -376,7 +462,10 @@ for (const host of ["wiki", "project"] as const) {
       const original =
         host === "wiki"
           ? f.wiki
-          : { ...f.document, path: `/w/${admin.workspaceSlug}/${key}-${f.document.number}` };
+          : {
+              ...f.document,
+              path: `/w/${admin.workspaceSlug}/${key}-${String(f.document.number)}`,
+            };
       const prefix =
         host === "wiki"
           ? `/api/v1/workspaces/${f.ws}/documents`
@@ -386,9 +475,15 @@ for (const host of ["wiki", "project"] as const) {
       let workspaceRefreshes = 0;
       let projectRefreshes = 0;
       page.on("request", (request) => {
-        if (request.method() !== "GET") return;
-        if (request.url().endsWith("/api/v1/me/workspaces")) workspaceRefreshes += 1;
-        if (request.url().endsWith(`/api/v1/workspaces/${f.ws}/projects`)) projectRefreshes += 1;
+        if (request.method() !== "GET") {
+          return;
+        }
+        if (request.url().endsWith("/api/v1/me/workspaces")) {
+          workspaceRefreshes += 1;
+        }
+        if (request.url().endsWith(`/api/v1/workspaces/${f.ws}/projects`)) {
+          projectRefreshes += 1;
+        }
       });
       await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
       const parentSelect = page.getByLabel("새 위치(부모 문서)");
@@ -405,19 +500,26 @@ for (const host of ["wiki", "project"] as const) {
       moved.release();
       await expect(parentSelect).toHaveValue("");
       const movedMeta = await page.request.get(`${prefix}/${original.id}`);
-      expect((await movedMeta.json()).parentId).toBe(parent.id);
+      expect((await readJson(movedMeta, flowSchemas.document)).parentId).toBe(parent.id);
       // Both real queries already have fresh 30-second cache data. The
       // active workspace query refetches; inactive project data becomes stale.
       expect(workspaceRefreshes).toBeGreaterThan(0);
       const projectInvalidated = await page.evaluate((workspaceId) => {
         type Client = import("@tanstack/vue-query").QueryClient;
         const root = document.getElementById("root") as HTMLElement & {
-          __vue_app__: { _context: { provides: Record<string, Client> } };
+          __vue_app__: {
+            _context: {
+              provides: Record<string, Client>;
+            };
+          };
         };
-        return root.__vue_app__._context.provides.VUE_QUERY_CLIENT!.getQueryState([
-          "projects",
-          workspaceId,
-        ])?.isInvalidated;
+        const required7 = root.__vue_app__._context.provides.VUE_QUERY_CLIENT;
+        if (required7 === undefined) {
+          throw new Error(
+            "Missing fixture value: root.__vue_app__._context.provides.VUE_QUERY_CLIENT",
+          );
+        }
+        return required7.getQueryState(["projects", workspaceId])?.isInvalidated;
       }, f.ws);
       expect(projectRefreshes > 0 || projectInvalidated).toBe(true);
       expect(await retainedCounts(page, f.ws)).toBe(countBefore);
@@ -490,9 +592,14 @@ for (const host of ["wiki", "project"] as const) {
       currentTrash.release();
       await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/trash$`));
       const counts = await page.request.get("/api/v1/me/workspaces");
-      expect(
-        (await counts.json()).items.find((item: { id: string }) => item.id === f.ws).documentCount,
-      ).toBe(beforeTrash - 2);
+      const fixtureValue2 = (await readJson(counts, flowSchemas.workspaces)).items.find(
+        (item: { id: string }) => item.id === f.ws,
+      );
+      if (fixtureValue2 === undefined)
+        throw new Error(
+          "Missing fixture value: (await readJson(counts, flowSchemas.workspaces)).items.find(\n          (item: { id: string }) => item.id === f.ws,\n        )",
+        );
+      expect(fixtureValue2.documentCount).toBe(beforeTrash - 2);
     } finally {
       for (const response of held) response.release();
       await peer.context.close();

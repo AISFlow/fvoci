@@ -1,7 +1,7 @@
 import path from "node:path";
 import { crc32 } from "node:zlib";
 import { expect, type Page, test } from "@playwright/test";
-import { login, watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, login, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -46,7 +46,12 @@ async function ensureOwnerSession(page: Page): Promise<void> {
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const res = await page.request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const body = (await res.json()) as { items: { id: string; slug: string }[] };
+  const body = (await readJson(res, flowSchemas.workspaces)) as {
+    items: {
+      id: string;
+      slug: string;
+    }[];
+  };
   const workspace = body.items.find((item) => item.slug === slug);
   expect(workspace).toBeTruthy();
   return workspace?.id ?? "";
@@ -104,10 +109,9 @@ function docx(title: string, body: string): Buffer {
 
 test("owner imports markdown zip and exports document markdown", async ({ page }) => {
   const cspViolations = watchCspViolations(page);
-  test.setTimeout(120_000);
+  test.setTimeout(120000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
-
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -120,8 +124,7 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
   await page.goto("/w/acme/settings");
   await expect(page.getByLabel("가져올 형식")).toBeVisible();
   await page.locator('input[type="file"]').setInputFiles(importZip);
-  await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible({ timeout: 30_000 });
-
+  await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible({ timeout: 30000 });
   // Async office-file import: the durable runner converts it; the page polls to completion.
   await page.getByLabel("가져올 형식").selectOption("office-file");
   await page.locator('input[type="file"]').setInputFiles({
@@ -130,12 +133,12 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
     buffer: Buffer.from("# 비동기 메모\n\n러너가 가져온 본문", "utf8"),
   });
   await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({
-    timeout: 60_000,
+    timeout: 60000,
   });
   await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible();
 
   await page.goto("/w/acme/wiki");
-  await expect(page.getByRole("link", { name: "비동기-메모" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("link", { name: "비동기-메모" })).toBeVisible({ timeout: 15000 });
   await page.getByRole("link", { name: "e2e-note" }).click();
   await expect(page.getByLabel("문서 제목")).toHaveValue("e2e-note");
 
@@ -148,7 +151,10 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
   const text = await download.createReadStream().then(async (stream) => {
     const chunks: Buffer[] = [];
     for await (const chunk of stream) {
-      chunks.push(Buffer.from(chunk));
+      const bytes: unknown = chunk;
+      if (!(bytes instanceof Uint8Array) && typeof bytes !== "string")
+        throw new Error("Unexpected download stream chunk");
+      chunks.push(Buffer.from(bytes));
     }
     return Buffer.concat(chunks).toString("utf8");
   });
@@ -164,13 +170,12 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
     buffer: docx("워드 제목", "워드에서 가져온 본문"),
   });
   await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({
-    timeout: 60_000,
+    timeout: 60000,
   });
   await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible();
   await page.goto("/w/acme/wiki");
   await page.getByRole("link", { name: "워드-회의록" }).click();
-  await expect(page.getByText("워드에서 가져온 본문")).toBeVisible({ timeout: 15_000 });
-
+  await expect(page.getByText("워드에서 가져온 본문")).toBeVisible({ timeout: 15000 });
   // Notion: a page and a CSV database into the chosen project (the asset
   // becomes an attachment; the web has no document attachment list, so the
   // Rust import suites assert it).
@@ -179,7 +184,9 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
     data: { key: "NOT", name: "노션 이관", visibility: "workspace" },
   });
   expect(createProject.status(), await createProject.text()).toBe(201);
-  const project = (await createProject.json()) as { id: string };
+  const project = (await readJson(createProject, flowSchemas.project)) as {
+    id: string;
+  };
   await page.goto("/w/acme/settings");
   await page.getByLabel("가져올 형식").selectOption("notion-zip");
   await page.getByLabel("대상 프로젝트").selectOption({ label: "노션 이관" });
@@ -193,21 +200,25 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
     }),
   });
   await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({
-    timeout: 60_000,
+    timeout: 60000,
   });
   await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible();
   const tasksRes = await page.request.get(`/api/v1/workspaces/${id}/projects/${project.id}/tasks`);
   expect(tasksRes.ok(), await tasksRes.text()).toBe(true);
-  const tasks = (await tasksRes.json()) as { items: { title: string }[] };
+  const tasks = (await readJson(tasksRes, flowSchemas.tasks)) as {
+    items: {
+      title: string;
+    }[];
+  };
   expect(tasks.items.map((task) => task.title)).toEqual(["노션에서 온 태스크"]);
   await page.goto("/w/acme/wiki");
   await page.getByRole("link", { name: "로드맵" }).click();
-  await expect(page.getByText("노션 본문")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("노션 본문")).toBeVisible({ timeout: 15000 });
   expect(cspViolations).toEqual([]);
 });
 
 test("member does not see workspace export in settings", async ({ page, browser }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(90000);
   const member = {
     email: "member-zip@example.com",
     password: "supersecret1",
@@ -228,6 +239,7 @@ test("member does not see workspace export in settings", async ({ page, browser 
   const inviteLink = page.getByRole("link").filter({ hasText: "/invite/" });
   const href = await inviteLink.getAttribute("href");
   const token = href?.split("/invite/")[1];
+  if (token === undefined) throw new Error("Missing fixture value: token");
   expect(token).toBeTruthy();
   await page.getByRole("button", { name: "로그아웃" }).click();
 
@@ -249,7 +261,7 @@ test("member does not see workspace export in settings", async ({ page, browser 
 });
 
 test("owner downloads workspace zip from settings", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(60000);
   await ensureOwnerSession(page);
 
   await page.goto("/w/acme/settings");

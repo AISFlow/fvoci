@@ -1,11 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
-import { watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, watchCspViolations } from "./helpers";
 
 function fixtureSql(sql: string): void {
   const admin = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  if (!admin || !container) throw new Error("isolated Rust/PostgreSQL fixture required");
+  if (!admin || !container) {
+    throw new Error("isolated Rust/PostgreSQL fixture required");
+  }
   execFileSync(
     "docker",
     [
@@ -25,7 +27,9 @@ function fixtureSql(sql: string): void {
 }
 
 function uuid(value: string): string {
-  if (!/^[0-9a-f-]{36}$/i.test(value)) throw new Error("invalid fixture UUID");
+  if (!/^[0-9a-f-]{36}$/i.test(value)) {
+    throw new Error("invalid fixture UUID");
+  }
   return `'${value}'`;
 }
 
@@ -33,7 +37,7 @@ test("observed body denial gates cached share tree, heading and snippets; full r
   page,
   browser,
 }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(90000);
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/);
   await page.getByLabel("성").fill("김");
@@ -46,15 +50,20 @@ test("observed body denial gates cached share tree, heading and snippets; full r
   await expect(page).toHaveURL(/\/$/);
   const workspaces = await page.request.get("/api/v1/me/workspaces");
   expect(workspaces.ok()).toBe(true);
-  const ws = (await workspaces.json()).items.find(
+  const fixtureValue1 = (await readJson(workspaces, flowSchemas.workspaces)).items.find(
     (item: { slug: string }) => item.slug === "acme",
-  ).id;
+  );
+  if (fixtureValue1 === undefined)
+    throw new Error(
+      'Missing fixture value: (await readJson(workspaces, flowSchemas.workspaces)).items.find(\n    (item: { slug: string }) => item.slug === "acme",\n  )',
+    );
+  const ws = fixtureValue1.id;
   const create = async (title: string, parentId: string | null = null) => {
     const response = await page.request.post(`/api/v1/workspaces/${ws}/documents`, {
       data: { title, parentId },
     });
     expect(response.status()).toBe(201);
-    return (await response.json()).id as string;
+    return (await readJson(response, flowSchemas.document)).id;
   };
 
   for (const scenario of ["revoked", "expired", "moved"] as const) {
@@ -75,9 +84,13 @@ test("observed body denial gates cached share tree, heading and snippets; full r
           type: "doc",
           content: [{ type: "paragraph", content: [{ type: "text", text }] }],
         });
+        const fixtureValue2 = text;
+        if (fixtureValue2 === undefined) throw new Error("Missing fixture value: text");
+        const fixtureValue3 = id;
+        if (fixtureValue3 === undefined) throw new Error("Missing fixture value: id");
         // Match the persistence projection: document search hydrates `text`, not content_json.
         fixtureSql(
-          `UPDATE fvoci.documents SET content_json = '${content}'::jsonb, text = '${text}' WHERE id = ${uuid(id)};`,
+          `UPDATE fvoci.documents SET content_json = '${content}'::jsonb, text = '${fixtureValue2}' WHERE id = ${uuid(fixtureValue3)};`,
         );
       }
       // Wait for normal index recall using the owner; no polling of the public rate limit.
@@ -86,9 +99,11 @@ test("observed body denial gates cached share tree, heading and snippets; full r
           async () => {
             const response = await page.request.get(`/api/v1/workspaces/${ws}/search?q=${q}`);
             expect(response.ok()).toBe(true);
-            return (await response.json()).items.some((item: { id: string }) => item.id === child);
+            return (await readJson(response, flowSchemas.search)).items.some(
+              (item: { id: string }) => item.id === child,
+            );
           },
-          { timeout: 30_000 },
+          { timeout: 30000 },
         )
         .toBe(true);
       const shareRes = await page.request.post(
@@ -96,9 +111,10 @@ test("observed body denial gates cached share tree, heading and snippets; full r
         { data: { expiresInDays: 7 } },
       );
       expect(shareRes.status()).toBe(201);
-      const share = await shareRes.json();
+      const share = await readJson(shareRes, flowSchemas.share);
       const path = new URL(share.url).pathname;
       const token = path.split("/")[2];
+      if (token === undefined) throw new Error("Missing fixture value: token");
       const anon = await browser.newContext();
       try {
         const reader = await anon.newPage();
@@ -106,7 +122,9 @@ test("observed body denial gates cached share tree, heading and snippets; full r
         const apiPaths: string[] = [];
         reader.on("request", (request) => {
           const apiPath = new URL(request.url()).pathname;
-          if (apiPath.startsWith("/api/")) apiPaths.push(apiPath);
+          if (apiPath.startsWith("/api/")) {
+            apiPaths.push(apiPath);
+          }
         });
         await reader.goto(path);
         await expect(reader.locator("#root")).toHaveAttribute("data-v-app", "");
@@ -124,16 +142,18 @@ test("observed body denial gates cached share tree, heading and snippets; full r
           expect(
             (await page.request.delete(`/api/v1/workspaces/${ws}/share-links/${share.id}`)).ok(),
           ).toBe(true);
-        } else if (scenario === "expired") {
-          fixtureSql(
-            `UPDATE fvoci.share_links SET expires_at = now() - interval '1 second' WHERE id = ${uuid(share.id)};`,
-          );
         } else {
-          const moved = await page.request.post(
-            `/api/v1/workspaces/${ws}/documents/${child}/move`,
-            { data: { newParentId: outside } },
-          );
-          expect(moved.status(), await moved.text()).toBe(200);
+          if (scenario === "expired") {
+            fixtureSql(
+              `UPDATE fvoci.share_links SET expires_at = now() - interval '1 second' WHERE id = ${uuid(share.id)};`,
+            );
+          } else {
+            const moved = await page.request.post(
+              `/api/v1/workspaces/${ws}/documents/${child}/move`,
+              { data: { newParentId: outside } },
+            );
+            expect(moved.status(), await moved.text()).toBe(200);
+          }
         }
         // Only the selected body's request observes denial; successful tree/search are still cached.
         const denied = reader.waitForResponse(

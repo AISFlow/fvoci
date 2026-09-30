@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, watchCspViolations } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -14,7 +14,7 @@ test("owner stars and shares a wiki document; the public link needs no session a
   page,
   browser,
 }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(90000);
   const cspViolations = watchCspViolations(page);
 
   // Global security headers on the SPA shell served by the Rust server.
@@ -26,7 +26,7 @@ test("owner stars and shares a wiki document; the public link needs no session a
   expect(appShell.headers()["x-frame-options"]).toBe("SAMEORIGIN");
 
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -38,9 +38,19 @@ test("owner stars and shares a wiki document; the public link needs no session a
 
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspaces = (await workspacesRes.json()) as { items: { id: string; slug: string }[] };
-  const wsId = workspaces.items.find((item) => item.slug === owner.workspaceSlug)!.id;
-
+  const workspaces = (await readJson(workspacesRes, flowSchemas.workspaces)) as {
+    items: {
+      id: string;
+      slug: string;
+    }[];
+  };
+  const required1 = workspaces.items.find((item) => item.slug === owner.workspaceSlug);
+  if (required1 === undefined) {
+    throw new Error(
+      "Missing fixture value: workspaces.items.find((item) => item.slug === owner.workspaceSlug)",
+    );
+  }
+  const wsId = required1.id;
   const rootTitle = "공유 루트 문서";
   const childTitle = "공유 하위 문서";
   const bodyText = "공개로 읽는 본문";
@@ -48,28 +58,36 @@ test("owner stars and shares a wiki document; the public link needs no session a
     data: { parentId: null, title: rootTitle },
   });
   expect(rootRes.status()).toBe(201);
-  const root = (await rootRes.json()) as { id: string; number: number };
+  const root = (await readJson(rootRes, flowSchemas.document)) as {
+    id: string;
+    number: number;
+  };
   const childRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: root.id, title: childTitle },
   });
   expect(childRes.status()).toBe(201);
 
   // Body through the real collab editor, then a durable persist.
-  await page.goto(`/w/acme/WIKI-${root.number}`);
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await page.goto(`/w/acme/WIKI-${String(root.number)}`);
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   const editor = page.locator(".fvoci-editor .ProseMirror");
   await expect(editor).toBeVisible();
   await editor.click();
   await page.keyboard.type(bodyText);
   await page.getByRole("button", { name: "저장", exact: true }).click();
-  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
-
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15000 });
   // Star toggle, then the starred and recent lists on the workspace home.
   await page.getByRole("button", { name: "즐겨찾기 추가" }).click();
   await expect(page.getByRole("button", { name: "즐겨찾기 해제" })).toBeVisible();
   const starsRes = await page.request.get(`/api/v1/workspaces/${wsId}/stars`);
   expect(
-    ((await starsRes.json()) as { items: { targetId: string }[] }).items.map((s) => s.targetId),
+    (
+      (await readJson(starsRes, flowSchemas.unknown)) as {
+        items: {
+          targetId: string;
+        }[];
+      }
+    ).items.map((s) => s.targetId),
   ).toEqual([root.id]);
 
   await page.getByRole("link", { name: "홈", exact: true }).click();
@@ -89,7 +107,7 @@ test("owner stars and shares a wiki document; the public link needs no session a
 
   // Share dialog: create a 30-day link and read the one-time URL.
   await starred.getByRole("link", { name: new RegExp(rootTitle) }).click();
-  await expect(page).toHaveURL(new RegExp(`/w/acme/WIKI-${root.number}$`));
+  await expect(page).toHaveURL(new RegExp(`/w/acme/WIKI-${String(root.number)}$`));
   await page.getByRole("button", { name: "공유 링크" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("공유 링크가 없습니다")).toBeVisible();
@@ -128,7 +146,9 @@ test("owner stars and shares a wiki document; the public link needs no session a
   const apiPaths: string[] = [];
   reader.on("request", (request) => {
     const path = new URL(request.url()).pathname;
-    if (path.startsWith("/api/")) apiPaths.push(path);
+    if (path.startsWith("/api/")) {
+      apiPaths.push(path);
+    }
   });
   const publicUrl = new URL(sharePath, page.url()).toString();
   await reader.goto(publicUrl);

@@ -9,13 +9,11 @@ import { login, watchCspViolations } from "./helpers";
 import {
   admin,
   blockAt,
-  blockTexts,
   caretAtEndOf,
   createDoc,
   editorOf,
   expectBlocks,
   focused,
-  newSignedInPage,
   openDoc,
   save,
   savedBody,
@@ -103,10 +101,11 @@ test("the block gutter adds, converts, duplicates, moves, colours and deletes bl
   const items = menu.getByRole("menuitem");
   await expect(items).toHaveCount(17);
   await expect(page.locator('[data-gutter="drag"]')).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator('[data-gutter="drag"]')).toHaveAttribute(
-    "aria-controls",
-    (await menu.getAttribute("id"))!,
-  );
+  const required1 = await menu.getAttribute("id");
+  if (required1 === null) {
+    throw new Error('Missing fixture value: (await menu.getAttribute("id"))');
+  }
+  await expect(page.locator('[data-gutter="drag"]')).toHaveAttribute("aria-controls", required1);
   await expect(items.first()).toBeFocused();
   await page.keyboard.press("ArrowDown");
   await expect(items.nth(1)).toBeFocused();
@@ -159,6 +158,7 @@ test("the block gutter adds, converts, duplicates, moves, colours and deletes bl
   // blocks get an id once edited; the converted heading has one.)
   await expect(blockAt(page, 0)).toHaveAttribute("data-id", /\S+/);
   const blockId = await blockAt(page, 0).getAttribute("data-id");
+  if (blockId === null) throw new Error("Missing fixture value: blockId");
   await openBlockMenu(page, 0);
   await blockMenu(page).getByRole("menuitem", { name: "블록 링크 복사" }).click();
   await expect(blockMenu(page)).toHaveCount(0);
@@ -228,7 +228,7 @@ async function tableShape(page: Page): Promise<string[][]> {
     .locator("table")
     .evaluate((table) =>
       [...table.querySelectorAll("tr")].map((row) =>
-        [...row.children].map((cell) => `${cell.tagName.toLowerCase()}:${cell.textContent ?? ""}`),
+        [...row.children].map((cell) => `${cell.tagName.toLowerCase()}:${cell.textContent}`),
       ),
     );
 }
@@ -311,9 +311,13 @@ test("the table handles insert, delete, move, format, merge and delete through t
   await openTableMenu(page, "col");
   await expect(tableMenu(page).getByRole("menuitem")).toHaveCount(19);
   await expect(tableMenu(page).getByRole("menuitem").first()).toBeFocused();
+  const required2 = await tableMenu(page).getAttribute("id");
+  if (required2 === null) {
+    throw new Error('Missing fixture value: (await tableMenu(page).getAttribute("id"))');
+  }
   await expect(page.locator('[data-table-handle="col"]')).toHaveAttribute(
     "aria-controls",
-    (await tableMenu(page).getAttribute("id"))!,
+    required2,
   );
   await tableMenu(page).getByRole("menuitem", { name: "열 삭제" }).click();
   await expect(tableMenu(page)).toHaveCount(0);
@@ -491,7 +495,7 @@ test("the code-block chrome sets the language, copies, and shows line numbers, w
   await expect(chrome.getByRole("button", { name: "접기" })).toHaveCount(0);
   for (let i = 2; i <= 9; i += 1) {
     await page.keyboard.press("Enter");
-    await page.keyboard.type(`line ${i}`);
+    await page.keyboard.type(`line ${String(i)}`);
   }
   const fold = chrome.getByRole("button", { name: "접기" });
   await fold.click();
@@ -578,7 +582,11 @@ test("the selection bubble formats text and its menus and popovers follow the me
   const typeMenu = page.getByRole("menu", { name: "블록 유형" });
   await expect(typeMenu).toBeVisible();
   await expect(typeTrigger).toHaveAttribute("aria-expanded", "true");
-  await expect(typeTrigger).toHaveAttribute("aria-controls", (await typeMenu.getAttribute("id"))!);
+  const required3 = await typeMenu.getAttribute("id");
+  if (required3 === null) {
+    throw new Error('Missing fixture value: (await typeMenu.getAttribute("id"))');
+  }
+  await expect(typeTrigger).toHaveAttribute("aria-controls", required3);
   const typeItems = typeMenu.getByRole("menuitemradio");
   await expect(typeItems).toHaveText(["본문", "H1", "H2", "H3"]);
   await expect(typeItems.first()).toBeFocused();
@@ -648,7 +656,15 @@ test("the selection bubble formats text and its menus and popovers follow the me
     const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
       editor: {
         state: {
-          selection: { from: number; to: number; $from: { parent: { textContent: string } } };
+          selection: {
+            from: number;
+            to: number;
+            $from: {
+              parent: {
+                textContent: string;
+              };
+            };
+          };
         };
       };
     };
@@ -686,20 +702,28 @@ test("the selection bubble formats text and its menus and popovers follow the me
       // Installed prosemirror-view schedules its selection-to-DOM focus repair
       // synchronously in the root focus handler with a 20ms delay.
       if (focusing && delay === 20 && typeof callback === "function") {
-        if (repair) throw new Error("multiple editor focus-repair tasks");
+        if (repair) {
+          throw new Error("multiple editor focus-repair tasks");
+        }
         gate.captured = true;
-        repair = () => callback(...args);
+        repair = () => {
+          Reflect.apply(callback, window, args);
+        };
         timer = nativeTimeout(() => {}, delay);
         return timer;
       }
       return nativeTimeout(callback, delay, ...args);
     }) as typeof window.setTimeout;
     const deliver = (event: KeyboardEvent) => {
-      if (event.key !== "Home" || !event.shiftKey) return;
+      if (event.key !== "Home" || !event.shiftKey) {
+        return;
+      }
       window.setTimeout = nativeTimeout;
       document.removeEventListener("keyup", deliver);
       window.clearTimeout(timer);
-      if (!repair) throw new Error("missing pending editor focus repair");
+      if (!repair) {
+        throw new Error("missing pending editor focus repair");
+      }
       gate.before = snapshot();
       repair();
       gate.delivered = true;
@@ -718,18 +742,26 @@ test("the selection bubble formats text and its menus and popovers follow the me
           __fvociKeyboardFocusRepair: {
             captured: boolean;
             delivered: boolean;
-            before: { text?: string; from: number; to: number; parent: string };
-            after: { text?: string; from: number; to: number; parent: string };
+            before: {
+              text?: string;
+              from: number;
+              to: number;
+              parent: string;
+            };
+            after: {
+              text?: string;
+              from: number;
+              to: number;
+              parent: string;
+            };
           };
         }
       ).__fvociKeyboardFocusRepair,
   );
-  await test
-    .info()
-    .attach("keyboard-focus-repair", {
-      body: JSON.stringify(focusRepair),
-      contentType: "application/json",
-    });
+  await test.info().attach("keyboard-focus-repair", {
+    body: JSON.stringify(focusRepair),
+    contentType: "application/json",
+  });
   expect(focusRepair.captured).toBe(true);
   expect(focusRepair.delivered).toBe(true);
   for (const boundary of [focusRepair.before, focusRepair.after]) {
@@ -855,7 +887,7 @@ test("on a narrow screen the gutter and bubble give way to the bottom toolbar", 
 
   await save(page);
   await page.reload();
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   await expect(blockAt(page, 0).locator("strong")).toHaveText("모바일 문단");
 
   // Wide again: no bottom toolbar.

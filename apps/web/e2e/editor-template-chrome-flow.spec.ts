@@ -1,7 +1,7 @@
 // Official Nuxt UI editor chrome on FVOCI's existing Tiptap/Yjs host.
 // Real browser, Rust server, DB, peer and persisted ACK; no demo document/store.
 import { expect, test } from "@playwright/test";
-import { login, watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, login, watchCspViolations } from "./helpers";
 import {
   admin,
   member,
@@ -52,7 +52,7 @@ test("non-editor Vue screens do not load the editor host or its collaboration pl
     data: { key: "TCL", name: "Editor lazy boundary", visibility: "workspace" },
   });
   expect(project.status()).toBe(201);
-  const projectId = (await project.json()).id;
+  const projectId = (await readJson(project, flowSchemas.project)).id;
   const task = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, {
     data: { title: "Lazy route witness", startDate: "2026-09-28", dueDate: "2026-09-30" },
   });
@@ -92,7 +92,15 @@ test("fixed insert and history use the existing room, selection and persisted do
     await openDoc(peer.page, doc.path);
     const plugins = await editorOf(page).evaluate((root) =>
       (
-        root as HTMLElement & { editor: { state: { plugins: Array<{ key: string }> } } }
+        root as HTMLElement & {
+          editor: {
+            state: {
+              plugins: Array<{
+                key: string;
+              }>;
+            };
+          };
+        }
       ).editor.state.plugins.map((plugin) => plugin.key),
     );
     expect(plugins.filter((key) => key.startsWith("bubbleMenu$"))).toHaveLength(1);

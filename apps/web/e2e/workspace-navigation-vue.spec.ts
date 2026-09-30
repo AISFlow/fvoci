@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
-import { createE2eUser, login, logout, watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, logout, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 const owner = { email: "navigation@example.com", password: "navigation123" };
@@ -25,9 +25,14 @@ test("workspace entrance, project creation validation, clone and archived naviga
   await page.getByLabel("주소(영문)").fill("navigation");
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
-  workspaceId = (await (await page.request.get("/api/v1/me/workspaces")).json()).items.find(
-    (item: { slug: string }) => item.slug === "navigation",
-  ).id;
+  const fixtureValue1 = (
+    await readJson(await page.request.get("/api/v1/me/workspaces"), flowSchemas.workspaces)
+  ).items.find((item: { slug: string }) => item.slug === "navigation");
+  if (fixtureValue1 === undefined)
+    throw new Error(
+      'Missing fixture value: (\n    await readJson(await page.request.get("/api/v1/me/workspaces"), flowSchemas.workspaces)\n  ).items.find((item: { slug: string }) => item.slug === "navigation")',
+    );
+  workspaceId = fixtureValue1.id;
   await page.goto("/w/navigation?from=direct#entrance");
   await vue(page);
   await expect(
@@ -51,9 +56,17 @@ test("workspace entrance, project creation validation, clone and archived naviga
   await expect(page).toHaveURL(/\/NAV\/tasks$/);
   await vue(page);
   const projects = (
-    await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()
+    await readJson(
+      await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`),
+      flowSchemas.projects,
+    )
   ).items;
-  projectId = projects.find((item: { key: string }) => item.key === "NAV").id;
+  const fixtureValue2 = projects.find((item: { key: string }) => item.key === "NAV");
+  if (fixtureValue2 === undefined)
+    throw new Error(
+      'Missing fixture value: projects.find((item: { key: string }) => item.key === "NAV")',
+    );
+  projectId = fixtureValue2.id;
   await page.goto("/w/navigation/projects");
   await page.getByRole("button", { name: "복제", exact: true }).click();
   await dialog.getByLabel("키", { exact: true }).fill("COPY");
@@ -85,8 +98,13 @@ test("wiki list creates documents and restores wiki and project trash through th
   await page.getByRole("button", { name: "새 문서", exact: true }).click();
   await expect(page).toHaveURL(/\/WIKI-\d+$/);
   await vue(page);
-  const wiki = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/tree`)).json())
-    .items[0];
+  const wiki = (
+    await readJson(
+      await page.request.get(`/api/v1/workspaces/${workspaceId}/tree`),
+      flowSchemas.documents,
+    )
+  ).items[0];
+  if (wiki === undefined) throw new Error("Missing fixture value: wiki");
   expect(
     (
       await page.request.patch(`/api/v1/workspaces/${workspaceId}/documents/${wiki.id}`, {
@@ -98,14 +116,18 @@ test("wiki list creates documents and restores wiki and project trash through th
     (await page.request.delete(`/api/v1/workspaces/${workspaceId}/documents/${wiki.id}`)).ok(),
   ).toBe(true);
   const copy = (
-    await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()
+    await readJson(
+      await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`),
+      flowSchemas.projects,
+    )
   ).items.find((item: { key: string }) => item.key === "COPY");
+  if (copy === undefined) throw new Error("Missing fixture value: copy");
   const created = await page.request.post(
     `/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents`,
     { data: { parentId: copy.rootDocumentId, title: "Restorable project document" } },
   );
   expect(created.status()).toBe(201);
-  const document = await created.json();
+  const document = await readJson(created, flowSchemas.document);
   expect(
     (
       await page.request.delete(
@@ -190,14 +212,26 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
     membershipRole: "member",
   });
   const members = (
-    await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()
+    await readJson(
+      await page.request.get(`/api/v1/workspaces/${workspaceId}/members`),
+      flowSchemas.members,
+    )
   ).items;
-  const memberId = members.find(
+  const fixtureValue3 = members.find(
     (item: { email: string }) => item.email === "navigation-inbox@example.com",
-  ).userId;
+  );
+  if (fixtureValue3 === undefined)
+    throw new Error(
+      'Missing fixture value: members.find(\n    (item: { email: string }) => item.email === "navigation-inbox@example.com",\n  )',
+    );
+  const memberId = fixtureValue3.userId;
   const copy = (
-    await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()
+    await readJson(
+      await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`),
+      flowSchemas.projects,
+    )
   ).items.find((item: { key: string }) => item.key === "COPY");
+  if (copy === undefined) throw new Error("Missing fixture value: copy");
   createE2eUser("navigation-mentions@example.com", "mentionspass123", "댓글", {
     workspaceSlug: "navigation",
     membershipRole: "member",
@@ -212,14 +246,16 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
         Array.from({ length: Math.min(5, 105 - start) }, async (_, offset) => {
           // Two real members stay within the unchanged sixty-comments/user limit.
           const author = start + offset < 53 ? page : coauthor;
+          const fixtureValue4 = copy.rootDocumentId;
+          if (fixtureValue4 === null) throw new Error("Missing fixture value: copy.rootDocumentId");
           const comment = await author.request.post(
-            `/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${copy.rootDocumentId}/comments`,
+            `/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${fixtureValue4}/comments`,
             {
-              data: { body: `Paged inbox ${start + offset}`, mentionedUserIds: [memberId] },
+              data: { body: `Paged inbox ${String(start + offset)}`, mentionedUserIds: [memberId] },
             },
           );
           expect(comment.status()).toBe(201);
-          commentIds.push((await comment.json()).id);
+          commentIds.push((await readJson(comment, flowSchemas.document)).id);
         }),
       );
     }
@@ -232,7 +268,9 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   for (const id of [workspaceId, memberId, ...commentIds]) expect(id).toMatch(/^[0-9a-f-]{36}$/i);
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
   const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
-  if (!container || !adminUrl) throw new Error("isolated PostgreSQL fixture context is required");
+  if (!container || !adminUrl) {
+    throw new Error("isolated PostgreSQL fixture context is required");
+  }
   const sql = `
     BEGIN;
     INSERT INTO fvoci.notifications (workspace_id, user_id, event_id, verb, actor_user_id, target_type, target_id, payload, created_at)
@@ -264,9 +302,10 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   await login(page, "navigation-inbox@example.com", "inboxpass123");
   expect(
     (
-      await (
-        await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)
-      ).json()
+      await readJson(
+        await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`),
+        flowSchemas.count,
+      )
     ).count,
   ).toBe(105);
   await page.goto("/w/navigation/notifications");
@@ -309,9 +348,10 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   await expect(rows).toHaveCount(0);
   expect(
     (
-      await (
-        await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)
-      ).json()
+      await readJson(
+        await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`),
+        flowSchemas.count,
+      )
     ).count,
   ).toBe(0);
 });

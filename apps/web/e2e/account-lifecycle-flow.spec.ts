@@ -27,16 +27,21 @@ const member = {
 function tokenFrom(text: string, pattern: RegExp): string {
   const match = text.match(pattern);
   expect(match?.[1]).toBeTruthy();
-  return match![1];
+  const required1 = match;
+  if (required1 === null) {
+    throw new Error("Missing fixture value: match");
+  }
+  const token = required1[1];
+  if (token === undefined) throw new Error("Missing token capture");
+  return token;
 }
 
 test("account settings: password, email change, magic link, withdraw and cancel", async ({
   page,
 }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(120000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
-
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);

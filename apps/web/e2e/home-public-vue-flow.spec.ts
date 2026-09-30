@@ -1,3 +1,4 @@
+import { readJson, flowSchemas } from "./helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function expectVue(page: Page): Promise<void> {
@@ -32,14 +33,14 @@ test("home and public pages boot Vue with real persisted workspaces, legal versi
     const published = await page.request.post("/api/v1/admin/legal", {
       data: {
         kind: "terms",
-        title: `공개 약관 ${version}`,
-        bodyMarkdown: `## 조항 ${version}\n\n**안전한 약관**과 [도움말](https://example.com/help).\n\n[위험한 링크](javascript:alert(1))\n\n<script>window.legalInjected = true</script>`,
+        title: `공개 약관 ${String(version)}`,
+        bodyMarkdown: `## 조항 ${String(version)}\n\n**안전한 약관**과 [도움말](https://example.com/help).\n\n[위험한 링크](javascript:alert(1))\n\n<script>window.legalInjected = true</script>`,
         effectiveAt: "2026-01-01T00:00:00Z",
         required: false,
       },
     });
     expect(published.status()).toBe(201);
-    expect((await published.json()).version).toBe(version);
+    expect((await readJson(published, flowSchemas.version)).version).toBe(version);
   }
   const operator = await page.request.patch("/api/v1/admin/instance-settings", {
     data: {

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser, login, logout } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login, logout } from "./helpers";
 
 const admin = {
   email: "Admin@Example.COM",
@@ -26,7 +26,7 @@ const readonlyMember = {
 
 test("setup → home → rename → logout → login → denied workspace", async ({ page }) => {
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await expect(page.locator("#root.isolate")).toHaveCount(1);
 
   await page.getByLabel("성").fill(admin.familyName);
@@ -43,7 +43,7 @@ test("setup → home → rename → logout → login → denied workspace", asyn
 
   const me = await page.request.get("/api/v1/auth/me");
   expect(me.ok()).toBe(true);
-  const meBody = await me.json();
+  const meBody = await readJson(me, flowSchemas.user);
   expect(meBody.email).toBe("admin@example.com");
 
   await page.getByRole("link", { name: admin.workspaceName }).click();

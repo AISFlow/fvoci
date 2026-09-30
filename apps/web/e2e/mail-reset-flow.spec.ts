@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { authSql, expectVueAuth, rejectMagicVariants, tokenHash } from "./auth-link-evidence";
-import { waitForCapturedMail } from "./helpers";
+import { readJson, flowSchemas, waitForCapturedMail } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -19,10 +19,9 @@ const invited = {
 test("invitation email is delivered and password reset uses the captured link", async ({
   page,
 }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(90000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
-
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -65,8 +64,12 @@ test("invitation email is delivered and password reset uses the captured link", 
   expect(resetMail.text).toContain("Subject: FVOCI 비밀번호 재설정");
   const tokenMatch = resetMail.text.match(/reset-password\?token=([A-Za-z0-9_-]+)/);
   expect(tokenMatch?.[1]).toBeTruthy();
-  const token = tokenMatch![1];
-
+  const required1 = tokenMatch;
+  if (required1 === null) {
+    throw new Error("Missing fixture value: tokenMatch");
+  }
+  const token = required1[1];
+  if (token === undefined) throw new Error("Missing fixture value: token");
   await rejectMagicVariants(page, "/reset-password", token, async () => {
     await page.getByLabel("새 비밀번호").fill(owner.newPassword);
     await page.getByRole("button", { name: "비밀번호 변경" }).click();
@@ -84,7 +87,7 @@ test("invitation email is delivered and password reset uses the captured link", 
     data: { token, newPassword: owner.newPassword },
   });
   expect(replay.status()).toBe(400);
-  expect((await replay.json()).code).toBe("magic_invalid");
+  expect((await readJson(replay, flowSchemas.error)).code).toBe("magic_invalid");
   await expect(
     page.getByRole("status").filter({ hasText: "비밀번호가 재설정되었습니다" }),
   ).toBeVisible();

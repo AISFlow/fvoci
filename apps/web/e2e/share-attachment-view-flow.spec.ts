@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { watchCspViolations } from "./helpers";
+import { readJson, flowSchemas, watchCspViolations } from "./helpers";
 import { expectVueViewer } from "./viewer-app";
 
 const owner = {
@@ -29,12 +29,18 @@ async function uploadDocumentAttachment(
     { data: { name, sizeBytes: bytes.length } },
   );
   expect(uploadRes.ok(), await uploadRes.text()).toBeTruthy();
-  const upload = (await uploadRes.json()) as {
+  const upload = (await readJson(uploadRes, flowSchemas.upload)) as {
     attachmentId: string;
     partSizeBytes: number;
-    parts: Array<{ partNumber: number; url: string }>;
+    parts: Array<{
+      partNumber: number;
+      url: string;
+    }>;
   };
-  const parts: { partNumber: number; etag: string }[] = [];
+  const parts: {
+    partNumber: number;
+    etag: string;
+  }[] = [];
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
@@ -46,7 +52,11 @@ async function uploadDocumentAttachment(
     expect(put.ok(), await put.text()).toBeTruthy();
     const etag = put.headers()["etag"];
     expect(etag).toBeTruthy();
-    parts.push({ partNumber: part.partNumber, etag: etag! });
+    const required1 = etag;
+    if (required1 === undefined) {
+      throw new Error("Missing fixture value: etag");
+    }
+    parts.push({ partNumber: part.partNumber, etag: required1 });
   }
   const completeRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`,
@@ -60,10 +70,9 @@ test("anonymous share attachment view: text, image and download inside the share
   page,
   browser,
 }) => {
-  test.setTimeout(90_000);
-
+  test.setTimeout(90000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -75,15 +84,29 @@ test("anonymous share attachment view: text, image and download inside the share
 
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspaces = (await workspacesRes.json()) as { items: { id: string; slug: string }[] };
-  const wsId = workspaces.items.find((item) => item.slug === owner.workspaceSlug)!.id;
-
+  const workspaces = (await readJson(workspacesRes, flowSchemas.workspaces)) as {
+    items: {
+      id: string;
+      slug: string;
+    }[];
+  };
+  const required2 = workspaces.items.find((item) => item.slug === owner.workspaceSlug);
+  if (required2 === undefined) {
+    throw new Error(
+      "Missing fixture value: workspaces.items.find((item) => item.slug === owner.workspaceSlug)",
+    );
+  }
+  const wsId = required2.id;
   const createDoc = async (title: string, parentId: string | null) => {
     const res = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
       data: { parentId, title },
     });
     expect(res.status()).toBe(201);
-    return ((await res.json()) as { id: string }).id;
+    return (
+      (await readJson(res, flowSchemas.document)) as {
+        id: string;
+      }
+    ).id;
   };
   const rootId = await createDoc("공유 첨부 루트", null);
   const childId = await createDoc("공유 첨부 하위", rootId);
@@ -109,9 +132,16 @@ test("anonymous share attachment view: text, image and download inside the share
     { data: { expiresInDays: 7 } },
   );
   expect(shareRes.status(), await shareRes.text()).toBe(201);
-  const share = (await shareRes.json()) as { id: string; url: string };
+  const share = (await readJson(shareRes, flowSchemas.share)) as {
+    id: string;
+    url: string;
+  };
   const sharePath = new URL(share.url).pathname;
-  const token = sharePath.split("/")[2]!;
+  const required3 = sharePath.split("/")[2];
+  if (required3 === undefined) {
+    throw new Error('Missing fixture value: sharePath.split("/")[2]');
+  }
+  const token = required3;
   expect(token.length).toBeGreaterThan(10);
   const viewPath = (attachmentId: string) => `${sharePath}/attachments/${attachmentId}/view`;
 
@@ -128,7 +158,9 @@ test("anonymous share attachment view: text, image and download inside the share
   const apiPaths: string[] = [];
   reader.on("request", (request) => {
     const path = new URL(request.url()).pathname;
-    if (path.startsWith("/api/")) apiPaths.push(path);
+    if (path.startsWith("/api/")) {
+      apiPaths.push(path);
+    }
   });
   const consoleLines: string[] = [];
   reader.on("console", (message) => consoleLines.push(message.text()));

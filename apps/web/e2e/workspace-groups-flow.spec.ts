@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { login, logout } from "./helpers";
+import { readJson, flowSchemas, login, logout } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -18,10 +18,9 @@ const invited = {
 };
 
 test("owner grants a group; a group-only member sees the private project", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(120000);
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
-
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
   await page.getByLabel("성").fill(owner.familyName);
   await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
   await page.getByLabel("이메일").fill(owner.email);
@@ -43,6 +42,7 @@ test("owner grants a group; a group-only member sees the private project", async
   await expect(inviteLink).toBeVisible();
   const href = await inviteLink.getAttribute("href");
   const token = href?.split("/invite/")[1];
+  if (token === undefined) throw new Error("Missing fixture value: token");
   expect(token).toBeTruthy();
 
   await page.getByRole("button", { name: "로그아웃" }).click();
@@ -125,13 +125,22 @@ test("owner grants a group; a group-only member sees the private project", async
   await expect(page.getByTestId("project-milestone-add")).toHaveCount(0);
   const workspaces = await page.request.get("/api/v1/me/workspaces");
   expect(workspaces.ok()).toBe(true);
-  const ws = (await workspaces.json()).items.find((row: { slug: string }) => row.slug === "acme");
+  const ws = (await readJson(workspaces, flowSchemas.workspaces)).items.find(
+    (row: { slug: string }) => row.slug === "acme",
+  );
+  if (ws === undefined) throw new Error("Missing fixture value: ws");
   const projects = await page.request.get(`/api/v1/workspaces/${ws.id}/projects`);
   expect(projects.ok()).toBe(true);
-  const project = (await projects.json()).items.find((row: { key: string }) => row.key === "GRP");
+  const project = (await readJson(projects, flowSchemas.projects)).items.find(
+    (row: { key: string }) => row.key === "GRP",
+  );
+  if (project === undefined) throw new Error("Missing fixture value: project");
   const groups = await page.request.get(`/api/v1/workspaces/${ws.id}/groups`);
   expect(groups.ok()).toBe(true);
-  const group = (await groups.json()).items.find((row: { name: string }) => row.name === "랩팀");
+  const group = (await readJson(groups, flowSchemas.groups)).items.find(
+    (row: { name: string }) => row.name === "랩팀",
+  );
+  if (group === undefined) throw new Error("Missing fixture value: group");
   expect(group).toBeTruthy();
   const grantUrl = `/api/v1/workspaces/${ws.id}/projects/${project.id}/groups`;
   expect(
@@ -163,7 +172,7 @@ test("owner grants a group; a group-only member sees the private project", async
   await expect(page.getByText("랩팀 · 뷰어")).toHaveCount(0);
   const grants = await page.request.get(grantUrl);
   expect(grants.ok()).toBe(true);
-  expect((await grants.json()).items).toEqual([]);
+  expect((await readJson(grants, flowSchemas.items)).items).toEqual([]);
   await logout(page);
   await login(page, invited.email, invited.password);
   await page.goto("/w/acme/GRP/tasks");

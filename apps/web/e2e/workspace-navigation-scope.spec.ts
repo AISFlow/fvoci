@@ -1,15 +1,26 @@
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
-import { createE2eUser, login } from "./helpers";
+import { readJson, flowSchemas, createE2eUser, login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 const owner = { email: "scope@example.com", password: "scopepass123" };
-let a: { id: string; slug: string };
-let b: { id: string; slug: string };
-let source: { id: string };
-let aWiki: { id: string };
-let bWiki: { id: string };
-
+let a: {
+  id: string;
+  slug: string;
+};
+let b: {
+  id: string;
+  slug: string;
+};
+let source: {
+  id: string;
+};
+let aWiki: {
+  id: string;
+};
+let bWiki: {
+  id: string;
+};
 // Send the real request and hold only its genuine response while the user switches.
 async function holdResponse(page: Page, path: string, method: string, succeeds = true) {
   let received!: () => void;
@@ -22,7 +33,9 @@ async function holdResponse(page: Page, path: string, method: string, succeeds =
   });
   const glob = `**${path}`;
   const handler = async (route: import("@playwright/test").Route) => {
-    if (route.request().method() !== method) return route.continue();
+    if (route.request().method() !== method) {
+      return route.continue();
+    }
     const response = await route.fetch();
     expect(response.ok()).toBe(succeeds);
     received();
@@ -41,7 +54,12 @@ async function holdResponse(page: Page, path: string, method: string, succeeds =
       await (await response).finished();
       // Browser microtasks and one paint finish the real mutation callback.
       await page.evaluate(
-        () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => {
+              resolve();
+            }),
+          ),
       );
       await page.unroute(glob, handler);
     },
@@ -76,8 +94,9 @@ function countBRequests(page: Page, resource: string): () => number {
     if (
       request.method() === "GET" &&
       new URL(request.url()).pathname === `/api/v1/workspaces/${b.id}/${resource}`
-    )
+    ) {
       count++;
+    }
   });
   return () => count;
 }
@@ -87,7 +106,7 @@ async function createProject(page: Page, workspaceId: string, key: string, name:
     data: { key, name, visibility: "workspace" },
   });
   expect(response.status()).toBe(201);
-  return response.json();
+  return readJson(response, flowSchemas.project);
 }
 
 async function createWiki(page: Page, workspaceId: string, title: string) {
@@ -95,7 +114,7 @@ async function createWiki(page: Page, workspaceId: string, title: string) {
     data: { parentId: null, title },
   });
   expect(response.status()).toBe(201);
-  return response.json();
+  return readJson(response, flowSchemas.document);
 }
 
 test("two real workspaces share reference spellings without sharing resources", async ({
@@ -110,12 +129,16 @@ test("two real workspaces share reference spellings without sharing resources", 
   await page.getByLabel("주소(영문)").fill("scope-a");
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
-  a = (await (await page.request.get("/api/v1/me/workspaces")).json()).items[0];
+  const firstWorkspace = (
+    await readJson(await page.request.get("/api/v1/me/workspaces"), flowSchemas.workspaces)
+  ).items[0];
+  if (firstWorkspace === undefined) throw new Error("Missing initial workspace");
+  a = firstWorkspace;
   const created = await page.request.post("/api/v1/workspaces", {
     data: { name: "Scope B", slug: "scope-b" },
   });
   expect(created.status()).toBe(201);
-  b = await created.json();
+  b = await readJson(created, flowSchemas.workspace);
   source = await createProject(page, a.id, "SAME", "A source");
   await createProject(page, b.id, "INFLIGHT", "B existing");
   await createProject(page, b.id, "COPIED", "B copy reference");
@@ -137,19 +160,22 @@ test("late project create and clone responses stay scoped to their original work
         : `/api/v1/workspaces/${a.id}/projects/${source.id}/clone`;
     const gate = await holdResponse(page, path, "POST");
     try {
-      if (kind === "create")
+      if (kind === "create") {
         await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
-      else
+      } else {
         await page
           .locator(".project-list__row")
           .filter({ has: page.locator(".project-list__key", { hasText: /^SAME$/ }) })
           .getByRole("button", { name: "복제", exact: true })
           .click();
+      }
       const dialog = page.getByRole("dialog");
       await dialog
         .getByLabel("키", { exact: true })
         .fill(kind === "create" ? "INFLIGHT" : "COPIED");
-      if (kind === "create") await dialog.getByLabel("이름", { exact: true }).fill("A created");
+      if (kind === "create") {
+        await dialog.getByLabel("이름", { exact: true }).fill("A created");
+      }
       await dialog
         .getByRole("button", { name: kind === "create" ? "새 프로젝트" : "복제", exact: true })
         .click();
@@ -161,7 +187,10 @@ test("late project create and clone responses stay scoped to their original work
       expect(count()).toBe(baseline);
       await expect(page.getByRole("dialog")).toHaveCount(0);
       const projects = (
-        await (await page.request.get(`/api/v1/workspaces/${a.id}/projects`)).json()
+        await readJson(
+          await page.request.get(`/api/v1/workspaces/${a.id}/projects`),
+          flowSchemas.projects,
+        )
       ).items;
       expect(
         projects.some(
@@ -186,20 +215,22 @@ test("project creation and cloning remain retired after returning A to B to A", 
         : `/api/v1/workspaces/${a.id}/projects/${source.id}/clone`;
     const gate = await holdResponse(page, path, "POST");
     try {
-      if (kind === "create")
+      if (kind === "create") {
         await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
-      else
+      } else {
         await page
           .locator(".project-list__row")
           .filter({ has: page.locator(".project-list__key", { hasText: /^SAME$/ }) })
           .getByRole("button", { name: "복제", exact: true })
           .click();
+      }
       const dialog = page.getByRole("dialog");
       await dialog
         .getByLabel("키", { exact: true })
         .fill(kind === "create" ? "ABAPROJ" : "ABACOPY");
-      if (kind === "create")
+      if (kind === "create") {
         await dialog.getByLabel("이름", { exact: true }).fill("Retired creation");
+      }
       await dialog
         .getByRole("button", { name: kind === "create" ? "새 프로젝트" : "복제", exact: true })
         .click();
@@ -287,17 +318,24 @@ test("late trash restoration refreshes A while B remains independently trashed",
     await createWiki(page, a.id, "Scoped restore"),
     await createWiki(page, b.id, "Scoped restore"),
   ];
-  for (let i = 0; i < 2; i++)
+  for (let i = 0; i < 2; i++) {
+    const workspace = [a, b][i];
+    const document = docs[i];
+    if (workspace === undefined || document === undefined)
+      throw new Error("Missing workspace/document fixture pair");
     expect(
       (
-        await page.request.post(`/api/v1/workspaces/${[a, b][i].id}/documents/${docs[i].id}/trash`)
+        await page.request.post(`/api/v1/workspaces/${workspace.id}/documents/${document.id}/trash`)
       ).ok(),
     ).toBe(true);
+  }
   await prepareA(page, "trash");
   const count = countBRequests(page, "trash");
+  const fixtureValue3 = docs[0];
+  if (fixtureValue3 === undefined) throw new Error("Missing fixture value: docs[0]");
   const gate = await holdResponse(
     page,
-    `/api/v1/workspaces/${a.id}/documents/${docs[0].id}/restore`,
+    `/api/v1/workspaces/${a.id}/documents/${fixtureValue3.id}/restore`,
     "POST",
   );
   try {
@@ -310,8 +348,10 @@ test("late trash restoration refreshes A while B remains independently trashed",
     await expect(
       page.getByRole("button", { name: "복원 Scoped restore", exact: true }),
     ).toBeVisible();
+    const fixtureValue4 = docs[0];
+    if (fixtureValue4 === undefined) throw new Error("Missing fixture value: docs[0]");
     expect(
-      (await page.request.get(`/api/v1/workspaces/${a.id}/documents/${docs[0].id}`)).status(),
+      (await page.request.get(`/api/v1/workspaces/${a.id}/documents/${fixtureValue4.id}`)).status(),
     ).toBe(200);
   } finally {
     gate.release();
@@ -324,10 +364,11 @@ test("late notification open and read-all preserve the other workspace's unread 
   baseURL,
 }) => {
   await login(page, owner.email, owner.password);
-  const userId = (await (await page.request.get("/api/v1/auth/me")).json()).userId;
+  const userId = (await readJson(await page.request.get("/api/v1/auth/me"), flowSchemas.user))
+    .userId;
   const commentIds: string[] = [];
   for (const [index, workspace] of [a, b].entries()) {
-    const email = `scope-actor-${index}@example.com`;
+    const email = `scope-actor-${String(index)}@example.com`;
     createE2eUser(email, "scopeactor123", "댓글", {
       workspaceSlug: workspace.slug,
       membershipRole: "member",
@@ -336,29 +377,40 @@ test("late notification open and read-all preserve the other workspace's unread 
     try {
       const actor = await context.newPage();
       await login(actor, email, "scopeactor123");
+      const fixtureValue5 = [aWiki, bWiki][index];
+      if (fixtureValue5 === undefined)
+        throw new Error("Missing fixture value: [aWiki, bWiki][index]");
       const response = await actor.request.post(
-        `/api/v1/workspaces/${workspace.id}/documents/${[aWiki, bWiki][index].id}/comments`,
+        `/api/v1/workspaces/${workspace.id}/documents/${fixtureValue5.id}/comments`,
         { data: { body: "Scoped notification", mentionedUserIds: [userId] } },
       );
       expect(response.status()).toBe(201);
-      commentIds.push((await response.json()).id);
+      commentIds.push((await readJson(response, flowSchemas.document)).id);
     } finally {
       await context.close();
     }
   }
   // Same approved real-event fixture as workspace-navigation-vue: no outbox timing shortcut in the request paths under test.
   for (const id of [userId, ...commentIds]) expect(id).toMatch(/^[0-9a-f-]{36}$/i);
+  const required1 = process.env.FVOCI_TEST_PG_CONTAINER;
+  if (required1 === undefined) {
+    throw new Error("Missing fixture value: process.env.FVOCI_TEST_PG_CONTAINER");
+  }
+  const required2 = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
+  if (required2 === undefined) {
+    throw new Error("Missing fixture value: process.env.FVOCI_E2E_ADMIN_DATABASE_URL");
+  }
   execFileSync(
     "docker",
     [
       "exec",
       "-i",
-      process.env.FVOCI_TEST_PG_CONTAINER!,
+      required1,
       "psql",
       "-U",
       "postgres",
       "-d",
-      new URL(process.env.FVOCI_E2E_ADMIN_DATABASE_URL!).pathname.slice(1),
+      new URL(required2).pathname.slice(1),
       "-v",
       "ON_ERROR_STOP=1",
     ],
@@ -369,8 +421,12 @@ test("late notification open and read-all preserve the other workspace's unread 
   );
   for (const operation of ["open", "read-all"] as const) {
     const notification = (
-      await (await page.request.get(`/api/v1/workspaces/${a.id}/notifications`)).json()
+      await readJson(
+        await page.request.get(`/api/v1/workspaces/${a.id}/notifications`),
+        flowSchemas.notifications,
+      )
     ).items[0];
+    if (notification === undefined) throw new Error("Missing fixture value: notification");
     expect(
       (
         await page.request.patch(`/api/v1/workspaces/${a.id}/notifications/${notification.id}`, {
@@ -400,9 +456,10 @@ test("late notification open and read-all preserve the other workspace's unread 
       expect(count()).toBe(baseline);
       expect(
         (
-          await (
-            await page.request.get(`/api/v1/workspaces/${b.id}/notifications/unread-count`)
-          ).json()
+          await readJson(
+            await page.request.get(`/api/v1/workspaces/${b.id}/notifications/unread-count`),
+            flowSchemas.count,
+          )
         ).count,
       ).toBe(1);
       await expect(page.getByRole("button", { name: "전체 읽음", exact: true })).toBeEnabled();
@@ -416,8 +473,12 @@ test("notification actions remain retired after A to B to A", async ({ page }) =
   await login(page, owner.email, owner.password);
   for (const operation of ["open", "read-all"] as const) {
     const notification = (
-      await (await page.request.get(`/api/v1/workspaces/${a.id}/notifications`)).json()
+      await readJson(
+        await page.request.get(`/api/v1/workspaces/${a.id}/notifications`),
+        flowSchemas.notifications,
+      )
     ).items[0];
+    if (notification === undefined) throw new Error("Missing fixture value: notification");
     expect(
       (
         await page.request.patch(`/api/v1/workspaces/${a.id}/notifications/${notification.id}`, {
@@ -485,7 +546,8 @@ test("a real workspace role change retires an owner operation without late navig
   baseURL,
 }) => {
   await login(page, owner.email, owner.password);
-  const userId = (await (await page.request.get("/api/v1/auth/me")).json()).userId;
+  const userId = (await readJson(await page.request.get("/api/v1/auth/me"), flowSchemas.user))
+    .userId;
   createE2eUser("scope-owner@example.com", "scopeowner123", "관리", {
     workspaceSlug: a.slug,
     membershipRole: "owner",
@@ -509,10 +571,13 @@ test("a real workspace role change retires an owner operation without late navig
       data: { role: "guest" },
     });
     expect(changed.ok(), await changed.text()).toBe(true);
-    const list = await (await refreshed).json();
-    expect(list.items.find((workspace: { id: string }) => workspace.id === a.id).role).toBe(
-      "guest",
-    );
+    const list = await readJson(await refreshed, flowSchemas.workspaces);
+    const fixtureValue6 = list.items.find((workspace: { id: string }) => workspace.id === a.id);
+    if (fixtureValue6 === undefined)
+      throw new Error(
+        "Missing fixture value: list.items.find((workspace: { id: string }) => workspace.id === a.id)",
+      );
+    expect(fixtureValue6.role).toBe("guest");
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await gate.finish();
     await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/projects$`));
