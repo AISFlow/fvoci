@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   shouldAdoptNativeOnAwareness,
   type AwarenessSelectionGuardInput,
-} from "../src/react/awareness-selection-guard.ts";
+} from "../src/awareness-selection-guard.ts";
 
 const base = (
   overrides: Partial<AwarenessSelectionGuardInput> = {},

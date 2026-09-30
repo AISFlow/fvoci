@@ -26,7 +26,7 @@
     "./export/docx": "./src/export/docx.ts",
     "./export/pptx": "./src/export/pptx.ts",
     "./export/limits": "./src/export/limits.ts",
-    "./styles.css": "./src/react/editor.css"
+    "./styles.css": "./src/editor.css"
   },
   "scripts": {
     "typecheck": "tsc --noEmit && vue-tsc --noEmit -p tsconfig.vue.json",

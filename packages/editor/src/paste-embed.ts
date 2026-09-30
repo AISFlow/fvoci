@@ -2,9 +2,9 @@
  * WHY: #602 사람용 주소 — 내부 링크는 `/w/:slug/:ref` 하나다. 워크스페이스는 UUID 가 아니라
  * 슬러그로 식별되므로 대소문자 무시로 비교한다(캐노니컬은 소문자).
  */
-import { formatDisplayId, parseDisplayId } from "../display-id.js";
-import type { EntityResolver } from "../entities.js";
-import { uuid } from "../uuid.js";
+import { formatDisplayId, parseDisplayId } from "./display-id.js";
+import type { EntityResolver } from "./entities.js";
+import { uuid } from "./uuid.js";
 
 const PATH = /^\/w\/([^/]+)\/([^/]+)/i;
 

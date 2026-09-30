@@ -28,24 +28,24 @@ import { Embed } from "./nodes/embed.js";
 import { MathBlock, MathInline } from "./nodes/math.js";
 import { Mention } from "./nodes/mention.js";
 import { Mermaid } from "./nodes/mermaid.js";
-import { shouldAdoptNativeOnAwareness } from "./react/awareness-selection-guard.js";
-import { isNativeOwnedDeleteKey } from "./react/native-delete-owner.js";
-import { parseWorkspaceUrl, resolvePastedEmbed } from "./react/paste-embed.js";
+import { shouldAdoptNativeOnAwareness } from "./awareness-selection-guard.js";
+import { isNativeOwnedDeleteKey } from "./native-delete-owner.js";
+import { parseWorkspaceUrl, resolvePastedEmbed } from "./paste-embed.js";
 import {
 	embedSlashItems,
 	filterSlashItems,
 	type SlashItem,
 	suggestionFloatingUi,
 	suggestionRenderer,
-} from "./react/suggestion-menu.js";
+} from "./suggestion-menu.js";
 import { createFvociExtensions, type EmojiMenuItem } from "./tiptap-schema.js";
 
 /* The collaborative editor's extension list without a UI framework. Hosts
  * (react/fvoci-editor.tsx) supply the framework-rendered node views, the
  * loaders and the upload hooks; the schema comes only from
  * createFvociExtensions, so every host edits the same Yjs content.
- * The helpers imported from react/ are plain DOM/ProseMirror code despite
- * their directory; the import-graph test in test/editor-extensions.test.ts
+ * The shared helpers are plain DOM/ProseMirror code; the import-graph test
+ * in test/editor-extensions.test.ts
  * fails if any of them pulls in a UI framework. */
 
 /** WHY: #749 — at textblock edges, block insertion happens outside the paragraph. */
@@ -69,7 +69,7 @@ export type FvociCollabUser = { id: string; name: string; color: string };
  * WHY: #738 — CollaborationCaret 기본 render 는 색을 setAttribute("style", …) 로 준다.
  * 해시 기반 style-src('unsafe-inline'·'unsafe-hashes' 없음) 아래에서 style= 속성은 CSP3 §6.7.3.3
  * 상 해시로 구제되지 않아 통째로 차단되고, 피어 캐럿·라벨이 색을 잃는다. CSSOM 쓰기는 그 검사를
- * 타지 않는다 — 피어 색만 커스텀 속성으로 넘기고 규칙은 react/editor.css 의 에디터 스킨에 둔다.
+ * 타지 않는다 — 피어 색만 커스텀 속성으로 넘기고 규칙은 editor.css 의 에디터 스킨에 둔다.
  * 라벨은 캐럿의 자식이라 --afn-caret-color 를 상속한다.
  */
 export function collabCaretRender(peer: {
