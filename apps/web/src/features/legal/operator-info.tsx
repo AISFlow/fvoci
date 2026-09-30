@@ -6,7 +6,6 @@ import { LEGAL_DOCS } from "./legal-docs";
 import {
   filledOperatorFields,
   hasOperatorInfo,
-  LEGAL_DOCS,
   operatorFieldHref,
   type OperatorInfo,
 } from "./operator-fields";
@@ -15,7 +14,6 @@ export type { OperatorInfo } from "./operator-fields";
 export {
   filledOperatorFields,
   hasOperatorInfo,
-  LEGAL_DOCS,
   operatorFieldHref,
 } from "./operator-fields";
 export { LEGAL_DOCS } from "./legal-docs";
