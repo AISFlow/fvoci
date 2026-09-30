@@ -17,8 +17,7 @@ import { useWorkspaceSession } from "../session/useWorkspaceSession";
 import "@/features/projects/projects.css";
 
 // `/w/:slug/:ref` project overview (archive / unarchive / delete, document
-// list). Not live: the boundary still boots React. After delete the projects
-// list is still React, so leaveTo uses location.assign unless isVueAppPath.
+// list). After delete, leaveTo loads the remaining React projects list.
 const route = useRoute();
 const router = useRouter();
 const queryClient = useQueryClient();

@@ -147,9 +147,9 @@ test("wiki documents stay wiki; project keys are project-home; gantt stays gantt
   assert.equal(router.resolve("/w/acme/GNT/gantt").name, "project-gantt");
   assert.equal(router.resolve("/w/acme/GNT/tasks").name, "project-tasks");
   assert.equal(router.resolve("/w/acme/GNT/board").name, "project-board");
-  // Declared but not live: afterEach still full-loads (same as /login above).
+  // These resource routes now stay within Vue.
   assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
-  assert.equal(isVueAppPath("/w/acme/GNT"), false);
+  assert.equal(isVueAppPath("/w/acme/GNT"), true);
   assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
 });
 
@@ -161,7 +161,7 @@ test("workspace-item is more specific than project-home; wiki stays wiki", () =>
   assert.equal(router.resolve("/w/acme/WIKI-3").name, "wiki-document");
   assert.equal(router.resolve("/w/acme/GNT").name, "project-home");
   assert.equal(router.resolve("/w/acme/GNT/tasks").name, "project-tasks");
-  // Declared but not live: afterEach still full-loads (same as /login above).
-  assert.equal(isVueAppPath("/w/acme/GNT-1"), false);
+  // These resource routes now stay within Vue.
+  assert.equal(isVueAppPath("/w/acme/GNT-1"), true);
   assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
 });

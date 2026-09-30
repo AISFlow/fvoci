@@ -4,7 +4,8 @@ import { QueryClient, useQuery, VueQueryPlugin } from "@tanstack/vue-query";
 import { createApp, effectScope } from "vue";
 import { projectDocumentsQuery, projectQuery } from "@/features/projects/queries";
 import { isVueAppPath } from "@/app-boundary";
-import { STAGED_PROJECT_HOME_PATH, STAGED_VUE_ROUTE_PATHS } from "../../route-paths.ts";
+import { PROJECT_HOME_PATH } from "@/app-boundary";
+import { VUE_ROUTE_PATHS } from "../../route-paths.ts";
 import { leaveTo } from "../../session/navigation.ts";
 import { projectHomeChildNodes } from "./project-home.ts";
 
@@ -26,27 +27,27 @@ function mount<T>(client: QueryClient, use: () => T): { result: T; stop: () => v
   };
 }
 
-test("the staged project-home path is /w/:slug/:ref like the collection routes", () => {
-  assert.equal(STAGED_VUE_ROUTE_PATHS.projectHome, "/w/:slug/:ref");
+test("the live project-home path is /w/:slug/:ref like the collection routes", () => {
+  assert.ok(VUE_ROUTE_PATHS.projectHome.startsWith("/w/:slug/:ref("));
 });
 
-test("the staged project-home boundary regex takes project keys only", () => {
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/GNT"), true);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/gnt"), true);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/GNT/"), true);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/wiki-3"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/WIKI-3"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/GNT-1"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/GNT/gantt"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/GNT/tasks"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/GNT/board"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/GNT/calendar"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/GNT/table"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/GNT/settings"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/projects"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/search"), false);
-  assert.equal(STAGED_PROJECT_HOME_PATH.test("/w/acme/wiki"), false);
-  assert.equal(isVueAppPath("/w/acme/GNT"), false, "boundary unchanged: still React");
+test("the live project-home boundary regex takes project keys only", () => {
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT"), true);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/gnt"), true);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT/"), true);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/wiki-3"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/WIKI-3"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT-1"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT/gantt"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT/tasks"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT/board"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT/calendar"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT/table"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT/settings"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/projects"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/search"), false);
+  assert.equal(PROJECT_HOME_PATH.test("/w/acme/wiki"), false);
+  assert.equal(isVueAppPath("/w/acme/GNT"), true, "boundary now renders Vue");
   assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
   assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
 });

@@ -13,7 +13,6 @@ import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
 import { SearchPage } from "@/pages/SearchPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
-import { ProjectTasksPage } from "@/pages/ProjectTasksPage";
 import { TrashPage } from "@/pages/TrashPage";
 import { WikiPage } from "@/pages/WikiPage";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
@@ -21,7 +20,6 @@ import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
 import { TemplatesSettingsPage } from "@/pages/TemplatesSettingsPage";
-import { ProjectCollectionPage } from "@/pages/ProjectCollectionPage";
 import { MyTasksPage } from "@/pages/MyTasksPage";
 import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
 import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
@@ -173,10 +171,6 @@ const router = createBrowserRouter(
           path="a/:attachmentId/view"
           {...lazyPage(() => import("@/pages/AttachmentViewPage").then((m) => m.AttachmentViewPage))}
         />
-        <Route path=":ref/tasks" element={<ProjectTasksPage />} />
-        <Route path=":ref/table" element={<ProjectCollectionPage type="table" />} />
-        <Route path=":ref/board" element={<ProjectCollectionPage type="board" />} />
-        <Route path=":ref/calendar" element={<ProjectCollectionPage type="calendar" />} />
         <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
         <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
         <Route path=":ref" element={<WorkspaceRefPage />} />

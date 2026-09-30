@@ -33,8 +33,8 @@ import { useWorkspaceSession } from "../session/useWorkspaceSession";
 import "@/features/projects/projects.css";
 
 // `/w/:slug/GNT-1`: lookup a task or a project document (React TaskDetailPage).
-// Not live: the boundary still boots React. After delete the tasks list is
-// still React, so leaveTo uses location.assign unless isVueAppPath.
+// Task and document links render this Vue page; task lifecycle actions return
+// to the connected task list through leaveTo.
 const route = useRoute();
 const router = useRouter();
 const queryClient = useQueryClient();

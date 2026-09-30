@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { isVueAppPath } from "@/app-boundary";
-import { STAGED_VUE_ROUTE_PATHS, VUE_ROUTE_PATHS } from "./route-paths";
+import { VUE_ROUTE_PATHS } from "./route-paths";
 
 /** The Vue app's pages; src/app-boundary.ts sends exactly the live paths
  * (VUE_ROUTE_PATHS) here. Each page is its own chunk, so the Gantt page does not load the wiki
@@ -11,32 +11,12 @@ export const routes: RouteRecordRaw[] = [
   // Wiki refs are more specific than project home's `/w/:slug/:ref` and must
   // stay listed first so `/w/acme/wiki-3` is never the project overview.
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
-  // Task list / collection views. src/app-boundary.ts is coordinator-owned;
-  // these routes stay unreachable until that regex list includes them
-  // (VUE_ROUTE_PATHS must be updated in the same change). A navigation that
-  // reaches them while the boundary still sends React will full-load away
-  // (afterEach below).
-  { path: "/w/:slug/:ref/tasks", name: "project-tasks", component: () => import("./pages/ProjectTasksPage.vue") },
-  { path: "/w/:slug/:ref/table", name: "project-table", component: () => import("./pages/ProjectCollectionPage.vue") },
-  { path: "/w/:slug/:ref/board", name: "project-board", component: () => import("./pages/ProjectCollectionPage.vue") },
-  { path: "/w/:slug/:ref/calendar", name: "project-calendar", component: () => import("./pages/ProjectCollectionPage.vue") },
-  // Task and project-document item refs. More specific than project-home's
-  // `/w/:slug/:ref`; wiki-document above is more specific still (`wiki-3`
-  // never reaches this page). Not live: STAGED_WORKSPACE_ITEM_PATH is the
-  // regex the coordinator would add later.
-  {
-    path: STAGED_VUE_ROUTE_PATHS.workspaceItem,
-    name: "workspace-item",
-    component: () => import("./pages/WorkspaceItemPage.vue"),
-  },
-  // Project home overview. Same `/w/:slug/:ref` shape as the collection
-  // routes; wiki-document and workspace-item above are more specific. Not
-  // live: STAGED_PROJECT_HOME_PATH is the regex the coordinator would add later.
-  {
-    path: STAGED_VUE_ROUTE_PATHS.projectHome,
-    name: "project-home",
-    component: () => import("./pages/ProjectHomePage.vue"),
-  },
+  { path: VUE_ROUTE_PATHS.projectTasks, name: "project-tasks", component: () => import("./pages/ProjectTasksPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectTable, name: "project-table", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectBoard, name: "project-board", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectCalendar, name: "project-calendar", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: VUE_ROUTE_PATHS.workspaceItem, name: "workspace-item", component: () => import("./pages/WorkspaceItemPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectHome, name: "project-home", component: () => import("./pages/ProjectHomePage.vue") },
   { path: VUE_ROUTE_PATHS.login, name: "login", component: () => import("./pages/LoginPage.vue") },
   { path: VUE_ROUTE_PATHS.home, name: "home", component: () => import("./pages/HomePage.vue") },
   { path: VUE_ROUTE_PATHS.legal, name: "legal", component: () => import("./pages/LegalPage.vue") },

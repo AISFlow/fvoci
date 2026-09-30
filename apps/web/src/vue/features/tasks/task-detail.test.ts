@@ -8,7 +8,8 @@ import { isVueAppPath } from "@/app-boundary";
 import { lookupQuery, resolveLookupTarget, type LookupItem } from "@/features/tasks/lookup";
 import { projectLabelsQuery, projectMilestonesQuery, taskQuery } from "@/features/tasks/queries";
 import { workflowQuery } from "@/features/projects/queries";
-import { STAGED_WORKSPACE_ITEM_PATH, STAGED_VUE_ROUTE_PATHS } from "../../route-paths.ts";
+import { WORKSPACE_ITEM_PATH } from "@/app-boundary";
+import { VUE_ROUTE_PATHS } from "../../route-paths.ts";
 import { leaveTo } from "../../session/navigation.ts";
 
 function queryClient(): QueryClient {
@@ -33,26 +34,26 @@ function source(rel: string): string {
   return readFileSync(path.join(import.meta.dirname, rel), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
 }
 
-test("the staged workspace-item path is the item-ref custom regex", () => {
+test("the live workspace-item path is the item-ref custom regex", () => {
   assert.equal(
-    STAGED_VUE_ROUTE_PATHS.workspaceItem,
+    VUE_ROUTE_PATHS.workspaceItem,
     "/w/:slug/:ref([A-Za-z0-9-]{2,32}-[1-9]\\d{0,8})",
   );
 });
 
-test("the staged workspace-item boundary regex takes item refs only", () => {
-  assert.equal(STAGED_WORKSPACE_ITEM_PATH.test("/w/acme/GNT-1"), true);
-  assert.equal(STAGED_WORKSPACE_ITEM_PATH.test("/w/acme/gnt-12"), true);
-  assert.equal(STAGED_WORKSPACE_ITEM_PATH.test("/w/acme/GNT-1/"), true);
-  assert.equal(STAGED_WORKSPACE_ITEM_PATH.test("/w/acme/wiki-3"), false);
-  assert.equal(STAGED_WORKSPACE_ITEM_PATH.test("/w/acme/WIKI-3"), false);
-  assert.equal(STAGED_WORKSPACE_ITEM_PATH.test("/w/acme/GNT"), false);
-  assert.equal(STAGED_WORKSPACE_ITEM_PATH.test("/w/acme/GNT-1/tasks"), false);
-  assert.equal(STAGED_WORKSPACE_ITEM_PATH.test("/w/acme/GNT/gantt"), false);
-  assert.equal(STAGED_WORKSPACE_ITEM_PATH.test("/w/acme/GNT/tasks"), false);
-  assert.equal(isVueAppPath("/w/acme/GNT-1"), false, "boundary unchanged: still React");
+test("the live workspace-item boundary regex takes item refs only", () => {
+  assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/GNT-1"), true);
+  assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/gnt-12"), true);
+  assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/GNT-1/"), true);
+  assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/wiki-3"), false);
+  assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/WIKI-3"), false);
+  assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/GNT"), false);
+  assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/GNT-1/tasks"), false);
+  assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/GNT/gantt"), false);
+  assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/GNT/tasks"), false);
+  assert.equal(isVueAppPath("/w/acme/GNT-1"), true, "boundary now renders Vue");
   assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
-  assert.equal(isVueAppPath("/w/acme/GNT"), false);
+  assert.equal(isVueAppPath("/w/acme/GNT"), true);
 });
 
 test("lookup, task, workflow, labels, milestones wait for workspace and ids", () => {
@@ -90,7 +91,7 @@ test("item-page queries stay idle until both ids exist", () => {
   }
 });
 
-test("after delete the tasks list is a full load unless it is a Vue path", () => {
+test("after delete the connected tasks list uses Vue navigation", () => {
   const assigns: string[] = [];
   const pushes: string[] = [];
   const env = {
@@ -98,11 +99,11 @@ test("after delete the tasks list is a full load unless it is a Vue path", () =>
     push: (path: string) => pushes.push(path),
   };
   leaveTo("/w/acme/GNT/tasks", env);
-  assert.deepEqual(assigns, ["/w/acme/GNT/tasks"]);
-  assert.deepEqual(pushes, []);
+  assert.deepEqual(assigns, []);
+  assert.deepEqual(pushes, ["/w/acme/GNT/tasks"]);
   leaveTo("/w/acme/GNT/gantt", env);
-  assert.deepEqual(assigns, ["/w/acme/GNT/tasks"]);
-  assert.deepEqual(pushes, ["/w/acme/GNT/gantt"]);
+  assert.deepEqual(assigns, []);
+  assert.deepEqual(pushes, ["/w/acme/GNT/tasks", "/w/acme/GNT/gantt"]);
 });
 
 const doc: LookupItem = {
