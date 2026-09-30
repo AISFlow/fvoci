@@ -1,36 +1,64 @@
-# Orca 환경·도구 검증 기록
+# FVOCI 실행 환경과 도구
 
-2026-09-24: 준비 검증 완료, 첫 인증·프로필 수직 기능 수락. 제품 검증 SHA·명령·잔여 기능은 `docs/rewrite.md`가 정본이다. 역할/소유권 규칙은 `AGENTS.md`를 따른다.
+이 문서는 현재 모델·Run 연결·설치 도구·탐색 설정·실행 제약의 정본이다.
+역할·권한·소유권·병렬 배정 규칙은 [AGENTS.md](../AGENTS.md), 기능·후보 SHA·검사 결과·활성 Task와
+다음 행동은 [rewrite.md](../docs/rewrite.md), 설치·복구는 [RUNNING.md](../RUNNING.md)를 따른다.
+과거 모델 교체·PR별 일지를 현재 실행 절차에 섞지 않는다.
 
-## 실제 실행 확인
+## 1. 현재 코디네이터와 Run 연결
 
-| 역할·도구 | 실제 경로·설정 | 확인 근거 |
+2026-10-01 00:36 KST, 현재 terminal 환경·세션 JSONL·설치 CLI·run-current를 읽기 전용으로 대조했다.
+
+| 항목 | 실제 값 | 근거 |
 | --- | --- | --- |
-| Orca | `/home/kinesis/.local/bin/orca-ide`, 1.4.207 | skills list, orca-cli/orchestration live guide, Run/Task/Dispatch 호출 성공. PATH의 `orca`는 빈 파일이므로 사용하지 않음 |
-| 코디네이터 | codex0.156.1, `gpt-6-astra`, medium | 현재 cwd의 turn_context model/effort 대조 |
-| 자문 | Claude Code2.1.280, `claude-fable-5-1`, medium | 실제 세션 JSONL/프로세스와 요청·유효 launch receipt 일치. Cursor Fable로 잘못 시작한 초기 task는 검토로 불인정 |
-| 구현 | cursor-agent2026.09.18-9a7762b, `composer-2.5` | 목록·receipt·TUI·완료 보고 대조. 별도 effort 미지정 |
-| 조사·검증 | 같은 cursor-agent, `cursor-grok-4.6-high` | 설치 목록의 Grok4.6 비-Fast ID, receipt/TUI 대조. 이름에 포함된 high 외 별도 추론 옵션을 요구하지 않음 |
-| Rust | 1.98.1, cargo/rustfmt/clippy | 프로젝트 전용 설치; rustup-init1.28.2 공식 SHA256 대조. cargo test 사용 |
-| PostgreSQL/Docker | PostgreSQL18.3, Docker29.8.1, native x86_64 | digest 고정 이미지와 실제 DB·HTTP 검사 |
-| GitHub | 인증된 gh | 원본/PR999/CI 읽기, 대상 기존 PR1 확인. 원격 쓰기 없음 |
+| 코디네이터 모델 / effort | `gpt-6.1-sol` / `high` | 최신 `turn_context`; 요청값·TUI 이름만으로 추정하지 않음 |
+| 실행 경로 / CLI | Orca Codex 주 terminal, `codex-cli 0.159.1`, source `cli` | session_meta·현재 `codex --version` |
+| 주 세션 | `01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0` | 실제 `CODEX_THREAD_ID`와 JSONL 일치 |
+| terminal handle | `term_cc010fa2-f24c-4018-820f-16172de0e39f` | 실제 `ORCA_TERMINAL_HANDLE`와 Run coordinator_handle 일치 |
+| 현재 Run / generation | `run_496803f4d94f` / `2` | 본인 terminal의 기존 Run 바인딩 및 최신 run-current |
+| Orca runtime | `73201137-ed1f-4a8a-bcde-302a44c54e4b` | 현재 CLI 응답 `_meta.runtimeId` |
+| 통합 worktree | `/home/kinesis/orca/workspaces/fvoci/f272-batch-integration` | 최신 turn_context.cwd·실제 Git |
+| 현재 sandbox / approval | `danger-full-access` / `never` | 최신 turn_context; filesystem·network 접근 가능, 강한 읽기 전용 sandbox 아님 |
 
-`agent`와 `cursor-agent`는 동일 설치 실행 파일임을 확인했다. Cursor turnStart 관측은 unsupported였으므로 receipt만으로 완료를 추정하지 않고 실제 TUI·반환 보고를 확인했다. 재사용 receipt의 model:null은 모델 재선택을 의미하지 않으며 동일 process incarnation의 검증된 Composer를 재사용했다.
+실제 transcript:
+`/home/kinesis/.codex/sessions/2026/09/30/rollout-2026-09-30T23-38-52-01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0.jsonl`.
 
-## 저장소·공통 스킬
+사용자 전면 인계 후 본인의 attested terminal에서
+`/home/kinesis/.local/bin/orca-ide orchestration run-use --id run_496803f4d94f --json`이
+**2026-09-30T14:42:01Z** 성공했다. coordinator_handle은 위 본인이고 consumer_generation은 2다.
+이전 generation 1의 대리 호출은 consumer_fenced로 거부되어 효과가 없었다. 기존 Run·작업·일곱 워커·WIP를
+보존하고 공식 @all로 소유권 변경을 전달했다. 다른 Run 생성/reset·terminal 사칭·자동 체인 재가동은 없었다.
+Run의 오래된 objective 문자열에 남은 “Astra”는 당시 생성 metadata이며 현재 역할 배정이 아니다.
 
-- 통합 worktree: `/home/kinesis/orca/workspaces/fvoci/daggertooth`, `fvoci/daggertooth`, 대상 AISFlow/fvoci. 초기97a3fe61 및 기존 starter 파일을 보존했다.
-- 원본: 별도 clone `/home/kinesis/orca/references/fvoci-rust-source-20260924`, PR HEAD393795261322b916e588043cf94feca999175843 detached/clean. 기준 main/PR base는 rewrite 문서에 고정했다. 원본과 대상은 서로의 linked worktree가 아니다.
-- 참조 clone에 쓰기 비트를 제거했다. 같은 사용자 권한으로 되돌릴 수 있는 우발 쓰기 방지이며 보안 샌드박스가 아니다. 워커는 현재 개발 계정 권한을 상속했으므로 숨겨진 도구만으로 강한 격리를 주장하지 않는다.
-- 5개 프로젝트 스킬의 정본은 `.agents/skills`. Codex 목록 발견 및 명시 읽기, Cursor/Claude Code 실제 세션의 명시 읽기와 완료 반환 확인. 자동 탐색 성공을 다른 클라이언트에 전용하지 않았고 adapter/복제본을 만들지 않았다.
-- 공식 스킬은 설치된 orca-cli/orchestration을 그대로 사용했다. 별도 scheduler/daemon/agent MCP는 만들지 않았다. 기존 다른 Run·전역 설정 불변.
-- 원본 private / 대상 public을 확인했다. 공개 문서 조회에는 라이브러리명/버전만 사용했다. 이번 작업에서 push·PR 생성·원본 변경은 하지 않았다.
+현재 구현·검증과 독립 검토는 Orca Codex terminal의 Sol 6.1이다. 신규 launch는 requested/effective
+`gpt-6.1-sol`과 effort, input_accepted/turn_started를 확인하고 보고서의 실제 session_meta/turn_context와 대조한다.
+별도 컨텍스트·고정 SHA·검토 도구의 제한은 각 보고서에 기록한다. 지원하지 않는 hard read-only 제한을
+적용했다고 주장하지 않으며 읽기 전용 prompt와 Git 변경 감시의 한계를 명시한다.
+실행 불가·capacity·readiness 실패는 작업 시작·검토 완료로 세지 않는다. 모델 fallback·계정/결제 변경은 하지 않는다.
 
-## 도구·자원
+**#272는 별도 사용자 승인 전 main 머지·태그·릴리스·제품 배포 금지**다.
+현재 Task/Dispatch·결과·다음 실행은 rewrite.md §1·§4·§7에서 확인한다.
 
-개발 MCP 추가 **0개**. GitHub는 gh, 문서는 공식 docs.rs/crates.io/도구 문서, 파일/Git/Rust는 기존 로컬 도구를 사용했다. 기존 MCP 설정은 덮어쓰지 않았다. 선택 MCP 미연결은 준비 차단으로 취급하지 않았다.
+## 2. 저장소와 설치 도구
 
-이 호스트의 Rust 실행 환경:
+| 항목 | 현재 경로·버전 / 확인 범위 |
+| --- | --- |
+| 호스트 | Linux `6.18.33.2-microsoft-standard-WSL2`, x86_64; 62 GiB RAM. 00:36 관측 가용35 GiB·디스크583 GiB는 일시 snapshot |
+| Orca | `/home/kinesis/.local/bin/orca-ide`, **1.4.217**. 선택한 실행 파일을 모든 호출에 재사용 |
+| Codex | `codex-cli 0.159.1`; 실행 모델/effort는 위 transcript로 확인 |
+| Bun | **1.4.2**, root `packageManager=bun@1.4.2`; 고정 lock와 worktree 로컬 dependencies 사용 |
+| 웹 도구 | manifest의 TypeScript5.9.3·ESLint10.11.0·Prettier3.9.9. Vue-tsc/Volar와 기타 pin은 manifest·patch 정본 확인 |
+| Rust | 프로젝트 toolchain의 `rustc 1.98.1 (48a229cea 2026-09-01)`; cargo/rustfmt/clippy 경로는 아래 환경 설정 |
+| Docker / Python / gh | Docker29.8.1, Python3.14.4, gh2.46.0. 버전 조회만 실행, 설치·전역 설정 변경 없음 |
+| CodeGraph | `/home/kinesis/.local/bin/codegraph`, **1.6.0**; 번들 Node를 쓰는 개발 도구 |
+| 원본 참조 clone | `/home/kinesis/orca/references/fvoci-rust-source-20260924`; target와 별도 저장소. 원본 고정 SHA는 rewrite.md §1 |
+
+원본은 private 읽기 전용 참조이고 대상은 AISFlow/fvoci다. 참조 clone의 쓰기 비트 제거는
+같은 계정이 되돌릴 수 있는 우발 쓰기 방지이며 보안 sandbox가 아니다. 현재 개발 계정 접근을
+Git worktree 분리나 숨겨진 도구만으로 강하게 격리했다고 주장하지 않는다.
+
+이 호스트의 프로젝트 Rust toolchain을 선택할 때만 해당 command 환경에 다음을 적용한다.
+현재 주 세션의 CARGO_HOME/RUSTUP_HOME은 unset이므로 자동 적용됐다고 추정하지 않는다.
 
 ```sh
 export CARGO_HOME=/home/kinesis/orca/toolchains/fvoci-rust/cargo
@@ -38,394 +66,91 @@ export RUSTUP_HOME=/home/kinesis/orca/toolchains/fvoci-rust/rustup
 export PATH="$CARGO_HOME/bin:$PATH"
 ```
 
-전역 셸 설정은 변경하지 않았다. worktree별 target, 실행별 UUID DB/비특권 앱 역할, 실제 port0 bind를 사용했다. crate 다운로드 캐시만 재사용했다. Redis/검색/브라우저는 첫 기능에서 필요하지 않아 기동하지 않았다. 동시 쓰기 최대2, 무거운 전체 검사 한 묶음으로 유지했다. 최종 두 실제 서버의 DB/역할/포트 분리 및 SIGTERM·재시작 보존 확인. 전체 workspace RLS/연결 풀 컨텍스트 검증은 후속 workspace API 수락 조건이다.
-
-DB 검사는 `scripts/start-test-postgres.sh`로 재현할 수 있다. Docker 로컬 daemon, openssl, 고정 PostgreSQL digest를 사용하며 loopback 동적 포트·실행 label·모드600 임시 credential 파일을 생성한다. 테스트 명령의 성공/실패 후 컨테이너와 credential 정리를 실제 확인했다. 테스트 본문/빠른 경로는 설치나 네트워크 다운로드를 수행하지 않는다.
-
-## task·검토·정리
-
-Run: `run_b01d432a9dee`. 세부 허용 경로/명령/수락 조건은 각 Orca task spec이 정본이다.
-
-| 작업 | task / dispatch | 결과 |
-| --- | --- | --- |
-| 초기 Claude Code 자문 | task_9f44ee133c43 / ctx_2988b16d4927 | 설계 검토 완료; user_takeover로 retained, 건드리지 않음 |
-| 원본 계약 | task_988a8245f639 / ctx_cb0170f995ac | Grok 조사 완료, release |
-| 협업·문서 probe | task_1532bb645f74 / ctx_00b1baf38504 | Grok e94ac2d 제출·통합 검증, release |
-| 첫 제품 구현 | task_3377f29385d5 / ctx_6f56b812c5f0 | Composer6a77f76 제출, release |
-| 보안 검토 | task_43a2bfe9a062 / ctx_f447be92fcf1 | Fable 차단 결함 확인, release |
-| 첫 보강 | task_12716d8c1cc0 / ctx_cf69c321c975 | Composer e2a7380/31dda85 보존; 후속으로 소유권 이관 |
-| HTTP/비밀번호 대조 | task_6678e958475f / ctx_d8b2fe334de7 | Grok 조사 완료, release |
-| 수락 보강 | task_0f2b86c05fc9 / ctx_f3fb566d9a40 | Composer a240805 제출, release |
-| 최종 독립 검토 | task_4aced35f7177 / ctx_ee0d5cd5054f | Fable a240805+25235f3 첫 slice 차단 해소 확인, release |
-
-한 번의 재사용 시도 ctx_cdfbbb6d1ad2는 이전 follow-up 실행 중 readiness timeout으로 실패했다. 기존 실행 종료를 확인한 뒤 동일 task를 재시도했다. 오래된 capability로 보낸 추가 완료는 거부됐으며 성공 증거로 사용하지 않았다. 완료된 작업을 idle 상태만으로 수락하지 않았다.
-
-최종 `worker-list --terminal-state reclaimable`은 빈 목록. retained4개는 초기 Fable user_takeover, 이관된 과거 readiness/보강 row 및 자원이 생성되지 않은 실패 시도다. 별도 진행 중인 쓰기 워커 없음. 원본·대상 task worktree와 커밋은 삭제하지 않았다.
-
-이번 코디네이터 소유 `fvoci-rust-b01d432a9dee` 컨테이너와 admin-url/postgres.env credential 파일은 검증 후 제거했다. 시험 HTTP 프로세스도 종료 확인. 로컬 진단 아티팩트는 `/tmp/fvoci-rust-b01d-jpu9ngdq`에 남겼으며 credential 실값은 저장하지 않는다. 확인 당시 별도로 존재한 `fvoci-rust-test-pg-kinesis` 컨테이너는 생성 주체를 확정하지 못해 삭제하지 않았다. 그 컨테이너는 최종 수락 검사에 사용하지 않았다.
-
-## 재개
-
-AGENTS → 이 기록 → docs/rewrite 최신 수락 → 해당 Run task와 실제 git status/worktree/프로세스를 대조한다. 마지막 검증 코드195a58f, 다음 workspace API/인가·RLS task를 아직 배정하지 않았다. 세션 종료 시 미수락 제품 diff 없음. 다음 명령은 `cargo fetch --locked`, 빠른 gate, `scripts/start-test-postgres.sh`; 기존 DB/credential 파일을 재사용하지 않는다.
-
-## 2026-09-24 재개 확인
-
-Orca1.4.207 기존 실행 경로와 Run을 유지했다. Composer2.5 / Grok4.6 / Claude Code Fable5.1 medium의 신규 dispatch 요청·유효 모델을 대조하고 실제 TUI 작업을 확인했다. 새 MCP·전역 설정 변경 없음. 사용자 승인 범위는 AGENTS.md의 대상 원격 반영 절을 따른다. PR1은 검증 후 merge했고, 후속 통합 worktree는 `rust-workspace-integration` (main fe30bd1 기반)이다. 최신 수락·task 상태는 docs/rewrite.md에 둔다.
-
-초기 rhwp Git dependency fetch가 공용 Cargo cache 잠금을 잡아 다른 worktree의 cargo clippy도 대기했다. target 출력은 분리되어 있으며 cache 대기를 컴파일/테스트 시간과 구분한다. 소유 불명 기존 PostgreSQL과 GitHub runner 컨테이너는 건드리지 않는다.
-
-
-사용자 추가 승인: Fable5.1의 실제 주간 한도 도달 시 Claude Code Opus5.5
-medium으로 자문을 대체할 수 있다. 아직 한도 도달/Opus 모델 ID·선택을
-확인하거나 전환 실행하지 않았다. 현재 검토는 Fable5.1 medium이다.
-
-## 2026-09-24 Fable 한도와 승인된 자문 전환
-
-고정0f862f8 lifecycle 자문 task08b0ddbb932f/ctx601e47738d17의 실제 Claude Code
-응답은 "You've reached your Fable limit. Run /usage-credits to continue or switch
-models with /model."였다. 검토 보고서/worker_done 없이 종료되어 검토 완료로
-인정하지 않았으며, 해당 dispatch를 worker-stop으로 중단·터미널 종료했다.
-설치 실행 파일은 /home/kinesis/.local/share/claude/versions/2.1.281이며, 같은
-한도 안내에는 "included Fable usage for this week"가 포함돼 있다. 설치된
-모델 카탈로그에서 claude-opus-5-5를 확인했고 CLI --effort medium 지원도
-확인했다. 사용자가 승인한 이 조건의 fallback만 적용한다. Opus 요청/유효
-receipt와 실제 검토 반환은 아래 후속 기록으로 확인하며, 아직 완료로 주장하지 않는다.
-/usage 읽기 전용 조회 외에 usage credits 활성화·결제·전역 설정 변경은 하지 않았다.
-
-재개 receipt: 같은 task08b0ddbb932f의 ctx9edaf2220d96, Claude Code
-`claude-opus-5-5`, medium 요청/유효 일치, turnStart observed. 실제 terminal
-term582f3fbb-7a5a-416d-921b-3ee6e6ebb2ac의 해당 고정 SHA 읽기 전용 검토만
-재개했다. 이전 Fable-only task 문구는 이 검증된 사용자 승인 fallback으로
-명시적으로 대체 전달했다. 검토 완료 여부는 docs/rewrite 최신 결과를 따른다.
-
-## 현재 자문 배정 — 사용자 전체 교체 지시
-
-기존 Fable 역할을 모두 Claude Code Opus5.5 medium (`claude-opus-5-5`)으로
-교체한다. 주간 한도 확인은 더 이상 전환 조건이 아니다. 기존 검토의 모델·결과
-이력은 변경하지 않는다. 실행 경로는 검증된 Claude Code2.1.281이며, 앞선
-ctx9edaf2220d96 및 ctx2297b3adb75a의 요청·유효 Opus/medium 검증을 유지한다.
-새 검토도 실제 dispatch 설정을 대조한다. 코디네이터·구현·조사 역할은 불변이다(13:00Z 이전 기록; 코디네이터는 아래 절에서 교체).
-
-## 코디네이터 교체 (2026-09-24 13:00Z 이후)
-
-사용자 지시로 코디네이터를 Claude Code2.1.281 `claude-opus-5-5`, medium으로 교체했다.
-실제 세션 모델 ID `claude-opus-5-5[1m]`(같은 모델의 1M context 변형이며 대체 모델이 아님), `/effort medium` 설정을 확인했다. Orca Run
-`run_b01d432a9dee`에 `run-use`로 이 terminal(term_7123bc52)을 바인딩했다. 위 표의 codex
-Astra 코디네이터 행은 **과거** 기록으로 보존한다. 독립 자문은 별도 Orca dispatch의 Claude Code
-`claude-opus-5-5`/medium이며 launch requested/effective를 대조한다. 첫 재개 dispatch:
-Grok `ctx_c97ebb20c9b0`(requested/effective `cursor-grok-4.6-high`), Composer
-`ctx_cfdccc3dbce5`/`ctx_a796df4ecf21`(requested/effective `composer-2.5`).
-
-## 상시 코디네이터 자문 (2026-09-25)
-
-사용자 지시로 PR 검토와 별개인 상시 자문 세션을 둔다: Orca task `task_20fbb8c98686` /
-dispatch `ctx_cd611507a373`, Claude Code `claude-opus-5-5` medium(requested/effective 일치), 읽기 전용.
-코디네이터가 dispatch로 질문을 보내고 필요하면 terminal로 깨운다. 답은 Run 메일(`ADVICE:`)과
-`/tmp/fvoci-advisor/*.md`. 워커·검토자 완료 전송은 반드시 `/home/kinesis/.local/bin/orca-ide`
-절대 경로로 한다(PATH의 bare `orca`는 빈 파일이라 메시지가 조용히 유실된다).
-
-## 2026-09-25 임시 All-Opus 실행 체제
-
-사용자 지시로 모든 신규 AI dispatch는 Claude Code Opus 5.5 medium이다. Orca
-`worker-start --agent claude --model claude-opus-5-5 --effort medium`의 launch receipt에서
-requested/effective 모두 `claude-opus-5-5`/`medium`임을 확인했다(예: ctx_a7cca29eeb44).
-진행 중이던 cursor Composer(가져오기·내보내기)·Grok(S3) 작업은 WIP 커밋·인계 기록 후
-종료하고 Opus 워커가 같은 브랜치에서 이어받는다. 과거 실행 기록은 수정하지 않는다.
-
-## 2026-09-26 역할 재배정 (사용자 통합 지시)
-
-사용자 지시로 AGENTS.md의 역할 표를 교체했다. 이전 All-Opus 강제 규칙은 현재 운영 규칙에서 해제하고
-당시 실행 기록은 위 절에 그대로 둔다. 확인한 실제 실행 경로:
-
-| 역할 | 실행 경로·모델 | 확인 근거 |
-| --- | --- | --- |
-| 코디네이터 | Claude Code 2.1.283, `claude-fable-5-1`, `/effort medium` | 현재 세션 `/model`·`/effort` 출력, Run `run_b01d432a9dee`에 `run-use`로 terminal `term_77898e46` 바인딩 |
-| 주 구현 | Orca `worker-start --agent claude --model claude-opus-5-5 --effort medium` | 첫 dispatch `ctx_07898f6011b7`(#85 수정) receipt requested/effective 모두 `claude-opus-5-5`/`medium` |
-| 조사·검증 | Orca `worker-start --agent cursor --model cursor-grok-4.6-high` | 첫 dispatch `ctx_6612f5d79ee2`(읽기 전용 감사) receipt requested/effective `cursor-grok-4.6-high`, effort null(모델 ID에 포함, 별도 옵션 없음). `cursor-agent --list-models`에 Grok 4.6 계열 확인 |
-| 독립 검토 | Orca `worker-start --agent claude --model claude-fable-5-1 --effort medium`, 별도 세션 | 첫 검토 dispatch receipt를 아래 후속 기록으로 확인한다 |
-
-인계 시점: main `90a3df02`(#84), 열린 PR #81(`2d858c2`)·#82(`e95261e`)·#85(`c475fab`), 미푸시 task-api
-`982f8637`, 활성 Opus 워커 collab-join-flake(`ctx_3a6ef72c2404`). 진행 중 프로세스를 강제 종료하지
-않았고 기존 코드·검토·측정 근거는 그대로 재사용한다. 코디네이터 인계 메모는
-`/home/kinesis/orca/fvoci-evidence/coordinator-handoff-2026-09-26.md`.
-
-## 2026-09-26 CodeGraph (선택적 개발 탐색 도구)
-
-- 사용자 지시로 코드 탐색·호출 관계·영향 조사 보조로만 도입한다. 새 모델·독립 검토자가 아니며 제품 런타임의
-  Node 예외 승인이 아니다. Cargo.toml·제품 package.json·Docker 이미지·CI required check에 넣지 않는다.
-- 설치는 이미 있던 `~/.codegraph/versions/v1.6.0`(`~/.local/bin/codegraph` 셸 래퍼, 번들 Node)이다. 릴리스
-  v1.6.0(2026-08-26, tag commit `dfccdf62`)의 `codegraph-linux-x64.tar.gz` SHA-256
-  `de3391f7…16b0`가 `SHA256SUMS`와 일치하고, 추출 내용이 설치본과 동일(`diff -rq` 차이 없음)함을 확인했다.
-  GitHub attestation API에 SLSA v1 provenance 1건(release.yml, 빌드 commit `b59023f0`=tag의 부모)이 있다.
-  gh 2.46에는 `gh attestation verify`가 없어 API 조회로 대신했다. 자동 upgrade는 켜지 않았다.
-- telemetry: `codegraph telemetry off`로 `~/.codegraph/telemetry.json` `enabled:false`, 대기열 삭제. MCP 서버
-  env에 `CODEGRAPH_TELEMETRY=0`·`DO_NOT_TRACK=1`을 넣었다(`telemetry status`가 DO_NOT_TRACK 우선을 표시).
-  `update-check.json`은 남아 있어 수동 실행 시 버전 확인이 갈 수 있다.
-- Claude Code 연결: `claude mcp add codegraph -s local …`로 daggertooth 프로젝트 범위(`~/.claude.json`)에만
-  등록했다. `codegraph install`(전역·자동 허용·지침 삽입)은 쓰지 않았다. 노출 도구는 기본 `codegraph_explore`
-  1개이며 stdio 초기화·tools/list·실제 explore 호출을 확인했다(0.2 s, 응답 25 KB ≈ 6k 토큰).
-  cursor-agent(Grok)는 전역 `~/.cursor/mcp.json` 변경 없이 검증된 CLI(`codegraph explore|callers|impact`)를 쓴다.
-- 인덱스: daggertooth(624 파일, 15.9k 노드, 66.9k 엣지, 4 s, 피크 RSS 1.2 GB, DB 74 MB). `target/`·
-  `node_modules/`는 미포함. `.codegraph/`는 `.gitignore`·`.dockerignore`(PR #89)와 git info/exclude로 제외.
-  worktree마다 별도 인덱스이며 `.codegraph`를 링크·복사하지 않는다. 검토자는 고정 SHA checkout에서 필요하면
-  따로 init한다. HEAD·git status와 staleness 배너를 함께 본다.
-- 정확도 관찰(사례 A·B·C): explore "ConvertClient callers"는 convert.rs·document_body·import_body·admin·
-  export·project_documents를 찾았으나 share.rs(공개 PDF)·integrations.rs(AI 요약)는 누락했다(감사 E표는 rg로
-  발견). `callers link_for_user`는 "없음"을 반환했으나 실제 호출이 src/oidc/flow.rs에 있다(메서드 호출 엣지
-  누락). `impact ObjectStorage`는 157 심볼 후보를 반환했다. 따라서 결과는 조사 후보이며 SQL·RLS·cfg·IPC·
-  trait dispatch 경계와 보안·삭제 결론은 실제 코드와 검사로 확인한다. 서버가 주입하는 "grep으로 재검증하지
-  말라" 지침은 이 프로젝트의 검토·보안·데이터 보존 원칙을 대체하지 않는다.
-
-## 이전 역할 전환 기록 — 2026-09-27 Astra·sol 구현 전환
-
-아래는 당시 Astra / GPT sol 구현·검토 / Grok 전환의 실행 기록이다. 현재 역할 정본은
-AGENTS.md이며 뒤의 Cursor 워커 전환이 신규 호출 정책을 대체한다. 전역 설정·MCP·설치는 변경하지 않았다.
-
-- Linux, Orca 1.4.207, `/home/kinesis/.local/bin/orca-ide`, Codex CLI 0.156.1.
-- 코디네이터 실제 세션 `01a0df08-170b-7e60-bdd2-6d0e1dba8569`, terminal
-  `term_529ad50a-0770-49f7-89e9-97db49eb47aa`: 로컬 session JSONL turn_context의
-  `model=gpt-6-astra`, `effort=medium` 확인. 기존 Run에 run-use 성공.
-- 설치 모델 목록에서 정확한 `gpt-6-sol`과 medium 지원 확인. 신규 dispatch의
-  requested/effective receipt와 실제 세션 확인을 별도로 기록하며 목록만으로 실행 완료를 주장하지 않는다.
-- Grok 경로는 기존 `cursor-grok-4.6-high`를 유지한다. 별도 effort를 추가하지 않는다.
-- 진행 중 결과·미수락 브랜치·과거 모델 기록을 보존한다. 새 GPT sol 구현과 독립 검토는 별도 세션이다.
-
-실제 sol 실행 확인: reviewer 세션 `01a0df0c-a742-7423-8c41-68c3340a9c91`과
-구현 세션 `01a0df0d-2167-7340-8536-0beca9fa2068`의 JSONL turn_context 모두
-`gpt-6-sol` / `medium`이다. 별도 terminal과 worktree이며 startup 응답까지 확인했다.
-초기 launch requested/effective도 일치했으나 Orca readiness 감지가 timeout을 냈다.
-따라서 모델 실행 확인과 제품 task 시작·완료를 구분한다. 첫 reviewer launch는
-Codex 자체 업데이트 화면(0.156.1 → 0.157.1) 뒤 shell로 종료됐으며 코디네이터가
-설치 명령을 실행하지 않았다. 제품 task 재시도·검증 결과는 진행 인계에 기록한다.
-
-## 현재 실행 설정 — 2026-09-27 Cursor 워커 전환
-
-코디네이터는 위 Codex `gpt-6-astra` / medium 세션을 유지하고, 별도 Codex
-`gpt-6-sol` / medium 세션은 읽기 전용 자문·독립 검토만 맡는다. 신규 구현·조사·검증은
-AGENTS.md의 두 Cursor 모델로 배정하며 기존 sol 구현 결과와 당시 실행 기록은 보존한다.
-
-- `/home/kinesis/.local/bin/cursor-agent`, 버전 `2026.09.26-dd393fe`의
-  `--list-models`에서 `composer-2.5`와 `cursor-grok-4.6-high`를 확인했다.
-  `composer-2.5-fast`는 별도 모델이며 사용하지 않는다. 두 모델 모두 별도 effort 인자를 넣지 않는다.
-- Composer 실제 dispatch `ctx_421a2d732220`: launch requested/effective 모두
-  `agent=cursor`, `model=composer-2.5`, `effort=null`. 실제 terminal
-  `term_11595c28-1cfe-4a20-8b82-2c4b79fb63fc`에서 Composer 2.5와 대상 worktree를 확인했다.
-- Grok은 검증된 `cursor-grok-4.6-high` 경로를 유지한다. 최근 조사 dispatch와 실제
-  Grok 4.6 High 실행 근거는 기존 진행 인계에 있으며 모델 확인만을 위한 새 작업은 만들지 않는다.
-- 실행 설정과 실제 task 완료는 구분한다. 현재 작업·파일 소유권·인계 결과는 기존 진행 기록에 둔다.
-
-## sol 차단 시 독립 검토 대체 — 2026-09-27 추가 사용자 승인
-
-사용자는 sol 독립 검토가 차단되면 cursor-agent Grok 4.6으로 진행하도록 명시 승인했다.
-실행 ID는 기존에 검증한 `cursor-grok-4.6-high`이며 별도 effort 인자를 넣지 않는다.
-구현자 및 코디네이터와 다른 읽기 전용 세션을 사용한다. sol의 이전 capacity 오류와 이후
-readiness timeout은 복구됐다고 기록하지 않으며 과거 sol 검토 이력도 그대로 보존한다.
-
-실제 대체 검토 dispatch `ctx_8d4b648cd02a`의 requested/effective는 모두
-`agent=cursor`, `model=cursor-grok-4.6-high`, `effort=null`이다. 별도 terminal
-`term_74250c16-7eda-49f8-8b51-02dff54b8421`에서 Grok 4.6 High와 대상 worktree를 확인했다.
-이 기록은 실행 배정의 확인이며, 개별 후보의 검토 완료·수락 결과는 진행 인계에 둔다.
-
-## 2026-09-27 worktree별 CodeGraph 활용
-
-현재 사용 원칙은 AGENTS.md를 따른다. 기존 `/home/kinesis/.local/bin/codegraph` 1.6.0의
-CLI를 해당 worktree에서 사용한다. 인덱스가 없으면 `init -y`, 변경 후에는 `sync`를 수행하고
-`status`와 실제 `explore`·`callers`·`impact` 결과의 stale 표시를 함께 확인한다.
-`status`가 최신이어도 개별 파일이 변경됐다는 탐색 경고가 있으면 다시 동기화한다.
-`.codegraph/`는 worktree 로컬 개발 산출물이며 전역 설정·설치·MCP 권한을 변경하지 않는다.
-실제 task의 호출·동기화 근거와 그래프 누락 관찰은 기존 진행·인계 기록에 남긴다.
-
-## 2026-09-27 Opus 구현·독립 검토 전환
-
-사용자 확인의 sol 라우팅 문제로 신규 sol 호출·복구 재시도는 중단한다. Astra 코디네이터는
-유지하며 새 핵심 구현과 별도 읽기 전용 수락 검토는 Claude Code Opus 5.5 medium이다.
-Grok `cursor-grok-4.6-high`는 별도 effort 없이 조사·재현·교차 검증에 사용한다.
-이전 Composer/sol/Grok 대체 검토 기록은 당시 사실이며 현 역할 승인이 아니다.
-
-- 기존 검증 경로 `orca-ide orchestration worker-start --agent claude --model claude-opus-5-5
-  --effort medium`를 재사용했다. 새 독립 검토 dispatch `ctx_1d287edef3d7`의 receipt는
-  requested/effective 모두 `claude-opus-5-5` / `medium`, `turnStart: observed`이다.
-- 구현 전환은 기존 작성자의 쓰기 종료와 변경·검사·자원 인계 후 수행한다. 요청만으로 구현
-  전환 완료를 주장하지 않는다. 현재 소유권과 후속 실행 근거는 기존 인계 기록에 둔다.
-- 모델별 스킬·전역 설정·권한은 추가하지 않는다. 각 worktree의 CodeGraph 인덱스를 사용한다.
-
-## 2026-09-27 구현 실행 확인과 쓰기 상한 변경
-
-기존 Composer 작성자의 쓰기 종료와 결과 인계 후, 주 구현 dispatch `ctx_4bfa4ded4abb`도
-Claude Code로 실제 실행했다. requested/effective 모두 `claude-opus-5-5` / `medium`,
-`turnStart: observed`이며 앞서 확인한 독립 검토와 별도 세션이다. 이후 동일 구현 세션의
-재사용과 현재 task·파일 소유권은 진행 인계에 기록한다.
-
-당시 추가 사용자 승인으로 프로젝트 전체 동시 쓰기 상한은 3개였다(현재 상한은 아래 후속 기록). 직접 구현하는 코디네이터와
-모든 하위 구현 agent를 합산하며, 읽기 전용 검토·조사는 제외한다. 모델별·worktree별로
-별도 할당하지 않는다. 무거운 로컬 검사 한 묶음과 기존 모델·권한 설정은 그대로다.
-과거 실행 기록의 2개 상한은 당시 사실로 보존한다.
-
-## 2026-09-27 쓰기·독립 검토 병렬 상한 확대
-
-쓰기 상한은 코디네이터의 추적 파일 편집과 모든 하위 구현 agent를 합쳐 프로젝트 전체 5개다.
-독립 Opus 5.5 medium 검토는 기본 1개, 서로 다른 고정 후보가 밀릴 때 최대 2개이며
-구현 세션과 분리한다. 무거운 로컬 검사는 계속 한 묶음이고 원격 CI 병렬화는 별개다.
-상한은 슬롯 충원 의무가 아니며 파일·공통 계약 소유권과 기존 실행 모델 검증을 유지한다.
-과거 2·3개 실행 기록은 당시 사실로 보존한다.
-
-## 2026-09-28 다음 코디네이터 Fable 인계 준비
-
-사용자 지시로 다음 코디네이터는 Claude Code Fable 5.1 medium이다. 구현과 별도 독립 검토는
-Opus 5.5 medium, 조사는 `cursor-grok-4.6-high`(별도 effort 없음)를 유지한다.
-쓰기 상한 5개, 독립 검토 기본 1개/서로 다른 후보 최대 2개도 유지한다.
-
-2026-09-28 01:44 UTC Linux 확인: `/home/kinesis/.local/bin/claude`는 2.1.283이며
-현재 `--help`에 `--model`과 `--effort medium`이 있다. 정확한 Fable ID
-`claude-fable-5-1`은 위 2026-09-26의 실제 세션 기록에서 확인했다.
-이 확인은 현재 서버의 지원 목록·유효 라우팅이나 새 세션 실행 성공을 증명하지 않는다.
-이번 인계 준비에서는 새 Fable 세션을 시작하지 않았으며 현재 라우팅은 미확인이다.
-인수 시 실제 `/model`·`/effort`와 turn 시작을 확인하고, 불가하면 대체 없이 차단을 기록한다.
-과거 Astra·Opus·Fable 실행 기록은 당시 사실대로 보존한다. 현재 작업·체크포인트는
-`docs/rewrite.md`의 새 인계 포인터를 따른다.
-
-## 2026-09-28 Fable 코디네이터 인수 확인
-
-2026-09-28 01:52 UTC(첫 인수 커밋 시각) Linux, Claude Code 2.1.283 세션에서 인수했다. 확인 근거: `~/.claude/settings.json`의
-`model: claude-fable-5-1`과 `modelSettings.effortLevel: medium`, 세션 환경 `CLAUDE_EFFORT=medium`,
-세션 자체 보고 모델 ID `claude-fable-5-1`. 실제 turn이 시작되어 이 기록을 작성했다. 별도 `/model`
-TUI 출력은 이 세션 안에서 캡처하지 않았다. Orca 1.4.207 `/home/kinesis/.local/bin/orca-ide`로
-Run `run_b01d432a9dee`에 `run-use` 성공, coordinator terminal
-`term_77972376-fa56-44ae-a334-0c95413c4fab`, 인박스 0, 활성 워커 0, reclaimable 0.
-인계 문서 `coordinator-handoff-2026-09-28-0145-utc-linux.md`와 실제 상태(main `9e15d50e`,
-후보 `b09114df` clean/7 paths, Draft #198 `7f2433f8`) 일치를 확인했다. 전역 설정·MCP 변경 없음.
-세션 JSONL `~/.claude/projects/-home-kinesis-orca-workspaces-fvoci-daggertooth/5b3ea42d-2ae1-4abb-9973-8761b6952f92.jsonl`의
-모든 assistant 턴 `model` 필드가 `claude-fable-5-1`, `effort` 필드가 `medium`이다(요청값이 아닌 실제 응답 기록).
-상단 "실제 실행 확인" 표의 코디네이터 행과 2026-09-27 "현재 실행 설정" 절은 당시 기록이며, 현재 코디네이터 실행 근거는 이 절이다.
-
-## 2026-09-28 Fable 코디네이터 계속 진행·상한 확대·첫 release 실행
-
-같은 Fable 5.1 medium 코디네이터 세션이 계속 조정한다(위 인수 확인 절). 사용자 지시로 쓰기 상한은
-프로젝트 전체 8개(기존 5개 슬롯을 먼저 쓰고 파일·공통 계약·선행 작업이 분리될 때만 6~8개), 독립 검토는
-기본 2개·서로 다른 고정 후보가 쌓일 때 최대 3개로 확대됐다(#217, AGENTS.md). 위 5개·1/2개 기록은 당시 사실로 보존한다.
-
-`v0.1.0` tag는 `57497e2f`(#215 merge)에 있다. release 실행 36416132900(main `54dcfc86`, workflow_dispatch)은 index
-`sha256:638aad92f5b48f9e48c929552c3dc567548be1b73c1ff1dfbc31e9e7ac4e1e11`을 빌드했고 GHCR 익명 manifest inspect는 성공했다.
-digest smoke는 테스트 클라이언트의 localhost cookie 전송 결함으로 실패했으며 수정은 PR #218이다. smoke 재실행은 대기 중이다.
-
-Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key를 쓰지 않는다. 모델·effort·실행 경로 확인 방법은 위 절과 같다.
-
-## 2026-09-29 Claude Code Opus 5.5 코디네이터 인수 (내장 workflow)
-
-현재 코디네이터 실행 근거는 이 절이며, 위 2026-09-28 Fable 절들은 당시 기록이다.
-
-사용자 지시로 코디네이터는 Claude Code 주 세션 Opus 5.5이며 조사·구현·독립 검토는 내장 subagent/workflow를
-우선 사용한다(AGENTS.md 역할표). 이전 Fable 코디네이터·자동 체인은 재가동하지 않았고 Orca Run은 사용하지 않았다.
-
-- 실행 환경: 로컬 WSL2 Linux, Claude Code 2.1.283(`/home/kinesis/.local/bin/claude`), Max 구독 OAuth(세션 환경에
-  API key 없음). 코디네이터의 계정·결제·전역 설정 변경 없음, 새 MCP 없음.
-- 주 세션: 시스템 보고 모델 ID `claude-opus-5-5`, `/effort ultracode`(세션 한정 xhigh + Dynamic Workflows),
-  `CLAUDE_EFFORT=xhigh`. 세션 JSONL의 assistant 턴 `model`/`effort` 필드가 모두 `claude-opus-5-5`/`xhigh`다.
-- 전역 `~/.claude/settings.json`: 사용자가 세션 시작 직후 `/model`로 Opus 5.5를 새 세션 기본값으로 저장했다
-  (2026-09-28 15:10Z, `model: opus`; 09-28 기록의 `claude-fable-5-1`에서 변경). `modelSettings.claude-opus-5-5.effortLevel: medium`은
-  ultracode 세션 설정 때문에 이 세션에 적용되지 않았다. 코디네이터는 전역 설정을 변경하지 않았다.
-- workflow agent: 기본값·명시 effort·`Plan` agent 유형 모두 transcript의 `model`/`effort`가 `claude-opus-5-5`/`xhigh`다
-  (probe `wf_c35a1d05-296`, 점검 `wf_2cd8e0c9-9cc`, 검토 `wf_17862adc-bd6`·`wf_53ddd0bf-91b`). agent 유형: 점검
-  `wf_2cd8e0c9-9cc`와 #227/#228 검토 `wf_53ddd0bf-91b`는 편집 도구 없는 `Plan`, 인수 초기 `wf_17862adc-bd6`(#225 1차 검토·PG16
-  원인·#223 범위)은 편집 도구가 있는 기본 `workflow-subagent`에 읽기 전용 prompt만 준 것이다(이 한계로 #225 수락 검토는
-  `Plan`으로 다시 한다). 이후 읽기 전용 검토·조사는 `Plan`을 쓴다. Bash는 남아 있으므로 쓰기 금지는 프롬프트로도 명시한다.
-- 주입된 지침 대조: 주 세션과 기본 workflow agent는 `/home/kinesis/orca/workspaces/fvoci/daggertooth/AGENTS.md`와 사용자
-  memory `MEMORY.md`를 세션 시작 시점 스냅샷으로 받았다. 세션 시작 때 이 worktree는 구 브랜치 `fvoci/rust-node-free-runtime`
-  (`6acccea0`, 2026-09-27)에 있었으므로 주입본은 그 시점의 Astra/sol 역할표다(transcript 대조; 요약 오류가 아니라 구버전
-  worktree 스냅샷). 원격 `a53074f7`의 활성 역할표는 Fable 코디네이터·Opus 구현/검토·Grok 조사였고, 이번 정정은
-  `a53074f7` 파일을 기준으로 했다. `Plan` 유형 agent에는 프로젝트 지침이 주입되지 않는다. 상위 디렉터리·사용자 전역
-  CLAUDE.md/AGENTS.md는 없다. 세션 중 바뀐 지침은 하위 agent에 반영되지 않으므로 코디네이터가 필요한 규칙을 prompt에 명시한다.
-- CodeGraph 1.6.0(`/home/kinesis/.local/bin/codegraph`), MCP `codegraph serve --mcp`(env `CODEGRAPH_TELEMETRY=0`,
-  `DO_NOT_TRACK=1`, `~/.claude.json`의 프로젝트 설정). worktree별 `.codegraph/` 인덱스를 쓰고, 통합 worktree 인덱스에서
-  #220의 `src/db/outbox_reset.rs` 최신 소스가 반환됨을 확인했다. 인덱스는 `.gitignore` 대상이며 제품 산출물에 들어가지 않는다.
-- `/advisor`(2026-09-29): Fable advisor는 켜지 않았다. 켜려면 다른 세션에도 적용되는 전역 설정 키가 필요하고 Fable 사용 크레딧
-  동의가 필요할 수 있다. 사용자는 `/advisor`로 직접 켤 수 있다. advisor 호출은 하지 않았다.
-- 디스크 정리(2026-09-29 13:56–14:12 KST): `df -h /` 사용량 913G → 299G(약 614 GiB 회수; 단계별 df 차이는 Docker volume 262.50,
-  worktree build·오래된 cargo target 디렉터리 272.80, 완료 worktree 73.60, image·build cache 8.81 GiB). 대상·검사·결과는
-  `/home/kinesis/orca/fvoci-evidence/space-reclaim-2026-09-29/`(단계별 TSV, `before.txt`, `after.txt`).
-- Ultracode 수량 면제(2026-09-29 사용자 지시 "ultracode는 수량 면제야. 편하게 사용해"):
-  - 이 세션은 Claude Code 주 세션 Opus 5.5(`claude-opus-5-5`)이며 Ultracode(xhigh + 내장 Dynamic Workflows)로 동작한다.
-  - 동시 쓰기·독립 검토·무거운 검증의 수량 제한을 적용하지 않는다(`AGENTS.md` "소유권과 자원").
-  - 실제 배정은 workflow 단위로 기록한다. 구현은 `general-purpose` agent, 독립 검토는 편집 도구가 없는 `Plan` agent이며, 둘 다 주 세션 모델을 상속한다.
-  - 호스트 자원: 32 core, 62 GB RAM. 메모리(가용 5 GB 미만)와 디스크(여유 15 GB 미만) 감시를 켠다.
-  - frontend 전용 e2e는 `prebuilt-8adaf1b8` backend 바이너리를 읽기 전용으로 공유한다.
-
-## 2026-09-29 임시 Grok 주 실행 (Opus 주간 한도)
-
-사용자 직접 승인(2026-09-29 23:24 KST): Claude Code Opus 5.5 Ultracode가 주간 한도
-("You've hit your weekly limit · resets Oct 1, 12pm (Asia/Seoul)")에 도달해 신규 Claude dispatch가
-거부된다. 한도 세션을 재시작해 복구를 기다리지 않는다.
-
-- 임시 주 실행: Cursor `cursor-grok-4.6-high`(별도 effort 인자 없음; 기존 검증 ID).
-  이 세션은 Cursor Grok 4.6이며 Ultracode 모드·effort CLI 옵션을 만들지 않는다.
-- 코디네이터는 하나다. 기존 Opus 컨트롤러와 같은 후보를 동시에 머지·릴리스하지 않는다.
-- Grok은 조사 전용이 아니다. 합의된 tracer의 구현·검증·독립 검토 조정·PR·통합·승인된 0.x를 수행한다.
-- 구현자와 다른 컨텍스트의 Grok 워커가 독립 검토를 할 수 있다. 같은 모델 여러 개의 찬성은 객관적 검증이 아니다.
-- 서브에이전트·쓰기·검토의 고정 수량 상한은 적용하지 않는다(AGENTS.md 수량 면제). 경로당 한 작성자와
-  공통 계약 소유권은 유지한다.
-- 실행 경로: Cursor 네이티브 `Task` 서브에이전트(`generalPurpose`, 모델 `cursor-grok-4.6-high`).
-  새 상주 오케스트레이터·Orca 자동 체인을 만들지 않는다.
-- 계정·결제·다른 API 키를 도입하지 않는다. Opus가 돌아와도 진행 중 소유권을 자동으로 뒤집지 않는다.
-- 기존 Opus 워커의 미커밋·미푸시 결과는 폐기하지 않고 회수한다. 한도 종료 시각은 세션
-  `e800da32-68b6-4e7a-a2da-5ad4517a542a`의 workflow output(23:09–23:10 KST)이다.
-
-## 2026-09-30 우선순위 교정 후 인계 (Cursor Grok 4.6)
-
-같은 임시 주 실행이 사용자 지시(신규 미연결 확대보다 기존 흐름 종결)를 적용했다.
-실제 모델은 Cursor Grok 4.6(설치 ID `cursor-grok-4.6-high`와 동일 계열; 이 세션은
-Ultracode/effort CLI를 쓰지 않음). daggertooth detached `a4662256`에는 제품 커밋 없음.
-
-인계 정본: `docs/rewrite.md` §6.2.1·§6.3. 다음 수락 후보는 #287 `485d118e`(독립 검토 +
-Web 36631118948 CLEAN). 자기 검토를 독립 검토로 세지 않음. worktree·WIP PR은 보존.
-
-
-## 2026-09-30 Astra 전면 인수 / Sol 6.1 실제 실행
-
-사용자 직접 지시가 이전 Grok/Opus 전용 배정을 대체했다. native Codex collaboration 도구를 사용하며 새 Orca Run·daemon을 만들지 않았다.
-- 코디네이터: `gpt-6-astra`, effort `medium`; session `01a0ef48-5c88-77f1-9f45-9008284a2deb`의 최신 `turn_context` 확인.
-- `/root/ci287`: `gpt-6.1-sol`, effort `low`; session `01a0ef62-400c-7192-b6db-8a99f6b99c54` 확인.
-- `/root/auth_acceptance`: `gpt-6.1-sol`, effort `low`; session `01a0ef62-70fb-7040-9e82-2144118ecbb0` 확인.
-- `/root/review287_setup`: 별도 컨텍스트의 `gpt-6.1-sol`, effort `low`; 완료 보고서의 turn_context 대조로 확인했다.
-- worker effort는 override하지 않은 실제 default이며 Ultracode를 사용했다고 주장하지 않는다. 과거 Sol6.1 요청 거부와
-  Sol6 대체 기록은 과거 사실로 보존하며 이번 실제 실행 성공과 구분한다.
-- 현재 서비스가 제공하는 native 동시 슬롯 4개는 도구 제한이다. 사용자 작업 수량 상한을 다시 도입한 것이 아니다.
-- 이전 Grok의 동결·쓰기 클레임 반납은 handoff-main.json과 Orca done 응답으로 확인했다. 기존 rust-oidc-ms Sol 터미널은
-  capacity 오류 후 입력 대기이며 유지했다. 이전 pending child를 새 작업으로 재실행하지 않았다.
-
-사용자의 후속 지시로 effort는 코디네이터가 작업별 자동 배정한다. `/root/review_ci_auth_delta`는 high,
-`/root/evidence_recovery`와 `/root/review_takeover_docs`는 medium(모두 transcript 확인). 구현 후속은
-invite_connect high, setup_integrate medium으로 요청했으며 실제 완료 보고의 runtime을 대조한다.
-
-## 2026-09-30 사용자 후속 지시: Orca 터미널 워커
-
-신규 워커는 Orca 터미널에서 실행하며 native subagent의 서비스 동시 슬롯4개를 Orca 워커 제한으로 적용하지 않는다.
-워커·작성자·검토자 고정 상한 없이 자원과 수락 처리량으로 배정한다. 과거 실행 기록은 당시 사실로 유지한다.
-설치 Orca1.4.207에서 requested/effective `gpt-6.1-sol`/`high` worker-start는 agent_readiness timeout으로
-작업 전달 전 실패했다. 해당 실패 터미널은 receipt의 worker-release로 정리했다. 기존 Run은 reset하지 않았다.
-후속은 Orca terminal create의 `codex exec`를 사용했고 supervised dispatch 성공으로 표시하지 않는다.
-- 홈 통합 session `01a0efc4-958a-78d2-a3eb-028e01a37de8`: 실제 gpt-6.1-sol/high, source exec.
-- 별도 검토 session `01a0efd3-77c8-7890-98f2-36b3ee8cb317`: 실제 gpt-6.1-sol/high, source exec.
-- 정리 조사 session `01a0efc4-15c9-7630-aaf6-d41631fc80d7`: 실제 gpt-6.1-sol/high, source exec.
-각 보고서에서 session_meta와 turn_context를 대조했다. 상세 후보/검사/잔존 자원은 docs/rewrite.md 및 연결 기록에 둔다.
-CLI connected는 화면 연결을 보장하지 않는다. 2026-09-30 `orca-ide open --json`은
-`desktop_activation_blocked`: persistent terminal provider unavailable로 headless 상태이며 앱 정상 종료/재시작을 안내했다.
-실행 결과를 회수·보존한 뒤 종료하며 활성 검사를 무차별 종료하거나 정상 표시로 주장하지 않는다.
-
-재개 확인 (2026-09-30): 사용자 Orca 재시작 뒤1.4.217 새 runtime73201137-ed1f-4a8a-bcde-302a44c54e4b에서
-desktop available, graph ready, connected 확인. worker-start가 visible terminal, requested/effective gpt-6.1-sol/high,
-input_accepted 및 turn_started observed를 반환했다. 이전 headless/준비 시간 초과와 구분한다. 상세 dispatch와 소유권은 진행 정본에 둔다.
-
-## 2026-09-30 Sol 6.1 high 코디네이터 전면 인수
-
-사용자 직접 지시로 단일 코디네이터를 Sol 6.1 high로 교체했다. 과거 모델·검토·수락 이력은 보존한다.
-- 실제 주 세션 `01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0`, source `cli`, cwd `f272-batch-integration`.
-  `/home/kinesis/.codex/sessions/2026/09/30/rollout-2026-09-30T23-38-52-01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0.jsonl`
-  최신 `turn_context`의 model `gpt-6.1-sol`, effort `high` 확인(요청값만으로 추정하지 않음).
-- 환경의 실제 `ORCA_TERMINAL_HANDLE=term_cc010fa2-f24c-4018-820f-16172de0e39f`에서 설치 Orca1.4.217의
-  `orchestration run-use --id run_496803f4d94f --json` 성공. 2026-09-30T14:42:01Z receipt의
-  coordinator_handle은 본인, consumer_generation은 2다. 기존 generation1의 대리 호출 실패와 구분한다.
-- 다른 Run 생성/reset·터미널 identity 대리 지정 없음. 기존 일곱 활성 워커·배정·근거 보존, 공식 @all로 소유권 변경 전달.
-- CodeGraph는 이 통합 worktree에서 별도 init: 1,119 files / 28,030 nodes / 122,755 edges. 타 worktree 인덱스 복사 없음.
-- 샌드박스의 일부 Orca 터미널/worker-start 호출은 runtime_unavailable로 거부돼 승인된 외부 실행으로 실제 runtime 연결을 확인했다.
-  강한 read-only 검토 sandbox는 적용했다고 주장하지 않으며, 별도 검토 prompt와 Git 변경 감시를 유지한다.
-- #272 별도 사용자 승인 전 main 머지·태그·릴리스·배포 금지. 실제 task/dispatch·검사·다음 실행은 docs/rewrite.md §6.5 정본에 둔다.
+프로젝트 설치의 최초 rustup-init1.28.2 공식 SHA-256 대조와 CodeGraph provenance는 §6의 과거 근거에 있다.
+crate 다운로드 cache의 잠금 대기는 worktree target compile/test 시간과 구분한다.
+
+## 3. Orca·스킬·개발 연결
+
+- installed orca-cli/orchestration 스킬의 stub에서 선택한 binary의 live guide를 읽는다.
+  필요할 때만 messaging/gates·coordinator-loop·placement/recovery reference를 추가로 읽는다.
+  unsupported 명령을 추정하거나 bare `orca`로 조용히 전환하지 않는다. 과거 PATH의 bare orca 빈 파일 문제가 있었고
+  이번 세션은 위 절대 경로로 통일했다.
+- worker-start receipt가 ready/turn observed인지 확인하고 uncertain/readiness timeout은 supported recovery로 조사한다.
+  FIFO delivery의 모든 메시지를 처리하고 settled worker의 결과·잔존 자원·공식 release/retain 결정을 회수한 후 ACK한다.
+  user_takeover retained를 released로 허위 기록하거나 다른 terminal·Run 자원을 강제 종료하지 않는다.
+- 신규 워커는 Orca terminal에서 실행한다. native subagent 서비스 슬롯을 Orca 병렬 상한으로 해석하지 않는다.
+  배정 규칙은 AGENTS.md가 정본이며, 실제 platform/CPU/RAM/disk/DB/browser·통합 처리량을 관측한다.
+- 프로젝트 스킬 정본은 `.agents/skills/`다. 현재 catalog 발견과 필요한 SKILL.md의 명시 읽기를 구분한다.
+  클라이언트의 자동 탐색 성공을 다른 클라이언트에 전용하지 않고 모델별 adapter/전문 복제본을 만들지 않는다.
+- 개발 MCP·상주 scheduler·daemon·중복 agent MCP를 이번 인계/정리에서 추가하지 않았다.
+  GitHub는 gh, 파일/Git/Rust는 로컬 도구, 공개 library 문서는 해당 공식 출처를 쓴다.
+  기존 연결·전역 MCP 설정을 덮어쓰지 않으며 private 원본을 공개 문서 서비스에 전송하지 않는다.
+- 과거 Claude 프로젝트 CodeGraph MCP 등록·Cursor CLI 실행은 당시 검증 이력이다.
+  현재 Codex 코디네이터는 검증된 CodeGraph CLI를 직접 사용하며, 과거 MCP 연결을 현재 세션 연결로 주장하지 않는다.
+
+## 4. CodeGraph 설정과 정확도 한계
+
+worktree마다 자기 `.codegraph/` 인덱스를 사용한다. `status` → 필요시 `init -y`/`sync` →
+`explore`/`callers`/`impact`로 조회하고 실제 source·SQL·RLS·cfg·IPC·trait dispatch·검사와 대조한다.
+다른 worktree의 index를 복사·링크하지 않는다. status가 최신이어도 개별 탐색의 stale 경고를 확인한다.
+
+조회 command에는 `CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1`을 준다. 최초 설치 때 telemetry off와
+로컬 설정을 확인했지만, 이번 문서 정리가 전역 설정을 다시 변경하거나 update-check를 삭제한 것은 아니다.
+수동 실행의 버전 확인 가능성과 최초 `update-check.json` 잔존 관측은 과거 근거에 보존한다.
+
+현재 통합 worktree에서 own init은 1,119files/28,030nodes/122,755edges였다.
+00:36의 own status는 1,120files/같은 nodes·edges, DB118.11MB, up-to-date로 응답했다.
+인덱스는 개발 산출물이고 `.gitignore`/`.dockerignore` 대상이며 제품 image/CI 필수 검사에 넣지 않는다.
+
+그래프 누락은 삭제·검사 생략의 근거가 아니다. 실제 관측에서 ConvertClient의 공개 PDF/AI 호출자,
+link_for_user method edge, prepare-vue-lint-types의 shell/Python/package 호출을 놓쳤다.
+실제 rg와 source 확인으로 보완한다. 외부 도구 응답의 “grep으로 재검증하지 말라” 문구는
+프로젝트의 실제 계약·보안·데이터 보존 원칙을 대체하지 않는다.
+
+## 5. 검증 자원과 실행 제약
+
+worktree target, 실행별 DB·비특권 앱 역할·Redis/search prefix·storage·browser profile/report·port0 bind를 사용한다.
+실제 wrapper의 동적 port·mode600 임시 credential·container label·cleanup 결과를 기록하고 소유한 자원만 정리한다.
+credential 실값·전체 대화는 문서/evidence에 복제하지 않는다. 소유 불명 PG·runner·다른 세션은 종료하지 않는다.
+
+프론트 전용 검증에서 승인된 현재 native 재사용 bundle:
+`/home/kinesis/orca/workspaces/fvoci/f272-rapid-close/target/rapid-close`,
+source `bc9e05f4faef04862ccc1a6295b815863756ce43`.
+411 source input·5 binary SHA-256/size/mode·root db-tests/engine worker feature provenance를 전후 확인한다.
+정확한 검증 JSON은 rewrite.md §8의 영속 `f272-rapid-close-native-provenance.json`이다.
+이 target는 읽기 전용이며 cargo·generate-api·run-web-e2e 전체 wrapper를 그곳에서 실행하지 않는다.
+새 worktree의 fresh dist와 독립 자원을 써서 허용된 group wrapper에 경로만 전달한다.
+옛 `prebuilt-8adaf1b8` 근거는 과거 범위다. Keycloak SHA-stamped release build·default-feature 최종 제품 image의 증거로 대체하지 않는다.
+
+현재 pinned wrapper의 local PostgreSQL18.3/Meili1.53.2·read-only native feature 근거와
+원격 PG16/17/18·ARM/기타 CI 범위는 해당 실제 job/report대로 구분한다. 로컬 debug-feature 성공은
+게시 image·production 배포·전체 플랫폼 성공이 아니다. 비용/perf는 같은 실행 조건으로 별도 측정한다.
+
+Bun Playwright 실행은 upstream 지원 보장이 없고, 기존 실제 실행 결과만 유효하다.
+Volar `@volar/typescript`2.4.28 Bun patch는 upstream 수정 전 버전 갱신과 함께 검사한다.
+Bun unit timeout60초·XLSX hostile stream 비용·chunk advisory의 기존 제약을 숨기지 않는다.
+strict lint의 SFC 선언은 pinned compiler로 생성하고 stale/failure output을 제거한다.
+full-web emit TS2742·잘못 설치된 TS 버전 등을 any shim·rule 완화로 우회하지 않는다.
+
+과거 1.4.207의 readiness/headless·desktop_activation_blocked 실패와 이후1.4.217 desktop/graph/visible
+복구는 별도 사건이다. 현재 run/worker receipt 성공을 화면 focus나 매 순간 OS UI가 정상이라는 주장으로 확대하지 않는다.
+실패와 support recovery·실제 runtime 모델 증거는 보고서에 남긴다.
+
+## 6. 과거 기록과 재개 포인터
+
+정리 전 전체 환경 기록은
+[고정 f442의 environment.md](https://github.com/AISFlow/fvoci/blob/f442a9f06c438b51524e13cb7a2043ff5d95566a/.agents/environment.md)와
+`git log -p -- .agents/environment.md`에서 확인한다. 과거 Astra/Fable/Opus/Grok/Composer/Sol 역할·fallback·수량 상한,
+Ultracode 요청/실제 effort·capacity/readiness 실패·old Run·dispatch/실행·정리 이력은 당시 사실로 보존한다.
+과거 모델을 현재 역할에 재배정하거나 실행 명령을 현재 재개 절차에 다시 넣지 않는다.
+
+- 현재 인수와 보고서: `/home/kinesis/orca/fvoci-evidence/recovery-20260930/takeover-evidence/`.
+- 이번 두 문서의 보존 delta·coverage·검토: 같은 root의 `sol-coordinator-docs-20261001/`.
+- 과거 cleanup/cache·614GiB 회수 근거: `/home/kinesis/orca/fvoci-evidence/space-reclaim-2026-09-29/` 및 recovery result/receipts.
+- 최초 CodeGraph1.6.0 release/provenance: f442의2026-09-26 설치 기록, release tag `dfccdf62`, build `b59023f0`,
+  tar SHA256SUMS 일치·attestation API 조회. gh2.46의 attestation verify 미지원은 API 조회와 구분한다.
+- 과거 Run `run_b01d432a9dee`와 native/workflow 세션은 추적 자료이며 현재 기본 실행 대상이 아니다.
+
+재개는 AGENTS → 이 파일의 실제 연결/도구 → rewrite.md §1·§4·§7 → 실제 Git/Orca task/worker/CI 순서다.
+이미 회수한 코드·검토·실패 근거를 재사용하고 현재 질문·남은 delta부터 이어간다.
+이번 정리는 재인수·재구현·전수 감사가 아니며 모델/계정/설치/권한/런타임 설정을 변경하지 않았다.
