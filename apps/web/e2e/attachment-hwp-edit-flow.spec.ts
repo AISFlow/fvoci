@@ -176,8 +176,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await searchLink.click();
   await expect(page).toHaveURL(/\/w\/acme\/search/);
   await expect(dialog).toHaveCount(0);
-  // The router commits a route in a React transition after the URL changes: a
-  // history step before that commit would supersede it and keep this viewer.
+  // Wait until the boundary load has unmounted the viewer before history back.
   await expect(viewer).toHaveCount(0);
   await page.goBack();
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
@@ -210,12 +209,26 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await expect(dialog).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(saveButton).toBeEnabled();
-  // History forward to the search page (the router's own entry from the link click
-  // above) is held too; 나가기 discards the edits and goes. History back is checked
-  // after save-copy, whose navigation gives the viewer a router entry behind it.
+  // Forward to the prior React document crosses a browser document boundary.
+  // Its native beforeunload prompt must preserve the exact dirty content when
+  // dismissed, and discard only after acceptance. Same-app history uses the
+  // custom dialog below, after save-copy.
+  const dirtyInk = await pageInk(page);
+  const dismissed = new Promise<void>((resolve, reject) => page.once("dialog", (prompt) => {
+    try { expect(prompt.type()).toBe("beforeunload"); } catch (error) { reject(error); return; }
+    void prompt.dismiss().then(resolve, reject);
+  }));
   await page.evaluate(() => window.history.forward());
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "나가기" }).click();
+  await dismissed;
+  await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
+  await expect(saveButton).toBeEnabled();
+  expect(await pageInk(page)).toBe(dirtyInk);
+  const accepted = new Promise<void>((resolve, reject) => page.once("dialog", (prompt) => {
+    try { expect(prompt.type()).toBe("beforeunload"); } catch (error) { reject(error); return; }
+    void prompt.accept().then(resolve, reject);
+  }));
+  await page.evaluate(() => window.history.forward());
+  await accepted;
   await expect(page).toHaveURL(/\/w\/acme\/search/);
   await expect(viewer).toHaveCount(0);
   await page.goBack();

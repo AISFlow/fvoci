@@ -14,10 +14,10 @@ withDefaults(defineProps<{ actionLabel?: string }>(), {
 });
 const emit = defineEmits<{ confirm: []; cancel: [] }>();
 const titleId = useId();
-const cancelBtn = useTemplateRef<HTMLButtonElement>("cancel");
+const dialog = useTemplateRef<HTMLDivElement>("dialog");
 
 onMounted(() => {
-  cancelBtn.value?.focus();
+  dialog.value?.querySelector<HTMLButtonElement>("button")?.focus();
 });
 
 function onKeydown(event: KeyboardEvent): void {
@@ -30,6 +30,7 @@ function onKeydown(event: KeyboardEvent): void {
 
 <template>
   <div
+    ref="dialog"
     role="alertdialog"
     aria-modal="true"
     :aria-labelledby="titleId"
@@ -40,7 +41,7 @@ function onKeydown(event: KeyboardEvent): void {
       <h2 :id="titleId" class="text-highlighted font-medium">{{ t("task.body.unsaved.title") }}</h2>
       <p class="mt-2 break-keep text-sm text-muted">{{ t("task.body.unsaved.body") }}</p>
       <div class="mt-4 flex justify-end gap-2">
-        <UButton ref="cancel" size="sm" variant="outline" color="neutral" @click="emit('cancel')">
+        <UButton size="sm" variant="outline" color="neutral" @click="emit('cancel')">
           {{ t("common.cancel") }}
         </UButton>
         <UButton size="sm" color="error" @click="emit('confirm')">{{ actionLabel }}</UButton>

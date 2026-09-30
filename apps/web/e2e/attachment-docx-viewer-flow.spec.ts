@@ -296,6 +296,7 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   await results.getByRole("link", { name: new RegExp(docxName) }).click();
   await expect(page).toHaveURL(new RegExp(`/w/acme/a/${docxId}/view(?:\\?chunk=\\d+)?$`));
   await expect(viewer).toBeVisible({ timeout: 20_000 });
+  await expectVueViewer(page);
 
   await page.goto(`/w/acme/a/${docxId}/view?chunk=0`);
   const supplement = page.locator("[data-chunk-supplement]");
