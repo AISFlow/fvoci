@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import * as Vue from "vue";
 import { compileScript, parse } from "vue/compiler-sfc";
@@ -12,7 +13,7 @@ import { formatDisplayId, itemPath } from "./href.ts";
 
 // Render the retained TaskList SFC, including its real rejection/pending
 // branch. The design-system button and unused links only provide SSR hosts.
-function taskList() {
+function taskList(): Vue.Component {
   const { descriptor } = parse(
     readFileSync(new URL("../vue/features/tasks/TaskList.vue", import.meta.url), "utf8"),
   );
@@ -47,7 +48,7 @@ function taskList() {
     if (!ts.isImportDeclaration(statement)) continue;
     const clause = statement.importClause;
     const specifier = statement.moduleSpecifier.getText(ast).slice(1, -1);
-    if (clause && !clause.isTypeOnly) {
+    if (clause && clause.phaseModifier !== ts.SyntaxKind.TypeKeyword) {
       if (clause.name)
         bindings.push(`const ${clause.name.text} = modules[${JSON.stringify(specifier)}].default;`);
       if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
@@ -60,15 +61,17 @@ function taskList() {
     }
     source = source.slice(0, statement.getFullStart()) + source.slice(statement.end);
   }
-  return new Function(
-    "modules",
-    new Bun.Transpiler({ loader: "ts" }).transformSync(
-      bindings.join("\n") + source.replace("export default", "return"),
-    ),
-  )(modules);
+  // Only the installed Vue compiler's output from this retained SFC is evaluated.
+  // A fresh VM context supplies the actual module identities, without a Function
+  // constructor or access to ambient test globals. The result is its component.
+  const javascript = ts.transpileModule(
+    bindings.join("\n") + source.replace("export default", "globalThis.component ="),
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } },
+  ).outputText;
+  return runInNewContext(javascript + "\ncomponent;", { modules }) as Vue.Component;
 }
 
-test("rejected second page shows a Korean alert and keeps load-more usable in the retained Vue list", async () => {
+await test("rejected second page shows a Korean alert and keeps load-more usable in the retained Vue list", async () => {
   const component = taskList();
   const props = {
     slug: "acme",
