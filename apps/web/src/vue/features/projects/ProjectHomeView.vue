@@ -44,7 +44,9 @@ function onArchiveToggle(): void {
     emit("lifecycle", "unarchive");
     return;
   }
-  if (window.confirm(`${t("project.archive.confirm.title")}\n${t("project.archive.confirm.body")}`)) {
+  if (
+    window.confirm(`${t("project.archive.confirm.title")}\n${t("project.archive.confirm.body")}`)
+  ) {
     emit("lifecycle", "archive");
   }
 }
@@ -93,8 +95,17 @@ function onDelete(): void {
       class="mx-auto flex w-full max-w-lg flex-1 flex-col items-start justify-center gap-3 px-6 py-12 sm:px-8"
     >
       <p class="break-keep text-title font-semibold">{{ t("doc.empty") }}</p>
-      <p v-if="!archived" class="max-w-prose break-keep text-ui leading-relaxed text-muted">{{ t("doc.emptyHint") }}</p>
-      <UButton v-if="canWrite" type="button" size="sm" class="mt-2" :disabled="creating" @click="emit('createDocument')">
+      <p v-if="!archived" class="max-w-prose break-keep text-ui leading-relaxed text-muted">{{
+        t("doc.emptyHint")
+      }}</p>
+      <UButton
+        v-if="canWrite"
+        type="button"
+        size="sm"
+        class="mt-2"
+        :disabled="creating"
+        @click="emit('createDocument')"
+      >
         {{ creating ? t("doc.create.pending") : t("nav.newDocument") }}
       </UButton>
     </div>

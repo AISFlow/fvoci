@@ -11,8 +11,8 @@ import type { IsoDate } from "@/lib/iso-date";
 import { problemMessage } from "@/lib/api";
 import { membersQuery } from "@/lib/queries";
 import { EMPTY_VIEW_QUERY, withTitleFilter, type ViewQuery } from "@/lib/view-query";
-import GanttChart, { type GanttBarChange } from "./GanttChart.vue";
-import type { PackMode } from "./gantt-geometry";
+import GanttChart from "./GanttChart.vue";
+import type { GanttBarChange, PackMode } from "./gantt-geometry";
 import { useGanttLayout } from "./useGanttLayout";
 import { useRescheduleTask } from "./useRescheduleTask";
 import "./gantt-theme.css";
@@ -41,7 +41,12 @@ const emit = defineEmits<{
 const layoutQuery = useGanttLayout(() => ({
   workspaceId: props.workspaceId,
   projectId: props.projectId,
-  filters: { year: props.year, month: props.month, weekStartsOn: props.weekStartsOn, query: props.query },
+  filters: {
+    year: props.year,
+    month: props.month,
+    weekStartsOn: props.weekStartsOn,
+    query: props.query,
+  },
 }));
 const workflow = useQuery(() => workflowQuery(props.workspaceId, props.projectId));
 const members = useQuery(() => membersQuery(props.workspaceId));
@@ -55,15 +60,21 @@ const pack = ref<PackMode>("rows");
 const layout = computed(() => layoutQuery.data.value);
 const items = computed(() => layout.value?.items ?? []);
 const itemsById = computed(() => new Map(items.value.map((item) => [item.id, item])));
-const statusById = computed(() => new Map((workflow.data.value?.statuses ?? []).map((s) => [s.id, s])));
+const statusById = computed(
+  () => new Map((workflow.data.value?.statuses ?? []).map((s) => [s.id, s])),
+);
 const memberNameById = computed(
   () => new Map((members.data.value?.items ?? []).map((m) => [m.userId, formatPersonName(m)])),
 );
 // A month or filter still loading shows the previous layout; it takes no edits.
-const canEdit = computed(() => layout.value?.canEdit === true && !layoutQuery.isPlaceholderData.value);
+const canEdit = computed(
+  () => layout.value?.canEdit === true && !layoutQuery.isPlaceholderData.value,
+);
 
 function assigneeName(ids: readonly string[]): string | undefined {
-  return ids.map((id) => memberNameById.value.get(id)).find((name): name is string => name !== undefined);
+  return ids
+    .map((id) => memberNameById.value.get(id))
+    .find((name): name is string => name !== undefined);
 }
 
 function onChange(change: GanttBarChange): void {
@@ -108,7 +119,9 @@ function onTitleInput(value: string | number | null | undefined): void {
     emit("search", title.value);
   }, 300);
 }
-onBeforeUnmount(() => window.clearTimeout(searchTimer));
+onBeforeUnmount(() => {
+  window.clearTimeout(searchTimer);
+});
 </script>
 
 <template>
@@ -157,13 +170,21 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer));
       close
       @update:open="reschedule.dismissError()"
     />
-    <p role="status" class="sr-only">{{ reschedule.savingId.value ? t("gantt.bar.saving") : "" }}</p>
+    <p role="status" class="sr-only">{{
+      reschedule.savingId.value ? t("gantt.bar.saving") : ""
+    }}</p>
     <p v-if="layout?.truncated" role="status" class="text-muted">{{ t("gantt.truncated") }}</p>
     <p v-if="layout && layout.linkTotal > layout.links.length" role="status" class="text-muted">
       {{ t("gantt.paths.truncated", { shown: layout.links.length, total: layout.linkTotal }) }}
     </p>
-    <p v-if="layoutQuery.isPending.value" role="status" class="p-4 text-muted">{{ t("load.loading") }}</p>
-    <div v-else-if="layoutQuery.isError.value && !layout" role="alert" class="flex items-center gap-2 p-4">
+    <p v-if="layoutQuery.isPending.value" role="status" class="p-4 text-muted">{{
+      t("load.loading")
+    }}</p>
+    <div
+      v-else-if="layoutQuery.isError.value && !layout"
+      role="alert"
+      class="flex items-center gap-2 p-4"
+    >
       <span>{{ problemMessage(layoutQuery.error.value, "load.failed") }}</span>
       <UButton size="sm" variant="outline" color="neutral" @click="layoutQuery.refetch()">
         {{ t("load.retry") }}
@@ -191,11 +212,15 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer));
             :title="statusById.get(item.statusId)?.name"
             >{{ statusById.get(item.statusId)?.name }}</span
           >
-          <span class="shrink-0 font-mono text-xs text-muted">{{ formatDisplayId(projectKey, item.number) }}</span>
-          <span class="min-w-0 flex-1 truncate">{{ item.title }}</span>
-          <span v-if="assigneeName(item.assigneeIds)" class="max-w-16 shrink-0 truncate text-xs text-muted">{{
-            assigneeName(item.assigneeIds)
+          <span class="shrink-0 font-mono text-xs text-muted">{{
+            formatDisplayId(projectKey, item.number)
           }}</span>
+          <span class="min-w-0 flex-1 truncate">{{ item.title }}</span>
+          <span
+            v-if="assigneeName(item.assigneeIds)"
+            class="max-w-16 shrink-0 truncate text-xs text-muted"
+            >{{ assigneeName(item.assigneeIds) }}</span
+          >
         </span>
       </template>
     </GanttChart>

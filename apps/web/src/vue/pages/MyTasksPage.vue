@@ -5,7 +5,12 @@ import { useInfiniteQuery, useQuery } from "@tanstack/vue-query";
 import { computed } from "vue";
 import { useRoute } from "vue-router";
 import { projectsQuery } from "@/features/projects/queries";
-import { groupTasksByProject, myTasksQuery, workspaceStatusesQuery, workspaceLabelsQuery } from "@/features/tasks/my-tasks";
+import {
+  groupTasksByProject,
+  myTasksQuery,
+  workspaceStatusesQuery,
+  workspaceLabelsQuery,
+} from "@/features/tasks/my-tasks";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { FALLBACK_TZ } from "@/lib/datetime";
@@ -37,30 +42,48 @@ const projects = useQuery(() => ({
 }));
 const me = useQuery(meQuery);
 const labels = useQuery(() => workspaceLabelsQuery(workspaceId.value));
-const members = useQuery(() => ({ ...membersQuery(workspaceId.value), enabled: Boolean(workspaceId.value) }));
+const members = useQuery(() => ({
+  ...membersQuery(workspaceId.value),
+  enabled: Boolean(workspaceId.value),
+}));
 
 const items = computed(() => mergeTaskListPages(tasks.data.value?.pages ?? [])?.items ?? []);
 const grouped = computed(() => groupTasksByProject(items.value));
-const projectById = computed(() => new Map((projects.data.value?.items ?? []).map((project) => [project.id, project])));
-const statusById = computed(() => new Map((statuses.data.value?.items ?? []).map((status) => [status.id, status])));
+const projectById = computed(
+  () => new Map((projects.data.value?.items ?? []).map((project) => [project.id, project])),
+);
+const statusById = computed(
+  () => new Map((statuses.data.value?.items ?? []).map((status) => [status.id, status])),
+);
 const timeZone = computed(() => me.data.value?.timezone ?? FALLBACK_TZ);
 const cursorStale = computed(
-  () => tasks.error.value instanceof ProblemError && tasks.error.value.status === 400 && items.value.length > 0,
+  () =>
+    tasks.error.value instanceof ProblemError &&
+    tasks.error.value.status === 400 &&
+    items.value.length > 0,
 );
 
-function onLoadMore(): void {
-  if (cursorStale.value) void tasks.refetch();
-  else void tasks.fetchNextPage();
+async function onLoadMore(): Promise<void> {
+  if (cursorStale.value) await tasks.refetch();
+  else await tasks.fetchNextPage();
 }
 </script>
 
 <template>
-  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="session.status.value === 'error'" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="myTasks">
+  <WorkspaceShell
+    v-else-if="workspace"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+    active="myTasks"
+  >
     <div class="task-home" data-testid="my-tasks">
       <div class="task-home__head">
         <h1 class="task-home__title">{{ t("task.mine") }}</h1>
@@ -69,15 +92,24 @@ function onLoadMore(): void {
       <QueryError
         v-else-if="tasks.isError.value && items.length === 0"
         :message="loadErrorMessage(tasks.error.value)"
-        @retry="() => void tasks.refetch()"
+        @retry="tasks.refetch()"
       />
-      <p v-else-if="tasks.isSuccess.value && items.length === 0" class="break-keep text-lg font-semibold">
+      <p
+        v-else-if="tasks.isSuccess.value && items.length === 0"
+        class="break-keep text-lg font-semibold"
+      >
         {{ t("task.assigned.empty") }}
       </p>
       <div class="flex flex-col gap-8">
-        <section v-for="[projectId, projectItems] in grouped" :key="projectId" class="flex flex-col gap-1">
+        <section
+          v-for="[projectId, projectItems] in grouped"
+          :key="projectId"
+          class="flex flex-col gap-1"
+        >
           <h2 class="border-b border-default pb-2 text-sm font-medium">
-            <span class="tabular-nums text-muted">{{ projectById.get(projectId)?.key ?? "—" }}</span>
+            <span class="tabular-nums text-muted">{{
+              projectById.get(projectId)?.key ?? "—"
+            }}</span>
             <span v-if="projectById.get(projectId)?.name" class="ml-2 break-keep">{{
               projectById.get(projectId)?.name
             }}</span>
@@ -91,11 +123,16 @@ function onLoadMore(): void {
                 :number="item.number"
                 :project-key="projectById.get(projectId)?.key"
                 :status-name="statusById.get(item.statusId)?.name"
-                :due-date="item.dueDate" :due-at="item.dueAt"
+                :due-date="item.dueDate"
+                :due-at="item.dueAt"
                 :time-zone="timeZone"
                 :type="item.type"
                 :priority="item.priority"
-                :labels="(labels.data.value?.items ?? []).filter(label => item.labelIds.includes(label.id))"
+                :labels="
+                  (labels.data.value?.items ?? []).filter((label) =>
+                    item.labelIds.includes(label.id),
+                  )
+                "
                 :assignee-ids="item.assigneeIds"
                 :members="members.data.value?.items ?? []"
               />
@@ -103,9 +140,13 @@ function onLoadMore(): void {
           </ul>
         </section>
       </div>
-      <p v-if="cursorStale" role="status" class="break-keep text-sm text-muted">{{ t("task.mine.cursorRestarted") }}</p>
+      <p v-if="cursorStale" role="status" class="break-keep text-sm text-muted">{{
+        t("task.mine.cursorRestarted")
+      }}</p>
       <div v-if="tasks.hasNextPage.value || cursorStale" class="flex flex-col items-start gap-2">
-        <p v-if="tasks.isFetchNextPageError.value && !cursorStale" role="alert">{{ t("task.mine.loadMoreFailed") }}</p>
+        <p v-if="tasks.isFetchNextPageError.value && !cursorStale" role="alert">{{
+          t("task.mine.loadMoreFailed")
+        }}</p>
         <UButton
           type="button"
           variant="outline"

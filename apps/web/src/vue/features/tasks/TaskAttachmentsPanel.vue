@@ -35,7 +35,9 @@ const remove = useMutation({
     ),
   onSuccess: async () => {
     error.value = null;
-    await queryClient.invalidateQueries({ queryKey: taskAttachmentsQuery(props.workspaceId, props.taskId).queryKey });
+    await queryClient.invalidateQueries({
+      queryKey: taskAttachmentsQuery(props.workspaceId, props.taskId).queryKey,
+    });
   },
   onError: (err) => {
     error.value = attachmentErrorMessage(err);
@@ -52,23 +54,25 @@ async function attach(files: File[]): Promise<void> {
     error.value = attachmentErrorMessage(err);
   } finally {
     uploading.value = false;
-    await queryClient.invalidateQueries({ queryKey: taskAttachmentsQuery(props.workspaceId, props.taskId).queryKey });
+    await queryClient.invalidateQueries({
+      queryKey: taskAttachmentsQuery(props.workspaceId, props.taskId).queryKey,
+    });
   }
 }
 
-function onPaste(event: ClipboardEvent): void {
+async function onPaste(event: ClipboardEvent): Promise<void> {
   if (props.readOnly) return;
   const files = [...(event.clipboardData?.files ?? [])];
   if (files.length === 0) return;
   event.preventDefault();
-  void attach(files);
+  await attach(files);
 }
 
-function onPick(event: Event): void {
+async function onPick(event: Event): Promise<void> {
   const input = event.currentTarget as HTMLInputElement;
   const files = [...(input.files ?? [])];
   input.value = "";
-  void attach(files);
+  await attach(files);
 }
 </script>
 
@@ -81,7 +85,10 @@ function onPick(event: Event): void {
     @paste="onPaste"
   >
     <div v-if="!readOnly" class="flex items-center gap-2">
-      <label :for="inputId" class="inline-flex h-9 cursor-pointer items-center rounded-md border border-default px-3 text-sm">
+      <label
+        :for="inputId"
+        class="inline-flex h-9 cursor-pointer items-center rounded-md border border-default px-3 text-sm"
+      >
         {{ t("task.attach.pick") }}
       </label>
       <input

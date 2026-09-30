@@ -29,7 +29,8 @@ const props = defineProps<{
 
 const { mentionItems, entityResolver } = useEditorEntities(
   () => props.workspaceId,
-  () => `${props.taskId}:${props.session?.generation ?? ""}:${props.collabUser?.id ?? ""}:${props.session?.status === "unauthorized"}`,
+  () =>
+    `${props.taskId}:${String(props.session?.generation ?? "")}:${props.collabUser?.id ?? ""}:${String(props.session?.status === "unauthorized")}`,
 );
 
 const persisting = ref(false);
@@ -40,7 +41,11 @@ const ready = computed(() => Boolean(props.session?.synced && props.collabUser))
 const refusalNote = computed(() => collabRefusalNote(props.session?.status, ready.value));
 const badge = computed(() =>
   props.session
-    ? collabBadge(props.session.status, props.session.pending || persisting.value, props.session.durableSaved)
+    ? collabBadge(
+        props.session.status,
+        props.session.pending || persisting.value,
+        props.session.durableSaved,
+      )
     : null,
 );
 const canPersist = computed(
@@ -86,7 +91,11 @@ async function persistBody(): Promise<void> {
       >
         {{ t(badge.label) }}
       </span>
-      <span v-else class="document-page__collab-status document-page__collab-status--wait" data-collab-persisted="false">
+      <span
+        v-else
+        class="document-page__collab-status document-page__collab-status--wait"
+        data-collab-persisted="false"
+      >
         {{ t("doc.collab.connecting") }}
       </span>
       <UButton size="sm" :disabled="!canPersist" @click="persistBody().catch(() => undefined)">
@@ -108,7 +117,10 @@ async function persistBody(): Promise<void> {
     </p>
     <p v-if="refusalNote" class="document-page__body-note" role="status">{{ t(refusalNote) }}</p>
     <QueryLoading v-if="!ready && session?.status !== 'unauthorized' && !refusalNote" />
-    <div v-if="ready && session && collabUser" class="document-page__body document-page__body--editor">
+    <div
+      v-if="ready && session && collabUser"
+      class="document-page__body document-page__body--editor"
+    >
       <FvociEditor
         :key="session.generation"
         :ydoc="session.doc"

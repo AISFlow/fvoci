@@ -31,7 +31,7 @@ const leadUserId = ref(props.currentUserId ?? "");
 const fieldError = ref<string | null>(null);
 const serverError = ref<string | null>(null);
 const submitting = ref(false);
-const busy = computed(() => props.pending === true || submitting.value);
+const busy = computed(() => props.pending || submitting.value);
 
 function onKeyInput(event: Event): void {
   key.value = canonicalizeProjectKey((event.target as HTMLInputElement).value);
@@ -75,11 +75,19 @@ async function submitForm(event: Event): Promise<void> {
 <template>
   <form class="project-form" novalidate @submit="submitForm">
     <p class="project-form__hint">{{ t("project.clone.help") }}</p>
-    <p class="project-form__hint">{{ t("project.clone.source") }}: {{ source.key }} — {{ source.name }}</p>
+    <p class="project-form__hint"
+      >{{ t("project.clone.source") }}: {{ source.key }} — {{ source.name }}</p
+    >
     <div class="project-form__row">
       <div class="project-form__field">
         <label for="clone-key">{{ t("project.keyLabel") }}</label>
-        <input id="clone-key" :value="key" autocomplete="off" :disabled="busy" @input="onKeyInput" />
+        <input
+          id="clone-key"
+          :value="key"
+          autocomplete="off"
+          :disabled="busy"
+          @input="onKeyInput"
+        />
       </div>
       <div class="project-form__field">
         <label for="clone-name">{{ t("project.name") }}</label>

@@ -66,7 +66,11 @@ function days(from: IsoDate, to: IsoDate): number {
 }
 
 /** The body for `change` of `item`, or null when no stored date changes. */
-export function rescheduleBody(item: RescheduleItem, change: BarChange, timeZone: string): RescheduleBody | null {
+export function rescheduleBody(
+  item: RescheduleItem,
+  change: BarChange,
+  timeZone: string,
+): RescheduleBody | null {
   const startDate = item.startDate ?? null;
   const dueDate = item.dueDate ?? null;
   const dueAt = item.dueAt ?? null;
@@ -81,7 +85,10 @@ export function rescheduleBody(item: RescheduleItem, change: BarChange, timeZone
     return body;
   }
 
-  const target = change.kind === "start" ? { start: change.start, end: item.end } : { start: item.start, end: change.end };
+  const target =
+    change.kind === "start"
+      ? { start: change.start, end: item.end }
+      : { start: item.start, end: change.end };
   if (target.start === item.start && target.end === item.end) return null;
   const hasFinish = dueDate !== null || dueAt !== null;
   // The layout's day for the finish (dueDate, else dueAt's UTC date): the
@@ -110,5 +117,7 @@ export function rescheduleBody(item: RescheduleItem, change: BarChange, timeZone
   } else {
     setFinish(target.end);
   }
-  return body.startDate === undefined && body.dueDate === undefined && body.dueAt === undefined ? null : body;
+  return body.startDate === undefined && body.dueDate === undefined && body.dueAt === undefined
+    ? null
+    : body;
 }

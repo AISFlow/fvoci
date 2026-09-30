@@ -3,14 +3,25 @@ import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, ref, watch } from "vue";
 import type { WorkflowStatus } from "@/features/projects/queries";
-import type { LabelItem, MilestoneItem, TaskDependency, TaskDetail, TaskListItem } from "@/features/tasks/queries";
+import type {
+  LabelItem,
+  MilestoneItem,
+  TaskDependency,
+  TaskDetail,
+  TaskListItem,
+} from "@/features/tasks/queries";
 import {
   PRIORITIES,
   clearsHierarchyParent,
   patchTypeBody,
   priorityLabel,
 } from "@/features/tasks/task-edit-payload";
-import { TASK_TYPES, TASK_TYPE_LABELS, isTaskType, type TaskType } from "@/features/tasks/task-types";
+import {
+  TASK_TYPES,
+  TASK_TYPE_LABELS,
+  isTaskType,
+  type TaskType,
+} from "@/features/tasks/task-types";
 import type { MemberOutput } from "@/lib/contracts";
 import { formatDisplayId, itemPath } from "@/lib/href";
 import AppLink from "../../components/AppLink.vue";
@@ -98,8 +109,10 @@ watch(
 );
 
 const showParent = computed(() => draftType.value !== "epic");
-const hierarchyDirty = computed(() => draftType.value !== props.task.type || draftParentId.value !== props.task.parentId);
-const dependencies = computed(() => (props.task.dependencies ?? []) as TaskDependency[]);
+const hierarchyDirty = computed(
+  () => draftType.value !== props.task.type || draftParentId.value !== props.task.parentId,
+);
+const dependencies = computed(() => props.task.dependencies);
 const parentCurrentTitle = computed(() => {
   const parent = props.task.parent;
   if (parent && draftParentId.value === parent.id) {
@@ -171,7 +184,7 @@ function toggleLabel(labelId: string, checked: boolean): void {
   emit("labelsChange", next);
 }
 
-function onAddDependency(event: Event): void {
+function submitDependency(event: Event): void {
   event.preventDefault();
   if (depBlockedId.value === NONE) {
     depLocalError.value = t("dep.target.required");
@@ -205,7 +218,9 @@ function onDepTypeChange(event: Event): void {
 function dependencyName(edge: TaskDependency): string {
   const otherId = edge.blockerId === props.task.id ? edge.blockedId : edge.blockerId;
   const other = props.dependencyCandidates.find((candidate) => candidate.id === otherId);
-  return other ? `${formatDisplayId(props.projectKey, other.number)} ${other.title}` : otherId.slice(0, 8);
+  return other
+    ? `${formatDisplayId(props.projectKey, other.number)} ${other.title}`
+    : otherId.slice(0, 8);
 }
 </script>
 
@@ -246,13 +261,17 @@ function dependencyName(edge: TaskDependency): string {
           :value="task.statusId"
           @change="emit('statusChange', ($event.target as HTMLSelectElement).value)"
         >
-          <option v-for="status in statuses" :key="status.id" :value="status.id">{{ status.name }}</option>
+          <option v-for="status in statuses" :key="status.id" :value="status.id">{{
+            status.name
+          }}</option>
         </select>
       </div>
       <fieldset class="task-form__hierarchy" :disabled="readOnly || pending">
         <legend>{{ t("task.hierarchy.edit") }}</legend>
         <div class="task-form__field">
-          <label for="task-edit-type" class="text-sm font-medium">{{ t("task.detail.type.label") }}</label>
+          <label for="task-edit-type" class="text-sm font-medium">{{
+            t("task.detail.type.label")
+          }}</label>
           <select
             id="task-edit-type"
             data-testid="task-edit-type"
@@ -260,11 +279,15 @@ function dependencyName(edge: TaskDependency): string {
             :value="draftType"
             @change="onTypeChange"
           >
-            <option v-for="value in TASK_TYPES" :key="value" :value="value">{{ TASK_TYPE_LABELS[value] }}</option>
+            <option v-for="value in TASK_TYPES" :key="value" :value="value">{{
+              TASK_TYPE_LABELS[value]
+            }}</option>
           </select>
         </div>
         <div v-if="showParent" class="task-form__field">
-          <label for="task-edit-parent" class="text-sm font-medium">{{ t("task.parent.label") }}</label>
+          <label for="task-edit-parent" class="text-sm font-medium">{{
+            t("task.parent.label")
+          }}</label>
           <TaskParentSelect
             v-model="draftParentId"
             :workspace-id="workspaceId"
@@ -280,7 +303,12 @@ function dependencyName(edge: TaskDependency): string {
             </AppLink>
           </p>
         </div>
-        <p v-if="hierarchyError" class="task-form__alert" role="alert" data-testid="task-edit-hierarchy-error">
+        <p
+          v-if="hierarchyError"
+          class="task-form__alert"
+          role="alert"
+          data-testid="task-edit-hierarchy-error"
+        >
           {{ hierarchyError }}
         </p>
         <div class="task-form__hierarchy-actions">
@@ -313,11 +341,15 @@ function dependencyName(edge: TaskDependency): string {
           :value="task.priority"
           @change="emit('priorityChange', ($event.target as HTMLSelectElement).value)"
         >
-          <option v-for="value in PRIORITIES" :key="value" :value="value">{{ priorityLabel(value) }}</option>
+          <option v-for="value in PRIORITIES" :key="value" :value="value">{{
+            priorityLabel(value)
+          }}</option>
         </select>
       </div>
       <div class="task-form__field">
-        <label for="task-edit-due-date" class="text-sm font-medium">{{ t("task.dueAllDay") }}</label>
+        <label for="task-edit-due-date" class="text-sm font-medium">{{
+          t("task.dueAllDay")
+        }}</label>
         <input
           id="task-edit-due-date"
           v-model="dueDateDraft"
@@ -346,7 +378,9 @@ function dependencyName(edge: TaskDependency): string {
       <fieldset class="task-form__field" :disabled="readOnly" data-testid="task-edit-labels">
         <legend>{{ t("task.filter.labelsShort") }}</legend>
         <div class="task-form__checks">
-          <p v-if="labels.length === 0" class="task-home__note">{{ t("task.activity.value.none") }}</p>
+          <p v-if="labels.length === 0" class="task-home__note">{{
+            t("task.activity.value.none")
+          }}</p>
           <label v-for="label in labels" :key="label.id" class="task-form__check">
             <input
               type="checkbox"
@@ -360,21 +394,35 @@ function dependencyName(edge: TaskDependency): string {
         </div>
       </fieldset>
       <div class="task-form__field">
-        <label for="task-edit-milestone" class="text-sm font-medium">{{ t("project.milestones") }}</label>
+        <label for="task-edit-milestone" class="text-sm font-medium">{{
+          t("project.milestones")
+        }}</label>
         <select
           id="task-edit-milestone"
           data-testid="task-edit-milestone"
           :aria-label="t('project.milestones')"
           :disabled="readOnly || pending"
           :value="task.milestoneId ?? NONE"
-          @change="emit('milestoneChange', ($event.target as HTMLSelectElement).value === NONE ? null : ($event.target as HTMLSelectElement).value)"
+          @change="
+            emit(
+              'milestoneChange',
+              ($event.target as HTMLSelectElement).value === NONE
+                ? null
+                : ($event.target as HTMLSelectElement).value,
+            )
+          "
         >
           <option :value="NONE">{{ t("task.milestone.none") }}</option>
-          <option v-for="milestone in milestones" :key="milestone.id" :value="milestone.id">{{ milestone.name }}</option>
+          <option v-for="milestone in milestones" :key="milestone.id" :value="milestone.id">{{
+            milestone.name
+          }}</option>
         </select>
       </div>
       <div class="task-form__field" data-testid="task-edit-dependencies">
-        <h2 v-if="dependencies.length > 0 || depFormOpen || depLocalError" class="settings-section__title">
+        <h2
+          v-if="dependencies.length > 0 || depFormOpen || depLocalError"
+          class="settings-section__title"
+        >
           {{ t("task.dep") }}
         </h2>
         <ul v-if="dependencies.length > 0" class="flex flex-col gap-1">
@@ -385,7 +433,10 @@ function dependencyName(edge: TaskDependency): string {
             :data-testid="`task-edit-dependency-${edge.blockerId}-${edge.blockedId}`"
           >
             <span>
-              {{ edge.blockerId !== task.id ? "← " : "" }}{{ t("task.dep.lag", { name: dependencyName(edge), type: edge.type, n: edge.lagDays }) }}
+              {{ edge.blockerId !== task.id ? "← " : ""
+              }}{{
+                t("task.dep.lag", { name: dependencyName(edge), type: edge.type, n: edge.lagDays })
+              }}
             </span>
             <UButton
               v-if="canEdit && !readOnly"
@@ -394,7 +445,9 @@ function dependencyName(edge: TaskDependency): string {
               color="neutral"
               :data-testid="`task-edit-dependency-remove-${edge.blockedId}`"
               :disabled="pending"
-              @click="emit('removeDependency', { blockerId: edge.blockerId, blockedId: edge.blockedId })"
+              @click="
+                emit('removeDependency', { blockerId: edge.blockerId, blockedId: edge.blockedId })
+              "
             >
               {{ t("task.dependency.remove") }}
             </UButton>
@@ -413,7 +466,7 @@ function dependencyName(edge: TaskDependency): string {
           >
             {{ t("task.dep.add") }}
           </UButton>
-          <form v-else class="flex flex-col gap-2" @submit="onAddDependency">
+          <form v-else class="flex flex-col gap-2" @submit="submitDependency">
             <select
               v-model="depBlockedId"
               data-testid="task-edit-dependency-target"
@@ -448,7 +501,12 @@ function dependencyName(edge: TaskDependency): string {
               :disabled="pending"
             />
             <div class="flex flex-wrap gap-2">
-              <UButton type="submit" size="sm" data-testid="task-edit-dependency-add" :disabled="pending">
+              <UButton
+                type="submit"
+                size="sm"
+                data-testid="task-edit-dependency-add"
+                :disabled="pending"
+              >
                 {{ t("task.dependency.add") }}
               </UButton>
               <UButton
@@ -466,8 +524,20 @@ function dependencyName(edge: TaskDependency): string {
           </form>
         </template>
       </div>
-      <p v-if="fieldError" class="task-form__alert" role="alert" data-testid="task-edit-field-error">{{ fieldError }}</p>
-      <p v-if="actionError" class="task-form__alert" role="alert" data-testid="task-edit-action-error">{{ actionError }}</p>
+      <p
+        v-if="fieldError"
+        class="task-form__alert"
+        role="alert"
+        data-testid="task-edit-field-error"
+        >{{ fieldError }}</p
+      >
+      <p
+        v-if="actionError"
+        class="task-form__alert"
+        role="alert"
+        data-testid="task-edit-action-error"
+        >{{ actionError }}</p
+      >
       <div v-if="canEdit" class="task-form__actions">
         <UButton
           v-if="!archived"

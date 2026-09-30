@@ -9,7 +9,7 @@ function source(file: string): string {
   return readFileSync(path.join(dir, file), "utf8");
 }
 
-test("the Vue my-tasks page uses the shared infinite query and does not import React", () => {
+await test("the Vue my-tasks page uses the shared infinite query and does not import React", () => {
   const page = source("../../pages/MyTasksPage.vue");
   assert.match(page, /myTasksQuery\(workspaceId\.value\)/);
   assert.match(page, /mergeTaskListPages/);

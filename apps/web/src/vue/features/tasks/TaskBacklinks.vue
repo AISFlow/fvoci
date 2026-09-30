@@ -21,7 +21,11 @@ const items = computed(() => backlinks.data.value?.items ?? []);
     <h2 class="text-sm font-medium">{{ t("backlinks.title") }}</h2>
     <ul class="flex flex-col gap-1">
       <li v-for="item in items" :key="item.id">
-        <AppLink v-if="item.from.displayId" :to="itemPath(slug, item.from.displayId)" class="break-keep hover:underline">
+        <AppLink
+          v-if="item.from.displayId"
+          :to="itemPath(slug, item.from.displayId)"
+          class="break-keep hover:underline"
+        >
           {{ item.from.title }}
         </AppLink>
         <span v-else class="break-keep">{{ item.from.title }}</span>

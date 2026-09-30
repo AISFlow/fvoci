@@ -41,7 +41,8 @@ const type = ref<ProjectViewType>("list");
 const conflict = ref(false);
 const error = ref<string | null>(null);
 const changed = computed(
-  () => selected.value !== undefined && !viewQueriesEqual(viewConfigOf(selected.value), props.query),
+  () =>
+    selected.value !== undefined && !viewQueriesEqual(viewConfigOf(selected.value), props.query),
 );
 
 function failure(err: unknown): string {
@@ -63,7 +64,10 @@ const create = useMutation({
     error.value = failure(err);
   },
   onSuccess: async (created) => {
-    queryClient.setQueryData(viewsKey.value, (previous: ProjectView[] = []) => [...previous, created]);
+    queryClient.setQueryData(viewsKey.value, (previous: ProjectView[] = []) => [
+      ...previous,
+      created,
+    ]);
     await queryClient.invalidateQueries({ queryKey: viewsKey.value });
     createOpen.value = false;
     name.value = "";
@@ -127,7 +131,9 @@ const remove = useMutation({
   },
 });
 
-const pending = computed(() => create.isPending.value || update.isPending.value || remove.isPending.value);
+const pending = computed(
+  () => create.isPending.value || update.isPending.value || remove.isPending.value,
+);
 
 watch(
   () => props.selectedId,
@@ -140,11 +146,16 @@ watch(
 function onSelectChange(event: Event): void {
   conflict.value = false;
   error.value = null;
-  emit("select", items.value.find((view) => view.id === (event.target as HTMLSelectElement).value) ?? null);
+  emit(
+    "select",
+    items.value.find((view) => view.id === (event.target as HTMLSelectElement).value) ?? null,
+  );
 }
 
 function onCreateType(event: Event): void {
-  const next = PROJECT_VIEW_TYPES.find((value) => value === (event.target as HTMLSelectElement).value);
+  const next = PROJECT_VIEW_TYPES.find(
+    (value) => value === (event.target as HTMLSelectElement).value,
+  );
   if (next) type.value = next;
 }
 
@@ -258,12 +269,16 @@ async function deleteSelected(): Promise<void> {
     </div>
     <div v-if="views.isError.value" role="alert" class="collection-toolbar">
       <span class="text-sm text-error">{{ t("task.savedView.failed") }}</span>
-      <UButton size="sm" variant="outline" color="neutral" @click="views.refetch()">{{ t("task.savedView.retry") }}</UButton>
+      <UButton size="sm" variant="outline" color="neutral" @click="views.refetch()">{{
+        t("task.savedView.retry")
+      }}</UButton>
     </div>
     <p v-if="error && !createOpen" role="alert" class="text-sm text-error">{{ error }}</p>
     <NativeModal :open="createOpen" :labelled-by="dialogTitleId" @close="createOpen = false">
       <form class="task-form" @submit.prevent="onCreateSubmit">
-        <h2 :id="dialogTitleId" class="project-dialog__title">{{ t("task.savedView.createTitle") }}</h2>
+        <h2 :id="dialogTitleId" class="project-dialog__title">{{
+          t("task.savedView.createTitle")
+        }}</h2>
         <p class="task-home__note">{{ t("task.savedView.createDescription") }}</p>
         <div class="task-form__field">
           <label :for="nameId" class="text-sm font-medium">{{ t("task.savedView.name") }}</label>
@@ -286,9 +301,15 @@ async function deleteSelected(): Promise<void> {
         </div>
         <p v-if="error" role="alert" class="task-form__alert">{{ error }}</p>
         <div class="task-form__actions">
-          <UButton variant="outline" color="neutral" @click="createOpen = false">{{ t("common.cancel") }}</UButton>
+          <UButton variant="outline" color="neutral" @click="createOpen = false">{{
+            t("common.cancel")
+          }}</UButton>
           <UButton type="submit" :disabled="create.isPending.value || !name.trim()">
-            {{ create.isPending.value ? t("task.savedView.creating") : t("task.savedView.createAction") }}
+            {{
+              create.isPending.value
+                ? t("task.savedView.creating")
+                : t("task.savedView.createAction")
+            }}
           </UButton>
         </div>
       </form>

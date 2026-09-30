@@ -8,7 +8,12 @@ import { formatDuration } from "@/features/tasks/time-entry-format";
 import type { components } from "@/generated/api";
 import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
 import type { MemberOutput } from "@/lib/contracts";
-import { datetimeLocalInTimeZoneToIso, durationSecondsBetween, FALLBACK_TZ, formatInstant } from "@/lib/datetime";
+import {
+  datetimeLocalInTimeZoneToIso,
+  durationSecondsBetween,
+  FALLBACK_TZ,
+  formatInstant,
+} from "@/lib/datetime";
 import { meQuery } from "@/lib/queries";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
@@ -40,7 +45,9 @@ const canCreate = computed(
   () => !props.readOnly && list.isSuccess.value && Boolean(list.data.value?.canCreate),
 );
 const total = computed(() => items.value.reduce((sum, row) => sum + (row.durationSeconds ?? 0), 0));
-const showHeading = computed(() => !list.isSuccess.value || items.value.length > 0 || formOpen.value);
+const showHeading = computed(
+  () => !list.isSuccess.value || items.value.length > 0 || formOpen.value,
+);
 
 const create = useMutation({
   mutationFn: async (body: TimeEntryCreateBody) =>
@@ -56,7 +63,9 @@ const create = useMutation({
     startedLocal.value = "";
     endedLocal.value = "";
     note.value = "";
-    await queryClient.invalidateQueries({ queryKey: taskTimeEntriesQuery(props.workspaceId, props.taskId).queryKey });
+    await queryClient.invalidateQueries({
+      queryKey: taskTimeEntriesQuery(props.workspaceId, props.taskId).queryKey,
+    });
   },
   onError: (err) => {
     formError.value = err instanceof ProblemError ? err.title : t("load.failed");
@@ -127,9 +136,9 @@ async function onSubmit(): Promise<void> {
               minute: "2-digit",
             })
           }}
-          {{ row.durationSeconds == null ? t("task.time.open") : formatDuration(row.durationSeconds) }}{{
-            row.note ? ` · ${row.note}` : ""
-          }}
+          {{
+            row.durationSeconds == null ? t("task.time.open") : formatDuration(row.durationSeconds)
+          }}{{ row.note ? ` · ${row.note}` : "" }}
         </li>
       </ul>
     </div>
@@ -145,10 +154,17 @@ async function onSubmit(): Promise<void> {
     >
       {{ t("task.time.submit") }}
     </UButton>
-    <form v-if="canCreate && formOpen" class="flex flex-col gap-2 sm:max-w-lg" novalidate @submit.prevent="onSubmit">
+    <form
+      v-if="canCreate && formOpen"
+      class="flex flex-col gap-2 sm:max-w-lg"
+      novalidate
+      @submit.prevent="onSubmit"
+    >
       <div class="grid gap-2 sm:grid-cols-2">
         <div class="flex flex-col gap-1">
-          <label class="text-sm text-muted" for="task-time-started">{{ t("task.time.startedAt") }}</label>
+          <label class="text-sm text-muted" for="task-time-started">{{
+            t("task.time.startedAt")
+          }}</label>
           <input
             id="task-time-started"
             v-model="startedLocal"
@@ -157,7 +173,9 @@ async function onSubmit(): Promise<void> {
           />
         </div>
         <div class="flex flex-col gap-1">
-          <label class="text-sm text-muted" for="task-time-ended">{{ t("task.time.endedAt") }}</label>
+          <label class="text-sm text-muted" for="task-time-ended">{{
+            t("task.time.endedAt")
+          }}</label>
           <input
             id="task-time-ended"
             v-model="endedLocal"
@@ -177,7 +195,9 @@ async function onSubmit(): Promise<void> {
       </div>
       <p v-if="shownError" role="alert" class="break-keep text-sm text-error">{{ shownError }}</p>
       <div class="flex flex-wrap gap-2">
-        <UButton type="submit" size="sm" :disabled="create.isPending.value">{{ t("task.time.submit") }}</UButton>
+        <UButton type="submit" size="sm" :disabled="create.isPending.value">{{
+          t("task.time.submit")
+        }}</UButton>
         <UButton type="button" size="sm" variant="outline" color="neutral" @click="cancelForm">
           {{ t("task.create.cancel") }}
         </UButton>

@@ -15,7 +15,7 @@ const props = withDefaults(
     currentTitle?: string;
     disabled?: boolean;
   }>(),
-  { disabled: false },
+  { currentTitle: undefined, disabled: false },
 );
 const emit = defineEmits<{ "update:modelValue": [value: string | null] }>();
 
@@ -25,8 +25,18 @@ const selected = ref<{ id: string; title: string } | null>(null);
 const q = computed(() => query.value.trim());
 
 const list = useInfiniteQuery(() => ({
-  ...taskParentListQuery(props.workspaceId, props.projectId, props.childType, props.excludeTaskId, q.value),
-  enabled: open.value && Boolean(props.workspaceId) && Boolean(props.projectId) && props.childType !== "epic",
+  ...taskParentListQuery(
+    props.workspaceId,
+    props.projectId,
+    props.childType,
+    props.excludeTaskId,
+    q.value,
+  ),
+  enabled:
+    open.value &&
+    Boolean(props.workspaceId) &&
+    Boolean(props.projectId) &&
+    props.childType !== "epic",
 }));
 
 watch(
@@ -88,9 +98,17 @@ function pick(id: string | null, title?: string): void {
       <p v-if="listPending" role="status" class="task-home__note">{{ t("task.parent.loading") }}</p>
       <div v-else-if="listError" role="alert">
         <p class="task-form__alert">{{ t("task.parent.failed") }}</p>
-        <UButton size="sm" variant="outline" color="neutral" @click="list.refetch()">{{ t("task.parent.retry") }}</UButton>
+        <UButton size="sm" variant="outline" color="neutral" @click="list.refetch()">{{
+          t("task.parent.retry")
+        }}</UButton>
       </div>
-      <ul v-else class="task-parent-select__list" role="listbox" :aria-label="t('task.parent.label')" :aria-busy="list.isFetching.value">
+      <ul
+        v-else
+        class="task-parent-select__list"
+        role="listbox"
+        :aria-label="t('task.parent.label')"
+        :aria-busy="list.isFetching.value"
+      >
         <li v-if="childType !== 'subtask'" role="presentation">
           <button
             type="button"
@@ -115,7 +133,9 @@ function pick(id: string | null, title?: string): void {
             {{ item.displayId }} {{ item.title }}
           </button>
         </li>
-        <li v-if="showEmpty" role="presentation" class="task-home__note">{{ t("task.parent.empty") }}</li>
+        <li v-if="showEmpty" role="presentation" class="task-home__note">{{
+          t("task.parent.empty")
+        }}</li>
       </ul>
       <UButton
         v-if="list.hasNextPage.value"

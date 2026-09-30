@@ -11,7 +11,6 @@ import QueryError from "../components/QueryError.vue";
 import QueryLoading from "../components/QueryLoading.vue";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
 import ProjectHomeView from "../features/projects/ProjectHomeView.vue";
-import { leaveTo } from "../session/navigation";
 import { useProjectRef } from "../session/useProjectRef";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
 import "@/features/projects/projects.css";
@@ -37,18 +36,59 @@ const documents = useQuery(() => projectDocumentsQuery(workspaceId.value, projec
 const lifecycleError = ref<string | null>(null);
 const lifetime = ref(0);
 let operationVersion = 0;
-watch([workspaceId, slug, refParam, () => session.me.value?.userId, () => session.me.value?.sessionId,
-  () => session.me.value?.isInstanceAdmin, () => workspace.value?.role, () => session.status.value],
-  () => { lifetime.value++; lifecycleError.value = null; }, { flush: "sync" });
-onScopeDispose(() => { lifetime.value++; });
-type ProjectScope = { workspaceId: string; projectId: string; slug: string; reference: string; lifetime: number; operation: number };
-const matchesScope = (scope: ProjectScope) => workspaceId.value === scope.workspaceId && slug.value === scope.slug && refParam.value === scope.reference && lifetime.value === scope.lifetime && scope.operation === operationVersion;
+watch(
+  [
+    workspaceId,
+    slug,
+    refParam,
+    () => session.me.value?.userId,
+    () => session.me.value?.sessionId,
+    () => session.me.value?.isInstanceAdmin,
+    () => workspace.value?.role,
+    () => session.status.value,
+  ],
+  () => {
+    lifetime.value++;
+    lifecycleError.value = null;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  lifetime.value++;
+});
+type ProjectScope = {
+  workspaceId: string;
+  projectId: string;
+  slug: string;
+  reference: string;
+  lifetime: number;
+  operation: number;
+};
+const matchesScope = (scope: ProjectScope) =>
+  workspaceId.value === scope.workspaceId &&
+  slug.value === scope.slug &&
+  refParam.value === scope.reference &&
+  lifetime.value === scope.lifetime &&
+  scope.operation === operationVersion;
 function currentScope(): ProjectScope {
-  return { workspaceId: workspaceId.value, projectId: projectId.value, slug: slug.value, reference: refParam.value, lifetime: lifetime.value, operation: ++operationVersion };
+  return {
+    workspaceId: workspaceId.value,
+    projectId: projectId.value,
+    slug: slug.value,
+    reference: refParam.value,
+    lifetime: lifetime.value,
+    operation: ++operationVersion,
+  };
 }
 
 const lifecycle = useMutation({
-  mutationFn: async ({ action, scope }: { action: "archive" | "unarchive" | "delete"; scope: ProjectScope }) => {
+  mutationFn: async ({
+    action,
+    scope,
+  }: {
+    action: "archive" | "unarchive" | "delete";
+    scope: ProjectScope;
+  }) => {
     const ws = scope.workspaceId;
     const id = scope.projectId;
     if (!ws || !id) throw new Error("missing project");
@@ -80,10 +120,7 @@ const lifecycle = useMutation({
       queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
     ]);
     if (action === "delete" && matchesScope(scope)) {
-      leaveTo(projectsPath(scope.slug), {
-        assign: (url) => window.location.assign(url),
-        push: (path) => void router.push(path),
-      });
+      await router.push(projectsPath(scope.slug));
     }
   },
   onError: (error: unknown, { action, scope }) => {
@@ -116,7 +153,9 @@ const createDocument = useMutation({
   },
   onSuccess: async (_doc, { scope }) => {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["project-documents", scope.workspaceId, scope.projectId] }),
+      queryClient.invalidateQueries({
+        queryKey: ["project-documents", scope.workspaceId, scope.projectId],
+      }),
       queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["wiki-discovery", scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
@@ -129,25 +168,34 @@ const loading = computed(
 );
 const error = computed(() =>
   projectRef.projects.isError.value || project.isError.value || documents.isError.value
-    ? loadErrorMessage(projectRef.projects.error.value ?? project.error.value ?? documents.error.value)
+    ? loadErrorMessage(
+        projectRef.projects.error.value ?? project.error.value ?? documents.error.value,
+      )
     : null,
 );
 
-function retry(): void {
-  void projectRef.retry();
-  void project.refetch();
-  void documents.refetch();
+async function retry(): Promise<void> {
+  await Promise.all([projectRef.retry(), project.refetch(), documents.refetch()]);
 }
 </script>
 
 <template>
-  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="session.status.value === 'error'" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name">
-    <p v-if="projectRef.notFound.value" role="alert" class="task-form__alert">{{ t("project.notFound") }}</p>
+  <WorkspaceShell
+    v-else-if="workspace"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+  >
+    <p v-if="projectRef.notFound.value" role="alert" class="task-form__alert">{{
+      t("project.notFound")
+    }}</p>
     <QueryError
       v-else-if="projectRef.failed.value"
       :message="loadErrorMessage(projectRef.projects.error.value)"
@@ -160,12 +208,25 @@ function retry(): void {
       :nodes="documents.data.value?.items ?? []"
       :loading="loading"
       :error="error"
-      :creating="createDocument.isPending.value && Boolean(createDocument.variables.value && matchesScope(createDocument.variables.value.scope))"
+      :creating="
+        createDocument.isPending.value &&
+        Boolean(
+          createDocument.variables.value && matchesScope(createDocument.variables.value.scope),
+        )
+      "
       :can-manage="listItem?.canManage ?? false"
-      :lifecycle-pending="lifecycle.isPending.value && Boolean(lifecycle.variables.value && matchesScope(lifecycle.variables.value.scope))"
+      :lifecycle-pending="
+        lifecycle.isPending.value &&
+        Boolean(lifecycle.variables.value && matchesScope(lifecycle.variables.value.scope))
+      "
       :lifecycle-error="lifecycleError"
       @retry="retry"
-      @create-document="createDocument.mutate({ scope: currentScope(), rootId: project.data.value?.rootDocumentId ?? undefined })"
+      @create-document="
+        createDocument.mutate({
+          scope: currentScope(),
+          rootId: project.data.value?.rootDocumentId ?? undefined,
+        })
+      "
       @lifecycle="lifecycle.mutate({ action: $event, scope: currentScope() })"
     />
     <QueryLoading v-else-if="loading" />

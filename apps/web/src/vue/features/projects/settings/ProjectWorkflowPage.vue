@@ -5,6 +5,10 @@ import ProjectWorkflowSettings from "./ProjectWorkflowSettings.vue";
 
 <template>
   <ProjectViewFrame v-slot="{ workspace, project }" active="workflow">
-    <ProjectWorkflowSettings :key="`${workspace.id}:${project.id}`" :workspace-id="workspace.id" :project="project" />
+    <ProjectWorkflowSettings
+      :key="`${workspace.id}:${project.id}`"
+      :workspace-id="workspace.id"
+      :project="project"
+    />
   </ProjectViewFrame>
 </template>

@@ -4,7 +4,10 @@ import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, ref } from "vue";
 import type { WorkflowStatus } from "@/features/projects/queries";
 import type { TaskListItem } from "@/features/tasks/queries";
-import { visibleTaskStatusSections, type TaskListStatusCount } from "@/features/tasks/task-list-page";
+import {
+  visibleTaskStatusSections,
+  type TaskListStatusCount,
+} from "@/features/tasks/task-list-page";
 import { taskTypeLabel } from "@/features/tasks/task-types";
 import { formatDisplayId, itemPath } from "@/lib/href";
 import AppLink from "../../components/AppLink.vue";
@@ -29,7 +32,12 @@ const emit = defineEmits<{ create: [statusId: string]; loadMore: [] }>();
 
 const collapsed = ref(new Set<string>());
 const sections = computed(() =>
-  visibleTaskStatusSections(props.items, props.statuses, props.statusCounts, t("task.list.otherStatus")),
+  visibleTaskStatusSections(
+    props.items,
+    props.statuses,
+    props.statusCounts,
+    t("task.list.otherStatus"),
+  ),
 );
 const catalogEmpty = computed(
   () => props.items.length === 0 && !props.statusCounts.some((row) => row.count > 0),
@@ -46,11 +54,18 @@ function toggle(id: string): void {
 <template>
   <div class="flex flex-col gap-6">
     <div class="flex flex-wrap items-center justify-end gap-2">
-      <UButton v-if="canCreate && defaultStatusId" size="sm" @click="emit('create', defaultStatusId)">
+      <UButton
+        v-if="canCreate && defaultStatusId"
+        size="sm"
+        @click="emit('create', defaultStatusId)"
+      >
         {{ t("task.create.new") }}
       </UButton>
     </div>
-    <div v-if="catalogEmpty" class="mx-auto flex w-full max-w-lg flex-1 flex-col items-start justify-center gap-3 px-6 py-12 sm:px-8">
+    <div
+      v-if="catalogEmpty"
+      class="mx-auto flex w-full max-w-lg flex-1 flex-col items-start justify-center gap-3 px-6 py-12 sm:px-8"
+    >
       <p class="text-xl font-semibold break-keep text-highlighted">{{ t("task.view.empty") }}</p>
     </div>
     <div class="flex flex-col gap-8">
@@ -78,7 +93,11 @@ function toggle(id: string): void {
         </div>
         <ul v-if="!collapsed.has(section.id)" class="task-status-list">
           <li v-for="item in section.items" :key="item.id">
-            <AppLink :to="itemPath(slug, formatDisplayId(projectKey, item.number))" class="task-row" :data-testid="`task-row-${item.id}`">
+            <AppLink
+              :to="itemPath(slug, formatDisplayId(projectKey, item.number))"
+              class="task-row"
+              :data-testid="`task-row-${item.id}`"
+            >
               <span class="task-row__id">{{ formatDisplayId(projectKey, item.number) }}</span>
               <span class="task-row__title">{{ item.title }}</span>
               <span class="project-list__private">{{ taskTypeLabel(item.type) }}</span>
@@ -89,7 +108,13 @@ function toggle(id: string): void {
     </div>
     <div v-if="hasMore" class="flex flex-col items-start gap-2">
       <p v-if="loadMoreError" role="alert" class="task-form__alert">{{ loadMoreError }}</p>
-      <UButton size="sm" variant="outline" color="neutral" :disabled="loadMorePending" @click="emit('loadMore')">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="loadMorePending"
+        @click="emit('loadMore')"
+      >
         {{ loadMorePending ? t("load.loading") : t("task.list.loadMore") }}
       </UButton>
     </div>

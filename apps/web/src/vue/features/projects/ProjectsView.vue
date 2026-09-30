@@ -2,7 +2,11 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, ref, useId } from "vue";
-import type { CloneProjectBody, CreateProjectBody, ProjectListItem } from "@/features/projects/queries";
+import type {
+  CloneProjectBody,
+  CreateProjectBody,
+  ProjectListItem,
+} from "@/features/projects/queries";
 import { projectTasksPath } from "@/lib/href";
 import type { components } from "@/generated/api";
 import NativeModal from "../../components/NativeModal.vue";
@@ -70,7 +74,9 @@ function onCloneClick(project: ProjectListItem, event: Event): void {
   <div class="project-home">
     <div class="project-home__head">
       <h1 class="project-home__title">{{ t("nav.projects") }}</h1>
-      <UButton v-if="projects.length > 0" type="button" @click="openCreate">{{ t("project.new") }}</UButton>
+      <UButton v-if="projects.length > 0" type="button" @click="openCreate">{{
+        t("project.new")
+      }}</UButton>
     </div>
     <QueryLoading v-if="loading" />
     <QueryError v-else-if="error" :message="error" @retry="onRetry" />
@@ -81,7 +87,9 @@ function onCloneClick(project: ProjectListItem, event: Event): void {
       <p class="break-keep text-lg font-semibold">
         {{ projects.length === 0 ? t("project.emptyHint") : t("project.emptyArchived") }}
       </p>
-      <UButton type="button" size="sm" :disabled="creating" @click="openCreate">{{ t("project.new") }}</UButton>
+      <UButton type="button" size="sm" :disabled="creating" @click="openCreate">{{
+        t("project.new")
+      }}</UButton>
     </div>
     <ul v-else class="project-list">
       <li v-for="project in active" :key="project.id">
@@ -94,8 +102,12 @@ function onCloneClick(project: ProjectListItem, event: Event): void {
             }}</span>
           </span>
           <span class="project-list__counts">
-            <span class="project-list__count">{{ t("entrance.documentCount", { count: project.documentCount ?? "—" }) }}</span>
-            <span class="project-list__count">{{ t("entrance.openTaskCount", { count: project.openTaskCount }) }}</span>
+            <span class="project-list__count">{{
+              t("entrance.documentCount", { count: project.documentCount ?? "—" })
+            }}</span>
+            <span class="project-list__count">{{
+              t("entrance.openTaskCount", { count: project.openTaskCount })
+            }}</span>
           </span>
           <UButton
             type="button"
@@ -109,7 +121,11 @@ function onCloneClick(project: ProjectListItem, event: Event): void {
         </a>
       </li>
     </ul>
-    <ul v-if="!loading && !error && archived.length > 0" class="project-list" :aria-label="t('project.archived.badge')">
+    <ul
+      v-if="!loading && !error && archived.length > 0"
+      class="project-list"
+      :aria-label="t('project.archived.badge')"
+    >
       <li v-for="project in archived" :key="project.id">
         <a :href="projectTasksPath(slug, project.key)" class="project-list__row">
           <span class="project-list__key">{{ project.key }}</span>
@@ -121,8 +137,12 @@ function onCloneClick(project: ProjectListItem, event: Event): void {
             }}</span>
           </span>
           <span class="project-list__counts">
-            <span class="project-list__count">{{ t("entrance.documentCount", { count: project.documentCount ?? "—" }) }}</span>
-            <span class="project-list__count">{{ t("entrance.openTaskCount", { count: project.openTaskCount }) }}</span>
+            <span class="project-list__count">{{
+              t("entrance.documentCount", { count: project.documentCount ?? "—" })
+            }}</span>
+            <span class="project-list__count">{{
+              t("entrance.openTaskCount", { count: project.openTaskCount })
+            }}</span>
           </span>
           <UButton
             type="button"

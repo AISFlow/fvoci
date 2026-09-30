@@ -26,11 +26,11 @@ const router = useRouter();
 const collection = useQuery(() => projectCollectionQuery(props.workspace.id, props.project.id));
 const viewId = computed(() => (typeof route.query.view === "string" ? route.query.view : null));
 
-function onOpenView(nextType: CollectionViewType, nextViewId: string | null): void {
+async function onOpenView(nextType: CollectionViewType, nextViewId: string | null): Promise<void> {
   if (nextType === props.type && nextViewId === viewId.value) return;
   const base = projectCollectionPath(props.slug, props.project.key, nextType);
   const href = nextViewId ? `${base}?view=${encodeURIComponent(nextViewId)}` : base;
-  void router[nextType === props.type ? "replace" : "push"](href);
+  await router[nextType === props.type ? "replace" : "push"](href);
 }
 </script>
 

@@ -62,9 +62,13 @@ const simple = computed(() => {
   const primary = readPrimarySort(props.query);
   return primary && sortItems.value.some((item) => item.id === primary.field) ? primary : null;
 });
-const sortValue = computed(() => simple.value?.field ?? (props.query.sort.length > 0 ? "advanced" : "default"));
+const sortValue = computed(
+  () => simple.value?.field ?? (props.query.sort.length > 0 ? "advanced" : "default"),
+);
 
-const selects = computed<{ key: SelectKey; label: string; items: { id: string; name: string }[] }[]>(() => [
+const selects = computed<
+  { key: SelectKey; label: string; items: { id: string; name: string }[] }[]
+>(() => [
   {
     key: "type",
     label: t("task.filter.typeShort"),
@@ -117,7 +121,10 @@ function onTitleBlur(): void {
 }
 
 function onSelect(key: SelectKey, event: Event): void {
-  emit("change", patchViewFilter(props.query, key, (event.target as HTMLSelectElement).value || undefined));
+  emit(
+    "change",
+    patchViewFilter(props.query, key, (event.target as HTMLSelectElement).value || undefined),
+  );
 }
 
 function onSort(event: Event): void {
@@ -135,7 +142,10 @@ function onSort(event: Event): void {
 function toggleDirection(): void {
   const current = simple.value;
   if (!current) return;
-  emit("change", setPrimarySort(props.query, current.field, current.direction === "asc" ? "desc" : "asc"));
+  emit(
+    "change",
+    setPrimarySort(props.query, current.field, current.direction === "asc" ? "desc" : "asc"),
+  );
 }
 </script>
 
@@ -166,7 +176,9 @@ function toggleDirection(): void {
           @change="onSelect(select.key, $event)"
         >
           <option value="">{{ t("task.filter.all") }}</option>
-          <option v-for="item in select.items" :key="item.id" :value="item.id">{{ item.name }}</option>
+          <option v-for="item in select.items" :key="item.id" :value="item.id">{{
+            item.name
+          }}</option>
         </select>
       </div>
       <div class="collection-field">
@@ -176,7 +188,16 @@ function toggleDirection(): void {
           class="h-9 rounded-md border border-default bg-default px-3 text-sm"
           type="date"
           :value="filters.dueBefore ?? ''"
-          @input="emit('change', patchViewFilter(query, 'dueBefore', ($event.target as HTMLInputElement).value || undefined))"
+          @input="
+            emit(
+              'change',
+              patchViewFilter(
+                query,
+                'dueBefore',
+                ($event.target as HTMLInputElement).value || undefined,
+              ),
+            )
+          "
         />
       </div>
       <label class="flex min-h-9 items-center gap-2 text-sm" :for="`${id}-open`">
@@ -185,7 +206,12 @@ function toggleDirection(): void {
           type="checkbox"
           data-testid="task-filter-openOnly"
           :checked="filters.openOnly === true"
-          @change="emit('change', patchViewFilter(query, 'openOnly', ($event.target as HTMLInputElement).checked))"
+          @change="
+            emit(
+              'change',
+              patchViewFilter(query, 'openOnly', ($event.target as HTMLInputElement).checked),
+            )
+          "
         />
         {{ t("task.filter.openOnly") }}
       </label>
@@ -193,13 +219,27 @@ function toggleDirection(): void {
     <div class="collection-toolbar">
       <div class="collection-field">
         <label :for="`${id}-sort`">{{ t("collection.sort") }}</label>
-        <select :id="`${id}-sort`" class="collection-select" data-testid="task-sort" :value="sortValue" @change="onSort">
+        <select
+          :id="`${id}-sort`"
+          class="collection-select"
+          data-testid="task-sort"
+          :value="sortValue"
+          @change="onSort"
+        >
           <option value="default">{{ t("collection.sort.default") }}</option>
-          <option v-if="sortValue === 'advanced'" value="advanced">{{ t("collection.sort.advanced") }}</option>
+          <option v-if="sortValue === 'advanced'" value="advanced">{{
+            t("collection.sort.advanced")
+          }}</option>
           <option v-for="item in sortItems" :key="item.id" :value="item.id">{{ item.name }}</option>
         </select>
       </div>
-      <UButton size="sm" variant="outline" color="neutral" :disabled="!simple" @click="toggleDirection">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="!simple"
+        @click="toggleDirection"
+      >
         {{ simple?.direction === "desc" ? t("collection.descending") : t("collection.ascending") }}
       </UButton>
       <UButton
@@ -212,7 +252,13 @@ function toggleDirection(): void {
       >
         {{ t("collection.filter.custom") }}
       </UButton>
-      <UButton v-if="!isEmptyViewQuery(query)" size="sm" variant="outline" color="neutral" @click="emit('change', { filters: {}, sort: [] })">
+      <UButton
+        v-if="!isEmptyViewQuery(query)"
+        size="sm"
+        variant="outline"
+        color="neutral"
+        @click="emit('change', { filters: {}, sort: [] })"
+      >
         {{ t("task.filter.clear") }}
       </UButton>
     </div>

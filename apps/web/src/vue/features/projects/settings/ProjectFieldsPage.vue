@@ -5,6 +5,10 @@ import ProjectFieldsSettings from "./ProjectFieldsSettings.vue";
 
 <template>
   <ProjectViewFrame v-slot="{ workspace, project }" active="fields">
-    <ProjectFieldsSettings :key="`${workspace.id}:${project.id}`" :workspace-id="workspace.id" :project="project" />
+    <ProjectFieldsSettings
+      :key="`${workspace.id}:${project.id}`"
+      :workspace-id="workspace.id"
+      :project="project"
+    />
   </ProjectViewFrame>
 </template>

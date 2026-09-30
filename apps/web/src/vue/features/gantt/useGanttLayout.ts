@@ -22,14 +22,23 @@ export interface GanttLayoutFilters {
  * lays itself out from items/links/calendar; the server's pixel fields are
  * not requested.
  */
-export function ganttLayoutQuery(workspaceId: string, projectId: string, filters: GanttLayoutFilters) {
+export function ganttLayoutQuery(
+  workspaceId: string,
+  projectId: string,
+  filters: GanttLayoutFilters,
+) {
   const encoded = encodeViewQueryParam(filters.query);
   return queryOptions({
     queryKey: [
       "task-layout",
       workspaceId,
       projectId,
-      { year: filters.year, month: filters.month, weekStartsOn: filters.weekStartsOn, query: encoded ?? null },
+      {
+        year: filters.year,
+        month: filters.month,
+        weekStartsOn: filters.weekStartsOn,
+        query: encoded ?? null,
+      },
     ] as const,
     queryFn: async ({ signal }) =>
       ensureOk(
@@ -51,7 +60,11 @@ export function ganttLayoutQuery(workspaceId: string, projectId: string, filters
 }
 
 export function useGanttLayout(
-  args: () => { workspaceId: string | undefined; projectId: string | undefined; filters: GanttLayoutFilters },
+  args: () => {
+    workspaceId: string | undefined;
+    projectId: string | undefined;
+    filters: GanttLayoutFilters;
+  },
 ) {
   return useQuery(() => {
     const { workspaceId = "", projectId = "", filters } = args();

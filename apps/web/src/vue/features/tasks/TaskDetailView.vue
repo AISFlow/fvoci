@@ -82,11 +82,11 @@ const archivePersistError = ref<string | null>(null);
 let archiveInFlight = false;
 
 const pageReadOnly = computed(() => props.readOnly);
-const readOnly = computed(
+const bodyReadOnly = computed(
   () => pageReadOnly.value || (session.value?.readOnly ?? false) || archivePersisting.value,
 );
 const pageEditable = computed(() => !pageReadOnly.value && props.task.archivedAt == null);
-const archiveBusy = computed(() => Boolean(props.archivePending) || archivePersisting.value);
+const archiveBusy = computed(() => props.archivePending || archivePersisting.value);
 
 async function handleArchiveToggle(archived: boolean): Promise<void> {
   if (archiveInFlight || props.archivePending || archivePersisting.value) return;
@@ -125,7 +125,9 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
 
 <template>
   <div class="task-home">
-    <p v-if="archivePersistError" role="alert" class="task-form__alert">{{ archivePersistError }}</p>
+    <p v-if="archivePersistError" role="alert" class="task-form__alert">{{
+      archivePersistError
+    }}</p>
     <nav class="task-home__crumb" :aria-label="t('nav.breadcrumb')">
       <AppLink :to="projectTasksPath(slug, projectKey)">{{ projectName ?? projectKey }}</AppLink>
       <span aria-hidden="true"> / </span>
@@ -147,7 +149,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :labels="labels"
       :milestones="milestones"
       :dependency-candidates="dependencyCandidates"
-      :read-only="readOnly"
+      :read-only="bodyReadOnly"
       :can-edit="canEdit"
       :pending="pending"
       :field-error="fieldError"
@@ -169,7 +171,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
     />
     <div v-if="canEdit" class="flex flex-wrap gap-2" data-testid="task-detail-actions">
       <UButton
-        v-if="!readOnly"
+        v-if="!bodyReadOnly"
         size="sm"
         variant="outline"
         color="neutral"
@@ -190,25 +192,29 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
         {{ t("task.delete") }}
       </ConfirmActionButton>
     </div>
-    <TaskCollectionProperties :workspace-id="workspaceId" :task-id="task.id" :read-only="readOnly" />
+    <TaskCollectionProperties
+      :workspace-id="workspaceId"
+      :task-id="task.id"
+      :read-only="bodyReadOnly"
+    />
     <TaskBodyEditor
       :workspace-id="workspaceId"
       :slug="slug"
       :task-id="task.id"
-      :read-only="readOnly"
+      :read-only="bodyReadOnly"
       :session="session"
       :collab-user="collabUser"
     />
     <TaskAttachmentsPanel
       :workspace-id="workspaceId"
       :task-id="task.id"
-      :read-only="readOnly || task.archivedAt != null"
+      :read-only="bodyReadOnly || task.archivedAt != null"
     />
     <TaskTimeEntries
       :workspace-id="workspaceId"
       :task-id="task.id"
       :members="members"
-      :read-only="readOnly"
+      :read-only="bodyReadOnly"
     />
     <TaskActivityPanel
       v-if="currentUserId"
@@ -216,7 +222,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :current-user-id="currentUserId"
-      :read-only="readOnly"
+      :read-only="bodyReadOnly"
     />
     <TaskBacklinks :slug="slug" :workspace-id="workspaceId" :task-id="task.id" />
     <OriginPanel :slug="slug" :workspace-id="workspaceId" :task-id="task.id" hide-when-empty />
