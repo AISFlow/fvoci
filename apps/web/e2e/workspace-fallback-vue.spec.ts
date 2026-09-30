@@ -20,7 +20,7 @@ test("generic workspace refs keep the real setup gate before canonicalization", 
   const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, { data: { key: "OPS", name: "Canonical project", visibility: "workspace" } });
   expect(response.status()).toBe(201);
   const project = await response.json();
-  expect((await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`, { data: { title: "Canonical task" } })).status()).toBe(201);
+  expect((await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`, { data: { title: "Canonical task", startDate: "2026-09-28", dueDate: "2026-09-30" } })).status()).toBe(201);
   expect((await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, { data: { title: "Canonical wiki", parentId: null } })).status()).toBe(201);
 });
 
@@ -84,7 +84,7 @@ test("cold home, legal and populated Gantt record their actual production asset 
   const origin = new URL(page.url()).origin;
   const storageState = await page.context().storageState();
   const witnesses = [];
-  for (const path of ["/", "/legal/privacy", "/w/fallback/OPS/gantt"]) {
+  for (const path of ["/", "/legal/privacy", "/w/fallback/OPS/gantt?month=2026-09"]) {
     const context = await browser.newContext({ storageState });
     try {
       const cold = await context.newPage();
@@ -94,7 +94,7 @@ test("cold home, legal and populated Gantt record their actual production asset 
       cold.on("response", response => { responses.push({ url: response.url(), status: response.status(), contentType: response.headers()["content-type"] ?? "" }); });
       await cold.goto(origin + path);
       await expect(cold.locator("#root[data-v-app]")).toHaveCount(1);
-      if (path.endsWith("gantt")) {
+      if (new URL(origin + path).pathname.endsWith("gantt")) {
         await expect(cold.getByRole("searchbox", { name: "태스크 검색" })).toBeVisible();
         await expect(cold.getByText("Canonical task", { exact: true })).toBeVisible();
       } else await expect(cold.locator("main")).toBeVisible();
