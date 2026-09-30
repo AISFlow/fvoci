@@ -56,7 +56,10 @@ test("project and task URLs mount Vue across direct loads, links, reload and enc
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   for (const view of ["tasks", "table", "board", "calendar", "gantt"]) {
     await page.goto(`/w/routes/OPS-DEV/${view}`);
-    if (view === "gantt") await expect(page.getByRole("navigation", { name: "프로젝트 관리 메뉴" })).toBeVisible();
+    if (view === "gantt") {
+      await expect(page.getByRole("navigation", { name: "프로젝트 관리 메뉴" })).toBeVisible();
+      await expect(page.getByRole("searchbox", { name: "태스크 검색" })).toBeVisible();
+    }
     else await expect(page.getByRole("heading", { name: "Route project" })).toBeVisible();
     await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
     await expect(page.getByRole("alert")).toHaveCount(0);
