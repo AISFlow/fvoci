@@ -84,7 +84,7 @@ test("cold home, legal and populated Gantt record their actual production asset 
   const origin = new URL(page.url()).origin;
   const storageState = await page.context().storageState();
   const witnesses = [];
-  for (const path of ["/", "/legal/privacy", "/w/fallback/OPS/gantt?month=2026-09"]) {
+  for (const path of ["/", "/legal/privacy", "/w/fallback/OPS/gantt?y=2026&m=9"]) {
     const context = await browser.newContext({ storageState });
     try {
       const cold = await context.newPage();
