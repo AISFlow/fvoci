@@ -16,16 +16,13 @@ import {
   defaultConfig,
   isViewType,
   PAGE_LIMIT,
-  weekdayNames,
   type CollectionViewType,
 } from "@/features/collections/collection-view";
 import {
   asCollectionValue,
   formatCollectionValue,
   isMonth,
-  monthGrid,
   monthWindow,
-  shiftMonth,
   SORTABLE_FIELD_TYPES,
   todayInTimeZone,
   type CollectionValue,
@@ -62,6 +59,8 @@ import ConfirmActionButton from "../../components/ConfirmActionButton.vue";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
 import CollectionBoard from "./CollectionBoard.vue";
+import CollectionCalendar from "./calendar/CollectionCalendar.vue";
+import { optimisticRow, type CalendarWrite } from "./calendar/calendar-adapter";
 import CustomFilters from "./CustomFilters.vue";
 import ValueEditor from "./ValueEditor.vue";
 import "@/features/collections/collections.css";
@@ -94,10 +93,13 @@ const viewConflict = ref(false);
 const cursor = ref<string | undefined>();
 const day = ref<string | null | undefined>();
 const month = ref("");
+const visibleRange = ref<{ from: string; to: string }>();
+const pendingPreview = ref<CollectionQueryPreview | null>(null);
 const customOpen = ref(false);
 const moveError = ref<string | null>(null);
 const moving = ref(false);
 const draggedDate = ref<CalendarRow | null>(null);
+const calendarUI = ref<InstanceType<typeof CollectionCalendar>>();
 const dropDay = ref<string | null | undefined>(undefined);
 
 const effectiveMonth = computed(() =>
@@ -138,7 +140,7 @@ watch(
 const groupedBoard = computed(() => props.type === "board" && config.value.groupBy !== null);
 const calendarWindow = computed(() =>
   props.type === "calendar" && config.value.dateBy
-    ? { ...monthWindow(effectiveMonth.value), timeZone: timeZone.value }
+    ? { ...(visibleRange.value ?? monthWindow(effectiveMonth.value)), timeZone: timeZone.value }
     : undefined,
 );
 const queryBody = computed<CollectionQueryBody>(() => ({
@@ -227,31 +229,43 @@ async function moveToDate(row: CalendarRow, target: string | null): Promise<void
     moveError.value = t("collection.saveError");
     return;
   }
+  const preview = (rows.data.value?.previews ?? []).find(item => item.id === row.id);
+  try { await saveCalendarDate(preview ?? { ...row, displayId: "", title: "", documentId: null, statusId: null }, request); } catch { /* moveError is shown */ }
+}
+
+async function saveCalendarDate(row: CollectionQueryPreview, request: CalendarWrite): Promise<void> {
+  if (moving.value || !navigator.onLine || !dateMovable(config.value.dateBy, row, active.value)) throw new Error("Calendar write unavailable");
+  moveError.value = null;
   moving.value = true;
+  pendingPreview.value = optimisticRow(row, request, timeZone.value, config.value.dateBy ?? undefined);
   try {
     if (request.kind === "task") {
-      await ensureOk(
-        await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
-          params: { path: { workspace_id: props.workspaceId, task_id: request.taskId } },
-          body: request.body,
-        }),
-      );
+      const accepted = await ensureOk(await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
+        params: { path: { workspace_id: props.workspaceId, task_id: request.taskId } }, body: request.body,
+      }));
+      // Use accepted stored dates, never treat the requested values as server truth.
+      pendingPreview.value = optimisticRow(row, { ...request, body: { ...request.body, ...(request.body.startDate !== undefined ? { startDate: accepted.startDate } : {}), ...(request.body.dueDate !== undefined ? { dueDate: accepted.dueDate } : {}), ...(request.body.dueAt !== undefined ? { dueAt: accepted.dueAt } : {}) } }, timeZone.value, config.value.dateBy ?? undefined);
       await queryClient.invalidateQueries({ queryKey: ["tasks", props.workspaceId, props.projectId] });
     } else {
-      await putCollectionValue(props.workspaceId, props.collectionId, row.id, {
-        fieldId: request.fieldId,
-        expectedVersion: request.expectedVersion,
-        expectedFieldVersion: request.expectedFieldVersion,
-        value: request.value,
+      const accepted = await putCollectionValue(props.workspaceId, props.collectionId, row.id, {
+        fieldId: request.fieldId, expectedVersion: request.expectedVersion, expectedFieldVersion: request.expectedFieldVersion, value: request.value,
       });
+      pendingPreview.value = { ...pendingPreview.value!, version: accepted.version };
     }
   } catch (err) {
+    pendingPreview.value = null;
     moveError.value = problemMessage(err, "collection.saveError");
+    throw err;
   } finally {
-    await refresh();
-    moving.value = false;
+    try { await refresh(); } finally { pendingPreview.value = null; moving.value = false; }
   }
 }
+function calendarTarget(event: DragEvent): string | null | undefined {
+  const cell = (event.target as HTMLElement).closest<HTMLElement>("[data-calendar-target]");
+  return cell ? cell.dataset.calendarTarget || null : undefined;
+}
+function externalCalendarOver(event: DragEvent) { const target = calendarTarget(event); if (target !== undefined) onDateDragOver(event, target); }
+function externalCalendarDrop(event: DragEvent) { const target = calendarTarget(event); if (target !== undefined) onDateDrop(event, target); }
 
 const saveView = useMutation({
   mutationFn: async () => {
@@ -335,25 +349,20 @@ const simple = computed(() =>
 );
 const sortValue = computed(() => simple.value?.field ?? (config.value.query.sort.length > 0 ? "advanced" : "default"));
 const calendarDrag = computed(() => props.type === "calendar" && config.value.dateBy !== null);
-const today = computed(() => todayInTimeZone(timeZone.value));
-const monthLabel = computed(() =>
-  t("cal.yearMonth", { year: effectiveMonth.value.slice(0, 4), month: Number(effectiveMonth.value.slice(5, 7)) }),
-);
-const dayCounts = computed(() => new Map((rows.data.value?.days ?? []).map((entry) => [entry.date, entry.count])));
-const previewsByDay = computed(() => {
-  const map = new Map<string, CollectionQueryPreview[]>();
-  for (const preview of rows.data.value?.previews ?? []) {
-    if (!preview.date) continue;
-    const list = map.get(preview.date) ?? [];
-    list.push(preview);
-    map.set(preview.date, list);
-  }
-  return map;
+const calendarPreviews = computed(() => {
+  const list = rows.data.value?.previews ?? [];
+  return pendingPreview.value ? [...list.filter(row => row.id !== pendingPreview.value!.id), pendingPreview.value] : list;
 });
-const weeks = computed(() => monthGrid(effectiveMonth.value, weekStartsOn.value));
-const weekdayLabels = computed(() => weekdayNames(weekStartsOn.value));
+const dayCounts = computed(() => {
+  const counts = new Map((rows.data.value?.days ?? []).map(entry => [entry.date, entry.count]));
+  const original = rows.data.value?.previews.find(row => row.id === pendingPreview.value?.id);
+  if (original && pendingPreview.value && original.date !== pendingPreview.value.date) {
+    counts.set(original.date, Math.max(0, (counts.get(original.date) ?? 0) - 1));
+    counts.set(pendingPreview.value.date, (counts.get(pendingPreview.value.date) ?? 0) + 1);
+  }
+  return counts;
+});
 const groups = computed(() => rows.data.value?.groups ?? []);
-const unassignedCount = computed(() => dayCounts.value.get(null) ?? 0);
 
 function formatValue(field: CollectionField, raw: unknown): string {
   return formatCollectionValue(asCollectionValue(raw), field.options, userNames.value, timeZone.value, {
@@ -370,14 +379,16 @@ function canMoveDate(row: CalendarRow | null, target: string | null): boolean {
   );
 }
 
-function onDateDragStart(event: DragEvent, row: CalendarRow): void {
+function onDateDragStart(event: DragEvent, row: CollectionQueryItem): void {
   if (!calendarDrag.value || moving.value || !dateMovable(config.value.dateBy, row, active.value)) return;
   event.dataTransfer?.setData(CALENDAR_DRAG_TYPE, row.id);
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
   draggedDate.value = row;
+  calendarUI.value?.nativeStart(row);
 }
 
 function onDateDragEnd(): void {
+  calendarUI.value?.cancel();
   draggedDate.value = null;
   dropDay.value = undefined;
 }
@@ -443,31 +454,6 @@ function toggleDirection(): void {
   change({
     query: setPrimarySort(config.value.query, simple.value.field, simple.value.direction === "asc" ? "desc" : "asc"),
   });
-}
-
-function onMonthInput(event: Event): void {
-  const value = (event.target as HTMLInputElement).value;
-  if (!isMonth(value)) return;
-  month.value = value;
-  day.value = undefined;
-  cursor.value = undefined;
-}
-
-function shiftCalendar(delta: number): void {
-  month.value = shiftMonth(effectiveMonth.value, delta);
-  day.value = undefined;
-  cursor.value = undefined;
-}
-
-function goToday(): void {
-  month.value = today.value.slice(0, 7);
-  day.value = undefined;
-  cursor.value = undefined;
-}
-
-function toggleDay(next: string | null): void {
-  day.value = day.value === next ? undefined : next;
-  cursor.value = undefined;
 }
 
 function retryMeta(): void {
@@ -638,90 +624,9 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
     </p>
     <p v-if="moveError" role="alert" class="text-sm text-error">{{ moveError }}</p>
 
-    <div v-if="type === 'calendar' && config.dateBy" class="flex flex-col gap-2">
-      <div class="collection-toolbar">
-        <UButton size="sm" variant="outline" color="neutral" @click="shiftCalendar(-1)">{{ t("cal.prevMonth") }}</UButton>
-        <div class="collection-field">
-          <label :for="`${baseId}-month`"><span class="sr-only">{{ monthLabel }}</span></label>
-          <input
-            :id="`${baseId}-month`"
-            class="h-9 rounded-md border border-default bg-default px-3 text-sm"
-            type="month"
-            :value="effectiveMonth"
-            @change="onMonthInput"
-          />
-        </div>
-        <UButton size="sm" variant="outline" color="neutral" @click="shiftCalendar(1)">{{ t("cal.nextMonth") }}</UButton>
-        <UButton size="sm" variant="outline" color="neutral" @click="goToday">{{ t("cal.today") }}</UButton>
-        <button
-          type="button"
-          class="collection-calendar__none"
-          :aria-pressed="day === null"
-          :data-drop-over="dropDay === null ? 'true' : undefined"
-          @click="toggleDay(null)"
-          @dragover="onDateDragOver($event, null)"
-          @dragleave="onDateDragLeave"
-          @drop="onDateDrop($event, null)"
-        >
-          {{ t("collection.unassigned") }} · {{ unassignedCount }}
-        </button>
-      </div>
-      <table class="collection-calendar" :aria-label="monthLabel" data-testid="collection-calendar">
-        <thead>
-          <tr>
-            <th v-for="name in weekdayLabels" :key="name" scope="col">{{ name }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="week in weeks" :key="week[0]!.date">
-            <td
-              v-for="cell in week"
-              :key="cell.date"
-              :data-outside="cell.inMonth ? undefined : 'true'"
-              :data-date="cell.date"
-              :data-drop-over="dropDay === cell.date ? 'true' : undefined"
-              @dragover="onDateDragOver($event, cell.date)"
-              @dragleave="onDateDragLeave"
-              @drop="onDateDrop($event, cell.date)"
-            >
-              <template v-if="cell.inMonth">
-                <button
-                  type="button"
-                  class="collection-calendar__day"
-                  :aria-pressed="day === cell.date"
-                  :data-today="cell.date === today ? 'true' : undefined"
-                  :aria-label="`${cell.date} · ${t('collection.count', { count: dayCounts.get(cell.date) ?? 0 })}`"
-                  @click="toggleDay(cell.date)"
-                >
-                  <span>{{ Number(cell.date.slice(8, 10)) }}</span>
-                  <span v-if="(dayCounts.get(cell.date) ?? 0) > 0">{{ dayCounts.get(cell.date) }}</span>
-                </button>
-                <ul v-if="(previewsByDay.get(cell.date) ?? []).length > 0" class="collection-calendar__previews">
-                  <li
-                    v-for="preview in previewsByDay.get(cell.date) ?? []"
-                    :key="preview.id"
-                    :data-testid="`collection-preview-${preview.displayId}`"
-                    :aria-busy="moving || undefined"
-                    :draggable="dateDraggable(preview)"
-                    @dragstart="onDateDragStart($event, preview)"
-                    @dragend="onDateDragEnd"
-                  >
-                    <a :href="itemPath(slug, preview.displayId)" :title="preview.title" draggable="false">{{
-                      preview.title
-                    }}</a>
-                  </li>
-                  <li
-                    v-if="(dayCounts.get(cell.date) ?? 0) > (previewsByDay.get(cell.date) ?? []).length"
-                    class="text-muted"
-                  >
-                    {{ t("collection.more", { count: (dayCounts.get(cell.date) ?? 0) - (previewsByDay.get(cell.date) ?? []).length }) }}
-                  </li>
-                </ul>
-              </template>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+    <div v-if="type === 'calendar' && config.dateBy" @dragover="externalCalendarOver" @drop="externalCalendarDrop" @dragleave="onDateDragLeave">
+      <CollectionCalendar ref="calendarUI" :month="effectiveMonth" :date-by="config.dateBy" :fields="active" :previews="calendarPreviews" :counts="dayCounts" :zone="timeZone" :week-starts-on="weekStartsOn" :slug="slug" :pending="moving" :refreshing="rows.isFetching.value" :can-edit="rows.data.value?.canEdit !== false" :save="saveCalendarDate"
+        @month="month = $event; day = undefined; cursor = undefined" @day="day = day === $event ? undefined : $event; cursor = undefined" @range="visibleRange = $event" @reconnect="refresh" />
     </div>
 
     <QueryLoading v-if="rows.isPending.value" />
@@ -782,6 +687,7 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
                     :data-testid="calendarDrag ? `collection-drag-${row.displayId}` : undefined"
                     :aria-busy="calendarDrag && moving ? true : undefined"
                     :draggable="dateDraggable(row)"
+                    @pointerdown="calendarDrag && calendarUI?.pointerdown($event, row)"
                     @dragstart="onDateDragStart($event, row)"
                     @dragend="onDateDragEnd"
                   >
