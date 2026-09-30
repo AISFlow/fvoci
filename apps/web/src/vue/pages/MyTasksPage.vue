@@ -58,7 +58,7 @@ function onLoadMore(): void {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-name="workspace.name" active="myTasks">
+  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="myTasks">
     <div class="task-home" data-testid="my-tasks">
       <div class="task-home__head">
         <h1 class="task-home__title">{{ t("task.mine") }}</h1>

@@ -113,7 +113,7 @@ async function loadMore(): Promise<void> {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-name="workspace.name" active="notifications">
+  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="notifications">
     <div class="notifications-page">
       <div class="notifications-page__head">
         <h1 class="notifications-page__title">{{ t("notif.list.title") }}</h1>
