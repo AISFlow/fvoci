@@ -87,11 +87,7 @@ export function taskQuery(workspaceId: string, taskId: string) {
 
 export type TaskActivityFilter = "all" | "comments" | "changes";
 
-export function taskActivityQuery(
-  workspaceId: string,
-  taskId: string,
-  filter: TaskActivityFilter,
-) {
+export function taskActivityQuery(workspaceId: string, taskId: string, filter: TaskActivityFilter) {
   return infiniteQueryOptions({
     queryKey: ["task-activity", workspaceId, taskId, filter] as const,
     queryFn: async ({ pageParam }) =>

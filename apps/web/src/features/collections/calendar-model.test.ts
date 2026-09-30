@@ -113,10 +113,9 @@ test("an undated datetime gets the default wall time; a DST gap is unavailable",
   });
   // 02:30 does not exist on 2026-03-08 in New York.
   const early = row({ values: { "f-dt": { datetime: "2026-03-01T07:30:00Z" } } as never });
-  assert.deepEqual(
-    dateMoveRequest("f-dt", early, "2026-03-08", fields, "America/New_York"),
-    { kind: "unavailable" },
-  );
+  assert.deepEqual(dateMoveRequest("f-dt", early, "2026-03-08", fields, "America/New_York"), {
+    kind: "unavailable",
+  });
 });
 
 test("moves that must not write are rejected", () => {

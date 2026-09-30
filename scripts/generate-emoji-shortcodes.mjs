@@ -16,53 +16,50 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EDITOR_PKG = join(ROOT, "packages/editor/package.json");
 const OUT_JSON = join(ROOT, "src/collab/emoji_shortcodes.json");
 const OUT_NOTICE = join(ROOT, "src/collab/emoji_shortcodes.NOTICE.md");
-const OUT_FIXTURE = join(
-	ROOT,
-	"tests/fixtures/collab-derived/emoji_glyph_expected.json",
-);
+const OUT_FIXTURE = join(ROOT, "tests/fixtures/collab-derived/emoji_glyph_expected.json");
 
 function readPinnedVersion() {
-	const editor = JSON.parse(readFileSync(EDITOR_PKG, "utf8"));
-	const pinned = editor.dependencies?.["@tiptap/extension-emoji"];
-	if (!pinned) {
-		throw new Error(`missing @tiptap/extension-emoji in ${EDITOR_PKG}`);
-	}
-	return pinned;
+  const editor = JSON.parse(readFileSync(EDITOR_PKG, "utf8"));
+  const pinned = editor.dependencies?.["@tiptap/extension-emoji"];
+  if (!pinned) {
+    throw new Error(`missing @tiptap/extension-emoji in ${EDITOR_PKG}`);
+  }
+  return pinned;
 }
 
 function resolveModuleRoot() {
-	const roots = [
-		process.env.FVOCI_EMOJI_GEN_NODE_MODULES,
-		join(ROOT, "node_modules"),
-		join(dirname(fileURLToPath(import.meta.url)), "node_modules"),
-	].filter(Boolean);
-	for (const root of roots) {
-		const pkgPath = join(root, "@tiptap/extension-emoji/package.json");
-		if (existsSync(pkgPath)) {
-			return { root, pkgPath, pkg: JSON.parse(readFileSync(pkgPath, "utf8")) };
-		}
-	}
-	throw new Error(
-		"Install @tiptap/extension-emoji locally (bun ci) or set FVOCI_EMOJI_GEN_NODE_MODULES",
-	);
+  const roots = [
+    process.env.FVOCI_EMOJI_GEN_NODE_MODULES,
+    join(ROOT, "node_modules"),
+    join(dirname(fileURLToPath(import.meta.url)), "node_modules"),
+  ].filter(Boolean);
+  for (const root of roots) {
+    const pkgPath = join(root, "@tiptap/extension-emoji/package.json");
+    if (existsSync(pkgPath)) {
+      return { root, pkgPath, pkg: JSON.parse(readFileSync(pkgPath, "utf8")) };
+    }
+  }
+  throw new Error(
+    "Install @tiptap/extension-emoji locally (bun ci) or set FVOCI_EMOJI_GEN_NODE_MODULES",
+  );
 }
 
 function assertPinnedVersion(pinned, installed) {
-	if (installed.version !== pinned) {
-		throw new Error(
-			`@tiptap/extension-emoji version mismatch: editor pins ${pinned}, installed ${installed.version}`,
-		);
-	}
+  if (installed.version !== pinned) {
+    throw new Error(
+      `@tiptap/extension-emoji version mismatch: editor pins ${pinned}, installed ${installed.version}`,
+    );
+  }
 }
 
 function readUpstreamLicense(pkgRoot) {
-	for (const name of ["LICENSE.md", "LICENSE"]) {
-		const path = join(pkgRoot, name);
-		if (existsSync(path)) {
-			return readFileSync(path, "utf8").trim();
-		}
-	}
-	return null;
+  for (const name of ["LICENSE.md", "LICENSE"]) {
+    const path = join(pkgRoot, name);
+    if (existsSync(path)) {
+      return readFileSync(path, "utf8").trim();
+    }
+  }
+  return null;
 }
 
 const pinnedVersion = readPinnedVersion();
@@ -74,112 +71,112 @@ const { emojis, shortcodeToEmoji } = require(join(emojiPkgRoot));
 
 /** Mirrors packages/editor/src/emoji-glyph.ts */
 function emojiGlyph(node) {
-	if (typeof node !== "object" || node === null) return "";
-	const attrs = node.attrs;
-	if (typeof attrs !== "object" || attrs === null) return "";
-	const glyph = attrs.emoji;
-	if (typeof glyph === "string" && glyph.length > 0) return glyph;
-	const name = attrs.name;
-	if (typeof name !== "string" || name.length === 0) return "";
-	return shortcodeToEmoji(name, emojis)?.emoji ?? `:${name}:`;
+  if (typeof node !== "object" || node === null) return "";
+  const attrs = node.attrs;
+  if (typeof attrs !== "object" || attrs === null) return "";
+  const glyph = attrs.emoji;
+  if (typeof glyph === "string" && glyph.length > 0) return glyph;
+  const name = attrs.name;
+  if (typeof name !== "string" || name.length === 0) return "";
+  return shortcodeToEmoji(name, emojis)?.emoji ?? `:${name}:`;
 }
 
 /** First-match semantics of Array.prototype.find over `emojis`. */
 function buildLookup(items) {
-	const lookup = {};
-	for (const item of items) {
-		const glyph = item.emoji;
-		if (typeof glyph !== "string" || glyph.length === 0) continue;
-		if (!(item.name in lookup)) lookup[item.name] = glyph;
-		for (const shortcode of item.shortcodes ?? []) {
-			if (!(shortcode in lookup)) lookup[shortcode] = glyph;
-		}
-	}
-	return lookup;
+  const lookup = {};
+  for (const item of items) {
+    const glyph = item.emoji;
+    if (typeof glyph !== "string" || glyph.length === 0) continue;
+    if (!(item.name in lookup)) lookup[item.name] = glyph;
+    for (const shortcode of item.shortcodes ?? []) {
+      if (!(shortcode in lookup)) lookup[shortcode] = glyph;
+    }
+  }
+  return lookup;
 }
 
 const lookup = buildLookup(emojis);
 const upstreamLicense = readUpstreamLicense(emojiPkgRoot);
 
 const payload = {
-	source: {
-		package: "@tiptap/extension-emoji",
-		version: installedPkg.version,
-		license: installedPkg.license ?? "MIT",
-		repository: installedPkg.repository?.url ?? installedPkg.repository,
-		entryCount: Object.keys(lookup).length,
-	},
-	shortcodes: lookup,
+  source: {
+    package: "@tiptap/extension-emoji",
+    version: installedPkg.version,
+    license: installedPkg.license ?? "MIT",
+    repository: installedPkg.repository?.url ?? installedPkg.repository,
+    entryCount: Object.keys(lookup).length,
+  },
+  shortcodes: lookup,
 };
 
 mkdirSync(dirname(OUT_JSON), { recursive: true });
 writeFileSync(OUT_JSON, `${JSON.stringify(payload, null, 2)}\n`);
 
 const notice = [
-	"# emoji_shortcodes.json provenance",
-	"",
-	"Generated by `scripts/generate-emoji-shortcodes.mjs` (dev-only; not run in cargo build/CI).",
-	"",
-	"| Field | Value |",
-	"| --- | --- |",
-	`| Package | @tiptap/extension-emoji |`,
-	`| Version | ${installedPkg.version} |`,
-	`| License | ${installedPkg.license ?? "MIT"} |`,
-	`| Lookup entries | ${payload.source.entryCount} |`,
-	"",
-	"Semantics match `shortcodeToEmoji(shortcode, emojis)` from the pinned package:",
-	"`emojis.find((item) => shortcode === item.name || item.shortcodes.includes(shortcode))`.",
-	"",
-	"The lookup table is derived from emoji metadata shipped inside",
-	"`@tiptap/extension-emoji` (which bundles `emojibase-data`). Redistribution of",
-	"the generated shortcode→glyph map must retain the upstream copyright notices below.",
-	"",
-	"Regenerate after bumping `packages/editor/package.json` `@tiptap/extension-emoji`.",
-	"",
-	"## Upstream license (@tiptap/extension-emoji)",
-	"",
-	upstreamLicense ?? "(LICENSE not found in installed package)",
-	"",
+  "# emoji_shortcodes.json provenance",
+  "",
+  "Generated by `scripts/generate-emoji-shortcodes.mjs` (dev-only; not run in cargo build/CI).",
+  "",
+  "| Field | Value |",
+  "| --- | --- |",
+  `| Package | @tiptap/extension-emoji |`,
+  `| Version | ${installedPkg.version} |`,
+  `| License | ${installedPkg.license ?? "MIT"} |`,
+  `| Lookup entries | ${payload.source.entryCount} |`,
+  "",
+  "Semantics match `shortcodeToEmoji(shortcode, emojis)` from the pinned package:",
+  "`emojis.find((item) => shortcode === item.name || item.shortcodes.includes(shortcode))`.",
+  "",
+  "The lookup table is derived from emoji metadata shipped inside",
+  "`@tiptap/extension-emoji` (which bundles `emojibase-data`). Redistribution of",
+  "the generated shortcode→glyph map must retain the upstream copyright notices below.",
+  "",
+  "Regenerate after bumping `packages/editor/package.json` `@tiptap/extension-emoji`.",
+  "",
+  "## Upstream license (@tiptap/extension-emoji)",
+  "",
+  upstreamLicense ?? "(LICENSE not found in installed package)",
+  "",
 ].join("\n");
 
 writeFileSync(OUT_NOTICE, `${notice}\n`);
 
 const fixtureCases = [
-	{
-		id: "attrs_emoji_override",
-		node: { type: "emoji", attrs: { name: "tada", emoji: "🎉" } },
-	},
-	{
-		id: "known_name",
-		node: { type: "emoji", attrs: { name: "tada" } },
-	},
-	{
-		id: "known_alias",
-		node: { type: "emoji", attrs: { name: "party_popper" } },
-	},
-	{
-		id: "unknown_shortcode",
-		node: { type: "emoji", attrs: { name: "fvoci_unknown_emoji_xyz" } },
-	},
-	{
-		id: "supplementary_plane_glyph",
-		node: { type: "emoji", attrs: { name: "tada", emoji: "🫠" } },
-	},
-	{
-		id: "korean_with_known_emoji",
-		node: { type: "emoji", attrs: { name: "tada", emoji: "🎉" } },
-		context: "서버",
-	},
+  {
+    id: "attrs_emoji_override",
+    node: { type: "emoji", attrs: { name: "tada", emoji: "🎉" } },
+  },
+  {
+    id: "known_name",
+    node: { type: "emoji", attrs: { name: "tada" } },
+  },
+  {
+    id: "known_alias",
+    node: { type: "emoji", attrs: { name: "party_popper" } },
+  },
+  {
+    id: "unknown_shortcode",
+    node: { type: "emoji", attrs: { name: "fvoci_unknown_emoji_xyz" } },
+  },
+  {
+    id: "supplementary_plane_glyph",
+    node: { type: "emoji", attrs: { name: "tada", emoji: "🫠" } },
+  },
+  {
+    id: "korean_with_known_emoji",
+    node: { type: "emoji", attrs: { name: "tada", emoji: "🎉" } },
+    context: "서버",
+  },
 ];
 
 const expected = {
-	source: payload.source,
-	cases: fixtureCases.map((case_) => ({
-		id: case_.id,
-		node: case_.node,
-		expected: emojiGlyph(case_.node),
-		context: case_.context ?? null,
-	})),
+  source: payload.source,
+  cases: fixtureCases.map((case_) => ({
+    id: case_.id,
+    node: case_.node,
+    expected: emojiGlyph(case_.node),
+    context: case_.context ?? null,
+  })),
 };
 
 mkdirSync(dirname(OUT_FIXTURE), { recursive: true });

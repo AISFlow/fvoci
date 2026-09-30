@@ -1,7 +1,4 @@
-import type {
-  AttachmentBlockBridge,
-  AttachmentUploadResult,
-} from "@fvoci/editor/attachment-model";
+import type { AttachmentBlockBridge, AttachmentUploadResult } from "@fvoci/editor/attachment-model";
 import type { components } from "@/generated/api";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 
@@ -79,7 +76,14 @@ function isAbortError(err: unknown): boolean {
 }
 
 function isPermanentPartStatus(status: number): boolean {
-  return status === 400 || status === 401 || status === 403 || status === 404 || status === 409 || status === 413;
+  return (
+    status === 400 ||
+    status === 401 ||
+    status === 403 ||
+    status === 404 ||
+    status === 409 ||
+    status === 413
+  );
 }
 
 function isPermanentAuthStatus(status: number): boolean {
@@ -211,9 +215,7 @@ async function putPresignedPart(
       lastError = err;
     }
   }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error(`part ${target.partNumber} failed`);
+  throw lastError instanceof Error ? lastError : new Error(`part ${target.partNumber} failed`);
 }
 
 async function putProxyPart(
@@ -264,9 +266,7 @@ async function putProxyPart(
       lastError = err;
     }
   }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error(`part ${target.partNumber} failed`);
+  throw lastError instanceof Error ? lastError : new Error(`part ${target.partNumber} failed`);
 }
 
 async function putParts(

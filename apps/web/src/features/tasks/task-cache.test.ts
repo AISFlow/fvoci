@@ -9,7 +9,10 @@ const PROJECT = "project-1";
 // "load more" and both are refreshed by the project task stream.
 const LISTS = [
   ["task list", ["tasks", WS, PROJECT, ""]],
-  ["collection board column", ["collection", WS, "collection-1", "board", { groupBy: "status" }, "s1"]],
+  [
+    "collection board column",
+    ["collection", WS, "collection-1", "board", { groupBy: "status" }, "s1"],
+  ],
 ] as const;
 
 type Page = { items: string[]; nextCursor: string | null };
@@ -57,7 +60,10 @@ for (const [list, key] of LISTS) {
     test(`${list}: ${name} during "load more" keeps the requested page and refetches every loaded page`, async () => {
       const { client, observer, gets, pages, unsubscribe } = mountList(key);
       await flush();
-      assert.deepEqual(gets.map((get) => get.cursor), [null]);
+      assert.deepEqual(
+        gets.map((get) => get.cursor),
+        [null],
+      );
       gets[0].resolve({ items: ["a"], nextCursor: "c1" });
       await flush();
 
@@ -76,13 +82,22 @@ for (const [list, key] of LISTS) {
       );
 
       // The hint is still applied: both loaded pages are fetched again.
-      assert.deepEqual(gets.slice(2).map((get) => get.cursor), [null]);
+      assert.deepEqual(
+        gets.slice(2).map((get) => get.cursor),
+        [null],
+      );
       gets[2].resolve({ items: ["a2"], nextCursor: "c1" });
       await flush();
-      assert.deepEqual(gets.slice(2).map((get) => get.cursor), [null, "c1"]);
+      assert.deepEqual(
+        gets.slice(2).map((get) => get.cursor),
+        [null, "c1"],
+      );
       gets[3].resolve({ items: ["b2"], nextCursor: null });
       await flush();
-      assert.deepEqual(pages().map((page) => page.items), [["a2"], ["b2"]]);
+      assert.deepEqual(
+        pages().map((page) => page.items),
+        [["a2"], ["b2"]],
+      );
       assert.equal(gets.length, 4);
       unsubscribe();
       client.clear();

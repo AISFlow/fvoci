@@ -17,8 +17,14 @@ test("the connected Vue workspace settings page gates its only SSO section with 
     path.join(import.meta.dirname, "../../vue/pages/WorkspaceSettingsPage.vue"),
     "utf8",
   );
-  assert.match(page, /import \{ showsWorkspaceSso \} from "@\/features\/settings\/workspace-sso-scope"/);
-  assert.match(page, /const showSso = computed\(\(\) =>\s*workspace\.value \? showsWorkspaceSso\(workspace\.value\.kind, canManage\.value\) : false/);
+  assert.match(
+    page,
+    /import \{ showsWorkspaceSso \} from "@\/features\/settings\/workspace-sso-scope"/,
+  );
+  assert.match(
+    page,
+    /const showSso = computed\(\(\) =>\s*workspace\.value \? showsWorkspaceSso\(workspace\.value\.kind, canManage\.value\) : false/,
+  );
   assert.equal((page.match(/<WorkspaceSsoSection\b/g) ?? []).length, 1);
   assert.match(page, /<WorkspaceSsoSection\s+v-if="showSso"\s+:workspace-id="workspace\.id"/);
 });

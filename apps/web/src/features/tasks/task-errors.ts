@@ -24,7 +24,9 @@ export function taskMutationErrorMessage(
   return problemMessage(err, fallback);
 }
 
-export function taskFieldValidationMessage(issue: "title" | "startDate" | "dueDate" | "estimate" | "type" | "parent"): string {
+export function taskFieldValidationMessage(
+  issue: "title" | "startDate" | "dueDate" | "estimate" | "type" | "parent",
+): string {
   switch (issue) {
     case "title":
       return t("task.form.titleRequired");

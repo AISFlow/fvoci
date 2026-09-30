@@ -9,8 +9,17 @@ test("childrenByParent indexes nested wiki nodes for recursive rendering", () =>
     { id: "grandchild", parentId: "child" },
   ];
   const byParent = childrenByParent(nodes);
-  assert.deepEqual(childrenOf(byParent, null).map((item) => item.id), ["root"]);
-  assert.deepEqual(childrenOf(byParent, "root").map((item) => item.id), ["child"]);
-  assert.deepEqual(childrenOf(byParent, "child").map((item) => item.id), ["grandchild"]);
+  assert.deepEqual(
+    childrenOf(byParent, null).map((item) => item.id),
+    ["root"],
+  );
+  assert.deepEqual(
+    childrenOf(byParent, "root").map((item) => item.id),
+    ["child"],
+  );
+  assert.deepEqual(
+    childrenOf(byParent, "child").map((item) => item.id),
+    ["grandchild"],
+  );
   assert.deepEqual(childrenOf(byParent, "grandchild"), []);
 });

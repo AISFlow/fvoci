@@ -43,7 +43,8 @@ export function projectCreatePayload(
   }
   const name = values.name.trim();
   if (name.length < 1) return { ok: false, issue: { field: "name", code: "too_small" } };
-  if (name.length > PROJECT_NAME_MAX) return { ok: false, issue: { field: "name", code: "too_big" } };
+  if (name.length > PROJECT_NAME_MAX)
+    return { ok: false, issue: { field: "name", code: "too_big" } };
   const description = blankToNull(values.description);
   if (description !== null && description.length > PROJECT_DESCRIPTION_MAX) {
     return { ok: false, issue: { field: "description", code: "too_big" } };

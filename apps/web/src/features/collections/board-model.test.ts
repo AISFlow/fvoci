@@ -40,7 +40,10 @@ test("column rows keep page order, drop duplicates and rows of another group", (
     columnRows(pages, "b").map((item) => item.id),
     ["3"],
   );
-  assert.deepEqual(columnRows([{ items: [row("5", null)] }], null).map((item) => item.id), ["5"]);
+  assert.deepEqual(
+    columnRows([{ items: [row("5", null)] }], null).map((item) => item.id),
+    ["5"],
+  );
 });
 
 test("more than one page per column stays complete and unique", () => {
@@ -107,8 +110,5 @@ test("keyboard choices mirror the board groups; archived ones stay visible but d
     { id: "opt-old", name: "Old", disabled: true },
     { id: null, name: "", disabled: false },
   ]);
-  assert.deepEqual(
-    moveChoices("status", [{ id: null, name: "", count: 0, deleted: false }]),
-    [],
-  );
+  assert.deepEqual(moveChoices("status", [{ id: null, name: "", count: 0, deleted: false }]), []);
 });

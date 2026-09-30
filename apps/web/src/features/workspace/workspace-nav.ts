@@ -11,14 +11,7 @@ import {
 
 /** The workspace header section a page belongs to (both web apps' workspace shells). */
 export type WorkspaceNav =
-  | "home"
-  | "wiki"
-  | "settings"
-  | "projects"
-  | "myTasks"
-  | "search"
-  | "notifications"
-  | "trash";
+  "home" | "wiki" | "settings" | "projects" | "myTasks" | "search" | "notifications" | "trash";
 
 /** Where switching to another workspace lands: the same section there. */
 export function landingPath(slug: string, activeNav: WorkspaceNav): string {

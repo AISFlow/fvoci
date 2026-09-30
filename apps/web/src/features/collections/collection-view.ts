@@ -25,8 +25,10 @@ export function collectionConfigOf(view: CollectionView): CollectionConfig {
   const base = defaultConfig(type, query);
   return {
     query,
-    groupBy: typeof raw?.groupBy === "string" ? raw.groupBy : raw?.groupBy === null ? null : base.groupBy,
-    dateBy: typeof raw?.dateBy === "string" ? raw.dateBy : raw?.dateBy === null ? null : base.dateBy,
+    groupBy:
+      typeof raw?.groupBy === "string" ? raw.groupBy : raw?.groupBy === null ? null : base.groupBy,
+    dateBy:
+      typeof raw?.dateBy === "string" ? raw.dateBy : raw?.dateBy === null ? null : base.dateBy,
   };
 }
 

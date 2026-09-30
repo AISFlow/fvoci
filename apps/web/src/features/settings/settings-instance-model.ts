@@ -82,7 +82,11 @@ export function listFieldValue(raw: string): string[] {
 }
 
 /** The message overrides with `key` set to `text` (removed when empty). */
-export function withMessageOverride(map: unknown, key: string, text: string): Record<string, string> {
+export function withMessageOverride(
+  map: unknown,
+  key: string,
+  text: string,
+): Record<string, string> {
   const next: Record<string, string> = {};
   if (isRecord(map)) {
     for (const [k, v] of Object.entries(map)) {

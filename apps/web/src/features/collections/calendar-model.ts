@@ -2,11 +2,7 @@
 // apps/web/src/features/collections/collection-panel.tsx (`move` with a date
 // target) decides the same writes; collection-calendar.tsx and
 // collection-drag.tsx provide the drop targets (a day or "none").
-import {
-  isoToZonedLocal,
-  zonedLocalToIso,
-  type CollectionValue,
-} from "@/lib/collection-values";
+import { isoToZonedLocal, zonedLocalToIso, type CollectionValue } from "@/lib/collection-values";
 import type { CollectionField } from "@/lib/queries/collections";
 import { patchDateBody, type PatchTaskBody } from "@/features/tasks/task-edit-payload";
 

@@ -10,14 +10,20 @@ import * as api from "@/lib/api";
 import * as form from "../../vue/features/settings/form.ts";
 import * as oidcForm from "../../vue/features/settings/workspace-oidc.ts";
 import { copyText } from "../../vue/features/settings/clipboard.ts";
-import { displayedRedirectUri, workspaceSsoRedirectUri } from "../../vue/features/settings/sso-uri.ts";
+import {
+  displayedRedirectUri,
+  workspaceSsoRedirectUri,
+} from "../../vue/features/settings/sso-uri.ts";
 
 const WORKSPACE_ID = "01900000-0000-7000-8000-000000000001";
-const filename = new URL("../../vue/features/settings/WorkspaceSsoSection.vue", import.meta.url).pathname;
+const filename = new URL("../../vue/features/settings/WorkspaceSsoSection.vue", import.meta.url)
+  .pathname;
 const { descriptor } = parse(readFileSync(filename, "utf8"), { filename });
 const script = compileScript(descriptor, { id: "sso-contract" });
 const template = compileTemplate({
-  source: descriptor.template!.content, filename, id: "sso-contract",
+  source: descriptor.template!.content,
+  filename,
+  id: "sso-contract",
   compilerOptions: { bindingMetadata: script.bindings },
 });
 assert.deepEqual(template.errors, []);
@@ -29,19 +35,29 @@ function evaluate(code: string, imports: Record<string, unknown>) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const module = { exports: {} as any };
-  new Function("require", "module", "exports", js)((name: string) => {
-    assert.ok(name in imports, `unmapped component import: ${name}`);
-    return imports[name];
-  }, module, module.exports);
+  new Function("require", "module", "exports", js)(
+    (name: string) => {
+      assert.ok(name in imports, `unmapped component import: ${name}`);
+      return imports[name];
+    },
+    module,
+    module.exports,
+  );
   return module.exports;
 }
 
 const button = Vue.defineComponent({
-  setup: (_props, { attrs, slots }) => () => Vue.h("button", attrs, slots.default?.()),
+  setup:
+    (_props, { attrs, slots }) =>
+    () =>
+      Vue.h("button", attrs, slots.default?.()),
 });
 const input = Vue.defineComponent({
   props: ["modelValue"],
-  setup: (props, { attrs }) => () => Vue.h("input", { ...attrs, value: props.modelValue }),
+  setup:
+    (props, { attrs }) =>
+    () =>
+      Vue.h("input", { ...attrs, value: props.modelValue }),
 });
 
 async function render(copy?: "copied" | "failed") {
@@ -50,27 +66,40 @@ async function render(copy?: "copied" | "failed") {
   const written: string[] = [];
   try {
     Object.defineProperty(globalThis, "window", {
-      configurable: true, value: { location: { origin: "http://intranet:8080" } },
+      configurable: true,
+      value: { location: { origin: "http://intranet:8080" } },
     });
     Object.defineProperty(globalThis, "navigator", {
       configurable: true,
-      value: copy === "failed" ? {} : { clipboard: { writeText: async (value: string) => void written.push(value) } },
+      value:
+        copy === "failed"
+          ? {}
+          : { clipboard: { writeText: async (value: string) => void written.push(value) } },
     });
     const idle = () => ({ isPending: Vue.ref(false) });
     const imports = {
-      vue: Vue, "@fvoci/i18n": { t }, "@/lib/api": api,
+      vue: Vue,
+      "@fvoci/i18n": { t },
+      "@/lib/api": api,
       "@tanstack/vue-query": {
         useQuery: () => ({
-          data: Vue.ref({ redirectUri: workspaceSsoRedirectUri("https://fvoci.example", WORKSPACE_ID) }),
-          isLoading: Vue.ref(false), isError: Vue.ref(false), error: Vue.ref(null),
+          data: Vue.ref({
+            redirectUri: workspaceSsoRedirectUri("https://fvoci.example", WORKSPACE_ID),
+          }),
+          isLoading: Vue.ref(false),
+          isError: Vue.ref(false),
+          error: Vue.ref(null),
         }),
-        useMutation: idle, useQueryClient: () => ({}),
+        useMutation: idle,
+        useQueryClient: () => ({}),
       },
       "@nuxt/ui/components/Button.vue": { default: button },
       "@nuxt/ui/components/Input.vue": { default: input },
       "./ConfirmAction.vue": { default: button },
-      "./clipboard": { copyText }, "./form": form,
-      "./sso-uri": { displayedRedirectUri }, "./workspace-oidc": oidcForm,
+      "./clipboard": { copyText },
+      "./form": form,
+      "./sso-uri": { displayedRedirectUri },
+      "./workspace-oidc": oidcForm,
       "@/features/settings/settings-shell.css": {},
     };
     const component = evaluate(script.content, imports).default;
@@ -82,11 +111,15 @@ async function render(copy?: "copied" | "failed") {
       return state;
     };
     const html = await renderToString(Vue.createSSRApp(component, { workspaceId: WORKSPACE_ID }));
-    if (copy === "copied") assert.deepEqual(written, [workspaceSsoRedirectUri("https://fvoci.example", WORKSPACE_ID)]);
+    if (copy === "copied")
+      assert.deepEqual(written, [workspaceSsoRedirectUri("https://fvoci.example", WORKSPACE_ID)]);
     if (copy === "failed") assert.deepEqual(written, []);
     return html;
   } finally {
-    for (const [key, descriptor] of [["window", originalWindow], ["navigator", originalNavigator]] as const) {
+    for (const [key, descriptor] of [
+      ["window", originalWindow],
+      ["navigator", originalNavigator],
+    ] as const) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
       else Reflect.deleteProperty(globalThis, key);
     }
@@ -123,13 +156,19 @@ test("the Vue section shows the server URI read-only with Korean help and a copy
   const html = await render();
   assert.match(html, /<label[^>]*>리디렉션 URI<\/label>/);
   const input = html.match(/<input[^>]*>/)?.[0] ?? "";
-  assert.ok(input.includes(`value="https://fvoci.example/api/v1/auth/sso/${WORKSPACE_ID}/callback"`), input);
+  assert.ok(
+    input.includes(`value="https://fvoci.example/api/v1/auth/sso/${WORKSPACE_ID}/callback"`),
+    input,
+  );
   assert.match(input, /readonly(?:=|\s|>)/);
   const inputId = input.match(/id="([^"]+)"/)?.[1];
   const helpId = input.match(/aria-describedby="([^"]+)"/)?.[1];
   assert.ok(inputId && helpId);
   assert.match(html, new RegExp(`<label for="${escape(inputId)}"`));
-  assert.match(html, new RegExp(`<p id="${escape(helpId)}"[^>]*>${escape(t("auth.sso.redirectUri.help"))}</p>`));
+  assert.match(
+    html,
+    new RegExp(`<p id="${escape(helpId)}"[^>]*>${escape(t("auth.sso.redirectUri.help"))}</p>`),
+  );
   assert.match(t("auth.sso.redirectUri.help"), /ID 공급자\(IdP\)/);
   assert.match(html, /<button type="button"[^>]*>복사<\/button>/);
   assert.doesNotMatch(html, /role="alert"/);
@@ -139,7 +178,10 @@ test("the actual Vue copy handler sets copied text or an alert to copy by hand",
   assert.match(await render("copied"), /<button type="button"[^>]*>복사됨<\/button>/);
   const failed = await render("failed");
   assert.match(failed, /<button type="button"[^>]*>복사<\/button>/);
-  assert.match(failed, /<p role="alert"[^>]*>주소를 복사하지 못했습니다\. 입력란에서 직접 선택해 복사해 주세요\.<\/p>/);
+  assert.match(
+    failed,
+    /<p role="alert"[^>]*>주소를 복사하지 못했습니다\. 입력란에서 직접 선택해 복사해 주세요\.<\/p>/,
+  );
 });
 
 test("copyText writes to the clipboard and fails without one", async () => {

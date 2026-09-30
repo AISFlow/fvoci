@@ -7,14 +7,7 @@ import { z } from "zod";
 import type { components } from "@/generated/api";
 
 export type SettingsWidget =
-  | "boolean"
-  | "enum"
-  | "number"
-  | "text"
-  | "list"
-  | "duration"
-  | "i18n_override"
-  | "asset";
+  "boolean" | "enum" | "number" | "text" | "list" | "duration" | "i18n_override" | "asset";
 
 export type SettingsEntry = {
   readonly schema: z.ZodTypeAny;
@@ -304,7 +297,12 @@ export function attachmentTransferView(status: AdminAttachmentTransfer | undefin
   blocked: boolean;
 } {
   if (!status) {
-    return { effectiveOptionKey: null, disabledOptions: new Set(), unavailableKey: null, blocked: false };
+    return {
+      effectiveOptionKey: null,
+      disabledOptions: new Set(),
+      unavailableKey: null,
+      blocked: false,
+    };
   }
   const reason = status.presignedAvailable ? null : status.unavailableReason;
   return {

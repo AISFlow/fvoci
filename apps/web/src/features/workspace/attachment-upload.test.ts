@@ -109,7 +109,9 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
         return jsonResponse(createOutput(3), 201);
       }
       if (url.endsWith("/complete") && init?.method === "POST") {
-        const body = (await readJsonBody(init)) as { parts: { partNumber: number; etag: string }[] };
+        const body = (await readJsonBody(init)) as {
+          parts: { partNumber: number; etag: string }[];
+        };
         completed = body.parts;
         return jsonResponse(storedOutput);
       }
@@ -303,57 +305,63 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     assert.equal(partCalls, 1);
   });
 
-  await t.test("complete fetch rejection reconciles stored metadata without a second POST", async () => {
-    let completeCalls = 0;
-    installFetch(async (url, init) => {
-      if (url.endsWith("/uploads") && init?.method === "POST") {
-        return jsonResponse(createOutput(1), 201);
-      }
-      if (url.endsWith("/complete") && init?.method === "POST") {
-        completeCalls += 1;
-        return Promise.reject(new TypeError("Failed to fetch"));
-      }
-      if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
-        return jsonResponse({
-          ...storedOutput,
-          completedAt: new Date(0).toISOString(),
-        });
-      }
-      const n = Number(url.split("/").at(-1));
-      return jsonResponse({ etag: `etag-${n}` });
-    });
-    const bridge = await loadBridge({ delay: () => Promise.resolve() });
-    const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
-    const result = await bridge.upload(file, () => undefined);
-    assert.equal(result.id, ATT);
-    assert.equal(completeCalls, 1);
-  });
+  await t.test(
+    "complete fetch rejection reconciles stored metadata without a second POST",
+    async () => {
+      let completeCalls = 0;
+      installFetch(async (url, init) => {
+        if (url.endsWith("/uploads") && init?.method === "POST") {
+          return jsonResponse(createOutput(1), 201);
+        }
+        if (url.endsWith("/complete") && init?.method === "POST") {
+          completeCalls += 1;
+          return Promise.reject(new TypeError("Failed to fetch"));
+        }
+        if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
+          return jsonResponse({
+            ...storedOutput,
+            completedAt: new Date(0).toISOString(),
+          });
+        }
+        const n = Number(url.split("/").at(-1));
+        return jsonResponse({ etag: `etag-${n}` });
+      });
+      const bridge = await loadBridge({ delay: () => Promise.resolve() });
+      const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
+      const result = await bridge.upload(file, () => undefined);
+      assert.equal(result.id, ATT);
+      assert.equal(completeCalls, 1);
+    },
+  );
 
-  await t.test("ambiguous complete reuses stored metadata instead of retrying complete", async () => {
-    let completeCalls = 0;
-    installFetch(async (url, init) => {
-      if (url.endsWith("/uploads") && init?.method === "POST") {
-        return jsonResponse(createOutput(1), 201);
-      }
-      if (url.endsWith("/complete") && init?.method === "POST") {
-        completeCalls += 1;
-        return jsonResponse({ code: "upload_is_not_in_the_required_state" }, 409);
-      }
-      if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
-        return jsonResponse({
-          ...storedOutput,
-          completedAt: new Date(0).toISOString(),
-        });
-      }
-      const n = Number(url.split("/").at(-1));
-      return jsonResponse({ etag: `etag-${n}` });
-    });
-    const bridge = await loadBridge({ delay: () => Promise.resolve() });
-    const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
-    const result = await bridge.upload(file, () => undefined);
-    assert.equal(result.id, ATT);
-    assert.equal(completeCalls, 1);
-  });
+  await t.test(
+    "ambiguous complete reuses stored metadata instead of retrying complete",
+    async () => {
+      let completeCalls = 0;
+      installFetch(async (url, init) => {
+        if (url.endsWith("/uploads") && init?.method === "POST") {
+          return jsonResponse(createOutput(1), 201);
+        }
+        if (url.endsWith("/complete") && init?.method === "POST") {
+          completeCalls += 1;
+          return jsonResponse({ code: "upload_is_not_in_the_required_state" }, 409);
+        }
+        if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
+          return jsonResponse({
+            ...storedOutput,
+            completedAt: new Date(0).toISOString(),
+          });
+        }
+        const n = Number(url.split("/").at(-1));
+        return jsonResponse({ etag: `etag-${n}` });
+      });
+      const bridge = await loadBridge({ delay: () => Promise.resolve() });
+      const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
+      const result = await bridge.upload(file, () => undefined);
+      assert.equal(result.id, ATT);
+      assert.equal(completeCalls, 1);
+    },
+  );
 
   // Cloudflare-style gateway failures answer with an HTML page, not a problem body.
   function gatewayResponse(status: number): Response {
@@ -367,31 +375,34 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     return jsonResponse({ ...storedOutput, completedAt: null });
   }
 
-  await t.test("complete 524 before the server commits re-sends the idempotent complete", async () => {
-    let completeCalls = 0;
-    let metaCalls = 0;
-    installFetch(async (url, init) => {
-      if (url.endsWith("/uploads") && init?.method === "POST") {
-        return jsonResponse(createOutput(2), 201);
-      }
-      if (url.endsWith("/complete") && init?.method === "POST") {
-        completeCalls += 1;
-        return completeCalls === 1 ? gatewayResponse(524) : jsonResponse(storedOutput);
-      }
-      if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
-        metaCalls += 1;
-        return notYetStored();
-      }
-      const n = Number(url.split("/").at(-1));
-      return jsonResponse({ etag: `etag-${n}` });
-    });
-    const bridge = await loadBridge({ delay: () => Promise.resolve() });
-    const file = new File([new Uint8Array(PART_SIZE * 2)], "f.bin");
-    const result = await bridge.upload(file, () => undefined);
-    assert.equal(result.id, ATT);
-    assert.equal(completeCalls, 2);
-    assert.equal(metaCalls, 1);
-  });
+  await t.test(
+    "complete 524 before the server commits re-sends the idempotent complete",
+    async () => {
+      let completeCalls = 0;
+      let metaCalls = 0;
+      installFetch(async (url, init) => {
+        if (url.endsWith("/uploads") && init?.method === "POST") {
+          return jsonResponse(createOutput(2), 201);
+        }
+        if (url.endsWith("/complete") && init?.method === "POST") {
+          completeCalls += 1;
+          return completeCalls === 1 ? gatewayResponse(524) : jsonResponse(storedOutput);
+        }
+        if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
+          metaCalls += 1;
+          return notYetStored();
+        }
+        const n = Number(url.split("/").at(-1));
+        return jsonResponse({ etag: `etag-${n}` });
+      });
+      const bridge = await loadBridge({ delay: () => Promise.resolve() });
+      const file = new File([new Uint8Array(PART_SIZE * 2)], "f.bin");
+      const result = await bridge.upload(file, () => undefined);
+      assert.equal(result.id, ATT);
+      assert.equal(completeCalls, 2);
+      assert.equal(metaCalls, 1);
+    },
+  );
 
   await t.test("complete connection loss with nothing stored re-sends complete", async () => {
     let completeCalls = 0;
@@ -438,11 +449,14 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     });
     const bridge = await loadBridge({ delay: () => Promise.resolve() });
     const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
-    await assert.rejects(bridge.upload(file, () => undefined), (err: unknown) => {
-      assert.ok(err instanceof Error);
-      assert.equal((err as { status?: number }).status, 524);
-      return true;
-    });
+    await assert.rejects(
+      bridge.upload(file, () => undefined),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal((err as { status?: number }).status, 524);
+        return true;
+      },
+    );
     assert.equal(completeCalls, 3);
   });
 
@@ -501,11 +515,14 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
         });
         const bridge = await loadBridge({ delay: () => Promise.resolve() });
         const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
-        await assert.rejects(bridge.upload(file, () => undefined), (err: unknown) => {
-          assert.equal((err as Error).name, "ProblemError", `${status} / ${label}`);
-          assert.equal((err as { status?: number }).status, status, `${status} / ${label}`);
-          return true;
-        });
+        await assert.rejects(
+          bridge.upload(file, () => undefined),
+          (err: unknown) => {
+            assert.equal((err as Error).name, "ProblemError", `${status} / ${label}`);
+            assert.equal((err as { status?: number }).status, status, `${status} / ${label}`);
+            return true;
+          },
+        );
         assert.equal(completeCalls, 1, `${status} / ${label}`);
         assert.equal(metaCalls, 1, `${status} / ${label}`);
       }
@@ -528,39 +545,48 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     });
     const bridge = await loadBridge({ delay: () => Promise.resolve() });
     const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
-    await assert.rejects(bridge.upload(file, () => undefined), (err: unknown) => {
-      assert.equal((err as { status?: number }).status, 413);
-      return true;
-    });
+    await assert.rejects(
+      bridge.upload(file, () => undefined),
+      (err: unknown) => {
+        assert.equal((err as { status?: number }).status, 413);
+        return true;
+      },
+    );
   });
 
-  await t.test("a failing metadata lookup keeps gateway retries bounded and the final 524", async () => {
-    for (const [label, meta] of unusableMeta) {
-      let completeCalls = 0;
-      installFetch(async (url, init) => {
-        if (url.endsWith("/uploads") && init?.method === "POST") {
-          return jsonResponse(createOutput(1), 201);
-        }
-        if (url.endsWith("/complete") && init?.method === "POST") {
-          completeCalls += 1;
-          return gatewayResponse(524);
-        }
-        if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
-          return meta();
-        }
-        const n = Number(url.split("/").at(-1));
-        return jsonResponse({ etag: `etag-${n}` });
-      });
-      const bridge = await loadBridge({ delay: () => Promise.resolve() });
-      const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
-      await assert.rejects(bridge.upload(file, () => undefined), (err: unknown) => {
-        assert.equal((err as Error).name, "ProblemError", label);
-        assert.equal((err as { status?: number }).status, 524, label);
-        return true;
-      });
-      assert.equal(completeCalls, 3, label);
-    }
-  });
+  await t.test(
+    "a failing metadata lookup keeps gateway retries bounded and the final 524",
+    async () => {
+      for (const [label, meta] of unusableMeta) {
+        let completeCalls = 0;
+        installFetch(async (url, init) => {
+          if (url.endsWith("/uploads") && init?.method === "POST") {
+            return jsonResponse(createOutput(1), 201);
+          }
+          if (url.endsWith("/complete") && init?.method === "POST") {
+            completeCalls += 1;
+            return gatewayResponse(524);
+          }
+          if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
+            return meta();
+          }
+          const n = Number(url.split("/").at(-1));
+          return jsonResponse({ etag: `etag-${n}` });
+        });
+        const bridge = await loadBridge({ delay: () => Promise.resolve() });
+        const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
+        await assert.rejects(
+          bridge.upload(file, () => undefined),
+          (err: unknown) => {
+            assert.equal((err as Error).name, "ProblemError", label);
+            assert.equal((err as { status?: number }).status, 524, label);
+            return true;
+          },
+        );
+        assert.equal(completeCalls, 3, label);
+      }
+    },
+  );
 
   await t.test("abort during the metadata lookup stops without another complete", async () => {
     let completeCalls = 0;
@@ -616,27 +642,30 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     assert.equal(completeCalls, 1);
   });
 
-  await t.test("a part answered 524 after the server stored it is re-sent and completes", async () => {
-    const putCounts = new Map<number, number>();
-    installFetch(async (url, init) => {
-      if (url.endsWith("/uploads") && init?.method === "POST") {
-        return jsonResponse(createOutput(2), 201);
-      }
-      if (url.endsWith("/complete") && init?.method === "POST") {
-        return jsonResponse(storedOutput);
-      }
-      const n = Number(url.split("/").at(-1));
-      putCounts.set(n, (putCounts.get(n) ?? 0) + 1);
-      if (n === 2 && putCounts.get(2) === 1) return gatewayResponse(524);
-      return jsonResponse({ etag: `etag-${n}` });
-    });
-    const bridge = await loadBridge({ delay: () => Promise.resolve() });
-    const file = new File([new Uint8Array(PART_SIZE * 2)], "f.bin");
-    const result = await bridge.upload(file, () => undefined);
-    assert.equal(result.id, ATT);
-    assert.equal(putCounts.get(1), 1);
-    assert.equal(putCounts.get(2), 2);
-  });
+  await t.test(
+    "a part answered 524 after the server stored it is re-sent and completes",
+    async () => {
+      const putCounts = new Map<number, number>();
+      installFetch(async (url, init) => {
+        if (url.endsWith("/uploads") && init?.method === "POST") {
+          return jsonResponse(createOutput(2), 201);
+        }
+        if (url.endsWith("/complete") && init?.method === "POST") {
+          return jsonResponse(storedOutput);
+        }
+        const n = Number(url.split("/").at(-1));
+        putCounts.set(n, (putCounts.get(n) ?? 0) + 1);
+        if (n === 2 && putCounts.get(2) === 1) return gatewayResponse(524);
+        return jsonResponse({ etag: `etag-${n}` });
+      });
+      const bridge = await loadBridge({ delay: () => Promise.resolve() });
+      const file = new File([new Uint8Array(PART_SIZE * 2)], "f.bin");
+      const result = await bridge.upload(file, () => undefined);
+      assert.equal(result.id, ATT);
+      assert.equal(putCounts.get(1), 1);
+      assert.equal(putCounts.get(2), 2);
+    },
+  );
 
   await t.test("resume completes with uploaded and remaining parts", async () => {
     let completed: { partNumber: number; etag: string }[] = [];
@@ -657,7 +686,9 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
         });
       }
       if (url.endsWith("/complete") && init?.method === "POST") {
-        const body = (await readJsonBody(init)) as { parts: { partNumber: number; etag: string }[] };
+        const body = (await readJsonBody(init)) as {
+          parts: { partNumber: number; etag: string }[];
+        };
         completed = body.parts;
         return jsonResponse(storedOutput);
       }
@@ -688,7 +719,10 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     partSizeBytes: PART_SIZE,
     transfer: "presigned",
     partUrlsExpireAt: new Date(expiresAt).toISOString(),
-    parts: Array.from({ length: partCount }, (_, i) => ({ partNumber: i + 1, url: signedUrl(i + 1) })),
+    parts: Array.from({ length: partCount }, (_, i) => ({
+      partNumber: i + 1,
+      url: signedUrl(i + 1),
+    })),
   });
   type StoragePut = { url: string; init?: RequestInit };
   /** API routes through `globalThis.fetch`; storage PUTs through `fetchImpl`. */
@@ -697,9 +731,15 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     resume?: () => unknown;
     storage: (put: StoragePut, n: number) => Response | Promise<Response>;
   }) {
-    const state = { resumes: 0, apiParts: 0, completed: [] as { partNumber: number; etag: string }[], puts: [] as StoragePut[] };
+    const state = {
+      resumes: 0,
+      apiParts: 0,
+      completed: [] as { partNumber: number; etag: string }[],
+      puts: [] as StoragePut[],
+    };
     installFetch(async (url, init) => {
-      if (url.endsWith("/uploads") && init?.method === "POST") return jsonResponse(opts.create, 201);
+      if (url.endsWith("/uploads") && init?.method === "POST")
+        return jsonResponse(opts.create, 201);
       if (url.endsWith("/upload") && init?.method === "GET") {
         state.resumes += 1;
         return jsonResponse(opts.resume?.());
@@ -764,7 +804,8 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
         uploadedParts: [{ partNumber: 1, etag: "etag-1" }],
         parts: [{ partNumber: 2, url: signedUrl(2, 2) }],
       }),
-      storage: (put, n) => (n === 2 && put.url.endsWith("sig1") ? new Response(null, { status: 403 }) : stored(n)),
+      storage: (put, n) =>
+        n === 2 && put.url.endsWith("sig1") ? new Response(null, { status: 403 }) : stored(n),
     });
     const bridge = await loadBridge({ fetchImpl, delay: () => Promise.resolve() });
     await bridge.upload(new File([new Uint8Array(PART_SIZE * 2)], "f.bin"), () => undefined);
@@ -878,10 +919,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
 
   await t.test("downloadUrl uses the workspace attachment download route", async () => {
     const bridge = await loadBridge();
-    assert.equal(
-      bridge.downloadUrl(ATT),
-      `/api/v1/workspaces/${WS}/attachments/${ATT}/download`,
-    );
+    assert.equal(bridge.downloadUrl(ATT), `/api/v1/workspaces/${WS}/attachments/${ATT}/download`);
   });
 
   await t.test("attachmentMeta maps stored attachment fields", async () => {

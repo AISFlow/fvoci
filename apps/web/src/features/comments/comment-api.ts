@@ -129,12 +129,7 @@ export async function unresolveComment(workspaceId: string, id: string) {
   );
 }
 
-export async function reactToComment(
-  workspaceId: string,
-  id: string,
-  emoji: string,
-  on: boolean,
-) {
+export async function reactToComment(workspaceId: string, id: string, emoji: string, on: boolean) {
   return ensureOk(
     await api.POST("/api/v1/workspaces/{workspace_id}/comments/{comment_id}/reactions", {
       params: { path: { workspace_id: workspaceId, comment_id: id } },

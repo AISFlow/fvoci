@@ -13,10 +13,7 @@ import {
   type onStatelessParameters,
 } from "@hocuspocus/provider";
 import * as Y from "yjs";
-import {
-  PERSIST_DISCONNECTED_MESSAGE,
-  persistNow,
-} from "./collab-model.ts";
+import { PERSIST_DISCONNECTED_MESSAGE, persistNow } from "./collab-model.ts";
 
 function fakeProvider(): {
   provider: Provider;
@@ -51,9 +48,7 @@ function fakeProvider(): {
 }
 
 function requestIdOf(payloads: string[]): string {
-  const line = payloads.find((payload) =>
-    payload.startsWith(`${COLLAB_PERSIST_REQUEST}:`),
-  );
+  const line = payloads.find((payload) => payload.startsWith(`${COLLAB_PERSIST_REQUEST}:`));
   const id = line?.slice(`${COLLAB_PERSIST_REQUEST}:`.length);
   assert.ok(id);
   return id;
@@ -110,7 +105,10 @@ test("persistNow 는 배칭된 편집을 먼저 내보내고 요청별 응답을
   const fake = fakeProvider();
   const persisted = persistNow(fake.provider);
   assert.equal(fake.calls[0], "flush");
-  assert.match(fake.calls[1] ?? "", new RegExp(`^stateless:${COLLAB_PERSIST_REQUEST}:[0-9a-f-]{36}$`));
+  assert.match(
+    fake.calls[1] ?? "",
+    new RegExp(`^stateless:${COLLAB_PERSIST_REQUEST}:[0-9a-f-]{36}$`),
+  );
   const requestId = fake.calls[1]?.slice(`stateless:${COLLAB_PERSIST_REQUEST}:`.length);
   fake.emit(`${COLLAB_PERSIST_DONE}:${requestId}`);
   await persisted;
@@ -239,9 +237,7 @@ test("real provider persist-failed and timeout still reject", async () => {
   const realClearTimeout = globalThis.clearTimeout;
   try {
     const failed = persistNow(live.provider);
-    live.provider.receiveStateless(
-      `${COLLAB_PERSIST_FAILED}:${requestIdOf(live.payloads)}`,
-    );
+    live.provider.receiveStateless(`${COLLAB_PERSIST_FAILED}:${requestIdOf(live.payloads)}`);
     await assert.rejects(failed, /collab persist failed/);
 
     live.payloads.length = 0;

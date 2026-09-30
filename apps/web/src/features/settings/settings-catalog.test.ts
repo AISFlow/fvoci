@@ -11,7 +11,10 @@ import {
 } from "./settings-catalog.ts";
 
 const ko = JSON.parse(
-  readFileSync(new URL("../../../../../packages/i18n/src/locales/ko.json", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../../../../../packages/i18n/src/locales/ko.json", import.meta.url),
+    "utf8",
+  ),
 ) as Record<string, string>;
 
 test("every catalog label, help, group and enum option has a Korean string", () => {
@@ -24,7 +27,10 @@ test("every catalog label, help, group and enum option has a Korean string", () 
       const options = SETTING_ENUM_OPTIONS[`${key}.${leaf}`];
       assert.ok(options && options.length > 0, `no options for ${key}.${leaf}`);
       for (const value of options) {
-        assert.ok(Object.hasOwn(ko, optionKey(key, leaf, value)), `missing option ${key}.${leaf}.${value}`);
+        assert.ok(
+          Object.hasOwn(ko, optionKey(key, leaf, value)),
+          `missing option ${key}.${leaf}.${value}`,
+        );
       }
     }
   }
@@ -46,8 +52,14 @@ test("withoutAssets drops only the upload-route leaves", () => {
 
 test("draft schemas mirror the server limits", () => {
   const share = SETTINGS_CATALOG.share.schema;
-  assert.equal(share.safeParse({ enabled: true, defaultExpiresDays: 7, maxExpiresDays: 30 }).success, true);
-  assert.equal(share.safeParse({ enabled: true, defaultExpiresDays: 40, maxExpiresDays: 30 }).success, false);
+  assert.equal(
+    share.safeParse({ enabled: true, defaultExpiresDays: 7, maxExpiresDays: 30 }).success,
+    true,
+  );
+  assert.equal(
+    share.safeParse({ enabled: true, defaultExpiresDays: 40, maxExpiresDays: 30 }).success,
+    false,
+  );
   const i18n = SETTINGS_CATALOG.i18n.schema;
   assert.equal(i18n.safeParse({ overrides: { "mail.invite.subject": "초대" } }).success, true);
   assert.equal(i18n.safeParse({ overrides: { "mail.invite.subject": "<b>" } }).success, false);
@@ -103,11 +115,19 @@ test("attachmentTransfer card: effective mode, unavailable reason and blocked va
   }
 
   const blocked = attachmentTransferView(
-    status({ source: "stored", presignedAvailable: false, unavailableReason: "public_endpoint_missing", blocked: true }),
+    status({
+      source: "stored",
+      presignedAvailable: false,
+      unavailableReason: "public_endpoint_missing",
+      blocked: true,
+    }),
   );
   assert.equal(blocked.blocked, true);
   assert.equal(blocked.effectiveOptionKey, "settings.attachmentTransfer.mode.option.proxy");
-  for (const key of ["settings.attachmentTransfer.blocked", "settings.attachmentTransfer.effective"]) {
+  for (const key of [
+    "settings.attachmentTransfer.blocked",
+    "settings.attachmentTransfer.effective",
+  ]) {
     assert.ok(Object.hasOwn(ko, key), key);
   }
   assert.deepEqual(attachmentTransferView(undefined), {

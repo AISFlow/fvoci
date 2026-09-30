@@ -31,10 +31,7 @@ export type PersistAckEvent =
   | ({ type: "timeout"; requestId: string } & PersistAckScope)
   | ({ type: "abort"; requestId: string } & PersistAckScope);
 
-export type CollabConnectionStatus =
-  | "connecting"
-  | "connected"
-  | "disconnected";
+export type CollabConnectionStatus = "connecting" | "connected" | "disconnected";
 
 export interface CollabConnectionGeneration {
   provider: unknown;
@@ -61,16 +58,10 @@ function cryptoRandomId(): string {
 }
 
 function sameScope(state: PersistAckState, scope: PersistAckScope): boolean {
-  return (
-    state.documentId === scope.documentId &&
-    state.connectionId === scope.connectionId
-  );
+  return state.documentId === scope.documentId && state.connectionId === scope.connectionId;
 }
 
-export function createPersistAck(
-  documentId: string,
-  connectionId: string,
-): PersistAckState {
+export function createPersistAck(documentId: string, connectionId: string): PersistAckState {
   return {
     documentId,
     connectionId,
@@ -99,10 +90,8 @@ export function advanceConnectionGeneration(
   nextId: () => string = cryptoRandomId,
 ): CollabConnectionGeneration {
   const providerChanged = !Object.is(next.provider, current.provider);
-  const enteredDisconnected =
-    next.status === "disconnected" && current.status !== "disconnected";
-  const leftConnected =
-    current.status === "connected" && next.status !== "connected";
+  const enteredDisconnected = next.status === "disconnected" && current.status !== "disconnected";
+  const leftConnected = current.status === "connected" && next.status !== "connected";
   if (providerChanged || enteredDisconnected || leftConnected) {
     return {
       provider: next.provider,
@@ -170,20 +159,15 @@ export function scopedPersistObserver(
 ): ScopedPersistObserver {
   const scope: PersistAckScope = { documentId, connectionId };
   return {
-    onRequest: (requestId) =>
-      dispatch({ type: "request", requestId, ...scope }),
+    onRequest: (requestId) => dispatch({ type: "request", requestId, ...scope }),
     onAck: (requestId) => dispatch({ type: "ack", requestId, ...scope }),
     onFail: (requestId) => dispatch({ type: "fail", requestId, ...scope }),
-    onTimeout: (requestId) =>
-      dispatch({ type: "timeout", requestId, ...scope }),
+    onTimeout: (requestId) => dispatch({ type: "timeout", requestId, ...scope }),
     onAbort: (requestId) => dispatch({ type: "abort", requestId, ...scope }),
   };
 }
 
-export function applyPersistAck(
-  state: PersistAckState,
-  event: PersistAckEvent,
-): PersistAckState {
+export function applyPersistAck(state: PersistAckState, event: PersistAckEvent): PersistAckState {
   switch (event.type) {
     case "bind":
       if (sameScope(state, event)) {
@@ -223,7 +207,5 @@ export function applyPersistAck(
 }
 
 export function isDurablySaved(state: PersistAckState): boolean {
-  return (
-    state.confirmedPrefix !== null && state.confirmedPrefix === state.editSeq
-  );
+  return state.confirmedPrefix !== null && state.confirmedPrefix === state.editSeq;
 }

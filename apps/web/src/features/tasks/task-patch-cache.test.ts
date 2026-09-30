@@ -159,11 +159,17 @@ test("mergeTaskMeta keeps detail-only fields and drops a parent preview that no 
   assert.deepEqual(cleared?.labelIds, ["label-1"]);
   assert.equal(cleared?.canEdit, true);
 
-  const kept = mergeTaskMeta(cachedWithParent, metaOf(detail({ type: "subtask", parentId: PARENT, title: "새 제목" })));
+  const kept = mergeTaskMeta(
+    cachedWithParent,
+    metaOf(detail({ type: "subtask", parentId: PARENT, title: "새 제목" })),
+  );
   assert.equal(kept?.parent, parent);
   assert.equal(kept?.title, "새 제목");
 
-  const moved = mergeTaskMeta(cachedWithParent, metaOf(detail({ type: "subtask", parentId: "other" })));
+  const moved = mergeTaskMeta(
+    cachedWithParent,
+    metaOf(detail({ type: "subtask", parentId: "other" })),
+  );
   assert.equal(moved?.parent, null);
 
   assert.equal(mergeTaskMeta(undefined, metaOf(detail())), undefined);

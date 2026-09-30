@@ -122,7 +122,12 @@ test("never-synced body room skips persist (still connecting)", async () => {
   let persisted = false;
   await runArchiveWithBodyPersist({
     pageEditable: true,
-    session: fakeSession({ synced: false, persistNow: async () => { persisted = true; } }),
+    session: fakeSession({
+      synced: false,
+      persistNow: async () => {
+        persisted = true;
+      },
+    }),
     collabUser,
     archive: async () => {},
   });

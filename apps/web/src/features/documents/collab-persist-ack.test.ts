@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  COLLAB_PERSIST_DONE,
-  COLLAB_PERSIST_REQUEST,
-} from "@fvoci/editor/collab";
+import { COLLAB_PERSIST_DONE, COLLAB_PERSIST_REQUEST } from "@fvoci/editor/collab";
 import type { HocuspocusProvider, onStatelessParameters } from "@hocuspocus/provider";
 import * as Y from "yjs";
 import { PERSIST_DISCONNECTED_MESSAGE, persistNow } from "./collab-model.ts";
@@ -33,10 +30,7 @@ function vectorsEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-function request(
-  requestId: string,
-  scope: PersistAckScope = ROOM,
-): PersistAckEvent {
+function request(requestId: string, scope: PersistAckScope = ROOM): PersistAckEvent {
   return { type: "request", requestId, ...scope };
 }
 
@@ -48,10 +42,7 @@ function fail(requestId: string, scope: PersistAckScope = ROOM): PersistAckEvent
   return { type: "fail", requestId, ...scope };
 }
 
-function timeout(
-  requestId: string,
-  scope: PersistAckScope = ROOM,
-): PersistAckEvent {
+function timeout(requestId: string, scope: PersistAckScope = ROOM): PersistAckEvent {
   return { type: "timeout", requestId, ...scope };
 }
 
@@ -256,11 +247,7 @@ test("provider identity change rotates even without a disconnect", () => {
   const second = { id: "second" };
   const ids = nextIds("g1", "g2");
   let gen = createConnectionGeneration(first, "connected", ids);
-  gen = advanceConnectionGeneration(
-    gen,
-    { provider: second, status: "connecting" },
-    ids,
-  );
+  gen = advanceConnectionGeneration(gen, { provider: second, status: "connecting" }, ids);
   assert.equal(gen.connectionId, "g2");
   assert.equal(gen.provider, second);
 });
@@ -278,22 +265,14 @@ test("same provider reconnect and delayed old persistNow ack cannot confirm save
     ...createConnectionGeneration(provider, "connecting", ids),
     ack: createPersistAck(DOC, "g1"),
   };
-  bind = syncPersistBind(
-    bind,
-    { provider, status: "connected", documentId: DOC },
-    ids,
-  );
+  bind = syncPersistBind(bind, { provider, status: "connected", documentId: DOC }, ids);
   assert.equal(bind.ack.connectionId, "g1");
   bind = reducePersistBind(bind, { type: "edit" });
 
   const fake = fakeProvider();
-  const oldObserver = scopedPersistObserver(
-    bind.ack.documentId,
-    bind.ack.connectionId,
-    (event) => {
-      bind = reducePersistBind(bind, event);
-    },
-  );
+  const oldObserver = scopedPersistObserver(bind.ack.documentId, bind.ack.connectionId, (event) => {
+    bind = reducePersistBind(bind, event);
+  });
   const abort = new AbortController();
   const inflight = persistNow(fake.provider, oldObserver, {
     signal: abort.signal,
@@ -301,32 +280,18 @@ test("same provider reconnect and delayed old persistNow ack cannot confirm save
   const requestLine = fake.calls.find((call) =>
     call.startsWith(`stateless:${COLLAB_PERSIST_REQUEST}:`),
   );
-  const requestId = requestLine?.slice(
-    `stateless:${COLLAB_PERSIST_REQUEST}:`.length,
-  );
+  const requestId = requestLine?.slice(`stateless:${COLLAB_PERSIST_REQUEST}:`.length);
   assert.ok(requestId);
   assert.equal(bind.ack.inflight?.requestId, requestId);
 
-  bind = syncPersistBind(
-    bind,
-    { provider, status: "disconnected", documentId: DOC },
-    ids,
-  );
+  bind = syncPersistBind(bind, { provider, status: "disconnected", documentId: DOC }, ids);
   abort.abort();
   await assert.rejects(inflight, { message: PERSIST_DISCONNECTED_MESSAGE });
   assert.equal(bind.ack.connectionId, "g2");
   assert.equal(isDurablySaved(bind.ack), false);
 
-  bind = syncPersistBind(
-    bind,
-    { provider, status: "connecting", documentId: DOC },
-    ids,
-  );
-  bind = syncPersistBind(
-    bind,
-    { provider, status: "connected", documentId: DOC },
-    ids,
-  );
+  bind = syncPersistBind(bind, { provider, status: "connecting", documentId: DOC }, ids);
+  bind = syncPersistBind(bind, { provider, status: "connected", documentId: DOC }, ids);
   assert.equal(bind.ack.connectionId, "g2");
 
   fake.emit(`${COLLAB_PERSIST_DONE}:${requestId}`);
@@ -336,13 +301,9 @@ test("same provider reconnect and delayed old persistNow ack cannot confirm save
   assert.equal(text.toString(), "미전송 한글");
   assert.equal(vectorsEqual(pending, Y.encodeStateAsUpdate(doc)), true);
 
-  const newObserver = scopedPersistObserver(
-    bind.ack.documentId,
-    bind.ack.connectionId,
-    (event) => {
-      bind = reducePersistBind(bind, event);
-    },
-  );
+  const newObserver = scopedPersistObserver(bind.ack.documentId, bind.ack.connectionId, (event) => {
+    bind = reducePersistBind(bind, event);
+  });
   bind = reducePersistBind(bind, { type: "edit" });
   newObserver.onRequest("req-new");
   oldObserver.onAck(requestId);
@@ -359,10 +320,7 @@ test("same provider reconnect and delayed old persistNow ack cannot confirm save
 test("scoped request from a previous room cannot start inflight on the current bind", () => {
   let state = createPersistAck(DOC, CONN);
   state = applyPersistAck(state, { type: "edit" });
-  state = applyPersistAck(
-    state,
-    request("req-other", { documentId: "doc-b", connectionId: CONN }),
-  );
+  state = applyPersistAck(state, request("req-other", { documentId: "doc-b", connectionId: CONN }));
   assert.equal(state.inflight, null);
   state = applyPersistAck(
     state,
@@ -370,10 +328,7 @@ test("scoped request from a previous room cannot start inflight on the current b
   );
   assert.equal(state.inflight, null);
   state = applyPersistAck(state, request("req-1"));
-  state = applyPersistAck(
-    state,
-    ack("req-1", { documentId: DOC, connectionId: "conn-old" }),
-  );
+  state = applyPersistAck(state, ack("req-1", { documentId: DOC, connectionId: "conn-old" }));
   assert.equal(isDurablySaved(state), false);
   state = applyPersistAck(state, ack("req-1"));
   assert.equal(isDurablySaved(state), true);

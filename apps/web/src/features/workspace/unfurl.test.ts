@@ -40,10 +40,11 @@ test("OG 필드·비http 이미지는 버린다", () => {
     ),
     { title: "FVOCI", description: "설명", imageUrl: null },
   );
-  assert.deepEqual(
-    unfurlCardDataOf(og({ title: "G", imageUrl: "https://example.com/og.png" })),
-    { title: "G", description: "", imageUrl: "https://example.com/og.png" },
-  );
+  assert.deepEqual(unfurlCardDataOf(og({ title: "G", imageUrl: "https://example.com/og.png" })), {
+    title: "G",
+    description: "",
+    imageUrl: "https://example.com/og.png",
+  });
 });
 
 test("GitHub 제목 폴백 owner/repo#n", () => {

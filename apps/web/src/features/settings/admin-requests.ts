@@ -14,7 +14,9 @@ export type LegalPublishInput = components["schemas"]["LegalPublishBody"];
 export type AdminUserPatch = { instanceAdmin?: boolean; suspended?: boolean };
 
 /** PATCHes the settings documents in `patch`; answers the whole admin view. */
-export async function patchInstanceSettings(patch: Record<string, unknown>): Promise<AdminInstanceSettings> {
+export async function patchInstanceSettings(
+  patch: Record<string, unknown>,
+): Promise<AdminInstanceSettings> {
   return ensureOk(
     await api.PATCH("/api/v1/admin/instance-settings", {
       // The catalog form builds the body key by key; the server checks it strictly.
@@ -27,7 +29,10 @@ export async function patchInstanceSettings(patch: Record<string, unknown>): Pro
  * Assets are not PATCH leaves: upload is a raw octet POST, clearing (`null`)
  * a DELETE. Answers the whole admin view.
  */
-export async function saveBrandingAsset(kind: BrandingAssetKind, file: File | null): Promise<AdminInstanceSettings> {
+export async function saveBrandingAsset(
+  kind: BrandingAssetKind,
+  file: File | null,
+): Promise<AdminInstanceSettings> {
   return file === null
     ? ensureOk(
         await api.DELETE("/api/v1/admin/branding/assets/{asset}", {
@@ -58,7 +63,10 @@ export async function cancelAdminUserErasure(userId: string): Promise<void> {
   await ensureOk(await api.POST("/api/v1/admin/users/cancel-erase", { body: { userId } }));
 }
 
-export async function publishLegalDocument(queryClient: QueryClient, input: LegalPublishInput): Promise<void> {
+export async function publishLegalDocument(
+  queryClient: QueryClient,
+  input: LegalPublishInput,
+): Promise<void> {
   await ensureOk(await api.POST("/api/v1/admin/legal", { body: input }));
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: legalDocQuery(input.kind).queryKey }),

@@ -35,7 +35,10 @@ test("field values: emptied numbers are unset, emptied text is null, lists are t
   assert.equal(numberFieldValue("14"), 14);
   assert.equal(textFieldValue(""), null);
   assert.equal(textFieldValue(" x "), " x ");
-  assert.deepEqual(listFieldValue(" a.example \n\nb.example\na.example\n"), ["a.example", "b.example"]);
+  assert.deepEqual(listFieldValue(" a.example \n\nb.example\na.example\n"), [
+    "a.example",
+    "b.example",
+  ]);
   assert.deepEqual(listFieldValue(""), []);
 });
 
@@ -61,7 +64,10 @@ test("settings search matches key, Korean label, group and leaf names", () => {
 });
 
 test("asset previews are versioned by the upload digest", () => {
-  assert.equal(assetDigest({ key: "k", sha256: "0123456789abcdef", mime: "image/png" }), "0123456789abcdef");
+  assert.equal(
+    assetDigest({ key: "k", sha256: "0123456789abcdef", mime: "image/png" }),
+    "0123456789abcdef",
+  );
   assert.equal(assetDigest(null), null);
   assert.equal(assetPreviewSrc("logo", "0123456789abcdef"), "/api/v1/branding/logo?v=0123456789ab");
 });
@@ -89,7 +95,13 @@ test("the legal publish form maps the date to midnight UTC and reports catalog k
   assert.ok(parsed.success);
   assert.equal(parsed.data.effectiveAt, "2026-01-01T00:00:00Z");
   assert.equal(parsed.data.title, "약관");
-  const bad = legalPublishInput.safeParse({ kind: "Terms!", title: "", bodyMarkdown: "", required: true, effectiveAt: "" });
+  const bad = legalPublishInput.safeParse({
+    kind: "Terms!",
+    title: "",
+    bodyMarkdown: "",
+    required: true,
+    effectiveAt: "",
+  });
   assert.equal(bad.success, false);
   assert.equal(issueMessage(bad.error!.issues[0]!.message), "입력을 확인해 주세요.");
 });

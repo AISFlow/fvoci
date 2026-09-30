@@ -21,9 +21,7 @@ export function isIsoDate(value: string): boolean {
   const [year, month, day] = value.split("-").map((part) => Number.parseInt(part, 10));
   const date = new Date(Date.UTC(year, month - 1, day));
   return (
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
   );
 }
 
@@ -110,7 +108,9 @@ export type TitlePatchIssue = "title";
 export type DatePatchIssue = "startDate" | "dueDate";
 export type EstimatePatchIssue = "estimate";
 
-export function patchTitleBody(title: string): { ok: true; body: Pick<PatchTaskBody, "title"> } | { ok: false; issue: TitlePatchIssue } {
+export function patchTitleBody(
+  title: string,
+): { ok: true; body: Pick<PatchTaskBody, "title"> } | { ok: false; issue: TitlePatchIssue } {
   const trimmed = title.trim();
   if (trimmed.length < 1 || trimmed.length > 500) {
     return { ok: false, issue: "title" };
@@ -122,7 +122,9 @@ export function patchDateBody(
   task: Pick<TaskDetail, "startDate" | "dueDate" | "dueAt">,
   field: DatePatchIssue,
   raw: string,
-): { ok: true; body: Pick<PatchTaskBody, "startDate" | "dueDate" | "dueAt" | "expectedDates"> } | { ok: false; issue: DatePatchIssue } {
+):
+  | { ok: true; body: Pick<PatchTaskBody, "startDate" | "dueDate" | "dueAt" | "expectedDates"> }
+  | { ok: false; issue: DatePatchIssue } {
   const next = raw === "" ? null : raw;
   if (next !== null && !isIsoDate(next)) {
     return { ok: false, issue: field };
@@ -153,7 +155,9 @@ export function patchEstimateBody(
 export function patchTypeBody(
   type: string,
   parentId: string | null,
-): { ok: true; body: Pick<PatchTaskBody, "type" | "parentId"> } | { ok: false; issue: "type" | "parent" } {
+):
+  | { ok: true; body: Pick<PatchTaskBody, "type" | "parentId"> }
+  | { ok: false; issue: "type" | "parent" } {
   if (!isTaskType(type)) return { ok: false, issue: "type" };
   if (type === "subtask" && parentId === null) {
     return { ok: false, issue: "parent" };

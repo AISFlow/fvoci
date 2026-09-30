@@ -29,7 +29,13 @@ test("방 거절은 연결됨이 아니라 거절 배지와 「불러오지 못�
   assert.equal(collabBadge("unavailable", true).label, "doc.collab.unavailable");
   assert.equal(collabRefusalNote("busy", false), "doc.collab.busyNote");
   assert.equal(collabRefusalNote("unavailable", false), "doc.collab.unavailableNote");
-  for (const status of ["connected", "connecting", "disconnected", "unauthorized", undefined] as const) {
+  for (const status of [
+    "connected",
+    "connecting",
+    "disconnected",
+    "unauthorized",
+    undefined,
+  ] as const) {
     assert.equal(collabRefusalNote(status, false), null);
   }
 });

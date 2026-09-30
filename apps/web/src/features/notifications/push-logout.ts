@@ -1,6 +1,10 @@
 import { api } from "@/lib/api";
 import { currentSubscription, localStore } from "@/features/notifications/push-browser";
-import { logoutWithPushDisconnect, withTimeout, writePushOwner } from "@/features/notifications/push-subscription";
+import {
+  logoutWithPushDisconnect,
+  withTimeout,
+  writePushOwner,
+} from "@/features/notifications/push-subscription";
 
 async function browserSubscription(): Promise<PushSubscription | null> {
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return null;

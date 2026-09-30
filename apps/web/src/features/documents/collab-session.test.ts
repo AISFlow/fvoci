@@ -19,10 +19,7 @@ test("Vue collab room binds the provider and preserves durable persist state", (
 });
 
 test("collab-session 에 hex 리터럴이 없다", () => {
-  const src = readFileSync(sessionPath, "utf8").replace(
-    /\/\*[\s\S]*?\*\/|\/\/.*/g,
-    "",
-  );
+  const src = readFileSync(sessionPath, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
   assert.equal(/#[0-9a-fA-F]{3,8}/.test(src), false);
 });
 
@@ -51,10 +48,9 @@ function oldClientIndex(userId: string): number {
 }
 
 function labelInk(css: string, key: string): string | undefined {
-  return new RegExp(
-    `^\\.afn-label-${key} \\{[^}]*--afn-label-ink: (#[0-9a-fA-F]{6})`,
-    "m",
-  ).exec(css)?.[1];
+  return new RegExp(`^\\.afn-label-${key} \\{[^}]*--afn-label-ink: (#[0-9a-fA-F]{6})`, "m").exec(
+    css,
+  )?.[1];
 }
 
 test("presenceColorOf 는 옛 클라이언트 인덱스와 같은 .afn-label-* 잉크를 고른다", () => {
@@ -79,7 +75,11 @@ test("다른 uuid 뒷자리는 다른 라벨 색을 고른다", () => {
 
 test("collabStatusOf: unauthorized > 방 거절 > 연결 상태 순이다", () => {
   for (const connection of ["connecting", "connected", "disconnected"] as const) {
-    assert.equal(collabStatusOf(false, null, connection), connection, "no refusal: the raw connection state");
+    assert.equal(
+      collabStatusOf(false, null, connection),
+      connection,
+      "no refusal: the raw connection state",
+    );
     assert.equal(collabStatusOf(false, "capacity", connection), "busy");
     assert.equal(collabStatusOf(false, "unavailable", connection), "unavailable");
     for (const refusal of [null, "capacity", "unavailable"] as const) {
@@ -125,13 +125,19 @@ test("Vue collab room sends authentication results to the state machine and expo
   assert.match(binding, /provider\.on\("authenticationFailed", onAuthenticationFailed\)/);
   assert.match(binding, /provider\.off\("authenticated", onAuthenticated\)/);
   assert.match(binding, /provider\.off\("authenticationFailed", onAuthenticationFailed\)/);
-  assert.match(src, /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/);
+  assert.match(
+    src,
+    /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/,
+  );
 });
 
 test("Vue collab room computes status with collabStatusOf and releases its generation on teardown", () => {
   const src = stripComments(readFileSync(sessionPath, "utf8"));
   assert.match(src, /return computed<CollabRoomSession>\(\(\) => \(/);
-  assert.match(src, /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/);
+  assert.match(
+    src,
+    /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/,
+  );
   const dispose = src.slice(src.indexOf("bindGeneration(connection.state);"));
   assert.match(dispose, /disposed = true;/);
   assert.match(dispose, /connection\.dispose\(\);/);

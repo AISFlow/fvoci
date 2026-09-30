@@ -24,9 +24,7 @@ export function boundTo(key: ArrayBuffer | null | undefined, publicKey: string):
   if (!key) return false;
   const expected = decodeKey(publicKey);
   const actual = new Uint8Array(key);
-  return (
-    actual.length === expected.length && actual.every((byte, at) => byte === expected[at])
-  );
+  return actual.length === expected.length && actual.every((byte, at) => byte === expected[at]);
 }
 
 export interface PushSubscriptionPayload {

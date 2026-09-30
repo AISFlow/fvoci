@@ -56,7 +56,11 @@ async function enable(
   log: string[],
   timeoutMs?: number,
 ) {
-  const subscription = await subscribeWhenActive(registration, { userVisibleOnly: true }, timeoutMs);
+  const subscription = await subscribeWhenActive(
+    registration,
+    { userVisibleOnly: true },
+    timeoutMs,
+  );
   log.push(`put:${subscription.endpoint}`);
 }
 

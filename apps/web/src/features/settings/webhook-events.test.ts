@@ -13,17 +13,26 @@ test("every offered webhook event has a Korean label; unknown verbs pass through
 
 test("webhook form accepts http(s) URLs up to 2048 chars with at least one event", () => {
   assert.equal(
-    webhookCreateInput.safeParse({ url: "https://example.com/hook", events: ["task.created"] }).success,
+    webhookCreateInput.safeParse({ url: "https://example.com/hook", events: ["task.created"] })
+      .success,
     true,
   );
   assert.equal(
-    webhookCreateInput.safeParse({ url: "http://127.0.0.1:8080/hook", events: ["task.created"] }).success,
+    webhookCreateInput.safeParse({ url: "http://127.0.0.1:8080/hook", events: ["task.created"] })
+      .success,
     true,
   );
   for (const url of ["", "ftp://example.com/x", "not a url", `https://e.com/${"a".repeat(2048)}`]) {
-    assert.equal(webhookCreateInput.safeParse({ url, events: ["task.created"] }).success, false, url);
+    assert.equal(
+      webhookCreateInput.safeParse({ url, events: ["task.created"] }).success,
+      false,
+      url,
+    );
   }
-  assert.equal(webhookCreateInput.safeParse({ url: "https://example.com", events: [] }).success, false);
+  assert.equal(
+    webhookCreateInput.safeParse({ url: "https://example.com", events: [] }).success,
+    false,
+  );
 });
 
 test("webhook create problems map to specific messages", () => {

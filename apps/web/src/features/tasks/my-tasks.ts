@@ -32,10 +32,16 @@ export function myTasksQuery(workspaceId: string) {
 export function assignedTasksPreviewQuery(workspaceId: string) {
   return queryOptions({
     queryKey: ["workspace-tasks", workspaceId, OPEN_ASSIGNED_QUERY, "preview", 8] as const,
-    queryFn: async ({ signal }) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/tasks", {
-      signal,
-      params: { path: { workspace_id: workspaceId }, query: { query: OPEN_ASSIGNED_QUERY, limit: 8 } },
-    })),
+    queryFn: async ({ signal }) =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/tasks", {
+          signal,
+          params: {
+            path: { workspace_id: workspaceId },
+            query: { query: OPEN_ASSIGNED_QUERY, limit: 8 },
+          },
+        }),
+      ),
     enabled: Boolean(workspaceId),
     retry: false,
   });
@@ -44,10 +50,13 @@ export function assignedTasksPreviewQuery(workspaceId: string) {
 export function workspaceLabelsQuery(workspaceId: string) {
   return queryOptions({
     queryKey: ["workspace-labels", workspaceId] as const,
-    queryFn: async ({ signal }) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/labels", {
-      signal,
-      params: { path: { workspace_id: workspaceId } },
-    })),
+    queryFn: async ({ signal }) =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/labels", {
+          signal,
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
     enabled: Boolean(workspaceId),
     retry: false,
   });

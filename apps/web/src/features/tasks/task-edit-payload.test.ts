@@ -92,22 +92,22 @@ test("clearsHierarchyParent matches source type-boundary rules", () => {
 test("hierarchy helpers filter eligible parents", () => {
   assert.equal(violatesTaskHierarchy("subtask", "epic"), true);
   assert.equal(violatesTaskHierarchy("task", "epic"), false);
-  const candidates = eligibleParentCandidates(
-    { id: "self", type: "task" },
-    [
-      { id: "self", type: "task", number: 1, title: "Self" },
-      { id: "epic", type: "epic", number: 2, title: "Epic" },
-      { id: "bug", type: "bug", number: 3, title: "Bug" },
-    ],
+  const candidates = eligibleParentCandidates({ id: "self", type: "task" }, [
+    { id: "self", type: "task", number: 1, title: "Self" },
+    { id: "epic", type: "epic", number: 2, title: "Epic" },
+    { id: "bug", type: "bug", number: 3, title: "Bug" },
+  ]);
+  assert.deepEqual(
+    candidates.map((item) => item.id),
+    ["epic"],
   );
-  assert.deepEqual(candidates.map((item) => item.id), ["epic"]);
-  const subtaskParents = eligibleParentCandidates(
-    { id: "self", type: "subtask" },
-    [
-      { id: "self", type: "task", number: 1, title: "Self" },
-      { id: "epic", type: "epic", number: 2, title: "Epic" },
-      { id: "bug", type: "bug", number: 3, title: "Bug" },
-    ],
+  const subtaskParents = eligibleParentCandidates({ id: "self", type: "subtask" }, [
+    { id: "self", type: "task", number: 1, title: "Self" },
+    { id: "epic", type: "epic", number: 2, title: "Epic" },
+    { id: "bug", type: "bug", number: 3, title: "Bug" },
+  ]);
+  assert.deepEqual(
+    subtaskParents.map((item) => item.id),
+    ["bug"],
   );
-  assert.deepEqual(subtaskParents.map((item) => item.id), ["bug"]);
 });

@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-function mergeHolidayItems(
-  current: string[] | undefined,
-  date: string,
-  remove: boolean,
-): string[] {
+function mergeHolidayItems(current: string[] | undefined, date: string, remove: boolean): string[] {
   return remove
     ? (current ?? []).filter((day) => day !== date)
     : [...new Set([...(current ?? []), date])].sort();

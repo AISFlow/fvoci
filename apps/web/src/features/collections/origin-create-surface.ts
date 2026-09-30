@@ -1,10 +1,5 @@
 export type OriginCreateSurface =
-  | "loading"
-  | "error"
-  | "create-task"
-  | "create-project"
-  | "unavailable"
-  | "pending";
+  "loading" | "error" | "create-task" | "create-project" | "unavailable" | "pending";
 
 /** Empty picker: members can create a project; guests with document View cannot. */
 export function originCreateSurface(input: {

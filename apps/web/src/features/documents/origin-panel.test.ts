@@ -8,14 +8,24 @@ test("empty picker lets a member create a project and hides the form from a gues
     "create-project",
   );
   assert.equal(
-    originCreateSurface({ isLoading: false, isError: false, itemCount: 0, canCreateProject: false }),
+    originCreateSurface({
+      isLoading: false,
+      isError: false,
+      itemCount: 0,
+      canCreateProject: false,
+    }),
     "unavailable",
   );
 });
 
 test("editable projects show the create-task form", () => {
   assert.equal(
-    originCreateSurface({ isLoading: false, isError: false, itemCount: 2, canCreateProject: false }),
+    originCreateSurface({
+      isLoading: false,
+      isError: false,
+      itemCount: 2,
+      canCreateProject: false,
+    }),
     "create-task",
   );
   assert.equal(originCreateSurface({ isLoading: true, isError: false }), "loading");

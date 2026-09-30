@@ -22,12 +22,15 @@ export function taskOriginsQuery(
     queryFn: async () =>
       documentId
         ? ensureOk(
-            await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins", {
-              params: {
-                path: { workspace_id: workspaceId, document_id: documentId },
-                query: { after: after ?? undefined, limit: 50 },
+            await api.GET(
+              "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins",
+              {
+                params: {
+                  path: { workspace_id: workspaceId, document_id: documentId },
+                  query: { after: after ?? undefined, limit: 50 },
+                },
               },
-            }),
+            ),
           )
         : ensureOk(
             await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/origin", {

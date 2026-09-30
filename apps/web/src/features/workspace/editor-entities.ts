@@ -13,67 +13,145 @@ type Schema = components["schemas"];
 export interface EditorEntityTransport {
   members(workspaceId: string, signal: AbortSignal): Promise<Schema["MembersResponse"]>;
   groups(workspaceId: string, signal: AbortSignal): Promise<Schema["GroupListResponse"]>;
-  lookup(workspaceId: string, displayId: string, signal: AbortSignal): Promise<Schema["LookupListResponse"]>;
-  search(workspaceId: string, q: string, kind: "task" | "document", signal: AbortSignal): Promise<Schema["SearchListResponse"]>;
+  lookup(
+    workspaceId: string,
+    displayId: string,
+    signal: AbortSignal,
+  ): Promise<Schema["LookupListResponse"]>;
+  search(
+    workspaceId: string,
+    q: string,
+    kind: "task" | "document",
+    signal: AbortSignal,
+  ): Promise<Schema["SearchListResponse"]>;
   projects(workspaceId: string, signal: AbortSignal): Promise<Schema["ProjectListResponse"]>;
   task(workspaceId: string, id: string, signal: AbortSignal): Promise<Schema["TaskOutput"]>;
   documentUuid(id: string, signal: AbortSignal): Promise<Schema["DocumentMetaResponse"]>;
-  document(workspaceId: string, id: string, projectId: string | null, signal: AbortSignal): Promise<Schema["DocumentMetaResponse"]>;
-  workflow(workspaceId: string, projectId: string, signal: AbortSignal): Promise<Schema["WorkflowOutput"]>;
+  document(
+    workspaceId: string,
+    id: string,
+    projectId: string | null,
+    signal: AbortSignal,
+  ): Promise<Schema["DocumentMetaResponse"]>;
+  workflow(
+    workspaceId: string,
+    projectId: string,
+    signal: AbortSignal,
+  ): Promise<Schema["WorkflowOutput"]>;
 }
 
 export const editorEntityTransport: EditorEntityTransport = {
-  members: async (workspace_id, signal) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/members", {
-    params: { path: { workspace_id } }, signal,
-  })),
-  groups: async (workspace_id, signal) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/groups", {
-    params: { path: { workspace_id } }, signal,
-  })),
-  lookup: async (workspace_id, display_id, signal) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/lookup/{display_id}", {
-    params: { path: { workspace_id, display_id } }, signal,
-  })),
-  search: async (workspace_id, q, type, signal) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/search", {
-    params: { path: { workspace_id }, query: { q, type, mode: "lexical", limit: 50 } }, signal,
-  })),
-  projects: async (workspace_id, signal) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/projects", {
-    params: { path: { workspace_id } }, signal,
-  })),
-  task: async (workspace_id, task_id, signal) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
-    params: { path: { workspace_id, task_id } }, signal,
-  })),
-  documentUuid: async (document_id, signal) => ensureOk(await api.GET("/api/v1/documents/{document_id}", {
-    params: { path: { document_id } }, signal,
-  })),
-  document: async (workspace_id, document_id, project_id, signal) => project_id === null
-    ? ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}", {
-        params: { path: { workspace_id, document_id } }, signal,
-      }))
-    : ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}", {
-        params: { path: { workspace_id, project_id, document_id } }, signal,
-      })),
-  workflow: async (workspace_id, project_id, signal) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/workflow", {
-    params: { path: { workspace_id, project_id } }, signal,
-  })),
+  members: async (workspace_id, signal) =>
+    ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/members", {
+        params: { path: { workspace_id } },
+        signal,
+      }),
+    ),
+  groups: async (workspace_id, signal) =>
+    ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/groups", {
+        params: { path: { workspace_id } },
+        signal,
+      }),
+    ),
+  lookup: async (workspace_id, display_id, signal) =>
+    ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/lookup/{display_id}", {
+        params: { path: { workspace_id, display_id } },
+        signal,
+      }),
+    ),
+  search: async (workspace_id, q, type, signal) =>
+    ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/search", {
+        params: { path: { workspace_id }, query: { q, type, mode: "lexical", limit: 50 } },
+        signal,
+      }),
+    ),
+  projects: async (workspace_id, signal) =>
+    ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/projects", {
+        params: { path: { workspace_id } },
+        signal,
+      }),
+    ),
+  task: async (workspace_id, task_id, signal) =>
+    ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
+        params: { path: { workspace_id, task_id } },
+        signal,
+      }),
+    ),
+  documentUuid: async (document_id, signal) =>
+    ensureOk(
+      await api.GET("/api/v1/documents/{document_id}", {
+        params: { path: { document_id } },
+        signal,
+      }),
+    ),
+  document: async (workspace_id, document_id, project_id, signal) =>
+    project_id === null
+      ? ensureOk(
+          await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}", {
+            params: { path: { workspace_id, document_id } },
+            signal,
+          }),
+        )
+      : ensureOk(
+          await api.GET(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
+            {
+              params: { path: { workspace_id, project_id, document_id } },
+              signal,
+            },
+          ),
+        ),
+  workflow: async (workspace_id, project_id, signal) =>
+    ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/workflow", {
+        params: { path: { workspace_id, project_id } },
+        signal,
+      }),
+    ),
 };
 
 function named(value: string | null | undefined): string | null {
   return value?.trim() || null;
 }
 
-function snapshot(label: string | null | undefined, icon = "", status?: string): EntitySnapshot | null {
+function snapshot(
+  label: string | null | undefined,
+  icon = "",
+  status?: string,
+): EntitySnapshot | null {
   const name = named(label);
-  return name ? { label: name, icon: named(icon) ?? "", ...(named(status) ? { status: status!.trim() } : {}) } : null;
+  return name
+    ? { label: name, icon: named(icon) ?? "", ...(named(status) ? { status: status!.trim() } : {}) }
+    : null;
 }
 
-function entityHit(kind: string, id: string, label: string | null, title: string): MentionHit | null {
+function entityHit(
+  kind: string,
+  id: string,
+  label: string | null,
+  title: string,
+): MentionHit | null {
   if ((kind !== "task" && kind !== "document") || !id || !named(label)) return null;
   return { entity: kind, id, label: label!, title };
 }
 
-export function createWorkspaceEditorEntities(workspaceId: string, transport: EditorEntityTransport = editorEntityTransport) {
+export function createWorkspaceEditorEntities(
+  workspaceId: string,
+  transport: EditorEntityTransport = editorEntityTransport,
+) {
   let alive = Boolean(workspaceId);
   let mentionEpoch = 0;
-  let mention: { query: string; controller: AbortController; promise: Promise<MentionHit[]> } | null = null;
+  let mention: {
+    query: string;
+    controller: AbortController;
+    promise: Promise<MentionHit[]>;
+  } | null = null;
   const controllers = new Set<AbortController>();
   const requests = new Map<string, Promise<unknown>>();
   const entities = new Map<string, Promise<EntitySnapshot | null>>();
@@ -100,7 +178,11 @@ export function createWorkspaceEditorEntities(workspaceId: string, transport: Ed
   }
 
   async function optional<T>(load: () => Promise<T>, fallback: T): Promise<T> {
-    try { return await authorized(load); } catch { return fallback; }
+    try {
+      return await authorized(load);
+    } catch {
+      return fallback;
+    }
   }
 
   // Only inflight results are shared. Every later lookup revalidates access.
@@ -121,7 +203,9 @@ export function createWorkspaceEditorEntities(workspaceId: string, transport: Ed
     const parsed = parseDisplayId(id);
     if (!parsed) return null;
     const displayId = formatDisplayId(parsed.prefix, parsed.n);
-    return request(`lookup:${displayId}`, (signal) => transport.lookup(workspaceId, displayId, signal));
+    return request(`lookup:${displayId}`, (signal) =>
+      transport.lookup(workspaceId, displayId, signal),
+    );
   }
 
   function mentionItems(raw: string): Promise<MentionHit[]> {
@@ -135,28 +219,54 @@ export function createWorkspaceEditorEntities(workspaceId: string, transport: Ed
     const signal = controller.signal;
     const parsed = parseDisplayId(query);
     const hits = parsed
-      ? optional(() => transport.lookup(workspaceId, formatDisplayId(parsed.prefix, parsed.n), signal), { items: [] })
-          .then((page) => page.items.map((item) => entityHit(item.kind, item.id, item.displayId, item.title)))
-      : query ? Promise.all([
-          optional(() => transport.search(workspaceId, query, "task", signal), { items: [], nextCursor: null }),
-          optional(() => transport.search(workspaceId, query, "document", signal), { items: [], nextCursor: null }),
-        ]).then(([tasks, documents]) => [...tasks.items, ...documents.items].map((item) => entityHit(item.type, item.id, item.displayId, item.title)))
-      : Promise.resolve([]);
+      ? optional(
+          () => transport.lookup(workspaceId, formatDisplayId(parsed.prefix, parsed.n), signal),
+          { items: [] },
+        ).then((page) =>
+          page.items.map((item) => entityHit(item.kind, item.id, item.displayId, item.title)),
+        )
+      : query
+        ? Promise.all([
+            optional(() => transport.search(workspaceId, query, "task", signal), {
+              items: [],
+              nextCursor: null,
+            }),
+            optional(() => transport.search(workspaceId, query, "document", signal), {
+              items: [],
+              nextCursor: null,
+            }),
+          ]).then(([tasks, documents]) =>
+            [...tasks.items, ...documents.items].map((item) =>
+              entityHit(item.type, item.id, item.displayId, item.title),
+            ),
+          )
+        : Promise.resolve([]);
     const promise = Promise.all([
       hits,
       optional(() => transport.members(workspaceId, signal), { items: [] }),
       optional(() => transport.groups(workspaceId, signal), { items: [] }),
-    ]).then(([hits, members, groups]) => {
-      if (!alive || signal.aborted || epoch !== mentionEpoch) return [];
-      const people: MentionHit[] = [
-        ...members.items.filter((m) => m.userId).map((m) => ({ entity: "user" as const, id: m.userId, label: formatPersonName(m), title: formatPersonName(m) })),
-        ...groups.items.filter((g) => g.id).map((g) => ({ entity: "group" as const, id: g.id, label: g.name, title: g.name })),
-      ].filter((person) => person.label.toLowerCase().includes(query.toLowerCase()));
-      return [...hits.filter((hit): hit is MentionHit => hit !== null), ...people];
-    }).finally(() => {
-      controllers.delete(controller);
-      if (mention?.promise === promise) mention = null;
-    });
+    ])
+      .then(([hits, members, groups]) => {
+        if (!alive || signal.aborted || epoch !== mentionEpoch) return [];
+        const people: MentionHit[] = [
+          ...members.items
+            .filter((m) => m.userId)
+            .map((m) => ({
+              entity: "user" as const,
+              id: m.userId,
+              label: formatPersonName(m),
+              title: formatPersonName(m),
+            })),
+          ...groups.items
+            .filter((g) => g.id)
+            .map((g) => ({ entity: "group" as const, id: g.id, label: g.name, title: g.name })),
+        ].filter((person) => person.label.toLowerCase().includes(query.toLowerCase()));
+        return [...hits.filter((hit): hit is MentionHit => hit !== null), ...people];
+      })
+      .finally(() => {
+        controllers.delete(controller);
+        if (mention?.promise === promise) mention = null;
+      });
     mention = { query, controller, promise };
     return promise;
   }
@@ -167,9 +277,14 @@ export function createWorkspaceEditorEntities(workspaceId: string, transport: Ed
     const key = `${entity}:${id}`;
     const existing = entities.get(key);
     if (existing) return existing;
-    const promise = resolve().then((result) => alive ? result : null, () => null).finally(() => {
-      if (entities.get(key) === promise) entities.delete(key);
-    });
+    const promise = resolve()
+      .then(
+        (result) => (alive ? result : null),
+        () => null,
+      )
+      .finally(() => {
+        if (entities.get(key) === promise) entities.delete(key);
+      });
     entities.set(key, promise);
     return promise;
 
@@ -188,9 +303,19 @@ export function createWorkspaceEditorEntities(workspaceId: string, transport: Ed
           return snapshot(page.items.find((item) => item.id === id)?.name);
         }
         case "project": {
-          const page = await request("projects", (signal) => transport.projects(workspaceId, signal));
-          const project = page.items.find((item) => isUuid ? item.id === id : item.key.toUpperCase() === id.toUpperCase());
-          return project ? snapshot(project.name, project.icon ?? "", project.status === "archived" ? t("project.archived.badge") : undefined) : null;
+          const page = await request("projects", (signal) =>
+            transport.projects(workspaceId, signal),
+          );
+          const project = page.items.find((item) =>
+            isUuid ? item.id === id : item.key.toUpperCase() === id.toUpperCase(),
+          );
+          return project
+            ? snapshot(
+                project.name,
+                project.icon ?? "",
+                project.status === "archived" ? t("project.archived.badge") : undefined,
+              )
+            : null;
         }
         case "document": {
           let doc: Schema["DocumentMetaResponse"];
@@ -200,18 +325,36 @@ export function createWorkspaceEditorEntities(workspaceId: string, transport: Ed
             const page = lookup(id);
             const hit = page ? (await page).items.find((item) => item.kind === "document") : null;
             if (!hit || !alive) return null;
-            doc = await request(`document:${hit.projectId}:${hit.id}`, (signal) => transport.document(workspaceId, hit.id, hit.projectId, signal));
+            doc = await request(`document:${hit.projectId}:${hit.id}`, (signal) =>
+              transport.document(workspaceId, hit.id, hit.projectId, signal),
+            );
           }
           return doc.workspaceId === workspaceId ? snapshot(doc.title, doc.icon ?? "") : null;
         }
         case "task": {
           const page = isUuid ? null : lookup(id);
-          const taskId = isUuid ? id : page ? (await page).items.find((item) => item.kind === "task")?.id : null;
+          const taskId = isUuid
+            ? id
+            : page
+              ? (await page).items.find((item) => item.kind === "task")?.id
+              : null;
           if (!taskId || !alive) return null;
-          const task = await request(`task:${taskId}`, (signal) => transport.task(workspaceId, taskId, signal));
+          const task = await request(`task:${taskId}`, (signal) =>
+            transport.task(workspaceId, taskId, signal),
+          );
           if (!alive || task.workspaceId !== workspaceId) return null;
-          const wf = await optional(() => request(`workflow:${task.projectId}`, (signal) => transport.workflow(workspaceId, task.projectId, signal)), null);
-          return snapshot(task.title, "", wf?.statuses.find((status) => status.id === task.statusId)?.name);
+          const wf = await optional(
+            () =>
+              request(`workflow:${task.projectId}`, (signal) =>
+                transport.workflow(workspaceId, task.projectId, signal),
+              ),
+            null,
+          );
+          return snapshot(
+            task.title,
+            "",
+            wf?.statuses.find((status) => status.id === task.statusId)?.name,
+          );
         }
       }
     }
