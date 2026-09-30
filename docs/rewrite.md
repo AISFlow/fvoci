@@ -936,7 +936,16 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
-#### 최신 전량 인수·통합 체크포인트 (2026-09-30 18:28 KST)
+#### 최신 전량 인수·통합 체크포인트 (2026-09-30 18:50 KST)
+
+현재 원격/로컬 기준은 `48f6246ca8cd931f3b41d9f0c67aa00617dc8887`, base/main `50d95df1a98c2d88d28f09222c2985fbdb585623`다. #272 Draft·auto-merge 없음. 실제 원격 Rust/Container install/Native documents/Native collaboration은 SUCCESS, Web은 FAILURE다. Web 정적검사와 브라우저5shards는 성공했고 shard1/4/5와 collaboration-flow의 실제 실패를 유지한다. Container upgrade-smoke-arm64 조건상 skip은 성공 검사에 합산하지 않는다.
+
+- 전량19 PR inventory의 Vue7개(#273/#274/#277/#279/#281/#283/#284)는 **C / superseded-closed**다. 독립 Sol `ctx_fb2ae2954c22`가 고유 코드·검사·미해결 지적의 원격48f 보존, 현재 source WIP·소유권과 새 review findings 부재를 확인했고, 코디네이터가 바로 전 head/base/status를 재조회한 뒤 각 PR에 #272 대응 근거를 댓글로 연결하고 닫았다. 여섯 원본 이력은 ancestor이며 #284는 exact spec `bfef67f0`와 후속 `4fca8cf3`로 보존했다. 원본 브랜치/worktree·캐시·증거는 삭제하지 않았다. 아래 B/closure HOLD는 당시 이력이며 이 체크포인트가 현재 처리 상태다. 별도11개 D와 #272 목적지는 유지한다. 근거: `takeover-evidence/source-pr-superseded-48f6246c.json`, `fvoci-front272-source-pr-closure-audit-sol61.txt`의 해시 보존본.
+- 독립 Sol `ctx_cd0c0c864181`가 c001/48f 누적 소스·기존 검토 연결·실제21ff wiki9 trace/wire/제한 역할 DB 근거를 **로컬 범위 ACCEPT**했다. 343자산·515native입력·4바이너리와 실제 송신/저장 데이터를 대조했다. 과거03ca 입력 소실 원인 해결이나 원격 전체 수락을 뜻하지 않는다. 최종 Web 실패는 여전히 차단이다.
+- CI 잔여 담당: `ctx_b9dbc0a7fc5b`는 legal의 옛 React 기대와 WikiBranch의 깊이·6개 자식 제한 결함, `ctx_727b0a7caa81`은 프로젝트 복원 검사 baseline 준비 race, `ctx_15ca6a2c0f9b`는 지원 members API와 mention fixture를 실제 Rust/DB 경로에서 처리한다. 각각 별도 worktree이며 공통 manifest/lock/API 변경 없음. 위키 제품 delta `96abf2fe`는 별도 `ctx_4b35d7f3220f`가 독립 검토한다. 아직 미통합이며 실패를 skip/timeout/재실행만으로 감추지 않는다.
+- c7 Docker와48f Container CI는 해당 기존 제품의 근거다. 새 위키 제품 변경 뒤에는 새 후보의 실제 이미지/필수 CI 범위 확인이 필요하다. 검토된 수정들을 로컬 통합·경계 검증한 후 한 묶음 push하며 **사용자 별도 승인 전 main 머지·태그·릴리스·배포 금지**를 유지한다.
+
+#### 직전 전량 인수·통합 체크포인트 (2026-09-30 18:28 KST)
 
 로컬 누적 후보 `c0015734b4173bc660cf62b2c4ebe2db410cf770`: 독립 검토된 search fixture `24cf0abf`→`f1cba315`, wiki fixture `21ffce96`→`c0015734`를 충돌 없이 ordinary merge했다. a39 대비 제품 코드는 같고 변경은 두 E2E spec과 진행 문서뿐이다. 해당 spec은 각각 검증된 원본과 동일하며 이전 실패 커밋·근거도 ancestry에 보존했다. 원격은 아직 b0, 원본7PR closure HOLD이며 한 묶음 제출 뒤 실제 원격 CI를 확인한다. 이 문서의 다음 커밋은 기록만 추가한다.
 
