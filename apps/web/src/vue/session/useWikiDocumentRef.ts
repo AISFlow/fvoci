@@ -3,7 +3,11 @@ import { computed, toValue, type MaybeRefOrGetter } from "vue";
 import { parseWikiRef } from "@/lib/href";
 import { treeQuery } from "@/lib/queries/documents";
 
-/** `/w/:slug/WIKI-<n>` to the workspace's wiki document (the React DocumentPage's lookup). */
+/**
+ * `/w/:slug/WIKI-<n>` to the workspace's wiki document: the ref's number
+ * (parseWikiRef) looked up in the workspace tree (treeQuery) among the nodes
+ * outside any project.
+ */
 export function useWikiDocumentRef(
   workspaceId: MaybeRefOrGetter<string | undefined>,
   ref: MaybeRefOrGetter<string>,
