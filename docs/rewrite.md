@@ -936,7 +936,26 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
-#### 최신 전량 인수·통합 체크포인트 (2026-09-30 18:50 KST)
+#### 추가 사용자 지시와 현재 실행 (2026-09-30 21:20 KST)
+
+원격 #272는 `9ec790aa70ebeabc15b20733693bfb38f211ebc3`, 로컬 제품 통합 후보는 `40f090d11a2f7a1b4cfe86a78b00e6d2682bca35`다. 아래 과거 체크포인트와 구분한다. Calendar `62e0d504`, caret `421e0f4c`, Rust close 순서 `bc9e05f4`는 별도 Sol 검토 후 로컬 통합했다. 고정 bc9의 새 native bundle/실제 Rust·DB에서 원래 wiki browser 9/9 통과; 합본40f 전체·최종 default-feature Docker·새 원격 CI의 완료를 뜻하지 않는다. 원격9ec Web은 실패, Rust는 cancelled, 다른3게이트는 성공이다. Draft·사용자 별도 승인 전 머지·태그·릴리스·배포 금지.
+
+- [ ] FRONT-LINT — ESLint + typescript-eslint + Vue lint + Prettier 엄격 적용
+  - 요청 근거: 최신 사용자 직접 지시로 Biome 계획·일시 대기를 교체. Biome 로컬 `6eac71c2`와 기존 조사/fixture는 보존하고 대체 검사 준비 후 전용 구성만 제거한다.
+  - 단계/담당: 설정·검사 범위 구현, 같은 Orca Sol 터미널의 새 `task_663d703cf4e0` / `ctx_f08197415d17`. manifest·lock·설정·CI 단독 소유. 기준 통합40f.
+  - 다음/수락: 고정 호환 버전·라이선스, strictTypeChecked/Vue flat recommended, 실제 typed SFC parser·정상/위반 fixture, Node 없는 Bun 실행. 전체 대상 lint 경고0·Prettier check·기존 tsc/vue-tsc·관련 회귀·독립 검토·최종 CI까지 수행. 설정만으로 완료하지 않는다. 포맷/위반/동작 수정은 분리하며 상시 Biome 이중 검사 없음.
+  - 배포 포함: 없음. 최종 누적 후보 수락 전 차단.
+- [ ] FRONT-DESIGN — 공식 스킬을 실제 대표 화면에 적용
+  - 요청 근거: 사용자 추가 지시. `anthropics/skills@41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f`의 frontend-design SKILL.md와 LICENSE.txt 원문 확인, Apache-2.0. 프로젝트 로컬 원문/라이선스/출처를 보존하며 자동 로딩과 직접 읽기를 구분한다.
+  - 단계/담당: 고정40f 화면 조사, `task_c2e0fb418167` / `ctx_a55a037fd52a`. 우선 skill 경로만 작성, 제품 파일은 소유권 조정 전 읽기 전용.
+  - 다음/수락: 목록·편집기·설정의 실제 production 화면/조작에서 긴 한국어·많은 항목·빈/오류/readonly·키보드·좁은 화면을 확인한다. 기존 Nuxt UI Dashboard/Editor/Calendar·토큰·폰트를 기준으로 작은 공통 방향을 공유하고 필수 사용성 결함만 수정. 별도 Sol이 같은 원문·요구사항과 실제 화면/흐름을 검토한다. 새 디자인 시스템·대규모 탐색 재설계는 현재 범위 아님.
+  - 배포 포함: 없음. 스킬 설치·스크린샷 생성 자체는 수락 아님.
+- [ ] IME-MULTIRANGE — 고정40f의 실제 OS 다중 문단 선택 후 한글 교체 검증
+  - 담당 `task_10f2931e66fc` / `ctx_d1628d091e46`, 제품 읽기 전용. 기존 첫 자모·pause undo·CDP caret 사례와 분리. 실제 IBus/XTest·저장/재조회·undo 경계의 증거를 보존하며 물리 키보드로 표시하지 않는다.
+
+최신 세부 실행·근거는 기존 #272 본문에서 함께 갱신하며 완료 이력은 지우지 않는다.
+
+#### 이전 전량 인수·통합 체크포인트 (2026-09-30 18:50 KST)
 
 현재 원격/로컬 기준은 `48f6246ca8cd931f3b41d9f0c67aa00617dc8887`, base/main `50d95df1a98c2d88d28f09222c2985fbdb585623`다. #272 Draft·auto-merge 없음. 실제 원격 Rust/Container install/Native documents/Native collaboration은 SUCCESS, Web은 FAILURE다. Web 정적검사와 브라우저5shards는 성공했고 shard1/4/5와 collaboration-flow의 실제 실패를 유지한다. Container upgrade-smoke-arm64 조건상 skip은 성공 검사에 합산하지 않는다.
 
