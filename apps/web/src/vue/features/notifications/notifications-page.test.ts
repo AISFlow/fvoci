@@ -9,7 +9,7 @@ function source(file: string): string {
   return readFileSync(path.join(dir, file), "utf8");
 }
 
-test("the Vue notifications page PATCHes read/archive, POSTs read-all, and follows hrefs", () => {
+await test("the Vue notifications page PATCHes read/archive, POSTs read-all, and follows hrefs", () => {
   const page = source("../../pages/NotificationsPage.vue");
   assert.match(page, /notificationListQuery/);
   assert.match(page, /enabled: Boolean\(id\)/);
@@ -30,7 +30,7 @@ test("the Vue notifications page PATCHes read/archive, POSTs read-all, and follo
   assert.doesNotMatch(page, /from ["']@tanstack\/react-query["']/);
 });
 
-test("followAppHref stays in Vue only for live app-boundary paths", () => {
+await test("followAppHref stays in Vue only for live app-boundary paths", () => {
   const navigation = source("../../session/navigation.ts");
   assert.match(navigation, /isVueAppPath\(href\.split/);
   assert.match(navigation, /router\.push\(href\)/);

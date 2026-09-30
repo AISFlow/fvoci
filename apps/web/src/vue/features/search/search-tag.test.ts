@@ -5,7 +5,7 @@ const tags = [
   { id: "one", name: "기획" },
   { id: "two", name: "Design" },
 ];
-test("fixed source search tag prefix resolves Unicode/case while preserving unknown literal queries", () => {
+await test("fixed source search tag prefix resolves Unicode/case while preserving unknown literal queries", () => {
   assert.deepEqual(parseSearchTagPrefix("  TAG:design  문서 확인  ", tags), {
     q: "문서 확인",
     tag: "two",

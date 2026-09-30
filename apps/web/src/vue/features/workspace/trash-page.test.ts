@@ -9,7 +9,7 @@ function source(file: string): string {
   return readFileSync(path.join(dir, file), "utf8");
 }
 
-test("the Vue trash page restores wiki vs project documents on the same POSTs as React", () => {
+await test("the Vue trash page restores wiki vs project documents on the same POSTs as React", () => {
   const page = source("../../pages/TrashPage.vue");
   assert.match(page, /trashQuery\(workspaceId\.value\)/);
   assert.match(page, /enabled: Boolean\(workspaceId\.value\)/);

@@ -9,7 +9,7 @@ function source(file: string): string {
   return readFileSync(path.join(dir, file), "utf8");
 }
 
-test("the Vue home page lists, creates, and leaves with full loads", () => {
+await test("the Vue home page lists, creates, and leaves with full loads", () => {
   const page = source("../../pages/HomePage.vue");
   assert.match(page, /wikiPath\(workspace\.slug\)/);
   assert.match(page, /api\.POST\("\/api\/v1\/workspaces"/);
@@ -24,7 +24,7 @@ test("the Vue home page lists, creates, and leaves with full loads", () => {
   assert.doesNotMatch(page, /from ["']@tanstack\/react-query["']/);
 });
 
-test("empty workspace and the create dialog submit through the shared schema", () => {
+await test("empty workspace and the create dialog submit through the shared schema", () => {
   const empty = source("EmptyWorkspace.vue");
   assert.match(empty, /workspaceCreateInput/);
   assert.match(empty, /<form\b/);

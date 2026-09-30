@@ -1,18 +1,49 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
+import { parse } from "vue/compiler-sfc";
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import ts from "typescript";
 import * as Vue from "vue";
 import * as Query from "@tanstack/vue-query";
 
 function deferred() {
-  let resolve!: (value: unknown) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<unknown>((yes, no) => {
-    resolve = yes;
-    reject = no;
+  let controls:
+    { resolve: (value: unknown) => void; reject: (reason: unknown) => void } | undefined;
+  const promise = new Promise<unknown>((resolve, reject) => {
+    controls = { resolve, reject };
   });
-  return { promise, resolve, reject };
+  assert.ok(controls, "the Promise executor must initialize its controls synchronously");
+  return { promise, ...controls };
+}
+function record(value: unknown): Record<string, unknown> {
+  assert.ok(typeof value === "object" && value !== null, "expected an exported setup object");
+  return value as Record<string, unknown>;
+}
+function callable(value: unknown): value is (...args: unknown[]) => unknown {
+  return typeof value === "function";
+}
+function pageAccess(value: unknown) {
+  const exports = record(value);
+  function call(name: string, ...args: unknown[]): unknown {
+    const method = exports[name];
+    assert.ok(callable(method), `expected setup function ${name}`);
+    return method(...args);
+  }
+  function callMutation(name: string, ...args: unknown[]): unknown {
+    const mutation = record(exports[name]);
+    const method = mutation.mutateAsync;
+    assert.ok(callable(method), `expected mutation ${name}`);
+    return method(...args);
+  }
+  function refValue(name: string, member?: string): unknown {
+    const value = member === undefined ? exports[name] : record(exports[name])[member];
+    assert.ok(Vue.isRef(value), `expected setup ref ${name}/${member ?? "value"}`);
+    const result: unknown = value.value;
+    return result;
+  }
+  return { call, callMutation, refValue };
 }
 // Run the actual SFC setup and actual Vue Query mutations; only HTTP/query data and host DOM are controlled.
 const renderer = Vue.createRenderer({
@@ -36,8 +67,9 @@ function harness(file: string) {
   const navigation: string[] = [];
   const queue: ReturnType<typeof deferred>[] = [];
   const client = new Query.QueryClient({ defaultOptions: { mutations: { retry: false } } });
-  client.invalidateQueries = async (options) => {
+  client.invalidateQueries = (options?: Query.InvalidateQueryFilters) => {
     calls.push({ method: "invalidate", key: options?.queryKey });
+    return Promise.resolve();
   };
   const request = async (
     method: string,
@@ -45,8 +77,9 @@ function harness(file: string) {
     options: { params: { path: { workspace_id: string } } },
   ) => {
     calls.push({ method, workspaceId: options.params.path.workspace_id });
-    assert.ok(queue.length, "a controlled response must be queued");
-    return queue.shift()!.promise;
+    const response = queue.shift();
+    assert.ok(response, "a controlled response must be queued");
+    return response.promise;
   };
   const fakeQuery = () => ({
     data: Vue.ref(undefined),
@@ -58,13 +91,15 @@ function harness(file: string) {
   const options = () => ({});
   const router = {
     currentRoute: Vue.computed(() => route),
-    push: async (href: string) => {
+    push: (href: string) => {
       navigation.push(href);
+      return Promise.resolve();
     },
-    replace: async () => {},
+    replace: () => Promise.resolve(),
   };
   const injected = {
     ...Vue,
+    useNavigationError,
     t: (key: string) => key,
     useRoute: () => route,
     useRouter: () => router,
@@ -100,9 +135,10 @@ function harness(file: string) {
     notificationMessage: options,
     FALLBACK_TZ: "Asia/Seoul",
   };
-  let source = readFileSync(new URL(file, import.meta.url), "utf8")
-    .split('<script setup lang="ts">')[1]!
-    .split("</script>")[0]!;
+  const { descriptor, errors } = parse(readFileSync(new URL(file, import.meta.url), "utf8"));
+  assert.deepEqual(errors, [], "the retained SFC must parse");
+  assert.ok(descriptor.scriptSetup, "the page must expose script setup");
+  let source = descriptor.scriptSetup.content;
   const parsed = ts.createSourceFile(
     "page.ts",
     source,
@@ -122,14 +158,15 @@ function harness(file: string) {
         : file === "TrashPage.vue"
           ? "onRestore,restore,restoreError"
           : "openItem,perform,readAll,actionError,actionPending";
-  let page: any;
+  let page: unknown;
   let mounted = true;
   const app = renderer.createApp({
     setup() {
-      page = new Function(
-        ...Object.keys(injected),
-        new Bun.Transpiler({ loader: "ts" }).transformSync(`${source}\nreturn {${exported}};`),
-      )(...Object.values(injected));
+      // Evaluate only this retained setup in a fresh context with explicit test dependencies.
+      const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(
+        `(() => {${source}\nreturn {${exported}};})()`,
+      );
+      page = runInNewContext(javascript, injected);
       return () => null;
     },
   });
@@ -142,7 +179,7 @@ function harness(file: string) {
     }
   }
   return {
-    page,
+    page: pageAccess(page),
     client,
     calls,
     navigation,
@@ -191,13 +228,13 @@ const flows = [
 function invoke(h: ReturnType<typeof harness>, file: string, flow: string) {
   if (file === "ProjectsPage.vue")
     return flow === "create"
-      ? h.page.onCreate({ key: "OLD" })
-      : h.page.onClone("source", { key: "OLD" });
-  if (file === "WikiPage.vue") return h.page.onCreateDocument();
-  return h.page.perform(() => h.page.openItem({ id: "OLD-7", readAt: null }));
+      ? h.page.call("onCreate", { key: "OLD" })
+      : h.page.call("onClone", "source", { key: "OLD" });
+  if (file === "WikiPage.vue") return h.page.call("onCreateDocument");
+  return h.page.call("perform", () => h.page.call("openItem", { id: "OLD-7", readAt: null }));
 }
 
-test("late successful mutations cannot navigate after ABA, actor/session/role change, guard retirement or unmount", async () => {
+await test("late successful mutations cannot navigate after ABA, actor/session/role change, guard retirement or unmount", async () => {
   for (const [file, flow] of flows)
     for (const change of ["aba", "actor", "session", "role", "guard", "dispose"]) {
       const h = harness(file);
@@ -229,7 +266,7 @@ test("late successful mutations cannot navigate after ABA, actor/session/role ch
     }
 });
 
-test("retired errors do not replace current restore/inbox errors or clear a newer pending action", async () => {
+await test("retired errors do not replace current restore/inbox errors or clear a newer pending action", async () => {
   for (const file of ["TrashPage.vue", "NotificationsPage.vue"])
     for (const change of ["aba", "actor", "session", "role", "guard", "superseded"]) {
       const h = harness(file);
@@ -237,34 +274,39 @@ test("retired errors do not replace current restore/inbox errors or clear a newe
         const old = h.queue();
         const first =
           file === "TrashPage.vue"
-            ? h.page.onRestore({ id: "old" })
-            : h.page.perform(() => h.page.readAll.mutateAsync("A"));
+            ? h.page.call("onRestore", { id: "old" })
+            : h.page.call("perform", () => h.page.callMutation("readAll", "A"));
         await until(() => h.calls.length === 1);
-        const oldMutation = h.client.getMutationCache().getAll()[0]!;
+        const oldMutation = h.client.getMutationCache().getAll()[0];
+        assert.ok(oldMutation, "the old request must own a mutation");
         h.transition(change);
         // Notifications deliberately serializes operations within one unchanged lifetime.
         if (change === "superseded" && file === "NotificationsPage.vue") {
           old.reject(new Error("current error"));
           await first;
-          assert.equal(h.page.actionError.value, "current error");
+          assert.equal(h.page.refValue("actionError"), "current error");
           continue;
         }
         const current = h.queue();
         const second =
           file === "TrashPage.vue"
-            ? h.page.onRestore({ id: "new" })
-            : h.page.perform(() => h.page.readAll.mutateAsync("A"));
+            ? h.page.call("onRestore", { id: "new" })
+            : h.page.call("perform", () => h.page.callMutation("readAll", "A"));
         await until(() => h.calls.filter((call) => call.method === "POST").length === 2);
         old.reject(new Error("obsolete error"));
         await first;
         await until(() => oldMutation.state.status === "error");
         assert.equal(
-          file === "TrashPage.vue" ? h.page.restoreError.value : h.page.actionError.value,
+          file === "TrashPage.vue"
+            ? h.page.refValue("restoreError")
+            : h.page.refValue("actionError"),
           null,
           `${file}/${change}`,
         );
         assert.equal(
-          file === "TrashPage.vue" ? h.page.restore.isPending.value : h.page.actionPending.value,
+          file === "TrashPage.vue"
+            ? h.page.refValue("restore", "isPending")
+            : h.page.refValue("actionPending"),
           true,
         );
         current.resolve({});
@@ -276,7 +318,7 @@ test("retired errors do not replace current restore/inbox errors or clear a newe
     }
 });
 
-test("a current successful user operation still navigates under its captured workspace", async () => {
+await test("a current successful user operation still navigates under its captured workspace", async () => {
   for (const [file, flow] of flows) {
     const h = harness(file);
     try {
@@ -286,7 +328,9 @@ test("a current successful user operation still navigates under its captured wor
       response.resolve({ key: "OLD", displayId: "WIKI-7" });
       await done;
       await until(() => h.navigation.length === 1);
-      assert.match(h.navigation[0]!, /^\/w\/alpha\//);
+      const destination = h.navigation[0];
+      assert.ok(destination, "the current operation must navigate");
+      assert.match(destination, /^\/w\/alpha\//);
     } finally {
       h.stop();
     }
