@@ -9,37 +9,20 @@ import { SearchCommand } from "@/features/workspace/search-command";
 import { NotificationBell } from "@/features/notifications/notification-bell";
 import { logout as logoutRequest } from "@/features/notifications/push-logout";
 import { usePushSessionRebind } from "@/features/notifications/push-toggle";
+import { landingPath, type WorkspaceNav } from "@/features/workspace/workspace-nav";
 import {
   myTasksPath,
   projectsPath,
   searchPath,
   settingsPath,
   wikiPath,
-  notificationsPath,
   workspaceHomePath,
 } from "@/lib/href";
 import { ProblemError, problemMessage } from "@/lib/api";
 import { workspacesQuery } from "@/lib/queries";
 import "@/features/workspace/workspace-aux.css";
 
-export type WorkspaceNav =
-  | "home"
-  | "wiki"
-  | "settings"
-  | "projects"
-  | "myTasks"
-  | "search"
-  | "notifications";
-
-function landingPath(slug: string, activeNav: WorkspaceNav): string {
-  if (activeNav === "settings") return settingsPath(slug);
-  if (activeNav === "projects") return projectsPath(slug);
-  if (activeNav === "myTasks") return myTasksPath(slug);
-  if (activeNav === "search") return searchPath(slug);
-  if (activeNav === "notifications") return notificationsPath(slug);
-  if (activeNav === "home") return workspaceHomePath(slug);
-  return wikiPath(slug);
-}
+export type { WorkspaceNav } from "@/features/workspace/workspace-nav";
 
 interface WorkspaceShellProps {
   slug: string;
