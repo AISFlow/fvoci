@@ -124,6 +124,15 @@ async function createInboxMentions(page: Page, browser: Browser, baseURL: string
   const recipient = await recipientContext.newPage();
   try {
     await login(recipient, "navigation-inbox@example.com", "inboxpass123");
+    // This user chooses an in-app-only inbox. The unchanged notifications-flow
+    // group covers immediate mail; this group exercises cursor pagination.
+    if (from === 0) {
+      const preferences = await recipient.request.put(`/api/v1/workspaces/${workspaceId}/notification-prefs`, {
+        data: { inApp: true, mailImmediate: false, mailDigest: false },
+      });
+      expect(preferences.status()).toBe(200);
+      expect(await preferences.json()).toEqual({ inApp: true, mailImmediate: false, mailDigest: false });
+    }
     for (let start = from; start < to; start += 5) {
       const count = Math.min(5, to - start);
       await Promise.all(Array.from({ length: count }, async (_, offset) => {
