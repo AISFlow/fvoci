@@ -60,19 +60,19 @@ async function attach(files: File[]): Promise<void> {
   }
 }
 
-function onPaste(event: ClipboardEvent): void {
+async function onPaste(event: ClipboardEvent): Promise<void> {
   if (props.readOnly) return;
   const files = [...(event.clipboardData?.files ?? [])];
   if (files.length === 0) return;
   event.preventDefault();
-  void attach(files);
+  await attach(files);
 }
 
-function onPick(event: Event): void {
+async function onPick(event: Event): Promise<void> {
   const input = event.currentTarget as HTMLInputElement;
   const files = [...(input.files ?? [])];
   input.value = "";
-  void attach(files);
+  await attach(files);
 }
 </script>
 

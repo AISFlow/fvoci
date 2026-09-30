@@ -98,7 +98,9 @@ export function useRescheduleTask(
   });
 
   return {
-    reschedule: (request: RescheduleRequest) => mutation.mutate(request),
+    reschedule: (request: RescheduleRequest) => {
+      mutation.mutate(request);
+    },
     savingId,
     pending,
     error,

@@ -11,8 +11,8 @@ import type { IsoDate } from "@/lib/iso-date";
 import { problemMessage } from "@/lib/api";
 import { membersQuery } from "@/lib/queries";
 import { EMPTY_VIEW_QUERY, withTitleFilter, type ViewQuery } from "@/lib/view-query";
-import GanttChart, { type GanttBarChange } from "./GanttChart.vue";
-import type { PackMode } from "./gantt-geometry";
+import GanttChart from "./GanttChart.vue";
+import type { GanttBarChange, PackMode } from "./gantt-geometry";
 import { useGanttLayout } from "./useGanttLayout";
 import { useRescheduleTask } from "./useRescheduleTask";
 import "./gantt-theme.css";
@@ -119,7 +119,9 @@ function onTitleInput(value: string | number | null | undefined): void {
     emit("search", title.value);
   }, 300);
 }
-onBeforeUnmount(() => window.clearTimeout(searchTimer));
+onBeforeUnmount(() => {
+  window.clearTimeout(searchTimer);
+});
 </script>
 
 <template>

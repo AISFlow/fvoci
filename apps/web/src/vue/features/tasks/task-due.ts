@@ -14,5 +14,7 @@ export function taskDueLabel(
     });
   if (!dueDate) return "";
   const [, month, day] = dueDate.split("-");
-  return month === undefined || day === undefined ? dueDate : `${Number(month)}. ${Number(day)}.`;
+  return month === undefined || day === undefined
+    ? dueDate
+    : `${String(Number(month))}. ${String(Number(day))}.`;
 }

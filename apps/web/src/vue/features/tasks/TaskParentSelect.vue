@@ -15,7 +15,7 @@ const props = withDefaults(
     currentTitle?: string;
     disabled?: boolean;
   }>(),
-  { disabled: false },
+  { currentTitle: undefined, disabled: false },
 );
 const emit = defineEmits<{ "update:modelValue": [value: string | null] }>();
 

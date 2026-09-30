@@ -22,7 +22,7 @@ const RANGE = item({
   end: "2026-09-14",
 });
 
-test("moving a bar shifts start and due by the same days and sends the layout's dates as expectedDates", () => {
+await test("moving a bar shifts start and due by the same days and sends the layout's dates as expectedDates", () => {
   assert.deepEqual(
     rescheduleBody(RANGE, { kind: "move", start: "2026-09-15", end: "2026-09-19" }, TZ),
     {
@@ -33,7 +33,7 @@ test("moving a bar shifts start and due by the same days and sends the layout's 
   );
 });
 
-test("a drop on the same days writes nothing", () => {
+await test("a drop on the same days writes nothing", () => {
   assert.equal(
     rescheduleBody(RANGE, { kind: "move", start: "2026-09-10", end: "2026-09-14" }, TZ),
     null,
@@ -44,7 +44,7 @@ test("a drop on the same days writes nothing", () => {
   );
 });
 
-test("moving a task with only a due date writes only the due date", () => {
+await test("moving a task with only a due date writes only the due date", () => {
   const dueOnly = item({ dueDate: "2026-09-20", start: "2026-09-20", end: "2026-09-20" });
   assert.deepEqual(
     rescheduleBody(dueOnly, { kind: "move", start: "2026-09-18", end: "2026-09-18" }, TZ),
@@ -63,7 +63,7 @@ test("moving a task with only a due date writes only the due date", () => {
   );
 });
 
-test("moving a dueAt keeps its time of day in the user's time zone and never clears it", () => {
+await test("moving a dueAt keeps its time of day in the user's time zone and never clears it", () => {
   // 00:30 on 2026-09-15 in Seoul; the bar's end is its UTC date, 2026-09-14.
   const timed = item({
     startDate: "2026-09-10",
@@ -93,7 +93,7 @@ test("moving a dueAt keeps its time of day in the user's time zone and never cle
   );
 });
 
-test("a task with both dueDate and dueAt moves both", () => {
+await test("a task with both dueDate and dueAt moves both", () => {
   const both = item({
     startDate: "2026-09-10",
     dueDate: "2026-09-14",
@@ -116,7 +116,7 @@ test("a task with both dueDate and dueAt moves both", () => {
   );
 });
 
-test("the start handle writes only the start; the end handle only the due", () => {
+await test("the start handle writes only the start; the end handle only the due", () => {
   assert.deepEqual(
     rescheduleBody(RANGE, { kind: "start", start: "2026-09-08", end: "2026-09-14" }, TZ),
     {
@@ -133,7 +133,7 @@ test("the start handle writes only the start; the end handle only the due", () =
   );
 });
 
-test("the end handle on a dueAt moves it by whole days and keeps its time", () => {
+await test("the end handle on a dueAt moves it by whole days and keeps its time", () => {
   const timed = item({
     startDate: "2026-09-10",
     dueAt: "2026-09-14T09:30:00.000Z",
@@ -149,7 +149,7 @@ test("the end handle on a dueAt moves it by whole days and keeps its time", () =
   );
 });
 
-test("a handle on a one-date bar writes only the date of its own edge", () => {
+await test("a handle on a one-date bar writes only the date of its own edge", () => {
   // The chart's handles: the start handle of a due-only task adds its start,
   // the end handle of a start-only task adds its due date.
   const dueOnly = item({ dueDate: "2026-09-20", start: "2026-09-20", end: "2026-09-20" });
@@ -182,7 +182,7 @@ test("a handle on a one-date bar writes only the date of its own edge", () => {
   );
 });
 
-test("the handle on a one-date bar's own date only moves that date; no other date is invented", () => {
+await test("the handle on a one-date bar's own date only moves that date; no other date is invented", () => {
   // The chart offers no such handle (a move does the same); a change of that
   // kind still writes nothing but the one date.
   const dueOnly = item({ dueDate: "2026-09-20", start: "2026-09-20", end: "2026-09-20" });
@@ -215,7 +215,7 @@ test("the handle on a one-date bar's own date only moves that date; no other dat
   );
 });
 
-test("a handle on a swapped bar (due before start) saves the drawn range in order", () => {
+await test("a handle on a swapped bar (due before start) saves the drawn range in order", () => {
   const swapped = item({
     startDate: "2026-09-14",
     dueDate: "2026-09-10",
@@ -242,7 +242,7 @@ test("a handle on a swapped bar (due before start) saves the drawn range in orde
   );
 });
 
-test("collapsing a range onto one day keeps both dates", () => {
+await test("collapsing a range onto one day keeps both dates", () => {
   assert.deepEqual(
     rescheduleBody(RANGE, { kind: "end", start: "2026-09-10", end: "2026-09-10" }, TZ),
     {
@@ -252,7 +252,7 @@ test("collapsing a range onto one day keeps both dates", () => {
   );
 });
 
-test("a swapped dueAt: the start handle moves the dueAt, whose day is the range's start", () => {
+await test("a swapped dueAt: the start handle moves the dueAt, whose day is the range's start", () => {
   // 18:00 on 2026-09-10 in Seoul is 09:00Z the same day: the finish day is the 10th.
   const swapped = item({
     startDate: "2026-09-14",
@@ -271,7 +271,7 @@ test("a swapped dueAt: the start handle moves the dueAt, whose day is the range'
   );
 });
 
-test("across a daylight-saving change the moved dueAt keeps its local time, and its UTC day can move a day more", () => {
+await test("across a daylight-saving change the moved dueAt keeps its local time, and its UTC day can move a day more", () => {
   // America/New_York leaves daylight saving on 2031-11-02. 19:30 EDT on
   // 2031-11-01 is 23:30Z (bar end 2031-11-01). Three days later at 19:30 EST
   // is 00:30Z on 2031-11-05: the bar is dropped ending on the 4th, and the
@@ -292,7 +292,8 @@ test("across a daylight-saving change the moved dueAt keeps its local time, and 
     dueAt: "2031-11-05T00:30:00.000Z",
     expectedDates: { startDate: "2031-10-28", dueDate: null, dueAt: "2031-11-01T23:30:00.000Z" },
   });
-  assert.equal(new Date(body!.dueAt!).toISOString().slice(0, 10), "2031-11-05");
+  assert.equal(new Date(body.dueAt).toISOString().slice(0, 10), "2031-11-05");
   const seoul = rescheduleBody(timed, { kind: "move", start: "2031-10-31", end: "2031-11-04" }, TZ);
-  assert.equal(new Date(seoul!.dueAt!).toISOString().slice(0, 10), "2031-11-04");
+  assert.ok(seoul?.dueAt);
+  assert.equal(new Date(seoul.dueAt).toISOString().slice(0, 10), "2031-11-04");
 });

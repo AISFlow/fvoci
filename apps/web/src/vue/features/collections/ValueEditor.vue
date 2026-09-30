@@ -86,19 +86,19 @@ async function save(next: CollectionValue): Promise<void> {
   }
 }
 
-function onSingleChange(event: Event): void {
+async function onSingleChange(event: Event): Promise<void> {
   const id = (event.target as HTMLSelectElement).value;
-  void save(id === "" ? null : people.value ? { users: [id] } : { options: [id] });
+  await save(id === "" ? null : people.value ? { users: [id] } : { options: [id] });
 }
 
-function onMultiToggle(id: string, checked: boolean): void {
+async function onMultiToggle(id: string, checked: boolean): Promise<void> {
   const ids = checked
     ? [...multiSelected.value, id]
     : multiSelected.value.filter((item) => item !== id);
-  void save(ids.length === 0 ? null : people.value ? { users: ids } : { options: ids });
+  await save(ids.length === 0 ? null : people.value ? { users: ids } : { options: ids });
 }
 
-function onDraftSubmit(event: Event): void {
+async function onDraftSubmit(event: Event): Promise<void> {
   event.preventDefault();
   if (disabled.value || draft.value === draftFromValue(props.value, props.timeZone)) return;
   const next = valueFromDraft(props.field.type, draft.value, props.timeZone);
@@ -106,7 +106,7 @@ function onDraftSubmit(event: Event): void {
     error.value = true;
     return;
   }
-  void save(next);
+  await save(next);
 }
 
 function onDraftKeydown(event: KeyboardEvent): void {

@@ -63,14 +63,7 @@ async function submit(event: Event) {
   }
   const write = props.resizeEdge
     ? resizeWrite(props.event, props.dateBy, props.resizeEdge, raw.value)
-    : editorWrite(
-        props.dateBy,
-        props.event,
-        raw.value,
-        Boolean(isTimed.value),
-        props.fields,
-        props.zone,
-      );
+    : editorWrite(props.dateBy, props.event, raw.value, isTimed.value, props.fields, props.zone);
   invalid.value = !write;
   if (!write) return;
   error.value = false;
@@ -104,11 +97,11 @@ async function submit(event: Event) {
     <label :for="id" class="text-sm">{{ t("collection.date") }} · {{ zone }}</label>
     <input
       :id="id"
+      v-model="raw"
       class="collection-select w-full"
       :type="isTimed ? 'datetime-local' : 'date'"
       :min="resizeEdge === 'end' ? (event.startDate ?? undefined) : undefined"
       :max="resizeEdge === 'start' ? (event.dueDate ?? undefined) : undefined"
-      v-model="raw"
       :disabled="readOnly || pending"
     />
     <p v-if="invalid || error" role="alert" class="text-sm text-error">{{

@@ -99,7 +99,11 @@ const customOpen = ref(false);
 const moveError = ref<string | null>(null);
 const moving = ref(false);
 const draggedDate = ref<CalendarRow | null>(null);
-const calendarUI = ref<InstanceType<typeof CollectionCalendar>>();
+const calendarUI = ref<{
+  nativeStart(row: CollectionQueryPreview): void;
+  pointerdown(event: PointerEvent, row: CollectionQueryPreview): void;
+  cancel(): void;
+}>();
 const dropDay = ref<string | null | undefined>(undefined);
 
 const effectiveMonth = computed(() =>
@@ -264,12 +268,8 @@ async function saveCalendarDate(
     throw new Error("Calendar write unavailable");
   moveError.value = null;
   moving.value = true;
-  pendingPreview.value = optimisticRow(
-    row,
-    request,
-    timeZone.value,
-    config.value.dateBy ?? undefined,
-  );
+  const preview = optimisticRow(row, request, timeZone.value, config.value.dateBy ?? undefined);
+  pendingPreview.value = preview;
   try {
     if (request.kind === "task") {
       const accepted = await ensureOk(
@@ -303,7 +303,7 @@ async function saveCalendarDate(
         expectedFieldVersion: request.expectedFieldVersion,
         value: request.value,
       });
-      pendingPreview.value = { ...pendingPreview.value!, version: accepted.version };
+      pendingPreview.value = { ...preview, version: accepted.version };
     }
   } catch (err) {
     pendingPreview.value = null;
@@ -326,9 +326,9 @@ function externalCalendarOver(event: DragEvent) {
   const target = calendarTarget(event);
   if (target !== undefined) onDateDragOver(event, target);
 }
-function externalCalendarDrop(event: DragEvent) {
+async function externalCalendarDrop(event: DragEvent) {
   const target = calendarTarget(event);
-  if (target !== undefined) onDateDrop(event, target);
+  if (target !== undefined) await onDateDrop(event, target);
 }
 
 const saveView = useMutation({
@@ -436,9 +436,8 @@ const sortValue = computed(
 const calendarDrag = computed(() => props.type === "calendar" && config.value.dateBy !== null);
 const calendarPreviews = computed(() => {
   const list = rows.data.value?.previews ?? [];
-  return pendingPreview.value
-    ? [...list.filter((row) => row.id !== pendingPreview.value!.id), pendingPreview.value]
-    : list;
+  const preview = pendingPreview.value;
+  return preview ? [...list.filter((row) => row.id !== preview.id), preview] : list;
 });
 const dayCounts = computed(() => {
   const counts = new Map((rows.data.value?.days ?? []).map((entry) => [entry.date, entry.count]));
@@ -499,14 +498,14 @@ function onDateDragLeave(event: DragEvent): void {
   if (current && !current.contains(event.relatedTarget as Node | null)) dropDay.value = undefined;
 }
 
-function onDateDrop(event: DragEvent, target: string | null): void {
+async function onDateDrop(event: DragEvent, target: string | null): Promise<void> {
   const row = draggedDate.value;
   draggedDate.value = null;
   dropDay.value = undefined;
   if (!row || !canMoveDate(row, target)) return;
   if (event.dataTransfer?.getData(CALENDAR_DRAG_TYPE) !== row.id) return;
   event.preventDefault();
-  void moveToDate(row, target);
+  await moveToDate(row, target);
 }
 
 function dateDraggable(row: CalendarRow): boolean {
@@ -556,10 +555,8 @@ function toggleDirection(): void {
   });
 }
 
-function retryMeta(): void {
-  void fields.refetch();
-  void views.refetch();
-  void me.refetch();
+async function retryMeta(): Promise<void> {
+  await Promise.all([fields.refetch(), views.refetch(), me.refetch()]);
 }
 
 function onSaveView(event: Event): void {
@@ -847,8 +844,8 @@ const emptyCount = computed(() =>
             </a>
             <p
               v-for="field in active"
-              :key="field.id"
               v-show="formatValue(field, valueOf(row, field.id))"
+              :key="field.id"
               class="collection-card__meta"
             >
               {{ field.name }}: {{ formatValue(field, valueOf(row, field.id)) }}
@@ -867,8 +864,8 @@ const emptyCount = computed(() =>
             </a>
             <p
               v-for="field in active"
-              :key="field.id"
               v-show="formatValue(field, valueOf(row, field.id))"
+              :key="field.id"
               class="collection-card__meta"
             >
               {{ field.name }}: {{ formatValue(field, valueOf(row, field.id)) }}

@@ -39,7 +39,9 @@ const now = ref(Date.now());
 const clock = window.setInterval(() => {
   now.value = Date.now();
 }, 60_000);
-onBeforeUnmount(() => window.clearInterval(clock));
+onBeforeUnmount(() => {
+  window.clearInterval(clock);
+});
 const today = computed(() => dateInZone(now.value, timeZone.value));
 
 function queryInt(name: string, min: number, max: number): number | undefined {
@@ -58,17 +60,17 @@ const viewQuery = computed(() => {
   return parseViewQueryParam(typeof raw === "string" ? raw : null) ?? EMPTY_VIEW_QUERY;
 });
 
-function onShiftMonth(delta: -1 | 1): void {
+async function onShiftMonth(delta: -1 | 1): Promise<void> {
   const next = shiftMonth(year.value, month.value, delta);
-  void router.replace({ query: { ...route.query, y: String(next.year), m: String(next.month) } });
+  await router.replace({ query: { ...route.query, y: String(next.year), m: String(next.month) } });
 }
 
-function onSearch(title: string): void {
+async function onSearch(title: string): Promise<void> {
   const next = withTitleFilter(viewQuery.value, title);
   const query = { ...route.query };
   if (next.filters.title) query.query = JSON.stringify(next);
   else delete query.query;
-  void router.replace({ query });
+  await router.replace({ query });
 }
 
 function onOpenTask(displayId: string): void {

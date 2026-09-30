@@ -82,11 +82,11 @@ const archivePersistError = ref<string | null>(null);
 let archiveInFlight = false;
 
 const pageReadOnly = computed(() => props.readOnly);
-const readOnly = computed(
+const bodyReadOnly = computed(
   () => pageReadOnly.value || (session.value?.readOnly ?? false) || archivePersisting.value,
 );
 const pageEditable = computed(() => !pageReadOnly.value && props.task.archivedAt == null);
-const archiveBusy = computed(() => Boolean(props.archivePending) || archivePersisting.value);
+const archiveBusy = computed(() => props.archivePending || archivePersisting.value);
 
 async function handleArchiveToggle(archived: boolean): Promise<void> {
   if (archiveInFlight || props.archivePending || archivePersisting.value) return;
@@ -149,7 +149,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :labels="labels"
       :milestones="milestones"
       :dependency-candidates="dependencyCandidates"
-      :read-only="readOnly"
+      :read-only="bodyReadOnly"
       :can-edit="canEdit"
       :pending="pending"
       :field-error="fieldError"
@@ -195,13 +195,13 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
     <TaskCollectionProperties
       :workspace-id="workspaceId"
       :task-id="task.id"
-      :read-only="readOnly"
+      :read-only="bodyReadOnly"
     />
     <TaskBodyEditor
       :workspace-id="workspaceId"
       :slug="slug"
       :task-id="task.id"
-      :read-only="readOnly"
+      :read-only="bodyReadOnly"
       :session="session"
       :collab-user="collabUser"
     />
@@ -214,7 +214,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :members="members"
-      :read-only="readOnly"
+      :read-only="bodyReadOnly"
     />
     <TaskActivityPanel
       v-if="currentUserId"
@@ -222,7 +222,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :current-user-id="currentUserId"
-      :read-only="readOnly"
+      :read-only="bodyReadOnly"
     />
     <TaskBacklinks :slug="slug" :workspace-id="workspaceId" :task-id="task.id" />
     <OriginPanel :slug="slug" :workspace-id="workspaceId" :task-id="task.id" hide-when-empty />

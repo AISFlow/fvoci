@@ -126,9 +126,9 @@ function preventComposingSubmit(event: KeyboardEvent): void {
         </UFormField>
         <UFormField :label="t('collection.fieldType')" :name="'type'">
           <select
-            :aria-label="t('collection.fieldType')"
             :id="`${baseId}-type`"
             v-model="type"
+            :aria-label="t('collection.fieldType')"
             class="collection-select"
             :disabled="create.isPending.value"
           >

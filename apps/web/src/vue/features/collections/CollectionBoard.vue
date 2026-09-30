@@ -22,6 +22,11 @@ const drag = reactive<{ row: CollectionQueryItem | null; over: string | null | u
   over: undefined,
 });
 
+function onDragChange(next: typeof drag): void {
+  drag.row = next.row;
+  drag.over = next.over;
+}
+
 function onMove(row: CollectionQueryItem, target: BoardGroup): void {
   emit("move", row, target);
 }
@@ -40,6 +45,7 @@ function onMove(row: CollectionQueryItem, target: BoardGroup): void {
       :group="group"
       :drag="drag"
       @move="onMove"
+      @drag-change="onDragChange"
     >
       <template #default="{ row }">
         <slot :row="row" />

@@ -46,7 +46,7 @@ function source(rel: string): string {
   );
 }
 
-test("time entries, backlinks, activity, collection item, and origins wait for ids", () => {
+await test("time entries, backlinks, activity, collection item, and origins wait for ids", () => {
   assert.equal(taskTimeEntriesQuery("", "t").enabled, false);
   assert.equal(taskTimeEntriesQuery("w", "").enabled, false);
   assert.equal(taskTimeEntriesQuery("w", "t").enabled, true);
@@ -70,7 +70,7 @@ test("time entries, backlinks, activity, collection item, and origins wait for i
   assert.equal("enabled" in taskAttachmentsQuery("w", "t"), false);
 });
 
-test("gated panel queries stay idle until both ids exist", () => {
+await test("gated panel queries stay idle until both ids exist", () => {
   const client = queryClient();
   const { result, stop } = mount(client, () => ({
     time: useQuery(() => taskTimeEntriesQuery("", "")),
@@ -92,7 +92,7 @@ test("gated panel queries stay idle until both ids exist", () => {
   }
 });
 
-test("activity display matches React field, actor, and list values", () => {
+await test("activity display matches React field, actor, and list values", () => {
   assert.equal(fieldLabel("title"), "제목");
   assert.equal(fieldLabel("unknownField"), "unknownField");
   assert.equal(displayValue("title", null), "없음");
@@ -151,7 +151,7 @@ test("activity display matches React field, actor, and list values", () => {
   assert.equal(created.kind, "created");
 });
 
-test("panel modules keep React testids, empty gates, and comment slots (source)", () => {
+await test("panel modules keep React testids, empty gates, and comment slots (source)", () => {
   const attachments = source("./TaskAttachmentsPanel.vue");
   const time = source("./TaskTimeEntries.vue");
   const backlinks = source("./TaskBacklinks.vue");

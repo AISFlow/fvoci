@@ -29,7 +29,10 @@ const props = defineProps<{
   group: BoardGroup;
   drag: { row: CollectionQueryItem | null; over: string | null | undefined };
 }>();
-const emit = defineEmits<{ move: [row: CollectionQueryItem, target: BoardGroup] }>();
+const emit = defineEmits<{
+  move: [row: CollectionQueryItem, target: BoardGroup];
+  dragChange: [drag: { row: CollectionQueryItem | null; over: string | null | undefined }];
+}>();
 
 defineSlots<{
   default(props: { row: CollectionQueryItem }): unknown;
@@ -48,8 +51,9 @@ const choices = computed(() => moveChoices(props.config.groupBy, props.groups));
 const invalidCursor = computed(() => isInvalidCursor(pages.error.value));
 const groupName = computed(() => props.group.name || t("collection.unassigned"));
 
-watch(invalidCursor, (invalid) => {
-  if (invalid) void queryClient.resetQueries({ queryKey: columnQuery.value.queryKey, exact: true });
+watch(invalidCursor, async (invalid) => {
+  if (invalid)
+    await queryClient.resetQueries({ queryKey: columnQuery.value.queryKey, exact: true });
 });
 
 function accepts(row: CollectionQueryItem | null): boolean {
@@ -62,30 +66,30 @@ function onDragStart(event: DragEvent, row: CollectionQueryItem, movable: boolea
   if (!movable) return;
   event.dataTransfer?.setData(BOARD_DRAG_TYPE, row.id);
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-  props.drag.row = row;
+  emit("dragChange", { ...props.drag, row });
 }
 
 function onDragEnd(): void {
-  props.drag.row = null;
-  props.drag.over = undefined;
+  emit("dragChange", { row: null, over: undefined });
 }
 
 function onDragOver(event: DragEvent): void {
   if (!accepts(props.drag.row)) return;
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-  if (props.drag.over !== props.group.id) props.drag.over = props.group.id;
+  if (props.drag.over !== props.group.id)
+    emit("dragChange", { ...props.drag, over: props.group.id });
 }
 
 function onDragLeave(event: DragEvent): void {
   const current = event.currentTarget as Node | null;
-  if (current && !current.contains(event.relatedTarget as Node | null)) props.drag.over = undefined;
+  if (current && !current.contains(event.relatedTarget as Node | null))
+    emit("dragChange", { ...props.drag, over: undefined });
 }
 
 function onDrop(event: DragEvent): void {
   const row = props.drag.row;
-  props.drag.row = null;
-  props.drag.over = undefined;
+  emit("dragChange", { row: null, over: undefined });
   if (!row || !accepts(row) || event.dataTransfer?.getData(BOARD_DRAG_TYPE) !== row.id) return;
   event.preventDefault();
   emit("move", row, props.group);

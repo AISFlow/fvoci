@@ -100,7 +100,10 @@ watch(
   [view, anchor, weeks],
   () => {
     const range = view.value === "month" ? weeks.value.flat().map((cell) => cell.date) : days.value;
-    emit("range", { from: range[0]!, to: addDays(range.at(-1)!, 1) });
+    const first = range[0];
+    const last = range.at(-1);
+    if (first === undefined || last === undefined) throw new Error("Calendar range is empty");
+    emit("range", { from: first, to: addDays(last, 1) });
   },
   { immediate: true },
 );
@@ -123,9 +126,11 @@ function open(event: CalendarEvent, trigger?: Event, edge?: "start" | "end") {
   if (rect) popoverReference.value = { getBoundingClientRect: () => rect };
   editorResizeEdge.value = edge ?? null;
   editorBasis.value = edge === "start" ? "start" : edge === "end" ? "due" : props.dateBy;
+  const local = edge === "start" ? event.startDate : edge === "end" ? event.dueDate : event.local;
+  if (local === null) throw new Error("Calendar resize endpoint is missing");
   editor.value = {
     ...event,
-    local: edge === "start" ? event.startDate! : edge === "end" ? event.dueDate! : event.local,
+    local,
     timed: edge ? false : event.timed,
   };
   editorOpen.value = true;
@@ -275,8 +280,9 @@ function keydown(event: KeyboardEvent) {
     return;
   if (!root.value?.contains(event.target as Node)) return;
   const switches: Record<string, CalendarView> = { d: "day", w: "week", m: "month" };
-  if (switches[event.key]) {
-    view.value = switches[event.key]!;
+  const nextView = switches[event.key];
+  if (nextView) {
+    view.value = nextView;
     event.preventDefault();
   } else if (event.key === "t") {
     select(today.value);
@@ -299,8 +305,9 @@ function reloadEditor() {
   if (latest) editor.value = { ...latest };
 }
 defineExpose({
-  pointerdown: (event: PointerEvent, row: CollectionQueryPreview) =>
-    pointerdown(event, eventFor(row, props.dateBy, props.fields, props.zone)),
+  pointerdown: (event: PointerEvent, row: CollectionQueryPreview) => {
+    pointerdown(event, eventFor(row, props.dateBy, props.fields, props.zone));
+  },
   nativeStart: (row: CollectionQueryPreview) => {
     nativeDragging.value = true;
     gesture = null;

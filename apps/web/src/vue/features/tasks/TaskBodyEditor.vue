@@ -30,7 +30,7 @@ const props = defineProps<{
 const { mentionItems, entityResolver } = useEditorEntities(
   () => props.workspaceId,
   () =>
-    `${props.taskId}:${props.session?.generation ?? ""}:${props.collabUser?.id ?? ""}:${props.session?.status === "unauthorized"}`,
+    `${props.taskId}:${String(props.session?.generation ?? "")}:${props.collabUser?.id ?? ""}:${String(props.session?.status === "unauthorized")}`,
 );
 
 const persisting = ref(false);

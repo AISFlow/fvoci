@@ -17,17 +17,11 @@ import {
   stackRows,
   type BarBox,
   type BarDragKind,
+  type GanttBarChange,
   type GanttScale,
   type PackMode,
 } from "./gantt-geometry";
 import type { GanttLayout, GanttLayoutItem } from "./useGanttLayout";
-
-export interface GanttBarChange {
-  id: string;
-  kind: BarDragKind;
-  start: IsoDate;
-  end: IsoDate;
-}
 
 const props = withDefaults(
   defineProps<{
@@ -94,8 +88,14 @@ interface DisplayBar extends BarBox {
   readonly end: IsoDate;
 }
 
+function itemForBar(bar: BarBox): GanttLayoutItem {
+  const item = itemsById.value.get(bar.id);
+  if (!item) throw new Error("Gantt bar has no layout item");
+  return item;
+}
+
 function placed(bar: BarBox, range: { start: IsoDate; end: IsoDate } | null): DisplayBar {
-  const item = itemsById.value.get(bar.id)!;
+  const item = itemForBar(bar);
   if (!range) return { ...bar, start: item.start, end: item.end };
   const rect = barRect(
     { start: range.start, end: range.end, milestone: bar.milestone },
@@ -263,16 +263,14 @@ function labelPlacement(bar: DisplayBar): LabelPlacement {
 }
 
 function diamond(cx: number, cy: number, r: number): string {
-  return `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
+  return `${String(cx)},${String(cy - r)} ${String(cx + r)},${String(cy)} ${String(cx)},${String(cy + r)} ${String(cx - r)},${String(cy)}`;
 }
 
 const rowRules = computed(() =>
   Array.from({ length: Math.max(laneCount.value, 1) }, (_, n) => (n + 1) * props.laneHeight),
 );
 const railRows = computed(() =>
-  [...bars.value]
-    .sort((a, b) => a.lane - b.lane || a.x - b.x)
-    .map((bar) => itemsById.value.get(bar.id)!),
+  [...bars.value].sort((a, b) => a.lane - b.lane || a.x - b.x).map(itemForBar),
 );
 </script>
 

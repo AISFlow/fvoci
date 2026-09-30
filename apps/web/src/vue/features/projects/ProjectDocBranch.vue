@@ -19,7 +19,7 @@ const props = withDefaults(
 );
 
 const childNodes = computed(() => childrenOf(props.byParent, props.node.id));
-const displayId = computed(() => `${props.projectKey}-${props.node.number}`);
+const displayId = computed(() => `${props.projectKey}-${String(props.node.number)}`);
 </script>
 
 <template>

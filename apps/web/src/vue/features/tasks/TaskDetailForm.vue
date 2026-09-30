@@ -112,7 +112,7 @@ const showParent = computed(() => draftType.value !== "epic");
 const hierarchyDirty = computed(
   () => draftType.value !== props.task.type || draftParentId.value !== props.task.parentId,
 );
-const dependencies = computed(() => (props.task.dependencies ?? []) as TaskDependency[]);
+const dependencies = computed(() => props.task.dependencies);
 const parentCurrentTitle = computed(() => {
   const parent = props.task.parent;
   if (parent && draftParentId.value === parent.id) {
@@ -184,7 +184,7 @@ function toggleLabel(labelId: string, checked: boolean): void {
   emit("labelsChange", next);
 }
 
-function onAddDependency(event: Event): void {
+function submitDependency(event: Event): void {
   event.preventDefault();
   if (depBlockedId.value === NONE) {
     depLocalError.value = t("dep.target.required");
@@ -466,7 +466,7 @@ function dependencyName(edge: TaskDependency): string {
           >
             {{ t("task.dep.add") }}
           </UButton>
-          <form v-else class="flex flex-col gap-2" @submit="onAddDependency">
+          <form v-else class="flex flex-col gap-2" @submit="submitDependency">
             <select
               v-model="depBlockedId"
               data-testid="task-edit-dependency-target"

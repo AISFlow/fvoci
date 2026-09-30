@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { test, expect } from "bun:test";
 import {
   addDays,
@@ -135,11 +136,12 @@ test("invalid/readonly edits never create a request; null clears explicitly", ()
   expect(editorWrite("time", base, "", true, fields, "UTC")).toMatchObject({ value: null });
 });
 test("optimistic preview projects intent without changing concurrency snapshot", () => {
-  const write = editorWrite("due", base, "2026-09-12", false, fields, "UTC")!;
+  const write = editorWrite("due", base, "2026-09-12", false, fields, "UTC");
+  assert.ok(write);
   const next = optimisticRow(base, write, "UTC");
-  expect(
-    optimisticRow(base, resizeWrite(base, "due", "start", "2026-09-02")!, "UTC", "due").date,
-  ).toBe("2026-09-10");
+  const resized = resizeWrite(base, "due", "start", "2026-09-02");
+  assert.ok(resized);
+  expect(optimisticRow(base, resized, "UTC", "due").date).toBe("2026-09-10");
   expect(next.date).toBe("2026-09-12");
   expect(next.version).toBe(7);
   expect(base.date).toBe("2026-09-10");
@@ -159,7 +161,8 @@ test("dual due fields follow Rust dueDate-first buckets and unchanged date save 
   const event = eventFor(dual, "due", fields, "America/New_York");
   expect(event.timed).toBe(false);
   expect(event.local).toBe("2026-09-10");
-  const unchanged = editorWrite("due", dual, event.local, event.timed, fields, "America/New_York")!;
+  const unchanged = editorWrite("due", dual, event.local, event.timed, fields, "America/New_York");
+  assert.ok(unchanged);
   expect(unchanged).toEqual({
     kind: "task",
     taskId: "task",

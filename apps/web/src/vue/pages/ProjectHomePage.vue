@@ -11,7 +11,6 @@ import QueryError from "../components/QueryError.vue";
 import QueryLoading from "../components/QueryLoading.vue";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
 import ProjectHomeView from "../features/projects/ProjectHomeView.vue";
-import { leaveTo } from "../session/navigation";
 import { useProjectRef } from "../session/useProjectRef";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
 import "@/features/projects/projects.css";
@@ -121,10 +120,7 @@ const lifecycle = useMutation({
       queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
     ]);
     if (action === "delete" && matchesScope(scope)) {
-      leaveTo(projectsPath(scope.slug), {
-        assign: (url) => window.location.assign(url),
-        push: (path) => void router.push(path),
-      });
+      await router.push(projectsPath(scope.slug));
     }
   },
   onError: (error: unknown, { action, scope }) => {
@@ -178,10 +174,8 @@ const error = computed(() =>
     : null,
 );
 
-function retry(): void {
-  void projectRef.retry();
-  void project.refetch();
-  void documents.refetch();
+async function retry(): Promise<void> {
+  await Promise.all([projectRef.retry(), project.refetch(), documents.refetch()]);
 }
 </script>
 

@@ -168,19 +168,24 @@ function orderByDependency(
   const next = new Map(items.map((item) => [item.id, [] as string[]]));
   for (const link of links) {
     if (!byId.has(link.blockerId) || !byId.has(link.blockedId)) continue;
-    next.get(link.blockerId)!.push(link.blockedId);
+    const successors = next.get(link.blockerId);
+    if (!successors) throw new Error("Gantt dependency source is missing");
+    successors.push(link.blockedId);
     indegree.set(link.blockedId, (indegree.get(link.blockedId) ?? 0) + 1);
   }
   const ready = items.filter((item) => indegree.get(item.id) === 0).sort(comparePacking);
   const out: ScheduledItem[] = [];
   while (ready.length > 0) {
-    const item = ready.shift()!;
+    const item = ready.shift();
+    if (!item) throw new Error("Gantt dependency queue is empty");
     out.push(item);
     for (const id of next.get(item.id) ?? []) {
       const left = (indegree.get(id) ?? 1) - 1;
       indegree.set(id, left);
       if (left === 0) {
-        ready.push(byId.get(id)!);
+        const target = byId.get(id);
+        if (!target) throw new Error("Gantt dependency target is missing");
+        ready.push(target);
         ready.sort(comparePacking);
       }
     }
@@ -405,12 +410,21 @@ export function chartHeight(
 ): number {
   let maxY = 0;
   for (const path of paths) {
-    for (let i = 1; i < path.points.length; i += 2) maxY = Math.max(maxY, path.points[i]!);
+    for (const [i, point] of path.points.entries()) {
+      if (i % 2 === 1) maxY = Math.max(maxY, point);
+    }
   }
   return Math.max(laneCount * laneHeight, maxY + 12, laneHeight);
 }
 
 export type BarDragKind = "move" | "start" | "end";
+
+export interface GanttBarChange {
+  id: string;
+  kind: BarDragKind;
+  start: IsoDate;
+  end: IsoDate;
+}
 
 /** A bar's days, both ends included. */
 export interface DayRange {

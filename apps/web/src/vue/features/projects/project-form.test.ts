@@ -10,7 +10,7 @@ const VALID = {
   icon: "",
 };
 
-test("project form: a valid form gives the strict payload", () => {
+await test("project form: a valid form gives the strict payload", () => {
   assert.deepEqual(
     projectFormPayload({ ...VALID, name: "  연구실 ", description: " 설명 ", leadUserId: "u1" }),
     {
@@ -31,7 +31,7 @@ test("project form: a valid form gives the strict payload", () => {
   });
 });
 
-test("project form: the first failing field wins, key before name, description and icon", () => {
+await test("project form: the first failing field wins, key before name, description and icon", () => {
   const all = { ...VALID, key: "", name: " ", description: "x".repeat(2001), icon: "x".repeat(51) };
   assert.deepEqual(projectFormPayload(all), { ok: false, field: "key", message: "form.too_small" });
   assert.deepEqual(projectFormPayload({ ...all, key: "LAB" }), {
@@ -56,7 +56,7 @@ test("project form: the first failing field wins, key before name, description a
   });
 });
 
-test("project form: reserved and malformed keys get the key messages", () => {
+await test("project form: reserved and malformed keys get the key messages", () => {
   assert.deepEqual(projectFormPayload({ ...VALID, key: "WIKI" }), {
     ok: false,
     field: "key",
@@ -76,7 +76,7 @@ test("project form: reserved and malformed keys get the key messages", () => {
   }
 });
 
-test("clone default name: marks the copy and keeps the name limit", () => {
+await test("clone default name: marks the copy and keeps the name limit", () => {
   assert.equal(cloneDefaultName("Home Wiki"), "Home Wiki (복사)");
   const long = "가".repeat(200);
   const named = cloneDefaultName(long);

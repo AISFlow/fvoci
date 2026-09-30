@@ -7,7 +7,7 @@ import {
   type DateMoveRequest,
 } from "@/features/collections/calendar-model";
 import { isIsoDate, patchDateBody } from "@/features/tasks/task-edit-payload";
-import { isoToZonedLocal, zonedLocalToIso } from "@/lib/collection-values";
+import { isoToZonedLocal, zonedLocalToIso, type CollectionValue } from "@/lib/collection-values";
 import type { CollectionField, CollectionQueryPreview } from "@/lib/queries/collections";
 
 export type CalendarView = "day" | "week" | "month";
@@ -99,13 +99,20 @@ export function editorWrite(
         ? previous.datetime
         : zonedLocalToIso(raw, zone)
       : null;
-  if (field.type === "datetime" && raw && !instant) return null;
+  let value: CollectionValue = null;
+  if (raw !== "") {
+    if (field.type === "date") value = { date: raw };
+    else {
+      if (instant === null) return null;
+      value = { datetime: instant };
+    }
+  }
   return {
     kind: "field",
     fieldId: field.id,
     expectedVersion: row.version,
     expectedFieldVersion: field.version,
-    value: raw === "" ? null : field.type === "date" ? { date: raw } : { datetime: instant! },
+    value,
   };
 }
 export function dayMove(
@@ -143,7 +150,10 @@ export function optimisticRow(
 }
 /** Existing plain task endpoints only. Rust schedule_task exposes these as start/end;
  * reversed dates are stored but inferred/swapped, so never silently resize those. */
-export function resizable(row: CalendarRow, dateBy: string): boolean {
+export function resizable(
+  row: CalendarRow,
+  dateBy: string,
+): row is CalendarRow & { taskId: string; startDate: string; dueDate: string } {
   return (
     (dateBy === "due" || dateBy === "start") &&
     row.canEdit &&
@@ -160,11 +170,11 @@ export function resizeWrite(
 ): CalendarWrite | null {
   if (!resizable(row, dateBy) || !isIsoDate(day)) return null;
   // Refuse crossing the other stored endpoint; no normalization or new date.
-  if (edge === "start" ? day > row.dueDate! : day < row.startDate!) return null;
+  if (edge === "start" ? day > row.dueDate : day < row.startDate) return null;
   if (day === (edge === "start" ? row.startDate : row.dueDate)) return null;
   return {
     kind: "task",
-    taskId: row.taskId!,
+    taskId: row.taskId,
     body: {
       [edge === "start" ? "startDate" : "dueDate"]: day,
       expectedDates: { startDate: row.startDate, dueDate: row.dueDate, dueAt: row.dueAt },

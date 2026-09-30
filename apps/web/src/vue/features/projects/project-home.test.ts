@@ -27,11 +27,11 @@ function mount<T>(client: QueryClient, use: () => T): { result: T; stop: () => v
   };
 }
 
-test("the live project-home path is /w/:slug/:ref like the collection routes", () => {
+await test("the live project-home path is /w/:slug/:ref like the collection routes", () => {
   assert.ok(VUE_ROUTE_PATHS.projectHome.startsWith("/w/:slug/:ref("));
 });
 
-test("the live project-home boundary regex takes project keys only", () => {
+await test("the live project-home boundary regex takes project keys only", () => {
   assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT"), true);
   assert.equal(PROJECT_HOME_PATH.test("/w/acme/gnt"), true);
   assert.equal(PROJECT_HOME_PATH.test("/w/acme/GNT/"), true);
@@ -52,7 +52,7 @@ test("the live project-home boundary regex takes project keys only", () => {
   assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
 });
 
-test("project detail and documents queries wait for workspace and project ids", () => {
+await test("project detail and documents queries wait for workspace and project ids", () => {
   assert.equal(projectQuery("", "p").enabled, false);
   assert.equal(projectQuery("w", "").enabled, false);
   assert.equal(projectQuery("w", "p").enabled, true);
@@ -61,7 +61,7 @@ test("project detail and documents queries wait for workspace and project ids", 
   assert.equal(projectDocumentsQuery("w", "p").enabled, true);
 });
 
-test("project home queries stay idle until both ids exist", () => {
+await test("project home queries stay idle until both ids exist", () => {
   const client = queryClient();
   const { result, stop } = mount(client, () => ({
     project: useQuery(() => projectQuery("", "")),
@@ -77,7 +77,7 @@ test("project home queries stay idle until both ids exist", () => {
   }
 });
 
-test("after delete the live projects list and Gantt stay Vue", () => {
+await test("after delete the live projects list and Gantt stay Vue", () => {
   const assigns: string[] = [];
   const pushes: string[] = [];
   const env = {
@@ -92,7 +92,7 @@ test("after delete the live projects list and Gantt stay Vue", () => {
   assert.deepEqual(pushes, ["/w/acme/projects", "/w/acme/GNT/gantt"]);
 });
 
-test("project fields and workflow settings stay Vue and preserve query/hash navigation", () => {
+await test("project fields and workflow settings stay Vue and preserve query/hash navigation", () => {
   const assigns: string[] = [];
   const pushes: string[] = [];
   const env = {
@@ -112,7 +112,7 @@ test("project fields and workflow settings stay Vue and preserve query/hash navi
   assert.deepEqual(pushes, [fields, workflow, nested]);
 });
 
-test("project home lists the project's root children, nested ones stay in the tree", () => {
+await test("project home lists the project's root children, nested ones stay in the tree", () => {
   const project = {
     id: "p1",
     rootDocumentId: "root",

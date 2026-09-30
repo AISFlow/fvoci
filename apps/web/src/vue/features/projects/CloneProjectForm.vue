@@ -31,7 +31,7 @@ const leadUserId = ref(props.currentUserId ?? "");
 const fieldError = ref<string | null>(null);
 const serverError = ref<string | null>(null);
 const submitting = ref(false);
-const busy = computed(() => props.pending === true || submitting.value);
+const busy = computed(() => props.pending || submitting.value);
 
 function onKeyInput(event: Event): void {
   key.value = canonicalizeProjectKey((event.target as HTMLInputElement).value);

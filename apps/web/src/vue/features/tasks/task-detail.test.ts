@@ -37,11 +37,11 @@ function source(rel: string): string {
   );
 }
 
-test("the live workspace-item path is the item-ref custom regex", () => {
+await test("the live workspace-item path is the item-ref custom regex", () => {
   assert.equal(VUE_ROUTE_PATHS.workspaceItem, "/w/:slug/:ref([A-Za-z0-9-]{2,32}-[1-9]\\d{0,8})");
 });
 
-test("the live workspace-item boundary regex takes item refs only", () => {
+await test("the live workspace-item boundary regex takes item refs only", () => {
   assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/GNT-1"), true);
   assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/gnt-12"), true);
   assert.equal(WORKSPACE_ITEM_PATH.test("/w/acme/GNT-1/"), true);
@@ -56,7 +56,7 @@ test("the live workspace-item boundary regex takes item refs only", () => {
   assert.equal(isVueAppPath("/w/acme/GNT"), true);
 });
 
-test("lookup, task, workflow, labels, milestones wait for workspace and ids", () => {
+await test("lookup, task, workflow, labels, milestones wait for workspace and ids", () => {
   assert.equal(lookupQuery("", "GNT-1").enabled, false);
   assert.equal(lookupQuery("w", "").enabled, false);
   assert.equal(lookupQuery("w", "GNT-1").enabled, true);
@@ -69,7 +69,7 @@ test("lookup, task, workflow, labels, milestones wait for workspace and ids", ()
   assert.equal(projectMilestonesQuery("", "p").enabled, false);
 });
 
-test("item-page queries stay idle until both ids exist", () => {
+await test("item-page queries stay idle until both ids exist", () => {
   const client = queryClient();
   const { result, stop } = mount(client, () => ({
     lookup: useQuery(() => lookupQuery("", "")),
@@ -91,7 +91,7 @@ test("item-page queries stay idle until both ids exist", () => {
   }
 });
 
-test("after delete the connected tasks list uses Vue navigation", () => {
+await test("after delete the connected tasks list uses Vue navigation", () => {
   const assigns: string[] = [];
   const pushes: string[] = [];
   const env = {
@@ -121,7 +121,7 @@ const task: LookupItem = {
   projectId: "p1",
 };
 
-test("lookup branches project documents, tasks, 404-class misses, and wiki-excluded items", () => {
+await test("lookup branches project documents, tasks, 404-class misses, and wiki-excluded items", () => {
   assert.deepEqual(resolveLookupTarget([], "GNT-1"), { kind: "miss" });
   assert.deepEqual(resolveLookupTarget([doc], "GNT-1"), { kind: "project-document", item: doc });
   assert.deepEqual(resolveLookupTarget([doc, task], "gnt-2"), { kind: "task", item: task });
@@ -129,7 +129,7 @@ test("lookup branches project documents, tasks, 404-class misses, and wiki-exclu
   assert.deepEqual(resolveLookupTarget([{ ...doc, projectId: null }], "GNT-1"), { kind: "miss" });
 });
 
-test("WorkspaceItemPage lookup 404 / miss / project-document vs task (source)", () => {
+await test("WorkspaceItemPage lookup 404 / miss / project-document vs task (source)", () => {
   const page = source("../../pages/WorkspaceItemPage.vue");
   assert.match(page, /lookupTarget\.value\?\.kind === "miss"/);
   assert.match(page, /lookup\.error\.value\.status === 404/);
@@ -140,7 +140,7 @@ test("WorkspaceItemPage lookup 404 / miss / project-document vs task (source)", 
   assert.match(page, /useWorkspaceSession\(slug\)/);
 });
 
-test("WorkspaceItemPage keeps PATCH MOVE trash archive clone delete and 409 refetch (source)", () => {
+await test("WorkspaceItemPage keeps PATCH MOVE trash archive clone delete and 409 refetch (source)", () => {
   const page = source("../../pages/WorkspaceItemPage.vue");
   assert.match(page, /api\.PATCH\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}"/);
   assert.match(
@@ -162,7 +162,7 @@ test("WorkspaceItemPage keeps PATCH MOVE trash archive clone delete and 409 refe
   assert.match(page, /projectTasksPath/);
 });
 
-test("task body uses collab kind task; project document uses kind document (source)", () => {
+await test("task body uses collab kind task; project document uses kind document (source)", () => {
   const taskView = source("./TaskDetailView.vue");
   const page = source("../../pages/WorkspaceItemPage.vue");
   const docView = source("../documents/ProjectDocumentView.vue");
@@ -184,7 +184,7 @@ test("task body uses collab kind task; project document uses kind document (sour
   assert.match(room, /function retire\(/);
 });
 
-test("TaskDetailView wires the React side panels without a second collab room (source)", () => {
+await test("TaskDetailView wires the React side panels without a second collab room (source)", () => {
   const taskView = source("./TaskDetailView.vue");
   assert.match(taskView, /TaskCollectionProperties/);
   assert.match(taskView, /TaskAttachmentsPanel/);

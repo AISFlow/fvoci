@@ -63,9 +63,9 @@ const cursorStale = computed(
     items.value.length > 0,
 );
 
-function onLoadMore(): void {
-  if (cursorStale.value) void tasks.refetch();
-  else void tasks.fetchNextPage();
+async function onLoadMore(): Promise<void> {
+  if (cursorStale.value) await tasks.refetch();
+  else await tasks.fetchNextPage();
 }
 </script>
 
@@ -92,7 +92,7 @@ function onLoadMore(): void {
       <QueryError
         v-else-if="tasks.isError.value && items.length === 0"
         :message="loadErrorMessage(tasks.error.value)"
-        @retry="() => void tasks.refetch()"
+        @retry="tasks.refetch()"
       />
       <p
         v-else-if="tasks.isSuccess.value && items.length === 0"

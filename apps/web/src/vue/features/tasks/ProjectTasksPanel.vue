@@ -76,17 +76,17 @@ const fields = useQuery(() =>
 const taskPages = computed(() => mergeTaskListPages(tasks.data.value?.pages ?? []));
 const firstPageFailed = computed(() => tasks.isError.value && !tasks.isFetchNextPageError.value);
 
-function applyQuery(
+async function applyQuery(
   next: ViewQuery,
   viewId: string | null | undefined = selectedViewId.value,
-): void {
+): Promise<void> {
   const query = { ...route.query } as Record<string, string>;
   const encoded = encodeViewQueryParam(next);
   if (encoded) query.query = encoded;
   else delete query.query;
   if (viewId) query.view = viewId;
   else delete query.view;
-  void router.replace({ query });
+  await router.replace({ query });
 }
 
 const createTask = useMutation({
@@ -107,9 +107,9 @@ const createTask = useMutation({
   },
 });
 
-function onSelectView(view: ProjectView | null): void {
-  if (view) applyQuery(viewConfigOf(view), view.id);
-  else applyQuery(viewQuery.value, null);
+async function onSelectView(view: ProjectView | null): Promise<void> {
+  if (view) await applyQuery(viewConfigOf(view), view.id);
+  else await applyQuery(viewQuery.value, null);
 }
 
 async function onCreateSubmit(values: TaskCreateBody): Promise<void> {
@@ -132,9 +132,11 @@ function onCreateClose(): void {
   createTask.reset();
 }
 
-function retryList(): void {
-  if (workflow.isError.value) void workflow.refetch();
-  if (firstPageFailed.value) void tasks.refetch();
+async function retryList(): Promise<void> {
+  await Promise.all([
+    ...(workflow.isError.value ? [workflow.refetch()] : []),
+    ...(firstPageFailed.value ? [tasks.refetch()] : []),
+  ]);
 }
 </script>
 
