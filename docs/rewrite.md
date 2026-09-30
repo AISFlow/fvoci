@@ -936,7 +936,18 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
-#### 최신 전량 인수·통합 체크포인트 (2026-09-30 16:46 KST)
+#### 최신 전량 인수·통합 체크포인트 (2026-09-30 17:25 KST)
+
+17:25 후속 갱신(아래 16:46 inventory·실패 이력은 당시 근거로 유지): 로컬 통합 HEAD는 `98a4a73bd3ca6910b606e32441ae119d8b80dfa5`이며 원격은 재조회에서도 `b0d25858`, Draft·auto-merge 없음이다. 44f6 합본은 별도 Sol ctx_af3c9a687568의 106 unit/type/build 및 실제 Rust/app-role DB browser14(entity6/settings4/project-settings4)로 수락됐다. 이어 독립 검토된 viewer a64→e58b3161, editor React host ebc→b60c2c92, Vue Keycloak fixture502→98a4를 충돌 없이 로컬 통합했다. 98a4 전체 검증·원격 제출은 아직 하지 않았다.
+
+- Vue Keycloak502는 실제 fixture의 flows8/failures7/wrong-secret1과 test-entitlement SSO1을 통과했다. mode별32 skip과 SSO37 filtered는 통과 수에 합산하지 않는다. 최종 Docker/외부 IdP 검증으로 확대하지 않는다.
+- workspace ctx_4bc48944e4ac의 Vue-only product b376은 parity6 및 fallback6(실제 cold home/legal/Gantt 요청과 wiki 저장·reload 포함)을 통과했다. 이전147의5pass/1fail은 남긴다. 원인은 재현에서 index backlog가5초를 넘긴 것이며 별도 backend 변경 없이 선행 리소스 API 준비만 기다리는11cd fixture가 실제 통과했다. 기존 새 태스크5초 단언은 유지됐다. scope/direct/누적 합본 검사는 계속 진행 중이다.
+- 공통 React glue62f3→792는 독립 ctx_fb0d558a8510 scoped ACCEPT. 최종 번들4개/129chunks의 React 모듈0 및 entry/Gantt 정적 closure에 editor 모듈0 근거를 회수했다. 중간 generateBundle codeHash 불일치는 당시 실패로 보존하고 final writeBundle/worker hook 및 실제 disk archive hash 검증을 구분한다.
+- discovery cache metadata/tag/restore 수정 `0a4da5fac84ca2144cd1a5212bb978df43a30518`: 원래 QueryClient8 negative, 관련68 unit 및 실제 Rust/DB browser3 통과. 독립 검토 ctx_eebb74a25806 진행 중이며 아직 통합하지 않았다.
+- dependency 후보 `a5220da5754cecdc2022f7cb2686b01ca070e595`: Sol ctx_3be61140c97c가 digest 고정 Bun1.4.2/Node 실행 파일 없는 컨테이너에서 frozen offline install·양쪽 typecheck·editor58/web724·Vite·API 생성 비교·Playwright CLI·개발용 PDF oracle 통과를 보고했다. 독립 ctx_210f0f58bd9c 검토 중; 실제 제품 Docker/image/browser 수락은 별도다.
+- 빠른 입력 소실03ca는 미해결이다. 최신44 기반 관측검사a83은 옛 React 준비 단언에서 중단돼 rapid/DB 증거가 없었다. 준비 계약만 Vue로 고친2ba18b9를 ctx_45af01bb6e95가 진단하며 기존 본문·back·persist·입력 시간 단언은 유지한다. 제품 수정·저장 정상으로 표시하지 않는다.
+
+위 고정 보고서의 정본 사본은 기존 `fvoci-evidence/recovery-20260930/takeover-evidence`에 보존한다. 원본7PR은 여전히 원격 회수 전 closure HOLD. 이 갱신은 main 수락·배포나 전체 전환 완료가 아니다.
 
 최신 사용자 Goal: **합의된 백엔드 Rust 이관 상태를 기존 수락 근거와 실제 실행 경로로 종결 확인하고, 기존 Vue 작업을 #272 하나에서 연결·검증·독립 검토하며 대체 React와 임시 경계를 제거한다. 최종 Rust/app-role DB/실제 이미지 검증 뒤 사용자 머지 승인 대기.** 기존 완료 이력·별도 요청·협업 비교는 유지한다.
 
