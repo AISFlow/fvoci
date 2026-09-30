@@ -151,11 +151,23 @@ test("share dialog creates, copies and revokes a link", async ({ page }) => {
   const sharePath = new URL(shareUrl).pathname;
   const shell = await page.request.get(sharePath);
   expect(shell.status()).toBe(200);
-  page.once("dialog", (confirm) => {
-    expect(confirm.message()).toContain("공유 링크를 해제할까요?");
-    void confirm.accept();
+  const confirmed = new Promise<void>((resolve, reject) => {
+    page.once("dialog", (confirm) => {
+      try {
+        expect(confirm.message()).toContain("공유 링크를 해제할까요?");
+      } catch (error) {
+        reject(
+          error instanceof Error
+            ? error
+            : new Error("Confirmation assertion failed", { cause: error }),
+        );
+        return;
+      }
+      confirm.accept().then(resolve, reject);
+    });
   });
   await dialog.getByRole("button", { name: "해제" }).click();
+  await confirmed;
   await expect(dialog.getByText("공유 링크가 없습니다")).toBeVisible();
   expect(csp).toEqual([]);
 });
