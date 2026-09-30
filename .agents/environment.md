@@ -7,18 +7,18 @@
 
 ## 1. 현재 코디네이터와 Run 연결
 
-2026-10-01 00:36 KST, 현재 terminal 환경·세션 JSONL·설치 CLI·run-current를 읽기 전용으로 대조했다.
+2026-10-01 03:43 KST, 현재 terminal 환경·세션 JSONL·설치 CLI·run-current를 읽기 전용으로 대조했다.
 
-| 항목                     | 실제 값                                                      | 근거                                                                         |
-| ------------------------ | ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| 코디네이터 모델 / effort | `gpt-6.1-sol` / `high`                                       | 최신 `turn_context`; 요청값·TUI 이름만으로 추정하지 않음                     |
-| 실행 경로 / CLI          | Orca Codex 주 terminal, `codex-cli 0.159.1`, source `cli`    | session_meta·현재 `codex --version`                                          |
-| 주 세션                  | `01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0`                       | 실제 `CODEX_THREAD_ID`와 JSONL 일치                                          |
-| terminal handle          | `term_cc010fa2-f24c-4018-820f-16172de0e39f`                  | 실제 `ORCA_TERMINAL_HANDLE`와 Run coordinator_handle 일치                    |
-| 현재 Run / generation    | `run_496803f4d94f` / `2`                                     | 본인 terminal의 기존 Run 바인딩 및 최신 run-current                          |
-| Orca runtime             | `73201137-ed1f-4a8a-bcde-302a44c54e4b`                       | 현재 CLI 응답 `_meta.runtimeId`                                              |
-| 통합 worktree            | `/home/kinesis/orca/workspaces/fvoci/f272-batch-integration` | 최신 turn_context.cwd·실제 Git                                               |
-| 현재 sandbox / approval  | `danger-full-access` / `never`                               | 최신 turn_context; filesystem·network 접근 가능, 강한 읽기 전용 sandbox 아님 |
+| 항목                     | 실제 값                                                                       | 근거                                                                         |
+| ------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 코디네이터 모델 / effort | `gpt-6.1-sol` / `high`                                                        | 최신 `turn_context`; 요청값·TUI 이름만으로 추정하지 않음                     |
+| 실행 경로 / CLI          | Orca Codex 주 terminal, 세션 CLI `0.159.1` / 설치 CLI `0.159.2`, source `cli` | session_meta의 기존 세션 버전·03:43 `codex --version`의 설치 버전 구분       |
+| 주 세션                  | `01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0`                                        | 실제 `CODEX_THREAD_ID`와 JSONL 일치                                          |
+| terminal handle          | `term_cc010fa2-f24c-4018-820f-16172de0e39f`                                   | 실제 `ORCA_TERMINAL_HANDLE`와 Run coordinator_handle 일치                    |
+| 현재 Run / generation    | `run_496803f4d94f` / `2`                                                      | 본인 terminal의 기존 Run 바인딩 및 최신 run-current                          |
+| Orca runtime             | `73201137-ed1f-4a8a-bcde-302a44c54e4b`                                        | 현재 CLI 응답 `_meta.runtimeId`                                              |
+| 통합 worktree            | `/home/kinesis/orca/workspaces/fvoci/f272-batch-integration`                  | 최신 turn_context.cwd·실제 Git                                               |
+| 현재 sandbox / approval  | `danger-full-access` / `never`                                                | 최신 turn_context; filesystem·network 접근 가능, 강한 읽기 전용 sandbox 아님 |
 
 실제 transcript:
 `/home/kinesis/.codex/sessions/2026/09/30/rollout-2026-09-30T23-38-52-01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0.jsonl`.
@@ -36,6 +36,10 @@ Run의 오래된 objective 문자열에 남은 “Astra”는 당시 생성 meta
 적용했다고 주장하지 않으며 읽기 전용 prompt와 Git 변경 감시의 한계를 명시한다.
 실행 불가·capacity·readiness 실패는 작업 시작·검토 완료로 세지 않는다. 모델 fallback·계정/결제 변경은 하지 않는다.
 
+03:40의 워커 readiness 실패 복구 중 코디네이터가 업데이트를 건너뛰려 보낸 입력이 기본 업데이트를 실행해
+CLI `0.159.2`가 실제 설치됐다. 의도하지 않은 변경과 첫 Task 미주입·공식 release/retry 근거는
+기존 evidence의 `f272-codex-readiness-update-incident.json`에 보존한다. 모델 교체·계정/결제 변경은 없었고 추가 설치 변경은 하지 않는다.
+
 **#272는 별도 사용자 승인 전 main 머지·태그·릴리스·제품 배포 금지**다.
 현재 Task/Dispatch·결과·다음 실행은 rewrite.md §1·§4·§7에서 확인한다.
 
@@ -45,11 +49,11 @@ Run의 오래된 objective 문자열에 남은 “Astra”는 당시 생성 meta
 | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | 호스트               | Linux `6.18.33.2-microsoft-standard-WSL2`, x86_64; 62 GiB RAM. 00:36 관측 가용35 GiB·디스크583 GiB는 일시 snapshot |
 | Orca                 | `/home/kinesis/.local/bin/orca-ide`, **1.4.217**. 선택한 실행 파일을 모든 호출에 재사용                            |
-| Codex                | `codex-cli 0.159.1`; 실행 모델/effort는 위 transcript로 확인                                                       |
+| Codex                | 설치 `codex-cli 0.159.2`, 기존 주 세션 `0.159.1`; 모델/effort는 실제 transcript 확인                               |
 | Bun                  | **1.4.2**, root `packageManager=bun@1.4.2`; 고정 lock와 worktree 로컬 dependencies 사용                            |
 | 웹 도구              | manifest의 TypeScript5.9.3·ESLint10.11.0·Prettier3.9.9. Vue-tsc/Volar와 기타 pin은 manifest·patch 정본 확인        |
 | Rust                 | 프로젝트 toolchain의 `rustc 1.98.1 (48a229cea 2026-09-01)`; cargo/rustfmt/clippy 경로는 아래 환경 설정             |
-| Docker / Python / gh | Docker29.8.1, Python3.14.4, gh2.46.0. 버전 조회만 실행, 설치·전역 설정 변경 없음                                   |
+| Docker / Python / gh | Docker29.8.1, Python3.14.4, gh2.46.0. 해당 도구 버전 조회만 실행, 설치·전역 설정 변경 없음                         |
 | CodeGraph            | `/home/kinesis/.local/bin/codegraph`, **1.6.0**; 번들 Node를 쓰는 개발 도구                                        |
 | 원본 참조 clone      | `/home/kinesis/orca/references/fvoci-rust-source-20260924`; target와 별도 저장소. 원본 고정 SHA는 rewrite.md §1    |
 
@@ -154,4 +158,4 @@ Ultracode 요청/실제 effort·capacity/readiness 실패·old Run·dispatch/실
 
 재개는 AGENTS → 이 파일의 실제 연결/도구 → rewrite.md §1·§4·§7 → 실제 Git/Orca task/worker/CI 순서다.
 이미 회수한 코드·검토·실패 근거를 재사용하고 현재 질문·남은 delta부터 이어간다.
-이번 정리는 재인수·재구현·전수 감사가 아니며 모델/계정/설치/권한/런타임 설정을 변경하지 않았다.
+이번 정리는 재인수·재구현·전수 감사가 아니다. 모델·계정·권한 배정은 유지하며, 실제 CLI 설치 변경은 §1의 근거와 구분해 기록한다.
