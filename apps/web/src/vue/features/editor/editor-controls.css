@@ -1,0 +1,61 @@
+/* The Vue editing controls (EditorControls.vue). The shared editor
+   stylesheet (@fvoci/editor/styles.css) styles the gutter, the table
+   handles, the mobile toolbar and the code chrome as in the React host;
+   this adds what the React components set inline or through Radix. */
+
+/* The table handles' places above the table. */
+.fvoci-table-handle--table,
+.fvoci-table-handle--col,
+.fvoci-table-handle--row,
+.fvoci-table-handle--col-plus,
+.fvoci-table-handle--row-plus {
+  top: -2.75rem;
+}
+.fvoci-table-handle--table {
+  left: 0;
+}
+.fvoci-table-handle--col {
+  left: 2.75rem;
+}
+.fvoci-table-handle--row {
+  left: 5.5rem;
+}
+.fvoci-table-handle--col-plus {
+  left: 8.25rem;
+}
+.fvoci-table-handle--row-plus {
+  left: 11rem;
+}
+
+/* Menus and popovers (UPopover content), sized to the space Reka's popper leaves. */
+.fvoci-vue-menu,
+.fvoci-vue-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 10rem;
+  max-width: min(calc(100vw - 1rem), var(--reka-popover-content-available-width));
+  max-height: var(--reka-popover-content-available-height);
+  padding: 0.25rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.fvoci-vue-menu > *,
+.fvoci-vue-popover > * {
+  flex-shrink: 0;
+}
+.fvoci-vue-menu__group {
+  display: flex;
+  flex-direction: column;
+}
+.fvoci-vue-menu__separator {
+  height: 1px;
+  margin: 0.25rem 0;
+  border: 0;
+  background: var(--ui-border);
+}
+.fvoci-vue-menu__alert {
+  padding: 0.25rem 0.5rem;
+  color: var(--ui-error);
+  font-size: var(--text-ui);
+}

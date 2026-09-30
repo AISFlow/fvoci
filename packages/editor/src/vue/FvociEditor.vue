@@ -4,8 +4,9 @@ import type { Editor, MappablePosition } from "@tiptap/core";
 import { AllSelection, type EditorState, TextSelection } from "@tiptap/pm/state";
 import { CellSelection } from "@tiptap/pm/tables";
 import BubbleMenu from "@tiptap/extension-bubble-menu";
+import DragHandle from "@tiptap/extension-drag-handle";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
-import { markRaw, onBeforeUnmount, provide, shallowRef, useSlots, useTemplateRef, watch } from "vue";
+import { markRaw, onBeforeUnmount, provide, reactive, shallowRef, useSlots, useTemplateRef, watch } from "vue";
 import type * as Y from "yjs";
 import type { AttachmentBlockBridge, AttachmentUploadResult } from "../attachment-model.js";
 import {
@@ -20,7 +21,15 @@ import type { EntityResolver } from "../entities.js";
 import { overlayOwner } from "../overlay-owner.js";
 import { selectAllEscape, selectAllStep } from "../table-actions.js";
 import AttachmentBlock from "./AttachmentBlock.vue";
-import { attachmentBridgeKey, entityResolverKey, type UrlEmbedComponent, urlEmbedKey } from "./keys.js";
+import type { GutterBlock, GutterHandle } from "./block-gutter.js";
+import {
+  attachmentBridgeKey,
+  type CodeChromeHost,
+  codeChromeHostKey,
+  entityResolverKey,
+  type UrlEmbedComponent,
+  urlEmbedKey,
+} from "./keys.js";
 import { VUE_NODE_VIEWS } from "./node-views.js";
 
 // The collaborative FVOCI editor for Vue pages (react/fvoci-editor.tsx is the
@@ -29,7 +38,9 @@ import { VUE_NODE_VIEWS } from "./node-views.js";
 // provider. The document lives only in Yjs; nothing here copies it out.
 // ydoc, provider and user are fixed for the component's life: the page keys
 // it by the room's socket generation, so a new provider mounts a new editor.
-// The host supplies the toolbar and the selection bubble through slots.
+// The host supplies the toolbar, the selection bubble and the editing
+// controls (block gutter, table handles, mobile toolbar, code-block chrome)
+// through slots.
 const props = defineProps<{
   ydoc: Y.Doc;
   provider: HocuspocusProvider;
@@ -49,12 +60,19 @@ const emit = defineEmits<{ ready: [editor: Editor | null] }>();
 defineSlots<{
   toolbar?(props: { editor: Editor }): unknown;
   bubble?(props: { editor: Editor }): unknown;
+  /** Rendered in the editor host after the content (react/fvoci-editor.tsx
+   * renders its gutter, table handles, mobile toolbar and code-block chrome
+   * there). `gutter` is the block drag handle the editor starts with; its
+   * buttons render into `gutter.element`. */
+  controls?(props: { editor: Editor; gutter: GutterHandle; editable: boolean }): unknown;
 }>();
 const slots = useSlots();
 
 provide(attachmentBridgeKey, props.attachmentBridge ?? null);
 provide(urlEmbedKey, props.urlEmbed ?? null);
 provide(entityResolverKey, props.entityResolver ?? null);
+const codeChromeHost = reactive<CodeChromeHost>({ wrap: null, folded: null });
+provide(codeChromeHostKey, codeChromeHost);
 
 /* Drop/paste uploads waiting for their attachment node. */
 const uploads = shallowRef<Array<{ key: string; file: File }>>([]);
@@ -101,6 +119,19 @@ const bubble = markRaw(document.createElement("div"));
 bubble.className = "fvoci-bubble";
 bubble.dataset.fvociBubble = "";
 
+/* WHY: the block drag handle is an extension the editor starts with, for the
+ * reason the bubble is (above): @tiptap/extension-drag-handle-vue-3 registers
+ * its plugin after mount. Its buttons render into this element through the
+ * controls slot's Teleport; the plugin positions and shows it, and moves the
+ * dragged block with a ProseMirror drop, which Yjs carries to peers. */
+const gutterElement = markRaw(document.createElement("div"));
+gutterElement.className = "fvoci-gutter";
+gutterElement.style.visibility = "hidden";
+gutterElement.style.position = "absolute";
+gutterElement.dataset.dragging = "false";
+const gutterBlock = shallowRef<GutterBlock>({ node: null, pos: -1 });
+const gutter: GutterHandle = markRaw({ element: gutterElement, block: gutterBlock });
+
 /* WHY: #738 — Tiptap 기본값은 <style data-tiptap-style> 을 head 에 꽂는다. style-src 는 'self' 와
  * 셸 인라인 블록의 빌드 시점 해시뿐이라 그 <style> 은 차단된다 — 규칙은 react/editor.css 에 있다. */
 const editor = useEditor({
@@ -117,6 +148,19 @@ const editor = useEditor({
       provider: props.provider,
       user: props.user,
     }),
+    ...(slots.controls
+      ? [
+          DragHandle.configure({
+            render: () => gutterElement,
+            nested: true,
+            // The plugin passes the block's position too (the option's type leaves it out).
+            onNodeChange: (change) => {
+              const pos = (change as { pos?: number }).pos;
+              gutterBlock.value = { node: change.node, pos: typeof pos === "number" ? pos : -1 };
+            },
+          }),
+        ]
+      : []),
     ...(slots.bubble
       ? [
           BubbleMenu.configure({
@@ -206,7 +250,13 @@ function bubbleOwner(): HTMLElement {
 
 <template>
   <slot v-if="editor" name="toolbar" :editor="editor" />
-  <div ref="host" class="fvoci-editor relative min-h-[16rem]" @mousedown="onHostMouseDown">
+  <div
+    ref="host"
+    class="fvoci-editor relative min-h-[16rem]"
+    :data-code-wrap="codeChromeHost.wrap === null ? undefined : codeChromeHost.wrap ? 'true' : 'false'"
+    :data-code-folded="codeChromeHost.folded === null ? undefined : codeChromeHost.folded ? 'true' : 'false'"
+    @mousedown="onHostMouseDown"
+  >
     <Teleport v-if="editor && $slots.bubble" :to="bubble">
       <slot name="bubble" :editor="editor" />
     </Teleport>
@@ -231,5 +281,6 @@ function bubbleOwner(): HTMLElement {
         @uploaded="insertUploaded(item.key, $event)"
       />
     </div>
+    <slot v-if="editor && $slots.controls" name="controls" :editor="editor" :gutter="gutter" :editable="editable" />
   </div>
 </template>
