@@ -78,6 +78,17 @@ test("real date interval resize and optimistic pending settle; failed concurrent
   await editor.getByRole("button", { name: "최신 저장 뷰 불러오기" }).click();
   await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
   await expect.poll(async () => (await f.stored(point.id)).dueDate).toBe("2027-05-12");
+  await expect(editor).toHaveCount(0);
+  await page.getByTestId(`collection-preview-${point.displayId}`).click();
+  await editor.getByLabel("마감 시각", { exact: true }).check();
+  // Converting a plain date requires the user's time; no invented 09:00 default.
+  await expect(editor.locator('input[type="datetime-local"]')).toHaveValue("");
+  await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
+  await expect(editor.getByRole("alert")).toBeVisible(); expect((await f.stored(point.id)).dueDate).toBe("2027-05-12");
+  await editor.locator('input[type="datetime-local"]').fill("2027-05-12T10:45");
+  await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
+  await expect.poll(async () => (await f.stored(point.id)).dueAt).toBe("2027-05-12T14:45:00Z");
+  expect((await f.stored(point.id)).dueDate).toBeNull();
 });
 
 test("offline reconnect preserves editor intent, refuses unsaved writes, and DST gap/fold stays in existing date contract", async ({ page, context }) => {

@@ -19,7 +19,7 @@ const isTimed = computed(() => props.dateBy === "due" ? timed.value : field.valu
 const readOnly = computed(() => !dateMovable(props.dateBy, props.event, props.fields));
 function toggleTimed(value: boolean) {
   timed.value = value;
-  raw.value = value ? (raw.value.includes('T') ? raw.value : `${raw.value}T09:00`) : raw.value.slice(0, 10);
+  raw.value = value ? (raw.value.includes('T') ? raw.value : `${raw.value}T`) : raw.value.slice(0, 10);
 }
 async function submit(event: Event) {
   event.preventDefault();
@@ -34,7 +34,7 @@ async function submit(event: Event) {
 <template>
   <form class="flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-3 p-3" aria-label="Calendar event editor" @submit="submit" @keydown.esc.prevent="emit('close')" @keydown.enter="($event.isComposing || $event.keyCode === 229) && $event.preventDefault()">
     <a :href="itemPath(slug, event.displayId)" class="font-semibold hover:underline">{{ event.title }}</a>
-    <label v-if="dateBy === 'due'" class="flex gap-2 text-sm"><input type="checkbox" :checked="timed" :disabled="readOnly || pending" @change="toggleTimed(($event.target as HTMLInputElement).checked)" />dueAt</label>
+    <label v-if="dateBy === 'due'" class="flex gap-2 text-sm"><input type="checkbox" :checked="timed" :disabled="readOnly || pending" @change="toggleTimed(($event.target as HTMLInputElement).checked)" />{{ t("task.activity.field.dueTime") }}</label>
     <label :for="id" class="text-sm">{{ t('collection.date') }} · {{ zone }}</label>
     <input :id="id" class="collection-select w-full" :type="isTimed ? 'datetime-local' : 'date'" v-model="raw" :disabled="readOnly || pending" />
     <p v-if="invalid || error" role="alert" class="text-sm text-error">{{ t('collection.saveError') }}</p>
