@@ -137,3 +137,46 @@ test(
     assert.deepEqual(loads, ["/w/acme"]);
   }),
 );
+
+const AUTH_REST = [
+  { name: "reset-password", path: "/reset-password" },
+  { name: "magic-link", path: "/magic-link" },
+  { name: "confirm-email", path: "/confirm-email" },
+  { name: "cancel-withdraw", path: "/cancel-withdraw" },
+  { name: "consent", path: "/consent" },
+] as const;
+
+test("the remaining auth routes are declared live Vue paths", () => {
+  for (const { name, path } of AUTH_REST) {
+    assert.equal(
+      routes.some((route) => route.name === name && route.path === path),
+      true,
+      name,
+    );
+    // The boundary and router agree for case and trailing slash variants.
+    assert.equal(isVueAppPath(path), true, path);
+    assert.equal(isVueAppPath(`${path}/`), true, `${path}/`);
+    assert.equal(isVueAppPath(path.toUpperCase()), true, path.toUpperCase());
+  }
+});
+
+test(
+  "a completed navigation to a remaining auth page stays in Vue",
+  withLocation(async (loads) => {
+    for (const path of [
+      "/reset-password?token=tok",
+      "/magic-link?token=tok",
+      "/confirm-email?token=tok",
+      "/cancel-withdraw",
+      "/consent?returnTo=%2F",
+    ]) {
+      const router = createAppRouter(createMemoryHistory());
+      for (const route of routes) {
+        router.removeRoute(route.name!);
+        router.addRoute({ path: route.path, name: route.name, component: { render: () => null } });
+      }
+      await router.push(path);
+      assert.deepEqual(loads.splice(0), [], path);
+    }
+  }),
+);

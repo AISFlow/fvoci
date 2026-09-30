@@ -25,6 +25,34 @@ const SAMPLES = [
   "/",
   "/login",
   "/login/",
+  "/reset-password",
+  "/reset-password/",
+  "/RESET-PASSWORD",
+  "/magic-link",
+  "/confirm-email",
+  "/cancel-withdraw",
+  "/consent",
+  "/reset-password/",
+  "/RESET-PASSWORD",
+  "/reset-password/extra",
+  "/reset-passwords",
+  "/magic-link/",
+  "/MAGIC-LINK",
+  "/magic-link/extra",
+  "/magic-links",
+  "/confirm-email/",
+  "/CONFIRM-EMAIL",
+  "/confirm-email/extra",
+  "/confirm-emails",
+  "/cancel-withdraw/",
+  "/CANCEL-WITHDRAW",
+  "/cancel-withdraw/extra",
+  "/cancel-withdraws",
+  "/consent/",
+  "/CONSENT",
+  "/consent/extra",
+  "/consents",
+
   "/legal/terms",
   "/legal/privacy",
   "/LEGAL/unknown",
@@ -139,7 +167,8 @@ test("every wiki path the boundary sends parses as the React app's wiki ref", ()
     const homeOrPublic = path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
     const invite = /^\/invite\/[^/]+\/?$/i.test(path);
     const setup = /^\/setup\/?$/i.test(path);
-    if (!gantt && !login && !homeOrPublic && !invite && !setup) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const auth = /^\/(reset-password|magic-link|confirm-email|cancel-withdraw|consent)\/?$/i.test(path);
+    if (!gantt && !login && !homeOrPublic && !invite && !setup && !auth) assert.equal(isVueAppPath(path), wiki !== null, path);
   }
 });
 

@@ -18,7 +18,18 @@ test("the Vue SSO slug form submits through startWorkspaceSso, never to the serv
 });
 
 test("the Vue login forms do not set method or action", () => {
-  for (const file of ["LoginForm.vue", "EmailActionForm.vue", "SsoSlugForm.vue", "MfaStep.vue", "InviteAcceptForm.vue"]) {
+  for (const file of [
+    "LoginForm.vue",
+    "EmailActionForm.vue",
+    "SsoSlugForm.vue",
+    "MfaStep.vue",
+    "InviteAcceptForm.vue",
+    "ResetPasswordView.vue",
+    "MagicLinkView.vue",
+    "ConfirmEmailView.vue",
+    "CancelWithdrawView.vue",
+    "ConsentView.vue",
+  ]) {
     assert.doesNotMatch(source(file), /\b(method|action)=/, file);
   }
 });
@@ -57,4 +68,37 @@ test("auth fields are uncontrolled (no v-model / :value)", () => {
   assert.doesNotMatch(field, /\bv-model\b/);
   assert.doesNotMatch(field, /:value=/);
   assert.match(field, /defineOptions\(\{\s*inheritAttrs:\s*false/);
+});
+
+test("the remaining auth pages call the React pages' APIs and do not consume on load", () => {
+  const reset = source("../../pages/ResetPasswordPage.vue");
+  assert.match(reset, /api\.POST\("\/api\/v1\/auth\/password-reset\/confirm"/);
+  assert.match(reset, /router\.replace\("\/login\?reset=1"\)/);
+  assert.match(reset, /redirectTo\("\/setup"\)/);
+  assert.doesNotMatch(reset, /from ["']react["']/);
+
+  const magic = source("../../pages/MagicLinkPage.vue");
+  assert.match(magic, /api\.POST\("\/api\/v1\/auth\/magic-link\/consume"/);
+  assert.match(magic, /window\.location\.replace\("\/"\)/);
+  assert.match(source("MagicLinkView.vue"), /@click="handleClick"/);
+  assert.doesNotMatch(source("MagicLinkView.vue"), /onMounted|watchEffect/);
+
+  const confirm = source("../../pages/ConfirmEmailPage.vue");
+  assert.match(confirm, /api\.POST\("\/api\/v1\/auth\/email\/confirm"/);
+  assert.match(confirm, /window\.location\.replace\("\/settings\/account\?email_changed=1"\)/);
+  assert.doesNotMatch(source("ConfirmEmailView.vue"), /onMounted|watchEffect/);
+
+  const cancel = source("../../pages/CancelWithdrawPage.vue");
+  assert.match(cancel, /parseErasureHash\(route\.hash\)/);
+  assert.match(cancel, /api\.POST\("\/api\/v1\/auth\/cancel-withdraw"/);
+  assert.match(cancel, /window\.history\.replaceState\(null, "", "\/cancel-withdraw"\)/);
+  assert.doesNotMatch(source("CancelWithdrawView.vue"), /onMounted/);
+
+  const consent = source("../../pages/ConsentPage.vue");
+  assert.match(consent, /api\.GET\("\/api\/v1\/auth\/consents\/pending"\)/);
+  assert.match(consent, /api\.POST\("\/api\/v1\/auth\/consents"/);
+  assert.match(consent, /window\.location\.assign\(returnTo\.value\)/);
+  assert.match(consent, /err\.status === 401/);
+  assert.doesNotMatch(consent, /from ["']react["']/);
+  assert.doesNotMatch(consent, /from ["']@tanstack\/react-query["']/);
 });

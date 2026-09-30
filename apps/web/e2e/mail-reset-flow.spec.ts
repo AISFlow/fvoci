@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { authSql, expectVueAuth, rejectMagicVariants, tokenHash } from "./auth-link-evidence";
 import { waitForCapturedMail } from "./helpers";
 
 const owner = {
@@ -63,11 +64,22 @@ test("invitation email is delivered and password reset uses the captured link", 
   expect(tokenMatch?.[1]).toBeTruthy();
   const token = tokenMatch![1];
 
+  await rejectMagicVariants(page, "/reset-password", token, async () => {
+    await page.getByLabel("새 비밀번호").fill(owner.newPassword);
+    await page.getByRole("button", { name: "비밀번호 변경" }).click();
+  });
   await page.goto(`/reset-password?token=${token}`);
+  await expectVueAuth(page);
   await expect(page.getByRole("heading", { name: "비밀번호 재설정" })).toBeVisible();
   await page.getByLabel("새 비밀번호").fill(owner.newPassword);
   await page.getByRole("button", { name: "비밀번호 변경" }).click();
   await expect(page).toHaveURL(/\/login\?reset=1/);
+  expect(authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${tokenHash(token)}'`)).toBe("0");
+  const replay = await page.request.post("/api/v1/auth/password-reset/confirm", {
+    data: { token, newPassword: owner.newPassword },
+  });
+  expect(replay.status()).toBe(400);
+  expect((await replay.json()).code).toBe("magic_invalid");
   await expect(
     page.getByRole("status").filter({ hasText: "비밀번호가 재설정되었습니다" }),
   ).toBeVisible();

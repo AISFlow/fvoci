@@ -21,6 +21,12 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   // that the React router decodes to one of these (percent-encoded) reach
   // WorkspaceRefPage, which reloads the canonical path.
   /^\/w\/[^/]+\/wiki-[1-9]\d{0,8}\/?$/i,
+  // Auth links consume tokens only after an explicit submission.
+  /^\/reset-password\/?$/i,
+  /^\/magic-link\/?$/i,
+  /^\/confirm-email\/?$/i,
+  /^\/cancel-withdraw\/?$/i,
+  /^\/consent\/?$/i,
   // Login: logout landing, MFA step, OIDC error query. Trailing slash and
   // any case, matching vue-router; /login/extra and /logins stay React.
   /^\/login\/?$/i,

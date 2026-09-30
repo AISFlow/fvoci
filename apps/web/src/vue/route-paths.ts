@@ -8,6 +8,11 @@ export const VUE_ROUTE_PATHS = {
   // case-insensitively, as the boundary does.
   wikiDocument: "/w/:slug/:ref(wiki-[1-9]\\d{0,8})",
   login: "/login",
+  resetPassword: "/reset-password",
+  magicLink: "/magic-link",
+  confirmEmail: "/confirm-email",
+  cancelWithdraw: "/cancel-withdraw",
+  consent: "/consent",
   home: "/",
   legal: "/legal/:kind",
   serviceInfo: "/service-info",
