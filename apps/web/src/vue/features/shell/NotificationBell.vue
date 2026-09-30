@@ -83,10 +83,16 @@ function onReadAll(): void {
       <div v-if="listFailed" class="p-3">
         <QueryError :message="loadErrorMessage(listError)" @retry="bell.list.refetch()" />
       </div>
-      <p v-if="!listPending && !listFailed && items.length === 0" class="m-0 p-3 text-sm text-muted">
+      <p
+        v-if="!listPending && !listFailed && items.length === 0"
+        class="m-0 p-3 text-sm text-muted"
+      >
         {{ t("notif.empty") }}
       </p>
-      <ul v-if="items.length > 0" class="m-0 max-h-[min(24rem,60vh)] list-none overflow-auto px-0 py-1">
+      <ul
+        v-if="items.length > 0"
+        class="m-0 max-h-[min(24rem,60vh)] list-none overflow-auto px-0 py-1"
+      >
         <li v-for="item in items" :key="item.id">
           <button
             type="button"
@@ -95,14 +101,19 @@ function onReadAll(): void {
           >
             <span
               aria-hidden="true"
-              :class="['mt-1.5 size-1.5 shrink-0 rounded-full', item.readAt ? 'bg-transparent' : 'bg-primary']"
+              :class="[
+                'mt-1.5 size-1.5 shrink-0 rounded-full',
+                item.readAt ? 'bg-transparent' : 'bg-primary',
+              ]"
             />
             <span>{{ bell.message(item) }}</span>
           </button>
         </li>
       </ul>
       <div class="flex items-center gap-2 border-t border-default px-3 py-2 text-sm">
-        <a :href="notificationsPath(slug)" class="underline underline-offset-2">{{ t("notif.viewAll") }}</a>
+        <a :href="notificationsPath(slug)" class="underline underline-offset-2">{{
+          t("notif.viewAll")
+        }}</a>
       </div>
     </div>
   </div>

@@ -31,18 +31,26 @@ const BROWSER: SessionEnvironment = {
  * Unlike the React layout, only a 401 from /auth/me counts as signed out;
  * another failure (network, 5xx) shows a retry instead of the login page.
  */
-export function useWorkspaceSession(slug: MaybeRefOrGetter<string>, env: SessionEnvironment = BROWSER) {
+export function useWorkspaceSession(
+  slug: MaybeRefOrGetter<string>,
+  env: SessionEnvironment = BROWSER,
+) {
   const queryClient = useQueryClient();
   const setup = useQuery(setupStatusQuery);
   const me = useQuery(meQuery);
   const workspaces = useQuery(workspacesQuery);
-  const workspace = computed(() => workspaces.data.value?.items.find((item) => item.slug === toValue(slug)));
+  const workspace = computed(() =>
+    workspaces.data.value?.items.find((item) => item.slug === toValue(slug)),
+  );
 
-  const signedOut = computed(() => me.error.value instanceof ProblemError && me.error.value.status === 401);
+  const signedOut = computed(
+    () => me.error.value instanceof ProblemError && me.error.value.status === 401,
+  );
   // Signed in (a cached `me` counts: a failed refetch keeps it) and a fresh
   // list without this workspace: the user cannot see it.
   const denied = computed(
-    () => me.data.value !== undefined && workspaces.isSuccess.value && workspace.value === undefined,
+    () =>
+      me.data.value !== undefined && workspaces.isSuccess.value && workspace.value === undefined,
   );
 
   let requestedRedirect: string | undefined;
@@ -76,7 +84,8 @@ export function useWorkspaceSession(slug: MaybeRefOrGetter<string>, env: Session
         onAccessChange: async () => {
           try {
             const list = await queryClient.fetchQuery({ ...workspacesQuery, staleTime: 0 });
-            if (!list.items.some((item) => item.id === workspaceId)) env.redirect("/?denied=workspace");
+            if (!list.items.some((item) => item.id === workspaceId))
+              env.redirect("/?denied=workspace");
           } catch {
             // A transport or list failure alone must not evict the page.
           }

@@ -22,9 +22,13 @@ export function useEffectAfterRender(
     mounted = true;
     run();
   });
-  watch(sources, () => {
-    if (mounted) run();
-  }, { flush: "post" });
+  watch(
+    sources,
+    () => {
+      if (mounted) run();
+    },
+    { flush: "post" },
+  );
   onUnmounted(() => {
     mounted = false;
     if (cleanup) cleanup();

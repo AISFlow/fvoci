@@ -35,7 +35,8 @@ export function useZodForm<T extends FieldValues, O>(options: {
     const next: Partial<Record<string, string>> = {};
     for (const issue of parsed.error.issues) {
       const field = issue.path[0];
-      if (typeof field === "string" && next[field] === undefined) next[field] = issueMessage(issue.message);
+      if (typeof field === "string" && next[field] === undefined)
+        next[field] = issueMessage(issue.message);
     }
     errors.value = next as Partial<Record<keyof T & string, string>>;
     return { ok: false };

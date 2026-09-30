@@ -1,5 +1,13 @@
 import { useQuery } from "@tanstack/vue-query";
-import { computed, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter, type Ref } from "vue";
+import {
+  computed,
+  onScopeDispose,
+  ref,
+  toValue,
+  watch,
+  type MaybeRefOrGetter,
+  type Ref,
+} from "vue";
 import type { SearchResult } from "@/features/workspace/search-target";
 import { searchQuery } from "@/lib/queries";
 
@@ -31,7 +39,10 @@ export function useSearchShortcut(open: Ref<boolean>, target: KeyTarget): void {
 }
 
 /** `source`, trimmed, once it has not changed for `ms`. */
-export function useDebouncedTrim(source: Ref<string>, ms: number = SEARCH_DEBOUNCE_MS): Readonly<Ref<string>> {
+export function useDebouncedTrim(
+  source: Ref<string>,
+  ms: number = SEARCH_DEBOUNCE_MS,
+): Readonly<Ref<string>> {
   const settled = ref(source.value.trim());
   watch(source, (value, _previous, onCleanup) => {
     const handle = setTimeout(() => {

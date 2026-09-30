@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { computed, nextTick, ref, useId, useTemplateRef, watch, type ComponentPublicInstance } from "vue";
+import {
+  computed,
+  nextTick,
+  ref,
+  useId,
+  useTemplateRef,
+  watch,
+  type ComponentPublicInstance,
+} from "vue";
 import NativeModal from "./NativeModal.vue";
 import "@/features/projects/projects.css";
 
@@ -26,7 +34,11 @@ const titleId = useId();
 const confirmBtn = useTemplateRef<ComponentPublicInstance>("confirmBtn");
 
 const triggerColor = computed(() =>
-  props.triggerVariant === "destructive" ? "error" : props.triggerVariant === "outline" ? "neutral" : "primary",
+  props.triggerVariant === "destructive"
+    ? "error"
+    : props.triggerVariant === "outline"
+      ? "neutral"
+      : "primary",
 );
 const triggerVariant = computed(() => (props.triggerVariant === "outline" ? "outline" : "solid"));
 

@@ -50,7 +50,9 @@ function logoutEnvironment(answer: () => Promise<{ response: { ok: boolean; stat
 }
 
 test("logout: a signed-out session leaves for the login page", async () => {
-  const { env, redirects } = logoutEnvironment(async () => ({ response: { ok: true, status: 200 } }));
+  const { env, redirects } = logoutEnvironment(async () => ({
+    response: { ok: true, status: 200 },
+  }));
   const { error, logout } = useLogout(env);
   await logout();
   assert.equal(error.value, null);
@@ -69,7 +71,9 @@ test("logout: a transport failure stays on the page with the network message", a
 
 test("logout: a refused logout says so, and a retry that succeeds clears it", async () => {
   let ok = false;
-  const { env, redirects } = logoutEnvironment(async () => ({ response: { ok, status: ok ? 200 : 500 } }));
+  const { env, redirects } = logoutEnvironment(async () => ({
+    response: { ok, status: ok ? 200 : 500 },
+  }));
   const { error, logout } = useLogout(env);
   await logout();
   assert.equal(error.value, t("error.auth.logout"));
@@ -102,7 +106,11 @@ test("search shortcut: Ctrl+K or Cmd+K opens, Escape closes an open palette", ()
 
     const escapeClosed = key({ key: "Escape" });
     target.dispatchEvent(escapeClosed);
-    assert.equal(escapeClosed.defaultPrevented, false, "Escape is left alone while the palette is closed");
+    assert.equal(
+      escapeClosed.defaultPrevented,
+      false,
+      "Escape is left alone while the palette is closed",
+    );
 
     const alreadyHandled = key({ key: "k", ctrlKey: true });
     alreadyHandled.preventDefault();
@@ -158,7 +166,10 @@ test("search palette: searches every kind in hybrid mode, and nothing for an emp
     result.draft.value = "  계획  ";
     await until(() => result.q.value === "계획", "the query to settle");
     const key = ["search", WORKSPACE_ID, "계획", "all", "", "", "hybrid"];
-    await until(() => client.getQueryCache().find({ queryKey: key, exact: true }) !== undefined, "the search");
+    await until(
+      () => client.getQueryCache().find({ queryKey: key, exact: true }) !== undefined,
+      "the search",
+    );
     await until(() => result.results.isError.value, "the search to fail without a server");
     assert.deepEqual(result.items.value, []);
   } finally {
@@ -193,7 +204,11 @@ function notification(overrides: Partial<NotificationItem>): NotificationItem {
 function mountBell(client: QueryClient) {
   const navigations: string[] = [];
   const mounted = mount(client, () =>
-    useNotificationBell({ workspaceId: WORKSPACE_ID, slug: SLUG, navigate: (path) => navigations.push(path) }),
+    useNotificationBell({
+      workspaceId: WORKSPACE_ID,
+      slug: SLUG,
+      navigate: (path) => navigations.push(path),
+    }),
   );
   return { ...mounted, navigations };
 }

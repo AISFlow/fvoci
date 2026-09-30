@@ -9,7 +9,8 @@ import { VUE_ROUTE_PATHS } from "./route-paths.ts";
 
 // Feature grammars stay exact; the SPA fallback is owned separately below.
 const featureRouter = createAppRouter(createMemoryHistory());
-const matchesFeaturePath = (path: string) => !["workspace-ref", "unknown-path"].includes(String(featureRouter.resolve(path).name));
+const matchesFeaturePath = (path: string) =>
+  !["workspace-ref", "unknown-path"].includes(String(featureRouter.resolve(path).name));
 
 const SAMPLES = [
   "/w/acme/GNT/gantt",
@@ -135,12 +136,25 @@ const SAMPLES = [
   "/w/acme/Search",
   "/w/acme/PRJ-1",
   "/w//WIKI-1",
-  "/w/acme/projects", "/w/acme/PROJECTS/", "/w/acme/search", "/w/acme/settings",
-  "/w/acme/my-tasks", "/w/acme/notifications", "/w/acme/trash", "/w/acme/a",
-  "/w/acme/OPS-DEV", "/w/acme/OPS-DEV-1", "/w/acme/PRJ-01", "/w/acme/PRJ-0",
-  "/w/acme/GNT/table", "/w/acme/GNT/board", "/w/acme/GNT/calendar/",
-  "/w/acme/GNT/settings/fields", "/w/acme/GNT/settings/workflow",
-  "/w/acme/%47NT", "/w/acme/%47NT-1",
+  "/w/acme/projects",
+  "/w/acme/PROJECTS/",
+  "/w/acme/search",
+  "/w/acme/settings",
+  "/w/acme/my-tasks",
+  "/w/acme/notifications",
+  "/w/acme/trash",
+  "/w/acme/a",
+  "/w/acme/OPS-DEV",
+  "/w/acme/OPS-DEV-1",
+  "/w/acme/PRJ-01",
+  "/w/acme/PRJ-0",
+  "/w/acme/GNT/table",
+  "/w/acme/GNT/board",
+  "/w/acme/GNT/calendar/",
+  "/w/acme/GNT/settings/fields",
+  "/w/acme/GNT/settings/workflow",
+  "/w/acme/%47NT",
+  "/w/acme/%47NT-1",
 ];
 
 test("the feature grammar matches the Gantt path alongside connected project flows, to the Vue app", () => {
@@ -215,46 +229,115 @@ test("single-segment resource routes agree with the shared ref grammar", () => {
     // React Router matches /w/:slug in any case, as the boundary does.
     const ref = /^\/w\/[^/]+\/([^/]+)\/?$/i.exec(path)?.[1];
     const resource = ref ? parseRef(ref) : null;
-    const projectView = /\/(gantt|tasks|table|board|calendar)\/?$/i.test(path) || /\/settings\/(fields|workflow)\/?$/i.test(path);
+    const projectView =
+      /\/(gantt|tasks|table|board|calendar)\/?$/i.test(path) ||
+      /\/settings\/(fields|workflow)\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
-    const homeOrPublic = /^\/s\/[^/]+\/?$/i.test(path) || path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
+    const homeOrPublic =
+      /^\/s\/[^/]+\/?$/i.test(path) ||
+      path === "/" ||
+      /^\/legal\/[^/]+\/?$/i.test(path) ||
+      /^\/service-info\/?$/i.test(path);
     const invite = /^\/invite\/[^/]+\/?$/i.test(path);
     const setup = /^\/setup\/?$/i.test(path);
-    const auth = /^\/(reset-password|magic-link|confirm-email|cancel-withdraw|consent)\/?$/i.test(path);
-    const attachment = /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
+    const auth = /^\/(reset-password|magic-link|confirm-email|cancel-withdraw|consent)\/?$/i.test(
+      path,
+    );
+    const attachment =
+      /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
       /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i.test(path);
-    const workspaceSection = /^\/w\/[^/]+(?:\/(?:projects|wiki|search|my-tasks|notifications|trash))?\/?$/i.test(path);
-    if (!/^\/settings\/(account|admin|audit|legal)\/?$/i.test(path) && !/^\/w\/[^/]+\/settings(?:\/(document-tags|templates))?\/?$/i.test(path) && !workspaceSection && !projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(matchesFeaturePath(path), resource !== null, path);
+    const workspaceSection =
+      /^\/w\/[^/]+(?:\/(?:projects|wiki|search|my-tasks|notifications|trash))?\/?$/i.test(path);
+    if (
+      !/^\/settings\/(account|admin|audit|legal)\/?$/i.test(path) &&
+      !/^\/w\/[^/]+\/settings(?:\/(document-tags|templates))?\/?$/i.test(path) &&
+      !workspaceSection &&
+      !projectView &&
+      !login &&
+      !homeOrPublic &&
+      !invite &&
+      !setup &&
+      !auth &&
+      !attachment
+    )
+      assert.equal(matchesFeaturePath(path), resource !== null, path);
   }
 });
 
 test("home, public and exact admin pages enter Vue", () => {
-  for (const path of ["/", "/legal/terms", "/legal/privacy/", "/LEGAL/unknown", "/service-info", "/SERVICE-INFO/", "/settings/legal", "/settings/admin", "/settings/audit", "/settings/account"]) {
+  for (const path of [
+    "/",
+    "/legal/terms",
+    "/legal/privacy/",
+    "/LEGAL/unknown",
+    "/service-info",
+    "/SERVICE-INFO/",
+    "/settings/legal",
+    "/settings/admin",
+    "/settings/audit",
+    "/settings/account",
+  ]) {
     assert.equal(matchesFeaturePath(path), true, path);
   }
-  for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal/extra"]) {
+  for (const path of [
+    "/legal",
+    "/legal/terms/extra",
+    "/service-infos",
+    "/service-info/extra",
+    "/settings/legal/extra",
+  ]) {
     assert.equal(matchesFeaturePath(path), false, path);
   }
 });
 
 test("workspace navigation owns exact section paths and excludes nested private flows", () => {
-  for (const section of ["", "/projects", "/wiki", "/search", "/my-tasks", "/notifications", "/trash"]) {
+  for (const section of [
+    "",
+    "/projects",
+    "/wiki",
+    "/search",
+    "/my-tasks",
+    "/notifications",
+    "/trash",
+  ]) {
     const path = `/w/acme${section}`;
     assert.equal(matchesFeaturePath(path), true, path);
     assert.equal(matchesFeaturePath(`${path}/`.toUpperCase()), true, path);
   }
-  for (const path of ["/w", "/w//", "/w/acme/wiki/extra", "/w/acme/search/extra", "/settings/account/extra"]) {
+  for (const path of [
+    "/w",
+    "/w//",
+    "/w/acme/wiki/extra",
+    "/w/acme/search/extra",
+    "/settings/account/extra",
+  ]) {
     assert.equal(matchesFeaturePath(path), false, path);
   }
 });
 
 test("attachment viewers and exact public share match Vue feature paths", () => {
-  for (const path of ["/w/acme/a/123/view", "/w/acme/a/123/view/", "/W/acme/A/123/VIEW",
-    "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View", "/s/tok", "/S/tok/"]) {
+  for (const path of [
+    "/w/acme/a/123/view",
+    "/w/acme/a/123/view/",
+    "/W/acme/A/123/VIEW",
+    "/s/tok/attachments/123/view",
+    "/s/tok/attachments/123/view/",
+    "/S/tok/attachments/123/View",
+    "/s/tok",
+    "/S/tok/",
+  ]) {
     assert.equal(matchesFeaturePath(path), true, path);
   }
-  for (const path of ["/s/tok/extra", "/settings/admin/extra", "/settings/audit/extra", "/settings/legal/extra",
-    "/w/acme/a/123", "/w/acme/a/123/view/extra", "/s/tok/attachments/123", "/s/tok/attachments/123/view/extra"]) {
+  for (const path of [
+    "/s/tok/extra",
+    "/settings/admin/extra",
+    "/settings/audit/extra",
+    "/settings/legal/extra",
+    "/w/acme/a/123",
+    "/w/acme/a/123/view/extra",
+    "/s/tok/attachments/123",
+    "/s/tok/attachments/123/view/extra",
+  ]) {
     assert.equal(matchesFeaturePath(path), false, path);
   }
 });
@@ -269,7 +352,9 @@ test("the Vue router matches exactly the paths the boundary sends it", () => {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
-      ...Object.values(VUE_ROUTE_PATHS).filter(path => path !== VUE_ROUTE_PATHS.workspaceRef).map((path) => ({ path, component: {} })),
+      ...Object.values(VUE_ROUTE_PATHS)
+        .filter((path) => path !== VUE_ROUTE_PATHS.workspaceRef)
+        .map((path) => ({ path, component: {} })),
       // Check the exact feature grammars independently of Vue's fallback.
       { path: "/:pathMatch(.*)*", name: "feature-fallback", component: {} },
     ],
@@ -296,7 +381,8 @@ test("workspace settings owns only its exact three supported pages", () => {
   }
 });
 
- test("Vue owns local fallback paths as well as every feature grammar", () => {
+test("Vue owns local fallback paths as well as every feature grammar", () => {
   for (const path of SAMPLES) assert.equal(ownsVuePath(path), true, path);
-  for (const path of ["", "https://example.com/", "//example.com/"]) assert.equal(ownsVuePath(path), false, path);
+  for (const path of ["", "https://example.com/", "//example.com/"])
+    assert.equal(ownsVuePath(path), false, path);
 });

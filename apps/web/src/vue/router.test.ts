@@ -12,7 +12,9 @@ function withLocation(run: (loads: string[]) => Promise<void>): () => Promise<vo
   return async () => {
     const loads: string[] = [];
     const previous = (globalThis as { window?: unknown }).window;
-    (globalThis as { window?: unknown }).window = { location: { replace: (url: string) => loads.push(url) } };
+    (globalThis as { window?: unknown }).window = {
+      location: { replace: (url: string) => loads.push(url) },
+    };
     try {
       await run(loads);
     } finally {
@@ -25,7 +27,9 @@ test(
   "unknown nested paths replace with home without a full load",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
-    router.getRoutes().find(record => record.name === "home")!.components = { default: { render: () => null } };
+    router.getRoutes().find((record) => record.name === "home")!.components = {
+      default: { render: () => null },
+    };
     await router.push("/settings/account/extra");
     assert.equal(router.currentRoute.value.path, "/");
     assert.deepEqual(loads, []);
@@ -109,7 +113,17 @@ test(
       router.removeRoute(route.name!);
       router.addRoute({ path: route.path, name: route.name, component: { render: () => null } });
     }
-    for (const path of ["/setup", "/", "/invite/tok", "/legal/terms?version=1", "/service-info", "/s/tok?search=hello#reader", "/settings/account", "/settings/admin", "/settings/audit"]) {
+    for (const path of [
+      "/setup",
+      "/",
+      "/invite/tok",
+      "/legal/terms?version=1",
+      "/service-info",
+      "/s/tok?search=hello#reader",
+      "/settings/account",
+      "/settings/admin",
+      "/settings/audit",
+    ]) {
       await router.push(path);
       assert.deepEqual(loads, [], path);
     }
@@ -122,14 +136,22 @@ test(
   "fallback navigation still honors aborted and superseded page guards",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
-    for (const record of router.getRoutes()) if (record.components) record.components = { default: { render: () => null } };
+    for (const record of router.getRoutes())
+      if (record.components) record.components = { default: { render: () => null } };
     await router.push("/w/acme/projects");
     let release = () => {};
     let entered = () => {};
-    const waiting = new Promise<void>(resolve => { entered = resolve; });
-    router.beforeEach(to => {
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    router.beforeEach((to) => {
       if (to.path === "/") return false;
-      if (to.path === "/w/acme/slow!") { entered(); return new Promise<void>(resolve => { release = resolve; }); }
+      if (to.path === "/w/acme/slow!") {
+        entered();
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
       return true;
     });
     assert.ok(await router.push("/unknown/nested"));
@@ -147,10 +169,7 @@ test(
 test("wiki list and search are live Vue routes", () => {
   assert.equal(VUE_WORKSPACE_ROUTE_PATHS.wikiList, "/w/:slug/wiki");
   assert.equal(VUE_WORKSPACE_ROUTE_PATHS.search, "/w/:slug/search");
-  assert.equal(
-    Object.values(VUE_ROUTE_PATHS).includes(VUE_WORKSPACE_ROUTE_PATHS.wikiList),
-    true,
-  );
+  assert.equal(Object.values(VUE_ROUTE_PATHS).includes(VUE_WORKSPACE_ROUTE_PATHS.wikiList), true);
   assert.equal(Object.values(VUE_ROUTE_PATHS).includes(VUE_WORKSPACE_ROUTE_PATHS.search), true);
 });
 
@@ -193,7 +212,9 @@ test("my-tasks, notifications, and trash are live Vue paths", () => {
     true,
   );
   assert.equal(
-    routes.some((route) => route.name === "notifications" && route.path === VUE_NAV_ROUTE_PATHS.notifications),
+    routes.some(
+      (route) => route.name === "notifications" && route.path === VUE_NAV_ROUTE_PATHS.notifications,
+    ),
     true,
   );
   assert.equal(
@@ -218,7 +239,11 @@ test(
     // what we need, and it runs after a completed navigation.
     const dummy = { render: () => null };
     for (const record of router.getRoutes()) {
-      if (record.name === "my-tasks" || record.name === "notifications" || record.name === "trash") {
+      if (
+        record.name === "my-tasks" ||
+        record.name === "notifications" ||
+        record.name === "trash"
+      ) {
         record.components = { default: dummy };
       }
     }
@@ -303,7 +328,10 @@ test("workspace-item is more specific than project-home; wiki stays wiki", () =>
 test("workspace settings routes are live Vue paths", () => {
   const router = createAppRouter(createMemoryHistory());
   assert.equal(router.resolve("/w/acme/settings").name, "workspace-settings");
-  assert.equal(router.resolve("/w/acme/settings/document-tags").name, "workspace-settings-document-tags");
+  assert.equal(
+    router.resolve("/w/acme/settings/document-tags").name,
+    "workspace-settings-document-tags",
+  );
   assert.equal(router.resolve("/w/acme/settings/templates").name, "workspace-settings-templates");
   // Boot and router agree on these exact settings paths.
   assert.equal(isVueAppPath("/w/acme/settings"), true);
@@ -319,18 +347,31 @@ test("project fields and workflow settings resolve to their own lazy pages", () 
 
 test("decoded and invalid single-segment refs reach the guarded fallback, exact sections retain precedence", () => {
   const router = createAppRouter(createMemoryHistory());
-  for (const path of ["/w/acme/%47NT", "/w/acme/%20GNT%20", "/w/acme/%EF%BC%A7%EF%BC%AE%EF%BC%B4", "/w/acme/WIKI-01", "/w/acme/a", "/w/acme/bad!"]) assert.equal(router.resolve(path).name, "workspace-ref", path);
+  for (const path of [
+    "/w/acme/%47NT",
+    "/w/acme/%20GNT%20",
+    "/w/acme/%EF%BC%A7%EF%BC%AE%EF%BC%B4",
+    "/w/acme/WIKI-01",
+    "/w/acme/a",
+    "/w/acme/bad!",
+  ])
+    assert.equal(router.resolve(path).name, "workspace-ref", path);
   assert.equal(router.resolve("/w/acme/%47NT").params.ref, "GNT");
-  for (const path of ["/w/acme/wiki/extra", "/settings/account/extra"]) assert.equal(router.resolve(path).name, "unknown-path", path);
+  for (const path of ["/w/acme/wiki/extra", "/settings/account/extra"])
+    assert.equal(router.resolve(path).name, "unknown-path", path);
 });
 
 test("canonical ref replacement preserves the current query spelling and hash; edits serialize normally", async () => {
   const router = createAppRouter(createMemoryHistory());
-  for (const record of router.getRoutes()) if (record.components) record.components = { default: { render: () => null } };
+  for (const record of router.getRoutes())
+    if (record.components) record.components = { default: { render: () => null } };
   await router.push("/w/acme/%47NT?from=encoded%20ref&x=1&x=2#overview");
   const current = router.currentRoute.value;
   await router.replace({ path: "/w/acme/GNT", query: current.query, hash: current.hash });
-  assert.equal(router.currentRoute.value.fullPath, "/w/acme/GNT?from=encoded%20ref&x=1&x=2#overview");
+  assert.equal(
+    router.currentRoute.value.fullPath,
+    "/w/acme/GNT?from=encoded%20ref&x=1&x=2#overview",
+  );
   await router.replace({ path: "/w/acme/GNT", query: { from: "new value" } });
   assert.equal(router.currentRoute.value.fullPath, "/w/acme/GNT?from=new+value");
 });

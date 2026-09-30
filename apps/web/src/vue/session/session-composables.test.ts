@@ -40,7 +40,9 @@ async function until(condition: () => boolean, what: string): Promise<void> {
 
 /** Starts a fetch of `queryKey` that never settles, as a slow retry would. */
 function hangFetch(client: QueryClient, queryKey: readonly unknown[]): void {
-  void client.fetchQuery({ queryKey, queryFn: () => new Promise<never>(() => {}) }).catch(() => undefined);
+  void client
+    .fetchQuery({ queryKey, queryFn: () => new Promise<never>(() => {}) })
+    .catch(() => undefined);
 }
 
 const WORKSPACE = { id: "11111111-1111-7111-8111-111111111111", slug: "acme", name: "Acme" };
@@ -64,7 +66,9 @@ test("session: stays ready when refetches fail with cached data", async () => {
   const client = queryClient();
   seedSession(client);
   const redirects: string[] = [];
-  const { result, stop } = mount(client, () => useWorkspaceSession("acme", testEnvironment(redirects)));
+  const { result, stop } = mount(client, () =>
+    useWorkspaceSession("acme", testEnvironment(redirects)),
+  );
   try {
     assert.equal(result.status.value, "ready");
     await client.refetchQueries({ queryKey: ["me", "workspaces"] });
@@ -84,9 +88,14 @@ test("session: an error only when a failed query has nothing to show", async () 
   client.setQueryData(["setup", "status"], { needed: false });
   client.setQueryData(["me", "workspaces"], { items: [WORKSPACE] });
   const redirects: string[] = [];
-  const { result, stop } = mount(client, () => useWorkspaceSession("acme", testEnvironment(redirects)));
+  const { result, stop } = mount(client, () =>
+    useWorkspaceSession("acme", testEnvironment(redirects)),
+  );
   try {
-    await until(() => client.getQueryState(["auth", "me"])?.status === "error", "the me request to fail");
+    await until(
+      () => client.getQueryState(["auth", "me"])?.status === "error",
+      "the me request to fail",
+    );
     await until(() => result.status.value === "error", "the error status");
     // A transport failure is not a sign-out: no login redirect.
     assert.deepEqual(redirects, []);
@@ -98,10 +107,15 @@ test("session: an error only when a failed query has nothing to show", async () 
 test("session: late setup completion does not restart the signed-out redirect", async () => {
   const client = queryClient();
   let rejectMe!: (error: ProblemError) => void;
-  void client.fetchQuery({
-    queryKey: ["auth", "me"],
-    queryFn: () => new Promise<never>((_resolve, reject) => { rejectMe = reject; }),
-  }).catch(() => undefined);
+  void client
+    .fetchQuery({
+      queryKey: ["auth", "me"],
+      queryFn: () =>
+        new Promise<never>((_resolve, reject) => {
+          rejectMe = reject;
+        }),
+    })
+    .catch(() => undefined);
   // Keep the setup query pending until /auth/me has caused the redirect.
   hangFetch(client, ["setup", "status"]);
   const redirects: string[] = [];
@@ -114,7 +128,9 @@ test("session: late setup completion does not restart the signed-out redirect", 
     assert.equal(result.status.value, "loading");
     client.setQueryData(["setup", "status"], { needed: false });
     await nextTick();
-    assert.deepEqual(redirects, ["/login?returnTo=%2Fw%2Facme%2Fa%2Fpdf%2Fview%3Fchunk%3D0%23document"]);
+    assert.deepEqual(redirects, [
+      "/login?returnTo=%2Fw%2Facme%2Fa%2Fpdf%2Fview%3Fchunk%3D0%23document",
+    ]);
     assert.equal(result.status.value, "loading");
     // Deduplication must not suppress a different, higher-priority guard.
     client.setQueryData(["setup", "status"], { needed: true });
@@ -134,15 +150,21 @@ test("session: cached user 401 redirects and teardown closes the access subscrip
   const redirects: string[] = [];
   let closed = 0;
   const env = testEnvironment(redirects);
-  env.watchAccess = () => ({ close: () => { closed += 1; } });
+  env.watchAccess = () => ({
+    close: () => {
+      closed += 1;
+    },
+  });
   const { result, stop } = mount(client, () => useWorkspaceSession("acme", env));
   try {
     assert.equal(result.status.value, "ready");
-    await client.fetchQuery({
-      queryKey: ["auth", "me"],
-      staleTime: 0,
-      queryFn: () => Promise.reject(new ProblemError(401)),
-    }).catch(() => undefined);
+    await client
+      .fetchQuery({
+        queryKey: ["auth", "me"],
+        staleTime: 0,
+        queryFn: () => Promise.reject(new ProblemError(401)),
+      })
+      .catch(() => undefined);
     await nextTick();
     assert.equal(result.status.value, "loading");
     assert.deepEqual(redirects, ["/login?returnTo=%2Fw%2Facme%2FWIKI-1"]);
@@ -152,11 +174,13 @@ test("session: cached user 401 redirects and teardown closes the access subscrip
     client.setQueryData(["auth", "me"], ME);
     await nextTick();
     assert.equal(result.status.value, "ready");
-    await client.fetchQuery({
-      queryKey: ["auth", "me"],
-      staleTime: 0,
-      queryFn: () => Promise.reject(new ProblemError(401)),
-    }).catch(() => undefined);
+    await client
+      .fetchQuery({
+        queryKey: ["auth", "me"],
+        staleTime: 0,
+        queryFn: () => Promise.reject(new ProblemError(401)),
+      })
+      .catch(() => undefined);
     await nextTick();
     assert.deepEqual(redirects, [
       "/login?returnTo=%2Fw%2Facme%2FWIKI-1",
@@ -172,7 +196,9 @@ test("session: a failed me refetch plus a fresh list without the workspace redir
   const client = queryClient();
   seedSession(client);
   const redirects: string[] = [];
-  const { result, stop } = mount(client, () => useWorkspaceSession("acme", testEnvironment(redirects)));
+  const { result, stop } = mount(client, () =>
+    useWorkspaceSession("acme", testEnvironment(redirects)),
+  );
   try {
     await client.refetchQueries({ queryKey: ["auth", "me"] });
     assert.equal(client.getQueryState(["auth", "me"])?.status, "error");

@@ -110,10 +110,7 @@ export function collabRoomName(workspaceId: string, kind: "document" | "task", i
  * signed-in user's awareness identity; the room connects without it, but
  * presence and awareness wait for it.
  */
-export function useCollabRoom(
-  name: string,
-  user: MaybeRefOrGetter<CollabUser | null>,
-): CollabRoom {
+export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | null>): CollabRoom {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${window.location.host}/collab`;
   const doc = markRaw(new Y.Doc({ gc: false }));
@@ -186,7 +183,10 @@ export function useCollabRoom(
     window.setTimeout(() => generation.provider.destroy(), 0);
   }
 
-  function bindSession(provider: HocuspocusProvider, generation: number): ComputedRef<CollabRoomSession> {
+  function bindSession(
+    provider: HocuspocusProvider,
+    generation: number,
+  ): ComputedRef<CollabRoomSession> {
     const documentId = roomNameOf(provider);
     // WHY: #653 — a provider that already synced must not fold back to "not loaded".
     const synced = shallowRef(provider.synced);
@@ -224,7 +224,8 @@ export function useCollabRoom(
       unsent.value = number > 0;
     });
     listen("status", () => {
-      connectionStatus.value = provider.configuration.websocketProvider.status as CollabConnectionStatus;
+      connectionStatus.value = provider.configuration.websocketProvider
+        .status as CollabConnectionStatus;
     });
     listen("disconnect", () => {
       bind.value = syncPersistBind(bind.value, { provider, status: "disconnected", documentId });

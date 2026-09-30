@@ -8,7 +8,12 @@ import { nextTick, useTemplateRef, watch } from "vue";
 // ends on the dialog itself (the backdrop, outside its content) asks to
 // close too. A drag that starts inside the content does not.
 const props = withDefaults(
-  defineProps<{ open: boolean; labelledBy: string; dialogClass?: string; closeOnBackdrop?: boolean }>(),
+  defineProps<{
+    open: boolean;
+    labelledBy: string;
+    dialogClass?: string;
+    closeOnBackdrop?: boolean;
+  }>(),
   { dialogClass: "project-dialog", closeOnBackdrop: false },
 );
 const emit = defineEmits<{ close: [] }>();

@@ -10,7 +10,8 @@ import test from "node:test";
 
 const web = path.resolve(import.meta.dirname, "../..");
 const packages = path.resolve(web, "../../packages");
-const REACT = /^(react|react-dom|react-router-dom|@tanstack\/react-query|@hocuspocus\/provider-react|@tiptap\/react|@tiptap\/extension-drag-handle-react|@radix-ui\/[^/]+)(\/|$)/;
+const REACT =
+  /^(react|react-dom|react-router-dom|@tanstack\/react-query|@hocuspocus\/provider-react|@tiptap\/react|@tiptap\/extension-drag-handle-react|@radix-ui\/[^/]+)(\/|$)/;
 
 function packageEntry(name: "editor" | "i18n", subpath: string): string {
   const manifest = JSON.parse(readFileSync(path.join(packages, name, "package.json"), "utf8")) as {
@@ -32,7 +33,13 @@ function resolve(spec: string, from: string): string | null {
     return entry.endsWith(".css") ? null : entry;
   }
   base = base.replace(/\.js$/, "");
-  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, `${base}.vue`, path.join(base, "index.ts")]) {
+  for (const candidate of [
+    base,
+    `${base}.ts`,
+    `${base}.tsx`,
+    `${base}.vue`,
+    path.join(base, "index.ts"),
+  ]) {
     if (statSync(candidate, { throwIfNoEntry: false })?.isFile()) return candidate;
   }
   return null;
@@ -44,7 +51,11 @@ test("the Vue app's module graph imports no React module", () => {
   const walk = (file: string) => {
     if (seen.has(file)) return;
     seen.add(file);
-    assert.equal(file.endsWith(".tsx"), false, `a React component module: ${path.relative(web, file)}`);
+    assert.equal(
+      file.endsWith(".tsx"),
+      false,
+      `a React component module: ${path.relative(web, file)}`,
+    );
     const source = readFileSync(file, "utf8");
     for (const [, spec] of source.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
       if (!spec) continue;
@@ -73,8 +84,12 @@ test("the Vue app's module graph imports no React module", () => {
 // stylesheets belong to the wiki page's chunk: the Gantt page must not load
 // them. Type-only imports and import() calls are not static loads.
 const STATIC_IMPORT = /^\s*(?:import|export)\s+(?!type\s)(?:[^;'"]*?\sfrom\s*)?["']([^"']+)["']/gm;
-const EDITOR_STACK = /^(@fvoci\/editor|@tiptap\/|@hocuspocus\/|yjs|y-protocols|y-prosemirror|prosemirror-|katex)(\/|$)/;
-const EDITOR_FILES = [path.join(packages, "editor") + path.sep, path.join(web, "src/features/documents") + path.sep];
+const EDITOR_STACK =
+  /^(@fvoci\/editor|@tiptap\/|@hocuspocus\/|yjs|y-protocols|y-prosemirror|prosemirror-|katex)(\/|$)/;
+const EDITOR_FILES = [
+  path.join(packages, "editor") + path.sep,
+  path.join(web, "src/features/documents") + path.sep,
+];
 
 test("the Vue entry's static graph leaves the wiki editor to the wiki page's chunk", () => {
   const seen = new Set<string>();
@@ -88,7 +103,8 @@ test("the Vue entry's static graph leaves the wiki editor to the wiki page's chu
       if (EDITOR_STACK.test(spec)) found.push(`${spec} in ${path.relative(web, file)}`);
       const next = resolve(spec, file);
       if (!next) continue;
-      if (EDITOR_FILES.some((dir) => next.startsWith(dir))) found.push(`${path.relative(web, next)} from ${path.relative(web, file)}`);
+      if (EDITOR_FILES.some((dir) => next.startsWith(dir)))
+        found.push(`${path.relative(web, next)} from ${path.relative(web, file)}`);
       if (!next.endsWith(".css")) walk(next);
     }
   };
@@ -129,7 +145,11 @@ test("the Vue entry's static graph leaves the wiki editor to the wiki page's chu
     "TemplatesSettingsPage.vue",
     "PublicSharePage.vue",
   ]) {
-    assert.equal(seen.has(path.join(web, "src/vue/pages", page)), false, `${page} is a lazy route chunk`);
+    assert.equal(
+      seen.has(path.join(web, "src/vue/pages", page)),
+      false,
+      `${page} is a lazy route chunk`,
+    );
   }
   assert.deepEqual(found, []);
 });

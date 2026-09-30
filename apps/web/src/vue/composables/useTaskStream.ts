@@ -1,6 +1,9 @@
 import { useQueryClient } from "@tanstack/vue-query";
 import { toValue, watch, type MaybeRefOrGetter } from "vue";
-import { invalidateTaskCaches, invalidateTaskStreamResyncCaches } from "@/features/tasks/task-cache";
+import {
+  invalidateTaskCaches,
+  invalidateTaskStreamResyncCaches,
+} from "@/features/tasks/task-cache";
 import { subscribeTaskStream } from "@/lib/task-stream";
 
 /**

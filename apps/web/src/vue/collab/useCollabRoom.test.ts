@@ -43,7 +43,10 @@ test("useCollabRoom keeps Yjs and provider objects raw, never reactive", () => {
   assert.equal(/\breactive\(/.test(src), false);
   assert.equal(/\bref\(/.test(src), false, "shallowRef only");
   assert.match(src, /const doc = markRaw\(new Y\.Doc\(\{ gc: false \}\)\);/);
-  assert.match(src, /open: \(onClosed\) => markRaw\(createRefusalAwareSocket\(\{ url \}, onClosed\)\),/);
+  assert.match(
+    src,
+    /open: \(onClosed\) => markRaw\(createRefusalAwareSocket\(\{ url \}, onClosed\)\),/,
+  );
   assert.match(src, /const provider = markRaw\(\s*new HocuspocusProvider\(/);
 });
 
@@ -60,15 +63,24 @@ test("useCollabRoom hands the room's auth results to the connection state machin
 
 test("useCollabRoom re-binds only on a new socket generation, never on a refusal", () => {
   const src = source();
-  const watches = [...src.matchAll(/watch\(\s*\(\) => room\.value\.([a-zA-Z]+),/g)].map((m) => m[1]);
-  assert.deepEqual(watches, ["generation"], "a watch on anything a refusal changes re-binds per refusal");
+  const watches = [...src.matchAll(/watch\(\s*\(\) => room\.value\.([a-zA-Z]+),/g)].map(
+    (m) => m[1],
+  );
+  assert.deepEqual(
+    watches,
+    ["generation"],
+    "a watch on anything a refusal changes re-binds per refusal",
+  );
   assert.match(src, /reclaimLimit: CLAIM_RETRY_LIMIT,/);
   assert.match(src, /doc\.clientID = new Y\.Doc\(\)\.clientID;/);
 });
 
 test("useCollabRoom decides the session status with collabStatusOf only", () => {
   const session = between(source(), "function bindSession(", "bindGeneration(connection.state);");
-  assert.match(session, /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/);
+  assert.match(
+    session,
+    /status: collabStatusOf\(unauthorized\.value, room\.value\.refusal, connectionStatus\.value\),/,
+  );
   assert.match(session, /pending: unsent\.value && !readOnly\.value,/);
   assert.match(session, /durableSaved: isDurablySaved\(bind\.value\.ack\),/);
 });
@@ -78,7 +90,10 @@ test("useCollabRoom tears down: flush and socket first, then the provider after 
   const dispose = between(src, "onScopeDispose(() => {\n    disposed = true;", "return {");
   const flush = dispose.indexOf("connection.dispose();");
   const retire = dispose.indexOf("retire(last)");
-  assert.ok(flush !== -1 && retire !== -1 && flush < retire, "connection.dispose() runs before the provider is retired");
+  assert.ok(
+    flush !== -1 && retire !== -1 && flush < retire,
+    "connection.dispose() runs before the provider is retired",
+  );
   const retireFn = between(src, "function retire(", "function bindSession(");
   assert.match(retireFn, /generation\.scope\.stop\(\);/);
   assert.match(retireFn, /window\.setTimeout\(\(\) => generation\.provider\.destroy\(\), 0\);/);

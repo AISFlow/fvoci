@@ -7,8 +7,13 @@ import { LEGAL_DOCS } from "@/features/legal/legal-docs";
 </script>
 
 <template>
-  <nav class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted" :aria-label="t('operator.title')">
-    <a href="/service-info" class="underline underline-offset-2 hover:text-default">{{ t("operator.title") }}</a>
+  <nav
+    class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted"
+    :aria-label="t('operator.title')"
+  >
+    <a href="/service-info" class="underline underline-offset-2 hover:text-default">{{
+      t("operator.title")
+    }}</a>
     <a
       v-for="doc in LEGAL_DOCS"
       :key="doc.kind"
