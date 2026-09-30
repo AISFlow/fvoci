@@ -637,6 +637,11 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
     if (!editor) throw new Error("missing live editor for caret inspection");
     const offset = edge === "start" ? 0 : text.length;
     const position = editor.view.posAtDOM(text, offset);
+    // A click inside an edge glyph can land on either side of that glyph.
+    // Keep the fallback inside this text; document Home/End can cross empty tables.
+    const glyph = edge === "start" ? Array.from(text.data)[0] : Array.from(text.data).at(-1)!;
+    const adjacentOffset = edge === "start" ? glyph.length : text.length - glyph.length;
+    const adjacentPosition = editor.view.posAtDOM(text, adjacentOffset);
     text.parentElement?.scrollIntoView({ block: "center", inline: "nearest" });
     const range = document.createRange();
     if (edge === "start") {
@@ -667,10 +672,9 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
       x,
       y,
     });
-    return { x, y, position };
+    return { x, y, position, adjacentPosition };
   }, where);
-  // Click the first/last content glyph (PM pointer path). Control+Home/End then
-  // moves to the document edge if the click landed inside a table cell or wrap.
+  // Click the first/last content glyph through the real PM pointer path.
   // Do not use locator.focus()+Range: that races PM's 20ms focus restore.
   await page.mouse.click(target.x, target.y);
   await expect.poll(() => locator.evaluate((root) => {
@@ -687,7 +691,15 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
     return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
   });
   if (already?.[0] !== target.position || already[1] !== target.position) {
-    await page.keyboard.press(where === "start" ? "Control+Home" : "Control+End");
+    // Only correct the other side of the clicked glyph. An unrelated selection
+    // is an input defect and must fail rather than be repaired by this helper.
+    await expect.poll(() => locator.evaluate((root) => {
+      const editor = (root as HTMLElement & {
+        editor?: { state: { selection: { from: number; to: number } } };
+      }).editor;
+      return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
+    })).toEqual([target.adjacentPosition, target.adjacentPosition]);
+    await page.keyboard.press(where === "start" ? "ArrowLeft" : "ArrowRight");
   }
   await expect.poll(() => locator.evaluate((root) => {
     const editor = (root as HTMLElement & {

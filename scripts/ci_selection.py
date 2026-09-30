@@ -17,7 +17,7 @@ from typing import Literal
 ROOT = Path(__file__).resolve().parent.parent
 
 Mode = Literal["full", "narrow"]
-NarrowFamily = Literal["docs", "frontend_web_install"]
+NarrowFamily = Literal["docs", "frontend_web_install", "web_tests"]
 
 PLAN_VERSION = 3
 
@@ -137,6 +137,8 @@ _EXPLICIT_DOCS: frozenset[str] = frozenset(
         "README.md",
         "RUNNING.md",
         "docs/rewrite.md",
+        "docs/RELEASING.md",
+        "docs/collab-engine-comparison.md",
         "AGENTS.md",
         ".agents/environment.md",
     }
@@ -148,11 +150,34 @@ _WEB_BROADEN_PREFIXES: tuple[str, ...] = (
     "apps/web/src/generated/",
     "apps/web/package.json",
     "apps/web/playwright.config.ts",
-    "apps/web/e2e/",
-    "apps/web/e2e-pending/",
 )
 
 _FRONTEND_NARROW_PREFIX = "apps/web/src/"
+
+# Browser UI code consumed by Web unit/type checks, production browser builds,
+# and the install image. Other editor paths retain full validation: schema,
+# serialization, CRDT adapters and exports mirror Rust contracts; fonts are also
+# read by the native export child. Do not narrow the entire packages/ workspace
+# (i18n/ko.json is include_str! input to a Rust test).
+_EDITOR_UI_PREFIXES = ("packages/editor/src/react/", "packages/editor/src/vue/")
+_EDITOR_UI_EXACT = frozenset({
+    "packages/editor/src/clipboard.ts",
+    "packages/editor/src/gutter-actions.ts",
+    "packages/editor/src/menu-roving.ts",
+})
+_UI_SUFFIXES = (".ts", ".tsx", ".vue", ".css")
+
+# The browser suites exercise API/DB/CRDT behavior with the actual Rust server.
+# Only flat specs and reviewed UI helpers narrow. Fixtures, server lifecycle,
+# wire codecs/oracles, configs and arbitrary new harness files remain full.
+_BROWSER_SPEC_RE = re.compile(r"^apps/web/(?:e2e|e2e-pending)/[^/]+\.spec\.ts$")
+_BROWSER_UI_HELPERS = frozenset({
+    "apps/web/e2e/helpers.ts",
+    "apps/web/e2e/mfa-helpers.ts",
+    "apps/web/e2e/workspace-wiki-vue-editor.ts",
+    "apps/web/e2e-pending/collab-helpers.ts",
+    "apps/web/e2e-pending/collab-helpers.test.ts",
+})
 
 
 def _starts_with(path: str, prefix: str) -> bool:
@@ -200,8 +225,22 @@ def _script_lines(text: str) -> list[str]:
 
 
 def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unknown"]:
+    # Git paths are relative and canonical. Reject unexpected separators or
+    # traversal before any allowlist/prefix match, including synthetic inputs.
+    if not path or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
+        return "unknown"
     if path in _EXPLICIT_DOCS:
         return "docs"
+    if _BROWSER_SPEC_RE.fullmatch(path) or path in _BROWSER_UI_HELPERS:
+        return "web_tests"
+    if path == "packages/editor/src/react/schema.tsx":
+        return "broaden"
+    if path in _EDITOR_UI_EXACT or (
+        path.startswith(_EDITOR_UI_PREFIXES) and path.endswith(_UI_SUFFIXES)
+    ):
+        return "frontend_web_install"
+    if re.fullmatch(r"packages/editor/test/[^/]+\.test\.ts", path):
+        return "web_tests"
     if path in _BROADEN_EXACT:
         return "broaden"
     for prefix in _BROADEN_PREFIXES:
@@ -216,6 +255,10 @@ def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unk
         if _starts_with(path, prefix):
             return "broaden"
     if _starts_with(path, _FRONTEND_NARROW_PREFIX):
+        if not path.endswith(_UI_SUFFIXES):
+            return "broaden"
+        if path.endswith((".test.ts", ".test.tsx")):
+            return "web_tests"
         return "frontend_web_install"
     if _starts_with(path, "apps/web/"):
         return "broaden"
@@ -370,14 +413,23 @@ def git_commit_parents(repo: Path, sha: str) -> tuple[list[str] | None, str | No
 def pr_checkout_narrow_block(
     repo: Path, tested_sha: str, base_sha: str, head_sha: str
 ) -> str | None:
-    """Return a force-full reason when the tested commit is not the event merge."""
+    """Bind the tested merge to the exact PR head and a trusted base lineage.
+
+    GitHub can regenerate refs/pull/N/merge after the event base advanced. Only
+    a descendant of the event's trusted base may replace the first parent. The
+    caller must still classify both the cumulative PR and actual merge diffs.
+    """
     parents, err = git_commit_parents(repo, tested_sha)
     if err:
         return err
     if len(parents) != 2:
         return "FULL_PR_CHECKOUT_NOT_MERGE"
-    if parents[0] != base_sha or parents[1] != head_sha:
+    if parents[1] != head_sha:
         return "FULL_PR_MERGE_PARENTS_MISMATCH"
+    if parents[0] != base_sha:
+        ancestry = _git(repo, "merge-base", "--is-ancestor", base_sha, parents[0])
+        if ancestry.returncode != 0:
+            return "FULL_PR_MERGE_PARENTS_MISMATCH"
     return None
 
 
@@ -410,12 +462,14 @@ def decide_from_paths(paths: list[str]) -> SelectionDecision:
         if kind == "unknown":
             return SelectionDecision("full", "FULL_UNKNOWN_PATH", frozenset())
         families.add(kind)
-    if len(families) != 1:
-        return SelectionDecision("full", "FULL_MIXED_NARROW", frozenset())
-    family = next(iter(families))
-    if family == "docs":
-        return SelectionDecision("narrow", "NARROW_DOCS", frozenset({family}))
-    return SelectionDecision("narrow", "NARROW_FRONTEND_WEB_INSTALL", frozenset({family}))
+    # Known impact families compose by union; explanatory docs add no jobs.
+    if "frontend_web_install" in families:
+        reason = "NARROW_FRONTEND_WEB_INSTALL"
+    elif "web_tests" in families:
+        reason = "NARROW_WEB_TESTS"
+    else:
+        reason = "NARROW_DOCS"
+    return SelectionDecision("narrow", reason, frozenset(families))
 
 
 def workflow_job_selected(workflow: str, job: str, decision: SelectionDecision) -> bool:
@@ -423,14 +477,9 @@ def workflow_job_selected(workflow: str, job: str, decision: SelectionDecision) 
         return False
     if decision.mode == "full":
         return True
-    family = next(iter(decision.families))
-    if family == "docs":
-        return False
-    if family == "frontend_web_install":
-        if workflow in ("web", "install"):
-            return job in WORKFLOW_JOBS[workflow]
-        return False
-    return False
+    return (
+        workflow in ("web", "install") and "frontend_web_install" in decision.families
+    ) or (workflow == "web" and "web_tests" in decision.families)
 
 
 def build_plan(
@@ -578,6 +627,17 @@ def resolve_selection_inputs(
     paths, diff_err, merge_base = diff_paths_for_pr(repo, base_sha, head_sha)
     if diff_err:
         return ResolvedInputs(None, diff_err, None, base_sha, head_sha, merge_base, tested_sha)
+
+    # A merge can contain conflict resolutions or injected files absent from the
+    # PR head. Inspect the exact tested tree relative to its trusted first parent
+    # even when both parents equal the event. Never accept an external path list.
+    parents, parent_err = git_commit_parents(repo, tested_sha)
+    if parent_err:
+        return ResolvedInputs(None, parent_err, None, base_sha, head_sha, merge_base, tested_sha)
+    merged_paths, diff_err = git_diff_paths(repo, parents[0], tested_sha)
+    if diff_err:
+        return ResolvedInputs(None, diff_err, None, base_sha, head_sha, merge_base, tested_sha)
+    paths = sorted(set(paths or []) | set(merged_paths))
 
     return ResolvedInputs(paths, None, None, base_sha, head_sha, merge_base, tested_sha)
 
@@ -1250,6 +1310,11 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         if parse_err:
             errors.append(f"{workflow}: {parse_err}")
             continue
+        triggers = data.get("on", data.get(True))
+        if not isinstance(triggers, dict) or "pull_request" not in triggers:
+            errors.append(f"{workflow}: pull_request trigger is required for the stable gate")
+        elif triggers["pull_request"] is not None:
+            errors.append(f"{workflow}: pull_request must be unfiltered so required gates always run")
         jobs = data.get("jobs")
         if not isinstance(jobs, dict) or not jobs:
             errors.append(f"{workflow}: jobs mapping missing")
@@ -1279,6 +1344,21 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
 
         plan_job = jobs.get(PLAN_JOB_ID)
         if isinstance(plan_job, dict):
+            # The ancestry exception trusts only GitHub's merge SHA for this
+            # event. Pin that assumption to normal checkout (no alternate ref
+            # or repository) and prevent YAML from replacing the runner SHA.
+            plan_steps = plan_job.get("steps", [])
+            checkouts = [
+                step for step in plan_steps
+                if isinstance(step, dict) and str(step.get("uses", "")).startswith("actions/checkout@")
+            ] if isinstance(plan_steps, list) else []
+            if len(checkouts) != 1 or checkouts[0].get("with") != {"fetch-depth": 0}:
+                errors.append(f"{workflow}: ci-plan must checkout the event merge with fetch-depth: 0 and no ref override")
+            envs = [data.get("env"), plan_job.get("env")]
+            if isinstance(plan_steps, list):
+                envs.extend(step.get("env") for step in plan_steps if isinstance(step, dict))
+            if any(isinstance(env, dict) and "GITHUB_SHA" in env for env in envs):
+                errors.append(f"{workflow}: ci-plan must not override trusted GITHUB_SHA")
             if "if" in plan_job:
                 errors.append(f"{workflow}: {PLAN_JOB_ID} must not have an if condition")
             outputs = plan_job.get("outputs")

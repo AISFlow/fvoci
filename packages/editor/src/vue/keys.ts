@@ -18,3 +18,13 @@ export const urlEmbedKey: InjectionKey<UrlEmbedComponent | null> =
 /** Labels document, task and project embeds; null shows the stored reference. */
 export const entityResolverKey: InjectionKey<EntityResolver | null> =
 	Symbol("fvociEntityResolver");
+
+/**
+ * The code-block chrome's wrap/fold view options on the editor host
+ * (`data-code-wrap` / `data-code-folded`). `null` means the caret is not
+ * in a code block, so the attributes are omitted (react/code-block-chrome.tsx).
+ */
+export type CodeChromeHost = { wrap: boolean | null; folded: boolean | null };
+export const codeChromeHostKey: InjectionKey<CodeChromeHost> = Symbol(
+	"fvociCodeChromeHost",
+);

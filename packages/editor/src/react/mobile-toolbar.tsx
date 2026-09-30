@@ -2,7 +2,7 @@ import { t } from "@fvoci/i18n";
 import type { Editor } from "@tiptap/react";
 import type { ReactNode } from "react";
 import { FormatToolbar } from "./format-toolbar.js";
-import { insertSlashHere } from "./gutter-actions.js";
+import { insertSlashHere } from "../gutter-actions.js";
 import { Button } from "./tiptap-ui-primitive/button.js";
 
 export function isNarrowViewport(): boolean {
