@@ -142,12 +142,90 @@ const slotName = "default";
         self.assertNotEqual(run([*PRETTIER, "--check", str(self.directory / "missing.ts")]).returncode, 0)
 
     def test_browser_does_not_receive_node_or_bun_globals(self):
-        result = run([*ESLINT, "--print-config", "apps/web/src/vue/features/settings/toggle.ts"])
-        config = json.loads(result.stdout)
-        for name in ["Bun", "process", "Buffer", "require"]:
-            self.assertNotIn(name, config["languageOptions"]["globals"])
-        self.assertIn("window", config["languageOptions"]["globals"])
-        self.assertEqual(config["rules"]["@typescript-eslint/no-floating-promises"][1]["ignoreVoid"], False)
+        forbidden = {"Bun", "process", "Buffer", "require", "__dirname", "__filename",
+                     "module", "exports", "setImmediate", "clearImmediate"}
+        for path, environment in self.runtime_paths():
+            with self.subTest(path=path):
+                result = run([*ESLINT, "--print-config", path])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = json.loads(result.stdout)
+                declared = config["languageOptions"].get("globals", {})
+                self.assertFalse(forbidden.intersection(declared), declared)
+                runtime_rule = config["rules"]["no-restricted-globals"][1]
+                expected = forbidden | {"window"} if environment == "worker" else forbidden
+                self.assertEqual(set(runtime_rule["globals"]), expected)
+                self.assertTrue(runtime_rule["checkGlobalObject"])
+                if environment == "browser":
+                    self.assertIn("window", declared)
+                elif environment == "worker":
+                    self.assertIn("self", declared)
+                    self.assertIn("postMessage", declared)
+                    self.assertNotIn("window", declared)
+                if path.endswith(".ts"):
+                    self.assertEqual(config["rules"]["@typescript-eslint/no-floating-promises"][1]["ignoreVoid"], False)
+
+    @staticmethod
+    def runtime_paths():
+        return [
+            ("apps/web/src/vue/features/settings/toggle.ts", "browser"),
+            ("apps/web/src/features/attachments/hwp-worker.ts", "worker"),
+            ("apps/web/src/features/attachments/pptx-worker.ts", "worker"),
+            ("apps/web/src/features/attachments/xlsx-worker.ts", "worker"),
+            ("apps/web/public/sw.js", "worker"),
+            ("packages/i18n/src/index.ts", "library"),
+        ]
+
+    def test_browser_worker_and_i18n_reject_runtime_node_bun(self):
+        # Stdin with actual file paths exercises the real root config/projects
+        # without writing product files or replacing the parser/rule set.
+        negative = '''export const forbidden = [process.pid, Bun.version,
+Buffer.alloc(0), require("bad"), __dirname, __filename, module, exports,
+setImmediate, clearImmediate];'''
+        names = {"Bun", "process", "Buffer", "require", "__dirname", "__filename",
+                 "module", "exports", "setImmediate", "clearImmediate"}
+        for path, environment in self.runtime_paths():
+            with self.subTest(path=path):
+                positive = {
+                    "browser": "export const href = window.location.href;",
+                    "worker": 'self.postMessage("ready");',
+                    "library": "export const add = (left: number, right: number): number => left + right;",
+                }[environment]
+                args = [*ESLINT, "--stdin", "--stdin-filename", path,
+                        "--max-warnings=0", "--format=json"]
+                valid = run(args, input=positive)
+                self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+                invalid = run(args, input=negative)
+                report = json.loads(invalid.stdout)
+                self.assertNotEqual(invalid.returncode, 0, report)
+                self.assertEqual(sum(f["fatalErrorCount"] for f in report), 0, report)
+                restricted = [m for f in report for m in f["messages"]
+                              if m["ruleId"] == "no-restricted-globals"]
+                self.assertEqual({m["message"].split("'")[1] for m in restricted}, names, report)
+                self.assertTrue(all(m["severity"] == 2 for m in restricted))
+
+    def test_qualified_runtime_globals_and_local_names(self):
+        for path in ["apps/web/src/vue/features/settings/toggle.ts",
+                     "apps/web/src/features/attachments/hwp-worker.ts",
+                     "packages/i18n/src/index.ts"]:
+            with self.subTest(path=path):
+                args = [*ESLINT, "--stdin", "--stdin-filename", path,
+                        "--max-warnings=0", "--format=json"]
+                positive = '''export function local(process: { pid: number }): number { return process.pid; }
+export function localObject(window: { process: { pid: number } }): number { return window.process.pid; }
+export const label = { process: "local", Bun: "local" };'''
+                valid = run(args, input=positive)
+                self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+                negative = '''export const qualified = [globalThis.process.pid,
+window.process.pid, self.process.pid, globalThis.Bun.version,
+window.Bun.version, self.Bun.version];'''
+                invalid = run(args, input=negative)
+                report = json.loads(invalid.stdout)
+                self.assertNotEqual(invalid.returncode, 0, report)
+                self.assertEqual(sum(f["fatalErrorCount"] for f in report), 0, report)
+                restricted = [m for f in report for m in f["messages"]
+                              if m["ruleId"] == "no-restricted-globals"]
+                self.assertEqual(len(restricted), 6, report)
+                self.assertTrue(all(m["severity"] == 2 for m in restricted))
 
     def test_formatter_keeps_import_order_text_and_tailwind(self):
         source = 'import "./z.css";\nimport "./a.css";\nexport const value = 1;\n'
