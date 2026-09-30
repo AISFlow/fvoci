@@ -769,16 +769,17 @@ test("moving between five documents in the app keeps one room socket and every e
     // locator actionability after typing can miss the provider's 200 ms batch.
     await expect(link).toHaveAttribute("href", next.path);
     await link.click({ trial: true });
-    const box = await link.boundingBox();
-    expect(box).not.toBeNull();
-    const point = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
-    await page.mouse.move(point.x, point.y);
+    const anchor = await link.elementHandle();
+    expect(anchor).not.toBeNull();
     await expect(editor).toBeFocused();
     await page.keyboard.type(`떠나기 직전 ${i + 1}`);
     // An in-app move (a router link) inside the editor's 200 ms update batch.
-    // Native browser mouse input at the prepared link, with no intervening
-    // locator resolution, scroll, assertion or DOM-dispatched click.
-    await page.mouse.click(point.x, point.y);
+    // Typing may scroll the focused editor, invalidating viewport coordinates.
+    // Use the prepared anchor with current scroll/geometry and native mouse
+    // input, skipping repeated locator/actionability waits. The trusted-event
+    // and exact-href assertions below still reject a missed/intercepted click.
+    await anchor!.click({ force: true });
+    await anchor!.dispose();
     const gesture = await page.evaluate(() => {
       const marks = window as unknown as {
         lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
@@ -788,7 +789,7 @@ test("moving between five documents in the app keeps one room socket and every e
         gap: marks.lastLinkAt - marks.lastKeyAt, keyTrusted: marks.lastKeyTrusted,
         clickTrusted: marks.lastLinkTrusted, href: marks.lastLinkHref };
     });
-    gestures.push({ ...gesture, point });
+    gestures.push(gesture);
     gaps.push(gesture.gap);
     expect(gesture.keyTrusted).toBe(true);
     expect(gesture.clickTrusted).toBe(true);
