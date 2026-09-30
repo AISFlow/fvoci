@@ -57,7 +57,7 @@ const recentItems = computed(() =>
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name">
+  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="home">
     <div class="entrance">
       <h1 class="project-home__title">{{ workspace.name }}</h1>
       <WorkspaceEntrance

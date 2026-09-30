@@ -3,7 +3,7 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery } from "@tanstack/vue-query";
 import { computed } from "vue";
-import { landingPath } from "@/features/workspace/workspace-nav";
+import { landingPath, type WorkspaceNav } from "@/features/workspace/workspace-nav";
 import {
   myTasksPath,
   projectsPath,
@@ -29,7 +29,7 @@ const props = withDefaults(
     workspaceId: string;
     workspaceName: string;
     /** The section the page belongs to. */
-    active?: "wiki" | "projects" | "search" | "myTasks" | "notifications";
+    active?: WorkspaceNav;
   }>(),
   { active: "projects" },
 );
@@ -57,7 +57,7 @@ function onSwitch(event: Event): void {
       <div class="flex flex-wrap items-center gap-4">
         <a href="/" class="underline underline-offset-2">{{ t("nav.backHome") }}</a>
         <nav class="flex flex-wrap items-center gap-3" :aria-label="t('nav.workspace')">
-          <a :href="workspaceHomePath(slug)">{{ t("nav.home") }}</a>
+          <a :href="workspaceHomePath(slug)" :aria-current="active === 'home' ? 'page' : undefined">{{ t("nav.home") }}</a>
           <a
             :href="wikiPath(slug)"
             :class="active === 'wiki' ? 'font-medium text-highlighted' : undefined"
@@ -77,7 +77,7 @@ function onSwitch(event: Event): void {
             >{{ t("task.mine") }}</a
           >
           <a :href="searchPath(slug)" :aria-current="active === 'search' ? 'page' : undefined">{{ t("nav.search") }}</a>
-          <a :href="settingsPath(slug)">{{ t("nav.settings") }}</a>
+          <a :href="settingsPath(slug)" :aria-current="active === 'settings' ? 'page' : undefined">{{ t("nav.settings") }}</a>
         </nav>
       </div>
       <div class="flex flex-wrap items-center gap-3">
