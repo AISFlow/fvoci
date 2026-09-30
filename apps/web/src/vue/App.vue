@@ -9,7 +9,7 @@ import { applyTextScale } from "@/lib/ui-preferences";
 
 const route = useRoute();
 // Public policies and auth/token links remain readable without a gated me request.
-const privatePage = computed(() => /^(?:\/$|\/w\/|\/settings(?:\/|$))/i.test(route.path));
+const privatePage = computed(() => route.matched.length > 0 && /^(?:\/$|\/w\/|\/settings(?:\/|$))/i.test(route.path));
 const me = useQuery(() => ({ ...meQuery, enabled: privatePage.value }));
 watch(() => me.data.value?.textScale, (scale) => {
   if (scale !== undefined) applyTextScale(scale);
