@@ -29,6 +29,13 @@ const save = useMutation({
 const prefs = computed(() => prefsQuery.data.value);
 const saving = ref(false);
 
+function committedPreference(
+  key: "inApp" | "mailImmediate" | "mailDigest",
+  fallback: boolean,
+): boolean {
+  return prefs.value?.[key] ?? fallback;
+}
+
 async function changePreference(
   key: "inApp" | "mailImmediate" | "mailDigest",
   event: Event,
@@ -51,7 +58,7 @@ async function changePreference(
     // The mutation renders the problem below and keeps the committed value.
   } finally {
     saving.value = false;
-    input.checked = prefs.value?.[key] ?? current[key];
+    input.checked = committedPreference(key, current[key]);
   }
 }
 </script>

@@ -115,9 +115,9 @@ async function submit(key: SettingsKey, next: unknown): Promise<void> {
   } finally {
     saving.value = false;
   }
-  const rest = { ...draft.value };
-  delete rest[key];
-  draft.value = rest;
+  draft.value = Object.fromEntries(
+    Object.entries(draft.value).filter(([draftKey]) => draftKey !== key),
+  );
   saved.value = true;
 }
 
@@ -155,7 +155,9 @@ function overrideText(value: unknown, key: string): string {
 }
 
 function widgetOf(entry: (typeof SETTINGS_ENTRIES)[number][1], leaf: string): SettingsWidget {
-  return entry.widgets[leaf]!;
+  const widget = entry.widgets[leaf];
+  if (widget === undefined) throw new Error(`Missing settings widget: ${leaf}`);
+  return widget;
 }
 
 function assetKindOf(leaf: string): BrandingAssetKind | null {

@@ -38,13 +38,11 @@ function onDrop(event: DragEvent): void {
 }
 
 const childNodes = computed(() => childrenOf(props.byParent, props.node.id));
-const wikiRef = computed(() =>
-  props.node.projectId
-    ? props.projectKeys?.get(props.node.projectId)
-      ? formatDisplayId(props.projectKeys.get(props.node.projectId)!, props.node.number)
-      : null
-    : wikiDisplayId(props.node.number),
-);
+const wikiRef = computed(() => {
+  if (!props.node.projectId) return wikiDisplayId(props.node.number);
+  const projectKey = props.projectKeys?.get(props.node.projectId);
+  return projectKey ? formatDisplayId(projectKey, props.node.number) : null;
+});
 const status = computed(() => {
   if (props.node.status === "draft") return t("doc.status.draft");
   if (props.node.status === "archived") return t("doc.status.archived");

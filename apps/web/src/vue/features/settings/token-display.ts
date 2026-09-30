@@ -30,6 +30,9 @@ export function formatExpiry(expiresAt: string | null): string {
 
 export function tokenScopeLabels(scopes: readonly string[]): string {
   return scopes
-    .map((scope) => t(TOKEN_SCOPE_LABEL[scope as TokenScope] ?? "token.scopes"))
+    .map((scope) => {
+      const parsed = apiTokenScope.safeParse(scope);
+      return t(parsed.success ? TOKEN_SCOPE_LABEL[parsed.data] : "token.scopes");
+    })
     .join(", ");
 }

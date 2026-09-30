@@ -45,7 +45,7 @@ const redirectUri = computed(() =>
   displayedRedirectUri(oidc.data.value?.redirectUri, window.location.origin, props.workspaceId),
 );
 const current = computed(() => oidc.data.value ?? null);
-const configured = computed(() => Boolean(current.value?.issuer && current.value?.clientId));
+const configured = computed(() => Boolean(current.value?.issuer && current.value.clientId));
 const eeRequired = computed(
   () => oidc.error.value instanceof ProblemError && oidc.error.value.status === 404,
 );
@@ -105,7 +105,9 @@ function syncForm(): void {
 
 watch(
   () => oidc.data.value,
-  () => syncForm(),
+  () => {
+    syncForm();
+  },
   { immediate: true },
 );
 

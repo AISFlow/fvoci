@@ -31,12 +31,15 @@ const members = useQuery(() => membersQuery(props.workspaceId));
 const groupMembersQuery = useQuery(() => ({
   queryKey: ["workspaces", props.workspaceId, "groups", selectedGroupId.value, "members"] as const,
   enabled: Boolean(selectedGroupId.value),
-  queryFn: async () =>
-    ensureOk(
+  queryFn: async () => {
+    const groupId = selectedGroupId.value;
+    if (groupId === null) throw new Error("Group members query requires a selected group");
+    return ensureOk(
       await api.GET("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members", {
-        params: { path: { workspace_id: props.workspaceId, group_id: selectedGroupId.value! } },
+        params: { path: { workspace_id: props.workspaceId, group_id: groupId } },
       }),
-    ),
+    );
+  },
   retry: false as const,
 }));
 

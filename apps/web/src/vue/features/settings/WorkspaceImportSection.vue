@@ -43,7 +43,9 @@ const projects = useQuery(() => ({
   enabled: props.canManage && source.value === "notion-zip",
 }));
 
-onUnmounted(() => pollRef.value?.abort());
+onUnmounted(() => {
+  pollRef.value?.abort();
+});
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -57,7 +59,9 @@ function fileToBase64(file: File): Promise<string> {
       const comma = result.indexOf(",");
       resolve(comma >= 0 ? result.slice(comma + 1) : result);
     };
-    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.onerror = () => {
+      reject(reader.error ?? new Error("read failed"));
+    };
     reader.readAsDataURL(file);
   });
 }
