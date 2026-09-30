@@ -194,7 +194,7 @@ test("workflow create, rename, all categories and delete persist; an occupied st
   const taskId = (await task.json()).id;
   const refused = page.waitForResponse(res => res.request().method() === "DELETE" && res.url().endsWith(`/statuses/${added.id}`));
   await row.getByRole("button", { name: "삭제", exact: true }).click();
-  expect((await refused).status()).toBe(400);
+  expect((await refused).status()).toBe(409);
   await expect(section.getByRole("alert")).toBeVisible();
   await expect(row).toBeVisible();
   expect((await workflow()).statuses.some(status => status.id === added.id)).toBe(true);
