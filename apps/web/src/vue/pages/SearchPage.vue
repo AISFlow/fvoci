@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import UInput from "@nuxt/ui/components/Input.vue";
@@ -36,6 +37,7 @@ const TAB_LABEL = {
 
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationError(() => route.fullPath);
 const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
@@ -129,12 +131,14 @@ const items = computed(() => {
 
 function replaceQuery(next: { q?: string; tab?: SearchTab; projectId?: string }): void {
   cancelDraft();
-  void router.replace(
-    searchPath(slug.value, {
-      q: next.q ?? draft.value.trim(),
-      tab: next.tab ?? tab.value,
-      projectId: "projectId" in next ? next.projectId : projectId.value,
-    }),
+  navigation.run(() =>
+    router.replace(
+      searchPath(slug.value, {
+        q: next.q ?? draft.value.trim(),
+        tab: next.tab ?? tab.value,
+        projectId: "projectId" in next ? next.projectId : projectId.value,
+      }),
+    ),
   );
 }
 
@@ -166,7 +170,7 @@ async function loadMore(): Promise<void> {
       }),
     );
     if (generation !== pageGeneration) return;
-    extra.value = [...extra.value, ...((fetched.items ?? []) as SearchHit[])];
+    extra.value = [...extra.value, ...(fetched.items as SearchHit[])];
     nextCursor.value = fetched.nextCursor ?? undefined;
   } catch {
     if (generation !== pageGeneration) return;
@@ -274,7 +278,9 @@ async function loadMore(): Promise<void> {
         :items="items"
         labelled-by="search-page-title"
       />
-      <p v-if="moreError" role="alert" class="search-page__status">{{ moreError }}</p>
+      <p v-if="moreError || navigation.error.value" role="alert" class="search-page__status">{{
+        moreError ?? navigation.error.value
+      }}</p>
       <UButton
         v-if="q && nextCursor"
         type="button"

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
@@ -19,6 +20,7 @@ import "../features/workspace/workspace-home.css";
 
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationError(() => route.fullPath);
 const queryClient = useQueryClient();
 const createOpen = ref(false);
 const logoutError = ref<string | null>(null);
@@ -45,7 +47,7 @@ watchEffect(() => {
 function dismissDenied(): void {
   const query = { ...route.query };
   delete query.denied;
-  void router.replace({ query });
+  navigation.run(() => router.replace({ query }));
 }
 
 async function logout(): Promise<void> {
@@ -101,11 +103,11 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
       </button>
     </div>
     <div
-      v-if="items.length > 0 && logoutError"
+      v-if="items.length > 0 && (logoutError || navigation.error.value)"
       role="alert"
       class="border-b border-default bg-elevated px-4 py-2 text-sm text-muted"
     >
-      {{ logoutError }}
+      {{ logoutError ?? navigation.error.value }}
     </div>
     <template v-if="items.length === 0">
       <main class="app-shell__main">
@@ -120,7 +122,11 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
           :is-admin="me.data.value?.isInstanceAdmin === true"
           :on-create="createWorkspace"
           :on-logout="() => void logout()"
-          :error="logoutError ?? (workspaces.isError.value ? t('load.listFailed') : null)"
+          :error="
+            navigation.error.value ??
+            logoutError ??
+            (workspaces.isError.value ? t('load.listFailed') : null)
+          "
           :on-retry="() => void workspaces.refetch()"
         />
       </main>

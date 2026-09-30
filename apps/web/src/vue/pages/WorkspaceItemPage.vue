@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
@@ -42,6 +43,7 @@ import "@/features/projects/projects.css";
 // to the connected task list through leaveTo.
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationError(() => route.fullPath);
 const queryClient = useQueryClient();
 const slug = computed(() => String(route.params.slug ?? ""));
 const refParam = computed(() => String(route.params.ref ?? ""));
@@ -107,8 +109,12 @@ async function afterMutation(): Promise<void> {
 
 function goTo(path: string): void {
   leaveTo(path, {
-    assign: (url) => window.location.assign(url),
-    push: (pathTo) => void router.push(pathTo),
+    assign: (url) => {
+      window.location.assign(url);
+    },
+    push: (pathTo) => {
+      navigation.run(() => router.push(pathTo));
+    },
   });
 }
 
@@ -264,7 +270,7 @@ const realNotFound = computed(
 const taskReadOnly = computed(
   () =>
     !task.data.value?.canEdit ||
-    task.data.value?.archivedAt !== null ||
+    task.data.value.archivedAt !== null ||
     project.value?.status === "archived",
 );
 
@@ -448,7 +454,7 @@ async function onTrash(): Promise<void> {
       :can-edit="task.data.value.canEdit"
       :pending="pending"
       :field-error="fieldError"
-      :action-error="actionError"
+      :action-error="actionError ?? navigation.error.value"
       :archive-pending="patchTask.isPending.value"
       :trash-pending="trashTask.isPending.value"
       :form-epoch="formEpoch"

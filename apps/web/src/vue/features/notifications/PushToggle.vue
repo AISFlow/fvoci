@@ -32,15 +32,15 @@ watch(
   () => [props.workspaceId, publicKey.value, userId.value] as const,
   ([workspaceId, key, uid], _previous, onCleanup) => {
     if (!pushSupported() || key === null || uid === null) return;
-    let live = true;
+    const lifetime = { live: true };
     onCleanup(() => {
-      live = false;
+      lifetime.live = false;
     });
     void (async () => {
       await refreshOwnSubscription(workspaceId, key, uid);
-      if (live) enabled.value = await liveSubscribed(key, uid);
+      if (lifetime.live) enabled.value = await liveSubscribed(key, uid);
     })().catch(async (err: unknown) => {
-      if (!live) return;
+      if (!lifetime.live) return;
       failure.value = attempted(err);
       enabled.value = await liveSubscribed(key, uid).catch(() => false);
     });
@@ -73,23 +73,27 @@ function pushReasonMessage(value: PushBlocker): string {
   }
 }
 
-function toggle(next: boolean): void {
+async function toggle(next: boolean): Promise<void> {
   const key = publicKey.value;
   const uid = userId.value;
   if (key === null || uid === null) return;
   busy.value = true;
   failure.value = null;
-  void (async () => {
+  try {
+    if (next) await subscribePush(props.workspaceId, key, uid);
+    else await unsubscribePush(uid);
+  } catch (err) {
+    failure.value = attempted(err);
+  } finally {
     try {
-      if (next) await subscribePush(props.workspaceId, key, uid);
-      else await unsubscribePush(uid);
+      enabled.value = await liveSubscribed(key, uid);
     } catch (err) {
       failure.value = attempted(err);
+      enabled.value = false;
     } finally {
-      enabled.value = await liveSubscribed(key, uid).catch(() => false);
       busy.value = false;
     }
-  })();
+  }
 }
 </script>
 

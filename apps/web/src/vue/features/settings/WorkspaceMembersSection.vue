@@ -82,9 +82,9 @@ const removeMember = useMutation({
 
 async function run(userId: string, action: () => Promise<void>): Promise<string | null> {
   pendingIds.value = new Set(pendingIds.value).add(userId);
-  const nextErrors = { ...rowErrors.value };
-  delete nextErrors[userId];
-  rowErrors.value = nextErrors;
+  rowErrors.value = Object.fromEntries(
+    Object.entries(rowErrors.value).filter(([id]) => id !== userId),
+  );
   status.value = null;
   try {
     await action();
@@ -125,28 +125,27 @@ function onInvite(): void {
   );
 }
 
-function onRoleChange(member: MemberOutput, event: Event): void {
+async function onRoleChange(member: MemberOutput, event: Event): Promise<void> {
   const next = (event.target as HTMLSelectElement).value as WorkspaceRole;
   if (next === member.role) return;
   const name = memberName(member);
-  void run(member.userId, async () => {
+  await run(member.userId, async () => {
     await patchRole.mutateAsync({ userId: member.userId, role: next });
     status.value = t("workspace.member.roleChanged", { name });
   });
 }
 
-function confirmRemove(): void {
+async function confirmRemove(): Promise<void> {
   const member = removeTarget.value;
   if (!member) return;
   const name = memberName(member);
-  void run(member.userId, async () => {
+  const error = await run(member.userId, async () => {
     await removeMember.mutateAsync(member.userId);
     status.value = t("workspace.member.removed", { name });
     removeTarget.value = null;
     removeError.value = null;
-  }).then((error) => {
-    if (error) removeError.value = error;
   });
+  if (error) removeError.value = error;
 }
 
 function copyInvite(url: string): void {

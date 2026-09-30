@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
@@ -22,6 +23,7 @@ function roleAtLeast(role: string, minimum: string): boolean {
 
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationError(() => route.fullPath);
 const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
@@ -59,7 +61,7 @@ const tree = useQuery(() => wikiDiscoveryQuery(workspaceId.value, tag.value));
 const projects = useQuery(() => projectsQuery(workspaceId.value));
 const tags = useQuery(() => documentTagPoolQuery(workspaceId.value));
 function selectTag(id?: string): void {
-  void router.replace({ query: { ...route.query, tag: id }, hash: route.hash });
+  navigation.run(() => router.replace({ query: { ...route.query, tag: id }, hash: route.hash }));
 }
 const move = useMutation({
   mutationFn: async ({
@@ -237,7 +239,7 @@ const createError = computed(() =>
           createDocument.variables.value.operation === createVersion,
         )
       "
-      :create-error="createError"
+      :create-error="createError ?? navigation.error.value"
       :can-create="canCreate"
       :role="workspace.role"
       :on-retry="

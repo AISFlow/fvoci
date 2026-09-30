@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { formatPersonName, notificationMessage, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/vue-query";
@@ -27,6 +28,7 @@ const TABS: { value: NotificationFilter; label: string }[] = [
 
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationError(() => route.fullPath);
 const queryClient = useQueryClient();
 const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
@@ -127,10 +129,12 @@ const readAll = useMutation({
 });
 
 function selectTab(value: NotificationFilter): void {
-  void router.replace({
-    query: { ...route.query, tab: value === "all" ? undefined : value },
-    hash: route.hash,
-  });
+  navigation.run(() =>
+    router.replace({
+      query: { ...route.query, tab: value === "all" ? undefined : value },
+      hash: route.hash,
+    }),
+  );
 }
 
 async function openItem(item: NotificationItem): Promise<void> {
@@ -216,7 +220,9 @@ async function toggleArchive(item: NotificationItem): Promise<void> {
           {{ entry.label }}
         </button>
       </div>
-      <p v-if="actionError" role="alert">{{ actionError }}</p>
+      <p v-if="actionError || navigation.error.value" role="alert">{{
+        actionError ?? navigation.error.value
+      }}</p>
       <QueryLoading v-if="list.isPending.value" />
       <QueryError
         v-else-if="list.isError.value"

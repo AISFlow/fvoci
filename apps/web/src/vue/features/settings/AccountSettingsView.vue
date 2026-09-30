@@ -220,8 +220,8 @@ async function handleUnlink(provider: string): Promise<void> {
   }
 }
 
-function linkProvider(provider: string): void {
-  void clickOidcStart(
+async function linkProvider(provider: string): Promise<void> {
+  await clickOidcStart(
     provider,
     () => startOidcLink(provider),
     {
