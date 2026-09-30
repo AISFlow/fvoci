@@ -132,7 +132,7 @@ test("guest member denial keeps allowed entities; inaccessible refs and readonly
     expect((await owner.page.request.post(grant, { data: { userId: guestId, role: "member" } })).ok()).toBe(true);
     const page = visitor.page;
     const editor = await openDoc(page, `/w/${admin.workspaceSlug}/ENG-${f.document.number}`);
-    expect((await page.request.get(`/api/v1/workspaces/${f.ws}/members`)).status()).toBe(403);
+    expect((await page.request.get(`/api/v1/workspaces/${f.ws}/members`)).status()).toBe(404);
     await editor.click(); await mention(page, `ENG-${f.task.number}`, f.task.title);
     await expect(editor.locator("[data-mention]")).toHaveText(`@${f.task.title}`);
     await nextParagraph(page, editor); await paste(page, f.wiki.id);
