@@ -2,8 +2,9 @@
 import { t } from "@fvoci/i18n";
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useRoute } from "vue-router";
+import { ProblemError } from "@/lib/api";
 import {
   sharePublicBodyQuery,
   sharePublicMetaQuery,
@@ -33,6 +34,11 @@ const body = useQuery(() => ({
   staleTime: 0,
 }));
 
+// Once a current body read is denied, no other cached share content remains visible.
+watch(body.error, (error) => {
+  if (error instanceof ProblemError && error.status === 404) accessError.value = failMessage(error);
+}, { flush: "sync", immediate: true });
+
 const share = computed(() => meta.data.value);
 const metaError = computed(() => (meta.error.value ? failMessage(meta.error.value) : null));
 const treeError = computed(() => (tree.error.value ? failMessage(tree.error.value) : null));
@@ -45,15 +51,20 @@ function onSelectDocument(documentId: string): void {
 }
 
 async function refresh(): Promise<void> {
+  const recovering = accessError.value !== null;
   refreshing.value = true;
   try {
     const result = await meta.refetch();
     if (result.isSuccess) {
-      accessError.value = null;
-      await Promise.all([
+      // A denied child may have moved outside the share. Reauthorize the root,
+      // keeping the denial gate until its fresh body and current tree succeed.
+      if (recovering) selectedDocumentId.value = null;
+      await nextTick();
+      const [freshTree, freshBody] = await Promise.all([
         tree.refetch(), body.refetch(),
         queryClient.refetchQueries({ queryKey: ["share-search", token.value], type: "active" }),
       ]);
+      if (recovering && freshTree.isSuccess && freshBody.isSuccess) accessError.value = null;
     }
   } finally {
     refreshing.value = false;
