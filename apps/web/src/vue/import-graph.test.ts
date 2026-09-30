@@ -45,7 +45,7 @@ function resolve(spec: string, from: string): string | null {
   return null;
 }
 
-test("the Vue app's module graph imports no React module", () => {
+await test("the Vue app's module graph imports no React module", () => {
   const seen = new Set<string>();
   const found: string[] = [];
   const walk = (file: string) => {
@@ -74,7 +74,7 @@ test("the Vue app's module graph imports no React module", () => {
   ]) {
     walk(path.join(web, "src/vue/pages", extra));
   }
-  assert.ok(seen.size > 100, `walked ${seen.size} modules`);
+  assert.ok(seen.size > 100, `walked ${String(seen.size)} modules`);
   assert.deepEqual(found, []);
 });
 
@@ -91,7 +91,7 @@ const EDITOR_FILES = [
   path.join(web, "src/features/documents") + path.sep,
 ];
 
-test("the Vue entry's static graph leaves the wiki editor to the wiki page's chunk", () => {
+await test("the Vue entry's static graph leaves the wiki editor to the wiki page's chunk", () => {
   const seen = new Set<string>();
   const found: string[] = [];
   const walk = (file: string) => {
@@ -176,12 +176,12 @@ function walkStatic(start: string): { seen: Set<string>; found: string[] } {
   return { seen, found };
 }
 
-test("the Gantt chunk still does not load the wiki editor", () => {
+await test("the Gantt chunk still does not load the wiki editor", () => {
   const { found } = walkStatic(path.join(web, "src/vue/pages/ProjectGanttPage.vue"));
   assert.deepEqual(found, []);
 });
 
-test("the workspace-item chunk may load the collab editor (the React page does)", () => {
+await test("the workspace-item chunk may load the collab editor (the React page does)", () => {
   const { found } = walkStatic(path.join(web, "src/vue/pages/WorkspaceItemPage.vue"));
   assert.ok(
     found.some((entry) => entry.includes("@fvoci/editor") || entry.includes("editor/")),
@@ -189,7 +189,7 @@ test("the workspace-item chunk may load the collab editor (the React page does)"
   );
 });
 
-test("the public share page does not load the wiki editor stack", () => {
+await test("the public share page does not load the wiki editor stack", () => {
   const seen = new Set<string>();
   const found: string[] = [];
   const walk = (file: string) => {
@@ -205,6 +205,6 @@ test("the public share page does not load the wiki editor stack", () => {
     }
   };
   walk(path.join(web, "src/vue/pages/PublicSharePage.vue"));
-  assert.ok(seen.size > 1, `walked ${seen.size} modules`);
+  assert.ok(seen.size > 1, `walked ${String(seen.size)} modules`);
   assert.deepEqual(found, []);
 });

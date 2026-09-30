@@ -35,7 +35,9 @@ export function useSearchShortcut(open: Ref<boolean>, target: KeyTarget): void {
     }
   };
   target.addEventListener("keydown", onKey);
-  onScopeDispose(() => target.removeEventListener("keydown", onKey));
+  onScopeDispose(() => {
+    target.removeEventListener("keydown", onKey);
+  });
 }
 
 /** `source`, trimmed, once it has not changed for `ms`. */
@@ -48,7 +50,9 @@ export function useDebouncedTrim(
     const handle = setTimeout(() => {
       settled.value = value.trim();
     }, ms);
-    onCleanup(() => clearTimeout(handle));
+    onCleanup(() => {
+      clearTimeout(handle);
+    });
   });
   return settled;
 }

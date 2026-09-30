@@ -41,7 +41,7 @@ async function until(condition: () => boolean, what: string): Promise<void> {
 /** Starts a fetch of `queryKey` that never settles, as a slow retry would. */
 function hangFetch(client: QueryClient, queryKey: readonly unknown[]): void {
   void client
-    .fetchQuery({ queryKey, queryFn: () => new Promise<never>(() => {}) })
+    .query({ queryKey, queryFn: () => new Promise<never>(() => {}) })
     .catch(() => undefined);
 }
 
@@ -62,7 +62,7 @@ function testEnvironment(redirects: string[]): SessionEnvironment {
   };
 }
 
-test("session: stays ready when refetches fail with cached data", async () => {
+await test("session: stays ready when refetches fail with cached data", async () => {
   const client = queryClient();
   seedSession(client);
   const redirects: string[] = [];
@@ -83,7 +83,7 @@ test("session: stays ready when refetches fail with cached data", async () => {
   }
 });
 
-test("session: an error only when a failed query has nothing to show", async () => {
+await test("session: an error only when a failed query has nothing to show", async () => {
   const client = queryClient();
   client.setQueryData(["setup", "status"], { needed: false });
   client.setQueryData(["me", "workspaces"], { items: [WORKSPACE] });
@@ -104,11 +104,11 @@ test("session: an error only when a failed query has nothing to show", async () 
   }
 });
 
-test("session: late setup completion does not restart the signed-out redirect", async () => {
+await test("session: late setup completion does not restart the signed-out redirect", async () => {
   const client = queryClient();
   let rejectMe!: (error: ProblemError) => void;
   void client
-    .fetchQuery({
+    .query({
       queryKey: ["auth", "me"],
       queryFn: () =>
         new Promise<never>((_resolve, reject) => {
@@ -144,7 +144,7 @@ test("session: late setup completion does not restart the signed-out redirect", 
   }
 });
 
-test("session: cached user 401 redirects and teardown closes the access subscription", async () => {
+await test("session: cached user 401 redirects and teardown closes the access subscription", async () => {
   const client = queryClient();
   seedSession(client);
   const redirects: string[] = [];
@@ -159,7 +159,7 @@ test("session: cached user 401 redirects and teardown closes the access subscrip
   try {
     assert.equal(result.status.value, "ready");
     await client
-      .fetchQuery({
+      .query({
         queryKey: ["auth", "me"],
         staleTime: 0,
         queryFn: () => Promise.reject(new ProblemError(401)),
@@ -175,7 +175,7 @@ test("session: cached user 401 redirects and teardown closes the access subscrip
     await nextTick();
     assert.equal(result.status.value, "ready");
     await client
-      .fetchQuery({
+      .query({
         queryKey: ["auth", "me"],
         staleTime: 0,
         queryFn: () => Promise.reject(new ProblemError(401)),
@@ -192,7 +192,7 @@ test("session: cached user 401 redirects and teardown closes the access subscrip
   assert.equal(closed, 1);
 });
 
-test("session: a failed me refetch plus a fresh list without the workspace redirects", async () => {
+await test("session: a failed me refetch plus a fresh list without the workspace redirects", async () => {
   const client = queryClient();
   seedSession(client);
   const redirects: string[] = [];
@@ -213,7 +213,7 @@ test("session: a failed me refetch plus a fresh list without the workspace redir
 
 const PROJECT = { id: "33333333-3333-7333-8333-333333333333", key: "GNT", name: "Gantt" };
 
-test("project ref: stays on the project when a refetch fails with cached data", async () => {
+await test("project ref: stays on the project when a refetch fails with cached data", async () => {
   const client = queryClient();
   client.setQueryData(["projects", WORKSPACE.id], { items: [PROJECT] });
   const { result, stop } = mount(client, () => useProjectRef(WORKSPACE.id, "GNT"));
@@ -221,7 +221,7 @@ test("project ref: stays on the project when a refetch fails with cached data", 
     assert.equal(result.project.value?.id, PROJECT.id);
     await result.retry();
     assert.equal(result.projects.isError.value, true);
-    assert.equal(result.project.value?.id, PROJECT.id);
+    assert.equal(result.project.value.id, PROJECT.id);
     assert.equal(result.failed.value, false);
     assert.equal(result.notFound.value, false);
   } finally {
@@ -229,7 +229,7 @@ test("project ref: stays on the project when a refetch fails with cached data", 
   }
 });
 
-test("project ref: an error only without data", async () => {
+await test("project ref: an error only without data", async () => {
   const client = queryClient();
   const { result, stop } = mount(client, () => useProjectRef(WORKSPACE.id, "GNT"));
   try {
@@ -241,7 +241,7 @@ test("project ref: an error only without data", async () => {
   }
 });
 
-test("project ref: a failed refetch after not found offers a retry", async () => {
+await test("project ref: a failed refetch after not found offers a retry", async () => {
   const client = queryClient();
   client.setQueryData(["projects", WORKSPACE.id], { items: [] });
   const { result, stop } = mount(client, () => useProjectRef(WORKSPACE.id, "GNT"));
@@ -271,7 +271,7 @@ const TREE_NODE = {
   status: "published",
 };
 
-test("wiki document ref: stays on the document when a refetch fails with cached data", async () => {
+await test("wiki document ref: stays on the document when a refetch fails with cached data", async () => {
   const client = queryClient();
   client.setQueryData(["tree", WORKSPACE.id], { items: [TREE_NODE] });
   const { result, stop } = mount(client, () => useWikiDocumentRef(WORKSPACE.id, "WIKI-7"));
@@ -279,7 +279,7 @@ test("wiki document ref: stays on the document when a refetch fails with cached 
     assert.equal(result.node.value?.id, TREE_NODE.id);
     await result.retry();
     assert.equal(result.tree.isError.value, true);
-    assert.equal(result.node.value?.id, TREE_NODE.id);
+    assert.equal(result.node.value.id, TREE_NODE.id);
     assert.equal(result.failed.value, false);
     assert.equal(result.notFound.value, false);
   } finally {
@@ -287,7 +287,7 @@ test("wiki document ref: stays on the document when a refetch fails with cached 
   }
 });
 
-test("wiki document ref: an error only without data", async () => {
+await test("wiki document ref: an error only without data", async () => {
   const client = queryClient();
   const { result, stop } = mount(client, () => useWikiDocumentRef(WORKSPACE.id, "WIKI-7"));
   try {
@@ -299,7 +299,7 @@ test("wiki document ref: an error only without data", async () => {
   }
 });
 
-test("wiki document ref: not found, then a failed refetch offers a retry", async () => {
+await test("wiki document ref: not found, then a failed refetch offers a retry", async () => {
   const client = queryClient();
   client.setQueryData(["tree", WORKSPACE.id], { items: [{ ...TREE_NODE, number: 8 }] });
   const { result, stop } = mount(client, () => useWikiDocumentRef(WORKSPACE.id, "WIKI-7"));
@@ -318,7 +318,7 @@ test("wiki document ref: not found, then a failed refetch offers a retry", async
   }
 });
 
-test("wiki document ref: a project document or a malformed ref is not a wiki document", () => {
+await test("wiki document ref: a project document or a malformed ref is not a wiki document", () => {
   const client = queryClient();
   client.setQueryData(["tree", WORKSPACE.id], {
     items: [{ ...TREE_NODE, projectId: PROJECT.id }],

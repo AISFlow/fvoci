@@ -23,11 +23,13 @@ function withLocation(run: (loads: string[]) => Promise<void>): () => Promise<vo
   };
 }
 
-test(
+await test(
   "unknown nested paths replace with home without a full load",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
-    router.getRoutes().find((record) => record.name === "home")!.components = {
+    const home = router.getRoutes().find((record) => record.name === "home");
+    assert.ok(home, "the home route exists");
+    home.components = {
       default: { render: () => null },
     };
     await router.push("/settings/account/extra");
@@ -36,7 +38,7 @@ test(
   }),
 );
 
-test(
+await test(
   "a completed navigation to /setup stays in the Vue app",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
@@ -45,7 +47,7 @@ test(
   }),
 );
 
-test(
+await test(
   "a completed navigation to /login stays in the Vue app",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
@@ -54,14 +56,14 @@ test(
   }),
 );
 
-test("the login route is declared (the boundary regex sends /login to Vue)", () => {
+await test("the login route is declared (the boundary regex sends /login to Vue)", () => {
   assert.equal(
     routes.some((route) => route.name === "login" && route.path === "/login"),
     true,
   );
 });
 
-test("home, legal, and service-info are declared live Vue paths", () => {
+await test("home, legal, and service-info are declared live Vue paths", () => {
   assert.equal(
     routes.some((route) => route.name === "home" && route.path === "/"),
     true,
@@ -76,14 +78,14 @@ test("home, legal, and service-info are declared live Vue paths", () => {
   );
 });
 
-test("the invite route is declared (the boundary sends token paths to Vue)", () => {
+await test("the invite route is declared (the boundary sends token paths to Vue)", () => {
   assert.equal(
     routes.some((route) => route.name === "invite" && route.path === "/invite/:token"),
     true,
   );
 });
 
-test(
+await test(
   "a completed navigation to an invite stays in the Vue app",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
@@ -92,7 +94,7 @@ test(
   }),
 );
 
-test("the setup route is declared and the boundary sends /setup to Vue", () => {
+await test("the setup route is declared and the boundary sends /setup to Vue", () => {
   assert.equal(
     routes.some((route) => route.name === "setup" && route.path === "/setup"),
     true,
@@ -103,14 +105,15 @@ test("the setup route is declared and the boundary sends /setup to Vue", () => {
   assert.equal(routerName("/setups"), "unknown-path");
 });
 
-test(
+await test(
   "setup, home, invite, public and account/admin navigation stay Vue with query and fragment",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
     // Bun does not compile SFCs. Exercise the real router/afterEach with
     // inert pages; mounted page behavior belongs to the browser groups.
     for (const route of routes) {
-      router.removeRoute(route.name!);
+      assert.ok(route.name, "every page route is named");
+      router.removeRoute(route.name);
       router.addRoute({ path: route.path, name: route.name, component: { render: () => null } });
     }
     for (const path of [
@@ -132,7 +135,7 @@ test(
   }),
 );
 
-test(
+await test(
   "fallback navigation still honors aborted and superseded page guards",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
@@ -166,14 +169,14 @@ test(
   }),
 );
 
-test("wiki list and search are live Vue routes", () => {
+await test("wiki list and search are live Vue routes", () => {
   assert.equal(VUE_WORKSPACE_ROUTE_PATHS.wikiList, "/w/:slug/wiki");
   assert.equal(VUE_WORKSPACE_ROUTE_PATHS.search, "/w/:slug/search");
   assert.equal(Object.values(VUE_ROUTE_PATHS).includes(VUE_WORKSPACE_ROUTE_PATHS.wikiList), true);
   assert.equal(Object.values(VUE_ROUTE_PATHS).includes(VUE_WORKSPACE_ROUTE_PATHS.search), true);
 });
 
-test("the workspace landing, project list, wiki list and search resolve as Vue routes", () => {
+await test("the workspace landing, project list, wiki list and search resolve as Vue routes", () => {
   const router = createAppRouter(createMemoryHistory());
   assert.equal(router.resolve("/w/acme").name, "workspace-home");
   assert.equal(router.resolve("/w/acme/projects").name, "projects");
@@ -188,9 +191,9 @@ test("the workspace landing, project list, wiki list and search resolve as Vue r
   assert.equal(router.resolve("/w/acme/wiki-12").name, "wiki-document");
 });
 
-test(
+await test(
   "wiki list and search stay Vue",
-  withLocation(async (loads) => {
+  withLocation((loads) => {
     const router = createAppRouter(createMemoryHistory());
     const wiki = router.resolve("/w/acme/wiki");
     const search = router.resolve("/w/acme/search?q=hello&tab=document");
@@ -203,10 +206,11 @@ test(
     if (!isVueAppPath(wiki.path)) window.location.replace(wiki.fullPath);
     if (!isVueAppPath(search.path)) window.location.replace(search.fullPath);
     assert.deepEqual(loads, []);
+    return Promise.resolve();
   }),
 );
 
-test("my-tasks, notifications, and trash are live Vue paths", () => {
+await test("my-tasks, notifications, and trash are live Vue paths", () => {
   assert.equal(
     routes.some((route) => route.name === "my-tasks" && route.path === VUE_NAV_ROUTE_PATHS.myTasks),
     true,
@@ -231,7 +235,7 @@ test("my-tasks, notifications, and trash are live Vue paths", () => {
   assert.equal(isVueAppPath("/w/acme/trash"), true);
 });
 
-test(
+await test(
   "navigating to my-tasks, notifications, or trash stays Vue",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
@@ -262,7 +266,7 @@ const AUTH_REST = [
   { name: "consent", path: "/consent" },
 ] as const;
 
-test("the remaining auth routes are declared live Vue paths", () => {
+await test("the remaining auth routes are declared live Vue paths", () => {
   for (const { name, path } of AUTH_REST) {
     assert.equal(
       routes.some((route) => route.name === name && route.path === path),
@@ -276,7 +280,7 @@ test("the remaining auth routes are declared live Vue paths", () => {
   }
 });
 
-test(
+await test(
   "a completed navigation to a remaining auth page stays in Vue",
   withLocation(async (loads) => {
     for (const path of [
@@ -288,7 +292,8 @@ test(
     ]) {
       const router = createAppRouter(createMemoryHistory());
       for (const route of routes) {
-        router.removeRoute(route.name!);
+        assert.ok(route.name, "every page route is named");
+        router.removeRoute(route.name);
         router.addRoute({ path: route.path, name: route.name, component: { render: () => null } });
       }
       await router.push(path);
@@ -297,7 +302,7 @@ test(
   }),
 );
 
-test("wiki documents stay wiki; project keys are project-home; gantt stays gantt", () => {
+await test("wiki documents stay wiki; project keys are project-home; gantt stays gantt", () => {
   const router = createAppRouter(createMemoryHistory());
   assert.equal(router.resolve("/w/acme/wiki-3").name, "wiki-document");
   assert.equal(router.resolve("/w/acme/WIKI-3").name, "wiki-document");
@@ -312,7 +317,7 @@ test("wiki documents stay wiki; project keys are project-home; gantt stays gantt
   assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
 });
 
-test("workspace-item is more specific than project-home; wiki stays wiki", () => {
+await test("workspace-item is more specific than project-home; wiki stays wiki", () => {
   const router = createAppRouter(createMemoryHistory());
   assert.equal(router.resolve("/w/acme/GNT-1").name, "workspace-item");
   assert.equal(router.resolve("/w/acme/gnt-12").name, "workspace-item");
@@ -325,7 +330,7 @@ test("workspace-item is more specific than project-home; wiki stays wiki", () =>
   assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
 });
 
-test("workspace settings routes are live Vue paths", () => {
+await test("workspace settings routes are live Vue paths", () => {
   const router = createAppRouter(createMemoryHistory());
   assert.equal(router.resolve("/w/acme/settings").name, "workspace-settings");
   assert.equal(
@@ -339,13 +344,13 @@ test("workspace settings routes are live Vue paths", () => {
   assert.equal(isVueAppPath("/w/acme/settings/templates"), true);
 });
 
-test("project fields and workflow settings resolve to their own lazy pages", () => {
+await test("project fields and workflow settings resolve to their own lazy pages", () => {
   const router = createAppRouter(createMemoryHistory());
   assert.equal(router.resolve("/w/acme/GNT/settings/fields").name, "project-fields");
   assert.equal(router.resolve("/w/acme/GNT/settings/workflow").name, "project-workflow");
 });
 
-test("decoded and invalid single-segment refs reach the guarded fallback, exact sections retain precedence", () => {
+await test("decoded and invalid single-segment refs reach the guarded fallback, exact sections retain precedence", () => {
   const router = createAppRouter(createMemoryHistory());
   for (const path of [
     "/w/acme/%47NT",
@@ -361,7 +366,7 @@ test("decoded and invalid single-segment refs reach the guarded fallback, exact 
     assert.equal(router.resolve(path).name, "unknown-path", path);
 });
 
-test("canonical ref replacement preserves the current query spelling and hash; edits serialize normally", async () => {
+await test("canonical ref replacement preserves the current query spelling and hash; edits serialize normally", async () => {
   const router = createAppRouter(createMemoryHistory());
   for (const record of router.getRoutes())
     if (record.components) record.components = { default: { render: () => null } };

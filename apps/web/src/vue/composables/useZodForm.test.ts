@@ -7,14 +7,19 @@ import { inputChecked, inputText, useZodForm } from "./useZodForm.ts";
 function mount<T>(use: () => T): { result: T; stop: () => void } {
   const scope = effectScope();
   const result = scope.run(use) as T;
-  return { result, stop: () => scope.stop() };
+  return {
+    result,
+    stop: () => {
+      scope.stop();
+    },
+  };
 }
 
 const emailSchema = z.object({
   newEmail: z.string().trim().email("i18n:form.email"),
 });
 
-test("nothing is checked until the first submit", async () => {
+await test("nothing is checked until the first submit", async () => {
   const { result, stop } = mount(() =>
     useZodForm({
       schema: () => emailSchema,
@@ -26,7 +31,7 @@ test("nothing is checked until the first submit", async () => {
     result.values.newEmail = "not-an-email";
     await Promise.resolve();
     assert.deepEqual(result.errors.value, {});
-    await result.submit(async () => {
+    await result.submit(() => {
       assert.fail("invalid values must not be submitted");
     });
     assert.equal(result.errors.value.newEmail, "이메일 형식을 확인해 주세요.");
@@ -35,7 +40,7 @@ test("nothing is checked until the first submit", async () => {
   }
 });
 
-test("a valid submit hands the parsed values and reset restores the unchecked state", async () => {
+await test("a valid submit hands the parsed values and reset restores the unchecked state", async () => {
   const { result, stop } = mount(() =>
     useZodForm({
       schema: () => emailSchema,
@@ -46,7 +51,7 @@ test("a valid submit hands the parsed values and reset restores the unchecked st
   try {
     const received: string[] = [];
     result.values.newEmail = "  user@example.com ";
-    await result.submit(async (data) => {
+    await result.submit((data) => {
       received.push(data.newEmail);
     });
     assert.deepEqual(received, ["user@example.com"]);
@@ -61,7 +66,7 @@ test("a valid submit hands the parsed values and reset restores the unchecked st
   }
 });
 
-test("a second submit is ignored while the first is still running", async () => {
+await test("a second submit is ignored while the first is still running", async () => {
   const { result, stop } = mount(() =>
     useZodForm({
       schema: () => emailSchema,
@@ -77,7 +82,7 @@ test("a second submit is ignored while the first is still running", async () => 
           release = resolve;
         }),
     );
-    const second = result.submit(async () => {
+    const second = result.submit(() => {
       assert.fail("the in-flight submit must not be joined");
     });
     assert.equal(result.submitting.value, true);
@@ -90,7 +95,7 @@ test("a second submit is ignored while the first is still running", async () => 
   }
 });
 
-test("input helpers read text and checkbox events", () => {
+await test("input helpers read text and checkbox events", () => {
   const text = { target: { value: "hello" } } as unknown as Event;
   const box = { target: { checked: true } } as unknown as Event;
   assert.equal(inputText(text), "hello");

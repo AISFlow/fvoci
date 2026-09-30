@@ -163,8 +163,12 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
       // Registered after the session's own listeners, as the React room's
       // handlers run after its children's: the state machine sees the result
       // last. Removed with the scope, before the provider's delayed destroy.
-      const onAuthenticated = () => connection.authenticated();
-      const onAuthenticationFailed = () => connection.reclaim();
+      const onAuthenticated = () => {
+        connection.authenticated();
+      };
+      const onAuthenticationFailed = () => {
+        connection.reclaim();
+      };
       provider.on("authenticated", onAuthenticated);
       provider.on("authenticationFailed", onAuthenticationFailed);
       onScopeDispose(() => {
@@ -172,7 +176,8 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
         provider.off("authenticationFailed", onAuthenticationFailed);
       });
       return bound;
-    })!;
+    });
+    if (!session) throw new Error("Collaboration generation scope did not run");
     provider.attach();
     current.value = { provider, scope, session };
     if (previous) retire(previous);
@@ -180,7 +185,9 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
 
   function retire(generation: Generation): void {
     generation.scope.stop();
-    window.setTimeout(() => generation.provider.destroy(), 0);
+    window.setTimeout(() => {
+      generation.provider.destroy();
+    }, 0);
   }
 
   function bindSession(
@@ -195,7 +202,7 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
     const unauthorized = shallowRef(false);
     const peers = shallowRef<CollabPeer[]>([]);
     const connectionStatus = shallowRef<CollabConnectionStatus>(
-      provider.configuration.websocketProvider.status as CollabConnectionStatus,
+      provider.configuration.websocketProvider.status,
     );
     const first = createConnectionGeneration(provider, connectionStatus.value);
     const bind = shallowRef<PersistBindState>({
@@ -206,21 +213,32 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
     const persistAborts = new Set<AbortController>();
 
     // Removed with the generation's scope (React: useHocuspocusEvent cleanups).
-    const listen = <T>(event: string, handler: (payload: T) => void) => {
+    interface SessionEvents {
+      synced: { state: boolean };
+      authenticated: { scope: string };
+      authenticationFailed: unknown;
+      unsyncedChanges: { number: number };
+      status: unknown;
+      disconnect: unknown;
+    }
+    const listen = <K extends keyof SessionEvents>(
+      event: K,
+      handler: (payload: SessionEvents[K]) => void,
+    ) => {
       provider.on(event, handler);
       onScopeDispose(() => provider.off(event, handler));
     };
-    listen<{ state: boolean }>("synced", ({ state }) => {
+    listen("synced", ({ state }) => {
       if (state) synced.value = true;
     });
-    listen<{ scope: string }>("authenticated", ({ scope }) => {
+    listen("authenticated", ({ scope }) => {
       readOnly.value = scope === "readonly";
       unauthorized.value = false;
     });
     listen("authenticationFailed", () => {
       unauthorized.value = true;
     });
-    listen<{ number: number }>("unsyncedChanges", ({ number }) => {
+    listen("unsyncedChanges", ({ number }) => {
       unsent.value = number > 0;
     });
     listen("status", () => {
@@ -248,7 +266,9 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
       bind.value = reducePersistBind(bind.value, { type: "edit" });
     };
     doc.on("update", onUpdate);
-    onScopeDispose(() => doc.off("update", onUpdate));
+    onScopeDispose(() => {
+      doc.off("update", onUpdate);
+    });
 
     watch(
       () => toValue(user),
