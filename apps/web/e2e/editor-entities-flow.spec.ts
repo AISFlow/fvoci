@@ -153,3 +153,177 @@ test("guest member denial keeps allowed entities; inaccessible refs and readonly
     await expect(page.locator(".fvoci-suggestion")).toHaveCount(0);
   } finally { await visitor.context.close(); await owner.context.close(); }
 });
+
+// Delay delivery, not execution: every held response comes from the real Rust
+// server/DB. Edits and peer presence then replace the computed session while
+// the document lifecycle mutation is still waiting for its HTTP response.
+async function holdResponse(page: Page, path: string, deferRequest = false) {
+  let forward!: () => void;
+  const requestGate = new Promise<void>((resolve) => { forward = resolve; });
+  if (!deferRequest) forward();
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  let received!: (status: number) => void;
+  const response = new Promise<number>((resolve) => { received = resolve; });
+  await page.route(`**${path}`, async (route) => {
+    await requestGate;
+    const result = await route.fetch();
+    received(result.status());
+    await wait;
+    await route.fulfill({ response: result });
+  }, { times: 1 });
+  return { response, release: () => { forward(); release(); }, forward };
+}
+
+async function retainedCounts(page: Page, ws: string, refresh = false) {
+  // Inspect the existing app's actual QueryClient; no product test hook or
+  // replacement client. fetchQuery must honor the retained 30-second cache.
+  return page.evaluate(async ({ workspaceId, refresh }) => {
+    type Client = import("@tanstack/vue-query").QueryClient;
+    const root = document.getElementById("root") as HTMLElement & {
+      __vue_app__: { _context: { provides: Record<string, Client> } };
+    };
+    const client = root.__vue_app__._context.provides.VUE_QUERY_CLIENT!;
+    const counts = await client.fetchQuery({
+      queryKey: ["me", "workspaces"], staleTime: refresh ? 0 : 30_000,
+      queryFn: async () => {
+        const response = await fetch("/api/v1/me/workspaces");
+        if (!response.ok) throw new Error(`workspace counts ${response.status}`);
+        return response.json() as Promise<{ items: { id: string; documentCount: number }[] }>;
+      },
+    });
+    await client.fetchQuery({
+      queryKey: ["projects", workspaceId], staleTime: 30_000,
+      queryFn: async () => {
+        const response = await fetch(`/api/v1/workspaces/${workspaceId}/projects`);
+        if (!response.ok) throw new Error(`project counts ${response.status}`);
+        return response.json();
+      },
+    });
+    return counts.items.find((item) => item.id === workspaceId)!.documentCount;
+  }, { workspaceId: ws, refresh });
+}
+async function pushDocument(page: Page, path: string) {
+  await page.evaluate(async (next) => {
+    const root = document.getElementById("root") as HTMLElement & {
+      __vue_app__: { config: { globalProperties: { $router: { push: (path: string) => Promise<unknown> } } } };
+    };
+    await root.__vue_app__.config.globalProperties.$router.push(next);
+  }, path);
+  await expect(page).toHaveURL(new RegExp(`${path}$`));
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(editorOf(page)).toBeVisible();
+}
+
+for (const host of ["wiki", "project"] as const) {
+  test(`${host}: real delayed move/trash survives same-room ACKs and retires on a room switch`, async ({ browser, baseURL }) => {
+    const signed = await newSignedInPage(browser, baseURL, admin);
+    const peer = await newSignedInPage(browser, baseURL, admin);
+    const page = signed.page;
+    const held: { release: () => void }[] = [];
+    try {
+      const key = host === "wiki" ? "LCW" : "LCP";
+      const f = await fixtures(page.request, key);
+      async function extra(title: string) {
+        if (host === "wiki") return createDoc(page.request, f.ws, title);
+        const response = await page.request.post(`/api/v1/workspaces/${f.ws}/projects/${f.project.id}/documents`, {
+          data: { title, parentId: f.project.rootDocumentId },
+        });
+        expect(response.status(), await response.text()).toBe(201);
+        const document = await response.json() as Item;
+        return { ...document, path: `/w/${admin.workspaceSlug}/${key}-${document.number}` };
+      }
+      const parent = await extra(`${key} parent`);
+      const retired = await extra(`${key} retired parent`);
+      const next = await extra(`${key} next room`);
+      const original = host === "wiki" ? f.wiki : { ...f.document, path: `/w/${admin.workspaceSlug}/${key}-${f.document.number}` };
+      const prefix = host === "wiki" ? `/api/v1/workspaces/${f.ws}/documents`
+        : `/api/v1/workspaces/${f.ws}/projects/${f.project.id}/documents`;
+      await openDoc(page, original.path);
+      const countBefore = await retainedCounts(page, f.ws);
+      let workspaceRefreshes = 0; let projectRefreshes = 0;
+      page.on("request", (request) => {
+        if (request.method() !== "GET") return;
+        if (request.url().endsWith("/api/v1/me/workspaces")) workspaceRefreshes += 1;
+        if (request.url().endsWith(`/api/v1/workspaces/${f.ws}/projects`)) projectRefreshes += 1;
+      });
+      const parentSelect = page.getByLabel("새 위치(부모 문서)");
+      await parentSelect.selectOption(parent.id);
+      const moved = await holdResponse(page, `${prefix}/${original.id}/move`); held.push(moved);
+      await page.getByRole("button", { name: "이동", exact: true }).click();
+      expect(await moved.response).toBe(200);
+      await openDoc(peer.page, original.path);
+      await editorOf(page).click(); await page.keyboard.type(`${key} edit during move`); await save(page);
+      await expect(editorOf(peer.page)).toContainText(`${key} edit during move`);
+      moved.release();
+      await expect(parentSelect).toHaveValue("");
+      const movedMeta = await page.request.get(`${prefix}/${original.id}`);
+      expect((await movedMeta.json()).parentId).toBe(parent.id);
+      // Both real queries already have fresh 30-second cache data. The
+      // active workspace query refetches; inactive project data becomes stale.
+      expect(workspaceRefreshes).toBeGreaterThan(0);
+      const projectInvalidated = await page.evaluate((workspaceId) => {
+        type Client = import("@tanstack/vue-query").QueryClient;
+        const root = document.getElementById("root") as HTMLElement & { __vue_app__: { _context: { provides: Record<string, Client> } } };
+        return root.__vue_app__._context.provides.VUE_QUERY_CLIENT!.getQueryState(["projects", workspaceId])?.isInvalidated;
+      }, f.ws);
+      expect(projectRefreshes > 0 || projectInvalidated).toBe(true);
+      expect(await retainedCounts(page, f.ws)).toBe(countBefore);
+
+      // A real missing-parent failure still appears after a successful persist
+      // ACK. The browser retains the option; the API independently trashes it.
+      await parentSelect.selectOption(retired.id);
+      expect((await page.request.post(`${prefix}/${retired.id}/trash`)).ok()).toBe(true);
+      const failed = await holdResponse(page, `${prefix}/${original.id}/move`); held.push(failed);
+      await page.getByRole("button", { name: "이동", exact: true }).click();
+      expect(await failed.response).toBeGreaterThanOrEqual(400);
+      await editorOf(page).click(); await page.keyboard.press("End"); await page.keyboard.type(" error ACK"); await save(page);
+      failed.release();
+      await expect(page.locator(".document-page__error[role=alert]")).toBeVisible();
+
+      // Retire a real in-flight error by switching via the actual SPA router.
+      const lateError = await holdResponse(page, `${prefix}/${original.id}/move`); held.push(lateError);
+      await page.getByRole("button", { name: "이동", exact: true }).click();
+      expect(await lateError.response).toBeGreaterThanOrEqual(400);
+      await pushDocument(page, next.path);
+      const deliveredError = page.waitForResponse((response) => response.url().endsWith(`${prefix}/${original.id}/move`));
+      lateError.release(); await deliveredError;
+      await expect(page.locator(".document-page__error[role=alert]")).toHaveCount(0);
+
+      // Retire successful trash: cache effects still apply to the old scope,
+      // but its completion must never redirect the newly opened room.
+      await pushDocument(page, original.path);
+      // The earlier API-only fixture deletion bypassed browser invalidation.
+      // Refresh the real baseline once, then retain it through the room switch.
+      const beforeTrash = await retainedCounts(page, f.ws, true);
+      const lateTrash = await holdResponse(page, `${prefix}/${original.id}/trash`); held.push(lateTrash);
+      page.once("dialog", (dialog) => dialog.accept());
+      await page.getByRole("button", { name: "휴지통으로 이동", exact: true }).click();
+      expect(await lateTrash.response).toBe(200);
+      await pushDocument(page, next.path);
+      const deliveredTrash = page.waitForResponse((response) => response.url().endsWith(`${prefix}/${original.id}/trash`));
+      lateTrash.release(); await deliveredTrash;
+      await expect.poll(() => retainedCounts(page, f.ws)).toBe(beforeTrash - 1);
+      await expect(page).toHaveURL(new RegExp(`${next.path}$`));
+      await expect(page.getByLabel("문서 제목")).toHaveValue(`${key} next room`);
+
+      // Current-room trash gets a persist ACK before delivery and must navigate.
+      await openDoc(peer.page, next.path);
+      const currentTrash = await holdResponse(page, `${prefix}/${next.id}/trash`, true); held.push(currentTrash);
+      // Deleting a document may close its collab room. Hold the outgoing
+      // request until the captured operation has observed a real persist ACK.
+      page.once("dialog", (dialog) => dialog.accept());
+      await page.getByRole("button", { name: "휴지통으로 이동", exact: true }).click();
+      await editorOf(page).click(); await page.keyboard.type("during trash ACK"); await save(page);
+      await expect(editorOf(peer.page)).toContainText("during trash ACK");
+      currentTrash.forward(); expect(await currentTrash.response).toBe(200);
+      currentTrash.release();
+      await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/trash$`));
+      const counts = await page.request.get("/api/v1/me/workspaces");
+      expect((await counts.json()).items.find((item: { id: string }) => item.id === f.ws).documentCount).toBe(beforeTrash - 2);
+    } finally {
+      for (const response of held) response.release();
+      await peer.context.close(); await signed.context.close();
+    }
+  });
+}

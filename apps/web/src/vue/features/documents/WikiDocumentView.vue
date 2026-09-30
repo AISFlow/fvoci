@@ -4,7 +4,7 @@ import "@fvoci/editor/styles.css";
 import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, type FunctionalComponent, h, markRaw, ref, shallowRef, watch } from "vue";
+import { computed, type FunctionalComponent, h, markRaw, onScopeDispose, ref, shallowRef, watch } from "vue";
 import { RouterLink } from "vue-router";
 import { bindBlockPresence, isBlockPresenceAwareness } from "@/features/documents/block-presence";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
@@ -115,21 +115,39 @@ watch(
   },
 );
 
-type DocumentOperation = { scope: DocumentScope; slug: string; session: typeof session.value };
+type DocumentOperation = { scope: DocumentScope; slug: string; lifecycle: number };
+let operationLifecycle = 0;
+// The computed session is a snapshot: peers, pending and ACKs replace it.
+// Only the actual room/provider generation, actor and route retire operations.
+watch(
+  [
+    () => scope.value.workspaceId,
+    () => scope.value.documentId,
+    () => scope.value.projectId,
+    () => props.slug,
+    () => collabUser.value?.id,
+    () => session.value?.doc,
+    () => session.value?.provider,
+    () => session.value?.generation,
+  ],
+  () => { operationLifecycle += 1; },
+  { flush: "sync" },
+);
+onScopeDispose(() => { operationLifecycle += 1; });
 function captureOperation(): DocumentOperation {
-  return { scope: { ...scope.value }, slug: props.slug, session: session.value };
+  return { scope: { ...scope.value }, slug: props.slug, lifecycle: operationLifecycle };
 }
 function currentOperation(operation: DocumentOperation): boolean {
-  return props.workspaceId === operation.scope.workspaceId &&
-    props.documentId === operation.scope.documentId &&
-    scope.value.projectId === operation.scope.projectId &&
-    props.slug === operation.slug && session.value === operation.session;
+  return operation.lifecycle === operationLifecycle && session.value !== null;
 }
 
 const trashDoc = useMutation({
   mutationFn: (operation: DocumentOperation) => trashDocument(operation.scope),
   onSuccess: async (_result, operation) => {
-    await queryClient.invalidateQueries({ queryKey: ["projects", operation.scope.workspaceId] });
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["projects", operation.scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+    ]);
     if (!currentOperation(operation)) return;
     lifecycleError.value = null;
     window.location.assign(trashPath(operation.slug));
@@ -145,6 +163,7 @@ const moveDoc = useMutation({
     const { workspaceId, documentId } = operation.scope;
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
       queryClient.invalidateQueries({ queryKey: ["tree", workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["document", workspaceId, documentId] }),
       queryClient.invalidateQueries({ queryKey: ["ancestors", workspaceId, documentId] }),
