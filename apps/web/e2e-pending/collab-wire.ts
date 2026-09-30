@@ -2,7 +2,7 @@
  * Bounded Hocuspocus 4.6.0 frame reader for product /collab Playwright
  * observation. Persist strings and auth token shape match
  * packages/editor/src/collab/constants.ts and the public provider 4.6.0
- * goldens in compat/fixtures/hocus-wire.json. This is not a second codec.
+ * goldens in tests/fixtures/collab/hocus-wire.json. This is not a second codec.
  */
 export const COLLAB_PERSIST_REQUEST = "persist";
 export const COLLAB_PERSIST_DONE = "persisted";

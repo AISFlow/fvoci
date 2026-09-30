@@ -100,7 +100,7 @@ RB_BUCKET_OVERLAY="$WORK/rollback-bucket.yml"
 BACKUP_DIR="$WORK/backup"
 COOKIE_JAR="$WORK/cookies"
 DOWNLOAD_PATH="$WORK/download"
-FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
+FIXTURE_HWPX="$ROOT/crates/document-extract/fixtures/user-hancom-12.30-안녕.hwpx"
 OLD_TREE="$WORK/src-old"
 NEW_TREE="$WORK/src-new"
 # The tree whose compose file last started the upgrade project.

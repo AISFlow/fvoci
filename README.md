@@ -14,6 +14,6 @@ cargo test --locked --offline --lib
 
 빠른 검사는 외부 DB나 Docker를 요구하지 않습니다. 실제 인가·원자성·경합 검사는 별도 PostgreSQL 환경에서 `cargo test --locked --offline --features db-tests --test db_integration`으로 실행하며 `TEST_DATABASE_URL`이 없으면 실패합니다.
 
-서버 런타임은 Rust와 PostgreSQL을 사용합니다. `compat/`의 JS 도구는 협업 프로토콜 조사 전용이며 제품 서버에서 호출하지 않습니다. 기존 프론트엔드 연결, 협업 서버, 문서 처리, 데이터 이관·백업·복원 및 다른 DB 엔진 지원은 아직 완료되지 않았습니다.
+서버 런타임은 Rust와 PostgreSQL을 사용합니다. 기존 프론트엔드 연결, 협업 서버, 문서 처리, 데이터 이관·백업·복원 및 다른 DB 엔진 지원은 아직 완료되지 않았습니다.
 
 에이전트 운영 규칙은 [AGENTS.md](AGENTS.md), 실제 도구 검증 기록은 [.agents/environment.md](.agents/environment.md)에 있습니다. 라이선스는 [MIT](LICENSE)입니다.

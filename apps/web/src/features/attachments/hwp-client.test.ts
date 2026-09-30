@@ -6,13 +6,11 @@ import test from "node:test";
 import { HwpDocument, initSync } from "@rhwp/core";
 import { HwpClientError, HwpDocumentClient, type HwpWorkerPort } from "./hwp-client.ts";
 import { createHwpSession, type HwpRequest, type HwpResponse } from "./hwp-worker-core.ts";
-import { readZip, writeZip } from "./hwp-test-fixture.ts";
+import { hancomBytes, readZip, writeZip } from "./hwp-test-fixture.ts";
 
 const require = createRequire(import.meta.url);
 const wasm = fs.readFileSync(path.join(path.dirname(require.resolve("@rhwp/core")), "rhwp_bg.wasm"));
 const module = new WebAssembly.Module(wasm);
-const repoRoot = path.resolve(import.meta.dirname, "../../../../..");
-const fixture = (name: string) => new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
 
 /** Every fake worker started, so a test can tell which are still running. */
 class FakeWorker implements HwpWorkerPort {
@@ -203,7 +201,7 @@ test("client and real-wasm session: the Scripts bomb is refused and its worker t
     return fake((request) => session(request));
   };
   const bomb = writeZip([
-    ...readZip(fixture("sample.hwpx")),
+    ...readZip(hancomBytes("hwpx")),
     ...[0, 1, 2, 3].map((n) => ({ name: `Scripts/s${n}.js`, data: new Uint8Array(32 * 1024 * 1024) })),
   ]);
   const f = real();
@@ -212,7 +210,7 @@ test("client and real-wasm session: the Scripts bomb is refused and its worker t
   assert.equal(f.worker.terminated, 1);
 
   const g = real();
-  const { client, pageCount } = await HwpDocumentClient.open(fixture("sample.hwpx"), module, {
+  const { client, pageCount } = await HwpDocumentClient.open(hancomBytes("hwpx"), module, {
     createWorker: g.createWorker,
   });
   assert.equal(pageCount, 1);

@@ -96,7 +96,6 @@ _BROADEN_PREFIXES: tuple[str, ...] = (
     "tests/",
     "scripts/",
     "vendor/",
-    "compat/",
     "infra/",
     ".agents/",
     "packages/",

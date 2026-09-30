@@ -15,7 +15,7 @@
 //! hyperlinks kept, list nesting as levels with the right numbers, task
 //! checkboxes, blocks taller than the rest of a slide continue on the next
 //! slide instead of shrinking, tables split across slides, ...) are listed in
-//! `compat/fixtures/export-pptx/README.md`.
+//! `tests/fixtures/export-pptx/README.md`.
 //!
 //! Runs in the `--internal-markdown` child only (`tiptap-to-pptx`).
 

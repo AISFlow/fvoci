@@ -7,13 +7,11 @@ import { HwpDocument, initSync } from "@rhwp/core";
 import { hwpExportFormat } from "./hwp-edit.ts";
 import { decodePageText, HWP_MAX_BYTES } from "./hwp-page.ts";
 import { createHwpSession, type HwpRequest, type HwpResponse, type RhwpApi, type RhwpDocument } from "./hwp-worker-core.ts";
-import { buildFixtureHwpx, FIXTURE_PAGES } from "./hwp-test-fixture.ts";
+import { buildFixtureHwpx, FIXTURE_PAGES, hancomBytes } from "./hwp-test-fixture.ts";
 
 const require = createRequire(import.meta.url);
 const wasm = fs.readFileSync(path.join(path.dirname(require.resolve("@rhwp/core")), "rhwp_bg.wasm"));
 const module = new WebAssembly.Module(wasm);
-const repoRoot = path.resolve(import.meta.dirname, "../../../../..");
-const fixture = (name: string) => new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
 
 const realApi: RhwpApi = {
   init: async (m) => void initSync({ module: m }),
@@ -66,7 +64,7 @@ test("export format follows the file name, not the MIME type", () => {
 });
 
 test("HWPX: replace all on one page, export as HWPX, reopen: only that page changed", async () => {
-  const session = await openSession(buildFixtureHwpx(fixture("sample.hwpx"), FIXTURE_PAGES));
+  const session = await openSession(buildFixtureHwpx(hancomBytes("hwpx"), FIXTURE_PAGES));
   const hits = occurrences(FIXTURE_PAGES[1]!, "하늘과");
   assert.ok(hits > 1);
   assert.equal(await replace(session, "하늘과", "구름과", true), "changed");
@@ -81,7 +79,7 @@ test("HWPX: replace all on one page, export as HWPX, reopen: only that page chan
 });
 
 test("HWP: replace one and replace all, export as HWP 5.0, reopen", async () => {
-  const session = await openSession(fixture("sample.hwp"));
+  const session = await openSession(hancomBytes("hwp"));
   assert.equal(await replace(session, "안", "잘", false), "changed");
   const bytes = await exported(session, "hwp");
   // HWP 5.0 is an OLE compound file.
@@ -89,7 +87,7 @@ test("HWP: replace one and replace all, export as HWP 5.0, reopen", async () => 
   assert.deepEqual(reopen(bytes), ["잘녕\n"]);
 
   // A three-page binary HWP source keeps its other pages.
-  const hwp = new HwpDocument(buildFixtureHwpx(fixture("sample.hwpx"), FIXTURE_PAGES));
+  const hwp = new HwpDocument(buildFixtureHwpx(hancomBytes("hwpx"), FIXTURE_PAGES));
   const source = hwp.exportHwp();
   hwp.free();
   const multi = await openSession(source);
@@ -102,7 +100,7 @@ test("HWP: replace one and replace all, export as HWP 5.0, reopen", async () => 
 });
 
 test("no match changes nothing: replaceAll count 0 and a refused replaceOne", async () => {
-  const session = await openSession(fixture("sample.hwpx"));
+  const session = await openSession(hancomBytes("hwpx"));
   assert.equal(await replace(session, "없는문자열", "X", true), "unchanged");
   // rhwp 0.8.6 answers {"ok":false} to a replaceOne with no match.
   assert.equal(await replace(session, "없는문자열", "X", false), "rejected");
@@ -111,7 +109,7 @@ test("no match changes nothing: replaceAll count 0 and a refused replaceOne", as
 });
 
 test("revert re-parses the original and drops every edit", async () => {
-  const session = await openSession(buildFixtureHwpx(fixture("sample.hwpx"), FIXTURE_PAGES));
+  const session = await openSession(buildFixtureHwpx(hancomBytes("hwpx"), FIXTURE_PAGES));
   assert.equal(await replace(session, "첫째", "처음", true), "changed");
   assert.equal(await replace(session, "셋째", "끝", false), "changed");
   assert.deepEqual(await call(session, { op: "revert" }), { id: nextId, ok: true, op: "revert", pageCount: 3 });

@@ -193,7 +193,7 @@ test("the mounted wiki editor has the server's yjs seed schema", async ({ page }
   // writer is tested against. The editor re-adds Mention after that list, so
   // mention is its last node.
   const fixture = JSON.parse(
-    fs.readFileSync(path.join(repoRoot, "compat/fixtures/yjs-seed/schema.json"), "utf8"),
+    fs.readFileSync(path.join(repoRoot, "tests/fixtures/yjs-seed/schema.json"), "utf8"),
   ) as SchemaDump;
   const mention = fixture.nodes.find((node) => node.name === "mention");
   expect(mention).toBeTruthy();

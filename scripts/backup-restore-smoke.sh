@@ -16,7 +16,7 @@ ASSERT_LOG="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-assert.${RUN_ID}.XXXXXX")"
 COOKIE_JAR="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-cookie.${RUN_ID}.XXXXXX")"
 DOWNLOAD_PATH="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-download.${RUN_ID}.XXXXXX")"
 chmod 600 "$SOURCE_ENV" "$RESTORE_ENV" "$ASSERT_LOG" "$COOKIE_JAR"
-FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
+FIXTURE_HWPX="$ROOT/crates/document-extract/fixtures/user-hancom-12.30-안녕.hwpx"
 SOURCE_COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$SOURCE_PROJECT" --env-file "$SOURCE_ENV")
 RESTORE_COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$RESTORE_PROJECT" --env-file "$RESTORE_ENV")
 

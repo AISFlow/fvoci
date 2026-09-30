@@ -37,7 +37,7 @@ by the `--internal-markdown` child timeout): 30,000 nested `*a ` (12.9 s), 50,00
 Tests: `util::edit_map::tests` compares the patched map with the verbatim upstream
 `add_impl` (same positions, before/after merges, removals, no-op edits, index cleared by
 `consume`): `cargo test --manifest-path vendor/markdown/Cargo.toml --locked --offline --lib`.
-The product's oracle corpus (`compat/fixtures/markdown-oracle`) runs through this copy.
+The product's oracle corpus (`tests/fixtures/markdown-oracle`) runs through this copy.
 
 Rule: replace this directory with the crates.io release (drop the `[patch]`) as soon as an
 upstream release contains the fix; do not add other local changes here.

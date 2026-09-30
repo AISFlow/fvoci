@@ -40,14 +40,7 @@ updates:
   # suppress security fixes in development-only network/fixture dependencies.
   - package-ecosystem: npm
     directories:
-      - /compat/js
       - /crates/collab-engine/js
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 0
-
-  - package-ecosystem: cargo
-    directory: /compat
     schedule:
       interval: weekly
     open-pull-requests-limit: 0

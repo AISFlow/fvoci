@@ -353,7 +353,7 @@ export type FvociNodeViewName =
 /** One `addNodeView` per node, e.g. `() => ReactNodeViewRenderer(MathNodeView)`.
  * The factory applies each only as `.extend({ addNodeView })`, so a map cannot
  * change attributes or parse rules: the schema — the collab contract in
- * compat/fixtures/yjs-seed/schema.json — is the same for every host. A host
+ * tests/fixtures/yjs-seed/schema.json — is the same for every host. A host
  * may leave `mermaid` out: `.extend` with no view keeps the node's own plain
  * source view (nodes/mermaid.ts). */
 export type FvociNodeViews = Readonly<

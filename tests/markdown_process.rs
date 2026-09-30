@@ -17,7 +17,7 @@ fn helper() -> MarkdownHelper {
 }
 
 fn oracle_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("compat/fixtures/markdown-oracle")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/markdown-oracle")
 }
 
 fn corpus() -> Vec<(String, String)> {

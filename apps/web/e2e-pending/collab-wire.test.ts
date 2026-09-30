@@ -13,7 +13,7 @@ import {
 
 const fixturePath = path.resolve(
   import.meta.dirname,
-  "../../../compat/fixtures/hocus-wire.json",
+  "../../../tests/fixtures/collab/hocus-wire.json",
 );
 
 function hexBytes(hex: string): Uint8Array {

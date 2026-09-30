@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import type { getSchema } from "@tiptap/core";
 
 // The schema projection of scripts/document-convert/schema-dump.mjs, which
-// writes compat/fixtures/yjs-seed/schema.json (the table the Rust seed writer
+// writes tests/fixtures/yjs-seed/schema.json (the table the Rust seed writer
 // is tested against), for the editor-extension tests of each host.
 
 export type AttrDump = {
@@ -54,7 +54,7 @@ export function dumpSchema(schema: ReturnType<typeof getSchema>): SchemaDump {
 export function editorSchemaFixture(): SchemaDump {
   const fixture = JSON.parse(
     readFileSync(
-      new URL("../../../compat/fixtures/yjs-seed/schema.json", import.meta.url),
+      new URL("../../../tests/fixtures/yjs-seed/schema.json", import.meta.url),
       "utf8",
     ),
   ) as SchemaDump;
