@@ -15,7 +15,9 @@ const current = useQuery(() => ({
   ...legalDocQuery(kind.value),
   enabled: me.data.value?.isInstanceAdmin === true && /^[a-z0-9-]{1,50}$/.test(kind.value),
 }));
-const none = computed(() => current.error.value instanceof ProblemError && current.error.value.status === 404);
+const none = computed(
+  () => current.error.value instanceof ProblemError && current.error.value.status === 404,
+);
 const failed = computed(() => current.isError.value && !none.value);
 </script>
 
