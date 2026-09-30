@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 import {
   devices,
   expect,
@@ -18,7 +21,6 @@ import {
   decodeHocuspocusFrame,
   frameBytes,
   persistParts,
-  PROVIDER_VERSION,
   SESSION_COOKIE,
   UUID_RE,
   type CollabFrame,
@@ -26,6 +28,21 @@ import {
 
 export { createE2eUser } from "../e2e/helpers";
 export { expect };
+
+// package.json is not exported by the provider. Resolve its public entry point
+// and read the shipped metadata beside dist; keep Node I/O out of collab-wire,
+// which must remain usable in browser bundles and with the frozen wire fixture.
+const providerEntry = createRequire(import.meta.url).resolve("@hocuspocus/provider");
+const installedProviderPackage = JSON.parse(
+  readFileSync(resolve(dirname(providerEntry), "../package.json"), "utf8"),
+) as { name: string; version: string };
+if (
+  installedProviderPackage.name !== "@hocuspocus/provider" ||
+  typeof installedProviderPackage.version !== "string" ||
+  installedProviderPackage.version.length === 0
+) {
+  throw new Error("missing installed provider version metadata");
+}
 
 export const test = base.extend<
   { baseURL: string; recycleCollab: void },
@@ -825,7 +842,7 @@ export async function expectAwarenessTokenNotSession(
   }
   expect(auth.token).toMatch(/^\d+$/);
   expect(auth.token).not.toBe(session);
-  expect(auth.providerVersion).toBe(PROVIDER_VERSION);
+  expect(auth.providerVersion).toBe(installedProviderPackage.version);
   expect(auth.routingKey).toContain(":document:");
 }
 
