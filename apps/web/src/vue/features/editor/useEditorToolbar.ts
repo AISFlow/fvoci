@@ -2,6 +2,8 @@
 // at 60886bda1442549b90312ab5097a449eff634fd1 (MIT). FVOCI owns commands,
 // permissions and the editor instance; these are presentation groups only.
 import type { EditorToolbarItem } from "@nuxt/ui";
+import { createHandlers } from "@nuxt/ui/utils/editor";
+import type { Editor as VueEditor } from "@tiptap/vue-3";
 import { type TiptapEditor, insertSlashHere, useEditorState } from "@fvoci/editor/vue";
 import { t } from "@fvoci/i18n";
 import { computed } from "vue";
@@ -49,7 +51,11 @@ export function useEditorToolbar(editor: TiptapEditor) {
   ]];
   function insertSlash(): void { if (canUseToolbar(editor)) insertSlashHere(editor); }
   function insertTrigger(trigger: "@" | ":"): void {
-    if (canUseToolbar(editor)) editor.chain().focus().insertContent(trigger).run();
+    if (!canUseToolbar(editor)) return;
+    // Official handlers add the required leading space after existing text,
+    // so @/: actually activate the existing suggestion plugins.
+    const handlers = createHandlers();
+    handlers[trigger === "@" ? "mention" : "emoji"].execute(editor as VueEditor).run();
   }
   return { state, history, insert, format, insertSlash, insertTrigger };
 }
