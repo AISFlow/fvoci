@@ -47,14 +47,14 @@ function onKeydown(event: KeyboardEvent): void {
   close();
 }
 
-function onConfirm(): void {
+async function onConfirm(): Promise<void> {
   busy.value = true;
-  void Promise.resolve()
-    .then(() => props.action())
-    .finally(() => {
-      busy.value = false;
-      close();
-    });
+  try {
+    await Promise.resolve().then(() => props.action());
+  } finally {
+    busy.value = false;
+    close();
+  }
 }
 </script>
 

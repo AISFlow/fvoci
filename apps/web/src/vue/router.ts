@@ -214,7 +214,9 @@ export function createAppRouter(history: RouterHistory = createWebHistory()) {
       const current = router.currentRoute.value;
       if (query !== current.query) return stringifyQuery(query);
       const suffix = current.fullPath.slice(current.path.length);
-      return suffix.startsWith("?") ? suffix.slice(1).split("#", 1)[0]! : "";
+      if (!suffix.startsWith("?")) return "";
+      const hash = suffix.indexOf("#");
+      return suffix.slice(1, hash === -1 ? undefined : hash);
     },
     routes: [...routes, { path: "/:pathMatch(.*)*", name: "unknown-path", redirect: "/" }],
   });

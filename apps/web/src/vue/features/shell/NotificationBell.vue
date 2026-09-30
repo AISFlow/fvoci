@@ -19,7 +19,9 @@ const bell = useNotificationBell({
   slug: () => props.slug,
   // A task or document is a React page (the router loads it) or a wiki
   // document of this app.
-  navigate: (path) => void router.push(path),
+  navigate: (path) => {
+    router.push(path).catch(reportError);
+  },
 });
 const { open, count, items, label, badge } = bell;
 const { isPending: listPending, isError: listFailed, error: listError } = bell.list;

@@ -21,10 +21,16 @@ export function useTaskStream(
     ([ws, project], _previous, onCleanup) => {
       if (!ws || !project) return;
       const subscription = subscribeTaskStream(ws, project, {
-        onResync: () => invalidateTaskStreamResyncCaches(queryClient, ws, project),
-        onTask: (hint) => void invalidateTaskCaches(queryClient, ws, project, hint.taskId),
+        onResync: () => {
+          invalidateTaskStreamResyncCaches(queryClient, ws, project);
+        },
+        onTask: (hint) => {
+          invalidateTaskCaches(queryClient, ws, project, hint.taskId).catch(reportError);
+        },
       });
-      onCleanup(() => subscription.close());
+      onCleanup(() => {
+        subscription.close();
+      });
     },
     { immediate: true },
   );

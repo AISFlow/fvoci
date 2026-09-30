@@ -11,7 +11,7 @@ export function redirectTo(path: string): void {
 
 /** Local app hrefs stay in Vue; external hrefs use a full page load. */
 export function followAppHref(href: string, router: Router): void {
-  if (isVueAppPath(href.split(/[?#]/, 1)[0] ?? "")) void router.push(href);
+  if (isVueAppPath(href.split(/[?#]/, 1)[0] ?? "")) router.push(href).catch(reportError);
   else window.location.assign(href);
 }
 
@@ -22,8 +22,12 @@ export interface LeaveEnvironment {
 }
 
 const BROWSER_LEAVE: LeaveEnvironment = {
-  assign: (url) => window.location.assign(url),
-  push: (path) => window.location.assign(path),
+  assign: (url) => {
+    window.location.assign(url);
+  },
+  push: (path) => {
+    window.location.assign(path);
+  },
 };
 
 /**

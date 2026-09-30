@@ -333,3 +333,53 @@ await test("wiki document ref: a project document or a malformed ref is not a wi
     malformed.stop();
   }
 });
+
+await test("access refresh failure remains on the query cache and keeps the cached workspace", async () => {
+  const client = queryClient();
+  seedSession(client);
+  const redirects: string[] = [];
+  const reported: unknown[] = [];
+  const env = testEnvironment(redirects);
+  let accessChanged: (() => void) | undefined;
+  env.watchAccess = (_workspaceId, handlers) => {
+    accessChanged = handlers.onAccessChange;
+    return {
+      close: () => {
+        accessChanged = undefined;
+      },
+    };
+  };
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "reportError");
+  Object.defineProperty(globalThis, "reportError", {
+    configurable: true,
+    value: (error: unknown) => {
+      reported.push(error);
+    },
+  });
+  const { result, stop } = mount(client, () => useWorkspaceSession("acme", env));
+  try {
+    assert.ok(accessChanged, "workspace access subscription is active");
+    accessChanged();
+    await until(
+      () => client.getQueryState(["me", "workspaces"])?.status === "error",
+      "the access refresh to fail",
+    );
+    await nextTick();
+    assert.ok(
+      client.getQueryState(["me", "workspaces"])?.error,
+      "the query cache owns the failure",
+    );
+    assert.equal(result.status.value, "ready");
+    assert.equal(result.workspace.value?.id, WORKSPACE.id);
+    assert.deepEqual(redirects, []);
+    assert.deepEqual(
+      reported,
+      [],
+      "a cache-owned query failure is not an uncaught consumer failure",
+    );
+  } finally {
+    stop();
+    if (previous) Object.defineProperty(globalThis, "reportError", previous);
+    else Reflect.deleteProperty(globalThis, "reportError");
+  }
+});

@@ -45,7 +45,7 @@ const triggerVariant = computed(() => (props.triggerVariant === "outline" ? "out
 watch(open, async (isOpen) => {
   if (!isOpen) return;
   await nextTick();
-  const el = confirmBtn.value?.$el;
+  const el: unknown = confirmBtn.value?.$el;
   if (el instanceof HTMLButtonElement) el.focus();
   else if (el instanceof HTMLElement) el.querySelector("button")?.focus();
 });
@@ -54,13 +54,15 @@ function close(): void {
   open.value = false;
 }
 
-function confirm(): void {
+async function confirm(): Promise<void> {
   if (busy.value) return;
   busy.value = true;
-  void Promise.resolve(props.onConfirm()).finally(() => {
+  try {
+    await props.onConfirm();
+  } finally {
     busy.value = false;
     close();
-  });
+  }
 }
 </script>
 

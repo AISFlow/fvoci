@@ -118,9 +118,6 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
   /* WHY: #664 — 서버는 연결이 접속 때 선언한 awareness clientId 하나만 받는다. clientId 는
    * Y.Doc 의 것이라 우리가 만들어 token 으로 넘긴다. #683 — 선언이 거부되면 clientID 를 갈고
    * 소켓 층부터 다시 세운다. Y.Doc 은 살아남아 미전송 편집을 다음 동기화에 싣는다(#704). */
-  const room: ShallowRef<RoomConnectionState<RefusalAwareSocket>> = shallowRef(
-    undefined as unknown as RoomConnectionState<RefusalAwareSocket>,
-  );
   const connection = new RoomConnection<RefusalAwareSocket>({
     open: (onClosed) => markRaw(createRefusalAwareSocket({ url }, onClosed)),
     onChange: (state) => {
@@ -133,7 +130,8 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
     reclaimLimit: CLAIM_RETRY_LIMIT,
     timers: BROWSER_TIMERS,
   });
-  room.value = connection.state;
+  // Construction opens the socket; onChange starts with later socket events.
+  const room: ShallowRef<RoomConnectionState<RefusalAwareSocket>> = shallowRef(connection.state);
 
   interface Generation {
     provider: HocuspocusProvider;
@@ -242,8 +240,7 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
       unsent.value = number > 0;
     });
     listen("status", () => {
-      connectionStatus.value = provider.configuration.websocketProvider
-        .status as CollabConnectionStatus;
+      connectionStatus.value = provider.configuration.websocketProvider.status;
     });
     listen("disconnect", () => {
       bind.value = syncPersistBind(bind.value, { provider, status: "disconnected", documentId });

@@ -81,17 +81,24 @@ export function useWorkspaceSession(
     (workspaceId, _previous, onCleanup) => {
       if (!workspaceId) return;
       const subscription = env.watchAccess(workspaceId, {
-        onAccessChange: async () => {
-          try {
-            const list = await queryClient.fetchQuery({ ...workspacesQuery, staleTime: 0 });
-            if (!list.items.some((item) => item.id === workspaceId))
-              env.redirect("/?denied=workspace");
-          } catch {
-            // A transport or list failure alone must not evict the page.
-          }
+        onAccessChange: () => {
+          queryClient
+            .query({ ...workspacesQuery, staleTime: 0 })
+            .then((list) => {
+              if (!list.items.some((item) => item.id === workspaceId))
+                env.redirect("/?denied=workspace");
+            })
+            .catch((error: unknown) => {
+              // Query failures remain on the cache and must not evict the page.
+              // Failures from the consumer (such as redirect) have no query owner.
+              if (queryClient.getQueryState(workspacesQuery.queryKey)?.error !== error)
+                reportError(error);
+            });
         },
       });
-      onCleanup(() => subscription.close());
+      onCleanup(() => {
+        subscription.close();
+      });
     },
     { immediate: true },
   );
@@ -113,9 +120,9 @@ export function useWorkspaceSession(
   });
 
   function retry(): void {
-    if (setup.isError.value) void setup.refetch();
-    if (me.isError.value) void me.refetch();
-    if (workspaces.isError.value) void workspaces.refetch();
+    if (setup.isError.value) setup.refetch().catch(reportError);
+    if (me.isError.value) me.refetch().catch(reportError);
+    if (workspaces.isError.value) workspaces.refetch().catch(reportError);
   }
 
   return { me: computed(() => me.data.value), workspace, status, retry };
