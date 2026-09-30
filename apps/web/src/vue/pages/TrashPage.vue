@@ -67,6 +67,8 @@ const restore = useMutation({
       queryClient.invalidateQueries({ queryKey: ["trash", id] }),
       queryClient.invalidateQueries({ queryKey: ["tree", id] }),
       queryClient.invalidateQueries({ queryKey: ["projects", id] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", id] }),
       item.projectId
         ? queryClient.invalidateQueries({
             queryKey: ["project-documents", id, item.projectId],

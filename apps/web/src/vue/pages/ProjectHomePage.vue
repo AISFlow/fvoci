@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { projectDocumentsQuery, projectQuery } from "@/features/projects/queries";
 import { api, ensureOk, loadErrorMessage } from "@/lib/api";
@@ -35,12 +35,17 @@ const project = useQuery(() => projectQuery(workspaceId.value, projectId.value))
 const documents = useQuery(() => projectDocumentsQuery(workspaceId.value, projectId.value));
 
 const lifecycleError = ref<string | null>(null);
+watch([workspaceId, projectId], () => { lifecycleError.value = null; });
+type ProjectScope = { workspaceId: string; projectId: string; slug: string };
+const matchesScope = (scope: ProjectScope) => workspaceId.value === scope.workspaceId && projectId.value === scope.projectId && slug.value === scope.slug;
+function currentScope(): ProjectScope {
+  return { workspaceId: workspaceId.value, projectId: projectId.value, slug: slug.value };
+}
 
 const lifecycle = useMutation({
-  onMutate: () => ({ workspaceId: workspace.value?.id, slug: slug.value }),
-  mutationFn: async (action: "archive" | "unarchive" | "delete") => {
-    const ws = workspace.value?.id;
-    const id = listItem.value?.id;
+  mutationFn: async ({ action, scope }: { action: "archive" | "unarchive" | "delete"; scope: ProjectScope }) => {
+    const ws = scope.workspaceId;
+    const id = scope.projectId;
     if (!ws || !id) throw new Error("missing project");
     const path = { workspace_id: ws, project_id: id };
     if (action === "delete") {
@@ -60,22 +65,24 @@ const lifecycle = useMutation({
           }),
     );
   },
-  onSuccess: async (_data, action, scope) => {
-    lifecycleError.value = null;
-    if (action === "delete") {
-      await queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] });
-      if (workspace.value?.id !== scope.workspaceId || slug.value !== scope.slug) return;
+  onSuccess: async (_data, { action, scope }) => {
+    if (matchesScope(scope)) lifecycleError.value = null;
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["project", scope.workspaceId, scope.projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["trash", scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+    ]);
+    if (action === "delete" && matchesScope(scope)) {
       leaveTo(projectsPath(scope.slug), {
         assign: (url) => window.location.assign(url),
         push: (path) => void router.push(path),
       });
-      return;
     }
-    await queryClient.invalidateQueries({ queryKey: ["projects", workspace.value?.id] });
-    await queryClient.invalidateQueries({ queryKey: ["project", workspace.value?.id, listItem.value?.id] });
-    await queryClient.invalidateQueries({ queryKey: ["trash", workspace.value?.id] });
   },
-  onError: (error: unknown, action) => {
+  onError: (error: unknown, { action, scope }) => {
+    if (!matchesScope(scope)) return;
     lifecycleError.value =
       action === "archive"
         ? t("project.archive.failed")
@@ -86,10 +93,9 @@ const lifecycle = useMutation({
 });
 
 const createDocument = useMutation({
-  mutationFn: async () => {
-    const rootId = project.data.value?.rootDocumentId;
-    const ws = workspace.value?.id;
-    const id = listItem.value?.id;
+  mutationFn: async ({ scope, rootId }: { scope: ProjectScope; rootId: string | undefined }) => {
+    const ws = scope.workspaceId;
+    const id = scope.projectId;
     if (!ws || !id || !rootId) throw new Error("missing project root");
     return ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents", {
@@ -103,10 +109,13 @@ const createDocument = useMutation({
       }),
     );
   },
-  onSuccess: async () => {
-    await queryClient.invalidateQueries({
-      queryKey: ["project-documents", workspace.value?.id, listItem.value?.id],
-    });
+  onSuccess: async (_doc, { scope }) => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["project-documents", scope.workspaceId, scope.projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+    ]);
   },
 });
 
@@ -146,13 +155,13 @@ function retry(): void {
       :nodes="documents.data.value?.items ?? []"
       :loading="loading"
       :error="error"
-      :creating="createDocument.isPending.value"
+      :creating="createDocument.isPending.value && Boolean(createDocument.variables.value && matchesScope(createDocument.variables.value.scope))"
       :can-manage="listItem?.canManage ?? false"
-      :lifecycle-pending="lifecycle.isPending.value"
+      :lifecycle-pending="lifecycle.isPending.value && Boolean(lifecycle.variables.value && matchesScope(lifecycle.variables.value.scope))"
       :lifecycle-error="lifecycleError"
       @retry="retry"
-      @create-document="createDocument.mutate()"
-      @lifecycle="lifecycle.mutate($event)"
+      @create-document="createDocument.mutate({ scope: currentScope(), rootId: project.data.value?.rootDocumentId ?? undefined })"
+      @lifecycle="lifecycle.mutate({ action: $event, scope: currentScope() })"
     />
     <QueryLoading v-else-if="loading" />
     <p v-else role="alert" class="task-form__alert">{{ error ?? t("error.resource.notFound") }}</p>

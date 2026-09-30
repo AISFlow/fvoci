@@ -37,7 +37,11 @@ const createProject = useMutation({
       }),
     ),
   onSuccess: async (_data, scope) => {
-    await queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] });
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", scope.workspaceId] }),
+    ]);
   },
 });
 
@@ -50,7 +54,11 @@ const cloneProject = useMutation({
       }),
     ),
   onSuccess: async (_data, scope) => {
-    await queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] });
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", scope.workspaceId] }),
+    ]);
   },
 });
 
