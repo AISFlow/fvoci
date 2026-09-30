@@ -1336,3 +1336,5 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
 - Orca 재시작 체크포인트: 본 세션이 띄운 직접 실행 워커5개 모두 최종 결과·세션 근거·로그 회수 후 종료된 셸만 close. 현재 이 파동의 활성 워커 없음. 기존 타 세션/앱/DB는 종료하지 않음. 화면 연결 복구를 위한 앱 정상 종료/재시작은 사용자 수행 필요; CLI open이 desktop_activation_blocked를 반환했다.
 
 - #267 fa7dac74 후보5게이트 SUCCESS와 독립 ACCEPT 후 expected-head merge. main f18f2b2b; controls 수락 main5d5171a7과 공통 merge-base 이후 변경 경로 겹침0, 예상 merge tree5ba62cfd와 실제 main tree 일치. 통합 후 셸/컨트롤 상호작용 검증은 후속 CI/브라우저로 별도 확인하며 배포 완료로 표시하지 않는다.
+
+- 사용자 요청으로 Orca 정상 재시작 전 정리 완료. 본 파동 워커5개와 생성 실패 워커2개 종료/회수, 생성 시 빈 셸1개도 자식 없음 확인 후 종료. root 코디네이터 터미널·기존 타 세션·앱/DB는 임의 종료하지 않음. 원격 CI는 취소하지 않았으며 계속 실행. 다음 시작: Orca 새 runtime/desktop 상태 확인 → 터미널 실제 표시·Sol6.1 모델/effort 확인 → auth269 setup 완료 경합 수정 워커 → docs 로컬246cc3ff 이후 delta 검토 → CI288 수락 후 frontend 갱신. main f18f2b2b, 홈 로컬21ad5327(독립 ACCEPT/실제21pass), CI288 de913cd8. 전체 종료/React 제거/배포 완료 아님.
