@@ -117,7 +117,7 @@ function blockHtml(n: unknown): string {
     case "heading": {
       const level = nodeAttr(n, "level");
       const nLevel = typeof level === "number" ? Math.min(6, Math.max(1, level)) : 1;
-      return `<h${nLevel}>${inlineHtml(content)}</h${nLevel}>`;
+      return `<h${String(nLevel)}>${inlineHtml(content)}</h${String(nLevel)}>`;
     }
     case "blockquote":
       return `<blockquote>${blocksHtml(content)}</blockquote>`;

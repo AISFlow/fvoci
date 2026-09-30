@@ -70,15 +70,15 @@ const YCHANGE_NODE_TYPES = [
 
 function ychangeTypeOf(value: unknown): "added" | "removed" | null {
   if (typeof value !== "object" || value === null) return null;
-  const type = Reflect.get(value, "type");
+  const type: unknown = Reflect.get(value, "type");
   return type === "added" || type === "removed" ? type : null;
 }
 
 function dataAttr(el: unknown, name: string): string | null {
   if (typeof el !== "object" || el === null) return null;
-  const get = Reflect.get(el, "getAttribute");
+  const get: unknown = Reflect.get(el, "getAttribute");
   if (typeof get !== "function") return null;
-  const v = get.call(el, name);
+  const v: unknown = Reflect.apply(get, el, [name]);
   return typeof v === "string" ? v : null;
 }
 
@@ -114,10 +114,10 @@ const YChangeMark = Mark.create({
       type: {
         default: null,
         parseHTML: (el) => dataAttr(el, "data-ychange-type"),
-        renderHTML: (attributes) =>
-          attributes.type === "added" || attributes.type === "removed"
-            ? { "data-ychange-type": attributes.type }
-            : {},
+        renderHTML: (attributes) => {
+          const type: unknown = attributes.type;
+          return type === "added" || type === "removed" ? { "data-ychange-type": type } : {};
+        },
       },
       color: {
         default: null,
@@ -165,7 +165,7 @@ export function createFvociExtensions(opts?: {
             default: [],
             parseHTML: (el) => parseHighlightLines(el.getAttribute("data-highlight-lines") ?? ""),
             renderHTML: (attributes) => {
-              const lines = attributes.highlightLines;
+              const lines: unknown = attributes.highlightLines;
               if (!Array.isArray(lines) || lines.length === 0) return {};
               return { "data-highlight-lines": lines.join(",") };
             },
@@ -240,7 +240,7 @@ export function createFvociExtensions(opts?: {
                 default: null,
                 parseHTML: (el) => dataAttr(el, "data-background"),
                 renderHTML: (attributes) => {
-                  const bg = attributes.background;
+                  const bg: unknown = attributes.background;
                   if (typeof bg !== "string" || bg.length === 0) return {};
                   return {
                     "data-background": bg,

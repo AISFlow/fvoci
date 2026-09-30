@@ -48,7 +48,8 @@ export function plusAt(editor: Editor, pos: number): boolean {
 
 function innerBlocks(node: Node): JSONContent[] {
   if (node.type.name === "listItem" || node.type.name === "taskItem") {
-    const json = node.toJSON();
+    // ProseMirror owns this serialization; Tiptap consumes the same JSONContent shape.
+    const json = node.toJSON() as JSONContent;
     return Array.isArray(json.content) ? json.content : [];
   }
   if (
@@ -62,7 +63,7 @@ function innerBlocks(node: Node): JSONContent[] {
     });
     return out.length > 0 ? out : [{ type: "paragraph" }];
   }
-  return [node.toJSON()];
+  return [node.toJSON() as JSONContent];
 }
 
 function insertCallout(
@@ -106,10 +107,10 @@ export function convertToCallout(editor: Editor, pos: number): boolean {
       let prefix = 0;
       parent.forEach((child, _offset, i) => {
         if (i < index) {
-          before.push(child.toJSON());
+          before.push(child.toJSON() as JSONContent);
           prefix += child.nodeSize;
         } else if (i > index) {
-          after.push(child.toJSON());
+          after.push(child.toJSON() as JSONContent);
         }
       });
       const replacement: JSONContent[] = [];
@@ -190,7 +191,7 @@ export function moveNodeTo(editor: Editor, from: number, insertPos: number): boo
   return editor
     .chain()
     .deleteRange({ from, to: from + size })
-    .insertContentAt(mapped, node.toJSON())
+    .insertContentAt(mapped, node.toJSON() as JSONContent)
     .run();
 }
 
@@ -218,7 +219,7 @@ export function duplicateBlock(editor: Editor, pos: number): boolean {
   if (!node) return false;
   return editor
     .chain()
-    .insertContentAt(pos + node.nodeSize, node.toJSON())
+    .insertContentAt(pos + node.nodeSize, node.toJSON() as JSONContent)
     .run();
 }
 

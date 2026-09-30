@@ -1,6 +1,6 @@
 import ko from "./locales/ko.json";
 
-const CATALOG: Record<string, string> = ko;
+const CATALOG: Partial<Record<string, string>> = ko;
 
 export type I18nKey = keyof typeof ko;
 
@@ -8,7 +8,10 @@ export function isI18nKey(key: string): key is I18nKey {
   return Object.hasOwn(CATALOG, key);
 }
 
-export function t(key: I18nKey, opts?: Record<string, unknown>): string {
+export function t(
+  key: I18nKey,
+  opts?: Readonly<Record<string, string | number | boolean | bigint | symbol | null | undefined>>,
+): string {
   const raw = CATALOG[key];
   if (raw === undefined) {
     throw new Error(`missing i18n key: ${key}`);
@@ -20,7 +23,7 @@ export function t(key: I18nKey, opts?: Record<string, unknown>): string {
   });
 }
 
-const PROBLEM_TITLES: Record<string, I18nKey> = {
+const PROBLEM_TITLES: Partial<Record<string, I18nKey>> = {
   authentication_required: "authentication required",
   invalid_email_or_password: "invalid email or password",
   invalid_input: "invalid input",
@@ -108,7 +111,7 @@ function payloadString(value: unknown): string | null {
 }
 
 function roParticle(word: string): string {
-  const code = [...word].at(-1)?.codePointAt(0) ?? 0;
+  const code = Array.from(word).at(-1)?.codePointAt(0) ?? 0;
   if (code < 0xac00 || code > 0xd7a3) return t("particle.euroParen");
   return (code - 0xac00) % 28 === 0 ? t("particle.ro") : t("particle.euro");
 }
@@ -127,7 +130,7 @@ function roleLabel(payload: Record<string, unknown>): string | null {
 
 function taskRef(payload: Record<string, unknown>): string | null {
   const title = payloadString(payload.title);
-  const number = typeof payload.number === "number" ? `#${payload.number}` : null;
+  const number = typeof payload.number === "number" ? `#${String(payload.number)}` : null;
   if (title && number) return `${number} 「${title}」`;
   if (title) return `「${title}」`;
   return number;

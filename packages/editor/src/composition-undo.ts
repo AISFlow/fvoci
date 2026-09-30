@@ -73,13 +73,17 @@ export function createCompositionUndoPlugin(): Plugin<number | null> {
       },
     },
     view: (view) => {
-      const manager: UndoManager = yUndoPluginKey.getState(view.state).undoManager;
+      const manager: UndoManager = (
+        yUndoPluginKey.getState(view.state) as { undoManager: UndoManager }
+      ).undoManager;
       const capture = compositionUndoCapture(manager);
       const before = (transaction: YTransaction) => {
         const id = key.getState(view.state);
         if (transaction.origin === ySyncPluginKey && typeof id === "number") capture.capture(id);
       };
-      const after = () => capture.release();
+      const after = () => {
+        capture.release();
+      };
       // Wrap the actual Yjs write, not view.update: awareness can dispatch
       // reentrant selection updates before y-sync writes the outer edit.
       // Collaboration (priority1000) creates the manager before this ordinary

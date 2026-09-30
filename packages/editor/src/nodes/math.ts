@@ -20,7 +20,7 @@ export const MathBlock = Node.create({
         tag: "[data-math]",
         getAttrs: (el) => {
           if (!(el instanceof HTMLElement)) return false;
-          return { latex: el.textContent ?? "" };
+          return { latex: el.textContent };
         },
       },
     ];
@@ -48,7 +48,7 @@ export const MathBlock = Node.create({
  * WHY: #688 — 본문 한가운데의 `$x$` 는 블록으로 눕힐 수 없다. 렌더·예산 사정은 위와 같아
  * 같은 지연 import 를 쓰고, 노드는 latex 하나만 든 인라인 아톰이다.
  */
-export const MathInline = Node.create({
+export const MathInline = Node.create<Record<string, never>, { pendingShiftEnter: boolean }>({
   name: "mathInline",
   group: "inline",
   inline: true,
@@ -63,7 +63,7 @@ export const MathInline = Node.create({
         tag: "span[data-math-inline]",
         getAttrs: (el) => {
           if (!(el instanceof HTMLElement)) return false;
-          return { latex: el.textContent ?? "" };
+          return { latex: el.textContent };
         },
       },
     ];

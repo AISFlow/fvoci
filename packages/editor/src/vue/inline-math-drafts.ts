@@ -3,6 +3,7 @@ import {
   absolutePositionToRelativePosition,
   relativePositionToAbsolutePosition,
   ySyncPluginKey,
+  type ProsemirrorBinding,
 } from "@tiptap/y-tiptap";
 import * as Y from "yjs";
 
@@ -18,6 +19,9 @@ export type InlineMathDraft = {
 // the transient field state outside that view, keyed by the Yjs item at the
 // atom's start, rather than its shifting document position or LaTeX value.
 // Nothing here writes the collaborative document or changes its format.
+// y-tiptap publishes PluginKey<any>; these fields are owned by its sync plugin.
+type SyncState = { doc: Y.Doc; type: Y.XmlFragment; binding: ProsemirrorBinding | null };
+
 type Entry = { position: Y.RelativePosition; draft: InlineMathDraft };
 const pools = new WeakMap<Editor, Map<string, Entry>>();
 
@@ -25,9 +29,13 @@ function identity(
   editor: Editor,
   pos: number,
 ): { key: string; position: Y.RelativePosition } | null {
-  const sync = ySyncPluginKey.getState(editor.state);
+  const sync = ySyncPluginKey.getState(editor.state) as SyncState | undefined;
   if (!sync?.binding || editor.state.doc.nodeAt(pos)?.type.name !== "mathInline") return null;
-  const boundary = absolutePositionToRelativePosition(pos, sync.type, sync.binding.mapping);
+  const boundary = absolutePositionToRelativePosition(
+    pos,
+    sync.type,
+    sync.binding.mapping,
+  ) as Y.RelativePosition;
   const absolute = Y.createAbsolutePositionFromRelativePosition(boundary, sync.doc);
   if (!absolute) return null;
   // y-tiptap associates a text boundary with the character on its left.
@@ -47,7 +55,7 @@ function identity(
   if (!(atom instanceof Y.XmlElement) || atom.nodeName !== "mathInline") return null;
   const position = Y.createRelativePositionFromTypeIndex(parent, index);
   if (!position.item) return null;
-  return { key: `${position.item.client}:${position.item.clock}`, position };
+  return { key: `${String(position.item.client)}:${String(position.item.clock)}`, position };
 }
 
 function pool(editor: Editor): Map<string, Entry> {
@@ -56,7 +64,7 @@ function pool(editor: Editor): Map<string, Entry> {
   const entries = new Map<string, Entry>();
   pools.set(editor, entries);
   const prune = () => {
-    const sync = ySyncPluginKey.getState(editor.state);
+    const sync = ySyncPluginKey.getState(editor.state) as SyncState | undefined;
     if (!sync?.binding) return;
     for (const [key, entry] of entries) {
       const pos = relativePositionToAbsolutePosition(

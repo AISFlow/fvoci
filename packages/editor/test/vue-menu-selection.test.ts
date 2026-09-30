@@ -37,7 +37,7 @@ test("selection failures restore the original contenteditable attribute", () => 
           domAtPos: () => ({ node: {} as Node, offset: 0 }),
         },
       });
-      assert.equal(editable, original, `${failing}, original=${original}`);
+      assert.equal(editable, original, `${failing}, original=${String(original)}`);
     }
   }
 });

@@ -31,7 +31,9 @@ test("a paused composition undoes and redoes as one operation while peer-origin 
     policy.release();
     assert.equal(manager.captureTimeout, 500);
     assert.equal(manager.undoStack.length, 1);
-    doc.transact(() => remote.insert(remote.length, "!"), "peer");
+    doc.transact(() => {
+      remote.insert(remote.length, "!");
+    }, "peer");
     // y-sync may stop capturing during its unrecorded remote selection repair.
     manager.stopCapturing();
   }
@@ -55,7 +57,9 @@ test("distinct compositions and normal time-based typing remain separate and cus
     [2, "글"],
   ] as const) {
     policy.capture(id);
-    doc.transact(() => text.insert(text.length, value));
+    doc.transact(() => {
+      text.insert(text.length, value);
+    });
     policy.release();
     policy.release();
     assert.equal(manager.captureTimeout, 37);
@@ -159,18 +163,23 @@ test("the installed plugin respects historical undo even when the old item retur
     ],
   });
   const host = { state };
-  const view = plugin.spec.view!(host as EditorView);
+  assert.ok(plugin.spec.view);
+  const view = plugin.spec.view(host as EditorView);
   const apply = (tr: import("@tiptap/pm/state").Transaction) => {
     state = state.apply(tr);
     host.state = state;
   };
   try {
     apply(state.tr.insertText("한", 1).setMeta("composition", 1));
-    doc.transact(() => text.insert(0, "한"), ySyncPluginKey);
+    doc.transact(() => {
+      text.insert(0, "한");
+    }, ySyncPluginKey);
     const originalItem = manager.undoStack.at(-1);
     manager.stopCapturing();
     apply(state.tr.insertText("ordinary", 2));
-    doc.transact(() => text.insert(text.length, "ordinary"), ySyncPluginKey);
+    doc.transact(() => {
+      text.insert(text.length, "ordinary");
+    }, ySyncPluginKey);
     assert.equal(manager.undoStack.length, 2);
     manager.undo();
     apply(
@@ -179,9 +188,13 @@ test("the installed plugin respects historical undo even when the old item retur
         .setMeta(ySyncPluginKey, { isChangeOrigin: true, isUndoRedoOperation: true }),
     );
     assert.equal(manager.undoStack.at(-1), originalItem);
-    doc.transact(() => peer.insert(0, "peer"), "peer");
+    doc.transact(() => {
+      peer.insert(0, "peer");
+    }, "peer");
     apply(state.tr.insertText("글", 2).setMeta("composition", 1));
-    doc.transact(() => text.insert(text.length, "글"), ySyncPluginKey);
+    doc.transact(() => {
+      text.insert(text.length, "글");
+    }, ySyncPluginKey);
     assert.equal(manager.undoStack.length, 2);
     manager.undo();
     assert.equal(text.toString(), "한");
@@ -190,7 +203,8 @@ test("the installed plugin respects historical undo even when the old item retur
     assert.equal(text.toString(), "한글");
     assert.equal(peer.toString(), "peer");
   } finally {
-    view.destroy!();
+    assert.ok(view.destroy);
+    view.destroy();
     manager.destroy();
     doc.destroy();
   }
@@ -260,7 +274,7 @@ test("the plugin wraps actual local Yjs writes and ignores remote, unrecorded an
   };
   manager.off = (name, listener) => {
     removed.push(name);
-    return off(name, listener);
+    off(name, listener);
   };
   const plugin = createCompositionUndoPlugin();
   const schema = getSchema(createFvociExtensions());
@@ -275,7 +289,8 @@ test("the plugin wraps actual local Yjs writes and ignores remote, unrecorded an
     ],
   });
   const host = { state };
-  const view = plugin.spec.view!(host as EditorView);
+  assert.ok(plugin.spec.view);
+  const view = plugin.spec.view(host as EditorView);
   const apply = (tr: import("@tiptap/pm/state").Transaction) => {
     state = state.apply(tr);
     host.state = state;
@@ -286,7 +301,9 @@ test("the plugin wraps actual local Yjs writes and ignores remote, unrecorded an
   };
   doc.on("beforeTransaction", observe);
   apply(state.tr.insertText("ㅎ", 1).setMeta("composition", 1));
-  doc.transact(() => text.insert(0, "ㅎ"), ySyncPluginKey);
+  doc.transact(() => {
+    text.insert(0, "ㅎ");
+  }, ySyncPluginKey);
   assert.equal(observed.at(-1), Infinity);
   assert.equal(manager.captureTimeout, 37);
   // Reentrant selection-only updates preserve the outer edit's composition ID.
@@ -304,21 +321,30 @@ test("the plugin wraps actual local Yjs writes and ignores remote, unrecorded an
       .setMeta("composition", 1)
       .setMeta(ySyncPluginKey, { isChangeOrigin: true }),
   );
-  doc.transact(() => text.insert(0, "peer"), "peer");
+  doc.transact(() => {
+    text.insert(0, "peer");
+  }, "peer");
   assert.equal(observed.at(-1), 37);
   apply(
     state.tr.insertText("unrecorded", 1).setMeta("composition", 1).setMeta("addToHistory", false),
   );
-  doc.transact(() => text.insert(0, "unrecorded"), ySyncPluginKey);
+  doc.transact(() => {
+    text.insert(0, "unrecorded");
+  }, ySyncPluginKey);
   assert.equal(observed.at(-1), 37);
   apply(state.tr.insertText("ordinary", 1));
-  doc.transact(() => text.insert(0, "ordinary"), ySyncPluginKey);
+  doc.transact(() => {
+    text.insert(0, "ordinary");
+  }, ySyncPluginKey);
   assert.equal(observed.at(-1), 37);
-  view.destroy!();
+  assert.ok(view.destroy);
+  view.destroy();
   assert.deepEqual(registered, ["stack-item-popped", "stack-cleared"]);
   assert.deepEqual(removed, registered, "destroy removes both owned history listeners");
   apply(state.tr.insertText("한", 1).setMeta("composition", 2));
-  doc.transact(() => text.insert(0, "한"), ySyncPluginKey);
+  doc.transact(() => {
+    text.insert(0, "한");
+  }, ySyncPluginKey);
   assert.equal(observed.at(-1), 37, "destroy removes the owned listeners");
   doc.off("beforeTransaction", observe);
   manager.destroy();

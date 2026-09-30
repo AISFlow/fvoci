@@ -243,8 +243,8 @@ export const suggestionFloatingUi = {
     size({
       padding: 8,
       apply({ availableHeight, availableWidth, elements }) {
-        elements.floating.style.maxHeight = `min(50dvh, ${Math.max(0, availableHeight)}px)`;
-        elements.floating.style.maxWidth = `min(22rem, ${Math.max(0, availableWidth)}px)`;
+        elements.floating.style.maxHeight = `min(50dvh, ${String(Math.max(0, availableHeight))}px)`;
+        elements.floating.style.maxWidth = `min(22rem, ${String(Math.max(0, availableWidth))}px)`;
       },
     }),
   ],
@@ -329,7 +329,7 @@ export function suggestionRenderer<T extends MenuItem>(
       btn.type = "button";
       btn.className = "fvoci-ui-button";
       btn.setAttribute("role", "option");
-      btn.id = `${root?.id}-option-${i}`;
+      btn.id = `${String(root?.id)}-option-${String(i)}`;
       btn.tabIndex = -1;
       btn.setAttribute("aria-selected", String(i === selected));
       const emoji = "emoji" in item && typeof item.emoji === "string" ? item.emoji : "";
@@ -357,7 +357,7 @@ export function suggestionRenderer<T extends MenuItem>(
         event.preventDefault();
       });
       btn.addEventListener("click", () => latest?.command(item));
-      group?.append(btn);
+      group.append(btn);
     });
     const active = root.querySelectorAll("[role=option]")[selected];
     if (active instanceof HTMLElement) {
@@ -412,6 +412,9 @@ export function suggestionRenderer<T extends MenuItem>(
       paint();
     },
     onKeyDown({ event, view }) {
+      // Native IME compatibility: some composition keys report 229 before isComposing.
+      // Remove only after a supported replacement passes the native IME regressions.
+      // eslint-disable-next-line @typescript-eslint/no-deprecated
       if (event.isComposing || view.composing || event.keyCode === 229) return false;
       if (event.key === "ArrowDown") {
         selected = clamp(selected + 1);

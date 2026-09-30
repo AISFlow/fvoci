@@ -25,7 +25,8 @@ Bun.plugin({
   setup(build) {
     build.onLoad({ filter: /\.vue$/ }, async ({ path }) => {
       const { descriptor, errors } = parse(await Bun.file(path).text(), { filename: path });
-      if (errors.length > 0) throw errors[0];
+      const error = errors[0];
+      if (error !== undefined) throw typeof error === "string" ? new Error(error) : error;
       const script = compileScript(descriptor, {
         id: Bun.hash(path).toString(16),
         inlineTemplate: true,

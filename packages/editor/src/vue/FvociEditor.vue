@@ -317,6 +317,9 @@ watch(editor, (current, _previous, onCleanup) => {
   const onKeyDown = (event: KeyboardEvent) => {
     const element = host.value;
     if (!element?.isConnected) return;
+    // Native IME compatibility: some composition keys report 229 before isComposing.
+    // Remove only after a supported replacement passes the native IME regressions.
+    // eslint-disable-next-line @typescript-eslint/no-deprecated
     if (event.isComposing || current.view.composing || event.keyCode === 229) return;
     if (isGuardedTextField(event.target, element)) return;
     if (event.key === "Escape") {
@@ -330,10 +333,14 @@ watch(editor, (current, _previous, onCleanup) => {
     selectAllStep(current);
   };
   document.addEventListener("keydown", onKeyDown, true);
-  onCleanup(() => document.removeEventListener("keydown", onKeyDown, true));
+  onCleanup(() => {
+    document.removeEventListener("keydown", onKeyDown, true);
+  });
 });
 
-onBeforeUnmount(() => emit("ready", null));
+onBeforeUnmount(() => {
+  emit("ready", null);
+});
 
 /* Padding below the last block focuses the end, as in the React host. */
 function onHostMouseDown(event: MouseEvent): void {

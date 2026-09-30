@@ -61,9 +61,8 @@ test("host node views are applied only as addNodeView", () => {
     assert.ok(ext, name);
     assert.equal(ext.parent, base, name);
     const { addNodeView, ...config } = { ...ext.config } as Record<string, unknown>;
-    const { addNodeView: _baseView, ...baseConfig } = {
-      ...base.config,
-    } as Record<string, unknown>;
+    const baseConfig: Record<string, unknown> = { ...base.config };
+    delete baseConfig.addNodeView;
     assert.equal(addNodeView, nodeViews[name], name);
     assert.deepEqual(Object.keys(config).sort(), Object.keys(baseConfig).sort());
     for (const key of Object.keys(baseConfig)) {

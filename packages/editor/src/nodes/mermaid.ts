@@ -16,7 +16,7 @@ export const Mermaid = Node.create({
         getAttrs: (el) => {
           if (!(el instanceof HTMLElement)) return false;
           return {
-            source: el.getAttribute("data-source") ?? el.textContent ?? "",
+            source: el.getAttribute("data-source") ?? el.textContent,
           };
         },
       },

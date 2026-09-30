@@ -64,7 +64,7 @@ function pushTextRuns(out: ReactElement[], text: string, keyBase: string): void 
   let last = 0;
   let i = 0;
   for (const m of text.matchAll(EMOJI_RE)) {
-    const idx = m.index ?? 0;
+    const idx = m.index;
     if (idx > last) {
       out.push(<Text key={`${keyBase}-${String(i++)}`}>{text.slice(last, idx)}</Text>);
     }
@@ -76,7 +76,7 @@ function pushTextRuns(out: ReactElement[], text: string, keyBase: string): void 
     last = idx + m[0].length;
   }
   if (last < text.length) {
-    out.push(<Text key={`${keyBase}-${String(i++)}`}>{text.slice(last)}</Text>);
+    out.push(<Text key={`${keyBase}-${String(i)}`}>{text.slice(last)}</Text>);
   }
 }
 

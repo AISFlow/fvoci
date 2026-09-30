@@ -11,5 +11,5 @@ export function formatBytes(bytes: number): string {
     unit += 1;
   }
   const digits = unit === 0 || value >= 100 ? 0 : 1;
-  return `${value.toFixed(digits)} ${UNITS[unit]}`;
+  return `${value.toFixed(digits)} ${String(UNITS[unit])}`;
 }

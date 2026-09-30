@@ -217,7 +217,7 @@ test("the code-block chrome's gutter numbers lines and paints highlighted and di
 
 test("the code-block chrome offers folding from nine lines on", () => {
   const lines = (count: number) =>
-    Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
+    Array.from({ length: count }, (_, i) => `line ${String(i + 1)}`).join("\n");
   const block = { id: "b", editable: true, language: "", highlightLines: [], text: lines(8) };
   assert.equal(codeChromeView(block, DEFAULT_CODE_CHROME).foldable, false);
   assert.equal(codeChromeView({ ...block, text: lines(9) }, DEFAULT_CODE_CHROME).foldable, true);

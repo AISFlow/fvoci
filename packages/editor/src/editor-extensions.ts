@@ -95,6 +95,9 @@ function handleNativeOwnedDeleteKeyDown(view: EditorView, event: KeyboardEvent):
       trusted: event.isTrusted,
       editable: view.editable,
       composing: event.isComposing,
+      // Native IME compatibility: some composition keys report 229 before isComposing.
+      // Remove only after a supported replacement passes the native IME regressions.
+      // eslint-disable-next-line @typescript-eslint/no-deprecated
       keyCode: event.keyCode,
       key: event.key,
       pmIsTextSelection: selection instanceof TextSelection,
@@ -442,8 +445,12 @@ export function createFvociEditorExtensions(opts: FvociEditorExtensionOptions): 
         }
       },
     }).configure({
-      onDrop: (current, files, pos) => uploads.queue(current, files, pos),
-      onPaste: (current, files) => uploads.queue(current, files, current.state.selection.to),
+      onDrop: (current, files, pos) => {
+        uploads.queue(current, files, pos);
+      },
+      onPaste: (current, files) => {
+        uploads.queue(current, files, current.state.selection.to);
+      },
     }),
     Extension.create({
       name: "fvociPasteEmbed",

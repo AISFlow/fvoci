@@ -99,7 +99,7 @@ function estimateH(text: string, fontSize: number, w: number, maxH: number): num
   const cpl = Math.max(8, Math.floor((w * 72) / fontSize));
   let lines = 0;
   for (const line of text.split("\n")) {
-    lines += Math.max(1, Math.ceil([...line].length / cpl));
+    lines += Math.max(1, Math.ceil(Array.from(line).length / cpl));
   }
   return Math.min(maxH, Math.max(MIN_H, lines * (fontSize / 72) * 1.25));
 }

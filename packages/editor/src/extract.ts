@@ -122,14 +122,15 @@ export function replaceTiptapNodeById(
   node: TiptapWalkNode,
 ): TiptapDoc | null {
   const next = structuredClone(doc);
-  let hit = false;
+  // The visitor mutates this result; an object keeps callback writes visible to TypeScript.
+  const result = { hit: false };
   walkTiptap(next, (n) => {
-    if (hit) return;
+    if (result.hit) return;
     if (n.attrs?.id !== blockId) return;
     if (typeof n.type !== "string" || !UNIQUE_ID_NODE_TYPE_SET.has(n.type)) {
       return;
     }
-    hit = true;
+    result.hit = true;
     const incoming = structuredClone(node);
     n.type = incoming.type;
     n.attrs = { ...(incoming.attrs ?? {}), id: blockId };
@@ -140,7 +141,7 @@ export function replaceTiptapNodeById(
     if (incoming.marks !== undefined) n.marks = incoming.marks;
     else delete n.marks;
   });
-  return hit ? next : null;
+  return result.hit ? next : null;
 }
 
 export function extractInternalRefs(root: unknown): InternalRef[] {

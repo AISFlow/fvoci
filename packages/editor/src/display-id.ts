@@ -18,5 +18,5 @@ export function parseDisplayId(raw: string): ParsedDisplayId | null {
 }
 
 export function formatDisplayId(prefix: string, n: number): string {
-  return `${prefix}-${n}`;
+  return `${prefix}-${String(n)}`;
 }

@@ -368,7 +368,7 @@ function tokenizeText(text: string, marks: Mark[], re: RegExp = TOKEN): TipNode[
   let last = 0;
   let highlight = false;
   for (const m of text.matchAll(re)) {
-    const idx = m.index ?? 0;
+    const idx = m.index;
     if (idx > last) {
       out.push(makeText(text.slice(last, idx), withHighlight(marks, highlight)));
     }

@@ -73,7 +73,6 @@ export function equalizeColumns(editor: Editor): boolean {
   const table = editor.state.doc.nodeAt(tablePos);
   if (!table) return false;
   const { tr } = editor.state;
-  let changed = false;
   table.descendants((node, rel) => {
     if (node.type.name !== "tableCell" && node.type.name !== "tableHeader") {
       return true;
@@ -83,10 +82,9 @@ export function equalizeColumns(editor: Editor): boolean {
       ...node.attrs,
       colwidth: null,
     });
-    changed = true;
     return true;
   });
-  if (!changed) return false;
+  if (tr.steps.length === 0) return false;
   editor.view.dispatch(tr);
   return true;
 }

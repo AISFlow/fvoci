@@ -291,7 +291,7 @@ function listMd(n: unknown, ordered: boolean, task = false): string {
           ? "- [x] "
           : "- [ ] "
         : ordered
-          ? `${i + 1}. `
+          ? `${String(i + 1)}. `
           : "- ";
       const inner = blocksMd(nodeContent(item));
       const [head, ...rest] = inner.split("\n");

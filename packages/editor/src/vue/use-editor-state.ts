@@ -6,7 +6,7 @@ import { onScopeDispose, type Ref, shallowRef } from "vue";
 export function sameValue(a: unknown, b: unknown): boolean {
   if (Object.is(a, b)) return true;
   if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
-  const proto = Object.getPrototypeOf(a);
+  const proto: unknown = Object.getPrototypeOf(a);
   if (proto !== Object.getPrototypeOf(b)) return false;
   if (proto !== Object.prototype && proto !== Array.prototype) return false;
   const left = a as Record<string, unknown>;
