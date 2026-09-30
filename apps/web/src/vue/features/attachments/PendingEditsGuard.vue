@@ -2,6 +2,7 @@
 import { t } from "@fvoci/i18n";
 import { onMounted, onUnmounted, ref } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from "vue-router";
+import { isVueAppPath } from "@/app-boundary";
 import DiscardEditsDialog from "./DiscardEditsDialog.vue";
 import { guardedViewerLink } from "./viewer-navigation";
 
@@ -54,8 +55,10 @@ function onLink(event: MouseEvent): void {
   void router.push(path);
 }
 
-const removeAfterEach = router.afterEach((_to, _from, failure) => {
-  if (failure) discardApproved = false;
+const removeAfterEach = router.afterEach((to, _from, failure) => {
+  // A same-app update may leave this dirty component mounted. Only the
+  // confirmed full-document handoff may bypass its native unload warning.
+  if (failure || isVueAppPath(to.path)) discardApproved = false;
 });
 onMounted(() => {
   window.addEventListener("beforeunload", warn);

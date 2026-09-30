@@ -195,6 +195,34 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await expect(viewer.getByText("2 / 3")).toBeVisible();
   await expect.poll(() => pageInk(page)).not.toBe(page2Before);
 
+  // A cancelled DOM click must remain cancelled; the dirty guard cannot
+  // navigate before the anchor's own event handlers have run.
+  const dirtyBeforeLinks = await pageInk(page);
+  await page.evaluate(() => {
+    const anchor = document.createElement("a");
+    anchor.href = "/w/acme/search";
+    anchor.addEventListener("click", (event) => event.preventDefault());
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+  });
+  await expect(dialog).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
+  await expect(saveButton).toBeEnabled();
+  expect(await pageInk(page)).toBe(dirtyBeforeLinks);
+
+  // Opening a new tab leaves this document and its dirty content intact.
+  await searchLink.evaluate((anchor) => anchor.setAttribute("target", "_blank"));
+  const newTab = page.context().waitForEvent("page");
+  await searchLink.click();
+  const other = await newTab;
+  await expect(other).toHaveURL(/\/w\/acme\/search/);
+  await other.close();
+  await searchLink.evaluate((anchor) => anchor.removeAttribute("target"));
+  await expect(dialog).toHaveCount(0);
+  await expect(saveButton).toBeEnabled();
+  expect(await pageInk(page)).toBe(dirtyBeforeLinks);
+
   // Unsaved edits hold in-app navigation: a link click stays put on 취소 (or Escape).
   await searchLink.click();
   await expect(dialog).toBeVisible();

@@ -101,10 +101,6 @@ const router = createBrowserRouter(
       {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
       <Route path="/s/:token" element={<PublicSharePage />} />
       <Route
-        path="/s/:token/attachments/:attachmentId/view"
-        element={<NoRoute />}
-      />
-      <Route
         path="/invite/:token"
         element={
           <SetupGuard>
@@ -201,10 +197,6 @@ const router = createBrowserRouter(
         <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
         <Route path="settings/templates" element={<TemplatesSettingsPage />} />
         <Route path="notifications" element={<NotificationsPage />} />
-        <Route
-          path="a/:attachmentId/view"
-          element={<NoRoute />}
-        />
         <Route path=":ref/tasks" element={<ProjectTasksPage />} />
         <Route path=":ref/table" element={<ProjectCollectionPage type="table" />} />
         <Route path=":ref/board" element={<ProjectCollectionPage type="board" />} />
