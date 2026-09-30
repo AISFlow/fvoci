@@ -177,6 +177,8 @@ test("public Vue project share presents task search excerpts and rechecks archiv
   await expect(results.locator("script, iframe, [contenteditable]")).toHaveCount(0);
   await expect(results.getByRole("link")).toHaveCount(0);
   fixtureSql(`UPDATE fvoci.tasks SET archived_at = now() WHERE id = ${uuid(task.id)};`);
+  await reader.getByRole("button", { name: "다시 시도", exact: true }).click();
+  await expect(reader.getByText("결과가 없습니다", { exact: true })).toBeVisible();
   await search.fill("");
   await expect(results).toHaveCount(0);
   await search.fill("sharemarker ");

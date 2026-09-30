@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
-import { useQuery } from "@tanstack/vue-query";
+import { useQuery, useQueryClient } from "@tanstack/vue-query";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, ref, watch } from "vue";
 import { useRoute } from "vue-router";
@@ -20,6 +20,8 @@ import "@/features/share/share.css";
  * `/s/:token/attachments/...` has its own anonymous viewer route.
  */
 const route = useRoute();
+const queryClient = useQueryClient();
+const refreshing = ref(false);
 const token = computed(() => String(route.params.token ?? ""));
 const selectedDocumentId = ref<string | null>(null);
 const accessError = ref<string | null>(null);
@@ -43,10 +45,18 @@ function onSelectDocument(documentId: string): void {
 }
 
 async function refresh(): Promise<void> {
-  const result = await meta.refetch();
-  if (result.isSuccess) {
-    accessError.value = null;
-    await Promise.all([tree.refetch(), body.refetch()]);
+  refreshing.value = true;
+  try {
+    const result = await meta.refetch();
+    if (result.isSuccess) {
+      accessError.value = null;
+      await Promise.all([
+        tree.refetch(), body.refetch(),
+        queryClient.refetchQueries({ queryKey: ["share-search", token.value], type: "active" }),
+      ]);
+    }
+  } finally {
+    refreshing.value = false;
   }
 }
 </script>
@@ -56,7 +66,7 @@ async function refresh(): Promise<void> {
     <div class="share-page__gate">
       <div class="flex flex-col gap-3">
         <p role="alert" class="share-page__alert">{{ metaError || treeError || accessError }}</p>
-        <UButton variant="outline" color="neutral" :loading="meta.isFetching.value || tree.isFetching.value" @click="refresh">
+        <UButton variant="outline" color="neutral" :loading="refreshing" @click="refresh">
           {{ t("load.retry") }}
         </UButton>
       </div>
@@ -77,7 +87,7 @@ async function refresh(): Promise<void> {
     :body="body.data.value ?? null"
     :body-loading="body.isFetching.value"
     :body-error="bodyError"
-    :refreshing="meta.isFetching.value || tree.isFetching.value || body.isFetching.value"
+    :refreshing="refreshing || meta.isFetching.value || tree.isFetching.value || body.isFetching.value"
     @select-document="onSelectDocument"
     @retry-body="() => void body.refetch()"
     @refresh="refresh"
