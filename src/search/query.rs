@@ -791,8 +791,10 @@ async fn scan_lexical_global(
                 workspace_id,
                 input.actor_user_id,
                 input.session_id,
-                None,
-                input.tag,
+                HydrateFilters {
+                    project_id: None,
+                    tag: input.tag,
+                },
                 acl,
                 &hits,
             )
@@ -1237,12 +1239,21 @@ async fn hydrate_hits(
         input.workspace_id,
         input.actor_user_id,
         input.session_id,
-        input.project_id,
-        input.tag,
+        HydrateFilters {
+            project_id: input.project_id,
+            tag: input.tag,
+        },
         acl,
         hits,
     )
     .await
+}
+
+/// Request filters applied against current PostgreSQL rows, after candidate recall.
+#[derive(Clone, Copy)]
+struct HydrateFilters {
+    project_id: Option<Uuid>,
+    tag: Option<Uuid>,
 }
 
 async fn hydrate_hits_for_workspace(
@@ -1250,8 +1261,7 @@ async fn hydrate_hits_for_workspace(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
-    project_filter: Option<Uuid>,
-    tag: Option<Uuid>,
+    filters: HydrateFilters,
     acl: &SearchAcl,
     hits: &[MeiliHit],
 ) -> Result<Vec<HydratedRow>, sqlx::Error> {
@@ -1266,16 +1276,7 @@ async fn hydrate_hits_for_workspace(
         tx.rollback().await?;
         return Ok(Vec::new());
     }
-    let rows = hydrate_in_tx(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        project_filter,
-        tag,
-        acl,
-        hits,
-    )
-    .await?;
+    let rows = hydrate_in_tx(&mut tx, workspace_id, actor_user_id, filters, acl, hits).await?;
     tx.commit().await?;
     Ok(rows)
 }
@@ -1284,11 +1285,14 @@ async fn hydrate_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
-    project_filter: Option<Uuid>,
-    tag: Option<Uuid>,
+    filters: HydrateFilters,
     acl: &SearchAcl,
     hits: &[MeiliHit],
 ) -> Result<Vec<HydratedRow>, sqlx::Error> {
+    let HydrateFilters {
+        project_id: project_filter,
+        tag,
+    } = filters;
     let mut loaded = HashMap::new();
     let doc_ids: Vec<Uuid> = hits
         .iter()
