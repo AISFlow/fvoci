@@ -3,9 +3,7 @@ import { reactive, ref } from "vue";
 
 /** The part of a zod schema the form uses (lib/validators.ts). */
 export interface FormSchema<O> {
-  safeParse(
-    data: unknown,
-  ):
+  safeParse(data: unknown):
     | { success: true; data: O }
     | {
         success: false;
