@@ -78,3 +78,50 @@ test("fallback refs enforce real missing-session and inaccessible-workspace gate
     await context.close();
   }
 });
+
+test("cold home, legal and populated Gantt record their actual production asset requests", async ({ page, browser }, testInfo) => {
+  await login(page, owner.email, owner.password);
+  const origin = new URL(page.url()).origin;
+  const storageState = await page.context().storageState();
+  const witnesses = [];
+  for (const path of ["/", "/legal/privacy", "/w/fallback/OPS/gantt"]) {
+    const context = await browser.newContext({ storageState });
+    try {
+      const cold = await context.newPage();
+      const requests: string[] = [];
+      const responses: { url: string; status: number; contentType: string }[] = [];
+      cold.on("request", request => { requests.push(request.url()); });
+      cold.on("response", response => { responses.push({ url: response.url(), status: response.status(), contentType: response.headers()["content-type"] ?? "" }); });
+      await cold.goto(origin + path);
+      await expect(cold.locator("#root[data-v-app]")).toHaveCount(1);
+      if (path.endsWith("gantt")) {
+        await expect(cold.getByRole("searchbox", { name: "태스크 검색" })).toBeVisible();
+        await expect(cold.getByText("Canonical task", { exact: true })).toBeVisible();
+      } else await expect(cold.locator("main")).toBeVisible();
+      await cold.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      witnesses.push({ path, requests, responses, resources: await cold.evaluate(() => performance.getEntriesByType("resource").map(entry => ({ name: entry.name, initiatorType: (entry as PerformanceResourceTiming).initiatorType }))) });
+    } finally {
+      await context.close();
+    }
+  }
+  await testInfo.attach("cold-production-network", { body: JSON.stringify(witnesses, null, 2), contentType: "application/json" });
+});
+
+test("cold wiki loads its editor and persists a real body before reload", async ({ page }, testInfo) => {
+  await login(page, owner.email, owner.password);
+  const requests: string[] = [];
+  page.on("request", request => { requests.push(request.url()); });
+  await page.goto("/w/fallback/WIKI-1");
+  await expect(page.getByRole("textbox", { name: "문서 제목", exact: true })).toHaveValue("Canonical wiki");
+  const body = page.locator(".tiptap");
+  await expect(body).toBeVisible();
+  await body.click();
+  await body.press("ControlOrMeta+End");
+  await body.pressSequentially("Fallback saved body");
+  await expect(body).toContainText("Fallback saved body");
+  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(page.getByRole("button", { name: "저장", exact: true })).toBeEnabled();
+  await page.reload();
+  await expect(body).toContainText("Fallback saved body");
+  await testInfo.attach("positive-editor-network", { body: JSON.stringify(requests, null, 2), contentType: "application/json" });
+});
