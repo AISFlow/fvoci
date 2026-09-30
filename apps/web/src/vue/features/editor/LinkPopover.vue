@@ -13,6 +13,7 @@ const state = useEditorState(props.editor, (editor) => ({ editable: editor.isEdi
 const url = shallowRef("");
 const composing = shallowRef<boolean>(false);
 function readLink(): void {
+  composing.value = false;
   const href = props.editor.getAttributes("link").href;
   url.value = typeof href === "string" ? href : "";
 }

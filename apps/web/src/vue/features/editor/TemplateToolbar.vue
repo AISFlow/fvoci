@@ -3,9 +3,10 @@
 // existing editor. Always use the fixed rendering mode: FvociEditor already
 // installs the one selection plugin at creation to preserve Yjs undo/redo.
 import type { Editor as VueEditor } from "@tiptap/vue-3";
-import type { TiptapEditor } from "@fvoci/editor/vue";
+import { overlayOwner, type TiptapEditor } from "@fvoci/editor/vue";
 import { type I18nKey, t } from "@fvoci/i18n";
 import UEditorToolbar from "@nuxt/ui/components/EditorToolbar.vue";
+import UTooltip from "@nuxt/ui/components/Tooltip.vue";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed } from "vue";
 import LinkPopover from "./LinkPopover.vue";
@@ -54,6 +55,7 @@ function keepSelection(event: MouseEvent): void {
   >
     <UEditorToolbar :editor="toolbarEditor" :items="items" layout="fixed" :aria-label="mode === 'fixed' ? t('editor.toolbar') : t('editor.format')" :ui="{ base: 'fvoci-template-toolbar__groups', group: 'shrink-0' }">
       <template #item="{ item, isActive, isDisabled, onClick }">
+        <UTooltip :text="item.tooltip?.text" :disabled="isDisabled(item)" :portal="overlayOwner(editor.view.dom)">
         <UButton
           :icon="item.icon" size="sm" color="neutral" variant="ghost" active-variant="soft"
           :aria-label="item.tooltip?.text" :title="item.tooltip?.text"
@@ -61,6 +63,7 @@ function keepSelection(event: MouseEvent): void {
           :active="isActive(item)" :disabled="isDisabled(item)"
           @click="run(() => onClick($event, item))"
         />
+        </UTooltip>
       </template>
       <template #type>
         <ToolbarPopover :editor="editor" kind="menu" :label="t('editor.block.type')" :side="side">

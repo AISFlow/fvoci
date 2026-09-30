@@ -4,7 +4,7 @@ import { expect, test } from "@playwright/test";
 import { login, watchCspViolations } from "./helpers";
 import {
   admin, member, blockAt, caretAtEndOf, createDoc, editorOf, newSignedInPage,
-  openDoc, save, savedBody, setupInstance, watchIconRequests, workspaceId,
+  expectBlocks, openDoc, save, savedBody, setupInstance, watchIconRequests, workspaceId,
 } from "./workspace-wiki-vue-editor";
 
 test.describe.configure({ mode: "serial" });
@@ -25,16 +25,15 @@ test("fixed insert and history use the existing room, selection and persisted do
     await expect(toolbar.getByRole("button", { name: "실행 취소", exact: true })).toBeDisabled();
     await caretAtEndOf(page, 0);
     await page.keyboard.type(" 내편집");
-    await expect(blockAt(peer.page, 0)).toHaveText("시작 내편집");
+    await expectBlocks(peer.page, ["시작 내편집", "동료"]);
     await caretAtEndOf(peer.page, 1);
     await peer.page.keyboard.type(" 원격편집");
-    await expect(blockAt(page, 1)).toHaveText("동료 원격편집");
+    await expectBlocks(page, ["시작 내편집", "동료 원격편집"]);
     await toolbar.getByRole("button", { name: "실행 취소", exact: true }).click();
-    await expect(blockAt(page, 0)).toHaveText("시작");
-    await expect(blockAt(peer.page, 0)).toHaveText("시작");
-    await expect(blockAt(page, 1)).toHaveText("동료 원격편집");
+    await expectBlocks(page, ["시작", "동료 원격편집"]);
+    await expectBlocks(peer.page, ["시작", "동료 원격편집"]);
     await toolbar.getByRole("button", { name: "다시 실행", exact: true }).click();
-    await expect(blockAt(peer.page, 0)).toHaveText("시작 내편집");
+    await expectBlocks(peer.page, ["시작 내편집", "동료 원격편집"]);
 
     await caretAtEndOf(page, 1);
     await toolbar.getByRole("button", { name: "삽입", exact: true }).click();
