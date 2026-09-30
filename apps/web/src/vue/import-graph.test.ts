@@ -85,7 +85,10 @@ test("the Vue entry's static graph leaves the wiki editor to the wiki page's chu
   };
   walk(path.join(web, "src/vue/main.ts"));
   assert.ok(seen.has(path.join(web, "src/vue/router.ts")), "the walk reaches the router");
-  for (const page of ["WikiDocumentPage.vue", "ProjectGanttPage.vue", "ProjectHomePage.vue", "WorkspaceItemPage.vue"]) {
+  for (const page of [
+    "WikiDocumentPage.vue", "ProjectGanttPage.vue", "ProjectHomePage.vue", "WorkspaceItemPage.vue",
+    "LoginPage.vue", "HomePage.vue", "LegalPage.vue", "ServiceInfoPage.vue", "InvitePage.vue", "SetupPage.vue",
+  ]) {
     assert.equal(seen.has(path.join(web, "src/vue/pages", page)), false, `${page} is a lazy route chunk`);
   }
   assert.deepEqual(found, []);

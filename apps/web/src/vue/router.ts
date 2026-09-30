@@ -2,8 +2,8 @@ import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory
 import { isVueAppPath } from "@/app-boundary";
 import { STAGED_VUE_ROUTE_PATHS, VUE_ROUTE_PATHS } from "./route-paths";
 
-/** The Vue app's pages; src/app-boundary.ts sends exactly these paths here.
- * Each page is its own chunk, so the Gantt page does not load the wiki
+/** The Vue app's pages; src/app-boundary.ts sends exactly the live paths
+ * (VUE_ROUTE_PATHS) here. Each page is its own chunk, so the Gantt page does not load the wiki
  * editor (Tiptap, Yjs, the collab provider) or its stylesheets
  * (import-graph.test.ts and e2e/project-gantt-flow.spec.ts check this). */
 export const routes: RouteRecordRaw[] = [
@@ -37,6 +37,12 @@ export const routes: RouteRecordRaw[] = [
     name: "project-home",
     component: () => import("./pages/ProjectHomePage.vue"),
   },
+  { path: VUE_ROUTE_PATHS.login, name: "login", component: () => import("./pages/LoginPage.vue") },
+  { path: VUE_ROUTE_PATHS.home, name: "home", component: () => import("./pages/HomePage.vue") },
+  { path: VUE_ROUTE_PATHS.legal, name: "legal", component: () => import("./pages/LegalPage.vue") },
+  { path: VUE_ROUTE_PATHS.serviceInfo, name: "service-info", component: () => import("./pages/ServiceInfoPage.vue") },
+  { path: VUE_ROUTE_PATHS.invite, name: "invite", component: () => import("./pages/InvitePage.vue") },
+  { path: VUE_ROUTE_PATHS.setup, name: "setup", component: () => import("./pages/SetupPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

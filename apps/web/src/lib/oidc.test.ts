@@ -253,23 +253,24 @@ test("the SSO slug form stays put on a slug the server would refuse", () => {
   assert.equal(t("form.invalid"), "입력을 확인해 주세요.");
 });
 
-test("the login page's SSO form submits through startWorkspaceSso, never to the server", () => {
-  const login = readFileSync(
-    path.join(import.meta.dirname, "../features/auth/login.tsx"),
-    "utf8",
-  );
-  const form = /function SsoSlugForm\(\)[\s\S]*?\n}\n/.exec(login)?.[0] ?? "";
-  assert.match(form, /<form\b/);
-  assert.match(form, /event\.preventDefault\(\);/);
-  assert.match(form, /startWorkspaceSso\(/);
-  assert.doesNotMatch(form, /\b(method|action|formAction)=/);
-  // Nor does any other form on the login page.
-  assert.doesNotMatch(login, /\b(method|action)=/);
+test("the Vue login page's SSO form submits through startWorkspaceSso, never to the server", () => {
+  const vueAuth = path.join(import.meta.dirname, "../vue/features/auth");
+  const sso = readFileSync(path.join(vueAuth, "SsoSlugForm.vue"), "utf8");
+  const login = readFileSync(path.join(vueAuth, "LoginForm.vue"), "utf8");
+  for (const [file, source] of [
+    ["SsoSlugForm.vue", sso],
+    ["LoginForm.vue", login],
+  ] as const) {
+    assert.match(source, /<form\b/, file);
+    assert.doesNotMatch(source, /\b(method|action|formAction)=/, file);
+  }
+  assert.match(sso, /event\.preventDefault\(\)/);
+  assert.match(sso, /startWorkspaceSso\(/);
 });
 
 test("the invite and account pages start OIDC by script, never by a native form", () => {
   for (const [file, start] of [
-    ["../features/auth/invite.tsx", "startOidcInvite"],
+    ["../vue/features/auth/InviteAcceptForm.vue", "startOidcInvite"],
     ["../features/settings/settings-account.tsx", "startOidcLink"],
   ] as const) {
     const page = readFileSync(path.join(import.meta.dirname, file), "utf8");

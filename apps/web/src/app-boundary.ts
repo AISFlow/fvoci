@@ -10,6 +10,10 @@
  * routes). Case-insensitive, as vue-router and React Router match by default.
  */
 export const VUE_APP_PATHS: readonly RegExp[] = [
+  // Home workspace picker and public policies/operator information.
+  /^\/$/,
+  /^\/legal\/[^/]+\/?$/i,
+  /^\/service-info\/?$/i,
   // Project Gantt: /w/:slug/:ref/gantt
   /^\/w\/[^/]+\/[^/]+\/gantt\/?$/i,
   // Wiki document: /w/:slug/WIKI-<n>, the refs parseWikiRef (lib/href.ts)
@@ -17,6 +21,13 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   // that the React router decodes to one of these (percent-encoded) reach
   // WorkspaceRefPage, which reloads the canonical path.
   /^\/w\/[^/]+\/wiki-[1-9]\d{0,8}\/?$/i,
+  // Login: logout landing, MFA step, OIDC error query. Trailing slash and
+  // any case, matching vue-router; /login/extra and /logins stay React.
+  /^\/login\/?$/i,
+  // Public invite: token is exactly one segment; nested paths stay React.
+  /^\/invite\/[^/]+\/?$/i,
+  // First-instance setup. /setup/extra and /setups stay React.
+  /^\/setup\/?$/i,
 ];
 
 export function isVueAppPath(pathname: string): boolean {
