@@ -85,6 +85,175 @@ test("Korean, Han, and emoji keep UniqueID across persist and reload", async ({
   expect(uniqueBlockIds(after)).toEqual(ids);
 });
 
+test("content caret glyph fallback stays before a trailing empty table", async ({ page }) => {
+  await ensureCollabFixture(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "텍스트 끝 caret");
+  const editor = await openEditor(page, doc.url);
+  await editor.click();
+  await page.keyboard.type("가나다");
+  await insertSlashTable(page);
+  const before = await editorShape(page);
+  expect(before.table).not.toBeNull();
+
+  // Force the valid opposite side of the last content glyph. This exercises
+  // the native-key fallback deterministically, including the empty table edge.
+  const click = page.mouse.click.bind(page.mouse);
+  page.mouse.click = async (_x, _y, options) => {
+    const rect = await editor.evaluate((root) => {
+      const text = root.querySelector("p")!.firstChild!;
+      const range = document.createRange();
+      range.setStart(text, 2);
+      range.setEnd(text, 3);
+      const rect = range.getBoundingClientRect();
+      return { x: rect.left + 0.1, y: rect.top + rect.height / 2 };
+    });
+    return click(rect.x, rect.y, options);
+  };
+  try {
+    await placeContentCaret(page, "end");
+  } finally {
+    page.mouse.click = click;
+  }
+  const selection = await readEditorSelection(page);
+  expect([selection.from, selection.to]).toEqual([4, 4]);
+  await page.keyboard.type("끝");
+  const after = await editorShape(page);
+  expect(after.text).toBe("가나다끝");
+  expect(after.table).toEqual(before.table);
+  await persistBody(page);
+  await page.reload();
+  await waitConnected(page);
+  expect(await editorShape(page)).toEqual(after);
+});
+
+for (const edge of ["start", "end"] as const) {
+  test(`content caret accepts ${edge} settling after an adjacent sample`, async ({ page }) => {
+    await ensureCollabFixture(page);
+    await login(page, member.email, member.password);
+    const doc = await createWikiDoc(page, `caret observation ${edge}`);
+    const editor = await openEditor(page, doc.url);
+    await editor.click();
+    await page.keyboard.type("가나다");
+    await insertSlashTable(page);
+    const before = await editorShape(page);
+    expect(before.table).not.toBeNull();
+    const desired = edge === "start" ? 1 : 4;
+    const adjacent = edge === "start" ? 2 : 3;
+    const points = await editor.evaluate((root, edge) => {
+      const text = root.querySelector("p")!.firstChild!;
+      const range = document.createRange();
+      range.setStart(text, edge === "start" ? 0 : 2);
+      range.setEnd(text, edge === "start" ? 1 : 3);
+      const rect = range.getBoundingClientRect();
+      return {
+        desiredX: edge === "start" ? rect.left + 0.1 : rect.right - 0.1,
+        adjacentX: edge === "start" ? rect.right - 0.1 : rect.left + 0.1,
+        y: rect.top + rect.height / 2,
+      };
+    }, edge);
+    const click = page.mouse.click.bind(page.mouse);
+    const evaluate = editor.evaluate.bind(editor);
+    const locate = page.locator.bind(page);
+    const press = page.keyboard.press.bind(page.keyboard);
+    let captured: unknown;
+    let settled: unknown;
+    let correctionKeys = 0;
+    // Deliver an actual adjacent selection observation after a second native
+    // click has settled at the requested edge. This controls the ordering of
+    // the observation response without assigning DOM or PM selections.
+    page.mouse.click = async (_x, _y, options) => click(points.adjacentX, points.y, options);
+    page.locator = (selector, options) => selector === ".fvoci-editor .ProseMirror"
+      ? editor : locate(selector, options);
+    editor.evaluate = async (pageFunction, arg, options) => {
+      const sample = await evaluate(pageFunction, arg, options);
+      if (captured === undefined && Array.isArray(sample) && sample.length === 2) {
+        expect(sample).toEqual([adjacent, adjacent]);
+        captured = sample;
+        await click(points.desiredX, points.y);
+        await expect.poll(() => evaluate((root) => {
+          const live = (root as HTMLElement & {
+            editor: { state: { selection: { from: number; to: number } } };
+          }).editor;
+          return [live.state.selection.from, live.state.selection.to];
+        })).toEqual([desired, desired]);
+        settled = await readEditorSelection(page);
+      }
+      return sample;
+    };
+    page.keyboard.press = async (key, options) => {
+      if (key === "ArrowLeft" || key === "ArrowRight") correctionKeys++;
+      return press(key, options);
+    };
+    try {
+      await placeContentCaret(page, edge);
+    } finally {
+      page.mouse.click = click;
+      page.locator = locate;
+      editor.evaluate = evaluate;
+      page.keyboard.press = press;
+    }
+    expect(captured).toEqual([adjacent, adjacent]);
+    expect(settled).toMatchObject({ from: desired, to: desired });
+    expect(correctionKeys).toBe(0);
+    const selection = await readEditorSelection(page);
+    expect([selection.from, selection.to]).toEqual([desired, desired]);
+    await page.keyboard.type("끝");
+    const after = await editorShape(page);
+    expect(after.text).toBe(edge === "start" ? "끝가나다" : "가나다끝");
+    expect(after.table).toEqual(before.table);
+    await persistBody(page);
+    await page.reload();
+    await waitConnected(page);
+    expect(await editorShape(page)).toEqual(after);
+  });
+}
+
+for (const invalid of ["unrelated", "range"] as const) {
+  test(`content caret rejects a settled ${invalid} selection`, async ({ page }) => {
+    await ensureCollabFixture(page);
+    await login(page, member.email, member.password);
+    const doc = await createWikiDoc(page, `invalid caret ${invalid}`);
+    const editor = await openEditor(page, doc.url);
+    await editor.click();
+    await page.keyboard.type("가나다");
+    const before = await editorShape(page);
+    const click = page.mouse.click.bind(page.mouse);
+    const press = page.keyboard.press.bind(page.keyboard);
+    let correctionKeys = 0;
+    page.mouse.click = async (_x, _y, options) => {
+      const point = await editor.evaluate((root) => {
+        const text = root.querySelector("p")!.firstChild!;
+        const range = document.createRange();
+        range.setStart(text, 2);
+        range.setEnd(text, 3);
+        const rect = range.getBoundingClientRect();
+        return { x: rect.right - 0.1, y: rect.top + rect.height / 2 };
+      });
+      await click(point.x, point.y, options);
+      if (invalid === "range") await press("Shift+ArrowLeft");
+      await expect.poll(async () => {
+        const selection = await readEditorSelection(page);
+        return [selection.from, selection.to];
+      }).toEqual(invalid === "range" ? [3, 4] : [4, 4]);
+    };
+    page.keyboard.press = async (key, options) => {
+      if (key === "ArrowLeft" || key === "ArrowRight") correctionKeys++;
+      return press(key, options);
+    };
+    try {
+      await expect(placeContentCaret(page, "start")).rejects.toThrow("Timeout 5000ms");
+    } finally {
+      page.mouse.click = click;
+      page.keyboard.press = press;
+    }
+    expect(correctionKeys).toBe(0);
+    const selection = await readEditorSelection(page);
+    expect([selection.from, selection.to]).toEqual(invalid === "range" ? [3, 4] : [4, 4]);
+    expect(await editorShape(page)).toEqual(before);
+  });
+}
+
 test("two clients insert at the same caret and both tokens survive", async ({
   browser,
   collabApp,
