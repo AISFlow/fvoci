@@ -130,7 +130,7 @@ function retry(): void {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-name="workspace.name">
+  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name">
     <p v-if="projectRef.notFound.value" role="alert" class="task-form__alert">{{ t("project.notFound") }}</p>
     <QueryError
       v-else-if="projectRef.failed.value"
