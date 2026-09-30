@@ -160,7 +160,8 @@ const slotName = "default";
     def test_template_correctness_a11y_security_and_parser_fail(self):
         cases = [
             ("ProofFor.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows">{{ row }}</p></template>', "lint/correctness/useVueVForKey"),
-            ("ProofForSyntax.vue", '<template><p v-for="item">bad</p></template>', "lint/nursery/useVueValidVFor"),
+            ("ProofForSyntax.vue", '<template><p v-for="item">bad</p></template>', "parse"),
+            ("ProofForKey.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows" :key="1">{{ row }}</p></template>', "lint/nursery/useVueValidVFor"),
             ("ProofIfFor.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-if="true" v-for="row in rows" :key="row">{{ row }}</p></template>', "lint/correctness/noVueVIfWithVFor"),
             ("ProofIf.vue", '<template><p v-if>bad</p></template>', "lint/correctness/useVueValidVIf"),
             ("ProofAlt.vue", '<template><img src="x.png" /></template>', "lint/a11y/useAltText"),
