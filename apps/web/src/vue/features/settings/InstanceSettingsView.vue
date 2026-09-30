@@ -56,6 +56,10 @@ const props = defineProps<{
 const query = ref("");
 const draft = ref<Partial<Record<SettingsKey, unknown>>>({});
 const assetProblems = ref<Partial<Record<BrandingAssetKind, string>>>({});
+const saving = ref(false);
+const busy = computed(() => props.pending || saving.value);
+const saveError = ref<string | null>(null);
+const saved = ref(false);
 
 const values = computed<Record<string, unknown>>(() => props.data?.values ?? {});
 const overridden = computed(() => new Set(props.data?.overridden ?? []));
@@ -93,22 +97,32 @@ function setLeaf(key: SettingsKey, leaf: string, next: unknown): void {
 }
 
 async function submit(key: SettingsKey, next: unknown): Promise<void> {
-  if (next === undefined) return;
+  if (next === undefined || busy.value || eeLocked(key)) return;
+  if (next !== null && !SETTINGS_CATALOG[key].schema.safeParse(next).success) return;
+  saving.value = true;
+  saveError.value = null;
+  saved.value = false;
   try {
     await props.onSave({ [key]: next === null ? null : withoutAssets(key, next) });
-  } catch {
+  } catch (err) {
+    saveError.value = problemMessage(err, "settings.save.failed");
     return;
+  } finally {
+    saving.value = false;
   }
   const rest = { ...draft.value };
   delete rest[key];
   draft.value = rest;
+  saved.value = true;
 }
 
 function runAsset(kind: BrandingAssetKind, file: File | null): void {
+  if (busy.value) return;
+  saving.value = true;
   assetProblems.value = { ...assetProblems.value, [kind]: undefined };
   void props.onAsset(kind, file).catch((err: unknown) => {
     assetProblems.value = { ...assetProblems.value, [kind]: problemMessage(err, "error.network") };
-  });
+  }).finally(() => { saving.value = false; });
 }
 
 function pickAsset(kind: BrandingAssetKind, event: Event): void {
@@ -163,6 +177,8 @@ const badgeClass =
   <section class="settings-section" aria-labelledby="instance-settings-title">
     <h2 class="settings-section__title text-title" id="instance-settings-title">{{ t("settings.ui.title") }}</h2>
     <p class="settings-section__lede">{{ t("settings.ui.help") }}</p>
+    <p v-if="saveError" role="alert" class="text-sm text-error">{{ saveError }}</p>
+    <p v-if="saved" role="status" class="text-sm text-muted">{{ t("workspace.settings.saved") }}</p>
     <div class="flex flex-col gap-4 text-sm">
       <label class="sr-only" for="settings-search">{{ t("settings.ui.search") }}</label>
       <input
@@ -237,7 +253,7 @@ const badgeClass =
                   type="file"
                   :accept="BRANDING_ASSET_MIME.join(',')"
                   :aria-describedby="assetProblems[assetKindOf(leaf)!] ? `${key}.${leaf}-problem` : undefined"
-                  :disabled="pending || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
+                  :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
                   @change="pickAsset(assetKindOf(leaf)!, $event)"
                 />
                 <p
@@ -252,7 +268,7 @@ const badgeClass =
                   <ConfirmAction
                     :action-label="t(ASSET_COPY[assetKindOf(leaf)!].clear)"
                     :description="t(ASSET_COPY[assetKindOf(leaf)!].body)"
-                    :disabled="pending || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
+                    :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
                     :on-confirm="() => runAsset(assetKindOf(leaf)!, null)"
                     :title="t(ASSET_COPY[assetKindOf(leaf)!].title)"
                   >
@@ -267,14 +283,14 @@ const badgeClass =
               type="checkbox"
               class="size-5"
               :checked="leafValue(currentValue(key), leaf) === true"
-              :disabled="pending || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
+              :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
               @change="setLeaf(key, leaf, inputChecked($event))"
             />
             <select
               v-else-if="widgetOf(entry, leaf) === 'enum'"
               :id="`${key}.${leaf}`"
               class="h-11 w-56 rounded-md border border-default bg-default px-3 text-sm disabled:opacity-50"
-              :disabled="pending || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
+              :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
               :value="String(leafValue(currentValue(key), leaf))"
               @change="
                 setLeaf(
@@ -300,7 +316,7 @@ const badgeClass =
               :id="`${key}.${leaf}`"
               :class="['w-56', fieldClass]"
               type="number"
-              :disabled="pending || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
+              :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
               :value="numberShown(leafValue(currentValue(key), leaf))"
               @input="setLeaf(key, leaf, numberFieldValue(inputText($event)))"
             />
@@ -308,7 +324,7 @@ const badgeClass =
               v-else-if="widgetOf(entry, leaf) === 'text'"
               :id="`${key}.${leaf}`"
               :class="fieldClass"
-              :disabled="pending || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
+              :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
               :value="textShown(leafValue(currentValue(key), leaf))"
               @input="setLeaf(key, leaf, textFieldValue(inputText($event)))"
             />
@@ -317,7 +333,7 @@ const badgeClass =
               :id="`${key}.${leaf}`"
               :class="textareaClass"
               rows="4"
-              :disabled="pending || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
+              :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
               :value="listShown(leafValue(currentValue(key), leaf))"
               @input="setLeaf(key, leaf, listFieldValue(inputText($event)))"
             />
@@ -327,7 +343,7 @@ const badgeClass =
                 <p class="whitespace-pre-line text-xs text-muted">{{ label(msgKey) }}</p>
                 <textarea
                   :class="textareaClass"
-                  :disabled="pending || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
+                  :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
                   :id="`msg-${msgKey}`"
                   rows="2"
                   :value="overrideText(leafValue(currentValue(key), leaf), msgKey)"
@@ -362,7 +378,7 @@ const badgeClass =
               v-if="entry.confirmDestructive"
               :action-label="t('settings.ui.save')"
               :description="t('settings.ui.confirmBody')"
-              :disabled="pending || !edited(key) || issueFor(key) !== undefined || eeLocked(key)"
+              :disabled="busy || !edited(key) || issueFor(key) !== undefined || eeLocked(key)"
               :on-confirm="() => submit(key, draft[key])"
               :title="t('settings.ui.confirmTitle')"
               trigger-variant="default"
@@ -373,7 +389,7 @@ const badgeClass =
               v-else
               type="button"
               size="sm"
-              :disabled="pending || !edited(key) || issueFor(key) !== undefined || eeLocked(key)"
+              :disabled="busy || !edited(key) || issueFor(key) !== undefined || eeLocked(key)"
               @click="submit(key, draft[key])"
             >
               {{ t("settings.ui.save") }}
@@ -384,7 +400,7 @@ const badgeClass =
               size="sm"
               variant="outline"
               color="neutral"
-              :disabled="pending || eeLocked(key)"
+              :disabled="busy || eeLocked(key)"
               @click="submit(key, null)"
             >
               {{ t("settings.ui.reset") }}

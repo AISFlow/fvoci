@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
+import { meQuery } from "@/lib/queries";
 import {
   type AdminUserPatch,
   cancelAdminUserErasure,
@@ -21,10 +22,11 @@ import AdminShell from "../components/AdminShell.vue";
 import AdminSettingsView from "../features/settings/AdminSettingsView.vue";
 
 const queryClient = useQueryClient();
-const usersQuery = useQuery(adminUsersQuery);
-const workspacesQuery = useQuery(adminWorkspacesQuery);
-const systemQuery = useQuery(adminSystemQuery);
-const settingsQuery = useQuery(adminInstanceSettingsQuery);
+const me = useQuery(meQuery);
+const usersQuery = useQuery(() => ({ ...adminUsersQuery, enabled: me.data.value?.isInstanceAdmin === true }));
+const workspacesQuery = useQuery(() => ({ ...adminWorkspacesQuery, enabled: me.data.value?.isInstanceAdmin === true }));
+const systemQuery = useQuery(() => ({ ...adminSystemQuery, enabled: me.data.value?.isInstanceAdmin === true }));
+const settingsQuery = useQuery(() => ({ ...adminInstanceSettingsQuery, enabled: me.data.value?.isInstanceAdmin === true }));
 
 const saveSettings = useMutation({
   mutationFn: patchInstanceSettings,

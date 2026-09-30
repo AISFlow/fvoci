@@ -80,19 +80,20 @@ async function submitReauth(): Promise<void> {
     if (props.status.enabled) {
       await props.onDisable(
         props.hasPassword
-          ? { currentPassword: reauthValue.value.trim(), code: null }
+          ? { currentPassword: reauthValue.value, code: null }
           : { currentPassword: null, code: reauthValue.value.trim() },
       );
       notice.value = t("auth.account.mfa.disabled");
       reauthValue.value = "";
     } else {
       notice.value = null;
-      setup.value = await props.onSetup({ currentPassword: props.hasPassword ? reauthValue.value.trim() : null });
+      setup.value = await props.onSetup({ currentPassword: props.hasPassword ? reauthValue.value : null });
       reauthValue.value = "";
     }
   } catch (err) {
     reauthError.value = problemMessage(err, props.status.enabled ? "error.mfa.disable" : "error.mfa.setup");
   } finally {
+    reauthValue.value = "";
     reauthPending.value = false;
   }
 }
@@ -175,7 +176,7 @@ const reauthAction = computed(() =>
         <UButton type="submit" size="sm" :disabled="enablePending">
           {{ enablePending ? t("auth.mfa.setup.confirming") : t("auth.account.mfa.enable") }}
         </UButton>
-        <UButton type="button" variant="outline" color="neutral" size="sm" @click="doneSetup">
+        <UButton type="button" variant="outline" color="neutral" size="sm" :disabled="enablePending" @click="doneSetup">
           {{ t("auth.mfa.setup.cancel") }}
         </UButton>
       </div>
