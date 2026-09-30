@@ -301,7 +301,7 @@ export function editorLocator(page: Page) {
 
 export async function openEditor(page: Page, url: string) {
   const navigation = await page.goto(url);
-  expect(navigation?.status(), "editor navigation must serve the React application").toBe(200);
+  expect(navigation?.status(), "editor navigation must serve the Vue application").toBe(200);
   await waitConnected(page);
   const editor = editorLocator(page);
   await expect(editor).toBeVisible();

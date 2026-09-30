@@ -35,15 +35,15 @@ onBeforeRouteUpdate(() => intercept());
 function warn(event: BeforeUnloadEvent): void {
   if (discardApproved) return;
   event.preventDefault();
-  // Chromium before 119 and Safari only prompt when returnValue is set.
-  // Older Chromium and Safari require returnValue for the unsaved-edits prompt.
+  // Retain the legacy returnValue assignment alongside preventDefault until
+  // its compatibility behavior is verified across the supported browsers (#291).
   // eslint-disable-next-line @typescript-eslint/no-deprecated
   event.returnValue = "";
 }
 
-// Shell links cross the app boundary as plain anchors. While dirty, consult
-// the same route guard first; after confirmation router.afterEach performs
-// the full React load. Modified clicks and byte downloads stay native.
+// Same-app plain anchors enter the router guard while edits are unsaved.
+// Confirmation allows router.push to continue; modified clicks and byte
+// downloads retain their native behavior.
 function onLink(event: MouseEvent): void {
   const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
   if (!(anchor instanceof HTMLAnchorElement)) return;
