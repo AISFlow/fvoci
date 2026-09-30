@@ -110,7 +110,6 @@ test("project fields and workflow settings stay Vue and preserve query/hash navi
   leaveTo(nested, env);
   assert.deepEqual(assigns, []);
   assert.deepEqual(pushes, [fields, workflow, nested]);
-  assert.deepEqual(pushes, [fields, workflow]);
 });
 
 test("project home lists the project's root children, nested ones stay in the tree", () => {
