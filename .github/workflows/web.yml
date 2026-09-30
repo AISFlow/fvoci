@@ -30,6 +30,7 @@ jobs:
       plan_ok: ${{ steps.plan.outputs.plan_ok }}
       plan_json: ${{ steps.plan.outputs.plan_json }}
       select_web_checks: ${{ steps.plan.outputs.select_web_checks }}
+      select_web_static: ${{ steps.plan.outputs.select_web_static }}
       select_workspace_browser_shard: ${{ steps.plan.outputs.select_workspace_browser_shard }}
       select_collaboration_flow: ${{ steps.plan.outputs.select_collaboration_flow }}
     steps:
@@ -47,6 +48,31 @@ jobs:
             --event-json "$GITHUB_EVENT_PATH" \
             --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
             --github-output "$GITHUB_OUTPUT"
+
+  # Frontend static analysis runs once, without a Rust build or database.
+  web-static:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_web_static == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - name: Prepare locked frontend tools
+        run: bun ci
+      - name: Strict pinned ESLint and Vue support proofs
+        run: |
+          set -euo pipefail
+          bun run lint:fixtures
+          bun run lint
+          bun run format:check
+      - name: Strict web and editor TypeScript and Vue template types
+        run: |
+          set -euo pipefail
+          (cd apps/web && bun --bun run typecheck)
+          (cd packages/editor && bun --bun run typecheck)
 
   # API contract, schema/static transport and unit regressions run once per SHA
   # here instead of in every browser job (same target, features and options).
@@ -78,14 +104,6 @@ jobs:
         run: |
           cargo fetch --locked
           bun ci
-      - name: Strict pinned Biome and Vue support proofs
-        run: |
-          set -euo pipefail
-          bun run lint:fixtures
-          bun run lint
-      - name: Strict web TypeScript and Vue template types
-        working-directory: apps/web
-        run: bun --bun run typecheck
       - name: Generate and verify the API contract
         run: |
           bash scripts/generate-api.sh
@@ -98,7 +116,7 @@ jobs:
       - name: Web and editor unit regressions
         run: |
           (cd apps/web && bun run test)
-          (cd packages/editor && bun --bun run typecheck && bun run test)
+          (cd packages/editor && bun run test)
       - name: Verify normal web e2e shard plan
         run: bash scripts/test-web-e2e-groups.sh
 
@@ -231,7 +249,7 @@ jobs:
 
   web-ci-gate:
     name: web-ci-gate
-    needs: [ci-plan, web-checks, workspace-browser-shard, collaboration-flow]
+    needs: [ci-plan, web-static, web-checks, workspace-browser-shard, collaboration-flow]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

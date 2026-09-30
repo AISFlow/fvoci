@@ -22,7 +22,7 @@ NarrowFamily = Literal["docs", "frontend_web_install", "web_tests"]
 PLAN_VERSION = 3
 
 WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
-    "web": ("web-checks", "workspace-browser-shard", "collaboration-flow"),
+    "web": ("web-static", "web-checks", "workspace-browser-shard", "collaboration-flow"),
     "rust": ("fast", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
@@ -115,8 +115,9 @@ _BROADEN_EXACT: frozenset[str] = frozenset(
         # The Bun workspace root: apps/web, packages/* and scripts/document-convert.
         "package.json",
         "bun.lock",
-        "biome.json",
-        "biome.jsonc",
+        "eslint.config.mjs",
+        ".prettierrc.json",
+        ".prettierignore",
         "bunfig.toml",
         ".bun-version",
     }
