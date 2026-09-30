@@ -11,6 +11,7 @@ export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
   { path: VUE_ROUTE_PATHS.login, name: "login", component: () => import("./pages/LoginPage.vue") },
   { path: VUE_ROUTE_PATHS.invite, name: "invite", component: () => import("./pages/InvitePage.vue") },
+  { path: VUE_ROUTE_PATHS.setup, name: "setup", component: () => import("./pages/SetupPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

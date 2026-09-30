@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isVueAppPath } from "@/app-boundary";
 import { createMemoryHistory } from "vue-router";
 import { createAppRouter, routes } from "./router.ts";
 
@@ -23,8 +24,17 @@ test(
   "a completed navigation to a React page is a full page load",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
+    await router.push("/w/acme");
+    assert.deepEqual(loads, ["/w/acme"]);
+  }),
+);
+
+test(
+  "a completed navigation to /setup stays in the Vue app",
+  withLocation(async (loads) => {
+    const router = createAppRouter(createMemoryHistory());
     await router.push("/setup?next=%2Fw%2Facme");
-    assert.deepEqual(loads, ["/setup?next=%2Fw%2Facme"]);
+    assert.deepEqual(loads, []);
   }),
 );
 
@@ -59,6 +69,17 @@ test(
     assert.deepEqual(loads, []);
   }),
 );
+
+test("the setup route is declared and the boundary sends /setup to Vue", () => {
+  assert.equal(
+    routes.some((route) => route.name === "setup" && route.path === "/setup"),
+    true,
+  );
+  assert.equal(isVueAppPath("/setup"), true);
+  assert.equal(isVueAppPath("/setup/"), true);
+  assert.equal(isVueAppPath("/SETUP"), true);
+  assert.equal(isVueAppPath("/setups"), false);
+});
 
 test(
   "a failed or superseded navigation to a React page loads nothing",

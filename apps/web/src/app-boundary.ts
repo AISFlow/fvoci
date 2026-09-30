@@ -22,6 +22,8 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   /^\/login\/?$/i,
   // Public invite: token is exactly one segment; nested paths stay React.
   /^\/invite\/[^/]+\/?$/i,
+  // First-instance setup. /setup/extra and /setups stay React.
+  /^\/setup\/?$/i,
 ];
 
 export function isVueAppPath(pathname: string): boolean {

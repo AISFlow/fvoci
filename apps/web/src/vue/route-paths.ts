@@ -9,4 +9,5 @@ export const VUE_ROUTE_PATHS = {
   wikiDocument: "/w/:slug/:ref(wiki-[1-9]\\d{0,8})",
   login: "/login",
   invite: "/invite/:token",
+  setup: "/setup",
 } as const;

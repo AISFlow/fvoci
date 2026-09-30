@@ -34,6 +34,11 @@ const SAMPLES = [
   "/invites/tok",
   "/invite/tok/extra",
   "/invite/a%2Fb",
+  "/setup",
+  "/setup/",
+  "/SETUP",
+  "/setup/extra",
+  "/setups",
   "/w/acme",
   "/w/acme/a/123/view",
   "/w/acme/WIKI-1",
@@ -99,6 +104,14 @@ test("the boot module sends exactly single-token invite paths to Vue", () => {
   assert.equal(isVueAppPath("/invites/tok"), false);
 });
 
+test("the boot module sends /setup, and only that path, to the Vue app", () => {
+  assert.equal(isVueAppPath("/setup"), true);
+  assert.equal(isVueAppPath("/setup/"), true);
+  assert.equal(isVueAppPath("/SETUP"), true);
+  assert.equal(isVueAppPath("/setup/extra"), false);
+  assert.equal(isVueAppPath("/setups"), false);
+});
+
 test("every wiki path the boundary sends parses as the React app's wiki ref", () => {
   for (const path of SAMPLES) {
     // React Router matches /w/:slug in any case, as the boundary does.
@@ -107,7 +120,8 @@ test("every wiki path the boundary sends parses as the React app's wiki ref", ()
     const gantt = /\/gantt\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
     const invite = /^\/invite\/[^/]+\/?$/i.test(path);
-    if (!gantt && !login && !invite) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const setup = /^\/setup\/?$/i.test(path);
+    if (!gantt && !login && !invite && !setup) assert.equal(isVueAppPath(path), wiki !== null, path);
   }
 });
 

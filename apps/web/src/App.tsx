@@ -12,7 +12,6 @@ import {
 import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
 import { HomePage } from "@/pages/HomePage";
-import { SetupPage } from "@/pages/SetupPage";
 import { SearchPage } from "@/pages/SearchPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { ProjectTasksPage } from "@/pages/ProjectTasksPage";
@@ -95,7 +94,6 @@ function lazyPage(load: () => Promise<ComponentType>, options: { setupGuard?: bo
 const router = createBrowserRouter(
   createRoutesFromElements(
     <>
-      <Route path="/setup" element={<SetupPage />} />
       {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
       <Route path="/s/:token" element={<PublicSharePage />} />
       <Route
