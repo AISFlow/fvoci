@@ -936,7 +936,26 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
-#### 최신 PR272 실행 체크포인트 (2026-09-30 15:13 KST)
+#### 최신 PR272 실행 체크포인트 (2026-09-30 15:53 KST)
+
+**#272 Draft·auto-merge 없음. 별도 사용자 승인 전 main 머지·릴리스 금지.** 이전 snapshot과 실패 근거는 아래 그대로 보존한다.
+
+- 원격 HEAD `b0d258586e935977f683fd151b44e6d74785501c`, base `50d95df1a98c2d88d28f09222c2985fbdb585623`. 9f05의 Web templates 진입 경합·Docker NOTICE 누락을 두 논리적 커밋으로 수정, 별도 `ctx_d50a68369344` ACCEPT 후 한 번 정상 push했다. 실제 라이선스6·Bun build·Docker context negative/positive·기존 web-build와 full NOTICE·Rust/DB templates1/1 근거는 `fvoci-front272-9f05-ci-fix{-review,}-sol61.txt`에 있다. 원격 새 Web36680350031/Install36680349995/Rust36680350123/Native documents36680350003/collaboration36680350008은 진행/대기이며 성공 아님. 이전9f05의 Rust/두 Native success, Web/Install failure는 그대로다.
+- 로컬 미push 후보 `4eb0bdeb0737c9a1b9ceb2039a526d8a0515ffa6`: 기존 Editor/Calendar에 accepted accountafb·workspace settings769·project settingsd90·public share91fc·CIb0를 ordinary merge로 보존. 설정 merge826의 sole test-title conflict는 별도 검토 ACCEPT, 기존 assertion 보존/75unit·type 성공. 공개 공유·설정 전용 React 제거 포함. 합본 production 검증 담당 `ctx_7e998108d5c3`; 범위별 이전 성공을 합본 성공으로 복사하지 않음.
+- Editor d292 실제 private IBus1test/4case·wiki8·full MIT HTTP 확인은 통과. 빠른 이동 ninth test는 기존 실패 후 test-only bbc413 후보 한 번 검증도1pass/1fail이며 `ctx_45af01bb6e95`가 실제 실패 원인 조사 중. <200ms 및 socket/back/persist assertion 완화 없음. 짧은 단독 검사 창 종료, 다른 담당 heavy 실행 재개.
+
+| 남은 실행 범위 | 현재 근거 / 단독 담당 | 다음 수락 행동 |
+| --- | --- | --- |
+| Workspace 홈·목록·검색·알림·휴지통 | `ctx_4bc48944e4ac`; af5 기존 API 실제4parity 통과, all-day timezone 후속218e 검증 필요 | frozen6c 독립 검토에서 A→B→A/동일 ID session·role 늦은 callback 결함 확인. captured cache 수정 보존하고 lifecycle epoch 수정·회귀·재검토. wiki typed endpoint 및 새 backend 대기 |
+| Wiki 탐색·tag 검색·이동 | `ctx_78bc50455736`; move7e6 exact app-role PG negative/positive1/1·discoveryc284 PG1/1 별도 검토 no blocker. count3a92도 별도 ACCEPT | count ordinary merge791b 후 실제 search negative/fix·PG/Meili·공식 API generation·새 binary 제작. UI 연결 및 통합 SHA 검사 미완료 |
+| Editor entity 세 호출자 | 3b 독립 BLOCK → 수정 `ctx_40251cafba50` | computed session snapshot 대신 안정된 room identity와 실제 lifecycle; captured projects/me-workspaces/discovery invalidation·회귀·별도 delta review |
+| Wiki 댓글·공유·리비전 #284 | `ctx_f46c1354d171`, 원본 spec 회수bfef | 실제5pass/1fail: toolbar가 revision save 가림. 별도 CSS4fca 수정 후 desktop6/mobile revision1·독립 검토 필요 |
+| Account/admin React 제거 | acceptedafb 기반 `ctx_9ef0898157bd` | React 전용10파일 제거·55unit/type/build 성공; Vue assets 동일이나 React CSS pruning 차이는 정확히 구분. 실제 account-admin group·독립 검토 대기 |
+| React 최종 공통 기반 | readonly 경계 조사 `ctx_0cbecd8d161a` | 현행 import/caller 및 기능 수락 의존을 확인해 중립 helper 이동·남은 boot/router/deps 제거를 순서대로 배정. 공통 파일 소유자는 사전 조정 |
+
+새 고정 검토·실패 보고서는 기존 `takeover-evidence/`에 SHA-256 대조 후 보존했다. 별도 goal 생성·목록 초기화 없음. 기존 compat/협업 비교·별도 사용자 작업·승인 후 배포는 정본의 기존 TODO에 유지하며, 현재 통합 후보나 main/배포 완료로 표시하지 않는다.
+
+#### 이전 PR272 실행 체크포인트 (2026-09-30 15:13 KST)
 
 아래 14:46 이하 기록은 해당 시각의 근거로 보존한다. **#272는 Draft이며 별도 사용자 승인 전 main 머지·릴리스 금지**다.
 
