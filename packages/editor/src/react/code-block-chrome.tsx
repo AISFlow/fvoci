@@ -9,7 +9,7 @@ import {
 	parseFenceLanguage,
 	parseHighlightLines,
 } from "../lowlight.js";
-import { copyText } from "./clipboard.js";
+import { copyText } from "../clipboard.js";
 import { Button } from "./tiptap-ui-primitive/button.js";
 
 const LANGS = [
