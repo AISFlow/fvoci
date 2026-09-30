@@ -28,7 +28,7 @@ async function downloadWikiBinary(
     : `/api/v1/workspaces/${workspaceId}/documents/${documentId}`;
   const response = await fetch(`${base}/${ext}`, { credentials: "include" });
   if (!response.ok) {
-    throw new Error(`export failed: ${response.status}`);
+    throw new Error(`export failed: ${String(response.status)}`);
   }
   const blob = await response.blob();
   triggerDownload(shareDownloadName(title, ext), blob);

@@ -35,7 +35,7 @@ export function setThemePreference(preference: ThemePreference): void {
 
 export function applyTextScale(scale: number): void {
   if (scale !== 16 && scale !== 18 && scale !== 20) return;
-  document.documentElement.style.fontSize = `${scale}px`;
+  document.documentElement.style.fontSize = `${String(scale)}px`;
   store("fvoci-text-scale", String(scale));
 }
 

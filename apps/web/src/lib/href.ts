@@ -20,7 +20,7 @@ export type ParsedRef =
   | { kind: "project"; key: string };
 
 export function formatDisplayId(prefix: string, number: number): string {
-  return `${prefix}-${number}`;
+  return `${prefix}-${String(number)}`;
 }
 
 export function wikiDisplayId(number: number): string {
@@ -92,7 +92,7 @@ export function attachmentViewPath(
   chunk?: number | null,
 ): string {
   const base = `/w/${slug.toLowerCase()}/a/${attachmentId}/view`;
-  return chunk === null || chunk === undefined ? base : `${base}?chunk=${chunk}`;
+  return chunk === null || chunk === undefined ? base : `${base}?chunk=${String(chunk)}`;
 }
 
 export const COMMENTS_ANCHOR_ID = "document-comments";

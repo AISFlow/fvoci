@@ -118,7 +118,7 @@ export function bundledIconPrefixes(code: string): string[] {
   }
   const prefixes = new Set<string>();
   for (const [, literal] of literals) {
-    const collections: unknown = JSON.parse(JSON.parse(literal!) as string);
+    const collections: unknown = JSON.parse(JSON.parse(literal) as string);
     if (!Array.isArray(collections)) {
       throw new Error(`${NUXT_UI_ICONS_MODULE_ID}: icon collections are not an array`);
     }

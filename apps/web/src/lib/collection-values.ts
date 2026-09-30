@@ -284,7 +284,7 @@ export function monthGrid(month: string, weekStartsOn: number): CalendarCell[][]
     const day = new Date(Date.UTC(year, monthNumber - 1, 1 - lead + index));
     const date = day.toISOString().slice(0, 10);
     if (index % 7 === 0) weeks.push([]);
-    weeks[weeks.length - 1]!.push({ date, inMonth: date.slice(0, 7) === month });
+    weeks[weeks.length - 1].push({ date, inMonth: date.slice(0, 7) === month });
   }
   return weeks;
 }

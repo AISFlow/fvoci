@@ -99,7 +99,9 @@ export type OidcStartDeps = {
 function browserStartDeps(): OidcStartDeps {
   return {
     fetch: async (input, init) => consentGate(await globalThis.fetch(input, init)),
-    navigate: (url) => window.location.assign(url),
+    navigate: (url) => {
+      window.location.assign(url);
+    },
   };
 }
 
@@ -209,7 +211,9 @@ export type WorkspaceSsoSlugIssue = "form.too_small" | "form.invalid";
  */
 export function startWorkspaceSso(
   input: string,
-  navigate: (url: string) => void = (url) => window.location.assign(url),
+  navigate: (url: string) => void = (url) => {
+    window.location.assign(url);
+  },
 ): WorkspaceSsoSlugIssue | null {
   const slug = input.trim().normalize("NFKC");
   if (slug === "") return "form.too_small";

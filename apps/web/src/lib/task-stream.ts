@@ -42,7 +42,7 @@ export function subscribeTaskStream(
   };
   const onTask = (event: MessageEvent<string>) => {
     try {
-      const body = JSON.parse(event.data) as TaskStreamHint;
+      const body = JSON.parse(event.data) as Partial<TaskStreamHint> | null;
       if (body?.taskId && body?.verb) {
         handlers.onTask(body);
       }

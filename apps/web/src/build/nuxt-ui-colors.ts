@@ -29,14 +29,13 @@ function shadeVars(key: string, value: string, prefix: string | undefined): stri
   const name = value === "neutral" ? "old-neutral" : value;
   return SHADES.map(
     (shade) =>
-      `--ui-color-${key}-${shade}: var(--${prefixStr}color-${name}-${shade}, ${colorValue(value, shade)});`,
+      `--ui-color-${key}-${String(shade)}: var(--${prefixStr}color-${name}-${String(shade)}, ${colorValue(value, shade)});`,
   ).join("\n  ");
 }
 
 /** The style text Nuxt UI's colors plugin renders for `ui`. */
 export function nuxtUiColorsCss(ui: NuxtUiColorConfig): string {
-  const { neutral: _neutral, ...rest } = ui.colors;
-  const accents = Object.keys(rest);
+  const accents = Object.keys(ui.colors).filter((key) => key !== "neutral");
   return `@layer theme {
   :root, :host {
   ${Object.entries(ui.colors)

@@ -92,14 +92,18 @@ function problemReason(params: unknown): string | undefined {
   return typeof code === "string" ? code : undefined;
 }
 
-export async function ensureOk<T>(result: ApiResult<T>): Promise<T> {
-  if (result.error) {
-    const status = result.response.status;
-    const reason = problemReason(result.error.params);
-    throw new ProblemError(status, result.error.code, undefined, reason);
-  }
-  if (result.data === undefined) {
-    throw new ProblemError(500);
-  }
-  return result.data;
+export function ensureOk<T>(result: ApiResult<T>): Promise<T> {
+  // The promise executor keeps both API failures and unexpected exceptions
+  // asynchronous to callers, just as the former async function did.
+  return new Promise<T>((resolve) => {
+    if (result.error) {
+      const status = result.response.status;
+      const reason = problemReason(result.error.params);
+      throw new ProblemError(status, result.error.code, undefined, reason);
+    }
+    if (result.data === undefined) {
+      throw new ProblemError(500);
+    }
+    resolve(result.data);
+  });
 }

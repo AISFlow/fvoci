@@ -15,7 +15,7 @@ export type BrowserLicenseSupplement = {
   source: string;
 };
 
-export type BrowserLicenseManifest = Record<string, BrowserLicenseSupplement>;
+export type BrowserLicenseManifest = Readonly<Partial<Record<string, BrowserLicenseSupplement>>>;
 
 export function hasLicenseText(text: string | undefined): boolean {
   return (text?.trim() ?? "").length > 0;

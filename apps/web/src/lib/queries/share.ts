@@ -127,7 +127,7 @@ export async function downloadSharePdf(
     credentials: "omit",
   });
   if (!response.ok) {
-    throw new Error(`share pdf failed: ${response.status}`);
+    throw new Error(`share pdf failed: ${String(response.status)}`);
   }
   triggerDownload(shareDownloadName(title, "pdf"), await response.blob());
 }

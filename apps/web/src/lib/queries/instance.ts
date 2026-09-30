@@ -40,5 +40,7 @@ export async function invalidateInstanceWrites(queryClient: QueryClient): Promis
 
 /** Only an explicit `true` opens the AI menu; this is a UI gate, the AI routes still enforce access. */
 export function selectAiEnabled(data: PublicInstance): boolean {
-  return data.values.features.ai === true;
+  // HTTP payloads can be missing or malformed despite the generated wire type.
+  const ai: unknown = data.values.features.ai;
+  return ai === true;
 }

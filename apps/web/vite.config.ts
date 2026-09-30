@@ -71,11 +71,15 @@ function pdfjsAssets(): Plugin {
       server.middlewares.use(`/${pdfjsBase}`, (req, res, next) => {
         let rel: string;
         try {
-          rel = decodeURIComponent((req.url ?? "").split("?")[0]!.replace(/^\//, ""));
+          rel = decodeURIComponent((req.url ?? "").split("?")[0].replace(/^\//, ""));
         } catch {
-          return next();
+          next();
+          return;
         }
-        if (!shipped.has(rel)) return next();
+        if (!shipped.has(rel)) {
+          next();
+          return;
+        }
         res.setHeader(
           "content-type",
           rel.endsWith(".wasm")
@@ -181,7 +185,8 @@ const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
 
 // Nuxt UI's plugin set registers @tailwindcss/vite itself; it is the only
 // Tailwind registration for the Vue app's stylesheets.
-const uiPlugins = ui(nuxtUiUserOptions).flat() as Plugin[];
+const uiResult = ui(nuxtUiUserOptions);
+const uiPlugins: Plugin[] = Array.isArray(uiResult) ? uiResult.flat() : [uiResult];
 
 export default defineConfig({
   plugins: [
