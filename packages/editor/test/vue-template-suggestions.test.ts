@@ -4,12 +4,33 @@ import { embedSlashItems, filterSlashItems } from "../src/suggestion-menu.ts";
 
 // The template presentation must leave the authorized async producers and
 // custom FVOCI commands discoverable, including when only an alias matches.
-test("grouped slash presentation preserves all existing command aliases and insertion callbacks", () => {
+await test("grouped slash presentation preserves all existing command aliases and insertion callbacks", () => {
   const commands = filterSlashItems("");
-  for (const alias of ["h1", "h2", "h3", "p", "ul", "ol", "quote", "code", "table", "hr", "task", "callout", "toggle", "math", "mermaid", "attachment"]) {
+  for (const alias of [
+    "h1",
+    "h2",
+    "h3",
+    "p",
+    "ul",
+    "ol",
+    "quote",
+    "code",
+    "table",
+    "hr",
+    "task",
+    "callout",
+    "toggle",
+    "math",
+    "mermaid",
+    "attachment",
+  ]) {
     const command = commands.find((item) => item.aliases.includes(alias));
     assert.ok(command, alias);
-    assert.equal(filterSlashItems(alias).some((item) => item.title === command.title), true, alias);
+    assert.equal(
+      filterSlashItems(alias).some((item) => item.title === command.title),
+      true,
+      alias,
+    );
     assert.equal(typeof command.run, "function", alias);
     assert.ok(command.group, alias);
   }
@@ -17,7 +38,7 @@ test("grouped slash presentation preserves all existing command aliases and inse
   assert.equal(filterSlashItems("unknown-no-match").length, 0);
 });
 
-test("template presentation leaves entity and URL embeds in the existing producer", () => {
+await test("template presentation leaves entity and URL embeds in the existing producer", () => {
   const hits = [
     { entity: "document", id: "d", label: "문서" },
     { entity: "task", id: "t", label: "태스크" },

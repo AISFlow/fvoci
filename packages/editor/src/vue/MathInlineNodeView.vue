@@ -11,7 +11,9 @@ import { useMathMl } from "./use-math-ml.js";
 // Enter commits; the display is a button so click, Enter and Space open it.
 const props = defineProps(nodeViewProps);
 const editable = useEditable(props.editor);
-const latex = computed(() => (typeof props.node.attrs.latex === "string" ? props.node.attrs.latex : ""));
+const latex = computed(() =>
+  typeof props.node.attrs.latex === "string" ? props.node.attrs.latex : "",
+);
 const render = useMathMl(latex, false);
 const empty = computed(() => latex.value.trim() === "");
 const drafts = inlineMathDrafts(props.editor, props.getPos);
@@ -31,33 +33,33 @@ function remember(): void {
   });
 }
 
-onBeforeUnmount(() => { if (editing.value) remember(); });
-onMounted(() => {
+onBeforeUnmount(() => {
+  if (editing.value) remember();
+});
+onMounted(async () => {
   if (!restored) return;
   // The Vue renderer mounts in a detached wrapper; ProseMirror attaches it
   // later in the same update. Restore focus once that update has finished.
-  void nextTick(() => {
-    const field = input.value;
-    if (!field || !editing.value || !editable.value) return;
-    field.value = restored.value;
-    if (restored.focused) field.focus();
-    field.setSelectionRange(restored.start, restored.end, restored.direction ?? undefined);
-  });
+  await nextTick();
+  const field = input.value;
+  if (!field || !editing.value || !editable.value) return;
+  field.value = restored.value;
+  if (restored.focused) field.focus();
+  field.setSelectionRange(restored.start, restored.end, restored.direction ?? undefined);
 });
 
 /** Opens the source field, uncontrolled like the block view's (MathNodeView.vue):
  * its value is written once, so a peer's change never resets what was typed. */
-function open(): void {
+async function open(): Promise<void> {
   drafts.begin();
   const source = latex.value;
   editing.value = true;
-  void nextTick(() => {
-    const field = input.value;
-    if (!field) return;
-    field.value = source;
-    field.focus();
-    remember();
-  });
+  await nextTick();
+  const field = input.value;
+  if (!field) return;
+  field.value = source;
+  field.focus();
+  remember();
 }
 
 function onBlur(event: FocusEvent): void {
@@ -83,11 +85,14 @@ watch(editable, (value) => {
 
 // ProseMirror may also reuse this view for a neighbouring inline atom after
 // deletion. Its draft belongs to the original Yjs item, never that neighbour.
-watch(() => props.node, () => {
-  if (drafts.isCurrent()) return;
-  editing.value = false;
-  drafts.clear();
-});
+watch(
+  () => props.node,
+  () => {
+    if (drafts.isCurrent()) return;
+    editing.value = false;
+    drafts.clear();
+  },
+);
 </script>
 
 <template>

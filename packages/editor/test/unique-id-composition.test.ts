@@ -5,10 +5,7 @@ import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { ySyncPluginKey } from "@tiptap/y-tiptap";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
-import {
-  createFvociEditorExtensions,
-  type FvociNodeViews,
-} from "../src/editor-extensions.ts";
+import { createFvociEditorExtensions, type FvociNodeViews } from "../src/editor-extensions.ts";
 
 // #258: UniqueID must not give a block its id in the transaction of an IME
 // composition update. The browser tests are the CDP composition test and the
@@ -70,7 +67,7 @@ const idsOf = (state: EditorState) => {
   return ids;
 };
 
-test("a composition update leaves a block without an id alone; the next plain edit gives it one", () => {
+await test("a composition update leaves a block without an id alone; the next plain edit gives it one", () => {
   // "첫 문단" is positions 1..5; the IME's first update inserts the jamo at its end.
   let state = withPlugins(["첫 문단", ""]);
   state = state.apply(state.tr.insertText("ㅎ", 5).setMeta("composition", 1));
@@ -85,7 +82,7 @@ test("a composition update leaves a block without an id alone; the next plain ed
   assert.equal(second, null);
 });
 
-test("a composition in an empty block without an id leaves it alone too", () => {
+await test("a composition in an empty block without an id leaves it alone too", () => {
   let state = withPlugins(["첫 문단", ""]);
   // The empty paragraph opens at 6, so its content starts at 7.
   state = state.apply(state.tr.insertText("ㅎ", 7).setMeta("composition", 1));
@@ -93,7 +90,7 @@ test("a composition in an empty block without an id leaves it alone too", () => 
   assert.deepEqual(idsOf(state), [null, null]);
 });
 
-test("a plain local edit still gives the block an id in the same dispatch", () => {
+await test("a plain local edit still gives the block an id in the same dispatch", () => {
   let state = withPlugins(["첫 문단", ""]);
   state = state.apply(state.tr.insertText("x", 5));
   const [first, second] = idsOf(state);
@@ -101,13 +98,15 @@ test("a plain local edit still gives the block an id in the same dispatch", () =
   assert.equal(second, null);
 });
 
-test("a Yjs-origin change still gives no id", () => {
+await test("a Yjs-origin change still gives no id", () => {
   let state = withPlugins(["첫 문단"]);
-  state = state.apply(state.tr.insertText("원격", 5).setMeta(ySyncPluginKey, { isChangeOrigin: true }));
+  state = state.apply(
+    state.tr.insertText("원격", 5).setMeta(ySyncPluginKey, { isChangeOrigin: true }),
+  );
   assert.deepEqual(idsOf(state), [null]);
 });
 
-test("splitting a block outside a composition still leaves two distinct ids", () => {
+await test("splitting a block outside a composition still leaves two distinct ids", () => {
   let state = withPlugins(["첫 문단"], ["block-a"]);
   const tr = state.tr.setSelection(TextSelection.create(state.doc, 2)).split(2);
   state = state.apply(tr);

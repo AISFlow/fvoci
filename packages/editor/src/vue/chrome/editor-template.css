@@ -10,9 +10,13 @@
   padding: 1rem;
 }
 @media (min-width: 48rem) {
-  .fvoci-editor .ProseMirror { padding: 3.5rem; }
+  .fvoci-editor .ProseMirror {
+    padding: 3.5rem;
+  }
 }
-.fvoci-editor .ProseMirror:focus { outline: none; }
+.fvoci-editor .ProseMirror:focus {
+  outline: none;
+}
 /* Existing producers and lifecycle stay shared; menus use the template's
    compact, scrollable item surface rather than document typography. */
 .fvoci-suggestion {
@@ -20,24 +24,24 @@
   max-height: min(20rem, 50dvh);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius);
-  padding: .25rem;
+  padding: 0.25rem;
   background: var(--ui-bg);
   color: var(--ui-text);
   box-shadow: 0 4px 16px #0002;
 }
 .fvoci-suggestion [role="option"] {
   border-radius: calc(var(--ui-radius) - 2px);
-  padding: .375rem .5rem;
-  font-size: .875rem;
+  padding: 0.375rem 0.5rem;
+  font-size: 0.875rem;
 }
 .fvoci-suggestion [role="option"][aria-selected="true"] {
   background: var(--ui-bg-elevated);
   color: var(--ui-text-highlighted);
 }
 .fvoci-suggestion-label {
-  padding: .375rem .5rem;
+  padding: 0.375rem 0.5rem;
   color: var(--ui-text-muted);
-  font-size: .75rem;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 .fvoci-suggestion-badge {
@@ -45,7 +49,7 @@
   align-items: center;
   justify-content: center;
   min-width: 1.75rem;
-  margin-inline-end: .5rem;
+  margin-inline-end: 0.5rem;
   color: var(--ui-text-muted);
-  font-size: .75rem;
+  font-size: 0.75rem;
 }

@@ -36,7 +36,9 @@ const phase = shallowRef<Phase>({ kind: "idle" });
 let abort: AbortController | null = null;
 
 const stored = computed(() => isStoredAttachmentId(props.blockProps.id));
-const percent = computed(() => (phase.value.kind === "uploading" ? Math.round(phase.value.fraction * 100) : 0));
+const percent = computed(() =>
+  phase.value.kind === "uploading" ? Math.round(phase.value.fraction * 100) : 0,
+);
 
 function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
@@ -113,7 +115,9 @@ watch(
   { immediate: true },
 );
 const badge = computed(() => attachmentBadge(meta.value?.sizeBytes, meta.value?.mime));
-const storedName = computed(() => decodeFilename(props.blockProps.name) || t("editor.block.attachment"));
+const storedName = computed(
+  () => decodeFilename(props.blockProps.name) || t("editor.block.attachment"),
+);
 </script>
 
 <template>
@@ -125,12 +129,16 @@ const storedName = computed(() => decodeFilename(props.blockProps.name) || t("ed
       :href="bridge.downloadUrl(blockProps.id)"
       download
     >
-      <span class="afn-attachment-icon" aria-hidden="true">{{ blockProps.image ? "🖼️" : "📎" }}</span>
+      <span class="afn-attachment-icon" aria-hidden="true">{{
+        blockProps.image ? "🖼️" : "📎"
+      }}</span>
       <span class="afn-attachment-name">{{ storedName }}</span>
       <span v-if="badge" class="afn-attachment-badge">{{ badge }}</span>
     </a>
     <div v-else class="afn-attachment" data-state="stored">
-      <span class="afn-attachment-icon" aria-hidden="true">{{ blockProps.image ? "🖼️" : "📎" }}</span>
+      <span class="afn-attachment-icon" aria-hidden="true">{{
+        blockProps.image ? "🖼️" : "📎"
+      }}</span>
       <span class="afn-attachment-name">{{ storedName }}</span>
     </div>
   </template>
@@ -161,15 +169,15 @@ const storedName = computed(() => decodeFilename(props.blockProps.name) || t("ed
     <span class="afn-attachment-icon" aria-hidden="true">⚠️</span>
     <span class="afn-attachment-name">{{ phase.name }}</span>
     <span class="afn-attachment-error">{{ t("editor.attach.failed") }}</span>
+    <button type="button" class="afn-attachment-button min-h-11" @mousedown.prevent @click="retry">
+      {{ t("editor.attach.retry") }}
+    </button>
     <button
       type="button"
       class="afn-attachment-button min-h-11"
       @mousedown.prevent
-      @click="retry"
+      @click="emit('remove')"
     >
-      {{ t("editor.attach.retry") }}
-    </button>
-    <button type="button" class="afn-attachment-button min-h-11" @mousedown.prevent @click="emit('remove')">
       {{ t("editor.attach.remove") }}
     </button>
   </div>
@@ -178,10 +186,20 @@ const storedName = computed(() => decodeFilename(props.blockProps.name) || t("ed
     <div class="afn-attachment" data-state="placeholder">
       <span class="afn-attachment-icon" aria-hidden="true">📎</span>
       <span class="afn-attachment-name">{{ t("editor.attach.unselected") }}</span>
-      <button type="button" class="afn-attachment-button min-h-11" @mousedown.prevent @click="picker?.click()">
+      <button
+        type="button"
+        class="afn-attachment-button min-h-11"
+        @mousedown.prevent
+        @click="picker?.click()"
+      >
         {{ t("editor.attach.pick") }}
       </button>
-      <button type="button" class="afn-attachment-button min-h-11" @mousedown.prevent @click="emit('remove')">
+      <button
+        type="button"
+        class="afn-attachment-button min-h-11"
+        @mousedown.prevent
+        @click="emit('remove')"
+      >
         {{ t("editor.attach.remove") }}
       </button>
     </div>

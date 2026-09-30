@@ -10,8 +10,8 @@ import MathNodeView from "./MathNodeView.vue";
  * yjs seed contract). Mermaid keeps its plain source view (nodes/mermaid.ts)
  * until a Vue diagram view exists. */
 export const VUE_NODE_VIEWS: FvociNodeViews = {
-	math: () => VueNodeViewRenderer(MathNodeView),
-	mathInline: () => VueNodeViewRenderer(MathInlineNodeView),
-	embed: () => VueNodeViewRenderer(EmbedNodeView),
-	attachment: () => VueNodeViewRenderer(AttachmentNodeView),
+  math: () => VueNodeViewRenderer(MathNodeView),
+  mathInline: () => VueNodeViewRenderer(MathInlineNodeView),
+  embed: () => VueNodeViewRenderer(EmbedNodeView),
+  attachment: () => VueNodeViewRenderer(AttachmentNodeView),
 };

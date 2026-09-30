@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { extractInternalRefs, extractText, toChosung } from "../src/extract.ts";
 
-test("toChosung", () => {
+await test("toChosung", () => {
   assert.equal(toChosung("한글"), "ㅎㄱ");
 });
 
-test("extractInternalRefs keeps mention and embed uuid refs", () => {
+await test("extractInternalRefs keeps mention and embed uuid refs", () => {
   const docId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const taskId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const json = {
@@ -34,7 +34,7 @@ test("extractInternalRefs keeps mention and embed uuid refs", () => {
   ]);
 });
 
-test("extractInternalRefs drops non-uuid ids", () => {
+await test("extractInternalRefs drops non-uuid ids", () => {
   const json = {
     type: "doc",
     content: [

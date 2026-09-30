@@ -7,21 +7,19 @@
  * browser focus reset that left PM ahead. */
 
 export type AwarenessSelectionGuardInput = {
-	awarenessUpdated: boolean;
-	docChanged: boolean;
-	selectionSet: boolean;
-	composing: boolean;
-	editable: boolean;
-	pmIsTextSelection: boolean;
-	observedDomSelectionMatchesNative: boolean;
+  awarenessUpdated: boolean;
+  docChanged: boolean;
+  selectionSet: boolean;
+  composing: boolean;
+  editable: boolean;
+  pmIsTextSelection: boolean;
+  observedDomSelectionMatchesNative: boolean;
 };
 
-export function shouldAdoptNativeOnAwareness(
-	input: AwarenessSelectionGuardInput,
-): boolean {
-	if (!input.awarenessUpdated) return false;
-	if (input.docChanged || input.selectionSet) return false;
-	if (!input.editable || input.composing) return false;
-	if (input.observedDomSelectionMatchesNative) return false;
-	return input.pmIsTextSelection;
+export function shouldAdoptNativeOnAwareness(input: AwarenessSelectionGuardInput): boolean {
+  if (!input.awarenessUpdated) return false;
+  if (input.docChanged || input.selectionSet) return false;
+  if (!input.editable || input.composing) return false;
+  if (input.observedDomSelectionMatchesNative) return false;
+  return input.pmIsTextSelection;
 }

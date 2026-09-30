@@ -14,10 +14,14 @@ export type AttrDump = {
 export type NodeDump = { name: string; attrs: AttrDump[] };
 export type MarkDump = NodeDump & { rank: number; overlapping: boolean };
 export type SchemaDump = { nodes: NodeDump[]; marks: MarkDump[] };
-type AttrSpec = { hasDefault: boolean; default: unknown; validate?: unknown };
+type AttrSpec = {
+  hasDefault: boolean;
+  default: unknown;
+  validate?: string | ((value: unknown) => void);
+};
 // NodeType/MarkType fields that prosemirror-model's .d.ts leaves out.
 type TypeInternals = { attrs: Readonly<Record<string, AttrSpec>>; rank: number };
-const internals = (type: object) => type as unknown as TypeInternals;
+const internals = (type: object) => type as TypeInternals;
 
 // Same projection as scripts/document-convert/schema-dump.mjs, which writes
 // the fixture the Rust seed tables are tested against.
@@ -53,10 +57,7 @@ export function dumpSchema(schema: ReturnType<typeof getSchema>): SchemaDump {
  * editor's own order only changes on purpose. */
 export function editorSchemaFixture(): SchemaDump {
   const fixture = JSON.parse(
-    readFileSync(
-      new URL("../../../compat/fixtures/yjs-seed/schema.json", import.meta.url),
-      "utf8",
-    ),
+    readFileSync(new URL("../../../compat/fixtures/yjs-seed/schema.json", import.meta.url), "utf8"),
   ) as SchemaDump;
   const mention = fixture.nodes.find((node) => node.name === "mention");
   if (!mention) throw new Error("fixture has no mention node");

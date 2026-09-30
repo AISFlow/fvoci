@@ -1,17 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FVOCI_YDOC_FRAGMENT } from "../src/collab/constants.ts";
-import {
-  replaceYDocContent,
-  tiptapJsonToYDoc,
-  yDocToTiptapJson,
-} from "../src/collab-tiptap.ts";
+import { replaceYDocContent, tiptapJsonToYDoc, yDocToTiptapJson } from "../src/collab-tiptap.ts";
 import type { TiptapDoc } from "../src/json.ts";
 
 const roundtrip = (json: TiptapDoc): TiptapDoc =>
   yDocToTiptapJson(tiptapJsonToYDoc(json, FVOCI_YDOC_FRAGMENT));
 
-test("tiptapJsonToYDoc gc false", () => {
+await test("tiptapJsonToYDoc gc false", () => {
   const doc = tiptapJsonToYDoc({
     type: "doc",
     content: [{ type: "paragraph" }],
@@ -19,7 +15,7 @@ test("tiptapJsonToYDoc gc false", () => {
   assert.equal(doc.gc, false);
 });
 
-test("paragraph roundtrip keeps Korean", () => {
+await test("paragraph roundtrip keeps Korean", () => {
   const json: TiptapDoc = {
     type: "doc",
     content: [
@@ -32,25 +28,21 @@ test("paragraph roundtrip keeps Korean", () => {
   assert.equal(JSON.stringify(roundtrip(json)).includes("안녕"), true);
 });
 
-test("replaceYDocContent", () => {
+await test("replaceYDocContent", () => {
   const doc = tiptapJsonToYDoc({
     type: "doc",
-    content: [
-      { type: "paragraph", content: [{ type: "text", text: "old" }] },
-    ],
+    content: [{ type: "paragraph", content: [{ type: "text", text: "old" }] }],
   });
   replaceYDocContent(doc, {
     type: "doc",
-    content: [
-      { type: "paragraph", content: [{ type: "text", text: "new" }] },
-    ],
+    content: [{ type: "paragraph", content: [{ type: "text", text: "new" }] }],
   });
   const back = yDocToTiptapJson(doc);
   assert.equal(JSON.stringify(back).includes("new"), true);
   assert.equal(JSON.stringify(back).includes("old"), false);
 });
 
-test("ychange 는 저장 JSON 에 안 남는다", () => {
+await test("ychange 는 저장 JSON 에 안 남는다", () => {
   const json = roundtrip({
     type: "doc",
     content: [

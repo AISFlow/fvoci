@@ -28,7 +28,7 @@ const MAX_SIZE = 100;
 const STYLE_ATTRIBUTE = /\sstyle="[^"]*"/g;
 
 export function withoutStyleAttributes(html: string): string {
-	return html.replace(STYLE_ATTRIBUTE, "");
+  return html.replace(STYLE_ATTRIBUTE, "");
 }
 
 export type MathRender = { html: SafeHtml | null; failed: boolean };
@@ -37,38 +37,35 @@ export type MathRender = { html: SafeHtml | null; failed: boolean };
  * nothing, source over MAX_LATEX is refused (`failed`) — or null when it has to
  * be rendered. Synchronous so a view can settle these cases without a tick. */
 export function mathMlWithoutKatex(latex: string): MathRender | null {
-	const tooLong = latex.length > MAX_LATEX;
-	if (latex.trim() === "" || tooLong) return { html: null, failed: tooLong };
-	return null;
+  const tooLong = latex.length > MAX_LATEX;
+  if (latex.trim() === "" || tooLong) return { html: null, failed: tooLong };
+  return null;
 }
 
 /** Renders `latex` to style-free MathML, loading the KaTeX chunk on first use.
  * Applies the same limits as {@link mathMlWithoutKatex}. Never rejects. */
-export function renderMathMl(
-	latex: string,
-	display: boolean,
-): Promise<MathRender> {
-	const settled = mathMlWithoutKatex(latex);
-	if (settled) return Promise.resolve(settled);
-	/* WHY: #656 F8 — throwOnError:false 여도 katex 는 던진다(중첩 중괄호 2000 개 → RangeError).
-	 * 청크 fetch 실패(재배포 후 stale·오프라인)도 같은 자리로 온다. 잡지 않으면 unhandled
-	 * rejection 이 나고 노드는 아무 표시 없이 원문에 머문다. */
-	return import("katex")
-		.then(({ default: katex }) =>
-			asSafeHtml(
-				withoutStyleAttributes(
-					katex.renderToString(latex, {
-						displayMode: display,
-						output: "mathml",
-						throwOnError: false,
-						trust: false,
-						maxSize: MAX_SIZE,
-					}),
-				),
-			),
-		)
-		.then(
-			(html): MathRender => ({ html, failed: false }),
-			(): MathRender => ({ html: null, failed: true }),
-		);
+export function renderMathMl(latex: string, display: boolean): Promise<MathRender> {
+  const settled = mathMlWithoutKatex(latex);
+  if (settled) return Promise.resolve(settled);
+  /* WHY: #656 F8 — throwOnError:false 여도 katex 는 던진다(중첩 중괄호 2000 개 → RangeError).
+   * 청크 fetch 실패(재배포 후 stale·오프라인)도 같은 자리로 온다. 잡지 않으면 unhandled
+   * rejection 이 나고 노드는 아무 표시 없이 원문에 머문다. */
+  return import("katex")
+    .then(({ default: katex }) =>
+      asSafeHtml(
+        withoutStyleAttributes(
+          katex.renderToString(latex, {
+            displayMode: display,
+            output: "mathml",
+            throwOnError: false,
+            trust: false,
+            maxSize: MAX_SIZE,
+          }),
+        ),
+      ),
+    )
+    .then(
+      (html): MathRender => ({ html, failed: false }),
+      (): MathRender => ({ html: null, failed: true }),
+    );
 }

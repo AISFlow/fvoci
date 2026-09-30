@@ -38,7 +38,8 @@ function readForm(container: HTMLElement): { entity: EmbedEntity; ref: string } 
   const input = container.querySelector("textarea");
   const select = container.querySelector("select");
   const raw = input instanceof HTMLTextAreaElement ? input.value : "";
-  const selected = select instanceof HTMLSelectElement && isEmbedEntity(select.value) ? select.value : "document";
+  const selected =
+    select instanceof HTMLSelectElement && isEmbedEntity(select.value) ? select.value : "document";
   return resolveEmbedProps(raw, selected);
 }
 
@@ -73,15 +74,14 @@ function open(): void {
 // this node (data-entity), which would reset what was typed.
 watch(
   showEditor,
-  (shown) => {
+  async (shown) => {
     if (!shown) return;
     const start = { entity: entity.value, ref: refValue.value };
-    void nextTick(() => {
-      if (kindSelect.value) kindSelect.value.value = start.entity;
-      if (!refInput.value) return;
-      refInput.value.value = start.ref;
-      refInput.value.focus();
-    });
+    await nextTick();
+    if (kindSelect.value) kindSelect.value.value = start.entity;
+    if (!refInput.value) return;
+    refInput.value.value = start.ref;
+    refInput.value.focus();
   },
   { immediate: true },
 );
@@ -112,7 +112,8 @@ watch(
     });
     resolver(kind, value).then(
       (snapshot) => {
-        if (!cancelled) card.value = snapshot ? { state: "resolved", snapshot } : { state: "inaccessible" };
+        if (!cancelled)
+          card.value = snapshot ? { state: "resolved", snapshot } : { state: "inaccessible" };
       },
       () => {
         if (!cancelled) card.value = { state: "inaccessible" };
@@ -133,7 +134,9 @@ watch(
         @change="rememberDraft"
         @blur="commitIfLeaving"
       >
-        <option v-for="item in EMBED_ENTITIES" :key="item" :value="item">{{ t(EMBED_KIND_KEY[item]) }}</option>
+        <option v-for="item in EMBED_ENTITIES" :key="item" :value="item">{{
+          t(EMBED_KIND_KEY[item])
+        }}</option>
       </select>
       <textarea
         ref="refInput"

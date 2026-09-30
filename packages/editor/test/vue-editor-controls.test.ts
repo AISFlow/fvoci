@@ -6,7 +6,11 @@ import { moveBlock } from "../src/gutter-actions.ts";
 import { HIGHLIGHT_MAX_CHARS } from "../src/lowlight.ts";
 import { createFvociExtensions } from "../src/tiptap-schema.ts";
 import { keyboardBlockPos } from "../src/vue/block-gutter.ts";
-import { codeBlockAtCaret, codeChromeView, DEFAULT_CODE_CHROME } from "../src/vue/code-block-chrome.ts";
+import {
+  codeBlockAtCaret,
+  codeChromeView,
+  DEFAULT_CODE_CHROME,
+} from "../src/vue/code-block-chrome.ts";
 import { boxInHost, tableCaret } from "../src/vue/table-handles.ts";
 import { sameValue, useEditorState } from "../src/vue/use-editor-state.ts";
 
@@ -27,7 +31,11 @@ const table: JSONContent = {
 };
 
 function editorWith(content: JSONContent[]): Editor {
-  return new Editor({ element: null, extensions: createFvociExtensions(), content: { type: "doc", content } });
+  return new Editor({
+    element: null,
+    extensions: createFvociExtensions(),
+    content: { type: "doc", content },
+  });
 }
 
 /** Position just inside the first text node that reads `value`. */
@@ -42,7 +50,7 @@ function posOfText(editor: Editor, value: string): number {
   return found;
 }
 
-test("sameValue compares plain values by structure and anything else by identity", () => {
+await test("sameValue compares plain values by structure and anything else by identity", () => {
   assert.equal(sameValue(1, 1), true);
   assert.equal(sameValue(Number.NaN, Number.NaN), true);
   assert.equal(sameValue({ a: [1, { b: "x" }] }, { a: [1, { b: "x" }] }), true);
@@ -52,14 +60,19 @@ test("sameValue compares plain values by structure and anything else by identity
   assert.equal(sameValue({ a: 1 }, [1]), false);
   const editor = editorWith([paragraph("x")]);
   assert.equal(sameValue(editor.state.doc, editor.state.doc), true);
-  assert.equal(sameValue({ node: editor.state.doc }, { node: editorWith([paragraph("x")]).state.doc }), false);
+  assert.equal(
+    sameValue({ node: editor.state.doc }, { node: editorWith([paragraph("x")]).state.doc }),
+    false,
+  );
 });
 
-test("useEditorState follows transactions, keeps an equal value, and stops with its scope", () => {
+await test("useEditorState follows transactions, keeps an equal value, and stops with its scope", () => {
   const editor = editorWith([paragraph("abc"), paragraph("def")]);
   const scope = effectScope();
   const state = scope.run(() =>
-    useEditorState(editor, (current) => ({ block: current.state.selection.$from.parent.textContent })),
+    useEditorState(editor, (current) => ({
+      block: current.state.selection.$from.parent.textContent,
+    })),
   );
   assert.ok(state);
   assert.deepEqual(state.value, { block: "abc" });
@@ -73,17 +86,18 @@ test("useEditorState follows transactions, keeps an equal value, and stops with 
   assert.deepEqual(state.value, { block: "def" }, "no update after the scope stopped");
 });
 
-test("useEditorState follows setEditable, which emits no transaction", () => {
+await test("useEditorState follows setEditable, which emits no transaction", () => {
   const editor = editorWith([paragraph("abc")]);
   const scope = effectScope();
   const editable = scope.run(() => useEditorState(editor, (current) => current.isEditable));
-  assert.equal(editable?.value, true);
+  assert.ok(editable);
+  assert.equal(editable.value, true);
   editor.setEditable(false);
-  assert.equal(editable?.value, false);
+  assert.equal(editable.value, false);
   scope.stop();
 });
 
-test("the keyboard gutter button acts on the caret's block and never on a table", () => {
+await test("the keyboard gutter button acts on the caret's block and never on a table", () => {
   const editor = editorWith([
     paragraph("top"),
     table,
@@ -101,16 +115,19 @@ test("the keyboard gutter button acts on the caret's block and never on a table"
   assert.equal(editor.state.doc.nodeAt(item - 1)?.type.name, "paragraph");
 });
 
-test("the table caret is the table's position and the caret, or null outside tables", () => {
+await test("the table caret is the table's position and the caret, or null outside tables", () => {
   const editor = editorWith([paragraph("before"), table, paragraph("after")]);
   editor.commands.setTextSelection(posOfText(editor, "before") + 1);
   assert.equal(tableCaret(editor), null);
   const inCell = posOfText(editor, "2") + 1;
   editor.commands.setTextSelection(inCell);
-  assert.deepEqual(tableCaret(editor), { tablePos: editor.state.doc.child(0).nodeSize, from: inCell });
+  assert.deepEqual(tableCaret(editor), {
+    tablePos: editor.state.doc.child(0).nodeSize,
+    from: inCell,
+  });
 });
 
-test("the table handles' box is the table's rectangle in the host's coordinates", () => {
+await test("the table handles' box is the table's rectangle in the host's coordinates", () => {
   assert.deepEqual(
     boxInHost(
       { left: 130, top: 260, width: 400, height: 90 },
@@ -121,7 +138,7 @@ test("the table handles' box is the table's rectangle in the host's coordinates"
   );
 });
 
-test("the table menu's up and down move a table past its sibling block", () => {
+await test("the table menu's up and down move a table past its sibling block", () => {
   const editor = editorWith([paragraph("before"), table, paragraph("after")]);
   const names = () => editor.state.doc.content.content.map((node) => node.textContent);
   const tablePos = editor.state.doc.child(0).nodeSize;
@@ -135,10 +152,14 @@ test("the table menu's up and down move a table past its sibling block", () => {
   assert.equal(moveBlock(editor, 0, -1), false, "the first block cannot move up");
 });
 
-test("the code-block chrome reads the block at the caret", () => {
+await test("the code-block chrome reads the block at the caret", () => {
   const editor = editorWith([
     paragraph("out"),
-    { type: "codeBlock", attrs: { language: "typescript", id: "code-1" }, content: [text("const a = 1;")] },
+    {
+      type: "codeBlock",
+      attrs: { language: "typescript", id: "code-1" },
+      content: [text("const a = 1;")],
+    },
   ]);
   editor.commands.setTextSelection(posOfText(editor, "out") + 1);
   assert.equal(codeBlockAtCaret(editor), null);
@@ -152,8 +173,14 @@ test("the code-block chrome reads the block at the caret", () => {
   });
 });
 
-test("the code-block chrome's gutter numbers lines and paints highlighted and diff lines", () => {
-  const block = { id: "b", editable: true, language: "typescript", highlightLines: [2], text: "one\ntwo\nthree" };
+await test("the code-block chrome's gutter numbers lines and paints highlighted and diff lines", () => {
+  const block = {
+    id: "b",
+    editable: true,
+    language: "typescript",
+    highlightLines: [2],
+    text: "one\ntwo\nthree",
+  };
   // Highlighted lines paint even without line numbers.
   assert.deepEqual(codeChromeView(block, DEFAULT_CODE_CHROME), {
     language: "typescript",
@@ -167,7 +194,10 @@ test("the code-block chrome's gutter numbers lines and paints highlighted and di
   // A fence's {n-m} applies when the attribute has none; line numbers label every line.
   const fenced = { ...block, language: "ts {1-2}", highlightLines: [] };
   assert.deepEqual(
-    codeChromeView(fenced, { ...DEFAULT_CODE_CHROME, linenos: true }).lines?.map((line) => [line.label, line.kind]),
+    codeChromeView(fenced, { ...DEFAULT_CODE_CHROME, linenos: true }).lines?.map((line) => [
+      line.label,
+      line.kind,
+    ]),
     [
       ["1", "meta"],
       ["2", "meta"],
@@ -186,10 +216,14 @@ test("the code-block chrome's gutter numbers lines and paints highlighted and di
   assert.equal(codeChromeView(huge, DEFAULT_CODE_CHROME).lines, null);
 });
 
-test("the code-block chrome offers folding from nine lines on", () => {
-  const lines = (count: number) => Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
+await test("the code-block chrome offers folding from nine lines on", () => {
+  const lines = (count: number) =>
+    Array.from({ length: count }, (_, i) => `line ${String(i + 1)}`).join("\n");
   const block = { id: "b", editable: true, language: "", highlightLines: [], text: lines(8) };
   assert.equal(codeChromeView(block, DEFAULT_CODE_CHROME).foldable, false);
   assert.equal(codeChromeView({ ...block, text: lines(9) }, DEFAULT_CODE_CHROME).foldable, true);
-  assert.equal(codeChromeView({ ...block, text: "" }, { ...DEFAULT_CODE_CHROME, linenos: true }).lines?.length, 1);
+  assert.equal(
+    codeChromeView({ ...block, text: "" }, { ...DEFAULT_CODE_CHROME, linenos: true }).lines?.length,
+    1,
+  );
 });
