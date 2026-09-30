@@ -2,12 +2,13 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, nextTick, ref, useId, useTemplateRef } from "vue";
+import { computed, nextTick, onScopeDispose, ref, useId, useTemplateRef, watch } from "vue";
 import {
   assignDocumentTag,
   createDocumentTag,
   removeDocumentTag,
 } from "@/features/documents/document-tags-api";
+import { meQuery } from "@/lib/queries";
 import { loadErrorMessage, problemMessage } from "@/lib/api";
 import {
   documentAssignedTagsQuery,
@@ -26,6 +27,7 @@ const props = defineProps<{
   readOnly: boolean;
 }>();
 const queryClient = useQueryClient();
+const me = useQuery(meQuery);
 const panelId = useId();
 const trigger = useTemplateRef<{ $el?: Element }>("trigger");
 const open = ref(false);
@@ -54,8 +56,22 @@ const canCreate = computed(
   () => (poolQuery.data.value?.canCreate ?? false) && needle.value !== "" && exact.value === undefined,
 );
 
-async function invalidate(): Promise<void> {
-  await queryClient.invalidateQueries({ queryKey: ["document-tags", props.workspaceId] });
+type TagOperation = { workspaceId: string; documentId: string; projectId: string | null; lifecycle: number };
+let operationLifecycle = 0;
+watch([() => props.workspaceId, () => props.documentId, () => props.projectId, () => props.readOnly,
+  () => me.data.value?.userId, () => me.data.value?.sessionId], () => { operationLifecycle++; }, { flush: "sync" });
+onScopeDispose(() => { operationLifecycle++; });
+function captureOperation(): TagOperation {
+  return { workspaceId: props.workspaceId, documentId: props.documentId, projectId: props.projectId, lifecycle: operationLifecycle };
+}
+function currentOperation(operation: TagOperation): boolean {
+  return operation.lifecycle === operationLifecycle;
+}
+async function invalidate(operation: TagOperation): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["document-tags", operation.workspaceId] }),
+    queryClient.invalidateQueries({ queryKey: ["wiki-discovery", operation.workspaceId] }),
+  ]);
 }
 
 function close(): void {
@@ -66,51 +82,55 @@ function close(): void {
 }
 
 const assign = useMutation({
-  mutationFn: (tagId: string) => assignDocumentTag(props.workspaceId, props.documentId, props.projectId, tagId),
-  onMutate: () => {
-    mutationError.value = null;
+  mutationFn: (operation: TagOperation & { tagId: string }) => assignDocumentTag(operation.workspaceId, operation.documentId, operation.projectId, operation.tagId),
+  onMutate: (operation) => {
+    if (currentOperation(operation)) mutationError.value = null;
   },
-  onError: (err: unknown) => {
-    mutationError.value = problemMessage(err, "error.http.fallback");
+  onError: (err: unknown, operation) => {
+    if (currentOperation(operation)) mutationError.value = problemMessage(err, "error.http.fallback");
   },
-  onSuccess: async (tag: DocumentTag) => {
-    queryClient.setQueryData(assignedOptions.value.queryKey, (items: DocumentTag[] = []) => [
+  onSuccess: async (tag: DocumentTag, operation) => {
+    queryClient.setQueryData(documentAssignedTagsQuery(operation.workspaceId, operation.documentId, operation.projectId).queryKey, (items: DocumentTag[] = []) => [
       ...items.filter((item) => item.id !== tag.id),
       tag,
     ]);
-    await invalidate();
-    close();
+    await invalidate(operation);
+    if (currentOperation(operation)) close();
   },
 });
 
 const create = useMutation({
-  mutationFn: (name: string) => createDocumentTag(queryClient, props.workspaceId, name),
-  onMutate: () => {
-    mutationError.value = null;
+  mutationFn: (operation: TagOperation & { name: string }) => createDocumentTag(queryClient, operation.workspaceId, operation.name),
+  onMutate: (operation) => {
+    if (currentOperation(operation)) mutationError.value = null;
   },
-  onError: (err: unknown) => {
-    mutationError.value = problemMessage(err, "error.http.fallback");
+  onError: (err: unknown, operation) => {
+    if (currentOperation(operation)) mutationError.value = problemMessage(err, "error.http.fallback");
   },
-  onSuccess: async (created) => {
-    await assign.mutateAsync(created.id).catch(() => undefined);
+  onSuccess: async (created, operation) => {
+    await assign.mutateAsync({ ...operation, tagId: created.id }).catch(() => undefined);
   },
 });
 
 const remove = useMutation({
-  mutationFn: (tagId: string) => removeDocumentTag(props.workspaceId, props.documentId, props.projectId, tagId),
-  onMutate: () => {
-    mutationError.value = null;
+  mutationFn: (operation: TagOperation & { tagId: string }) => removeDocumentTag(operation.workspaceId, operation.documentId, operation.projectId, operation.tagId),
+  onMutate: (operation) => {
+    if (currentOperation(operation)) mutationError.value = null;
   },
-  onError: (err: unknown) => {
-    mutationError.value = problemMessage(err, "error.http.fallback");
+  onError: (err: unknown, operation) => {
+    if (currentOperation(operation)) mutationError.value = problemMessage(err, "error.http.fallback");
   },
-  onSuccess: async (_ok, tagId) => {
-    queryClient.setQueryData(assignedOptions.value.queryKey, (items: DocumentTag[] = []) =>
-      items.filter((tag) => tag.id !== tagId),
+  onSuccess: async (_ok, operation) => {
+    queryClient.setQueryData(documentAssignedTagsQuery(operation.workspaceId, operation.documentId, operation.projectId).queryKey, (items: DocumentTag[] = []) =>
+      items.filter((tag) => tag.id !== operation.tagId),
     );
-    await invalidate();
+    await invalidate(operation);
   },
 });
+
+function assignTag(tagId: string): void { assign.mutate({ ...captureOperation(), tagId }); }
+function createTag(name: string): void { create.mutate({ ...captureOperation(), name }); }
+function removeTag(tagId: string): void { remove.mutate({ ...captureOperation(), tagId }); }
 
 const pending = computed(() => assign.isPending.value || create.isPending.value || remove.isPending.value);
 const hidden = computed(() => props.readOnly && assignedQuery.isSuccess.value && assigned.value.length === 0);
@@ -129,8 +149,8 @@ function onFilterKeydown(event: KeyboardEvent): void {
   if (event.key !== "Enter" || event.isComposing) return;
   event.preventDefault();
   const first = exact.value && !assignedIds.value.has(exact.value.id) ? exact.value : candidates.value[0];
-  if (first) assign.mutate(first.id);
-  else if (canCreate.value) create.mutate(filter.value.trim());
+  if (first) assignTag(first.id);
+  else if (canCreate.value) createTag(filter.value.trim());
 }
 
 function onPanelKeydown(event: KeyboardEvent): void {
@@ -156,7 +176,7 @@ function onPanelKeydown(event: KeyboardEvent): void {
         class="tags-bar__remove"
         :aria-label="`${t('doc.tags.remove')}: ${tag.name}`"
         :disabled="pending"
-        @click="remove.mutate(tag.id)"
+        @click="removeTag(tag.id)"
       >
         <span aria-hidden="true">×</span>
       </button>
@@ -191,12 +211,12 @@ function onPanelKeydown(event: KeyboardEvent): void {
       />
       <ul v-if="poolQuery.isSuccess.value" class="tags-bar__options">
         <li v-for="tag in candidates" :key="tag.id">
-          <button type="button" class="tags-bar__option" :disabled="pending" @click="assign.mutate(tag.id)">
+          <button type="button" class="tags-bar__option" :disabled="pending" @click="assignTag(tag.id)">
             <span class="tag-chip" :data-color="tag.color">{{ tag.name }}</span>
           </button>
         </li>
         <li v-if="canCreate">
-          <button type="button" class="tags-bar__option" :disabled="pending" @click="create.mutate(filter.trim())">
+          <button type="button" class="tags-bar__option" :disabled="pending" @click="createTag(filter.trim())">
             {{ t("doc.tags.create", { name: filter.trim() }) }}
           </button>
         </li>
