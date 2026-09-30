@@ -164,6 +164,11 @@ function openCreate(): void {
   createOpen.value = true;
 }
 
+function onCreateSubmit(): void {
+  if (!name.value.trim() || create.isPending.value) return;
+  create.mutate();
+}
+
 async function deleteSelected(): Promise<void> {
   const current = selected.value;
   if (!current) return;
@@ -257,13 +262,7 @@ async function deleteSelected(): Promise<void> {
     </div>
     <p v-if="error && !createOpen" role="alert" class="text-sm text-error">{{ error }}</p>
     <NativeModal :open="createOpen" :labelled-by="dialogTitleId" @close="createOpen = false">
-      <form
-        class="task-form"
-        @submit.prevent="
-          if (!name.trim() || create.isPending.value) return;
-          create.mutate();
-        "
-      >
+      <form class="task-form" @submit.prevent="onCreateSubmit">
         <h2 :id="dialogTitleId" class="project-dialog__title">{{ t("task.savedView.createTitle") }}</h2>
         <p class="task-home__note">{{ t("task.savedView.createDescription") }}</p>
         <div class="task-form__field">
