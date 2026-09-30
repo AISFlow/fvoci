@@ -115,13 +115,15 @@ const remove = useMutation({
         body: { confirmSlug: input.confirmSlug },
       }),
     ),
-  onSuccess: (_data, input) => {
+  onSuccess: async (_data, input) => {
     if (isCurrent(input)) {
       deleteError.value = null;
       window.location.replace("/");
     }
-    void queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] });
-    void queryClient.invalidateQueries({ queryKey: ["workspaces", input.workspaceId] });
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["workspaces", input.workspaceId] }),
+    ]);
   },
   onError: (err: unknown, input) => {
     if (!isCurrent(input)) return;

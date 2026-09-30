@@ -70,11 +70,8 @@ const ready = computed(
   () => me.data.value && identities.data.value && providers.data.value && mfa.data.value,
 );
 
-function retry(): void {
-  void me.refetch();
-  void identities.refetch();
-  void providers.refetch();
-  void mfa.refetch();
+async function retry(): Promise<void> {
+  await Promise.all([me.refetch(), identities.refetch(), providers.refetch(), mfa.refetch()]);
 }
 
 async function onWithdraw(input: Parameters<typeof withdrawAccount>[0]): Promise<void> {

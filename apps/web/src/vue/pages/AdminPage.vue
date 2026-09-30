@@ -74,6 +74,10 @@ const cancelEraseUser = useMutation({
 const err = () => usersQuery.error.value ?? workspacesQuery.error.value ?? systemQuery.error.value;
 const settingsError = () =>
   settingsQuery.error.value ?? saveSettings.error.value ?? saveAsset.error.value;
+
+async function retrySettings(): Promise<void> {
+  await settingsQuery.refetch();
+}
 </script>
 
 <template>
@@ -97,13 +101,7 @@ const settingsError = () =>
       :settings="settingsQuery.data.value ?? null"
       :settings-loading="settingsQuery.isLoading.value"
       :settings-error="settingsError() ? adminActionMessage(settingsError()) : null"
-      :on-retry-settings="
-        settingsQuery.error.value
-          ? () => {
-              void settingsQuery.refetch();
-            }
-          : undefined
-      "
+      :on-retry-settings="settingsQuery.error.value ? retrySettings : undefined"
       :settings-pending="saveSettings.isPending.value || saveAsset.isPending.value"
       :on-save-settings="
         (patch) => {
