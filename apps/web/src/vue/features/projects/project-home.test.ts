@@ -77,7 +77,7 @@ test("project home queries stay idle until both ids exist", () => {
   }
 });
 
-test("after delete the projects list is a full load unless it is a Vue path", () => {
+test("after delete the live projects list and Gantt stay Vue", () => {
   const assigns: string[] = [];
   const pushes: string[] = [];
   const env = {
@@ -85,11 +85,11 @@ test("after delete the projects list is a full load unless it is a Vue path", ()
     push: (path: string) => pushes.push(path),
   };
   leaveTo("/w/acme/projects", env);
-  assert.deepEqual(assigns, ["/w/acme/projects"]);
-  assert.deepEqual(pushes, []);
+  assert.deepEqual(assigns, []);
+  assert.deepEqual(pushes, ["/w/acme/projects"]);
   leaveTo("/w/acme/GNT/gantt", env);
-  assert.deepEqual(assigns, ["/w/acme/projects"]);
-  assert.deepEqual(pushes, ["/w/acme/GNT/gantt"]);
+  assert.deepEqual(assigns, []);
+  assert.deepEqual(pushes, ["/w/acme/projects", "/w/acme/GNT/gantt"]);
 });
 
 test("project home lists the project's root children, nested ones stay in the tree", () => {
