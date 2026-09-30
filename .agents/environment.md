@@ -395,3 +395,18 @@ Web 36631118948 CLEAN). 자기 검토를 독립 검토로 세지 않음. worktre
 사용자의 후속 지시로 effort는 코디네이터가 작업별 자동 배정한다. `/root/review_ci_auth_delta`는 high,
 `/root/evidence_recovery`와 `/root/review_takeover_docs`는 medium(모두 transcript 확인). 구현 후속은
 invite_connect high, setup_integrate medium으로 요청했으며 실제 완료 보고의 runtime을 대조한다.
+
+## 2026-09-30 사용자 후속 지시: Orca 터미널 워커
+
+신규 워커는 Orca 터미널에서 실행하며 native subagent의 서비스 동시 슬롯4개를 Orca 워커 제한으로 적용하지 않는다.
+워커·작성자·검토자 고정 상한 없이 자원과 수락 처리량으로 배정한다. 과거 실행 기록은 당시 사실로 유지한다.
+설치 Orca1.4.207에서 requested/effective `gpt-6.1-sol`/`high` worker-start는 agent_readiness timeout으로
+작업 전달 전 실패했다. 해당 실패 터미널은 receipt의 worker-release로 정리했다. 기존 Run은 reset하지 않았다.
+후속은 Orca terminal create의 `codex exec`를 사용했고 supervised dispatch 성공으로 표시하지 않는다.
+- 홈 통합 session `01a0efc4-958a-78d2-a3eb-028e01a37de8`: 실제 gpt-6.1-sol/high, source exec.
+- 별도 검토 session `01a0efd3-77c8-7890-98f2-36b3ee8cb317`: 실제 gpt-6.1-sol/high, source exec.
+- 정리 조사 session `01a0efc4-15c9-7630-aaf6-d41631fc80d7`: 실제 gpt-6.1-sol/high, source exec.
+각 보고서에서 session_meta와 turn_context를 대조했다. 상세 후보/검사/잔존 자원은 docs/rewrite.md 및 연결 기록에 둔다.
+CLI connected는 화면 연결을 보장하지 않는다. 2026-09-30 `orca-ide open --json`은
+`desktop_activation_blocked`: persistent terminal provider unavailable로 headless 상태이며 앱 정상 종료/재시작을 안내했다.
+실행 결과를 회수·보존한 뒤 종료하며 활성 검사를 무차별 종료하거나 정상 표시로 주장하지 않는다.

@@ -1056,18 +1056,18 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 기존 React 제거 조건: 각 설정 흐름 수락 후.
 
 - [ ] / · /legal/:kind · /service-info — [#272](https://github.com/AISFlow/fvoci/pull/272)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 21, 'SKIPPED': 6, 'FAILURE': 4}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `c9b59494ac3e0b30517aefcd4a94af9ee0ac315b` / #272 / #269; 관측 base `ef17b410779f1eeebcf50f47050cb81b1ab9aaca`.
-  - 남은 구체적인 작업: 기존 공개 홈/약관 경로 연결. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
-  - 수락 검사: 직접 진입·새로고침·공개/인증 가드; 중요한 delta는 별도 Sol6.1 검토.
+  - 현재 단계: 로컬 후보 실제 Vue URL 연결·Rust/DB 검증 완료, 독립 full-PR 검토 중. 원격은 기존 c9b59494이며 미push·main/배포 미수락.
+  - 담당 Sol 6.1 워커: home_public_connect 구현·검증, review_invite_final 독립 검토.
+  - 기준 HEAD / PR / 선행 의존성: 로컬 `0676c812e8614e6143924752f19f9273d7687aab` / #272 / #269 f6fbb8df; 다음 차수 준비.
+  - 남은 구체적인 작업: full-PR 검토 지적 해결, 현재 원격 수락 대기열 이후 제출·CI·main 수락. 현재 협업 비교 고정 차수를 늘리지 않는다.
+  - 수락 검사: 로컬 unit80·fresh Bun build·실제 workspace7/공개페이지1/service4 통과. 서비스3개 controlled 검사는 primary 실제 API 검증과 구분.
   - 출시 차단: login 선행.
-  - 기존 React 제거 조건: Vue 공개 페이지 수락 후.
+  - 기존 React 제거 조건: 대체 HomePage/public LegalPage/ServiceInfoPage·전용 route 제거 후보; 관리자 약관과 공통 코드는 유지.
 
 - [ ] /invite/:token — [#271](https://github.com/AISFlow/fvoci/pull/271)
   - 현재 단계: 실제 URL 연결·Rust/DB 검증·독립 최종 ACCEPT; 최신 CI 진행, main/배포 미수락.
   - 담당 Sol 6.1 워커: invite_connect 구현·검증; review_invite/review_invite_final 독립 검토.
-  - 기준 HEAD / PR / 선행 의존성: `9d8ac2e2d4c1bfd7303c86b6e23a8037f37a7e7b` / #271 / #269.
+  - 기준 HEAD / PR / 선행 의존성: `f2623c4d7d5b3ba9b56857e26ae93a5e337bc56f` / #271 / #269.
   - 남은 구체적인 작업: 최신 CI와 #269 통합 후 수락. 이 후보의 외부 IdP callback은 미실행이며 기존 Keycloak 검증과 구분.
   - 수락 검사: invite3·기존MFA1 실제 Rust/DB 통과, 관련unit40·production build, 최종 독립 ACCEPT.
   - 출시 차단: login 선행.
@@ -1076,14 +1076,14 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
 - [ ] /setup — [#270](https://github.com/AISFlow/fvoci/pull/270)
   - 현재 단계: Vue setup 연결·원래 코드와 auth delta 독립 ACCEPT; 원격 CI 진행, main/배포 미수락.
   - 담당 Sol 6.1 워커: setup_integrate 구현·검증; review287_setup/review_ci_auth_delta 독립 검토.
-  - 기준 HEAD / PR / 선행 의존성: `ef7d2b1f9cf7b74350f493c4252f547ad0bfe693` / #270 / #269.
+  - 기준 HEAD / PR / 선행 의존성: `4b7f9578a6e8e665e6ed2b2d6fa31c01604368f8` / #270 / #269.
   - 남은 구체적인 작업: #269 최신 수락 후 필요한 통합 delta 확인·현재 CI 수락. 다른 브랜치를 기계적으로 갱신하지 않는다.
   - 수락 검사: setup 단위19 + workspace-flow 실제 Rust/DB; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: login 선행.
   - 기존 React 제거 조건: 후보의 React SetupPage 제거 검증.
 
 - [ ] /login — [#269](https://github.com/AISFlow/fvoci/pull/269)
-  - 현재 단계: Vue login 실제 연결·제품 검토 ACCEPT; 후속 caret 검사 최종40통과/기존OSIME12skip·delta 검토와 최신 CI 진행. main/배포 미수락.
+  - 현재 단계: Vue login 실제 연결·제품 검토 ACCEPT; 후속 caret 검사 최종40통과/기존OSIME12skip·delta 독립 ACCEPT, 최신 CI 진행. main/배포 미수락.
   - 담당 Sol 6.1 워커: auth_acceptance/auth_guard_fix 제품·검증, caret_settle_recovery 후속; review_ci_auth_delta와 review_controls_final 독립 검토.
   - 기준 HEAD / PR / 선행 의존성: `f6fbb8df0a2c95e3ac21d11972e27ff8a81fe2fb` / #269 / main 및 #287 포함.
   - 남은 구체적인 작업: caret delta 최종 수락·최신 CI·main 통합. setup 오류 spinner F1은 3fdd194b에서 해결·독립 ACCEPT.
@@ -1301,3 +1301,36 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   현재 worktree61개; unique 증거·미커밋 WIP는 보존. takeover-evidence/ci-287/worktree-cleanup.json.
 - 새 후보 실행이 이미 등록된 본 세션의 구 SHA CI5개만 취소했다(문서a52dce8f/769b39b3, 인증3fdd194b).
   원래 실패를 성공으로 계산하지 않는다. 실행 ID·대체 실행은 takeover-evidence/obsolete-own-ci-cancellations.json.
+
+- 현재 #269 f6fbb8df caret delta 독립 ACCEPT. #270 `4b7f9578`, #271 `f2623c4d`에 같은 두 검사 파일만
+  병합했고 동일 blob/부모 관계를 별도 검토했다. 두 제품 흐름의 기존 검증 SHA는 그대로 보존, 최신 원격 CI 진행.
+- CI 범위 조사(제품/CI 수정 없음): E2E 경로는 FULL_PATH_BROADEN, 일부 오래된 문서 PR은 event base와
+  실제 merge checkout 차이 때문에 FULL_PR_MERGE_PARENTS_MISMATCH로 전체 검사를 선택한다. main push는
+  FULL_EVENT_PUSH. runner 미배정 대기는 관측했으나 장애/quota 원인은 미확정. 필요한 검사는 유지한다.
+  근거 takeover-evidence/fvoci-ci-queue-scope-sol61.txt.
+- 다음 차수 기존 WIP #272: home_public_connect(Sol6.1 high)가 clean `c9b59494` tree를 인수했다.
+  `/`, 공개 `/legal/:kind`, `/service-info` 실제 연결·검증·전용 React 제거를 로컬 준비하며 원격 CI는 추가하지 않는다.
+  현재 비교 기준 차수 #265/#267/#269/#270/#271+#287에 #272를 추가하지 않는다.
+
+- 사용자 후속 지시: CI 트리거/검사 범위를 더 좁히도록 승인. 이전 읽기 전용 조사 당시의 정책 유지 판단 뒤
+  새 지시를 적용한다. ci_impact_implement(Sol6.1 high)가 별도 ci-impact-scope(base a1d19b6e)를 소유하고
+  변경 영향별 분류·안전한 merge provenance·조건별 회귀를 구현한다. 필수 gate/보호 조건·결제/runner 설정은 유지.
+  CI 자체 변경 후보는 독립 검토와 필요한 전체 검증 후 수락하며 현재 실패를 skip으로 덮어쓰지 않는다.
+- 현재 #271 통합: auth_stack_integrate가 setup4b7f9578과 invitef2623c4d 사이의 실제6파일 충돌을 해결했다.
+  로컬 `54bcc682f50eb5b4457e479021603669ab781258` 검증·별도 review_invite_final 검토 진행.
+  두 Vue route/test와 React 제거를 모두 보존하며 실제 logout readiness 경합의 테스트 수정을 포함한다.
+- #272 독립 full-PR ACCEPT0676c812 뒤 설명 주석만 `ea9400f7`에서 정정. 로컬 보존, 원격 미제출.
+
+- 사용자 후속 지시: CI 최적화·리팩터링 수락 후 대기 중인 프론트엔드 PR 전체에 최신 CI를 반영하고 다시 push한다. WIP와 stacked 의존 순서를 보존하며, 충돌 해결 delta는 필요한 독립 검토를 거치고 새 HEAD의 실제 CI를 확인한다. 그 전에는 일괄 갱신으로 기존 큐를 늘리지 않는다.
+
+- 사용자 지시로 이후 워커는 Orca 터미널의 Sol 6.1로 전환하며 고정 워커 수 상한 대신 자원·소유권·수락 처리량을 따른다. 내장 워커는 체크포인트 회수 완료. Orca supervised 시작은 agent_readiness timeout으로 작업 전달 전 실패했고 해당 터미널은 공식 worker-release로 정리했다. 실제 후속 실행은 Orca terminal create의 codex exec이며 정리 조사 term_88880254-1f1d-4a82-b182-6145c86958b2, 홈 통합 term_ada09f43-3535-48b5-ac8d-d9fb1ed9a3c8. 이 실행들은 supervised dispatch 성공으로 기록하지 않는다.
+- CI 선택 최적화 #288 `de913cd8` push/PR 생성 완료: 로컬133검사 및 별도 Sol6.1 ACCEPT, 원격 전체 CI 대기. 워크트리 정리는 사용자 요청으로 read-only 보존 대조 진행 중이며 삭제 전 후보별 재확인한다.
+
+- 전체 접근 복구 후 종료 작업 worktree8개를 공식 Orca rm(비강제)로 정리: ops-followups-043, postgres-supported-versions, postgres-supported-versions-review, postgres-uuid-compat, rust-backup-no-python, rust-import-recovery, rust-license-policy, rust-task-origin-ui. main 포함 커밋·clean 상태·빈 셸 및 자식 프로세스 없음 확인 후 셸 종료; 로컬 branch/upstream 및 recovery refs 보존 확인. worktree62→54. 증거: recovery-20260930/cleanup-orca-20260930/results.json. WIP·열린 PR·prebuilt 보존.
+- 홈 통합 로컬21ad5327: 부모ea9400f7+54bcc682 보존, 단위110/build 통과. Orca 별도 독립검토와 실제Rust/DB6그룹21검사 배정; 아직 결과 미수락.
+- #265 최종93425dad 독립 ACCEPT_WITH_NITS 및 원격5게이트 SUCCESS 후 expected head로 merge. main `5d5171a7d07f04fd8ef665617464a6ac8fe194a4`의 tree가 수락 후보와 동일함 확인, clean main fast-forward. main 후속 CI/배포 별도 대기. #269 f6fbb8df Web shard6 실패는 Orca read-only 조사에 배정, 무조건 재실행하지 않음.
+- Orca 사용자 표시 문제 확인: CLI runtime connected이나 desktop_activation_blocked, persistent terminal provider unavailable로 headless 상태. 워커 실제 실행과 화면 연결은 별개. 앱 정상 종료/재시작 필요 안내; 워커 결과·로그 회수 후 수행. 현 홈21ad5327 브라우저6그룹21pass 로그는 durable checkpoint에 보존, 최종 검토/정리 보고서 수령 전.
+
+- 홈21ad5327: 별도 Orca Sol6.1/high 고정 merge 독립 ACCEPT(경계/라우터18검사)와 실제 production Rust/PG/Meili 6그룹21pass/0fail/0skip 수령. 단위110/build 및 부모 구현 검토 재사용; 새 HEAD 브라우저 증거를 별도 보존. 로컬 수락 후보, PR272 원격 갱신은 CI288 수락 후 계획에 유지.
+- 인증269 실패 원인: 테스트 setup 완료가 원래 `/` URL만 보고 반환해 Vue login의 늦은 home redirect와 위키 goto가 경합. 실제 me200/document201, 네트워크변동0. shell CSS 문제 아님. `/tmp/fvoci-auth-ci-shard6-orca-sol61.txt` 및 durable artifact 보존. 다음 Sol 수정은 setup helper의 실제 authenticated-home 준비 완료 보장과 관련 회귀; timeout/skip/retry 우회 금지.
+- Orca 재시작 체크포인트: 본 세션이 띄운 직접 실행 워커5개 모두 최종 결과·세션 근거·로그 회수 후 종료된 셸만 close. 현재 이 파동의 활성 워커 없음. 기존 타 세션/앱/DB는 종료하지 않음. 화면 연결 복구를 위한 앱 정상 종료/재시작은 사용자 수행 필요; CLI open이 desktop_activation_blocked를 반환했다.
