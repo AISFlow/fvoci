@@ -34,9 +34,19 @@ function copy(): void {
   <div class="flex flex-col gap-2 rounded-md border border-default p-3">
     <p role="status">{{ statusText }}</p>
     <div class="flex flex-wrap items-end gap-2">
-      <UInput :model-value="value" readonly class="min-w-0 flex-1 font-mono" :aria-label="label" autocomplete="off" />
+      <UInput
+        :model-value="value"
+        readonly
+        class="min-w-0 flex-1 font-mono"
+        :aria-label="label"
+        autocomplete="off"
+      />
       <UButton type="button" size="sm" variant="outline" color="neutral" @click="copy">
-        {{ copyStatus === "copied" ? (copiedLabel ?? t("token.copied")) : (copyLabel ?? t("token.copy")) }}
+        {{
+          copyStatus === "copied"
+            ? (copiedLabel ?? t("token.copied"))
+            : (copyLabel ?? t("token.copy"))
+        }}
       </UButton>
     </div>
     <p v-if="copyStatus === 'failed'" role="alert" class="settings-notice settings-notice--danger">

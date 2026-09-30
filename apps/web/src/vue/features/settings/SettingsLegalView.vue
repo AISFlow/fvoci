@@ -42,12 +42,15 @@ const fieldError = ref<string | null>(null);
 const published = ref(false);
 
 // Keep the kind input mounted while dropping the previous kind's draft/notices.
-watch(() => props.kind, () => {
-  form.reset();
-  fieldError.value = null;
-  serverError.value = null;
-  published.value = false;
-});
+watch(
+  () => props.kind,
+  () => {
+    form.reset();
+    fieldError.value = null;
+    serverError.value = null;
+    published.value = false;
+  },
+);
 
 async function submit(): Promise<void> {
   form.values.kind = props.kind;
@@ -71,8 +74,15 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="legal-manage-title">
-    <h2 class="settings-section__title text-title" id="legal-manage-title">{{ t("legal.manage") }}</h2>
+  <UPageCard
+    as="section"
+    variant="subtle"
+    class="settings-section"
+    aria-labelledby="legal-manage-title"
+  >
+    <h2 class="settings-section__title text-title" id="legal-manage-title">{{
+      t("legal.manage")
+    }}</h2>
     <div class="flex flex-col gap-6">
       <div class="flex flex-col gap-1.5">
         <label class="text-sm font-medium" for="legal-kind">{{ t("legal.kind") }}</label>
@@ -90,26 +100,47 @@ async function submit(): Promise<void> {
             {{ p.label }}({{ p.kind }})
           </UButton>
         </div>
-        <input :disabled="form.submitting.value" id="legal-kind" :class="fieldClass" :value="kind" @input="onKindChange(inputText($event))" />
+        <input
+          :disabled="form.submitting.value"
+          id="legal-kind"
+          :class="fieldClass"
+          :value="kind"
+          @input="onKindChange(inputText($event))"
+        />
       </div>
 
       <div class="flex flex-col gap-1.5 border-t border-default pt-4">
         <p class="text-sm font-medium">{{ t("legal.current") }}</p>
         <QueryLoading v-if="loading" />
         <QueryError v-if="!loading && error" :message="error" @retry="onRetry" />
-        <ul v-if="!loading && !error && current" class="text-sm text-muted" :aria-label="t('legal.current')">
+        <ul
+          v-if="!loading && !error && current"
+          class="text-sm text-muted"
+          :aria-label="t('legal.current')"
+        >
           <li>{{ t("legal.document.title") }}: {{ current.title }}</li>
           <li>{{ t("legal.document.version") }}: v{{ current.version }}</li>
           <li>{{ t("legal.effectiveAt") }}: {{ formatDateKo(current.effectiveAt) }}</li>
-          <li>{{ t("legal.requiredFlag") }}: {{ current.required ? t("common.required") : t("common.optional") }}</li>
+          <li
+            >{{ t("legal.requiredFlag") }}:
+            {{ current.required ? t("common.required") : t("common.optional") }}</li
+          >
         </ul>
-        <p v-if="!loading && !error && !current" class="text-sm text-muted">{{ t("legal.nonePublished") }}</p>
+        <p v-if="!loading && !error && !current" class="text-sm text-muted">{{
+          t("legal.nonePublished")
+        }}</p>
       </div>
 
-      <form class="flex flex-col gap-3 border-t border-default pt-4" novalidate @submit.prevent="submit">
+      <form
+        class="flex flex-col gap-3 border-t border-default pt-4"
+        novalidate
+        @submit.prevent="submit"
+      >
         <p class="text-sm font-medium">{{ t("legal.publishNew") }}</p>
         <div class="flex flex-col gap-1.5">
-          <label class="text-sm font-medium" for="legal-title">{{ t("legal.document.title") }}</label>
+          <label class="text-sm font-medium" for="legal-title">{{
+            t("legal.document.title")
+          }}</label>
           <input
             id="legal-title"
             :class="fieldClass"
@@ -128,7 +159,9 @@ async function submit(): Promise<void> {
           />
         </div>
         <div class="flex flex-col gap-1.5">
-          <label class="text-sm font-medium" for="legal-effective-at">{{ t("legal.effectiveAt") }}</label>
+          <label class="text-sm font-medium" for="legal-effective-at">{{
+            t("legal.effectiveAt")
+          }}</label>
           <input
             id="legal-effective-at"
             :class="fieldClass"
@@ -145,7 +178,9 @@ async function submit(): Promise<void> {
             :checked="form.values.required === true"
             @change="form.values.required = inputChecked($event)"
           />
-          <label class="text-sm font-normal" for="legal-required">{{ t("legal.requiredDoc") }}</label>
+          <label class="text-sm font-normal" for="legal-required">{{
+            t("legal.requiredDoc")
+          }}</label>
         </div>
         <p v-if="fieldError" role="alert" class="text-sm text-error">{{ fieldError }}</p>
         <p v-if="serverError" role="alert" class="text-sm text-error">{{ serverError }}</p>

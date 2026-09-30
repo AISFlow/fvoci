@@ -11,7 +11,13 @@ import { apiTokenCreateInput, apiTokenScope } from "@/lib/validators";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import RevealedSecret from "./RevealedSecret.vue";
 import { parseForm } from "./form";
-import { formatExpiry, scopeDomId, TOKEN_SCOPE_LABEL, tokenScopeLabels, type TokenScope } from "./token-display";
+import {
+  formatExpiry,
+  scopeDomId,
+  TOKEN_SCOPE_LABEL,
+  tokenScopeLabels,
+  type TokenScope,
+} from "./token-display";
 import { toggleItem } from "./toggle";
 import "@/features/settings/settings-shell.css";
 
@@ -49,7 +55,9 @@ const create = useMutation({
     ),
   onSuccess: async (created) => {
     revealed.value = { id: created.id, token: created.token };
-    await queryClient.invalidateQueries({ queryKey: ["workspaces", props.workspaceId, "api-tokens"] });
+    await queryClient.invalidateQueries({
+      queryKey: ["workspaces", props.workspaceId, "api-tokens"],
+    });
   },
 });
 
@@ -61,7 +69,9 @@ const revoke = useMutation({
       }),
     ),
   onSuccess: async () => {
-    await queryClient.invalidateQueries({ queryKey: ["workspaces", props.workspaceId, "api-tokens"] });
+    await queryClient.invalidateQueries({
+      queryKey: ["workspaces", props.workspaceId, "api-tokens"],
+    });
   },
 });
 
@@ -128,13 +138,21 @@ function confirmRevoke(): void {
               :aria-invalid="nameError ? true : undefined"
               :aria-describedby="nameError ? `${formId}-name-error` : undefined"
             />
-            <p v-if="nameError" :id="`${formId}-name-error`" class="text-error" role="alert">{{ nameError }}</p>
+            <p v-if="nameError" :id="`${formId}-name-error`" class="text-error" role="alert">{{
+              nameError
+            }}</p>
           </div>
-          <UButton type="submit" size="sm" :disabled="create.isPending.value">{{ t("token.create") }}</UButton>
+          <UButton type="submit" size="sm" :disabled="create.isPending.value">{{
+            t("token.create")
+          }}</UButton>
         </div>
         <fieldset class="flex flex-col gap-1.5">
           <legend class="font-medium">{{ t("token.scopes") }}</legend>
-          <div v-for="scope in apiTokenScope.options" :key="scope" class="flex min-h-11 items-center gap-2">
+          <div
+            v-for="scope in apiTokenScope.options"
+            :key="scope"
+            class="flex min-h-11 items-center gap-2"
+          >
             <input
               :id="`${formId}-${scopeDomId(scope)}`"
               type="checkbox"
@@ -149,15 +167,27 @@ function confirmRevoke(): void {
         </fieldset>
         <div class="flex flex-wrap gap-4">
           <label class="flex min-h-11 items-center gap-2">
-            <input v-model="unlimited" type="checkbox" class="size-4" :disabled="create.isPending.value" />
+            <input
+              v-model="unlimited"
+              type="checkbox"
+              class="size-4"
+              :disabled="create.isPending.value"
+            />
             <span>{{ t("token.unlimited") }}</span>
           </label>
           <label class="flex min-h-11 items-center gap-2">
-            <input v-model="service" type="checkbox" class="size-4" :disabled="create.isPending.value" />
+            <input
+              v-model="service"
+              type="checkbox"
+              class="size-4"
+              :disabled="create.isPending.value"
+            />
             <span>{{ t("token.service") }}</span>
           </label>
         </div>
-        <p v-if="formError" role="alert" class="settings-notice settings-notice--danger">{{ formError }}</p>
+        <p v-if="formError" role="alert" class="settings-notice settings-notice--danger">{{
+          formError
+        }}</p>
       </form>
       <RevealedSecret
         v-if="revealed"
@@ -167,8 +197,12 @@ function confirmRevoke(): void {
         :label="t('token.once')"
       />
       <p v-if="tokens.isPending.value" role="status">{{ t("load.loading") }}</p>
-      <p v-if="listError" role="alert" class="settings-notice settings-notice--danger">{{ listError }}</p>
-      <p v-if="!tokens.isPending.value && !listError && items.length === 0" class="text-muted">{{ t("token.empty") }}</p>
+      <p v-if="listError" role="alert" class="settings-notice settings-notice--danger">{{
+        listError
+      }}</p>
+      <p v-if="!tokens.isPending.value && !listError && items.length === 0" class="text-muted">{{
+        t("token.empty")
+      }}</p>
       <ul v-if="items.length > 0" class="flex flex-col divide-y">
         <li
           v-for="row in items"
@@ -178,10 +212,14 @@ function confirmRevoke(): void {
           <div class="min-w-0">
             <p class="font-medium break-keep">
               {{ row.name }}
-              <span v-if="row.userId === null" class="ml-2 text-muted">{{ t("token.service") }}</span>
+              <span v-if="row.userId === null" class="ml-2 text-muted">{{
+                t("token.service")
+              }}</span>
             </p>
             <p class="text-muted break-keep">{{ tokenScopeLabels(row.scopes) }}</p>
-            <p class="text-muted">{{ t("token.expires") }}: {{ formatExpiry(row.expiresAt ?? null) }}</p>
+            <p class="text-muted"
+              >{{ t("token.expires") }}: {{ formatExpiry(row.expiresAt ?? null) }}</p
+            >
           </div>
           <UButton
             type="button"

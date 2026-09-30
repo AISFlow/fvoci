@@ -27,7 +27,11 @@ import {
 } from "@/lib/validators";
 import { fieldClass } from "./field-classes";
 import { settingLabel } from "@/features/settings/settings-instance-model";
-import { readThemePreference, setThemePreference, type ThemePreference } from "@/lib/ui-preferences";
+import {
+  readThemePreference,
+  setThemePreference,
+  type ThemePreference,
+} from "@/lib/ui-preferences";
 import { optionKey, SETTING_ENUM_OPTIONS } from "@/features/settings/settings-catalog";
 import "@/features/settings/settings-shell.css";
 
@@ -39,7 +43,12 @@ const props = defineProps<{
   successNotice?: string | null;
   errorNotice?: string | null;
   onSaveName: (input: ProfileNameInput) => Promise<void>;
-  onSavePreferences: (input: { locale: "ko"; timezone: string; weekStartsOn: number; textScale: number }) => Promise<void>;
+  onSavePreferences: (input: {
+    locale: "ko";
+    timezone: string;
+    weekStartsOn: number;
+    textScale: number;
+  }) => Promise<void>;
   onSendVerification: (email: string) => Promise<void>;
   onChangeEmail: (newEmail: string) => Promise<void>;
   onChangePassword: (input: PasswordChangeInput) => Promise<void>;
@@ -98,7 +107,8 @@ const nameForm = useZodForm({
   fieldIds: { familyName: "settings-family-name", givenName: "settings-given-name" },
 });
 const nameError = ref<string | null>(null);
-const nameFieldError = () => nameForm.errors.value.familyName ?? nameForm.errors.value.givenName ?? null;
+const nameFieldError = () =>
+  nameForm.errors.value.familyName ?? nameForm.errors.value.givenName ?? null;
 
 async function submitName(): Promise<void> {
   await nameForm.submit(async (data) => {
@@ -115,21 +125,29 @@ async function submitName(): Promise<void> {
 }
 
 const preferenceForm = useZodForm({
-  schema: () => z.object({
-    locale: z.literal("ko"),
-    timezone: z.string().min(1, "i18n:form.too_small"),
-    weekStartsOn: z.enum(["0", "1"]).transform(Number),
-    textScale: z.enum(["16", "18", "20"]).transform(Number),
-  }),
+  schema: () =>
+    z.object({
+      locale: z.literal("ko"),
+      timezone: z.string().min(1, "i18n:form.too_small"),
+      weekStartsOn: z.enum(["0", "1"]).transform(Number),
+      textScale: z.enum(["16", "18", "20"]).transform(Number),
+    }),
   defaults: () => ({
     locale: "ko" as const,
     timezone: props.me.timezone,
     weekStartsOn: String(props.me.weekStartsOn),
     textScale: String(props.me.textScale),
   }),
-  fieldIds: { locale: "settings-locale", timezone: "settings-timezone", weekStartsOn: "settings-week-start", textScale: "settings-text-scale" },
+  fieldIds: {
+    locale: "settings-locale",
+    timezone: "settings-timezone",
+    weekStartsOn: "settings-week-start",
+    textScale: "settings-text-scale",
+  },
 });
-const timezones = computed(() => [...new Set([props.me.timezone, "UTC", ...Intl.supportedValuesOf("timeZone")])]);
+const timezones = computed(() => [
+  ...new Set([props.me.timezone, "UTC", ...Intl.supportedValuesOf("timeZone")]),
+]);
 const preferenceError = ref<string | null>(null);
 const preferencesSaved = ref(false);
 const theme = ref<ThemePreference>(readThemePreference());
@@ -203,14 +221,19 @@ async function handleUnlink(provider: string): Promise<void> {
 }
 
 function linkProvider(provider: string): void {
-  void clickOidcStart(provider, () => startOidcLink(provider), {
-    setPending: (next) => {
-      linkPending.value = next;
+  void clickOidcStart(
+    provider,
+    () => startOidcLink(provider),
+    {
+      setPending: (next) => {
+        linkPending.value = next;
+      },
+      setError: (message) => {
+        methodError.value = message;
+      },
     },
-    setError: (message) => {
-      methodError.value = message;
-    },
-  }, "error.link");
+    "error.link",
+  );
 }
 
 const withdrawForm = useZodForm({
@@ -252,8 +275,15 @@ async function handleExport(): Promise<void> {
 
 <template>
   <div class="settings-stack">
-    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="account-title">
-      <h1 id="account-title" class="settings-section__title text-title">{{ t("auth.account.title") }}</h1>
+    <UPageCard
+      as="section"
+      variant="subtle"
+      class="settings-section"
+      aria-labelledby="account-title"
+    >
+      <h1 id="account-title" class="settings-section__title text-title">{{
+        t("auth.account.title")
+      }}</h1>
       <div class="flex flex-col gap-6">
         <p v-if="successNotice" role="status" class="text-sm text-muted">{{ successNotice }}</p>
         <p v-if="errorNotice" role="alert" class="text-sm text-error">{{ errorNotice }}</p>
@@ -262,7 +292,11 @@ async function handleExport(): Promise<void> {
           <div class="flex items-center gap-2">
             <p class="text-sm text-muted" data-testid="account-email">{{ me.email }}</p>
             <span role="status" class="text-xs text-muted">
-              {{ me.emailVerifiedAt !== null ? t("auth.account.email.verified") : t("auth.account.email.unverified") }}
+              {{
+                me.emailVerifiedAt !== null
+                  ? t("auth.account.email.verified")
+                  : t("auth.account.email.unverified")
+              }}
             </span>
           </div>
           <div v-if="me.emailVerifiedAt === null" class="flex flex-col gap-1.5">
@@ -277,14 +311,20 @@ async function handleExport(): Promise<void> {
             >
               {{ t("auth.account.email.sendVerify") }}
             </UButton>
-            <p v-if="!magicLink" class="break-keep text-sm text-muted">{{ SEND_DISABLED_NOTICE }}</p>
+            <p v-if="!magicLink" class="break-keep text-sm text-muted">{{
+              SEND_DISABLED_NOTICE
+            }}</p>
             <p v-if="verifyError" role="alert" class="text-sm text-error">{{ verifyError }}</p>
-            <p v-if="verifySent" role="status" class="text-sm text-muted">{{ VERIFY_SENT_NOTICE }}</p>
+            <p v-if="verifySent" role="status" class="text-sm text-muted">{{
+              VERIFY_SENT_NOTICE
+            }}</p>
           </div>
         </div>
 
         <form class="flex flex-col gap-1.5" novalidate @submit.prevent="submitEmail">
-          <label class="text-sm font-medium" for="settings-new-email">{{ t("auth.account.email.new") }}</label>
+          <label class="text-sm font-medium" for="settings-new-email">{{
+            t("auth.account.email.new")
+          }}</label>
           <div class="flex gap-2">
             <input
               id="settings-new-email"
@@ -297,19 +337,27 @@ async function handleExport(): Promise<void> {
               @input="emailForm.values.newEmail = inputText($event)"
             />
             <UButton type="submit" size="sm" :disabled="!magicLink || emailForm.submitting.value">
-              {{ emailForm.submitting.value ? t("auth.emailChange.requesting") : t("common.change") }}
+              {{
+                emailForm.submitting.value ? t("auth.emailChange.requesting") : t("common.change")
+              }}
             </UButton>
           </div>
           <p v-if="!magicLink" class="break-keep text-sm text-muted">{{ SEND_DISABLED_NOTICE }}</p>
           <p v-if="emailForm.errors.value.newEmail" role="alert" class="text-sm text-error">
             {{ emailForm.errors.value.newEmail }}
           </p>
-          <p v-if="emailServerError" role="alert" class="text-sm text-error">{{ emailServerError }}</p>
-          <p v-if="emailSent" role="status" class="break-keep text-sm text-muted">{{ EMAIL_CHANGE_SENT_NOTICE }}</p>
+          <p v-if="emailServerError" role="alert" class="text-sm text-error">{{
+            emailServerError
+          }}</p>
+          <p v-if="emailSent" role="status" class="break-keep text-sm text-muted">{{
+            EMAIL_CHANGE_SENT_NOTICE
+          }}</p>
         </form>
 
         <form class="flex flex-col gap-1.5" novalidate @submit.prevent="submitName">
-          <label class="text-sm font-medium" for="settings-given-name">{{ t("settings.givenName") }}</label>
+          <label class="text-sm font-medium" for="settings-given-name">{{
+            t("settings.givenName")
+          }}</label>
           <div class="flex gap-2">
             <input
               id="settings-family-name"
@@ -327,10 +375,16 @@ async function handleExport(): Promise<void> {
               @input="nameForm.values.givenName = inputText($event)"
             />
             <UButton type="submit" size="sm" :disabled="nameForm.submitting.value">
-              {{ nameForm.submitting.value ? t("settings.profile.saving") : t("settings.profile.save") }}
+              {{
+                nameForm.submitting.value
+                  ? t("settings.profile.saving")
+                  : t("settings.profile.save")
+              }}
             </UButton>
           </div>
-          <p v-if="nameFieldError()" role="alert" class="text-sm text-error">{{ nameFieldError() }}</p>
+          <p v-if="nameFieldError()" role="alert" class="text-sm text-error">{{
+            nameFieldError()
+          }}</p>
           <p v-if="nameError" role="alert" class="text-sm text-error">{{ nameError }}</p>
         </form>
 
@@ -338,14 +392,20 @@ async function handleExport(): Promise<void> {
           <p class="text-sm font-medium">{{ t("auth.password") }}</p>
           <form class="flex flex-col gap-1.5" novalidate @submit.prevent="submitPassword">
             <template v-if="me.hasPassword">
-              <label class="text-sm font-medium" for="settings-current-password">{{ t("auth.passwordCurrent") }}</label>
+              <label class="text-sm font-medium" for="settings-current-password">{{
+                t("auth.passwordCurrent")
+              }}</label>
               <input
                 id="settings-current-password"
                 :class="fieldClass"
                 type="password"
                 autocomplete="current-password"
                 :aria-invalid="passwordForm.errors.value.currentPassword ? true : undefined"
-                :aria-describedby="passwordForm.errors.value.currentPassword ? 'settings-current-password-error' : undefined"
+                :aria-describedby="
+                  passwordForm.errors.value.currentPassword
+                    ? 'settings-current-password-error'
+                    : undefined
+                "
                 :value="passwordForm.values.currentPassword"
                 @input="passwordForm.values.currentPassword = inputText($event)"
               />
@@ -367,7 +427,9 @@ async function handleExport(): Promise<void> {
               type="password"
               autocomplete="new-password"
               :aria-invalid="passwordForm.errors.value.newPassword ? true : undefined"
-              :aria-describedby="passwordForm.errors.value.newPassword ? 'settings-new-password-error' : undefined"
+              :aria-describedby="
+                passwordForm.errors.value.newPassword ? 'settings-new-password-error' : undefined
+              "
               :value="passwordForm.values.newPassword"
               @input="passwordForm.values.newPassword = inputText($event)"
             />
@@ -379,9 +441,18 @@ async function handleExport(): Promise<void> {
             >
               {{ passwordForm.errors.value.newPassword }}
             </p>
-            <p v-if="passwordServerError" role="alert" class="text-sm text-error">{{ passwordServerError }}</p>
-            <p v-if="passwordSuccess" role="status" class="text-sm text-muted">{{ PASSWORD_CHANGED_NOTICE }}</p>
-            <UButton type="submit" size="sm" class="w-fit" :disabled="passwordForm.submitting.value">
+            <p v-if="passwordServerError" role="alert" class="text-sm text-error">{{
+              passwordServerError
+            }}</p>
+            <p v-if="passwordSuccess" role="status" class="text-sm text-muted">{{
+              PASSWORD_CHANGED_NOTICE
+            }}</p>
+            <UButton
+              type="submit"
+              size="sm"
+              class="w-fit"
+              :disabled="passwordForm.submitting.value"
+            >
               {{
                 passwordForm.submitting.value
                   ? t("form.changing")
@@ -397,7 +468,9 @@ async function handleExport(): Promise<void> {
 
         <div class="flex flex-col gap-2">
           <p class="text-sm font-medium">{{ t("auth.account.social.title") }}</p>
-          <p v-if="providers.length === 0" class="text-sm text-muted">{{ t("auth.account.social.empty") }}</p>
+          <p v-if="providers.length === 0" class="text-sm text-muted">{{
+            t("auth.account.social.empty")
+          }}</p>
           <div
             v-for="p in providers"
             :key="p.provider"
@@ -436,36 +509,104 @@ async function handleExport(): Promise<void> {
         </div>
       </div>
     </UPageCard>
-    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="account-preferences-title">
-      <h2 id="account-preferences-title" class="settings-section__title">{{ t("settings.title") }}</h2>
+    <UPageCard
+      as="section"
+      variant="subtle"
+      class="settings-section"
+      aria-labelledby="account-preferences-title"
+    >
+      <h2 id="account-preferences-title" class="settings-section__title">{{
+        t("settings.title")
+      }}</h2>
       <form class="flex flex-col gap-4" novalidate @submit.prevent="submitPreferences">
         <fieldset :disabled="preferenceForm.submitting.value" class="grid gap-4 sm:grid-cols-2">
           <legend class="sr-only">{{ t("settings.title") }}</legend>
-          <UFormField name="locale" :label="t('settings.locale')" :error="preferenceForm.errors.value.locale">
-            <USelect id="settings-locale" class="w-full" :model-value="preferenceForm.values.locale"
-              :items="[{ label: settingLabel(optionKey('defaults.user', 'locale', 'ko')), value: 'ko' }]"
-              @update:model-value="(value) => { if (value === 'ko') preferenceForm.values.locale = value; }" />
+          <UFormField
+            name="locale"
+            :label="t('settings.locale')"
+            :error="preferenceForm.errors.value.locale"
+          >
+            <USelect
+              id="settings-locale"
+              class="w-full"
+              :model-value="preferenceForm.values.locale"
+              :items="[
+                { label: settingLabel(optionKey('defaults.user', 'locale', 'ko')), value: 'ko' },
+              ]"
+              @update:model-value="
+                (value) => {
+                  if (value === 'ko') preferenceForm.values.locale = value;
+                }
+              "
+            />
           </UFormField>
-          <UFormField name="timezone" :label="t('settings.timezone')" :error="preferenceForm.errors.value.timezone">
-            <USelect id="settings-timezone" class="w-full" v-model="preferenceForm.values.timezone" :items="timezones" />
+          <UFormField
+            name="timezone"
+            :label="t('settings.timezone')"
+            :error="preferenceForm.errors.value.timezone"
+          >
+            <USelect
+              id="settings-timezone"
+              class="w-full"
+              v-model="preferenceForm.values.timezone"
+              :items="timezones"
+            />
           </UFormField>
-          <UFormField name="weekStartsOn" :label="t('settings.weekStart')" :error="preferenceForm.errors.value.weekStartsOn">
-            <USelect id="settings-week-start" class="w-full" v-model="preferenceForm.values.weekStartsOn"
-              :items="SETTING_ENUM_OPTIONS['defaults.user.weekStartsOn']!.map(value => ({ label: settingLabel(optionKey('defaults.user', 'weekStartsOn', value)), value }))" />
+          <UFormField
+            name="weekStartsOn"
+            :label="t('settings.weekStart')"
+            :error="preferenceForm.errors.value.weekStartsOn"
+          >
+            <USelect
+              id="settings-week-start"
+              class="w-full"
+              v-model="preferenceForm.values.weekStartsOn"
+              :items="
+                SETTING_ENUM_OPTIONS['defaults.user.weekStartsOn']!.map((value) => ({
+                  label: settingLabel(optionKey('defaults.user', 'weekStartsOn', value)),
+                  value,
+                }))
+              "
+            />
           </UFormField>
-          <UFormField name="textScale" :label="t('settings.textScale')" :error="preferenceForm.errors.value.textScale">
-            <USelect id="settings-text-scale" class="w-full" v-model="preferenceForm.values.textScale"
-              :items="SETTING_ENUM_OPTIONS['defaults.user.textScale']!.map(value => ({ label: settingLabel(optionKey('defaults.user', 'textScale', value)), value }))" />
+          <UFormField
+            name="textScale"
+            :label="t('settings.textScale')"
+            :error="preferenceForm.errors.value.textScale"
+          >
+            <USelect
+              id="settings-text-scale"
+              class="w-full"
+              v-model="preferenceForm.values.textScale"
+              :items="
+                SETTING_ENUM_OPTIONS['defaults.user.textScale']!.map((value) => ({
+                  label: settingLabel(optionKey('defaults.user', 'textScale', value)),
+                  value,
+                }))
+              "
+            />
           </UFormField>
         </fieldset>
         <UFormField name="theme" :label="t('settings.theme')">
-          <USelect id="settings-theme" class="w-full sm:max-w-xs" :model-value="theme"
-            :items="[{ label: t('settings.theme.system'), value: 'system' }, { label: t('settings.theme.light'), value: 'light' }, { label: t('settings.theme.dark'), value: 'dark' }]"
-            @update:model-value="changeTheme" />
+          <USelect
+            id="settings-theme"
+            class="w-full sm:max-w-xs"
+            :model-value="theme"
+            :items="[
+              { label: t('settings.theme.system'), value: 'system' },
+              { label: t('settings.theme.light'), value: 'light' },
+              { label: t('settings.theme.dark'), value: 'dark' },
+            ]"
+            @update:model-value="changeTheme"
+          />
         </UFormField>
         <p v-if="preferenceError" role="alert" class="text-sm text-error">{{ preferenceError }}</p>
-        <p v-if="preferencesSaved" role="status" class="text-sm text-muted">{{ t("common.saved") }}</p>
-        <UButton type="submit" class="w-fit" :disabled="preferenceForm.submitting.value">{{ t("settings.ui.save") }}</UButton>
+        <p v-if="preferencesSaved" role="status" class="text-sm text-muted">{{
+          t("common.saved")
+        }}</p>
+        <UButton type="submit" class="w-fit" :disabled="preferenceForm.submitting.value">{{
+          t("settings.ui.save")
+        }}</UButton>
       </form>
     </UPageCard>
     <UPageCard as="section" variant="subtle" class="settings-section">
@@ -480,7 +621,9 @@ async function handleExport(): Promise<void> {
       >
         {{ t("export.me") }}
       </UButton>
-      <p v-if="exportError" role="alert" class="settings-notice settings-notice--danger">{{ exportError }}</p>
+      <p v-if="exportError" role="alert" class="settings-notice settings-notice--danger">{{
+        exportError
+      }}</p>
     </UPageCard>
     <UPageCard as="section" variant="subtle" class="settings-section">
       <h2 class="settings-section__title text-title">{{ t("auth.account.withdraw.title") }}</h2>
@@ -489,7 +632,9 @@ async function handleExport(): Promise<void> {
           {{ me.hasPassword ? t("auth.passwordCurrent") : t("auth.account.withdraw.localPart") }}
         </label>
         <p class="break-keep text-sm text-muted">{{ t("auth.account.withdraw.body") }}</p>
-        <p v-if="!me.hasPassword" class="break-keep text-sm text-muted">{{ WITHDRAW_LOCAL_PART_HINT }}</p>
+        <p v-if="!me.hasPassword" class="break-keep text-sm text-muted">{{
+          WITHDRAW_LOCAL_PART_HINT
+        }}</p>
         <input
           id="withdraw-confirm"
           :class="fieldClass"
@@ -498,11 +643,25 @@ async function handleExport(): Promise<void> {
           :value="withdrawForm.values.confirmValue"
           @input="withdrawForm.values.confirmValue = inputText($event)"
         />
-        <p v-if="withdrawForm.errors.value.confirmValue || withdrawError" role="alert" class="text-sm text-error">
+        <p
+          v-if="withdrawForm.errors.value.confirmValue || withdrawError"
+          role="alert"
+          class="text-sm text-error"
+        >
           {{ withdrawForm.errors.value.confirmValue ?? withdrawError }}
         </p>
-        <UButton type="submit" size="sm" color="error" class="w-fit" :disabled="withdrawForm.submitting.value">
-          {{ withdrawForm.submitting.value ? t("auth.withdraw.pending") : t("auth.account.withdraw.submit") }}
+        <UButton
+          type="submit"
+          size="sm"
+          color="error"
+          class="w-fit"
+          :disabled="withdrawForm.submitting.value"
+        >
+          {{
+            withdrawForm.submitting.value
+              ? t("auth.withdraw.pending")
+              : t("auth.account.withdraw.submit")
+          }}
         </UButton>
       </form>
     </UPageCard>

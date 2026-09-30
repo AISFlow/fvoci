@@ -29,7 +29,10 @@ const save = useMutation({
 const prefs = computed(() => prefsQuery.data.value);
 const saving = ref(false);
 
-async function changePreference(key: "inApp" | "mailImmediate" | "mailDigest", event: Event): Promise<void> {
+async function changePreference(
+  key: "inApp" | "mailImmediate" | "mailDigest",
+  event: Event,
+): Promise<void> {
   const input = event.target as HTMLInputElement;
   const current = prefs.value;
   if (!current) return;
@@ -64,37 +67,41 @@ async function changePreference(key: "inApp" | "mailImmediate" | "mailDigest", e
     <h2 class="settings-section__title">{{ t("settings.notifications.title") }}</h2>
     <fieldset class="flex flex-col gap-3" :disabled="saving" :aria-busy="saving">
       <legend class="sr-only">{{ t("settings.notifications.title") }}</legend>
-    <label class="settings-form__row">
-      <input
-        id="prefs-in-app"
-        type="checkbox"
-        :checked="prefs.inApp"
-        @change="changePreference('inApp', $event)"
-      />
-      <span>{{ t("notif.prefs.inApp") }}</span>
-    </label>
-    <label class="settings-form__row">
-      <input
-        id="prefs-mail-immediate"
-        type="checkbox"
-        :checked="prefs.mailImmediate"
-        @change="changePreference('mailImmediate', $event)"
-      />
-      <span>{{ t("notif.prefs.mailImmediate") }}</span>
-    </label>
-    <label class="settings-form__row">
-      <input
-        id="prefs-mail-digest"
-        type="checkbox"
-        :checked="prefs.mailDigest"
-        @change="changePreference('mailDigest', $event)"
-      />
-      <span>{{ t("notif.prefs.mailDigest") }}</span>
-    </label>
+      <label class="settings-form__row">
+        <input
+          id="prefs-in-app"
+          type="checkbox"
+          :checked="prefs.inApp"
+          @change="changePreference('inApp', $event)"
+        />
+        <span>{{ t("notif.prefs.inApp") }}</span>
+      </label>
+      <label class="settings-form__row">
+        <input
+          id="prefs-mail-immediate"
+          type="checkbox"
+          :checked="prefs.mailImmediate"
+          @change="changePreference('mailImmediate', $event)"
+        />
+        <span>{{ t("notif.prefs.mailImmediate") }}</span>
+      </label>
+      <label class="settings-form__row">
+        <input
+          id="prefs-mail-digest"
+          type="checkbox"
+          :checked="prefs.mailDigest"
+          @change="changePreference('mailDigest', $event)"
+        />
+        <span>{{ t("notif.prefs.mailDigest") }}</span>
+      </label>
     </fieldset>
     <PushToggle :workspace-id="workspaceId" />
     <p v-if="save.error.value" role="alert" class="settings-notice">
-      {{ save.error.value instanceof ProblemError ? save.error.value.title : t("settings.save.failed") }}
+      {{
+        save.error.value instanceof ProblemError
+          ? save.error.value.title
+          : t("settings.save.failed")
+      }}
     </p>
   </section>
 </template>

@@ -66,8 +66,15 @@ function pendingDays(user: AdminUser): number | null {
 
 <template>
   <div class="settings-stack">
-    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="admin-system-title">
-      <h2 class="settings-section__title text-title" id="admin-system-title">{{ t("admin.system") }}</h2>
+    <UPageCard
+      as="section"
+      variant="subtle"
+      class="settings-section"
+      aria-labelledby="admin-system-title"
+    >
+      <h2 class="settings-section__title text-title" id="admin-system-title">{{
+        t("admin.system")
+      }}</h2>
       <div class="text-sm">
         <QueryLoading v-if="loading" />
         <ul v-if="system" class="flex flex-col gap-1 settings-tabular">
@@ -79,10 +86,19 @@ function pendingDays(user: AdminUser): number | null {
         <p v-if="error" role="alert" class="text-error">{{ error }}</p>
       </div>
     </UPageCard>
-    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="admin-users-title">
-      <h2 class="settings-section__title text-title" id="admin-users-title">{{ t("admin.users") }}</h2>
+    <UPageCard
+      as="section"
+      variant="subtle"
+      class="settings-section"
+      aria-labelledby="admin-users-title"
+    >
+      <h2 class="settings-section__title text-title" id="admin-users-title">{{
+        t("admin.users")
+      }}</h2>
       <div class="flex flex-col gap-2 overflow-x-auto">
-        <p v-if="actionError" role="alert" class="settings-notice settings-notice--danger">{{ actionError }}</p>
+        <p v-if="actionError" role="alert" class="settings-notice settings-notice--danger">{{
+          actionError
+        }}</p>
         <table class="w-full border-collapse">
           <thead>
             <tr>
@@ -103,11 +119,16 @@ function pendingDays(user: AdminUser): number | null {
                   {{
                     pendingDays(u) === 0
                       ? t("admin.erase.processing")
-                      : t("admin.erase.until", { date: formatDateKo(u.eraseAt), days: pendingDays(u) })
+                      : t("admin.erase.until", {
+                          date: formatDateKo(u.eraseAt),
+                          days: pendingDays(u),
+                        })
                   }}
                 </p>
               </td>
-              <td :class="tableCellClass">{{ u.instanceAdmin ? t("admin.yes") : t("admin.no") }}</td>
+              <td :class="tableCellClass">{{
+                u.instanceAdmin ? t("admin.yes") : t("admin.no")
+              }}</td>
               <td :class="tableCellClass">{{ u.suspendedAt ? t("admin.yes") : t("admin.no") }}</td>
               <td :class="[tableCellClass, 'text-right']">
                 <div class="flex flex-wrap justify-end gap-2">
@@ -124,8 +145,16 @@ function pendingDays(user: AdminUser): number | null {
                     {{ t("admin.instanceAdmin") }}
                   </UButton>
                   <ConfirmAction
-                    :title="u.suspendedAt ? t('admin.restore.confirm.title') : t('admin.suspend.confirm.title')"
-                    :description="u.suspendedAt ? t('admin.restore.confirm.body') : t('admin.suspend.confirm.body')"
+                    :title="
+                      u.suspendedAt
+                        ? t('admin.restore.confirm.title')
+                        : t('admin.suspend.confirm.title')
+                    "
+                    :description="
+                      u.suspendedAt
+                        ? t('admin.restore.confirm.body')
+                        : t('admin.suspend.confirm.body')
+                    "
                     :action-label="u.suspendedAt ? t('admin.restore') : t('admin.suspend')"
                     :disabled="busy() || u.deletedAt != null"
                     :destructive="!u.suspendedAt"
@@ -165,8 +194,15 @@ function pendingDays(user: AdminUser): number | null {
         </table>
       </div>
     </UPageCard>
-    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="admin-workspaces-title">
-      <h2 class="settings-section__title text-title" id="admin-workspaces-title">{{ t("admin.workspaces") }}</h2>
+    <UPageCard
+      as="section"
+      variant="subtle"
+      class="settings-section"
+      aria-labelledby="admin-workspaces-title"
+    >
+      <h2 class="settings-section__title text-title" id="admin-workspaces-title">{{
+        t("admin.workspaces")
+      }}</h2>
       <div class="overflow-x-auto">
         <table class="w-full border-collapse">
           <thead>

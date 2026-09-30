@@ -87,7 +87,9 @@ const remove = useMutation({
 const canCreate = computed(() => tags.data.value?.canCreate ?? false);
 const canManage = computed(() => tags.data.value?.canManage ?? false);
 const items = computed(() => tags.data.value?.items ?? []);
-const pending = computed(() => create.isPending.value || patch.isPending.value || remove.isPending.value);
+const pending = computed(
+  () => create.isPending.value || patch.isPending.value || remove.isPending.value,
+);
 
 function onCreate(): void {
   const trimmed = name.value.trim();
@@ -127,15 +129,25 @@ function onColor(id: string, next: string): void {
   />
   <section v-else class="settings-section" data-testid="document-tags-settings">
     <h1 class="settings-section__title">{{ t("settings.documentTags.title") }}</h1>
-    <p v-if="actionError" role="alert" class="settings-notice settings-notice--danger">{{ actionError }}</p>
-    <p v-if="items.length === 0" class="settings-section__lede">{{ t("settings.documentTags.empty") }}</p>
+    <p v-if="actionError" role="alert" class="settings-notice settings-notice--danger">{{
+      actionError
+    }}</p>
+    <p v-if="items.length === 0" class="settings-section__lede">{{
+      t("settings.documentTags.empty")
+    }}</p>
     <div v-else class="overflow-x-auto">
       <table class="w-full border-collapse">
         <thead>
           <tr>
-            <th scope="col" class="border-b border-default px-2 py-2 text-left">{{ t("doc.tags.name") }}</th>
-            <th scope="col" class="border-b border-default px-2 py-2 text-left">{{ t("doc.tags.color") }}</th>
-            <th scope="col" class="border-b border-default px-2 py-2 text-left">{{ t("doc.tags.assignments") }}</th>
+            <th scope="col" class="border-b border-default px-2 py-2 text-left">{{
+              t("doc.tags.name")
+            }}</th>
+            <th scope="col" class="border-b border-default px-2 py-2 text-left">{{
+              t("doc.tags.color")
+            }}</th>
+            <th scope="col" class="border-b border-default px-2 py-2 text-left">{{
+              t("doc.tags.assignments")
+            }}</th>
             <th v-if="canManage" scope="col" class="border-b border-default px-2 py-2">
               <span class="sr-only">{{ t("doc.tags.delete") }}</span>
             </th>
@@ -170,7 +182,9 @@ function onColor(id: string, next: string): void {
               </select>
               <span v-else>{{ row.color }}</span>
             </td>
-            <td class="border-b border-default px-2 py-2 settings-tabular">{{ row.assignmentCount }}</td>
+            <td class="border-b border-default px-2 py-2 settings-tabular">{{
+              row.assignmentCount
+            }}</td>
             <td v-if="canManage" class="border-b border-default px-2 py-2">
               <UButton
                 type="button"
@@ -178,7 +192,10 @@ function onColor(id: string, next: string): void {
                 variant="outline"
                 color="neutral"
                 :disabled="pending"
-                @click="actionError = null; removeTarget = row"
+                @click="
+                  actionError = null;
+                  removeTarget = row;
+                "
               >
                 {{ t("doc.tags.delete") }}
               </UButton>
@@ -204,7 +221,9 @@ function onColor(id: string, next: string): void {
           <option v-for="item in TAG_COLORS" :key="item" :value="item">{{ item }}</option>
         </select>
       </div>
-      <UButton type="submit" size="sm" :disabled="pending || name.trim() === ''">{{ t("doc.tags.create.action") }}</UButton>
+      <UButton type="submit" size="sm" :disabled="pending || name.trim() === ''">{{
+        t("doc.tags.create.action")
+      }}</UButton>
     </form>
     <ConfirmDialog
       :open="removeTarget !== null"

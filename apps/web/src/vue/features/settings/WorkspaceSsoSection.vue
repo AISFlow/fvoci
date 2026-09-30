@@ -25,7 +25,9 @@ const issuer = ref("");
 const clientId = ref("");
 const clientSecret = ref("");
 const label = ref("");
-const fieldErrors = ref<Partial<Record<"issuer" | "clientId" | "clientSecret" | "label", string>>>({});
+const fieldErrors = ref<Partial<Record<"issuer" | "clientId" | "clientSecret" | "label", string>>>(
+  {},
+);
 
 const queryKey = ["workspaces", props.workspaceId, "oidc"] as const;
 const oidc = useQuery(() => ({
@@ -44,7 +46,9 @@ const redirectUri = computed(() =>
 );
 const current = computed(() => oidc.data.value ?? null);
 const configured = computed(() => Boolean(current.value?.issuer && current.value?.clientId));
-const eeRequired = computed(() => oidc.error.value instanceof ProblemError && oidc.error.value.status === 404);
+const eeRequired = computed(
+  () => oidc.error.value instanceof ProblemError && oidc.error.value.status === 404,
+);
 
 function failMessage(err: unknown): string {
   return err instanceof ProblemError ? err.title : t("error.network");
@@ -86,7 +90,9 @@ const remove = useMutation({
 
 const pending = computed(() => save.isPending.value || remove.isPending.value);
 const error = computed(
-  () => actionError.value ?? (oidc.error.value && !eeRequired.value ? failMessage(oidc.error.value) : null),
+  () =>
+    actionError.value ??
+    (oidc.error.value && !eeRequired.value ? failMessage(oidc.error.value) : null),
 );
 
 function syncForm(): void {
@@ -148,8 +154,12 @@ function onSave(): void {
     <div class="settings-disclosure__body flex flex-col gap-4">
       <template v-if="!oidc.isLoading.value && !oidc.isError.value">
         <div class="flex flex-col gap-1.5" data-testid="workspace-sso-redirect-uri">
-          <label :for="`${formId}-redirect-uri`" class="font-medium">{{ t("auth.sso.redirectUri") }}</label>
-          <p :id="`${formId}-redirect-uri-help`" class="text-muted">{{ t("auth.sso.redirectUri.help") }}</p>
+          <label :for="`${formId}-redirect-uri`" class="font-medium">{{
+            t("auth.sso.redirectUri")
+          }}</label>
+          <p :id="`${formId}-redirect-uri-help`" class="text-muted">{{
+            t("auth.sso.redirectUri.help")
+          }}</p>
           <div class="flex flex-wrap items-center gap-2">
             <UInput
               :id="`${formId}-redirect-uri`"
@@ -162,10 +172,20 @@ function onSave(): void {
               @focus="($event.target as HTMLInputElement).select()"
             />
             <UButton type="button" size="sm" variant="outline" color="neutral" @click="onCopy">
-              {{ t(copyStatus === "copied" ? "auth.sso.redirectUri.copied" : "auth.sso.redirectUri.copy") }}
+              {{
+                t(
+                  copyStatus === "copied"
+                    ? "auth.sso.redirectUri.copied"
+                    : "auth.sso.redirectUri.copy",
+                )
+              }}
             </UButton>
           </div>
-          <p v-if="copyStatus === 'failed'" role="alert" class="settings-notice settings-notice--danger">
+          <p
+            v-if="copyStatus === 'failed'"
+            role="alert"
+            class="settings-notice settings-notice--danger"
+          >
             {{ t("auth.sso.redirectUri.copyFailed") }}
           </p>
         </div>
@@ -180,7 +200,9 @@ function onSave(): void {
               :disabled="pending"
               :aria-invalid="fieldErrors.issuer ? true : undefined"
             />
-            <p v-if="fieldErrors.issuer" class="text-error" role="alert">{{ fieldErrors.issuer }}</p>
+            <p v-if="fieldErrors.issuer" class="text-error" role="alert">{{
+              fieldErrors.issuer
+            }}</p>
           </div>
           <div class="flex flex-col gap-1.5">
             <label :for="`${formId}-clientId`">{{ t("auth.sso.clientId") }}</label>
@@ -191,7 +213,9 @@ function onSave(): void {
               :disabled="pending"
               :aria-invalid="fieldErrors.clientId ? true : undefined"
             />
-            <p v-if="fieldErrors.clientId" class="text-error" role="alert">{{ fieldErrors.clientId }}</p>
+            <p v-if="fieldErrors.clientId" class="text-error" role="alert">{{
+              fieldErrors.clientId
+            }}</p>
           </div>
           <div class="flex flex-col gap-1.5">
             <label :for="`${formId}-clientSecret`">{{ t("auth.sso.clientSecret") }}</label>
@@ -203,7 +227,9 @@ function onSave(): void {
               :disabled="pending"
               :aria-invalid="fieldErrors.clientSecret ? true : undefined"
             />
-            <p v-if="fieldErrors.clientSecret" class="text-error" role="alert">{{ fieldErrors.clientSecret }}</p>
+            <p v-if="fieldErrors.clientSecret" class="text-error" role="alert">{{
+              fieldErrors.clientSecret
+            }}</p>
           </div>
           <div class="flex flex-col gap-1.5">
             <label :for="`${formId}-label`">{{ t("auth.sso.label") }}</label>

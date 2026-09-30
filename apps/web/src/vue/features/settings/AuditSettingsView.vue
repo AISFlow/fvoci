@@ -26,7 +26,10 @@ defineProps<{
         <p v-if="eeRequired" class="text-sm text-muted">{{ t("ee.required") }}</p>
         <p v-if="error" class="text-sm text-error" role="alert">{{ error }}</p>
         <QueryLoading v-if="loading" />
-        <p v-if="!eeRequired && !loading && !error && items.length === 0" class="text-sm text-muted">
+        <p
+          v-if="!eeRequired && !loading && !error && items.length === 0"
+          class="text-sm text-muted"
+        >
           {{ t("audit.empty") }}
         </p>
         <div v-if="!eeRequired && !loading && items.length > 0" class="overflow-x-auto">

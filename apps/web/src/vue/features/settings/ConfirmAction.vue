@@ -36,7 +36,14 @@ async function confirm(): Promise<void> {
 </script>
 
 <template>
-  <UButton type="button" size="sm" variant="outline" color="neutral" :disabled="disabled" @click="open = true">
+  <UButton
+    type="button"
+    size="sm"
+    variant="outline"
+    color="neutral"
+    :disabled="disabled"
+    @click="open = true"
+  >
     <slot />
   </UButton>
   <NativeModal :open="open" :labelled-by="titleId" @close="close">
@@ -47,7 +54,9 @@ async function confirm(): Promise<void> {
         <UButton type="button" size="sm" variant="outline" color="neutral" @click="close">{{
           t("common.cancel")
         }}</UButton>
-        <UButton type="button" size="sm" color="error" :disabled="busy" @click="confirm">{{ actionLabel }}</UButton>
+        <UButton type="button" size="sm" color="error" :disabled="busy" @click="confirm">{{
+          actionLabel
+        }}</UButton>
       </div>
     </div>
   </NativeModal>

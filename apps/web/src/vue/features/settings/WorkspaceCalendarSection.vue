@@ -100,7 +100,9 @@ function addHoliday(): void {
 <template>
   <section class="settings-section">
     <details class="rounded-md border border-default p-3">
-      <summary class="min-h-11 cursor-pointer">{{ t("ics.subscribe") }} · {{ t("ics.holidays") }}</summary>
+      <summary class="min-h-11 cursor-pointer"
+        >{{ t("ics.subscribe") }} · {{ t("ics.holidays") }}</summary
+      >
       <div class="mt-2 flex flex-col gap-2">
         <UButton type="button" :disabled="copy.isPending.value" @click="copyFeed">
           {{ t(copy.isSuccess.value ? "ics.subscribe.copied" : "ics.subscribe.copy") }}
@@ -125,10 +127,14 @@ function addHoliday(): void {
         </ul>
         <form v-if="canEdit" class="flex flex-wrap gap-2" @submit.prevent="addHoliday">
           <UInput v-model="date" type="date" :aria-label="t('ics.holidays.date')" />
-          <UButton type="submit" :disabled="!date || writesDisabled">{{ t("ics.holidays.add") }}</UButton>
+          <UButton type="submit" :disabled="!date || writesDisabled">{{
+            t("ics.holidays.add")
+          }}</UButton>
         </form>
         <div v-if="holidays.isError.value" role="alert">
-          <p>{{ t(write.isSuccess.value ? "ics.holidays.refreshFailed" : "ics.holidays.loadFailed") }}</p>
+          <p>{{
+            t(write.isSuccess.value ? "ics.holidays.refreshFailed" : "ics.holidays.loadFailed")
+          }}</p>
           <UButton type="button" @click="holidays.refetch()">{{ t("load.retry") }}</UButton>
         </div>
         <p v-if="write.isSuccess.value" role="status">{{ t("ics.holidays.saved") }}</p>

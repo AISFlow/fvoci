@@ -175,7 +175,9 @@ function copyInvite(url: string): void {
           <div class="min-w-0">
             <p class="font-medium break-keep">
               {{ memberName(member) }}
-              <span v-if="member.userId === currentUserId" class="ml-2 text-muted">{{ t("workspace.member.self") }}</span>
+              <span v-if="member.userId === currentUserId" class="ml-2 text-muted">{{
+                t("workspace.member.self")
+              }}</span>
             </p>
             <p class="text-muted wrap-anywhere">{{ member.email }}</p>
             <p v-if="rowErrors[member.userId]" role="alert" class="mt-1 text-error break-keep">
@@ -204,7 +206,9 @@ function copyInvite(url: string): void {
                 :disabled="pendingIds.has(member.userId)"
                 @change="onRoleChange(member, $event)"
               >
-                <option v-for="role in inviteRoles" :key="role" :value="role">{{ roleLabel(role) }}</option>
+                <option v-for="role in inviteRoles" :key="role" :value="role">{{
+                  roleLabel(role)
+                }}</option>
               </select>
               <UButton
                 type="button"
@@ -222,7 +226,9 @@ function copyInvite(url: string): void {
         </li>
       </ul>
       <p v-if="status" role="status">{{ status }}</p>
-      <p v-if="membersError" role="alert" class="settings-notice settings-notice--danger">{{ membersError }}</p>
+      <p v-if="membersError" role="alert" class="settings-notice settings-notice--danger">{{
+        membersError
+      }}</p>
       <form v-if="canManage" class="flex flex-col gap-1.5" novalidate @submit.prevent="onInvite">
         <div class="flex flex-wrap items-end gap-2">
           <div class="flex min-w-40 flex-1 flex-col gap-1.5">
@@ -244,28 +250,44 @@ function copyInvite(url: string): void {
               class="h-11 min-w-28 rounded-md border border-default bg-default px-3"
               :disabled="invite.isPending.value"
             >
-              <option v-for="role in inviteRoles" :key="role" :value="role">{{ roleLabel(role) }}</option>
+              <option v-for="role in inviteRoles" :key="role" :value="role">{{
+                roleLabel(role)
+              }}</option>
             </select>
           </div>
-          <UButton type="submit" size="sm" :disabled="invite.isPending.value">{{ t("auth.invite.send") }}</UButton>
+          <UButton type="submit" size="sm" :disabled="invite.isPending.value">{{
+            t("auth.invite.send")
+          }}</UButton>
         </div>
-        <p v-if="emailError" role="alert" class="settings-notice settings-notice--danger">{{ emailError }}</p>
-        <p v-if="inviteError" role="alert" class="settings-notice settings-notice--danger">{{ inviteError }}</p>
+        <p v-if="emailError" role="alert" class="settings-notice settings-notice--danger">{{
+          emailError
+        }}</p>
+        <p v-if="inviteError" role="alert" class="settings-notice settings-notice--danger">{{
+          inviteError
+        }}</p>
         <div v-if="inviteResult" class="flex flex-col gap-2">
           <p role="status">
             {{ t("workspace.invite.created") }}
-            <template v-if="inviteResult.mailDelayed"> {{ t("workspace.invite.mailDelayed") }}</template>
+            <template v-if="inviteResult.mailDelayed">
+              {{ t("workspace.invite.mailDelayed") }}</template
+            >
           </p>
           <p class="wrap-anywhere">
-            <a :href="inviteResult.acceptUrl" class="underline underline-offset-2">{{ inviteResult.acceptUrl }}</a>
+            <a :href="inviteResult.acceptUrl" class="underline underline-offset-2">{{
+              inviteResult.acceptUrl
+            }}</a>
           </p>
-          <UButton type="button" size="sm" variant="outline" color="neutral" class="w-fit" @click="copyInvite(inviteResult.acceptUrl)">
+          <UButton
+            type="button"
+            size="sm"
+            variant="outline"
+            color="neutral"
+            class="w-fit"
+            @click="copyInvite(inviteResult.acceptUrl)"
+          >
             {{ t("workspace.invite.copyLink") }}
           </UButton>
-          <p
-            v-if="inviteCopyStatus"
-            :role="inviteCopyStatus === 'failed' ? 'alert' : 'status'"
-          >
+          <p v-if="inviteCopyStatus" :role="inviteCopyStatus === 'failed' ? 'alert' : 'status'">
             {{
               t(
                 inviteCopyStatus === "copied"
@@ -280,9 +302,7 @@ function copyInvite(url: string): void {
     <ConfirmDialog
       :open="removeTarget !== null"
       :title="
-        removeTarget
-          ? t('workspace.member.remove.title', { name: memberName(removeTarget) })
-          : ''
+        removeTarget ? t('workspace.member.remove.title', { name: memberName(removeTarget) }) : ''
       "
       :body="
         removeTarget

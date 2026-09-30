@@ -9,4 +9,8 @@ export const IMPORT_ACCEPT: Record<ImportSource, string> = {
 
 export const IMPORT_NO_PROJECT = "none";
 
-export const IMPORT_SOURCES: readonly ImportSource[] = ["markdown-zip", "office-file", "notion-zip"];
+export const IMPORT_SOURCES: readonly ImportSource[] = [
+  "markdown-zip",
+  "office-file",
+  "notion-zip",
+];

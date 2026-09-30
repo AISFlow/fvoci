@@ -13,7 +13,12 @@ import {
   pollImportJob,
   type ImportJobStatus,
 } from "@/lib/import-poll";
-import { IMPORT_ACCEPT, IMPORT_NO_PROJECT, IMPORT_SOURCES, type ImportSource } from "./import-source";
+import {
+  IMPORT_ACCEPT,
+  IMPORT_NO_PROJECT,
+  IMPORT_SOURCES,
+  type ImportSource,
+} from "./import-source";
 import "@/features/settings/settings-shell.css";
 
 class PollStopped extends Error {
@@ -168,7 +173,9 @@ function sourceLabel(value: ImportSource): string {
         class="h-11 rounded-md border border-default bg-default px-3"
         :disabled="pending"
       >
-        <option v-for="item in IMPORT_SOURCES" :key="item" :value="item">{{ sourceLabel(item) }}</option>
+        <option v-for="item in IMPORT_SOURCES" :key="item" :value="item">{{
+          sourceLabel(item)
+        }}</option>
       </select>
       <template v-if="source === 'notion-zip'">
         <label for="import-project">{{ t("workspace.import.project") }}</label>
@@ -179,7 +186,11 @@ function sourceLabel(value: ImportSource): string {
           :disabled="pending"
         >
           <option :value="IMPORT_NO_PROJECT">{{ t("workspace.import.project.none") }}</option>
-          <option v-for="project in projects.data.value?.items ?? []" :key="project.id" :value="project.id">
+          <option
+            v-for="project in projects.data.value?.items ?? []"
+            :key="project.id"
+            :value="project.id"
+          >
             {{ project.name }}
           </option>
         </select>
@@ -188,7 +199,13 @@ function sourceLabel(value: ImportSource): string {
       <UButton type="button" :disabled="pending" @click="inputRef?.click()">
         {{ pending ? t("workspace.import.running") : t("workspace.import.source") }}
       </UButton>
-      <UButton v-if="pending" type="button" variant="outline" color="neutral" @click="pollRef?.abort()">
+      <UButton
+        v-if="pending"
+        type="button"
+        variant="outline"
+        color="neutral"
+        @click="pollRef?.abort()"
+      >
         {{ t("workspace.import.cancelPoll") }}
       </UButton>
       <UButton
