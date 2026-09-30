@@ -9,6 +9,7 @@
     "./react": "./src/react/schema.tsx",
     "./fvoci-editor": "./src/react/fvoci-editor.tsx",
     "./vue": "./src/vue/index.ts",
+    "./vue/safe-html": "./src/vue/safe-html.ts",
     "./block-menu": "./src/react/block-menu.tsx",
     "./format-toolbar": "./src/react/format-toolbar.tsx",
     "./link-popover": "./src/react/tiptap-ui/link-popover.tsx",

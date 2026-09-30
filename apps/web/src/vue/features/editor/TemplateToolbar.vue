@@ -21,7 +21,7 @@ const toolbarEditor = props.editor as VueEditor;
 const { state, history, insert, format, insertSlash, insertTrigger } = useEditorToolbar(props.editor);
 const items = computed(() => props.mode === "fixed" ? [history.value, [insert]] : props.mode === "mobile" ? [...format, [insert]] : format);
 const side = computed(() => props.mode === "mobile" ? "top" : "bottom");
-const headingLabel = computed(() => state.value.heading ? `H${state.value.heading}▾` : `${t("editor.block.paragraph")}▾`);
+const headingLabel = computed(() => state.value.heading ? `H${state.value.heading}` : t("editor.block.paragraph"));
 const lists = [
   { type: "bulletList", key: "editor.block.bullet", icon: "i-lucide-list" },
   { type: "orderedList", key: "editor.block.ordered", icon: "i-lucide-list-ordered" },
