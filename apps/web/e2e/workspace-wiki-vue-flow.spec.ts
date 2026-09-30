@@ -426,8 +426,8 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
     // text, each step replacing the syllable being composed, then a commit.
     // The composing syllable is the selected block, as Korean IMEs show it.
     // Synthetic events: this is not the OS IME witness. With the caret at
-    // the end of the marked text instead, the first jamo stays behind (the
-    // known bug the next test pins); the real IBus witness shows that too.
+    // the end of the marked text previously left the first jamo behind.
+    // The next test pins the repaired path; the IBus witness recorded the bug.
     const ime = await a.context.newCDPSession(a.page);
     const setComposition = (text: string) =>
       ime.send("Input.imeSetComposition", { text, selectionStart: 0, selectionEnd: text.length });
@@ -472,17 +472,13 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
   }
 });
 
-// Known bug, in the React editor as well (it predates the Vue page): when
-// the IME reports the caret at the end of the marked text, as Chromium does
-// for the IBus Hangul engine on Linux, the first composition step's jamo is
-// committed on its own and the syllable is then composed after it:
-// "첫 문단" + 한글 gives "첫 문단ㅎ한글". A peer is not needed. The OS IME
-// witness (e2e-pending/workspace-wiki-vue-os-ime.spec.ts) shows the same on
-// the real input path. Tracked in #258. Suspected cause, to be confirmed
-// there: ProseMirror writes the DOM selection (selectionToDOM) on the first
-// composition update, which restarts the IME's composition. Expected to fail
-// until that is fixed; when it passes, drop test.fail.
-test.fail("Korean composition with the caret after the marked text leaves no stray jamo (known bug)", async ({ page }) => {
+// #268 (`83c01480`) skips UniqueID setNodeMarkup while a transaction has
+// composition meta, so Chromium/IBus no longer restarts the first Hangul
+// step. #258 is closed. This used to be test.fail; CI on main f3f53c90
+// (Web 36599369890 shard 5) failed with "Expected to fail, but passed".
+// Keep the assertion as a regression: "첫 문단" + 한글 must be "첫 문단한글",
+// not "첫 문단ㅎ한글".
+test("Korean composition with the caret after the marked text leaves no stray jamo", async ({ page }) => {
   await login(page, admin.email, admin.password);
   const wsId = await workspaceId(page.request);
   const doc = await createDoc(page.request, wsId, "한글 조합 캐럿", "첫 문단\n");

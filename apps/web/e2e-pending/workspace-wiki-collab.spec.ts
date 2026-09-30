@@ -85,6 +85,48 @@ test("Korean, Han, and emoji keep UniqueID across persist and reload", async ({
   expect(uniqueBlockIds(after)).toEqual(ids);
 });
 
+test("content caret glyph fallback stays before a trailing empty table", async ({ page }) => {
+  await ensureCollabFixture(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "텍스트 끝 caret");
+  const editor = await openEditor(page, doc.url);
+  await editor.click();
+  await page.keyboard.type("가나다");
+  await insertSlashTable(page);
+  const before = await editorShape(page);
+  expect(before.table).not.toBeNull();
+
+  // Force the valid opposite side of the last content glyph. This exercises
+  // the native-key fallback deterministically, including the empty table edge.
+  const click = page.mouse.click.bind(page.mouse);
+  page.mouse.click = async (_x, _y, options) => {
+    const rect = await editor.evaluate((root) => {
+      const text = root.querySelector("p")!.firstChild!;
+      const range = document.createRange();
+      range.setStart(text, 2);
+      range.setEnd(text, 3);
+      const rect = range.getBoundingClientRect();
+      return { x: rect.left + 0.1, y: rect.top + rect.height / 2 };
+    });
+    return click(rect.x, rect.y, options);
+  };
+  try {
+    await placeContentCaret(page, "end");
+  } finally {
+    page.mouse.click = click;
+  }
+  const selection = await readEditorSelection(page);
+  expect([selection.from, selection.to]).toEqual([4, 4]);
+  await page.keyboard.type("끝");
+  const after = await editorShape(page);
+  expect(after.text).toBe("가나다끝");
+  expect(after.table).toEqual(before.table);
+  await persistBody(page);
+  await page.reload();
+  await waitConnected(page);
+  expect(await editorShape(page)).toEqual(after);
+});
+
 test("two clients insert at the same caret and both tokens survive", async ({
   browser,
   collabApp,
