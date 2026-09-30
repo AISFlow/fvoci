@@ -79,7 +79,7 @@ export const routes: RouteRecordRaw[] = [
   // Public share reader. apps/web/src/app-boundary.ts is owned elsewhere;
   // boot still needs `/^\/s\/[^/]+\/?$/i` and must NOT match
   // `/s/:token/attachments/...` (that stays a different route).
-  { path: "/s/:token", name: "public-share", component: () => import("./pages/PublicSharePage.vue") },
+  { path: VUE_ROUTE_PATHS.publicShare, name: "public-share", component: () => import("./pages/PublicSharePage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

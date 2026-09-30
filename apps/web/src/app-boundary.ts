@@ -50,6 +50,8 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   /^\/invite\/[^/]+\/?$/i,
   // First-instance setup. /setup/extra and /setups stay React.
   /^\/setup\/?$/i,
+  // Anonymous public share reader; nested attachment paths retain their viewer.
+  /^\/s\/[^/]+\/?$/i,
   // Session and anonymous share attachment viewers.
   /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i,
   /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i,

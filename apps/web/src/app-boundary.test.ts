@@ -212,7 +212,7 @@ test("single-segment resource routes agree with the shared ref grammar", () => {
     const resource = ref ? parseRef(ref) : null;
     const projectView = /\/(gantt|tasks|table|board|calendar)\/?$/i.test(path) || /\/settings\/(fields|workflow)\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
-    const homeOrPublic = path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
+    const homeOrPublic = /^\/s\/[^/]+\/?$/i.test(path) || path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
     const invite = /^\/invite\/[^/]+\/?$/i.test(path);
     const setup = /^\/setup\/?$/i.test(path);
     const auth = /^\/(reset-password|magic-link|confirm-email|cancel-withdraw|consent)\/?$/i.test(path);
@@ -243,12 +243,12 @@ test("workspace navigation owns exact section paths and excludes nested private 
   }
 });
 
-test("attachment viewers boot Vue while public share and admin pages retain React", () => {
+test("attachment viewers and exact public share boot Vue while admin pages retain React", () => {
   for (const path of ["/w/acme/a/123/view", "/w/acme/a/123/view/", "/W/acme/A/123/VIEW",
-    "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View"]) {
+    "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View", "/s/tok", "/S/tok/"]) {
     assert.equal(isVueAppPath(path), true, path);
   }
-  for (const path of ["/s/tok", "/settings/admin", "/settings/audit", "/settings/legal",
+  for (const path of ["/s/tok/extra", "/settings/admin", "/settings/audit", "/settings/legal",
     "/w/acme/a/123", "/w/acme/a/123/view/extra", "/s/tok/attachments/123", "/s/tok/attachments/123/view/extra"]) {
     assert.equal(isVueAppPath(path), false, path);
   }

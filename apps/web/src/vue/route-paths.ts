@@ -30,6 +30,7 @@ const VUE_BASE_ROUTE_PATHS = {
   // Session attachment viewer: /w/:slug/a/:attachmentId/view
   attachmentView: "/w/:slug/a/:attachmentId/view",
   // Anonymous share attachment viewer: /s/:token/attachments/:attachmentId/view
+  publicShare: "/s/:token",
   shareAttachmentView: "/s/:token/attachments/:attachmentId/view",
 } as const;
 
