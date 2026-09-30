@@ -738,25 +738,39 @@ test("moving between five documents in the app keeps one room socket and every e
 
   await openDoc(page, docs[0]!.path);
   await expectRoom(docs[0]!);
+  type NativeReceipt = {
+    kind: string; at: number; trusted: boolean; key?: string; data?: string | null;
+    inEditor: boolean; href?: string;
+  };
   // When the last keystroke and the link click reached the page.
   await page.evaluate(() => {
     const marks = window as unknown as {
       lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
-      lastLinkTrusted: boolean; lastLinkHref: string;
+      lastLinkTrusted: boolean; lastLinkHref: string; nativeEvents: NativeReceipt[];
     };
-    addEventListener("keydown", (event) => {
-      marks.lastKeyAt = performance.now();
-      marks.lastKeyTrusted = event.isTrusted;
-    }, true);
-    addEventListener("click", (event) => {
-      const link = (event.target as Element | null)?.closest("a");
-      if (link) {
-        marks.lastLinkAt = performance.now();
-        marks.lastLinkTrusted = event.isTrusted;
-        marks.lastLinkHref = link.getAttribute("href") ?? "";
-      }
-    }, true);
+    marks.nativeEvents = [];
+    for (const kind of ["keydown", "beforeinput", "input", "keyup", "mousedown", "mouseup", "click"]) {
+      addEventListener(kind, (event) => {
+        const target = event.target as Element | null;
+        const inEditor = !!target?.closest(".fvoci-editor .ProseMirror");
+        const link = target?.closest("a");
+        const at = performance.now();
+        if (kind === "keydown") {
+          marks.lastKeyAt = at;
+          marks.lastKeyTrusted = event.isTrusted;
+        }
+        if (kind === "click" && link) {
+          marks.lastLinkAt = at;
+          marks.lastLinkTrusted = event.isTrusted;
+          marks.lastLinkHref = link.getAttribute("href") ?? "";
+        }
+        if (inEditor || link) marks.nativeEvents.push({ kind, at, trusted: event.isTrusted,
+          key: (event as KeyboardEvent).key, data: (event as InputEvent).data,
+          inEditor, href: link?.getAttribute("href") ?? undefined });
+      }, true);
+    }
   });
+  const native = await page.context().newCDPSession(page);
   const gaps: number[] = [];
   const gestures: unknown[] = [];
   for (let i = 0; i < 4; i += 1) {
@@ -765,37 +779,67 @@ test("moving between five documents in the app keeps one room socket and every e
     const link = page.getByRole("navigation", { name: "상위 경로" })
       .getByRole("link", { name: `이동 ${i + 2}`, exact: true });
     await editor.click();
-    // Resolve, scroll and check the real link before the rapid gesture. Doing
-    // locator actionability after typing can miss the provider's 200 ms batch.
+    await page.keyboard.type("떠나기 직전 ");
+    // Prepare the real target before the final edit. The digit below must still
+    // reach the editor immediately before native activation of its router link.
     await expect(link).toHaveAttribute("href", next.path);
     await link.click({ trial: true });
-    const anchor = await link.elementHandle();
-    expect(anchor).not.toBeNull();
+    const { root } = await native.send("DOM.getDocument");
+    const { nodeId } = await native.send("DOM.querySelector", {
+      nodeId: root.nodeId, selector: `[aria-label="상위 경로"] a[href="${next.path}"]`,
+    });
+    expect(nodeId).not.toBe(0);
     await expect(editor).toBeFocused();
-    await page.keyboard.type(`떠나기 직전 ${i + 1}`);
+    await page.evaluate(() => {
+      (window as unknown as { nativeEvents: NativeReceipt[] }).nativeEvents = [];
+    });
     // An in-app move (a router link) inside the editor's 200 ms update batch.
-    // Typing may scroll the focused editor, invalidating viewport coordinates.
-    // Use the prepared anchor with current scroll/geometry and native mouse
-    // input, skipping repeated locator/actionability waits. The trusted-event
-    // and exact-href assertions below still reject a missed/intercepted click.
-    await anchor!.click({ force: true });
-    await anchor!.dispose();
+    // Sequential Chromium input is the same native path as Playwright keyboard
+    // and mouse actions, without intervening actionability/DOM snapshots. Trace
+    // stays enabled and records these commands plus the ordered DOM receipts.
+    const digit = String(i + 1);
+    const key = { key: digit, code: `Digit${digit}`, windowsVirtualKeyCode: 49 + i };
+    await native.send("Input.dispatchKeyEvent", {
+      ...key, type: "keyDown", text: digit, unmodifiedText: digit,
+    });
+    await native.send("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
+    // Editing may scroll the focused editor. Read live geometry of the already
+    // prepared anchor, rather than reuse a point measured before that edit.
+    await native.send("DOM.scrollIntoViewIfNeeded", { nodeId });
+    const { quads } = await native.send("DOM.getContentQuads", { nodeId });
+    const quad = quads[0]!;
+    const point = { x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
+      y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4 };
+    await native.send("Input.dispatchMouseEvent", { ...point, type: "mouseMoved" });
+    await native.send("Input.dispatchMouseEvent", {
+      ...point, type: "mousePressed", button: "left", buttons: 1, clickCount: 1,
+    });
+    await native.send("Input.dispatchMouseEvent", {
+      ...point, type: "mouseReleased", button: "left", buttons: 0, clickCount: 1,
+    });
     const gesture = await page.evaluate(() => {
       const marks = window as unknown as {
         lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
-        lastLinkTrusted: boolean; lastLinkHref: string;
+        lastLinkTrusted: boolean; lastLinkHref: string; nativeEvents: NativeReceipt[];
       };
       return { keyAt: marks.lastKeyAt, clickAt: marks.lastLinkAt,
         gap: marks.lastLinkAt - marks.lastKeyAt, keyTrusted: marks.lastKeyTrusted,
-        clickTrusted: marks.lastLinkTrusted, href: marks.lastLinkHref };
+        clickTrusted: marks.lastLinkTrusted, href: marks.lastLinkHref, events: marks.nativeEvents };
     });
     gestures.push(gesture);
     gaps.push(gesture.gap);
     expect(gesture.keyTrusted).toBe(true);
     expect(gesture.clickTrusted).toBe(true);
     expect(gesture.href).toBe(next.path);
+    expect(gesture.events.map((event) => event.kind))
+      .toEqual(["keydown", "beforeinput", "input", "keyup", "mousedown", "mouseup", "click"]);
+    for (const event of gesture.events) expect(event.trusted).toBe(true);
+    expect(gesture.events[0]).toMatchObject({ key: digit, inEditor: true });
+    expect(gesture.events[1]).toMatchObject({ data: digit, inEditor: true });
+    expect(gesture.events[2]).toMatchObject({ data: digit, inEditor: true });
     await expectRoom(next);
   }
+  await native.detach();
   await testInfo.attach("rapid-navigation-input", { body: JSON.stringify(gestures), contentType: "application/json" });
   // The fifth room connected: no socket leaked against the per-session cap.
   expect(sockets.opened()).toBe(5);
