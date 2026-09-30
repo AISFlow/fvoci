@@ -5225,6 +5225,12 @@ export interface components {
             createdAt: string;
             createdBy: string;
             description: string | null;
+            /**
+             * Format: int64
+             * @description Live project documents, including the root; unavailable for deleted rows
+             *     or API tokens without document read access.
+             */
+            documentCount: number | null;
             icon: string | null;
             id: string;
             key: string;

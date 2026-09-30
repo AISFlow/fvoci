@@ -17,7 +17,7 @@ import { useWorkspaceSession } from "../session/useWorkspaceSession";
 import "@/features/projects/projects.css";
 
 // `/w/:slug/:ref` project overview (archive / unarchive / delete, document
-// list). After delete, leaveTo loads the remaining React projects list.
+// list). After delete, refresh the shared list before entering it.
 const route = useRoute();
 const router = useRouter();
 const queryClient = useQueryClient();
@@ -37,6 +37,7 @@ const documents = useQuery(() => projectDocumentsQuery(workspaceId.value, projec
 const lifecycleError = ref<string | null>(null);
 
 const lifecycle = useMutation({
+  onMutate: () => ({ workspaceId: workspace.value?.id, slug: slug.value }),
   mutationFn: async (action: "archive" | "unarchive" | "delete") => {
     const ws = workspace.value?.id;
     const id = listItem.value?.id;
@@ -59,10 +60,12 @@ const lifecycle = useMutation({
           }),
     );
   },
-  onSuccess: async (_data, action) => {
+  onSuccess: async (_data, action, scope) => {
     lifecycleError.value = null;
     if (action === "delete") {
-      leaveTo(projectsPath(slug.value), {
+      await queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] });
+      if (workspace.value?.id !== scope.workspaceId || slug.value !== scope.slug) return;
+      leaveTo(projectsPath(scope.slug), {
         assign: (url) => window.location.assign(url),
         push: (path) => void router.push(path),
       });

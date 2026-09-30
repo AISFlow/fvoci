@@ -71,6 +71,7 @@ pub struct ProjectRow {
 #[derive(Debug, Clone)]
 pub struct ProjectListItem {
     pub project: ProjectRow,
+    pub document_count: i64,
     pub task_count: i64,
     pub open_task_count: i64,
     pub can_edit: bool,
@@ -1165,7 +1166,7 @@ pub async fn list_projects(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<ProjectListItem>, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -1189,8 +1190,15 @@ pub async fn list_projects(
     let list_sql = format!(
         r#"
         SELECT p.id, p.key, p.name, p.description, p.icon, p.visibility, p.root_document_id,
-               p.status, p.created_by, p.created_at, p.updated_at
+               p.status, p.created_by, p.created_at, p.updated_at,
+               COALESCE(dc.document_count, 0)::bigint AS document_count
         FROM fvoci.projects p
+        LEFT JOIN (
+            SELECT workspace_id, project_id, count(*)::bigint AS document_count
+            FROM fvoci.documents
+            WHERE workspace_id = $1 AND project_id IS NOT NULL AND deleted_at IS NULL
+            GROUP BY workspace_id, project_id
+        ) dc ON dc.workspace_id = p.workspace_id AND dc.project_id = p.id
         WHERE p.workspace_id = $1
           AND p.deleted_at IS NULL
           AND {visible}
@@ -1211,6 +1219,7 @@ pub async fn list_projects(
             Uuid,
             DateTime<Utc>,
             DateTime<Utc>,
+            i64,
         ),
     >(&list_sql)
     .bind(workspace_id)
@@ -1276,6 +1285,7 @@ pub async fn list_projects(
                 created_at: row.9,
                 updated_at: row.10,
             },
+            document_count: row.11,
             task_count: counts.0,
             open_task_count: counts.1,
             can_edit,

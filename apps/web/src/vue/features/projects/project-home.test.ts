@@ -77,7 +77,7 @@ test("project home queries stay idle until both ids exist", () => {
   }
 });
 
-test("after delete the live projects list stays Vue and private settings full-load React", () => {
+test("after delete the live projects list and Gantt stay Vue", () => {
   const assigns: string[] = [];
   const pushes: string[] = [];
   const env = {

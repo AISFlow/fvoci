@@ -28908,6 +28908,7 @@
           "createdBy",
           "createdAt",
           "updatedAt",
+          "documentCount",
           "taskCount",
           "openTaskCount",
           "canEdit",
@@ -28933,6 +28934,14 @@
               "string",
               "null"
             ]
+          },
+          "documentCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Live project documents, including the root; unavailable for deleted rows\nor API tokens without document read access."
           },
           "icon": {
             "type": [
