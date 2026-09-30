@@ -227,6 +227,26 @@ window.Bun.version, self.Bun.version];'''
                 self.assertEqual(len(restricted), 6, report)
                 self.assertTrue(all(m["severity"] == 2 for m in restricted))
 
+    def test_indexed_access_preserves_missing_route_fallbacks(self):
+        source = '''<script setup lang="ts">
+import { computed } from "vue";
+import { useRoute } from "vue-router";
+const route = useRoute();
+const slug = computed(() => String(route.params.slug ?? ""));
+</script><template><p>{{ slug }}</p></template>'''
+        result, report = self.lint("ProofRoute.vue", source)
+        self.assertEqual(result.returncode, 0, report)
+        dictionary = 'export function read(values: Record<string, string>): string { return values.slug ?? ""; }'
+        result, report = self.lint("ProofDictionary.ts", dictionary)
+        self.assertEqual(result.returncode, 0, report)
+        valid = self.compiler("apps/web/tsconfig.eslint.json", dictionary, "ts", "tsc")
+        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+        invalid = self.compiler("apps/web/tsconfig.eslint.json", dictionary.replace('values.slug ?? ""', 'values.slug'), "ts", "tsc")
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("TS2322", invalid.stdout + invalid.stderr)
+        self.assertIn("undefined", invalid.stdout + invalid.stderr)
+        self.assert_rule("ProofKnownField.ts", 'export function read(value: { slug: string }): string { return value.slug ?? ""; }', "@typescript-eslint/no-unnecessary-condition")
+
     def test_exact_development_export_buffer_contract(self):
         for path in ["packages/editor/src/export/docx.ts", "packages/editor/src/export/pptx.ts"]:
             with self.subTest(path=path):
