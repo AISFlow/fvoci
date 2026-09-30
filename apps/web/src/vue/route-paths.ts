@@ -1,4 +1,4 @@
-/** Live paths agree with app-boundary.ts; staged settings/account pages stay React. */
+/** Live paths agree with app-boundary.ts. */
 // Escape inner closing parentheses for vue-router's custom-regexp parser.
 // Reserved workspace screens and item refs must never resolve as project home.
 const projectRef = "(?!(?:projects|search|wiki|trash|my-tasks|notifications|settings|a)(?:/|$))(?![^/]*-\\d+(?:/|$))[A-Za-z][A-Za-z0-9-]{1,31}";
@@ -49,7 +49,7 @@ export const VUE_NAV_ROUTE_PATHS = {
   trash: "/w/:slug/trash",
 } as const;
 
-/** Staged account/admin pages; boot remains React until their owner verifies them. */
+/** Connected account and instance administration paths. */
 export const VUE_ACCOUNT_ROUTE_PATHS = {
   accountSettings: "/settings/account",
   admin: "/settings/admin",
@@ -69,4 +69,5 @@ export const VUE_ROUTE_PATHS = {
   ...VUE_WORKSPACE_ROUTE_PATHS,
   ...VUE_NAV_ROUTE_PATHS,
   ...VUE_SETTINGS_ROUTE_PATHS,
+  ...VUE_ACCOUNT_ROUTE_PATHS,
 } as const;

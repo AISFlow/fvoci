@@ -22,6 +22,8 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   /^\/$/,
   /^\/legal\/[^/]+\/?$/i,
   /^\/service-info\/?$/i,
+  // Account and instance administration; nested paths stay outside ownership.
+  /^\/settings\/(?:account|admin|audit|legal)\/?$/i,
   // Workspace settings and its exact tag/template screens.
   /^\/w\/[^/]+\/settings(?:\/(?:document-tags|templates))?\/?$/i,
   // Existing project overview, task/document items and collection views.

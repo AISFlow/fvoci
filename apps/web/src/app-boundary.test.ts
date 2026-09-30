@@ -219,15 +219,15 @@ test("single-segment resource routes agree with the shared ref grammar", () => {
     const attachment = /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
       /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i.test(path);
     const workspaceSection = /^\/w\/[^/]+(?:\/(?:projects|wiki|search|my-tasks|notifications|trash))?\/?$/i.test(path);
-    if (!/^\/w\/[^/]+\/settings(?:\/(document-tags|templates))?\/?$/i.test(path) && !workspaceSection && !projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
+    if (!/^\/settings\/(account|admin|audit|legal)\/?$/i.test(path) && !/^\/w\/[^/]+\/settings(?:\/(document-tags|templates))?\/?$/i.test(path) && !workspaceSection && !projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
   }
 });
 
-test("home and public pages enter Vue while admin policies remain React", () => {
-  for (const path of ["/", "/legal/terms", "/legal/privacy/", "/LEGAL/unknown", "/service-info", "/SERVICE-INFO/"]) {
+test("home, public and exact admin pages enter Vue", () => {
+  for (const path of ["/", "/legal/terms", "/legal/privacy/", "/LEGAL/unknown", "/service-info", "/SERVICE-INFO/", "/settings/legal", "/settings/admin", "/settings/audit", "/settings/account"]) {
     assert.equal(isVueAppPath(path), true, path);
   }
-  for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal"]) {
+  for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal/extra"]) {
     assert.equal(isVueAppPath(path), false, path);
   }
 });
@@ -238,17 +238,17 @@ test("workspace navigation owns exact section paths and excludes nested private 
     assert.equal(isVueAppPath(path), true, path);
     assert.equal(isVueAppPath(`${path}/`.toUpperCase()), true, path);
   }
-  for (const path of ["/w", "/w//", "/w/acme/wiki/extra", "/w/acme/search/extra", "/settings/account"]) {
+  for (const path of ["/w", "/w//", "/w/acme/wiki/extra", "/w/acme/search/extra", "/settings/account/extra"]) {
     assert.equal(isVueAppPath(path), false, path);
   }
 });
 
-test("attachment viewers and exact public share boot Vue while admin pages retain React", () => {
+test("attachment viewers and exact public share boot Vue", () => {
   for (const path of ["/w/acme/a/123/view", "/w/acme/a/123/view/", "/W/acme/A/123/VIEW",
     "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View", "/s/tok", "/S/tok/"]) {
     assert.equal(isVueAppPath(path), true, path);
   }
-  for (const path of ["/s/tok/extra", "/settings/admin", "/settings/audit", "/settings/legal",
+  for (const path of ["/s/tok/extra", "/settings/admin/extra", "/settings/audit/extra", "/settings/legal/extra",
     "/w/acme/a/123", "/w/acme/a/123/view/extra", "/s/tok/attachments/123", "/s/tok/attachments/123/view/extra"]) {
     assert.equal(isVueAppPath(path), false, path);
   }

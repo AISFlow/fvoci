@@ -25,8 +25,8 @@ test(
   "a completed navigation to a React page is a full page load",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
-    await router.push("/settings/account");
-    assert.deepEqual(loads, ["/settings/account"]);
+    await router.push("/settings/account/extra");
+    assert.deepEqual(loads, ["/settings/account/extra"]);
   }),
 );
 
@@ -98,7 +98,7 @@ test("the setup route is declared and the boundary sends /setup to Vue", () => {
 });
 
 test(
-  "setup, home, invite and public navigation stay Vue; admin legal leaves with its query and fragment",
+  "setup, home, invite, public and account/admin navigation stay Vue with query and fragment",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
     // Bun does not compile SFCs. Exercise the real router/afterEach with
@@ -107,12 +107,12 @@ test(
       router.removeRoute(route.name!);
       router.addRoute({ path: route.path, name: route.name, component: { render: () => null } });
     }
-    for (const path of ["/setup", "/", "/invite/tok", "/legal/terms?version=1", "/service-info"]) {
+    for (const path of ["/setup", "/", "/invite/tok", "/legal/terms?version=1", "/service-info", "/s/tok?search=hello#reader", "/settings/account", "/settings/admin", "/settings/audit"]) {
       await router.push(path);
       assert.deepEqual(loads, [], path);
     }
     await router.push("/settings/legal?kind=terms#editor");
-    assert.deepEqual(loads, ["/settings/legal?kind=terms#editor"]);
+    assert.deepEqual(loads, []);
   }),
 );
 
@@ -132,10 +132,10 @@ test(
     assert.deepEqual(loads, []);
 
     const slow = router.push("/slow");
-    await router.push("/settings/account");
+    await router.push("/settings/account/extra");
     release();
     assert.ok(await slow, "the later navigation superseded it");
-    assert.deepEqual(loads, ["/settings/account"]);
+    assert.deepEqual(loads, ["/settings/account/extra"]);
   }),
 );
 
@@ -300,7 +300,7 @@ test("workspace settings routes are live Vue paths", () => {
   assert.equal(router.resolve("/w/acme/settings").name, "workspace-settings");
   assert.equal(router.resolve("/w/acme/settings/document-tags").name, "workspace-settings-document-tags");
   assert.equal(router.resolve("/w/acme/settings/templates").name, "workspace-settings-templates");
-  // Boot still loads the React app for these paths (src/app-boundary.ts).
+  // Boot and router agree on these exact settings paths.
   assert.equal(isVueAppPath("/w/acme/settings"), true);
   assert.equal(isVueAppPath("/w/acme/settings/document-tags"), true);
   assert.equal(isVueAppPath("/w/acme/settings/templates"), true);

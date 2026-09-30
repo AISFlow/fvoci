@@ -13,7 +13,6 @@ import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
 import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
-import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -74,26 +73,10 @@ const router = createBrowserRouter(
     <>
       {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
       <Route path="/s/:token" element={<NoRoute />} />
-      <Route
-        path="/settings/admin"
-        {...lazyPage(() => import("@/pages/AdminPage").then((m) => m.AdminPage), { setupGuard: true })}
-      />
-      <Route
-        path="/settings/audit"
-        {...lazyPage(() => import("@/pages/AdminAuditPage").then((m) => m.AdminAuditPage), { setupGuard: true })}
-      />
-      <Route
-        path="/settings/legal"
-        {...lazyPage(() => import("@/pages/AdminLegalPage").then((m) => m.AdminLegalPage), { setupGuard: true })}
-      />
-      <Route
-        path="/settings/account"
-        element={
-          <SetupGuard>
-            <AccountSettingsPage />
-          </SetupGuard>
-        }
-      />
+      <Route path="/settings/admin" element={<NoRoute />} />
+      <Route path="/settings/audit" element={<NoRoute />} />
+      <Route path="/settings/legal" element={<NoRoute />} />
+      <Route path="/settings/account" element={<NoRoute />} />
       <Route
         path="/w/:slug"
         element={
