@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import {
@@ -93,4 +94,18 @@ test("finalizeBrowserOpenSourceNotice appends notices for copied runtime assets"
   ]);
   assert.match(notice, /## FVOCI source: LICENSE/);
   assert.match(notice, /## pdfjs-dist 6\.3\.289 runtime data: standard_fonts\/LICENSE_FOXIT\n\nFoxit notice text\n/);
+});
+
+test("published notice preserves web source provenance and full template permission text", () => {
+  const sourceNotice = fs.readFileSync(path.join(repoRoot, "apps/web/NOTICE.md"), "utf8").trim();
+  const notice = finalizeBrowserOpenSourceNotice(
+    JSON.stringify([{ name: "vue", version: "3.5.43", identifier: "MIT", text: "Vue dependency license" }]),
+    repoRoot,
+    manifestPath,
+  );
+  assert.ok(notice.includes(`## FVOCI source: apps/web/NOTICE.md\n\n${sourceNotice}\n`));
+  assert.match(notice, /393795261322b916e588043cf94feca999175843/);
+  assert.match(notice, /57e8a76e85ac382f2dd75946aa450afb1b3e4b0d/);
+  assert.match(notice, /Copyright \(c\) 2025 Nuxt UI Templates/);
+  assert.match(notice, /OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE\./);
 });

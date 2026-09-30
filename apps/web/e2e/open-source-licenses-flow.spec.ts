@@ -48,6 +48,11 @@ test("open-source-licenses.txt is discoverable, served verbatim, and linked from
   );
   const distBytes = fs.readFileSync(distLicense);
   const distText = distBytes.toString("utf8");
+  // Source adaptations are outside Vite's dependency graph; their complete
+  // provenance and license text must survive the production build too.
+  const sourceNotice = fs.readFileSync(path.join(repoRoot, "apps/web/NOTICE.md"), "utf8").trim();
+  expect(distText).toContain(`## FVOCI source: apps/web/NOTICE.md\n\n${sourceNotice}\n`);
+  expect(distText).toContain("Copyright (c) 2025 Nuxt UI Templates");
   for (const forbidden of FORBIDDEN_NOTICE_PACKAGE_HEADINGS) {
     expect(distText).not.toMatch(new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
