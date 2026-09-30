@@ -22,7 +22,10 @@ watchEffect(() => {
   if (setup.isLoading.value || setup.isError.value) return;
   if (setup.data.value && !setup.data.value.needed) {
     // /login is already a Vue page: stay in this app.
-    void router.replace("/login");
+    router.replace("/login").catch(() => {
+      // Recover with a full load if the SPA navigation fails.
+      window.location.replace("/login");
+    });
   }
 });
 

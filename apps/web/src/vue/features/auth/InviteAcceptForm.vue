@@ -25,7 +25,7 @@ function roleLabel(role: string): string {
 }
 
 function consentKey(doc: { kind: string; version: number }): string {
-  return `${doc.kind}:${doc.version}`;
+  return `${doc.kind}:${String(doc.version)}`;
 }
 
 const props = defineProps<{
@@ -69,8 +69,8 @@ const onSubmit = form.handleSubmit(async (values) => {
   }
 });
 
-function startProvider(provider: string): void {
-  void clickOidcStart(
+async function startProvider(provider: string): Promise<void> {
+  await clickOidcStart(
     provider,
     () => startOidcInvite(provider, { token: props.token, consents: consentItems.value }),
     {

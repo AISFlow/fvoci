@@ -35,7 +35,10 @@ function formatDeadline(iso: string): string {
 }
 
 async function copyText(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
+  if (
+    typeof navigator.clipboard !== "undefined" &&
+    typeof navigator.clipboard.writeText === "function"
+  ) {
     await navigator.clipboard.writeText(value);
     return;
   }

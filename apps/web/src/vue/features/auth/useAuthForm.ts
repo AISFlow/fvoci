@@ -85,17 +85,17 @@ export function useAuthForm<F extends string, O = Record<F, string>>(options: {
   const submitting = ref(false);
 
   function clearErrors(): void {
-    for (const field of fields) delete errors[field];
+    for (const field of fields) Reflect.deleteProperty(errors, field);
   }
 
   function revalidate(field: F): void {
     if (!options.schema) {
-      delete errors[field];
+      Reflect.deleteProperty(errors, field);
       return;
     }
     const result = options.schema.safeParse({ ...values });
     const message = result.success ? undefined : firstIssues(result.error.issues, [field])[field];
-    if (message === undefined) delete errors[field];
+    if (message === undefined) Reflect.deleteProperty(errors, field);
     else errors[field] = message;
   }
 

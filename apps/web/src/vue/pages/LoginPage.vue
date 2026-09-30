@@ -55,7 +55,7 @@ watchEffect(() => {
   }
 });
 
-async function enterApp(): Promise<void> {
+function enterApp(): void {
   if (returnTo.value !== "/") {
     window.location.assign(returnTo.value);
     return;
@@ -73,7 +73,7 @@ async function onLogin(input: LoginInput): Promise<void> {
     mfaToken.value = result.mfaToken;
     return;
   }
-  await enterApp();
+  enterApp();
 }
 
 async function onMagicLink(email: string): Promise<void> {

@@ -9,7 +9,7 @@ function source(file: string): string {
   return readFileSync(path.join(dir, file), "utf8");
 }
 
-test("the Vue SSO slug form submits through startWorkspaceSso, never to the server", () => {
+await test("the Vue SSO slug form submits through startWorkspaceSso, never to the server", () => {
   const page = source("SsoSlugForm.vue");
   assert.match(page, /<form\b/);
   assert.match(page, /event\.preventDefault\(\)/);
@@ -17,7 +17,7 @@ test("the Vue SSO slug form submits through startWorkspaceSso, never to the serv
   assert.doesNotMatch(page, /\b(method|action|formAction)=/);
 });
 
-test("the Vue login forms do not set method or action", () => {
+await test("the Vue login forms do not set method or action", () => {
   for (const file of [
     "LoginForm.vue",
     "EmailActionForm.vue",
@@ -34,13 +34,13 @@ test("the Vue login forms do not set method or action", () => {
   }
 });
 
-test("OIDC starts are plain anchors, not fetches", () => {
+await test("OIDC starts are plain anchors, not fetches", () => {
   const page = source("LoginForm.vue");
   assert.match(page, /oidcStartHref\(/);
   assert.match(page, /class="auth-shell__outline-link"/);
 });
 
-test("the login page leaves the Vue app with a full load", () => {
+await test("the login page leaves the Vue app with a full load", () => {
   const page = source("../../pages/LoginPage.vue");
   assert.match(page, /window\.location\.assign\(returnTo/);
   assert.match(page, /window\.location\.replace\(/);
@@ -56,21 +56,21 @@ test("the login page leaves the Vue app with a full load", () => {
   assert.doesNotMatch(page, /from ["']@\/lib\/queries\/admin["']/);
 });
 
-test("the service-info footer opens public pages with plain anchors", () => {
+await test("the service-info footer opens public pages with plain anchors", () => {
   const page = source("ServiceInfoFooter.vue");
   assert.match(page, /href="\/service-info"/);
   assert.match(page, /:href="`\/legal\/\$\{doc\.kind\}`"/);
   assert.doesNotMatch(page, /RouterLink/);
 });
 
-test("auth fields are uncontrolled (no v-model / :value)", () => {
+await test("auth fields are uncontrolled (no v-model / :value)", () => {
   const field = source("AuthField.vue");
   assert.doesNotMatch(field, /\bv-model\b/);
   assert.doesNotMatch(field, /:value=/);
   assert.match(field, /defineOptions\(\{\s*inheritAttrs:\s*false/);
 });
 
-test("the remaining auth pages call the React pages' APIs and do not consume on load", () => {
+await test("the remaining auth pages call the React pages' APIs and do not consume on load", () => {
   const reset = source("../../pages/ResetPasswordPage.vue");
   assert.match(reset, /api\.POST\("\/api\/v1\/auth\/password-reset\/confirm"/);
   assert.match(reset, /router\.replace\("\/login\?reset=1"\)/);

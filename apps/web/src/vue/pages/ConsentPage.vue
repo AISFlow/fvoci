@@ -33,7 +33,10 @@ const unauthorized = computed(() => {
 
 watchEffect(() => {
   if (unauthorized.value) {
-    void router.replace("/login");
+    router.replace("/login").catch(() => {
+      // Recover with a full load if the SPA navigation fails.
+      window.location.replace("/login");
+    });
     return;
   }
   // Nothing (left) to accept: continue where the gate interrupted.

@@ -3,12 +3,12 @@ import test from "node:test";
 import { loginInput } from "@/lib/validators.ts";
 import { firstIssues, issueMessage, useAuthForm } from "./useAuthForm.ts";
 
-test("issueMessage looks up i18n: keys and leaves other text", () => {
+await test("issueMessage looks up i18n: keys and leaves other text", () => {
   assert.equal(issueMessage("i18n:form.email"), "이메일 형식을 확인해 주세요.");
   assert.equal(issueMessage("plain"), "plain");
 });
 
-test("firstIssues keeps the first message per named field", () => {
+await test("firstIssues keeps the first message per named field", () => {
   assert.deepEqual(
     firstIssues(
       [
@@ -35,14 +35,14 @@ function form(env?: { focus(id: string): void }) {
   });
 }
 
-test("nothing is validated before the first submit", () => {
+await test("nothing is validated before the first submit", () => {
   const auth = form();
   auth.onInput("email", "not-an-email");
   assert.equal(auth.errors.email, undefined);
   assert.equal(auth.submitted.value, false);
 });
 
-test("a submit validates every field, focuses the first invalid, and skips the handler", async () => {
+await test("a submit validates every field, focuses the first invalid, and skips the handler", async () => {
   const focused: string[] = [];
   const auth = form({ focus: (id) => focused.push(id) });
   let ran = false;
@@ -57,7 +57,7 @@ test("a submit validates every field, focuses the first invalid, and skips the h
   assert.equal(auth.submitting.value, false);
 });
 
-test("a valid submit runs the handler with the parsed values", async () => {
+await test("a valid submit runs the handler with the parsed values", async () => {
   const auth = form();
   auth.onInput("email", "  user@example.com  ");
   auth.onInput("password", "secret");
@@ -69,17 +69,18 @@ test("a valid submit runs the handler with the parsed values", async () => {
   assert.deepEqual({ ...auth.errors }, {});
 });
 
-test("after a submit a changed field is validated again", async () => {
+await test("after a submit a changed field is validated again", async () => {
   const auth = form();
   await auth.handleSubmit(() => undefined)();
   assert.equal(auth.errors.email, "이메일 형식을 확인해 주세요.");
   auth.onInput("email", "user@example.com");
   assert.equal(auth.errors.email, undefined);
+  assert.equal(Object.hasOwn(auth.errors, "email"), false);
   auth.onInput("email", "nope");
   assert.equal(auth.errors.email, "이메일 형식을 확인해 주세요.");
 });
 
-test("a form event calls preventDefault", async () => {
+await test("a form event calls preventDefault", async () => {
   const auth = form();
   const event = {
     preventDefault() {
@@ -92,7 +93,7 @@ test("a form event calls preventDefault", async () => {
   assert.equal(event.prevented, true);
 });
 
-test("without a schema a changed field drops its error", async () => {
+await test("without a schema a changed field drops its error", async () => {
   const auth = useAuthForm({
     initial: { code: "" },
     ids: { code: "mfa-code" },
@@ -105,4 +106,5 @@ test("without a schema a changed field drops its error", async () => {
   assert.equal(auth.errors.code, "required");
   auth.onInput("code", "123456");
   assert.equal(auth.errors.code, undefined);
+  assert.equal(Object.hasOwn(auth.errors, "code"), false);
 });

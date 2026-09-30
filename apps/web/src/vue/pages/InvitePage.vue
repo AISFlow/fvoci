@@ -43,7 +43,7 @@ watchEffect(() => {
   }
 });
 
-async function enterApp(): Promise<void> {
+function enterApp(): void {
   window.location.assign("/");
 }
 
@@ -62,7 +62,7 @@ async function onAccept(input: InvitationAcceptInput): Promise<void> {
     mfaToken.value = result.mfaToken;
     return;
   }
-  await enterApp();
+  enterApp();
 }
 
 const loadError = computed(() => {

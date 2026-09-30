@@ -29,7 +29,7 @@ watchEffect(() => {
   }
 });
 
-async function enterApp(): Promise<void> {
+function enterApp(): void {
   // A full load clears anonymous queries after sign-in.
   window.location.replace("/");
 }
@@ -50,7 +50,7 @@ async function onConsume(value: string): Promise<void> {
     mfaToken.value = result.mfaToken;
     return;
   }
-  await enterApp();
+  enterApp();
 }
 </script>
 

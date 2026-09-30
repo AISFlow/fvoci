@@ -23,7 +23,7 @@ const error = ref<string | null>(null);
 const submitting = ref(false);
 
 function consentKey(doc: { kind: string; version: number }): string {
-  return `${doc.kind}:${doc.version}`;
+  return `${doc.kind}:${String(doc.version)}`;
 }
 
 const allChecked = computed(
