@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  isNativeOwnedDeleteKey,
-  type NativeDeleteKey,
-} from "../src/native-delete-owner.ts";
+import { isNativeOwnedDeleteKey, type NativeDeleteKey } from "../src/native-delete-owner.ts";
 
 const base = (overrides: Partial<NativeDeleteKey> = {}): NativeDeleteKey => ({
   trusted: true,

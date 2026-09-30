@@ -6,19 +6,19 @@
  * selectionFromDOM does and falls through to the stock keymap. Kept separate from
  * the tsx graph so node:test can load it. */
 export type NativeDeleteKey = {
-	trusted: boolean;
-	editable: boolean;
-	composing: boolean;
-	keyCode: number;
-	key: string;
-	pmIsTextSelection: boolean;
+  trusted: boolean;
+  editable: boolean;
+  composing: boolean;
+  keyCode: number;
+  key: string;
+  pmIsTextSelection: boolean;
 };
 
 export function isNativeOwnedDeleteKey(input: NativeDeleteKey): boolean {
-	// Android readDOMChange synthesizes untrusted Backspace; composition and
-	// keyCode 229 belong to the IME path.
-	if (!input.trusted || !input.editable) return false;
-	if (input.composing || input.keyCode === 229) return false;
-	if (input.key !== "Delete" && input.key !== "Backspace") return false;
-	return input.pmIsTextSelection;
+  // Android readDOMChange synthesizes untrusted Backspace; composition and
+  // keyCode 229 belong to the IME path.
+  if (!input.trusted || !input.editable) return false;
+  if (input.composing || input.keyCode === 229) return false;
+  if (input.key !== "Delete" && input.key !== "Backspace") return false;
+  return input.pmIsTextSelection;
 }

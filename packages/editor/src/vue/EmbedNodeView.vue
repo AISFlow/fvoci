@@ -38,7 +38,8 @@ function readForm(container: HTMLElement): { entity: EmbedEntity; ref: string } 
   const input = container.querySelector("textarea");
   const select = container.querySelector("select");
   const raw = input instanceof HTMLTextAreaElement ? input.value : "";
-  const selected = select instanceof HTMLSelectElement && isEmbedEntity(select.value) ? select.value : "document";
+  const selected =
+    select instanceof HTMLSelectElement && isEmbedEntity(select.value) ? select.value : "document";
   return resolveEmbedProps(raw, selected);
 }
 
@@ -112,7 +113,8 @@ watch(
     });
     resolver(kind, value).then(
       (snapshot) => {
-        if (!cancelled) card.value = snapshot ? { state: "resolved", snapshot } : { state: "inaccessible" };
+        if (!cancelled)
+          card.value = snapshot ? { state: "resolved", snapshot } : { state: "inaccessible" };
       },
       () => {
         if (!cancelled) card.value = { state: "inaccessible" };
@@ -133,7 +135,9 @@ watch(
         @change="rememberDraft"
         @blur="commitIfLeaving"
       >
-        <option v-for="item in EMBED_ENTITIES" :key="item" :value="item">{{ t(EMBED_KIND_KEY[item]) }}</option>
+        <option v-for="item in EMBED_ENTITIES" :key="item" :value="item">{{
+          t(EMBED_KIND_KEY[item])
+        }}</option>
       </select>
       <textarea
         ref="refInput"

@@ -82,7 +82,10 @@ test("the Vue editor imports no React module", () => {
     }
   };
   walk(new URL("../src/vue/index.ts", import.meta.url));
-  assert.deepEqual([...bare].filter((spec) => react.test(spec)), []);
+  assert.deepEqual(
+    [...bare].filter((spec) => react.test(spec)),
+    [],
+  );
   assert.ok(bare.has("@tiptap/vue-3"));
 });
 
@@ -97,7 +100,8 @@ test("the Vue node views never bind the value of a field being edited", () => {
   for (const name of readdirSync(dir).filter((file) => file.endsWith(".vue"))) {
     const source = readFileSync(new URL(name, dir), "utf8");
     for (const [tag] of source.matchAll(/<(?:input|textarea|select)\b[^>]*>/g)) {
-      if (/(?:^|\s)(?::value|v-bind:value|v-model(?:\.[a-z]+)*)=/.test(tag)) bound.push(`${name}: ${tag.replace(/\s+/g, " ")}`);
+      if (/(?:^|\s)(?::value|v-bind:value|v-model(?:\.[a-z]+)*)=/.test(tag))
+        bound.push(`${name}: ${tag.replace(/\s+/g, " ")}`);
     }
   }
   assert.deepEqual(bound, []);

@@ -11,7 +11,9 @@ import { useMathMl } from "./use-math-ml.js";
 // Enter commits; the display is a button so click, Enter and Space open it.
 const props = defineProps(nodeViewProps);
 const editable = useEditable(props.editor);
-const latex = computed(() => (typeof props.node.attrs.latex === "string" ? props.node.attrs.latex : ""));
+const latex = computed(() =>
+  typeof props.node.attrs.latex === "string" ? props.node.attrs.latex : "",
+);
 const render = useMathMl(latex, false);
 const empty = computed(() => latex.value.trim() === "");
 const drafts = inlineMathDrafts(props.editor, props.getPos);
@@ -31,7 +33,9 @@ function remember(): void {
   });
 }
 
-onBeforeUnmount(() => { if (editing.value) remember(); });
+onBeforeUnmount(() => {
+  if (editing.value) remember();
+});
 onMounted(() => {
   if (!restored) return;
   // The Vue renderer mounts in a detached wrapper; ProseMirror attaches it
@@ -83,11 +87,14 @@ watch(editable, (value) => {
 
 // ProseMirror may also reuse this view for a neighbouring inline atom after
 // deletion. Its draft belongs to the original Yjs item, never that neighbour.
-watch(() => props.node, () => {
-  if (drafts.isCurrent()) return;
-  editing.value = false;
-  drafts.clear();
-});
+watch(
+  () => props.node,
+  () => {
+    if (drafts.isCurrent()) return;
+    editing.value = false;
+    drafts.clear();
+  },
+);
 </script>
 
 <template>

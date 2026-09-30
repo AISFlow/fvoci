@@ -53,10 +53,7 @@ export function dumpSchema(schema: ReturnType<typeof getSchema>): SchemaDump {
  * editor's own order only changes on purpose. */
 export function editorSchemaFixture(): SchemaDump {
   const fixture = JSON.parse(
-    readFileSync(
-      new URL("../../../compat/fixtures/yjs-seed/schema.json", import.meta.url),
-      "utf8",
-    ),
+    readFileSync(new URL("../../../compat/fixtures/yjs-seed/schema.json", import.meta.url), "utf8"),
   ) as SchemaDump;
   const mention = fixture.nodes.find((node) => node.name === "mention");
   if (!mention) throw new Error("fixture has no mention node");

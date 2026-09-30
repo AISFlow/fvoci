@@ -11,8 +11,8 @@ const PATH = /^\/w\/([^/]+)\/([^/]+)/i;
 const PASTE_KINDS = ["document", "task", "project"] as const;
 
 type PastedEmbed = {
-	entity: (typeof PASTE_KINDS)[number];
-	ref: string;
+  entity: (typeof PASTE_KINDS)[number];
+  ref: string;
 };
 
 /*
@@ -21,49 +21,46 @@ type PastedEmbed = {
  * WHY: 주소만으로는 문서·태스크가 갈리지 않는다. 기본은 `document` 이고, 종류는
  * EntityResolver 가 같은 해석 결과로 고른다(#491 C).
  */
-export function parseWorkspaceUrl(
-	raw: string,
-	workspaceSlug: string,
-): PastedEmbed | null {
-	let url: URL;
-	try {
-		url = new URL(raw.trim());
-	} catch {
-		return null;
-	}
-	if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-	const m = PATH.exec(url.pathname);
-	const slug = m?.[1];
-	const ref = m?.[2];
-	if (!slug || !ref) return null;
-	if (slug.toLowerCase() !== workspaceSlug.toLowerCase()) return null;
-	if (uuid.safeParse(ref.toLowerCase()).success) {
-		return { entity: "document", ref: ref.toLowerCase() };
-	}
-	const parsed = parseDisplayId(ref);
-	if (parsed) {
-		return {
-			entity: "document",
-			ref: formatDisplayId(parsed.prefix, parsed.n),
-		};
-	}
-	return null;
+export function parseWorkspaceUrl(raw: string, workspaceSlug: string): PastedEmbed | null {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  const m = PATH.exec(url.pathname);
+  const slug = m?.[1];
+  const ref = m?.[2];
+  if (!slug || !ref) return null;
+  if (slug.toLowerCase() !== workspaceSlug.toLowerCase()) return null;
+  if (uuid.safeParse(ref.toLowerCase()).success) {
+    return { entity: "document", ref: ref.toLowerCase() };
+  }
+  const parsed = parseDisplayId(ref);
+  if (parsed) {
+    return {
+      entity: "document",
+      ref: formatDisplayId(parsed.prefix, parsed.n),
+    };
+  }
+  return null;
 }
 
 export async function resolvePastedEmbed(
-	raw: string,
-	workspaceSlug: string,
-	resolve: EntityResolver | null,
+  raw: string,
+  workspaceSlug: string,
+  resolve: EntityResolver | null,
 ): Promise<PastedEmbed | null> {
-	const parsed = parseWorkspaceUrl(raw, workspaceSlug);
-	if (!parsed) return null;
-	if (!resolve) return parsed;
-	const hits = await Promise.all(
-		PASTE_KINDS.map(async (entity) => {
-			const snap = await resolve(entity, parsed.ref);
-			return snap ? entity : null;
-		}),
-	);
-	const entity = hits.find((kind) => kind !== null) ?? parsed.entity;
-	return { entity, ref: parsed.ref };
+  const parsed = parseWorkspaceUrl(raw, workspaceSlug);
+  if (!parsed) return null;
+  if (!resolve) return parsed;
+  const hits = await Promise.all(
+    PASTE_KINDS.map(async (entity) => {
+      const snap = await resolve(entity, parsed.ref);
+      return snap ? entity : null;
+    }),
+  );
+  const entity = hits.find((kind) => kind !== null) ?? parsed.entity;
+  return { entity, ref: parsed.ref };
 }

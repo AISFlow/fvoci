@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FVOCI_YDOC_FRAGMENT } from "../src/collab/constants.ts";
-import {
-  replaceYDocContent,
-  tiptapJsonToYDoc,
-  yDocToTiptapJson,
-} from "../src/collab-tiptap.ts";
+import { replaceYDocContent, tiptapJsonToYDoc, yDocToTiptapJson } from "../src/collab-tiptap.ts";
 import type { TiptapDoc } from "../src/json.ts";
 
 const roundtrip = (json: TiptapDoc): TiptapDoc =>
@@ -35,15 +31,11 @@ test("paragraph roundtrip keeps Korean", () => {
 test("replaceYDocContent", () => {
   const doc = tiptapJsonToYDoc({
     type: "doc",
-    content: [
-      { type: "paragraph", content: [{ type: "text", text: "old" }] },
-    ],
+    content: [{ type: "paragraph", content: [{ type: "text", text: "old" }] }],
   });
   replaceYDocContent(doc, {
     type: "doc",
-    content: [
-      { type: "paragraph", content: [{ type: "text", text: "new" }] },
-    ],
+    content: [{ type: "paragraph", content: [{ type: "text", text: "new" }] }],
   });
   const back = yDocToTiptapJson(doc);
   assert.equal(JSON.stringify(back).includes("new"), true);

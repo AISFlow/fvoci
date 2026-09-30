@@ -7,7 +7,16 @@ import type { EditorView } from "@tiptap/pm/view";
 import BubbleMenu from "@tiptap/extension-bubble-menu";
 import DragHandle from "@tiptap/extension-drag-handle";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
-import { markRaw, onBeforeUnmount, provide, reactive, shallowRef, useSlots, useTemplateRef, watch } from "vue";
+import {
+  markRaw,
+  onBeforeUnmount,
+  provide,
+  reactive,
+  shallowRef,
+  useSlots,
+  useTemplateRef,
+  watch,
+} from "vue";
 import type * as Y from "yjs";
 import type { AttachmentBlockBridge, AttachmentUploadResult } from "../attachment-model.js";
 import {
@@ -101,7 +110,11 @@ function insertUploaded(key: string, result: AttachmentUploadResult): void {
   current
     .chain()
     .setMeta(FILE_UPLOAD_META, key)
-    .insertContentAt(anchor.position, { type: "attachment", attrs: result }, { updateSelection: false })
+    .insertContentAt(
+      anchor.position,
+      { type: "attachment", attrs: result },
+      { updateSelection: false },
+    )
     .run();
   dropUpload(key);
 }
@@ -188,11 +201,22 @@ const editor = useEditor({
  * Returning false leaves native click handling and other plugins in control;
  * this changes only the selection, using PM's pointer transaction semantics. */
 function settleNativeTextClick(view: EditorView, pos: number, event: MouseEvent): boolean {
-  if (!view.editable || view.composing || !view.hasFocus() || event.button !== 0 ||
-      event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return false;
+  if (
+    !view.editable ||
+    view.composing ||
+    !view.hasFocus() ||
+    event.button !== 0 ||
+    event.shiftKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.altKey
+  )
+    return false;
   const native = view.dom.ownerDocument.getSelection();
-  if (!native?.isCollapsed || !native.anchorNode || !view.dom.contains(native.anchorNode)) return false;
-  if (event.target instanceof Element && event.target.closest('[contenteditable="false"]')) return false;
+  if (!native?.isCollapsed || !native.anchorNode || !view.dom.contains(native.anchorNode))
+    return false;
+  if (event.target instanceof Element && event.target.closest('[contenteditable="false"]'))
+    return false;
   const $pos = view.state.doc.resolve(pos);
   if (!$pos.parent.isTextblock) return false;
   const selection = TextSelection.create(view.state.doc, pos);
@@ -207,12 +231,33 @@ function settleNativeTextClick(view: EditorView, pos: number, event: MouseEvent)
  * range in that gap. Record the completed selection at keyup using public APIs;
  * leave composition, cell/node selections and native event handling alone. */
 function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): boolean {
-  if (!view.editable || view.composing || event.isComposing || !view.hasFocus() ||
-      !["Home", "End", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown"].includes(event.key) ||
-      !(view.state.selection instanceof TextSelection)) return false;
+  if (
+    !view.editable ||
+    view.composing ||
+    event.isComposing ||
+    !view.hasFocus() ||
+    ![
+      "Home",
+      "End",
+      "ArrowLeft",
+      "ArrowRight",
+      "ArrowUp",
+      "ArrowDown",
+      "PageUp",
+      "PageDown",
+    ].includes(event.key) ||
+    !(view.state.selection instanceof TextSelection)
+  )
+    return false;
   const native = view.dom.ownerDocument.getSelection();
-  if (!native || !native.anchorNode || !native.focusNode ||
-      !view.dom.contains(native.anchorNode) || !view.dom.contains(native.focusNode)) return false;
+  if (
+    !native ||
+    !native.anchorNode ||
+    !native.focusNode ||
+    !view.dom.contains(native.anchorNode) ||
+    !view.dom.contains(native.focusNode)
+  )
+    return false;
   for (const node of [native.anchorNode, native.focusNode]) {
     const element = node instanceof Element ? node : node.parentElement;
     const leaf = element?.closest('[contenteditable="false"]');
@@ -220,7 +265,11 @@ function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): 
   }
   const anchor = view.posAtDOM(native.anchorNode, native.anchorOffset);
   const head = view.posAtDOM(native.focusNode, native.focusOffset);
-  if (!view.state.doc.resolve(anchor).parent.isTextblock || !view.state.doc.resolve(head).parent.isTextblock) return false;
+  if (
+    !view.state.doc.resolve(anchor).parent.isTextblock ||
+    !view.state.doc.resolve(head).parent.isTextblock
+  )
+    return false;
   const selection = TextSelection.create(view.state.doc, anchor, head);
   if (!view.state.selection.eq(selection)) view.dispatch(view.state.tr.setSelection(selection));
   return false;
@@ -232,7 +281,8 @@ watch(
 );
 
 /* WHY: #571 — 열린 오버레이가 Escape 를 먹는다. 에디터까지 올라가면 selectAllEscape 가 함께 돈다. */
-const OVERLAY_SELECTOR = ".fvoci-block-menu, .fvoci-ui-popover-content, .fvoci-ui-dropdown-content, [data-reka-popper-content-wrapper]";
+const OVERLAY_SELECTOR =
+  ".fvoci-block-menu, .fvoci-ui-popover-content, .fvoci-ui-dropdown-content, [data-reka-popper-content-wrapper]";
 
 function isNarrowViewport(): boolean {
   return window.matchMedia("(max-width: 47.999rem)").matches;
@@ -304,15 +354,23 @@ function bubbleOwner(): HTMLElement {
   <div
     ref="host"
     class="fvoci-editor relative min-h-[16rem]"
-    :data-code-wrap="codeChromeHost.wrap === null ? undefined : codeChromeHost.wrap ? 'true' : 'false'"
-    :data-code-folded="codeChromeHost.folded === null ? undefined : codeChromeHost.folded ? 'true' : 'false'"
+    :data-code-wrap="
+      codeChromeHost.wrap === null ? undefined : codeChromeHost.wrap ? 'true' : 'false'
+    "
+    :data-code-folded="
+      codeChromeHost.folded === null ? undefined : codeChromeHost.folded ? 'true' : 'false'
+    "
     @mousedown="onHostMouseDown"
   >
     <Teleport v-if="editor && $slots.bubble" :to="bubble">
       <slot name="bubble" :editor="editor" />
     </Teleport>
     <EditorContent :editor="editor" />
-    <div v-if="uploads.length > 0" data-fvoci-uploads="" class="sticky bottom-0 z-10 flex flex-col gap-1 bg-default py-1">
+    <div
+      v-if="uploads.length > 0"
+      data-fvoci-uploads=""
+      class="sticky bottom-0 z-10 flex flex-col gap-1 bg-default py-1"
+    >
       <AttachmentBlock
         v-for="item in uploads"
         :key="item.key"
@@ -332,6 +390,12 @@ function bubbleOwner(): HTMLElement {
         @uploaded="insertUploaded(item.key, $event)"
       />
     </div>
-    <slot v-if="editor && $slots.controls" name="controls" :editor="editor" :gutter="gutter" :editable="editable" />
+    <slot
+      v-if="editor && $slots.controls"
+      name="controls"
+      :editor="editor"
+      :gutter="gutter"
+      :editable="editable"
+    />
   </div>
 </template>

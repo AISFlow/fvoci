@@ -11,7 +11,9 @@ import { useMathMl } from "./use-math-ml.js";
 // attribute, which Yjs carries to the other editors.
 const props = defineProps(nodeViewProps);
 const editable = useEditable(props.editor);
-const latex = computed(() => (typeof props.node.attrs.latex === "string" ? props.node.attrs.latex : ""));
+const latex = computed(() =>
+  typeof props.node.attrs.latex === "string" ? props.node.attrs.latex : "",
+);
 const render = useMathMl(latex, true);
 const empty = computed(() => latex.value.trim() === "");
 

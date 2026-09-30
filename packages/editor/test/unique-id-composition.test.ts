@@ -5,10 +5,7 @@ import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { ySyncPluginKey } from "@tiptap/y-tiptap";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
-import {
-  createFvociEditorExtensions,
-  type FvociNodeViews,
-} from "../src/editor-extensions.ts";
+import { createFvociEditorExtensions, type FvociNodeViews } from "../src/editor-extensions.ts";
 
 // #258: UniqueID must not give a block its id in the transaction of an IME
 // composition update. The browser tests are the CDP composition test and the
@@ -103,7 +100,9 @@ test("a plain local edit still gives the block an id in the same dispatch", () =
 
 test("a Yjs-origin change still gives no id", () => {
   let state = withPlugins(["첫 문단"]);
-  state = state.apply(state.tr.insertText("원격", 5).setMeta(ySyncPluginKey, { isChangeOrigin: true }));
+  state = state.apply(
+    state.tr.insertText("원격", 5).setMeta(ySyncPluginKey, { isChangeOrigin: true }),
+  );
   assert.deepEqual(idsOf(state), [null]);
 });
 
