@@ -120,10 +120,8 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   const members = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()).items;
   const memberId = members.find((item: { email: string }) => item.email === "navigation-inbox@example.com").userId;
   const copy = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items.find((item: { key: string }) => item.key === "COPY");
-  // The recipient creates tasks, then the owner assigns them: creation excludes
-  // its actor, so each assignment contributes exactly one notification.
-  // Confirm outbox delivery for each bounded setup batch before producing more.
-  // This keeps relay backlog out of the paging assertion without longer waits.
+  // Explicit comment mentions create one notification per outbox event.
+  // Confirm each bounded batch before producing more, without longer waits.
   const recipientContext = await browser.newContext({ baseURL });
   const recipient = await recipientContext.newPage();
   try {
@@ -131,11 +129,10 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
     for (let start = 0; start < 105; start += 15) {
       const count = Math.min(15, 105 - start);
       await Promise.all(Array.from({ length: count }, async (_, offset) => {
-        const task = await recipient.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/tasks`, { data: { title: `Paged inbox ${start + offset}` } });
-        expect(task.status()).toBe(201);
-        const id = (await task.json()).id;
-        const assigned = await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${id}`, { data: { assigneeIds: [memberId] } });
-        expect(assigned.status()).toBe(200);
+        const comment = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${copy.rootDocumentId}/comments`, {
+          data: { body: `Paged inbox ${start + offset}`, mentionedUserIds: [memberId] },
+        });
+        expect(comment.status()).toBe(201);
       }));
       await expect.poll(async () => (await (await recipient.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(start + count);
     }
@@ -155,7 +152,7 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   await expect(rows).toHaveCount(105);
   await expect(page.getByRole("button", { name: "더 보기", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: /안 읽은 알림 105건/ }).click();
-  await expect(page.getByRole("region", { name: "알림", exact: true }).getByText(/Paged inbox/).first()).toBeVisible();
+  await expect(page.getByRole("region", { name: "알림", exact: true }).getByText("문서에 새 댓글이 달렸습니다", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: /안 읽은 알림 105건/ }).click();
   await rows.first().getByRole("button", { name: "보관", exact: true }).click();
   await page.getByRole("tab", { name: "보관", exact: true }).click();
