@@ -162,7 +162,7 @@ test("the boot module sends valid wiki and project items, to the Vue app", () =>
   assert.equal(isVueAppPath("/w/acme/PRJ-1"), true);
   assert.equal(isVueAppPath("/w/acme/GNT-1"), true);
   assert.equal(isVueAppPath("/w/acme/XWIKI-1"), true);
-  assert.equal(isVueAppPath("/w/acme/wiki"), false);
+  assert.equal(isVueAppPath("/w/acme/wiki"), true);
 });
 
 test("the boot module sends /login, and only that path, to the Vue app", () => {
@@ -193,13 +193,13 @@ test("the boot module sends /setup, and only that path, to the Vue app", () => {
   assert.equal(isVueAppPath("/setups"), false);
 });
 
-test("boot still sends the wiki list and workspace search to the React app", () => {
-  assert.equal(isVueAppPath("/w/acme/wiki"), false);
-  assert.equal(isVueAppPath("/w/acme/wiki/"), false);
-  assert.equal(isVueAppPath("/w/acme/WIKI"), false);
-  assert.equal(isVueAppPath("/w/acme/search"), false);
-  assert.equal(isVueAppPath("/w/acme/search/"), false);
-  assert.equal(isVueAppPath("/w/acme/Search"), false);
+test("wiki list and workspace search boot Vue", () => {
+  assert.equal(isVueAppPath("/w/acme/wiki"), true);
+  assert.equal(isVueAppPath("/w/acme/wiki/"), true);
+  assert.equal(isVueAppPath("/w/acme/WIKI"), true);
+  assert.equal(isVueAppPath("/w/acme/search"), true);
+  assert.equal(isVueAppPath("/w/acme/search/"), true);
+  assert.equal(isVueAppPath("/w/acme/Search"), true);
   // Wiki documents stay on the Vue app; the list path must not steal them.
   assert.equal(isVueAppPath("/w/acme/WIKI-1"), true);
   assert.equal(isVueAppPath("/w/acme/wiki-12"), true);
@@ -210,44 +210,45 @@ test("single-segment resource routes agree with the shared ref grammar", () => {
     // React Router matches /w/:slug in any case, as the boundary does.
     const ref = /^\/w\/[^/]+\/([^/]+)\/?$/i.exec(path)?.[1];
     const resource = ref ? parseRef(ref) : null;
-    const projectView = /\/(gantt|tasks|table|board|calendar)\/?$/i.test(path);
+    const projectView = /\/(gantt|tasks|table|board|calendar)\/?$/i.test(path) || /\/settings\/(fields|workflow)\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
-    const homeOrPublic = path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
+    const homeOrPublic = /^\/s\/[^/]+\/?$/i.test(path) || path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
     const invite = /^\/invite\/[^/]+\/?$/i.test(path);
     const setup = /^\/setup\/?$/i.test(path);
     const auth = /^\/(reset-password|magic-link|confirm-email|cancel-withdraw|consent)\/?$/i.test(path);
     const attachment = /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
       /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i.test(path);
-    if (!projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
+    const workspaceSection = /^\/w\/[^/]+(?:\/(?:projects|wiki|search|my-tasks|notifications|trash))?\/?$/i.test(path);
+    if (!/^\/settings\/(account|admin|audit|legal)\/?$/i.test(path) && !/^\/w\/[^/]+\/settings(?:\/(document-tags|templates))?\/?$/i.test(path) && !workspaceSection && !projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
   }
 });
 
-test("home and public pages enter Vue while admin policies remain React", () => {
-  for (const path of ["/", "/legal/terms", "/legal/privacy/", "/LEGAL/unknown", "/service-info", "/SERVICE-INFO/"]) {
+test("home, public and exact admin pages enter Vue", () => {
+  for (const path of ["/", "/legal/terms", "/legal/privacy/", "/LEGAL/unknown", "/service-info", "/SERVICE-INFO/", "/settings/legal", "/settings/admin", "/settings/audit", "/settings/account"]) {
     assert.equal(isVueAppPath(path), true, path);
   }
-  for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal"]) {
+  for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal/extra"]) {
     assert.equal(isVueAppPath(path), false, path);
   }
 });
 
-test("workspace nav pages stay on the React boot until the coordinator regexes land", () => {
-  assert.equal(isVueAppPath("/w/acme/my-tasks"), false);
-  assert.equal(isVueAppPath("/w/acme/my-tasks/"), false);
-  assert.equal(isVueAppPath("/w/acme/notifications"), false);
-  assert.equal(isVueAppPath("/w/acme/trash"), false);
-  const boundary = readFileSync(new URL("./app-boundary.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/my-tasks/);
-  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/notifications/);
-  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/trash/);
+test("workspace navigation owns exact section paths and excludes nested private flows", () => {
+  for (const section of ["", "/projects", "/wiki", "/search", "/my-tasks", "/notifications", "/trash"]) {
+    const path = `/w/acme${section}`;
+    assert.equal(isVueAppPath(path), true, path);
+    assert.equal(isVueAppPath(`${path}/`.toUpperCase()), true, path);
+  }
+  for (const path of ["/w", "/w//", "/w/acme/wiki/extra", "/w/acme/search/extra", "/settings/account/extra"]) {
+    assert.equal(isVueAppPath(path), false, path);
+  }
 });
 
-test("attachment viewers boot Vue while public share and admin pages retain React", () => {
+test("attachment viewers and exact public share boot Vue", () => {
   for (const path of ["/w/acme/a/123/view", "/w/acme/a/123/view/", "/W/acme/A/123/VIEW",
-    "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View"]) {
+    "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View", "/s/tok", "/S/tok/"]) {
     assert.equal(isVueAppPath(path), true, path);
   }
-  for (const path of ["/s/tok", "/settings/admin", "/settings/audit", "/settings/legal",
+  for (const path of ["/s/tok/extra", "/settings/admin/extra", "/settings/audit/extra", "/settings/legal/extra",
     "/w/acme/a/123", "/w/acme/a/123/view/extra", "/s/tok/attachments/123", "/s/tok/attachments/123/view/extra"]) {
     assert.equal(isVueAppPath(path), false, path);
   }
@@ -271,5 +272,21 @@ test("the Vue router matches exactly the paths the boundary sends it", () => {
   for (const path of SAMPLES) {
     const matched = router.resolve(path).name !== "react-app";
     assert.equal(matched, isVueAppPath(path), path);
+  }
+});
+
+test("project settings retain exact fields/workflow route ownership", () => {
+  for (const section of ["fields", "workflow"]) {
+    assert.equal(isVueAppPath(`/w/acme/GNT/settings/${section}`), true);
+    assert.equal(isVueAppPath(`/W/acme/gnt/SETTINGS/${section.toUpperCase()}/`), true);
+    assert.equal(isVueAppPath(`/w/acme/GNT/settings/${section}/extra`), false);
+  }
+});
+
+test("workspace settings owns only its exact three supported pages", () => {
+  for (const part of ["", "/document-tags", "/templates"]) {
+    assert.equal(isVueAppPath(`/w/acme/settings${part}`), true);
+    assert.equal(isVueAppPath(`/W/acme/SETTINGS${part.toUpperCase()}/`), true);
+    assert.equal(isVueAppPath(`/w/acme/settings${part}/extra`), false);
   }
 });

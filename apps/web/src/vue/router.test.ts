@@ -25,8 +25,8 @@ test(
   "a completed navigation to a React page is a full page load",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
-    await router.push("/w/acme");
-    assert.deepEqual(loads, ["/w/acme"]);
+    await router.push("/settings/account/extra");
+    assert.deepEqual(loads, ["/settings/account/extra"]);
   }),
 );
 
@@ -98,7 +98,7 @@ test("the setup route is declared and the boundary sends /setup to Vue", () => {
 });
 
 test(
-  "setup, home, invite and public navigation stay Vue; admin legal leaves with its query and fragment",
+  "setup, home, invite, public and account/admin navigation stay Vue with query and fragment",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
     // Bun does not compile SFCs. Exercise the real router/afterEach with
@@ -107,12 +107,12 @@ test(
       router.removeRoute(route.name!);
       router.addRoute({ path: route.path, name: route.name, component: { render: () => null } });
     }
-    for (const path of ["/setup", "/", "/invite/tok", "/legal/terms?version=1", "/service-info"]) {
+    for (const path of ["/setup", "/", "/invite/tok", "/legal/terms?version=1", "/service-info", "/s/tok?search=hello#reader", "/settings/account", "/settings/admin", "/settings/audit"]) {
       await router.push(path);
       assert.deepEqual(loads, [], path);
     }
     await router.push("/settings/legal?kind=terms#editor");
-    assert.deepEqual(loads, ["/settings/legal?kind=terms#editor"]);
+    assert.deepEqual(loads, []);
   }),
 );
 
@@ -132,21 +132,21 @@ test(
     assert.deepEqual(loads, []);
 
     const slow = router.push("/slow");
-    await router.push("/w/acme/my-tasks");
+    await router.push("/settings/account/extra");
     release();
     assert.ok(await slow, "the later navigation superseded it");
-    assert.deepEqual(loads, ["/w/acme/my-tasks"]);
+    assert.deepEqual(loads, ["/settings/account/extra"]);
   }),
 );
 
-test("wiki list and search are Vue routes but stay off the live path object", () => {
+test("wiki list and search are live Vue routes", () => {
   assert.equal(VUE_WORKSPACE_ROUTE_PATHS.wikiList, "/w/:slug/wiki");
   assert.equal(VUE_WORKSPACE_ROUTE_PATHS.search, "/w/:slug/search");
   assert.equal(
     Object.values(VUE_ROUTE_PATHS).includes(VUE_WORKSPACE_ROUTE_PATHS.wikiList),
-    false,
+    true,
   );
-  assert.equal(Object.values(VUE_ROUTE_PATHS).includes(VUE_WORKSPACE_ROUTE_PATHS.search), false);
+  assert.equal(Object.values(VUE_ROUTE_PATHS).includes(VUE_WORKSPACE_ROUTE_PATHS.search), true);
 });
 
 test("the workspace landing, project list, wiki list and search resolve as Vue routes", () => {
@@ -165,24 +165,24 @@ test("the workspace landing, project list, wiki list and search resolve as Vue r
 });
 
 test(
-  "wiki list and search still full-load React (app-boundary unchanged)",
+  "wiki list and search stay Vue",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
     const wiki = router.resolve("/w/acme/wiki");
     const search = router.resolve("/w/acme/search?q=hello&tab=document");
     assert.equal(wiki.name, "wiki-list");
     assert.equal(search.name, "search");
-    assert.equal(isVueAppPath(wiki.path), false);
-    assert.equal(isVueAppPath(search.path), false);
+    assert.equal(isVueAppPath(wiki.path), true);
+    assert.equal(isVueAppPath(search.path), true);
     // bun cannot mount .vue route chunks; afterEach uses this same replace
     // for any completed nav the boundary still sends to React.
     if (!isVueAppPath(wiki.path)) window.location.replace(wiki.fullPath);
     if (!isVueAppPath(search.path)) window.location.replace(search.fullPath);
-    assert.deepEqual(loads, ["/w/acme/wiki", "/w/acme/search?q=hello&tab=document"]);
+    assert.deepEqual(loads, []);
   }),
 );
 
-test("my-tasks, notifications, and trash are declared but not live Vue paths", () => {
+test("my-tasks, notifications, and trash are live Vue paths", () => {
   assert.equal(
     routes.some((route) => route.name === "my-tasks" && route.path === VUE_NAV_ROUTE_PATHS.myTasks),
     true,
@@ -200,13 +200,13 @@ test("my-tasks, notifications, and trash are declared but not live Vue paths", (
   assert.equal(router.resolve("/w/acme/my-tasks/").name, "my-tasks");
   assert.equal(router.resolve("/w/acme/notifications").name, "notifications");
   assert.equal(router.resolve("/w/acme/trash").name, "trash");
-  assert.equal(isVueAppPath("/w/acme/my-tasks"), false);
-  assert.equal(isVueAppPath("/w/acme/notifications"), false);
-  assert.equal(isVueAppPath("/w/acme/trash"), false);
+  assert.equal(isVueAppPath("/w/acme/my-tasks"), true);
+  assert.equal(isVueAppPath("/w/acme/notifications"), true);
+  assert.equal(isVueAppPath("/w/acme/trash"), true);
 });
 
 test(
-  "navigating to my-tasks, notifications, or trash is a full page load (boot is still React)",
+  "navigating to my-tasks, notifications, or trash stays Vue",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
     // bun test does not compile .vue lazy chunks; the afterEach guard is
@@ -220,7 +220,7 @@ test(
     await router.push("/w/acme/my-tasks");
     await router.push("/w/acme/notifications");
     await router.push("/w/acme/trash");
-    assert.deepEqual(loads, ["/w/acme/my-tasks", "/w/acme/notifications", "/w/acme/trash"]);
+    assert.deepEqual(loads, []);
   }),
 );
 
@@ -295,13 +295,19 @@ test("workspace-item is more specific than project-home; wiki stays wiki", () =>
   assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
 });
 
-test("workspace settings routes exist but the boundary still sends them to React", () => {
+test("workspace settings routes are live Vue paths", () => {
   const router = createAppRouter(createMemoryHistory());
   assert.equal(router.resolve("/w/acme/settings").name, "workspace-settings");
   assert.equal(router.resolve("/w/acme/settings/document-tags").name, "workspace-settings-document-tags");
   assert.equal(router.resolve("/w/acme/settings/templates").name, "workspace-settings-templates");
-  // Boot still loads the React app for these paths (src/app-boundary.ts).
-  assert.equal(isVueAppPath("/w/acme/settings"), false);
-  assert.equal(isVueAppPath("/w/acme/settings/document-tags"), false);
-  assert.equal(isVueAppPath("/w/acme/settings/templates"), false);
+  // Boot and router agree on these exact settings paths.
+  assert.equal(isVueAppPath("/w/acme/settings"), true);
+  assert.equal(isVueAppPath("/w/acme/settings/document-tags"), true);
+  assert.equal(isVueAppPath("/w/acme/settings/templates"), true);
+});
+
+test("project fields and workflow settings resolve to their own lazy pages", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/GNT/settings/fields").name, "project-fields");
+  assert.equal(router.resolve("/w/acme/GNT/settings/workflow").name, "project-workflow");
 });
