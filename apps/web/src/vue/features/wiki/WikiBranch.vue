@@ -61,9 +61,9 @@ const status = computed(() => {
       <span v-if="status" class="wiki-tree__status">{{ status }}</span>
       <span class="wiki-tree__key">{{ wikiRef }}</span>
     </RouterLink>
-    <ul v-if="!flat && !nested && childNodes.length > 0" class="wiki-tree wiki-tree--nested">
+    <ul v-if="!flat && childNodes.length > 0" class="wiki-tree wiki-tree--nested">
       <WikiBranch
-        v-for="child in childNodes.slice(0, 6)"
+        v-for="child in childNodes"
         :key="child.id"
         :slug="slug"
         :node="child"
@@ -73,7 +73,6 @@ const status = computed(() => {
         :draggable="draggable"
         @drop-document="(source, dest, position) => emit('dropDocument', source, dest, position)"
       />
-      <li v-if="childNodes.length > 6 && wikiRef"><RouterLink :to="documentPath(slug, wikiRef)" class="wiki-tree__row wiki-tree__row--nested">{{ t("task.list.loadMore") }} (+{{ childNodes.length - 6 }})</RouterLink></li>
     </ul>
   </li>
 </template>

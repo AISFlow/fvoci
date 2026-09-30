@@ -284,7 +284,7 @@ test("member create transport failure shows an error without navigation", async 
   await expect(page).toHaveURL(/\/w\/acme\/wiki$/);
 });
 
-test("nested wiki tree renders more than two levels", async ({ page }) => {
+test("nested wiki tree preserves deep links and more than six children", async ({ page }) => {
   await login(page, admin.email, admin.password);
   const id = await workspaceId(page, "acme");
 
@@ -304,11 +304,44 @@ test("nested wiki tree renders more than two levels", async ({ page }) => {
     data: { parentId: child.id, title: "하위 문서" },
   });
   expect(grandchildRes.ok()).toBe(true);
+  const grandchild = await grandchildRes.json();
+  const descendantRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
+    data: { parentId: grandchild.id, title: "최하위 문서" },
+  });
+  expect(descendantRes.ok()).toBe(true);
+  const descendant = await descendantRes.json();
+  const levels = [root, child, grandchild, descendant];
+  const siblings = [];
+  for (let index = 1; index <= 6; index++) {
+    const siblingRes = await page.request.post(`/api/v1/workspaces/${id}/documents`, {
+      data: { parentId: root.id, title: `형제 문서 ${index}` },
+    });
+    expect(siblingRes.ok()).toBe(true);
+    siblings.push(await siblingRes.json());
+  }
+  const documents = [...levels, ...siblings];
 
   await page.goto("/w/acme/wiki");
-  await expect(page.getByRole("link", { name: "루트 문서" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "중간 문서" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "하위 문서" })).toBeVisible();
+  await expect(page.getByTestId(`wiki-doc-WIKI-${root.number}`).locator("..").locator(":scope > ul > li")).toHaveCount(7);
+  for (const document of documents) {
+    const link = page.getByTestId(`wiki-doc-WIKI-${document.number}`);
+    await expect(link).toBeVisible();
+    await expect(link).toContainText(document.title);
+    await expect(link).toHaveAttribute("href", `/w/acme/WIKI-${document.number}`);
+  }
+  await page.getByTestId(`wiki-doc-WIKI-${descendant.number}`).click();
+  await expect(page).toHaveURL(new RegExp(`/w/acme/WIKI-${descendant.number}$`));
+  await expect(page.getByLabel("문서 제목")).toHaveValue("최하위 문서");
+  await page.reload();
+  await expect(page.getByLabel("문서 제목")).toHaveValue("최하위 문서");
+  await page.goto("/w/acme/wiki");
+  await page.reload();
+  for (const document of documents) {
+    await expect(page.getByTestId(`wiki-doc-WIKI-${document.number}`)).toBeVisible();
+    const persisted = await page.request.get(documentResourcePath(id, document.id));
+    expect(persisted.ok()).toBe(true);
+    expect((await persisted.json()).parentId).toBe(document.parentId);
+  }
 });
 
 test("admin sees member document and guest cannot read wiki", async ({ page }) => {
