@@ -3,7 +3,7 @@ import { computed } from "vue";
 import { RouterLink } from "vue-router";
 import { t } from "@fvoci/i18n";
 import { childrenOf, type ChildrenByParent } from "@/features/workspace/wiki-tree";
-import { documentPath, wikiDisplayId } from "@/lib/href";
+import { documentPath, wikiDisplayId, formatDisplayId } from "@/lib/href";
 import type { TreeNode } from "@/lib/queries/documents";
 
 defineOptions({ name: "WikiBranch" });
@@ -13,10 +13,30 @@ const props = defineProps<{
   node: TreeNode;
   byParent: ChildrenByParent<TreeNode>;
   nested?: boolean;
+  flat?: boolean;
+  projectKeys?: ReadonlyMap<string, string>;
+  draggable?: boolean;
 }>();
+const emit = defineEmits<{ dropDocument: [sourceId: string, destId: string, position: "top" | "bottom" | "onto"] }>();
+function onDragStart(event: DragEvent): void {
+  if (!props.draggable || (props.node.projectId && props.node.parentId === null)) { event.preventDefault(); return; }
+  event.dataTransfer?.setData("application/x-fvoci-document", props.node.id);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+function onDrop(event: DragEvent): void {
+  const id = event.dataTransfer?.getData("application/x-fvoci-document");
+  if (!props.draggable || !id) return;
+  event.preventDefault();
+  const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  const ratio = (event.clientY - box.top) / Math.max(box.height, 1);
+  emit("dropDocument", id, props.node.id, ratio < .28 ? "top" : ratio > .72 ? "bottom" : "onto");
+}
+
 
 const childNodes = computed(() => childrenOf(props.byParent, props.node.id));
-const wikiRef = computed(() => wikiDisplayId(props.node.number));
+const wikiRef = computed(() => props.node.projectId
+  ? props.projectKeys?.get(props.node.projectId) ? formatDisplayId(props.projectKeys.get(props.node.projectId)!, props.node.number) : null
+  : wikiDisplayId(props.node.number));
 const status = computed(() => {
   if (props.node.status === "draft") return t("doc.status.draft");
   if (props.node.status === "archived") return t("doc.status.archived");
@@ -27,24 +47,33 @@ const status = computed(() => {
 <template>
   <li :class="nested ? undefined : 'wiki-tree__branch'">
     <RouterLink
+      v-if="wikiRef"
       :to="documentPath(slug, wikiRef)"
       :class="nested ? 'wiki-tree__row wiki-tree__row--nested' : 'wiki-tree__row'"
       :data-testid="`wiki-doc-${wikiRef}`"
+      :draggable="draggable && !(node.projectId && node.parentId === null)"
+      @dragstart="onDragStart"
+      @dragover="draggable && $event.preventDefault()"
+      @drop.stop="onDrop"
     >
       <span v-if="node.icon" class="wiki-tree__icon" aria-hidden>{{ node.icon }}</span>
       <span class="wiki-tree__title">{{ node.title }}</span>
       <span v-if="status" class="wiki-tree__status">{{ status }}</span>
       <span class="wiki-tree__key">{{ wikiRef }}</span>
     </RouterLink>
-    <ul v-if="childNodes.length > 0" class="wiki-tree wiki-tree--nested">
+    <ul v-if="!flat && !nested && childNodes.length > 0" class="wiki-tree wiki-tree--nested">
       <WikiBranch
-        v-for="child in childNodes"
+        v-for="child in childNodes.slice(0, 6)"
         :key="child.id"
         :slug="slug"
         :node="child"
         :by-parent="byParent"
         nested
+        :project-keys="projectKeys"
+        :draggable="draggable"
+        @drop-document="(source, dest, position) => emit('dropDocument', source, dest, position)"
       />
+      <li v-if="childNodes.length > 6 && wikiRef"><RouterLink :to="documentPath(slug, wikiRef)" class="wiki-tree__row wiki-tree__row--nested">{{ t("task.list.loadMore") }} (+{{ childNodes.length - 6 }})</RouterLink></li>
     </ul>
   </li>
 </template>
