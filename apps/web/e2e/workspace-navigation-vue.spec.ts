@@ -113,3 +113,48 @@ test("direct section URLs preserve query and hash across reload; foreign and sig
   await expect(page).toHaveURL(/\?denied=workspace$/);
   expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).status()).toBe(404);
 });
+
+test("notification pagination reaches a third page, bell cache stays valid, and archive/read persist", async ({ page }) => {
+  await login(page, owner.email, owner.password);
+  createE2eUser("navigation-inbox@example.com", "inboxpass123", "수신", { workspaceSlug: "navigation", membershipRole: "member" });
+  const members = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()).items;
+  const memberId = members.find((item: { email: string }) => item.email === "navigation-inbox@example.com").userId;
+  const copy = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items.find((item: { key: string }) => item.key === "COPY");
+  // Real task creation and assignment generate the inbox through the outbox.
+  for (let start = 0; start < 105; start += 5) {
+    await Promise.all(Array.from({ length: Math.min(5, 105 - start) }, async (_, offset) => {
+      const task = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/tasks`, { data: { title: `Paged inbox ${start + offset}` } });
+      expect(task.status()).toBe(201);
+      const id = (await task.json()).id;
+      const assigned = await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${id}`, { data: { assigneeIds: [memberId] } });
+      expect(assigned.status()).toBe(200);
+    }));
+  }
+  await logout(page);
+  await login(page, "navigation-inbox@example.com", "inboxpass123");
+  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(105);
+  await page.goto("/w/navigation/notifications");
+  await vue(page);
+  const rows = page.locator(".notifications-page__row");
+  await expect(rows).toHaveCount(50);
+  await page.getByRole("button", { name: "더 보기", exact: true }).click();
+  await expect(rows).toHaveCount(100);
+  await page.getByRole("button", { name: "더 보기", exact: true }).click();
+  await expect(rows).toHaveCount(105);
+  await expect(page.getByRole("button", { name: "더 보기", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: /안 읽은 알림 105건/ }).click();
+  await expect(page.getByRole("region", { name: "알림", exact: true }).getByText(/Paged inbox/).first()).toBeVisible();
+  await page.getByRole("button", { name: /안 읽은 알림 105건/ }).click();
+  await rows.first().getByRole("button", { name: "보관", exact: true }).click();
+  await page.getByRole("tab", { name: "보관", exact: true }).click();
+  await expect(rows).toHaveCount(1);
+  await page.reload();
+  await page.getByRole("tab", { name: "보관", exact: true }).click();
+  await expect(rows).toHaveCount(1);
+  await rows.first().getByRole("button", { name: "보관 해제", exact: true }).click();
+  await expect(rows).toHaveCount(0);
+  await page.getByRole("button", { name: "전체 읽음", exact: true }).click();
+  await page.getByRole("tab", { name: "안 읽음", exact: true }).click();
+  await expect(rows).toHaveCount(0);
+  expect((await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(0);
+});
