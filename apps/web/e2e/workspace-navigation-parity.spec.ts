@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 import { login } from "./helpers";
 
@@ -181,6 +182,56 @@ test("source tag:name search filters documents and leaves task hits in the real 
   await login(page, owner.email, owner.password);
   const tag = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/document-tags`)).json()).items.find((tag: { name: string }) => tag.name === "Planning");
   expect(tag).toBeTruthy();
+  // Complete only the already committed setup prefix through the actual
+  // search worker before starting the fresh task's unchanged recall window.
+  const container = process.env.FVOCI_TEST_PG_CONTAINER;
+  const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
+  if (!container || !adminUrl) throw new Error("isolated PostgreSQL fixture context is required");
+  const fixtureContainer = container;
+  const fixtureDatabase = new URL(adminUrl).pathname.slice(1);
+  expect(workspaceId).toMatch(/^[0-9a-f-]{36}$/i);
+  function fixtureJson<T>(sql: string): T {
+    const output = execFileSync("docker", ["exec", "-i", fixtureContainer, "psql", "-U", "postgres", "-d", fixtureDatabase, "-qAt", "-v", "ON_ERROR_STOP=1"], {
+      input: `BEGIN READ ONLY;\n${sql}\nCOMMIT;\n`, encoding: "utf8", timeout: 5_000, stdio: ["pipe", "pipe", "pipe"],
+    });
+    return JSON.parse(output.trim());
+  }
+  const watermark = fixtureJson<{ id: string; xact: string; seq: string }>(`
+    SELECT row_to_json(w) FROM (
+      SELECT id, xact::text AS xact, seq::text AS seq FROM fvoci.events
+      WHERE workspace_id = '${workspaceId}'::uuid ORDER BY xact DESC, seq DESC LIMIT 1
+    ) w;
+  `);
+  expect(watermark.id).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(watermark.xact).toMatch(/^\d+$/);
+  expect(watermark.seq).toMatch(/^\d+$/);
+  const setupStarted = Date.now();
+  const prefixSamples: { elapsedMs: number; total: number; pending: number; failures: number }[] = [];
+  try {
+    await expect.poll(() => {
+      const state = fixtureJson<{ total: number; pending: number; failures: number }>(`
+        WITH prior AS (
+          SELECT id FROM fvoci.events WHERE workspace_id = '${workspaceId}'::uuid
+            AND (xact, seq) <= ('${watermark.xact}'::xid8, ${watermark.seq}::bigint)
+        )
+        SELECT json_build_object(
+          'total', (SELECT count(*) FROM prior),
+          'pending', (SELECT count(*) FROM prior e WHERE NOT EXISTS (
+            SELECT 1 FROM fvoci.processed_events p WHERE p.consumer = 'search-index' AND p.event_id = e.id
+          )),
+          'failures', (SELECT count(*) FROM prior e JOIN fvoci.outbox_failures f ON f.event_id = e.id WHERE f.consumer = 'search-index')
+        );
+      `);
+      prefixSamples.push({ elapsedMs: Date.now() - setupStarted, ...state });
+      expect(state.total).toBeGreaterThan(0);
+      if (state.failures !== 0) throw new Error("preceding search setup has failed or dead-letter events");
+      return state.pending;
+    }, { timeout: 15_000 }).toBe(0);
+  } finally {
+    await testInfo.attach("prior-search-prefix-readiness", {
+      body: JSON.stringify({ workspaceId, watermark, prefixSamples }, null, 2), contentType: "application/json",
+    });
+  }
   // The preceding fixture writes many resources. Prove its real search
   // readiness before timing recall of the next task; do not mix the existing
   // outbox backlog with that task's five-second assertion.
