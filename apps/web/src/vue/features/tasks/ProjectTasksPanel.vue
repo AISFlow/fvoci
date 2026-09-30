@@ -19,7 +19,11 @@ import { api, ensureOk, loadErrorMessage, ProblemError, problemMessage } from "@
 import { FALLBACK_TZ } from "@/lib/datetime";
 import { formatDisplayId, itemPath } from "@/lib/href";
 import { membersQuery, meQuery } from "@/lib/queries";
-import { collectionFieldsQuery, projectCollectionQuery, type ProjectView } from "@/lib/queries/collections";
+import {
+  collectionFieldsQuery,
+  projectCollectionQuery,
+  type ProjectView,
+} from "@/lib/queries/collections";
 import { encodeViewQueryParam, parseViewQueryParam, type ViewQuery } from "@/lib/view-query";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
@@ -57,18 +61,25 @@ const selectedViewId = computed(() => {
 });
 
 const workflow = useQuery(() => workflowQuery(props.workspace.id, props.project.id));
-const tasks = useInfiniteQuery(() => taskListQuery(props.workspace.id, props.project.id, encodedQuery.value));
+const tasks = useInfiniteQuery(() =>
+  taskListQuery(props.workspace.id, props.project.id, encodedQuery.value),
+);
 const me = useQuery(() => meQuery);
 const members = useQuery(() => membersQuery(props.workspace.id));
 const labels = useQuery(() => projectLabelsQuery(props.workspace.id, props.project.id));
 const milestones = useQuery(() => projectMilestonesQuery(props.workspace.id, props.project.id));
 const collection = useQuery(() => projectCollectionQuery(props.workspace.id, props.project.id));
-const fields = useQuery(() => collectionFieldsQuery(props.workspace.id, collection.data.value?.id ?? ""));
+const fields = useQuery(() =>
+  collectionFieldsQuery(props.workspace.id, collection.data.value?.id ?? ""),
+);
 
 const taskPages = computed(() => mergeTaskListPages(tasks.data.value?.pages ?? []));
 const firstPageFailed = computed(() => tasks.isError.value && !tasks.isFetchNextPageError.value);
 
-function applyQuery(next: ViewQuery, viewId: string | null | undefined = selectedViewId.value): void {
+function applyQuery(
+  next: ViewQuery,
+  viewId: string | null | undefined = selectedViewId.value,
+): void {
   const query = { ...route.query } as Record<string, string>;
   const encoded = encodeViewQueryParam(next);
   if (encoded) query.query = encoded;
@@ -145,7 +156,9 @@ function retryList(): void {
     :time-zone="me.data.value?.timezone ?? FALLBACK_TZ"
     @change="applyQuery($event)"
   />
-  <p v-if="parsedQuery === null" role="alert" class="task-form__alert">{{ t("task.filter.lastValidResults") }}</p>
+  <p v-if="parsedQuery === null" role="alert" class="task-form__alert">{{
+    t("task.filter.lastValidResults")
+  }}</p>
   <QueryLoading v-if="workflow.isLoading.value || tasks.isLoading.value" />
   <QueryError
     v-if="workflow.isError.value || firstPageFailed"
@@ -153,7 +166,13 @@ function retryList(): void {
     @retry="retryList"
   />
   <TaskList
-    v-if="!workflow.isLoading.value && !tasks.isLoading.value && !workflow.isError.value && !firstPageFailed && taskPages"
+    v-if="
+      !workflow.isLoading.value &&
+      !tasks.isLoading.value &&
+      !workflow.isError.value &&
+      !firstPageFailed &&
+      taskPages
+    "
     :slug="slug"
     :project-key="project.key"
     :items="taskPages.items"
@@ -184,6 +203,14 @@ function retryList(): void {
     @close="onCreateClose"
     @submit="onCreateSubmit"
   />
-  <ProjectMilestonesSection :workspace-id="workspace.id" :project-id="project.id" :can-manage="project.status === 'active' && project.canEdit" />
-  <ProjectGroupsSection :workspace-id="workspace.id" :project-id="project.id" :can-manage="workspace.role === 'admin' || workspace.role === 'owner'" />
+  <ProjectMilestonesSection
+    :workspace-id="workspace.id"
+    :project-id="project.id"
+    :can-manage="project.status === 'active' && project.canEdit"
+  />
+  <ProjectGroupsSection
+    :workspace-id="workspace.id"
+    :project-id="project.id"
+    :can-manage="workspace.role === 'admin' || workspace.role === 'owner'"
+  />
 </template>

@@ -3,7 +3,12 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { ref, useId, watch } from "vue";
 import { taskCreatePayload, type TaskCreateBody } from "@/features/tasks/create-payload";
-import { TASK_TYPES, TASK_TYPE_LABELS, isTaskType, type TaskType } from "@/features/tasks/task-types";
+import {
+  TASK_TYPES,
+  TASK_TYPE_LABELS,
+  isTaskType,
+  type TaskType,
+} from "@/features/tasks/task-types";
 import NativeModal from "../../components/NativeModal.vue";
 import "@/features/projects/projects.css";
 
@@ -86,12 +91,16 @@ function onSubmit(): void {
       <div class="task-form__field">
         <label :for="typeId" class="text-sm font-medium">{{ t("task.form.type.label") }}</label>
         <select :id="typeId" :disabled="pending" :value="type" @change="onTypeChange">
-          <option v-for="value in TASK_TYPES" :key="value" :value="value">{{ TASK_TYPE_LABELS[value] }}</option>
+          <option v-for="value in TASK_TYPES" :key="value" :value="value">{{
+            TASK_TYPE_LABELS[value]
+          }}</option>
         </select>
         <p v-if="typeError" class="task-form__alert" role="alert">{{ typeError }}</p>
       </div>
       <div class="task-form__actions">
-        <UButton variant="outline" color="neutral" @click="emit('close')">{{ t("task.create.cancel") }}</UButton>
+        <UButton variant="outline" color="neutral" @click="emit('close')">{{
+          t("task.create.cancel")
+        }}</UButton>
         <UButton type="submit" :disabled="pending">
           {{ pending ? t("task.create.pending") : t("task.create") }}
         </UButton>

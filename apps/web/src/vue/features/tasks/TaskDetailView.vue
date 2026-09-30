@@ -125,7 +125,9 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
 
 <template>
   <div class="task-home">
-    <p v-if="archivePersistError" role="alert" class="task-form__alert">{{ archivePersistError }}</p>
+    <p v-if="archivePersistError" role="alert" class="task-form__alert">{{
+      archivePersistError
+    }}</p>
     <nav class="task-home__crumb" :aria-label="t('nav.breadcrumb')">
       <AppLink :to="projectTasksPath(slug, projectKey)">{{ projectName ?? projectKey }}</AppLink>
       <span aria-hidden="true"> / </span>
@@ -190,7 +192,11 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
         {{ t("task.delete") }}
       </ConfirmActionButton>
     </div>
-    <TaskCollectionProperties :workspace-id="workspaceId" :task-id="task.id" :read-only="readOnly" />
+    <TaskCollectionProperties
+      :workspace-id="workspaceId"
+      :task-id="task.id"
+      :read-only="readOnly"
+    />
     <TaskBodyEditor
       :workspace-id="workspaceId"
       :slug="slug"

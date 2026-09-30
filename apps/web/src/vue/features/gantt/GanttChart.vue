@@ -82,7 +82,9 @@ const packed = computed(() =>
 const width = computed(() => scaleWidth(scale.value));
 const columns = computed(() => dayColumns(scale.value, calendar.value));
 const months = computed(() => monthBands(columns.value));
-const laneCount = computed(() => packed.value.bars.reduce((max, bar) => Math.max(max, bar.lane + 1), 0));
+const laneCount = computed(() =>
+  packed.value.bars.reduce((max, bar) => Math.max(max, bar.lane + 1), 0),
+);
 const todayX = computed(() => dateToX(props.today, scale.value));
 const editable = computed(() => props.canEdit);
 const locked = computed(() => !props.canEdit || props.savingId !== null);
@@ -95,15 +97,22 @@ interface DisplayBar extends BarBox {
 function placed(bar: BarBox, range: { start: IsoDate; end: IsoDate } | null): DisplayBar {
   const item = itemsById.value.get(bar.id)!;
   if (!range) return { ...bar, start: item.start, end: item.end };
-  const rect = barRect({ start: range.start, end: range.end, milestone: bar.milestone }, scale.value);
-  return rect ? { ...bar, ...rect, start: range.start, end: range.end } : { ...bar, start: item.start, end: item.end };
+  const rect = barRect(
+    { start: range.start, end: range.end, milestone: bar.milestone },
+    scale.value,
+  );
+  return rect
+    ? { ...bar, ...rect, start: range.start, end: range.end }
+    : { ...bar, start: item.start, end: item.end };
 }
 
 /** Committed bars, with a saved-but-not-refetched range in place. */
 const committedBars = computed(() =>
   packed.value.bars.map((bar) => placed(bar, props.pending?.id === bar.id ? props.pending : null)),
 );
-const paths = computed(() => linkPaths(props.layout.links, committedBars.value, props.laneHeight, props.pxPerDay));
+const paths = computed(() =>
+  linkPaths(props.layout.links, committedBars.value, props.laneHeight, props.pxPerDay),
+);
 const height = computed(() => chartHeight(laneCount.value, props.laneHeight, paths.value));
 
 // Drag state is local to the chart; only a finished change leaves it.
@@ -163,7 +172,8 @@ function onPointerMove(event: PointerEvent): void {
 function onPointerUp(event: PointerEvent): void {
   const done = drag;
   drag = null;
-  if (svg.value?.hasPointerCapture(event.pointerId)) svg.value.releasePointerCapture(event.pointerId);
+  if (svg.value?.hasPointerCapture(event.pointerId))
+    svg.value.releasePointerCapture(event.pointerId);
   live.value = null;
   if (!done) return;
   const changed = done.start !== done.originStart || done.end !== done.originEnd;
@@ -210,7 +220,8 @@ function onBarKeydown(event: KeyboardEvent, bar: DisplayBar): void {
   event.preventDefault();
   const kind: BarDragKind = event.shiftKey && hasHandle(bar, "end") ? "end" : "move";
   const next = applyBarDelta(kind, bar, event.key === "ArrowLeft" ? -1 : 1, scale.value);
-  if (next.start !== bar.start || next.end !== bar.end) emit("change", { id: bar.id, kind, ...next });
+  if (next.start !== bar.start || next.end !== bar.end)
+    emit("change", { id: bar.id, kind, ...next });
 }
 
 function title(id: string): string {
@@ -259,7 +270,9 @@ const rowRules = computed(() =>
   Array.from({ length: Math.max(laneCount.value, 1) }, (_, n) => (n + 1) * props.laneHeight),
 );
 const railRows = computed(() =>
-  [...bars.value].sort((a, b) => a.lane - b.lane || a.x - b.x).map((bar) => itemsById.value.get(bar.id)!),
+  [...bars.value]
+    .sort((a, b) => a.lane - b.lane || a.x - b.x)
+    .map((bar) => itemsById.value.get(bar.id)!),
 );
 </script>
 
@@ -275,7 +288,9 @@ const railRows = computed(() =>
     :aria-busy="savingId !== null ? 'true' : undefined"
   >
     <div class="fvoci-gantt__rail">
-      <div class="fvoci-gantt__rail-head" :style="{ height: `${laneHeight * 1.4}px` }">{{ t("gantt.rail") }}</div>
+      <div class="fvoci-gantt__rail-head" :style="{ height: `${laneHeight * 1.4}px` }">{{
+        t("gantt.rail")
+      }}</div>
       <button
         v-for="item in railRows"
         :key="item.id"
@@ -290,7 +305,10 @@ const railRows = computed(() =>
       </button>
     </div>
     <section class="fvoci-gantt__board" :aria-label="t('view.gantt')" tabindex="0">
-      <div class="fvoci-gantt__header" :style="{ width: `${width}px`, height: `${laneHeight * 1.4}px` }">
+      <div
+        class="fvoci-gantt__header"
+        :style="{ width: `${width}px`, height: `${laneHeight * 1.4}px` }"
+      >
         <span
           v-for="band in months"
           :key="band.key"
@@ -310,9 +328,10 @@ const railRows = computed(() =>
           :data-date="column.date"
           :data-off-duty="column.offDuty ? '1' : undefined"
         >
-          <span :class="column.date === today ? 'fvoci-gantt__tick-today' : 'fvoci-gantt__tick-label'">{{
-            column.label
-          }}</span>
+          <span
+            :class="column.date === today ? 'fvoci-gantt__tick-today' : 'fvoci-gantt__tick-label'"
+            >{{ column.label }}</span
+          >
         </span>
       </div>
       <svg
@@ -322,12 +341,20 @@ const railRows = computed(() =>
         :height="height"
         overflow="visible"
         role="group"
-        :aria-label="t('gantt.chart.aria', { count: bars.length, start: layout.scale.start, end: layout.scale.end })"
+        :aria-label="
+          t('gantt.chart.aria', {
+            count: bars.length,
+            start: layout.scale.start,
+            end: layout.scale.end,
+          })
+        "
         @pointermove="onPointerMove"
         @pointerup="onPointerUp"
         @pointercancel="onPointerUp"
       >
-        <title>{{ t("gantt.chart.title", { start: layout.scale.start, end: layout.scale.end }) }}</title>
+        <title>
+          {{ t("gantt.chart.title", { start: layout.scale.start, end: layout.scale.end }) }}
+        </title>
         <defs>
           <marker
             :id="markerId"
@@ -391,7 +418,9 @@ const railRows = computed(() =>
           }"
           role="button"
           tabindex="0"
-          :aria-label="t('gantt.bar.aria', { title: title(bar.id), start: bar.start, end: bar.end })"
+          :aria-label="
+            t('gantt.bar.aria', { title: title(bar.id), start: bar.start, end: bar.end })
+          "
           :aria-busy="savingId === bar.id ? 'true' : undefined"
           :aria-keyshortcuts="
             !editable
@@ -407,7 +436,9 @@ const railRows = computed(() =>
           @click="onBarClick(bar.id)"
           @keydown="onBarKeydown($event, bar)"
         >
-          <title>{{ `${title(bar.id)} (${bar.milestone ? t("gantt.milestone") : t("gantt.kind.bar")})` }}</title>
+          <title>
+            {{ `${title(bar.id)} (${bar.milestone ? t("gantt.milestone") : t("gantt.kind.bar")})` }}
+          </title>
           <rect
             v-if="pack === 'rows'"
             class="fvoci-gantt__hit"
@@ -429,7 +460,9 @@ const railRows = computed(() =>
           <polygon
             v-if="bar.milestone"
             class="fvoci-gantt__milestone"
-            :points="diamond(bar.x + bar.width / 2, laneCenterY(bar.lane, laneHeight), bar.width / 2)"
+            :points="
+              diamond(bar.x + bar.width / 2, laneCenterY(bar.lane, laneHeight), bar.width / 2)
+            "
             @pointerdown="beginDrag($event, bar, 'move')"
           />
           <rect
@@ -481,7 +514,9 @@ const railRows = computed(() =>
             v-if="labelPlacement(bar) !== 'none'"
             class="fvoci-gantt__bar-label"
             :class="{ 'fvoci-gantt__bar-label--outside': labelPlacement(bar) === 'outer' }"
-            :clip-path="labelPlacement(bar) === 'inner' ? `url(#${markerId}-clip-${bar.id})` : undefined"
+            :clip-path="
+              labelPlacement(bar) === 'inner' ? `url(#${markerId}-clip-${bar.id})` : undefined
+            "
             :x="labelPlacement(bar) === 'inner' ? bar.x + 8 : bar.x + bar.width + 8"
             :y="laneCenterY(bar.lane, laneHeight)"
             dy="0.35em"

@@ -31,14 +31,14 @@ function mount<T>(client: QueryClient, use: () => T): { result: T; stop: () => v
 }
 
 function source(rel: string): string {
-  return readFileSync(path.join(import.meta.dirname, rel), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+  return readFileSync(path.join(import.meta.dirname, rel), "utf8").replace(
+    /\/\*[\s\S]*?\*\/|\/\/.*/g,
+    "",
+  );
 }
 
 test("the live workspace-item path is the item-ref custom regex", () => {
-  assert.equal(
-    VUE_ROUTE_PATHS.workspaceItem,
-    "/w/:slug/:ref([A-Za-z0-9-]{2,32}-[1-9]\\d{0,8})",
-  );
+  assert.equal(VUE_ROUTE_PATHS.workspaceItem, "/w/:slug/:ref([A-Za-z0-9-]{2,32}-[1-9]\\d{0,8})");
 });
 
 test("the live workspace-item boundary regex takes item refs only", () => {
@@ -143,9 +143,18 @@ test("WorkspaceItemPage lookup 404 / miss / project-document vs task (source)", 
 test("WorkspaceItemPage keeps PATCH MOVE trash archive clone delete and 409 refetch (source)", () => {
   const page = source("../../pages/WorkspaceItemPage.vue");
   assert.match(page, /api\.PATCH\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}"/);
-  assert.match(page, /api\.POST\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}\/move"/);
-  assert.match(page, /api\.POST\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}\/trash"/);
-  assert.match(page, /api\.POST\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}\/clone"/);
+  assert.match(
+    page,
+    /api\.POST\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}\/move"/,
+  );
+  assert.match(
+    page,
+    /api\.POST\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}\/trash"/,
+  );
+  assert.match(
+    page,
+    /api\.POST\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}\/clone"/,
+  );
   assert.match(page, /api\.DELETE\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}"/);
   assert.match(page, /err\.status === 409/);
   assert.match(page, /formEpoch\.value \+= 1/);
@@ -157,12 +166,21 @@ test("task body uses collab kind task; project document uses kind document (sour
   const taskView = source("./TaskDetailView.vue");
   const page = source("../../pages/WorkspaceItemPage.vue");
   const docView = source("../documents/ProjectDocumentView.vue");
-  assert.match(taskView, /useCollabRoom\(collabRoomName\(props\.workspaceId, "task", props\.task\.id\)/);
+  assert.match(
+    taskView,
+    /useCollabRoom\(collabRoomName\(props\.workspaceId, "task", props\.task\.id\)/,
+  );
   assert.equal((taskView.match(/useCollabRoom\(/g) ?? []).length, 1);
   assert.match(page, /collabRoomName\(workspace\.id, ['"]task['"]/);
   assert.match(page, /collabRoomName\(workspace\.id, ['"]document['"]/);
-  assert.match(docView, /useCollabRoom\(\s*collabRoomName\(props\.workspaceId, "document", props\.documentId\)/);
-  const room = readFileSync(path.join(import.meta.dirname, "../../collab/useCollabRoom.ts"), "utf8");
+  assert.match(
+    docView,
+    /useCollabRoom\(\s*collabRoomName\(props\.workspaceId, "document", props\.documentId\)/,
+  );
+  const room = readFileSync(
+    path.join(import.meta.dirname, "../../collab/useCollabRoom.ts"),
+    "utf8",
+  );
   assert.match(room, /function retire\(/);
 });
 

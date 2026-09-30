@@ -11,8 +11,7 @@ import {
 export type ProjectFormField = "key" | "name" | "description" | "icon";
 
 export type ProjectFormResult =
-  | { ok: true; body: ProjectCreateBody }
-  | { ok: false; field: ProjectFormField; message: I18nKey };
+  { ok: true; body: ProjectCreateBody } | { ok: false; field: ProjectFormField; message: I18nKey };
 
 function issue(field: ProjectFormField, message: I18nKey): ProjectFormResult {
   return { ok: false, field, message };
@@ -29,7 +28,8 @@ export function projectFormPayload(values: ProjectCreateFormValues): ProjectForm
   const name = values.name.trim();
   if (name.length < 1) return issue("name", "form.too_small");
   if (name.length > PROJECT_NAME_MAX) return issue("name", "form.too_big");
-  if ((values.description ?? "").length > PROJECT_DESCRIPTION_MAX) return issue("description", "form.too_big");
+  if ((values.description ?? "").length > PROJECT_DESCRIPTION_MAX)
+    return issue("description", "form.too_big");
   if ((values.icon ?? "").length > PROJECT_ICON_MAX) return issue("icon", "form.too_big");
 
   const parsed = projectCreatePayload(values);

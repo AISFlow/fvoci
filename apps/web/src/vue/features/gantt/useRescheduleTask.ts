@@ -43,7 +43,9 @@ function whenIdle(queryClient: QueryClient, queryKey: QueryKey): Promise<void> {
  *   is no longer allowed).
  * - 401: /auth/me is refetched and the session guard sends the page to login.
  */
-export function useRescheduleTask(context: () => { workspaceId: string; projectId: string; timeZone: string }) {
+export function useRescheduleTask(
+  context: () => { workspaceId: string; projectId: string; timeZone: string },
+) {
   const queryClient = useQueryClient();
   const error = ref<string | null>(null);
   const failed = ref(false);
@@ -85,7 +87,9 @@ export function useRescheduleTask(context: () => { workspaceId: string; projectI
     },
   });
 
-  const savingId = computed(() => (mutation.isPending.value ? (mutation.variables.value?.id ?? null) : null));
+  const savingId = computed(() =>
+    mutation.isPending.value ? (mutation.variables.value?.id ?? null) : null,
+  );
   /** The saved range to draw until the refetched layout has it. */
   const pending = computed<{ id: string; start: IsoDate; end: IsoDate } | null>(() => {
     const request = mutation.variables.value;

@@ -40,7 +40,10 @@ function mount<T>(client: QueryClient, use: () => T): { result: T; stop: () => v
 }
 
 function source(rel: string): string {
-  return readFileSync(path.join(import.meta.dirname, rel), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+  return readFileSync(path.join(import.meta.dirname, rel), "utf8").replace(
+    /\/\*[\s\S]*?\*\/|\/\/.*/g,
+    "",
+  );
 }
 
 test("time entries, backlinks, activity, collection item, and origins wait for ids", () => {
@@ -101,7 +104,10 @@ test("activity display matches React field, actor, and list values", () => {
   assert.equal(displayValue("assigneeIds", { items: [], totalCount: 0 }), "없음");
   assert.equal(
     displayValue("labelIds", {
-      items: [{ id: "1", label: "A" }, { id: "2", label: null }],
+      items: [
+        { id: "1", label: "A" },
+        { id: "2", label: null },
+      ],
       totalCount: 4,
     }),
     "A, 확인할 수 없는 항목 외 2개",

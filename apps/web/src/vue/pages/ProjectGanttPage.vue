@@ -44,7 +44,8 @@ const today = computed(() => dateInZone(now.value, timeZone.value));
 
 function queryInt(name: string, min: number, max: number): number | undefined {
   const raw = route.query[name];
-  const value = typeof raw === "string" && /^\d{1,4}$/.test(raw) ? Number.parseInt(raw, 10) : Number.NaN;
+  const value =
+    typeof raw === "string" && /^\d{1,4}$/.test(raw) ? Number.parseInt(raw, 10) : Number.NaN;
   return Number.isInteger(value) && value >= min && value <= max ? value : undefined;
 }
 
@@ -76,12 +77,19 @@ function onOpenTask(displayId: string): void {
 </script>
 
 <template>
-  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="session.status.value === 'error'" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name">
+  <WorkspaceShell
+    v-else-if="workspace"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+  >
     <p v-if="notFound" role="alert" class="text-error">{{ t("project.notFound") }}</p>
     <div v-else-if="projectRef.failed.value">
       <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
@@ -89,11 +97,16 @@ function onOpenTask(displayId: string): void {
     </div>
     <div v-else-if="project" class="flex flex-col gap-3">
       <p class="text-sm">
-        <a :href="projectsPath(slug)" class="underline underline-offset-2">{{ t("nav.projects") }}</a>
-        <span aria-hidden="true"> / </span>
-        <a :href="projectPath(slug, project.key)" class="underline underline-offset-2" data-slot="project-link">{{
-          project.key
+        <a :href="projectsPath(slug)" class="underline underline-offset-2">{{
+          t("nav.projects")
         }}</a>
+        <span aria-hidden="true"> / </span>
+        <a
+          :href="projectPath(slug, project.key)"
+          class="underline underline-offset-2"
+          data-slot="project-link"
+          >{{ project.key }}</a
+        >
       </p>
       <ProjectViewTabs :slug="slug" :project-key="project.key" active="gantt" />
       <GanttView

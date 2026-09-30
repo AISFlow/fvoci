@@ -147,10 +147,14 @@ const queryBody = computed<CollectionQueryBody>(() => ({
   config: config.value,
   limit: groupedBoard.value ? 1 : PAGE_LIMIT,
   ...(cursor.value && !groupedBoard.value ? { cursor: cursor.value } : {}),
-  ...(props.type === "calendar" && config.value.dateBy && day.value !== undefined ? { day: day.value } : {}),
+  ...(props.type === "calendar" && config.value.dateBy && day.value !== undefined
+    ? { day: day.value }
+    : {}),
   ...(calendarWindow.value ? { window: calendarWindow.value } : {}),
 }));
-const rowsEnabled = computed(() => fields.isSuccess.value && views.isSuccess.value && me.isSuccess.value);
+const rowsEnabled = computed(
+  () => fields.isSuccess.value && views.isSuccess.value && me.isSuccess.value,
+);
 const rows = useQuery(() =>
   collectionRowsQuery(props.workspaceId, props.collectionId, queryBody.value, rowsEnabled.value),
 );
@@ -176,7 +180,11 @@ function valueOf(row: { values: Record<string, never> }, fieldId: string): unkno
   return (row.values as Record<string, unknown>)[fieldId];
 }
 
-async function setValue(row: CollectionQueryItem, field: CollectionField, value: CollectionValue): Promise<void> {
+async function setValue(
+  row: CollectionQueryItem,
+  field: CollectionField,
+  value: CollectionValue,
+): Promise<void> {
   try {
     await putCollectionValue(props.workspaceId, props.collectionId, row.id, {
       fieldId: field.id,
@@ -202,7 +210,9 @@ async function moveToGroup(row: CollectionQueryItem, target: BoardGroup): Promis
           body: { statusId: request.statusId, expectedStatusId: request.expectedStatusId },
         }),
       );
-      await queryClient.invalidateQueries({ queryKey: ["tasks", props.workspaceId, props.projectId] });
+      await queryClient.invalidateQueries({
+        queryKey: ["tasks", props.workspaceId, props.projectId],
+      });
     } else {
       const field = fields.data.value?.items.find((item) => item.id === request.fieldId);
       if (!field) return;
@@ -222,33 +232,76 @@ async function moveToGroup(row: CollectionQueryItem, target: BoardGroup): Promis
 }
 
 async function moveToDate(row: CalendarRow, target: string | null): Promise<void> {
-  const request = dateMoveRequest(config.value.dateBy, row, target, fields.data.value?.items ?? [], timeZone.value);
+  const request = dateMoveRequest(
+    config.value.dateBy,
+    row,
+    target,
+    fields.data.value?.items ?? [],
+    timeZone.value,
+  );
   if (!request || moving.value) return;
   moveError.value = null;
   if (request.kind === "unavailable") {
     moveError.value = t("collection.saveError");
     return;
   }
-  const preview = (rows.data.value?.previews ?? []).find(item => item.id === row.id);
-  try { await saveCalendarDate(preview ?? { ...row, displayId: "", title: "", documentId: null, statusId: null }, request); } catch { /* moveError is shown */ }
+  const preview = (rows.data.value?.previews ?? []).find((item) => item.id === row.id);
+  try {
+    await saveCalendarDate(
+      preview ?? { ...row, displayId: "", title: "", documentId: null, statusId: null },
+      request,
+    );
+  } catch {
+    /* moveError is shown */
+  }
 }
 
-async function saveCalendarDate(row: CollectionQueryPreview, request: CalendarWrite): Promise<void> {
-  if (moving.value || !navigator.onLine || !dateMovable(config.value.dateBy, row, active.value)) throw new Error("Calendar write unavailable");
+async function saveCalendarDate(
+  row: CollectionQueryPreview,
+  request: CalendarWrite,
+): Promise<void> {
+  if (moving.value || !navigator.onLine || !dateMovable(config.value.dateBy, row, active.value))
+    throw new Error("Calendar write unavailable");
   moveError.value = null;
   moving.value = true;
-  pendingPreview.value = optimisticRow(row, request, timeZone.value, config.value.dateBy ?? undefined);
+  pendingPreview.value = optimisticRow(
+    row,
+    request,
+    timeZone.value,
+    config.value.dateBy ?? undefined,
+  );
   try {
     if (request.kind === "task") {
-      const accepted = await ensureOk(await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
-        params: { path: { workspace_id: props.workspaceId, task_id: request.taskId } }, body: request.body,
-      }));
+      const accepted = await ensureOk(
+        await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
+          params: { path: { workspace_id: props.workspaceId, task_id: request.taskId } },
+          body: request.body,
+        }),
+      );
       // Use accepted stored dates, never treat the requested values as server truth.
-      pendingPreview.value = optimisticRow(row, { ...request, body: { ...request.body, ...(request.body.startDate !== undefined ? { startDate: accepted.startDate } : {}), ...(request.body.dueDate !== undefined ? { dueDate: accepted.dueDate } : {}), ...(request.body.dueAt !== undefined ? { dueAt: accepted.dueAt } : {}) } }, timeZone.value, config.value.dateBy ?? undefined);
-      await queryClient.invalidateQueries({ queryKey: ["tasks", props.workspaceId, props.projectId] });
+      pendingPreview.value = optimisticRow(
+        row,
+        {
+          ...request,
+          body: {
+            ...request.body,
+            ...(request.body.startDate !== undefined ? { startDate: accepted.startDate } : {}),
+            ...(request.body.dueDate !== undefined ? { dueDate: accepted.dueDate } : {}),
+            ...(request.body.dueAt !== undefined ? { dueAt: accepted.dueAt } : {}),
+          },
+        },
+        timeZone.value,
+        config.value.dateBy ?? undefined,
+      );
+      await queryClient.invalidateQueries({
+        queryKey: ["tasks", props.workspaceId, props.projectId],
+      });
     } else {
       const accepted = await putCollectionValue(props.workspaceId, props.collectionId, row.id, {
-        fieldId: request.fieldId, expectedVersion: request.expectedVersion, expectedFieldVersion: request.expectedFieldVersion, value: request.value,
+        fieldId: request.fieldId,
+        expectedVersion: request.expectedVersion,
+        expectedFieldVersion: request.expectedFieldVersion,
+        value: request.value,
       });
       pendingPreview.value = { ...pendingPreview.value!, version: accepted.version };
     }
@@ -257,15 +310,26 @@ async function saveCalendarDate(row: CollectionQueryPreview, request: CalendarWr
     moveError.value = problemMessage(err, "collection.saveError");
     throw err;
   } finally {
-    try { await refresh(); } finally { pendingPreview.value = null; moving.value = false; }
+    try {
+      await refresh();
+    } finally {
+      pendingPreview.value = null;
+      moving.value = false;
+    }
   }
 }
 function calendarTarget(event: DragEvent): string | null | undefined {
   const cell = (event.target as HTMLElement).closest<HTMLElement>("[data-calendar-target]");
   return cell ? cell.dataset.calendarTarget || null : undefined;
 }
-function externalCalendarOver(event: DragEvent) { const target = calendarTarget(event); if (target !== undefined) onDateDragOver(event, target); }
-function externalCalendarDrop(event: DragEvent) { const target = calendarTarget(event); if (target !== undefined) onDateDrop(event, target); }
+function externalCalendarOver(event: DragEvent) {
+  const target = calendarTarget(event);
+  if (target !== undefined) onDateDragOver(event, target);
+}
+function externalCalendarDrop(event: DragEvent) {
+  const target = calendarTarget(event);
+  if (target !== undefined) onDateDrop(event, target);
+}
 
 const saveView = useMutation({
   mutationFn: async () => {
@@ -277,16 +341,19 @@ const saveView = useMutation({
     };
     if (view.value) {
       return ensureOk(
-        await api.PATCH("/api/v1/workspaces/{workspace_id}/collections/{collection_id}/views/{view_id}", {
-          params: {
-            path: {
-              workspace_id: props.workspaceId,
-              collection_id: props.collectionId,
-              view_id: view.value.id,
+        await api.PATCH(
+          "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/views/{view_id}",
+          {
+            params: {
+              path: {
+                workspace_id: props.workspaceId,
+                collection_id: props.collectionId,
+                view_id: view.value.id,
+              },
             },
+            body: { ...payload, expectedVersion: view.value.version },
           },
-          body: { ...payload, expectedVersion: view.value.version },
-        }),
+        ),
       );
     }
     return ensureOk(
@@ -312,11 +379,18 @@ const saveView = useMutation({
 const removeView = useMutation({
   mutationFn: async (viewId: string) =>
     ensureOk(
-      await api.DELETE("/api/v1/workspaces/{workspace_id}/collections/{collection_id}/views/{view_id}", {
-        params: {
-          path: { workspace_id: props.workspaceId, collection_id: props.collectionId, view_id: viewId },
+      await api.DELETE(
+        "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/views/{view_id}",
+        {
+          params: {
+            path: {
+              workspace_id: props.workspaceId,
+              collection_id: props.collectionId,
+              view_id: viewId,
+            },
+          },
         },
-      }),
+      ),
     ),
   onSuccess: async () => {
     applyView(null);
@@ -330,32 +404,45 @@ const memberItems = computed<MemberOutput[]>(() => members.data.value?.items ?? 
 const userNames = computed(() =>
   memberItems.value.map((member) => ({ userId: member.userId, name: formatPersonName(member) })),
 );
-const active = computed(() => (fields.data.value?.items ?? []).filter((field) => field.deletedAt === null));
+const active = computed(() =>
+  (fields.data.value?.items ?? []).filter((field) => field.deletedAt === null),
+);
 const canSave = computed(() => views.data.value?.canSave === true);
 const canManageViews = computed(() => views.data.value?.canManage === true);
-const ownsView = computed(() => view.value === null || view.value.ownerId === me.data.value?.userId);
+const ownsView = computed(
+  () => view.value === null || view.value.ownerId === me.data.value?.userId,
+);
 const shareBlocked = computed(
-  () => (visibility.value === "shared" || view.value?.visibility === "shared") && !canManageViews.value,
+  () =>
+    (visibility.value === "shared" || view.value?.visibility === "shared") && !canManageViews.value,
 );
 const invalidQuery = computed(() => isInvalidInput(rows.error.value));
 const sortItems = computed(() => [
   { id: "created", name: t("collection.created") },
   { id: "title", name: t("collection.resourceTitle") },
-  ...active.value.filter((field) => SORTABLE_FIELD_TYPES.includes(field.type)).map((field) => ({ id: field.id, name: field.name })),
+  ...active.value
+    .filter((field) => SORTABLE_FIELD_TYPES.includes(field.type))
+    .map((field) => ({ id: field.id, name: field.name })),
 ]);
 const primary = computed(() => readPrimarySort(config.value.query));
 const simple = computed(() =>
-  primary.value && sortItems.value.some((item) => item.id === primary.value?.field) ? primary.value : null,
+  primary.value && sortItems.value.some((item) => item.id === primary.value?.field)
+    ? primary.value
+    : null,
 );
-const sortValue = computed(() => simple.value?.field ?? (config.value.query.sort.length > 0 ? "advanced" : "default"));
+const sortValue = computed(
+  () => simple.value?.field ?? (config.value.query.sort.length > 0 ? "advanced" : "default"),
+);
 const calendarDrag = computed(() => props.type === "calendar" && config.value.dateBy !== null);
 const calendarPreviews = computed(() => {
   const list = rows.data.value?.previews ?? [];
-  return pendingPreview.value ? [...list.filter(row => row.id !== pendingPreview.value!.id), pendingPreview.value] : list;
+  return pendingPreview.value
+    ? [...list.filter((row) => row.id !== pendingPreview.value!.id), pendingPreview.value]
+    : list;
 });
 const dayCounts = computed(() => {
-  const counts = new Map((rows.data.value?.days ?? []).map(entry => [entry.date, entry.count]));
-  const original = rows.data.value?.previews.find(row => row.id === pendingPreview.value?.id);
+  const counts = new Map((rows.data.value?.days ?? []).map((entry) => [entry.date, entry.count]));
+  const original = rows.data.value?.previews.find((row) => row.id === pendingPreview.value?.id);
   if (original && pendingPreview.value && original.date !== pendingPreview.value.date) {
     counts.set(original.date, Math.max(0, (counts.get(original.date) ?? 0) - 1));
     counts.set(pendingPreview.value.date, (counts.get(pendingPreview.value.date) ?? 0) + 1);
@@ -365,10 +452,16 @@ const dayCounts = computed(() => {
 const groups = computed(() => rows.data.value?.groups ?? []);
 
 function formatValue(field: CollectionField, raw: unknown): string {
-  return formatCollectionValue(asCollectionValue(raw), field.options, userNames.value, timeZone.value, {
-    yes: t("collection.filter.true"),
-    no: t("collection.filter.false"),
-  });
+  return formatCollectionValue(
+    asCollectionValue(raw),
+    field.options,
+    userNames.value,
+    timeZone.value,
+    {
+      yes: t("collection.filter.true"),
+      no: t("collection.filter.false"),
+    },
+  );
 }
 
 function canMoveDate(row: CalendarRow | null, target: string | null): boolean {
@@ -380,7 +473,8 @@ function canMoveDate(row: CalendarRow | null, target: string | null): boolean {
 }
 
 function onDateDragStart(event: DragEvent, row: CollectionQueryItem): void {
-  if (!calendarDrag.value || moving.value || !dateMovable(config.value.dateBy, row, active.value)) return;
+  if (!calendarDrag.value || moving.value || !dateMovable(config.value.dateBy, row, active.value))
+    return;
   event.dataTransfer?.setData(CALENDAR_DRAG_TYPE, row.id);
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
   draggedDate.value = row;
@@ -420,7 +514,9 @@ function dateDraggable(row: CalendarRow): boolean {
 }
 
 function onSavedViewChange(event: Event): void {
-  const saved = views.data.value?.items.find((item) => item.id === (event.target as HTMLSelectElement).value) ?? null;
+  const saved =
+    views.data.value?.items.find((item) => item.id === (event.target as HTMLSelectElement).value) ??
+    null;
   saveView.reset();
   if (saved && isViewType(saved.type) && saved.type !== props.type) {
     emit("openView", saved.type, saved.id);
@@ -452,7 +548,11 @@ function onSort(event: Event): void {
 function toggleDirection(): void {
   if (!simple.value) return;
   change({
-    query: setPrimarySort(config.value.query, simple.value.field, simple.value.direction === "asc" ? "desc" : "asc"),
+    query: setPrimarySort(
+      config.value.query,
+      simple.value.field,
+      simple.value.direction === "asc" ? "desc" : "asc",
+    ),
   });
 }
 
@@ -464,7 +564,13 @@ function retryMeta(): void {
 
 function onSaveView(event: Event): void {
   event.preventDefault();
-  if (!viewName.value.trim() || saveView.isPending.value || viewConflict.value || shareBlocked.value || invalidQuery.value) {
+  if (
+    !viewName.value.trim() ||
+    saveView.isPending.value ||
+    viewConflict.value ||
+    shareBlocked.value ||
+    invalidQuery.value
+  ) {
     return;
   }
   saveView.mutate();
@@ -492,13 +598,19 @@ const deleteDisabled = computed(() => {
   return current.visibility === "shared" ? !canManageViews.value : current.ownerId !== userId;
 });
 
-const showDayList = computed(() => !(props.type === "calendar" && config.value.dateBy && day.value === undefined));
-const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count ?? 0) : (rows.data.value?.items.length ?? 0)));
+const showDayList = computed(
+  () => !(props.type === "calendar" && config.value.dateBy && day.value === undefined),
+);
+const emptyCount = computed(() =>
+  groupedBoard.value ? (rows.data.value?.count ?? 0) : (rows.data.value?.items.length ?? 0),
+);
 </script>
 
 <template>
   <QueryError v-if="failed" :message="t('collection.error')" @retry="retryMeta" />
-  <p v-else-if="!fields.data.value || !views.data.value || !me.data.value" role="status">{{ t("collection.loading") }}</p>
+  <p v-else-if="!fields.data.value || !views.data.value || !me.data.value" role="status">{{
+    t("collection.loading")
+  }}</p>
   <section v-else class="flex min-w-0 flex-col gap-4" :data-testid="`collection-${type}`">
     <div class="collection-toolbar">
       <div class="collection-field">
@@ -512,28 +624,45 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
         >
           <option value="">{{ t("collection.newView") }}</option>
           <option v-for="item in views.data.value.items" :key="item.id" :value="item.id">
-            {{ item.name }} · {{ item.visibility === "shared" ? t("collection.shared") : t("collection.private") }}
+            {{ item.name }} ·
+            {{ item.visibility === "shared" ? t("collection.shared") : t("collection.private") }}
           </option>
         </select>
       </div>
       <div v-if="type === 'board'" class="collection-field">
         <label :for="`${baseId}-group`">{{ t("collection.group") }}</label>
-        <select :id="`${baseId}-group`" class="collection-select" :value="config.groupBy ?? ''" @change="onGroupBy">
+        <select
+          :id="`${baseId}-group`"
+          class="collection-select"
+          :value="config.groupBy ?? ''"
+          @change="onGroupBy"
+        >
           <option value="">{{ t("collection.none") }}</option>
           <option value="status">{{ t("collection.status") }}</option>
-          <option v-for="field in active.filter((item) => item.type === 'select')" :key="field.id" :value="field.id">
+          <option
+            v-for="field in active.filter((item) => item.type === 'select')"
+            :key="field.id"
+            :value="field.id"
+          >
             {{ field.name }}
           </option>
         </select>
       </div>
       <div v-if="type === 'calendar'" class="collection-field">
         <label :for="`${baseId}-date`">{{ t("collection.date") }}</label>
-        <select :id="`${baseId}-date`" class="collection-select" :value="config.dateBy ?? ''" @change="onDateBy">
+        <select
+          :id="`${baseId}-date`"
+          class="collection-select"
+          :value="config.dateBy ?? ''"
+          @change="onDateBy"
+        >
           <option value="">{{ t("collection.none") }}</option>
           <option value="due">{{ t("collection.due") }}</option>
           <option value="start">{{ t("collection.start") }}</option>
           <option
-            v-for="field in active.filter((item) => item.type === 'date' || item.type === 'datetime')"
+            v-for="field in active.filter(
+              (item) => item.type === 'date' || item.type === 'datetime',
+            )"
             :key="field.id"
             :value="field.id"
           >
@@ -543,13 +672,26 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
       </div>
       <div class="collection-field">
         <label :for="`${baseId}-sort`">{{ t("collection.sort") }}</label>
-        <select :id="`${baseId}-sort`" class="collection-select" :value="sortValue" @change="onSort">
+        <select
+          :id="`${baseId}-sort`"
+          class="collection-select"
+          :value="sortValue"
+          @change="onSort"
+        >
           <option value="default">{{ t("collection.sort.default") }}</option>
-          <option v-if="sortValue === 'advanced'" value="advanced">{{ t("collection.sort.advanced") }}</option>
+          <option v-if="sortValue === 'advanced'" value="advanced">{{
+            t("collection.sort.advanced")
+          }}</option>
           <option v-for="item in sortItems" :key="item.id" :value="item.id">{{ item.name }}</option>
         </select>
       </div>
-      <UButton size="sm" variant="outline" color="neutral" :disabled="!simple" @click="toggleDirection">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="!simple"
+        @click="toggleDirection"
+      >
         {{ simple?.direction === "desc" ? t("collection.descending") : t("collection.ascending") }}
       </UButton>
       <UButton
@@ -589,7 +731,10 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
           class="collection-select"
           :value="visibility"
           :disabled="!ownsView"
-          @change="visibility = ($event.target as HTMLSelectElement).value === 'shared' ? 'shared' : 'private'"
+          @change="
+            visibility =
+              ($event.target as HTMLSelectElement).value === 'shared' ? 'shared' : 'private'
+          "
         >
           <option value="private">{{ t("collection.private") }}</option>
           <option value="shared" :disabled="!canManageViews">{{ t("collection.shared") }}</option>
@@ -598,7 +743,14 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
       <UButton
         type="submit"
         size="sm"
-        :disabled="!viewName.trim() || saveView.isPending.value || removeView.isPending.value || viewConflict || shareBlocked || invalidQuery"
+        :disabled="
+          !viewName.trim() ||
+          saveView.isPending.value ||
+          removeView.isPending.value ||
+          viewConflict ||
+          shareBlocked ||
+          invalidQuery
+        "
       >
         {{ t("collection.saveView") }}
       </UButton>
@@ -615,24 +767,69 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
     </form>
     <div v-if="viewConflict" role="alert" class="collection-toolbar">
       <span class="text-sm text-error">{{ t("collection.viewConflict") }}</span>
-      <UButton size="sm" variant="outline" color="neutral" :disabled="views.isFetching.value" @click="reloadView">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="views.isFetching.value"
+        @click="reloadView"
+      >
         {{ t("collection.reloadView") }}
       </UButton>
     </div>
-    <p v-if="(saveView.isError.value && !viewConflict) || removeView.isError.value" role="alert" class="text-sm text-error">
+    <p
+      v-if="(saveView.isError.value && !viewConflict) || removeView.isError.value"
+      role="alert"
+      class="text-sm text-error"
+    >
       {{ t("collection.saveError") }}
     </p>
     <p v-if="moveError" role="alert" class="text-sm text-error">{{ moveError }}</p>
 
-    <div v-if="type === 'calendar' && config.dateBy" @dragover="externalCalendarOver" @drop="externalCalendarDrop" @dragleave="onDateDragLeave">
-      <CollectionCalendar ref="calendarUI" :month="effectiveMonth" :date-by="config.dateBy" :fields="active" :previews="calendarPreviews" :counts="dayCounts" :zone="timeZone" :week-starts-on="weekStartsOn" :slug="slug" :pending="moving" :refreshing="rows.isFetching.value" :can-edit="rows.data.value?.canEdit !== false" :save="saveCalendarDate"
-        @month="month = $event; day = undefined; cursor = undefined" @day="day = day === $event ? undefined : $event; cursor = undefined" @range="visibleRange = $event" @reconnect="refresh" />
+    <div
+      v-if="type === 'calendar' && config.dateBy"
+      @dragover="externalCalendarOver"
+      @drop="externalCalendarDrop"
+      @dragleave="onDateDragLeave"
+    >
+      <CollectionCalendar
+        ref="calendarUI"
+        :month="effectiveMonth"
+        :date-by="config.dateBy"
+        :fields="active"
+        :previews="calendarPreviews"
+        :counts="dayCounts"
+        :zone="timeZone"
+        :week-starts-on="weekStartsOn"
+        :slug="slug"
+        :pending="moving"
+        :refreshing="rows.isFetching.value"
+        :can-edit="rows.data.value?.canEdit !== false"
+        :save="saveCalendarDate"
+        @month="
+          month = $event;
+          day = undefined;
+          cursor = undefined;
+        "
+        @day="
+          day = day === $event ? undefined : $event;
+          cursor = undefined;
+        "
+        @range="visibleRange = $event"
+        @reconnect="refresh"
+      />
     </div>
 
     <QueryLoading v-if="rows.isPending.value" />
-    <QueryError v-if="rows.isError.value" :message="loadErrorMessage(rows.error.value)" @retry="rows.refetch()" />
+    <QueryError
+      v-if="rows.isError.value"
+      :message="loadErrorMessage(rows.error.value)"
+      @retry="rows.refetch()"
+    />
     <template v-if="rows.data.value">
-      <p class="text-caption text-muted" role="status">{{ t("collection.count", { count: rows.data.value.count }) }}</p>
+      <p class="text-caption text-muted" role="status">{{
+        t("collection.count", { count: rows.data.value.count })
+      }}</p>
       <template v-if="showDayList">
         <p v-if="emptyCount === 0" class="text-sm text-muted">{{ t("collection.empty") }}</p>
         <CollectionBoard
@@ -648,7 +845,12 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
             <a :href="itemPath(slug, row.displayId)" class="font-medium hover:underline">
               <span class="text-muted">{{ row.displayId }}</span> {{ row.title }}
             </a>
-            <p v-for="field in active" :key="field.id" v-show="formatValue(field, valueOf(row, field.id))" class="collection-card__meta">
+            <p
+              v-for="field in active"
+              :key="field.id"
+              v-show="formatValue(field, valueOf(row, field.id))"
+              class="collection-card__meta"
+            >
               {{ field.name }}: {{ formatValue(field, valueOf(row, field.id)) }}
             </p>
           </template>
@@ -663,7 +865,12 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
             <a :href="itemPath(slug, row.displayId)" class="font-medium hover:underline">
               <span class="text-muted">{{ row.displayId }}</span> {{ row.title }}
             </a>
-            <p v-for="field in active" :key="field.id" v-show="formatValue(field, valueOf(row, field.id))" class="collection-card__meta">
+            <p
+              v-for="field in active"
+              :key="field.id"
+              v-show="formatValue(field, valueOf(row, field.id))"
+              class="collection-card__meta"
+            >
               {{ field.name }}: {{ formatValue(field, valueOf(row, field.id)) }}
             </p>
           </li>
@@ -681,7 +888,11 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="row in rows.data.value.items" :key="row.id" :data-testid="`collection-row-${row.displayId}`">
+                <tr
+                  v-for="row in rows.data.value.items"
+                  :key="row.id"
+                  :data-testid="`collection-row-${row.displayId}`"
+                >
                   <td
                     class="min-w-40"
                     :data-testid="calendarDrag ? `collection-drag-${row.displayId}` : undefined"
@@ -716,8 +927,17 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
             </table>
           </div>
         </template>
-        <div v-if="!groupedBoard && (cursor || rows.data.value.nextCursor)" class="collection-toolbar">
-          <UButton size="sm" variant="outline" color="neutral" :disabled="!cursor" @click="cursor = undefined">
+        <div
+          v-if="!groupedBoard && (cursor || rows.data.value.nextCursor)"
+          class="collection-toolbar"
+        >
+          <UButton
+            size="sm"
+            variant="outline"
+            color="neutral"
+            :disabled="!cursor"
+            @click="cursor = undefined"
+          >
             {{ t("collection.previous") }}
           </UButton>
           <UButton

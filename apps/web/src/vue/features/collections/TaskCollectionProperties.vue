@@ -33,7 +33,9 @@ const fields = useQuery(() => collectionFieldsQuery(props.workspaceId, collectio
 const members = useQuery(() => membersQuery(props.workspaceId));
 const me = useQuery(meQuery);
 const timeZone = computed(() => me.data.value?.timezone ?? FALLBACK_TZ);
-const active = computed(() => (fields.data.value?.items ?? []).filter((field) => field.deletedAt === null));
+const active = computed(() =>
+  (fields.data.value?.items ?? []).filter((field) => field.deletedAt === null),
+);
 const hidden = computed(
   () =>
     (lookup.isSuccess.value && lookup.data.value?.item === null) ||
@@ -58,8 +60,12 @@ async function save(field: CollectionField, value: CollectionValue): Promise<voi
     });
   } finally {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: collectionPrefix(props.workspaceId, collectionId.value) }),
-      queryClient.invalidateQueries({ queryKey: ["collection-item", props.workspaceId, "task", props.taskId] }),
+      queryClient.invalidateQueries({
+        queryKey: collectionPrefix(props.workspaceId, collectionId.value),
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["collection-item", props.workspaceId, "task", props.taskId],
+      }),
     ]);
   }
 }
@@ -74,17 +80,17 @@ async function save(field: CollectionField, value: CollectionValue): Promise<voi
   >
     <h2 id="task-properties-title" class="settings-section__title">{{ t("task.properties") }}</h2>
     <QueryLoading v-if="lookup.isPending.value || fields.isPending.value" />
-    <QueryError
-      v-if="error"
-      :message="loadErrorMessage(error)"
-      @retry="retryLoad"
-    />
+    <QueryError v-if="error" :message="loadErrorMessage(error)" @retry="retryLoad" />
     <div v-if="item && fields.data.value" class="grid gap-3 sm:grid-cols-2">
       <ValueEditor
         v-for="field in active"
         :key="field.id"
         :field="field"
-        :value="asCollectionValue((lookup.data.value?.values as Record<string, unknown> | undefined)?.[field.id])"
+        :value="
+          asCollectionValue(
+            (lookup.data.value?.values as Record<string, unknown> | undefined)?.[field.id],
+          )
+        "
         :members="members.data.value?.items ?? []"
         :time-zone="timeZone"
         :read-only="readOnly || !(lookup.data.value?.canEdit ?? false)"

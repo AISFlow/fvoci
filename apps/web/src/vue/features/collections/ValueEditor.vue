@@ -50,7 +50,11 @@ const currentSingle = computed(() =>
 const multiSelected = computed(() => (people.value ? selectedUsers.value : selectedOptions.value));
 const multiChoices = computed(() =>
   people.value
-    ? props.members.map((member) => ({ id: member.userId, label: formatPersonName(member), deleted: false }))
+    ? props.members.map((member) => ({
+        id: member.userId,
+        label: formatPersonName(member),
+        deleted: false,
+      }))
     : props.field.options.map((option) => ({
         id: option.id,
         label: option.label,
@@ -88,7 +92,9 @@ function onSingleChange(event: Event): void {
 }
 
 function onMultiToggle(id: string, checked: boolean): void {
-  const ids = checked ? [...multiSelected.value, id] : multiSelected.value.filter((item) => item !== id);
+  const ids = checked
+    ? [...multiSelected.value, id]
+    : multiSelected.value.filter((item) => item !== id);
   void save(ids.length === 0 ? null : people.value ? { users: ids } : { options: ids });
 }
 
@@ -171,7 +177,12 @@ function onDraftKeydown(event: KeyboardEvent): void {
         {{ choice.label }}{{ choice.deleted ? ` · ${t("collection.archived")}` : "" }}
       </label>
     </fieldset>
-    <form v-else class="flex flex-wrap items-center gap-2" @submit="onDraftSubmit" @keydown="onDraftKeydown">
+    <form
+      v-else
+      class="flex flex-wrap items-center gap-2"
+      @submit="onDraftSubmit"
+      @keydown="onDraftKeydown"
+    >
       <textarea
         v-if="field.type === 'paragraph'"
         :id="controlId"
@@ -192,7 +203,14 @@ function onDraftKeydown(event: KeyboardEvent): void {
         :value="draft"
         @input="draft = ($event.target as HTMLInputElement).value"
       />
-      <UButton v-if="!readOnly" type="submit" size="sm" variant="outline" color="neutral" :disabled="disabled || draft === draftFromValue(value, timeZone)">
+      <UButton
+        v-if="!readOnly"
+        type="submit"
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="disabled || draft === draftFromValue(value, timeZone)"
+      >
         {{ t("collection.save") }}
       </UButton>
     </form>

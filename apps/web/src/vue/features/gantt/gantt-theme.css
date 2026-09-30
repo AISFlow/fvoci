@@ -1,325 +1,303 @@
 /* Gantt chart theme (was features/tasks/gantt/theme.css; originally packages/gantt/src/theme.css) */
 
 :where(.fvoci-gantt) {
-	--fvoci-gantt-font-family: var(
-		--font-sans,
-		ui-sans-serif,
-		system-ui,
-		sans-serif
-	);
-	--fvoci-gantt-font-size-bar: var(--text-ui-size, 0.875rem);
-	--fvoci-gantt-font-size-header: var(--text-dense-size, 0.8125rem);
-	--fvoci-gantt-font-size-tick: var(--text-caption-size, 0.75rem);
-	--fvoci-gantt-line-height: var(--text-ui-leading, 1.45);
-	--fvoci-gantt-lane-height: 2.25rem;
-	--fvoci-gantt-bar-radius: var(
-		--radius-sm,
-		calc(var(--radius, 0.625rem) - 4px)
-	);
-	--fvoci-gantt-ring: var(--ring, currentColor);
-	--fvoci-gantt-ring-contrast: var(--ring-contrast, var(--ring, currentColor));
-	--fvoci-gantt-fg: var(--foreground, currentColor);
-	--fvoci-gantt-muted-fg: var(
-		--muted-foreground,
-		color-mix(in srgb, currentColor 62%, transparent)
-	);
-	--fvoci-gantt-bar-bg: var(
-		--schedule-fill,
-		color-mix(in oklch, var(--primary, currentColor) 22%, transparent)
-	);
-	--fvoci-gantt-bar-fg: var(--foreground, currentColor);
-	--fvoci-gantt-bar-border: var(
-		--schedule-edge,
-		color-mix(in oklch, var(--primary, currentColor) 42%, transparent)
-	);
-	--fvoci-gantt-bar-inferred-bg: color-mix(
-		in oklch,
-		var(--primary, currentColor) 8%,
-		transparent
-	);
-	--fvoci-gantt-bar-selected-bg: var(
-		--schedule-selected,
-		color-mix(in oklch, var(--primary, currentColor) 28%, transparent)
-	);
-	--fvoci-gantt-link-color: color-mix(
-		in oklch,
-		var(--foreground, currentColor) 72%,
-		transparent
-	);
-	--fvoci-gantt-offduty-bg: var(
-		--schedule-offduty,
-		var(--muted, color-mix(in srgb, currentColor 6%, transparent))
-	);
-	--fvoci-gantt-grid-color: var(
-		--border,
-		color-mix(in srgb, currentColor 12%, transparent)
-	);
-	--fvoci-gantt-today-bg: var(
-		--schedule-today,
-		color-mix(in oklch, var(--primary, currentColor) 9%, transparent)
-	);
-	--fvoci-gantt-today-line: var(--primary, currentColor);
-	--fvoci-gantt-surface: var(--card, var(--background, transparent));
-	--fvoci-gantt-caption-fg: var(--muted-foreground, currentColor);
+  --fvoci-gantt-font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+  --fvoci-gantt-font-size-bar: var(--text-ui-size, 0.875rem);
+  --fvoci-gantt-font-size-header: var(--text-dense-size, 0.8125rem);
+  --fvoci-gantt-font-size-tick: var(--text-caption-size, 0.75rem);
+  --fvoci-gantt-line-height: var(--text-ui-leading, 1.45);
+  --fvoci-gantt-lane-height: 2.25rem;
+  --fvoci-gantt-bar-radius: var(--radius-sm, calc(var(--radius, 0.625rem) - 4px));
+  --fvoci-gantt-ring: var(--ring, currentColor);
+  --fvoci-gantt-ring-contrast: var(--ring-contrast, var(--ring, currentColor));
+  --fvoci-gantt-fg: var(--foreground, currentColor);
+  --fvoci-gantt-muted-fg: var(
+    --muted-foreground,
+    color-mix(in srgb, currentColor 62%, transparent)
+  );
+  --fvoci-gantt-bar-bg: var(
+    --schedule-fill,
+    color-mix(in oklch, var(--primary, currentColor) 22%, transparent)
+  );
+  --fvoci-gantt-bar-fg: var(--foreground, currentColor);
+  --fvoci-gantt-bar-border: var(
+    --schedule-edge,
+    color-mix(in oklch, var(--primary, currentColor) 42%, transparent)
+  );
+  --fvoci-gantt-bar-inferred-bg: color-mix(in oklch, var(--primary, currentColor) 8%, transparent);
+  --fvoci-gantt-bar-selected-bg: var(
+    --schedule-selected,
+    color-mix(in oklch, var(--primary, currentColor) 28%, transparent)
+  );
+  --fvoci-gantt-link-color: color-mix(in oklch, var(--foreground, currentColor) 72%, transparent);
+  --fvoci-gantt-offduty-bg: var(
+    --schedule-offduty,
+    var(--muted, color-mix(in srgb, currentColor 6%, transparent))
+  );
+  --fvoci-gantt-grid-color: var(--border, color-mix(in srgb, currentColor 12%, transparent));
+  --fvoci-gantt-today-bg: var(
+    --schedule-today,
+    color-mix(in oklch, var(--primary, currentColor) 9%, transparent)
+  );
+  --fvoci-gantt-today-line: var(--primary, currentColor);
+  --fvoci-gantt-surface: var(--card, var(--background, transparent));
+  --fvoci-gantt-caption-fg: var(--muted-foreground, currentColor);
 
-	color: var(--fvoci-gantt-fg);
-	background: var(--fvoci-gantt-surface);
-	font-family: var(--fvoci-gantt-font-family);
-	line-height: var(--fvoci-gantt-line-height);
-	border: 1px solid var(--fvoci-gantt-grid-color);
-	border-radius: var(--radius-md, var(--radius, 0.625rem));
-	overflow: hidden;
+  color: var(--fvoci-gantt-fg);
+  background: var(--fvoci-gantt-surface);
+  font-family: var(--fvoci-gantt-font-family);
+  line-height: var(--fvoci-gantt-line-height);
+  border: 1px solid var(--fvoci-gantt-grid-color);
+  border-radius: var(--radius-md, var(--radius, 0.625rem));
+  overflow: hidden;
 }
 
 .fvoci-gantt--split {
-	display: grid;
-	grid-template-columns: minmax(0, min(20rem, 45%)) minmax(0, 1fr);
+  display: grid;
+  grid-template-columns: minmax(0, min(20rem, 45%)) minmax(0, 1fr);
 }
 
 @media (max-width: 30rem) {
-	.fvoci-gantt--split {
-		grid-template-columns: minmax(0, min(7rem, 32%)) minmax(0, 1fr);
-	}
+  .fvoci-gantt--split {
+    grid-template-columns: minmax(0, min(7rem, 32%)) minmax(0, 1fr);
+  }
 }
 
 .fvoci-gantt__rail {
-	min-width: 0;
-	border-inline-end: 1px solid var(--fvoci-gantt-grid-color);
-	background: var(--fvoci-gantt-surface);
+  min-width: 0;
+  border-inline-end: 1px solid var(--fvoci-gantt-grid-color);
+  background: var(--fvoci-gantt-surface);
 }
 
 .fvoci-gantt__rail-head {
-	display: flex;
-	align-items: center;
-	height: calc(var(--fvoci-gantt-lane-height) * 1.4);
-	padding-inline: 0.75rem;
-	border-bottom: 1px solid var(--fvoci-gantt-grid-color);
-	font-size: var(--fvoci-gantt-font-size-header);
-	font-weight: 500;
-	color: var(--fvoci-gantt-muted-fg);
+  display: flex;
+  align-items: center;
+  height: calc(var(--fvoci-gantt-lane-height) * 1.4);
+  padding-inline: 0.75rem;
+  border-bottom: 1px solid var(--fvoci-gantt-grid-color);
+  font-size: var(--fvoci-gantt-font-size-header);
+  font-weight: 500;
+  color: var(--fvoci-gantt-muted-fg);
 }
 
 .fvoci-gantt__row-label {
-	display: flex;
-	flex-direction: column;
-	justify-content: center;
-	align-items: stretch;
-	width: 100%;
-	padding-inline: 0.75rem;
-	padding-block: 0.2rem;
-	border: 0;
-	border-bottom: 1px solid var(--fvoci-gantt-grid-color);
-	background: transparent;
-	color: inherit;
-	font: inherit;
-	font-size: var(--fvoci-gantt-font-size-bar);
-	font-weight: 500;
-	text-align: start;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  width: 100%;
+  padding-inline: 0.75rem;
+  padding-block: 0.2rem;
+  border: 0;
+  border-bottom: 1px solid var(--fvoci-gantt-grid-color);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--fvoci-gantt-font-size-bar);
+  font-weight: 500;
+  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
 }
 
 .fvoci-gantt__row-label:hover {
-	background: var(--accent, var(--fvoci-gantt-bar-bg));
+  background: var(--accent, var(--fvoci-gantt-bar-bg));
 }
 
 .fvoci-gantt__row-label:focus-visible {
-	outline: none;
-	box-shadow: inset 0 0 0 2px var(--fvoci-gantt-ring);
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--fvoci-gantt-ring);
 }
 
 .fvoci-gantt__row-label--selected {
-	background: var(--fvoci-gantt-bar-selected-bg);
+  background: var(--fvoci-gantt-bar-selected-bg);
 }
 
 .fvoci-gantt__board {
-	min-width: 0;
-	overflow-x: auto;
-	overflow-y: hidden;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 @media (prefers-reduced-motion: no-preference) {
-	:where(.fvoci-gantt) {
-		--fvoci-gantt-motion: 150ms ease;
-	}
+  :where(.fvoci-gantt) {
+    --fvoci-gantt-motion: 150ms ease;
+  }
 }
 
 .fvoci-gantt__bar-label {
-	font-size: var(--fvoci-gantt-font-size-bar);
-	font-weight: 500;
-	fill: var(--fvoci-gantt-bar-fg);
-	pointer-events: none;
+  font-size: var(--fvoci-gantt-font-size-bar);
+  font-weight: 500;
+  fill: var(--fvoci-gantt-bar-fg);
+  pointer-events: none;
 }
 
 .fvoci-gantt__bar-label--outside {
-	fill: var(--fvoci-gantt-muted-fg);
+  fill: var(--fvoci-gantt-muted-fg);
 }
 
 .fvoci-gantt__header {
-	font-size: var(--fvoci-gantt-font-size-header);
-	color: var(--fvoci-gantt-muted-fg);
+  font-size: var(--fvoci-gantt-font-size-header);
+  color: var(--fvoci-gantt-muted-fg);
 }
 
 .fvoci-gantt__tick {
-	font-size: var(--fvoci-gantt-font-size-tick);
-	color: var(--fvoci-gantt-muted-fg);
+  font-size: var(--fvoci-gantt-font-size-tick);
+  color: var(--fvoci-gantt-muted-fg);
 }
 
 .fvoci-gantt__bar--inferred {
-	background: var(--fvoci-gantt-bar-inferred-bg);
-	border-style: dashed;
+  background: var(--fvoci-gantt-bar-inferred-bg);
+  border-style: dashed;
 }
 
 .fvoci-gantt__col--offduty {
-	background: var(--fvoci-gantt-offduty-bg);
+  background: var(--fvoci-gantt-offduty-bg);
 }
 
 .fvoci-gantt__day--today {
-	background: var(--fvoci-gantt-today-bg);
-	box-shadow: inset 0 0 0 1px
-		color-mix(in oklch, var(--fvoci-gantt-today-line) 35%, transparent);
+  background: var(--fvoci-gantt-today-bg);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--fvoci-gantt-today-line) 35%, transparent);
 }
 
 .fvoci-gantt__header {
-	position: relative;
-	height: calc(var(--fvoci-gantt-lane-height) * 1.4);
-	border-bottom: 1px solid var(--fvoci-gantt-grid-color);
+  position: relative;
+  height: calc(var(--fvoci-gantt-lane-height) * 1.4);
+  border-bottom: 1px solid var(--fvoci-gantt-grid-color);
 }
 
 .fvoci-gantt__header .fvoci-gantt__month {
-	position: absolute;
-	top: 0;
-	height: 50%;
-	padding-inline-start: 0.25rem;
-	font-size: var(--fvoci-gantt-font-size-header);
-	font-weight: 500;
-	color: var(--fvoci-gantt-muted-fg);
-	white-space: nowrap;
-	overflow: hidden;
-	border-left: 1px solid var(--fvoci-gantt-grid-color);
+  position: absolute;
+  top: 0;
+  height: 50%;
+  padding-inline-start: 0.25rem;
+  font-size: var(--fvoci-gantt-font-size-header);
+  font-weight: 500;
+  color: var(--fvoci-gantt-muted-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  border-left: 1px solid var(--fvoci-gantt-grid-color);
 }
 
 .fvoci-gantt__header .fvoci-gantt__tick {
-	position: absolute;
-	top: 50%;
-	height: 50%;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	border-left: 1px solid var(--fvoci-gantt-grid-color);
-	white-space: nowrap;
-	overflow: hidden;
+  position: absolute;
+  top: 50%;
+  height: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-left: 1px solid var(--fvoci-gantt-grid-color);
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .fvoci-gantt__tick-today {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 1.25rem;
-	height: 1.25rem;
-	border-radius: 9999px;
-	background: var(--fvoci-gantt-today-line);
-	color: var(--primary-foreground, var(--background));
-	font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 9999px;
+  background: var(--fvoci-gantt-today-line);
+  color: var(--primary-foreground, var(--background));
+  font-weight: 600;
 }
 
 .fvoci-gantt__bar-rect {
-	fill: var(--fvoci-gantt-bar-bg);
-	stroke: var(--fvoci-gantt-bar-border);
+  fill: var(--fvoci-gantt-bar-bg);
+  stroke: var(--fvoci-gantt-bar-border);
 }
 
 .fvoci-gantt__milestone {
-	fill: var(--fvoci-gantt-bar-border);
+  fill: var(--fvoci-gantt-bar-border);
 }
 
 .fvoci-gantt__link {
-	stroke: var(--fvoci-gantt-link-color);
-	stroke-width: 2;
-	stroke-linecap: round;
-	stroke-linejoin: round;
-	fill: none;
-	pointer-events: none;
+  stroke: var(--fvoci-gantt-link-color);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  pointer-events: none;
 }
 
 .fvoci-gantt__link-head {
-	fill: var(--fvoci-gantt-link-color);
+  fill: var(--fvoci-gantt-link-color);
 }
 
 .fvoci-gantt__row-rule {
-	stroke: var(--fvoci-gantt-grid-color);
-	stroke-width: 1;
+  stroke: var(--fvoci-gantt-grid-color);
+  stroke-width: 1;
 }
 
 .fvoci-gantt__today-line {
-	stroke: var(--fvoci-gantt-today-line);
-	stroke-width: 1.5;
-	stroke-dasharray: 3 3;
-	opacity: 0.7;
+  stroke: var(--fvoci-gantt-today-line);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 3;
+  opacity: 0.7;
 }
 
 .fvoci-gantt__bar--inferred .fvoci-gantt__bar-rect {
-	fill: var(--fvoci-gantt-bar-inferred-bg);
-	stroke-dasharray: 3 2;
+  fill: var(--fvoci-gantt-bar-inferred-bg);
+  stroke-dasharray: 3 2;
 }
 
 .fvoci-gantt__bar--selected .fvoci-gantt__bar-rect,
 .fvoci-gantt__bar--selected .fvoci-gantt__milestone {
-	fill: var(--fvoci-gantt-bar-selected-bg);
-	stroke: var(--primary, currentColor);
+  fill: var(--fvoci-gantt-bar-selected-bg);
+  stroke: var(--primary, currentColor);
 }
 
 svg.fvoci-gantt__canvas rect.fvoci-gantt__col--offduty {
-	fill: var(--fvoci-gantt-offduty-bg);
+  fill: var(--fvoci-gantt-offduty-bg);
 }
 
 svg.fvoci-gantt__canvas rect.fvoci-gantt__today-band {
-	fill: var(--fvoci-gantt-today-bg);
+  fill: var(--fvoci-gantt-today-bg);
 }
 
 .fvoci-gantt__hit {
-	cursor: pointer;
+  cursor: pointer;
 }
 
 .fvoci-gantt__bar[role="button"] {
-	cursor: pointer;
+  cursor: pointer;
 }
 
 .fvoci-gantt[data-bar-edit] .fvoci-gantt__bar {
-	user-select: none;
+  user-select: none;
 }
 
 .fvoci-gantt[data-bar-edit] .fvoci-gantt__bar-rect,
 .fvoci-gantt[data-bar-edit] .fvoci-gantt__milestone {
-	cursor: grab;
-	touch-action: none;
+  cursor: grab;
+  touch-action: none;
 }
 
 .fvoci-gantt[data-bar-edit] .fvoci-gantt__bar--live .fvoci-gantt__bar-rect,
 .fvoci-gantt[data-bar-edit] .fvoci-gantt__bar--live .fvoci-gantt__milestone {
-	cursor: grabbing;
+  cursor: grabbing;
 }
 
 .fvoci-gantt__handle {
-	fill: color-mix(in oklch, var(--fvoci-gantt-bar-border) 70%, transparent);
-	cursor: ew-resize;
-	touch-action: none;
+  fill: color-mix(in oklch, var(--fvoci-gantt-bar-border) 70%, transparent);
+  cursor: ew-resize;
+  touch-action: none;
 }
 
 /* The bar group spans its whole lane (the row hit area), so the browser's own
    focus ring would outline the lane; focus is shown on the bar itself. */
 .fvoci-gantt__bar[role="button"]:focus {
-	outline: none;
+  outline: none;
 }
 
 .fvoci-gantt__bar[role="button"]:focus-visible .fvoci-gantt__bar-rect,
 .fvoci-gantt__bar[role="button"]:focus-visible .fvoci-gantt__milestone {
-	stroke: var(--fvoci-gantt-ring-contrast);
-	stroke-width: 2;
-	filter: drop-shadow(
-		0 0 3px color-mix(in oklch, var(--fvoci-gantt-ring) 45%, transparent)
-	);
+  stroke: var(--fvoci-gantt-ring-contrast);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 3px color-mix(in oklch, var(--fvoci-gantt-ring) 45%, transparent));
 }
 
 /*
@@ -328,7 +306,7 @@ svg.fvoci-gantt__canvas rect.fvoci-gantt__today-band {
  * 조건은 화면 폭이 아니라 포인터다 — 태블릿은 데스크톱만큼 넓어 폭으로는 갈리지 않는다.
  */
 @media (pointer: coarse) {
-	:where(.fvoci-gantt) {
-		--fvoci-gantt-lane-height: 3.75rem;
-	}
+  :where(.fvoci-gantt) {
+    --fvoci-gantt-lane-height: 3.75rem;
+  }
 }

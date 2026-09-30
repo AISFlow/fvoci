@@ -53,7 +53,9 @@ watch(invalidCursor, (invalid) => {
 });
 
 function accepts(row: CollectionQueryItem | null): boolean {
-  return !props.moving && row !== null && moveRequest(props.config.groupBy, row, props.group) !== null;
+  return (
+    !props.moving && row !== null && moveRequest(props.config.groupBy, row, props.group) !== null
+  );
 }
 
 function onDragStart(event: DragEvent, row: CollectionQueryItem, movable: boolean): void {
@@ -90,7 +92,9 @@ function onDrop(event: DragEvent): void {
 }
 
 function onSelectMove(row: CollectionQueryItem, event: Event): void {
-  const target = props.groups.find((item) => (item.id ?? "") === (event.target as HTMLSelectElement).value);
+  const target = props.groups.find(
+    (item) => (item.id ?? "") === (event.target as HTMLSelectElement).value,
+  );
   if (target) emit("move", row, target);
 }
 </script>
@@ -115,7 +119,9 @@ function onSelectMove(row: CollectionQueryItem, event: Event): void {
       :message="loadErrorMessage(pages.error.value)"
       @retry="pages.refetch()"
     />
-    <p v-else-if="pages.data.value && rows.length === 0" class="text-sm text-muted">{{ t("collection.emptyPage") }}</p>
+    <p v-else-if="pages.data.value && rows.length === 0" class="text-sm text-muted">{{
+      t("collection.emptyPage")
+    }}</p>
     <ul v-else-if="pages.data.value" class="flex flex-col gap-2">
       <li
         v-for="row in rows"
@@ -142,12 +148,17 @@ function onSelectMove(row: CollectionQueryItem, event: Event): void {
             :value="choice.id ?? ''"
             :disabled="choice.disabled && choice.id !== row.group"
           >
-            {{ choice.name || t("collection.unassigned") }}{{ choice.disabled ? ` · ${t("collection.archived")}` : "" }}
+            {{ choice.name || t("collection.unassigned")
+            }}{{ choice.disabled ? ` · ${t("collection.archived")}` : "" }}
           </option>
         </select>
       </li>
     </ul>
-    <p v-if="pages.isFetchNextPageError.value && !invalidCursor" role="alert" class="text-sm text-error">
+    <p
+      v-if="pages.isFetchNextPageError.value && !invalidCursor"
+      role="alert"
+      class="text-sm text-error"
+    >
       {{ t("search.loadMoreError") }}
     </p>
     <UButton
