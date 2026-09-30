@@ -1,3 +1,4 @@
+import type { components } from "../src/generated/api";
 import {
   devices,
   expect,
@@ -25,10 +26,12 @@ export { createE2eUser } from "../e2e/helpers";
 export { expect };
 
 export const test = base.extend<
-  { baseURL: string; recycleCollab: void },
+  { baseURL: string; recycleCollab: undefined },
   { collabApp: OwnedServer }
 >({
   collabApp: [
+    // Playwright parses this destructured parameter; the fixture has no dependencies.
+    // eslint-disable-next-line no-empty-pattern -- required dependency-free Playwright fixture syntax
     async ({}, use) => {
       const server = await startOwnedServer();
       try {
@@ -41,7 +44,7 @@ export const test = base.extend<
   ],
   recycleCollab: [
     async ({ collabApp }, use) => {
-      await use();
+      await use(undefined);
       await collabApp.recycle();
     },
     { auto: true },
@@ -125,7 +128,7 @@ export function attachmentNodeCount(shape: EditorShape): number {
 
 export async function ensureCollabFixture(page: Page): Promise<void> {
   const setupRes = await page.request.get("/api/v1/setup");
-  expect(setupRes.ok(), `setup status failed: ${setupRes.status()}`).toBe(true);
+  expect(setupRes.ok(), `setup status failed: ${String(setupRes.status())}`).toBe(true);
   const setup = (await setupRes.json()) as { needed: boolean };
   if (setup.needed) {
     await page.goto("/setup");
@@ -228,9 +231,11 @@ export async function sessionCookie(context: BrowserContext): Promise<string> {
 export async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
-  const workspacesBody = await workspacesRes.json();
-  const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
+  const workspacesBody =
+    (await workspacesRes.json()) as components["schemas"]["WorkspaceListResponse"];
+  const workspace = workspacesBody.items.find((item) => item.slug === slug);
   expect(workspace).toBeTruthy();
+  if (!workspace) throw new Error(`workspace fixture missing: ${slug}`);
   return workspace.id;
 }
 
@@ -247,7 +252,8 @@ export async function createWikiDoc(page: Page, title: string): Promise<WikiDoc>
     data: { parentId: null, title },
   });
   expect(res.ok()).toBe(true);
-  const body = await res.json();
+  const body = (await res.json()) as components["schemas"]["DocumentMetaResponse"];
+  if (!body.displayId) throw new Error("document fixture response has no displayId");
   return {
     id: body.id,
     displayId: body.displayId,
@@ -271,7 +277,8 @@ export async function waitConnected(page: Page): Promise<void> {
       .innerText()
       .catch(() => "");
     throw new Error(
-      `collab not connected url=${page.url()} status=${status} collab=${JSON.stringify(collab)} cause=${String(error)}`,
+      `collab not connected url=${page.url()} status=${String(status)} collab=${JSON.stringify(collab)} cause=${String(error)}`,
+      { cause: error },
     );
   }
 }
@@ -438,21 +445,22 @@ export async function installCaretProbe(page: Page): Promise<void> {
       log.push(event);
       if (log.length > 240) log.splice(0, log.length - 240);
     };
-    const initialRoot = document.querySelector(".fvoci-editor .ProseMirror") as
-      (HTMLElement & { editor?: unknown }) | null;
+    const initialRoot = document.querySelector<HTMLElement & { editor?: unknown }>(
+      ".fvoci-editor .ProseMirror",
+    );
     const initialEditor = initialRoot?.editor;
     const snap = (kind: string, extra: Record<string, unknown> = {}) => {
-      const root = document.querySelector(".fvoci-editor .ProseMirror") as
-        | (HTMLElement & {
-            editor?: {
-              view: { posAtDOM(node: Node, offset: number): number };
-              state: {
-                selection: { from: number; to: number; empty: boolean };
-                doc: { textContent: string; content: { size: number } };
-              };
+      const root = document.querySelector<
+        HTMLElement & {
+          editor?: {
+            view: { posAtDOM(node: Node, offset: number): number };
+            state: {
+              selection: { from: number; to: number; empty: boolean };
+              doc: { textContent: string; content: { size: number } };
             };
-          })
-        | null;
+          };
+        }
+      >(".fvoci-editor .ProseMirror");
       const live = root?.editor;
       const native = window.getSelection();
       const anchor = native?.anchorNode ?? null;
@@ -493,7 +501,9 @@ export async function installCaretProbe(page: Page): Promise<void> {
       "input",
       () => {
         push(snap("input"));
-        queueMicrotask(() => push(snap("input-microtask")));
+        queueMicrotask(() => {
+          push(snap("input-microtask"));
+        });
       },
       true,
     );
@@ -527,32 +537,32 @@ export async function installCaretProbe(page: Page): Promise<void> {
       );
     });
     const attachEditor = () => {
-      const root = document.querySelector(".fvoci-editor .ProseMirror") as
-        | (HTMLElement & {
-            editor?: {
-              view: {
-                updateState: (state: unknown) => void;
-                posAtDOM(node: Node, offset: number): number;
-              };
-              on(
-                event: "transaction",
-                cb: (props: {
-                  transaction: {
-                    getMeta(key: string): unknown;
-                    docChanged: boolean;
-                    selectionSet: boolean;
-                  };
-                  editor: {
-                    state: {
-                      selection: { from: number; to: number; empty: boolean };
-                      doc: { textContent: string; content: { size: number } };
-                    };
-                  };
-                }) => void,
-              ): void;
+      const root = document.querySelector<
+        HTMLElement & {
+          editor?: {
+            view: {
+              updateState: (state: unknown) => void;
+              posAtDOM(node: Node, offset: number): number;
             };
-          })
-        | null;
+            on(
+              event: "transaction",
+              cb: (props: {
+                transaction: {
+                  getMeta(key: string): unknown;
+                  docChanged: boolean;
+                  selectionSet: boolean;
+                };
+                editor: {
+                  state: {
+                    selection: { from: number; to: number; empty: boolean };
+                    doc: { textContent: string; content: { size: number } };
+                  };
+                };
+              }) => void,
+            ): void;
+          };
+        }
+      >(".fvoci-editor .ProseMirror");
       const live = root?.editor;
       if (!live) return;
       if (!host.__fvociCaretProbeView) {
@@ -653,7 +663,8 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
     const position = editor.view.posAtDOM(text, offset);
     // A click inside an edge glyph can land on either side of that glyph.
     // Keep the fallback inside this text; document Home/End can cross empty tables.
-    const glyph = edge === "start" ? Array.from(text.data)[0] : Array.from(text.data).at(-1)!;
+    const glyph = edge === "start" ? Array.from(text.data)[0] : Array.from(text.data).at(-1);
+    if (!glyph) throw new Error("content caret requires a nonempty edge glyph");
     const adjacentOffset = edge === "start" ? glyph.length : text.length - glyph.length;
     const adjacentPosition = editor.view.posAtDOM(text, adjacentOffset);
     text.parentElement?.scrollIntoView({ block: "center", inline: "nearest" });
@@ -870,7 +881,7 @@ export async function expectAwarenessTokenNotSession(
     .poll(() => log.sent.find((frame) => frame.kind === "auth-token") ?? null)
     .not.toBeNull();
   const auth = log.sent.find((frame) => frame.kind === "auth-token");
-  if (!auth || auth.kind !== "auth-token") {
+  if (!auth) {
     throw new Error("missing auth-token frame");
   }
   expect(auth.token).toMatch(/^\d+$/);
@@ -939,7 +950,8 @@ export async function insertSlashAttachment(
 export async function storedAttachmentDownloadBytes(page: Page): Promise<Buffer> {
   const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
   expect(href).toBeTruthy();
-  const response = await page.request.get(href!);
+  if (!href) throw new Error("stored attachment has no download href");
+  const response = await page.request.get(href);
   expect(response.ok()).toBe(true);
   return response.body();
 }

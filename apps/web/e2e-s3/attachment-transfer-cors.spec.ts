@@ -74,15 +74,13 @@ test("storage CORS for another origin fails the presigned upload without an API 
   });
 
   const panel = page.getByRole("region", { name: "첨부" });
-  await panel
-    .getByLabel("파일 첨부")
-    .setInputFiles([
-      {
-        name: "blocked.txt",
-        mimeType: "text/plain",
-        buffer: Buffer.from("never stored\n", "utf8"),
-      },
-    ]);
+  await panel.getByLabel("파일 첨부").setInputFiles([
+    {
+      name: "blocked.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("never stored\n", "utf8"),
+    },
+  ]);
   // The pipeline's error for a transfer that never reached storage.
   await expect(panel.getByRole("alert")).toHaveText("연결을 확인하고 다시 시도해 주세요.", {
     timeout: 60_000,

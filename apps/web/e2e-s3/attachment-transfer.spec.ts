@@ -71,7 +71,7 @@ async function pageFetchOutcome(page: Page, url: string, init: FetchInit): Promi
       try {
         const res = await fetch(url, init);
         await res.arrayBuffer();
-        return `status ${res.status}`;
+        return `status ${String(res.status)}`;
       } catch (err) {
         return `rejected: ${err instanceof Error ? err.name : String(err)}`;
       }
@@ -207,12 +207,12 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
   const start = PART_SIZE - 10;
   const end = PART_SIZE + 9;
   const ranged = await pageFetch(page, bigHref as string, {
-    headers: { Range: `bytes=${start}-${end}` },
+    headers: { Range: `bytes=${String(start)}-${String(end)}` },
   });
   expect(ranged).toMatchObject({
     status: 206,
     redirected: true,
-    range: `bytes ${start}-${end}/${big.length}`,
+    range: `bytes ${String(start)}-${String(end)}/${String(big.length)}`,
     length: 20,
     sha: sha256(big.subarray(start, end + 1)),
   });

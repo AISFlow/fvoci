@@ -102,7 +102,8 @@ async function kcAdmin(path: string, init: RequestInit = {}): Promise<Response> 
       }),
     },
   );
-  if (!tokenResponse.ok) throw new Error(`Keycloak admin token: HTTP ${tokenResponse.status}`);
+  if (!tokenResponse.ok)
+    throw new Error(`Keycloak admin token: HTTP ${String(tokenResponse.status)}`);
   const { access_token: token } = (await tokenResponse.json()) as { access_token: string };
   return fetch(`${c.keycloakOrigin}/admin/realms/${c.realm}${path}`, {
     ...init,
@@ -121,7 +122,9 @@ async function kcClient(): Promise<KcClient> {
   expect(response.status).toBe(200);
   const clients = (await response.json()) as KcClient[];
   expect(clients).toHaveLength(1);
-  return clients[0];
+  const client = clients[0];
+  if (!client) throw new Error("expected Keycloak client fixture missing");
+  return client;
 }
 
 /** Registers the one redirect URI this server generates (its port is chosen at start). */
@@ -200,7 +203,9 @@ async function kcUserId(username: string): Promise<string> {
   const response = await kcAdmin(`/users?exact=true&username=${encodeURIComponent(username)}`);
   const users = (await response.json()) as Array<{ id: string }>;
   expect(users).toHaveLength(1);
-  return users[0].id;
+  const user = users[0];
+  if (!user) throw new Error("expected Keycloak user fixture missing");
+  return user.id;
 }
 
 async function kcSessionCount(username: string): Promise<number> {
@@ -605,7 +610,7 @@ async function watchPosts(page: Page, urls: readonly string[]) {
 /** The server log without terminal colour codes. */
 function serverLogLines(path: string): string[] {
   return readFileSync(path, "utf8")
-    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), "")
     .split("\n");
 }
 
@@ -664,10 +669,10 @@ async function prepareInstance(browser: Browser): Promise<void> {
     maxRedirects: 0,
   });
   expect(sso.status()).toBe(302);
-  expect(new URL(sso.headers().location, fvociOrigin).pathname).toBe("/login");
-  expect(new URL(sso.headers().location, fvociOrigin).searchParams.get("error")).toBe(
-    "provider_not_configured",
-  );
+  const location = sso.headers().location;
+  if (!location) throw new Error("workspace SSO redirect has no Location header");
+  expect(new URL(location, fvociOrigin).pathname).toBe("/login");
+  expect(new URL(location, fvociOrigin).searchParams.get("error")).toBe("provider_not_configured");
   observe("unentitledWorkspaceSso", {
     workspaceSso: false,
     status: sso.status(),
@@ -842,6 +847,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     });
     expect(userCount()).toBe(1);
     expect(csp).toEqual([]);
+    if (!link) throw new Error("expected Keycloak identity link missing");
     observe("B_link", {
       callback: "/settings/account?linked=1",
       linkIssuerEqualsConfiguredIssuer: link.issuer === config().issuer,
@@ -934,7 +940,10 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       });
       const body = (await response.json()) as { authorizationUrl?: string };
       const target = body.authorizationUrl;
-      if (target) setTimeout(() => window.location.assign(target), 0);
+      if (target)
+        setTimeout(() => {
+          window.location.assign(target);
+        }, 0);
       return response.status;
     });
     expect(started).toBe(200);
@@ -1301,7 +1310,7 @@ window.post = async (url, body) => {
       response.end(html);
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const otherOrigin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const otherOrigin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
     const network = await watchPosts(page, [linkUrl, startUrl]);
     try {
       await page.goto(`${otherOrigin}/`);
@@ -1374,7 +1383,11 @@ window.post = async (url, body) => {
       observe("F_cross_origin", { otherOrigin, sameSite: true, ...refused, statesIssued: 0 });
     } finally {
       await network.stop();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) =>
+        server.close(() => {
+          resolve();
+        }),
+      );
       await context.close();
     }
   });

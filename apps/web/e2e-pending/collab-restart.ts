@@ -68,13 +68,13 @@ export function ownedServerChildEnv(
     if (value !== undefined && value !== "") env[key] = value;
   }
   for (const key of CHILD_ENV_DENY) {
-    delete env[key];
+    Reflect.deleteProperty(env, key);
   }
   env.FVOCI_BIND = bind;
   env.FVOCI_PUBLIC_ORIGIN = `http://${bind}`;
   if (options.maxRooms !== undefined) {
     if (!Number.isInteger(options.maxRooms) || options.maxRooms < 1) {
-      throw new Error(`maxRooms must be a positive integer, got ${options.maxRooms}`);
+      throw new Error(`maxRooms must be a positive integer, got ${String(options.maxRooms)}`);
     }
     env.FVOCI_COLLAB_MAX_ROOMS = String(options.maxRooms);
   }
@@ -83,7 +83,7 @@ export function ownedServerChildEnv(
 
 export function readProcMember(pid: number): ProcMember | null {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
     const close = stat.lastIndexOf(")");
     if (close < 0) return null;
     const comm = stat.slice(stat.indexOf("(") + 1, close);
@@ -101,7 +101,7 @@ export function readProcMember(pid: number): ProcMember | null {
 
 export function processGroupMembers(pgid: number): ProcMember[] {
   const members: ProcMember[] = [];
-  let names: string[] = [];
+  let names: string[];
   try {
     names = readdirSync("/proc");
   } catch {
@@ -111,7 +111,7 @@ export function processGroupMembers(pgid: number): ProcMember[] {
     if (!/^\d+$/.test(name)) continue;
     const pid = Number(name);
     try {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
       const close = stat.lastIndexOf(")");
       if (close < 0) continue;
       const comm = stat.slice(stat.indexOf("(") + 1, close);
@@ -147,7 +147,7 @@ export function signalOwnedMember(member: ProcMember): void {
   const now = readProcMember(member.pid);
   if (now == null) return;
   if (now.starttime !== member.starttime) {
-    throw new Error(`cannot prove ownership of pid ${member.pid}`);
+    throw new Error(`cannot prove ownership of pid ${String(member.pid)}`);
   }
   try {
     process.kill(member.pid, "SIGKILL");
@@ -186,7 +186,7 @@ export function signalOwnedGroup(pgid: number, owners: readonly ProcMember[]): v
       ),
     )
   ) {
-    throw new Error(`cannot prove ownership of process group ${pgid}`);
+    throw new Error(`cannot prove ownership of process group ${String(pgid)}`);
   }
   try {
     process.kill(-pgid, "SIGKILL");
@@ -357,7 +357,7 @@ export class OwnedServer {
       mkdirSync(root, { recursive: true });
       this.runDir = join(
         root,
-        `collab-server-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        `collab-server-${String(process.pid)}-${String(Date.now())}-${Math.random().toString(16).slice(2)}`,
       );
       mkdirSync(this.runDir, { recursive: true, mode: 0o700 });
       this.storageDir = join(this.runDir, "storage");
@@ -379,8 +379,12 @@ export class OwnedServer {
     this.child = child;
     this.pgid = child.pid;
     this.parentPid = child.pid;
-    child.stdout?.on("data", (chunk) => this.appendLog(chunk));
-    child.stderr?.on("data", (chunk) => this.appendLog(chunk));
+    child.stdout.on("data", (chunk: Buffer) => {
+      this.appendLog(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      this.appendLog(chunk);
+    });
     child.once("exit", () => {
       if (this.child === child) this.child = null;
     });
@@ -403,6 +407,7 @@ export class OwnedServer {
       const match = LISTEN_RE.exec(this.logs);
       if (match) {
         const url = match[1];
+        if (!url) throw new Error("listen regex matched without URL");
         const bound = url.replace("http://", "");
         if (expectedBind && bound !== expectedBind) {
           await this.killGroupObserved();

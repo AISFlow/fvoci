@@ -1,3 +1,4 @@
+import type { components } from "../src/generated/api";
 /**
  * The Vue wiki page's collab room against the owned server
  * (collab-restart.ts): across a restart, where it stops gracefully and comes
@@ -87,7 +88,9 @@ test("after a collab restart the same editor reconnects with its unsent edits", 
       `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`,
     );
     expect(body.ok()).toBe(true);
-    expect(JSON.stringify((await body.json()).contentJson)).toContain("끊긴 동안 쓴 문장");
+    expect(
+      JSON.stringify(((await body.json()) as components["schemas"]["BodyResponse"]).contentJson),
+    ).toContain("끊긴 동안 쓴 문장");
 
     await pageB.reload();
     await waitConnected(pageB);

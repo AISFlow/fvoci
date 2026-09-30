@@ -21,7 +21,7 @@ function hexBytes(hex: string): Uint8Array {
   return out;
 }
 
-test("decoder keeps provider 4.6 persist strings and awareness token", () => {
+await test("decoder keeps provider 4.6 persist strings and awareness token", () => {
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
     pins: { "@hocuspocus/provider": string; yjs: string };
     clientID: number;
@@ -40,7 +40,7 @@ test("decoder keeps provider 4.6 persist strings and awareness token", () => {
 
   const auth = decodeHocuspocusFrame(hexBytes(byId.get("auth_token_client") ?? ""));
   assert.equal(auth?.kind, "auth-token");
-  if (auth?.kind === "auth-token") {
+  {
     assert.equal(auth.token, String(fixture.clientID));
     assert.equal(auth.providerVersion, PROVIDER_VERSION);
     assert.notEqual(auth.token, "fvoci_session");
@@ -48,11 +48,11 @@ test("decoder keeps provider 4.6 persist strings and awareness token", () => {
 
   const readonly = decodeHocuspocusFrame(hexBytes(byId.get("auth_authenticated_readonly") ?? ""));
   assert.equal(readonly?.kind, "auth-scope");
-  if (readonly?.kind === "auth-scope") assert.equal(readonly.scope, "readonly");
+  assert.equal(readonly.scope, "readonly");
 
   const persist = decodeHocuspocusFrame(hexBytes(byId.get("stateless_persist") ?? ""));
   assert.equal(persist?.kind, "stateless");
-  if (persist?.kind === "stateless") {
+  {
     assert.deepEqual(persistParts(persist.payload), {
       kind: "request",
       id: "33333333-3333-4333-8333-333333333333",
@@ -62,7 +62,7 @@ test("decoder keeps provider 4.6 persist strings and awareness token", () => {
 
   const done = decodeHocuspocusFrame(hexBytes(byId.get("stateless_persisted") ?? ""));
   assert.equal(done?.kind, "stateless");
-  if (done?.kind === "stateless") {
+  {
     assert.deepEqual(persistParts(done.payload), {
       kind: "done",
       id: "33333333-3333-4333-8333-333333333333",
@@ -72,7 +72,7 @@ test("decoder keeps provider 4.6 persist strings and awareness token", () => {
 
   const failed = decodeHocuspocusFrame(hexBytes(byId.get("stateless_persist_failed") ?? ""));
   assert.equal(failed?.kind, "stateless");
-  if (failed?.kind === "stateless") {
+  {
     assert.deepEqual(persistParts(failed.payload), {
       kind: "failed",
       id: "33333333-3333-4333-8333-333333333333",

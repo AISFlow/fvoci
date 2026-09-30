@@ -46,6 +46,7 @@ class Cursor {
   readByte(): number {
     if (this.pos >= this.input.length) throw new Error("truncated");
     const byte = this.input[this.pos];
+    if (byte === undefined) throw new Error("truncated");
     this.pos += 1;
     return byte;
   }
@@ -125,6 +126,8 @@ export function persistParts(
   if (!match) return null;
   const prefix = match[1];
   const id = match[2];
+  if (prefix === undefined || id === undefined)
+    throw new Error("persist regex matched without captures");
   if (prefix === COLLAB_PERSIST_REQUEST) return { kind: "request", id };
   if (prefix === COLLAB_PERSIST_DONE) return { kind: "done", id };
   return { kind: "failed", id };

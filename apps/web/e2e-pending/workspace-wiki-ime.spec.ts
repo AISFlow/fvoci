@@ -1,3 +1,4 @@
+import type { components } from "../src/generated/api";
 /**
  * #258: Korean IME composition in blocks that have no UniqueID yet, on the
  * wiki page. Blocks of a body the server seeded (body PUT, imports) and
@@ -52,7 +53,7 @@ import {
 const imePeer = { ...peer, email: "collab-ime-peer@example.com" };
 
 /** The seeded body: blocks without ids, as the server stores a PUT body. */
-const SEED = ["첫 문단", "둘째 문단", ""];
+const SEED: [string, string, string] = ["첫 문단", "둘째 문단", ""];
 
 type Where = "end" | "empty" | "mid";
 /** Where each case composes: top-level block and character offset. */
@@ -63,7 +64,7 @@ const CARET: Record<Where, { block: number; offset: number }> = {
 };
 
 /** The seed with `typed` inserted at the case's caret. */
-function seedWith(where: Where, typed: string, texts = SEED): string[] {
+function seedWith(where: Where, typed: string, texts: string[] = SEED): string[] {
   const { block, offset } = CARET[where];
   return texts.map((text, i) =>
     i === block ? text.slice(0, offset) + typed + text.slice(offset) : text,
@@ -218,10 +219,11 @@ test("native Home survives the pending editor focus repair before ArrowRight", a
     await editorLocator(page).evaluate((element) => {
       const root = element as HTMLElement & { editor: LiveEditor };
       const snapshot = () => {
-        const native = document.getSelection()!;
+        const native = document.getSelection();
+        if (!native?.anchorNode) throw new Error("native caret fixture has no anchor node");
         const model = root.editor.state.selection.$from;
         const browser = root.editor.state.doc.resolve(
-          root.editor.view.posAtDOM(native.anchorNode!, native.anchorOffset),
+          root.editor.view.posAtDOM(native.anchorNode, native.anchorOffset),
         );
         return {
           model: { block: model.index(0), offset: model.parentOffset },
@@ -258,7 +260,9 @@ test("native Home survives the pending editor focus repair before ArrowRight", a
         if (focusing && delay === 20 && typeof callback === "function") {
           if (repair) throw new Error("multiple editor focus-repair tasks");
           gate.captured = true;
-          repair = () => callback(...args);
+          repair = () => {
+            Reflect.apply(callback, undefined, args);
+          };
           timer = nativeTimeout(() => {}, delay);
           return timer;
         }
@@ -284,12 +288,10 @@ test("native Home survives the pending editor focus repair before ArrowRight", a
     const gate = await page.evaluate(
       () => (window as unknown as { __imeFocusRepair: unknown }).__imeFocusRepair,
     );
-    await test
-      .info()
-      .attach("native-home-focus-repair", {
-        body: JSON.stringify(gate),
-        contentType: "application/json",
-      });
+    await test.info().attach("native-home-focus-repair", {
+      body: JSON.stringify(gate),
+      contentType: "application/json",
+    });
     const expected = { model: { block: 1, offset: 0 }, browser: { block: 1, offset: 0 } };
     expect(gate).toEqual({ captured: true, delivered: true, before: expected, after: expected });
     // Deliberately no fixture navigation barrier between native keys.
@@ -353,7 +355,7 @@ for (const where of ["end", "empty", "mid"] as const) {
 
         await mark("ㅎ");
         await expect.poll(() => blockTexts(a)).toEqual(seedWith(where, "ㅎ"));
-        let texts = SEED;
+        let texts: string[] = SEED;
         if (remote) {
           texts = withRemote(SEED, peerBlock(where));
           await peerEdit(a, b, peerBlock(where), seedWith(where, "ㅎ", texts));
@@ -452,9 +454,11 @@ async function headedPage(
  * (the block gutter sits at its left edge). */
 async function xClickBlock(page: Page, index: number): Promise<void> {
   const block = editorLocator(page).locator(":scope > *").nth(index);
-  await block.evaluate((el) => el.scrollIntoView({ block: "center" }));
+  await block.evaluate((el) => {
+    el.scrollIntoView({ block: "center" });
+  });
   const box = await block.boundingBox();
-  if (!box) throw new Error(`block ${index} has no box`);
+  if (!box) throw new Error(`block ${String(index)} has no box`);
   const win = await page.evaluate(() => ({
     x: window.screenX + (window.outerWidth - window.innerWidth),
     y: window.screenY + (window.outerHeight - window.innerHeight),
@@ -490,7 +494,7 @@ test.describe("OS IME witness", () => {
       keys("g", "k", "s", "r", "m", "f", "space");
       // A contenteditable keeps a trailing space as U+00A0.
       await expect
-        .poll(() => a.page.locator("p").evaluate((p) => (p.textContent ?? "").replace(/ /g, " ")))
+        .poll(() => a.page.locator("p").evaluate((p) => p.textContent.replace(/\u00a0/g, " ")))
         .toBe("첫 문단한글 ");
     } finally {
       await a.browser.close();
@@ -522,7 +526,7 @@ test.describe("OS IME witness", () => {
           expect((await modelBlocks(a.page)).map((block) => block.id)).toEqual([null, null, null]);
           // The first composition right after placing the caret, with no pause.
           await xPlaceCaret(a.page, where);
-          let texts = SEED;
+          let texts: string[] = SEED;
           if (remote) {
             keys("g");
             await expect.poll(() => blockTexts(a.page)).toEqual(seedWith(where, "ㅎ"));
@@ -626,7 +630,9 @@ test.describe("OS IME witness", () => {
       const body = await a.page.request.get(
         `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`,
       );
-      expect(JSON.stringify((await body.json()).contentJson)).toContain("한글");
+      expect(
+        JSON.stringify(((await body.json()) as components["schemas"]["BodyResponse"]).contentJson),
+      ).toContain("한글");
 
       await ctxB.close();
       await collabApp.recycle();

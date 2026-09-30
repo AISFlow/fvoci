@@ -1,3 +1,4 @@
+import type { components } from "../src/generated/api";
 /**
  * Product /collab acceptance for two real FvociEditor clients.
  * Registered separately in the collaboration-flow CI job. Full product
@@ -101,7 +102,8 @@ test("content caret glyph fallback stays before a trailing empty table", async (
   const click = page.mouse.click.bind(page.mouse);
   page.mouse.click = async (_x, _y, options) => {
     const rect = await editor.evaluate((root) => {
-      const text = root.querySelector("p")!.firstChild!;
+      const text = root.querySelector("p")?.firstChild;
+      if (!text) throw new Error("selection fixture requires paragraph text");
       const range = document.createRange();
       range.setStart(text, 2);
       range.setEnd(text, 3);
@@ -141,7 +143,8 @@ for (const edge of ["start", "end"] as const) {
     const desired = edge === "start" ? 1 : 4;
     const adjacent = edge === "start" ? 2 : 3;
     const points = await editor.evaluate((root, edge) => {
-      const text = root.querySelector("p")!.firstChild!;
+      const text = root.querySelector("p")?.firstChild;
+      if (!text) throw new Error("selection fixture requires paragraph text");
       const range = document.createRange();
       range.setStart(text, edge === "start" ? 0 : 2);
       range.setEnd(text, edge === "start" ? 1 : 3);
@@ -229,7 +232,8 @@ for (const invalid of ["unrelated", "range"] as const) {
     let correctionKeys = 0;
     page.mouse.click = async (_x, _y, options) => {
       const point = await editor.evaluate((root) => {
-        const text = root.querySelector("p")!.firstChild!;
+        const text = root.querySelector("p")?.firstChild;
+        if (!text) throw new Error("selection fixture requires paragraph text");
         const range = document.createRange();
         range.setStart(text, 2);
         range.setEnd(text, 3);
@@ -305,7 +309,7 @@ test("insert and delete conflict keeps the insertion and applies the deletion", 
     await editorA.click();
     await pageA.keyboard.type("한글본문");
     await expectTokens(pageA, ["한글본문"]);
-    const editorB = await openEditor(pageB, doc.url);
+    await openEditor(pageB, doc.url);
     await expectTokens(pageB, ["한글본문"]);
     await Promise.all([installCaretProbe(pageA), installCaretProbe(pageB)]);
     try {
@@ -355,7 +359,7 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
     const editorA = await openEditor(pageA, doc.url);
     await editorA.click();
     await pageA.keyboard.type("안녕🙂세계");
-    const editorB = await openEditor(pageB, doc.url);
+    await openEditor(pageB, doc.url);
     await expectTokens(pageA, ["안녕🙂세계"]);
     await expectTokens(pageB, ["안녕🙂세계"]);
     await expectConverged(pageA, pageB);
@@ -669,7 +673,7 @@ test("membership revoke while connected stops further edits", async ({ browser, 
     await login(memberPage, peer.email, peer.password);
     const me = await memberPage.request.get("/api/v1/auth/me");
     expect(me.ok()).toBe(true);
-    const memberId = (await me.json()).userId as string;
+    const memberId = ((await me.json()) as components["schemas"]["SessionUserOutput"]).userId;
 
     await login(ownerPage, admin.email, admin.password);
     const doc = await createWikiDoc(ownerPage, "철회 문서");
@@ -851,11 +855,12 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   collabApp,
 }) => {
   const started = Date.now();
-  const phase = (name: string) =>
+  const phase = (name: string) => {
     console.info("crash recovery phase", {
       name,
       elapsedMs: Date.now() - started,
     });
+  };
   const logSelection = async (page: import("@playwright/test").Page, label: string) => {
     console.info("crash recovery selection", {
       label,
@@ -979,7 +984,7 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
       await openEditor(restoredB, url);
       await expectTokens(restoredB, ["살아남을한글"]);
       await expectTokensAbsent(restoredB, ["지울토큰XYZ"]);
-      await expect(await editorShape(restoredB)).toEqual(seeded);
+      expect(await editorShape(restoredB)).toEqual(seeded);
     });
     phase("second fresh client verified against DB structure");
 
@@ -1015,7 +1020,7 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
       await expectTokens(restoredB, ["살아남을한글", "후속A", "후속B"]);
       await expectConverged(restoredA, restoredB);
       await expectTokensAbsent(restoredA, ["지울토큰XYZ"]);
-      expect((await editorShape(restoredA)).table?.id).toBe(seeded?.table?.id);
+      expect((await editorShape(restoredA)).table?.id).toBe(seeded.table?.id);
     });
     phase("subsequent edits converged");
   } catch (error) {
@@ -1023,7 +1028,7 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     // Only frame categories: never print cookies, auth tokens or document data.
     for (const [client, wire] of restoredWires.entries()) {
       const category = (frame: (typeof wire.sent)[number]) =>
-        frame.kind === "other" ? `document-type-${frame.type}` : frame.kind;
+        frame.kind === "other" ? `document-type-${String(frame.type)}` : frame.kind;
       console.info("crash recovery fresh wire", {
         client,
         sentCount: wire.sent.length,
@@ -1092,13 +1097,14 @@ test("@ mention uses authorized suggestions and preserves the selected user afte
   const [members, groups] = await Promise.all([membersResponse, groupsResponse]);
   expect(members.status()).toBe(200);
   expect(groups.status()).toBe(200);
-  const body = await members.json();
-  const selected = body.items.find((item: { email: string }) => item.email === mentionPeer.email);
+  const body = (await members.json()) as components["schemas"]["MembersResponse"];
+  const selected = body.items.find((item) => item.email === mentionPeer.email);
   expect(selected).toMatchObject({
     givenName: mentionPeer.givenName,
     familyName: mentionPeer.familyName,
     role: "member",
   });
+  if (!selected) throw new Error("mention fixture member missing");
   expect(selected.userId).toMatch(UUID_RE);
   await expect(
     page.getByRole("listbox").getByRole("option", { name: mentionLabel, exact: true }),
@@ -1145,7 +1151,7 @@ test("@ mention member metadata denies guests, nonmembers and unauthenticated us
   for (const [email, password] of [
     ["collab-mention-guest@example.com", "guestpass1"],
     ["collab-mention-outsider@example.com", "outsiderpass1"],
-  ]) {
+  ] as const) {
     await login(page, email, password);
     const response = await page.request.get(path);
     expect(response.status()).toBe(404);
@@ -1208,6 +1214,7 @@ test("stored attachment bytes survive owned-server restart", async ({ page, coll
   await persistBody(page);
   const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
   expect(href).toBeTruthy();
+  if (!href) throw new Error("stored attachment has no download href");
   await collabApp.crashAndRestart();
   await page.reload();
   await waitConnected(page);
@@ -1235,7 +1242,7 @@ test("revoked member cannot download or create wiki attachments", async ({
     await login(memberPage, revokePeer.email, revokePeer.password);
     const me = await memberPage.request.get("/api/v1/auth/me");
     expect(me.ok()).toBe(true);
-    const memberId = (await me.json()).userId as string;
+    const memberId = ((await me.json()) as components["schemas"]["SessionUserOutput"]).userId;
 
     await login(ownerPage, admin.email, admin.password);
     const doc = await createWikiDoc(ownerPage, "첨부 철회");
@@ -1249,12 +1256,13 @@ test("revoked member cannot download or create wiki attachments", async ({
       .locator('.afn-attachment[data-state="stored"]')
       .getAttribute("href");
     expect(href).toBeTruthy();
+    if (!href) throw new Error("stored attachment has no download href");
 
     const ws = await workspaceId(ownerPage, admin.workspaceSlug);
     const revoke = await ownerPage.request.delete(`/api/v1/workspaces/${ws}/members/${memberId}`);
     expect(revoke.ok()).toBe(true);
 
-    const revokedDownload = await memberPage.request.get(href!);
+    const revokedDownload = await memberPage.request.get(href);
     expect(revokedDownload.status()).toBe(404);
     const revokedCreate = await memberPage.request.post(
       `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/uploads`,
@@ -1288,9 +1296,10 @@ test("guest attachment upload and download are denied by the product APIs", asyn
   });
   const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
   expect(href).toBeTruthy();
+  if (!href) throw new Error("stored attachment has no download href");
   await page.context().clearCookies();
   await login(page, "collab-attach-guest@example.com", "guestpass1");
-  const guestDownload = await page.request.get(href!);
+  const guestDownload = await page.request.get(href);
   expect(guestDownload.status()).toBe(404);
   const guestCreate = await page.request.post(
     `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/uploads`,
@@ -1381,7 +1390,7 @@ test("edit, create revision, restore, both peers see restored content after relo
     await login(pageB, member.email, member.password);
     const doc = await createWikiDoc(pageA, "개정 복원");
     const editorA = await openEditor(pageA, doc.url);
-    const editorB = await openEditor(pageB, doc.url);
+    await openEditor(pageB, doc.url);
     await editorA.click();
     await pageA.keyboard.type("개정 전 본문");
     await persistBody(pageA);
@@ -1403,7 +1412,7 @@ test("edit, create revision, restore, both peers see restored content after relo
       .poll(async () => (await editorShape(pageA)).text, { timeout: 15_000 })
       .not.toContain("그리고 더 작성");
     await expectConverged(pageA, pageB);
-    await expect((await editorShape(pageB)).text).toContain("개정 전 본문");
+    expect((await editorShape(pageB)).text).toContain("개정 전 본문");
     await pageA.reload();
     await waitConnected(pageA);
     expect((await editorShape(pageA)).text).toContain("개정 전 본문");

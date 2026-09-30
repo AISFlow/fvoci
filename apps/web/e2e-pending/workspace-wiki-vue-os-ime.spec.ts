@@ -1,3 +1,4 @@
+import type { components } from "../src/generated/api";
 /**
  * Opt-in OS IME witness for the Vue wiki page: real key events (XTEST, via
  * xdotool) through IBus Hangul (2-set) into headed Chromium, against the
@@ -116,9 +117,7 @@ test("control: the IME composes Korean in a plain contenteditable of the same br
     keys("g", "k", "s", "r", "m", "f", "space");
     // A contenteditable keeps a trailing space as U+00A0.
     await expect
-      .poll(() =>
-        a.page.locator("p").evaluate((p) => (p.textContent ?? "").replace(/\u00a0/g, " ")),
-      )
+      .poll(() => a.page.locator("p").evaluate((p) => p.textContent.replace(/\u00a0/g, " ")))
       .toBe("첫 문단한글 ");
   } finally {
     await a.browser.close();
@@ -227,7 +226,9 @@ test("a composition survives a peer's edit; preedit Backspace, undo, redo, save 
     const body = await a.page.request.get(
       `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`,
     );
-    expect(JSON.stringify((await body.json()).contentJson)).toContain(" 한글");
+    expect(
+      JSON.stringify(((await body.json()) as components["schemas"]["BodyResponse"]).contentJson),
+    ).toContain(" 한글");
 
     await ctxB.close();
     await collabApp.recycle();
