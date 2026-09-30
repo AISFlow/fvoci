@@ -352,7 +352,8 @@
 
 .document-revision-panel {
   position: absolute;
-  z-index: 20;
+  /* Keep revision actions above the editor's fixed/mobile toolbar (layer 20). */
+  z-index: 21;
   right: 0;
   top: calc(100% + 0.5rem);
   width: min(24rem, calc(100vw - 2rem));
