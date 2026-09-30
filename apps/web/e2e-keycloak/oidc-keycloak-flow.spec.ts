@@ -90,15 +90,18 @@ function config(): KcConfig {
 
 async function kcAdmin(path: string, init: RequestInit = {}): Promise<Response> {
   const c = config();
-  const tokenResponse = await fetch(`${c.keycloakOrigin}/realms/master/protocol/openid-connect/token`, {
-    method: "POST",
-    body: new URLSearchParams({
-      grant_type: "password",
-      client_id: "admin-cli",
-      username: c.admin.username,
-      password: c.admin.password,
-    }),
-  });
+  const tokenResponse = await fetch(
+    `${c.keycloakOrigin}/realms/master/protocol/openid-connect/token`,
+    {
+      method: "POST",
+      body: new URLSearchParams({
+        grant_type: "password",
+        client_id: "admin-cli",
+        username: c.admin.username,
+        password: c.admin.password,
+      }),
+    },
+  );
   if (!tokenResponse.ok) throw new Error(`Keycloak admin token: HTTP ${tokenResponse.status}`);
   const { access_token: token } = (await tokenResponse.json()) as { access_token: string };
   return fetch(`${c.keycloakOrigin}/admin/realms/${c.realm}${path}`, {
@@ -107,7 +110,11 @@ async function kcAdmin(path: string, init: RequestInit = {}): Promise<Response> 
   });
 }
 
-type KcClient = Record<string, unknown> & { id: string; redirectUris: string[]; webOrigins: string[] };
+type KcClient = Record<string, unknown> & {
+  id: string;
+  redirectUris: string[];
+  webOrigins: string[];
+};
 
 async function kcClient(): Promise<KcClient> {
   const response = await kcAdmin(`/clients?clientId=${encodeURIComponent(config().clientId)}`);
@@ -181,7 +188,10 @@ async function registerRedirectUri(): Promise<void> {
     expect(`${location.origin}${location.pathname}`).toBe(redirectUri);
     expect(answer.has("code")).toBe(false);
     expect(answer.get("error")).toBeTruthy();
-    refusals[name] = { error: answer.get("error"), error_description: answer.get("error_description") };
+    refusals[name] = {
+      error: answer.get("error"),
+      error_description: answer.get("error_description"),
+    };
   }
   observe("keycloakAuthorizationRefusals", refusals);
 }
@@ -225,7 +235,21 @@ function sql(query: string): string {
   const database = new URL(adminUrl).pathname.slice(1);
   return execFileSync(
     "docker",
-    ["exec", "-i", container, "psql", "-U", "postgres", "-d", database, "-v", "ON_ERROR_STOP=1", "-tA", "-c", query],
+    [
+      "exec",
+      "-i",
+      container,
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      database,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-tA",
+      "-c",
+      query,
+    ],
     { encoding: "utf8" },
   ).trim();
 }
@@ -237,7 +261,13 @@ function count(query: string): number {
 const userCount = () => count("SELECT count(*) FROM fvoci.users");
 const stateCount = () => count("SELECT count(*) FROM fvoci.oidc_states");
 
-type LinkRow = { user: string; provider: string; subject: string; issuer: string | null; email: string | null };
+type LinkRow = {
+  user: string;
+  provider: string;
+  subject: string;
+  issuer: string | null;
+  email: string | null;
+};
 
 function links(): LinkRow[] {
   return JSON.parse(
@@ -319,7 +349,10 @@ async function setupOwner(page: Page): Promise<void> {
 /** Owner's members settings: creates an invitation and returns its token. */
 async function inviteViaUi(page: Page, email: string): Promise<string> {
   await page.goto(`/w/${WORKSPACE.slug}/settings`);
-  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^멤버$/ })
+    .click();
   await page.getByLabel("초대할 이메일").fill(email);
   await page.getByRole("button", { name: "초대", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "초대를 만들었습니다" })).toBeVisible();
@@ -329,7 +362,9 @@ async function inviteViaUi(page: Page, email: string): Promise<string> {
   return token;
 }
 
-async function newPage(browser: Browser): Promise<{ context: BrowserContext; page: Page; csp: string[] }> {
+async function newPage(
+  browser: Browser,
+): Promise<{ context: BrowserContext; page: Page; csp: string[] }> {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
   return { context, page, csp: watchCspViolations(page) };
@@ -342,10 +377,15 @@ async function newPage(browser: Browser): Promise<{ context: BrowserContext; pag
  */
 function keycloakLeg(page: Page) {
   const authorizationEndpoint = `${config().issuer}/protocol/openid-connect/auth`;
-  const authorization = page.waitForRequest((r) => r.url().startsWith(`${authorizationEndpoint}?`), {
-    timeout: 30_000,
+  const authorization = page.waitForRequest(
+    (r) => r.url().startsWith(`${authorizationEndpoint}?`),
+    {
+      timeout: 30_000,
+    },
+  );
+  const callback = page.waitForRequest((r) => r.url().startsWith(`${redirectUri}?`), {
+    timeout: 60_000,
   });
-  const callback = page.waitForRequest((r) => r.url().startsWith(`${redirectUri}?`), { timeout: 60_000 });
   authorization.catch(() => undefined);
   callback.catch(() => undefined);
   return {
@@ -386,8 +426,13 @@ async function callbackResult(request: Request): Promise<{ status: number; locat
   return { status: response.status(), location: `${target.pathname}${target.search}` };
 }
 
-async function visitCallback(page: Page, url: string): Promise<{ status: number; location: string }> {
-  const request = page.waitForRequest((r) => r.url().startsWith(`${redirectUri}?`), { timeout: 30_000 });
+async function visitCallback(
+  page: Page,
+  url: string,
+): Promise<{ status: number; location: string }> {
+  const request = page.waitForRequest((r) => r.url().startsWith(`${redirectUri}?`), {
+    timeout: 30_000,
+  });
   await page.goto(url);
   return callbackResult(await request);
 }
@@ -397,7 +442,9 @@ async function visitCallback(page: Page, url: string): Promise<{ status: number;
  * also sees the redirect hop Keycloak answers with; Playwright's route does
  * not) and answers it locally, so the code and state stay unused.
  */
-async function holdCallback(page: Page): Promise<{ url: Promise<string>; release: () => Promise<void> }> {
+async function holdCallback(
+  page: Page,
+): Promise<{ url: Promise<string>; release: () => Promise<void> }> {
   const cdp = await page.context().newCDPSession(page);
   let held = false;
   let resolveUrl: (url: string) => void = () => undefined;
@@ -420,7 +467,9 @@ async function holdCallback(page: Page): Promise<{ url: Promise<string>; release
       })
       .catch(() => undefined);
   });
-  await cdp.send("Fetch.enable", { patterns: [{ urlPattern: `${redirectUri}*`, requestStage: "Request" }] });
+  await cdp.send("Fetch.enable", {
+    patterns: [{ urlPattern: `${redirectUri}*`, requestStage: "Request" }],
+  });
   return {
     url,
     release: async () => {
@@ -451,7 +500,10 @@ function linkButton(page: Page) {
 }
 
 /** Signs in with the provider from the login page; returns the user info. */
-async function providerSignIn(page: Page, user: KcUser | null): Promise<{ via: "form" | "sso"; me: Me }> {
+async function providerSignIn(
+  page: Page,
+  user: KcUser | null,
+): Promise<{ via: "form" | "sso"; me: Me }> {
   await openLogin(page);
   const leg = keycloakLeg(page);
   await clickProvider(page);
@@ -521,13 +573,17 @@ async function watchPosts(page: Page, urls: readonly string[]) {
         const sent = entry(event.networkId);
         try {
           const body = await cdp.send("Fetch.getResponseBody", { requestId: event.requestId });
-          const text = body.base64Encoded ? Buffer.from(body.body, "base64").toString("utf8") : body.body;
+          const text = body.base64Encoded
+            ? Buffer.from(body.body, "base64").toString("utf8")
+            : body.body;
           sent.code = (JSON.parse(text) as { code?: string }).code ?? null;
         } catch {
           sent.code = null;
         }
       }
-      await cdp.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => undefined);
+      await cdp
+        .send("Fetch.continueRequest", { requestId: event.requestId })
+        .catch(() => undefined);
     })();
   });
   await cdp.send("Network.enable");
@@ -548,7 +604,9 @@ async function watchPosts(page: Page, urls: readonly string[]) {
 
 /** The server log without terminal colour codes. */
 function serverLogLines(path: string): string[] {
-  return readFileSync(path, "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n");
+  return readFileSync(path, "utf8")
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .split("\n");
 }
 
 function stateCookie(cookies: Cookie[]): Cookie | undefined {
@@ -576,7 +634,8 @@ async function prepareInstance(browser: Browser): Promise<void> {
     jwks_uri: doc.jwks_uri,
     token_endpoint_auth_methods_supported: doc.token_endpoint_auth_methods_supported,
     code_challenge_methods_supported: doc.code_challenge_methods_supported,
-    authorization_response_iss_parameter_supported: doc.authorization_response_iss_parameter_supported,
+    authorization_response_iss_parameter_supported:
+      doc.authorization_response_iss_parameter_supported,
   });
   observe("topology", {
     fvociOrigin,
@@ -592,17 +651,28 @@ async function prepareInstance(browser: Browser): Promise<void> {
   expect(providersResponse.status()).toBe(200);
   const providersText = await providersResponse.text();
   const secret = process.env.OIDC_GENERIC_CLIENT_SECRET ?? "";
-  expect(secret.length > 0 && providersText.includes(secret), "the client secret stays on the server").toBe(false);
+  expect(
+    secret.length > 0 && providersText.includes(secret),
+    "the client secret stays on the server",
+  ).toBe(false);
   const providers = JSON.parse(providersText) as { providers: unknown; workspaceSso: boolean };
   expect(providers.providers).toEqual([{ provider: "generic", label: c.label }]);
   expect(providers.workspaceSso).toBe(false);
   // A normal build trusts no entitlement issuer: local test-license SSO below
   // must never be mistaken for enabling workspace SSO in this release server.
-  const sso = await page.request.get(`/api/v1/auth/sso?slug=${WORKSPACE.slug}`, { maxRedirects: 0 });
+  const sso = await page.request.get(`/api/v1/auth/sso?slug=${WORKSPACE.slug}`, {
+    maxRedirects: 0,
+  });
   expect(sso.status()).toBe(302);
   expect(new URL(sso.headers().location, fvociOrigin).pathname).toBe("/login");
-  expect(new URL(sso.headers().location, fvociOrigin).searchParams.get("error")).toBe("provider_not_configured");
-  observe("unentitledWorkspaceSso", { workspaceSso: false, status: sso.status(), error: "provider_not_configured" });
+  expect(new URL(sso.headers().location, fvociOrigin).searchParams.get("error")).toBe(
+    "provider_not_configured",
+  );
+  observe("unentitledWorkspaceSso", {
+    workspaceSso: false,
+    status: sso.status(),
+    error: "provider_not_configured",
+  });
   observe("providers", providers);
   observe("servedWebAssets", await servedAssetsWithout(page, secret));
   await context.close();
@@ -612,20 +682,26 @@ async function prepareInstance(browser: Browser): Promise<void> {
 async function servedAssetsWithout(page: Page, secret: string): Promise<Record<string, number>> {
   const root = process.env.FVOCI_STATIC_DIR ?? "";
   expect(root.length > 0, "the harness serves a static root").toBe(true);
-  const files = (readdirSync(root, { recursive: true, withFileTypes: true }) as Array<{
-    name: string;
-    parentPath: string;
-    isFile(): boolean;
-  }>)
+  const files = (
+    readdirSync(root, { recursive: true, withFileTypes: true }) as Array<{
+      name: string;
+      parentPath: string;
+      isFile(): boolean;
+    }>
+  )
     .filter((entry) => entry.isFile())
-    .map((entry) => path.relative(root, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"));
+    .map((entry) =>
+      path.relative(root, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"),
+    );
   const paths = ["/", "/login", "/settings/account", ...files.map((file) => `/${file}`)];
   let checked = 0;
   for (const asset of paths) {
     const response = await page.request.get(asset);
     expect(response.status(), asset).toBe(200);
     const body = await response.body();
-    expect(secret.length > 0 && body.includes(secret), `${asset} holds the client secret`).toBe(false);
+    expect(secret.length > 0 && body.includes(secret), `${asset} holds the client secret`).toBe(
+      false,
+    );
     checked += 1;
   }
   expect(files).toContain("index.html");
@@ -639,7 +715,10 @@ test.skip(!kc, "opt-in: set by scripts/keycloak-oidc-e2e.sh (real Keycloak)");
 
 test.afterAll(() => {
   if (!outDir || !kc) return;
-  writeFileSync(`${outDir}/observations-${mode}.json`, `${JSON.stringify(observations, null, 2)}\n`);
+  writeFileSync(
+    `${outDir}/observations-${mode}.json`,
+    `${JSON.stringify(observations, null, 2)}\n`,
+  );
   // Server log excerpt: OIDC outcomes and the auth routes' request events
   // (the request trace logs route templates, never URIs or headers).
   const log = process.env.SERVER_LOG ?? "";
@@ -662,7 +741,9 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     expect(ownerId.length).toBe(36);
   });
 
-  test("A: an unlinked Keycloak user is refused (oidc_not_linked); request shape", async ({ browser }) => {
+  test("A: an unlinked Keycloak user is refused (oidc_not_linked); request shape", async ({
+    browser,
+  }) => {
     const { context, page, csp } = await newPage(browser);
     const usersBefore = userCount();
     await openLogin(page);
@@ -689,7 +770,9 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     expect(params.get("client_id")).toBe(config().clientId);
     expect(params.get("redirect_uri")).toBe(redirectUri);
     expect(params.get("code_challenge_method")).toBe("S256");
-    expect(random43(params.get("code_challenge")), "S256 challenge is 43 base64url chars").toBe(true);
+    expect(random43(params.get("code_challenge")), "S256 challenge is 43 base64url chars").toBe(
+      true,
+    );
     expect(random43(params.get("state")), "state is 32 random bytes").toBe(true);
     expect(random43(params.get("nonce")), "nonce is 32 random bytes").toBe(true);
     expect(params.get("state") === params.get("nonce")).toBe(false);
@@ -742,8 +825,12 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     await expect(page.getByText(MSG.linked)).toBeVisible();
     await expect(page.getByText(`${config().label} — ${config().users.alice.email}`)).toBeVisible();
     const identities = await page.request.get("/api/v1/auth/identities");
-    const items = ((await identities.json()) as { items: Array<{ provider: string; email: string }> }).items;
-    expect(items.map((i) => [i.provider, i.email])).toEqual([["generic", config().users.alice.email]]);
+    const items = (
+      (await identities.json()) as { items: Array<{ provider: string; email: string }> }
+    ).items;
+    expect(items.map((i) => [i.provider, i.email])).toEqual([
+      ["generic", config().users.alice.email],
+    ]);
     const [link] = links();
     // The id_token `iss` the server verified is stored with the link.
     expect(link).toEqual({
@@ -764,7 +851,9 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     await context.close();
   });
 
-  test("B/D: sign out ends the app session; the provider signs in to the same account", async ({ browser }) => {
+  test("B/D: sign out ends the app session; the provider signs in to the same account", async ({
+    browser,
+  }) => {
     const { context, page, csp } = await newPage(browser);
     // The owner's browser signs in with the password first, then signs out.
     await login(page, OWNER.email, OWNER.password);
@@ -826,7 +915,9 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     await context.close();
   });
 
-  test("B: a second Keycloak user cannot be linked into the owner's account", async ({ browser }) => {
+  test("B: a second Keycloak user cannot be linked into the owner's account", async ({
+    browser,
+  }) => {
     const { context, page } = await newPage(browser);
     await login(page, OWNER.email, OWNER.password);
     await openAccountSettings(page);
@@ -855,7 +946,10 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     await expect(page.getByText(MSG.alreadyLinked)).toBeVisible();
     expect(linksOf(OWNER.email).map((l) => l.email)).toEqual([config().users.alice.email]);
     expect(userCount()).toBe(1);
-    observe("B_second_identity", { callback: "/settings/account?error=oidc_already_linked", ownerLinks: 1 });
+    observe("B_second_identity", {
+      callback: "/settings/account?error=oidc_already_linked",
+      ownerLinks: 1,
+    });
     await context.close();
   });
 
@@ -890,7 +984,10 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       },
     ]);
     await owner.page.goto(`/w/${WORKSPACE.slug}/settings`);
-    await owner.page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+    await owner.page
+      .locator("summary")
+      .filter({ hasText: /^멤버$/ })
+      .click();
     await expect(owner.page.getByText(carol.email)).toBeVisible();
     expect(csp).toEqual([]);
     observe("C_invite_match", {
@@ -927,7 +1024,9 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       const result = await callbackResult(await leg.callback);
       const current = result.location === "/" ? await me(page) : null;
       const accepted =
-        sql(`SELECT accepted_at IS NOT NULL FROM fvoci.invitations WHERE email = '${probe.invited}'`) === "t";
+        sql(
+          `SELECT accepted_at IS NOT NULL FROM fvoci.invitations WHERE email = '${probe.invited}'`,
+        ) === "t";
       const observed = {
         invitedEmail: probe.invited,
         idpEmail: idpUser.email,
@@ -1020,7 +1119,9 @@ test.describe("failure boundaries", () => {
     await context.close();
   });
 
-  test("a replayed callback creates no session (with and without the state cookie)", async ({ browser }) => {
+  test("a replayed callback creates no session (with and without the state cookie)", async ({
+    browser,
+  }) => {
     const { context, page } = await newPage(browser);
     await openLogin(page);
     const leg = keycloakLeg(page);
@@ -1055,7 +1156,9 @@ test.describe("failure boundaries", () => {
     await context.close();
   });
 
-  test("a callback delivered to another browser context does not sign in or link", async ({ browser }) => {
+  test("a callback delivered to another browser context does not sign in or link", async ({
+    browser,
+  }) => {
     // Sign-in: context X starts, context Y receives X's callback.
     const x = await newPage(browser);
     await openLogin(x.page);
@@ -1113,7 +1216,10 @@ test.describe("failure boundaries", () => {
     await linkButton(page).click();
     expect(await leg.pass(config().users.alice)).toBe("form");
     const result = await callbackResult(await leg.callback);
-    expect(result).toEqual({ status: 302, location: "/settings/account?error=oidc_already_linked" });
+    expect(result).toEqual({
+      status: 302,
+      location: "/settings/account?error=oidc_already_linked",
+    });
     await expect(page.getByText(MSG.alreadyLinked)).toBeVisible();
     expect(linksOf(PAT.email)).toEqual([]);
     expect(linksOf(OWNER.email).map((l) => l.email)).toEqual([config().users.alice.email]);
@@ -1121,7 +1227,9 @@ test.describe("failure boundaries", () => {
     await context.close();
   });
 
-  test("access denied at Keycloak (declined terms) fails cleanly; a restart links", async ({ browser }) => {
+  test("access denied at Keycloak (declined terms) fails cleanly; a restart links", async ({
+    browser,
+  }) => {
     const { context, page, csp } = await newPage(browser);
     await login(page, PAT.email, PAT.password);
     await openAccountSettings(page);
@@ -1135,7 +1243,10 @@ test.describe("failure boundaries", () => {
     expect(deniedParams.get("error")).toBe("access_denied");
     expect(deniedParams.has("code")).toBe(false);
     const result = await callbackResult(denied);
-    expect(result).toEqual({ status: 302, location: "/settings/account?error=oidc_provider_error" });
+    expect(result).toEqual({
+      status: 302,
+      location: "/settings/account?error=oidc_provider_error",
+    });
     await expect(page.getByText(MSG.providerError)).toBeVisible();
     expect(linksOf(PAT.email)).toEqual([]);
 
@@ -1146,7 +1257,9 @@ test.describe("failure boundaries", () => {
     const linked = await callbackResult(await retry.callback);
     expect(linked).toEqual({ status: 302, location: "/settings/account?linked=1" });
     await expect(page.getByText(MSG.linked)).toBeVisible();
-    expect(linksOf(PAT.email).map((l) => [l.email, l.issuer])).toEqual([[tina.email, config().issuer]]);
+    expect(linksOf(PAT.email).map((l) => [l.email, l.issuer])).toEqual([
+      [tina.email, config().issuer],
+    ]);
     expect(csp).toEqual([]);
     observe("F_access_denied", {
       keycloakRedirect: {
@@ -1201,10 +1314,9 @@ window.post = async (url, body) => {
       ] as const) {
         const pageSees = await page.evaluate(
           ([target, form]) =>
-            (window as unknown as { post: (u: string, b?: URLSearchParams) => Promise<string> }).post(
-              target,
-              form === null ? undefined : new URLSearchParams(form),
-            ),
+            (
+              window as unknown as { post: (u: string, b?: URLSearchParams) => Promise<string> }
+            ).post(target, form === null ? undefined : new URLSearchParams(form)),
           [url, body] as const,
         );
         expect(pageSees).toBe("unreadable (TypeError)");
@@ -1253,7 +1365,9 @@ window.post = async (url, body) => {
       expect(stateCount()).toBe(statesBefore);
       expect(links()).toEqual(linksBefore);
       expect(
-        sql(`SELECT accepted_at IS NULL FROM fvoci.invitations WHERE email = 'kc-xorigin@example.com'`),
+        sql(
+          `SELECT accepted_at IS NULL FROM fvoci.invitations WHERE email = 'kc-xorigin@example.com'`,
+        ),
       ).toBe("t");
       // The owner's session was attached (same site, other origin) and is intact.
       expect((await me(page))?.userId).toBe(ownerId);
@@ -1269,7 +1383,9 @@ window.post = async (url, body) => {
 test.describe("wrong client secret on the server", () => {
   test.skip(mode !== "wrong-secret", "FVOCI_KC_E2E_MODE=wrong-secret");
 
-  test("the token exchange fails clearly: error shown, no session, reason logged", async ({ browser }) => {
+  test("the token exchange fails clearly: error shown, no session, reason logged", async ({
+    browser,
+  }) => {
     await prepareInstance(browser);
     const { context, page } = await newPage(browser);
     await openLogin(page);
@@ -1290,7 +1406,9 @@ test.describe("wrong client secret on the server", () => {
     expect(failures.length).toBe(1);
     expect(failures[0]).toContain("provider response: token error");
     const secret = process.env.OIDC_GENERIC_CLIENT_SECRET ?? "";
-    expect(secret.length > 0 && log.includes(secret), "the server log never holds the secret").toBe(false);
+    expect(secret.length > 0 && log.includes(secret), "the server log never holds the secret").toBe(
+      false,
+    );
     const events = await kcAdmin(`/events?type=CODE_TO_TOKEN_ERROR&client=${config().clientId}`);
     const errors = ((await events.json()) as Array<{ error?: string }>).map((e) => e.error);
     expect(errors).toContain("invalid_client_credentials");

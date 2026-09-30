@@ -36,14 +36,20 @@ import {
   type WikiDoc,
 } from "./collab-helpers";
 
-test.skip(process.env.FVOCI_E2E_OS_IME !== "1", "opt-in: FVOCI_E2E_OS_IME=1 on an X display with IBus Hangul");
+test.skip(
+  process.env.FVOCI_E2E_OS_IME !== "1",
+  "opt-in: FVOCI_E2E_OS_IME=1 on an X display with IBus Hangul",
+);
 
 const env = { ...process.env } as Record<string, string>;
 const xdotool = (...args: string[]) => execFileSync("xdotool", args, { env });
 /** Real key presses; the IBus Hangul 2-set layout turns g k s r m f into ㅎ ㅏ ㄴ ㄱ ㅡ ㄹ. */
 const keys = (...names: string[]) => xdotool("key", "--delay", "60", ...names);
 
-const paragraph = (text?: string) => ({ type: "paragraph", ...(text ? { content: [{ type: "text", text }] } : {}) });
+const paragraph = (text?: string) => ({
+  type: "paragraph",
+  ...(text ? { content: [{ type: "text", text }] } : {}),
+});
 
 /** Top-level block texts without peer caret labels. */
 async function blocks(page: Page): Promise<string[]> {
@@ -63,34 +69,56 @@ async function blocks(page: Page): Promise<string[]> {
 }
 
 /** A headed browser, whose X window receives the IME's key events. */
-async function headedPage(baseUrl: string): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
-  const browser = await chromium.launch({ headless: false, env, args: ["--window-position=0,0", "--window-size=1200,900"] });
-  const context = await browser.newContext({ baseURL: baseUrl, viewport: { width: 1180, height: 780 } });
+async function headedPage(
+  baseUrl: string,
+): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
+  const browser = await chromium.launch({
+    headless: false,
+    env,
+    args: ["--window-position=0,0", "--window-size=1200,900"],
+  });
+  const context = await browser.newContext({
+    baseURL: baseUrl,
+    viewport: { width: 1180, height: 780 },
+  });
   const page = await context.newPage();
   // The pointer stays over the window, away from the text, so X keeps its focus.
   xdotool("mousemove", "600", "450");
   return { browser, context, page };
 }
 
-async function documentWith(page: Page, title: string, texts: (string | undefined)[]): Promise<WikiDoc> {
+async function documentWith(
+  page: Page,
+  title: string,
+  texts: (string | undefined)[],
+): Promise<WikiDoc> {
   const doc = await createWikiDoc(page, title);
-  const put = await page.request.put(`/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`, {
-    data: { contentJson: { type: "doc", content: texts.map(paragraph) } },
-  });
+  const put = await page.request.put(
+    `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`,
+    {
+      data: { contentJson: { type: "doc", content: texts.map(paragraph) } },
+    },
+  );
   expect(put.ok(), await put.text()).toBe(true);
   return doc;
 }
 
-test("control: the IME composes Korean in a plain contenteditable of the same browser", async ({ collabApp }) => {
+test("control: the IME composes Korean in a plain contenteditable of the same browser", async ({
+  collabApp,
+}) => {
   const a = await headedPage(collabApp.baseUrl);
   try {
-    await a.page.setContent('<div contenteditable="true" style="min-height:80px"><p>첫 문단</p></div>');
+    await a.page.setContent(
+      '<div contenteditable="true" style="min-height:80px"><p>첫 문단</p></div>',
+    );
     await a.page.locator("p").click();
     await a.page.keyboard.press("End");
     keys("g", "k", "s", "r", "m", "f", "space");
     // A contenteditable keeps a trailing space as U+00A0.
     await expect
-      .poll(() => a.page.locator("p").evaluate((p) => (p.textContent ?? "").replace(/\u00a0/g, " ")))
+      .poll(() =>
+        a.page.locator("p").evaluate((p) => (p.textContent ?? "").replace(/\u00a0/g, " ")),
+      )
       .toBe("첫 문단한글 ");
   } finally {
     await a.browser.close();
@@ -102,22 +130,25 @@ test("control: the IME composes Korean in a plain contenteditable of the same br
 // end of a text or in an empty paragraph, with or without a peer. The
 // synthetic counterpart is the test.fail in e2e/workspace-wiki-vue-flow.spec.ts.
 // Tracked in #258. Expected to fail until fixed; when it passes, drop test.fail.
-test.fail("the first composition after placing the caret leaves no stray jamo (known bug)", async ({ collabApp }) => {
-  const a = await headedPage(collabApp.baseUrl);
-  try {
-    await ensureCollabFixture(a.page);
-    await login(a.page, member.email, member.password);
-    const doc = await documentWith(a.page, "OS IME 첫 조합", ["첫 문단"]);
-    await a.page.goto(doc.url);
-    await waitConnected(a.page);
-    await a.page.locator(".fvoci-editor .ProseMirror > *").first().click();
-    await a.page.keyboard.press("End");
-    keys("g", "k", "s", "r", "m", "f", "space");
-    await expect.poll(() => blocks(a.page), { timeout: 5_000 }).toEqual(["첫 문단한글 "]);
-  } finally {
-    await a.browser.close();
-  }
-});
+test.fail(
+  "the first composition after placing the caret leaves no stray jamo (known bug)",
+  async ({ collabApp }) => {
+    const a = await headedPage(collabApp.baseUrl);
+    try {
+      await ensureCollabFixture(a.page);
+      await login(a.page, member.email, member.password);
+      const doc = await documentWith(a.page, "OS IME 첫 조합", ["첫 문단"]);
+      await a.page.goto(doc.url);
+      await waitConnected(a.page);
+      await a.page.locator(".fvoci-editor .ProseMirror > *").first().click();
+      await a.page.keyboard.press("End");
+      keys("g", "k", "s", "r", "m", "f", "space");
+      await expect.poll(() => blocks(a.page), { timeout: 5_000 }).toEqual(["첫 문단한글 "]);
+    } finally {
+      await a.browser.close();
+    }
+  },
+);
 
 test("a composition survives a peer's edit; preedit Backspace, undo, redo, save and a restart keep it", async ({
   browser,
@@ -150,10 +181,14 @@ test("a composition survives a peer's edit; preedit Backspace, undo, redo, save 
     await b.locator(".fvoci-editor .ProseMirror > *").nth(1).click();
     await b.keyboard.press("End");
     await b.keyboard.type(" 원격");
-    await expect.poll(() => blocks(a.page), { timeout: 15_000 }).toEqual(["첫 문단", "둘째 문단 원격", " ㅎ"]);
+    await expect
+      .poll(() => blocks(a.page), { timeout: 15_000 })
+      .toEqual(["첫 문단", "둘째 문단 원격", " ㅎ"]);
     keys("k", "s", "r", "m", "f", "space");
     await expect.poll(() => blocks(a.page)).toEqual(["첫 문단", "둘째 문단 원격", " 한글 "]);
-    await expect.poll(() => blocks(b), { timeout: 15_000 }).toEqual(["첫 문단", "둘째 문단 원격", " 한글 "]);
+    await expect
+      .poll(() => blocks(b), { timeout: 15_000 })
+      .toEqual(["첫 문단", "둘째 문단 원격", " 한글 "]);
 
     // Backspace inside a preedit removes jamo only.
     keys("g", "k");
@@ -164,7 +199,9 @@ test("a composition survives a peer's edit; preedit Backspace, undo, redo, save 
     await expect.poll(() => blocks(a.page)).toEqual(["첫 문단", "둘째 문단 원격", " 한글 "]);
     keys("BackSpace");
     await expect.poll(() => blocks(a.page)).toEqual(["첫 문단", "둘째 문단 원격", " 한글"]);
-    await expect.poll(() => blocks(b), { timeout: 15_000 }).toEqual(["첫 문단", "둘째 문단 원격", " 한글"]);
+    await expect
+      .poll(() => blocks(b), { timeout: 15_000 })
+      .toEqual(["첫 문단", "둘째 문단 원격", " 한글"]);
 
     // Undo takes back only A's text (the Yjs undo manager groups by time), redo restores it.
     let undos = 0;
@@ -176,14 +213,20 @@ test("a composition survives a peer's edit; preedit Backspace, undo, redo, save 
       await expect.poll(async () => (await blocks(a.page))[2]).not.toBe(before);
       expect((await blocks(a.page))[1]).toBe("둘째 문단 원격");
     }
-    await expect.poll(() => blocks(b), { timeout: 15_000 }).toEqual(["첫 문단", "둘째 문단 원격", ""]);
+    await expect
+      .poll(() => blocks(b), { timeout: 15_000 })
+      .toEqual(["첫 문단", "둘째 문단 원격", ""]);
     for (let i = 0; i < undos; i += 1) keys("ctrl+shift+z");
     await expect.poll(() => blocks(a.page)).toEqual(["첫 문단", "둘째 문단 원격", " 한글"]);
-    await expect.poll(() => blocks(b), { timeout: 15_000 }).toEqual(["첫 문단", "둘째 문단 원격", " 한글"]);
+    await expect
+      .poll(() => blocks(b), { timeout: 15_000 })
+      .toEqual(["첫 문단", "둘째 문단 원격", " 한글"]);
 
     await a.page.getByRole("button", { name: "저장", exact: true }).click();
     await expect(a.page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
-    const body = await a.page.request.get(`/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`);
+    const body = await a.page.request.get(
+      `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`,
+    );
     expect(JSON.stringify((await body.json()).contentJson)).toContain(" 한글");
 
     await ctxB.close();

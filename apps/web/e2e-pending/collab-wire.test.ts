@@ -11,10 +11,7 @@ import {
   PROVIDER_VERSION,
 } from "./collab-wire.ts";
 
-const fixturePath = path.resolve(
-  import.meta.dirname,
-  "../../../compat/fixtures/hocus-wire.json",
-);
+const fixturePath = path.resolve(import.meta.dirname, "../../../compat/fixtures/hocus-wire.json");
 
 function hexBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
@@ -49,9 +46,7 @@ test("decoder keeps provider 4.6 persist strings and awareness token", () => {
     assert.notEqual(auth.token, "fvoci_session");
   }
 
-  const readonly = decodeHocuspocusFrame(
-    hexBytes(byId.get("auth_authenticated_readonly") ?? ""),
-  );
+  const readonly = decodeHocuspocusFrame(hexBytes(byId.get("auth_authenticated_readonly") ?? ""));
   assert.equal(readonly?.kind, "auth-scope");
   if (readonly?.kind === "auth-scope") assert.equal(readonly.scope, "readonly");
 
@@ -75,9 +70,7 @@ test("decoder keeps provider 4.6 persist strings and awareness token", () => {
     assert.equal(done.payload.startsWith(`${COLLAB_PERSIST_DONE}:`), true);
   }
 
-  const failed = decodeHocuspocusFrame(
-    hexBytes(byId.get("stateless_persist_failed") ?? ""),
-  );
+  const failed = decodeHocuspocusFrame(hexBytes(byId.get("stateless_persist_failed") ?? ""));
   assert.equal(failed?.kind, "stateless");
   if (failed?.kind === "stateless") {
     assert.deepEqual(persistParts(failed.payload), {

@@ -65,7 +65,9 @@ const CARET: Record<Where, { block: number; offset: number }> = {
 /** The seed with `typed` inserted at the case's caret. */
 function seedWith(where: Where, typed: string, texts = SEED): string[] {
   const { block, offset } = CARET[where];
-  return texts.map((text, i) => (i === block ? text.slice(0, offset) + typed + text.slice(offset) : text));
+  return texts.map((text, i) =>
+    i === block ? text.slice(0, offset) + typed + text.slice(offset) : text,
+  );
 }
 
 /** The block a peer edits meanwhile: never the one being composed in. */
@@ -77,9 +79,12 @@ async function seededDoc(page: Page, title: string): Promise<WikiDoc> {
     type: "paragraph",
     ...(text ? { content: [{ type: "text", text }] } : {}),
   });
-  const put = await page.request.put(`/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`, {
-    data: { contentJson: { type: "doc", content: SEED.map(paragraph) } },
-  });
+  const put = await page.request.put(
+    `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`,
+    {
+      data: { contentJson: { type: "doc", content: SEED.map(paragraph) } },
+    },
+  );
   expect(put.ok(), await put.text()).toBe(true);
   return doc;
 }
@@ -138,25 +143,38 @@ async function caret(page: Page): Promise<{ block: number; offset: number } | nu
  * pending focus repair can restore PM's old paragraph end in that gap, so the
  * next ArrowRight enters the following empty paragraph instead of the word. */
 async function expectCaret(page: Page, block: number, offset: number): Promise<void> {
-  await expect.poll(() => editorLocator(page).evaluate((root) => {
-    const editor = (root as HTMLElement & { editor?: LiveEditor }).editor;
-    if (!editor) throw new Error("missing live editor");
-    const selection = editor.state.selection;
-    const native = root.ownerDocument.getSelection();
-    let browser = null;
-    if (native?.isCollapsed && native.anchorNode && root.contains(native.anchorNode)) {
-      const pos = editor.state.doc.resolve(editor.view.posAtDOM(native.anchorNode, native.anchorOffset));
-      browser = { block: pos.index(0), offset: pos.parentOffset };
-    }
-    return {
-      focused: editor.view.hasFocus(),
-      model: selection.empty ? { block: selection.$from.index(0), offset: selection.$from.parentOffset } : null,
-      browser,
-    };
-  })).toEqual({ focused: true, model: { block, offset }, browser: { block, offset } });
+  await expect
+    .poll(() =>
+      editorLocator(page).evaluate((root) => {
+        const editor = (root as HTMLElement & { editor?: LiveEditor }).editor;
+        if (!editor) throw new Error("missing live editor");
+        const selection = editor.state.selection;
+        const native = root.ownerDocument.getSelection();
+        let browser = null;
+        if (native?.isCollapsed && native.anchorNode && root.contains(native.anchorNode)) {
+          const pos = editor.state.doc.resolve(
+            editor.view.posAtDOM(native.anchorNode, native.anchorOffset),
+          );
+          browser = { block: pos.index(0), offset: pos.parentOffset };
+        }
+        return {
+          focused: editor.view.hasFocus(),
+          model: selection.empty
+            ? { block: selection.$from.index(0), offset: selection.$from.parentOffset }
+            : null,
+          browser,
+        };
+      }),
+    )
+    .toEqual({ focused: true, model: { block, offset }, browser: { block, offset } });
 }
 
-async function navigateCaret(page: Page, key: string, block: number, offset: number): Promise<void> {
+async function navigateCaret(
+  page: Page,
+  key: string,
+  block: number,
+  offset: number,
+): Promise<void> {
   await page.keyboard.press(key);
   await expectCaret(page, block, offset);
 }
@@ -180,7 +198,10 @@ async function placeCaret(page: Page, where: Where): Promise<void> {
   await expect.poll(() => caret(page)).toEqual({ block, offset });
 }
 
-test("native Home survives the pending editor focus repair before ArrowRight", async ({ browser, collabApp }) => {
+test("native Home survives the pending editor focus repair before ArrowRight", async ({
+  browser,
+  collabApp,
+}) => {
   const ctx = await newCollabContext(browser, collabApp.baseUrl);
   try {
     const page = await ctx.newPage();
@@ -199,21 +220,39 @@ test("native Home survives the pending editor focus repair before ArrowRight", a
       const snapshot = () => {
         const native = document.getSelection()!;
         const model = root.editor.state.selection.$from;
-        const browser = root.editor.state.doc.resolve(root.editor.view.posAtDOM(native.anchorNode!, native.anchorOffset));
+        const browser = root.editor.state.doc.resolve(
+          root.editor.view.posAtDOM(native.anchorNode!, native.anchorOffset),
+        );
         return {
           model: { block: model.index(0), offset: model.parentOffset },
           browser: { block: browser.index(0), offset: browser.parentOffset },
         };
       };
-      const gate = { captured: false, delivered: false, before: null as ReturnType<typeof snapshot> | null,
-        after: null as ReturnType<typeof snapshot> | null };
+      const gate = {
+        captured: false,
+        delivered: false,
+        before: null as ReturnType<typeof snapshot> | null,
+        after: null as ReturnType<typeof snapshot> | null,
+      };
       Object.assign(window, { __imeFocusRepair: gate });
       const nativeTimeout = window.setTimeout.bind(window);
       let focusing = false;
       let repair: (() => void) | undefined;
       let timer: number | undefined;
-      root.addEventListener("focus", () => { focusing = true; }, { capture: true, once: true });
-      root.addEventListener("focusin", () => { focusing = false; }, { once: true });
+      root.addEventListener(
+        "focus",
+        () => {
+          focusing = true;
+        },
+        { capture: true, once: true },
+      );
+      root.addEventListener(
+        "focusin",
+        () => {
+          focusing = false;
+        },
+        { once: true },
+      );
       window.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
         // Pinned prosemirror-view schedules this during the root focus event.
         if (focusing && delay === 20 && typeof callback === "function") {
@@ -242,8 +281,15 @@ test("native Home survives the pending editor focus repair before ArrowRight", a
     await editorLocator(page).locator(":scope > *").nth(1).click();
     await expectCaret(page, 1, SEED[1].length);
     await page.keyboard.press("Home");
-    const gate = await page.evaluate(() => (window as unknown as { __imeFocusRepair: unknown }).__imeFocusRepair);
-    await test.info().attach("native-home-focus-repair", { body: JSON.stringify(gate), contentType: "application/json" });
+    const gate = await page.evaluate(
+      () => (window as unknown as { __imeFocusRepair: unknown }).__imeFocusRepair,
+    );
+    await test
+      .info()
+      .attach("native-home-focus-repair", {
+        body: JSON.stringify(gate),
+        contentType: "application/json",
+      });
     const expected = { model: { block: 1, offset: 0 }, browser: { block: 1, offset: 0 } };
     expect(gate).toEqual({ captured: true, delivered: true, before: expected, after: expected });
     // Deliberately no fixture navigation barrier between native keys.
@@ -335,7 +381,10 @@ for (const where of ["end", "empty", "mid"] as const) {
   }
 }
 
-test("CDP composition as the first input of a new document leaves no stray jamo", async ({ browser, collabApp }) => {
+test("CDP composition as the first input of a new document leaves no stray jamo", async ({
+  browser,
+  collabApp,
+}) => {
   const ctx = await newCollabContext(browser, collabApp.baseUrl);
   try {
     const a = await ctx.newPage();
@@ -355,7 +404,11 @@ test("CDP composition as the first input of a new document leaves no stray jamo"
       [["ㄱ", "그", "글"], "글"],
     ] as const) {
       for (const text of steps) {
-        await ime.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+        await ime.send("Input.imeSetComposition", {
+          text,
+          selectionStart: text.length,
+          selectionEnd: text.length,
+        });
       }
       await ime.send("Input.insertText", { text: commit });
     }
@@ -377,13 +430,18 @@ const xdotool = (...args: string[]) => execFileSync("xdotool", args, { env });
 const keys = (...names: string[]) => xdotool("key", "--delay", "60", ...names);
 
 /** A headed browser, whose X window receives the IME's key events. */
-async function headedPage(baseUrl: string): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
+async function headedPage(
+  baseUrl: string,
+): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
   const browser = await chromium.launch({
     headless: false,
     env,
     args: ["--window-position=0,0", "--window-size=1200,900"],
   });
-  const context = await browser.newContext({ baseURL: baseUrl, viewport: { width: 1180, height: 780 } });
+  const context = await browser.newContext({
+    baseURL: baseUrl,
+    viewport: { width: 1180, height: 780 },
+  });
   const page = await context.newPage();
   // The pointer stays over the window, so X keeps the keyboard focus there.
   xdotool("mousemove", "600", "450");
@@ -419,10 +477,14 @@ async function xPlaceCaret(page: Page, where: Where): Promise<void> {
 test.describe("OS IME witness", () => {
   test.skip(!osIme, "opt-in: FVOCI_E2E_OS_IME=1 on an X display with IBus Hangul");
 
-  test("control: the IME composes Korean in a plain contenteditable of the same browser", async ({ collabApp }) => {
+  test("control: the IME composes Korean in a plain contenteditable of the same browser", async ({
+    collabApp,
+  }) => {
     const a = await headedPage(collabApp.baseUrl);
     try {
-      await a.page.setContent('<div contenteditable="true" style="min-height:80px"><p>첫 문단</p></div>');
+      await a.page.setContent(
+        '<div contenteditable="true" style="min-height:80px"><p>첫 문단</p></div>',
+      );
       await a.page.locator("p").click();
       await a.page.keyboard.press("End");
       keys("g", "k", "s", "r", "m", "f", "space");
@@ -558,8 +620,12 @@ test.describe("OS IME witness", () => {
       await expectBlocks(b, ["첫 문단", "둘째 문단 원격", "한글"]);
 
       await a.page.getByRole("button", { name: "저장", exact: true }).click();
-      await expect(a.page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
-      const body = await a.page.request.get(`/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`);
+      await expect(a.page.locator('[data-collab-persisted="true"]')).toBeVisible({
+        timeout: 15_000,
+      });
+      const body = await a.page.request.get(
+        `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/body`,
+      );
       expect(JSON.stringify((await body.json()).contentJson)).toContain("한글");
 
       await ctxB.close();

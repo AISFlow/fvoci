@@ -178,9 +178,14 @@ async function waitRecordedMembersGone(
 export function signalOwnedGroup(pgid: number, owners: readonly ProcMember[]): void {
   const current = processGroupMembers(pgid);
   if (current.length === 0) return;
-  if (!current.some((member) => owners.some((owner) =>
-    owner.pid === member.pid && owner.starttime === member.starttime && owner.pgrp === pgid,
-  ))) {
+  if (
+    !current.some((member) =>
+      owners.some(
+        (owner) =>
+          owner.pid === member.pid && owner.starttime === member.starttime && owner.pgrp === pgid,
+      ),
+    )
+  ) {
     throw new Error(`cannot prove ownership of process group ${pgid}`);
   }
   try {
@@ -310,9 +315,7 @@ export class OwnedServer {
       await delay(200);
       leftovers = processGroupMembers(pgid);
       this.lastGracefulLeftovers = leftovers;
-      throw new Error(
-        `graceful SIGTERM left process group members: ${JSON.stringify(leftovers)}`,
-      );
+      throw new Error(`graceful SIGTERM left process group members: ${JSON.stringify(leftovers)}`);
     }
   }
 
@@ -325,8 +328,11 @@ export class OwnedServer {
   }
 
   private observeOwnedMembers(): ProcMember[] {
-    if (this.parentPid != null && this.pgid != null &&
-      sameIdentity(this.parentIdentity, this.parentPid)) {
+    if (
+      this.parentPid != null &&
+      this.pgid != null &&
+      sameIdentity(this.parentIdentity, this.parentPid)
+    ) {
       this.ownedMembers = processGroupMembers(this.pgid);
     }
     return this.ownedMembers;
@@ -433,10 +439,7 @@ export class OwnedServer {
     if (child && child.exitCode == null && child.signalCode == null) {
       await Promise.race([once(child, "exit"), delay(5_000)]);
     }
-    await waitRecordedMembersGone(
-      helpersBefore,
-      "crash SIGKILL left collaboration helpers",
-    );
+    await waitRecordedMembersGone(helpersBefore, "crash SIGKILL left collaboration helpers");
     const deadline = Date.now() + 5_000;
     let leftovers = processGroupMembers(pgid);
     while (Date.now() < deadline && leftovers.length > 0) {
@@ -447,9 +450,7 @@ export class OwnedServer {
       leftovers = processGroupMembers(pgid);
     }
     if (leftovers.length > 0) {
-      throw new Error(
-        `crash SIGKILL left process group members: ${JSON.stringify(leftovers)}`,
-      );
+      throw new Error(`crash SIGKILL left process group members: ${JSON.stringify(leftovers)}`);
     }
   }
 }

@@ -8,11 +8,16 @@ import { setTransferMode, setUpOwnerTask, storageOrigin } from "./transfer-helpe
 
 function allowedOrigin(): string {
   const origin = process.env.FVOCI_E2E_S3_CORS_ALLOW_ORIGIN;
-  if (!origin) throw new Error("FVOCI_E2E_S3_CORS_ALLOW_ORIGIN is required (scripts/run-web-e2e-s3.sh --narrow-cors)");
+  if (!origin)
+    throw new Error(
+      "FVOCI_E2E_S3_CORS_ALLOW_ORIGIN is required (scripts/run-web-e2e-s3.sh --narrow-cors)",
+    );
   return origin;
 }
 
-test("storage CORS for another origin fails the presigned upload without an API fallback", async ({ page }) => {
+test("storage CORS for another origin fails the presigned upload without an API fallback", async ({
+  page,
+}) => {
   test.setTimeout(120_000);
   const storage = storageOrigin();
   const other = allowedOrigin();
@@ -41,12 +46,18 @@ test("storage CORS for another origin fails the presigned upload without an API 
   page.on("request", (req) => {
     const url = req.url();
     if (req.method() === "PUT" && url.startsWith(`${storage}/`)) storagePuts.push(url);
-    if (url.startsWith(`${appOrigin}/api/`) && /\/(parts\/|complete$|upload$)/.test(new URL(url).pathname)) {
-      apiCalls.push(`${req.method()} ${new URL(url).pathname.replace(/.*\/attachments\/[^/]+\//, "")}`);
+    if (
+      url.startsWith(`${appOrigin}/api/`) &&
+      /\/(parts\/|complete$|upload$)/.test(new URL(url).pathname)
+    ) {
+      apiCalls.push(
+        `${req.method()} ${new URL(url).pathname.replace(/.*\/attachments\/[^/]+\//, "")}`,
+      );
     }
   });
   page.on("requestfailed", (req) => {
-    if (req.method() === "PUT" && req.url().startsWith(`${storage}/`)) failedStoragePuts.push(req.url());
+    if (req.method() === "PUT" && req.url().startsWith(`${storage}/`))
+      failedStoragePuts.push(req.url());
   });
   const created: Record<string, unknown>[] = [];
   const resumed: Record<string, unknown>[] = [];
@@ -63,11 +74,19 @@ test("storage CORS for another origin fails the presigned upload without an API 
   });
 
   const panel = page.getByRole("region", { name: "첨부" });
-  await panel.getByLabel("파일 첨부").setInputFiles([
-    { name: "blocked.txt", mimeType: "text/plain", buffer: Buffer.from("never stored\n", "utf8") },
-  ]);
+  await panel
+    .getByLabel("파일 첨부")
+    .setInputFiles([
+      {
+        name: "blocked.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("never stored\n", "utf8"),
+      },
+    ]);
   // The pipeline's error for a transfer that never reached storage.
-  await expect(panel.getByRole("alert")).toHaveText("연결을 확인하고 다시 시도해 주세요.", { timeout: 60_000 });
+  await expect(panel.getByRole("alert")).toHaveText("연결을 확인하고 다시 시도해 주세요.", {
+    timeout: 60_000,
+  });
   await expect(panel.getByRole("link", { name: "blocked.txt" })).toHaveCount(0);
 
   // Presigned from create through its one resume; every attempt went to

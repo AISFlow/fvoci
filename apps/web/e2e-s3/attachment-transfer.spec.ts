@@ -52,7 +52,14 @@ function patterned(seed: number): Buffer {
 
 const sha256 = (bytes: Buffer | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-type PageFetch = { status: number; redirected: boolean; url: string; range: string | null; sha: string; length: number };
+type PageFetch = {
+  status: number;
+  redirected: boolean;
+  url: string;
+  range: string | null;
+  sha: string;
+  length: number;
+};
 
 /** `fetch` from the page, like the viewers do; hashes the body in the page. */
 type FetchInit = { credentials?: RequestCredentials; headers?: Record<string, string> };
@@ -92,7 +99,9 @@ async function pageFetch(page: Page, url: string, init: FetchInit): Promise<Page
   );
 }
 
-test("presigned mode moves bytes between the browser and storage; proxy mode is unchanged", async ({ page }) => {
+test("presigned mode moves bytes between the browser and storage; proxy mode is unchanged", async ({
+  page,
+}) => {
   test.setTimeout(180_000);
   const storage = storageOrigin();
   const csp = watchCspViolations(page);
@@ -119,11 +128,17 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
   const photo = pngBytes(2400, 600);
   const created: Record<string, unknown>[] = [];
   page.on("response", async (res) => {
-    if (res.url().endsWith("/uploads") && res.request().method() === "POST" && res.status() === 201) {
+    if (
+      res.url().endsWith("/uploads") &&
+      res.request().method() === "POST" &&
+      res.status() === 201
+    ) {
       created.push((await res.json()) as Record<string, unknown>);
     }
   });
-  const pdf = Buffer.from(buildFixturePdf([{ text: "FVOCI PRESIGNED", script: "latin", band: "top-red" }]));
+  const pdf = Buffer.from(
+    buildFixturePdf([{ text: "FVOCI PRESIGNED", script: "latin", band: "top-red" }]),
+  );
   const note = Buffer.from("presigned text viewer body\n", "utf8");
   await panel.getByLabel("파일 첨부").setInputFiles([
     { name: "big.bin", mimeType: "application/octet-stream", buffer: big },
@@ -135,7 +150,12 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
   await expect(panel.getByRole("link", { name: "사진.png" })).toBeVisible();
   await expect(panel.getByRole("link", { name: "report.pdf" })).toBeVisible();
   await expect(panel.getByRole("link", { name: "notes.txt" })).toBeVisible();
-  expect(created.map((c) => c.transfer)).toEqual(["presigned", "presigned", "presigned", "presigned"]);
+  expect(created.map((c) => c.transfer)).toEqual([
+    "presigned",
+    "presigned",
+    "presigned",
+    "presigned",
+  ]);
 
   // Five part PUTs (two for big.bin, one each for the others), all to storage
   // with nothing but the signed URL, and none through the API.
@@ -177,11 +197,18 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
   // viewers' credentials mode (viewer-download.ts: the session cookie to the
   // API, none to storage), and a range across the part boundary.
   const whole = await pageFetch(page, bigHref as string, { credentials: "same-origin" });
-  expect(whole).toMatchObject({ status: 200, redirected: true, length: big.length, sha: sha256(big) });
+  expect(whole).toMatchObject({
+    status: 200,
+    redirected: true,
+    length: big.length,
+    sha: sha256(big),
+  });
   expect(whole.url.startsWith(`${storage}/`)).toBe(true);
   const start = PART_SIZE - 10;
   const end = PART_SIZE + 9;
-  const ranged = await pageFetch(page, bigHref as string, { headers: { Range: `bytes=${start}-${end}` } });
+  const ranged = await pageFetch(page, bigHref as string, {
+    headers: { Range: `bytes=${start}-${end}` },
+  });
   expect(ranged).toMatchObject({
     status: 206,
     redirected: true,
@@ -210,18 +237,28 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
       void cdp.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => {});
       return;
     }
-    strippedFor.push(response.find((h) => h.name.toLowerCase() === "access-control-allow-origin")?.value);
+    strippedFor.push(
+      response.find((h) => h.name.toLowerCase() === "access-control-allow-origin")?.value,
+    );
     void cdp
       .send("Fetch.continueResponse", {
         requestId: event.requestId,
         responseCode: event.responseStatusCode,
-        responseHeaders: response.filter((h) => h.name.toLowerCase() !== "access-control-allow-credentials"),
+        responseHeaders: response.filter(
+          (h) => h.name.toLowerCase() !== "access-control-allow-credentials",
+        ),
       })
       .catch(() => {});
   });
-  await cdp.send("Fetch.enable", { patterns: [{ urlPattern: `${storage}/*`, requestStage: "Response" }] });
-  expect(await pageFetchOutcome(page, bigHref as string, { credentials: "include" })).toBe("rejected: TypeError");
-  expect(await pageFetchOutcome(page, bigHref as string, { credentials: "same-origin" })).toBe("status 200");
+  await cdp.send("Fetch.enable", {
+    patterns: [{ urlPattern: `${storage}/*`, requestStage: "Response" }],
+  });
+  expect(await pageFetchOutcome(page, bigHref as string, { credentials: "include" })).toBe(
+    "rejected: TypeError",
+  );
+  expect(await pageFetchOutcome(page, bigHref as string, { credentials: "same-origin" })).toBe(
+    "status 200",
+  );
   // The PDF viewer (downloadCapped) and the text viewer through the redirect.
   await page.goto(`/w/${WORKSPACE_SLUG}/a/${pdfId}/view`);
   const pdfViewer = page.locator("[data-pdf-viewer]");
@@ -240,17 +277,25 @@ test("presigned mode moves bytes between the browser and storage; proxy mode is 
   await page.goto(taskUrl);
   const proxied = patterned(9);
   const putsBefore = storagePuts.length;
-  await page.getByRole("region", { name: "첨부" }).getByLabel("파일 첨부").setInputFiles([
-    { name: "proxy.bin", mimeType: "application/octet-stream", buffer: proxied },
-  ]);
-  const proxyLink = page.getByRole("region", { name: "첨부" }).getByRole("link", { name: "proxy.bin" });
+  await page
+    .getByRole("region", { name: "첨부" })
+    .getByLabel("파일 첨부")
+    .setInputFiles([{ name: "proxy.bin", mimeType: "application/octet-stream", buffer: proxied }]);
+  const proxyLink = page
+    .getByRole("region", { name: "첨부" })
+    .getByRole("link", { name: "proxy.bin" });
   await expect(proxyLink).toBeVisible({ timeout: 60_000 });
   expect(created.at(-1)?.transfer).toBe("proxy");
   expect(storagePuts).toHaveLength(putsBefore);
   expect(apiParts).toHaveLength(2);
   const proxyHref = (await proxyLink.getAttribute("href")) as string;
   const viaApi = await pageFetch(page, proxyHref, { credentials: "same-origin" });
-  expect(viaApi).toMatchObject({ status: 200, redirected: false, length: proxied.length, sha: sha256(proxied) });
+  expect(viaApi).toMatchObject({
+    status: 200,
+    redirected: false,
+    length: proxied.length,
+    sha: sha256(proxied),
+  });
   expect(viaApi.url.startsWith(new URL(page.url()).origin)).toBe(true);
   // Originals uploaded in presigned mode are now served by the API too.
   const bigViaApi = await pageFetch(page, bigHref as string, { credentials: "same-origin" });

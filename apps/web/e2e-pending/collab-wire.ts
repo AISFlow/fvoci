@@ -9,8 +9,7 @@ export const COLLAB_PERSIST_DONE = "persisted";
 export const COLLAB_PERSIST_FAILED = "persist-failed";
 export const PROVIDER_VERSION = "4.6.0";
 export const SESSION_COOKIE = "fvoci_session";
-export const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const PERSIST_ID_RE = new RegExp(
   `^(${COLLAB_PERSIST_REQUEST}|${COLLAB_PERSIST_DONE}|${COLLAB_PERSIST_FAILED}):(${UUID_RE.source.slice(1, -1)})$`,
   "i",

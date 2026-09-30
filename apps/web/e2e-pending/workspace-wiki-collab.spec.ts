@@ -163,20 +163,26 @@ for (const edge of ["start", "end"] as const) {
     // click has settled at the requested edge. This controls the ordering of
     // the observation response without assigning DOM or PM selections.
     page.mouse.click = async (_x, _y, options) => click(points.adjacentX, points.y, options);
-    page.locator = (selector, options) => selector === ".fvoci-editor .ProseMirror"
-      ? editor : locate(selector, options);
+    page.locator = (selector, options) =>
+      selector === ".fvoci-editor .ProseMirror" ? editor : locate(selector, options);
     editor.evaluate = async (pageFunction, arg, options) => {
       const sample = await evaluate(pageFunction, arg, options);
       if (captured === undefined && Array.isArray(sample) && sample.length === 2) {
         expect(sample).toEqual([adjacent, adjacent]);
         captured = sample;
         await click(points.desiredX, points.y);
-        await expect.poll(() => evaluate((root) => {
-          const live = (root as HTMLElement & {
-            editor: { state: { selection: { from: number; to: number } } };
-          }).editor;
-          return [live.state.selection.from, live.state.selection.to];
-        })).toEqual([desired, desired]);
+        await expect
+          .poll(() =>
+            evaluate((root) => {
+              const live = (
+                root as HTMLElement & {
+                  editor: { state: { selection: { from: number; to: number } } };
+                }
+              ).editor;
+              return [live.state.selection.from, live.state.selection.to];
+            }),
+          )
+          .toEqual([desired, desired]);
         settled = await readEditorSelection(page);
       }
       return sample;
@@ -232,10 +238,12 @@ for (const invalid of ["unrelated", "range"] as const) {
       });
       await click(point.x, point.y, options);
       if (invalid === "range") await press("Shift+ArrowLeft");
-      await expect.poll(async () => {
-        const selection = await readEditorSelection(page);
-        return [selection.from, selection.to];
-      }).toEqual(invalid === "range" ? [3, 4] : [4, 4]);
+      await expect
+        .poll(async () => {
+          const selection = await readEditorSelection(page);
+          return [selection.from, selection.to];
+        })
+        .toEqual(invalid === "range" ? [3, 4] : [4, 4]);
     };
     page.keyboard.press = async (key, options) => {
       if (key === "ArrowLeft" || key === "ArrowRight") correctionKeys++;
@@ -392,7 +400,10 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
 // These two cases observe settled selection; the unpaced race above does not.
 // Delete is a real key event; ProseMirror performs the emoji atom deletion.
 for (const remotePosition of ["adjacent", "start"] as const) {
-  test(`native emoji Delete with remote caret ${remotePosition}`, async ({ browser, collabApp }) => {
+  test(`native emoji Delete with remote caret ${remotePosition}`, async ({
+    browser,
+    collabApp,
+  }) => {
     const ctxA = await newCollabContext(browser, collabApp.baseUrl);
     const ctxB = await newCollabContext(browser, collabApp.baseUrl);
     const pageA = await ctxA.newPage();
@@ -417,26 +428,36 @@ for (const remotePosition of ["adjacent", "start"] as const) {
         await pageA.keyboard.press("ArrowRight");
       }
       const remoteCaretPosition = remotePosition === "adjacent" ? 3 : 1;
-      await expect.poll(() => editorLocator(pageB).evaluate((root) => {
-        const live = (root as HTMLElement & {
-          editor?: { view: { posAtDOM(node: Node, offset: number): number } };
-        }).editor;
-        const caret = root.querySelector(".collaboration-carets__caret");
-        return live && caret ? live.view.posAtDOM(caret, 0) : null;
-      })).toBe(remoteCaretPosition);
+      await expect
+        .poll(() =>
+          editorLocator(pageB).evaluate((root) => {
+            const live = (
+              root as HTMLElement & {
+                editor?: { view: { posAtDOM(node: Node, offset: number): number } };
+              }
+            ).editor;
+            const caret = root.querySelector(".collaboration-carets__caret");
+            return live && caret ? live.view.posAtDOM(caret, 0) : null;
+          }),
+        )
+        .toBe(remoteCaretPosition);
       await placeContentCaret(pageB, "end");
       await pageB.keyboard.press("ArrowLeft");
       await pageB.keyboard.press("ArrowLeft");
       await pageB.keyboard.press("ArrowLeft");
       // Observe the requested native selection; do not repair it or dispatch a
       // Tiptap transaction. The emoji is an atom, so PM textContent omits it.
-      await expect.poll(async () => {
-        const probe = await readCaretProbe(pageB) as {
-          current?: { from: number; to: number; nativePmPos: number; focused: boolean };
-        };
-        const selection = probe.current;
-        return selection && [selection.from, selection.to, selection.nativePmPos, selection.focused];
-      }).toEqual([3, 3, 3, true]);
+      await expect
+        .poll(async () => {
+          const probe = (await readCaretProbe(pageB)) as {
+            current?: { from: number; to: number; nativePmPos: number; focused: boolean };
+          };
+          const selection = probe.current;
+          return (
+            selection && [selection.from, selection.to, selection.nativePmPos, selection.focused]
+          );
+        })
+        .toEqual([3, 3, 3, true]);
       await pageB.keyboard.press("Delete");
       await expectTokensAbsent(pageB, ["🙂"]);
       await expectTokensAbsent(pageA, ["🙂"]);
@@ -460,9 +481,13 @@ for (const remotePosition of ["adjacent", "start"] as const) {
 
 async function blurEditorToTitle(page: import("@playwright/test").Page): Promise<void> {
   await page.getByRole("textbox", { name: "문서 제목" }).click();
-  await expect.poll(() => page.evaluate(() => (
-    document.activeElement?.classList.contains("document-page__title") ?? false
-  ))).toBe(true);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.activeElement?.classList.contains("document-page__title") ?? false,
+      ),
+    )
+    .toBe(true);
 }
 
 test("host-padding focus(end) types at the document end", async ({ page }) => {
@@ -477,17 +502,26 @@ test("host-padding focus(end) types at the document end", async ({ page }) => {
   await expectTokens(page, ["first", "second"]);
   await blurEditorToTitle(page);
   await page.locator(".fvoci-editor").dispatchEvent("mousedown");
-  await expect.poll(() => editor.evaluate((root) => {
-    const live = (root as HTMLElement & {
-      editor?: {
-        view: { hasFocus(): boolean };
-        state: { selection: { from: number; to: number }; doc: { content: { size: number } } };
-      };
-    }).editor;
-    if (!live) return null;
-    const end = live.state.doc.content.size - 1;
-    return [live.view.hasFocus(), live.state.selection.from, live.state.selection.to, end];
-  })).toEqual([true, 14, 14, 14]);
+  await expect
+    .poll(() =>
+      editor.evaluate((root) => {
+        const live = (
+          root as HTMLElement & {
+            editor?: {
+              view: { hasFocus(): boolean };
+              state: {
+                selection: { from: number; to: number };
+                doc: { content: { size: number } };
+              };
+            };
+          }
+        ).editor;
+        if (!live) return null;
+        const end = live.state.doc.content.size - 1;
+        return [live.view.hasFocus(), live.state.selection.from, live.state.selection.to, end];
+      }),
+    )
+    .toEqual([true, 14, 14, 14]);
   await page.keyboard.type("X");
   await page.keyboard.press("Enter");
   await page.keyboard.type("Y");
@@ -506,21 +540,29 @@ test("blurred insertContent types at the intended position", async ({ page }) =>
   await expectTokens(page, ["second"]);
   await blurEditorToTitle(page);
   await editor.evaluate((root) => {
-    const live = (root as HTMLElement & {
-      editor?: {
-        chain(): { focus(): { insertContent(content: string): { run(): boolean } } };
-      };
-    }).editor;
+    const live = (
+      root as HTMLElement & {
+        editor?: {
+          chain(): { focus(): { insertContent(content: string): { run(): boolean } } };
+        };
+      }
+    ).editor;
     if (!live) throw new Error("missing live editor");
     live.chain().focus().insertContent("Z").run();
   });
   await expect.poll(async () => (await editorShape(page)).text).toBe("secondZ");
-  await expect.poll(() => editor.evaluate((root) => {
-    const live = (root as HTMLElement & {
-      editor?: { view: { hasFocus(): boolean } };
-    }).editor;
-    return live?.view.hasFocus() ?? false;
-  })).toBe(true);
+  await expect
+    .poll(() =>
+      editor.evaluate((root) => {
+        const live = (
+          root as HTMLElement & {
+            editor?: { view: { hasFocus(): boolean } };
+          }
+        ).editor;
+        return live?.view.hasFocus() ?? false;
+      }),
+    )
+    .toBe(true);
   await page.keyboard.type("W");
   expect((await editorShape(page)).text).toBe("secondZW");
 });
@@ -535,22 +577,30 @@ test("focus(pos) types at the requested document position", async ({ page }) => 
   await expectTokens(page, ["first"]);
   await blurEditorToTitle(page);
   await editor.evaluate((root) => {
-    const live = (root as HTMLElement & {
-      editor?: { commands: { focus(pos: number): boolean } };
-    }).editor;
+    const live = (
+      root as HTMLElement & {
+        editor?: { commands: { focus(pos: number): boolean } };
+      }
+    ).editor;
     if (!live) throw new Error("missing live editor");
     live.commands.focus(3);
   });
-  await expect.poll(() => editor.evaluate((root) => {
-    const live = (root as HTMLElement & {
-      editor?: {
-        view: { hasFocus(): boolean };
-        state: { selection: { from: number; to: number } };
-      };
-    }).editor;
-    if (!live) return null;
-    return [live.view.hasFocus(), live.state.selection.from, live.state.selection.to];
-  })).toEqual([true, 3, 3]);
+  await expect
+    .poll(() =>
+      editor.evaluate((root) => {
+        const live = (
+          root as HTMLElement & {
+            editor?: {
+              view: { hasFocus(): boolean };
+              state: { selection: { from: number; to: number } };
+            };
+          }
+        ).editor;
+        if (!live) return null;
+        return [live.view.hasFocus(), live.state.selection.from, live.state.selection.to];
+      }),
+    )
+    .toEqual([true, 3, 3]);
   await page.keyboard.type("Q");
   expect((await editorShape(page)).text).toBe("fiQrst");
 });
@@ -609,10 +659,7 @@ test("archived document stays connected and read-only", async ({ page }) => {
   await expect(editor).not.toContainText("보관 후 문장");
 });
 
-test("membership revoke while connected stops further edits", async ({
-  browser,
-  collabApp,
-}) => {
+test("membership revoke while connected stops further edits", async ({ browser, collabApp }) => {
   installCollabPeer();
   const ownerCtx = await newCollabContext(browser, collabApp.baseUrl);
   const memberCtx = await newCollabContext(browser, collabApp.baseUrl);
@@ -632,9 +679,7 @@ test("membership revoke while connected stops further edits", async ({
     await expect(editor).toContainText("철회 전 문장");
 
     const ws = await workspaceId(ownerPage, admin.workspaceSlug);
-    const revoke = await ownerPage.request.delete(
-      `/api/v1/workspaces/${ws}/members/${memberId}`,
-    );
+    const revoke = await ownerPage.request.delete(`/api/v1/workspaces/${ws}/members/${memberId}`);
     expect(revoke.ok()).toBe(true);
 
     // Membership loss is reconciled via workspace access-stream → home eviction, not
@@ -682,45 +727,76 @@ test("delete-only save then structured marks, table, and IDs persist", async ({ 
   try {
     // Observe the native input precondition; never repair focus or selection.
     // A failure here distinguishes input/remount trouble from losing Shift+Home.
-    await expect.poll(() => editor.evaluate((root) => {
-      const live = (root as HTMLElement & {
-        editor?: {
-          view: { posAtDOM(node: Node, offset: number): number };
-          state: {
-            selection: { from: number; to: number; empty: boolean };
-            doc: { textContent: string; childCount: number; firstChild: { content: { size: number } } | null };
-          };
-        };
-      }).editor;
-      const native = window.getSelection();
-      const anchor = native?.anchorNode;
-      const inside = Boolean(anchor && root.contains(anchor));
-      const end = live?.state.doc.childCount === 1 && live.state.doc.firstChild
-        ? live.state.doc.firstChild.content.size + 1 : null;
-      const selection = live?.state.selection;
-      return {
-        text: live?.state.doc.textContent ?? null,
-        focused: document.activeElement === root || root.contains(document.activeElement),
-        editable: root.getAttribute("contenteditable"),
-        nativeAtEnd: Boolean(inside && native?.isCollapsed && live && anchor &&
-          live.view.posAtDOM(anchor, native.anchorOffset) === end),
-        editorAtEnd: Boolean(selection?.empty && selection.from === end && selection.to === end),
-      };
-    }), { message: "native input must finish with the focused caret at the typed paragraph end" })
-      .toEqual({ text: "굵은링크", focused: true, editable: "true", nativeAtEnd: true, editorAtEnd: true });
+    await expect
+      .poll(
+        () =>
+          editor.evaluate((root) => {
+            const live = (
+              root as HTMLElement & {
+                editor?: {
+                  view: { posAtDOM(node: Node, offset: number): number };
+                  state: {
+                    selection: { from: number; to: number; empty: boolean };
+                    doc: {
+                      textContent: string;
+                      childCount: number;
+                      firstChild: { content: { size: number } } | null;
+                    };
+                  };
+                };
+              }
+            ).editor;
+            const native = window.getSelection();
+            const anchor = native?.anchorNode;
+            const inside = Boolean(anchor && root.contains(anchor));
+            const end =
+              live?.state.doc.childCount === 1 && live.state.doc.firstChild
+                ? live.state.doc.firstChild.content.size + 1
+                : null;
+            const selection = live?.state.selection;
+            return {
+              text: live?.state.doc.textContent ?? null,
+              focused: document.activeElement === root || root.contains(document.activeElement),
+              editable: root.getAttribute("contenteditable"),
+              nativeAtEnd: Boolean(
+                inside &&
+                native?.isCollapsed &&
+                live &&
+                anchor &&
+                live.view.posAtDOM(anchor, native.anchorOffset) === end,
+              ),
+              editorAtEnd: Boolean(
+                selection?.empty && selection.from === end && selection.to === end,
+              ),
+            };
+          }),
+        { message: "native input must finish with the focused caret at the typed paragraph end" },
+      )
+      .toEqual({
+        text: "굵은링크",
+        focused: true,
+        editable: "true",
+        nativeAtEnd: true,
+        editorAtEnd: true,
+      });
 
     await page.keyboard.press("Shift+Home");
     // Both native and PM selections must reflect the real keyboard gesture.
-    await expect.poll(async () => {
-      const selection = await readEditorSelection(page);
-      return { browser: selection.browser, editor: selection.editor };
-    }, { message: "native and editor selection must cover the intended marked text" })
+    await expect
+      .poll(
+        async () => {
+          const selection = await readEditorSelection(page);
+          return { browser: selection.browser, editor: selection.editor };
+        },
+        { message: "native and editor selection must cover the intended marked text" },
+      )
       .toEqual({ browser: "굵은링크", editor: "굵은링크" });
   } catch (error) {
     console.info("caret probe on selection failure", {
       probe: await readCaretProbe(page),
       reconnects,
-      newAuthFrames: wire.received.filter((frame) => frame.kind === "auth-scope").length - authFramesBefore,
+      newAuthFrames:
+        wire.received.filter((frame) => frame.kind === "auth-scope").length - authFramesBefore,
     });
     throw error;
   }
@@ -775,9 +851,11 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   collabApp,
 }) => {
   const started = Date.now();
-  const phase = (name: string) => console.info("crash recovery phase", {
-    name, elapsedMs: Date.now() - started,
-  });
+  const phase = (name: string) =>
+    console.info("crash recovery phase", {
+      name,
+      elapsedMs: Date.now() - started,
+    });
   const logSelection = async (page: import("@playwright/test").Page, label: string) => {
     console.info("crash recovery selection", {
       label,
@@ -808,10 +886,11 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     ]);
   };
   try {
-    await test.step("authenticate independent seed clients", () => Promise.all([
-      login(pageA, member.email, member.password),
-      login(pageB, member.email, member.password),
-    ]));
+    await test.step("authenticate independent seed clients", () =>
+      Promise.all([
+        login(pageA, member.email, member.password),
+        login(pageB, member.email, member.password),
+      ]));
     phase("seed clients authenticated");
     const doc = await createWikiDoc(pageA, "크래시 복원");
     url = doc.url;
@@ -861,10 +940,8 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     }
   }
   try {
-    await test.step(
-      "SIGKILL owned process tree while collaboration helper is live",
-      () => collabApp.crashKillWhenHelperLive(),
-    );
+    await test.step("SIGKILL owned process tree while collaboration helper is live", () =>
+      collabApp.crashKillWhenHelperLive());
     phase("process tree crashed with live helper");
     await ensureSeedContextsClosed();
     phase("persist acknowledged and old clients closed");
@@ -881,10 +958,11 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   const restoredWires = [attachCollabWire(restoredA), attachCollabWire(restoredB)];
   let restoreBodyFailed = false;
   try {
-    await test.step("authenticate independent fresh clients", () => Promise.all([
-      login(restoredA, member.email, member.password),
-      login(restoredB, member.email, member.password),
-    ]));
+    await test.step("authenticate independent fresh clients", () =>
+      Promise.all([
+        login(restoredA, member.email, member.password),
+        login(restoredB, member.email, member.password),
+      ]));
     phase("fresh clients authenticated");
     expect(await indexedDbNames(restoredA)).toEqual([]);
     expect(await indexedDbNames(restoredB)).toEqual([]);
@@ -963,10 +1041,17 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   }
 });
 
-test("@ mention uses authorized suggestions and preserves the selected user after reload", async ({ page }) => {
+test("@ mention uses authorized suggestions and preserves the selected user after reload", async ({
+  page,
+}) => {
   await ensureCollabFixture(page);
   // Other scenarios revoke the shared peer; own this suggestion's membership.
-  const mentionPeer = { ...peer, email: "collab-mention-peer@example.com", givenName: "제안", familyName: "멘션" };
+  const mentionPeer = {
+    ...peer,
+    email: "collab-mention-peer@example.com",
+    givenName: "제안",
+    familyName: "멘션",
+  };
   const mentionLabel = "멘션제안";
   installCollabPeer(mentionPeer);
   await login(page, member.email, member.password);
@@ -982,8 +1067,11 @@ test("@ mention uses authorized suggestions and preserves the selected user afte
   let selectingMention = true;
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname.startsWith("/api/") &&
-      (selectingMention || /\/(search|lookup|members|groups|mentions?|users)(\/|$)/.test(url.pathname))) {
+    if (
+      url.pathname.startsWith("/api/") &&
+      (selectingMention ||
+        /\/(search|lookup|members|groups|mentions?|users)(\/|$)/.test(url.pathname))
+    ) {
       mentionHits.push({ method: request.method(), path: url.pathname, query: url.search });
     }
   });
@@ -993,8 +1081,12 @@ test("@ mention uses authorized suggestions and preserves the selected user afte
       failedApiResponses.push({ path, status: response.status() });
     }
   });
-  const membersResponse = page.waitForResponse((response) => new URL(response.url()).pathname === membersPath);
-  const groupsResponse = page.waitForResponse((response) => new URL(response.url()).pathname === groupsPath);
+  const membersResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === membersPath,
+  );
+  const groupsResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === groupsPath,
+  );
   await editor.click();
   await page.keyboard.type("@");
   const [members, groups] = await Promise.all([membersResponse, groupsResponse]);
@@ -1002,14 +1094,25 @@ test("@ mention uses authorized suggestions and preserves the selected user afte
   expect(groups.status()).toBe(200);
   const body = await members.json();
   const selected = body.items.find((item: { email: string }) => item.email === mentionPeer.email);
-  expect(selected).toMatchObject({ givenName: mentionPeer.givenName, familyName: mentionPeer.familyName, role: "member" });
+  expect(selected).toMatchObject({
+    givenName: mentionPeer.givenName,
+    familyName: mentionPeer.familyName,
+    role: "member",
+  });
   expect(selected.userId).toMatch(UUID_RE);
-  await expect(page.getByRole("listbox").getByRole("option", { name: mentionLabel, exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("listbox").getByRole("option", { name: mentionLabel, exact: true }),
+  ).toBeVisible();
   await page.getByRole("listbox").getByRole("option", { name: mentionLabel, exact: true }).click();
   await expect(editor.locator("[data-mention]")).toHaveText(`@${mentionLabel}`);
   const before = await editorShape(page);
-  expect(before.document.content?.flatMap((node) => node.content ?? []).filter((node) => node.type === "mention"))
-    .toEqual([{ type: "mention", attrs: { entity: "user", id: selected.userId, label: mentionLabel } }]);
+  expect(
+    before.document.content
+      ?.flatMap((node) => node.content ?? [])
+      .filter((node) => node.type === "mention"),
+  ).toEqual([
+    { type: "mention", attrs: { entity: "user", id: selected.userId, label: mentionLabel } },
+  ]);
   selectingMention = false;
   await persistBody(page);
   await page.reload();
@@ -1018,11 +1121,18 @@ test("@ mention uses authorized suggestions and preserves the selected user afte
   await expect(editorLocator(page).locator("[data-mention]")).toHaveText(`@${mentionLabel}`);
   expect(mentionHits).toContainEqual({ method: "GET", path: membersPath, query: "" });
   expect(mentionHits).toContainEqual({ method: "GET", path: groupsPath, query: "" });
-  expect(mentionHits.filter((hit) => hit.method !== "GET" || hit.query !== "" || ![membersPath, groupsPath].includes(hit.path))).toEqual([]);
+  expect(
+    mentionHits.filter(
+      (hit) =>
+        hit.method !== "GET" || hit.query !== "" || ![membersPath, groupsPath].includes(hit.path),
+    ),
+  ).toEqual([]);
   expect(failedApiResponses).toEqual([]);
 });
 
-test("@ mention member metadata denies guests, nonmembers and unauthenticated users", async ({ page }) => {
+test("@ mention member metadata denies guests, nonmembers and unauthenticated users", async ({
+  page,
+}) => {
   await ensureCollabFixture(page);
   await login(page, member.email, member.password);
   const id = await workspaceId(page, admin.workspaceSlug);
@@ -1141,9 +1251,7 @@ test("revoked member cannot download or create wiki attachments", async ({
     expect(href).toBeTruthy();
 
     const ws = await workspaceId(ownerPage, admin.workspaceSlug);
-    const revoke = await ownerPage.request.delete(
-      `/api/v1/workspaces/${ws}/members/${memberId}`,
-    );
+    const revoke = await ownerPage.request.delete(`/api/v1/workspaces/${ws}/members/${memberId}`);
     expect(revoke.ok()).toBe(true);
 
     const revokedDownload = await memberPage.request.get(href!);
@@ -1228,15 +1336,27 @@ test("two users show presence and drop it when the peer closes", async ({
     await openEditor(pageB, doc.url);
     await expect(pageA.getByLabel(/동시 접속 1명/)).toBeVisible({ timeout: 15_000 });
     await expect(pageB.getByLabel(/동시 접속 1명/)).toBeVisible();
-    await expect(pageA.getByRole("button", { name: `${PEER_PRESENCE} 커서 위치로 이동` })).toBeVisible();
-    await expect(pageB.getByRole("button", { name: `${MEMBER_PRESENCE} 커서 위치로 이동` })).toBeVisible();
+    await expect(
+      pageA.getByRole("button", { name: `${PEER_PRESENCE} 커서 위치로 이동` }),
+    ).toBeVisible();
+    await expect(
+      pageB.getByRole("button", { name: `${MEMBER_PRESENCE} 커서 위치로 이동` }),
+    ).toBeVisible();
     await ctxB.close();
     await expect(pageA.getByLabel(/동시 접속 \d+명/)).toBeHidden({ timeout: 20_000 });
-    await expect(pageA.getByRole("button", { name: `${PEER_PRESENCE} 커서 위치로 이동` })).toHaveCount(0);
+    await expect(
+      pageA.getByRole("button", { name: `${PEER_PRESENCE} 커서 위치로 이동` }),
+    ).toHaveCount(0);
   } finally {
     const summary = {
-      a: { sent: wireA.sent.map((frame) => frame.kind), received: wireA.received.map((frame) => frame.kind) },
-      b: { sent: wireB.sent.map((frame) => frame.kind), received: wireB.received.map((frame) => frame.kind) },
+      a: {
+        sent: wireA.sent.map((frame) => frame.kind),
+        received: wireA.received.map((frame) => frame.kind),
+      },
+      b: {
+        sent: wireB.sent.map((frame) => frame.kind),
+        received: wireB.received.map((frame) => frame.kind),
+      },
     };
     await testInfo.attach("collab-wire-kinds.json", {
       body: Buffer.from(JSON.stringify(summary)),
