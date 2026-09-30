@@ -4,7 +4,7 @@ import type { Node } from "@tiptap/pm/model";
 import { type Editor, useEditorState } from "@tiptap/react";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { BlockMenu } from "./block-menu.js";
-import { isInsideTable, isTableBlock, plusAt } from "./gutter-actions.js";
+import { isInsideTable, isTableBlock, plusAt } from "../gutter-actions.js";
 
 export function Gutter({
 	editor,
