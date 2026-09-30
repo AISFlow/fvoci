@@ -12,6 +12,7 @@ import WorkspaceShell from "../components/WorkspaceShell.vue";
 import DeletedProjectsSection from "../features/settings/DeletedProjectsSection.vue";
 import NotificationPrefsSection from "../features/settings/NotificationPrefsSection.vue";
 import WorkspaceCalendarSection from "../features/settings/WorkspaceCalendarSection.vue";
+import WorkspaceConsentsSection from "../features/settings/WorkspaceConsentsSection.vue";
 import WorkspaceEventsSection from "../features/settings/WorkspaceEventsSection.vue";
 import WorkspaceExportSection from "../features/settings/WorkspaceExportSection.vue";
 import WorkspaceGithubSection from "../features/settings/WorkspaceGithubSection.vue";
@@ -149,6 +150,7 @@ function onSaveName(name: string): void {
         :current-user-role="workspace.role"
       />
       <WorkspaceGroupsSection v-if="memberOrAbove" :workspace-id="workspace.id" :can-manage="canManage" />
+      <WorkspaceConsentsSection v-if="canManage" :workspace-id="workspace.id" />
       <WorkspaceExportSection :workspace-id="workspace.id" :can-manage="canManage" />
       <WorkspaceImportSection :workspace-id="workspace.id" :can-manage="canManage" />
       <NotificationPrefsSection v-if="memberOrAbove" :workspace-id="workspace.id" />

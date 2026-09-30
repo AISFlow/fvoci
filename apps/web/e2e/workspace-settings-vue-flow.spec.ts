@@ -1,5 +1,6 @@
 import path from "node:path";
 import { expect, type Page, request, test } from "@playwright/test";
+import { authSql } from "./auth-link-evidence";
 import { createE2eUser, login, logout, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
@@ -184,4 +185,75 @@ test("actual Vue tags and templates URLs persist edits, apply documents, and enf
   await openSettings(page, "/document-tags");
   await expect(page.getByTestId("document-tag-row-Renamed settings tag").getByRole("textbox")).toHaveCount(0);
   expect(csp).toEqual([]);
+});
+
+test("workspace consents show real empty, populated, timezone, retry and role denial states", async ({ page, browser }) => {
+  await login(page, owner.email, owner.password);
+  await openSettings(page);
+  const section = page.getByTestId("workspace-consents");
+  await section.locator("summary").click();
+  await expect(section).toContainText("기록된 동의가 없습니다");
+  expect(await (await page.request.get(`/api/v1/workspaces/${workspaceId}/consents`)).json()).toEqual({ members: [] });
+
+  const published = await page.request.post("/api/v1/admin/legal", { data: {
+    kind: "terms", title: "Settings consent terms", bodyMarkdown: "Settings consent terms",
+    effectiveAt: "2026-01-01T00:00:00Z", required: false,
+  } });
+  expect(published.status()).toBe(201);
+  const version = (await published.json()).version;
+  expect((await page.request.post("/api/v1/auth/consents", { data: { items: [{ kind: "terms", version }] } })).ok()).toBe(true);
+  const currentUserId = (await (await page.request.get("/api/v1/auth/me")).json()).userId;
+  // Fixture timestamp straddles a UTC day; the production read must use the
+  // user's persisted timezone, rather than the browser's or server's zone.
+  authSql(`UPDATE fvoci.users SET timezone = 'America/Los_Angeles' WHERE id = '${currentUserId}';
+    UPDATE fvoci.user_consents SET consented_at = '2026-01-01T00:30:00Z' WHERE user_id = '${currentUserId}' AND kind = 'terms' AND version = ${version}`);
+  const consentUrl = `**/api/v1/workspaces/${workspaceId}/consents`;
+  await page.route(consentUrl, (route) => route.abort("failed"));
+  await page.reload();
+  await section.locator("summary").click();
+  await expect(section.getByRole("alert")).toBeVisible();
+  await expect(section.getByText("기록된 동의가 없습니다")).toHaveCount(0);
+  await page.unroute(consentUrl);
+  await section.getByRole("button", { name: "다시 시도" }).click();
+  await expect(section.getByRole("alert")).toHaveCount(0);
+  const row = section.getByRole("row").filter({ has: page.getByRole("cell", { name: "terms", exact: true }) });
+  await expect(row.getByRole("cell").nth(0)).toHaveText("김 설정");
+  await expect(row.getByRole("cell").nth(2)).toHaveText(String(version));
+  await expect(row.getByRole("cell").nth(3)).toHaveText("2025. 12. 31.");
+  const stored = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/consents`)).json();
+  expect(stored.members.find((member: { userId: string }) => member.userId === currentUserId).consents)
+    .toEqual([{ kind: "terms", version, consentedAt: "2026-01-01T00:30:00Z" }]);
+
+  // Names are a separate query: a transient name lookup failure must keep
+  // actual consent rows usable with the original user-ID fallback.
+  await page.route(`**/api/v1/workspaces/${workspaceId}/members`, (route) => route.abort("failed"));
+  await page.reload();
+  await section.locator("summary").click();
+  await expect(row.getByRole("cell").nth(0)).toHaveText(currentUserId);
+  await page.unroute(`**/api/v1/workspaces/${workspaceId}/members`);
+  authSql(`UPDATE fvoci.users SET timezone = 'Asia/Seoul' WHERE id = '${currentUserId}'`);
+
+  for (const role of ["admin", "member"]) {
+    const email = `settings-consent-${role}@example.com`;
+    createE2eUser(email, "consentpass1", role, { workspaceSlug: "settings-vue", membershipRole: role });
+    const rolePage = await browser.newPage();
+    try {
+      await login(rolePage, email, "consentpass1");
+      let consentRequests = 0;
+      rolePage.on("request", (req) => { if (req.url().endsWith(`/workspaces/${workspaceId}/consents`)) consentRequests += 1; });
+      await openSettings(rolePage);
+      if (role === "admin") {
+        await rolePage.getByTestId("workspace-consents").locator("summary").click();
+        await expect(rolePage.getByTestId("workspace-consents").getByRole("cell", { name: "terms", exact: true })).toBeVisible();
+        expect((await rolePage.request.get(`/api/v1/workspaces/${workspaceId}/consents`)).status()).toBe(200);
+      } else {
+        await expect(rolePage.getByText("설정을 변경하려면 관리자 권한이 필요합니다")).toBeVisible();
+        await expect(rolePage.getByTestId("workspace-consents")).toHaveCount(0);
+        expect(consentRequests).toBe(0);
+        expect((await rolePage.request.get(`/api/v1/workspaces/${workspaceId}/consents`)).status()).toBe(404);
+      }
+    } finally {
+      await rolePage.close();
+    }
+  }
 });
