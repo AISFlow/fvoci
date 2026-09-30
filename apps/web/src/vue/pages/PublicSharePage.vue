@@ -84,6 +84,12 @@ function onDenied(error: unknown): void {
   accessError.value = failMessage(error);
 }
 
+function settledAndAuthorized(): boolean {
+  return [meta, tree, body].every(
+    (query) => !query.error.value && query.isSuccess.value && !query.isFetching.value,
+  );
+}
+
 async function refresh(): Promise<void> {
   const recovering = accessError.value !== null;
   const refreshToken = token.value;
@@ -118,15 +124,7 @@ async function refresh(): Promise<void> {
         selectedDocumentId.value === null &&
         freshTree.isSuccess &&
         freshBody.isSuccess &&
-        meta.isSuccess.value &&
-        tree.isSuccess.value &&
-        body.isSuccess.value &&
-        !meta.error.value &&
-        !tree.error.value &&
-        !body.error.value &&
-        !meta.isFetching.value &&
-        !tree.isFetching.value &&
-        !body.isFetching.value
+        settledAndAuthorized()
       ) {
         accessError.value = null;
       }

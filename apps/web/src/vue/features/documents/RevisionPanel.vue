@@ -29,9 +29,9 @@ const props = withDefaults(
     /** Documents (default) or the task body room. */
     targetKind?: "document" | "task";
     readOnly: boolean;
-    persistNow?: () => Promise<void>;
+    persistNow?: (() => Promise<void>) | undefined;
   }>(),
-  { targetKind: "document" },
+  { targetKind: "document", persistNow: undefined },
 );
 const queryClient = useQueryClient();
 const me = useQuery(meQuery);
@@ -123,24 +123,28 @@ const restore = useMutation({
     notice.value = t("version.restore.done");
     await queryClient.invalidateQueries({ queryKey: queryKey.value });
   },
-  onError: (err: unknown) => {
+  onError: async (err: unknown) => {
     const timedOut = err instanceof ProblemError && err.status === 504;
-    if (timedOut) {
-      void queryClient.invalidateQueries({ queryKey: queryKey.value });
-      if (scopeProjectId.value) {
-        void queryClient.invalidateQueries({
-          queryKey: ["project-document", props.workspaceId, scopeProjectId.value, props.documentId],
-        });
-      } else if (props.targetKind === "document") {
-        void queryClient.invalidateQueries({
-          queryKey: ["document", props.workspaceId, props.documentId],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: ["document-body", props.workspaceId, props.documentId],
-        });
-      }
-    }
     notice.value = timedOut ? t("version.restore.timeout") : t("version.restore.failed");
+    if (!timedOut) return;
+    const invalidations = [queryClient.invalidateQueries({ queryKey: queryKey.value })];
+    if (scopeProjectId.value) {
+      invalidations.push(
+        queryClient.invalidateQueries({
+          queryKey: ["project-document", props.workspaceId, scopeProjectId.value, props.documentId],
+        }),
+      );
+    } else if (props.targetKind === "document") {
+      invalidations.push(
+        queryClient.invalidateQueries({
+          queryKey: ["document", props.workspaceId, props.documentId],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["document-body", props.workspaceId, props.documentId],
+        }),
+      );
+    }
+    await Promise.all(invalidations);
   },
 });
 
@@ -159,7 +163,9 @@ async function showPreview(id: string): Promise<void> {
 }
 
 function save(): void {
-  void persistThenCreate(props.persistNow, () => saveRevision.mutate()).catch(() => {
+  persistThenCreate(props.persistNow, () => {
+    saveRevision.mutate();
+  }).catch(() => {
     notice.value = t("version.save.failed");
   });
 }

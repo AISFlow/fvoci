@@ -31,16 +31,7 @@ type PageImage = { url: string; page: number; width: number } | null;
 /** A page for one document and search chunk: the chunk's start page or the user's choice. */
 type PageChoice = { client: HwpDocumentClient; chunk: number | undefined; page: number } | null;
 
-/**
- * Session edit context (source `hwpEditable` + `onSavedCopy`). `editable`
- * comes from `GET …/edit-context`; `save` is present only in a workspace
- * session, and the server re-checks edit access when the copy is written.
- * A share view passes none of it.
- */
-export type HwpEditProps = {
-  editable: boolean;
-  save?: { workspaceId: string; attachmentId: string; onSavedCopy: (attachmentId: string) => void };
-};
+import type { HwpEditProps } from "./hwp-edit-props";
 
 /** An edit step waiting on the "discard edits?" dialog. */
 type Discard = "undo" | "exit" | "retry" | null;
@@ -100,6 +91,7 @@ let liveClient: HwpDocumentClient | null = null;
 useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch], () => {
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   let client: HwpDocumentClient | null = null;
   state.value = { status: "loading" };
   image.value = null;
@@ -109,44 +101,42 @@ useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch]
   editError.value = null;
   busy.value = null;
   discard.value = null;
-  void (async () => {
-    try {
-      const body = await (props.prefetch?.take(controller.signal) ??
-        downloadCapped(props.downloadUrl, HWP_MAX_BYTES, controller.signal));
-      if (!alive) return;
-      if (body.status === "failed") {
-        state.value = { status: "error", message: t("load.failed"), retry: true };
-        return;
-      }
-      if (body.status === "tooLarge") {
-        state.value = unavailable();
-        return;
-      }
-      const module = await loadRhwpModule();
-      if (!alive) return;
-      // The signal terminates the worker mid-parse, before a client exists here.
-      const opened = await HwpDocumentClient.open(body.bytes, module, {
-        signal: controller.signal,
-      });
-      if (!alive) {
-        opened.client.close();
-        return;
-      }
-      client = opened.client;
-      liveClient = client;
-      state.value = { status: "ready", client, pageCount: opened.pageCount };
-    } catch (error) {
-      if (!alive || (error instanceof Error && error.name === "AbortError")) return;
-      // A file rhwp will not lay out, or one too costly to, stays download-only;
-      // fetching and parsing it again will not help.
-      const reason = error instanceof HwpClientError ? error.reason : null;
-      if (reason === "tooLarge" || reason === "invalid" || reason === "timeout") {
-        state.value = unavailable();
-        return;
-      }
+  (async () => {
+    const body = await (props.prefetch?.take(controller.signal) ??
+      downloadCapped(props.downloadUrl, HWP_MAX_BYTES, controller.signal));
+    if (!isAlive()) return;
+    if (body.status === "failed") {
       state.value = { status: "error", message: t("load.failed"), retry: true };
+      return;
     }
-  })();
+    if (body.status === "tooLarge") {
+      state.value = unavailable();
+      return;
+    }
+    const module = await loadRhwpModule();
+    if (!isAlive()) return;
+    // The signal terminates the worker mid-parse, before a client exists here.
+    const opened = await HwpDocumentClient.open(body.bytes, module, {
+      signal: controller.signal,
+    });
+    if (!isAlive()) {
+      opened.client.close();
+      return;
+    }
+    client = opened.client;
+    liveClient = client;
+    state.value = { status: "ready", client, pageCount: opened.pageCount };
+  })().catch((error: unknown) => {
+    if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
+    // A file rhwp will not lay out, or one too costly to, stays download-only;
+    // fetching and parsing it again will not help.
+    const reason = error instanceof HwpClientError ? error.reason : null;
+    if (reason === "tooLarge" || reason === "invalid" || reason === "timeout") {
+      state.value = unavailable();
+      return;
+    }
+    state.value = { status: "error", message: t("load.failed"), retry: true };
+  });
   return () => {
     alive = false;
     controller.abort();
@@ -168,14 +158,16 @@ useEffectAfterRender([client, () => props.chunk, pageCount], () => {
     return;
   }
   let alive = true;
+  const isAlive = (): boolean => alive;
   const chunk = props.chunk;
   current.startPage(chunk).then(
     (page) => {
-      if (alive) start.value = { client: current, chunk, page: clampPage(page, pageCount.value) };
+      if (isAlive())
+        start.value = { client: current, chunk, page: clampPage(page, pageCount.value) };
     },
     () => {
       // The worker is gone; the page render below reports it.
-      if (alive) start.value = { client: current, chunk, page: 0 };
+      if (isAlive()) start.value = { client: current, chunk, page: 0 };
     },
   );
   return () => {
@@ -183,13 +175,13 @@ useEffectAfterRender([client, () => props.chunk, pageCount], () => {
   };
 });
 
-function matches(choice: PageChoice): boolean {
+function matches(choice: PageChoice): choice is NonNullable<PageChoice> {
   return choice !== null && choice.client === client.value && choice.chunk === props.chunk;
 }
 
 const chosen = computed(() => {
-  if (matches(nav.value)) return nav.value!.page;
-  if (matches(start.value)) return start.value!.page;
+  if (matches(nav.value)) return nav.value.page;
+  if (matches(start.value)) return start.value.page;
   return null;
 });
 // An edit may have shortened the document under the chosen page.
@@ -208,17 +200,18 @@ useEffectAfterRender([client, page, revision], () => {
   const target = page.value;
   if (!current || target === null) return;
   let alive = true;
+  const isAlive = (): boolean => alive;
   let url: string | null = null;
   image.value = null;
   current.renderPage(target).then(
     (svg) => {
-      if (!alive) return;
+      if (!isAlive()) return;
       url = URL.createObjectURL(svg);
       image.value = { url, page: target, width: 0 };
       renderFailed.value = false;
     },
     () => {
-      if (alive) renderFailed.value = true;
+      if (isAlive()) renderFailed.value = true;
     },
   );
   return () => {
@@ -283,8 +276,8 @@ async function run(
   }
 }
 
-function replace(all: boolean): void {
-  void run(
+async function replace(all: boolean): Promise<void> {
+  await run(
     "replace",
     async (doc, live) => {
       const result = await doc.replace(findText.value, replaceText.value, all);
@@ -304,8 +297,8 @@ function replace(all: boolean): void {
   );
 }
 
-function revert(then?: () => void): void {
-  void run(
+async function revert(then?: () => void): Promise<void> {
+  await run(
     "revert",
     async (doc, live) => {
       const count = await doc.revert();
@@ -318,8 +311,8 @@ function revert(then?: () => void): void {
   );
 }
 
-function download(): void {
-  void run(
+async function download(): Promise<void> {
+  await run(
     "download",
     async (doc, live) => {
       const bytes = await doc.exportDocument(exportMeta.value.format);
@@ -332,16 +325,18 @@ function download(): void {
       link.download = editedCopyName(props.name);
       link.click();
       // The download has taken the bytes by the next task.
-      setTimeout(() => URL.revokeObjectURL(href), 0);
+      setTimeout(() => {
+        URL.revokeObjectURL(href);
+      }, 0);
     },
     t("attachment.viewer.edit.failed"),
   );
 }
 
-function saveCopy(): void {
+async function saveCopy(): Promise<void> {
   const dest = save.value;
   if (!dest) return;
-  void run(
+  await run(
     "save",
     async (doc, live) => {
       const bytes = await doc.exportDocument(exportMeta.value.format);
@@ -361,17 +356,20 @@ function saveCopy(): void {
       // Clear the guard before leaving for the copy.
       dirty.value = false;
       await nextTick();
-      dest.onSavedCopy(saved.id);
+      await dest.onSavedCopy(saved.id);
     },
     t("attachment.viewer.edit.saveFailed"),
   );
 }
 
-function confirmDiscard(): void {
+async function confirmDiscard(): Promise<void> {
   const action = discard.value;
   discard.value = null;
-  if (action === "undo") revert();
-  else if (action === "exit") revert(() => (editing.value = false));
+  if (action === "undo") await revert();
+  else if (action === "exit")
+    await revert(() => {
+      editing.value = false;
+    });
   else if (action === "retry") retry();
 }
 

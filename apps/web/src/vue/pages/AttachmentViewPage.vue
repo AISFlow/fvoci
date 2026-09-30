@@ -56,9 +56,9 @@ const retryable = computed(
     (!(query.error.value instanceof ProblemError) || query.error.value.status >= 500),
 );
 
-function onSavedCopy(copyId: string): void {
+async function onSavedCopy(copyId: string): Promise<void> {
   // The copy opens without the original's search chunk.
-  void router.push(attachmentViewPath(slug.value, copyId));
+  await router.push(attachmentViewPath(slug.value, copyId));
 }
 </script>
 

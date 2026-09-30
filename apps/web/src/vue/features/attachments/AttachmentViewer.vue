@@ -9,7 +9,7 @@ import SearchChunkSupplement from "./SearchChunkSupplement.vue";
 import TextBytesPane from "./TextBytesPane.vue";
 import ViewerDownloadButton from "./ViewerDownloadButton.vue";
 import ViewerErrorPane from "./ViewerErrorPane.vue";
-import type { HwpEditProps } from "./HwpViewer.vue";
+import type { HwpEditProps } from "./hwp-edit-props";
 import "@/features/attachments/attachment-shell.css";
 
 export type { HwpEditProps };

@@ -89,11 +89,11 @@ const session = room.session;
 const { mentionItems, entityResolver } = useEditorEntities(
   () => props.workspaceId,
   () =>
-    `${props.documentId}:${session.value?.generation ?? ""}:${collabUser.value?.id ?? ""}:${session.value?.status === "unauthorized"}`,
+    `${props.documentId}:${String(session.value?.generation ?? "")}:${collabUser.value?.id ?? ""}:${String(session.value?.status === "unauthorized")}`,
 );
 
 const optionsOpen = ref(false);
-const optionsButton = ref<InstanceType<typeof UButton> | null>(null);
+const optionsButton = ref<{ $el: HTMLElement } | null>(null);
 function onOptionsKeydown(event: KeyboardEvent): void {
   if (event.key !== "Escape" || !optionsOpen.value) return;
   event.preventDefault();
@@ -111,7 +111,7 @@ watch(
     let width = 0;
     const resize = () => {
       input.style.height = "auto";
-      input.style.height = `${input.scrollHeight + 2}px`;
+      input.style.height = `${String(input.scrollHeight + 2)}px`;
     };
     const observer = new ResizeObserver(([entry]) => {
       if (entry && entry.contentRect.width !== width) {
@@ -120,7 +120,9 @@ watch(
       }
     });
     observer.observe(input);
-    onCleanup(() => observer.disconnect());
+    onCleanup(() => {
+      observer.disconnect();
+    });
     await nextTick();
     if (titleInput.value === input) resize();
   },
@@ -327,10 +329,10 @@ async function saveStatus(next: string): Promise<void> {
   }
 }
 
-function onStatusChange(event: Event): void {
+async function onStatusChange(event: Event): Promise<void> {
   const next = (event.target as HTMLSelectElement).value;
   status.value = next;
-  void saveStatus(next);
+  await saveStatus(next);
 }
 
 /** The Save button: flush, then wait for the persist ACK that matches this edit prefix. */
@@ -355,9 +357,9 @@ function onTitleFocus(): void {
     setTitleEditing(awareness.value, true);
 }
 
-function onTitleBlur(): void {
+async function onTitleBlur(): Promise<void> {
   if (isBlockPresenceAwareness(awareness.value)) setTitleEditing(awareness.value, false);
-  void saveTitle();
+  await saveTitle();
 }
 
 function onTitleInput(event: Event): void {
@@ -385,7 +387,9 @@ function flashBlock(id: string): void {
   );
   if (!element) return;
   element.setAttribute("data-afn-flash", "");
-  window.setTimeout(() => element.removeAttribute("data-afn-flash"), 800);
+  window.setTimeout(() => {
+    element.removeAttribute("data-afn-flash");
+  }, 800);
 }
 </script>
 

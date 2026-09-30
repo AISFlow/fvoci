@@ -56,68 +56,67 @@ const shown = shallowRef<PageState | null>(null);
 useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch], () => {
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   state.value = { status: "loading" };
   sheetIndex.value = 0;
   rowPage.value = 0;
   colPage.value = 0;
   shown.value = null;
   let book: RemoteXlsxBook | null = null;
-  void (async () => {
-    try {
-      const body = await (props.prefetch?.take(controller.signal) ??
-        downloadCapped(props.downloadUrl, XLSX_MAX_BYTES, controller.signal));
-      if (!alive) return;
-      if (body.status === "failed") {
-        state.value = { status: "error", message: t("load.failed"), retry: true };
-        return;
-      }
-      if (body.status === "tooLarge") {
-        state.value = {
-          status: "error",
-          message: t("attachment.viewer.previewUnavailable"),
-          retry: false,
-        };
-        return;
-      }
-      const opened = await openXlsxInWorker(body.bytes, { signal: controller.signal });
-      if (opened.status === "ok") book = opened.book;
-      if (!alive) {
-        book?.close();
-        return;
-      }
-      if (opened.status === "ok") {
-        // The first page arrives with the book, so the grid never flashes empty.
-        let first: PageState | null = null;
-        if (opened.book.sheets[0]?.kind === "worksheet") {
-          try {
-            first = {
-              sheetIndex: 0,
-              rowPage: 0,
-              colPage: 0,
-              page: await opened.book.page(0, 0, 0),
-            };
-          } catch (error) {
-            if (alive) state.value = pageError(error);
-            return;
-          }
-          if (!alive) return;
+  (async () => {
+    const body = await (props.prefetch?.take(controller.signal) ??
+      downloadCapped(props.downloadUrl, XLSX_MAX_BYTES, controller.signal));
+    if (!isAlive()) return;
+    if (body.status === "failed") {
+      state.value = { status: "error", message: t("load.failed"), retry: true };
+      return;
+    }
+    if (body.status === "tooLarge") {
+      state.value = {
+        status: "error",
+        message: t("attachment.viewer.previewUnavailable"),
+        retry: false,
+      };
+      return;
+    }
+    const opened = await openXlsxInWorker(body.bytes, { signal: controller.signal });
+    if (opened.status === "ok") book = opened.book;
+    if (!isAlive()) {
+      book?.close();
+      return;
+    }
+    if (opened.status === "ok") {
+      // The first page arrives with the book, so the grid never flashes empty.
+      let first: PageState | null = null;
+      if (opened.book.sheets[0]?.kind === "worksheet") {
+        try {
+          first = {
+            sheetIndex: 0,
+            rowPage: 0,
+            colPage: 0,
+            page: await opened.book.page(0, 0, 0),
+          };
+        } catch (error) {
+          if (isAlive()) state.value = pageError(error);
+          return;
         }
-        shown.value = first;
-        state.value = { status: "ready", book: opened.book };
-      } else if (opened.status === "tooLarge") {
-        state.value = {
-          status: "error",
-          message: t("attachment.viewer.previewUnavailable"),
-          retry: false,
-        };
-      } else {
-        state.value = { status: "error", message: t("load.failed"), retry: true };
+        if (!isAlive()) return;
       }
-    } catch (error) {
-      if (!alive || (error instanceof Error && error.name === "AbortError")) return;
+      shown.value = first;
+      state.value = { status: "ready", book: opened.book };
+    } else if (opened.status === "tooLarge") {
+      state.value = {
+        status: "error",
+        message: t("attachment.viewer.previewUnavailable"),
+        retry: false,
+      };
+    } else {
       state.value = { status: "error", message: t("load.failed"), retry: true };
     }
-  })();
+  })().catch((error: unknown) => {
+    if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
+    state.value = { status: "error", message: t("load.failed"), retry: true };
+  });
   return () => {
     alive = false;
     controller.abort();
@@ -140,15 +139,16 @@ useEffectAfterRender([book, sheet, sheetIndex, rowPage, colPage, matchesShown], 
   const current = book.value;
   if (!current || sheet.value?.kind !== "worksheet" || matchesShown.value) return;
   let alive = true;
+  const isAlive = (): boolean => alive;
   const index = sheetIndex.value;
   const row = rowPage.value;
   const col = colPage.value;
   current.page(index, row, col).then(
     (next) => {
-      if (alive) shown.value = { sheetIndex: index, rowPage: row, colPage: col, page: next };
+      if (isAlive()) shown.value = { sheetIndex: index, rowPage: row, colPage: col, page: next };
     },
     (error: unknown) => {
-      if (alive) state.value = pageError(error);
+      if (isAlive()) state.value = pageError(error);
     },
   );
   return () => {

@@ -41,7 +41,7 @@ const origins = useQuery(() =>
 const projects = useQuery(() => documentTaskProjectsQuery(props.workspaceId, props.documentId));
 const hide = computed(
   () =>
-    Boolean(props.hideWhenEmpty) &&
+    props.hideWhenEmpty &&
     !origins.isLoading.value &&
     !origins.isError.value &&
     origins.data.value?.count === 0,
@@ -61,12 +61,15 @@ watch(
 );
 
 const createTask = useMutation({
-  mutationFn: () =>
-    createTaskFromDocument(props.workspaceId, props.documentId!, {
+  mutationFn: () => {
+    const documentId = props.documentId;
+    if (!documentId) throw new Error("Document origin task requires a document ID");
+    return createTaskFromDocument(props.workspaceId, documentId, {
       projectId: projectId.value,
       requestId: requestId.value,
       title: title.value.trim(),
-    }),
+    });
+  },
   onSuccess: async () => {
     after.value = null;
     title.value = "";

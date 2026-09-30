@@ -192,13 +192,14 @@ const hidden = computed(
 );
 const filterInput = useTemplateRef<HTMLInputElement>("filterInput");
 
-function toggle(): void {
+async function toggle(): Promise<void> {
   if (open.value) {
     close();
     return;
   }
   open.value = true;
-  void nextTick(() => filterInput.value?.focus());
+  await nextTick();
+  filterInput.value?.focus();
 }
 
 function onFilterKeydown(event: KeyboardEvent): void {

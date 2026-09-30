@@ -22,39 +22,38 @@ const state = shallowRef<State>({ status: "loading" });
 useEffectAfterRender([() => props.previewHtmlUrl], () => {
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   state.value = { status: "loading" };
-  void (async () => {
-    try {
-      const response = await fetch(props.previewHtmlUrl, {
-        credentials: "include",
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        await response.body?.cancel();
-        if (alive) {
-          state.value = {
-            status: response.status === 404 || response.status === 413 ? "unavailable" : "error",
-          };
-        }
-        return;
+  (async () => {
+    const response = await fetch(props.previewHtmlUrl, {
+      credentials: "include",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (isAlive()) {
+        state.value = {
+          status: response.status === 404 || response.status === 413 ? "unavailable" : "error",
+        };
       }
-      const payload: unknown = await response.json();
-      const html =
-        typeof payload === "object" && payload !== null && "html" in payload ? payload.html : null;
-      if (!alive) return;
-      if (typeof html !== "string") {
-        state.value = { status: "error" };
-        return;
-      }
-      // The server escapes the text into one <pre> with no attributes; only
-      // its text is used, never markup.
-      const text = new DOMParser().parseFromString(html, "text/html").body.textContent ?? "";
-      state.value = { status: "text", text };
-    } catch (error) {
-      if (!alive || (error instanceof Error && error.name === "AbortError")) return;
-      state.value = { status: "error" };
+      return;
     }
-  })();
+    const payload: unknown = await response.json();
+    const html =
+      typeof payload === "object" && payload !== null && "html" in payload ? payload.html : null;
+    if (!isAlive()) return;
+    if (typeof html !== "string") {
+      state.value = { status: "error" };
+      return;
+    }
+    // The server escapes the text into one <pre> with no attributes; only
+    // its text is used, never markup.
+    const text = new DOMParser().parseFromString(html, "text/html").body.textContent;
+    state.value = { status: "text", text };
+  })().catch((error: unknown) => {
+    if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
+    state.value = { status: "error" };
+  });
   return () => {
     alive = false;
     controller.abort();

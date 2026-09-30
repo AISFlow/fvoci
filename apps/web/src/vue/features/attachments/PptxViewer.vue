@@ -65,31 +65,30 @@ const retired = new WeakSet<RemotePptxDeck>();
 useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch], () => {
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   const fail = (message: string, retry: boolean) => {
-    if (alive) state.value = { status: "error", message, retry };
+    if (isAlive()) state.value = { status: "error", message, retry };
   };
   state.value = { status: "loading" };
   source.value = null;
   slide.value = 0;
-  void (async () => {
-    try {
-      const body = await (props.prefetch?.take(controller.signal) ??
-        downloadCapped(props.downloadUrl, PPTX_MAX_BYTES, controller.signal));
-      if (!alive) return;
-      if (body.status === "failed") {
-        fail(t("load.failed"), true);
-        return;
-      }
-      if (body.status === "tooLarge") {
-        fail(t("attachment.viewer.previewUnavailable"), false);
-        return;
-      }
-      source.value = { bytes: body.bytes };
-    } catch (error) {
-      if (!alive || (error instanceof Error && error.name === "AbortError")) return;
+  (async () => {
+    const body = await (props.prefetch?.take(controller.signal) ??
+      downloadCapped(props.downloadUrl, PPTX_MAX_BYTES, controller.signal));
+    if (!isAlive()) return;
+    if (body.status === "failed") {
       fail(t("load.failed"), true);
+      return;
     }
-  })();
+    if (body.status === "tooLarge") {
+      fail(t("attachment.viewer.previewUnavailable"), false);
+      return;
+    }
+    source.value = { bytes: body.bytes };
+  })().catch((error: unknown) => {
+    if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
+    fail(t("load.failed"), true);
+  });
   return () => {
     alive = false;
     controller.abort();
@@ -107,28 +106,34 @@ useEffectAfterRender([source, epoch], () => {
   }
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   let opened: RemotePptxDeck | null = null;
-  void openPptxInWorker(current.bytes, { signal: controller.signal }).then((result) => {
-    if (result.status === "ok") opened = result.deck;
-    if (!alive) {
-      opened?.close();
-      return;
-    }
-    if (result.status === "ok") {
-      const { width, height, slideCount } = result.deck;
-      state.value = { status: "ready", width, height, slideCount };
-      deck.value = result.deck;
-    } else if (result.status === "failed") {
+  openPptxInWorker(current.bytes, { signal: controller.signal })
+    .then((result) => {
+      if (result.status === "ok") opened = result.deck;
+      if (!isAlive()) {
+        opened?.close();
+        return;
+      }
+      if (result.status === "ok") {
+        const { width, height, slideCount } = result.deck;
+        state.value = { status: "ready", width, height, slideCount };
+        deck.value = result.deck;
+      } else if (result.status === "failed") {
+        state.value = { status: "error", message: t("load.failed"), retry: true };
+      } else {
+        // Over a cap, too slow, or not a deck the renderer can read: fetching again will not help.
+        state.value = {
+          status: "error",
+          message: t("attachment.viewer.previewUnavailable"),
+          retry: false,
+        };
+      }
+    })
+    .catch((error: unknown) => {
+      if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
       state.value = { status: "error", message: t("load.failed"), retry: true };
-    } else {
-      // Over a cap, too slow, or not a deck the renderer can read: fetching again will not help.
-      state.value = {
-        status: "error",
-        message: t("attachment.viewer.previewUnavailable"),
-        retry: false,
-      };
-    }
-  });
+    });
   return () => {
     alive = false;
     controller.abort();
@@ -155,13 +160,14 @@ useEffectAfterRender([deck, slide], () => {
     return;
   }
   let alive = true;
+  const isAlive = (): boolean => alive;
   let settled = false;
   let url: string | null = null;
   const index = slide.value;
   currentDeck.render(index).then(
     (rendered) => {
       settled = true;
-      if (!alive) return;
+      if (!isAlive()) return;
       if (rendered.status === "ok") {
         url = URL.createObjectURL(new Blob([rendered.svg], { type: SLIDE_IMAGE_TYPE }));
         image.value = { deck: currentDeck, index, status: "ready", url };
@@ -172,7 +178,7 @@ useEffectAfterRender([deck, slide], () => {
     (error: unknown) => {
       settled = true;
       // `closed`: whoever closed the worker also opens the next one, or the viewer is gone.
-      if (!alive || (error instanceof PptxWorkerError && error.reason === "closed")) return;
+      if (!isAlive() || (error instanceof PptxWorkerError && error.reason === "closed")) return;
       failed.slides.add(index);
       retired.add(currentDeck);
       image.value = { deck: currentDeck, index, status: "unavailable" };
