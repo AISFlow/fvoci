@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
@@ -7,7 +7,28 @@ let workspaceId: string;
 let project: { id: string; key: string; rootDocumentId: string };
 let tasks: { id: string; title: string }[] = [];
 
-test("workspace landing has authorized projects, counts, and eight due-ordered assigned rows", async ({ page }) => {
+// Finish each preceding resource's real search prerequisite before producing
+// the next one. This does not change the later new-task recall deadline.
+async function indexedSetupResource(page: Page, testInfo: TestInfo, resource: { id: string; title: string }, type: "task" | "document", tag?: string) {
+  const query = new URLSearchParams({ q: resource.title, type, ...(tag ? { tag } : {}) });
+  const started = Date.now();
+  const samples: { elapsedMs: number; ids: string[] }[] = [];
+  try {
+    await expect.poll(async () => {
+      const response = await page.request.get(`/api/v1/workspaces/${workspaceId}/search?${query}`);
+      expect(response.ok()).toBe(true);
+      const ids = (await response.json()).items.map((item: { id: string }) => item.id);
+      samples.push({ elapsedMs: Date.now() - started, ids });
+      return ids;
+    }, { timeout: 5_000 }).toContain(resource.id);
+  } finally {
+    await testInfo.attach(`setup-search-${resource.id}-${tag ?? "all"}-${testInfo.attachments.length}`, {
+      body: JSON.stringify({ workspaceId, resource, type, tag, samples }, null, 2), contentType: "application/json",
+    });
+  }
+}
+
+test("workspace landing has authorized projects, counts, and eight due-ordered assigned rows", async ({ page }, testInfo) => {
   await page.goto("/");
   await page.getByLabel("성").fill("김");
   await page.getByLabel("이름", { exact: true }).fill("동등");
@@ -35,7 +56,9 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
     expect(response.status()).toBe(201);
     const task = await response.json();
     tasks.push(task);
+    await indexedSetupResource(page, testInfo, task, "task");
     expect((await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${task.id}`, { data: { assigneeIds: [me.userId], labelIds: labels } })).ok()).toBe(true);
+    await indexedSetupResource(page, testInfo, task, "task");
   }
   const archived = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, { data: { key: "OLD", name: "Archived project", visibility: "workspace" } });
   expect(archived.status()).toBe(201);
@@ -123,26 +146,31 @@ test("trash timestamp follows the saved user zone instead of the browser zone", 
   await expect(time).toHaveText(expected);
 });
 
-test("wiki tag URLs include child-only matches and project documents; unfiltered drag moves and sorts persist", async ({ page }) => {
+test("wiki tag URLs include child-only matches and project documents; unfiltered drag moves and sorts persist", async ({ page }, testInfo) => {
   await login(page, owner.email, owner.password);
   const wiki = [];
   for (const title of ["Wiki parent", "Wiki second", "Wiki third"]) {
     const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, { data: { title, parentId: null } });
     expect(response.status()).toBe(201);
-    wiki.push(await response.json());
+    const doc = await response.json();
+    wiki.push(doc);
+    await indexedSetupResource(page, testInfo, doc, "document");
   }
   const childResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, { data: { title: "Tagged child", parentId: wiki[0].id } });
   expect(childResponse.status()).toBe(201);
   const child = await childResponse.json();
+  await indexedSetupResource(page, testInfo, child, "document");
   const projectResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents`, { data: { title: "Tagged project child", parentId: project.rootDocumentId } });
   expect(projectResponse.status()).toBe(201);
   const projectChild = await projectResponse.json();
+  await indexedSetupResource(page, testInfo, projectChild, "document");
   const tagResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/document-tags`, { data: { name: "Planning", color: "gray" } });
   expect(tagResponse.status()).toBe(201);
   const tag = await tagResponse.json();
   for (const [doc, path] of [[child, `/api/v1/workspaces/${workspaceId}/documents/${child.id}/tags`], [projectChild, `/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents/${projectChild.id}/tags`]] as const) {
     expect((await page.request.post(path, { data: { tagId: tag.id } })).ok()).toBe(true);
     expect(doc.id).toBeTruthy();
+    await indexedSetupResource(page, testInfo, doc, "document", tag.id);
   }
   await page.goto(`/w/parity/wiki?tag=${tag.id}`);
   const selected = page.getByRole("button", { name: "Planning", exact: true });
