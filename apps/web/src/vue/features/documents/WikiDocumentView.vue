@@ -27,6 +27,7 @@ import QueryLoading from "../../components/QueryLoading.vue";
 import CommentPanel from "../comments/CommentPanel.vue";
 import EditorControls from "../editor/EditorControls.vue";
 import TemplateToolbar from "../editor/TemplateToolbar.vue";
+import { useEditorEntities } from "../editor/useEditorEntities";
 import UnfurlCard from "../editor/UnfurlCard.vue";
 import CollabPresence from "./CollabPresence.vue";
 import DocumentAiMenu from "./DocumentAiMenu.vue";
@@ -73,6 +74,10 @@ const collabUser = computed(() => {
 });
 const room = useCollabRoom(collabRoomName(props.workspaceId, "document", props.documentId), collabUser);
 const session = room.session;
+const { mentionItems, entityResolver } = useEditorEntities(
+  () => props.workspaceId,
+  () => `${props.documentId}:${session.value?.generation ?? ""}:${collabUser.value?.id ?? ""}:${session.value?.status === "unauthorized"}`,
+);
 
 const title = ref("");
 const icon = ref("");
@@ -416,6 +421,8 @@ function flashBlock(id: string): void {
         :editable="!readOnly"
         :aria-label="t('doc.body.a11y')"
         :workspace-slug="slug"
+        :mention-items="mentionItems"
+        :entity-resolver="entityResolver"
         :attachment-bridge="attachmentBridge"
         :url-embed="UrlEmbed"
         @ready="editor = $event"
