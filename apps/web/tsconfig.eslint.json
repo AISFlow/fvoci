@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.vue.json",
+  "include": ["**/*.ts", "**/*.tsx", "**/*.vue"],
+  "exclude": ["node_modules", "src/generated/api.ts"]
+}

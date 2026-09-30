@@ -67,10 +67,20 @@
     "@volar/typescript@2.4.28": "patches/@volar%2Ftypescript@2.4.28.patch"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.14"
+    "@eslint/js": "10.0.1",
+    "@typescript-eslint/parser": "8.71.0",
+    "eslint": "10.11.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-vue": "10.11.1",
+    "globals": "17.12.0",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0",
+    "vue-eslint-parser": "10.4.1"
   },
   "scripts": {
     "lint": "bash scripts/lint-web.sh",
-    "lint:fixtures": "python3 scripts/test_biome.py"
+    "lint:fixtures": "python3 scripts/test_eslint.py",
+    "format:check": "bash scripts/format-web.sh"
   }
 }

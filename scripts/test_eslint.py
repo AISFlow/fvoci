@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Positive and negative proofs for the pinned Bun-only Vue toolchain."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parent.parent
+ESLINT = ["bun", "--bun", str(ROOT / "node_modules/eslint/bin/eslint.js")]
+PRETTIER = ["bun", "--bun", str(ROOT / "node_modules/prettier/bin/prettier.cjs")]
+
+
+class VueToolchain(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        verified = run(["bun", "--bun", "scripts/verify-web-tools.mjs"])
+        if verified.returncode:
+            raise AssertionError(verified.stdout + verified.stderr)
+        cls.temp = tempfile.TemporaryDirectory(prefix="eslint-proof-", dir=ROOT / "apps/web")
+        cls.directory = Path(cls.temp.name)
+        (cls.directory / "props.ts").write_text("export interface ImportedProps { title: string }\n")
+        (cls.directory / "ProofChild.vue").write_text(CHILD)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def source(self, name, source):
+        path = self.directory / name
+        path.write_text(source)
+        return path
+
+    def lint(self, name, source, *options):
+        path = self.source(name, source)
+        result = run([*ESLINT, str(path), "--max-warnings=0", "--format=json", *options])
+        return result, json.loads(result.stdout)
+
+    def assert_rule(self, name, source, rule):
+        result, report = self.lint(name, source)
+        self.assertNotEqual(result.returncode, 0, report)
+        self.assertIn(rule, {m["ruleId"] for f in report for m in f["messages"]}, report)
+
+    def compiler(self, config, source, extension="vue", compiler="vue-tsc"):
+        path = self.source(f"TypeProof.{extension}", source)
+        config_path = self.directory / "tsconfig.json"
+        config_path.write_text(json.dumps({
+            "extends": str(ROOT / config),
+            "compilerOptions": {"incremental": False, "composite": False},
+            "include": [str(path)], "exclude": [],
+        }))
+        return run(["bun", "--bun", str(ROOT / "node_modules/.bin" / compiler),
+                    "--noEmit", "-p", str(config_path)])
+
+    def test_runtime_and_positive_sfc(self):
+        runtime = run(["bun", "-e", 'console.log(JSON.stringify({bun:process.versions.bun,execPath:process.execPath}))'])
+        self.assertEqual(json.loads(runtime.stdout)["bun"], "1.4.2")
+        result, report = self.lint("ProofValid.vue", VALID)
+        self.assertEqual(result.returncode, 0, report)
+        for config in ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]:
+            result = self.compiler(config, VALID)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        formatted = run([*PRETTIER, "--stdin-filepath", str(self.directory / "ProofValid.vue")], input=VALID)
+        self.assertEqual(formatted.returncode, 0, formatted.stderr)
+        self.assertIn("color: red;\n", formatted.stdout)
+        self.assertIn(':key="row.id"', formatted.stdout)
+        self.assertIn('emit("select", id);\n', formatted.stdout)
+        path = self.source("ProofValid.vue", formatted.stdout)
+        checked = run([*PRETTIER, "--check", str(path)])
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        path.write_text(VALID)
+        self.assertNotEqual(run([*PRETTIER, "--check", str(path)]).returncode, 0)
+
+    def test_dynamic_slots_have_no_unused_false_positive(self):
+        source = '''<script setup lang="ts">
+import ProofChild from "./ProofChild.vue";
+const slotName = "default";
+</script>
+<template><ProofChild label="ok"><template #[slotName]="{ row }"><span>{{ row.label }}</span></template></ProofChild></template>'''
+        result, report = self.lint("ProofDynamic.vue", source)
+        self.assertEqual(result.returncode, 0, report)
+        result = self.compiler("apps/web/tsconfig.vue.json", source.replace("#[slotName]", "#[missingSlotName]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missingSlotName", result.stdout)
+
+    def test_directives_unused_any_and_typed_promises_fail(self):
+        cases = [
+            ("ProofUnused.vue", '<script setup lang="ts">const unused = 1;</script><template><p>ok</p></template>', "@typescript-eslint/no-unused-vars"),
+            ("ProofUnusedImport.vue", '<script setup lang="ts">import { ref } from "vue";</script><template><p>ok</p></template>', "@typescript-eslint/no-unused-vars"),
+            ("ProofParse.vue", '<template><p v-if="(">bad</p></template>', "vue/no-parsing-error"),
+            ("ProofFor.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows">{{ row }}</p></template>', "vue/require-v-for-key"),
+            ("ProofKey.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-for="row in rows" :key="1">{{ row }}</p></template>', "vue/valid-v-for"),
+            ("ProofIfFor.vue", '<script setup lang="ts">const rows = [1];</script><template><p v-if="true" v-for="row in rows" :key="row">{{ row }}</p></template>', "vue/no-use-v-if-with-v-for"),
+            ("ProofIf.vue", '<template><p v-if>bad</p></template>', "vue/valid-v-if"),
+            ("ProofModel.vue", '<template><input v-model="1" /></template>', "vue/valid-v-model"),
+            ("ProofAny.ts", 'export const value: any = 1;', "@typescript-eslint/no-explicit-any"),
+            ("ProofUnsafe.ts", 'export function read(value: any): string { return value; }', "@typescript-eslint/no-unsafe-return"),
+            ("ProofPromise.ts", 'export const save = (): Promise<number> => Promise.resolve(1); save();', "@typescript-eslint/no-floating-promises"),
+            ("ProofVoid.ts", 'export const save = (): Promise<number> => Promise.resolve(1); void save();', "@typescript-eslint/no-floating-promises"),
+        ]
+        for name, source, rule in cases:
+            with self.subTest(name=name):
+                self.assert_rule(name, source, rule)
+
+    def test_strict_script_template_props_emits_and_slots_types(self):
+        cases = [
+            ('<script setup lang="ts">const value: number = "bad";</script><template><p>{{ value }}</p></template>', "TS2322"),
+            ('<script setup lang="ts">const value = 1;</script><template><p>{{ value.toUpperCase() }}</p></template>', "TS2339"),
+            ('<template><p>{{ missingTemplateName }}</p></template>', "TS2339"),
+            ('<template><UnknownComponent /></template>', "UnknownComponent"),
+            ('<script setup lang="ts">import ProofChild from "./ProofChild.vue";</script><template><ProofChild :label="1" /></template>', "TS2322"),
+            ('<script setup lang="ts">const emit = defineEmits<{ select: [id: number] }>(); emit("select", "bad");</script><template><p>bad</p></template>', "TS2345"),
+            ('<script setup lang="ts">import ProofChild from "./ProofChild.vue";</script><template><ProofChild label="ok" v-slot="{ row }"><p>{{ row.missing }}</p></ProofChild></template>', "TS2339"),
+        ]
+        for config in ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]:
+            for source, expected in cases:
+                with self.subTest(config=config, expected=expected):
+                    result = self.compiler(config, source)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(expected, result.stdout + result.stderr)
+        for config in ["apps/web/tsconfig.app.json", "packages/editor/tsconfig.json"]:
+            result = self.compiler(config, 'export const value: number = "bad";', "ts", "tsc")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("TS2322", result.stdout)
+
+    def test_actual_nuxt_autoimport_registration_boundary(self):
+        # FVOCI disables Nuxt UI autoimports: an unregistered template name must fail.
+        result = self.compiler("apps/web/tsconfig.vue.json", '<template><UButton type="button">ok</UButton></template>')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("UButton", result.stdout)
+
+    def test_unused_disables_warnings_and_unmatched_paths_fail(self):
+        result, report = self.lint("ProofDisable.ts", '// eslint-disable-next-line no-debugger\nexport const value = 1;\n')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(any("Unused eslint-disable" in m["message"] and m["severity"] == 2 for f in report for m in f["messages"]))
+        result, report = self.lint("ProofWarning.vue", '<template><div v-html="\'content\'" /></template>')
+        self.assertEqual(sum(f["errorCount"] for f in report), 0, report)
+        self.assertGreater(sum(f["warningCount"] for f in report), 0, report)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotEqual(run([*ESLINT, str(self.directory / "missing.ts")]).returncode, 0)
+        self.assertNotEqual(run([*PRETTIER, "--check", str(self.directory / "missing.ts")]).returncode, 0)
+
+    def test_browser_does_not_receive_node_or_bun_globals(self):
+        result = run([*ESLINT, "--print-config", "apps/web/src/vue/features/settings/toggle.ts"])
+        config = json.loads(result.stdout)
+        for name in ["Bun", "process", "Buffer", "require"]:
+            self.assertNotIn(name, config["languageOptions"]["globals"])
+        self.assertIn("window", config["languageOptions"]["globals"])
+        self.assertEqual(config["rules"]["@typescript-eslint/no-floating-promises"][1]["ignoreVoid"], False)
+
+    def test_formatter_keeps_import_order_text_and_tailwind(self):
+        source = 'import "./z.css";\nimport "./a.css";\nexport const value = 1;\n'
+        result = run([*PRETTIER, "--stdin-filepath", "order.ts"], input=source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(result.stdout.index('"./z.css"'), result.stdout.index('"./a.css"'))
+        source = '<template><p>before <strong>middle</strong> after</p><pre>  keep\n spacing </pre></template>'
+        result = run([*PRETTIER, "--stdin-filepath", "text.vue"], input=source)
+        self.assertIn('before <strong>middle</strong> after', result.stdout)
+        self.assertIn('  keep\n spacing ', result.stdout)
+        source = '@import "tailwindcss" source(none);\n@source "./";\n@theme { --color-brand: #123456; }\n@utility proof { @apply flex; }\n'
+        result = run([*PRETTIER, "--stdin-filepath", "proof.css"], input=source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+
+
+def run(args, **kwargs):
+    # Bun 1.4.2 + ESLint's exit path can truncate >64KiB piped stdout.
+    # A regular file preserves the complete print-config/JSON evidence.
+    with tempfile.TemporaryFile(mode="w+") as output:
+        result = subprocess.run(args, cwd=ROOT, text=True, stdout=output,
+                                stderr=subprocess.PIPE, **kwargs)
+        output.seek(0)
+        return subprocess.CompletedProcess(args, result.returncode, output.read(), result.stderr)
+
+CHILD = '<script setup lang="ts">\ndefineProps<{ label: string }>();\ndefineSlots<{ default(props: { row: { id: number; label: string } }): unknown }>();\n</script>\n<template><slot :row="{ id: 1, label }" /></template>\n'
+
+VALID = '<script setup lang="ts">\nimport UButton from "@nuxt/ui/components/Button.vue";\nimport { ref } from "vue";\nimport ProofChild from "./ProofChild.vue";\nimport type { ImportedProps } from "./props";\n\ndefineProps<ImportedProps & { enabled: boolean }>();\nconst emit = defineEmits<{ select: [id: number] }>();\ndefineSlots<{ default(props: { value: string }): unknown }>();\nconst model = ref("");\nconst rows = [{ id: 1, label: "one" }];\nfunction select(id: number): void { emit("select", id); }\n</script>\n<template>\n  <section v-if="enabled" class="flex gap-2 hover:bg-teal-50">\n    <label>Search<input v-model="model" name="search" /></label>\n    <ProofChild :label="title">\n      <template #default="{ row }"><span>{{ row.label }}</span></template>\n    </ProofChild>\n    <UButton v-for="row in rows" :key="row.id" type="button" @click="select(row.id)">{{ row.label }}</UButton>\n    <slot :value="model" />\n  </section>\n</template>\n<style scoped>\n.host :deep(.child) { color: red; }\n.host :slotted(span) { color: blue; }\n</style>\n'
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
