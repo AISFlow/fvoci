@@ -12,24 +12,13 @@ test("the SSO section is shown only to a team workspace's admins", () => {
   assert.equal(showsWorkspaceSso("", true), false);
 });
 
-test("the workspace settings page renders the SSO section behind that rule", () => {
-  const page = readFileSync(
-    path.join(import.meta.dirname, "../../pages/WorkspaceSettingsPage.tsx"),
-    "utf8",
-  );
-  const uses = page.match(/<WorkspaceSsoSection\b/g) ?? [];
-  assert.equal(uses.length, 1);
-  assert.match(
-    page,
-    /\{showsWorkspaceSso\(workspace\.kind, canManage\) \? \(\s*<WorkspaceSsoSection\b/,
-  );
-});
-
-test("the Vue workspace settings page renders the SSO section behind that rule", () => {
+test("the connected Vue workspace settings page gates its only SSO section with the policy", () => {
   const page = readFileSync(
     path.join(import.meta.dirname, "../../vue/pages/WorkspaceSettingsPage.vue"),
     "utf8",
   );
-  assert.match(page, /showsWorkspaceSso\(/);
-  assert.match(page, /<WorkspaceSsoSection\b/);
+  assert.match(page, /import \{ showsWorkspaceSso \} from "@\/features\/settings\/workspace-sso-scope"/);
+  assert.match(page, /const showSso = computed\(\(\) =>\s*workspace\.value \? showsWorkspaceSso\(workspace\.value\.kind, canManage\.value\) : false/);
+  assert.equal((page.match(/<WorkspaceSsoSection\b/g) ?? []).length, 1);
+  assert.match(page, /<WorkspaceSsoSection\s+v-if="showSso"\s+:workspace-id="workspace\.id"/);
 });

@@ -12,6 +12,8 @@ export {
 } from "./keys.js";
 export { VUE_NODE_VIEWS } from "./node-views.js";
 export type { Editor as TiptapEditor } from "@tiptap/core";
+export type { EntityResolver, EntitySnapshot, MentionEntity } from "../entities.js";
+export type { MentionHit, MentionLoader } from "../editor-extensions.js";
 export { collabCaretRender, type FvociCollabUser } from "../editor-extensions.js";
 
 // The editing controls' behaviour; the web app renders them (Nuxt UI).

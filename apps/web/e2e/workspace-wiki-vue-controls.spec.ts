@@ -80,8 +80,8 @@ test("the block gutter adds, converts, duplicates, moves, colours and deletes bl
   await hoverBlock(page, 1);
   await expect(page.locator('[data-gutter="plus"]')).toBeVisible();
   await expect(page.locator('[data-gutter="drag"]')).toBeVisible();
-  await expect(page.locator('[data-gutter="plus"]')).toHaveText("+");
-  await expect(page.locator('[data-gutter="drag"]')).toHaveText("⠿");
+  await expect(page.locator('[data-gutter="plus"]')).toHaveAccessibleName("블록 추가");
+  await expect(page.locator('[data-gutter="drag"]')).toHaveAccessibleName("블록 이동");
 
   // "+" on a filled block adds an empty block below it with the slash menu open.
   await page.locator('[data-gutter="plus"]').click();
@@ -511,7 +511,7 @@ test("the selection bubble formats text and its menus and popovers follow the me
 
   // Block type menu: enters at its first item (paragraph, checked), Escape
   // closes it and returns focus to its trigger, the trigger toggles it.
-  const typeTrigger = toolbar.getByRole("button", { name: "본문▾" });
+  const typeTrigger = toolbar.getByRole("button", { name: "본문", exact: true });
   await typeTrigger.click();
   const typeMenu = page.getByRole("menu", { name: "블록 유형" });
   await expect(typeMenu).toBeVisible();
@@ -534,7 +534,7 @@ test("the selection bubble formats text and its menus and popovers follow the me
   await typeMenu.getByRole("menuitemradio", { name: "H2" }).click();
   await expect(typeMenu).toHaveCount(0);
   await expect(editorOf(page).locator(":scope > h2")).toHaveText("첫 문단 글자");
-  await expect(toolbar.getByRole("button", { name: "H2▾" })).toBeVisible();
+  await expect(toolbar.getByRole("button", { name: "H2", exact: true })).toBeVisible();
 
   // Link: the field takes focus; Escape closes it and returns to the
   // trigger without touching the selection; Apply links the selection.
@@ -715,7 +715,7 @@ test("on a narrow screen the gutter and bubble give way to the bottom toolbar", 
   await expect(blockAt(page, 0).locator("strong")).toHaveText("모바일 문단");
 
   // Its menus open upwards, above the bar.
-  await bar.getByRole("button", { name: "본문▾" }).click();
+  await bar.getByRole("button", { name: "본문", exact: true }).click();
   const typeMenu = page.getByRole("menu", { name: "블록 유형" });
   await expect(typeMenu).toBeVisible();
   await expect(typeMenu).toHaveAttribute("data-side", "top");

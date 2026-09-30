@@ -495,6 +495,71 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
   }
 });
 
+test("a peer's change to the same inline math preserves the focused draft until commit", async ({ browser, baseURL }) => {
+  const a = await newSignedInPage(browser, baseURL, admin);
+  const b = await newSignedInPage(browser, baseURL, member);
+  try {
+    const wsId = await workspaceId(a.page.request);
+    const doc = await createDoc(a.page.request, wsId, "인라인 수식 초안", "앞 $x$ 뒤 $q$\n\n끝\n");
+    await openDoc(a.page, doc.path);
+    await openDoc(b.page, doc.path);
+    await a.page.locator("button.afn-math-inline").first().click();
+    const draft = a.page.getByLabel("수식 LaTeX");
+    await draft.fill("a+b");
+    for (const remote of ["y", "z"]) {
+      await b.page.locator("button.afn-math-inline").first().click();
+      await b.page.getByLabel("수식 LaTeX").fill(remote);
+      await b.page.getByLabel("수식 LaTeX").press("Enter");
+      await expect(b.page.locator(".afn-math-inline annotation").first()).toHaveText(remote);
+      // Changing text before the atom shifts its position and its left boundary.
+      await caretAtEndOf(b.page, 0);
+      await b.page.keyboard.press("Home");
+      await b.page.keyboard.type(remote);
+      // The subsequent text travels on the same socket after the math update.
+      await caretAtEndOf(b.page, 1);
+      await b.page.keyboard.type(remote);
+      await expect.poll(async () => (await blockTexts(a.page))[1]).toBe(remote === "y" ? "끝y" : "끝yz");
+      await expect(draft).toBeFocused();
+      await expect(draft).toHaveValue("a+b");
+    }
+    await draft.press("Enter");
+    await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("a+b");
+    await expect(b.page.locator(".afn-math-inline annotation").first()).toHaveText("a+b");
+    await expect(a.page.locator(".afn-math-inline annotation").last()).toHaveText("q");
+    await save(a.page);
+    expect(await bodyJson(a.page.request, wsId, doc.id)).toContain('"latex":"a+b"');
+    await a.page.reload();
+    await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("a+b");
+
+    // Deletion and insertion at the very same position are a different atom.
+    await a.page.locator("button.afn-math-inline").first().click();
+    await draft.fill("must-not-resurrect");
+    const removedAt = await editorOf(b.page).evaluate((root) => {
+      const view = (root as HTMLElement & { editor: { view: EditorView } }).editor.view;
+      let pos = -1;
+      view.state.doc.descendants((node, at) => {
+        if (pos < 0 && node.type.name === "mathInline") pos = at;
+      });
+      if (pos < 0) throw new Error("inline math missing");
+      view.dispatch(view.state.tr.delete(pos, pos + 1));
+      return pos;
+    });
+    await expect(draft).toHaveCount(0);
+    await expect(a.page.locator(".afn-math-inline annotation")).toHaveText(["q"]);
+    await editorOf(b.page).evaluate((root, pos) => {
+      const view = (root as HTMLElement & { editor: { view: EditorView } }).editor.view;
+      view.dispatch(view.state.tr.insert(pos, view.state.schema.nodes.mathInline!.create({ latex: "replacement" })));
+    }, removedAt);
+    await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("replacement");
+    await expect(draft).toHaveCount(0);
+    await save(a.page);
+    expect(await bodyJson(a.page.request, wsId, doc.id)).not.toContain("must-not-resurrect");
+  } finally {
+    await a.context.close();
+    await b.context.close();
+  }
+});
+
 test("Korean composition survives a concurrent remote edit, then undoes and redoes", async ({
   browser,
   baseURL,
@@ -552,6 +617,70 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
 
     await save(a.page);
     expect(await bodyJson(a.page.request, wsId, doc.id)).toContain("첫 문단한글");
+  } finally {
+    await a.context.close();
+    await b.context.close();
+  }
+});
+
+test("one Korean composition is one undo step despite pauses and a concurrent peer edit", async ({ browser, baseURL }, testInfo) => {
+  const a = await newSignedInPage(browser, baseURL, admin);
+  const b = await newSignedInPage(browser, baseURL, member);
+  try {
+    const wsId = await workspaceId(a.page.request);
+    const doc = await createDoc(a.page.request, wsId, "조합 실행 취소 단위", "첫 문단\n\n둘째 문단\n");
+    await openDoc(a.page, doc.path);
+    await openDoc(b.page, doc.path);
+    await caretAtEndOf(a.page, 0);
+    await editorOf(a.page).evaluate((root) => {
+      const editor = (root as HTMLElement & { editor: { view: EditorView; on: (event: string, callback: (props: { transaction: import("@tiptap/pm/state").Transaction }) => void) => void } }).editor;
+      const log: unknown[] = [];
+      (root as HTMLElement & { compositionLog: unknown[] }).compositionLog = log;
+      const undoPlugin = editor.view.state.plugins.find((plugin) => plugin.key.startsWith("y-undo$"));
+      const manager = undoPlugin?.getState(editor.view.state).undoManager;
+      manager.doc.on("beforeTransaction", (transaction: { origin: { key?: string } | null }) => {
+        const policy = editor.view.state.plugins.find((plugin) => plugin.key.startsWith("fvociCompositionUndo$"));
+        log.push({ type: "y-before", origin: transaction.origin?.key, composition: policy?.getState(editor.view.state), captureTimeout: manager.captureTimeout, lastChange: manager.lastChange, undo: manager.undoStack.length });
+      });
+      manager.doc.on("afterTransaction", () => log.push({ type: "y-after", captureTimeout: manager.captureTimeout, lastChange: manager.lastChange, undo: manager.undoStack.length }));
+      for (const name of ["compositionstart", "compositionupdate", "compositionend"]) {
+        root.addEventListener(name, (event) => log.push({ type: name, data: (event as CompositionEvent).data, composing: editor.view.composing }));
+      }
+      editor.on("transaction", ({ transaction }) => {
+        const plugin = editor.view.state.plugins.find((plugin) => plugin.key.startsWith("y-undo$"));
+        const manager = plugin?.getState(editor.view.state).undoManager;
+        log.push({ type: "transaction", composition: transaction.getMeta("composition"), changed: transaction.docChanged, text: editor.view.state.doc.textContent, undo: manager?.undoStack.length, captureTimeout: manager?.captureTimeout });
+      });
+    });
+    const ime = await a.context.newCDPSession(a.page);
+    // Chromium's synthetic CDP composition path, not an actual OS IME witness.
+    const preedit = async (text: string) => {
+      await ime.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+      await expectBlocks(a.page, [`첫 문단${text}`, "둘째 문단 원격"]);
+    };
+    await ime.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
+    await expectBlocks(a.page, ["첫 문단ㅎ", "둘째 문단"]);
+    await caretAtEndOf(b.page, 1);
+    await b.page.keyboard.type(" 원격");
+    await expectBlocks(a.page, ["첫 문단ㅎ", "둘째 문단 원격"]);
+    // Deliberate pauses exceed Yjs's normal 500 ms capture window (#260).
+    await a.page.waitForTimeout(650);
+    await preedit("하");
+    await a.page.waitForTimeout(650);
+    await preedit("한");
+    await ime.send("Input.insertText", { text: "한" });
+    await expectBlocks(b.page, ["첫 문단한", "둘째 문단 원격"]);
+    await testInfo.attach("paused-composition-transactions", { body: JSON.stringify(await editorOf(a.page).evaluate((root) => (root as HTMLElement & { compositionLog: unknown[] }).compositionLog)), contentType: "application/json" });
+    await a.page.keyboard.press("Control+z");
+    const afterUndo = await blockTexts(a.page);
+    await testInfo.attach("paused-composition-after-one-undo", { body: JSON.stringify(afterUndo), contentType: "application/json" });
+    await expectBlocks(a.page, ["첫 문단", "둘째 문단 원격"]);
+    await expectBlocks(b.page, ["첫 문단", "둘째 문단 원격"]);
+    await a.page.keyboard.press("Control+Shift+z");
+    await expectBlocks(a.page, ["첫 문단한", "둘째 문단 원격"]);
+    await expectBlocks(b.page, ["첫 문단한", "둘째 문단 원격"]);
+    await save(a.page);
+    expect(await bodyJson(a.page.request, wsId, doc.id)).toContain("첫 문단한");
   } finally {
     await a.context.close();
     await b.context.close();

@@ -4,7 +4,7 @@ import "@fvoci/editor/styles.css";
 import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, type FunctionalComponent, h, markRaw, ref, shallowRef, watch } from "vue";
+import { computed, type FunctionalComponent, h, markRaw, onScopeDispose, ref, shallowRef, watch } from "vue";
 import { RouterLink } from "vue-router";
 import { bindBlockPresence, isBlockPresenceAwareness } from "@/features/documents/block-presence";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
@@ -25,9 +25,9 @@ import { collabRoomName, useCollabRoom } from "../../collab/useCollabRoom";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
 import CommentPanel from "../comments/CommentPanel.vue";
-import EditorBubble from "../editor/EditorBubble.vue";
 import EditorControls from "../editor/EditorControls.vue";
-import EditorToolbar from "../editor/EditorToolbar.vue";
+import TemplateToolbar from "../editor/TemplateToolbar.vue";
+import { useEditorEntities } from "../editor/useEditorEntities";
 import UnfurlCard from "../editor/UnfurlCard.vue";
 import CollabPresence from "./CollabPresence.vue";
 import DocumentAiMenu from "./DocumentAiMenu.vue";
@@ -74,6 +74,10 @@ const collabUser = computed(() => {
 });
 const room = useCollabRoom(collabRoomName(props.workspaceId, "document", props.documentId), collabUser);
 const session = room.session;
+const { mentionItems, entityResolver } = useEditorEntities(
+  () => props.workspaceId,
+  () => `${props.documentId}:${session.value?.generation ?? ""}:${collabUser.value?.id ?? ""}:${session.value?.status === "unauthorized"}`,
+);
 
 const title = ref("");
 const icon = ref("");
@@ -111,31 +115,73 @@ watch(
   },
 );
 
+type DocumentOperation = { scope: DocumentScope; slug: string; lifecycle: number };
+let operationLifecycle = 0;
+// The computed session is a snapshot: peers, pending and ACKs replace it.
+// Only the actual room/provider generation, actor and route retire operations.
+watch(
+  [
+    () => scope.value.workspaceId,
+    () => scope.value.documentId,
+    () => scope.value.projectId,
+    () => props.slug,
+    () => collabUser.value?.id,
+    () => session.value?.doc,
+    () => session.value?.provider,
+    () => session.value?.generation,
+  ],
+  () => { operationLifecycle += 1; },
+  { flush: "sync" },
+);
+onScopeDispose(() => { operationLifecycle += 1; });
+function captureOperation(): DocumentOperation {
+  return { scope: { ...scope.value }, slug: props.slug, lifecycle: operationLifecycle };
+}
+function currentOperation(operation: DocumentOperation): boolean {
+  return operation.lifecycle === operationLifecycle && session.value !== null;
+}
+
 const trashDoc = useMutation({
-  mutationFn: () => trashDocument(scope.value),
-  onSuccess: () => {
+  mutationFn: (operation: DocumentOperation) => trashDocument(operation.scope),
+  onSuccess: async (_result, operation) => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["projects", operation.scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", operation.scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+    ]);
+    if (!currentOperation(operation)) return;
     lifecycleError.value = null;
-    // The trash list is the React app's page.
-    window.location.assign(trashPath(props.slug));
+    window.location.assign(trashPath(operation.slug));
   },
-  onError: (error: unknown) => {
-    lifecycleError.value = loadErrorMessage(error);
+  onError: (error: unknown, operation) => {
+    if (currentOperation(operation)) lifecycleError.value = loadErrorMessage(error);
   },
 });
 
 const moveDoc = useMutation({
-  mutationFn: (newParentId: string) => moveDocument(scope.value, newParentId),
-  onSuccess: async () => {
+  mutationFn: (operation: DocumentOperation & { newParentId: string }) => moveDocument(operation.scope, operation.newParentId),
+  onSuccess: async (_result, operation) => {
+    const { workspaceId, documentId } = operation.scope;
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["tree", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["document", workspaceId, documentId] }),
+      queryClient.invalidateQueries({ queryKey: ["ancestors", workspaceId, documentId] }),
+    ]);
+    if (!currentOperation(operation)) return;
     lifecycleError.value = null;
     moveParentId.value = "";
-    await queryClient.invalidateQueries({ queryKey: treeKey.value });
-    await queryClient.invalidateQueries({ queryKey: metaKey.value });
-    await queryClient.invalidateQueries({ queryKey: ["ancestors", props.workspaceId, props.documentId] });
   },
-  onError: (error: unknown) => {
-    lifecycleError.value = loadErrorMessage(error);
+  onError: (error: unknown, operation) => {
+    if (currentOperation(operation)) lifecycleError.value = loadErrorMessage(error);
   },
 });
+
+function move(newParentId: string): void {
+  moveDoc.mutate({ ...captureOperation(), newParentId });
+}
 
 const patchMeta = useMutation({
   mutationFn: (body: PatchDocumentBody) => patchDocument(scope.value, body),
@@ -257,7 +303,7 @@ function onTitleKeydown(event: KeyboardEvent): void {
 
 function trash(): void {
   if (!window.confirm(`${t("doc.trash.confirm.title")}\n${t("doc.trash.confirm.body")}`)) return;
-  trashDoc.mutate();
+  trashDoc.mutate(captureOperation());
 }
 
 function flashBlock(id: string): void {
@@ -354,7 +400,7 @@ function flashBlock(id: string): void {
             variant="outline"
             color="neutral"
             :disabled="!moveParentId || moveDoc.isPending.value || trashDoc.isPending.value"
-            @click="moveParentId && moveDoc.mutate(moveParentId)"
+            @click="moveParentId && move(moveParentId)"
           >
             {{ moveDoc.isPending.value ? t("doc.move.pending") : t("doc.move.submit") }}
           </UButton>
@@ -417,15 +463,17 @@ function flashBlock(id: string): void {
         :editable="!readOnly"
         :aria-label="t('doc.body.a11y')"
         :workspace-slug="slug"
+        :mention-items="mentionItems"
+        :entity-resolver="entityResolver"
         :attachment-bridge="attachmentBridge"
         :url-embed="UrlEmbed"
         @ready="editor = $event"
       >
         <template #toolbar="{ editor: live }">
-          <EditorToolbar :editor="live" :disabled="readOnly" />
+          <TemplateToolbar :editor="live" mode="fixed" />
         </template>
         <template #bubble="{ editor: live }">
-          <EditorBubble :editor="live" />
+          <TemplateToolbar :editor="live" mode="selection" />
         </template>
         <template #controls="{ editor: live, gutter, editable }">
           <EditorControls :editor="live" :gutter="gutter" :editable="editable" />

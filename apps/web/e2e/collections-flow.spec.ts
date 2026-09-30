@@ -179,7 +179,7 @@ test("document tags, project collection fields/views and saved task views round-
   await page.locator('input[type="month"]').fill("2027-03");
   await expect(page.getByLabel("2027년 3월", { exact: true }).first()).toBeVisible();
   const calendar = page.getByTestId("collection-calendar");
-  await expect(calendar.getByRole("link", { name: "달력 태스크" })).toBeVisible();
+  await expect(calendar.getByRole("button", { name: "달력 태스크", exact: true })).toBeVisible();
   await calendar.getByRole("button", { name: "2027-03-15 · 전체 1개" }).click();
   await expect(page.getByRole("heading", { name: "2027-03-15 항목" })).toBeVisible();
   await expect(page.getByTestId(`collection-row-COL-${dueTask.number}`)).toBeVisible();
@@ -576,6 +576,9 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
 
   // A timed due (dueAt) moves to a plain due date, as the source calendar does.
   await expect(cell(dayIn("2027-05-05T03:00:00Z")).getByTestId(`collection-preview-${timed.displayId}`)).toBeVisible();
+  // Optimistic previews become visible before refetch settles. Wait for the
+  // actual draggable capability before beginning a second mutation.
+  await expect(preview(timed.displayId)).toHaveAttribute("draggable", "true");
   await preview(timed.displayId).dragTo(cell("2027-05-20"));
   await expect(cell("2027-05-20").getByTestId(`collection-preview-${timed.displayId}`)).toBeVisible();
   await expect
@@ -653,6 +656,7 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   const sourceDay = dayIn(instant);
   await expect(cell(sourceDay).getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
   const targetDay = `2027-05-${String(Number(sourceDay.slice(8, 10)) + 2).padStart(2, "0")}`;
+  await expect(preview(previewed.displayId)).toHaveAttribute("draggable", "true");
   await preview(previewed.displayId).dragTo(cell(targetDay));
   await expect(cell(targetDay).getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
   await expect
@@ -664,6 +668,7 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
 
   // 5. Date field: stays a plain date; the keyboard editor in the day list still saves.
   await dateBy("기준일");
+  await expect(preview(listed.displayId)).toHaveAttribute("draggable", "true");
   await preview(listed.displayId).dragTo(cell("2027-05-04"));
   await expect(cell("2027-05-04").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
   await expect.poll(async () => (await itemRow(listed.displayId)).values[dateField.id]).toEqual({ date: "2027-05-04" });

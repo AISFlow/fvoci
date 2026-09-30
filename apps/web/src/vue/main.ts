@@ -1,12 +1,14 @@
 import ui from "@nuxt/ui/vue-plugin";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import { createApp } from "vue";
+import { startUiPreferences } from "@/lib/ui-preferences";
 import App from "./App.vue";
 import { createAppRouter } from "./router";
 import "./styles.css";
 
 /** Mounts the Vue app (src/boot.ts calls this for the Vue pages). */
 export function start(): void {
+  startUiPreferences();
   // The React app's query defaults (src/App.tsx).
   const queryClient = new QueryClient({
     defaultOptions: {

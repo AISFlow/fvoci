@@ -37,7 +37,7 @@ test("owner creates an API token, sees the secret once, then revokes it", async 
 
   await page.getByRole("button", { name: "폐기" }).click();
   await expect(page.getByRole("heading", { name: "토큰을 폐기할까요?" })).toBeVisible();
-  await page.getByRole("alertdialog").getByRole("button", { name: "폐기" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "폐기" }).click();
   await expect(page.getByText("토큰이 없습니다")).toBeVisible();
   await expect(page.getByText("CI 연동")).toHaveCount(0);
 });

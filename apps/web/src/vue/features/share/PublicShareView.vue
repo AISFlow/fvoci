@@ -6,6 +6,8 @@ import { downloadSharePdf, type ShareTreeNode } from "@/lib/queries/share";
 import { shareTreeRoots } from "@/lib/share-links";
 import PublicTreeBranch from "./PublicTreeBranch.vue";
 import ShareBodyView from "./ShareBodyView.vue";
+import PublicShareSearch from "./PublicShareSearch.vue";
+import type { ProblemError } from "@/lib/api";
 
 const props = defineProps<{
   token: string;
@@ -23,6 +25,7 @@ const emit = defineEmits<{
   selectDocument: [documentId: string];
   retryBody: [];
   refresh: [];
+  denied: [error: ProblemError];
 }>();
 
 const dateFormat = new Intl.DateTimeFormat("ko", {
@@ -83,21 +86,22 @@ function exportPdf(): void {
             </p>
           </div>
           <div class="flex flex-wrap gap-2">
-          <UButton type="button" variant="ghost" color="neutral" size="sm" :loading="refreshing" @click="emit('refresh')">
-            {{ t("load.retry") }}
-          </UButton>
-          <UButton
-            type="button"
-            variant="outline"
-            color="neutral"
-            size="sm"
-            :disabled="pdfPending || bodyLoading || Boolean(bodyError)"
-            @click="exportPdf"
-          >
-            {{ t("export.pdf") }}
-          </UButton>
+            <UButton type="button" variant="ghost" color="neutral" size="sm" :loading="refreshing" @click="emit('refresh')">
+              {{ t("load.retry") }}
+            </UButton>
+            <UButton
+              type="button"
+              variant="outline"
+              color="neutral"
+              size="sm"
+              :disabled="pdfPending || bodyLoading || Boolean(bodyError)"
+              @click="exportPdf"
+            >
+              {{ t("export.pdf") }}
+            </UButton>
           </div>
         </div>
+        <PublicShareSearch :token="token" @select-document="emit('selectDocument', $event)" @denied="emit('denied', $event)" />
         <p v-if="bodyLoading" role="status" class="share-page__status">
           {{ t("doc.loading") }}
         </p>

@@ -63,7 +63,7 @@ function confirm(): void {
   >
     <slot />
   </UButton>
-  <NativeModal :open="open" :labelled-by="titleId" @close="close">
+  <NativeModal role="alertdialog" :open="open" :labelled-by="titleId" @close="close">
     <h2 :id="titleId" class="project-dialog__title">{{ title }}</h2>
     <p class="mt-2 break-keep text-sm text-muted">{{ description }}</p>
     <div class="mt-4 flex justify-end gap-2">

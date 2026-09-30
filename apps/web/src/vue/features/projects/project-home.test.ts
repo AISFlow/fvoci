@@ -92,6 +92,26 @@ test("after delete the live projects list and Gantt stay Vue", () => {
   assert.deepEqual(pushes, ["/w/acme/projects", "/w/acme/GNT/gantt"]);
 });
 
+test("project fields and workflow settings stay Vue and preserve query/hash navigation", () => {
+  const assigns: string[] = [];
+  const pushes: string[] = [];
+  const env = {
+    assign: (url: string) => assigns.push(url),
+    push: (path: string) => pushes.push(path),
+  };
+  const fields = "/w/acme/GNT/settings/fields?collection=c1#field";
+  const workflow = "/W/acme/gnt/SETTINGS/WORKFLOW/#status";
+  leaveTo(fields, env);
+  leaveTo(workflow, env);
+  assert.deepEqual(assigns, []);
+  assert.deepEqual(pushes, [fields, workflow]);
+
+  const nested = "/w/acme/GNT/settings/fields/extra";
+  leaveTo(nested, env);
+  assert.deepEqual(assigns, [nested]);
+  assert.deepEqual(pushes, [fields, workflow]);
+});
+
 test("project home lists the project's root children, nested ones stay in the tree", () => {
   const project = {
     id: "p1",

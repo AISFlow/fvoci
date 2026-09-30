@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
+import UInput from "@nuxt/ui/components/Input.vue";
+import UPageCard from "@nuxt/ui/components/PageCard.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref } from "vue";
 import { workflowQuery, type ProjectListItem } from "@/features/projects/queries";
@@ -59,7 +61,7 @@ function deleteStatus(id: string): void {
 </script>
 
 <template>
-  <section class="settings-section mt-4" data-testid="project-workflow">
+  <UPageCard as="section" variant="subtle" class="mt-4" data-testid="project-workflow">
     <h2 class="settings-section__title">{{ t("project.workflow") }}</h2>
     <div class="flex flex-col gap-3">
       <QueryLoading v-if="workflow.isPending.value" />
@@ -70,7 +72,7 @@ function deleteStatus(id: string): void {
           <ProjectWorkflowStatus v-for="row in workflow.data.value.statuses" :key="`${row.id}:${row.name}:${row.category}`" :row="row" :pending="pending" :read-only="readOnly" @patch="saveStatus" @delete="deleteStatus" />
         </ul>
         <form v-if="!readOnly" class="flex flex-wrap items-end gap-2" @submit.prevent="submit">
-          <input v-model="newName" :aria-label="t('project.workflow')" maxlength="100" :disabled="pending" class="h-10 rounded border px-3" />
+          <UInput v-model="newName" :aria-label="t('project.workflow')" maxlength="100" :disabled="pending" class="min-w-48" />
           <select v-model="newCategory" :aria-label="categoryLabel(newCategory)" :disabled="pending" class="collection-select">
             <option v-for="category in STATUS_CATEGORIES" :key="category" :value="category">{{ categoryLabel(category) }}</option>
           </select>
@@ -79,5 +81,5 @@ function deleteStatus(id: string): void {
       </template>
       <p v-if="error" role="alert" class="text-sm text-error">{{ error }}</p>
     </div>
-  </section>
+  </UPageCard>
 </template>

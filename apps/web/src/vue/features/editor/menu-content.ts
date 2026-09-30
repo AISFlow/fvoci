@@ -13,7 +13,7 @@ type PopoverContent = NonNullable<PopoverProps["content"]>;
 export function menuContent(
   options: Pick<
     PopoverContent,
-    "side" | "sideOffset" | "onOpenAutoFocus" | "onEscapeKeyDown" | "onCloseAutoFocus"
+    "side" | "sideOffset" | "onOpenAutoFocus" | "onEscapeKeyDown" | "onCloseAutoFocus" | "onFocusOutside"
   >,
 ): PopoverContent {
   return { align: "start", collisionPadding: 8, ...options, asChild: true } as PopoverContent;

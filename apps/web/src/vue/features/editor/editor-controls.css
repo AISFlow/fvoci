@@ -1,3 +1,5 @@
+@import "../../../../../../packages/editor/src/vue/chrome/editor-template.css";
+
 /* The Vue editing controls (EditorControls.vue). The shared editor
    stylesheet (@fvoci/editor/styles.css) styles the gutter, the table
    handles, the mobile toolbar and the code chrome as in the React host;
@@ -58,4 +60,63 @@
   padding: 0.25rem 0.5rem;
   color: var(--ui-error);
   font-size: var(--text-ui);
+}
+
+/* Official EditorToolbar group surface; all three presentations share items. */
+.fvoci-template-toolbar__groups {
+  display: flex;
+  align-items: center;
+  gap: .25rem;
+  flex-wrap: wrap;
+  padding: .25rem;
+}
+.fvoci-template-toolbar--fixed {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin-bottom: 0;
+  border-block: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.fvoci-template-toolbar--selection {
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg);
+  box-shadow: 0 4px 16px #0002;
+}
+.fvoci-template-toolbar--mobile { display: none; }
+@media (max-width: 47.999rem) {
+  .fvoci-template-toolbar--mobile {
+    display: block;
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+    padding-bottom: env(safe-area-inset-bottom);
+    border-top: 1px solid var(--ui-border);
+    background: var(--ui-bg);
+  }
+  .fvoci-template-toolbar--mobile .fvoci-template-toolbar__groups {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    max-width: calc(100vw - 2rem);
+    overscroll-behavior-x: contain;
+  }
+}
+/* Supersede the React bubble's pixel chrome with Nuxt UI button states. */
+[data-fvoci-bubble] {
+  border: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+[data-fvoci-bubble] button {
+  width: auto;
+  height: auto;
+  min-width: 0;
+  padding: .375rem;
+  border-radius: var(--ui-radius);
+}
+@media (max-width: 47.999rem) {
+  .fvoci-template-toolbar--mobile button { min-width: 2.75rem; min-height: 2.75rem; }
 }

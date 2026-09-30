@@ -64,6 +64,10 @@ test("workspace templates create list and apply document and task", async ({ pag
   await page.getByLabel("공개 범위").selectOption("workspace");
   await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${slug}/TPL/tasks$`));
+  // The React URL changes before the full load into Vue completes. Wait for
+  // the destination project and task data before starting another navigation.
+  await expect(page.getByRole("heading", { name: "Tpl", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "새 태스크", exact: true })).toBeVisible();
 
   await openTemplates(page, slug);
   await page.getByLabel("제목").fill("E2E 태스크 템플릿");

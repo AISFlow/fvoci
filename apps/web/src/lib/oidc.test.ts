@@ -268,10 +268,10 @@ test("the Vue login page's SSO form submits through startWorkspaceSso, never to 
   assert.match(sso, /startWorkspaceSso\(/);
 });
 
-test("the invite and account pages start OIDC by script, never by a native form", () => {
+test("the Vue invite and account pages start OIDC by script, never by a native form", () => {
   for (const [file, start] of [
     ["../vue/features/auth/InviteAcceptForm.vue", "startOidcInvite"],
-    ["../features/settings/settings-account.tsx", "startOidcLink"],
+    ["../vue/features/settings/AccountSettingsView.vue", "startOidcLink"],
   ] as const) {
     const page = readFileSync(path.join(import.meta.dirname, file), "utf8");
     // The provider button posts by fetch, then navigates by script.
@@ -281,4 +281,21 @@ test("the invite and account pages start OIDC by script, never by a native form"
     // provider is blocked by the CSP `form-action 'self'`.
     assert.doesNotMatch(page, /\b(method|action|formAction|formMethod)=/, file);
   }
+});
+
+test("the Vue account provider button calls the link handler and reflects its pending/error state", () => {
+  const page = readFileSync(
+    path.join(import.meta.dirname, "../vue/features/settings/AccountSettingsView.vue"),
+    "utf8",
+  );
+  // Follow the mounted button through its handler to the POST helper tested
+  // above; checking an unused helper import would not protect this UI contract.
+  assert.match(page, /<UButton\b[^>]*\btype="button"[^>]*@click="linkProvider\(p\.provider\)"/);
+  assert.match(page, /function linkProvider\(provider: string\): void\s*\{\s*void clickOidcStart\(provider, \(\) => startOidcLink\(provider\),/);
+  assert.match(page, /setPending: \(next\) =>\s*\{\s*linkPending\.value = next;/);
+  assert.match(page, /setError: \(message\) =>\s*\{\s*methodError\.value = message;/);
+  assert.match(page, /\}, "error\.link"\);/);
+  assert.match(page, /:disabled="linkPending !== null"/);
+  assert.match(page, /:aria-busy="linkPending === p\.provider \? true : undefined"/);
+  assert.match(page, /<p v-if="methodError" role="alert"[^>]*>\{\{ methodError \}\}/);
 });

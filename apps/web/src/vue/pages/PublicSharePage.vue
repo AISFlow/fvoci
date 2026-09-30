@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
-import { useQuery } from "@tanstack/vue-query";
+import { useQuery, useQueryClient } from "@tanstack/vue-query";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useRoute } from "vue-router";
+import { ProblemError } from "@/lib/api";
 import {
   sharePublicBodyQuery,
   sharePublicMetaQuery,
@@ -20,14 +21,32 @@ import "@/features/share/share.css";
  * `/s/:token/attachments/...` has its own anonymous viewer route.
  */
 const route = useRoute();
+const queryClient = useQueryClient();
+const refreshing = ref(false);
 const token = computed(() => String(route.params.token ?? ""));
 const selectedDocumentId = ref<string | null>(null);
-watch(token, () => { selectedDocumentId.value = null; }, { flush: "sync" });
-const meta = useQuery(() => sharePublicMetaQuery(token.value));
-const tree = useQuery(() => sharePublicTreeQuery(token.value, meta.isSuccess.value));
-const body = useQuery(() =>
-  sharePublicBodyQuery(token.value, selectedDocumentId.value, meta.isSuccess.value),
-);
+const accessError = ref<string | null>(null);
+let queryGeneration = 0;
+let recoveryGeneration = 0;
+let denialGeneration = 0;
+watch([token, selectedDocumentId], () => { queryGeneration += 1; }, { flush: "sync" });
+watch(token, () => {
+  recoveryGeneration += 1;
+  refreshing.value = false;
+  selectedDocumentId.value = null;
+  accessError.value = null;
+}, { flush: "sync" });
+const meta = useQuery(() => ({ ...sharePublicMetaQuery(token.value), staleTime: 0 }));
+const tree = useQuery(() => ({ ...sharePublicTreeQuery(token.value, meta.isSuccess.value), staleTime: 0 }));
+const body = useQuery(() => ({
+  ...sharePublicBodyQuery(token.value, selectedDocumentId.value, meta.isSuccess.value),
+  staleTime: 0,
+}));
+
+// Once a current body read is denied, no other cached share content remains visible.
+watch(body.error, (error) => {
+  if (error instanceof ProblemError && error.status === 404) onDenied(error);
+}, { flush: "sync", immediate: true });
 
 const share = computed(() => meta.data.value);
 const metaError = computed(() => (meta.error.value ? failMessage(meta.error.value) : null));
@@ -40,18 +59,56 @@ function onSelectDocument(documentId: string): void {
   selectedDocumentId.value = documentId === rootId ? null : documentId;
 }
 
+function onDenied(error: unknown): void {
+  // Repeated denials have the same message but must invalidate older recovery.
+  denialGeneration += 1;
+  accessError.value = failMessage(error);
+}
+
 async function refresh(): Promise<void> {
-  const result = await meta.refetch();
-  if (result.isSuccess) await Promise.all([tree.refetch(), body.refetch()]);
+  const recovering = accessError.value !== null;
+  const refreshToken = token.value;
+  const recovery = ++recoveryGeneration;
+  const denial = denialGeneration;
+  let query = queryGeneration;
+  const isCurrent = () => token.value === refreshToken && recovery === recoveryGeneration &&
+    denial === denialGeneration && query === queryGeneration;
+  refreshing.value = true;
+  try {
+    const result = await meta.refetch();
+    if (isCurrent() && result.isSuccess && meta.isSuccess.value && !meta.error.value) {
+      // A denied child may have moved outside the share. Reauthorize the root,
+      // keeping the denial gate until its fresh body and current tree succeed.
+      if (recovering) selectedDocumentId.value = null;
+      query = queryGeneration;
+      await nextTick();
+      if (!isCurrent()) return;
+      const [freshTree, freshBody] = await Promise.all([
+        tree.refetch(), body.refetch(),
+        queryClient.refetchQueries({ queryKey: ["share-search", refreshToken], type: "active" }),
+      ]);
+      // Refetch results are snapshots. Reconnect can deny the root again while
+      // the earlier tree is pending; only current, settled queries may reopen it.
+      if (recovering && isCurrent() && selectedDocumentId.value === null &&
+        freshTree.isSuccess && freshBody.isSuccess &&
+        meta.isSuccess.value && tree.isSuccess.value && body.isSuccess.value &&
+        !meta.error.value && !tree.error.value && !body.error.value &&
+        !meta.isFetching.value && !tree.isFetching.value && !body.isFetching.value) {
+        accessError.value = null;
+      }
+    }
+  } finally {
+    if (recovery === recoveryGeneration) refreshing.value = false;
+  }
 }
 </script>
 
 <template>
-  <div v-if="metaError || treeError" class="share-page" data-public-share="vue">
+  <div v-if="metaError || treeError || accessError" class="share-page" data-public-share="vue">
     <div class="share-page__gate">
       <div class="flex flex-col gap-3">
-        <p role="alert" class="share-page__alert">{{ metaError || treeError }}</p>
-        <UButton variant="outline" color="neutral" :loading="meta.isFetching.value || tree.isFetching.value" @click="refresh">
+        <p role="alert" class="share-page__alert">{{ metaError || treeError || accessError }}</p>
+        <UButton variant="outline" color="neutral" :loading="refreshing" @click="refresh">
           {{ t("load.retry") }}
         </UButton>
       </div>
@@ -70,11 +127,12 @@ async function refresh(): Promise<void> {
     :tree="tree.data.value?.items ?? []"
     :active-document-id="activeDocumentId"
     :body="body.data.value ?? null"
-    :body-loading="body.isLoading.value"
+    :body-loading="body.isFetching.value"
     :body-error="bodyError"
-    :refreshing="meta.isFetching.value || tree.isFetching.value || body.isFetching.value"
+    :refreshing="refreshing || meta.isFetching.value || tree.isFetching.value || body.isFetching.value"
     @select-document="onSelectDocument"
     @retry-body="() => void body.refetch()"
     @refresh="refresh"
+    @denied="onDenied"
   />
 </template>

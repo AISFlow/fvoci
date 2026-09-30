@@ -74,6 +74,11 @@ async function waitForJob(jobId: string): Promise<void> {
       resumeJobId.value = jobId;
       throw new PollStopped(outcome.kind);
     }
+  } catch (err) {
+    // Keep the durable job available after a transient status-read failure.
+    // Resuming observes the existing job instead of submitting the file twice.
+    if (!(err instanceof ProblemError) && !controller.signal.aborted) resumeJobId.value = jobId;
+    throw err;
   } finally {
     if (pollRef.value === controller) pollRef.value = null;
   }
@@ -96,24 +101,28 @@ function showError(err: Error): void {
 
 const importMutation = useMutation({
   mutationFn: async (file: File) => {
+    const workspaceId = props.workspaceId;
+    const selectedSource = source.value;
+    const selectedProjectId = projectId.value;
     const zipBase64 = await fileToBase64(file);
     const response = await fetch("/api/v1/import", {
       method: "POST",
       credentials: "include",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        workspaceId: props.workspaceId,
-        source: source.value,
+        workspaceId,
+        source: selectedSource,
         zipBase64,
         fileName: file.name,
-        ...(source.value === "notion-zip" && projectId.value !== IMPORT_NO_PROJECT
-          ? { projectId: projectId.value }
+        ...(selectedSource === "notion-zip" && selectedProjectId !== IMPORT_NO_PROJECT
+          ? { projectId: selectedProjectId }
           : {}),
       }),
     });
     if (!response.ok) throw new ProblemError(response.status, "import_failed");
     const job = (await response.json()) as { id: string; status: ImportJobStatus };
     if (isImportActive(job.status)) await waitForJob(job.id);
+    else if (job.status !== "completed") throw new ProblemError(400, "import_failed");
     return job;
   },
   onSuccess: showDone,
@@ -134,6 +143,10 @@ function onFileChange(event: Event): void {
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
+  if (pending.value || !props.canManage) return;
+  message.value = null;
+  error.value = null;
+  resumeJobId.value = null;
   importMutation.mutate(file);
 }
 
@@ -153,6 +166,7 @@ function sourceLabel(value: ImportSource): string {
         id="import-source"
         v-model="source"
         class="h-11 rounded-md border border-default bg-default px-3"
+        :disabled="pending"
       >
         <option v-for="item in IMPORT_SOURCES" :key="item" :value="item">{{ sourceLabel(item) }}</option>
       </select>
@@ -186,8 +200,8 @@ function sourceLabel(value: ImportSource): string {
       >
         {{ t("workspace.import.resumePoll") }}
       </UButton>
-      <p v-if="message" class="text-muted">{{ message }}</p>
-      <p v-if="error" class="text-error">{{ error }}</p>
+      <p v-if="message" role="status" class="text-muted">{{ message }}</p>
+      <p v-if="error" role="alert" class="text-error">{{ error }}</p>
     </div>
   </section>
 </template>

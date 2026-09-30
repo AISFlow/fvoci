@@ -287,7 +287,7 @@ main push 대기 관측은 이미 수락된 PR의 취소가 아니다.
 | [#238](https://github.com/AISFlow/fvoci/pull/238) | `7a1529dd` | `1b8666a5e84aad763fddef3f46b8ca49705e8a9d` | 감사 WP5: 서버 `PR_SET_DUMPABLE 0`(실패 시 기동 거부, install-F01), helper 자체 `oom_score_adj=1000`과 부모 확인, helper PDEATHSIG(collab-F10), 지연·복구 가능한 engine bridge(collab F1/F4, room open당 helper 1개), helper slot 포화 1013(이전 1011), `collab_product` 예약 교착 테스트 수정. migration 없음. 미실행: AppArmor docker-default 측정. 잔여: `RUNNING.md` perf/seccomp 문구 nit(§5). 검토: 독립 Plan-agent 검토(다른 컨텍스트) | 39 성공·1 skip, 5개 gate 성공 |
 | [#236](https://github.com/AISFlow/fvoci/pull/236) | `5866007b` | `31459b3c9228a0ea4f27848bfee5536ced116b3f` | identity·공개 endpoint 강화(0.2.0 minor 사유; workspace SSO 항목은 `workspaceSso` 사용권을 받는 빌드에만 해당, 게시 이미지는 켤 수 없음, §5): workspace SSO별 callback `/api/v1/auth/sso/{workspace_id}/callback`(OIDC-1 IdP mix-up), 초대 OIDC start same-origin POST(INV-1, 403 `origin_mismatch`), 초대 수락 login 한도·IP당 60/5분(INV-2), TOTP 최신 step claim(MFA F3), 동시 `--secrets-rotate` 검증(MFA F4), migration 044 이메일 변경 시 `auth_generation` 증가(MAG-1), wiki 공유 링크 생성 시 하위 트리 View 요구(Share F1 A), 개인 workspace SSO 저장 409·기존 행 비활성, 서버 제공 `redirectUri`, link·SSO slug의 script 시작(Chromium CSP). 사용자 결정 대기: ACC-1, Share B. 잔여: team workspace 관리자의 GET start login CSRF, 검토 nit(§5). Chromium 153 1회 실행만(브라우저 테스트 미커밋). 검토: 독립 Plan-agent 검토(다른 컨텍스트) | 39 성공·1 skip, 5개 gate 성공 |
 | [#239](https://github.com/AISFlow/fvoci/pull/239) | `c55bee4d` | `e600047c1aef043357061f00fe735a3ce0d9e4ea` | 테스트 전용: `collections_integration` `wiki_collection_can_edit_uses_one_set_based_permission_lookup`의 문 목록 비교에서 #231 acquire 검사 문을 제외(sqlx는 재사용 idle 연결에만 `before_acquire`를 실행하므로 검사 수가 pool 상태에 따른다). `086f2b4d` main의 `postgres-pg16-b` 실패(run 36498519146) 수정. 제품 변경 없음. 검토: 독립 Plan-agent 검토(다른 컨텍스트) ACCEPT_WITH_NITS(run `wq2qspket`) | 39 성공·1 skip, 5개 gate 성공 |
-| [#240](https://github.com/AISFlow/fvoci/pull/240) | `874dbecf` | `d560ac8f017e283de548ad3edc97977a4406582c` | 0.2.0 release 준비: `Cargo.toml`·`Cargo.lock` 0.2.0, `apps/web/openapi.json`, `scripts/release-notes-template.md`(`notes-for: 0.2.0`), 이 문서. merge 커밋이 `v0.2.0` tag 대상(release [36514930444](https://github.com/AISFlow/fvoci/actions/runs/36514930444), tag push). PR head CI 39 성공·1 skip, 5개 gate 성공. 검토: `<TBD>`(PR 본문·evidence에 검토 기록 없음, 코디네이터 기입) | main push 39 성공·1 skip, 5개 gate 성공 (+ v0.2.0 release 실행 9 성공) |
+| [#240](https://github.com/AISFlow/fvoci/pull/240) | `874dbecf` | `d560ac8f017e283de548ad3edc97977a4406582c` | 0.2.0 release 준비: `Cargo.toml`·`Cargo.lock` 0.2.0, `apps/web/openapi.json`, `scripts/release-notes-template.md`(`notes-for: 0.2.0`), 이 문서. merge 커밋이 `v0.2.0` tag 대상(release [36514930444](https://github.com/AISFlow/fvoci/actions/runs/36514930444), tag push). PR head CI 39 성공·1 skip, 5개 gate 성공. 검토: 독립 Plan-agent 검토 2개(다른 컨텍스트, `9b01c2dc`의 발행 노트·이 문서 기록) 모두 ACCEPT_WITH_NITS → 수정 `4384f5ca` delta ACCEPT_WITH_NITS(문구 nit 6개 반영 `9752f716`) → `874dbecf` delta ACCEPT | main push 39 성공·1 skip, 5개 gate 성공 (+ v0.2.0 release 실행 9 성공) |
 
 2026-09-29 KST 추가 대조 지점(수락 제품 main): `a7261dc8138fe163731de65c700413ed16f466a3`(#256 merge). 아래는 v0.2.0 tag(`d560ac8f`) 이후
 first-parent 순서의 수락분이며 0.3.0 준비 PR merge의 `v0.3.0` 게시 대상이다. 각 PR의 고정 HEAD(merge 직전 PR head) 원격 CI는
@@ -313,7 +313,7 @@ first-parent 순서의 수락분이며 0.3.0 준비 PR merge의 `v0.3.0` 게시 
 | [#254](https://github.com/AISFlow/fvoci/pull/254) | `73f01bd9` | `995ad6e24664378cc2b6a3fa782d62f8f2b799cc` | #149 A/B 첨부 전송(사용자 결정 2026-09-29, #149 기록): `FVOCI_ATTACHMENT_TRANSFER_MODE` > 관리자 설정 `attachmentTransfer.mode` > 기본 `proxy`. `presigned`(S3+`S3_PUBLIC_ENDPOINT`)는 `rusty_s3` presigned UploadPart·GetObject, 세션별 mode 고정(`upload_meta`, migration 없음), complete 전 ListParts 개수·번호·크기·ETag 대조와 권한 재검사, 기동 거부(잘못된 값·S3/endpoint 없음·https origin 아래 http·앱과 같은 host)와 400 `attachment_transfer_unavailable`, API token·local 저장소는 proxy, CSP에 storage origin(`S3_PUBLIC_ENDPOINT` 설정 시), S3 overlay 변수, RUNNING.md 운영자 설정. 검증: MinIO+PG `attachment_s3_integration` 24, 수동 Chromium cross-origin(`scripts/run-web-e2e-s3.sh`, CI 아님). 미검증: 실제 AWS S3·다른 S3 호환·CDN/proxy·Firefox·Safari. 발급 URL 만료 전 철회 불가(§5). 검토: `76ad2775` ACCEPT_WITH_NITS → fix·finish·nit 라운드 delta 모두 ACCEPT_WITH_NITS, 이후 main merge만 | 39 성공·1 skip, 5개 gate 성공 |
 | [#255](https://github.com/AISFlow/fvoci/pull/255) | `bd31bfd3` | `d265b42629a06520cdd3a209c0d5f395ece3a176` | Vue 3 + Nuxt UI 전환 tracer 1(사용자 결정, #250 기반): 프로젝트 Gantt를 Vue 페이지로. vue 3.5.43·@nuxt/ui 4.11.2 등 정확 고정, react-query와 vue-query가 query-core 1벌 공유, `bun-lock.test.ts`가 중복·`@tiptap-pro/` 거부. 단일 `index.html`에서 `src/boot.ts`가 Gantt 경로만 Vue, 나머지는 React로 시작하고 경계 이동은 전체 페이지 로드. 저장은 기존 `PATCH /tasks/{id}`에 layout 그대로의 `expectedDates`(권한·의존성·충돌은 서버): 이동은 태스크가 가진 날짜 필드만, 시작 handle은 `startDate`만, 끝 handle은 due 쪽만, `dueAt`은 시각 유지. 화살표·Shift+화살표, 409 메시지·refetch, 400 의존성 모순 snap back, 오늘·기본 월은 사용자 시간대. React Gantt 삭제(서버 pixel layout 필드는 유지, 후속 contract 단계), React 로그인 페이지의 `returnTo`(`safeReturnTo`). CSP: Nuxt UI colors `<style>`을 `index.html`에 그대로 기록해 기존 hash로 허용(`'unsafe-inline'`·Rust 변경 없음), Lucide 아이콘 오프라인 번들·오픈소스 고지. `vue-tsc`용 `@volar/typescript` 2.4.28 Bun `patchedDependencies` patch(volarjs/volar.js#310, Dockerfile `COPY patches`). API·DB·설치 계약 변경 없음. 검증: 웹 단위 480, 실제 PG·Meili e2e 45 group 85/85와 Vue Gantt spec, 협업 26, Node 없는 `oven/bun:1.4.2`. 한계: DST를 건너 이동한 `dueAt`은 그린 막대와 하루 어긋날 수 있음, overlap mode rail 행 정렬, Chromium만. 검토: REJECT(월 경계 막대 날짜 오저장·아이콘 고지 누락 major 2) → fix round(13건) delta ACCEPT_WITH_NITS → minor(백그라운드 refetch 실패 시 캐시된 프로젝트 목록 유지) `6e99ce66` 수정 → 추가 수정 `bd31bfd3`(실패 query에 보여줄 데이터가 없을 때만 Vue 오류 상태) 검토 ACCEPT_WITH_NITS | 39 성공·1 skip, 5개 gate 성공 |
 | [#256](https://github.com/AISFlow/fvoci/pull/256) | `8ddd1486` | `a7261dc8138fe163731de65c700413ed16f466a3` | 도구: #241의 실제 Keycloak 확인을 Bun으로(`bun` 요구, `bun --bun run build`, Playwright 확인을 `run-web-e2e.sh`와 같게; #250 이후 hoisted layout에서 이전 Playwright 확인이 main에서 실패하던 문제 해소). redaction·xtrace guard·interrupt 정리·`--skip-build` HEAD 확인 유지. 실제 재실행 flows 8·failures 7·wrong-secret 1·workspace-sso 1 통과(Keycloak 26.7.4, Bun 1.4.2, Playwright 1.63.0). 검토: 독립 Plan-agent 검토(다른 컨텍스트) ACCEPT_WITH_NITS | 39 성공·1 skip, 5개 gate 성공(PR head) |
-| 0.3.0 준비 PR `<TBD>` | `<TBD>` | `<TBD>` | 0.3.0 release 준비: `Cargo.toml`·`Cargo.lock` 0.3.0, `apps/web/openapi.json`(`info.version`만), `scripts/release-notes-template.md`(`notes-for: 0.3.0`), `RUNNING.md`(npm→Bun 전환 시 `node_modules` 삭제), 이 문서, `.agents/environment.md`, main(#255·#256) merge. merge 커밋이 `v0.3.0` tag 대상. 검토: `<TBD>` | `<TBD>` |
+| [#257](https://github.com/AISFlow/fvoci/pull/257) | `b7b77c11` | `6f64febc487808246596f02922b1826b4fcc939a` | 0.3.0 release 준비: `Cargo.toml`·`Cargo.lock` 0.3.0, `apps/web/openapi.json`(`info.version`만), `scripts/release-notes-template.md`(`notes-for: 0.3.0`), `RUNNING.md`(npm→Bun 전환 시 `node_modules` 삭제), 이 문서, `.agents/environment.md`, main(#255·#256) merge. merge 커밋이 `v0.3.0` tag 대상(release [36567429611](https://github.com/AISFlow/fvoci/actions/runs/36567429611), tag push). PR head CI 39 성공·1 skip, 5개 gate 성공. 검토: 독립 Plan-agent 검토(다른 컨텍스트) `04f61092` REJECT(#255 누락, 업그레이드·되돌리기 문구가 업그레이드 확인 근거와 모순) → 수정 `6a965174` delta ACCEPT_WITH_NITS(F1–F10 해소) → `6a965174..02c9f931`(main #256 merge·Keycloak 문구) delta ACCEPT_WITH_NITS → nit 반영 `b7b77c11`(문서만) | main push 39 성공·1 skip, 5개 gate 성공 (+ v0.3.0 release 실행 9 성공) |
 
 실제 OS IME witness(F, 협업 행): 별도 Opus 5.5 medium 검토가 ACCEPT했다. 비공개 WSL2 X11 silo(IBus hangul 2벌식,
 headed Chromium 153)에서 실제 XTEST 키 입력으로 preedit 중 다른 문단의 원격 갱신(조합 유지), preedit Backspace와 조합 후
@@ -641,12 +641,12 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
 
 ## 6. 재개
 
-### 6.1 인계 체크포인트 (2026-09-29 `<TBD>` KST, 0.3.0 준비·게시, Claude Code Opus 5.5 코디네이터)
+### 6.1 인계 체크포인트 (2026-09-29 22:58 KST, 0.3.0 게시 후 병렬 wave, Claude Code Opus 5.5 코디네이터)
 
 다음 세션은 이 절과 실제 `origin/main`·열린 PR·브랜치·release를 대조한 뒤 인수한다. 로컬 evidence(`/home/kinesis/orca/fvoci-evidence/*`)는
 보조자료이며 재개에 필수는 아니다. 이전 체크포인트(2026-09-29, 0.2.0 준비·게시)는 이 파일의 git 이력에 있다.
 
-- **확인한 origin/main**: 0.3.0 준비 PR merge `<TBD>`(게시 후 기입). main push CI: `<TBD>`.
+- **확인한 origin/main**: `9e4f3af3c0389a6b875c6b24c3f00d23f27b41f8`(#264 merge). 그 전 `6f64febc487808246596f02922b1826b4fcc939a`(#257 merge, `v0.3.0` 태그 대상, 이동하지 않음).
   직전 관측: `d265b426`(#255 merge) main CI 39 성공·1 skip, 5개 gate 성공(push 실행 5개, Dependabot 실행 없음), `995ad6e2`(#254 merge)도 같다. `42b9255a`(#244)의 `rust-ci-gate`는 `postgres-arm64`
   `pool_release_integration` 테스트 경합으로 빨간 상태였고 #252(`4c73c0fa`)로 수정했다. `7cbb8bea`(#253)의 `web-ci-gate`는 웹 단위 테스트
   `collab-reconnect.test.ts` 1회 실패로 빨간 상태였다(재실행 없음, §5). `d929c985`(#246)·`c5e7a9e9`(#250)의 Dependabot 실패는 gate가 아니다(§5).
@@ -661,13 +661,46 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
     `ghcr.io/aisflow/fvoci:0.2.0@sha256:d1ec15b99a468350dda0afe992b624f667c9cad50b3d53203d61d026cbd28f0b`
     (amd64 `sha256:0f34a6f675136b4fc4e906178ed28660ee7745b2c30631f1546d67dcf5cfc38b`, arm64 `sha256:13c6c5371b4d979ddd7fc8e7e39e86ef2cbd2344acbe7f1dd641f0b18fe0baba`),
     `:0.2` 동일, pre-release https://github.com/AISFlow/fvoci/releases/tag/v0.2.0.
-  - `v0.3.0`: 게시 예정(게시 후 기입). tag `<TBD>`, release `<TBD>`, 이미지 `ghcr.io/aisflow/fvoci:0.3.0@<TBD>`
-    (amd64 `<TBD>`, arm64 `<TBD>`), `:0.3` `<TBD>`, pre-release https://github.com/AISFlow/fvoci/releases/tag/v0.3.0.
+  - `v0.3.0` = `6f64febc487808246596f02922b1826b4fcc939a`(#257 merge, annotated tag 객체 `706fc715fca293c9952a8677f60a11175e67da04`), release
+    [36567429611](https://github.com/AISFlow/fvoci/actions/runs/36567429611)(tag push, 9 job 성공), 이미지
+    `ghcr.io/aisflow/fvoci:0.3.0@sha256:bd8d2e45deac97849a7c079a9b856f59a1882735148b3deea1834a4fd50580f9`
+    (amd64 `sha256:99ef8a79b05a4af5a16dfcb4e1bb9a85681da774e1e1e31dcce373dcb6cae5e1`, arm64 `sha256:5073f6a2d75d60064fb1dc4b80d03919afa32513472cc4a4ad336fdeab6857cb`),
+    `:0.3` 동일(`:0.2`는 0.2.0 그대로), pre-release https://github.com/AISFlow/fvoci/releases/tag/v0.3.0(2026-09-29 12:37 UTC).
 - **0.3.0 포함 변경**(v0.2.0 이후, first-parent): 제품 #242 #243 #244 #245 #246 #247 #248 #253 #254, 프론트엔드 #255(Vue Gantt tracer 1), 빌드·구조 #250 #251, 테스트·도구 #241 #252 #256,
   문서 #249. minor 사유: #246(설치 파일 변경과 폐기된 `<VAR>_FILE` 기동 거부), #254(운영자 설정 `FVOCI_ATTACHMENT_TRANSFER_MODE`·
   `attachmentTransfer.mode`). migration 없음(044 유지), 새 필수 `.env` 값 없음. 발행 노트는 `scripts/release-notes-template.md`(`notes-for: 0.3.0`,
   #255 "Tasks: Gantt" 절 포함).
-- **열린 PR**: 0.3.0 준비 PR `<TBD>`, Dependabot #152 #153 #155 #156 #157 #158 #160 #191.
+- **열린 PR**(2026-09-30 01:50 KST 대조):
+  - **main**: `f3f53c90` = #262. `83c01480` = #268. `9e4f3af3` = #264. v0.3.0 태그는 `6f64febc`에 고정.
+  - 제품(연결 예정): #265 `1ee57935`, #267 `e257a434`, #269 `ef17b410`, #266 `ddce8bf2`.
+  - 후보에서 연결됨(main 아님): #270 `/setup` `b601ef64` (on #269). IME CI 수정 #287 `485d118e` (main 직전).
+  - Vue 미연결 WIP: #271–#279, #281–#283, #285–#286. 모두 **live 아님**. #280은 문서(`ffeacb19`). #284는 live 위키 크롬 e2e.
+  - 문서: #263 (`42be6870`). base는 아직 `6f64febc`(v0.3.0). 독립 검토 없이 머지하지 않음.
+  - Dependabot(비게이트): #152 #153 #155 #156 #157 #158 #160 #191.
+  프론트엔드 전환 현황·실행 TODO는 §6.3이 정본이다. #262·#265·#267은 같은 위키 흐름이며 서로 다른 기능군 완료로 세지 않는다.
+- **추적 issue**(2026-09-29 개설): #258 한글 IME 첫 자모 — **닫힘**(#268). #259 인라인 수식 원격 변경 시 초안 유실, #260 조합 중 멈춤과 undo 분리, #261 Vue 위키 편집기 React 대비 누락 컨트롤.
+  #261은 **0.4.0 발행 전 필수**다. 해결 전에는 Vue 위키가 포함된 릴리스를 발행하지 않는다.
+- **프론트엔드 전환 TODO**: §6.3 (정본). 아래 브랜치는 그 표와 같다.
+- **진행 중 작업**(Ultracode 수량 면제; 각 작업은 자기 worktree에서 구현한 뒤 독립 검토 2개, 수정, delta 검토를 거친다):
+  - #262 head 기준:
+    - `r9-vue-editor-parity`(#261 A)
+    - `r9-vue-shell-parity`(#261 B)
+    - `r11-vue-{auth,setup,workspace,project-views,settings,account-admin,viewers}`(Vue 페이지 이식; setup은 #269에 넣지 않음)
+  - main `9e4f3af3` 기준:
+    - `r7-ime-first-jamo`(#258) — **수락·main** (#268)
+    - `r8-reconnect-dispose-race` — **수락·main** (#264)
+    - `r10-digest-rotation`(outbox C9)
+    - `r10-import-admission`(첨부 C10·C12)
+    - `r10-gantt-contract`(#253 contract)
+    - `r11-identity`(HI-04·08·10·11; HI-11 IPv6 /64는 코디네이터 결정, 사용자가 되돌릴 수 있음)
+    - `r11-search-streams`(SA-7·10·11, SA-9 측정)
+    - `r11-collab-structure`(db·collab C11·C12)
+    - `r11-ops-cli`(CO-10·12)
+    - `r11-dependabot`
+  - 대기:
+    - #259·#260: #261 A 수락 뒤
+    - 협업 엔진 비교: #280 `ffeacb19`. **Yrs 유지.** tracer 수락 후 현행 비용 측정, 필요 시 제품과 분리된 ProseMirror step authority 실험. 계약 팩 재실행 ≠ 비교 완료. 엔진 교체·데이터 이전은 별도 채택.
+    - sqlx 0.9, outbox C10·C12, 첨부 C9·C11, CO-11, HI-09: 관련 wave 통합 뒤
 - **다음 후속(비차단, 순서는 코디네이터 결정)**: Vue 전환 다음 tracer와 #253 contract 단계(pixel layout 필드 제거); presigned 실제 S3 제공자·
   Firefox·Safari 검증(#149 F); Dependabot bun.lock v2·#155 recreate 대응(§5); `collab-reconnect.test.ts`
   실패 원인 확인; sqlx 0.9 업그레이드와 acquire 검사 제거·`disallowed-methods`; 메일 수락 수신자 영속화(migration); digest streak 한계 재검토;
@@ -683,8 +716,33 @@ x64/ARM64 협업 실행에서 통과; helper process tree SIGKILL 후 새 컨텍
   정상 서버는 uid 1000·제한 앱 역할; 무설정 bootstrap 서비스·secrets 모드·미배포 초안 호환 계층을 다시 만들지 않는다. 웹 프론트엔드는 Bun 고정
   버전·lockfile로 Vue 3 + Nuxt UI + Tiptap 전환 중이다(사용자 결정; #250 기반, #255 tracer 1). 성능 수치는 각 PR의 작성자 로컬 측정이며 게시
   이미지 측정이 아니다. 보류: `flushDelay` 50/100 실험, DocumentView 구독 분리, Svelte·Astro·Valkey·대규모 room 재설계.
-- **로컬 자료·자원**: `<TBD>`. 2026-09-29 디스크 정리 기록은 `.agents/environment.md`와 `fvoci-evidence/space-reclaim-2026-09-29`.
-- **자동 연결**: `<TBD>`. 진행 중 릴리스 `<TBD>`.
+- **로컬 자료·자원**: 위 작업별 worktree(`/home/kinesis/orca/workspaces/fvoci/<이름>`), 공유 읽기 전용 backend `prebuilt-8adaf1b8`, 통합 worktree `daggertooth`. 2026-09-29 디스크 정리 기록은 `.agents/environment.md`와 `fvoci-evidence/space-reclaim-2026-09-29`.
+- **자동 연결**: 이 세션의 내장 workflow·agent만 사용한다(외부 scheduler 없음). 세션이 끝나면 위 worktree의 미수락 커밋을 기준으로 재개한다. 진행 중 릴리스 없음.
+
+### 6.2.1 재개 인계 (2026-09-30 06:41 KST, Cursor Grok 4.6)
+
+임시 주 실행은 Cursor Grok 4.6이며 daggertooth(`a4662256` detached)에는 제품 커밋이 없다. 정본은 이 절과 §6.3. Opus 주간 한도 리셋은 2026-10-01 12:00 Asia/Seoul. 한도 복구를 기다리지 말고 우선순위 교정을 이어간다: **신규 미연결 페이지를 늘리지 않고 기존 흐름을 연결·검증·수락한다.** Vue 전환 전체 권한·수량 상한 해제는 유지. GitHub auto-merge 없음. force push·main 직접 push·1.0.0+·사용자 환경 자동 배포 없음.
+
+**다음 명령 (한 번에 하나)**
+
+1. #287 `485d118e`를 **구현과 다른 컨텍스트**에서 독립 검토한다(편집 도구 없는 Plan). 범위: `apps/web/e2e/workspace-wiki-vue-flow.spec.ts`만. 단언 `"첫 문단한글"` 불변.
+2. Web [36631118948](https://github.com/AISFlow/fvoci/actions/runs/36631118948): **shard 5 success**(원래 `test.fail` 샤드). `collaboration-flow` **failure** — `e2e-pending/workspace-wiki-collab.spec.ts:604` SIGKILL 후 `placeContentCaret` (`collab-helpers.ts:697`, 5s). #287은 이 파일을 건드리지 않음. skip·무조건 재실행으로 숨기지 말고 main `f3f53c90`의 같은 job과 대조한다. CLEAN이 아니면 머지하지 않음.
+3. CLEAN+검토 후에만 `expectedHeadSha=485d118e` merge. 그다음 #269 `ef17b410` CI, 이어서 #270 `b601ef64`.
+4. 다음 미연결 연결은 인증이면 #271, 프로젝트면 #276이 묶음의 첫 실행 가능 흐름. 화면만 추가하지 않음.
+
+**고정 SHA (푸시됨, 로컬 dirty 없음; docs worktree만 `scripts/__pycache__` 미추적)**
+
+| 작업 | worktree | HEAD | PR |
+| --- | --- | --- | --- |
+| IME e2e 표기 | `fix-wiki-ime-expected-fail` | `485d118e` | #287 |
+| `/setup` 연결 | `r11-vue-setup` | `b601ef64` | #270 (base #269) |
+| `/login` | `r11-vue-auth` | `ef17b410` | #269 |
+| Yrs 비교 문서 | `collab-engine-comparison` | `ffeacb19` | #280 |
+| tracker | `docs-0-3-0-record` | 이 브랜치 HEAD | #263 |
+
+로컬 검사 (숨기지 않음): IME 회귀 2 passed (`ensureSetup` 포함); `/setup` 단위 19 + `workspace-flow` 7/7, prebuilt `8adaf1b8`. 소유 e2e 컨테이너는 그룹 종료 시 정리됨. worktree 삭제하지 않음.
+
+**금지**: #263 독립 검토 없이 머지. 자기 검토를 독립 검토로 셈. PR 일괄 폐기. 계약 팩 재실행을 #280 비교 완료로 보고. React 공통 기반을 경로 수락 전에 제거.
 
 CI 선택 범위 변경 후보(2026-09-30, base `a1d19b6e`, 아직 수락 전): 명시적 설명 문서와 웹 UI·브라우저 검사 변경을
 합집합으로 선택한다. UI·editor UI는 Web와 설치 검사, 브라우저 spec·검토한 UI helper·웹 단위 테스트는 Web 검사,
@@ -703,3 +761,912 @@ CI 선택 범위 변경 후보(2026-09-30, base `a1d19b6e`, 아직 수락 전): 
    --features db-tests --test <suite>`. 서버 실행 전 `fvoci-migrate` → `fvoci-migrate --grant-app-role <role>`.
 4. 설치 확인: 개발 stack `scripts/install-smoke.sh`, 사용자 설치 `scripts/standalone-install-smoke.sh`(RUNNING.md "Install"); 릴리스 절차 `docs/RELEASING.md`.
 5. 다음 기능은 위 대응표의 잔여 행에서 의존성이 준비된 사용자 흐름을 먼저 고른다.
+
+### 6.3 Vue 프론트엔드 전환 체크리스트 (2026-09-30, 정본)
+
+승인 범위는 합의된 사용자 기능 전체(Vue 3 + Nuxt UI + Tiptap)이며 Gantt·위키 예광탄만이 아니다. 필요한 Rust/API/OpenAPI/DB 변경은 막지 않는다. React DOM 복제가 아니라 동등한 제공이 목표다. 이 절은 기능군·라우트 대응표의 정본이며, 같은 이슈·PR의 현재 실행·소유권·수락 조건은 §6.5 기존 항목에서 갱신한다.
+
+**단계**: 미착수 / 구현 중·로컬 WIP / 실제 라우트 연결 완료 / 종단 간 검증 완료 / 독립 검토·CI 중 / main 수락 완료.
+예광탄 수락 ≠ 상위 기능군 완료. stacked PR을 main 수락으로 적지 않는다. 확인하지 못한 항목은 미확인. #263·#266은 제품 기능군 완료 수에 넣지 않는다.
+
+**인수 당시 라우트 대조(기준 main `f3f53c90`; 현재 단계는 §6.5, 페이지 파일만으로 완료 판정하지 않음)**
+
+- main `f3f53c90` `app-boundary.ts` / `boot.ts`: Vue는 Gantt + 위키 문서. `/login`·`/setup`은 아직 React.
+- 후보: #269가 `/login`을 Vue로 보냄. #270 `b601ef64`가 `/setup`을 Vue로 보내고 React `SetupPage`를 제거함. 둘 다 main 아님.
+- 회수 WIP는 Vue `router.ts`에 경로가 있어도 `app-boundary.ts`가 안 보내면 boot는 React다(연결 전). `app-boundary.ts`의 최종 통합 소유자는 코디네이터이며, 명시적으로 지정한 Sol 워커가 후보의 경로를 연결·검사한다.
+
+인수 당시 React 잔여 URL(후속 후보 연결·수락은 §6.5에서 추적): `/setup`, `/s/:token`, `/invite/:token`, `/reset-password`, `/consent`, `/service-info`, `/legal/:kind`, `/magic-link`, `/confirm-email`, `/cancel-withdraw`, `/`, `/w/:slug/wiki`, `/w/:slug/search`, `/w/:slug/trash`, `/w/:slug/settings`(+ document-tags·templates), `/w/:slug/notifications`, `/w/:slug/my-tasks`, `/w/:slug/:ref`(프로젝트 홈·태스크·프로젝트 문서), `/w/:slug/:ref/settings/fields|workflow`. MFA·OIDC 버튼은 별도 URL이 아니라 `/login` 하위.
+
+#### 기능군 완료 체크 (상위는 필수 하위·출시 차단·구 경로 제거가 모두 끝날 때)
+
+- [x] 프로젝트 Gantt tracer 1 — main 수락, v0.3.0에 포함. 기능군 「프로젝트 뷰 전체」의 완료가 아님.
+- [ ] 최초 설정·로그인·로그아웃·OIDC/MFA·초대·동의
+- [ ] 워크스페이스 탐색·위키 목록/트리·검색·알림·공통 셸
+- [ ] 위키 문서·프로젝트 문서·태스크 본문과 협업 편집
+- [ ] 프로젝트·태스크 목록/상세·보드·간트·캘린더·컬렉션
+- [ ] 첨부 업로드/재개·A/B 전송·다운로드·지원 형식별 뷰어
+- [ ] 댓글·공유·즐겨찾기·리비전·가져오기/내보내기·휴지통/복원
+- [ ] 워크스페이스 설정·계정·멤버/권한·인스턴스 관리자 화면
+
+#### 현황표
+
+| ID | 사용자 흐름·라우트 | 단계 | 브랜치/HEAD·PR | 검증 근거 | 남은 작업·선행 | 담당 | 차단 | 배포 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| FE-Gantt | `/w/:slug/:ref/gantt` | main 수락 완료 | main `d265b426` #255 | e2e `project-gantt-flow`·웹 단위·CI 39/1 skip | DST/`dueAt`·overlap rail은 §5 한계. pixel layout 필드 제거는 #253 contract | 수락됨 | 없음 | v0.3.0 |
+| FE-Wiki-collab | `/w/:slug/WIKI-<n>` 열기·편집·저장·재접속 | main 수락 완료 | merge `f3f53c90` ← `73bf4a22` #262 | 제품 `8adaf1b8` ACCEPT_WITH_NITS. typefix `RefusalAwareSocket`. 기능군 「위키 전체」완료 아님. 0.4.0 전 #261 | 없음 | 수락됨 | 없음 | 미포함. 0.4.0 전 #261 필수 |
+| FE-Wiki-editor | 위키 거터·표 손잡이·코드 크롬·버블·모바일 툴바 | 독립 검토·CI 중 | #265 제품 `6eb0380d`, 스택+main `1ee57935` | 제품 SHA 검토 ACCEPT_WITH_NITS×2. 로컬 e2e controls 6/6 | drop/paste e2e는 #261 잔여. 6/6 ≠ 전체 편집기. CI on `1ee57935` | 검토는 `6eb0380d` | CI | 미포함 |
+| FE-Wiki-shell | Vue 셸: 로그아웃·벨·검색·푸터·전환 | 독립 검토·CI 중 | #267 제품 `ea8bd1c9` **ACCEPT**, 스택+main `e257a434` | app-boundary 불변 | CI on `e257a434`. `vue-shell-flow` | 수락 대기(CI) | CI | 미포함 |
+| FE-IME | 한글 첫 자모 (#258), React·Vue 공통 편집기 | main 수락 완료 | merge `83c01480` ← `d5093efd` #268. e2e 회귀 `485d118e` | UniqueID composition skip. 제품 수정은 main. e2e `test.fail`이 CI 36599369890에서 통과해 실패 | `485d118e` 독립 검토·CI 후 머지. 단언 불변 | Grok 임시 실행자 | CI (e2e 표기) | 출시 차단 해제(#258) |
+| FE-Math-draft | 인라인 수식 원격 변경 시 초안 (#259) | 미착수 | issue #259 | #262에 관련 고정 테스트·이슈 주석 | #261 A 수락 뒤 (#258은 main) | Grok 임시 실행자 | FE-Wiki-editor | 출시 차단 |
+| FE-Undo-IME | 조합 중 undo 단위 (#260) | 미착수 | issue #260 | 없음 | #261 A 수락 뒤 (#258은 main) | Grok 임시 실행자 | FE-Wiki-editor | 출시 차단 |
+| FE-Auth-login | `/login` 비밀번호·매직·리셋 요청·OIDC 링크·MFA 스텝·로그아웃 착지 | 독립 검토·CI 중 | #269 제품 `dcf3ca77` ACCEPT_WITH_NITS; nit `79236b2e` **ACCEPT**; 스택+main `ef17b410` | 단위 20. e2e `login-vue-flow` 3/3. **`mfa-flow` 원격 필수** | IME `485d118e` 후 CI. 기능군 완료 아님 | Grok 임시 실행자 | CI (IME test.fail) | 미포함 |
+| FE-Auth-setup | `/setup` | 종단 간 검증 완료 (후보) | #270 `b601ef64` (on #269) | boundary `/^\/setup\/?$/i`. React SetupPage 제거. 단위 19. e2e `workspace-flow` 7/7 (prebuilt `8adaf1b8`, `#root.isolate`, `/api/v1/auth/me`) | #269 뒤 독립 검토·CI. 기능군 완료 아님 | Grok 임시 실행자 | FE-Auth-login | — |
+| FE-Auth-invite | `/invite/:token` | 구현 중·로컬 WIP (연결 전) | #271 `d31d33a4` (on #269) | Vue invite. setup 성공 뒤에만 invitation/providers `enabled`. **app-boundary 불변** | boundary + `workspace-invite-flow` | Grok 임시 실행자 | FE-Auth-login | — |
+| FE-Auth-rest | `/reset-password` `/magic-link` `/confirm-email` `/cancel-withdraw` `/consent` | 구현 중·로컬 WIP (연결 전) | #278 `20846dd8` (on #269) | Vue 페이지·라우트 선언. setup 가드는 폼 표시만(consume는 클릭). **app-boundary 불변** | boundary + mail-reset/account-lifecycle e2e. 동의 청크 `@fvoci/editor/vue` barrel | Grok 임시 실행자 | FE-Auth-login | — |
+| FE-WS-home | `/w/:slug` 랜딩 | 구현 중·로컬 WIP (연결 전) | #274 `e18fdbbe` | `WorkspaceHomePage.vue`. **boundary 없음** | regex + e2e | Grok 임시 실행자 | app-boundary 소유 | — |
+| FE-WS-projects | `/w/:slug/projects` | 구현 중·로컬 WIP (연결 전) | #274 동일 | `ProjectsPage.vue` | `/^\/w\/[^/]+\/projects\/?$/i` + 목록 e2e | Grok 임시 실행자 | FE-WS-home과 같은 PR | — |
+| FE-WS-wiki-list | `/w/:slug/wiki` 트리/목록 | 구현 중·로컬 WIP (연결 전) | #279 `4fe8480f` (on #274) | Vue 목록. treeQuery `enabled`는 workspace id. 문서 URL(#262)과 별개. **boundary 불변** | regex는 `wiki-[1-9]…`를 삼키면 안 됨. `workspace-wiki-flow` | Grok 임시 실행자 | 없음 | — |
+| FE-WS-search | `/w/:slug/search` | 구현 중·로컬 WIP (연결 전) | #279 동일 | Vue 검색. 빈 q·빈 workspace는 query `enabled` false. 결과는 `isVueAppPath`로 링크 | `search-flow`는 boundary 후 | Grok 임시 실행자 | FE-WS-wiki-list와 같은 PR | — |
+| FE-WS-nav | `/w/:slug/my-tasks` `/notifications` `/trash` | 구현 중·로컬 WIP (연결 전) | #283 `739290ac` (on #274) | Vue 세 페이지. `VUE_NAV_ROUTE_PATHS` 분리. **boundary 불변** | regex 세 개 + e2e. wiki/search와 파일 분리 | Grok 임시 실행자 | 없음 | — |
+| FE-Proj-tasks | `/w/:slug/:ref/tasks` | 구현 중·로컬 WIP (연결 전) | #276 `dc2611e6` | `ProjectTasksPage.vue` + SA-12 | boundary + 목록 e2e | Grok 임시 실행자 | 없음 | — |
+| FE-Proj-collections | `/w/:slug/:ref/{table,board,calendar}` | 구현 중·로컬 WIP (연결 전) | #276 동일 | `ProjectCollectionPage.vue` | boundary 3경로 + collections e2e | Grok 임시 실행자 | FE-Proj-tasks와 같은 PR | — |
+| FE-Proj-home | `/w/:slug/:ref` 프로젝트 홈 | 구현 중·로컬 WIP (연결 전) | #282 `8623ab2a` (on #276) | Vue 개요. `STAGED_PROJECT_HOME_PATH`는 `KEY-n` 제외. **boundary 불변** | 위키 `:ref`와 겹치지 않게 | Grok 임시 실행자 | 없음 | — |
+| FE-Doc-project | 프로젝트 문서 `:ref` 중 문서 prefix | 구현 중·로컬 WIP (연결 전) | #285 `d3533356` (on #282) | lookup project-document + `ProjectDocumentView`. **boundary 불변** | `KEY-n`이며 wiki 아님 | Grok 임시 실행자 | FE-Proj-home | — |
+| FE-Doc-task | 태스크 상세·본문 `/w/:slug/:ref` item | 구현 중·로컬 WIP (연결 전) | #285 `d3533356`; 패널 #286 `e133d90e` (on #285) | lookup·collab·첨부·시간·활동·백링크·컬렉션·Origin. **boundary 불변** | regex는 wiki-를 삼키면 안 됨. e2e는 연결 후 | Grok 임시 실행자 | 없음 | — |
+| FE-Attach-view | `/w/:slug/a/:id/view` | 구현 중·로컬 WIP (연결 전) | #275 `9ec6c413` | `AttachmentViewPage.vue`. **boundary 없음** | regex + viewer e2e | Grok 임시 실행자 | 없음 | — |
+| FE-Attach-share | `/s/:token/attachments/:id/view` | 구현 중·로컬 WIP (연결 전) | #275 동일 | `ShareAttachmentViewPage.vue` | `share-attachment-view-flow` | Grok 임시 실행자 | FE-Attach-view와 같은 PR | — |
+| FE-Attach-upload | 문서/태스크 첨부 업로드·재개·A/B | 부분 | React + Vue 위키 bridge + #286 태스크 패널 | Vue 태스크는 `createTaskAttachmentBridge`. 위키 drop/paste e2e는 #261 | 전송 모드 전용 메시지 미구현(§5) | Grok 임시 실행자 | #261 drop/paste | — |
+| FE-Share-public | `/s/:token` 문서 공유 읽기 | 구현 중·로컬 WIP (연결 전) | #281 제품 `a5fff966`; nit `beaa095c` (on main) | Vue 익명 읽기. tree/body는 meta 성공 뒤. href는 v-html 전에 고정. **boundary 불변** | regex `/^\/s\/[^/]+\/?$/i`가 attachments를 삼키면 안 됨 | Grok 임시 실행자 | 없음 | — |
+| FE-Wiki-chrome | 위키 페이지의 댓글·공유·별·리비전·보내기·태그 | 종단 간 검증 중 | #284 `6e90189a` on main `f3f53c90` | live Vue 크롬 e2e 6/6 (로컬, prebuilt `8adaf1b8`). 기능군 완료 아님 | 원격 web 샤드. 태스크/프로젝트 문서 표면은 React | Grok 임시 실행자 | CI | — |
+| FE-Import-export | 가져오기/보내기·휴지통 복원(워크스페이스) | 구현 중·로컬 WIP (연결 전) | #273 import/export 섹션; 휴지통 복원 #283 | 워크스페이스 URL은 settings/trash. 문서 export는 위키 크롬 | boundary 후 `workspace-import-export`·trash e2e | Grok 임시 실행자 | FE-Settings-ws · FE-WS-nav | — |
+| FE-Settings-ws | `/w/:slug/settings` 멤버·권한·SSO·토큰 등 | 구현 중·로컬 WIP (연결 전) | #273 `c4c7d878` | 사용자 가능 섹션 Vue 이식. **app-boundary React** | boundary + e2e. 기능군 완료 아님 | Grok 임시 실행자 | 없음 | — |
+| FE-Settings-account | `/settings/account` | 구현 중·로컬 WIP (연결 전) | #277 `b16c20b0` 정본 (#273 초안은 미사용) | MFA/export/withdraw. boundary 없음. PR 폐기 없음 | #277에서 연결 + `mfa-flow` | Grok 임시 실행자 | 없음 | — |
+| FE-Admin | `/settings/admin` `/audit` `/legal` | 구현 중·로컬 WIP (연결 전) | #277 `b16c20b0` | 관리자 legal은 게시 UI. 공개 `/legal`은 #272 | boundary + admin e2e | Grok 임시 실행자 | 없음 | — |
+| FE-Home | `/` 워크스페이스 선택 | 구현 중·로컬 WIP (연결 전) | #272 `c9b59494` (on #269) | Vue Home. **boundary 없음** | #269 후 연결 + 홈 e2e | Grok 임시 실행자 | FE-Auth-login | — |
+| FE-Legal | `/legal/:kind` `/service-info` | 구현 중·로컬 WIP (연결 전) | #272 정본 | 공개 문서. #277 관리자 legal과 다름 | #272에서 연결 | Grok 임시 실행자 | 없음 | — |
+| FE-Dispose | collab socket retire/dispose | main 수락 완료 | merge `9e4f3af3` ← `bf3387ec` #264 | 검토 ACCEPT_WITH_NITS×2. CI 24 success·6 skip | 없음. #262 `web-checks`가 이 계약을 재실행 | 수락됨 | 없음 | 제품 UI 전환 아님 |
+| FE-Compat | `compat/` 폐기, fixture를 `tests/fixtures`로 | 독립 검토·CI 중 | #266 제품 `6dd4bff9` ACCEPT_WITH_NITS; main+#262 merge `ddce8bf2` | #262 합친 뒤 schema 경로 충돌 해소(`tests/fixtures/yjs-seed`) | `ddce8bf2` CI 후 merge. **프론트엔드 기능군 완료가 아님** | Grok 임시 실행자 | CI | 아님 |
+| FE-Docs-ops | 운영·역할 문서 | 독립 검토·CI 중 | `fvoci/docs-0-3-0-record` `42be6870` #263 | 문서 PR. 제품 전환 수에 미포함 | 독립 검토 후. base는 v0.3.0 | Grok 임시 실행자 | 없음 | 아님 |
+
+공통 파일(`app-boundary.ts`, vue `router.ts`/`route-paths.ts`, i18n, manifest/lockfile, OpenAPI) 소유: 임시 실행자(코디네이터). `app-boundary.ts` 단독 소유는 유지하되, 미연결 PR은 그 후보에서 경로를 연결하고 e2e 한다. 모든 페이지가 main에 먼저 있어야 E2E 가능하다는 전제를 두지 않는다.
+
+#### 연결·검증·수락 (2026-09-30 우선순위 교정)
+
+수락 단위는 실제 라우트 → Rust/API·DB → 확정 결과·재조회다. 작성된 페이지·단위 검사 통과·PR 개수는 수락이 아니다.
+
+**main에서 live인 경로**
+
+| 경로 | SHA/PR | 담당 | 다음 |
+| --- | --- | --- | --- |
+| `/w/:slug/:ref/gantt` | #255 | 수락됨 | 없음 |
+| `/w/:slug/WIKI-<n>` | #262 `f3f53c90` | 수락됨 | #261 편집 컨트롤은 0.4.0 전 |
+| 위키 한글 첫 자모 | #268 `83c01480` | 수락됨 | e2e `test.fail` 잔존 → `485d118e` |
+
+**후보에서 연결·검증한 경로 (main 수락 아님)**
+
+| 경로 | PR/HEAD | 담당 | 다음 수락 행동 |
+| --- | --- | --- | --- |
+| Hangul composition 회귀 (같은 단언, `test.fail` 제거) | #287 `485d118e` | Grok 임시 실행자 | 독립 검토 + Web CI 후 머지. skip 없음 |
+| `/login` | #269 `ef17b410` | Grok 임시 실행자 | IME PR 머지 후 CI(mfa-flow 포함). 같은 wiki IME `test.fail`이 샤드 실패 |
+| `/setup` | #270 `b601ef64` | Grok 임시 실행자 | 로컬 `workspace-flow` 7/7. #269 뒤 독립 검토·CI |
+
+**남은 미연결 흐름 (구현은 보존, 다음 화면 생성 금지)**
+
+| 흐름 | PR | 연결·e2e 책임 | 다음 수락 행동 |
+| --- | --- | --- | --- |
+| `/invite/:token` | #271 | Grok 임시 실행자 | #269 뒤 boundary + `workspace-invite-flow`. setup `enabled` 유지 |
+| auth-rest (`/reset-password` 등) | #278 | Grok 임시 실행자 | #269 뒤 경로별로 boundary + mail-reset/account-lifecycle |
+| `/` 홈·공개 `/legal` `/service-info` | #272 | Grok 임시 실행자 | 공개 legal이 정본. #277의 공개 legal 초안은 쓰지 않음 |
+| `/w/:slug/settings` | #273 | Grok 임시 실행자 | 워크스페이스 설정만. `/settings/account`는 #277 |
+| `/settings/account`·admin `/settings/{admin,audit,legal}` | #277 | Grok 임시 실행자 | 계정+관리자 정본. 공개 legal(#272)과 다름. 폐기하지 않음 |
+| WS 랜딩·projects | #274 | Grok 임시 실행자 | 가장 작은 `/w/:slug`부터 |
+| wiki 목록·검색 | #279 | Grok 임시 실행자 | wiki- 문서 URL을 삼키지 않는 regex |
+| my-tasks·notifications·trash | #283 | Grok 임시 실행자 | #274 뒤 세 경로 |
+| 프로젝트 목록/컬렉션 | #276 | Grok 임시 실행자 | 묶음 #276→#282→#285→#286의 **첫** 실행 가능 흐름 |
+| 프로젝트 홈 | #282 | Grok 임시 실행자 | `STAGED_PROJECT_HOME_PATH`(KEY-n 제외) |
+| 태스크·프로젝트 문서 | #285 | Grok 임시 실행자 | item regex를 wiki보다 먼저 |
+| 태스크 패널 | #286 | Grok 임시 실행자 | #285 뒤. 한 `useCollabRoom` |
+| 첨부 뷰어 | #275 | Grok 임시 실행자 | `/a/:id/view`와 share attachments |
+| 공개 공유 `/s/:token` | #281 | Grok 임시 실행자 | attachments를 삼키지 않는 regex |
+| 위키 크롬 e2e | #284 | Grok 임시 실행자 | CI. 이미 live 위키 위 |
+| Yrs 비용·PM-step 비교 | #280 `ffeacb19` | 코디네이터 | tracer 수락 후 측정. 계약 팩만으로 완료 보고 금지 |
+
+**CI 게이트 (main `f3f53c90`)**
+
+Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expected to fail, but passed". 원인은 #268이 main에 있고 e2e만 기대 실패로 남은 것. `485d118e`가 같은 단언을 회귀로 둔다. #265/#267/#266/#269는 wiki 샤드가 같은 표기로 실패하면 IME 먼저.
+
+**중복 정본 (#277 등, PR 일괄 폐기 없음)**
+
+- 공개 `/` `/legal/:kind` `/service-info` → #272
+- 관리자 `/settings/legal`(게시) → #277 `AdminLegalPage` (공개 legal과 다름)
+- `/settings/account` → #277 (MFA/export/withdraw). #273의 계정 초안은 쓰지 않음
+- `/w/:slug/settings` → #273
+
+#### 바로 수락할 후보
+
+1. **#287** `485d118e` — 독립 검토 + Web CI CLEAN 후 main. shard 5는 통과. `collaboration-flow`(React pending SIGKILL caret)는 별도 대조.
+2. **#265** `1ee57935` / **#267** `e257a434` / **#266** `ddce8bf2` — 각 CI CLEAN + 기존 독립 검토.
+3. **#269** `ef17b410` — IME 후 CI. 인증 기능군 완료 아님.
+4. **#270** `b601ef64` — #269 뒤. 로컬 연결 검증됨.
+5. **#284** `6e90189a` — live 위키 크롬 e2e. #261 아님.
+6. **#280** `ffeacb19` — 문서. 엔진 전환 PR 없음.
+
+#### 전체 전환 종결까지 남은 필수
+
+- 기능 누락: 위 표의 미착수 URL 전부 + settings 부분 이식 + 계정 페이지 중복 WIP 정리.
+- 출시 차단: #259 #260, #261(편집 컨트롤 A + 셸 B + drop/paste e2e). Vue 위키를 넣은 0.4.0은 #261 전에 발행하지 않는다. #258은 #268로 main.
+- 구 React 경로: 경로가 Vue로 수락된 뒤에만 제거(#255 Gantt, #262 위키 문서). 연결 전 파일은 쌓아 두지 않고 해당 ID의 연결 TODO로 끝낸다.
+- 후속 배정 검증: 각 연결 PR은 실제 사용자 URL + Rust API/DB + production dist + 인가/오류 + 독립 검토 + CI. mock 수락 없음. 관련 백엔드 무변경이면 `prebuilt-8adaf1b8` 재사용(SHA·diff 근거).
+
+임의 백분율은 쓰지 않는다. 분모는 위 ID가 닫힐 때 확정된다.
+
+
+### 6.4 로컬 회수·정리 (2026-09-30, Codex /root)
+
+사용자의 handoff-main.json 인수·정리 요청 범위에서 수행했다. 원격 main은 `f3f53c90`, 열린 PR 31개.
+제품 수락·모델 역할 변경을 선언하지 않는다. 이 실행의 정확한 모델 ID는 미검증이며 하위 agent를 생성하지 않았다.
+
+- worktree 71 → 62: main에 조상으로 포함된 8개와 #165로 대체된 i18n 중복 1개를 공식 Orca CLI로 정리했다.
+  각 대상의 터미널 0·cwd 프로세스 0·tracked/untracked WIP 없음 및 ignored 항목을 확인했다. 원래 브랜치·HEAD는 모두 보존했다.
+- Gantt 19경로·identity 34경로 WIP, 미추적 dev-tools·로그와 다른 미추적 파일은 원본과 별도 archive에 보존했다.
+  모든 로컬 branch/tag의 full-history bundle을 생성·검증했다. 기존 tracked WIP가 변하지 않은 것도 대조했다.
+- digest `a83c38a3`, import admission `8f418b2f`, search/streams `aa3cd449`, collab structure `9070bbfd`,
+  Dependabot `11b203b0`은 고정 base/head와 패치로 회수했고 현 main에서 `git apply --check` 통과. 제품 검사·독립 검토·수락은 미실행이다.
+- i18n `1172a73a`는 #165의 `7f3e2477`과 제품 코드가 같고 테스트 두 assertion의 실패 메시지만 다르다. 재반영하지 않는다.
+- Orca rust-oidc-ms의 working 표시는 실제 화면의 model-capacity 오류·입력 대기와 다르다. 터미널을 보존했고 재실행하지 않았다.
+  현재 thread에는 /root만 있으며, 이전 thread의 pending worker가 전역에서 종료됐다고 단정하지 않는다.
+- main Web `36599369890` 및 #287 Web `36631118948`은 실패 유지. #287 shard5는 성공, collaboration-flow는 실패다.
+  원격 쓰기·CI 재실행·제품 커밋·통합·머지 없음. 다음은 해당 CI 원인 해결 후 #269 → #270 수락 흐름이다.
+- 상세 SHA·정리 목록·복구 파일·명령 결과: `/home/kinesis/orca/fvoci-evidence/recovery-20260930/result.json`.
+  이 절은 로컬 미커밋 기록이며 기존 #263의 원격 HEAD `8777f372`에는 아직 없다.
+
+
+### 6.5 Astra / Sol 6.1 실행 TODO (2026-09-30 인수)
+이 절이 현재 소유권·다음 실행의 정본이다. §6.3 기능표·기존 검증을 재사용하며 과거 Grok/Opus 담당·검사·요청은 당시 기록으로 보존한다. 아래 최초 인수 HEAD·check 집계는 과거 snapshot이며 실제 테스트 수나 최신 수락 상태가 아니다.
+
+상위 목표는 **현재 Astra 세션에서 사용자가 요청한 모든 작업과 진행 중 결과를 보존하고 끝까지 완료하는 것**이다. 합의된 전체 Vue 3 + Nuxt UI + Tiptap/Bun 프론트엔드를 실제 Rust/API/DB에 연결하고, 흐름별 연결 → production 브라우저·데이터/권한 검증 → 별도 Sol6.1 고정 HEAD 검토를 거친 결과와 최종 React 제거를 **기존 PR #272에 모두 누적**한다. 최종 통합 HEAD의 실제 CI·독립 검토 뒤 **별도 사용자 승인까지 main 머지·릴리스를 보류**하며 부분 프론트엔드 머지는 계획하지 않는다(2026-09-30 사용자 후속 지시). 대체된 React 경로와 임시 포팅 기반을 조건 충족 후 제거하되 사용자 데이터·보안·기능·라이선스·복구 근거를 보존하며, 승인된 비교와 0.x 시험 배포 증거까지 이어간다. 기존 PR·브랜치·검사 이력은 입력 근거로 보존하며 새 인수/reset이나 새 기능 자동 승인이 아니다.
+
+기존 Codex goal thread `01a0ef48-5c88-77f1-9f45-9008284a2deb`의 범위에는 이미 CI #288과 전체 프론트엔드 갱신이 포함돼 있다. 코디네이터가 실제 `get_goal`로 확인한 상태는 `blocked`이며 그 목표·이력은 보존한다. 현재 도구에는 objective 수정·resume API가 없으므로 active로 표시하거나 새 goal/재개 명령을 만들지 않는다. 이 문서가 확장된 목표·실행 TODO의 정본이고, 기존 Orca `run_496803f4d94f`에서 계속 실행한다.
+
+요청별 추적은 기존 ID에 연결한다: 전체 사용자 작업은 §6.3 기능군과 아래 기존 PR/WIP, 결함은 #149/#259/#260/#261 및 #269, Vue 흐름 수락은 #265/#267/#269–#279/#281–#287, React 제거는 각 흐름의 제거 조건과 아래 공통 제거 항목, 호환·비교는 #266/#280과 §5 잔여, 승인된 0.x 배포는 기존 §6.1 출시 기록과 각 항목의 배포 상태다. 후속 0.x 시험 배포의 기존 AGENTS 승인 범위는 보존하되, **현재 PR272 차수는 green 결과에도 별도 사용자 승인 전 main 머지·릴리스 금지**다. 이후 승인된 배포는 독립 검토·필수 검사 수락 및 green main first-parent에서 기존 release workflow로 코디네이터가 수행한다; 1.0.0+·사용자 운영 환경 자동 배포·불변 산출물 덮어쓰기는 포함하지 않는다. 목록을 따로 복제하지 않으며 개별 PR 완료를 전체 종료로 세지 않는다.
+
+2026-09-30 11:10–11:13 KST 조회: 원격 main `50d95df1a98c2d88d28f09222c2985fbdb585623`, 원격 PR HEAD/base와 로컬 HEAD를 구분했다. main의 install/rust/web/documents/collab-engine 5게이트 모두 SUCCESS 근거는 `/home/kinesis/orca/fvoci-evidence/recovery-20260930/takeover-evidence/main-50d95df1-gates.json`. 게시 pre-release는 여전히 `v0.3.0`(2026-09-29T12:37:09Z)이며 새 배포 없음. 최초 인수의 main `f3f53c907d27982065984249916e7447dd94ac45`와 Web `36599369890` failure/나머지4 workflow success는 과거 근거로 보존한다. 당시 열린 PR31·이슈4(auto-merge0)는 인수 snapshot이며 현재 이슈4의 추적은 유지한다.
+
+갱신 제출 근거는 같은 evidence root의 `wave-a-refresh-push.json`, `wave-b-refresh-push.json`, `docs-compat-refresh-push.json`, `qr156-refresh-push.json`과 `/tmp/fvoci-refresh-wave-a-orca-sol61.txt`, `/tmp/fvoci-refresh-wave-a-review-sol61.txt`, `/tmp/fvoci-refresh-wave-b-orca-sol61.txt`, `/tmp/fvoci-refresh-wave-b-review-sol61.txt`, `/tmp/fvoci-compat-docs-merge-review-sol61.txt`, `/tmp/fvoci-qr156-review-sol61.txt`다. 갱신 검토는 해당 fixed HEAD/delta 범위이며 실제 라우트 수락이나 새 diff 검토로 전용하지 않는다.
+
+현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
+
+#### 최신 Goal·누적 실행 체크포인트 (2026-09-30 16:21 KST)
+
+최신 사용자 Goal: **합의된 백엔드 Rust 이관 상태를 실제 실행 경로와 기존 수락 근거로 종결 확인하고, #272에서 전체 Vue 3 + Nuxt UI + Tiptap/Bun 사용자 흐름·선택한 Editor/Calendar UI·React 및 임시 전환 계층 제거를 완결한다. 실제 Rust/app-role DB/최종 배포 이미지 검증과 독립 검토 뒤 머지하지 않고 별도 사용자 승인을 기다린다.** 이전 별도 요청·완료 이력·WIP·협업 비교는 취소하지 않는다. 브라우저 TypeScript나 개발 생성기를 Rust로 옮기는 목표가 아니다. 기존 goal 도구의 blocked 이력과 수정 API 부재는 그대로이며 이 절을 정본으로 갱신한다.
+
+- 원격272는 `b0d258586e935977f683fd151b44e6d74785501c`, base/main `50d95df1a98c2d88d28f09222c2985fbdb585623`, Draft/open/auto-merge 없음. Web36680350031·Rust36680350123·Install36680349995·Native documents36680350003·collaboration36680350008 **모두 SUCCESS**. Install amd64/arm64 설치·백업복구4 jobs 성공, upgrade-smoke-arm64는 조건상 SKIPPED이며 통과로 세지 않는다. 이 결과는 이후 로컬 합본의 검증이 아니다.
+- 로컬 미push `c84ba72ef0c3920ab59c5b6cf64a890a0f84fbd5`: 기존4eb 이후 accepted wiki4fca(원본#284 spec 회수+revision panel 층 수정), account React retirement30c, neutral editor movea51을 ordinary merge. 합본4eb의 독립 검증은85unit·실제12browser·Bun build·HTTP343assets+NOTICE 일치, docs8c 별도 ACCEPT. 후속 c84 전체 실행은 아직 수락 전이다.
+- wiki4fca: original5pass/1fail 보존, fixed desktop6/mobile viewport revision1 및 별도 ACCEPT. account30c: React전용10파일 제거,55unit/actual5browser 및 별도 ACCEPT. a51: helper4+CSS를 중립 위치로 이동,58editor+6web units/schema/build/actual4browser 및 별도 ACCEPT. PDF 개발 oracle·일반 Hocuspocus provider·문서 변환은 유지. a51 native inventory는930이름 중928tracked일치+2개 양쪽 부재이며930실파일 검증으로 확대하지 않는다.
+- native rapid navigation9a는 첫 trusted key→click201.4ms로 기존<200 조건 FAILURE; 나머지184.2/84.1/68.3ms, back/persist tail 미실행. trace가 측정 사이 Playwright snapshot 대기를 확인했으나 모든 지연의 원인으로 단정하지 않는다. `ctx_45af01bb6e95`가 별도 CDP native browser-event 후보 준비, 기존 임계값/trace/신뢰 입력/room/history/persist 조건 유지. 실제 OS IBus 성공 근거와 CDP 합성 입력은 구분한다.
+
+| 보존된 실행 항목 | 현재 담당·고정 입력 | 다음 수락 행동 |
+| --- | --- | --- |
+| Workspace 홈/위키/검색/알림/휴지통·최종 fallback | `ctx_4bc48944e4ac`, lifecycle2b8696c4, 새 Rust 연결c6fca53a/18237087 | 새 native quartet과 실제 scope11/parity6/direct4 검증·별도 review. encoded ref/unknown/setup/auth fallback 후 boot 제거; 재작성 아님 |
+| Wiki 이동·discovery·검색·count backend | `ctx_78bc50455736`, generated214da/source3fee→lint49f4 | move/discovery/count/search scoped review 재사용, 실제49 clippy·합본 project/group/search 검사와 새 native pairing. security/typegen 검토는 통과, gate 결과와 구분 |
+| Entity lifecycle/count cache | fixeddf7656e1, 독립 `ctx_795f547d4a6c` | 기존3b BLOCK 수정56unit/6browser + 최종prefix2browser; captured discovery 계약과 실제 합본 연결 후 수락 |
+| Workspace settings React 제거 | fixed8c9379df, 독립 `ctx_03db58092810` | 전용20파일·세 contract 검사 전환,56unit/build/actual4browser 보고 검토·통합 |
+| 첨부 viewer React 제거 | `ctx_9ac253a0ad9f`, baseffe69033 | 수락된 Vue viewer 재사용, React 전용8개 호출자 확인·제거·PDF/share/HWP-edit 회귀. 공통 worker/WASM/Office/PDF 보존 |
+| 백엔드 이관 종결 확인 | readonly `ctx_aeb0bee4a004`, basec84/main50d95·기존 수락 근거 | A 구현/수락 B 실제 공백 C 승인 차이 D 외부 검증한계 E 개발도구로 좁게 정리. 전체 재감사/새 설계 없음 |
+| 최종 누적 수락 | Astra 조정·Sol 별도 검증/검토 | 고정 Bun 설치/도구 실행·API/schema·전체 Vue 실제회귀·기존 Keycloak fixture·S3 A/B·깨끗한 Docker 이미지/NOTICE·지원아키텍처 설치/재시작/복구·모듈/네트워크 React 부재. 최종 SHA가 준비된 뒤 범위 맞춰 재사용/실행 |
+
+**최종 이미지 검사를 host build/prebuilt로 대신하지 않는다.** 외부 제공자·OS·브라우저 미검증은 구체적으로 분리하고 다른 전환 작업을 막지 않는다. desktop/좁은 화면 실제 screenshot·메뉴·스크롤·focus·한글/readonly 증거를 Editor/Calendar 최종 수락에 연결한다. 최종 후보 완료 후에도 main/하위PR merge, tag/release/배포 금지·사용자 승인 대기. 기존 별도 0.x 요청은 이 hold를 우회하지 않는다.
+
+#### 이전 PR272 실행 체크포인트 (2026-09-30 15:53 KST)
+
+**#272 Draft·auto-merge 없음. 별도 사용자 승인 전 main 머지·릴리스 금지.** 이전 snapshot과 실패 근거는 아래 그대로 보존한다.
+
+- 원격 HEAD `b0d258586e935977f683fd151b44e6d74785501c`, base `50d95df1a98c2d88d28f09222c2985fbdb585623`. 9f05의 Web templates 진입 경합·Docker NOTICE 누락을 두 논리적 커밋으로 수정, 별도 `ctx_d50a68369344` ACCEPT 후 한 번 정상 push했다. 실제 라이선스6·Bun build·Docker context negative/positive·기존 web-build와 full NOTICE·Rust/DB templates1/1 근거는 `fvoci-front272-9f05-ci-fix{-review,}-sol61.txt`에 있다. 원격 새 Web36680350031/Install36680349995/Rust36680350123/Native documents36680350003/collaboration36680350008은 진행/대기이며 성공 아님. 이전9f05의 Rust/두 Native success, Web/Install failure는 그대로다.
+- 로컬 미push 후보 `4eb0bdeb0737c9a1b9ceb2039a526d8a0515ffa6`: 기존 Editor/Calendar에 accepted accountafb·workspace settings769·project settingsd90·public share91fc·CIb0를 ordinary merge로 보존. 설정 merge826의 sole test-title conflict는 별도 검토 ACCEPT, 기존 assertion 보존/75unit·type 성공. 공개 공유·설정 전용 React 제거 포함. 합본 production 검증 담당 `ctx_7e998108d5c3`; 범위별 이전 성공을 합본 성공으로 복사하지 않음.
+- Editor d292 실제 private IBus1test/4case·wiki8·full MIT HTTP 확인은 통과. 빠른 이동 ninth test는 기존 실패 후 test-only bbc413 후보 한 번 검증도1pass/1fail이며 `ctx_45af01bb6e95`가 실제 실패 원인 조사 중. <200ms 및 socket/back/persist assertion 완화 없음. 짧은 단독 검사 창 종료, 다른 담당 heavy 실행 재개.
+
+| 남은 실행 범위 | 현재 근거 / 단독 담당 | 다음 수락 행동 |
+| --- | --- | --- |
+| Workspace 홈·목록·검색·알림·휴지통 | `ctx_4bc48944e4ac`; af5 기존 API 실제4parity 통과, all-day timezone 후속218e 검증 필요 | frozen6c 독립 검토에서 A→B→A/동일 ID session·role 늦은 callback 결함 확인. captured cache 수정 보존하고 lifecycle epoch 수정·회귀·재검토. wiki typed endpoint 및 새 backend 대기 |
+| Wiki 탐색·tag 검색·이동 | `ctx_78bc50455736`; move7e6 exact app-role PG negative/positive1/1·discoveryc284 PG1/1 별도 검토 no blocker. count3a92도 별도 ACCEPT | count ordinary merge791b 후 실제 search negative/fix·PG/Meili·공식 API generation·새 binary 제작. UI 연결 및 통합 SHA 검사 미완료 |
+| Editor entity 세 호출자 | 3b 독립 BLOCK → 수정 `ctx_40251cafba50` | computed session snapshot 대신 안정된 room identity와 실제 lifecycle; captured projects/me-workspaces/discovery invalidation·회귀·별도 delta review |
+| Wiki 댓글·공유·리비전 #284 | `ctx_f46c1354d171`, 원본 spec 회수bfef | 실제5pass/1fail: toolbar가 revision save 가림. 별도 CSS4fca 수정 후 desktop6/mobile revision1·독립 검토 필요 |
+| Account/admin React 제거 | acceptedafb 기반 `ctx_9ef0898157bd` | React 전용10파일 제거·55unit/type/build 성공; Vue assets 동일이나 React CSS pruning 차이는 정확히 구분. 실제 account-admin group·독립 검토 대기 |
+| React 최종 공통 기반 | readonly 경계 조사 `ctx_0cbecd8d161a` | 현행 import/caller 및 기능 수락 의존을 확인해 중립 helper 이동·남은 boot/router/deps 제거를 순서대로 배정. 공통 파일 소유자는 사전 조정 |
+
+새 고정 검토·실패 보고서는 기존 `takeover-evidence/`에 SHA-256 대조 후 보존했다. 별도 goal 생성·목록 초기화 없음. 기존 compat/협업 비교·별도 사용자 작업·승인 후 배포는 정본의 기존 TODO에 유지하며, 현재 통합 후보나 main/배포 완료로 표시하지 않는다.
+
+#### 이전 PR272 실행 체크포인트 (2026-09-30 15:13 KST)
+
+아래 14:46 이하 기록은 해당 시각의 근거로 보존한다. **#272는 Draft이며 별도 사용자 승인 전 main 머지·릴리스 금지**다.
+
+- 원격 HEAD `9f05a907860d83313ff8493eb7300709e17d9977`, base main `50d95df1a98c2d88d28f09222c2985fbdb585623`. accepted6441/491/90ad 묶음을 정상 push했다. 별도 Sol 검토·검증 `ctx_48f8d77b5f65` ACCEPT: fresh Bun 타입/build, 단위41, 실제 Rust/app-role DB/Chromium9(수식2·고지1·셸6), 원본13개 변경 blob/319 assets/4 binaries 전후 확인. 이전90ad Gantt10은 동일 영향 범위의 재사용이며 새 실행이 아니다. 보고 `fvoci-front272-batch9f05-review-verify-sol61.txt`.
+- 이 SHA의 실제 원격 CI가 시작됐다: Web36676813448, Install36676813449, Native collaboration36676813454, Native documents36676813465, Rust36676813494. 진행/대기 상태이며 성공으로 표시하지 않는다. CI 동안 원격 HEAD를 고정한다. 이전 cd828 실패는 보존; main·v0.3.0에는 미반영.
+- 로컬 통합만 `774c160f956ee7a75502693f6f47d2dcd026afb7`: reviewed Editor17496449, undo260 ea00d043, native helper0bdc4ca7, noticec319 및 Calendar8b3c0434를 ordinary merge로 보존했다. staged9146994e 조상도 포함되므로 미연결 workspace/settings 전체를 수락했다고 보지 않는다. 원격 미push, 합본 전체 검증 미완료.
+
+| 기존 흐름 | 현재 고정 근거 / 담당 | 다음 수락 행동 |
+| --- | --- | --- |
+| Editor UI·수식/조합 undo | Editor17496449 scoped ACCEPT(18 real browser/50 unit), undo ea00d043 별도 ACCEPT(56 unit/9 real browser), #2596441 유지 | `ctx_987ed25c9963`가 고정 합본d2926b99의 새 Bun build·실제 private IBus 입력·wiki undo/협업·served full MIT를 검증. 이 SHA에는 이후 Calendar merge가 없음 |
+| 실제 한글 OS 입력 | product6441 + helper0bdc4ca7의 Linux IBus/XTest 1test/4case 저장·재조회 독립 ACCEPT | 이전 native 근거를 새 Editor/undo 성공으로 복사하지 않음. 일반 contenteditable과 Enter baseline 일치, Windows/물리 키보드 주장은 없음 |
+| Calendar | 8b3c0434 scoped ACCEPT: dueDate-first/unchanged-save 및 resize crossing correction; 31 unit, actual6+3 browser | 통합774c의 적절한 경계 검사·고지 산출물·최종 CI 필요. touch/타 브라우저 미검증 구분 |
+| Workspace/common routes | `ctx_4bc48944e4ac`, be91d0f9에서 A→B 늦은 callback scope 수정 검증 중 | home8tasks·wiki discovery/tag·search300ms/tag:name·notification URL·task metadata 원본 기능 복구와 실제 검증; 문서 count API와 연계 |
+| Account/admin | 681f83 검토 BLOCK; 후속 작성 `ctx_ecb473925431` | legal kind 입력 remount/focus와 PAT expiry account timezone 수정 후 별도 delta review, 그 뒤 React 전용 경로 제거 |
+| Workspace settings | 76980465 실제4browser/16unit; 별도 검토 `ctx_5b18b0660e20` | admin consent table 및 rename/delete lifecycle 수정 delta 수락, 기존15검사를 새로 실행한 것으로 표시하지 않음 |
+| Public share | 7bb4eff7 독립 BLOCK; 수정 `ctx_8ce781a4781a` | reconnect의 새404 뒤 이전 recovery가 reader를 다시 노출하는 경합 수정·실제 회귀·독립 delta review |
+| Editor entity 연결 | `ctx_701a3f170775`, Wiki/ProjectDocument/TaskBody 세 호출자 단독 소유 | 기존 Rust 권한 API mention/entity resolver, 실제 저장/권한/browser 검증. 공통 query helper 소유권 별도 조정 |
+| Project documentCount | `ctx_b5e72397e7cf`, backend956ca350 및 focused PG 검사 진행 | numeric/null PAT 계약·같은 read snapshot·실제47검사 결과 고정 후 독립 검토. 생성물 소유권은 완료까지 본인 |
+| Wiki discovery/search tag·실제 move500 | `ctx_78bc50455736`, 기존 source 조사 정본 재사용 | docs.rs의 wiki→project subtree renumber 충돌500 우선 재현/수정. 별도 명시적 discovery endpoint와 원본 tag 검색 semantics 구현, PG/Meili 검증. 기본tree·인가 보장 유지, count DTO/생성물 동시 편집 금지 |
+
+위 보고서들은 기존 `/home/kinesis/orca/fvoci-evidence/recovery-20260930/takeover-evidence/`에 SHA-256 대조 후 보존했다. 같은 이름의 이전 내용은 덮어쓰지 않았다. 신규 실제500 실패는 `/tmp/fvoci-front272-project-count-pg-final.log`와 담당자 재현으로 유지하고, 성공 fixture만으로 전체 이동 완료라고 표시하지 않는다. 기존 #284 회수·project settings d90·React 공통 제거·compat/비교·별도 사용자 요청은 아래 기존 TODO에 유지한다.
+
+#### 이전 PR272 체크포인트 (2026-09-30 14:35 KST 원격 관측 / 14:46 KST 코디네이터 delta)
+
+이 snapshot이 아래 13:00 배정 제안·최초 인수 TODO의 현재 단계보다 우선한다. 과거 SHA·검사·담당·실패는 당시 기록으로 유지하며 체크박스는 전체 수락 조건이 충족되기 전 닫지 않는다. 현재 권위는 Astra 코디네이터 / Orca Sol6.1 작성·별도 컨텍스트 검토이며 과거 Opus 전용 조건은 현 배정이 아니다. **어떤 로컬/원격 green 결과도 별도 사용자 승인 전 main 머지·릴리스를 허용하지 않는다.**
+
+- 원격 [Draft #272](https://github.com/AISFlow/fvoci/pull/272) HEAD `cd828c9113263038490a498383b9b7e3a565bb8b`, base main `50d95df1a98c2d88d28f09222c2985fbdb585623`; main·게시 v0.3.0 수락 기록은 그대로다. 실제 tested merge `c8e02ef665eeecb75b227acb0b3e14202d7d01ca`의 Native collaboration `36669299635`, Native documents `36669299628`, Install `36669299632`, Rust `36669299624` 게이트 SUCCESS. Web `36669299627`은 shards2/4와 gate FAILURE, 다른6 shards·web-checks·collaboration-flow SUCCESS다. check 집계는 테스트 수가 아니다.
+- 실패는 Vue로 연결된 task/Gantt를 React full-load로 기대하던 두 검사다. 로컬 교정 `90ad51f85f6a1f8543f5bede357d5ec09617898a`는 실제 Rust/DB production browser shell6 + Gantt10 = **16pass/0fail/0skip**와 build를 통과했다. 별도 고정 검토 `ctx_55a6ce9b4157`의 **ACCEPT**는 `/tmp/fvoci-front272-ci-cd828-review-sol61.txt`; 배정 당시 pending에서 갱신했다. 원격 cd828 실패를 green으로 바꾸거나 미래 workspace 연결 검증으로 전용하지 않는다. 정확한 실행/실패·847 backend 입력·asset 증거는 `/tmp/fvoci-front272-ci-cd828-sol61.txt`와 기존 `recovery-20260930/takeover-evidence/pr272-cd828-web-failure/`에 있다.
+- 코디네이터 전용 로컬 통합 `/home/kinesis/orca/workspaces/fvoci/f272-batch-integration`은 `9f05a907860d83313ff8493eb7300709e17d9977` clean/diff-check pass다. remote cd828에서 accepted6441을 merge2760d5e9, accepted491을 merge53f9ac33, CI90ad를 merge9f05로 누적했으며 새 통합 runtime 검사는 아직 미실행·원격 미push다. 로컬 merge와 원격 PR/main 수락을 구분한다(코디네이터 `msg_449a3497a167`와 실제 Git 대조).
+- 원본 후보 PR **#275/#276/#278/#282/#285/#286는 PR272로 superseded/closed, 미병합**이다. 읽기 전용 API의 각 원격 HEAD가 cd828의 ancestor임을 `git merge-base --is-ancestor`로 모두 확인했다. 원격 ancestry·로컬 고정 작성/검토 보고·브랜치를 보존한다. 이슈 **#149/#259/#260/#261은 모두 open**이며 이 차수에 닫지 않았다. 원격 관측 근거는 `/tmp/fvoci-front272-notice-checkpoint-remote.json`이다.
+
+| 기존 흐름·현재 고정 입력 | 현재 검증/검토 단계 | 남은 구체적인 작업·근거 |
+| --- | --- | --- |
+| project fields/workflow `d90d5b97071f9c4ad3d30d3b4c6c169f16b071fd` | 별도 Sol6.1 ACCEPT와 코디네이터 bounded 로컬 수락; 전용 React4파일 제거 수락. 동일359 assets로 기존 실제 settings4 + collections3을 재사용한 근거이며 exact d90에서 browser7 재실행한 주장은 아님 | PR272 통합 delta·최종 CI/승인 hold; `/tmp/fvoci-front272-project-settings-review-sol61.txt`, `/tmp/fvoci-front272-project-settings-sol61.txt` |
+| template notice/public generator `491130d8e54acebc05001b36fe82d59eafc6cb25` (generator `3d1faf5437185c5b8bd09e012be0e2e4c01d2bbf`) | 고정 base c2ac→491 독립 ACCEPT, Dashboard source notice·public 고지14unit/build/실제 browser1 근거 보존 | 이번 Editor/Calendar notice + 정본 status delta의 별도 검토, 최종 bundle closure; `/tmp/fvoci-front272-template-review-sol61.txt` |
+| #259 Vue 수식 draft `6441b418f3447865f658175c1b62662bea772a6b` | 별도 Sol6.1 ACCEPT + 코디네이터 bounded 수락 | React259·지원 Vue 전체 흐름/React 제거·최종 CI 이전 issue open; 과거259 dist 전체 manifest 미수집 한계를 보존. `/tmp/fvoci-front272-math259-review-sol61.txt` |
+| #260 composition undo `bdcde3716f25a19a29152f6d9bc85fcc00358bd8` | 최종53 editor units·build/typecheck·실제 관련18 browser 통과지만 별도 `ctx_0bf0e6fbc033`는 실제 helper/plugin probe에서 **BLOCK** | undo 후 같은 composition을 재개하면 history가 잘못 묶이는 gap; fixer `ctx_bb2d82617902` 교정·회귀·재검토 pending. 공유 React/Vue factory와 검증한 Vue·OS IME 범위를 구분. `/tmp/fvoci-front272-editor-input-sol61.txt`, `/tmp/fvoci-front272-composition260-sol61.txt`의 초기 checkpoint와 최종 결과를 구분; blocker는 `/tmp/fvoci-front272-composition260-review-sol61.txt` |
+| workspace/wiki/search/my-tasks/notifications/trash `bf4eef3f4866cfe32c82966ca934106fda5a6464` | 이전4adb delete cache·paging 실패를 교정:650unit·실제23 browser 통과(직접4 + 기존19). 승인된 isolated DB105-row fixture로 real HTTP cursor/action 검증, high-volume outbox delivery 수락과 별개 | 원본 home project picker/totals·8-task rail·wiki `?tag`/project grid·notification URL tab 누락과 documentCount gap은 여전히 미수락; frontend 작성자가 복구 중. 기존 실패·검증 SHA/provenance와 final report `/tmp/fvoci-front272-workspace-connect-sol61.txt` 보존 |
+| account/admin `0c831c39f27dbb16ac466b05b0994b5b587ae413` | 이전26146 boot/browser pending을 갱신: fresh build·21unit·실제 account browser5 통과 | 기존3 browser groups·고정 독립검토/통합 delta pending. 이전26146·76b27486과 최신 actual run을 구분, startup theme/textScale·MFA/admin/legal/API 거부 전체 수락은 아직 아님. `/tmp/fvoci-front272-account-admin-sol61.txt` |
+| workspace settings `00c19f14726d771133b4dcee1cc7feaf2554b255` | 65unit·실제15 browser 통과지만 별도 `ctx_75afaddeb975` **BLOCK**: 원본 member-consent table 누락 + workspaceA pending rename 응답이 전환한 workspaceB에 영향 | 기존 consent API 호출/UI와 응답 scope guard 교정·회귀·재검토는 fixer `ctx_a471163715b4`; `/tmp/fvoci-front272-workspace-settings-review-sol61.txt`와 작성자 보고 보존. PR272 통합/최종 CI 이전 수락 아님 |
+| public share `5dd107c38756b08115df766a584fcf3ac96b39ad` | 실제4 browser 통과지만 별도 검토 REQUEST_CHANGES R1 | body404 관측 뒤 cached search excerpts/tree/title이 계속 보이는 거부 gate 결함. corrective `ctx_b75295c546c5`에서 교정·회귀·별도 delta검토; `/tmp/fvoci-front272-public-share-review-sol61.txt` |
+| Editor chrome `070a859e837b9daa027076a45a5b700465b4ecb0` | scope별 units/build/browser 근거, 코디네이터 후속 `msg_c4a6a3f9d10d`는 immutable copied artifact network closure **1/1pass** 확인 | 1.3MB chunk 존재만으로 eager preload 결함을 주장하지 않는다. safe-HTML import 경계 정리는 허용된 coupling 개선이며 성능 수락 아님; 최종 changed candidate network 회귀·전체 Editor/OS IME/custom-node·collab/권한·독립검토 pending |
+| Calendar `734bc83f4c0786218dd2d0a3455f3950bfca89ac` | template 기준 day/week/month·popover/date adapter 구현; existing external drag 회귀 실패를 보존, full acceptance 아님 | 후속 `313c8354893295b1c45ba1fb0c812233e2d34828`에서 별도 `ctx_6e20ee86fa8f` 검토 중이며 timed drag 실패의 final test binding을 요청했다. 검토는 dueDate+dueAt에서 Rust dueDate-first 우선순위 위반과 keyboard resize editor의 endpoint crossing guard 우회도 발견, 작성자 교정 중. 이전734bc 외부 drag 실패·후속 실패를 보존, 최종 actual browser/검토 전 수락하지 않음. `/tmp/fvoci-front272-calendar-template-provenance.json`, `/tmp/fvoci-front272-calendar-browser-existing-final*.log` |
+| native Korean IME `ctx_37aeb1026352` | 코디네이터 dispatch 근거: private OS smoke 통과, **제품 실행 pending** | OS 입력 가능한 환경 smoke와 production FVOCI/실제 persist·undo·peer 관측 수락 구분. 이전 capability 보고 `/tmp/fvoci-front272-os-ime-capability-sol61.txt`는 당시 blocked 사실; 현재 full OS acceptance가 아님 |
+
+계속 남기는 원본 계약/호출자 gap: source39379526 `projects-view.tsx`의 `documentCountOf`에 대응하는 **documentCount API가 현재 ProjectListItemOutput에 없고**, project 문서는 workspace tree에서 제외된다. fake0/N+1/all-doc fetch로 완료 처리하지 않으며 API/DB 소유자의 별도 구현·실제 검증이 필요하다. 고정 Editor070a `FvociEditor`는 `mentionItems`/`entityResolver`를 받지만 WikiDocumentView·ProjectDocumentView·TaskBodyEditor 호출자는 이 값을 주지 않는다. toolbar의 @/: presentation·기존 suggestion renderer만으로 원본 mention/entity 제품 연결을 수락하지 않는다. 코디네이터는 별도 계약 gap 조사자를 배정했으며 Rust/API/DB·인가와 실제 소비자 delta를 다음 TODO로 이어간다.
+
+기존 #284 `8372c610f598761bdac127c558323d80a4145e0c`의 유용한 live wiki chrome E2E는 보존·회수 대상으로 유지한다. 단순 refresh 수락을 새 통합 수락으로 승격하지 않고 새 PR272에 필요한 해당 spec/delta만 회수하여 실제 그룹을 실행한다. #156/#191 의존성 갱신, #263/#280 문서, #266 compat와 §5 잔여, Gantt19/identity34 WIP·fixture·S3 A/B·지원 DB/platform 및 나머지 사용자 작업은 기존 TODO 그대로다. 승인된 비교 기준265/267/269/270/271+287과 Yjs/Yrs 비교 차수·채택 판단을 바꾸지 않는다. 흐름별 수락 뒤 전용 React 제거, 전체 합의 URL/encoded redirect/catch-all 수락 뒤 공통 boot/의존성/build 제거, 최종 PR272 fixed diff·실제 CI·독립검토와 **별도 사용자 승인**이 계속 선행이다.
+
+이번 bounded notice/checkpoint 소유권: `task_740794d9df38` / `ctx_45309efaa178`, terminal `term_ade8eb4a-9a94-42e3-935e-150169dcc0a8`; 실제 Codex CLI0.159.1 `gpt-6.1-sol/high`, session `01a0f0cb-7a20-7980-8687-366f579a9784` turn_context 확인. base491, 작성 파일은 기존 `apps/web/NOTICE.md`·이 `docs/rewrite.md`뿐이며 새 관리 문서/제품/API/manifest/lock/원격 쓰기 없음. Editor070a와 Calendar734bc의 고정 실제 diff + 공식 clone LICENSE/source를 대조해 중앙 고지에 경로별 각색과 MIT 전문을 추가한다. package-level editor 각색도 중앙 notice에 정확한 destination으로 남기되 package notice 파일을 이 작업에서 새로 만들지 않는다. 복사/각색 고지는 feature acceptance와 무관하게 필요하며 full UI 수락 주장은 없다. 코디네이터 최종 회신은 저자 `msg_47b8855af66b`(Editor 후속40856eee의 pure SafeHtml entry/export·LegalConsent import·heading chevron만 변경)·`msg_7db6d665ee27`(Calendar313)을 근거로 source/destination mapping·assets/dependencies 변경 없음을 확인했다. notice는 검증한070a/734에 고정하며 보지 않은 미래 delta를 포함했다고 주장하지 않는다. 보고서·정확한 검사/미실행·잔존 자원은 `/tmp/fvoci-front272-notice-checkpoint-sol61.txt`; 이 문서 delta의 독립검토/통합은 코디네이터 다음 작업이다.
+
+#### 공식 Nuxt UI v4 템플릿 재사용 결정·실행 delta (2026-09-30 사용자 후속 지시)
+
+- [ ] React 문법의 기계적 번역 대신 공식 MIT **Dashboard / Editor / Calendar** 템플릿의 실제 UI 패턴을 재사용해 직접 작성 UI를 줄인다. 이 결정은 기존 PR272 단일 통합 TODO에 포함하며 별도 기능 범위·Nuxt 서버 전환을 만들지 않는다. **PR272는 사용자 승인 hold** 상태로 유지한다. 아래는 고정 소스 조사와 적용 계획이며 제품 흐름·main 수락·배포 완료 선언이 아니다.
+- 고정 upstream: [Dashboard `57e8a76e85ac382f2dd75946aa450afb1b3e4b0d`](https://github.com/nuxt-ui-templates/dashboard/tree/57e8a76e85ac382f2dd75946aa450afb1b3e4b0d), [Editor `60886bda1442549b90312ab5097a449eff634fd1`](https://github.com/nuxt-ui-templates/editor/tree/60886bda1442549b90312ab5097a449eff634fd1), [Calendar `11809148a32a40612d1d7ddab8aef5372ad46edf`](https://github.com/nuxt-ui-templates/calendar/tree/11809148a32a40612d1d7ddab8aef5372ad46edf). 세 root `LICENSE` 전문은 동일 MIT, `Copyright (c) 2025 Nuxt UI Templates`, SHA-256 `e40f408c466e72a3b02eabe846ef35cfab210c14daff782a072dd4903d911f93`다. 소스 코드 외 의존성과 아이콘의 라이선스는 별도로 확인한다.
+- FVOCI 조사 입력은 현재 연결 기준 `cd828c9113263038490a498383b9b7e3a565bb8b`와 workspace 준비 `9146994e1a1915f5a6e7d421de3dd2d6508e5693`를 읽기 전용으로 고정했다. `@nuxt/ui 4.11.2`, Vue3.5.43, Tiptap3.31.3이 이미 맞으므로 upstream manifest/lockfile 전체 복사·일괄 갱신은 필요 없다. web Zod3와 upstream Zod4 차이는 기존 schema/검증 adapter로 처리하며 schema를 바꾸지 않는다.
+
+| 재사용할 upstream 경로·패턴 | FVOCI 적용 경로·줄일 직접 UI | 반드시 유지할 제품 adapter / delta |
+| --- | --- | --- |
+| Dashboard `app/layouts/default.vue`, `app/pages/index.vue`: `UDashboardGroup/Panel/Navbar/Toolbar`, `UNavigationMenu` | `apps/web/src/vue/components/WorkspaceShell.vue`, 명시 소유자의 `AdminShell.vue`·설정 page shell; 수동 header/nav·panel 레이아웃을 template slots/menu items로 축소 | 현재 세션·역할/관리자 gate, encoded href·Vue/잔여 boundary 전환, 알림·검색·push rebind·logout·legal footer. Sidebar는 실제 필요 시 같은 패턴으로 연결하고 demo nav·cookie toast·NuxtPage는 제외 |
+| Dashboard `app/components/TeamsMenu.vue`, `UserMenu.vue` | WorkspaceShell의 workspace select·계정 메뉴를 `UDropdownMenu`/`UButton` 그룹으로 대체하는 후속 delta | 선택은 `workspacesQuery` + `landingPath`/기존 navigation, 실패 전 현재 workspace 유지; logout은 기존 push 정리·서버 성공/실패를 보존. demo teams/user/avatar/theme/브랜드 링크를 복사하지 않음 |
+| Dashboard `app/pages/settings.vue`, `app/pages/settings/index.vue`, `app/components/customers/AddModal.vue` | `WorkspaceSettingsPage.vue`, `features/settings/{WorkspaceIdentitySection,AccountSettingsView}.vue`, `features/projects/{CreateProjectForm,CloneProjectForm}.vue`: `UNavigationMenu`, `UPageCard`, `UFormField`, `UForm`, `UModal` | 기존 검증·한글 입력·첫 오류 focus·변환값·pending/중복 제출 차단·실제 mutation ACK/오류/재조회. 성공 toast만 보이는 demo submit과 제한값을 가져오지 않음; destructive 확인·권한·secret reveal은 유지 |
+| Editor `app/composables/useEditorToolbar.ts`, `app/pages/index.vue`의 toolbar groups; `app/components/editor/LinkPopover.vue`의 popover UI | `apps/web/src/vue/features/editor/{EditorToolbar,FormatToolbar,MobileToolbar,TableHandles,ToolbarPopover}.vue`: 기존 editor를 받는 `UEditorToolbar` fixed layout와 item slots/메뉴 패턴으로 반복 button/group/tooltip 축소 | `FvociEditor` ready의 **같은** TiptapEditor/Ydoc/provider/schema만 전달. 기존 bubble/gutter owner 안에 fixed toolbar를 넣어 BubbleMenu/DragHandle 중복 방지. undo/redo의 focus·개인 undo, link sanitizer·native selection/IME/한 단계 Escape·Tab·modal portal, math/callout/embed/첨부/table 명령 유지 |
+| Calendar `app/components/calendar/Mini.vue`, `app/pages/[view]/[date].vue`의 날짜 controls, `MonthWeek.vue`/`EventChip.vue`의 표시 패턴 | `apps/web/src/vue/features/collections/CollectionContents.vue`의 월 controls·day/count/previews와 `features/settings/WorkspaceCalendarSection.vue` holiday picker: `UCalendar`/`UPopover`/`UButton` 및 표시 markup 재사용 | collection query/monthWindow·timeZone·weekStartsOn·날짜/시간/null·unassigned·cursor/count/more와 `dateMoveRequest`의 canEdit/expectedDates/row·field version/DST 거부 유지. UCalendar는 날짜 선택기이며 event grid 대체가 아님. 독립 CalendarEvent store·이벤트 CRUD·offline queue·200ms autosave를 가져오지 않음 |
+
+Editor의 stock undo/redo handler는 focus를 보장하지 않고 LinkPopover Enter에는 composition guard가 없으므로 그대로 parity로 인정하지 않는다. existing item slots/얇은 callback으로 명령·focus·isComposing guard를 보존한다. 본문 `v-model`/Markdown ref·empty-doc timeout seeding, 새 schema·Yjs room·PartyKit, Nuxt/Nitro/NuxtHub server/auth/data·AI/upload route를 가져오지 않는다. Rust/OpenAPI/cookie auth/인가·storage·collab persist ACK, CSP·sanitize·링크 허용 정책은 그대로 수락 조건이다. 현재 차수에 Yjs/Yrs 교체를 추가하지 않는다.
+
+라이선스·출처 실행 TODO: 정본 source notice는 **`apps/web/NOTICE.md`**, editor package로 실제 코드가 이동하면 `packages/editor/NOTICE.md`도 해당 경로만 추가한다. 복사/각색이 확인된 destination마다 upstream repo + full SHA + source path + 바꾼 UI 부분을 적고 full MIT copyright/permission/disclaimer를 보존한다. 이 조사 자체는 제품 code/assets/dependencies를 복사하지 않았다. 이후 workspace 작성자의 고정 `b00bbd11fe59dbfb15604b8c036c5c238eea9144`에서 `WorkspaceShell.vue`가 Dashboard의 위 두 소스 패턴을 각색한 실제 diff를 확인했으며, 코디네이터가 별도 작은 커밋의 `apps/web/NOTICE.md` 단독 소유권을 이 조사 워커에 추가 배정했다. 다른 추천 경로는 실제 각색 확인 전 copied로 적지 않는다. settings 작성자의 generic component 사용만으로 출처 복사를 주장하지 않는다.
+
+초기 조사 당시 `apps/web/src/build/web-licenses.ts`의 `readBundledSourceNotices`는 web source notice를 public output에 넣지 않았다. 이후 승인된 `3d1faf5437185c5b8bd09e012be0e2e4c01d2bbf`가 기존 web source notice와 **실제 각색의 template MIT 전문·출처를 `/open-source-licenses.txt`에 포함**하도록 수정했다. 관련 unit 14개와 production build·전문 포함 검사는 통과했고, 고정 `31ff5e003fc37d559f1ed2b6b1da2bffd83660a8`의 실제 Rust/DB notice browser 1개가 통과했다. 후속 `4478c291`·`5bb79f16`은 문서만 바뀌었으며 제품 입력 동일성을 확인했다. 이 고지 delta의 고정491 독립 ACCEPT는 `/tmp/fvoci-front272-template-review-sol61.txt`이며 최종 #272 통합은 별도 대기다. Editor/Calendar 기능 검증을 뜻하지 않는다. 단순 dependency graph license가 template source notice를 대체하지 않는다. Lucide1.2.137은 ISC + Feather-derived MIT 전문의 기존 `third-party/browser-licenses/supplements/iconify-json-lucide-1.2.137-LICENSE`를 유지한다. simple-icons1.2.97은 npm CC0 표기지만 tarball LICENSE 없음이며 브랜드 자산은 별도 권리가 있으므로 demo 브랜드/로고/외부 avatar·favicon/placeholder.jpeg를 현재 적용에서 제외한다. @internationalized/date3.12.4는 Apache-2.0(Adobe2019), Nuxt UI/Vue/VueUse/Tiptap은 MIT이고 date-fns4.4.0·gpu-time0.5.0은 MIT지만 이 narrow 적용에는 추가하지 않는다. 실제 bundle closure는 lockfile/notice/build 소유자가 새 HEAD에서 검사한다.
+
+Calendar 추가 사용자 결정(같은 차수 후속): 위 Calendar source는 **구현 기준 UI/상호작용**이며 React pixel parity를 목표로 삼지 않는다. 전용 `ctx_4cb33a8ff5c8` 작성자는 `CollectionContents.vue` calendar 추출과 `vue/features/collections/calendar/**`를 단독 소유하고 workspace settings의 holiday/ICS와 경로를 분리한다. day/week/month, mini/sidebar, drag/resize, keyboard, responsive, optimistic UI, offline/reconnect, edit popover를 구현·검증한다. 기준 source는 `app/pages/[view]/[date].vue`, `AppSidebar.vue`, `calendar/{Mini,WeekView,DayColumn,MonthView,MonthWeek,EventBlock,EventChip,EventPopover,EventForm,EventDraft,NowIndicator}.vue`, `composables/useCalendar.ts`와 `useEvent{Draft,Drag,Move,Editor}.ts`다. narrow adapter가 FVOCI의 dueDate/dueAt·timezone·DST·version/expectedDates·인가를 보존하며 Rust가 최종 권위다. template의 `useCalendarEvents.ts`·demo API/store·Nuxt payload cache를 가져오지 않고, offline replay/optimistic rollback은 실패·충돌·권한 철회·재접속 때 실제 Rust 상태로 조정한다. `EventForm`의 200ms autosave/unmount flush와 floating local ISO/half-open event range를 기존 task 날짜 계약에 그대로 적용하지 않는다. 새로운 date-fns 의존이 필요하면 manifest 소유자가 정확한 license와 delta를 검토한다.
+
+Editor 추가 사용자 결정(같은 차수 후속): 공식 Editor가 **레이아웃·toolbar·bubble·slash·drag·mention/emoji·responsive UI의 구현 기준**이며 React pixel parity나 기존 chrome의 generic wrapper 추가로 끝내지 않는다. 전용 `f272-editor-template` 작성자가 Vue FvociEditor/menu/gutter/code/table chrome을 소유하고 Math/undo/shared schema 소유자와 분리한다. 위 source의 `app/pages/index.vue`, `composables/useEditor{Toolbar,Suggestions,DragHandle,Emojis,Mentions}.ts`, `components/editor/{LinkPopover,CollaborationUsers}.vue`, `AppHeader.vue`에서 실제 UI composition을 각색하며 FVOCI의 단일 editor/body/Ydoc/provider·기능/데이터/협업 계약을 유지한다. template body/state/schema/demo provider/AI/backend를 가져오지 않는다. 기존 직접 작성 chrome은 대응 UI의 실제 수락 뒤 제거하며 IME·local undo·remote draft·custom nodes·표/code·첨부·실제 collab을 final acceptance로 검증한다. 각 destination의 고정 diff를 중앙 notice 소유자에게 보내고 실제 각색된 source path만 고지한다.
+
+Editor 최종 관측 수락 기준(후속 사용자 지시): component architecture는 editor core(schema/commands/협업/data)가 Vue/Nuxt UI를 import하지 않고 Vue host/UI adapter가 core를 사용하는 경계로 검증하며 기계적인 디렉터리 복제를 하지 않는다. 작성자는 실제 custom-node/명령 전체 목록과 호출자를 대응시켜 누락을 확인하고 React 중립 helper 이동도 실제 호출자를 검증한 범위에서만 한다. 실제 OS 한국어 IME와 CDP/synthetic composition 근거를 구분하고 paste·non-BMP·업로드 undo·peer 변경을 보존하는 local undo·room cleanup/재접속·권한 철회를 실제 production/collab에서 관측한다. 성능은 동일한 production 조건/입력에서 측정하며 비-editor 경로가 editor bundle을 preload하지 않는지도 검사한다. 이 추가 기준은 기존 위키/태스크/문서 검증 및 현재 owner의 final report에 연결하고 별도 giant prompt/document나 새 merge 승인을 만들지 않는다. 이번 notice task의 browser1검사는 이 Editor 기준을 실행한 근거가 아니다.
+
+코디네이터 추가 소유권(조사 중 수신): `apps/web/NOTICE.md`와 `apps/web/src/build/web-licenses.ts`·직접 unit test·`apps/web/e2e/open-source-licenses-flow.spec.ts`만 좁게 허용됐다. Dashboard 확인 출처 커밋 `a9b07038ac340c841d3a6c1abd33e52b8a86e361`은 기존 notice bytes를 보존하며 `WorkspaceShell.vue` 실제 각색만 추가한다. public notice에 기존 web source notice 전문을 포함하는 별도 delta를 구현·검증하며 root/font/third-party 고지와 기존 거부 검사를 유지한다. 이 변경은 출처/고지 누락 수정이고 shell/editor/calendar 제품 구현을 공동 편집한 것이 아니다.
+
+필수 delta 검증(구현 시): shell의 실제 URL·encoded slug/back/active/mobile/keyboard·workspace 전환/search/notification/logout 실패 및 push 정리, forms의 한글 IME/첫 오류 focus/중복 제출/권한/서버 오류·확정 재조회, editor의 mouse·keyboard selection/Tab/Home/End/Escape/link IME·두 클라이언트 local undo/redo·표/드래그/업로드·재접속/권한 철회/persist reload, calendar의 timezone·주 시작·DST gap/overlap·plain date/datetime·null/unassigned·row/field/date conflict·권한 거부/count/cursor·keyboard 이동을 해당 기존 검사에 delta로 추가/실행한다. build와 `web-licenses.test.ts`·`vite-plugin-fvoci-web-licenses.test.ts`, production `open-source-licenses-flow.spec.ts`로 template notice와 실제 dependency/아이콘 전문을 확인한다. 새 통합 HEAD의 관련 실제 Rust/API/DB browser 검사·별도 Sol6.1 fixed diff 검토·원격 CI를 모두 확인하며 이번 문서 조사를 제품 테스트 성공으로 세지 않는다.
+
+조사/문서 제출: Orca `task_5b56007f068d` / `ctx_a6109445eef6`, terminal `term_70521322-aefe-4d02-8f2e-b871c7ebf4a2`, 실제 `gpt-6.1-sol/high`(session `01a0f091-833c-74a2-b441-918be1ec40a1` turn_context). doc base `bac2140aea40493103fe8f987335c037590db20f`가 이미 기존 doc을 포함하므로 중복 cherry-pick하지 않았다. 상세 고정 source/license·경로별 provenance plan·검사 명령·미실행 범위는 `/tmp/fvoci-front272-template-patterns-sol61.txt`, 작은 reference/license 증거는 `/home/kinesis/orca/fvoci-evidence/front272-official-templates/`에 있다. 초기 조사 단계에서는 무거운 검사를 실행하지 않았다. 후속 notice 구현에는 승인된 production build와 실제 Rust/DB browser 1개를 실행했으며 위 고정 SHA 근거로 구분한다. 원격 push/merge/release·추가 agent 실행은 없었고, doc과 별도 source notice 커밋은 각각 독립 검토 뒤 코디네이터가 통합한다. 기존 이력과 아래 TODO를 보존한다.
+
+#### PR272 단일 통합과 다음 소유권 (2026-09-30 13:00 KST 과거 관측; 최신 체크포인트가 우선)
+
+아래가 이전의 흐름별 별도 제출/main 순서를 갱신한다. main `50d95df1a98c2d88d28f09222c2985fbdb585623`·게시 `v0.3.0`은 그대로다. PR272 원격 `9026e10678fb6167ca53f3d4045b67cd575733a0`은 auth/setup/invite/home·공개 legal/service-info와 수락된 wiki keyup 수정을 포함한다. 해당 SHA의 Web36666203931/Rust36666204025/documents36666204110/collab36666203956은 SUCCESS, Install36666204075는 조회 때 IN_PROGRESS이므로 전체 CI 완료가 아니다. keyup의 별도 ACCEPT·실제16 browser/22 unit/build 근거는 `/tmp/fvoci-home272-wiki-ci-fix-sol61.txt`와 `/tmp/fvoci-home272-wiki-ci-review-sol61.txt`에 있다.
+
+인증 잔여 `fcf910125528081178a2193054f12b5f1e9bb526`(#278), 프로젝트/태스크 `b3290523a6909c3fa80623f7d97a2f4c35d4253f`(#276→282→285→286), 뷰어 `56f3484403ea79e39006b3b4c7d539196728d3f2`(#275)는 각각 실제 URL·검사·독립 ACCEPT를 받은 로컬 입력이다. 다른 단독 작성자가 이 세 입력만 home에 병합한 로컬 `c08659ae8568d48c3fe072ca02213139be732672`는 통합 검사/독립 delta 검토 전 단계이며 원격9026·main 수락과 구분한다. 프로젝트의 d63 실제18그룹33검사와 b329의 동일309산출물/build·102 unit·직접 route1검사, 인증4그룹5검사·49 unit, 뷰어7그룹·184 unit의 기존 SHA 근거를 재사용한다. 이전 실패와 12:28의 검토 대기 관측은 아래 이력에 보존한다.
+
+다음 표는 **배정 제안**이며 신규 워커를 실행한 기록이 아니다. 여섯 잔여 후보는 Vue 페이지/router 후보가 있으나 각 후보의 app-boundary와 현재 home의 실제 진입은 React다. 원본 고정39379526의 대응 route·현재 Rust/API 계약·기존 검사는 상세 보고서 `/tmp/fvoci-front272-remaining-sol61.txt`에 연결한다. 기존 갱신 build/unit·독립 검토는 refresh 근거이며 actual URL 수락을 대신하지 않는다.
+
+| 다음 단독 작성 범위 | 재사용 브랜치 / 고정 HEAD | 선행·허용 경로·다음 검사 |
+| --- | --- | --- |
+| workspace 랜딩·projects (#274) | `fvoci/r11-vue-workspace` / `d26e117ec4fed6d39b060aa5be2748fe20e2a787` | 현 home 통합 동결 뒤 `WorkspaceHomePage.vue`, `ProjectsPage.vue`와 해당 Vue projects 폼만; 실제 `/w/:slug`·projects 연결, workspace/project 권한·별/최근·생성/복제 재조회 |
+| wiki 목록·검색 (#279) | `fvoci/r11-vue-wiki-search` / `88ca2ce763b493d1c86980b9af6197a2e1cfcdb8` | #274 입력 뒤 두 페이지·Vue wiki/search 기능만; `/wiki`·`/search?q=…`와 문서 WIKI-n/결과 이동·권한 검증 |
+| my-tasks·notifications·trash (#283) | `fvoci/r11-vue-ws-nav` / `c6179f0383676f66b4685257d90dfe4328a41316` | #274 입력 뒤 세 페이지·MyTaskRow와 해당 검사만; 태스크 페이지네이션·알림 읽음/이동·문서/프로젝트 복원 |
+| workspace settings (#273) | `fvoci/r11-vue-settings` / `0480f1dfbc16a1ff3b7cb9e30a5e8f3f62e3c64e` | settings/document-tags/templates 세 페이지·workspace 전용 설정 섹션만; 멤버·SSO·토큰·그룹·가져오기/보내기·설정 권한 검증. AccountSettings/Mfa는 #277 정본 |
+| account·admin/audit/legal (#277) | `fvoci/r11-vue-account-admin` / `37789ee38fd9b56c063b11bb09ded0b075a916fe` | 계정/MFA·관리 세 페이지와 전용 섹션/요청만; 계정 생명주기·MFA·관리자/비관리자·게시/동의 검증. 공개 `/legal/:kind`와 다른 관리자 게시 경로 |
+| 익명 공개 공유 (#281) | `fvoci/r11-vue-public-share` / `fe536b84f2abaddeed117807b4e416ef098a4005` | PublicSharePage와 Vue public-share 기능만; 정확한 `/s/:token`, meta 후 tree/body·만료/철회·하위문서·HTML/CSP. 공유 첨부 `/s/:token/attachments/:id/view`는 #275 입력 |
+| 누락된 project fields / workflow | home 통합 + 프로젝트 `b3290523`; 현재 `ProjectFieldsPage.tsx` / `ProjectWorkflowPage.tsx` | 실제 React `/w/:slug/:ref/settings/{fields,workflow}`와 ProjectViewTabs 링크가 남고 Vue 페이지 없음. 각 페이지/전용 field-manager 또는 workflow 폼을 좁게 이식; collections-flow의 fields 및 task-ops-flow의 workflow 저장/재조회·비활성/권한 거부 |
+
+#279/#283의 실제 PR base는 #274 `d26e117e`, 나머지 네 후보는 main50이다. 두 자식의 기존 workspace 파일을 재작성하지 않고 새로 검증한 #274 입력을 먼저 보존한다. page 작성자와 공통 URL 통합 작성자를 분리할 경우 후자는 `App.tsx`, app-boundary·검사, vue router/route-paths·검사/import-graph, WorkspaceShell·navigation을 단독 소유하고 경로별 연결을 바로 제공한다. #273/#277의 중복 계정/MFA와 공통 shell/legal/admin-query 충돌은 이 소유권 아래 순차 통합하며 i18n·manifest/lock·API/CI 변경은 별도 명시 배정한다. 이 규칙을 연결 대기 사유로 쓰지 않는다.
+
+#284 `8372c610f598761bdac127c558323d80a4145e0c`는 이미 live인 위키의 `workspace-wiki-vue-chrome-flow.spec.ts` 한 파일뿐이다. 기존6검사/refresh 근거를 재사용해 PR272에 검사 후보를 포함하고 새 통합 SHA에서 실행한다. #156 `763f692e` QR2.0.4, #191 `ae034156` provider4.7/Yjs13.6.33/XLSX0.22/KaTeX0.18.9/Vite8.3.1은 현재 home의 QR1.4.4/provider4.6/Yjs13.6.32 등과 다른 별도 갱신 후보이며 연결의 필수 선행이 아니다. 기존 갱신 TODO/검토·fixture를 유지하고 채택 때만 manifest/lock 소유자와 실제 소비자 검사를 배정한다. #263/#280 문서·#266 compat·백엔드 의존성은 별도 관리한다.
+
+#149/#259/#260/#261, §5 잔여·승인된 지원 범위와 비교 고정 차수265/267/269/270/271+287은 유지한다. PR272 확대만으로 비교에 새 페이지나 Yjs/Yrs 교체 선행을 추가하지 않는다. 흐름별 로컬 수락 뒤 전용 React를 제거하고, 전체 합의 URL과 catch-all/encoded redirect가 Vue에서 검증된 뒤 공통 React boot·의존성·빌드를 제거해 같은 PR272의 최종 검토/CI/main 수락을 받는다. 문서 조사는 task_f18f4cdcbefe/ctx_854caade6ecc, 실제 Sol6.1/high session01a0f073-57e9-72c3-b0cb-83fd3df404f9이며 제품 tree 읽기 전용·무거운 검사/원격 쓰기/dispatch 없음이다.
+
+- [x] 위키 한글 회귀·협업 복구 — [#287](https://github.com/AISFlow/fvoci/pull/287)
+  - 요청 근거: 기존 위키 한글·협업 결함 복구 요청; 고정 SHA 수락 근거 보존.
+  - 실제 라우트/범위: 위키 한글 회귀·협업 복구.
+  - 현재 단계: main 수락 `a1d19b6e03c13ce94c642129b9cc5bc573be3764`; 배포 v0.3.0에는 미포함. 원래 merge SHA CI와 현재 main50d95df1 5게이트 SUCCESS를 구분한다.
+  - 담당 Sol 6.1 워커: ci287 구현, review287_setup/review_ci_auth_delta 독립 검토 완료.
+  - 기준 HEAD / PR / 선행 의존성: `15ed8e0b1634cb410367aca4f9dcb211103efd4a` / #287 merged / main.
+  - 남은 구체적인 작업: 원래 후보 수락 완료. 후속 native caret settle 검사 경합은 #269 f6fbb8df에서 처리; #287 성공을 후속 수정 성공으로 재표시하지 않는다.
+  - 수락 검사: 독립 ACCEPT + 5 workflow gate 성공. takeover-evidence/ci-287/final-checks.json. 실제 pending36통과/기존OSIME12skip.
+  - 출시 차단: 출시 검사 차단.
+  - 기존 React 제거 조건: 해당 없음.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] 태스크 첨부/활동/시간 패널 — [#286](https://github.com/AISFlow/fvoci/pull/286)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: 태스크 상세 내 첨부·활동·시간 패널; #285 상세 URL/단일 collab room.
+  - 현재 단계: 프로젝트 stack의 로컬 b3290523 실제 URL·검사·독립 ACCEPT 완료, PR272 통합 입력; main 미수락·미배포. d63 브라우저 실행과 b329 동일 산출물/직접 route 검사 근거 구분
+  - 담당 Sol 6.1 워커: 기존 갱신 B 이력 보존; task_79205b0fa921/ctx_4b589d9c15f9 연결·검증 완료, 별도 task_3419d084323f 고정b329 독립 ACCEPT; PR272 통합 작성자는 별도 단독 소유
+  - 기준 HEAD / PR / 선행 의존성: 원격 `5b2574bf1daacd4ca313e0b7158d17d866ae4d9d` / #286 / #285; 조회 base `802d00cce04617ab712b81bc560cf17273e99da3`
+  - 남은 구체적인 작업: 위 단일 PR272 표대로 수락된 b329 입력의 통합 delta 검사/독립 검토; 누락 fields/workflow는 별도 좁은 작성 범위로 보완하고 PR272 최종 CI/main 수락
+  - 수락 검사: 첨부·활동·시간 확정 저장/재조회; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 285 선행.
+  - 기존 React 제거 조건: 패널 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `e133d90e5776c7935196c7faafa90d14a2720ce4` / #286 / #285; 관측 base `d3533356b2547dd14cbc89e4bf3b12e6c1e448c3`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 10, 'FAILURE': 15, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] 태스크·프로젝트 문서 상세 — [#285](https://github.com/AISFlow/fvoci/pull/285)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/:ref 태스크·프로젝트 문서 상세와 본문.
+  - 현재 단계: 프로젝트 stack의 로컬 b3290523 실제 URL·검사·독립 ACCEPT 완료, PR272 통합 입력; main 미수락·미배포. d63 브라우저 실행과 b329 동일 산출물/직접 route 검사 근거 구분
+  - 담당 Sol 6.1 워커: 기존 갱신 B 이력 보존; task_79205b0fa921/ctx_4b589d9c15f9 연결·검증 완료, 별도 task_3419d084323f 고정b329 독립 ACCEPT; PR272 통합 작성자는 별도 단독 소유
+  - 기준 HEAD / PR / 선행 의존성: 원격 `802d00cce04617ab712b81bc560cf17273e99da3` / #285 / #282; 조회 base `a21c1454c296a710e617861636aff55e7fabcc7b`
+  - 남은 구체적인 작업: 위 단일 PR272 표대로 수락된 b329 입력의 통합 delta 검사/독립 검토; 누락 fields/workflow는 별도 좁은 작성 범위로 보완하고 PR272 최종 CI/main 수락
+  - 수락 검사: 문서/태스크 권한·협업·저장 E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 282 선행.
+  - 기존 React 제거 조건: Vue item 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `d3533356b2547dd14cbc89e4bf3b12e6c1e448c3` / #285 / #282; 관측 base `8623ab2af9eafbb5420c234f00045983259a7bdb`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 10, 'FAILURE': 15, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] live 위키 댓글/공유/별/리비전 — [#284](https://github.com/AISFlow/fvoci/pull/284)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: 기존 live 위키 문서 URL 내 댓글·공유·별·리비전.
+  - 현재 단계: 이미 live Vue 위키의 E2E 한 파일 후보8372c610; refresh 검토/일반 push 완료, PR272 검사 입력으로 누적할 대상; main 미수락·미배포
+  - 담당 Sol 6.1 워커: 갱신 B task_14b99302f53e/ctx_f15669a41d93 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `8372c610f598761bdac127c558323d80a4145e0c` / #284 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 기존6검사·고정 검토를 재사용해 workspace-wiki-vue-chrome-flow.spec.ts만 PR272에 포함, 새 통합 HEAD에서 해당 실제 그룹 실행·독립 delta 검토·최종 CI; 신규 router 연결 아님
+  - 수락 검사: live wiki chrome E2E·필수 CI; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 261 전체 완료와 구분.
+  - 기존 React 제거 조건: 기존 live 경로 유지.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `6e90189af32f55812388a1a5b5964aa2901e2850` / #284 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 독립 검토·CI; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] my-tasks · notifications · trash — [#283](https://github.com/AISFlow/fvoci/pull/283)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/my-tasks · /w/:slug/notifications · /w/:slug/trash.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `c6179f0383676f66b4685257d90dfe4328a41316` / #283 / #274; 조회 base `d26e117ec4fed6d39b060aa5be2748fe20e2a787`
+  - 남은 구체적인 작업: 위 단일 PR272 소유권 표의 #283 범위로 기존 후보를 연결·production Rust/DB/browser 검증·독립 검토하고 PR272에 누적; 별도 기능 PR/main 머지 없이 최종 통합 SHA에서 CI 수락
+  - 수락 검사: 알림·내 일감·휴지통/복원 E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 274 선행.
+  - 기존 React 제거 조건: 각 경로 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `739290acd6eff824692dc2b9c829910fedd434a0` / #283 / #274; 관측 base `e18fdbbe9ed5fd97d88b041165cb5023bc9b4f6a`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] 프로젝트 홈 — [#282](https://github.com/AISFlow/fvoci/pull/282)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/:ref 프로젝트 홈; KEY-n 상세와 구분.
+  - 현재 단계: 프로젝트 stack의 로컬 b3290523 실제 URL·검사·독립 ACCEPT 완료, PR272 통합 입력; main 미수락·미배포. d63 브라우저 실행과 b329 동일 산출물/직접 route 검사 근거 구분
+  - 담당 Sol 6.1 워커: 기존 갱신 B 이력 보존; task_79205b0fa921/ctx_4b589d9c15f9 연결·검증 완료, 별도 task_3419d084323f 고정b329 독립 ACCEPT; PR272 통합 작성자는 별도 단독 소유
+  - 기준 HEAD / PR / 선행 의존성: 원격 `a21c1454c296a710e617861636aff55e7fabcc7b` / #282 / #276; 조회 base `f419c402d2fec43d32e8a9dee89676fb7c0d3adf`
+  - 남은 구체적인 작업: 위 단일 PR272 표대로 수락된 b329 입력의 통합 delta 검사/독립 검토; 누락 fields/workflow는 별도 좁은 작성 범위로 보완하고 PR272 최종 CI/main 수락
+  - 수락 검사: 프로젝트 홈 실제 권한/재조회; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 276 선행.
+  - 기존 React 제거 조건: Vue 홈 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `8623ab2af9eafbb5420c234f00045983259a7bdb` / #282 / #276; 관측 base `dc2611e605439b9cb38c069a4230ba8c648474c9`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 10, 'FAILURE': 15, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] /s/:token — [#281](https://github.com/AISFlow/fvoci/pull/281)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /s/:token 공개 공유.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `fe536b84f2abaddeed117807b4e416ef098a4005` / #281 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 위 단일 PR272 소유권 표의 #281 범위로 기존 후보를 연결·production Rust/DB/browser 검증·독립 검토하고 PR272에 누적; 별도 기능 PR/main 머지 없이 최종 통합 SHA에서 CI 수락
+  - 수락 검사: 익명 공유·삭제/철회·직접진입 E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 공개 공유 전환.
+  - 기존 React 제거 조건: Vue 공유 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `beaa095cc9c44cccf334cd96d36edb3e52fa24ab` / #281 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] 협업 비교 계획 — [#280](https://github.com/AISFlow/fvoci/pull/280)
+  - 요청 근거: 승인된 차수 후 비용·복구·스키마 비교 지시; Yrs 유지 결론 선결정 금지.
+  - 실제 라우트/범위: 현재 차수 수락 뒤 CRDT 비용·복구·스키마 비교; 기본 엔진 채택/데이터 이전은 별도 판단.
+  - 현재 단계: 최신 사용자 비교 정책과 전체 문서 독립 ACCEPT; 최신 CI 진행.
+  - 담당 Sol 6.1 워커: review_ci_auth_delta/review_invite_final 독립 검토; Astra 문서 통합.
+  - 기준 HEAD / PR / 선행 의존성: `b4d5bf25` / #280 / main.
+  - 남은 구체적인 작업: CI 후 문서 수락. 현재 차수 #265/#267/#269/#270/#271+#287 수락 뒤 고정 기준으로 비교 시작; 비교 결과와 엔진 채택 구분.
+  - 수락 검사: 문서 delta 독립 검토; 실제 비교는 별도 측정; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 현재 차수 비차단.
+  - 기존 React 제거 조건: React 제거와 무관.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] /w/:slug/wiki · search — [#279](https://github.com/AISFlow/fvoci/pull/279)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/wiki · /w/:slug/search.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `88ca2ce763b493d1c86980b9af6197a2e1cfcdb8` / #279 / #274; 조회 base `d26e117ec4fed6d39b060aa5be2748fe20e2a787`
+  - 남은 구체적인 작업: 위 단일 PR272 소유권 표의 #279 범위로 기존 후보를 연결·production Rust/DB/browser 검증·독립 검토하고 PR272에 누적; 별도 기능 PR/main 머지 없이 최종 통합 SHA에서 CI 수락
+  - 수락 검사: wiki 목록·검색·권한 E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: workspace 선행.
+  - 기존 React 제거 조건: 목록/검색 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `4fe8480f1f1021c04c39eeada689230b2fac02bc` / #279 / #274; 관측 base `e18fdbbe9ed5fd97d88b041165cb5023bc9b4f6a`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 22, 'SKIPPED': 6, 'FAILURE': 3}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] reset/magic/confirm/cancel/consent — [#278](https://github.com/AISFlow/fvoci/pull/278)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /reset-password · /magic-link · /confirm-email · /cancel-withdraw · /consent.
+  - 현재 단계: 로컬fcf91012 다섯 URL·실제Rust/PG/SMTP/Chromium4그룹5검사·49 unit/build·독립 ACCEPT 완료; PR272 통합 입력, main 미수락·미배포
+  - 담당 Sol 6.1 워커: 기존 auth-rest 연결 작성자 결과 보존; 별도 task_510990ffec8a 고정fcf91012 독립 ACCEPT 완료, PR272 통합 작성자는 별도 단독 소유
+  - 기준 HEAD / PR / 선행 의존성: 원격 `20846dd86c1572ae7f2587ee5358b859d089439c` / #278 / 구 #269; 로컬 수락 입력 `fcf910125528081178a2193054f12b5f1e9bb526`, PR272 통합으로 승계
+  - 남은 구체적인 작업: 수락된fcf91012 입력의 PR272 통합 delta 검사/독립 검토·최종 CI/main 수락; 기존 토큰/query/hash/MFA·React 제거 근거 보존
+  - 수락 검사: mail-reset/account lifecycle E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: login 선행.
+  - 기존 React 제거 조건: 경로별 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] /settings/account · admin/audit/legal — [#277](https://github.com/AISFlow/fvoci/pull/277)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /settings/account 및 관리자 audit/legal; 공개 약관 #272와 구분.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `37789ee38fd9b56c063b11bb09ded0b075a916fe` / #277 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 위 단일 PR272 소유권 표의 #277 범위로 기존 후보를 연결·production Rust/DB/browser 검증·독립 검토하고 PR272에 누적; 별도 기능 PR/main 머지 없이 최종 통합 SHA에서 CI 수락
+  - 수락 검사: MFA·account lifecycle·admin/legal E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 계정/관리 전환.
+  - 기존 React 제거 조건: 각 기능 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `b16c20b044c47a9f9acff82f54104c6863741d58` / #277 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] 프로젝트 task/collection views — [#276](https://github.com/AISFlow/fvoci/pull/276)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/:ref 프로젝트 목록·보드·간트·캘린더·컬렉션.
+  - 현재 단계: 프로젝트 stack의 로컬 b3290523 실제 URL·검사·독립 ACCEPT 완료, PR272 통합 입력; main 미수락·미배포. d63 브라우저 실행과 b329 동일 산출물/직접 route 검사 근거 구분
+  - 담당 Sol 6.1 워커: 기존 갱신 B 이력 보존; task_79205b0fa921/ctx_4b589d9c15f9 연결·검증 완료, 별도 task_3419d084323f 고정b329 독립 ACCEPT; PR272 통합 작성자는 별도 단독 소유
+  - 기준 HEAD / PR / 선행 의존성: 원격 `f419c402d2fec43d32e8a9dee89676fb7c0d3adf` / #276 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 위 단일 PR272 표대로 수락된 b329 입력의 통합 delta 검사/독립 검토; 누락 fields/workflow는 별도 좁은 작성 범위로 보완하고 PR272 최종 CI/main 수락
+  - 수락 검사: 목록·보드·캘린더·컬렉션 권한/저장 E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 프로젝트 전환 선행.
+  - 기존 React 제거 조건: 뷰별 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `dc2611e605439b9cb38c069a4230ba8c648474c9` / #276 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 25, 'FAILURE': 15, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] 첨부/공유 첨부 viewer — [#275](https://github.com/AISFlow/fvoci/pull/275)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/a/:id/view · /s/:token/attachments/:id/view; 지원 형식·다운로드·WASM·HWP 편집.
+  - 현재 단계: 로컬56f34844 actual viewer 두 URL·7 browser그룹·184 unit/build·독립 ACCEPT 완료; PR272 통합 입력, main 미수락·미배포
+  - 담당 Sol 6.1 워커: task_e06d60a6154c/ctx_73d490e8dabb Sol6.1/high, 같은 r11-vue-viewers tree 단독 소유; 갱신 A 이력 보존
+  - 기준 HEAD / PR / 선행 의존성: 원격 `7818d32f2a1b1d6ec0a4a585a7c1a58696c2d89c` / #275 / main50d95df1; 로컬 수락 입력 `56f3484403ea79e39006b3b4c7d539196728d3f2`, 이전 a71a6872 부분 검사 근거 보존
+  - 남은 구체적인 작업: 수락된56f34844 입력을 PR272에 누적한 새 HEAD에서 경계·HWP 이탈 보호·공개 공유 연결 delta 확인, 별도 검토/최종 CI/main 수락; 원래 실패 근거 보존
+  - 수락 검사: 고정56f34844의 actual viewer URL·지원 형식/WASM·첨부/공유/다운로드 권한·HWP 수정/저장/이동 보존7그룹과184 unit/build·독립 ACCEPT; 이전 a71의 quick182/6그룹 및 HWP 실패는 과거 근거. 새 PR272 통합 delta/최종 CI는 별도
+  - 출시 차단: 첨부 전환.
+  - 기존 React 제거 조건: 모든 지원 형식 대체 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `9ec6c4133630f3b7d9bd9f52827368feac9d3c17` / #275 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 22, 'FAILURE': 3, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] /w/:slug · /w/:slug/projects — [#274](https://github.com/AISFlow/fvoci/pull/274)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug · /w/:slug/projects.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `d26e117ec4fed6d39b060aa5be2748fe20e2a787` / #274 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 위 단일 PR272 소유권 표의 #274 범위로 기존 후보를 연결·production Rust/DB/browser 검증·독립 검토하고 PR272에 누적; 별도 기능 PR/main 머지 없이 최종 통합 SHA에서 CI 수락
+  - 수락 검사: workspace/project 권한·재조회 E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 탐색 선행.
+  - 기존 React 제거 조건: Vue workspace 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `e18fdbbe9ed5fd97d88b041165cb5023bc9b4f6a` / #274 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] /w/:slug/settings — [#273](https://github.com/AISFlow/fvoci/pull/273)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/settings 및 document-tags/templates·멤버·SSO·import/export.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `0480f1dfbc16a1ff3b7cb9e30a5e8f3f62e3c64e` / #273 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 위 단일 PR272 소유권 표의 #273 범위로 기존 후보를 연결·production Rust/DB/browser 검증·독립 검토하고 PR272에 누적; 별도 기능 PR/main 머지 없이 최종 통합 SHA에서 CI 수락
+  - 수락 검사: 설정 권한·멤버·SSO·import/export E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 설정 기능 누락.
+  - 기존 React 제거 조건: 각 설정 흐름 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `c4c7d87812b4570531ec7bfc481278c2c65d8eba` / #273 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] 전체 프론트엔드 단일 통합 (홈·공개 정보 포함) — [#272](https://github.com/AISFlow/fvoci/pull/272)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: 기존 홈 / · /legal/:kind · /service-info와 합의된 전체 프론트엔드·최종 React 제거; 위 잔여 flow 표가 입력/범위를 구분한다.
+  - 현재 단계: 전체 프론트엔드·최종React 제거의 단일 통합 PR로 범위 갱신; 원격9026e106 네 게이트SUCCESS/Install진행 관측, 로컬 세 입력 통합c08659ae는 새 검사/독립 delta 검토 전; main 미수락·미배포
+  - 담당 Sol 6.1 워커: home_public_connect 구현·검증, review_invite_final 독립 검토.
+  - 기준 HEAD / PR / 선행 의존성: 원격 `9026e10678fb6167ca53f3d4045b67cd575733a0` / #272 / main50d95df1; 세 로컬 입력 통합 `c08659ae8568d48c3fe072ca02213139be732672`, 검증/검토 수락은 별도
+  - 남은 구체적인 작업: 현재 auth-rest/project/viewer 통합을 검증·고정 검토한 뒤 위 잔여 flow 소유권을 배정; 흐름별 로컬 수락/React 전용 제거와 공통 제거를 모두 PR272에 누적하고 최종 HEAD CI/독립 검토 뒤 한 번 main 수락
+  - 수락 검사: 이전21ad5327의 unit110/build·경계18검사·실제Rust/DB6그룹21pass 근거는 해당 SHA에 보존. 이후9026 및 세 입력의 실제 검사는 위 고정 근거를 재사용하고 새 통합 HEAD의 관련 검사/독립 검토/최종 CI를 별도로 받는다.
+  - 출시 차단: login 선행.
+  - 기존 React 제거 조건: 대체 HomePage/public LegalPage/ServiceInfoPage·전용 route 제거 후보; 관리자 약관과 공통 코드는 유지.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] /invite/:token — [#271](https://github.com/AISFlow/fvoci/pull/271)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /invite/:token.
+  - 현재 단계: 실제 URL 연결·Rust/DB 검증·독립 최종 ACCEPT; 최신 CI 진행, main/배포 미수락.
+  - 담당 Sol 6.1 워커: invite_connect 구현·검증; review_invite/review_invite_final 독립 검토.
+  - 기준 HEAD / PR / 선행 의존성: `54bcc682f50eb5b4457e479021603669ab781258` / #271 / #270 → #269.
+  - 남은 구체적인 작업: 최종 #269 auth delta 검증·독립 검토 뒤 의존 순서로 기존 후보 갱신/충돌 delta 검토·push·새 HEAD CI/main 수락; 기존 실제 URL/검사/React 제거 근거 보존, 비교 고정 차수는 유지
+  - 수락 검사: invite3·기존MFA1 실제 Rust/DB 통과, 관련unit40·production build, 최종 독립 ACCEPT.
+  - 출시 차단: login 선행.
+  - 기존 React 제거 조건: 전용 React invite page/form과 route 제거 완료; 다른 계정·약관 흐름 유지.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] /setup — [#270](https://github.com/AISFlow/fvoci/pull/270)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /setup.
+  - 현재 단계: Vue setup 연결·원래 코드와 auth delta 독립 ACCEPT; 원격 CI 진행, main/배포 미수락.
+  - 담당 Sol 6.1 워커: setup_integrate 구현·검증; review287_setup/review_ci_auth_delta 독립 검토.
+  - 기준 HEAD / PR / 선행 의존성: `4b7f9578a6e8e665e6ed2b2d6fa31c01604368f8` / #270 / #269.
+  - 남은 구체적인 작업: 최종 #269 auth delta 검증·독립 검토 뒤 의존 순서로 기존 후보 갱신/충돌 delta 검토·push·새 HEAD CI/main 수락; 기존 실제 URL/검사/React 제거 근거 보존, 비교 고정 차수는 유지
+  - 수락 검사: setup 단위19 + workspace-flow 실제 Rust/DB; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: login 선행.
+  - 기존 React 제거 조건: 후보의 React SetupPage 제거 검증.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] /login — [#269](https://github.com/AISFlow/fvoci/pull/269)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /login 내 MFA/OIDC와 logout·협업 이동/입력 회귀.
+  - 현재 단계: 로컬 `8a878ad18ed16f23cf33efa9998352a949a90fb3`(parent3da6737e)에서 native caret/remote-sync 제품 race 재현 후 supported handleClick 최소 수정; controlled old-negative/fixed-pass 및 wiki7/editorunit22 통과. controls/input/login 최종 실행·독립 검토 대기, main 미수락
+  - 담당 Sol 6.1 워커: task_9ad3573ebff9/ctx_cadd8faad24b Sol6.1/high, r11-vue-auth 단독 소유; 이전 auth/caret 검토는 당시 고정 범위
+  - 기준 HEAD / PR / 선행 의존성: 원격 `f6fbb8df0a2c95e3ac21d11972e27ff8a81fe2fb` / #269 / main 및 #287; 로컬 `8a878ad18ed16f23cf33efa9998352a949a90fb3`, 수정 base `3da6737e`
+  - 남은 구체적인 작업: 진행 중 controls/native input/login 최종 결과 회수 → 제품 handleClick·검사 delta 별도 Sol 검토 → 일반 push/최신 CI/main; setup→home 준비 경합 실패·과거 caret 검사 성공을 새 제품 수정 수락으로 전용하지 않음
+  - 수락 검사: 로그인 제품 최종5실제E2E, 이전19흐름 근거 보존; caret deterministic red/green과 정확한 native selection 단언·최신 CI.
+  - 출시 차단: 인증 전환 선행.
+  - 기존 React 제거 조건: Vue 인증 수락 후 React LoginPage/전용 연결.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `f6fbb8df0a2c95e3ac21d11972e27ff8a81fe2fb` / #269 / main 및 #287 포함. 당시 단계·check snapshot: Vue login 실제 연결·제품 검토 ACCEPT; 후속 caret 검사 최종40통과/기존OSIME12skip·delta 독립 ACCEPT, 최신 CI 진행. main/배포 미수락.
+
+- [x] Vue 공통 셸 main 수락 — [#267](https://github.com/AISFlow/fvoci/pull/267)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: Vue 공통 셸·알림 이동·위키 문서 주변 경로.
+  - 현재 단계: main `f18f2b2bf40d2fe67b01089b807aecf54e695ec5` 수락; 독립 ACCEPT·후보5게이트 SUCCESS. 현재 main50d95df1 5게이트 SUCCESS; 신규 배포 없음.
+  - 담당 Sol 6.1 워커: shell_ci_recovery 구현·검증; review_invite_final 별도 컨텍스트 delta 검토.
+  - 기준 HEAD / PR / 선행 의존성: `fa7dac746fdf5e6852bdb70fffe467794bfe96e2` / #267 / main 및 #287 포함.
+  - 남은 구체적인 작업: main 통합 후 셸/위키 관련 회귀·CI와 배포 확인. 이전 a446a7c3 원격 timeout은 수정 SHA의 성공으로 덮어쓰지 않는다.
+  - 수락 검사: 원래 독립 full-shell 검토와 새 3경로 delta ACCEPT, 실패 재현 후 실제 shell6통과·production build.
+  - 출시 차단: 261 / 0.4.0 차단.
+  - 기존 React 제거 조건: Vue 셸 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] compat probe 정리 — [#266](https://github.com/AISFlow/fvoci/pull/266)
+  - 요청 근거: 현재 세션의 목표/TODO 정합화·임시 포팅 기반 정리 지시; 기존 결과·fixture 보존.
+  - 실제 라우트/범위: compat probe/도구 정리와 canonical fixture·oracle/소비자 보존.
+  - 현재 단계: 최신 main merge `1c0a5a85` 별도 Sol ACCEPT 후 일반 push; 실제 원격 CI 대기·main 미수락
+  - 담당 Sol 6.1 워커: 갱신 구현 Sol6.1; 독립 task_038be2b42562/ctx_7b4d8c01ce05 high 완료, Astra 통합 소유
+  - 기준 HEAD / PR / 선행 의존성: `1c0a5a85d7858a9a1035a6ced40e85175d457d89` / #266 / main `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: fixture/oracle320보존·실제 소비자·CI selector delta 고정 검토 근거 유지; 실제 원격 full CI와 tested merge/base/head 확인 후 main 수락, 임시 probe 정리를 제품 제거로 확대하지 않음
+  - 수락 검사: fixture 경로/관련 Rust·web 검사; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 비기능 정리.
+  - 기존 React 제거 조건: 제품 기능 제거 금지.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `ddce8bf2ba799dc5316d2475c2a90f9fd5ecdc4b` / #266 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 독립 검토·CI; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [x] 위키 편집 컨트롤 main 수락 — [#265](https://github.com/AISFlow/fvoci/pull/265)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: 위키 문서 실제 URL의 편집 컨트롤·native drop/paste·첨부/협업.
+  - 현재 단계: main `5d5171a7d07f04fd8ef665617464a6ac8fe194a4` 수락. 후보5게이트 SUCCESS·실제 Rust/DB·독립 ACCEPT_WITH_NITS; 배포 미포함; 현재 main50d95df1 5게이트 SUCCESS.
+  - 담당 Sol 6.1 워커: wiki_controls_complete 구현·검증; review_controls_final 독립 검토.
+  - 기준 HEAD / PR / 선행 의존성: `93425dadb878e5759ac162aadc48d1ba0c36969c` / #265 / main 및 #287 포함.
+  - 남은 구체적인 작업: main 후속 CI와 후속 배포 확인. 선택 복구 finally·native drag/drop/paste는 수락; 업로드 gate filename 명시 nit은 비차단.
+  - 수락 검사: production build·unit11·controls6·native input3 통과, 실제 peer/저장재조회/download인가 포함. 통합 후 영향 검사.
+  - 출시 차단: 261 / 0.4.0 차단.
+  - 기존 React 제거 조건: Vue 컨트롤 수락 후 공통 PM 로직 보존.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] 운영·역할·인계 기록 — [#263](https://github.com/AISFlow/fvoci/pull/263)
+  - 요청 근거: 현재 세션의 목표/TODO 정합화·임시 포팅 기반 정리 지시; 기존 결과·fixture 보존.
+  - 실제 라우트/범위: AGENTS/environment 및 기존 rewrite 목표·수락/실행 기록.
+  - 현재 단계: 원격 d556a7eb fixed merge 독립 ACCEPT 후 push; 11:13 KST documents/install SUCCESS, collab/rust/web gate QUEUED. 현재 goal/TODO 로컬 신규 delta는 새 독립 검토·push/CI/main 미수락
+  - 담당 Sol 6.1 워커: 문서 단독 writer task_581011afa5c2/ctx_0f43e6ec581e; Astra 최종 소유. 이전 d556 검토 task_038be2b42562/ctx_7b4d8c01ce05를 신규 diff 검토로 전용하지 않음
+  - 기준 HEAD / PR / 선행 의존성: 원격/이번 수정 base `d556a7eb30f7876e4c1f0a4b2103ea4b4cdf13c5` / #263 / main `50d95df1a98c2d88d28f09222c2985fbdb585623`; 신규 로컬 commit은 제출 보고서에 고정
+  - 남은 구체적인 작업: 기존 목표·TODO 보강 로컬 commit → 별도 Sol6.1 신규 delta 사실 검토 → 코디네이터 일반 push → 새 tested merge/base/head CI → main 수락; worker 원격 쓰기 없음
+  - 수락 검사: 문서 diff/check + 독립 사실 대조; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: 제품 전환 완료로 계산 안 함.
+  - 기존 React 제거 조건: 해당 없음.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `8777f372e230e27ca89092c65b37548a0a3bd93d` / #263 / main; 관측 base `6f64febc487808246596f02922b1826b4fcc939a`. 당시 단계·check snapshot: 독립 검토·CI; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] build(deps): bump the web-minor-patch group across 2 directories with 6 updates — [#191](https://github.com/AISFlow/fvoci/pull/191)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: web/editor manifests·Bun lock·Hocuspocus4.7/Yjs/XLSX/KaTeX/Vite와 라이선스.
+  - 현재 단계: 로컬ae034156 live-provider 기대값 수정 독립 ACCEPT 뒤 일반 push 완료; 실제 영향 browser·최신CI/main 수락 대기, PR272 연결의 필수 선행 아님
+  - 담당 Sol 6.1 워커: 수정 task_8235301f8f3d/ctx_6293af3a651e 단독 writer; 독립 검토 task_1b090797cb8a/ctx_24c36068f541 high 완료
+  - 기준 HEAD / PR / 선행 의존성: 원격/로컬 `ae034156bef2be1db027da975f96b912225237d6` / #191 / main50d95df1; 이전 a72e1a0e REQUEST_CHANGES와 fixture4.6 이력 보존
+  - 남은 구체적인 작업: 실제 collaboration/XLSX/math/라이선스 브라우저·CI 후 별도 갱신 수락; PR272 필수 입력으로 자동 지정하지 않고 채택 때 manifest/lock 소유권 조정
+  - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: Vue 연결의 필수 선행 아님.
+  - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `320514c797a367051d0f8a710c711d6bb21e5e3c` / #191 / main; 관측 base `3919a326f384b2f3168eb495f539a9556b536f73`. 당시 단계·check snapshot: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 22, 'FAILURE': 18, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] build(deps): bump base64 from 0.22.1 to 0.23.1 in /crates/collab-engine — [#160](https://github.com/AISFlow/fvoci/pull/160)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): bump base64 from 0.22.1 to 0.23.1 in /crates/collab-engine; 해당 의존성 manifest/lock·실제 소비자.
+  - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 9, 'FAILURE': 27}(검사 수가 아닌 check 집계, 외부 check 포함).
+  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
+  - 기준 HEAD / PR / 선행 의존성: `7546b78002e3b917811b403f36ccb62c9c3f96fc` / #160 / main; 관측 base `5f114ea4e90d741bb8bbccaadfa4725d20df88ff`.
+  - 남은 구체적인 작업: 자동 의존성 갱신 별도 우선순위; 현재 lockfile/런타임 호환부터 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: Vue 연결의 필수 선행 아님.
+  - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] build(deps): bump base64 from 0.22.1 to 0.23.1 — [#158](https://github.com/AISFlow/fvoci/pull/158)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): bump base64 from 0.22.1 to 0.23.1; 해당 의존성 manifest/lock·실제 소비자.
+  - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 36}(검사 수가 아닌 check 집계, 외부 check 포함).
+  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
+  - 기준 HEAD / PR / 선행 의존성: `98886c09a4eb00bbf035f2e4fdb48d00a4c9f2d1` / #158 / main; 관측 base `5f114ea4e90d741bb8bbccaadfa4725d20df88ff`.
+  - 남은 구체적인 작업: 자동 의존성 갱신 별도 우선순위; 현재 lockfile/런타임 호환부터 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: Vue 연결의 필수 선행 아님.
+  - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] build(deps): Bump thiserror from 2.0.20 to 2.0.21 in the rust-minor-patch group across 1 directory — [#157](https://github.com/AISFlow/fvoci/pull/157)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): Bump thiserror from 2.0.20 to 2.0.21 in the rust-minor-patch group across 1 directory; 해당 의존성 manifest/lock·실제 소비자.
+  - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
+  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
+  - 기준 HEAD / PR / 선행 의존성: `ece789f0ed5cf5d67aba93ad725fb55a173dc94b` / #157 / main; 관측 base `c5e7a9e906f2579a953caf6712fcb3df1008e499`.
+  - 남은 구체적인 작업: 자동 의존성 갱신 별도 우선순위; 현재 lockfile/런타임 호환부터 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: Vue 연결의 필수 선행 아님.
+  - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] build(deps): bump qrcode-generator from 1.4.4 to 2.0.4 in /apps/web — [#156](https://github.com/AISFlow/fvoci/pull/156)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: QR2.0.4 API·MFA 설정 화면·완전한 MIT notice와 browser licenses.
+  - 현재 단계: 763f692e fixed 갱신/QR·notice delta 독립 PASS 후 push; 실제 MFA/license browser·원격 CI/main 수락 대기
+  - 담당 Sol 6.1 워커: 갱신 구현 Sol6.1/high; 독립 task_536dbf95fbb7/ctx_6e5378b01ff1 Sol6.1/medium 완료; 추가 browser 담당 Astra 배정
+  - 기준 HEAD / PR / 선행 의존성: `763f692e67de4a638d7bb2d72afa8febfbb914bf` / #156 / main `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 최신 HEAD 실제 MFA 설정/TOTP/recovery 및 public license browser 검사·원격 CI 수락; API/geometry·완전 MIT supplement 고정 검토를 browser 성공으로 표시하지 않음
+  - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: Vue 연결의 필수 선행 아님.
+  - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `a193311f3a29c0e61d398f434f3d63f78b618a59` / #156 / main; 관측 base `73cc54bac5c978d48018a4d9847fd5415d860b20`. 당시 단계·check snapshot: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 21, 'FAILURE': 15}(검사 수가 아닌 check 집계, 외부 check 포함).
+
+- [ ] build(deps): Bump the services-minor-patch group across 1 directory with 2 updates — [#155](https://github.com/AISFlow/fvoci/pull/155)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): Bump the services-minor-patch group across 1 directory with 2 updates; 해당 의존성 manifest/lock·실제 소비자.
+  - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 40, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
+  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
+  - 기준 HEAD / PR / 선행 의존성: `87185d93092ec99edf7ac9d54e0f68b4bf5d83ec` / #155 / main; 관측 base `c5e7a9e906f2579a953caf6712fcb3df1008e499`.
+  - 남은 구체적인 작업: 자동 의존성 갱신 별도 우선순위; 현재 lockfile/런타임 호환부터 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: Vue 연결의 필수 선행 아님.
+  - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] build(deps): Bump debian from `8820086` to `3783cc0` in /infra/rust — [#153](https://github.com/AISFlow/fvoci/pull/153)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): Bump debian from `8820086` to `3783cc0` in /infra/rust; 해당 의존성 manifest/lock·실제 소비자.
+  - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 40, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
+  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
+  - 기준 HEAD / PR / 선행 의존성: `b00c059f63a818921a2c39252966fd2835d19716` / #153 / main; 관측 base `c5e7a9e906f2579a953caf6712fcb3df1008e499`.
+  - 남은 구체적인 작업: 자동 의존성 갱신 별도 우선순위; 현재 lockfile/런타임 호환부터 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: Vue 연결의 필수 선행 아님.
+  - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+- [ ] build(deps): Bump actions/checkout from 4.4.0 to 7.0.1 — [#152](https://github.com/AISFlow/fvoci/pull/152)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): Bump actions/checkout from 4.4.0 to 7.0.1; 해당 의존성 manifest/lock·실제 소비자.
+  - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 40, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
+  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
+  - 기준 HEAD / PR / 선행 의존성: `126b1263053523563e5b7121490fde046c4906b1` / #152 / main; 관측 base `c5e7a9e906f2579a953caf6712fcb3df1008e499`.
+  - 남은 구체적인 작업: 자동 의존성 갱신 별도 우선순위; 현재 lockfile/런타임 호환부터 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
+  - 출시 차단: Vue 연결의 필수 선행 아님.
+  - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+
+#### 열린 이슈 인수
+
+- [ ] #261: Vue 누락 컨트롤·셸·drop/paste. #265/#267 main 수락 뒤 잔여 검증 중이며 0.4.0 출시 차단. 실제 입력·첨부 E2E 후 종료한다.
+  - 요청 근거 / 실제 라우트·범위: 기존 Vue 컨트롤·셸·drop/paste 누락 및 0.4.0 차단 요청; 위키 편집/공통 셸 actual URL·native 입력/첨부.
+  - 현재 단계 / 담당 Sol 6.1 워커: 부분 해결: #265/#267 main 수락; 이슈 전체 미종결; 후속 담당 미배정, Astra가 소유권 지정.
+  - 기준 HEAD/PR / 남은 구체적인 작업: main50d95df1; #265 93425dad/#267 fa7dac74; 최종 잔여 scope 대조·입력/첨부 실제 E2E와 기능별 제거 확인 후 종료.
+  - 수락 검사 / 차단·선행 의존성: 독립 검토·실제 Rust/DB/peer/저장·브라우저·CI; 전체 기능군 완료와 구분; 기존 흐름 종결 우선; 0.4.0 출시 차단 유지.
+  - 기존 React 제거 조건 / 배포: 이 흐름의 Vue 계약·실제 검증·검토·main 수락 뒤 전용 경로 제거; 새 수정 배포 없음, v0.3.0 기록 보존.
+
+- [ ] #259: 인라인 수식 원격 변경 중 로컬 초안 손실. 제품 결함·출시 차단, #265 기반 수락 후 기존 재현부터 이어간다.
+  - 요청 근거 / 실제 라우트·범위: 원격 변경 중 인라인 수식 로컬 초안 손실 결함 요청; Vue/Tiptap 수식 편집의 remote update와 로컬 초안 보존.
+  - 현재 단계 / 담당 Sol 6.1 워커: 제품 결함·미수락; 후속 담당 미배정, Astra가 소유권 지정.
+  - 기준 HEAD/PR / 남은 구체적인 작업: 수락 #265/main50d95df1; 새 수정 HEAD/PR 미생성; 기존 재현과 negative control부터 이어 최소 수정·별도 회귀/검토/CI/main 수락.
+  - 수락 검사 / 차단·선행 의존성: 실제 peer 원격 변경·초안/저장/재조회·취소·최신 fixed HEAD 독립 검토; 제품 결함·출시 차단; #265 기반 수락 완료.
+  - 기존 React 제거 조건 / 배포: 이 흐름의 Vue 계약·실제 검증·검토·main 수락 뒤 전용 경로 제거; 새 수정 배포 없음, v0.3.0 기록 보존.
+
+- [ ] #260: 한글 조합 중 500ms 초과 정지 시 undo 분리. 저장 손실과 구분되는 제품 입력 결함; 별도 회귀와 수정을 배정한다.
+  - 요청 근거 / 실제 라우트·범위: 한글 조합 중 500ms 초과 정지 때 undo 분리 결함 요청; Vue/Tiptap 실제 한글 조합·undo grouping; 저장 손실과 구분.
+  - 현재 단계 / 담당 Sol 6.1 워커: 제품 입력 결함·미수락; 후속 담당 미배정, Astra가 소유권 지정.
+  - 기준 HEAD/PR / 남은 구체적인 작업: main50d95df1; 새 수정 HEAD/PR 미생성; 기존 재현 보존·독립 회귀/최소 수정 배정·실제 입력 검증 후 수락.
+  - 수락 검사 / 차단·선행 의존성: native IME/정지/undo·협업/저장 구분·negative control·별도 Sol 검토/CI; 현재 차수의 입력 검증과 구분하며 무조건 skip/retry로 해결하지 않음.
+  - 기존 React 제거 조건 / 배포: 이 흐름의 Vue 계약·실제 검증·검토·main 수락 뒤 전용 경로 제거; 새 수정 배포 없음, v0.3.0 기록 보존.
+
+- [ ] #149: A/B 모두 사용자 승인, #254 구현 수락. 추가 정책 승인을 기다리지 않는다. 실제 외부 S3/다른 브라우저 검증 F와 오래된 이슈 기록 정정이 남았다.
+  - 요청 근거 / 실제 라우트·범위: 사용자 A/B 전송 승인 및 #254 후속 외부 검증 요청; 실제 외부 S3·다른 브라우저·프록시의 첨부 A/B 전송.
+  - 현재 단계 / 담당 Sol 6.1 워커: A/B 승인·#254 구현 수락; 외부 검증 F 잔여; 후속 담당 미배정, Astra가 소유권 지정.
+  - 기준 HEAD/PR / 남은 구체적인 작업: 기존 #254 수락 근거·§5; 새 수정 HEAD/PR 미생성; 추가 정책 승인을 기다리지 않고 외부 제공자/브라우저/프록시 실제 검증 F와 오래된 이슈 기록 정정.
+  - 수락 검사 / 차단·선행 의존성: 실제 업로드/재개/다운로드·인가·데이터 보존·A/B 비용/기록; 최종 Sol 검토; 외부 제공자·브라우저 검증 자원 필요; 기본 정책을 새로 승인하지 않음.
+  - 기존 React 제거 조건 / 배포: 이 흐름의 Vue 계약·실제 검증·검토·main 수락 뒤 전용 경로 제거; 새 수정 배포 없음, v0.3.0 기록 보존.
+
+#### 로컬 WIP·기존 후속 인수
+
+- [ ] Gantt contract19경로·identity34경로 tracked WIP: 원본 유지·별도 binary patch 보존. 공통 OpenAPI·인가 경로가 겹치므로 현재 새 작성자 없음.
+  - 요청 근거 / 실제 범위 / 단계: 기존 세션 WIP·데이터 계약 보존 지시; Gantt19/identity34 경로의 계약·인가 수정, 미검증 WIP.
+  - Sol 담당 / fixed HEAD·PR / 다음 작업: Astra 소유·작성자 미배정; recovery patch와 §6.4 원래 SHA를 고정하고 필요 흐름에만 배정. 새 PR/HEAD 미생성, 원본 패치·미커밋 보존.
+  - 수락 검사 / 의존성 / 구 코드 제거 조건 / 배포: 공통 OpenAPI·인가 소유권 조정 후 실제 계약·DB/권한·별도 검토/CI; 회수만으로 수락·삭제하지 않음, 신규 배포 없음.
+- [ ] digest `a83c38a3`, import admission `8f418b2f`, search/streams `aa3cd449`, collab structure `9070bbfd`, Dependabot `11b203b0`: 회수 패치의 main 적용 검사만 통과. 제품 검증/수락 아님. Vue 연결 선행으로 삼지 않는다.
+  - 요청 근거 / 실제 범위 / 단계: 기존 사용자 후속·커밋 보존 지시; 위 고정 SHA의 digest/import/search/collab/의존성 범위, 제품 미수락.
+  - Sol 담당 / HEAD·PR / 다음 작업: Astra 소유·후속 미배정; 위 HEAD와 recovery mapping 보존, 필요한 기능별 실제 diff/의존성부터 확인하고 기존 항목에 배정.
+  - 수락 검사 / 의존성 / 구 코드 제거 조건 / 배포: 실제 Rust/API/DB 및 해당 브라우저·독립 검토/CI; main 적용 가능 여부는 제품 성공이 아님. fixture/원본·구 경로를 수락 전에 폐기하지 않음, 신규 배포 없음.
+- [x] i18n `1172a73a`는 #165 `7f3e2477`로 대체됨을 확인. 제품 코드 동일·테스트 메시지2곳만 차이; 재구현하지 않음.
+- [x] 미사용 worktree9개 정리, 71→62. 브랜치/HEAD·bundle·WIP·유일 로그 보존. 상세 §6.4와 recovery result.json.
+- [ ] 기존 §5/§6.1 후속(메일 전달 영속화, digest 한계, SSE 비용, xmin, 외부 IdP/S3/플랫폼, upgrade 검증 등)은 Astra가 계속 소유하며 기능별 필요 시 배정한다. 새 기능·정책 변경으로 확대하지 않는다.
+  - 요청 근거 / 실제 범위 / 단계: 현재 세션의 모든 기존 요청 종결; §5/§6.1에 기록한 미구현·부분 검증/외부 계약 범위 유지, 전체 미완료.
+  - Sol 담당 / fixed HEAD·PR / 다음 작업: Astra 최종 소유·필요 기능별 Sol 배정; 해당 기존 항목의 fixed SHA/PR/근거 유지, 선행이 준비된 후 실제 잔여 작업을 이어감.
+  - 수락 검사 / 의존성 / 구 코드 제거 조건 / 배포: 기능별 실제 외부 시스템·보안/데이터/복구·플랫폼 및 독립 검토/CI; 새 정책/기능은 자동 승인하지 않음. 대체 경로 수락 뒤 제거, 최신 v0.3.0과 후속0.x 증거 구분.
+- [ ] 전체 합의 흐름의 Vue 로컬 수락 뒤 React 공통 부팅·router·adapter·의존성·빌드·lockfile 제거를 같은 PR272에 누적. production module graph와 실제 브라우저 직접진입/redirect/WASM까지 검증하고 최종 통합 main 수락한다.
+  - 요청 근거 / 실제 범위: 전체 Vue 전환 종결·대체 React/임시 포팅 기반 제거 지시; 공통 boot/router/adapter·package/lock/build와 잔여 runtime 위임. #266 fixture/probe 정리와 구분한다.
+  - 현재 단계 / 담당 Sol 6.1 워커 / 기준 HEAD·PR: 흐름별 대체 중, 공통 제거 미착수; Astra 최종 소유, Sol 단독 작성자 추후 배정; main50d95df1/§6.3 기존 PR 대응표, 새 제거 PR 미생성.
+  - 다음 작업 / 차단·의존성 / 구 코드 제거 조건: 기존 Vue 후보 actual URL→Rust/DB→production browser→별도 고정 검토의 흐름별 로컬 수락 뒤 전용 React 제거; 전체 흐름·누락 project settings·catch-all/encoded redirect를 검증한 뒤 공통 제거까지 PR272에 누적해 최종 CI/독립 검토/main 수락. 데이터·보안·기능·라이선스와 fixture는 보존한다.
+  - 수락 검사 / 배포: production module graph·직접진입/redirect/WASM·전체 영향 검사·독립 검토/CI; 서버 제품 경로는 Node/Bun/Deno/내장 JS 엔진 없는 실제 최종 환경 검증도 필요. 삭제/배포 완료 아님, 승인된 후속0.x 증거까지 추적.
+
+최초 인수 당시 쓰기 소유권(현재 소유권은 위 항목의 task/dispatch): `fix-wiki-ime-expected-fail`의 caret/helper 회귀는 ci287, `r11-vue-auth`의 인증 이동 경합은 auth_acceptance,
+`docs-0-3-0-record`의 AGENTS/environment/rewrite는 Astra. review287_setup은 별도 읽기 전용 컨텍스트이며 제품 변경 권한이 없다.
+당시 무거운 로컬 E2E는 ci287에 먼저 배정했고 auth는 빠른 검사를 진행한다. 소유권 겹침이나 실행 자원 변경은 먼저 조정한다.
+
+
+#### 인수 실행 결과 갱신 (2026-09-30, 첫 Sol6.1 검증 차수)
+
+- #287: `15ed8e0b1634cb410367aca4f9dcb211103efd4a`로 일반 push. 이전 실패의 원인은 끝 텍스트 위치를
+  요구하면서 Control+End로 뒤 빈 table까지 이동한 검사 helper였다. 실제 클릭+한 번의 방향키로 같은 glyph의 반대쪽만
+  보정하고 정확한 caret·table·저장/재조회 단언을 유지한다. 원본 실패 [4,4]≠[28,28] 재현 후 수정 suite36통과·기존
+  OSIME 조건부12skip(통과로 세지 않음). build·fixture typecheck 통과. 독립 Sol6.1 high delta ACCEPT.
+  원격 Web `36643827183` 등 5 workflow 진행 중; 아직 머지 아님.
+- #269: helper `b38667d3` 및 #287을 충돌 없이 합친 `f29b8b8422f69a84fd27fdf4787895682c201ac6`로 push.
+  로그아웃 URL만 보고 Vue 문서 로드 전 다음 동작을 시작한 경합을 실제 로그인 폼 준비 확인으로 수정.
+  실제 Rust/DB E2E19통과(workspace+wiki14,notifications1,login3,MFA1), frontend550·typecheck·build 통과.
+  helper 독립 검토는 ACCEPT이나 전체 login 검토에서 setup 실패+me 성공 시 오류가 spinner에 가려지는 결함 발견.
+  이 결함 해결 전 전체 후보 수락 불가. 현재 Web `36643829243` 등 새 후보 CI와 구분한다.
+- #270: 원래 후보 `b601ef64` 독립 Sol6.1 검토 ACCEPT. auth 최신을 충돌 없이 합친 `31bf3a9926084f595fb41fa2d75f9d52a0daa004`
+  로컬 후보에서 setup_integrate(Sol6.1 medium)가 setup/실제 production workspace delta 검증 중; 아직 push 안 함.
+- #271: invite_connect(Sol6.1 high)가 기존 초대 페이지를 `/invite/:token`으로 연결하고 실제 E2E·전용 React 제거를 수행 중.
+  own tree의 app-boundary/router/App.tsx invite stanza/oidc invite assertion을 포함해 소유권 부여. 다른 라우트는 넘기지 않는다.
+- Claude 기록 회수: `/home/kinesis/orca/fvoci-evidence/recovery-20260930/takeover-evidence/fvoci-claude-evidence-index.txt`.
+  고정 SHA 검토/테스트 요약을 별도 보존했고 원본은 그대로다. #265/#267/#269의 최종 ACCEPT 주장 일부는 tracker에만
+  남아 원본 verdict 미발견이며 유효 원본을 찾거나 해당 미검토 delta를 확인해야 한다. 한도 종료·undefined HEAD 검토는 인정하지 않는다.
+- 구현/검토 상세: 같은 takeover-evidence의 ci287/auth 보고서, 독립287/270 보고서. native agent ID는 `/root/ci287`,
+  `/root/auth_acceptance`, `/root/review287_setup`, `/root/review_ci_auth_delta`; 각 실제 모델/effort는 보고서와 환경 기록.
+
+
+#### 인수 실행 결과 갱신 (2026-09-30, 수락 후보 고정)
+
+- #287 `15ed8e0b`: 원격 Web36643827183, Native documents36643827195, Native collaboration36643827187 성공.
+  Container36643827184 설치·복구 양 아키텍처 성공; upgrade-smoke-arm64는 기존 계획상 skip이며 성공 검사로 세지 않는다.
+  Rust36643827185의 실제 DB/협업 검사 성공, 최종 gate 대기. 아직 main 통합 아님.
+- #269 `3fdd194b08bc71ad2ad1268bf68a0c21e6e5b557`: setup 오류를 spinner보다 먼저 표시해 F1 수정.
+  기존 제품에서 새 회귀 실패를 확인한 뒤 실제 production 로그인5/5 통과. 별도 Sol6.1 high가 전체 login ACCEPT,
+  이전 F1 요청은 과거 SHA에만 해당. 최신 후보 push 후 CI 진행. f29b8b8의 5개 CI는 이 결함 발견 후 코디네이터가
+  취소했으며 성공으로 세지 않는다. `/tmp/fvoci-auth-guard-sol61.txt`, `/tmp/fvoci-delta-review-sol61.txt`.
+- #270 `ef7d2b1f9cf7b74350f493c4252f547ad0bfe693`: 원래 setup ACCEPT와 31bf3a99의 unit19/실제workspace7+login3
+  성공 근거 유지. 최신 auth 수정 병합은 제품·회귀의 동일 delta임을 독립 검토했으며 push 후 최신 CI 진행.
+- #271 `271fb507edc30090aa9a78887c4e27f97242931d`: 실제 `/invite/:token` Vue 연결과 전용 React 페이지·폼 제거.
+  기존 47f61214 구현 독립 검토 ACCEPT. 최종 auth 병합 후 실제 Rust/DB invite3(가입·기존계정·약관/MFA),
+  기존 MFA1, 관련 unit40 및 production build 통과. 기존 TOTP helper의 변경 없는 추출과 추가 회귀는
+  별도 `review_invite_final` Sol6.1 high 검토 중. 외부 IdP callback은 이 후보에서 미실행. 아직 push/수락 아님.
+- #267 `a446a7c3e4a5aef19e591b4d7eefce9b9eb70e7c`: 셸 코드 독립 ACCEPT_WITH_NITS, #287 병합 mapping 확인,
+  push 후 해당 후보 원격 CI 진행. 옛 79fa166e 실제 셸6/위키7/간트10은 원래 SHA 근거로만 보존.
+- #265: `wiki_controls_complete` Sol6.1 high가 `042cdc25`에서 실제 파일 drop/paste와 native drag를 검증 중.
+  기존 controls6 통과; 새 native drag에서 dragstart가 발생하지 않는 경로를 조사 중이며 미수락. #261은 계속 열림.
+- #149 이슈를 현재 승인 상태로 정정했다. A/B는 이미 승인·#254 수락이며 외부 제공자/브라우저/프록시 검증만 잔여.
+- #280 `62e40fc5`: 현재 차수를 #265/#267/#269/#270/#271 + #287로 고정하고 비교를 불가능한 결함 조건으로
+  제한하지 않는 사용자 지시 반영. 별도 Sol6.1 검토 중, 아직 push 안 함.
+- 현재 작성자: 위키 컨트롤 tree는 wiki_controls_complete; 초대 tree는 구현 완료 후 검토 고정;
+  공통 기록 docs-0-3-0-record는 Astra. 나머지 기존 작성자는 체크포인트를 반환했으며 같은 파일 중복 쓰기 없음.
+  최신 모델/effort 대응표는 기존 recovery의 takeover-evidence/runtime-map.json에 실제 session_meta 기준으로 보존.
+
+- #287 최종 수락: 위 다섯 workflow gate 모두 성공 후 기대 HEAD15ed8e0b를 지정해 merge.
+  main `a1d19b6e03c13ce94c642129b9cc5bc573be3764`, 로컬 main도 clean fast-forward 완료.
+  merge SHA의 원격 CI36645650952/36645651166/36645651179/36645651109/36645651163 진행 중.
+  배포는 여전히 v0.3.0이며 이 변경이 배포됐다고 표시하지 않는다. 최종 check snapshot은 takeover-evidence/ci-287/final-checks.json.
+- #280 정책 모순 한 곳의 추가 지적을 `769b39b323e054bbe488721b381f428197f7f2ab`에서 수정했고
+  별도 Sol6.1 delta ACCEPT 후 push. 최신 CI 대기; 기존62e40fc5 REQUEST_CHANGES는 과거 근거로 보존.
+- 보관 문서의 직접 upload201 재현은 서버 계약 조사 대상으로 분리했다. 새 worktree archived-attachment-guard
+  (base a1d19b6e)의 Sol6.1 high가 원본/현재 계약과 실제 DB를 대조한다. 화면 읽기 전용만으로 새 정책을 추론하지 않는다.
+  해당 tree만 추가되어 현재 worktree63개; 기존 정리9개와 보존 근거는 유지.
+
+- #271 최종 nit 정리 `9d8ac2e2d4c1bfd7303c86b6e23a8037f37a7e7b`: TOTP helper EOF 빈 줄1개 제거만 추가.
+  271fb507 독립 최종 delta ACCEPT(보고서 `/tmp/fvoci-invite-final-review-sol61.txt`), push 후 CI 시작.
+- #267 현재 후보 Web36644692476의 vue-shell-flow 알림 이동 검사에서 timeout. 2통과/1실패/3미실행이며
+  기존 옛 SHA6통과로 대체하지 않는다. `shell_ci_recovery` Sol6.1 high가 같은 tree에서 원인 재현·수정을 소유한다.
+- 보관 문서 upload 조사 결론: 원본3937952의 attachment/create·문서 본문·revision은 문서 status archived를
+  막지 않는다. Rust collab의 별도 읽기 전용과 REST 허용은 현재 서로 다른 계약이므로 직접201만으로 결함 확정 불가.
+  새409 정책을 추가하지 않고 Vue 읽기 전용/native drop 차단 검증을 유지한다. archived_attachment_guard는 제품 수정 없음.
+
+- #271 `9d8ac2e2` 최종 whitespace delta도 별도 Sol6.1 ACCEPT, 전체 diff 검사 통과. 추가 런타임 재실행 없음.
+- archive 조사 tree는 제품/WIP 없음·소유 shell 외 프로세스 없음 확인 후 Orca 비강제 정리.
+  브랜치 a1d19b6e와 조사 보고서 takeover-evidence/fvoci-archived-attachment-sol61.txt 보존, worktree 수62개로 복귀.
+
+- #265 `93425dad` 최종 독립 ACCEPT_WITH_NITS, 실제 별도 group controls6/native inputs3 및 unit11/build 통과.
+  #267 `fa7dac74` 모바일 알림 패널 수정 독립 ACCEPT, 실제 shell6 통과. 두 최신 후보 push 후 CI 진행.
+- #269 후속 `f6fbb8df`는 native caret의 이전 관측이 늦게 도착한 검사 경합을 수정한다. 원래 helper에서
+  시작/끝 회귀 모두 실패, 수정 후 실제 pending40통과/기존OSIME12skip/0실패. 독립 delta 검토와 최신 원격 CI 별도.
+  작성 중 range 회귀의 즉시 관측 실패는 정확한 native 상태 poll로 수정했고 실패 근거를 보존했다.
+- #287 수락 worktree도 clean·무실행 확인 후 비강제 정리했다. Orca rm이 지운 local ref는 즉시 같은15ed8e0b로
+  복원 검증했으며 원격 branch는 그대로다. 조사 전용 archived-attachment-guard ref도 a1d19b6e로 복원했다.
+  현재 worktree61개; unique 증거·미커밋 WIP는 보존. takeover-evidence/ci-287/worktree-cleanup.json.
+- 새 후보 실행이 이미 등록된 본 세션의 구 SHA CI5개만 취소했다(문서a52dce8f/769b39b3, 인증3fdd194b).
+  원래 실패를 성공으로 계산하지 않는다. 실행 ID·대체 실행은 takeover-evidence/obsolete-own-ci-cancellations.json.
+
+- 현재 #269 f6fbb8df caret delta 독립 ACCEPT. #270 `4b7f9578`, #271 `f2623c4d`에 같은 두 검사 파일만
+  병합했고 동일 blob/부모 관계를 별도 검토했다. 두 제품 흐름의 기존 검증 SHA는 그대로 보존, 최신 원격 CI 진행.
+- CI 범위 조사(제품/CI 수정 없음): E2E 경로는 FULL_PATH_BROADEN, 일부 오래된 문서 PR은 event base와
+  실제 merge checkout 차이 때문에 FULL_PR_MERGE_PARENTS_MISMATCH로 전체 검사를 선택한다. main push는
+  FULL_EVENT_PUSH. runner 미배정 대기는 관측했으나 장애/quota 원인은 미확정. 필요한 검사는 유지한다.
+  근거 takeover-evidence/fvoci-ci-queue-scope-sol61.txt.
+- 다음 차수 기존 WIP #272: home_public_connect(Sol6.1 high)가 clean `c9b59494` tree를 인수했다.
+  `/`, 공개 `/legal/:kind`, `/service-info` 실제 연결·검증·전용 React 제거를 로컬 준비하며 원격 CI는 추가하지 않는다.
+  현재 비교 기준 차수 #265/#267/#269/#270/#271+#287에 #272를 추가하지 않는다.
+
+- 사용자 후속 지시: CI 트리거/검사 범위를 더 좁히도록 승인. 이전 읽기 전용 조사 당시의 정책 유지 판단 뒤
+  새 지시를 적용한다. ci_impact_implement(Sol6.1 high)가 별도 ci-impact-scope(base a1d19b6e)를 소유하고
+  변경 영향별 분류·안전한 merge provenance·조건별 회귀를 구현한다. 필수 gate/보호 조건·결제/runner 설정은 유지.
+  CI 자체 변경 후보는 독립 검토와 필요한 전체 검증 후 수락하며 현재 실패를 skip으로 덮어쓰지 않는다.
+- 현재 #271 통합: auth_stack_integrate가 setup4b7f9578과 invitef2623c4d 사이의 실제6파일 충돌을 해결했다.
+  로컬 `54bcc682f50eb5b4457e479021603669ab781258` 검증·별도 review_invite_final 검토 진행.
+  두 Vue route/test와 React 제거를 모두 보존하며 실제 logout readiness 경합의 테스트 수정을 포함한다.
+- #272 독립 full-PR ACCEPT0676c812 뒤 설명 주석만 `ea9400f7`에서 정정. 로컬 보존, 원격 미제출.
+
+- 사용자 후속 지시: CI 최적화·리팩터링 수락 후 대기 중인 프론트엔드 PR 전체에 최신 CI를 반영하고 다시 push한다. WIP와 stacked 의존 순서를 보존하며, 충돌 해결 delta는 필요한 독립 검토를 거치고 새 HEAD의 실제 CI를 확인한다. 그 전에는 일괄 갱신으로 기존 큐를 늘리지 않는다.
+
+- 사용자 지시로 이후 워커는 Orca 터미널의 Sol 6.1로 전환하며 고정 워커 수 상한 대신 자원·소유권·수락 처리량을 따른다. 내장 워커는 체크포인트 회수 완료. Orca supervised 시작은 agent_readiness timeout으로 작업 전달 전 실패했고 해당 터미널은 공식 worker-release로 정리했다. 실제 후속 실행은 Orca terminal create의 codex exec이며 정리 조사 term_88880254-1f1d-4a82-b182-6145c86958b2, 홈 통합 term_ada09f43-3535-48b5-ac8d-d9fb1ed9a3c8. 이 실행들은 supervised dispatch 성공으로 기록하지 않는다.
+- CI 선택 최적화 #288 `de913cd8` push/PR 생성 완료: 로컬133검사 및 별도 Sol6.1 ACCEPT, 원격 전체 CI 대기. 워크트리 정리는 사용자 요청으로 read-only 보존 대조 진행 중이며 삭제 전 후보별 재확인한다.
+
+- 전체 접근 복구 후 종료 작업 worktree8개를 공식 Orca rm(비강제)로 정리: ops-followups-043, postgres-supported-versions, postgres-supported-versions-review, postgres-uuid-compat, rust-backup-no-python, rust-import-recovery, rust-license-policy, rust-task-origin-ui. main 포함 커밋·clean 상태·빈 셸 및 자식 프로세스 없음 확인 후 셸 종료; 로컬 branch/upstream 및 recovery refs 보존 확인. worktree62→54. 증거: recovery-20260930/cleanup-orca-20260930/results.json. WIP·열린 PR·prebuilt 보존.
+- 홈 통합 로컬21ad5327: 부모ea9400f7+54bcc682 보존, 단위110/build 통과. Orca 별도 독립검토와 실제Rust/DB6그룹21검사 배정; 아직 결과 미수락.
+- #265 최종93425dad 독립 ACCEPT_WITH_NITS 및 원격5게이트 SUCCESS 후 expected head로 merge. main `5d5171a7d07f04fd8ef665617464a6ac8fe194a4`의 tree가 수락 후보와 동일함 확인, clean main fast-forward. main 후속 CI/배포 별도 대기. #269 f6fbb8df Web shard6 실패는 Orca read-only 조사에 배정, 무조건 재실행하지 않음.
+- Orca 사용자 표시 문제 확인: CLI runtime connected이나 desktop_activation_blocked, persistent terminal provider unavailable로 headless 상태. 워커 실제 실행과 화면 연결은 별개. 앱 정상 종료/재시작 필요 안내; 워커 결과·로그 회수 후 수행. 현 홈21ad5327 브라우저6그룹21pass 로그는 durable checkpoint에 보존, 최종 검토/정리 보고서 수령 전.
+
+- 홈21ad5327: 별도 Orca Sol6.1/high 고정 merge 독립 ACCEPT(경계/라우터18검사)와 실제 production Rust/PG/Meili 6그룹21pass/0fail/0skip 수령. 단위110/build 및 부모 구현 검토 재사용; 새 HEAD 브라우저 증거를 별도 보존. 로컬 수락 후보, PR272 원격 갱신은 CI288 수락 후 계획에 유지.
+- 인증269 실패 원인: 테스트 setup 완료가 원래 `/` URL만 보고 반환해 Vue login의 늦은 home redirect와 위키 goto가 경합. 실제 me200/document201, 네트워크변동0. shell CSS 문제 아님. `/tmp/fvoci-auth-ci-shard6-orca-sol61.txt` 및 durable artifact 보존. 다음 Sol 수정은 setup helper의 실제 authenticated-home 준비 완료 보장과 관련 회귀; timeout/skip/retry 우회 금지.
+- Orca 재시작 체크포인트: 본 세션이 띄운 직접 실행 워커5개 모두 최종 결과·세션 근거·로그 회수 후 종료된 셸만 close. 현재 이 파동의 활성 워커 없음. 기존 타 세션/앱/DB는 종료하지 않음. 화면 연결 복구를 위한 앱 정상 종료/재시작은 사용자 수행 필요; CLI open이 desktop_activation_blocked를 반환했다.
+
+- #267 fa7dac74 후보5게이트 SUCCESS와 독립 ACCEPT 후 expected-head merge. main f18f2b2b; controls 수락 main5d5171a7과 공통 merge-base 이후 변경 경로 겹침0, 예상 merge tree5ba62cfd와 실제 main tree 일치. 통합 후 셸/컨트롤 상호작용 검증은 후속 CI/브라우저로 별도 확인하며 배포 완료로 표시하지 않는다.
+
+- 사용자 요청으로 Orca 정상 재시작 전 정리 완료. 본 파동 워커5개와 생성 실패 워커2개 종료/회수, 생성 시 빈 셸1개도 자식 없음 확인 후 종료. root 코디네이터 터미널·기존 타 세션·앱/DB는 임의 종료하지 않음. 원격 CI는 취소하지 않았으며 계속 실행. 다음 시작: Orca 새 runtime/desktop 상태 확인 → 터미널 실제 표시·Sol6.1 모델/effort 확인 → auth269 setup 완료 경합 수정 워커 → docs 로컬246cc3ff 이후 delta 검토 → CI288 수락 후 frontend 갱신. main f18f2b2b, 홈 로컬21ad5327(독립 ACCEPT/실제21pass), CI288 de913cd8. 전체 종료/React 제거/배포 완료 아님.
+
+- Orca 복구 후 run496803f4d94f에서 visible Sol6.1/high 워커 재개: auth 수정 ctx8ecf949c8a08(무거운 브라우저 단독 소유), frontend 갱신 A ctxa3b86c32d2d6(273/274→279/283,275/277/281), B ctxf15669a41d93(276→282→285→286,284). 모든 이전 파동 워커 종료 확인 뒤 배정. 기존 WIP 유지, 원격 쓰기는 코디네이터만.
+- CI288 de913cd8 독립 ACCEPT와 후보5게이트 SUCCESS 후 main50d95df1a98c2d88d28f09222c2985fbdb585623에 수락. mainf18과 변경 경로 겹침0, 예상/실제 merge tree4cdd0bbe 일치, clean main fast-forward. 이제 대기 frontend PR의 동일 고정 기반 갱신을 진행한다. main 후속 CI/배포 별도. 265/267은 이미 수락되어 갱신 대상에서 완료 처리.
+  - 요청 근거 / 실제 범위: 현재 세션의 CI 영향 선택 최적화·수락 후 전체 대기 frontend PR 갱신 지시; CI selector·workflow gate와 실제 event merge provenance.
+  - 현재 단계 / Sol 담당 / fixed HEAD·PR: #288 `de913cd8f7b4960f575f41636bbc1562f6bf3ecb` 독립 ACCEPT·main 수락; ci_impact_implement 구현/별도 검토 이력 보존, Astra 통합 소유. 현재 main50d95df1의 5게이트도 SUCCESS.
+  - 다음 작업 / 수락 검사 / 차단·의존성: 기존 갱신 A/B 제출 완료, #269 최종 수정→#270/#271/#272/#278 갱신은 대기; 각 새 fixed HEAD의 실제 merge/base/head CI·독립 delta 검토·제품 URL/DB/browser 수락 확인. CI288 수락은 Vue 흐름 수락이 아니다.
+  - 구 코드 제거 조건 / 배포: React 제거 선행 조건은 각 기능 수락과 전체 대응표; 신규 배포 없음, v0.3.0 및 승인된 후속0.x 조건 유지.
+
+
+- 2026-09-30 11:44 KST 후속 체크포인트(앞의 시각별 상태를 대체하지 않고 이후 진행을 연결): 사용자 요청으로 CI 병목을 줄이도록 중간 브랜치별 push를 중단하고, 실제 연결·로컬 검사·독립 검토가 끝난 사용자 흐름별 최종 후보를 제출한다. 기존 WIP·브랜치·검토 이력은 보존한다.
+  - #269/#270/#271은 커밋·고정 검토 근거를 포함한 #272로 대체하여 closed 처리했다. #272는 main 기준 `d158e971acef9e892f64e3311500f9a2c3a3ccd4`로 실제 push했고 CI 대기다. 로그인·setup·초대·홈·공개 약관·서비스 정보의 연결 후보이며, 단계는 검토·CI이고 main 수락/배포 완료가 아니다. 네 로컬 후보 build·215 unit 및 선택13 실제 Chromium 검사를 각 SHA별로 보존한다. 별도 Sol6.1/high `task_e57c6f34d931`은 최종 merge·호출자·실행 근거를 ACCEPT했다. 아직 staged인 #278 `7e4711f2`는 포함하지 않는다.
+  - 제출 과정에서 닫힌 PR base 변경이 GitHub HTTP422로 거부됐다(제목·본문은 부분 반영). 다시 열어 base main으로 바꾼 뒤 최종 HEAD를 일반 push했다. 직후 REST의 오래된 head 때문에 검증 assertion이 실패했으나 후속 조회로 정확한 새 head/base/open 상태를 확인했고 재push하지 않았다. 옛 head 재개 실행도 발생했으므로 단일 CI event만 발생했다고 주장하지 않는다. 다음에는 base를 먼저 정리하고 최종 후보만 push한다.
+  - #275 `56f3484403ea79e39006b3b4c7d539196728d3f2`: 인증·공개 첨부 viewer URL 연결, 전용 React 페이지 제거, HWP 초안 이탈 보호를 구현했다. own production build·184 unit·실제 Rust/DB browser7그룹 통과, 별도 `task_434d37dc2562` ACCEPT. 원격은 아직7818이며 후보는 로컬 보존; #272와 별도 제출한다. 현재 main/배포에 포함됐다는 뜻은 아니다.
+  - 실제 CI 조사 `task_a814a363a479`: 시각별 paginated snapshot에서 queued run45/in-progress run5가 실제 queued job124/running job20에 대응했다. 고정 runner 상한으로 해석하지 않는다. 프로젝트 #276/#282/#285/#286 설치16개 product job의 실패는 `TaskSavedViews.vue` inline handler의 return-outside-function 컴파일 결함이며, main50/인증/뷰어에는 없다. 전 refresh는 typecheck만 수행했고 production build 성공 근거는 없었다. Sol6.1/high `task_b78f9977b5c9`이 로컬·고정 Bun 컨테이너의 baseline 실패/수정 후 build 성공을 확인한 `9d24434252730a4a40a6160e79e80c88ad6b81e6`을 작성했고 독립 검토 중이다. 후속 프로젝트 브랜치 갱신·연결·실제 E2E는 남아 있다.
+  - obsolete viewer7818 5개, 대체된 auth8a 5개, #272의 옛c9 5개 실행만 SHA 대조 후 취소 요청했다. 요청 접수와 완료를 구분하며, viewer 일부는 취소 완료됐고 지연된 나머지는 지정 실행만 force-cancel 요청했다. 현재 유효한 CI/보호 조건은 우회하지 않는다. 근거는 기존 recovery-20260930/takeover-evidence의 pr272-batching-result.json, pr269/270/271-superseded-by272.json 및 취소 요청 receipt에 보존한다.
+  - main은50d95df1 5게이트 SUCCESS, 게시 버전은v0.3.0 그대로다. 비교 고정 차수265/267/269/270/271+287은 유지한다. PR 묶음에 홈이 포함돼도 비교 착수 조건에 새 페이지를 계속 추가하지 않는다. 이 체크포인트는 기존 Goal/TODO 진행이며 신규 목표나 전체 완료 선언이 아니다.
+
+- 2026-09-30 12:28 KST 후속 체크포인트: 사용자 흐름별 로컬 검토 후 제출 방식을 유지한다. 대체된 #269/#270/#271의 closed 상태는 미병합이며 #272가 이력·기능을 승계한다. 지정 obsolete CI15개 모두 completed/cancelled 확인(`obsolete-ci-cancel-final.json`); 추가 미연결 후보6개의 활성 Web/Install 실행은 조회 시 없어서 취소하지 않았다.
+  - #272 현재 원격 `479a1cce3cba0f59e3a1711982495529b3cb5cdf`, base main50d95df1. 앞선 d158의 서비스 정보 Vue 전환에 맞지 않는 셸 검사 기대값을 바로잡고, 기존 URL·본문·탐색·CSP 검사를 유지했다. 별도 Sol 검토 ACCEPT, build·21 unit·실제 셸6검사 통과. 새 Web36663156026에서 shard0 등7개 shard/협업/타입 검사는 통과했지만 shard1 위키 선택 메뉴 검사578행이 timeout으로 실패했다(3pass/1fail/2미실행 그룹). 재실행으로 덮지 않고 Sol6.1/high task746bfe4e5b2a가 같은 tree에서 원인·회귀를 조사한다. 머지 보류, Install 최종 gate도 별도 확인한다.
+  - #278 로컬 `fcf910125528081178a2193054f12b5f1e9bb526`: reset-password·confirm-email·magic-link·cancel-withdraw·consent 연결, 토큰/query/hash/MFA 상태 결함 수정, 전용 React10파일 제거. 최종 build·49 unit·실제 Rust/PG/SMTP/Chromium4그룹5pass, 별도 task510990ffec8a 독립 ACCEPT. 원격은20846dd8 그대로, main/배포 미포함. 구현·검토 보고서는 기존 takeover-evidence/orca-runtime-checkpoint에 보존했다.
+  - 프로젝트/태스크 #286 로컬 `b3290523a6909c3fa80623f7d97a2f4c35d4253f`: 기존 stack과 컴파일 수정9d244342를 보존해 실제 프로젝트·태스크·컬렉션 URL 연결, 빠졌던 milestone/group 관리 복구, 전용 React39파일 제거. 제거 후 d63fc624의18그룹33pass와 b329의309개 동일 산출물 해시를 구분해 보존; b329 build·102 unit·직접 라우트1pass. 별도 task3419d084323f 최종 검토 대기, 원격 갱신 전이다. 관련 없는 workspace/settings 등의 React 경로는 별도 TODO로 유지한다.
+  - 현재 main50d95df1 및 게시 v0.3.0은 그대로이며 새 후보의 로컬 수락을 main/배포 완료로 계산하지 않는다. 다음 제출은 #272 결함 해결·수락 뒤 준비된 인증/프로젝트/뷰어 후보 순서를 조정한다. 기존 Goal·비교 차수·미처리 이슈는 변경하지 않는다.

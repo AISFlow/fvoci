@@ -126,7 +126,7 @@ function onCreate(): void {
     actionError.value = t("group.name.required");
     return;
   }
-  void create.mutateAsync(trimmed);
+  create.mutate(trimmed);
 }
 
 function selectGroup(id: string): void {

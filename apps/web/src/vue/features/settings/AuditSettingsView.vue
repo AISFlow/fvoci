@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
+import UPageCard from "@nuxt/ui/components/PageCard.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
 import type { components } from "@/generated/api";
 import { formatInstant } from "@/lib/datetime";
@@ -19,7 +20,7 @@ defineProps<{
 
 <template>
   <div class="settings-stack">
-    <section class="settings-section" aria-labelledby="audit-title">
+    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="audit-title">
       <h2 class="settings-section__title text-title" id="audit-title">{{ t("audit.title") }}</h2>
       <div class="flex flex-col gap-4">
         <p v-if="eeRequired" class="text-sm text-muted">{{ t("ee.required") }}</p>
@@ -49,6 +50,6 @@ defineProps<{
           </table>
         </div>
       </div>
-    </section>
+    </UPageCard>
   </div>
 </template>

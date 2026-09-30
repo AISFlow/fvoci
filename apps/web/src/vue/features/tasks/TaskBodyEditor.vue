@@ -8,8 +8,9 @@ import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badg
 import type { CollabUser } from "@/features/documents/collab-model";
 import type { CollabRoomSession } from "../../collab/useCollabRoom";
 import QueryLoading from "../../components/QueryLoading.vue";
-import EditorBubble from "../editor/EditorBubble.vue";
-import EditorToolbar from "../editor/EditorToolbar.vue";
+import EditorControls from "../editor/EditorControls.vue";
+import TemplateToolbar from "../editor/TemplateToolbar.vue";
+import { useEditorEntities } from "../editor/useEditorEntities";
 import UnfurlCard from "../editor/UnfurlCard.vue";
 import CollabPresence from "../documents/CollabPresence.vue";
 import RevisionPanel from "../documents/RevisionPanel.vue";
@@ -25,6 +26,11 @@ const props = defineProps<{
   session: CollabRoomSession | null;
   collabUser: CollabUser | null;
 }>();
+
+const { mentionItems, entityResolver } = useEditorEntities(
+  () => props.workspaceId,
+  () => `${props.taskId}:${props.session?.generation ?? ""}:${props.collabUser?.id ?? ""}:${props.session?.status === "unauthorized"}`,
+);
 
 const persisting = ref(false);
 const persistError = ref<string | null>(null);
@@ -111,13 +117,18 @@ async function persistBody(): Promise<void> {
         :editable="!readOnly"
         :aria-label="t('doc.body.a11y')"
         :workspace-slug="slug"
+        :mention-items="mentionItems"
+        :entity-resolver="entityResolver"
         :url-embed="UrlEmbed"
       >
         <template #toolbar="{ editor: live }">
-          <EditorToolbar :editor="live" :disabled="readOnly" />
+          <TemplateToolbar :editor="live" mode="fixed" />
         </template>
         <template #bubble="{ editor: live }">
-          <EditorBubble :editor="live" />
+          <TemplateToolbar :editor="live" mode="selection" />
+        </template>
+        <template #controls="{ editor: live, gutter, editable }">
+          <EditorControls :editor="live" :gutter="gutter" :editable="editable" />
         </template>
       </FvociEditor>
     </div>
