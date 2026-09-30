@@ -15,10 +15,9 @@ import { Mermaid } from "../src/nodes/mermaid.ts";
 import { dumpSchema, editorSchemaFixture } from "./schema-dump.ts";
 
 // Never called: getSchema does not build views. Distinct functions let the
-// wiring test check that each node gets its own entry. The React host's real
-// map is built in a component module (react/fvoci-editor.tsx), which node:test
-// cannot load; the addNodeView-only test below is what keeps any map
-// schema-neutral. The Vue host's real map is tested in vue-node-views.test.ts,
+// wiring test check that each node gets its own entry. The addNodeView-only
+// test below keeps any host map schema-neutral. The Vue host's real map is
+// tested in vue-node-views.test.ts,
 // and apps/web/e2e/workspace-wiki-flow.spec.ts checks the schema of the editor
 // the web app mounts.
 const stubView = () => () => ({ dom: {} as HTMLElement });
