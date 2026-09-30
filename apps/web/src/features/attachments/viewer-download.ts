@@ -64,7 +64,9 @@ export function startViewerPrefetch(
   download: typeof downloadCapped = downloadCapped,
 ): ViewerPrefetch {
   const controller = new AbortController();
-  const abort = () => controller.abort();
+  const abort = () => {
+    controller.abort();
+  };
   if (signal.aborted) abort();
   else signal.addEventListener("abort", abort, { once: true });
   let pending: Promise<ViewerBytes> | null = download(url, max, controller.signal);

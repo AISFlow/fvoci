@@ -20,8 +20,9 @@ const module = new WebAssembly.Module(wasm);
 function realApi(): RhwpApi & { opened: number } {
   const api = {
     opened: 0,
-    init: async (m: WebAssembly.Module) => {
+    init: (m: WebAssembly.Module) => {
       initSync({ module: m });
+      return Promise.resolve();
     },
     open: (bytes: Uint8Array) => {
       api.opened += 1;
@@ -33,7 +34,7 @@ function realApi(): RhwpApi & { opened: number } {
 
 const open = (id: number, bytes: Uint8Array): HwpRequest => ({ id, op: "open", bytes, module });
 
-test("a session opens, finds the chunk's page and renders inert SVG blobs", async () => {
+await test("a session opens, finds the chunk's page and renders inert SVG blobs", async () => {
   const session = createHwpSession(realApi());
   const hwpx = buildFixtureHwpx(fixture("sample.hwpx"), FIXTURE_PAGES);
   assert.deepEqual(await session(open(1, hwpx)), { id: 1, ok: true, op: "open", pageCount: 3 });
@@ -62,7 +63,7 @@ test("a session opens, finds the chunk's page and renders inert SVG blobs", asyn
   assert.deepEqual(await session(open(5, hwpx)), { id: 5, ok: false, error: "failed" });
 });
 
-test("binary HWP opens in a session", async () => {
+await test("binary HWP opens in a session", async () => {
   const session = createHwpSession(realApi());
   assert.deepEqual(await session(open(1, fixture("sample.hwp"))), {
     id: 1,
@@ -72,12 +73,12 @@ test("binary HWP opens in a session", async () => {
   });
 });
 
-test("an over-budget HWPX never reaches rhwp; undecodable bytes are invalid", async () => {
+await test("an over-budget HWPX never reaches rhwp; undecodable bytes are invalid", async () => {
   const api = realApi();
   const bomb = writeZip([
     ...readZip(fixture("sample.hwpx")),
     ...[0, 1, 2, 3].map((n) => ({
-      name: `Scripts/s${n}.js`,
+      name: `Scripts/s${String(n)}.js`,
       data: new Uint8Array(32 * 1024 * 1024),
     })),
   ]);
@@ -95,7 +96,7 @@ test("an over-budget HWPX never reaches rhwp; undecodable bytes are invalid", as
   });
 });
 
-test("requests before a document and a failing wasm init report failed", async () => {
+await test("requests before a document and a failing wasm init report failed", async () => {
   const session = createHwpSession(realApi());
   assert.deepEqual(await session({ id: 1, op: "render", page: 0 }), {
     id: 1,
@@ -103,9 +104,7 @@ test("requests before a document and a failing wasm init report failed", async (
     error: "failed",
   });
   const broken = createHwpSession({
-    init: async () => {
-      throw new Error("no wasm");
-    },
+    init: () => Promise.reject(new Error("no wasm")),
     open: () => {
       throw new Error("unreachable");
     },

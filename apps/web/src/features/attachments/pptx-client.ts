@@ -112,13 +112,18 @@ export function openPptxInWorker(
     pending = null;
     waiting?.reject(new PptxWorkerError(reason));
   };
-  const onAbort = () => kill("closed");
+  const onAbort = () => {
+    kill("closed");
+  };
   signal?.addEventListener("abort", onAbort);
   worker.onmessage = ({ data }) => {
     const waiting = pending;
     pending = null;
     clearTimeout(timer);
-    if (!waiting) return kill("failed");
+    if (!waiting) {
+      kill("failed");
+      return;
+    }
     if (data.type === "failed") {
       waiting.reject(new PptxWorkerError("failed"));
       kill("failed");
@@ -126,13 +131,20 @@ export function openPptxInWorker(
       waiting.resolve(data);
     }
   };
-  worker.onerror = worker.onmessageerror = () => kill("failed");
+  worker.onerror = worker.onmessageerror = () => {
+    kill("failed");
+  };
 
   const request = (message: PptxWorkerRequest, timeoutMs: number, transfer: Transferable[] = []) =>
     new Promise<PptxWorkerResponse>((resolve, reject) => {
-      if (dead) return reject(new PptxWorkerError("closed"));
+      if (dead) {
+        reject(new PptxWorkerError("closed"));
+        return;
+      }
       pending = { resolve, reject };
-      timer = setTimeout(() => kill("timeout"), timeoutMs);
+      timer = setTimeout(() => {
+        kill("timeout");
+      }, timeoutMs);
       worker.postMessage(message, transfer);
     });
 
@@ -160,14 +172,19 @@ export function openPptxInWorker(
             return reply.slide;
           });
         },
-        close: () => kill("closed"),
+        close: () => {
+          kill("closed");
+        },
         get closed() {
           return dead;
         },
       };
       return { status: "ok", deck };
     },
-    (error: PptxWorkerError) =>
-      error.reason === "timeout" ? { status: "tooLarge" } : { status: "failed" },
+    (error: unknown) => {
+      if (!(error instanceof PptxWorkerError))
+        throw new Error("unexpected worker rejection", { cause: error });
+      return error.reason === "timeout" ? { status: "tooLarge" } : { status: "failed" };
+    },
   );
 }

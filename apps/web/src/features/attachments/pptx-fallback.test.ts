@@ -1,3 +1,4 @@
+import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderSlideToSvg } from "@office-kit/pptx-preview";
@@ -26,12 +27,12 @@ function withoutViewports(svg: string): string {
   );
 }
 
-test("markup without a fallback group is returned as is, unparsed", () => {
+await test("markup without a fallback group is returned as is, unparsed", () => {
   const svg = "<svg><not well-formed";
   assert.deepEqual(boundFallbackLabels(svg), { status: "ok", svg });
 });
 
-test("a labelled fallback's text is wrapped in a viewport of exactly its rect, nothing else changes", () => {
+await test("a labelled fallback's text is wrapped in a viewport of exactly its rect, nothing else changes", () => {
   for (const kind of ["image", "chart", "graphicFrame"]) {
     const svg = `<svg ${NS}><g data-pptx-fallback="${kind}" transform="rotate(90 24.00 24.00)">${RECT("0.00", "0.00", "48.00", "48.00")}<title>t</title>${LABEL}<g><text>overlay</text></g></g></svg>`;
     const out = bounded(svg);
@@ -46,7 +47,7 @@ test("a labelled fallback's text is wrapped in a viewport of exactly its rect, n
   }
 });
 
-test("offsets hold across non-BMP text, entities, CRLF and nested groups; every fallback is bounded", () => {
+await test("offsets hold across non-BMP text, entities, CRLF and nested groups; every fallback is bounded", () => {
   const svg =
     `<svg ${NS}>\r\n<g><text>🙂🚀 &amp; 가</text><g transform="scale(2)">` +
     `<g data-pptx-fallback="image">${RECT("-10.50", "7.25", "24.00", "12.00")}<text x="1">🙂 a&lt;b</text></g></g>` +
@@ -65,7 +66,7 @@ test("offsets hold across non-BMP text, entities, CRLF and nested groups; every 
   assert.equal(withoutViewports(out), svg);
 });
 
-test("offsets hold across CDATA sections, comments and processing instructions holding tag text", () => {
+await test("offsets hold across CDATA sections, comments and processing instructions holding tag text", () => {
   const label = "<text><![CDATA[🙂 </text> <g> 가]]></text>";
   const svg =
     `<?xml version="1.0"?>\r\n<!-- <g data-pptx-fallback="image"> 🚀 -->\r\n<svg ${NS}><?pi <text>?>` +
@@ -80,7 +81,7 @@ test("offsets hold across CDATA sections, comments and processing instructions h
   );
 });
 
-test("a DOCTYPE's entities are not expanded and nothing is loaded: an entity reference is failed", () => {
+await test("a DOCTYPE's entities are not expanded and nothing is loaded: an entity reference is failed", () => {
   const svgs = [
     `<!DOCTYPE svg [<!ENTITY e "x">]><svg ${NS}><g data-pptx-fallback="image">${RECT("0", "0", "4", "4")}<text>&e;</text></g></svg>`,
     `<!DOCTYPE svg [<!ENTITY e SYSTEM "https://example.com/e">]><svg ${NS}><g data-pptx-fallback="image">${RECT("0", "0", "4", "4")}<text>&e;</text></g></svg>`,
@@ -88,18 +89,18 @@ test("a DOCTYPE's entities are not expanded and nothing is loaded: an entity ref
   for (const svg of svgs) assert.deepEqual(boundFallbackLabels(svg), { status: "failed" }, svg);
 });
 
-test("a box without area shows no label", () => {
+await test("a box without area shows no label", () => {
   for (const [w, h] of [
     ["0.00", "48.00"],
     ["48.00", "0.00"],
     ["-4.00", "48.00"],
   ]) {
-    const svg = `<svg ${NS}><g data-pptx-fallback="image">${RECT("0.00", "0.00", w!, h!)}${LABEL}</g></svg>`;
+    const svg = `<svg ${NS}><g data-pptx-fallback="image">${RECT("0.00", "0.00", assertPresent(w), assertPresent(h))}${LABEL}</g></svg>`;
     assert.equal(bounded(svg), svg.replace(LABEL, `<svg width="0" height="0">${LABEL}</svg>`));
   }
 });
 
-test("other groups carrying the marker are left alone", () => {
+await test("other groups carrying the marker are left alone", () => {
   const svgs = [
     // custGeom marks real geometry, not a labelled placeholder.
     `<svg ${NS}><g data-pptx-fallback="custGeom"><path d="M0 0"/><text>x</text></g></svg>`,
@@ -112,7 +113,7 @@ test("other groups carrying the marker are left alone", () => {
   for (const svg of svgs) assert.equal(bounded(svg), svg);
 });
 
-test("markup that is not well-formed, or a fallback group of another shape, is failed", () => {
+await test("markup that is not well-formed, or a fallback group of another shape, is failed", () => {
   const bad = [
     `<svg ${NS}><g data-pptx-fallback="image">${RECT("0", "0", "4", "4")}${LABEL}</svg>`,
     `<svg ${NS}><g data-pptx-fallback="image">${RECT("0", "0", "4", "4")}<text>&nbsp;</text></g></svg>`,
@@ -127,11 +128,11 @@ test("markup that is not well-formed, or a fallback group of another shape, is f
   for (const svg of bad) assert.deepEqual(boundFallbackLabels(svg), { status: "failed" }, svg);
 });
 
-test("renderer placeholders: linked, grouped, rotated and missing pictures are cut to their own box", async () => {
+await test("renderer placeholders: linked, grouped, rotated and missing pictures are cut to their own box", async () => {
   const opened = await openPptx(buildFixturePptx(undefined, { slide2Fallbacks: true }), alive);
   assert.equal(opened.status, "ok");
   const deck = (opened as { deck: Parameters<typeof renderSlide>[0] }).deck;
-  const raw = renderSlideToSvg(deck.pres, deck.slides[1]!);
+  const raw = renderSlideToSvg(deck.pres, assertPresent(deck.slides[1]));
   const rendered = renderSlide(deck, 1);
   assert.equal(rendered.status, "ok");
   const svg = (rendered as { svg: string }).svg;

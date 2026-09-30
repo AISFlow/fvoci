@@ -1,3 +1,4 @@
+import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -34,10 +35,14 @@ class FakeWorker implements HwpWorkerPort {
 
   postMessage(message: HwpRequest, transfer: Transferable[] = []): void {
     this.received.push({ message, transfer });
-    void Promise.resolve(this.answer(message)).then((response) => {
-      if (response && this.terminated === 0)
-        this.onmessage?.({ data: response } as MessageEvent<HwpResponse>);
-    });
+    Promise.resolve(this.answer(message))
+      .then((response) => {
+        if (response && this.terminated === 0)
+          this.onmessage?.({ data: response } as MessageEvent<HwpResponse>);
+      })
+      .catch((error: unknown) => {
+        assert.fail(String(error));
+      });
   }
 
   terminate(): void {
@@ -54,7 +59,7 @@ function fake(answer: (request: HwpRequest) => HwpResponse | Promise<HwpResponse
   return {
     createWorker: () => (worker = new FakeWorker(answer)),
     get worker() {
-      return worker!;
+      return assertPresent(worker);
     },
   };
 }
@@ -78,14 +83,14 @@ async function rejectsWith(promise: Promise<unknown>, reason: string): Promise<v
   );
 }
 
-test("open transfers the bytes, and requests are answered through the worker", async () => {
+await test("open transfers the bytes, and requests are answered through the worker", async () => {
   const f = fake(opened);
   const bytes = new Uint8Array([1, 2, 3]);
   const { client, pageCount } = await HwpDocumentClient.open(bytes, module, {
     createWorker: f.createWorker,
   });
   assert.equal(pageCount, 3);
-  assert.deepEqual(f.worker.received[0]!.transfer, [bytes.buffer]);
+  assert.deepEqual(assertPresent(f.worker.received[0]).transfer, [bytes.buffer]);
   assert.equal(await client.startPage(1), 2);
   assert.equal(await (await client.renderPage(0)).text(), "<svg/>");
   client.close();
@@ -94,7 +99,7 @@ test("open transfers the bytes, and requests are answered through the worker", a
   await rejectsWith(client.renderPage(0), "closed");
 });
 
-test("a failed open terminates its worker", async () => {
+await test("a failed open terminates its worker", async () => {
   for (const error of ["tooLarge", "invalid", "failed"] as const) {
     const f = fake((request) => ({ id: request.id, ok: false, error }));
     await rejectsWith(
@@ -105,7 +110,7 @@ test("a failed open terminates its worker", async () => {
   }
 });
 
-test("a parse past its deadline is terminated", async () => {
+await test("a parse past its deadline is terminated", async () => {
   const f = fake(() => null);
   await rejectsWith(
     HwpDocumentClient.open(new Uint8Array(1), module, {
@@ -117,7 +122,7 @@ test("a parse past its deadline is terminated", async () => {
   assert.equal(f.worker.terminated, 1);
 });
 
-test("aborting a pending open terminates the worker at once, not at the deadline", async () => {
+await test("aborting a pending open terminates the worker at once, not at the deadline", async () => {
   const f = fake(() => null);
   const controller = new AbortController();
   const open = HwpDocumentClient.open(new Uint8Array(1), module, {
@@ -136,7 +141,7 @@ test("aborting a pending open terminates the worker at once, not at the deadline
   assert.equal(f.worker.terminated, 1);
 });
 
-test("an already aborted signal starts no worker; one aborted after the open leaves the client open", async () => {
+await test("an already aborted signal starts no worker; one aborted after the open leaves the client open", async () => {
   FakeWorker.all = [];
   const aborted = AbortSignal.abort();
   const f = fake(opened);
@@ -162,7 +167,7 @@ test("an already aborted signal starts no worker; one aborted after the open lea
   assert.equal(g.worker.terminated, 1);
 });
 
-test("a render past its deadline terminates the worker and fails later requests", async () => {
+await test("a render past its deadline terminates the worker and fails later requests", async () => {
   const f = fake((request) => (request.op === "render" ? null : opened(request)));
   const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, {
     createWorker: f.createWorker,
@@ -176,12 +181,17 @@ test("a render past its deadline terminates the worker and fails later requests"
   await rejectsWith(client.startPage(0), "closed");
 });
 
-test("closing cancels pending requests; a worker error fails them", async () => {
+await test("closing cancels pending requests; a worker error fails them", async () => {
   let release: (() => void) | null = null;
   const f = fake((request) =>
     request.op === "open"
       ? opened(request)
-      : new Promise<HwpResponse>((resolve) => (release = () => resolve(opened(request)))),
+      : new Promise<HwpResponse>(
+          (resolve) =>
+            (release = () => {
+              resolve(opened(request));
+            }),
+        ),
   );
   const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, {
     createWorker: f.createWorker,
@@ -189,7 +199,7 @@ test("closing cancels pending requests; a worker error fails them", async () => 
   const pending = client.renderPage(1);
   client.close();
   await rejectsWith(pending, "closed");
-  release!();
+  assertPresent(release)();
   await rejectsWith(client.renderPage(1), "closed");
 
   const g = fake((request) => (request.op === "open" ? opened(request) : null));
@@ -202,7 +212,7 @@ test("closing cancels pending requests; a worker error fails them", async () => 
   assert.equal(g.worker.terminated, 1);
 });
 
-test("replacing documents leaves no worker running", async () => {
+await test("replacing documents leaves no worker running", async () => {
   FakeWorker.all = [];
   const clients: HwpDocumentClient[] = [];
   for (let n = 0; n < 3; n += 1) {
@@ -214,16 +224,19 @@ test("replacing documents leaves no worker running", async () => {
     clients.push(client);
     assert.equal(FakeWorker.running().length, 1);
   }
-  clients.at(-1)!.close();
+  assertPresent(clients.at(-1)).close();
   assert.deepEqual(FakeWorker.running(), []);
   assert.ok(FakeWorker.all.every((worker) => worker.terminated === 1));
 });
 
-test("client and real-wasm session: the Scripts bomb is refused and its worker terminated", async () => {
+await test("client and real-wasm session: the Scripts bomb is refused and its worker terminated", async () => {
   // The worker body in-process: the same session code the module worker runs.
   const api = {
     opens: 0,
-    init: async (m: WebAssembly.Module) => void initSync({ module: m }),
+    init: (m: WebAssembly.Module) => {
+      initSync({ module: m });
+      return Promise.resolve();
+    },
     open: (bytes: Uint8Array) => {
       api.opens += 1;
       return new HwpDocument(bytes);
@@ -236,7 +249,7 @@ test("client and real-wasm session: the Scripts bomb is refused and its worker t
   const bomb = writeZip([
     ...readZip(fixture("sample.hwpx")),
     ...[0, 1, 2, 3].map((n) => ({
-      name: `Scripts/s${n}.js`,
+      name: `Scripts/s${String(n)}.js`,
       data: new Uint8Array(32 * 1024 * 1024),
     })),
   ]);
@@ -258,7 +271,7 @@ test("client and real-wasm session: the Scripts bomb is refused and its worker t
   assert.equal(g.worker.terminated, 1);
 });
 
-test("edits travel through the worker; a revert gets the open deadline, a replace the request deadline", async () => {
+await test("edits travel through the worker; a revert gets the open deadline, a replace the request deadline", async () => {
   let pending: ((response: HwpResponse) => void) | null = null;
   const f = fake((request) => {
     if (request.op === "open") return { id: request.id, ok: true, op: "open", pageCount: 3 };
@@ -276,7 +289,9 @@ test("edits travel through the worker; a revert gets the open deadline, a replac
     if (request.op === "revert") {
       // Answered after the request deadline but within the open deadline.
       return new Promise((resolve) =>
-        setTimeout(() => resolve({ id: request.id, ok: true, op: "revert", pageCount: 3 }), 30),
+        setTimeout(() => {
+          resolve({ id: request.id, ok: true, op: "revert", pageCount: 3 });
+        }, 30),
       );
     }
     return new Promise((resolve) => (pending = resolve));
@@ -288,7 +303,7 @@ test("edits travel through the worker; a revert gets the open deadline, a replac
   });
   assert.deepEqual(await client.replace("a", "b", true), { outcome: "changed", pageCount: 4 });
   assert.deepEqual(await client.replace("a", "b", false), { outcome: "rejected", pageCount: 4 });
-  assert.deepEqual(f.worker.received[1]!.message, {
+  assert.deepEqual(assertPresent(f.worker.received[1]).message, {
     id: 2,
     op: "replace",
     find: "a",
@@ -296,17 +311,21 @@ test("edits travel through the worker; a revert gets the open deadline, a replac
     all: true,
   });
   assert.deepEqual([...(await client.exportDocument("hwpx"))], [7]);
-  assert.deepEqual(f.worker.received[3]!.message, { id: 4, op: "export", format: "hwpx" });
+  assert.deepEqual(assertPresent(f.worker.received[3]).message, {
+    id: 4,
+    op: "export",
+    format: "hwpx",
+  });
   assert.equal(await client.revert(), 3);
   assert.equal(client.closed, false);
   // A render left unanswered past its deadline takes the document with it.
   await rejectsWith(client.renderPage(0), "timeout");
-  assert.equal(pending !== null, true);
+  assertPresent(pending);
   await rejectsWith(client.exportDocument("hwp"), "closed");
   assert.equal(f.worker.terminated, 1);
 });
 
-test("a failed export rejects only that request; a failed replace terminates the worker", async () => {
+await test("a failed export rejects only that request; a failed replace terminates the worker", async () => {
   const f = fake((request) =>
     request.op === "open"
       ? { id: request.id, ok: true, op: "open", pageCount: 1 }

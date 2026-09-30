@@ -82,7 +82,9 @@ export function inertElementFactory(scratch: Document) {
       Object.assign((result as HTMLElement).style, style);
     }
     for (const [key, value] of Object.entries(props)) {
-      if (value !== undefined) (result as unknown as Record<string, unknown>)[key] = value;
+      if (value !== undefined && !Reflect.set(result, key, value)) {
+        throw new TypeError(`cannot set rendered element property ${key}`);
+      }
     }
     for (const child of children ?? []) result.appendChild(h(child));
     return result;
@@ -99,7 +101,7 @@ export function inertElementFactory(scratch: Document) {
 export function sanitizeRenderedDocx(root: Element | DocumentFragment): void {
   for (const node of root.querySelectorAll(DENIED_ELEMENTS)) node.remove();
   for (const style of root.querySelectorAll("style")) {
-    style.textContent = neutralizeCssUrls(style.textContent ?? "");
+    style.textContent = neutralizeCssUrls(style.textContent);
   }
   for (const el of root.querySelectorAll("*")) {
     for (const attr of [...el.attributes]) {
@@ -145,8 +147,8 @@ export function adoptFrameStyles(doc: Document, win: Window, cssTexts: string[])
  * are the same tree.
  */
 export function transferInlineStyles(source: Element, destination: Element): void {
-  const from = source as HTMLElement;
-  const to = destination as HTMLElement;
+  const from: Element & { style?: CSSStyleDeclaration } = source;
+  const to: Element & { style?: CSSStyleDeclaration } = destination;
   if (from.style && to.style) {
     const text = from.style.cssText;
     to.removeAttribute("style");
@@ -155,7 +157,9 @@ export function transferInlineStyles(source: Element, destination: Element): voi
   const sourceKids = source.children;
   const destKids = destination.children;
   for (let i = 0; i < sourceKids.length && i < destKids.length; i += 1) {
-    transferInlineStyles(sourceKids[i]!, destKids[i]!);
+    const sourceKid = sourceKids.item(i);
+    const destKid = destKids.item(i);
+    if (sourceKid && destKid) transferInlineStyles(sourceKid, destKid);
   }
 }
 

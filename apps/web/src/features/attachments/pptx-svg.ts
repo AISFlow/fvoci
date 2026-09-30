@@ -86,8 +86,9 @@ const OUTER =
  */
 export function innerSlideSvg(outer: string): string | null {
   const match = OUTER.exec(outer);
-  if (!match || match[3]!.length % 4 !== 0) return null;
-  const binary = atob(match[3]!);
+  const encoded = match?.[3];
+  if (encoded === undefined || encoded.length % 4 !== 0) return null;
+  const binary = atob(encoded);
   const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);

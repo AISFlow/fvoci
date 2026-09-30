@@ -26,14 +26,14 @@ function svgOf(deck: PptxDeck, index: number): string {
   return (rendered as { svg: string }).svg;
 }
 
-test("the fixture deck opens with two 960×540 slides", async () => {
+await test("the fixture deck opens with two 960×540 slides", async () => {
   const deck = await fixtureDeck();
   assert.equal(deck.slides.length, 2);
   assert.equal(deck.width, FIXTURE_PPTX_SLIDE_W);
   assert.equal(deck.height, FIXTURE_PPTX_SLIDE_H);
 });
 
-test("slide 1 lays out Korean/emoji text, runs, list, table, shapes and the embedded picture", async () => {
+await test("slide 1 lays out Korean/emoji text, runs, list, table, shapes and the embedded picture", async () => {
   const deck = await fixtureDeck();
   const svg = svgOf(deck, 0);
   const text = DEFAULT_PPTX_TEXT;
@@ -89,7 +89,7 @@ test("slide 1 lays out Korean/emoji text, runs, list, table, shapes and the embe
   assert.ok(svg.includes('href="javascript:alert(1)"'));
 });
 
-test("slide 2 carries only its own text", async () => {
+await test("slide 2 carries only its own text", async () => {
   const deck = await fixtureDeck();
   const svg = svgOf(deck, 1);
   assert.ok(svg.includes(DEFAULT_PPTX_TEXT.secondSlide));
@@ -97,7 +97,7 @@ test("slide 2 carries only its own text", async () => {
   assert.equal(renderSlide(deck, 2).status, "failed");
 });
 
-test("slide count and rendered size caps", async () => {
+await test("slide count and rendered size caps", async () => {
   assert.deepEqual(await openPptx(buildFixturePptx(), alive, { ...PPTX_LIMITS, maxSlides: 1 }), {
     status: "tooLarge",
   });
@@ -108,7 +108,7 @@ test("slide count and rendered size caps", async () => {
   assert.equal(renderSlide(deck, 1, { ...PPTX_LIMITS, maxSlideSvgBytes: 1000 }).status, "ok");
 });
 
-test("packages over the inflate cap or that are not decks are refused", async () => {
+await test("packages over the inflate cap or that are not decks are refused", async () => {
   const inflated = new Uint8Array(200 * 1024 * 1024);
   const bomb = writeZip([
     { name: "[Content_Types].xml", bytes: new TextEncoder().encode("<Types/>") },
@@ -143,6 +143,6 @@ test("packages over the inflate cap or that are not decks are refused", async ()
   assert.deepEqual(await openPptx(docx, alive), { status: "invalid" });
 });
 
-test("cancellation during the package check opens nothing", async () => {
+await test("cancellation during the package check opens nothing", async () => {
   assert.deepEqual(await openPptx(buildFixturePptx(), () => false), { status: "invalid" });
 });

@@ -74,9 +74,15 @@ export class HwpDocumentClient {
     this.#worker = worker;
     this.#requestTimeoutMs = requestTimeoutMs;
     this.#openTimeoutMs = openTimeoutMs;
-    worker.onmessage = (event) => this.#receive(event.data);
-    worker.onerror = () => this.#fail("failed");
-    worker.onmessageerror = () => this.#fail("failed");
+    worker.onmessage = (event) => {
+      this.#receive(event.data);
+    };
+    worker.onerror = () => {
+      this.#fail("failed");
+    };
+    worker.onmessageerror = () => {
+      this.#fail("failed");
+    };
   }
 
   /**
@@ -97,7 +103,9 @@ export class HwpDocumentClient {
       options.requestTimeoutMs ?? HWP_REQUEST_TIMEOUT_MS,
       openTimeoutMs,
     );
-    const abort = () => client.close();
+    const abort = () => {
+      client.close();
+    };
     signal?.addEventListener("abort", abort, { once: true });
     try {
       const opened = await client.#request({ op: "open", bytes, module }, openTimeoutMs, [
@@ -187,10 +195,12 @@ export class HwpDocumentClient {
     if (this.#closed) return Promise.reject(new HwpClientError("closed"));
     const id = (this.#nextId += 1);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.#fail("timeout"), timeoutMs);
+      const timer = setTimeout(() => {
+        this.#fail("timeout");
+      }, timeoutMs);
       this.#pending.set(id, { resolve, reject, timer });
       try {
-        this.#worker.postMessage({ id, ...body } as HwpRequest, transfer);
+        this.#worker.postMessage({ id, ...body }, transfer);
       } catch {
         this.#fail("failed");
       }

@@ -1,3 +1,4 @@
+import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { deflateRawSync, crc32 as zlibCrc32 } from "node:zlib";
@@ -137,7 +138,9 @@ function packageWithHiddenRecords(hidden: number, bombBytes: number) {
     offset += header.byteLength + record.body.byteLength;
   }
   for (let i = 0; i < hidden; i += 1) {
-    centrals.push(centralRecord({ ...bomb, name: `ppt/hidden-${i}.xml` }, carrierDataOffset));
+    centrals.push(
+      centralRecord({ ...bomb, name: `ppt/hidden-${String(i)}.xml` }, carrierDataOffset),
+    );
   }
   const cd = join(centrals);
   const count = records.length + hidden;
@@ -154,11 +157,10 @@ function packageWithHiddenRecords(hidden: number, bombBytes: number) {
   return { bytes: join([...locals, cd, end]), names: records.map((r) => r.name) };
 }
 
-test("the fixture repacks STORE-only with identical parts and still loads two slides", async () => {
+await test("the fixture repacks STORE-only with identical parts and still loads two slides", async () => {
   const original = buildFixturePptx();
   const result = await repackPptx(original, alive);
   assert.equal(result.status, "ok");
-  if (result.status !== "ok") return;
   const records = directory(result.bytes);
   assert.equal(records.length, 14);
   for (const record of records) {
@@ -178,7 +180,7 @@ test("the fixture repacks STORE-only with identical parts and still loads two sl
   assert.equal(getSlides(pres).length, 2);
 });
 
-test("a DEFLATE bomb stops at the inflated-size cap", async () => {
+await test("a DEFLATE bomb stops at the inflated-size cap", async () => {
   const inflated = new Uint8Array(200 * MiB);
   const bytes = writeZip([
     { name: "[Content_Types].xml", bytes: new TextEncoder().encode("<Types/>") },
@@ -193,7 +195,7 @@ test("a DEFLATE bomb stops at the inflated-size cap", async () => {
   assert.deepEqual(await repackPptx(bytes, alive), { status: "tooLarge" });
 });
 
-test("declared sizes are not trusted: a small declared size still counts real output", async () => {
+await test("declared sizes are not trusted: a small declared size still counts real output", async () => {
   const inflated = new Uint8Array(2 * MiB);
   const bytes = writeZip([
     {
@@ -207,7 +209,7 @@ test("declared sizes are not trusted: a small declared size still counts real ou
   assert.equal((await repackPptx(bytes, alive, 4 * MiB)).status, "ok");
 });
 
-test("hidden and overlapping central-directory records never reach the renderer", async () => {
+await test("hidden and overlapping central-directory records never reach the renderer", async () => {
   const { bytes, names } = packageWithHiddenRecords(20, 64 * MiB);
   // The loader's own reader would inflate every one of these records.
   const raw = directory(bytes);
@@ -220,7 +222,6 @@ test("hidden and overlapping central-directory records never reach the renderer"
 
   const result = await repackPptx(bytes, alive);
   assert.equal(result.status, "ok");
-  if (result.status !== "ok") return;
   const seen = directory(result.bytes);
   assert.deepEqual(seen.map((r) => r.name).sort(), [...names].sort());
   assert.ok(seen.every((r) => r.compression === 0));
@@ -228,7 +229,7 @@ test("hidden and overlapping central-directory records never reach the renderer"
   assert.equal(getSlides(await loadPresentation(result.bytes)).length, 2);
 });
 
-test("duplicate names (case-insensitive, as OPC part names) are rejected", async () => {
+await test("duplicate names (case-insensitive, as OPC part names) are rejected", async () => {
   const enc = (s: string) => new TextEncoder().encode(s);
   for (const second of ["ppt/slides/slide1.xml", "PPT/Slides/Slide1.xml"]) {
     const bytes = writeZip([
@@ -239,7 +240,7 @@ test("duplicate names (case-insensitive, as OPC part names) are rejected", async
   }
 });
 
-test("entry count cap, unknown compression, truncation and non-ZIP input", async () => {
+await test("entry count cap, unknown compression, truncation and non-ZIP input", async () => {
   const fixture = buildFixturePptx();
   assert.deepEqual(await repackPptx(fixture, alive, undefined, 3), { status: "tooLarge" });
 
@@ -259,7 +260,7 @@ test("entry count cap, unknown compression, truncation and non-ZIP input", async
   assert.deepEqual(await repackPptx(new Uint8Array(0), alive), { status: "invalid" });
 });
 
-test("streamed ZIPs with data descriptors repack; directory entries are dropped", async () => {
+await test("streamed ZIPs with data descriptors repack; directory entries are dropped", async () => {
   const chunks: Uint8Array[] = [];
   const zip = new Zip((error, data) => {
     if (error) throw error;
@@ -275,8 +276,7 @@ test("streamed ZIPs with data descriptors repack; directory entries are dropped"
   assert.ok(directory(streamed).every((r) => r.compression === 8));
   const result = await repackPptx(streamed, alive);
   assert.equal(result.status, "ok");
-  if (result.status === "ok")
-    assert.equal(getSlides(await loadPresentation(result.bytes)).length, 2);
+  assert.equal(getSlides(await loadPresentation(result.bytes)).length, 2);
 
   const withDir = writeZip([
     { name: "ppt/", bytes: new Uint8Array(0) },
@@ -284,11 +284,10 @@ test("streamed ZIPs with data descriptors repack; directory entries are dropped"
   ]);
   const repacked = await repackPptx(withDir, alive);
   assert.equal(repacked.status, "ok");
-  if (repacked.status === "ok")
-    assert.deepEqual(Object.keys(unzipSync(repacked.bytes)), ["ppt/a.xml"]);
+  assert.deepEqual(Object.keys(unzipSync(repacked.bytes)), ["ppt/a.xml"]);
 });
 
-test("cancellation stops the read", async () => {
+await test("cancellation stops the read", async () => {
   const inflated = new Uint8Array(8 * MiB).fill(7);
   const bytes = writeZip([
     {
@@ -306,7 +305,7 @@ test("cancellation stops the read", async () => {
 
 // XLSX review F1 counterexamples: the guard reads local headers only, so a
 // broken central directory or a forged ZIP64 entry count changes nothing.
-test("a malformed central directory does not bypass the inflated-size cap", async () => {
+await test("a malformed central directory does not bypass the inflated-size cap", async () => {
   const inflated = new Uint8Array(200 * MiB);
   const deflated = deflateRawSync(inflated);
   const bytes = writeZip([
@@ -320,7 +319,7 @@ test("a malformed central directory does not bypass the inflated-size cap", asyn
   assert.deepEqual(await repackPptx(bytes, alive), { status: "tooLarge" });
 });
 
-test("a forged ZIP64 entry count is never walked", async () => {
+await test("a forged ZIP64 entry count is never walked", async () => {
   // ZIP64 end record: 0xFFFFFFFF entries, directory "at" offset 1000 (past the
   // end), so fflate's `unzipSync` would walk ~4e9 all-zero records (~140 ms per
   // million here) before failing.
@@ -373,7 +372,7 @@ function deflated(name: string, bytes: Uint8Array) {
   return { name, deflated: deflateRawSync(bytes), crc: zlibCrc32(bytes), size: bytes.byteLength };
 }
 
-test("the loader's XML reader starts at '<' after BOMs and XML whitespace; anything else is not markup", () => {
+await test("the loader's XML reader starts at '<' after BOMs and XML whitespace; anything else is not markup", () => {
   assert.equal(startsLikeMarkup(enc("<?xml")), true);
   assert.equal(startsLikeMarkup(enc(" \t\r\n<p:sld")), true);
   assert.equal(startsLikeMarkup(new Uint8Array([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf, 0x3c])), true);
@@ -385,7 +384,7 @@ test("the loader's XML reader starts at '<' after BOMs and XML whitespace; anyth
   assert.equal(startsLikeMarkup(enc("x<p/>")), false);
 });
 
-test("markup is counted by content at the cap edge, whatever the part name", async () => {
+await test("markup is counted by content at the cap edge, whatever the part name", async () => {
   const cap = 64 * 1024;
   const parts = [
     { name: "[Content_Types].xml", bytes: markupOf(1000, "\uFEFF") },
@@ -402,7 +401,6 @@ test("markup is counted by content at the cap edge, whatever the part name", asy
   const zip = writeZip(parts.map((p) => deflated(p.name, p.bytes)));
   const ok = await repackPptx(zip, alive, undefined, undefined, cap);
   assert.equal(ok.status, "ok");
-  if (ok.status !== "ok") return;
   assert.equal(ok.markup, cap);
   assert.equal(ok.expanded, cap + 11 + 4 * cap);
   assert.deepEqual(await repackPptx(zip, alive, undefined, undefined, cap - 1), {
@@ -412,7 +410,7 @@ test("markup is counted by content at the cap edge, whatever the part name", asy
   assert.deepEqual(await repackPptx(zip, alive, 4 * cap, undefined, cap), { status: "tooLarge" });
 });
 
-test("default budgets: 16 MiB of markup passes, one byte more does not; 128 MiB total stays", async () => {
+await test("default budgets: 16 MiB of markup passes, one byte more does not; 128 MiB total stays", async () => {
   assert.equal(PPTX_MAX_MARKUP_BYTES, 16 * MiB);
   assert.equal(PPTX_MAX_EXPANDED_BYTES, 128 * MiB);
   const at = writeZip([deflated("ppt/slides/slide1.xml", markupOf(PPTX_MAX_MARKUP_BYTES))]);
@@ -422,7 +420,7 @@ test("default budgets: 16 MiB of markup passes, one byte more does not; 128 MiB 
   assert.deepEqual(await repackPptx(over, alive), { status: "tooLarge" });
 });
 
-test("a small deck with a 16 MiB+ slide is refused before the loader parses it; large media still opens", async () => {
+await test("a small deck with a 16 MiB+ slide is refused before the loader parses it; large media still opens", async () => {
   const filler = enc(FIXTURE_PPTX_FILLER).byteLength;
   const deck = buildFixturePptx(DEFAULT_PPTX_TEXT, {
     slide2Paragraphs: Math.ceil(PPTX_MAX_MARKUP_BYTES / filler),
@@ -435,7 +433,7 @@ test("a small deck with a 16 MiB+ slide is refused before the loader parses it; 
   // Control: 24 MiB of picture bytes is not markup, and the deck opens.
   const media = unzipSync(buildFixturePptx());
   const png = new Uint8Array(24 * MiB);
-  png.set(media["ppt/media/blue.png"]!);
+  png.set(assertPresent(media["ppt/media/blue.png"]));
   media["ppt/media/blue.png"] = png;
   const withMedia = writeZip(Object.entries(media).map(([name, bytes]) => deflated(name, bytes)));
   const opened = await openPptx(withMedia, alive);

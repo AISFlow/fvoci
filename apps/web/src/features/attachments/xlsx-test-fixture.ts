@@ -42,7 +42,11 @@ const CRC_TABLE = (() => {
 
 function crc32(bytes: Uint8Array): number {
   let c = 0xffffffff;
-  for (const byte of bytes) c = CRC_TABLE[(c ^ byte) & 0xff]! ^ (c >>> 8);
+  for (const byte of bytes) {
+    const entry = CRC_TABLE[(c ^ byte) & 0xff];
+    if (entry === undefined) throw new Error("missing CRC table entry");
+    c = entry ^ (c >>> 8);
+  }
   return (c ^ 0xffffffff) >>> 0;
 }
 
@@ -135,7 +139,9 @@ const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships
 const XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
 
 function rowOf(ref: string): number {
-  return Number(/\d+$/.exec(ref)![0]);
+  const match = /\d+$/.exec(ref);
+  if (!match) throw new Error("fixture cell reference has no row");
+  return Number(match[0]);
 }
 
 function worksheetXml(
@@ -147,11 +153,11 @@ function worksheetXml(
   for (const cell of cells) {
     let xml: string;
     if ("shared" in cell) {
-      xml = `<c r="${cell.ref}" t="s"><v>${sharedIndex.get(cell.shared)}</v></c>`;
+      xml = `<c r="${cell.ref}" t="s"><v>${String(sharedIndex.get(cell.shared))}</v></c>`;
     } else if ("inline" in cell) {
       xml = `<c r="${cell.ref}" t="inlineStr"><is><t xml:space="preserve">${escapeXml(cell.inline)}</t></is></c>`;
     } else if ("number" in cell) {
-      xml = `<c r="${cell.ref}"><v>${cell.number}</v></c>`;
+      xml = `<c r="${cell.ref}"><v>${String(cell.number)}</v></c>`;
     } else {
       const type = typeof cell.cached === "string" ? ' t="str"' : "";
       xml = `<c r="${cell.ref}"${type}><f>${escapeXml(cell.formula)}</f><v>${escapeXml(String(cell.cached))}</v></c>`;
@@ -161,12 +167,12 @@ function worksheetXml(
   }
   const sheetData = [...rows.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([row, xml]) => `<row r="${row}">${xml.join("")}</row>`)
+    .map(([row, xml]) => `<row r="${String(row)}">${xml.join("")}</row>`)
     .join("");
   const mergeXml =
     merges.length === 0
       ? ""
-      : `<mergeCells count="${merges.length}">${merges.map((ref) => `<mergeCell ref="${ref}"/>`).join("")}</mergeCells>`;
+      : `<mergeCells count="${String(merges.length)}">${merges.map((ref) => `<mergeCell ref="${ref}"/>`).join("")}</mergeCells>`;
   return `${XML_DECL}<worksheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}"><sheetData>${sheetData}</sheetData>${mergeXml}</worksheet>`;
 }
 
@@ -193,31 +199,33 @@ export async function buildFixtureXlsx(
   const sheetEntries: string[] = [];
   sheets.forEach((sheet, index) => {
     const n = index + 1;
-    const rId = `rId${n}`;
+    const rId = `rId${String(n)}`;
     if ("chart" in sheet) {
       parts.push({
-        name: `xl/chartsheets/sheet${n}.xml`,
+        name: `xl/chartsheets/sheet${String(n)}.xml`,
         xml: `${XML_DECL}<chartsheet xmlns="${NS_MAIN}" xmlns:r="${NS_REL}"><sheetViews><sheetView workbookViewId="0"/></sheetViews></chartsheet>`,
       });
       overrides.push(
-        `<Override PartName="/xl/chartsheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml"/>`,
+        `<Override PartName="/xl/chartsheets/sheet${String(n)}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml"/>`,
       );
       wbRels.push(
-        `<Relationship Id="${rId}" Type="${REL}/chartsheet" Target="chartsheets/sheet${n}.xml"/>`,
+        `<Relationship Id="${rId}" Type="${REL}/chartsheet" Target="chartsheets/sheet${String(n)}.xml"/>`,
       );
     } else {
       parts.push({
-        name: `xl/worksheets/sheet${n}.xml`,
+        name: `xl/worksheets/sheet${String(n)}.xml`,
         xml: worksheetXml(sheet.cells, sheet.merges ?? [], sharedIndex),
       });
       overrides.push(
-        `<Override PartName="/xl/worksheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`,
+        `<Override PartName="/xl/worksheets/sheet${String(n)}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`,
       );
       wbRels.push(
-        `<Relationship Id="${rId}" Type="${REL}/worksheet" Target="worksheets/sheet${n}.xml"/>`,
+        `<Relationship Id="${rId}" Type="${REL}/worksheet" Target="worksheets/sheet${String(n)}.xml"/>`,
       );
     }
-    sheetEntries.push(`<sheet name="${escapeXml(sheet.name)}" sheetId="${n}" r:id="${rId}"/>`);
+    sheetEntries.push(
+      `<sheet name="${escapeXml(sheet.name)}" sheetId="${String(n)}" r:id="${rId}"/>`,
+    );
   });
 
   let extraRel = sheets.length;
@@ -225,7 +233,7 @@ export async function buildFixtureXlsx(
     extraRel += 1;
     parts.push({
       name: "xl/sharedStrings.xml",
-      xml: `${XML_DECL}<sst xmlns="${NS_MAIN}" count="${shared.length}" uniqueCount="${shared.length}">${shared
+      xml: `${XML_DECL}<sst xmlns="${NS_MAIN}" count="${String(shared.length)}" uniqueCount="${String(shared.length)}">${shared
         .map((text) => `<si><t xml:space="preserve">${escapeXml(text)}</t></si>`)
         .join("")}</sst>`,
     });
@@ -233,7 +241,7 @@ export async function buildFixtureXlsx(
       '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>',
     );
     wbRels.push(
-      `<Relationship Id="rId${extraRel}" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/>`,
+      `<Relationship Id="rId${String(extraRel)}" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/>`,
     );
   }
   let externalReferences = "";
@@ -251,9 +259,9 @@ export async function buildFixtureXlsx(
       '<Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/>',
     );
     wbRels.push(
-      `<Relationship Id="rId${extraRel}" Type="${REL}/externalLink" Target="externalLinks/externalLink1.xml"/>`,
+      `<Relationship Id="rId${String(extraRel)}" Type="${REL}/externalLink" Target="externalLinks/externalLink1.xml"/>`,
     );
-    externalReferences = `<externalReferences><externalReference r:id="rId${extraRel}"/></externalReferences>`;
+    externalReferences = `<externalReferences><externalReference r:id="rId${String(extraRel)}"/></externalReferences>`;
   }
   if (options.vba) {
     extraRel += 1;
@@ -266,7 +274,7 @@ export async function buildFixtureXlsx(
       '<Override PartName="/xl/vbaProject.bin" ContentType="application/vnd.ms-office.vbaProject"/>',
     );
     wbRels.push(
-      `<Relationship Id="rId${extraRel}" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>`,
+      `<Relationship Id="rId${String(extraRel)}" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>`,
     );
   }
 
@@ -315,7 +323,7 @@ export function gridSheet(name: string, rows: number, cols: number): FixtureShee
   const cells: FixtureCell[] = [];
   for (let r = 1; r <= rows; r += 1) {
     for (let c = 1; c <= cols; c += 1) {
-      cells.push({ ref: `${columnLetters(c)}${r}`, inline: `R${r}C${c}` });
+      cells.push({ ref: `${columnLetters(c)}${String(r)}`, inline: `R${String(r)}C${String(c)}` });
     }
   }
   return { name, cells };

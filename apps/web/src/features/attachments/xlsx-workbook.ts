@@ -33,7 +33,7 @@ export type XlsxOpenResult =
   /** Not a readable XLSX package (corrupt, encrypted, legacy .xls, …). */
   | { status: "invalid" };
 
-const OVER_CAP = Symbol("xlsx package over cap");
+const OVER_CAP = new Error("xlsx package over cap");
 
 /**
  * Declared-metadata check that runs before @office-kit/xlsx sees the bytes.

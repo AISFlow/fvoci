@@ -96,13 +96,18 @@ export function openXlsxInWorker(
     pending = null;
     waiting?.reject(new XlsxWorkerError(reason));
   };
-  const onAbort = () => kill("failed");
+  const onAbort = () => {
+    kill("failed");
+  };
   signal?.addEventListener("abort", onAbort);
   worker.onmessage = ({ data }) => {
     const waiting = pending;
     pending = null;
     clearTimeout(timer);
-    if (!waiting) return kill("failed");
+    if (!waiting) {
+      kill("failed");
+      return;
+    }
     if (data.type === "failed") {
       waiting.reject(new XlsxWorkerError("failed"));
       kill("failed");
@@ -110,13 +115,20 @@ export function openXlsxInWorker(
       waiting.resolve(data);
     }
   };
-  worker.onerror = worker.onmessageerror = () => kill("failed");
+  worker.onerror = worker.onmessageerror = () => {
+    kill("failed");
+  };
 
   const request = (message: XlsxWorkerRequest, timeoutMs: number, transfer: Transferable[] = []) =>
     new Promise<XlsxWorkerResponse>((resolve, reject) => {
-      if (dead) return reject(new XlsxWorkerError("failed"));
+      if (dead) {
+        reject(new XlsxWorkerError("failed"));
+        return;
+      }
       pending = { resolve, reject };
-      timer = setTimeout(() => kill("timeout"), timeoutMs);
+      timer = setTimeout(() => {
+        kill("timeout");
+      }, timeoutMs);
       worker.postMessage(message, transfer);
     });
 
@@ -148,10 +160,16 @@ export function openXlsxInWorker(
             return reply.page;
           });
         },
-        close: () => kill("failed"),
+        close: () => {
+          kill("failed");
+        },
       };
       return { status: "ok", book };
     },
-    (error: XlsxWorkerError) => ({ status: error.reason === "timeout" ? "tooLarge" : "invalid" }),
+    (error: unknown) => {
+      if (!(error instanceof XlsxWorkerError))
+        throw new Error("unexpected worker rejection", { cause: error });
+      return { status: error.reason === "timeout" ? "tooLarge" : "invalid" };
+    },
   );
 }

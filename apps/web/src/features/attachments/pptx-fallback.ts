@@ -55,7 +55,7 @@ function number(tag: SaxesTagNS, name: string): number {
 function viewport(box: Box): string {
   if (!(box.width > 0 && box.height > 0)) return '<svg width="0" height="0">';
   const { x, y, width, height } = box;
-  return `<svg x="${x}" y="${y}" width="${width}" height="${height}" viewBox="${x} ${y} ${width} ${height}" overflow="hidden">`;
+  return `<svg x="${String(x)}" y="${String(y)}" width="${String(width)}" height="${String(height)}" viewBox="${String(x)} ${String(y)} ${String(width)} ${String(height)}" overflow="hidden">`;
 }
 
 /** `svg` with every renderer placeholder label clipped to its placeholder box. */
@@ -103,11 +103,14 @@ export function boundFallbackLabels(svg: string): BoundedLabels {
     });
   });
   parser.on("closetag", () => {
-    const frame = stack.pop()!;
+    const frame = stack.pop();
+    if (!frame) throw new Unexpected("closing tag without a frame");
     if (frame.fallback && frame.fallback.label !== "done")
       throw new Unexpected("fallback without a label");
     if (frame.label) {
-      stack[stack.length - 1]!.fallback!.label = "done";
+      const parent = stack[stack.length - 1]?.fallback;
+      if (!parent) throw new Unexpected("label without a fallback group");
+      parent.label = "done";
       inserts.push({ at: parser.position, text: "</svg>" });
     }
   });

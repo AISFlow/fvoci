@@ -24,11 +24,11 @@ function assertInertSvg(svg: string): void {
   assert.doesNotMatch(svg, /url\((?!#|["']?data:)/i);
 }
 
-test("pinned @rhwp/core is the source contract version", () => {
+await test("pinned @rhwp/core is the source contract version", () => {
   assert.equal(version(), "0.8.6");
 });
 
-test("the user-authored Hancom HWP and HWPX samples lay out their Korean text", () => {
+await test("the user-authored Hancom HWP and HWPX samples lay out their Korean text", () => {
   for (const name of ["sample.hwp", "sample.hwpx"]) {
     const doc = new HwpDocument(
       new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name))),
@@ -43,7 +43,7 @@ test("the user-authored Hancom HWP and HWPX samples lay out their Korean text", 
   }
 });
 
-test("synthetic HWPX has one page per fixture page and chunk N opens page N", () => {
+await test("synthetic HWPX has one page per fixture page and chunk N opens page N", () => {
   const hwpx = buildFixtureHwpx(
     new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures/sample.hwpx"))),
     FIXTURE_PAGES,

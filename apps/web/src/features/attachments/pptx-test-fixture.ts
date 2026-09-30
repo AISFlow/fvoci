@@ -49,19 +49,19 @@ function xmlText(text: string): string {
 }
 
 const xfrm = (x: number, y: number, w: number, h: number) =>
-  `<a:xfrm><a:off x="${px(x)}" y="${px(y)}"/><a:ext cx="${px(w)}" cy="${px(h)}"/></a:xfrm>`;
+  `<a:xfrm><a:off x="${String(px(x))}" y="${String(px(y))}"/><a:ext cx="${String(px(w))}" cy="${String(px(h))}"/></a:xfrm>`;
 
 const solid = (hex: string) => `<a:solidFill><a:srgbClr val="${hex}"/></a:solidFill>`;
 
 const hexOf = ([r, g, b]: readonly number[]) =>
   [r, g, b]
-    .map((c) => c!.toString(16).padStart(2, "0"))
+    .map((c) => c.toString(16).padStart(2, "0"))
     .join("")
     .toUpperCase();
 
 /** A text run; `size` is in hundredths of a point (2000 = 20 pt = 26.67 CSS px). */
 const run = (text: string, { size = 2000, bold = false, inner = "" } = {}) =>
-  `<a:r><a:rPr lang="ko-KR" sz="${size}"${bold ? ' b="1"' : ""}>${inner}</a:rPr><a:t>${xmlText(text)}</a:t></a:r>`;
+  `<a:r><a:rPr lang="ko-KR" sz="${String(size)}"${bold ? ' b="1"' : ""}>${inner}</a:rPr><a:t>${xmlText(text)}</a:t></a:r>`;
 
 const textBox = (
   id: number,
@@ -72,7 +72,7 @@ const textBox = (
   h: number,
   paragraphs: string,
 ) =>
-  `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="${name}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr>${xfrm(x, y, w, h)}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0"/><a:lstStyle/>${paragraphs}</p:txBody></p:sp>`;
+  `<p:sp><p:nvSpPr><p:cNvPr id="${String(id)}" name="${name}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr>${xfrm(x, y, w, h)}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0"/><a:lstStyle/>${paragraphs}</p:txBody></p:sp>`;
 
 const shape = (
   id: number,
@@ -84,7 +84,7 @@ const shape = (
   h: number,
   fill: string,
 ) =>
-  `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="${name}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>${xfrm(x, y, w, h)}<a:prstGeom prst="${preset}"><a:avLst/></a:prstGeom>${solid(fill)}<a:ln><a:noFill/></a:ln></p:spPr></p:sp>`;
+  `<p:sp><p:nvSpPr><p:cNvPr id="${String(id)}" name="${name}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>${xfrm(x, y, w, h)}<a:prstGeom prst="${preset}"><a:avLst/></a:prstGeom>${solid(fill)}<a:ln><a:noFill/></a:ln></p:spPr></p:sp>`;
 
 const picture = (
   id: number,
@@ -96,7 +96,7 @@ const picture = (
   h: number,
   rot = 0,
 ) =>
-  `<p:pic><p:nvPicPr><p:cNvPr id="${id}" name="${name}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill>${blip}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>${rot ? xfrm(x, y, w, h).replace("<a:xfrm>", `<a:xfrm rot="${rot * 60000}">`) : xfrm(x, y, w, h)}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+  `<p:pic><p:nvPicPr><p:cNvPr id="${String(id)}" name="${name}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill>${blip}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>${rot ? xfrm(x, y, w, h).replace("<a:xfrm>", `<a:xfrm rot="${String(rot * 60000)}">`) : xfrm(x, y, w, h)}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
 
 /** A group whose children are laid out in `child` coordinates and scaled onto `outer`. */
 const group = (
@@ -105,10 +105,10 @@ const group = (
   child: [number, number, number, number],
   shapes: string,
 ) =>
-  `<p:grpSp><p:nvGrpSpPr><p:cNvPr id="${id}" name="Group ${id}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="${px(outer[0])}" y="${px(outer[1])}"/><a:ext cx="${px(outer[2])}" cy="${px(outer[3])}"/><a:chOff x="${px(child[0])}" y="${px(child[1])}"/><a:chExt cx="${px(child[2])}" cy="${px(child[3])}"/></a:xfrm></p:grpSpPr>${shapes}</p:grpSp>`;
+  `<p:grpSp><p:nvGrpSpPr><p:cNvPr id="${String(id)}" name="Group ${String(id)}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="${String(px(outer[0]))}" y="${String(px(outer[1]))}"/><a:ext cx="${String(px(outer[2]))}" cy="${String(px(outer[3]))}"/><a:chOff x="${String(px(child[0]))}" y="${String(px(child[1]))}"/><a:chExt cx="${String(px(child[2]))}" cy="${String(px(child[3]))}"/></a:xfrm></p:grpSpPr>${shapes}</p:grpSp>`;
 
 const bullet = (text: string, level: number) =>
-  `<a:p><a:pPr lvl="${level}" marL="${px(24 + level * 32)}" indent="${px(-18)}"><a:buFont typeface="Arial"/><a:buChar char="${level === 0 ? "•" : "–"}"/></a:pPr>${run(text)}</a:p>`;
+  `<a:p><a:pPr lvl="${String(level)}" marL="${String(px(24 + level * 32))}" indent="${String(px(-18))}"><a:buFont typeface="Arial"/><a:buChar char="${level === 0 ? "•" : "–"}"/></a:pPr>${run(text)}</a:p>`;
 
 const border = (side: string) =>
   `<a:${side} w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:${side}>`;
@@ -173,9 +173,9 @@ export function buildFixturePptx(
 ): Uint8Array {
   const enc = (s: string) => new TextEncoder().encode(s);
   const contentTypes = `${XML}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>`;
-  const presentation = `${XML}<p:presentation xmlns:a="${A}" xmlns:r="${R}" xmlns:p="${P}"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/></p:sldIdLst><p:sldSz cx="${px(FIXTURE_PPTX_SLIDE_W)}" cy="${px(FIXTURE_PPTX_SLIDE_H)}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`;
+  const presentation = `${XML}<p:presentation xmlns:a="${A}" xmlns:r="${R}" xmlns:p="${P}"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/></p:sldIdLst><p:sldSz cx="${String(px(FIXTURE_PPTX_SLIDE_W))}" cy="${String(px(FIXTURE_PPTX_SLIDE_H))}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`;
 
-  const table = `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="6" name="Table"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="${px(480)}" y="${px(260)}"/><a:ext cx="${px(320)}" cy="${px(80)}"/></p:xfrm><a:graphic><a:graphicData uri="${TABLE_URI}"><a:tbl><a:tblPr/><a:tblGrid><a:gridCol w="${px(160)}"/><a:gridCol w="${px(160)}"/></a:tblGrid><a:tr h="${px(40)}">${cell(text.table[0], hexOf(FIXTURE_PPTX_COLORS.red))}${cell(text.table[1])}</a:tr><a:tr h="${px(40)}">${cell(text.table[2])}${cell(text.table[3])}</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+  const table = `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="6" name="Table"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="${String(px(480))}" y="${String(px(260))}"/><a:ext cx="${String(px(320))}" cy="${String(px(80))}"/></p:xfrm><a:graphic><a:graphicData uri="${TABLE_URI}"><a:tbl><a:tblPr/><a:tblGrid><a:gridCol w="${String(px(160))}"/><a:gridCol w="${String(px(160))}"/></a:tblGrid><a:tr h="${String(px(40))}">${cell(text.table[0], hexOf(FIXTURE_PPTX_COLORS.red))}${cell(text.table[1])}</a:tr><a:tr h="${String(px(40))}">${cell(text.table[2])}${cell(text.table[3])}</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
 
   const slide1 = slideXml(
     [

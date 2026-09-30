@@ -1,3 +1,4 @@
+import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { once } from "node:events";
@@ -46,10 +47,14 @@ function threadWorker(): ThreadPort {
     onmessage: null,
     onerror: null,
     onmessageerror: null,
-    postMessage: (message, transfer) => thread.postMessage(message, transfer as never),
+    postMessage: (message, transfer) => {
+      thread.postMessage(message, transfer as never);
+    },
     terminate: () => {
       terminated = true;
-      void thread.terminate();
+      thread.terminate().catch((error: unknown) => {
+        assert.fail(String(error));
+      });
     },
     booted: new Promise((resolve) => (booted = resolve)),
     exited: new Promise((resolve) => thread.once("exit", resolve)),
@@ -59,11 +64,11 @@ function threadWorker(): ThreadPort {
     if (data === "booted") booted();
     else port.onmessage?.({ data } as MessageEvent<XlsxWorkerResponse>);
   });
-  thread.on("error", (error) => port.onerror?.(error as unknown as ErrorEvent));
+  thread.on("error", (error) => port.onerror?.(error as ErrorEvent));
   return port;
 }
 
-test("the worker opens and pages a workbook, then close terminates it", async () => {
+await test("the worker opens and pages a workbook, then close terminates it", async () => {
   const worker = threadWorker();
   const opened = await openXlsxInWorker(
     await buildFixtureXlsx([gridSheet("Grid", 401, 65)], { deflate: true }),
@@ -72,13 +77,12 @@ test("the worker opens and pages a workbook, then close terminates it", async ()
     },
   );
   assert.equal(opened.status, "ok");
-  if (opened.status !== "ok") return;
   assert.deepEqual(opened.book.sheets, [{ name: "Grid", kind: "worksheet" }]);
-  const first = (await opened.book.page(0, 0, 0))!;
+  const first = assertPresent(await opened.book.page(0, 0, 0));
   assert.equal(first.rowPages, 3);
-  assert.equal(first.rows[199]![63], "R200C64");
+  assert.equal(assertPresent(first.rows[199])[63], "R200C64");
   // Out-of-range indexes still clamp to the last page, as in xlsx-workbook.ts.
-  assert.deepEqual((await opened.book.page(0, 9, 9))!.rows, [["R401C65"]]);
+  assert.deepEqual(assertPresent(await opened.book.page(0, 9, 9)).rows, [["R401C65"]]);
   assert.equal(await opened.book.page(5, 0, 0), null);
   opened.book.close();
   assert.ok(worker.terminated());
@@ -89,7 +93,7 @@ test("the worker opens and pages a workbook, then close terminates it", async ()
   );
 });
 
-test("cap and format failures come back from the worker, which is then terminated", async () => {
+await test("cap and format failures come back from the worker, which is then terminated", async () => {
   const large = threadWorker();
   const rows = await openXlsxInWorker(await buildFixtureXlsx([gridSheet("Rows", 20_001, 1)]), {
     createWorker: () => large,
@@ -140,7 +144,7 @@ function hostileStream(): Promise<Uint8Array> {
   return hostile.then((zip) => zip.slice());
 }
 
-test("a stream that decodes far past its declared size passes the metadata check", async () => {
+await test("a stream that decodes far past its declared size passes the metadata check", async () => {
   const zip = await hostileStream();
   assert.ok(zip.byteLength < 4 * 1024 * 1024);
   // Declared sizes are within every cap; only decoding the stream costs.
@@ -149,7 +153,7 @@ test("a stream that decodes far past its declared size passes the metadata check
 
 // Decoding the 512 MiB takes about 1.3 s under V8 (Chromium, the e2e browser)
 // and 10 s under Bun's JavaScriptCore, past bun test's 5 s default.
-test(
+await test(
   "negative control: left to finish, the worker decodes it and reports invalid, off the main thread",
   { timeout: 60_000 },
   async () => {
@@ -168,7 +172,7 @@ test(
   },
 );
 
-test("the open timeout terminates a booted worker in the middle of that decode", async () => {
+await test("the open timeout terminates a booted worker in the middle of that decode", async () => {
   const worker = threadWorker();
   await worker.booted;
   const opened = await openXlsxInWorker(await hostileStream(), {
@@ -209,14 +213,13 @@ function silentPager(): XlsxWorkerPort & { requests: XlsxWorkerRequest[]; termin
   return port;
 }
 
-test("a page request past its timeout terminates the worker", async () => {
+await test("a page request past its timeout terminates the worker", async () => {
   const worker = silentPager();
   const opened = await openXlsxInWorker(new Uint8Array(8), {
     createWorker: () => worker,
     pageTimeoutMs: 20,
   });
   assert.equal(opened.status, "ok");
-  if (opened.status !== "ok") return;
   const first = opened.book.page(0, 0, 0);
   const queued = opened.book.page(0, 1, 0);
   await assert.rejects(
@@ -235,7 +238,7 @@ test("a page request past its timeout terminates the worker", async () => {
   );
 });
 
-test("an abort, a worker error or a mismatched reply terminates the worker", async () => {
+await test("an abort, a worker error or a mismatched reply terminates the worker", async () => {
   const aborted = silentPager();
   const controller = new AbortController();
   controller.abort();
@@ -257,7 +260,6 @@ test("an abort, a worker error or a mismatched reply terminates the worker", asy
     createWorker: () => late,
   });
   assert.equal(opened.status, "ok");
-  if (opened.status !== "ok") return;
   const page = opened.book.page(0, 0, 0);
   lateController.abort();
   await assert.rejects(
@@ -289,7 +291,7 @@ test("an abort, a worker error or a mismatched reply terminates the worker", asy
   assert.ok(confused.terminated);
 });
 
-test("the default bounds", () => {
+await test("the default bounds", () => {
   assert.equal(XLSX_OPEN_TIMEOUT_MS, 20_000);
   assert.equal(XLSX_PAGE_TIMEOUT_MS, 10_000);
 });

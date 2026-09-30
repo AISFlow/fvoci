@@ -78,8 +78,12 @@ export async function checkDocxPackage(
             resolve(total > maxExpanded ? "tooLarge" : "invalid");
           }
         })
-        .on("error", () => resolve("invalid"))
-        .on("end", () => resolve("ok"))
+        .on("error", () => {
+          resolve("invalid");
+        })
+        .on("end", () => {
+          resolve("ok");
+        })
         .resume();
     });
     if (result !== "ok") return result;

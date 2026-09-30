@@ -24,18 +24,18 @@ function names(bytes: Uint8Array): string[] {
   return readZip(bytes).map((entry) => entry.name);
 }
 
-test("the review's small Scripts bomb is rejected before rhwp runs", async () => {
+await test("the review's small Scripts bomb is rejected before rhwp runs", async () => {
   // Four unreferenced 32 MiB scripts: about 140 KB on disk, about 324 MiB of
   // wasm heap when rhwp 0.8.6 opens it directly (review B1 table).
   const bomb = withExtra(
-    [0, 1, 2, 3].map((n) => ({ name: `Scripts/s${n}.js`, data: new Uint8Array(32 * MiB) })),
+    [0, 1, 2, 3].map((n) => ({ name: `Scripts/s${String(n)}.js`, data: new Uint8Array(32 * MiB) })),
   );
   assert.ok(bomb.length < 256 * 1024);
   assert.equal(HWPX_MAX_EXPANDED_BYTES, 128 * MiB);
   assert.deepEqual(await prepareHwpBytes(bomb, alive), { status: "tooLarge" });
 });
 
-test("rhwp itself opens an over-budget package; the check is what refuses it", async () => {
+await test("rhwp itself opens an over-budget package; the check is what refuses it", async () => {
   initSync({ module: fs.readFileSync(path.join(coreDir, "rhwp_bg.wasm")) });
   const bomb = withExtra([{ name: "Scripts/s.js", data: new Uint8Array(8 * MiB) }]);
   const doc = new HwpDocument(bomb);
@@ -49,7 +49,7 @@ test("rhwp itself opens an over-budget package; the check is what refuses it", a
   assert.equal(ok.status, "ok");
 });
 
-test("rhwp gets a re-written package holding only the measured parts", async () => {
+await test("rhwp gets a re-written package holding only the measured parts", async () => {
   const forged = withExtra([
     // Declared empty: JSZip keeps no data, so the re-written part is empty too.
     { name: "Scripts/empty.js", data: new Uint8Array(8 * MiB), declaredSize: 0 },
@@ -61,7 +61,6 @@ test("rhwp gets a re-written package holding only the measured parts", async () 
   ]);
   const checked = await prepareHwpBytes(forged, alive, 1 * MiB);
   assert.equal(checked.status, "ok");
-  if (checked.status !== "ok") return;
   const parts = readZip(checked.bytes);
   const scripts = parts.filter((part) => part.name.startsWith("Scripts/"));
   assert.deepEqual(
@@ -80,7 +79,7 @@ test("rhwp gets a re-written package holding only the measured parts", async () 
   }
 });
 
-test("the part count is capped and malformed or cancelled packages are invalid", async () => {
+await test("the part count is capped and malformed or cancelled packages are invalid", async () => {
   const sample = fixture("sample.hwpx");
   assert.deepEqual(
     await prepareHwpBytes(sample, alive, HWPX_MAX_EXPANDED_BYTES, names(sample).length - 1),
@@ -97,9 +96,9 @@ test("the part count is capped and malformed or cancelled packages are invalid",
   assert.deepEqual(await prepareHwpBytes(sample, () => false), { status: "invalid" });
 });
 
-test("non-ZIP formats (HWP 5) are passed to rhwp unchanged", async () => {
+await test("non-ZIP formats (HWP 5) are passed to rhwp unchanged", async () => {
   const hwp = fixture("sample.hwp");
   const checked = await prepareHwpBytes(hwp, alive);
   assert.equal(checked.status, "ok");
-  assert.equal(checked.status === "ok" && checked.bytes, hwp);
+  assert.equal(checked.bytes, hwp);
 });

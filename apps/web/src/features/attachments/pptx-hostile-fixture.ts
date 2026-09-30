@@ -28,7 +28,8 @@ export const HOSTILE_PPTX_MARKUP = {
 /** A one-slide deck whose chart data labels carry `markup` as a quoted number-format prefix. */
 export async function buildChartPptx(markup: string): Promise<Uint8Array> {
   const pres = createPresentation();
-  const layout = getSlideLayouts(pres)[0]!;
+  const layout = getSlideLayouts(pres)[0];
+  if (!layout) throw new Error("fixture presentation has no slide layout");
   const slide = addSlide(pres, { layout });
   addSlideChart(slide, {
     x: emu(0),

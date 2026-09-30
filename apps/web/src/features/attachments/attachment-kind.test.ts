@@ -10,7 +10,7 @@ import {
   viewerKind,
 } from "./attachment-kind.ts";
 
-test("chunkSearch accepts a non-negative integer chunk query", () => {
+await test("chunkSearch accepts a non-negative integer chunk query", () => {
   assert.deepEqual(chunkSearch(new URLSearchParams("chunk=3")), { chunk: 3 });
   assert.deepEqual(chunkSearch(new URLSearchParams("chunk=0")), { chunk: 0 });
   assert.deepEqual(chunkSearch(new URLSearchParams("chunk=-1")), {});
@@ -18,7 +18,7 @@ test("chunkSearch accepts a non-negative integer chunk query", () => {
   assert.deepEqual(chunkSearch(new URLSearchParams()), {});
 });
 
-test("viewerKind prefers images, then PDF, then HWP, then DOCX, then PPTX, then XLSX, then extractable text, then download", () => {
+await test("viewerKind prefers images, then PDF, then HWP, then DOCX, then PPTX, then XLSX, then extractable text, then download", () => {
   assert.equal(viewerKind({ name: "a.png", mime: "image/png", image: true }), "image");
   assert.equal(viewerKind({ name: "a.pdf", mime: "application/pdf", image: false }), "pdf");
   assert.equal(

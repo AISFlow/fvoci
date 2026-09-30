@@ -1,3 +1,4 @@
+import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -25,7 +26,10 @@ const fixture = (name: string) =>
   new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
 
 const realApi: RhwpApi = {
-  init: async (m) => void initSync({ module: m }),
+  init: (m) => {
+    initSync({ module: m });
+    return Promise.resolve();
+  },
   open: (bytes) => new HwpDocument(bytes),
 };
 
@@ -66,7 +70,7 @@ function reopen(bytes: Uint8Array): string[] {
 const occurrences = (text: string, word: string) => text.split(word).length - 1;
 const pagesText = FIXTURE_PAGES.map((text) => `${text}\n`);
 
-test("export format follows the file name, not the MIME type", () => {
+await test("export format follows the file name, not the MIME type", () => {
   assert.deepEqual(hwpExportFormat("보고서.hwpx"), { format: "hwpx", mime: "application/hwpx" });
   assert.deepEqual(hwpExportFormat("REPORT.HWPX"), { format: "hwpx", mime: "application/hwpx" });
   assert.deepEqual(hwpExportFormat("보고서.hwp"), { format: "hwp", mime: "application/x-hwp" });
@@ -74,9 +78,9 @@ test("export format follows the file name, not the MIME type", () => {
   assert.deepEqual(hwpExportFormat("a.hwpx.hwp"), { format: "hwp", mime: "application/x-hwp" });
 });
 
-test("HWPX: replace all on one page, export as HWPX, reopen: only that page changed", async () => {
+await test("HWPX: replace all on one page, export as HWPX, reopen: only that page changed", async () => {
   const session = await openSession(buildFixtureHwpx(fixture("sample.hwpx"), FIXTURE_PAGES));
-  const hits = occurrences(FIXTURE_PAGES[1]!, "하늘과");
+  const hits = occurrences(assertPresent(FIXTURE_PAGES[1]), "하늘과");
   assert.ok(hits > 1);
   assert.equal(await replace(session, "하늘과", "구름과", true), "changed");
   const bytes = await exported(session, "hwpx");
@@ -84,10 +88,10 @@ test("HWPX: replace all on one page, export as HWPX, reopen: only that page chan
   const pages = reopen(bytes);
   assert.deepEqual(pages, [
     pagesText[0],
-    pagesText[1]!.replaceAll("하늘과", "구름과"),
+    assertPresent(pagesText[1]).replaceAll("하늘과", "구름과"),
     pagesText[2],
   ]);
-  assert.equal(occurrences(pages[1]!, "구름과"), hits);
+  assert.equal(occurrences(assertPresent(pages[1]), "구름과"), hits);
   // The copy is itself a document the viewer opens.
   const again = createHwpSession(realApi);
   assert.deepEqual(await call(again, { op: "open", bytes, module }), {
@@ -98,7 +102,7 @@ test("HWPX: replace all on one page, export as HWPX, reopen: only that page chan
   });
 });
 
-test("HWP: replace one and replace all, export as HWP 5.0, reopen", async () => {
+await test("HWP: replace one and replace all, export as HWP 5.0, reopen", async () => {
   const session = await openSession(fixture("sample.hwp"));
   assert.equal(await replace(session, "안", "잘", false), "changed");
   const bytes = await exported(session, "hwp");
@@ -115,11 +119,11 @@ test("HWP: replace one and replace all, export as HWP 5.0, reopen", async () => 
   assert.deepEqual(reopen(await exported(multi, "hwp")), [
     pagesText[0],
     pagesText[1],
-    pagesText[2]!.replaceAll("백두산이", "한라산이"),
+    assertPresent(pagesText[2]).replaceAll("백두산이", "한라산이"),
   ]);
 });
 
-test("no match changes nothing: replaceAll count 0 and a refused replaceOne", async () => {
+await test("no match changes nothing: replaceAll count 0 and a refused replaceOne", async () => {
   const session = await openSession(fixture("sample.hwpx"));
   assert.equal(await replace(session, "없는문자열", "X", true), "unchanged");
   // rhwp 0.8.6 answers {"ok":false} to a replaceOne with no match.
@@ -128,7 +132,7 @@ test("no match changes nothing: replaceAll count 0 and a refused replaceOne", as
   assert.deepEqual(reopen(await exported(session, "hwpx")), ["안녕\n"]);
 });
 
-test("revert re-parses the original and drops every edit", async () => {
+await test("revert re-parses the original and drops every edit", async () => {
   const session = await openSession(buildFixtureHwpx(fixture("sample.hwpx"), FIXTURE_PAGES));
   assert.equal(await replace(session, "첫째", "처음", true), "changed");
   assert.equal(await replace(session, "셋째", "끝", false), "changed");
@@ -141,7 +145,10 @@ test("revert re-parses the original and drops every edit", async () => {
   assert.deepEqual(reopen(await exported(session, "hwpx")), pagesText);
   // Editing goes on from the original.
   assert.equal(await replace(session, "둘째", "두번째", false), "changed");
-  assert.equal(reopen(await exported(session, "hwpx"))[1], pagesText[1]!.replace("둘째", "두번째"));
+  assert.equal(
+    reopen(await exported(session, "hwpx"))[1],
+    assertPresent(pagesText[1]).replace("둘째", "두번째"),
+  );
 });
 
 /** A stand-in document whose edit and export answers a test controls. */
@@ -150,7 +157,7 @@ function stubApi(
   opens: { count: number; fail?: number } = { count: 0 },
 ): RhwpApi {
   return {
-    init: async () => undefined,
+    init: () => Promise.resolve(),
     open: () => {
       opens.count += 1;
       if (opens.fail === opens.count) throw new Error("trap");
@@ -169,7 +176,7 @@ function stubApi(
   };
 }
 
-test("malformed mutation answers are refused without an edit, and the document stays usable", async () => {
+await test("malformed mutation answers are refused without an edit, and the document stays usable", async () => {
   for (const raw of ["not-json", "[]", '{"ok":true,"count":-1}', '{"ok":true,"count":"2"}']) {
     const session = await openSession(new Uint8Array([9]), stubApi({ replaceAll: () => raw }));
     assert.equal(await replace(session, "a", "b", true), "rejected", raw);
@@ -177,7 +184,7 @@ test("malformed mutation answers are refused without an edit, and the document s
   }
 });
 
-test("a replace that traps drops the half-edited document: nothing renders, exports or reverts after it", async () => {
+await test("a replace that traps drops the half-edited document: nothing renders, exports or reverts after it", async () => {
   // The stand-in applies part of its edit before trapping, as a wasm panic mid-replace can.
   let text = "original";
   const exports: string[] = [];
@@ -217,7 +224,7 @@ test("a replace that traps drops the half-edited document: nothing renders, expo
   assert.deepEqual(exports, []);
 });
 
-test("an export that throws, is empty, or exceeds the viewer's budget is refused", async () => {
+await test("an export that throws, is empty, or exceeds the viewer's budget is refused", async () => {
   const throwing = await openSession(
     new Uint8Array([9]),
     stubApi({
@@ -257,7 +264,7 @@ test("an export that throws, is empty, or exceeds the viewer's budget is refused
   assert.ok(ok.ok && ok.op === "export" && ok.bytes.byteLength === HWP_MAX_BYTES);
 });
 
-test("a revert whose re-parse fails keeps the edited document", async () => {
+await test("a revert whose re-parse fails keeps the edited document", async () => {
   const opens = { count: 0, fail: 2 };
   let freed = 0;
   const session = await openSession(

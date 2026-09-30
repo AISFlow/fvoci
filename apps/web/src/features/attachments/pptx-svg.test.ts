@@ -1,3 +1,4 @@
+import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { openPptx, renderSlide, renderSlideImage, type PptxDeck } from "./pptx-deck.ts";
@@ -32,7 +33,7 @@ const TEMPLATE = (w: string, h: string, base64: string) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
   `<image width="${w}" height="${h}" href="data:image/svg+xml;base64,${base64}"/></svg>`;
 
-test("the served slide is exactly the fixed template around the renderer's SVG, byte for byte", async () => {
+await test("the served slide is exactly the fixed template around the renderer's SVG, byte for byte", async () => {
   const deck = await deckOf(buildFixturePptx());
   for (const index of [0, 1]) {
     const raw = rawSvg(deck, index);
@@ -41,7 +42,7 @@ test("the served slide is exactly the fixed template around the renderer's SVG, 
     assert.equal(innerSlideSvg(outer), raw);
   }
   // Korean text, links (inert as an image), foreignObject text and the embedded picture are all still inside.
-  const inner = innerSlideSvg(imageSvg(deck, 0))!;
+  const inner = assertPresent(innerSlideSvg(imageSvg(deck, 0)));
   for (const part of [
     DEFAULT_PPTX_TEXT.title,
     DEFAULT_PPTX_TEXT.link,
@@ -55,7 +56,7 @@ test("the served slide is exactly the fixed template around the renderer's SVG, 
   assert.equal(deck.height, FIXTURE_PPTX_SLIDE_H);
 });
 
-test("review B1 counterexamples: chart number-format markup reaches the renderer, never the outer document", async () => {
+await test("review B1 counterexamples: chart number-format markup reaches the renderer, never the outer document", async () => {
   for (const [name, markup] of Object.entries(HOSTILE_PPTX_MARKUP)) {
     const deck = await deckOf(await buildChartPptx(markup));
     const raw = rawSvg(deck, 0);
@@ -67,12 +68,12 @@ test("review B1 counterexamples: chart number-format markup reaches the renderer
         outer,
       );
     assert.ok(match, name);
-    assert.equal(outer, TEMPLATE("1280", "720", match[1]!), name);
+    assert.equal(outer, TEMPLATE("1280", "720", assertPresent(match[1])), name);
     assert.equal(innerSlideSvg(outer), raw, name);
   }
 });
 
-test("base64 is standard and chunk joins are exact", () => {
+await test("base64 is standard and chunk joins are exact", () => {
   let seed = 7;
   const random = (n: number) =>
     Uint8Array.from({ length: n }, () => {
@@ -85,7 +86,7 @@ test("base64 is standard and chunk joins are exact", () => {
   }
 });
 
-test("UTF-8: multi-byte text round-trips, a lone surrogate becomes U+FFFD, the cap counts bytes", () => {
+await test("UTF-8: multi-byte text round-trips, a lone surrogate becomes U+FFFD, the cap counts bytes", () => {
   const inner = '<svg viewBox="0 0 1 1"><text>한글 😀 &amp;</text></svg>';
   const ok = slideImageSvg(inner, 1, 1, 1024);
   assert.equal(ok.status, "ok");
@@ -105,7 +106,7 @@ test("UTF-8: multi-byte text round-trips, a lone surrogate becomes U+FFFD, the c
   assert.deepEqual(slideImageSvg(inner, 1, 1, inner.length - 1), { status: "tooLarge" });
 });
 
-test("only a renderer <svg> root and sane dimensions are wrapped", () => {
+await test("only a renderer <svg> root and sane dimensions are wrapped", () => {
   for (const inner of [
     "",
     "<html></html>",
@@ -124,7 +125,11 @@ test("only a renderer <svg> root and sane dimensions are wrapped", () => {
     [0.004, 1],
     [1, 0.0049],
   ]) {
-    assert.deepEqual(slideImageSvg("<svg></svg>", w!, h!, 1024), { status: "failed" }, `${w}x${h}`);
+    assert.deepEqual(
+      slideImageSvg("<svg></svg>", assertPresent(w), assertPresent(h), 1024),
+      { status: "failed" },
+      `${String(w)}x${String(h)}`,
+    );
   }
   // The smallest dimension the template can write.
   const smallest = slideImageSvg("<svg></svg>", 0.005, 1e6, 1024);
@@ -141,7 +146,7 @@ test("only a renderer <svg> root and sane dimensions are wrapped", () => {
   );
 });
 
-test("innerSlideSvg accepts the exact template only", () => {
+await test("innerSlideSvg accepts the exact template only", () => {
   const outer = (slideImageSvg("<svg>한</svg>", 10, 20, 1024) as { svg: string }).svg;
   assert.equal(innerSlideSvg(outer), "<svg>한</svg>");
   for (const other of [

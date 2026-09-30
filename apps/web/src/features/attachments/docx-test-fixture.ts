@@ -27,7 +27,11 @@ const CRC_TABLE = (() => {
 
 export function crc32(bytes: Uint8Array): number {
   let c = 0xffffffff;
-  for (const byte of bytes) c = CRC_TABLE[(c ^ byte) & 0xff]! ^ (c >>> 8);
+  for (const byte of bytes) {
+    const entry = CRC_TABLE[(c ^ byte) & 0xff];
+    if (entry === undefined) throw new Error("missing CRC table entry");
+    c = entry ^ (c >>> 8);
+  }
   return (c ^ 0xffffffff) >>> 0;
 }
 
@@ -133,9 +137,13 @@ function zlibStored(data: Uint8Array): Uint8Array {
 function pngChunk(type: string, data: Uint8Array): Uint8Array {
   const typed = concat([new TextEncoder().encode(type), data]);
   return concat([
-    header(4, (view) => view.setUint32(0, data.byteLength)),
+    header(4, (view) => {
+      view.setUint32(0, data.byteLength);
+    }),
     typed,
-    header(4, (view) => view.setUint32(0, crc32(typed))),
+    header(4, (view) => {
+      view.setUint32(0, crc32(typed));
+    }),
   ]);
 }
 
@@ -185,10 +193,10 @@ const run = (text: string, props = "") =>
   `<w:r>${props ? `<w:rPr>${props}</w:rPr>` : ""}<w:t xml:space="preserve">${xmlText(text)}</w:t></w:r>`;
 
 const listItem = (text: string, level: number) =>
-  `<w:p><w:pPr><w:numPr><w:ilvl w:val="${level}"/><w:numId w:val="1"/></w:numPr></w:pPr>${run(text)}</w:p>`;
+  `<w:p><w:pPr><w:numPr><w:ilvl w:val="${String(level)}"/><w:numId w:val="1"/></w:numPr></w:pPr>${run(text)}</w:p>`;
 
 const picture = (id: number, blip: string, cx: number, cy: number) =>
-  `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${id}" name="picture ${id}"/><a:graphic><a:graphicData uri="${PIC}"><pic:pic><pic:nvPicPr><pic:cNvPr id="${id}" name="picture ${id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill>${blip}<a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+  `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${String(cx)}" cy="${String(cy)}"/><wp:docPr id="${String(id)}" name="picture ${String(id)}"/><a:graphic><a:graphicData uri="${PIC}"><pic:pic><pic:nvPicPr><pic:cNvPr id="${String(id)}" name="picture ${String(id)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill>${blip}<a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${String(cx)}" cy="${String(cy)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 
 const cell = (text: string, fill?: string) =>
   `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/>${fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>` : ""}</w:tcPr><w:p>${run(text)}</w:p></w:tc>`;

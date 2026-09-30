@@ -17,11 +17,11 @@ const licensesRoot = path.resolve(
   "../../../../../third-party/browser-licenses",
 );
 
-test("the rhwp wasm notice is the pinned wasm32 graph concatenation", () => {
+await test("the rhwp wasm notice is the pinned wasm32 graph concatenation", () => {
   const bytes = fs.readFileSync(path.join(licensesRoot, RHWP_THIRD_PARTY_FILE));
   assert.equal(createHash("sha256").update(bytes).digest("hex"), RHWP_THIRD_PARTY_SHA256);
   const text = bytes.toString("utf8");
-  assert.match(text, new RegExp(`^${RHWP_WASM_CRATE_COUNT} crates:$`, "m"));
+  assert.match(text, new RegExp(`^${String(RHWP_WASM_CRATE_COUNT)} crates:$`, "m"));
   assert.equal(text.match(/^ {2}\S+ \d\S*: /gm)?.length, RHWP_WASM_CRATE_COUNT);
   // AND-licensed and incorporated texts a crate table alone would not carry.
   assert.match(text, /^Applies to: encoding_rs 0\.8\.35 \(LICENSE-WHATWG\)$/m);
@@ -45,7 +45,7 @@ test("the rhwp wasm notice is the pinned wasm32 graph concatenation", () => {
   }
 });
 
-test("the notice follows the installed @rhwp/core version", () => {
+await test("the notice follows the installed @rhwp/core version", () => {
   const require = createRequire(import.meta.url);
   const pkg = JSON.parse(
     fs.readFileSync(path.join(path.dirname(require.resolve("@rhwp/core")), "package.json"), "utf8"),

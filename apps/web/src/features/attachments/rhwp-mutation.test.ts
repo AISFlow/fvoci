@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseRhwpMutation, rhwpMutationChanged } from "./rhwp-mutation.ts";
 
-test("replaceAll counts and replaceOne positions parse; only a positive count or a position is a change", () => {
+await test("replaceAll counts and replaceOne positions parse; only a positive count or a position is a change", () => {
   assert.deepEqual(parseRhwpMutation('{"ok":true,"count":2}'), { ok: true, count: 2 });
   assert.equal(rhwpMutationChanged(parseRhwpMutation('{"ok":true,"count":2}')), true);
   const zero = parseRhwpMutation('{"ok":true,"count":0}');
@@ -13,7 +13,7 @@ test("replaceAll counts and replaceOne positions parse; only a positive count or
   assert.equal(rhwpMutationChanged(one), true);
 });
 
-test("refusals and malformed answers are failures, never changes", () => {
+await test("refusals and malformed answers are failures, never changes", () => {
   const cases: [string, string][] = [
     ['{"ok":false}', "not_ok"],
     ['{"count":3}', "not_ok"],

@@ -49,10 +49,14 @@ function threadWorker(): ThreadPort {
     onmessage: null,
     onerror: null,
     onmessageerror: null,
-    postMessage: (message, transfer) => thread.postMessage(message, transfer as never),
+    postMessage: (message, transfer) => {
+      thread.postMessage(message, transfer as never);
+    },
     terminate: () => {
       terminated = true;
-      void thread.terminate();
+      thread.terminate().catch((error: unknown) => {
+        assert.fail(String(error));
+      });
     },
     booted: new Promise((resolve) => (booted = resolve)),
     exited: new Promise((resolve) => thread.once("exit", resolve)),
@@ -62,7 +66,7 @@ function threadWorker(): ThreadPort {
     if (data === "booted") booted();
     else port.onmessage?.({ data } as MessageEvent<PptxWorkerResponse>);
   });
-  thread.on("error", (error) => port.onerror?.(error as unknown as ErrorEvent));
+  thread.on("error", (error) => port.onerror?.(error as ErrorEvent));
   return port;
 }
 
@@ -87,7 +91,9 @@ async function warmedUp(worker: ThreadPort, bytes: Uint8Array): Promise<void> {
   await worker.booted;
   const reply = (message: PptxWorkerRequest, transfer: Transferable[] = []) =>
     new Promise<PptxWorkerResponse>((resolve) => {
-      worker.onmessage = ({ data }) => resolve(data);
+      worker.onmessage = ({ data }) => {
+        resolve(data);
+      };
       worker.postMessage(message, transfer);
     });
   const copy = bytes.slice();
@@ -106,7 +112,7 @@ async function warmedUp(worker: ThreadPort, bytes: Uint8Array): Promise<void> {
 /** Slide 2 with this many filler paragraphs lays out in about 0.5 s in Node (review B3: 1,394 → 0.48 s). */
 const SLOW_PARAGRAPHS = 1_394;
 
-test("the worker opens the fixture and returns each slide as the outer image SVG; the caller's bytes stay intact", async () => {
+await test("the worker opens the fixture and returns each slide as the outer image SVG; the caller's bytes stay intact", async () => {
   const worker = threadWorker();
   const bytes = buildFixturePptx();
   const copy = bytes.slice();
@@ -124,7 +130,8 @@ test("the worker opens the fixture and returns each slide as the outer image SVG
   assert.deepEqual(await deck.render(5), { status: "failed" });
   assert.equal(deck.closed, false);
   deck.close();
-  assert.ok(deck.closed && worker.terminated());
+  assert.equal(deck.closed, true);
+  assert.ok(worker.terminated());
   await worker.exited;
   await assert.rejects(
     deck.render(0),
@@ -132,7 +139,7 @@ test("the worker opens the fixture and returns each slide as the outer image SVG
   );
 });
 
-test("hostile chart markup comes back from the worker only inside the image template", async () => {
+await test("hostile chart markup comes back from the worker only inside the image template", async () => {
   const worker = threadWorker();
   const deck = await openedIn(worker, await buildChartPptx(HOSTILE_PPTX_MARKUP.prefixedScript));
   const slide = (await deck.render(0)) as { status: "ok"; svg: string };
@@ -143,7 +150,7 @@ test("hostile chart markup comes back from the worker only inside the image temp
   await worker.exited;
 });
 
-test("cap and format failures come back from the worker, which is then terminated", async () => {
+await test("cap and format failures come back from the worker, which is then terminated", async () => {
   const filler = new TextEncoder().encode(FIXTURE_PPTX_FILLER).byteLength;
   const overMarkup = buildFixturePptx(DEFAULT_PPTX_TEXT, {
     slide2Paragraphs: Math.ceil(PPTX_MAX_MARKUP_BYTES / filler),
@@ -160,7 +167,7 @@ test("cap and format failures come back from the worker, which is then terminate
   }
 });
 
-test("negative control: left to finish, a slow slide lays out in the worker while this thread keeps running", async () => {
+await test("negative control: left to finish, a slow slide lays out in the worker while this thread keeps running", async () => {
   const worker = threadWorker();
   const deck = await openedIn(
     worker,
@@ -182,7 +189,7 @@ test("negative control: left to finish, a slow slide lays out in the worker whil
   await worker.exited;
 });
 
-test("the render timeout terminates the worker in the middle of that layout", async () => {
+await test("the render timeout terminates the worker in the middle of that layout", async () => {
   const worker = threadWorker();
   const bytes = buildFixturePptx(DEFAULT_PPTX_TEXT, { slide2Paragraphs: SLOW_PARAGRAPHS });
   // Warm-up outside the client: the 50 ms bound is for the slow slide only (a cold first render can exceed it).
@@ -194,11 +201,12 @@ test("the render timeout terminates the worker in the middle of that layout", as
     (error) => error instanceof PptxWorkerError && error.reason === "timeout",
   );
   assert.ok(performance.now() - started < 150);
-  assert.ok(deck.closed && worker.terminated());
+  assert.equal(deck.closed, true);
+  assert.ok(worker.terminated());
   await worker.exited;
 });
 
-test("the open timeout and an abort terminate a booted worker mid-open", async () => {
+await test("the open timeout and an abort terminate a booted worker mid-open", async () => {
   const slowOpen = buildFixturePptx(DEFAULT_PPTX_TEXT, { slide2Paragraphs: 11_000 });
   const timed = threadWorker();
   await timed.booted;
@@ -218,7 +226,9 @@ test("the open timeout and an abort terminate a booted worker mid-open", async (
     createWorker: () => aborted,
     signal: controller.signal,
   });
-  setTimeout(() => controller.abort(), 5);
+  setTimeout(() => {
+    controller.abort();
+  }, 5);
   assert.deepEqual(await opening, { status: "failed" });
   assert.ok(aborted.terminated());
   await aborted.exited;
@@ -251,7 +261,7 @@ function silentDeck(): PptxWorkerPort & { requests: PptxWorkerRequest[]; termina
   return port;
 }
 
-test("close, an abort, a worker error or a mismatched reply terminates the worker", async () => {
+await test("close, an abort, a worker error or a mismatched reply terminates the worker", async () => {
   const already = silentDeck();
   const controller = new AbortController();
   controller.abort();
@@ -328,7 +338,7 @@ test("close, an abort, a worker error or a mismatched reply terminates the worke
   assert.ok(confused.terminated && book.deck.closed);
 });
 
-test("a worker that dies while idle is closed, and every later render fails with `closed` without a request", async () => {
+await test("a worker that dies while idle is closed, and every later render fails with `closed` without a request", async () => {
   for (const event of ["onerror", "onmessageerror"] as const) {
     const idle = silentDeck();
     const opened = await openPptxInWorker(new Uint8Array(8), { createWorker: () => idle });
@@ -349,7 +359,7 @@ test("a worker that dies while idle is closed, and every later render fails with
   }
 });
 
-test("the default bounds", () => {
+await test("the default bounds", () => {
   assert.equal(PPTX_OPEN_TIMEOUT_MS, 20_000);
   assert.equal(PPTX_RENDER_TIMEOUT_MS, 10_000);
 });

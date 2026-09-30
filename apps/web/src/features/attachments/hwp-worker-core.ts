@@ -100,8 +100,9 @@ export function createHwpSession(api: RhwpApi): (request: HwpRequest) => Promise
     if (request.op === "startPage") {
       let page = 0;
       try {
+        const currentDoc = doc;
         const pages = Array.from({ length: pageCount }, (_, index) =>
-          decodePageText(doc!.getPageText(index)),
+          decodePageText(currentDoc.getPageText(index)),
         );
         page = clampPage(pageOfChunk(pages, request.chunk), pageCount);
       } catch {
