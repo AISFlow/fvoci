@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory } from "vue-router";
+import { createRouter, createWebHistory, stringifyQuery, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { VUE_SETTINGS_ROUTE_PATHS, VUE_ACCOUNT_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
 
 /** The Vue app's pages; src/app-boundary.ts sends exactly the live paths
@@ -87,6 +87,15 @@ export const routes: RouteRecordRaw[] = [
 export function createAppRouter(history: RouterHistory = createWebHistory()) {
   const router = createRouter({
     history,
+    // Reusing the current query during a canonical ref replacement preserves
+    // its original spelling (including repeated keys and encoded spaces).
+    // New query objects use Vue Router's standard serialization.
+    stringifyQuery: (query) => {
+      const current = router.currentRoute.value;
+      if (query !== current.query) return stringifyQuery(query);
+      const suffix = current.fullPath.slice(current.path.length);
+      return suffix.startsWith("?") ? suffix.slice(1).split("#", 1)[0]! : "";
+    },
     routes: [
       ...routes,
       { path: "/:pathMatch(.*)*", name: "unknown-path", redirect: "/" },

@@ -20,7 +20,7 @@ watchEffect(() => {
     ? itemPath(slug.value, parsed.value.displayId)
     : projectPath(slug.value, parsed.value.key);
   // Preserve the original encoded query and fragment during canonicalization.
-  void router.replace(path + route.fullPath.slice(route.path.length));
+  void router.replace({ path, query: route.query, hash: route.hash });
 });
 </script>
 

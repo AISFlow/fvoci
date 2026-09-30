@@ -323,3 +323,14 @@ test("decoded and invalid single-segment refs reach the guarded fallback, exact 
   assert.equal(router.resolve("/w/acme/%47NT").params.ref, "GNT");
   for (const path of ["/w/acme/wiki/extra", "/settings/account/extra"]) assert.equal(router.resolve(path).name, "unknown-path", path);
 });
+
+test("canonical ref replacement preserves the current query spelling and hash; edits serialize normally", async () => {
+  const router = createAppRouter(createMemoryHistory());
+  for (const record of router.getRoutes()) if (record.components) record.components = { default: { render: () => null } };
+  await router.push("/w/acme/%47NT?from=encoded%20ref&x=1&x=2#overview");
+  const current = router.currentRoute.value;
+  await router.replace({ path: "/w/acme/GNT", query: current.query, hash: current.hash });
+  assert.equal(router.currentRoute.value.fullPath, "/w/acme/GNT?from=encoded%20ref&x=1&x=2#overview");
+  await router.replace({ path: "/w/acme/GNT", query: { from: "new value" } });
+  assert.equal(router.currentRoute.value.fullPath, "/w/acme/GNT?from=new+value");
+});
