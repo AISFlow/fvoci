@@ -651,6 +651,8 @@ test("archived document stays connected and read-only", async ({ page }) => {
   await editor.click();
   await page.keyboard.type("보관 전 문장");
   await persistBody(page);
+  await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
+  await expect(page.getByLabel("문서 상태")).toBeVisible();
   await page.getByLabel("문서 상태").selectOption("archived");
   await expect(page.getByLabel("문서 상태")).toHaveValue("archived");
   await expect(page.getByText("읽기 전용")).toBeVisible();
