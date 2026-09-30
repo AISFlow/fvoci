@@ -25,6 +25,7 @@ const online = ref(typeof navigator === "undefined" || navigator.onLine);
 const editor = ref<CalendarEvent | null>(null);
 const editorOpen = ref(false);
 const editorBasis = ref(props.dateBy);
+const editorResizeEdge = ref<"start" | "end" | null>(null);
 const editorEvent = computed(() => editor.value ? { ...editor.value, canEdit: editor.value.canEdit && props.canEdit && (events.value.find(event => event.id === editor.value?.id)?.canEdit ?? true) } : null);
 const dragged = ref<CalendarEvent | null>(null);
 const resizeEdge = ref<"start" | "end" | null>(null);
@@ -47,7 +48,7 @@ watch([view, anchor, weeks], () => {
 }, { immediate: true });
 function select(day: string) { if (!isIsoDate(day)) return; anchor.value = day; emit("month", day.slice(0, 7)); sidebar.value = false; }
 function shift(delta: number) { select(view.value === "month" ? shiftMonth(props.month, delta) + "-01" : addDays(anchor.value, delta * (view.value === "week" ? 7 : 1))); }
-function open(event: CalendarEvent, trigger?: Event, edge?: "start" | "end") { if (suppressed.value) return; const rect = (trigger?.currentTarget as HTMLElement | undefined)?.getBoundingClientRect(); if (rect) popoverReference.value = { getBoundingClientRect: () => rect }; editorBasis.value = edge === "start" ? "start" : edge === "end" ? "due" : props.dateBy; editor.value = { ...event, local: edge === "start" ? event.startDate! : edge === "end" ? event.dueDate! : event.local, timed: edge ? false : event.timed }; editorOpen.value = true; }
+function open(event: CalendarEvent, trigger?: Event, edge?: "start" | "end") { if (suppressed.value) return; const rect = (trigger?.currentTarget as HTMLElement | undefined)?.getBoundingClientRect(); if (rect) popoverReference.value = { getBoundingClientRect: () => rect }; editorResizeEdge.value = edge ?? null; editorBasis.value = edge === "start" ? "start" : edge === "end" ? "due" : props.dateBy; editor.value = { ...event, local: edge === "start" ? event.startDate! : edge === "end" ? event.dueDate! : event.local, timed: edge ? false : event.timed }; editorOpen.value = true; }
 function list(day: string) { select(day); emit("day", day); }
 function eventsAt(day: string, hour?: number) { return events.value.filter(event => event.date === day && (hour === undefined || (hour === -1 ? !event.timed : event.timed && Number(event.local.slice(11, 13)) === hour))); }
 function movable(event: CalendarEvent) { return online.value && props.canEdit && !props.pending && dateMovable(props.dateBy, event, props.fields); }
@@ -170,7 +171,7 @@ onBeforeUnmount(() => { window.removeEventListener("online", reconnect); window.
     <!-- Stable host: refetch and moving a chip cannot discard the editor's draft. -->
     <UPopover :reference="popoverReference" :open="editorOpen" :ui="{ content: 'p-0' }" @update:open="editorOpen = $event">
       <button v-if="editor" type="button" class="sr-only" aria-label="Selected calendar event">{{ editor.title }}</button>
-      <template #content><CalendarEventEditor v-if="editorEvent" :key="`${editorEvent.id}-${editorBasis}`" :event="editorEvent" :date-by="editorBasis" :fields="fields" :zone="zone" :slug="slug" :pending="pending" :online="online" :save="save" @close="editorOpen = false" @reload="reloadEditor" /></template>
+      <template #content><CalendarEventEditor v-if="editorEvent" :key="`${editorEvent.id}-${editorBasis}-${editorResizeEdge}`" :event="editorEvent" :date-by="editorBasis" :resize-edge="editorResizeEdge" :fields="fields" :zone="zone" :slug="slug" :pending="pending" :online="online" :save="save" @close="editorOpen = false" @reload="reloadEditor" /></template>
     </UPopover>
   </div>
 </template>

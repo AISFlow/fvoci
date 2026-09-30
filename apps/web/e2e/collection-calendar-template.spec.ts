@@ -1,8 +1,17 @@
 import { expect, test, type Page } from "@playwright/test";
 import { login } from "./helpers";
+import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
 
 test.describe.configure({ mode: "serial" });
 async function fixture(page: Page, key: string) {
+  const served: Promise<{ path: string; sha256: string }>[] = [];
+  page.on("response", response => {
+    const path = new URL(response.url()).pathname;
+    if (path.startsWith("/assets/") && /\.(js|css)$/.test(path)) {
+      served.push(response.body().then(body => ({ path: path.slice(1), sha256: createHash("sha256").update(body).digest("hex") })));
+    }
+  });
   await page.goto("/");
   await expect(page.getByRole("button", { name: "시작하기" }).or(page.getByRole("button", { name: "로그아웃" })).or(page.getByRole("button", { name: "로그인", exact: true }))).toBeVisible();
   if (await page.getByRole("button", { name: "시작하기" }).count()) {
@@ -22,7 +31,7 @@ async function fixture(page: Page, key: string) {
     const row = await created.json(); return { ...row, displayId: `${key}-${row.number}` };
   }
   async function stored(id: string) { const res = await page.request.get(`${base}/tasks/${id}`); expect(res.ok()).toBe(true); return res.json(); }
-  async function open(month = "2027-05") { await page.goto(`/w/caltemplate/${key}/calendar`); await expect(page).toHaveURL(`/w/caltemplate/${key}/calendar`); await expect(page.locator("[data-v-app]")).toHaveCount(1); await page.locator('input[type="month"]').fill(month); await expect(page.locator('table[data-testid="collection-calendar"]')).toBeVisible(); }
+  async function open(month = "2027-05") { await page.goto(`/w/caltemplate/${key}/calendar`); await expect(page).toHaveURL(`/w/caltemplate/${key}/calendar`); await expect(page.locator("[data-v-app]")).toHaveCount(1); await page.locator('input[type="month"]').fill(month); await expect(page.locator('table[data-testid="collection-calendar"]')).toBeVisible(); writeFileSync(`/tmp/fvoci-front272-calendar-served-${key}.json`, JSON.stringify({ head: process.env.FVOCI_CALENDAR_VERIFY_HEAD ?? "unbound", url: new URL(page.url()).pathname, assets: await Promise.all(served) }, null, 2)); }
   return { base, project, task, stored, open };
 }
 
@@ -162,4 +171,34 @@ test("archive during pending calendar write is refused by real Rust permission g
   await expect(page.locator('td[data-date="2027-05-12"]').getByTestId(`collection-preview-${item.displayId}`)).toHaveCount(0);
   expect((await f.stored(item.id)).dueDate).toBe("2027-05-08");
   await expect(editor.locator('input[type="date"]')).toHaveValue("2027-05-12"); await expect(editor.getByRole("button", { name: "저장 뷰 저장" })).toBeDisabled();
+});
+
+test("dual due fields keep Rust date precedence on unchanged edit; resize click and keyboard keep endpoint constraints", async ({ page }) => {
+  const f = await fixture(page, "EDGE"); const dual = await f.task("Both due fields", { dueDate: "2027-05-08" });
+  expect((await page.request.patch(`${f.base}/tasks/${dual.id}`, { data: { dueAt: "2027-05-20T13:30:00Z" } })).ok()).toBe(true);
+  const range = await f.task("Keyboard resize", { startDate: "2027-05-05", dueDate: "2027-05-07" });
+  await f.open();
+  await expect(page.locator('td[data-date="2027-05-08"]').getByTestId(`collection-preview-${dual.displayId}`)).toBeVisible();
+  await page.getByTestId(`collection-preview-${dual.displayId}`).click();
+  const editor = page.getByRole("form", { name: "Calendar event editor" });
+  await expect(editor.locator('input[type="date"]')).toHaveValue("2027-05-08"); await expect(editor.getByLabel("마감 시각", { exact: true })).not.toBeChecked();
+  const unchanged = page.waitForResponse(r => r.request().method() === "PATCH" && r.url().endsWith(`/tasks/${dual.id}`));
+  await editor.getByRole("button", { name: "저장 뷰 저장" }).click(); const response = await unchanged; expect(response.ok()).toBe(true);
+  expect(response.request().postDataJSON()).not.toHaveProperty("dueAt");
+  expect((await f.stored(dual.id)).dueDate).toBe("2027-05-08"); expect((await f.stored(dual.id)).dueAt).toBe("2027-05-20T13:30:00Z");
+  await expect(page.locator('td[data-date="2027-05-08"]').getByTestId(`collection-preview-${dual.displayId}`)).not.toHaveAttribute("aria-busy", "true");
+  await page.getByRole("button", { name: "Resize end · Keyboard resize" }).click();
+  const date = editor.locator('input[type="date"]');
+  await expect(editor.getByLabel("마감 시각", { exact: true })).toHaveCount(0);
+  await date.fill("2027-05-04"); await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
+  expect(await date.evaluate((node: HTMLInputElement) => node.validity.rangeUnderflow)).toBe(true);
+  expect((await f.stored(range.id)).dueDate).toBe("2027-05-07");
+  await date.fill("2027-05-09"); await date.press("Enter");
+  await expect.poll(async () => (await f.stored(range.id)).dueDate).toBe("2027-05-09");
+  await expect(editor).toHaveCount(0);
+  const start = page.getByRole("button", { name: "Resize start · Keyboard resize" }); await expect(start).toBeEnabled(); await start.focus(); await start.press("Enter");
+  await expect(date).toHaveValue("2027-05-05"); await date.fill("2027-05-10"); await date.press("Enter");
+  expect(await date.evaluate((node: HTMLInputElement) => node.validity.rangeOverflow)).toBe(true);
+  expect((await f.stored(range.id)).startDate).toBe("2027-05-05");
+  await date.fill("2027-05-06"); await date.press("Enter"); await expect.poll(async () => (await f.stored(range.id)).startDate).toBe("2027-05-06");
 });

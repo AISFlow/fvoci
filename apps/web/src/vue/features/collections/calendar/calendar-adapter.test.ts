@@ -49,3 +49,15 @@ test("optimistic preview projects intent without changing concurrency snapshot",
   expect(weekDays("2026-03-08", 1)).toEqual(["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-07", "2026-03-08"]);
   expect(addDays("2026-03-08", 1)).toBe("2026-03-09");
 });
+test("dual due fields follow Rust dueDate-first buckets and unchanged date save preserves dueAt", () => {
+  const dual = { ...base, dueDate: "2026-09-10", dueAt: "2026-09-20T14:30:00Z" };
+  const event = eventFor(dual, "due", fields, "America/New_York");
+  expect(event.timed).toBe(false); expect(event.local).toBe("2026-09-10");
+  const unchanged = editorWrite("due", dual, event.local, event.timed, fields, "America/New_York")!;
+  expect(unchanged).toEqual({ kind: "task", taskId: "task", body: { dueDate: dual.dueDate, expectedDates: { ...expectedDates, dueAt: dual.dueAt } } });
+  expect(optimisticRow(dual, unchanged, "America/New_York", "due").date).toBe(dual.dueDate);
+  expect(optimisticRow(dual, unchanged, "America/New_York", "due").dueAt).toBe(dual.dueAt);
+  expect(editorWrite("due", dual, "2026-09-11", false, fields, "America/New_York")).toMatchObject({ body: { dueDate: "2026-09-11", dueAt: null } });
+  expect(editorWrite("due", dual, "2026-09-20T10:30", true, fields, "America/New_York")).toMatchObject({ body: { dueDate: null, dueAt: dual.dueAt } });
+  expect(resizable(dual, "due")).toBe(false);
+});

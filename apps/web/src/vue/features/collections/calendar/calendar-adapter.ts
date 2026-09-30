@@ -11,7 +11,7 @@ export type CalendarWrite = Exclude<DateMoveRequest, { kind: "unavailable" }>;
 export function eventFor(row: CollectionQueryPreview, dateBy: string, fields: readonly CollectionField[], zone: string): CalendarEvent {
   const field = fields.find(f => f.id === dateBy);
   const value = row.values[dateBy] as { datetime?: string } | undefined;
-  const instant = dateBy === "due" ? row.dueAt : field?.type === "datetime" ? value?.datetime : null;
+  const instant = dateBy === "due" ? row.dueDate === null ? row.dueAt : null : field?.type === "datetime" ? value?.datetime : null;
   return { ...row, timed: Boolean(instant), local: instant ? isoToZonedLocal(instant, zone) : row.date ?? "" };
 }
 export function addDays(day: string, count: number): string {
@@ -33,6 +33,11 @@ export function editorWrite(dateBy: string, row: CalendarRow, raw: string, timed
     if (raw && !instant) return null;
     return { kind: "task", taskId: row.taskId, body: { dueDate: null, dueAt: instant, expectedDates: { startDate: row.startDate, dueDate: row.dueDate, dueAt: row.dueAt } } };
   }
+  if (dateBy === "due" && row.taskId && row.dueDate !== null && raw === row.dueDate) {
+    // A no-change save must preserve a secondary dueAt in existing dual-field
+    // records. Only an explicit changed date or timed conversion clears it.
+    return { kind: "task", taskId: row.taskId, body: { dueDate: row.dueDate, expectedDates: { startDate: row.startDate, dueDate: row.dueDate, dueAt: row.dueAt } } };
+  }
   if (dateBy === "start" || dateBy === "due") {
     const patch = patchDateBody(row, dateBy === "due" ? "dueDate" : "startDate", raw);
     return patch.ok && row.taskId ? { kind: "task", taskId: row.taskId, body: patch.body } : null;
@@ -53,7 +58,7 @@ export function dayMove(dateBy: string, row: CalendarRow, day: string | null, fi
 export function optimisticRow(row: CollectionQueryPreview, write: CalendarWrite, zone: string, dateBy?: string): CollectionQueryPreview {
   if (write.kind === "task") {
     const next = { ...row, ...write.body };
-    const date = (dateBy ? dateBy === "start" : "startDate" in write.body) ? next.startDate : next.dueAt ? isoToZonedLocal(next.dueAt, zone).slice(0, 10) : next.dueDate;
+    const date = (dateBy ? dateBy === "start" : "startDate" in write.body) ? next.startDate : next.dueDate ?? (next.dueAt ? isoToZonedLocal(next.dueAt, zone).slice(0, 10) : null);
     return { ...next, date };
   }
   const value = write.value as { date?: string; datetime?: string } | null;
