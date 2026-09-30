@@ -1,0 +1,12 @@
+@media (prefers-color-scheme: dark) {
+    body {
+        background-color: #222;
+    }
+    .swagger-ui {
+        filter: invert(92%) hue-rotate(180deg);
+    }
+
+    .swagger-ui .microlight {
+        filter: invert(100%) hue-rotate(180deg);
+    }
+}

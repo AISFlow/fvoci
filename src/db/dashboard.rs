@@ -15,11 +15,11 @@ use uuid::Uuid;
 
 use crate::db::context::{clear_self_user, session_is_live, set_self_user, set_tenant};
 use crate::db::documents::document_permission;
-use crate::db::projects::project_permission;
+use crate::db::projects::{load_live_project, project_permission};
 use crate::db::tasks::{list_open_assigned_in_tx, TaskListItemRow};
 use crate::db::workspace::{workspace_card_counts_in_tx, MemberRow, WorkspaceRole};
 use crate::projects::ProjectPermission;
-use crate::search::query::{load_live_project, load_search_acl, SearchAcl};
+use crate::search::query::{load_search_acl, SearchAcl};
 
 /// Source `DASHBOARD_ASSIGNED_LIMIT`.
 pub const DASHBOARD_ASSIGNED_LIMIT: i64 = 50;

@@ -10,9 +10,9 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{recheck_session, set_tenant};
-use crate::db::documents::{document_permission, workspace_is_live};
+use crate::db::documents::document_permission;
 use crate::db::projects::project_permission_by_id;
-use crate::db::workspace::{membership_role, WorkspaceRole};
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::projects::{effective_permission, ProjectPermission};
 
 pub const EXPORT_TASK_PAGE: i64 = 10_000;

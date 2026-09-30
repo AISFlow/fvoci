@@ -1,37 +1,95 @@
 import { t } from "@fvoci/i18n";
 import { useQuery } from "@tanstack/react-query";
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { loadErrorMessage } from "@/components/query-status";
 import { publicInstanceQuery } from "@/lib/queries/admin";
 import { chunkPlainText } from "./chunk-plain-text";
+import type { HwpEditProps } from "./hwp-viewer";
 import { viewerKind } from "./attachment-kind";
+import {
+  ORIGINAL_FETCH_CREDENTIALS,
+  startViewerPrefetch,
+  VIEWER_MAX_BYTES,
+  type LayoutKind,
+  type ViewerPrefetch,
+} from "./viewer-download";
 import { ViewerDownloadButton, ViewerErrorPane, ViewerLoadingPane } from "./viewer-shell";
 import "./attachment-shell.css";
 
-const PdfViewer = lazy(async () => {
-  const mod = await import("./pdf-viewer");
-  return { default: mod.PdfViewer };
-});
+// Each layout viewer stays its own chunk (pdf.js, rhwp WASM, office renderers).
+const viewerModules = {
+  pdf: () => import("./pdf-viewer"),
+  docx: () => import("./docx-viewer"),
+  hwp: () => import("./hwp-viewer"),
+  pptx: () => import("./pptx-viewer"),
+  xlsx: () => import("./xlsx-viewer"),
+};
 
-const DocxViewer = lazy(async () => {
-  const mod = await import("./docx-viewer");
-  return { default: mod.DocxViewer };
-});
+type ViewerModules = { [K in LayoutKind]: Awaited<ReturnType<(typeof viewerModules)[K]>> };
 
-const HwpViewer = lazy(async () => {
-  const mod = await import("./hwp-viewer");
-  return { default: mod.HwpViewer };
-});
+/**
+ * Loads the viewer chunk for `kind`. The page calls it as soon as the
+ * attachment metadata names the kind; the module map makes repeat calls free.
+ */
+export function loadViewerModule<K extends LayoutKind>(kind: K): Promise<ViewerModules[K]> {
+  return viewerModules[kind]() as Promise<ViewerModules[K]>;
+}
 
-const PptxViewer = lazy(async () => {
-  const mod = await import("./pptx-viewer");
-  return { default: mod.PptxViewer };
-});
+type LayoutState<K extends LayoutKind> =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "ready"; module: ViewerModules[K]; prefetch: ViewerPrefetch };
 
-const XlsxViewer = lazy(async () => {
-  const mod = await import("./xlsx-viewer");
-  return { default: mod.XlsxViewer };
-});
+/**
+ * Starts the file download and the viewer chunk together, shows the loading
+ * pane as ordinary state, and mounts the viewer once its module is in.
+ * Not a Suspense fallback: React throttles revealing a boundary to 300 ms
+ * after its fallback appeared, which held the viewer (and its download) back.
+ * Unmount or a new file aborts the download; key the loader by the file.
+ */
+function LayoutLoader<K extends LayoutKind>({
+  kind,
+  downloadUrl,
+  children,
+}: {
+  kind: K;
+  downloadUrl: string;
+  children: (module: ViewerModules[K], prefetch: ViewerPrefetch) => ReactNode;
+}): ReactNode {
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<LayoutState<K>>({ status: "loading" });
+  useEffect(() => {
+    const controller = new AbortController();
+    let alive = true;
+    setState({ status: "loading" });
+    const prefetch = startViewerPrefetch(downloadUrl, VIEWER_MAX_BYTES[kind], controller.signal);
+    loadViewerModule(kind).then(
+      (module) => {
+        if (alive) setState({ status: "ready", module, prefetch });
+      },
+      () => {
+        controller.abort();
+        if (alive) setState({ status: "error" });
+      },
+    );
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [kind, downloadUrl, attempt]);
+
+  if (state.status === "loading") return <ViewerLoadingPane />;
+  if (state.status === "error") {
+    return (
+      <ViewerErrorPane
+        message={t("load.failed")}
+        downloadUrl={downloadUrl}
+        onRetry={() => setAttempt((n) => n + 1)}
+      />
+    );
+  }
+  return children(state.module, state.prefetch);
+}
 
 export type AttachmentViewerProps = {
   name: string;
@@ -43,6 +101,8 @@ export type AttachmentViewerProps = {
   chunk?: number;
   /** Session-only `preview-html` URL for the search-chunk supplement; share views omit it. */
   previewHtmlUrl?: string;
+  /** Session-only HWP/HWPX 간단 편집 (edit-context + save-copy); share views omit it. */
+  hwpEdit?: HwpEditProps;
 };
 
 function ChunkText({ text, chunk }: { text: string; chunk?: number }) {
@@ -71,7 +131,7 @@ function TextBytesPane({ downloadUrl, chunk }: { downloadUrl: string; chunk?: nu
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
-    void fetch(downloadUrl, { credentials: "include" })
+    void fetch(downloadUrl, { credentials: ORIGINAL_FETCH_CREDENTIALS })
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(String(response.status));
@@ -181,13 +241,17 @@ function SearchChunkSupplement({ previewHtmlUrl, chunk }: { previewHtmlUrl: stri
  * not wait for it.
  */
 function HwpPane({
+  name,
   downloadUrl,
   previewHtmlUrl,
   chunk,
+  edit,
 }: {
+  name: string;
   downloadUrl: string;
   previewHtmlUrl?: string;
   chunk?: number;
+  edit?: HwpEditProps;
 }) {
   const wantsSupplement = previewHtmlUrl !== undefined && chunk !== undefined;
   const mode = useQuery({
@@ -200,9 +264,17 @@ function HwpPane({
       {wantsSupplement && mode.data === "server" ? (
         <SearchChunkSupplement previewHtmlUrl={previewHtmlUrl} chunk={chunk} />
       ) : null}
-      <Suspense fallback={<ViewerLoadingPane />}>
-        <HwpViewer key={downloadUrl} downloadUrl={downloadUrl} {...(chunk === undefined ? {} : { chunk })} />
-      </Suspense>
+      <LayoutLoader key={downloadUrl} kind="hwp" downloadUrl={downloadUrl}>
+        {({ HwpViewer }, prefetch) => (
+          <HwpViewer
+            name={name}
+            downloadUrl={downloadUrl}
+            prefetch={prefetch}
+            {...(chunk === undefined ? {} : { chunk })}
+            {...(edit === undefined ? {} : { edit })}
+          />
+        )}
+      </LayoutLoader>
     </>
   );
 }
@@ -247,28 +319,42 @@ export function AttachmentViewer(props: AttachmentViewerProps): ReactNode {
     );
   } else if (kind === "pdf") {
     body = (
-      <Suspense fallback={<ViewerLoadingPane />}>
-        <PdfViewer downloadUrl={props.downloadUrl} />
-      </Suspense>
+      <LayoutLoader key={props.downloadUrl} kind="pdf" downloadUrl={props.downloadUrl}>
+        {({ PdfViewer }, prefetch) => <PdfViewer downloadUrl={props.downloadUrl} prefetch={prefetch} />}
+      </LayoutLoader>
     );
   } else if (kind === "hwp") {
     body = (
       <HwpPane
+        name={props.name}
         downloadUrl={props.downloadUrl}
         {...(props.previewHtmlUrl === undefined ? {} : { previewHtmlUrl: props.previewHtmlUrl })}
         {...(props.chunk === undefined ? {} : { chunk: props.chunk })}
+        {...(props.hwpEdit === undefined ? {} : { edit: props.hwpEdit })}
       />
     );
   } else if (kind === "docx" || kind === "pptx" || kind === "xlsx") {
-    const Layout = kind === "docx" ? DocxViewer : kind === "pptx" ? PptxViewer : XlsxViewer;
+    const url = props.downloadUrl;
+    const layout =
+      kind === "docx" ? (
+        <LayoutLoader key={`docx:${url}`} kind="docx" downloadUrl={url}>
+          {({ DocxViewer }, prefetch) => <DocxViewer downloadUrl={url} prefetch={prefetch} />}
+        </LayoutLoader>
+      ) : kind === "pptx" ? (
+        <LayoutLoader key={`pptx:${url}`} kind="pptx" downloadUrl={url}>
+          {({ PptxViewer }, prefetch) => <PptxViewer downloadUrl={url} prefetch={prefetch} />}
+        </LayoutLoader>
+      ) : (
+        <LayoutLoader key={`xlsx:${url}`} kind="xlsx" downloadUrl={url}>
+          {({ XlsxViewer }, prefetch) => <XlsxViewer downloadUrl={url} prefetch={prefetch} />}
+        </LayoutLoader>
+      );
     body = (
       <>
         {props.chunk !== undefined && props.previewHtmlUrl !== undefined ? (
           <SearchChunkSupplement previewHtmlUrl={props.previewHtmlUrl} chunk={props.chunk} />
         ) : null}
-        <Suspense fallback={<ViewerLoadingPane />}>
-          <Layout key={props.downloadUrl} downloadUrl={props.downloadUrl} />
-        </Suspense>
+        {layout}
       </>
     );
   } else {

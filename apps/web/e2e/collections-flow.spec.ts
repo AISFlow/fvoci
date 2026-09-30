@@ -294,6 +294,34 @@ test("grouped board pages each column and moves cards by drag or select through 
     }
   });
 
+  // Hold the project stream until the column's "load more" is in flight, and that
+  // page until the stream has opened, so the stream's `open` resync lands while the
+  // page loads: the order that dropped the requested page.
+  const streamPath = `${base}/projects/${project.id}/stream`;
+  let loadMoreSent!: () => void;
+  const loadMoreInFlight = new Promise<void>((resolve) => {
+    loadMoreSent = resolve;
+  });
+  await page.route((url) => url.pathname === streamPath, async (route) => {
+    await loadMoreInFlight;
+    await route.continue();
+  });
+  let nextPageHeld = false;
+  await page.route(
+    (url) => url.pathname === `${base}/collections/${collection.id}/query`,
+    async (route) => {
+      const body = route.request().postDataJSON() as { cursor?: string };
+      if (nextPageHeld || !body.cursor) return route.continue();
+      nextPageHeld = true;
+      const streamOpened = page.waitForResponse(
+        (response) => new URL(response.url()).pathname === streamPath,
+      );
+      loadMoreSent();
+      await streamOpened;
+      await route.continue();
+    },
+  );
+
   // 1. Status board: each column pages its own group; loading more is per column.
   // A viewport taller than a 60-card column keeps real mouse drags free of scrolling.
   await page.setViewportSize({ width: 1600, height: 7000 });

@@ -2,9 +2,9 @@ use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use sqlx::{PgPool, Row, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{session_is_live, set_tenant};
+use crate::db::context::{begin_read, session_is_live, set_tenant};
 use crate::db::holidays::list_holiday_dates;
-use crate::db::projects::{project_permission_by_id, ProjectDbError};
+use crate::db::projects::{load_live_project, project_permission, ProjectDbError};
 use crate::db::tasks::{
     compiled_sort_terms, load_task_refs, order_clause, task_list_filter_conditions,
 };
@@ -45,10 +45,7 @@ pub async fn get_project_task_layout(
     let to = range.1.clone();
     let time_zone = crate::db::dashboard::user_time_zone(pool, actor_user_id).await?;
 
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
+    let mut tx = begin_read(pool).await?;
     sqlx::query("SET LOCAL statement_timeout = '15s'")
         .execute(&mut *tx)
         .await?;
@@ -57,19 +54,22 @@ pub async fn get_project_task_layout(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::Forbidden));
     }
-    if !crate::db::documents::workspace_is_live(&mut tx, workspace_id).await? {
+    if !crate::db::workspace::workspace_is_live(&mut tx, workspace_id).await? {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let permission =
-        project_permission_by_id(&mut tx, workspace_id, actor_user_id, project_id).await?;
-    if !permission
-        .map(|p| p.at_least(ProjectPermission::View))
-        .unwrap_or(false)
-    {
+    let Some(project) = load_live_project(&mut tx, workspace_id, project_id).await? else {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &project).await?;
+    if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
+    // Same conditions as the project half of `require_task_write_access`, read
+    // without its locks: only a hint for the UI, which PATCH re-checks.
+    let can_edit = permission.at_least(ProjectPermission::Edit) && project.status != "archived";
 
     let scope_condition = "t.project_id = $2".to_string();
     let (mut base_conditions, mut base_binds) =
@@ -222,6 +222,7 @@ pub async fn get_project_task_layout(
         max_lanes: layout.max_lanes,
         truncated,
         item_meta,
+        can_edit,
     })))
 }
 

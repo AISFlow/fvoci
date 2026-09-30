@@ -14,7 +14,10 @@ use axum::body::Body;
 use axum::http::StatusCode;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use fvoci_server::db::documents::ImportFence;
-use fvoci_server::db::import_jobs::{claim_next_import_job, finish_import_job, ImportStatus};
+use fvoci_server::db::import_jobs::{
+    claim_next_import_job, create_sync_import_job, finish_import_job, finish_sync_import_job,
+    ImportStatus,
+};
 use fvoci_server::documents::import_body::create_fenced_wiki_document;
 use fvoci_server::import_job::sweep_orphan_imports;
 use import_harness::*;
@@ -117,6 +120,310 @@ async fn markdown_zip_failure_marks_job_failed_and_returns_import_failed() {
     .await
     .unwrap();
     assert_eq!(titles, vec![("a".into(),), ("b".into(),), ("c".into(),)]);
+    harness.cleanup().await;
+}
+
+async fn owner_session_id(fx: &Fixture) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM fvoci.sessions WHERE token_hash = $1")
+        .bind(fvoci_server::auth::token::hash_token(&fx.cookie))
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap()
+}
+
+async fn age_import_job(fx: &Fixture, job_id: Uuid, hours: i32) {
+    sqlx::query(
+        "UPDATE fvoci.import_jobs SET created_at = now() - make_interval(hours => $2), updated_at = now() - make_interval(hours => $2) WHERE id = $1",
+    )
+    .bind(job_id)
+    .bind(hours)
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+}
+
+async fn import_job_status(fx: &Fixture, job_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM fvoci.import_jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&fx.admin)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn daily_sweep_fails_markdown_zip_rows_pending_for_over_a_day() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let session_id = owner_session_id(&fx).await;
+    let mut jobs = Vec::new();
+    for _ in 0..3 {
+        let job = create_sync_import_job(&fx.pool, fx.workspace_id, fx.user_id, session_id)
+            .await
+            .unwrap()
+            .expect("admin may import");
+        jobs.push(job.id);
+    }
+    let (stale, long_running, fresh) = (jobs[0], jobs[1], jobs[2]);
+    // A sync run never refreshes updated_at, so only a row far older than
+    // any request (24 h) is known to be abandoned.
+    age_import_job(&fx, stale, 25).await;
+    age_import_job(&fx, long_running, 23).await;
+
+    let swept = sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(swept, 1);
+    assert_eq!(import_job_status(&fx, stale).await, "failed");
+    assert_eq!(import_job_status(&fx, long_running).await, "pending");
+    assert_eq!(import_job_status(&fx, fresh).await, "pending");
+    let (_, has_payload, _, _) = job_row(&fx.admin, stale).await;
+    assert!(!has_payload);
+    let job = fx.job_status(&fx.cookie, &stale.to_string()).await;
+    assert_eq!(job["status"], "failed", "{job}");
+    // Idempotent.
+    assert_eq!(
+        sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+            .await
+            .unwrap(),
+        0
+    );
+    // The requests still running finish their own rows.
+    for job_id in [long_running, fresh] {
+        assert!(
+            finish_sync_import_job(&fx.pool, fx.workspace_id, job_id, ImportStatus::Completed)
+                .await
+                .unwrap()
+        );
+        assert_eq!(import_job_status(&fx, job_id).await, "completed");
+    }
+    // A stale-failed row is final: a late finish does not move it.
+    assert!(
+        !finish_sync_import_job(&fx.pool, fx.workspace_id, stale, ImportStatus::Completed)
+            .await
+            .unwrap()
+    );
+    harness.cleanup().await;
+}
+
+/// Test-only advisory gate (per test database) that parks a markdown-zip
+/// page's INSERT until the test releases it.
+const IMPORT_PAGE_GATE_NS: i32 = 0x6676636f; // "fvoc"
+const IMPORT_PAGE_GATE_KEY: i32 = 0x235;
+
+#[tokio::test]
+async fn cancelled_markdown_zip_request_is_failed_by_the_stale_sweep() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let before = fx.document_count().await;
+    // Deterministic cut: `page-1`'s INSERT waits on a lock the test holds,
+    // so the abort always lands with `page-0` committed, `page-1` in flight
+    // and `page-2` never reached, however fast the import runs.
+    sqlx::query(&format!(
+        r#"CREATE FUNCTION fvoci.test_gate_import_page() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+               IF NEW.title = 'page-1' THEN
+                   PERFORM pg_advisory_xact_lock({IMPORT_PAGE_GATE_NS}, {IMPORT_PAGE_GATE_KEY});
+               END IF;
+               RETURN NEW;
+           END $$"#
+    ))
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_gate_import_page BEFORE INSERT ON fvoci.documents \
+         FOR EACH ROW EXECUTE FUNCTION fvoci.test_gate_import_page()",
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    let mut gate = fx.admin.begin().await.unwrap();
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(IMPORT_PAGE_GATE_NS)
+        .bind(IMPORT_PAGE_GATE_KEY)
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+
+    let pages: Vec<(String, Vec<u8>)> = (0..3)
+        .map(|n| {
+            (
+                format!("page-{n}.md"),
+                format!("# Page {n}\n\nbody").into_bytes(),
+            )
+        })
+        .collect();
+    let entries: Vec<(&str, &[u8])> = pages
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
+    let body = json!({
+        "workspaceId": fx.workspace_id,
+        "source": "markdown-zip",
+        "zipBase64": B64.encode(zip_bytes(&entries))
+    });
+    let request = tokio::spawn({
+        let app = fx.app.clone();
+        let cookie = fx.cookie.clone();
+        async move { json_request(app, "POST", "/api/v1/import", Some(body), Some(&cookie)).await }
+    });
+    // The only lock the gate transaction holds is the gate, so a backend it
+    // blocks is the import parked in `page-1`'s INSERT.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let parked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(gate_pid)
+            .fetch_one(&fx.admin)
+            .await
+            .unwrap();
+            if parked {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the import parks its second page in the gate");
+    assert_eq!(fx.document_count().await - before, 1);
+    // Drop the handler future mid-import, as hyper does when the client
+    // disconnects or the shutdown drain deadline passes. It is waiting on
+    // the gated INSERT, so it cannot have finished.
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    // The dropped request never commits the page it had in flight.
+    gate.commit().await.unwrap();
+
+    let job_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM fvoci.import_jobs WHERE workspace_id = $1 AND source = 'markdown-zip'",
+    )
+    .bind(fx.workspace_id)
+    .fetch_one(&fx.admin)
+    .await
+    .unwrap();
+    assert_eq!(import_job_status(&fx, job_id).await, "pending");
+    assert_eq!(
+        sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+            .await
+            .unwrap(),
+        0,
+        "a recent row may still belong to a live request"
+    );
+    assert_eq!(import_job_status(&fx, job_id).await, "pending");
+
+    age_import_job(&fx, job_id, 25).await;
+    assert_eq!(
+        sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(import_job_status(&fx, job_id).await, "failed");
+    // markdown-zip does not compensate: the committed page stays.
+    assert_eq!(fx.document_count().await - before, 1);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn stale_row_failure_does_not_skip_expired_lease_compensation() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    // A lease-expired async job with an orphan document to compensate.
+    let (_, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "office-file",
+                "fileName": "note.txt",
+                "zipBase64": B64.encode("plain")
+            }),
+        )
+        .await;
+    let expired: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    let claim = claim_next_import_job(&fx.pool)
+        .await
+        .unwrap()
+        .expect("claim");
+    let orphan = create_fenced_wiki_document(
+        &fx.pool,
+        fx.workspace_id,
+        claim.created_by,
+        claim.session_id,
+        "orphan",
+        None,
+        ImportFence {
+            job_id: expired,
+            lease_token: claim.lease_token,
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.import_jobs SET lease_until = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(expired)
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    // A stale markdown-zip row whose failing UPDATE errors.
+    let stale = create_sync_import_job(
+        &fx.pool,
+        fx.workspace_id,
+        fx.user_id,
+        owner_session_id(&fx).await,
+    )
+    .await
+    .unwrap()
+    .expect("admin may import")
+    .id;
+    age_import_job(&fx, stale, 25).await;
+    sqlx::query(
+        r#"CREATE FUNCTION fvoci.test_block_stale_sync_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+               IF OLD.source = 'markdown-zip' AND NEW.status = 'failed' THEN
+                   RAISE EXCEPTION 'injected stale sync import failure';
+               END IF;
+               RETURN NEW;
+           END $$"#,
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_block_stale_sync_fail BEFORE UPDATE ON fvoci.import_jobs \
+         FOR EACH ROW EXECUTE FUNCTION fvoci.test_block_stale_sync_fail()",
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+
+    let swept = sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+        .await
+        .expect("a failed stale-row pass does not fail the sweep");
+    assert_eq!(swept, 1);
+    assert!(!document_exists(&fx.admin, &orphan.to_string()).await);
+    assert_eq!(import_job_status(&fx, expired).await, "failed");
+    assert_eq!(import_job_status(&fx, stale).await, "pending");
+
+    // The next sweep retries the stale row.
+    sqlx::query("DROP TRIGGER test_block_stale_sync_fail ON fvoci.import_jobs")
+        .execute(&fx.admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(import_job_status(&fx, stale).await, "failed");
     harness.cleanup().await;
 }
 

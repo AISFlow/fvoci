@@ -1,10 +1,10 @@
 import type { TiptapEditor } from "@fvoci/editor/fvoci-editor";
-import { type I18nKey, t } from "@fvoci/i18n";
+import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
+import { ProblemError, problemMessage } from "@/lib/api";
 import { documentPath, wikiDisplayId } from "@/lib/href";
 import { treeQuery } from "@/lib/queries/documents";
 import { aiEnabledQuery } from "@/lib/queries/instance-settings";
@@ -16,25 +16,15 @@ import {
   isDefiniteStatus,
   type TaskApplyState,
 } from "./document-ai-apply";
-
-type AiAction = "summarize" | "generateTasks" | "suggestLinks";
-
-type AiResult =
-  | { action: "summarize"; lines: string[] }
-  | { action: "generateTasks"; titles: string[]; states: TaskApplyState[] }
-  | { action: "suggestLinks"; documents: Array<{ id: string; title: string }> };
-
-const ACTIONS: readonly AiAction[] = ["summarize", "generateTasks", "suggestLinks"];
-const MENU_LABEL: Record<AiAction, I18nKey> = {
-  summarize: "ai.summarize",
-  generateTasks: "ai.generateTasks",
-  suggestLinks: "ai.suggestLinks",
-};
-const APPLY_LABEL: Record<AiAction, I18nKey> = {
-  summarize: "ai.apply.summarize",
-  generateTasks: "ai.apply.generateTasks",
-  suggestLinks: "ai.apply.suggestLinks",
-};
+import {
+  type AiAction,
+  AI_ACTIONS as ACTIONS,
+  AI_APPLY_LABEL as APPLY_LABEL,
+  AI_MENU_LABEL as MENU_LABEL,
+  type AiResult,
+  createAiTask,
+  runAiAction,
+} from "./document-ai-api";
 
 /** Project whose document this is; tasks are created there. Absent for wiki documents. */
 export interface AiTaskProject {
@@ -82,36 +72,7 @@ export function DocumentAiMenu({
   const applying = useRef(false);
 
   const run = useMutation({
-    mutationFn: async (action: AiAction): Promise<AiResult> => {
-      const init = {
-        params: { path: { workspace_id: workspaceId } },
-        body: { documentId },
-      };
-      if (action === "summarize") {
-        const { summary } = await ensureOk(
-          await api.POST("/api/v1/workspaces/{workspace_id}/ai/summarize", init),
-        );
-        return {
-          action,
-          lines: summary
-            .split("\n")
-            .map((line) => line.trim())
-            .filter((line) => line.length > 0),
-        };
-      }
-      if (action === "generateTasks") {
-        const { titles } = await ensureOk(
-          await api.POST("/api/v1/workspaces/{workspace_id}/ai/generate-tasks", init),
-        );
-        return { action, titles, states: titles.map(() => "pending") };
-      }
-      // WHY: labels come from the server's permission-filtered titles, never from the wiki tree —
-      // project documents are not in it, and a raw id would persist as the mention label.
-      const { documents } = await ensureOk(
-        await api.POST("/api/v1/workspaces/{workspace_id}/ai/suggest-links", init),
-      );
-      return { action, documents };
-    },
+    mutationFn: (action: AiAction): Promise<AiResult> => runAiAction(workspaceId, documentId, action),
     onMutate: () => {
       setError(null);
       setNotice(null);
@@ -136,14 +97,7 @@ export function DocumentAiMenu({
         return await applyTaskTitles(
           current.titles,
           current.states,
-          async (title) => {
-            await ensureOk(
-              await api.POST("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks", {
-                params: { path: { workspace_id: workspaceId, project_id: projectId } },
-                body: { title, type: "task", priority: "none" },
-              }),
-            );
-          },
+          (title) => createAiTask(workspaceId, projectId, title),
           (err) => isDefiniteStatus(err instanceof ProblemError ? err.status : null),
           (states) => setResult({ ...current, states }),
         );

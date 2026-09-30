@@ -14,19 +14,19 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::collab::COLLAB_STATE_ENCODING_V1;
-use crate::db::context::{lock_tree, set_tenant};
+use crate::db::context::{
+    begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::documents::{
     between, document_permission, fetch_document_row, format_display_id,
     record_document_event_and_audit, row_to_meta, to_path_label, AncestorCrumb, DocumentDbError,
     DocumentMeta, DOCUMENT_SCHEMA_VERSION,
 };
-use crate::db::documents::{
-    lock_membership_users, recheck_session, session_is_live, workspace_is_live,
-};
 use crate::db::project_documents::{
     assert_project_document, project_key, require_project_document_access, with_project_display_id,
 };
 use crate::db::projects::project_permission_by_id;
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
 /// Which route family addressed the document (source `affiliationFromParams`).
@@ -47,7 +47,9 @@ impl DocumentScope {
 
 /// Session, workspace, route affiliation and permission of one live document.
 /// Wiki documents use `document_permission`; project documents the project's
-/// effective permission (an archived project refuses edit).
+/// effective permission (an archived project refuses edit). `lock` takes the
+/// project row lock for a caller that writes in this transaction; see
+/// `require_project_document_access`.
 async fn scoped_access(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -56,6 +58,7 @@ async fn scoped_access(
     scope: DocumentScope,
     document_id: Uuid,
     min: ProjectPermission,
+    lock: bool,
 ) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
     match scope {
         DocumentScope::Wiki => {
@@ -81,6 +84,7 @@ async fn scoped_access(
                 session_id,
                 project_id,
                 min,
+                lock,
             )
             .await?
             {
@@ -119,7 +123,9 @@ async fn scoped_meta(
     }
 }
 
-/// Current metadata when the actor holds at least `min` on the document.
+/// Current metadata when the actor holds at least `min` on the document. A
+/// read-only check: the transaction ends before the caller acts, so it takes
+/// no project row lock (a body write rechecks inside its own write).
 pub async fn authorize_document(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -129,7 +135,7 @@ pub async fn authorize_document(
     document_id: Uuid,
     min: ProjectPermission,
 ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if let Err(err) = scoped_access(
         &mut tx,
@@ -139,6 +145,7 @@ pub async fn authorize_document(
         scope,
         document_id,
         min,
+        false,
     )
     .await?
     {
@@ -159,7 +166,7 @@ pub async fn list_project_ancestors(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<Vec<AncestorCrumb>, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if let Err(err) = scoped_access(
         &mut tx,
@@ -169,6 +176,7 @@ pub async fn list_project_ancestors(
         DocumentScope::Project(project_id),
         document_id,
         ProjectPermission::View,
+        false,
     )
     .await?
     {
@@ -258,7 +266,11 @@ pub async fn list_document_backlinks(
     scope: DocumentScope,
     document_id: Uuid,
 ) -> Result<Result<Vec<Backlink>, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
+    // Bounds the two body scans (JSONPath over every live document and task).
+    sqlx::query("SET LOCAL statement_timeout = '15s'")
+        .execute(&mut *tx)
+        .await?;
     set_tenant(&mut tx, workspace_id).await?;
     if let Err(err) = scoped_access(
         &mut tx,
@@ -268,6 +280,7 @@ pub async fn list_document_backlinks(
         scope,
         document_id,
         ProjectPermission::View,
+        false,
     )
     .await?
     {
@@ -508,7 +521,7 @@ pub async fn load_duplicate_sources(
     document_id: Uuid,
     include_children: bool,
 ) -> Result<Result<Vec<DuplicateSource>, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if let Err(err) = scoped_access(
         &mut tx,
@@ -518,6 +531,8 @@ pub async fn load_duplicate_sources(
         scope,
         document_id,
         ProjectPermission::Edit,
+        // Phase 1 only reads; phase 2 rechecks under the lock.
+        false,
     )
     .await?
     {
@@ -662,6 +677,7 @@ pub async fn commit_duplicate(
         scope,
         root.id,
         ProjectPermission::Edit,
+        true,
     )
     .await?
     {
@@ -672,7 +688,7 @@ pub async fn commit_duplicate(
     // (group grants on the source document do not allow creating documents).
     if scope.project_id().is_none() {
         let role =
-            crate::db::documents::membership_role_for_update(&mut tx, workspace_id, actor_user_id)
+            crate::db::workspace::membership_role_for_update(&mut tx, workspace_id, actor_user_id)
                 .await?;
         if !crate::db::documents::wiki_can_edit(role) {
             tx.rollback().await?;

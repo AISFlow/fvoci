@@ -1,12 +1,12 @@
 import { t } from "@fvoci/i18n";
 import { Link } from "react-router-dom";
-import { searchItemHref, type SearchHit as SearchTargetHit } from "@/features/workspace/search-target";
+import {
+  searchHitTypeLabel,
+  searchItemHref,
+  type SearchResult,
+} from "@/features/workspace/search-target";
 
-export type SearchHit = SearchTargetHit & {
-  title: string;
-  snippet?: Array<{ text: string; match: boolean }> | null;
-  extractStatus?: string | null;
-};
+export type SearchHit = SearchResult;
 
 export function searchHitHref(slug: string, item: SearchHit): string | null {
   return searchItemHref(slug, item);
@@ -25,16 +25,7 @@ export function SearchResultList({
     <ul className="search-results" role="region" aria-labelledby={labelledBy}>
       {items.map((item) => {
         const href = searchHitHref(slug, item);
-        const typeLabel =
-          item.type === "document"
-            ? t("search.tab.document")
-            : item.type === "task"
-              ? t("search.tab.task")
-              : item.type === "attachment"
-                ? t("search.tab.attachment")
-                : item.type === "comment"
-                  ? t("search.tab.comment")
-                  : item.type;
+        const typeLabel = searchHitTypeLabel(item.type);
         return (
           <li key={`${item.type}:${item.id}`} className="search-results__row">
             {href ? (

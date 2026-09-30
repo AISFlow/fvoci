@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path, RawQuery, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -18,15 +19,15 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    IdentitiesOutput, IdentityOutput, OkResponse, ProviderOutput, ProvidersOutput,
-    WorkspaceOidcBody, WorkspaceOidcGetOutput, WorkspaceOidcOutput,
+    IdentitiesOutput, IdentityOutput, OidcAuthorizationOutput, OkResponse, ProviderOutput,
+    ProvidersOutput, WorkspaceOidcBody, WorkspaceOidcGetOutput, WorkspaceOidcOutput,
 };
 use crate::auth::scopes::ApiTokenScope;
 use crate::db::oidc::{self as db, ManageError, UnlinkOutcome, WorkspaceOidcInput};
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::authz::{require_request_auth, Access, RequestAuth};
 use crate::http::cookie::set_session_cookie;
-use crate::http::guard::check_origin;
+use crate::http::guard::{check_origin, require_origin};
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::identity::{workspace_oidc_context, Identity};
@@ -50,8 +51,15 @@ pub fn router(identity: Arc<Identity>) -> Router<AppState> {
         .route("/api/v1/auth/providers", get(providers))
         .route("/api/v1/auth/identities", get(identities))
         .route("/api/v1/auth/sso", get(sso))
-        .route("/api/v1/auth/oidc/{provider}/start", get(start))
+        .route(
+            "/api/v1/auth/oidc/{provider}/start",
+            get(start).post(start_invite),
+        )
         .route("/api/v1/auth/oidc/{provider}/callback", get(callback))
+        .route(
+            "/api/v1/auth/sso/{workspace_id}/callback",
+            get(sso_callback),
+        )
         .route("/api/v1/auth/oidc/{provider}/link", post(link))
         .route("/api/v1/auth/oidc/{provider}/unlink", post(unlink))
         .route(
@@ -116,7 +124,8 @@ struct ConsentQueryItem {
     version: i32,
 }
 
-/// Source `parseConsentsQuery`: JSON array of `{kind, version}`.
+/// Source `parseConsentsQuery`: JSON array of `{kind, version}` (here the
+/// invite form field).
 fn parse_consents(raw: Option<&String>) -> Result<Vec<(String, i32)>, AppError> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
@@ -147,6 +156,26 @@ fn redirect(status: StatusCode, location: &str) -> Response {
 
 fn state_redirect(state: &AppState, started: Started, status: StatusCode) -> Response {
     let mut response = redirect(status, &started.authorization_url);
+    append_cookie(
+        &mut response,
+        &state_cookie(state.cookie_secure, &started.signed_state, STATE_TTL_SECS),
+    );
+    response
+}
+
+/// The POST starts (invite, link) answer `200 {authorizationUrl}` with the
+/// state cookie, and the page navigates there by script. They are not form
+/// submissions: under the SPA's `Referrer-Policy: no-referrer` a form
+/// navigation carries `Origin: null`, which the Origin check refuses, and a
+/// 303 to the provider would end the submission on another origin, which the
+/// SPA's `form-action 'self'` blocks in Chromium and WebKit. The page's
+/// `fetch` sends its real origin. The request is still same-origin only: a
+/// cross-site post fails the Origin check and could not read this body.
+fn state_json(state: &AppState, started: Started) -> Response {
+    let mut response = Json(OidcAuthorizationOutput {
+        authorization_url: started.authorization_url,
+    })
+    .into_response();
     append_cookie(
         &mut response,
         &state_cookie(state.cookie_secure, &started.signed_state, STATE_TTL_SECS),
@@ -219,13 +248,51 @@ async fn identities(
     }))
 }
 
+/// Workspace SSO by slug. The login page navigates here (a top-level
+/// navigation, not an API call), so every answer is a redirect: 302 to the
+/// workspace's provider with the state cookie, or on any refusal 302 to
+/// `/login?error=<problem code>`, which the login page shows, instead of a
+/// problem+json page. The refusal issues no state, and its Location is only
+/// the public origin and a static code. HTTP status metrics therefore count
+/// every refusal, 429 and 5xx causes included, as a 302. Every refusal's
+/// problem code is logged in the `oidc.sso_refused` line (debug for the
+/// limiter's refusal, warn otherwise). A database error or provider failure
+/// is also logged before it, by [`internal`] (error; with the PostgreSQL
+/// message only for an error PostgreSQL returned) or as
+/// `oidc.begin_failed` (warn), and a workspace client secret that does not
+/// open logs an error before its refusal reads `provider_not_configured`.
 async fn sso(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     RawQuery(raw): RawQuery,
-) -> Result<Response, AppError> {
-    limit_ip(&state, peer).await?;
+) -> Response {
+    match begin_sso(&state, &identity, peer, raw).await {
+        Ok(started) => state_redirect(&state, started, StatusCode::FOUND),
+        Err(err) => {
+            let code = err.code.as_str();
+            // The limiter's own refusal logs at debug: the limiter does not
+            // count it, so anyone can repeat it without signing in and a warn
+            // each time would be unbounded. Every other refusal is counted by
+            // that limiter first.
+            if err.code == ProblemCode::RateLimitExceeded {
+                tracing::debug!(reason = code, "oidc.sso_refused");
+            } else {
+                tracing::warn!(reason = code, "oidc.sso_refused");
+            }
+            let origin = state.public_origin.trim_end_matches('/');
+            redirect(StatusCode::FOUND, &format!("{origin}/login?error={code}"))
+        }
+    }
+}
+
+async fn begin_sso(
+    state: &AppState,
+    identity: &Identity,
+    peer: SocketAddr,
+    raw: Option<String>,
+) -> Result<Started, AppError> {
+    limit_ip(state, peer).await?;
     if !state.auth.db.license.has_feature("workspaceSso") {
         return Err(AppError::from_code(ProblemCode::ProviderNotConfigured));
     }
@@ -240,9 +307,9 @@ async fn sso(
     else {
         return Err(AppError::from_code(ProblemCode::ProviderNotConfigured));
     };
-    let started = flow::begin(
+    flow::begin(
         &state.auth.db.pool,
-        &identity,
+        identity,
         &state.auth.db.license,
         BeginParams {
             provider: ProviderKey::Generic,
@@ -254,10 +321,11 @@ async fn sso(
         },
     )
     .await
-    .map_err(begin_error)?;
-    Ok(state_redirect(&state, started, StatusCode::FOUND))
+    .map_err(begin_error)
 }
 
+/// Plain sign-in only. Invite mode is [`start_invite`]: a GET can be started
+/// by any site's link.
 async fn start(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
@@ -267,15 +335,7 @@ async fn start(
 ) -> Result<Response, AppError> {
     let provider = provider_param(&provider)?;
     limit_ip(&state, peer).await?;
-    let query = strict_query(raw, &["invitation", "consents", "workspaceId"])?;
-    let invitation = query.get("invitation").cloned();
-    if invitation.as_deref() == Some("") {
-        return Err(AppError::with_source(
-            ProblemCode::InvalidInput,
-            "/invitation",
-        ));
-    }
-    let consents = parse_consents(query.get("consents"))?;
+    let query = strict_query(raw, &["workspaceId"])?;
     let workspace_id = uuid_query(&query, "workspaceId")?;
     let started = flow::begin(
         &state.auth.db.pool,
@@ -283,20 +343,75 @@ async fn start(
         &state.auth.db.license,
         BeginParams {
             provider,
-            mode: if invitation.is_some() {
-                Mode::Invite
-            } else {
-                Mode::Login
-            },
-            invitation_token: invitation,
+            mode: Mode::Login,
+            invitation_token: None,
             user_id: None,
-            consents,
+            consents: Vec::new(),
             workspace_id,
         },
     )
     .await
     .map_err(begin_error)?;
     Ok(state_redirect(&state, started, StatusCode::FOUND))
+}
+
+fn is_form(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| {
+            v.trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
+}
+
+/// Invite mode links the browser's provider identity to the invited account
+/// and replaces its session, so, like link, it starts only from a same-origin
+/// POST ([`require_origin`]). The invitation token and the consents come from
+/// the urlencoded body.
+async fn start_invite(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Arc<Identity>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+    RawQuery(raw): RawQuery,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    require_origin(&headers, &state.public_origin)?;
+    let provider = provider_param(&provider)?;
+    limit_ip(&state, peer).await?;
+    strict_query(raw, &[])?;
+    if !is_form(&headers) {
+        return Err(AppError::with_source(ProblemCode::InvalidInput, "/"));
+    }
+    let body = String::from_utf8(body.to_vec())
+        .map_err(|_| AppError::with_source(ProblemCode::InvalidInput, "/"))?;
+    let form = strict_query(Some(body), &["invitation", "consents"])?;
+    let Some(invitation) = form.get("invitation").filter(|v| !v.is_empty()).cloned() else {
+        return Err(AppError::with_source(
+            ProblemCode::InvalidInput,
+            "/invitation",
+        ));
+    };
+    let consents = parse_consents(form.get("consents"))?;
+    let started = flow::begin(
+        &state.auth.db.pool,
+        &identity,
+        &state.auth.db.license,
+        BeginParams {
+            provider,
+            mode: Mode::Invite,
+            invitation_token: Some(invitation),
+            user_id: None,
+            consents,
+            workspace_id: None,
+        },
+    )
+    .await
+    .map_err(begin_error)?;
+    Ok(state_json(&state, started))
 }
 
 async fn callback(
@@ -308,7 +423,44 @@ async fn callback(
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     let provider = provider_param(&provider)?;
-    limit_ip(&state, peer).await?;
+    finish_callback(&state, &identity, peer, provider, None, &jar, raw).await
+}
+
+/// Workspace SSO callback: the redirect URI registered for this workspace's
+/// provider only completes flows started for this workspace.
+async fn sso_callback(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Arc<Identity>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(workspace_id): Path<String>,
+    jar: CookieJar,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, AppError> {
+    let workspace_id = workspace_path(&workspace_id)?;
+    finish_callback(
+        &state,
+        &identity,
+        peer,
+        ProviderKey::Generic,
+        Some(workspace_id),
+        &jar,
+        raw,
+    )
+    .await
+}
+
+/// Shared tail of the callback routes: completes the flow and answers with
+/// the fixed redirect for its outcome.
+async fn finish_callback(
+    state: &AppState,
+    identity: &Identity,
+    peer: SocketAddr,
+    provider: ProviderKey,
+    workspace_id: Option<Uuid>,
+    jar: &CookieJar,
+    raw: Option<String>,
+) -> Result<Response, AppError> {
+    limit_ip(state, peer).await?;
     let mut query = HashMap::new();
     for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
         query
@@ -340,10 +492,11 @@ async fn callback(
     let ip = peer_ip(peer.ip());
     let result = flow::complete(
         &state.auth.db.pool,
-        &identity,
+        identity,
         &state.auth.db.license,
         CompleteParams {
             provider,
+            workspace_id,
             query: &query,
             signed_state: signed_state.as_deref(),
             session,
@@ -411,6 +564,8 @@ async fn callback(
     Ok(response)
 }
 
+/// Links a provider identity to the signed-in account: a same-origin POST
+/// only ([`require_origin`]), like invite.
 async fn link(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
@@ -420,7 +575,7 @@ async fn link(
     Path(provider): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
-    check_origin(&headers, &state.public_origin)?;
+    require_origin(&headers, &state.public_origin)?;
     let auth = session(&state, &headers, &jar).await?;
     let provider = provider_param(&provider)?;
     limit_ip(&state, peer).await?;
@@ -441,7 +596,7 @@ async fn link(
     )
     .await
     .map_err(begin_error)?;
-    Ok(state_redirect(&state, started, StatusCode::SEE_OTHER))
+    Ok(state_json(&state, started))
 }
 
 async fn unlink(
@@ -494,6 +649,9 @@ fn manage_error(err: ManageError) -> AppError {
         ManageError::NotFound => AppError::from_code(ProblemCode::NotFound),
         ManageError::Forbidden => AppError::from_code(ProblemCode::InsufficientPermissions),
         ManageError::SessionGone => AppError::from_code(ProblemCode::AuthenticationRequired),
+        ManageError::PersonalWorkspace => {
+            AppError::from_code(ProblemCode::PersonalWorkspaceImmutable)
+        }
     }
 }
 
@@ -504,6 +662,7 @@ fn workspace_path(raw: &str) -> Result<Uuid, AppError> {
 
 async fn get_workspace_oidc(
     State(state): State<AppState>,
+    Extension(identity): Extension<Arc<Identity>>,
     headers: HeaderMap,
     jar: CookieJar,
     Path(workspace_id): Path<String>,
@@ -522,16 +681,21 @@ async fn get_workspace_oidc(
     .await
     .map_err(internal)?
     .map_err(manage_error)?;
+    // The exact string the provider must register: the admin's browser may
+    // be on another host name than the public origin the server signs with.
+    let redirect_uri = identity.oidc.workspace_redirect_uri(workspace_id);
     Ok(Json(match row {
         Some(row) => WorkspaceOidcGetOutput {
             issuer: Some(row.issuer),
             client_id: Some(row.client_id),
             label: Some(row.label),
+            redirect_uri,
         },
         None => WorkspaceOidcGetOutput {
             issuer: None,
             client_id: None,
             label: None,
+            redirect_uri,
         },
     }))
 }

@@ -1,0 +1,30 @@
+# Optional: let an existing Prometheus scrape /metrics. Not part of the
+# default install and adds no monitoring service. Next to compose.yml:
+#
+#   docker compose -f compose.yml -f compose.metrics.yml up -d
+#
+# with, in .env (RUNNING.md "Prometheus scrape"):
+#
+#   FVOCI_METRICS_SUBNET=172.31.250.0/29      # a free private range
+#   METRICS_ALLOW_IPS=172.31.250.6/32         # the scraper's address in it
+#
+# The fvoci container joins an internal network (no outside route, no
+# published port) and takes a low dynamic address in it; the host holds the
+# first. A Prometheus container attached with the fixed, highest address
+# scrapes http://fvoci:8080/metrics. Allow that one address, not the subnet.
+# Only the direct socket peer counts: X-Forwarded-For is ignored, every other
+# peer gets 404.
+services:
+  fvoci:
+    environment:
+      METRICS_ALLOW_IPS: ${METRICS_ALLOW_IPS:?set METRICS_ALLOW_IPS in .env}
+    networks:
+      default: {}
+      metrics: {}
+
+networks:
+  metrics:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${FVOCI_METRICS_SUBNET:?set FVOCI_METRICS_SUBNET in .env}

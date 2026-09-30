@@ -1,0 +1,105 @@
+# Test copy of infra/rust/compose.user.yml (the .env install, values passed as
+# environment); scripts/test_release_dist.py also checks the real file when present.
+# FVOCI install. In an empty folder with this file and env.example (the
+# release asset; infra/rust/compose.user.env.example in the source):
+#
+#   cp env.example .env      # fill in the empty values as its comments show
+#   docker compose up -d
+#
+# then open FVOCI_PUBLIC_ORIGIN (http://localhost:8080) and create the first
+# administrator. On every start the fvoci container, as root, checks the
+# settings, waits for PostgreSQL and Meilisearch, creates the app role,
+# migrates, grants and writes the search key, then runs the server as uid 1000
+# without the database owner password or the Meilisearch master key in its
+# environment. Compose gives each service only the .env values named below,
+# as container environment (anyone who can run docker inspect reads them, as
+# they can read .env); after editing .env, `docker compose up -d` recreates
+# the containers whose values changed. Optional settings: RUNNING.md "Install".
+name: fvoci
+
+# One product image. Release files pin it to a digest.
+x-fvoci-image: &fvoci-image ${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:0.1.0}
+
+services:
+  fvoci:
+    image: *fvoci-image
+    # Root prepares, then drops to uid 1000 for the server. docker exec and the
+    # healthcheck run as root too: they start with the environment below, and
+    # uid 1000 cannot read a root process's environment.
+    user: "0:0"
+    # The drop to uid 1000 is setgid/setuid before exec; nothing may regain
+    # privileges through a setuid file afterwards.
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:${FVOCI_PUBLISH_PORT:?set FVOCI_PUBLISH_PORT in .env}:8080"
+    environment:
+      FVOCI_PUBLIC_ORIGIN: ${FVOCI_PUBLIC_ORIGIN:?set FVOCI_PUBLIC_ORIGIN in .env}
+      PASSWORD_PEPPER_KEYS: ${PASSWORD_PEPPER_KEYS:?set PASSWORD_PEPPER_KEYS in .env}
+      PASSWORD_PEPPER_ACTIVE_KEY_ID: ${PASSWORD_PEPPER_ACTIVE_KEY_ID:?set PASSWORD_PEPPER_ACTIVE_KEY_ID in .env}
+      ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:?set ENCRYPTION_KEYS in .env}
+      ENCRYPTION_ACTIVE_KEY_ID: ${ENCRYPTION_ACTIVE_KEY_ID:?set ENCRYPTION_ACTIVE_KEY_ID in .env}
+      # Preparation only: removed from the server's environment before it
+      # starts (it gets the app password inside DATABASE_APP_URL).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      FVOCI_APP_PASSWORD: ${FVOCI_APP_PASSWORD:?set FVOCI_APP_PASSWORD in .env}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
+      # Verified capacity pair: 64 collaboration rooms need postgres
+      # max_connections=150 below (64 room fences + app pool 64 + reserve 10).
+      FVOCI_COLLAB_MAX_ROOMS: "64"
+    volumes:
+      - storage:/data/storage
+      - meili_key:/run/fvoci/meili
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 4g
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "/opt/fvoci/bin/fvoci-server", "healthcheck"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  postgres:
+    image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+    command: ["postgres", "-c", "max_connections=150"]
+    environment:
+      POSTGRES_USER: fvoci_owner
+      POSTGRES_DB: fvoci
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fvoci_owner -d fvoci"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9
+    environment:
+      MEILI_ENV: production
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
+    volumes:
+      - searchdata:/meili_data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7700/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  pgdata:
+  storage:
+  searchdata:
+  meili_key:

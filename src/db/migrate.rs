@@ -76,9 +76,25 @@ const MIGRATIONS: &[(&str, i32)] = &[
     ),
     (include_str!("../../migrations/039_templates.sql"), 39),
     (include_str!("../../migrations/040_web_push.sql"), 40),
+    (
+        include_str!("../../migrations/041_outbox_consumer_seed_repair.sql"),
+        41,
+    ),
+    (
+        include_str!("../../migrations/042_secret_maintenance.sql"),
+        42,
+    ),
+    (
+        include_str!("../../migrations/043_events_index_outbox_lag.sql"),
+        43,
+    ),
+    (
+        include_str!("../../migrations/044_email_change_auth_generation.sql"),
+        44,
+    ),
 ];
 
-const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
+pub(crate) const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
 
 const APP_ROLE_GRANTS: &str = include_str!("../../scripts/grant-app-role.sql");
 const APP_ROLE_PLACEHOLDER: &str = ":\"app_role\"";
@@ -700,6 +716,22 @@ mod tests {
         (
             40,
             "ed2db8ff0ab33ce59fd098d0370e05464779d5197799a16054bf43b7e2b6f33f",
+        ),
+        (
+            41,
+            "1d86261505a7065283f7a27b53399e2628602464c576ed36fe7a6a2ff2ff6137",
+        ),
+        (
+            42,
+            "b30c81994d86829c682b69c0f849b08575cdb64e17466a39d26f35ae12344431",
+        ),
+        (
+            43,
+            "a513c4f1c24e1c0c65c49e78e12131cc82931036c59c377956b5348fe8ce22c8",
+        ),
+        (
+            44,
+            "bfabdbe0270e7275212aa45489405d2651526b34108c6d50ff718e243c363d5d",
         ),
     ];
 

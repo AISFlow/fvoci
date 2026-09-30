@@ -1,39 +1,38 @@
-//! Collaboration DB admission boundary.
+//! Collaboration DB boundary for document and task rooms: access checks,
+//! durable state (snapshot, update tail, op receipts) and the writer fence.
+//! The database stays the ACL, durability and fence authority.
 //!
-//! ## Caps (source-grounded final)
-//! - `MAX_COLLAB_SNAPSHOT_BYTES` / `MAX_COLLAB_UPDATE_BYTES`: 8 MiB each (supersedes 1 MiB).
+//! ## Caps
+//! - `MAX_COLLAB_SNAPSHOT_BYTES` / `MAX_COLLAB_UPDATE_BYTES`: 8 MiB each.
 //! - `MAX_COLLAB_TAIL_UPDATES`: 64 tail rows.
 //! - `MAX_COLLAB_LOAD_BYTES`: snapshot + tail combined 32 MiB (engine reload budget).
-//! - Engine Load framed JSON cap 48 MiB (documented; DB refuses tails engine cannot reload).
+//! - Engine Load framed JSON cap 48 MiB (DB refuses tails the engine cannot reload).
 //! - Op receipts are append-only identity rows (seq/actor/len/digest); history grows without
 //!   automatic retention or a per-document receipt count cap. Memory/recovery stays bounded by
 //!   the 32 MiB / 64-row tail load budget above.
-//!
-//! ## Public API (room actor consumes later; DB remains ACL/durable/fence authority)
-//! - `claim_writer_and_load(pool, workspace_id, actor_user_id, session_id, document_id)`
-//! - `load_collab_document(pool, workspace_id, actor_user_id, session_id, document_id)`
-//! - `append_collab_update(pool, AppendCollabInput)` → `AppendCollabResult` | `CollabDbError`
-//! - `lookup_collab_operation(pool, workspace_id, actor_user_id, session_id, document_id, op_id)`
-//! - `verify_collab_operation(pool, VerifyCollabInput)` → length+digest+actor mismatch → `OpIdConflict`
 //!
 //! ## Op receipts (immutable identity, no raw payload)
 //! Receipts retain `seq`, `actor_user_id`, `payload_len`, and `payload_sha256` only.
 //! They do not store historical update bytes; callers cannot recover raw payload from a
 //! receipt alone and must load the canonical snapshot plus tail for payload bytes.
-//! - `compact_collab_snapshot(pool, CompactCollabInput)` — exact cutoff fence; receipts retained
+//! Compaction keeps receipts and fences its cutoff exactly.
 //!
-//! ## Lock order within one transaction (sorted when multiple user ids):
-//! 1. `pg_advisory_xact_lock(1907006, lockKeyFromUuid(userId))` for each actor user
+//! ## Lock order within one transaction
+//! Every authorizing transaction starts with `lock_collab_actor` (steps 1-5):
+//! 1. `lock_membership_users` for the actor (the membership advisory lock;
+//!    keys sorted when several users are locked)
 //! 2. `users` + `sessions` `FOR UPDATE` via `recheck_session`
 //! 3. `memberships` `FOR UPDATE` via `membership_role_for_update`
-//! 4. project documents only: `projects` `FOR SHARE` (before the document row, matching
-//!    the project → document order of project document mutations)
-//! 5. `documents` `FOR UPDATE` for the wiki or project document row
-//! 6. `document_states` `FOR UPDATE`
+//! 4. project documents and tasks: `projects` `FOR SHARE` (before the resource
+//!    row, matching the project → document/task order of their mutations)
+//! 5. `documents` `FOR UPDATE`, or `tasks` `FOR NO KEY UPDATE`
+//! 6. the state row (`document_states` / `task_states`) `FOR UPDATE`
 //!
-//! Empty-state seed only: `pg_advisory_xact_lock(1907004, lockKeyFromUuid(documentId))`.
-//! Reserved for a future room-manager connection lifetime lock:
-//! `pg_advisory_lock(1907007, lockKeyFromUuid(documentId))` — not acquired here.
+//! Empty-state seed only: a transaction advisory lock in
+//! `COLLAB_INIT_LOCK_NAMESPACE`, keyed by `lock_key_from_uuid(resource_id)`.
+//! Room fence: `collab::guard::RoomGuard` holds a session advisory lock in
+//! `COLLAB_ROOM_SESSION_LOCK_NAMESPACE`, keyed the same way, on a dedicated
+//! connection for the room's lifetime (not acquired in this module).
 
 use std::time::Instant;
 
@@ -44,19 +43,21 @@ use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::collab::derived_body::PreparedDerivedBody;
-use crate::db::context::{lock_key_from_uuid, set_tenant};
-use crate::db::documents::{
-    document_permission, empty_document_json, lock_membership_users, membership_role_for_update,
-    recheck_session, workspace_is_live,
-};
+use crate::db::context::{lock_key_from_uuid, lock_membership_users, recheck_session, set_tenant};
+use crate::db::documents::{document_permission, empty_document_json};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::share_lock_project_permission;
+use crate::db::workspace::{membership_role_for_update, workspace_is_live};
 use crate::projects::ProjectPermission;
 
 pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
 
+/// Stage timings of one collab transaction, logged as `collab.stage` fields.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CollabDbStageTimings {
+    /// Not measured (always 0): the timed append runs on the room's fence
+    /// connection; the pool variant discards its timings. Kept as a stable log
+    /// field.
     pub pool_wait_us: u64,
     pub advisory_lock_us: u64,
     pub row_lock_us: u64,
@@ -64,9 +65,13 @@ pub struct CollabDbStageTimings {
     pub commit_us: u64,
 }
 
+/// Serializes seeding a missing state row (transaction lock keyed by the
+/// resource id), so concurrent first claims insert it once.
 pub const COLLAB_INIT_LOCK_NAMESPACE: i32 = 1_907_004;
-/// Reserved for a future room-manager session lock held for the connection lifetime.
-/// Init paths must not reuse this namespace/key pair.
+/// Room fence: `RoomGuard` holds this session lock, keyed by the resource id,
+/// for the room's lifetime, so at most one room, in any server process, owns a
+/// resource at a time. No other two-int advisory lock may use this namespace
+/// (see `db::context` tests).
 pub const COLLAB_ROOM_SESSION_LOCK_NAMESPACE: i32 = 1_907_007;
 pub const COLLAB_STATE_ENCODING_V1: i16 = 1;
 pub const MAX_COLLAB_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
@@ -588,6 +593,30 @@ async fn fetch_state_fence_for_update(
     .await
 }
 
+/// The fields an append checks, from the locked state row: the snapshot's
+/// stored size (`octet_length` reads the length without detoasting, so the
+/// snapshot bytes never leave the server), `writer_generation`,
+/// `snapshot_cutoff_seq` and `tail_seq`.
+async fn fetch_append_fence_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<Option<(i64, i64, i64, i64)>, sqlx::Error> {
+    sqlx::query_as(&t.sql(
+        r#"
+        SELECT octet_length(state)::bigint, writer_generation, snapshot_cutoff_seq, tail_seq
+        FROM {states}
+        WHERE workspace_id = $1 AND {id} = $2
+        FOR UPDATE
+        "#,
+    ))
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
 async fn fetch_state_for_update(
     tx: &mut Transaction<'_, Postgres>,
     t: &CollabTables,
@@ -669,6 +698,62 @@ fn state_row_to_load(row: StateRow, tail: Vec<CollabUpdateRow>) -> CollabLoadSta
     }
 }
 
+/// What the actor prefix found, before a writer or reader maps it to an error.
+enum ActorAccess {
+    /// The session or its user is no longer live.
+    SessionInactive,
+    WorkspaceGone,
+    NotMember,
+    /// Missing, trashed, in a trashed project, or moved between the unlocked
+    /// read and the row lock (see [`lock_collab_access`]).
+    ResourceGone,
+    Access(CollabDocumentAccess),
+}
+
+/// The actor prefix of every authorizing collab transaction, in the lock
+/// order of the module doc: membership advisory lock, session recheck, live
+/// workspace, membership row, then the resource rows. Runs after `set_tenant`.
+/// Records `advisory_lock_us` for the advisory lock and `row_lock_us` for the
+/// rest. Callers map the result with [`authorize_collab_write`] or
+/// [`authorize_collab_read`].
+async fn lock_collab_actor(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    resource_id: Uuid,
+    timings: &mut CollabDbStageTimings,
+) -> Result<ActorAccess, sqlx::Error> {
+    let advisory_started = Instant::now();
+    lock_membership_users(tx, &[actor_user_id]).await?;
+    timings.advisory_lock_us = advisory_started.elapsed().as_micros() as u64;
+    let row_started = Instant::now();
+    let access = async {
+        if !recheck_session(tx, actor_user_id, session_id).await? {
+            return Ok(ActorAccess::SessionInactive);
+        }
+        if !workspace_is_live(tx, workspace_id).await? {
+            return Ok(ActorAccess::WorkspaceGone);
+        }
+        if membership_role_for_update(tx, workspace_id, actor_user_id)
+            .await?
+            .is_none()
+        {
+            return Ok(ActorAccess::NotMember);
+        }
+        let access = lock_collab_access(tx, kind, workspace_id, actor_user_id, resource_id).await?;
+        Ok::<_, sqlx::Error>(access.map_or(ActorAccess::ResourceGone, ActorAccess::Access))
+    }
+    .await;
+    timings.row_lock_us = row_started.elapsed().as_micros() as u64;
+    access
+}
+
+/// Writer check (claim, load, append, compaction, derived-body write): the
+/// actor prefix, then Edit on an unarchived resource. A dead session or a
+/// non-member is `Forbidden`. Existence (tenant, trash, affiliation) decides
+/// `NotFound` before permission decides `Forbidden`.
 async fn authorize_collab_write(
     tx: &mut Transaction<'_, Postgres>,
     kind: CollabKind,
@@ -676,35 +761,33 @@ async fn authorize_collab_write(
     actor_user_id: Uuid,
     session_id: Uuid,
     document_id: Uuid,
-) -> Result<Result<(Value,), CollabDbError>, sqlx::Error> {
-    lock_membership_users(tx, &[actor_user_id]).await?;
-    if !recheck_session(tx, actor_user_id, session_id).await? {
-        return Ok(Err(CollabDbError::Forbidden));
-    }
-    if !workspace_is_live(tx, workspace_id).await? {
-        return Ok(Err(CollabDbError::NotFound));
-    }
-    let role = membership_role_for_update(tx, workspace_id, actor_user_id).await?;
-    if role.is_none() {
-        return Ok(Err(CollabDbError::Forbidden));
-    }
-    // Existence (tenant, trash, affiliation) decides NotFound before permission decides Forbidden.
-    let Some(access) =
-        lock_collab_access(tx, kind, workspace_id, actor_user_id, document_id).await?
-    else {
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    if !access.permission.at_least(ProjectPermission::Edit) {
-        return Ok(Err(CollabDbError::Forbidden));
-    }
-    if access.archived {
-        return Ok(Err(CollabDbError::Forbidden));
-    }
-    let content =
-        load_resource_content(tx, CollabTables::for_kind(kind), workspace_id, document_id).await?;
-    Ok(Ok(content))
+    timings: &mut CollabDbStageTimings,
+) -> Result<Result<(), CollabDbError>, sqlx::Error> {
+    let access = lock_collab_actor(
+        tx,
+        kind,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        timings,
+    )
+    .await?;
+    Ok(match access {
+        ActorAccess::SessionInactive | ActorAccess::NotMember => Err(CollabDbError::Forbidden),
+        ActorAccess::WorkspaceGone | ActorAccess::ResourceGone => Err(CollabDbError::NotFound),
+        ActorAccess::Access(access)
+            if access.permission.at_least(ProjectPermission::Edit) && !access.archived =>
+        {
+            Ok(())
+        }
+        ActorAccess::Access(_) => Err(CollabDbError::Forbidden),
+    })
 }
 
+/// Reader check (admission, receipt lookup and verify, read-only load): the
+/// actor prefix, then at least View. Only a dead session is `Forbidden`;
+/// every other refusal, including a permission below View, is `NotFound`.
 async fn authorize_collab_read(
     tx: &mut Transaction<'_, Postgres>,
     kind: CollabKind,
@@ -712,27 +795,28 @@ async fn authorize_collab_read(
     actor_user_id: Uuid,
     session_id: Uuid,
     document_id: Uuid,
-) -> Result<Result<(), CollabDbError>, sqlx::Error> {
-    lock_membership_users(tx, &[actor_user_id]).await?;
-    if !recheck_session(tx, actor_user_id, session_id).await? {
-        return Ok(Err(CollabDbError::Forbidden));
-    }
-    if !workspace_is_live(tx, workspace_id).await? {
-        return Ok(Err(CollabDbError::NotFound));
-    }
-    let role = membership_role_for_update(tx, workspace_id, actor_user_id).await?;
-    if role.is_none() {
-        return Ok(Err(CollabDbError::NotFound));
-    }
-    let Some(access) =
-        lock_collab_access(tx, kind, workspace_id, actor_user_id, document_id).await?
-    else {
-        return Ok(Err(CollabDbError::NotFound));
-    };
-    if !access.permission.at_least(ProjectPermission::View) {
-        return Ok(Err(CollabDbError::NotFound));
-    }
-    Ok(Ok(()))
+    timings: &mut CollabDbStageTimings,
+) -> Result<Result<CollabDocumentAccess, CollabDbError>, sqlx::Error> {
+    let access = lock_collab_actor(
+        tx,
+        kind,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        timings,
+    )
+    .await?;
+    Ok(match access {
+        ActorAccess::SessionInactive => Err(CollabDbError::Forbidden),
+        ActorAccess::WorkspaceGone | ActorAccess::NotMember | ActorAccess::ResourceGone => {
+            Err(CollabDbError::NotFound)
+        }
+        ActorAccess::Access(access) if access.permission.at_least(ProjectPermission::View) => {
+            Ok(access)
+        }
+        ActorAccess::Access(_) => Err(CollabDbError::NotFound),
+    })
 }
 
 /// System `document.updated` / `task.updated` event (`collab: true`) after a
@@ -844,22 +928,21 @@ pub async fn claim_writer_and_load_kind(
     let t = CollabTables::for_kind(kind);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let content = match authorize_collab_write(
+    if let Err(err) = authorize_collab_write(
         &mut tx,
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
+        &mut CollabDbStageTimings::default(),
     )
     .await?
     {
-        Ok(content) => content,
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    };
+        tx.rollback().await?;
+        return Ok(Err(err));
+    }
+    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
     match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
         Ok(()) => {}
         Err(err) => {
@@ -946,22 +1029,21 @@ pub async fn load_collab_document_kind(
     let t = CollabTables::for_kind(kind);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let content = match authorize_collab_write(
+    if let Err(err) = authorize_collab_write(
         &mut tx,
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
+        &mut CollabDbStageTimings::default(),
     )
     .await?
     {
-        Ok(content) => content,
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    };
+        tx.rollback().await?;
+        return Ok(Err(err));
+    }
+    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
     match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
         Ok(()) => {}
         Err(err) => {
@@ -1066,53 +1148,42 @@ async fn append_collab_update_in_tx(
     } = input;
     let t = CollabTables::for_kind(kind);
     set_tenant(&mut tx, workspace_id).await?;
-    let advisory_started = Instant::now();
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    timings.advisory_lock_us = advisory_started.elapsed().as_micros() as u64;
-    let row_started = Instant::now();
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+    if let Err(err) = authorize_collab_write(
+        &mut tx,
+        kind,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        &mut timings,
+    )
+    .await?
+    {
         tx.rollback().await?;
-        return Ok((Err(CollabDbError::Forbidden), timings));
+        return Ok((Err(err), timings));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::NotFound), timings));
-    }
-    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
-    if role.is_none() {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::Forbidden), timings));
-    }
-    let Some(access) =
-        lock_collab_access(&mut tx, kind, workspace_id, actor_user_id, document_id).await?
-    else {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::NotFound), timings));
-    };
-    if !access.permission.at_least(ProjectPermission::Edit) {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::Forbidden), timings));
-    }
-    if access.archived {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::Forbidden), timings));
-    }
-    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
-    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
-        Ok(()) => {}
-        Err(err) => {
+    let state_started = Instant::now();
+    let mut fence = fetch_append_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
+    if fence.is_none() {
+        // Claim creates the state row, so only a row that never existed gets
+        // here. Seed it the way claim does (NotFound unless the body is still
+        // the empty seed); only this path reads content_json.
+        let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
+        if let Err(err) =
+            ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await?
+        {
             tx.rollback().await?;
             return Ok((Err(err), timings));
         }
+        fence = fetch_append_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
     }
-    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
-    timings.row_lock_us = row_started.elapsed().as_micros() as u64;
+    timings.row_lock_us += state_started.elapsed().as_micros() as u64;
     let stmt_started = Instant::now();
-    let Some(state) = state else {
+    let Some((snapshot_len, current_generation, snapshot_cutoff_seq, tail_seq)) = fence else {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::NotFound), timings));
     };
-    if state.2 != writer_generation {
+    if current_generation != writer_generation {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::StaleWriter), timings));
     }
@@ -1145,7 +1216,7 @@ async fn append_collab_update_in_tx(
         tx.rollback().await?;
         return Ok((Err(CollabDbError::OpIdConflict), timings));
     }
-    if state.4 != expected_tail_seq {
+    if tail_seq != expected_tail_seq {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::StaleCutoff), timings));
     }
@@ -1155,8 +1226,8 @@ async fn append_collab_update_in_tx(
         t,
         workspace_id,
         document_id,
-        state.3,
-        state.0.len() as i64,
+        snapshot_cutoff_seq,
+        snapshot_len,
         payload.len() as i64,
     )
     .await?
@@ -1253,21 +1324,19 @@ pub async fn lookup_collab_operation(
     let t = CollabTables::for_kind(kind);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    match authorize_collab_read(
+    if let Err(err) = authorize_collab_read(
         &mut tx,
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
+        &mut CollabDbStageTimings::default(),
     )
     .await?
     {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
+        tx.rollback().await?;
+        return Ok(Err(err));
     }
     let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(&t.sql(
         r#"
@@ -1317,21 +1386,19 @@ pub async fn verify_collab_operation_kind(
     } = input;
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    match authorize_collab_read(
+    if let Err(err) = authorize_collab_read(
         &mut tx,
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
+        &mut CollabDbStageTimings::default(),
     )
     .await?
     {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
+        tx.rollback().await?;
+        return Ok(Err(err));
     }
     let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(&t.sql(
         r#"
@@ -1393,22 +1460,21 @@ pub async fn compact_collab_snapshot_kind(
 
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let content = match authorize_collab_write(
+    if let Err(err) = authorize_collab_write(
         &mut tx,
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
+        &mut CollabDbStageTimings::default(),
     )
     .await?
     {
-        Ok(content) => content,
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    };
+        tx.rollback().await?;
+        return Ok(Err(err));
+    }
+    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
     match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
         Ok(()) => {}
         Err(err) => {
@@ -1575,91 +1641,33 @@ pub async fn resolve_collab_admission_kind(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabAdmission, CollabDbError>, sqlx::Error> {
-    let tx = pool.begin().await?;
-    resolve_collab_admission_tx(
-        tx,
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let access = match authorize_collab_read(
+        &mut tx,
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
-        CollabDbStageTimings::default(),
+        &mut CollabDbStageTimings::default(),
     )
-    .await
-    .map(|(result, _)| result)
-}
-
-async fn resolve_collab_admission_tx(
-    mut tx: Transaction<'_, Postgres>,
-    kind: CollabKind,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-    mut timings: CollabDbStageTimings,
-) -> Result<(Result<CollabAdmission, CollabDbError>, CollabDbStageTimings), sqlx::Error> {
-    set_tenant(&mut tx, workspace_id).await?;
-    let advisory_started = Instant::now();
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    timings.advisory_lock_us = advisory_started.elapsed().as_micros() as u64;
-    let row_started = Instant::now();
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::Forbidden), timings));
-    }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::NotFound), timings));
-    }
-    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
-    if role.is_none() {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::NotFound), timings));
-    }
-    let access =
-        lock_collab_access(&mut tx, kind, workspace_id, actor_user_id, document_id).await?;
-    timings.row_lock_us = row_started.elapsed().as_micros() as u64;
-    let Some(access) = access else {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::NotFound), timings));
+    .await?
+    {
+        Ok(access) => access,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
     };
-    if !access.permission.at_least(ProjectPermission::View) {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::NotFound), timings));
-    }
-    let permission = access.permission;
-    let archived = access.archived;
-    let commit_started = Instant::now();
     tx.commit().await?;
-    timings.commit_us = commit_started.elapsed().as_micros() as u64;
-    Ok((
-        Ok(CollabAdmission {
-            read_only: archived || !permission.at_least(ProjectPermission::Edit),
-            archived,
-        }),
-        timings,
-    ))
+    Ok(Ok(CollabAdmission {
+        read_only: access.archived || !access.permission.at_least(ProjectPermission::Edit),
+        archived: access.archived,
+    }))
 }
 
 /// Read-only collab load for sync without claiming writer generation.
-pub async fn load_collab_readonly(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
-    load_collab_readonly_kind(
-        pool,
-        CollabKind::Document,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-    )
-    .await
-}
-
 pub async fn load_collab_readonly_kind(
     pool: &PgPool,
     kind: CollabKind,
@@ -1671,21 +1679,19 @@ pub async fn load_collab_readonly_kind(
     let t = CollabTables::for_kind(kind);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    match authorize_collab_read(
+    if let Err(err) = authorize_collab_read(
         &mut tx,
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
+        &mut CollabDbStageTimings::default(),
     )
     .await?
     {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
+        tx.rollback().await?;
+        return Ok(Err(err));
     }
     let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
     match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
@@ -1830,22 +1836,20 @@ pub async fn project_derived_body_kind(
 
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    match authorize_collab_write(
+    if let Err(err) = authorize_collab_write(
         &mut tx,
         kind,
         workspace_id,
         actor_user_id,
         session_id,
         document_id,
+        &mut CollabDbStageTimings::default(),
     )
     .await?
     {
-        Ok(_) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
-    };
+        tx.rollback().await?;
+        return Ok(Err(err));
+    }
 
     let state = fetch_state_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
     let Some((current_generation, current_tail_seq)) = state else {

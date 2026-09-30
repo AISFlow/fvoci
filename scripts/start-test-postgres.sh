@@ -35,7 +35,9 @@ PASSWORD="$(openssl rand -hex 24)"
 printf 'POSTGRES_PASSWORD=%s\n' "$PASSWORD" >"$ENV_FILE"
 
 cleanup() {
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  # -v: the image declares a VOLUME; without it every run leaves an anonymous
+  # volume behind (the --rm auto-removal does not run after an explicit rm).
+  docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
   rm -f "$ENV_FILE"
 }
 trap cleanup EXIT

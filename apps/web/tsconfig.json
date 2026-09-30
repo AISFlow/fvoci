@@ -1,4 +1,9 @@
 {
   "files": [],
-  "references": [{ "path": "./tsconfig.app.json" }]
+  "references": [{ "path": "./tsconfig.app.json" }],
+  // `bun test` reads only this file, not the referenced project; it needs the
+  // app's `@/` alias (tsconfig.app.json, vite.config.ts) to load src modules.
+  "compilerOptions": {
+    "paths": { "@/*": ["./src/*"] }
+  }
 }

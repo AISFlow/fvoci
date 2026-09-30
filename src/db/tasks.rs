@@ -6,7 +6,8 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{
-    lock_key_from_uuid, lock_membership_users, recheck_session, session_is_live, set_tenant,
+    begin_read, lock_key_from_uuid, lock_membership_users, recheck_session, session_is_live,
+    set_tenant,
 };
 use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
 use crate::db::holidays::list_holiday_dates;
@@ -14,13 +15,15 @@ use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::labels::{assignee_filter_member_exists, project_label_exists};
 use crate::db::milestones::project_milestone_exists;
 use crate::db::projects::{
-    lock_project, project_permission, visible_project_sql_for_guest, ProjectDbError,
+    load_live_project, lock_project, project_permission, visible_project_sql_for_guest,
+    ProjectDbError,
 };
 use crate::db::task_activity::{record_task_activity, task_activity_snapshot};
 use crate::db::view_query::{
     compile_view_query, due_date_sql, scalar_value_sql, value_column, CompileOptions, CompiledView,
     RootKind, SqlArgs, ViewScope,
 };
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 use crate::tasks::activity::{patch_activity_fields, ActivitySnapshot};
 use crate::tasks::dependency::{
@@ -135,18 +138,6 @@ pub(crate) struct TaskChangeRecord<'a> {
     pub(crate) target_id: Uuid,
     pub(crate) payload: Value,
     pub(crate) client_ip: Option<&'a str>,
-}
-
-pub(crate) async fn workspace_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
 }
 
 const MAX_TASK_REFS: usize = 50;
@@ -535,7 +526,8 @@ async fn default_backlog_status(
     Ok(fallback.map(|(id,)| id))
 }
 
-const TASK_STATUS_LOCK_NAMESPACE: i32 = 1_907_002;
+/// Serializes WIP-limit checks per target status (transaction-scoped).
+pub(crate) const TASK_STATUS_LOCK_NAMESPACE: i32 = 1_907_003;
 
 fn violates_task_hierarchy(child_type: &str, parent_type: &str) -> bool {
     if child_type == "subtask" {
@@ -1194,7 +1186,7 @@ pub async fn get_task(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<TaskDetailRow, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -1231,12 +1223,12 @@ pub async fn get_task(
     .fetch_one(&mut *tx)
     .await?;
     let project_id = task_row.project_id;
-    let locked = lock_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
+    let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+    let Some(project) = project else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
@@ -1337,7 +1329,7 @@ async fn list_tasks_in_scope(
             return Ok(Err(ProjectDbError::InvalidCursor));
         }
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     // Bounds the correlated filter/sort subqueries of a user-built view query.
     sqlx::query("SET LOCAL statement_timeout = '15s'")
         .execute(&mut *tx)
@@ -1353,12 +1345,12 @@ async fn list_tasks_in_scope(
     }
     let scope_condition = match project_id {
         Some(project_id) => {
-            let locked = lock_project(&mut tx, workspace_id, project_id).await?;
-            let Some(locked) = locked else {
+            let project = load_live_project(&mut tx, workspace_id, project_id).await?;
+            let Some(project) = project else {
                 tx.rollback().await?;
                 return Ok(Err(ProjectDbError::NotFound));
             };
-            if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+            if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
                 .await?
                 .at_least(ProjectPermission::View)
             {
@@ -1369,7 +1361,7 @@ async fn list_tasks_in_scope(
         }
         None => {
             let Some(role) =
-                crate::db::documents::membership_role(&mut tx, workspace_id, actor_user_id).await?
+                crate::db::workspace::membership_role(&mut tx, workspace_id, actor_user_id).await?
             else {
                 tx.rollback().await?;
                 return Ok(Err(ProjectDbError::NotFound));
@@ -2340,13 +2332,20 @@ async fn transition_task_status(
     }))
 }
 
+/// `dueAt` is compared to the millisecond, not to the microsecond PostgreSQL
+/// stores: browser clients hold it in a JS `Date`, and the task layout and
+/// collection rows render it with milliseconds. A different millisecond is
+/// still a conflict.
 fn dates_conflict(
     expected: &crate::tasks::patch::ExpectedDatesInput,
     start_date: Option<NaiveDate>,
     due_date: Option<NaiveDate>,
     due_at: Option<DateTime<Utc>>,
 ) -> bool {
-    expected.start_date != start_date || expected.due_date != due_date || expected.due_at != due_at
+    let millis = |at: Option<DateTime<Utc>>| at.map(|at| at.timestamp_millis());
+    expected.start_date != start_date
+        || expected.due_date != due_date
+        || millis(expected.due_at) != millis(due_at)
 }
 
 fn patch_only_unarchives(input: &crate::tasks::patch::PatchTaskMetaInput) -> bool {
@@ -3332,7 +3331,7 @@ pub async fn list_project_dependencies(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<TaskDependencyEdge>, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -3342,11 +3341,11 @@ pub async fn list_project_dependencies(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let Some(locked) = lock_project(&mut tx, workspace_id, project_id).await? else {
+    let Some(project) = load_live_project(&mut tx, workspace_id, project_id).await? else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+    if !project_permission(&mut tx, workspace_id, actor_user_id, &project)
         .await?
         .at_least(ProjectPermission::View)
     {

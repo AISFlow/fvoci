@@ -542,8 +542,9 @@ pub struct TestServer {
 /// process, whose room slots stay under that cap. libtest runs many tests, each
 /// with its own hub, in one process; without this gate, ungated parallel tests
 /// exceed the shared cap and a helper spawn fails with `ResourceLimit` ("live
-/// primary collab children at cap N"), which surfaces as a 1011 "collab
-/// unavailable" close before auth. Each test server keeps at most one live room
+/// primary collab children at cap N"), which the hub refuses as capacity
+/// (`JoinError::CapacityRetry`): a 1013 retry-later close before auth, not a
+/// 1011 engine failure. Each test server keeps at most one live room
 /// plus one offline revision-capture helper, so 3 servers x 2 children fit in 6.
 const MAX_CONCURRENT_TEST_SERVERS: usize = 3;
 

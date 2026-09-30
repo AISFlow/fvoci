@@ -268,3 +268,78 @@ Claude Code로 실제 실행했다. requested/effective 모두 `claude-opus-5-5`
 구현 세션과 분리한다. 무거운 로컬 검사는 계속 한 묶음이고 원격 CI 병렬화는 별개다.
 상한은 슬롯 충원 의무가 아니며 파일·공통 계약 소유권과 기존 실행 모델 검증을 유지한다.
 과거 2·3개 실행 기록은 당시 사실로 보존한다.
+
+## 2026-09-28 다음 코디네이터 Fable 인계 준비
+
+사용자 지시로 다음 코디네이터는 Claude Code Fable 5.1 medium이다. 구현과 별도 독립 검토는
+Opus 5.5 medium, 조사는 `cursor-grok-4.6-high`(별도 effort 없음)를 유지한다.
+쓰기 상한 5개, 독립 검토 기본 1개/서로 다른 후보 최대 2개도 유지한다.
+
+2026-09-28 01:44 UTC Linux 확인: `/home/kinesis/.local/bin/claude`는 2.1.283이며
+현재 `--help`에 `--model`과 `--effort medium`이 있다. 정확한 Fable ID
+`claude-fable-5-1`은 위 2026-09-26의 실제 세션 기록에서 확인했다.
+이 확인은 현재 서버의 지원 목록·유효 라우팅이나 새 세션 실행 성공을 증명하지 않는다.
+이번 인계 준비에서는 새 Fable 세션을 시작하지 않았으며 현재 라우팅은 미확인이다.
+인수 시 실제 `/model`·`/effort`와 turn 시작을 확인하고, 불가하면 대체 없이 차단을 기록한다.
+과거 Astra·Opus·Fable 실행 기록은 당시 사실대로 보존한다. 현재 작업·체크포인트는
+`docs/rewrite.md`의 새 인계 포인터를 따른다.
+
+## 2026-09-28 Fable 코디네이터 인수 확인
+
+2026-09-28 01:52 UTC(첫 인수 커밋 시각) Linux, Claude Code 2.1.283 세션에서 인수했다. 확인 근거: `~/.claude/settings.json`의
+`model: claude-fable-5-1`과 `modelSettings.effortLevel: medium`, 세션 환경 `CLAUDE_EFFORT=medium`,
+세션 자체 보고 모델 ID `claude-fable-5-1`. 실제 turn이 시작되어 이 기록을 작성했다. 별도 `/model`
+TUI 출력은 이 세션 안에서 캡처하지 않았다. Orca 1.4.207 `/home/kinesis/.local/bin/orca-ide`로
+Run `run_b01d432a9dee`에 `run-use` 성공, coordinator terminal
+`term_77972376-fa56-44ae-a334-0c95413c4fab`, 인박스 0, 활성 워커 0, reclaimable 0.
+인계 문서 `coordinator-handoff-2026-09-28-0145-utc-linux.md`와 실제 상태(main `9e15d50e`,
+후보 `b09114df` clean/7 paths, Draft #198 `7f2433f8`) 일치를 확인했다. 전역 설정·MCP 변경 없음.
+세션 JSONL `~/.claude/projects/-home-kinesis-orca-workspaces-fvoci-daggertooth/5b3ea42d-2ae1-4abb-9973-8761b6952f92.jsonl`의
+모든 assistant 턴 `model` 필드가 `claude-fable-5-1`, `effort` 필드가 `medium`이다(요청값이 아닌 실제 응답 기록).
+상단 "실제 실행 확인" 표의 코디네이터 행과 2026-09-27 "현재 실행 설정" 절은 당시 기록이며, 현재 코디네이터 실행 근거는 이 절이다.
+
+## 2026-09-28 Fable 코디네이터 계속 진행·상한 확대·첫 release 실행
+
+같은 Fable 5.1 medium 코디네이터 세션이 계속 조정한다(위 인수 확인 절). 사용자 지시로 쓰기 상한은
+프로젝트 전체 8개(기존 5개 슬롯을 먼저 쓰고 파일·공통 계약·선행 작업이 분리될 때만 6~8개), 독립 검토는
+기본 2개·서로 다른 고정 후보가 쌓일 때 최대 3개로 확대됐다(#217, AGENTS.md). 위 5개·1/2개 기록은 당시 사실로 보존한다.
+
+`v0.1.0` tag는 `57497e2f`(#215 merge)에 있다. release 실행 36416132900(main `54dcfc86`, workflow_dispatch)은 index
+`sha256:638aad92f5b48f9e48c929552c3dc567548be1b73c1ff1dfbc31e9e7ac4e1e11`을 빌드했고 GHCR 익명 manifest inspect는 성공했다.
+digest smoke는 테스트 클라이언트의 localhost cookie 전송 결함으로 실패했으며 수정은 PR #218이다. smoke 재실행은 대기 중이다.
+
+Claude Code 워커(Opus 5.5 medium)는 Max 구독 OAuth로 인증하며 API key를 쓰지 않는다. 모델·effort·실행 경로 확인 방법은 위 절과 같다.
+
+## 2026-09-29 Claude Code Opus 5.5 코디네이터 인수 (내장 workflow)
+
+현재 코디네이터 실행 근거는 이 절이며, 위 2026-09-28 Fable 절들은 당시 기록이다.
+
+사용자 지시로 코디네이터는 Claude Code 주 세션 Opus 5.5이며 조사·구현·독립 검토는 내장 subagent/workflow를
+우선 사용한다(AGENTS.md 역할표). 이전 Fable 코디네이터·자동 체인은 재가동하지 않았고 Orca Run은 사용하지 않았다.
+
+- 실행 환경: 로컬 WSL2 Linux, Claude Code 2.1.283(`/home/kinesis/.local/bin/claude`), Max 구독 OAuth(세션 환경에
+  API key 없음). 코디네이터의 계정·결제·전역 설정 변경 없음, 새 MCP 없음.
+- 주 세션: 시스템 보고 모델 ID `claude-opus-5-5`, `/effort ultracode`(세션 한정 xhigh + Dynamic Workflows),
+  `CLAUDE_EFFORT=xhigh`. 세션 JSONL의 assistant 턴 `model`/`effort` 필드가 모두 `claude-opus-5-5`/`xhigh`다.
+- 전역 `~/.claude/settings.json`: 사용자가 세션 시작 직후 `/model`로 Opus 5.5를 새 세션 기본값으로 저장했다
+  (2026-09-28 15:10Z, `model: opus`; 09-28 기록의 `claude-fable-5-1`에서 변경). `modelSettings.claude-opus-5-5.effortLevel: medium`은
+  ultracode 세션 설정 때문에 이 세션에 적용되지 않았다. 코디네이터는 전역 설정을 변경하지 않았다.
+- workflow agent: 기본값·명시 effort·`Plan` agent 유형 모두 transcript의 `model`/`effort`가 `claude-opus-5-5`/`xhigh`다
+  (probe `wf_c35a1d05-296`, 점검 `wf_2cd8e0c9-9cc`, 검토 `wf_17862adc-bd6`·`wf_53ddd0bf-91b`). agent 유형: 점검
+  `wf_2cd8e0c9-9cc`와 #227/#228 검토 `wf_53ddd0bf-91b`는 편집 도구 없는 `Plan`, 인수 초기 `wf_17862adc-bd6`(#225 1차 검토·PG16
+  원인·#223 범위)은 편집 도구가 있는 기본 `workflow-subagent`에 읽기 전용 prompt만 준 것이다(이 한계로 #225 수락 검토는
+  `Plan`으로 다시 한다). 이후 읽기 전용 검토·조사는 `Plan`을 쓴다. Bash는 남아 있으므로 쓰기 금지는 프롬프트로도 명시한다.
+- 주입된 지침 대조: 주 세션과 기본 workflow agent는 `/home/kinesis/orca/workspaces/fvoci/daggertooth/AGENTS.md`와 사용자
+  memory `MEMORY.md`를 세션 시작 시점 스냅샷으로 받았다. 세션 시작 때 이 worktree는 구 브랜치 `fvoci/rust-node-free-runtime`
+  (`6acccea0`, 2026-09-27)에 있었으므로 주입본은 그 시점의 Astra/sol 역할표다(transcript 대조; 요약 오류가 아니라 구버전
+  worktree 스냅샷). 원격 `a53074f7`의 활성 역할표는 Fable 코디네이터·Opus 구현/검토·Grok 조사였고, 이번 정정은
+  `a53074f7` 파일을 기준으로 했다. `Plan` 유형 agent에는 프로젝트 지침이 주입되지 않는다. 상위 디렉터리·사용자 전역
+  CLAUDE.md/AGENTS.md는 없다. 세션 중 바뀐 지침은 하위 agent에 반영되지 않으므로 코디네이터가 필요한 규칙을 prompt에 명시한다.
+- CodeGraph 1.6.0(`/home/kinesis/.local/bin/codegraph`), MCP `codegraph serve --mcp`(env `CODEGRAPH_TELEMETRY=0`,
+  `DO_NOT_TRACK=1`, `~/.claude.json`의 프로젝트 설정). worktree별 `.codegraph/` 인덱스를 쓰고, 통합 worktree 인덱스에서
+  #220의 `src/db/outbox_reset.rs` 최신 소스가 반환됨을 확인했다. 인덱스는 `.gitignore` 대상이며 제품 산출물에 들어가지 않는다.
+- `/advisor`(2026-09-29): Fable advisor는 켜지 않았다. 켜려면 다른 세션에도 적용되는 전역 설정 키가 필요하고 Fable 사용 크레딧
+  동의가 필요할 수 있다. 사용자는 `/advisor`로 직접 켤 수 있다. advisor 호출은 하지 않았다.
+- 디스크 정리(2026-09-29 13:56–14:12 KST): `df -h /` 사용량 913G → 299G(약 614 GiB 회수; 단계별 df 차이는 Docker volume 262.50,
+  worktree build·오래된 cargo target 디렉터리 272.80, 완료 worktree 73.60, image·build cache 8.81 GiB). 대상·검사·결과는
+  `/home/kinesis/orca/fvoci-evidence/space-reclaim-2026-09-29/`(단계별 TSV, `before.txt`, `after.txt`).

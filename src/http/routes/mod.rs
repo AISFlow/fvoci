@@ -1,5 +1,6 @@
 pub mod account;
 pub mod admin;
+pub mod api_docs;
 pub mod api_tokens;
 pub mod attachments;
 pub mod auth;

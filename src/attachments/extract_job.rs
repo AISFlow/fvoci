@@ -25,7 +25,9 @@ use crate::documents::office::{
 use crate::search::embed::Embedder;
 use crate::search::embed_pass::{run_embed_pass, EmbedBackoff, EmbedPassOutcome};
 
-const _: () = assert!(EXTRACT_LEASE_SECS * 1000 > DEFAULT_TIMEOUT_MS);
+// One native extraction can take `timeout_ms` of slot wait plus `timeout_ms`
+// for the child; the lease must outlast both.
+const _: () = assert!(EXTRACT_LEASE_SECS * 1000 > 2 * DEFAULT_TIMEOUT_MS);
 
 #[derive(Debug, Clone)]
 pub struct ExtractJobSettings {
@@ -577,7 +579,7 @@ mod tests {
         use crate::db::attachment_extract::EXTRACT_MAX_ATTEMPTS;
         use document_extract_client::limits::MAX_INPUT_BYTES;
 
-        const _: () = assert!(EXTRACT_LEASE_SECS * 1000 > DEFAULT_TIMEOUT_MS);
+        const _: () = assert!(EXTRACT_LEASE_SECS * 1000 > 2 * DEFAULT_TIMEOUT_MS);
         assert_eq!(EXTRACT_MAX_ATTEMPTS, 2);
         const _: () = assert!(MAX_INPUT_BYTES == 20 * 1024 * 1024);
     }

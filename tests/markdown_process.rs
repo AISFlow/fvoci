@@ -1,6 +1,9 @@
 //! The Markdown child (`fvoci-server --internal-markdown`) as the server runs
 //! it: real process, real rlimits, the TS oracle corpus and hostile inputs.
 
+#[path = "support/child_oom.rs"]
+mod child_oom;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -149,4 +152,26 @@ async fn child_refuses_bad_arguments_and_non_utf8_input() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("missing --op"));
+}
+
+/// The Markdown child raises its own `oom_score_adj` to 1000 before it reads
+/// input, so a cgroup OOM kill picks the converter before the server or a
+/// collaboration helper.
+#[cfg(target_os = "linux")]
+#[test]
+fn markdown_child_raises_own_oom_score_adj() {
+    let adj = child_oom::oom_score_adj_of_child(&[
+        fvoci_server::documents::markdown_helper::MARKDOWN_HELPER_ARG,
+        "--op",
+        "md-to-tiptap",
+        "--max-input",
+        "1024",
+        "--max-output",
+        "1024",
+        "--max-as",
+        &MarkdownLimits::default().address_space.to_string(),
+        "--cpu-secs",
+        "5",
+    ]);
+    assert_eq!(adj, Some(1000));
 }

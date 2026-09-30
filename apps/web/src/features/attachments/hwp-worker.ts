@@ -5,7 +5,7 @@ import { initRhwp } from "./rhwp-init.ts";
 /** Module worker for one HWP/HWPX document (see `hwp-client.ts`). */
 const scope = self as unknown as {
   onmessage: ((event: MessageEvent<HwpRequest>) => void) | null;
-  postMessage(message: HwpResponse): void;
+  postMessage(message: HwpResponse, transfer?: Transferable[]): void;
 };
 
 const handle = createHwpSession({ init: initRhwp, open: (bytes) => new HwpDocument(bytes) });
@@ -21,6 +21,7 @@ scope.onmessage = (event) => {
     } catch {
       response = { id: request.id, ok: false, error: "failed" };
     }
-    scope.postMessage(response);
+    // Exported bytes are rhwp's own copy; hand the buffer over instead of cloning it.
+    scope.postMessage(response, response.ok && response.op === "export" ? [response.bytes.buffer as ArrayBuffer] : []);
   });
 };

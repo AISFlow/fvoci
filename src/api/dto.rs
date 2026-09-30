@@ -894,6 +894,10 @@ pub struct CreateAttachmentUploadBody {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct AttachmentPartUrlResponse {
     pub part_number: i32,
+    /// `proxy`: the same-origin API path (PUT with the session). `presigned`:
+    /// an absolute signed storage URL for one PUT of exactly this part's
+    /// bytes, sent without cookies, `Authorization` or `Content-Type`; it
+    /// stops working at `partUrlsExpireAt`.
     pub url: String,
 }
 
@@ -903,6 +907,14 @@ pub struct AttachmentPartUrlResponse {
 pub struct CreateAttachmentUploadResponse {
     pub attachment_id: String,
     pub part_size_bytes: i64,
+    /// Transfer mode of this upload session, fixed for its whole life:
+    /// the mode in effect now for a browser session, always `proxy` for an
+    /// API-token request.
+    pub transfer: crate::attachments::TransferMode,
+    /// When the presigned part URLs expire (resume re-issues them); null for
+    /// `proxy`.
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub part_urls_expire_at: Option<DateTime<Utc>>,
     pub parts: Vec<AttachmentPartUrlResponse>,
 }
 
@@ -920,6 +932,11 @@ pub struct AttachmentUploadedPartResponse {
 pub struct ResumeAttachmentUploadResponse {
     pub attachment_id: String,
     pub part_size_bytes: i64,
+    /// The session's own transfer mode (not the current setting).
+    pub transfer: crate::attachments::TransferMode,
+    /// When the freshly issued presigned part URLs expire; null for `proxy`.
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub part_urls_expire_at: Option<DateTime<Utc>>,
     pub uploaded_parts: Vec<AttachmentUploadedPartResponse>,
     pub parts: Vec<AttachmentPartUrlResponse>,
 }
@@ -1264,6 +1281,8 @@ pub struct ExpectedDatesBody {
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     #[serde(deserialize_with = "deserialize_nullable_date")]
     pub due_date: Option<NaiveDate>,
+    /// Compared with the stored `dueAt` to the millisecond; finer digits are
+    /// ignored.
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub due_at: Option<DateTime<Utc>>,
 }
@@ -2079,7 +2098,8 @@ pub struct WorkspaceOidcOutput {
     pub label: String,
 }
 
-/// All null when the workspace has no configuration.
+/// `issuer`, `clientId` and `label` are all null when the workspace has no
+/// configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
@@ -2090,6 +2110,19 @@ pub struct WorkspaceOidcGetOutput {
     pub client_id: Option<String>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub label: Option<String>,
+    /// The redirect URI to register at this workspace's identity provider,
+    /// exactly as the server sends it (built from the public origin).
+    pub redirect_uri: String,
+}
+
+/// An OIDC start answered with JSON: the page navigates the browser to
+/// `authorizationUrl` itself. A form submission that redirects to the
+/// provider would be blocked by the app's `form-action 'self'`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct OidcAuthorizationOutput {
+    pub authorization_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2211,6 +2244,41 @@ pub struct AuditLogItemOutput {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct AuditLogListResponse {
     pub items: Vec<AuditLogItemOutput>,
+    pub next_cursor: Option<String>,
+}
+
+/// Source `eventListQuery` (strict: only `limit` and `cursor`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceEventListQuery {
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// Source `eventOutput` (packages/contracts/src/events.ts).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceEventOutput {
+    pub id: String,
+    pub verb: String,
+    pub workspace_id: Option<String>,
+    pub actor_user_id: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Object))]
+    pub payload: Value,
+    pub channel: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceEventListResponse {
+    pub items: Vec<WorkspaceEventOutput>,
     pub next_cursor: Option<String>,
 }
 
@@ -2411,6 +2479,26 @@ pub struct AdminInstanceSettingsOutput {
     pub restart_required: Vec<String>,
     pub env_applied: Vec<String>,
     pub ee_features: Vec<String>,
+    pub attachment_transfer: AdminAttachmentTransferOutput,
+}
+
+/// The attachment transfer mode this process applies, next to the configured
+/// `values.attachmentTransfer.mode`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminAttachmentTransferOutput {
+    /// Mode for new upload sessions and original downloads of browser
+    /// sessions; API-token requests always use `proxy`.
+    pub effective: crate::attachments::TransferMode,
+    /// Where the configured mode comes from; `env` cannot be changed here.
+    pub source: crate::settings::TransferSource,
+    /// Whether this server's storage can serve `presigned`.
+    pub presigned_available: bool,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub unavailable_reason: Option<crate::attachments::TransferUnavailable>,
+    /// A stored `presigned` that cannot apply here, so `proxy` is in effect.
+    pub blocked: bool,
 }
 
 /// Public branding: asset delivery paths, never storage keys.
@@ -2482,6 +2570,9 @@ pub struct InstanceSettingsPatchSchema {
     #[serde(rename = "attachmentPreview")]
     #[schema(nullable = true)]
     pub attachment_preview: Option<crate::settings::catalog::AttachmentPreviewSettings>,
+    #[serde(rename = "attachmentTransfer")]
+    #[schema(nullable = true)]
+    pub attachment_transfer: Option<crate::settings::catalog::AttachmentTransferSettings>,
     #[schema(nullable = true)]
     pub i18n: Option<crate::settings::catalog::I18nSettings>,
     #[schema(nullable = true)]

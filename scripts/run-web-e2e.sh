@@ -43,16 +43,8 @@ while (($# > 0)); do
 done
 
 require_prepared() {
-  local missing=0
-  if [[ ! -d "$ROOT/apps/web/node_modules" ]]; then
-    echo "missing $ROOT/apps/web/node_modules; run scripts/prepare-web-e2e.sh" >&2
-    missing=1
-  fi
-  if [[ ! -x "$ROOT/apps/web/node_modules/.bin/playwright" ]]; then
-    echo "missing Playwright install; run scripts/prepare-web-e2e.sh" >&2
-    missing=1
-  fi
-  if (( missing != 0 )); then
+  if ! (cd "$ROOT/apps/web" && bun --bun x --no-install playwright --version) >/dev/null 2>&1; then
+    echo "missing web dependencies or Playwright; run scripts/prepare-web-e2e.sh" >&2
     exit 1
   fi
 }
@@ -61,7 +53,7 @@ build_current_artifacts() {
   bash "$ROOT/scripts/generate-api.sh"
 
   cd "$ROOT/apps/web"
-  npm run build
+  bun --bun run build
 
   cd "$ROOT"
   cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests

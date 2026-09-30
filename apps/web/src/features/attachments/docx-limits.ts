@@ -1,7 +1,7 @@
 import JSZip from "jszip";
 
-/** Largest DOCX the browser viewer downloads; bigger files stay download-only. */
-export const DOCX_MAX_BYTES = 32 * 1024 * 1024;
+// Defined beside the other caps so the attachment page can read it without this module's zip reader.
+export { DOCX_MAX_BYTES } from "./viewer-download.ts";
 
 /** Total inflated size of every package part, checked before the renderer runs. */
 export const DOCX_MAX_EXPANDED_BYTES = 256 * 1024 * 1024;

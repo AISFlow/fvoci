@@ -8,33 +8,17 @@ import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-s
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { UrlEmbedProvider } from "@/features/workspace/document-editor";
-import {
-  documentPath,
-  formatDisplayId,
-  projectPath,
-  trashPath,
-  wikiDisplayId,
-  wikiPath,
-} from "@/lib/href";
-import { api, ensureOk, ProblemError } from "@/lib/api";
-import type { components } from "@/generated/api";
+import { documentPath, formatDisplayId, projectPath, trashPath } from "@/lib/href";
+import { ProblemError } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
-import {
-  ancestorsQuery,
-  documentMetaQuery,
-  projectDocumentMetaQuery,
-  treeQuery,
-} from "@/lib/queries/documents";
+import { projectDocumentMetaQuery } from "@/lib/queries/documents";
 import { projectAncestors } from "./project-ancestors";
 import { projectDocumentsQuery } from "@/features/projects/queries";
 import { CommentPanel } from "@/features/comments/comment-panel";
 import { OriginPanel } from "@/features/collections/origin-panel";
-import {
-  createAttachmentBridge,
-  createProjectDocumentAttachmentBridge,
-} from "@/features/workspace/attachment-upload";
+import { createProjectDocumentAttachmentBridge } from "@/features/workspace/attachment-upload";
 import { bindBlockPresence, isBlockPresenceAwareness } from "./block-presence";
-import { collabBadge } from "./collab-badge";
+import { collabBadge, collabRefusalNote } from "./collab-badge";
 import { CollabPresence } from "./collab-presence";
 import { collabUserOf, setTitleEditing, useCollabSession } from "./collab-session";
 import { RevisionPanel } from "./revision-panel";
@@ -43,9 +27,14 @@ import { DocumentExportMenu } from "./document-export-menu";
 import { ShareDialog } from "@/features/share/share-dialog";
 import { StarToggle } from "@/features/share/star-toggle";
 import { DocumentTagsBar } from "./document-tags-bar";
+import {
+  type DocumentScope,
+  moveDocument,
+  type PatchDocumentBody,
+  patchDocument,
+  trashDocument,
+} from "./document-api";
 import "./document-shell.css";
-
-type PatchDocumentBody = components["schemas"]["PatchDocumentBody"];
 
 const STATUSES = ["draft", "published", "archived"] as const;
 const TITLE_MAX = 300;
@@ -64,7 +53,7 @@ function flashBlock(id: string): (() => void) | undefined {
   };
 }
 
-/** Project document page context; absent for wiki documents. */
+/** The project document's page context (wiki documents are the Vue app's page). */
 export interface ProjectDocumentContext {
   id: string;
   key: string;
@@ -77,34 +66,18 @@ interface DocumentViewProps {
   workspaceId: string;
   slug: string;
   documentId: string;
-  project?: ProjectDocumentContext;
+  project: ProjectDocumentContext;
 }
 
 export function DocumentView({ workspaceId, slug, documentId, project }: DocumentViewProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const me = useQuery(meQuery);
-  const projectId = project?.id ?? "";
-  const wikiMeta = useQuery({
-    ...documentMetaQuery(workspaceId, documentId),
-    enabled: !project && Boolean(workspaceId) && Boolean(documentId),
-  });
-  const projectMeta = useQuery(projectDocumentMetaQuery(workspaceId, projectId, documentId));
-  const metaQuery = project ? projectMeta : wikiMeta;
-  const ancestors = useQuery({
-    ...ancestorsQuery(workspaceId, documentId),
-    enabled: !project && Boolean(workspaceId) && Boolean(documentId),
-  });
-  const wikiTree = useQuery({
-    ...treeQuery(workspaceId),
-    enabled: !project && Boolean(workspaceId),
-  });
-  const projectTree = useQuery(projectDocumentsQuery(workspaceId, projectId));
-  const tree = project ? projectTree : wikiTree;
-  const metaKey = project
-    ? ["project-document", workspaceId, projectId, documentId]
-    : ["document", workspaceId, documentId];
-  const treeKey = project ? ["project-documents", workspaceId, projectId] : ["tree", workspaceId];
+  const projectId = project.id;
+  const metaQuery = useQuery(projectDocumentMetaQuery(workspaceId, projectId, documentId));
+  const tree = useQuery(projectDocumentsQuery(workspaceId, projectId));
+  const metaKey = ["project-document", workspaceId, projectId, documentId];
+  const treeKey = ["project-documents", workspaceId, projectId];
 
   const [title, setTitle] = useState("");
   const [icon, setIcon] = useState("");
@@ -123,15 +96,10 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
     setStatus(metaQuery.data.status);
   }, [metaQuery.data]);
 
-  // Project documents upload through the project route (affiliation checked
-  // by the server), wiki documents through the wiki route.
-  const projectIdForUploads = project?.id ?? null;
+  // Project documents upload through the project route (affiliation checked by the server).
   const attachmentBridge = useMemo(
-    () =>
-      projectIdForUploads
-        ? createProjectDocumentAttachmentBridge(workspaceId, projectIdForUploads, documentId)
-        : createAttachmentBridge(workspaceId, documentId),
-    [workspaceId, documentId, projectIdForUploads],
+    () => createProjectDocumentAttachmentBridge(workspaceId, projectId, documentId),
+    [workspaceId, documentId, projectId],
   );
   const collabUser = useMemo(() => {
     if (!me.data) return null;
@@ -145,30 +113,10 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
     return bindBlockPresence(editor, awareness);
   }, [editor, collabSession?.provider.awareness]);
 
+  const scope: DocumentScope = { workspaceId, documentId, projectId };
+
   const trashDoc = useMutation({
-    mutationFn: async () =>
-      project
-        ? ensureOk(
-            await api.POST(
-              "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/trash",
-              {
-                params: {
-                  path: {
-                    workspace_id: workspaceId,
-                    project_id: project.id,
-                    document_id: documentId,
-                  },
-                },
-              },
-            ),
-          )
-        : ensureOk(
-            await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/trash", {
-              params: {
-                path: { workspace_id: workspaceId, document_id: documentId },
-              },
-            }),
-          ),
+    mutationFn: () => trashDocument(scope),
     onSuccess: async () => {
       setLifecycleError(null);
       await navigate(trashPath(slug));
@@ -181,37 +129,12 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
   });
 
   const moveDoc = useMutation({
-    mutationFn: async (newParentId: string) =>
-      project
-        ? ensureOk(
-            await api.POST(
-              "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/move",
-              {
-                params: {
-                  path: {
-                    workspace_id: workspaceId,
-                    project_id: project.id,
-                    document_id: documentId,
-                  },
-                },
-                body: { newParentId },
-              },
-            ),
-          )
-        : ensureOk(
-            await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/move", {
-              params: {
-                path: { workspace_id: workspaceId, document_id: documentId },
-              },
-              body: { newParentId },
-            }),
-          ),
+    mutationFn: (newParentId: string) => moveDocument(scope, newParentId),
     onSuccess: async () => {
       setLifecycleError(null);
       setMoveParentId("");
       await queryClient.invalidateQueries({ queryKey: treeKey });
       await queryClient.invalidateQueries({ queryKey: metaKey });
-      await queryClient.invalidateQueries({ queryKey: ["ancestors", workspaceId, documentId] });
     },
     onError: (error: unknown) => {
       setLifecycleError(loadErrorMessage(error));
@@ -219,31 +142,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
   });
 
   const patchMeta = useMutation({
-    mutationFn: async (body: PatchDocumentBody) =>
-      project
-        ? ensureOk(
-            await api.PATCH(
-              "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
-              {
-                params: {
-                  path: {
-                    workspace_id: workspaceId,
-                    project_id: project.id,
-                    document_id: documentId,
-                  },
-                },
-                body,
-              },
-            ),
-          )
-        : ensureOk(
-            await api.PATCH("/api/v1/workspaces/{workspace_id}/documents/{document_id}", {
-              params: {
-                path: { workspace_id: workspaceId, document_id: documentId },
-              },
-              body,
-            }),
-          ),
+    mutationFn: (body: PatchDocumentBody) => patchDocument(scope, body),
     onSuccess: async () => {
       setSaveError(null);
       await Promise.all([
@@ -263,11 +162,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
     return (
       <div className="document-page">
         <p>{t("doc.error.notFound")}</p>
-        {project ? (
-          <Link to={projectPath(slug, project.key)}>{t("nav.projects")}</Link>
-        ) : (
-          <Link to={wikiPath(slug)}>{t("nav.toWiki")}</Link>
-        )}
+        <Link to={projectPath(slug, project.key)}>{t("nav.projects")}</Link>
       </div>
     );
   }
@@ -287,23 +182,19 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
     return <QueryLoading />;
   }
 
-  const displayRef = project
-    ? formatDisplayId(project.key, metaQuery.data.number)
-    : wikiDisplayId(metaQuery.data.number);
-  const refOf = (number: number) =>
-    project ? formatDisplayId(project.key, number) : wikiDisplayId(number);
+  const displayRef = formatDisplayId(project.key, metaQuery.data.number);
+  const refOf = (number: number) => formatDisplayId(project.key, number);
   const treeNode = tree.data?.items.find((node) => node.id === documentId);
-  const crumbAncestors = project
-    ? projectAncestors(tree.data?.items ?? [], documentId, project.rootDocumentId)
-    : (ancestors.data?.items ?? []);
+  const crumbAncestors = projectAncestors(tree.data?.items ?? [], documentId, project.rootDocumentId);
   const meta = metaQuery.data;
   const docPath = meta.path;
   const docPathPrefix = `${docPath}.`;
   const saving = patchMeta.isPending;
   const archived = meta.status === "archived";
-  const projectReadOnly = project ? !project.canEdit || project.archived : false;
+  const projectReadOnly = !project.canEdit || project.archived;
   const readOnly = archived || projectReadOnly || (collabSession?.readOnly ?? false);
   const ready = Boolean(collabSession?.synced && collabUser);
+  const refusalNote = collabRefusalNote(collabSession?.status, ready);
   const badge = collabSession
     ? collabBadge(
         collabSession.status,
@@ -370,11 +261,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
     <article className="document-page" data-testid={`document-${displayRef}`}>
       <header className="document-page__head">
         <nav className="document-page__breadcrumb" aria-label={t("breadcrumb.ancestors")}>
-          {project ? (
-            <Link to={projectPath(slug, project.key)}>{project.key}</Link>
-          ) : (
-            <Link to={wikiPath(slug)}>{t("nav.wiki")}</Link>
-          )}
+          <Link to={projectPath(slug, project.key)}>{project.key}</Link>
           {crumbAncestors.map((item) => (
             <span key={item.id}>
               <span aria-hidden> / </span>
@@ -462,21 +349,21 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
             {!readOnly ? (
               <ShareDialog
                 workspaceId={workspaceId}
-                target={{ documentId, projectId: project?.id ?? null }}
+                target={{ documentId, projectId }}
               />
             ) : null}
           </div>
           <DocumentTagsBar
             workspaceId={workspaceId}
             documentId={documentId}
-            projectId={project?.id ?? null}
+            projectId={projectId}
             readOnly={readOnly}
           />
           <DocumentExportMenu
             workspaceId={workspaceId}
             documentId={documentId}
             title={title}
-            projectId={project?.id ?? null}
+            projectId={projectId}
             persistNow={canPersist ? persistBody : undefined}
           />
           {!readOnly ? (
@@ -495,7 +382,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
                     .filter(
                       (node) =>
                         node.id !== documentId &&
-                        node.projectId === (project?.id ?? null) &&
+                        node.projectId === projectId &&
                         node.path !== docPath &&
                         !node.path.startsWith(docPathPrefix),
                     )
@@ -565,7 +452,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
             <RevisionPanel
               workspaceId={workspaceId}
               documentId={documentId}
-              projectId={project?.id ?? null}
+              projectId={projectId}
               readOnly={readOnly}
               persistNow={canPersist ? persistBody : undefined}
             />
@@ -583,7 +470,14 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
             {t("doc.collab.unauthorized")}
           </p>
         ) : null}
-        {!ready && collabSession?.status !== "unauthorized" ? <QueryLoading /> : null}
+        {refusalNote ? (
+          <p className="document-page__body-note" role="status">
+            {t(refusalNote)}
+          </p>
+        ) : null}
+        {!ready && collabSession?.status !== "unauthorized" && !refusalNote ? (
+          <QueryLoading />
+        ) : null}
         {ready && collabSession && collabUser ? (
           <AttachmentBlockContext.Provider value={attachmentBridge}>
             <UrlEmbedProvider workspaceId={workspaceId}>
@@ -607,9 +501,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
         workspaceId={workspaceId}
         slug={slug}
         documentId={documentId}
-        project={
-          project ? { id: project.id, canCreateTasks: project.canEdit && !project.archived } : null
-        }
+        project={{ id: project.id, canCreateTasks: project.canEdit && !project.archived }}
         editor={ready ? editor : null}
         insertBlockedReason={
           readOnly
@@ -625,7 +517,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
           workspaceId={workspaceId}
           kind="document"
           targetId={documentId}
-          projectId={project?.id}
+          projectId={projectId}
           currentUserId={me.data.userId}
           readOnly={readOnly}
         />

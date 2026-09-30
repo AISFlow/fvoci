@@ -35,8 +35,15 @@ const PERMISSIONS_POLICY: &str =
 
 impl SecurityHeaders {
     /// `public_origin` decides HSTS and `upgrade-insecure-requests`;
-    /// `static_dir` (when the SPA is served) supplies inline block hashes.
-    pub fn new(public_origin: &str, static_dir: Option<&Path>) -> Self {
+    /// `static_dir` (when the SPA is served) supplies inline block hashes;
+    /// `storage_origin` is the browser-facing S3 origin of the presigned
+    /// transfer mode (set whenever `S3_PUBLIC_ENDPOINT` is configured, since
+    /// the mode can be switched at run time).
+    pub fn new(
+        public_origin: &str,
+        static_dir: Option<&Path>,
+        storage_origin: Option<&str>,
+    ) -> Self {
         let https = public_origin.starts_with("https://");
         let (script_hashes, style_hashes) = static_dir
             .and_then(|root| std::fs::read_to_string(root.join("index.html")).ok())
@@ -47,7 +54,7 @@ impl SecurityHeaders {
                 )
             })
             .unwrap_or_default();
-        let csp = content_security_policy(https, &script_hashes, &style_hashes);
+        let csp = content_security_policy(https, &script_hashes, &style_hashes, storage_origin);
 
         let mut headers: Vec<(HeaderName, HeaderValue)> = vec![
             (
@@ -119,9 +126,17 @@ impl SecurityHeaders {
 }
 
 /// Source directive list, in the source order. `connect-src 'self'` covers the
-/// same-origin `/collab` WebSocket; S3 is proxied by the API (no browser
-/// storage origin). `'wasm-unsafe-eval'` allows compiling wasm, not JS eval.
-fn content_security_policy(https: bool, script: &[String], style: &[String]) -> String {
+/// same-origin `/collab` WebSocket. The storage origin, when configured, is
+/// added to `connect-src` (presigned part PUTs, viewer fetches that follow
+/// the download redirect) and `img-src` (the original image viewer).
+/// `'wasm-unsafe-eval'` allows compiling wasm, not JS eval.
+fn content_security_policy(
+    https: bool,
+    script: &[String],
+    style: &[String],
+    storage_origin: Option<&str>,
+) -> String {
+    let storage: Vec<String> = storage_origin.map(str::to_string).into_iter().collect();
     let join = |base: &[&str], extra: &[String]| {
         base.iter()
             .map(|s| s.to_string())
@@ -135,12 +150,12 @@ fn content_security_policy(https: bool, script: &[String], style: &[String]) -> 
         "font-src 'self' data:".to_string(),
         "form-action 'self'".to_string(),
         "frame-ancestors 'self'".to_string(),
-        "img-src 'self' data: blob:".to_string(),
+        format!("img-src {}", join(&["'self'", "data:", "blob:"], &storage)),
         "object-src 'none'".to_string(),
         format!("script-src {}", join(&["'self'", "'wasm-unsafe-eval'"], script)),
         "script-src-attr 'none'".to_string(),
         format!("style-src {}", join(&["'self'"], style)),
-        "connect-src 'self'".to_string(),
+        format!("connect-src {}", join(&["'self'"], &storage)),
         "frame-src 'self' blob: https://www.youtube.com https://player.vimeo.com https://www.figma.com"
             .to_string(),
     ];
@@ -189,12 +204,12 @@ mod tests {
 
     #[test]
     fn https_adds_hsts_and_upgrade() {
-        let plain = SecurityHeaders::new("http://localhost:8080", None);
+        let plain = SecurityHeaders::new("http://localhost:8080", None, None);
         assert!(!plain
             .headers
             .iter()
             .any(|(n, _)| n == header::STRICT_TRANSPORT_SECURITY));
-        let tls = SecurityHeaders::new("https://fvoci.example", None);
+        let tls = SecurityHeaders::new("https://fvoci.example", None, None);
         let csp = &tls
             .headers
             .iter()
@@ -209,5 +224,39 @@ mod tests {
             .headers
             .iter()
             .any(|(n, _)| n == header::STRICT_TRANSPORT_SECURITY));
+    }
+
+    fn csp_of(headers: &SecurityHeaders) -> String {
+        headers
+            .headers
+            .iter()
+            .find(|(n, _)| n == header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .1
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn storage_origin_is_added_to_connect_and_img_only_when_configured() {
+        let plain = csp_of(&SecurityHeaders::new("https://app.example", None, None));
+        assert!(plain.contains("connect-src 'self';"), "{plain}");
+        assert!(plain.contains("img-src 'self' data: blob:;"), "{plain}");
+        let with = csp_of(&SecurityHeaders::new(
+            "https://app.example",
+            None,
+            Some("https://files.example"),
+        ));
+        assert!(
+            with.contains("connect-src 'self' https://files.example;"),
+            "{with}"
+        );
+        assert!(
+            with.contains("img-src 'self' data: blob: https://files.example;"),
+            "{with}"
+        );
+        assert_eq!(with.matches("https://files.example").count(), 2, "{with}");
+        assert!(with.contains("default-src 'self';"), "{with}");
     }
 }

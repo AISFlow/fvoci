@@ -51,9 +51,16 @@ export type ProcMember = {
   pgrp: number;
 };
 
+/** Settings a scenario gives its own server process (a restart resets them). */
+export type OwnedServerOptions = {
+  /** FVOCI_COLLAB_MAX_ROOMS: a small cap makes a capacity refusal (close 1013) reachable. */
+  maxRooms?: number;
+};
+
 export function ownedServerChildEnv(
   bind: string,
   source: NodeJS.ProcessEnv = process.env,
+  options: OwnedServerOptions = {},
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of CHILD_ENV_ALLOW) {
@@ -65,6 +72,12 @@ export function ownedServerChildEnv(
   }
   env.FVOCI_BIND = bind;
   env.FVOCI_PUBLIC_ORIGIN = `http://${bind}`;
+  if (options.maxRooms !== undefined) {
+    if (!Number.isInteger(options.maxRooms) || options.maxRooms < 1) {
+      throw new Error(`maxRooms must be a positive integer, got ${options.maxRooms}`);
+    }
+    env.FVOCI_COLLAB_MAX_ROOMS = String(options.maxRooms);
+  }
   return env;
 }
 
@@ -208,15 +221,17 @@ export class OwnedServer {
   /**
    * Recycle the server PID on the same bind and isolated DB so collab rooms
    * from an independent scenario cannot occupy the product four-room cap.
-   * SIGTERM the parent only; this is not the crash SIGKILL case.
+   * SIGTERM the parent only; this is not the crash SIGKILL case. `options`
+   * apply to the new process only; the next recycle without them restores
+   * the defaults (the recycleCollab fixture recycles after every test).
    */
-  async recycle(): Promise<void> {
+  async recycle(options: OwnedServerOptions = {}): Promise<void> {
     if (this.bind === "") {
       throw new Error("cannot recycle before the owned server has bound a port");
     }
     const bind = this.bind;
     await this.shutdownGraceful();
-    await this.spawnAt(bind, bind);
+    await this.spawnAt(bind, bind, options);
   }
 
   private requireObservedLiveHelper(): ProcMember[] {
@@ -317,7 +332,11 @@ export class OwnedServer {
     return this.ownedMembers;
   }
 
-  private async spawnAt(bind: string, expectedBind?: string): Promise<void> {
+  private async spawnAt(
+    bind: string,
+    expectedBind?: string,
+    options: OwnedServerOptions = {},
+  ): Promise<void> {
     const bin = this.requiredBin();
     const engine = process.env.FVOCI_COLLAB_ENGINE?.trim() ?? "";
     if (engine === "" || !existsSync(engine)) {
@@ -341,7 +360,7 @@ export class OwnedServer {
     this.logPath = join(this.runDir, "server.log");
     writeFileSync(this.logPath, "", { mode: 0o600 });
 
-    const env = ownedServerChildEnv(bind);
+    const env = ownedServerChildEnv(bind, process.env, options);
     env.FVOCI_STORAGE_DIR = this.storageDir;
     const child = spawn(bin, [], {
       env,

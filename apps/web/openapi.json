@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.0"
+    "version": "0.3.0"
   },
   "paths": {
     "/api/v1/admin/audit": {
@@ -437,7 +437,7 @@
             }
           },
           "400": {
-            "description": "Invalid input",
+            "description": "Invalid input, or `attachment_transfer_unavailable`: `attachmentTransfer.mode` = `presigned` on a server whose storage cannot presign (local driver, or S3 without `S3_PUBLIC_ENDPOINT`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1901,11 +1901,38 @@
           }
         ],
         "responses": {
-          "303": {
-            "description": "Redirect to the provider; sets fvoci_oidc_state"
+          "200": {
+            "description": "Link started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcAuthorizationOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
           },
           "401": {
             "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "origin_mismatch: another origin, or no `Origin` header at all",
             "content": {
               "application/json": {
                 "schema": {
@@ -1959,24 +1986,6 @@
             }
           },
           {
-            "name": "invitation",
-            "in": "query",
-            "description": "Invitation token: accept with this identity",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "consents",
-            "in": "query",
-            "description": "JSON array of {kind, version}",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
             "name": "workspaceId",
             "in": "query",
             "description": "Workspace SSO (generic)",
@@ -1988,10 +1997,90 @@
         ],
         "responses": {
           "302": {
-            "description": "Redirect to the provider; sets fvoci_oidc_state"
+            "description": "Sign-in only: redirect to the provider; sets fvoci_oidc_state. Accepting an invitation is the POST on this path; an `invitation` or `consents` query answers 400"
           },
           "400": {
-            "description": "Invalid input or invalid_consents_query",
+            "description": "Invalid input (including any other query parameter)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "provider_not_configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "oidc_start_invite",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "google | microsoft | kakao | naver | generic",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Same-origin `fetch` from the invite page; no query string",
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcInviteStartForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Invite mode started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script (a form submission redirected to the provider would break the page's `form-action 'self'`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcAuthorizationOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (not a form, unknown or repeated field, missing invitation, any query) or invalid_consents_query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "origin_mismatch: another origin, or no `Origin` header at all",
             "content": {
               "application/json": {
                 "schema": {
@@ -2293,10 +2382,34 @@
         ],
         "responses": {
           "302": {
-            "description": "Redirect to the workspace identity provider; sets fvoci_oidc_state"
+            "description": "A browser navigation, answered only by redirects. Success: to the workspace identity provider, setting fvoci_oidc_state. Any refusal: to `/login?error=<problem code>` without state, e.g. `provider_not_configured` (unknown slug, a workspace without SSO, a personal workspace, or a build without the `workspaceSso` license feature), `invalid_input`, `rate_limit_exceeded`, `encryption_unavailable` or `internal_error`"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/sso/{workspace_id}/callback": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "sso_callback",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id: the redirect URI its SSO provider registers",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Workspace SSO callback. Completes only a flow started for this workspace (otherwise error `oidc_state_mismatch`, before any request to the provider). To `/` with a session, `/login#mfa=<token>`, `/settings/account?linked=1`, or `/login?error=<oidc code>` / `/settings/account?error=<oidc code>`"
           },
           "400": {
-            "description": "Invalid input",
+            "description": "Invalid workspace id",
             "content": {
               "application/json": {
                 "schema": {
@@ -2305,8 +2418,18 @@
               }
             }
           },
-          "404": {
-            "description": "provider_not_configured",
+          "401": {
+            "description": "The session that asked for the link is gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Seat limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -3206,6 +3329,16 @@
           },
           "428": {
             "description": "Consent required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited: per address, per address and token, or (existing account) the login password budget",
             "content": {
               "application/json": {
                 "schema": {
@@ -5693,6 +5826,7 @@
         "tags": [
           "attachments"
         ],
+        "description": "Publishes the upload after re-checking the session and permissions (again right before the row is marked stored). For a `presigned` session storage must first list exactly parts 1..N, each of its exact length, with the submitted ETags; otherwise nothing is published and the session stays open.",
         "operationId": "complete_attachment_upload",
         "parameters": [
           {
@@ -5736,7 +5870,7 @@
             }
           },
           "400": {
-            "description": "Invalid parts",
+            "description": "Invalid parts (`submitted_parts_do_not_match_uploaded_parts` when storage holds other parts than submitted)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5840,6 +5974,17 @@
             "description": "Partial content",
             "content": {
               "application/octet-stream": {}
+            }
+          },
+          "302": {
+            "description": "Presigned transfer mode, browser sessions and the original only (API-token requests always get the bytes here): `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Signed storage URL"
+              }
             }
           },
           "304": {
@@ -6204,7 +6349,7 @@
             }
           },
           "409": {
-            "description": "Upload is not in the required state",
+            "description": "Upload is not in the required state, or a `presigned` session (its parts go to the signed storage URLs only)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6331,6 +6476,7 @@
         "tags": [
           "attachments"
         ],
+        "description": "Re-checks the session, workspace, edit permission, uploader and writable parent, lists the parts storage holds, and returns targets for the rest in the session's own transfer mode. For a `presigned` session every call signs fresh part URLs (the re-issue path after expiry).",
         "operationId": "resume_attachment_upload",
         "parameters": [
           {
@@ -6394,7 +6540,17 @@
             }
           },
           "409": {
-            "description": "Upload is not in the required state",
+            "description": "Upload is not in the required state, or `attachment_transfer_unavailable`: a `presigned` session on a server that can no longer presign (it is never moved to the proxy path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Presigned URL re-issue rate limited",
             "content": {
               "application/json": {
                 "schema": {
@@ -11260,7 +11416,7 @@
         },
         "responses": {
           "201": {
-            "description": "Upload session created",
+            "description": "Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request",
             "content": {
               "application/json": {
                 "schema": {
@@ -11472,6 +11628,94 @@
           },
           "404": {
             "description": "Not found or no edit permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/events": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "list_workspace_events",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size 1-100 (default 50)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Relay-order cursor from nextCursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace event log, oldest first (owners and admins)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceEventListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
             "content": {
               "application/json": {
                 "schema": {
@@ -13501,6 +13745,16 @@
           },
           "404": {
             "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "personal_workspace_is_immutable: a personal workspace takes no SSO configuration",
             "content": {
               "application/json": {
                 "schema": {
@@ -16956,7 +17210,7 @@
         },
         "responses": {
           "201": {
-            "description": "Upload session created",
+            "description": "Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request",
             "content": {
               "application/json": {
                 "schema": {
@@ -22015,7 +22269,7 @@
         },
         "responses": {
           "201": {
-            "description": "Upload session created",
+            "description": "Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request",
             "content": {
               "application/json": {
                 "schema": {
@@ -23373,6 +23627,45 @@
         },
         "additionalProperties": false
       },
+      "AdminAttachmentTransferOutput": {
+        "type": "object",
+        "description": "The attachment transfer mode this process applies, next to the configured\n`values.attachmentTransfer.mode`.",
+        "required": [
+          "effective",
+          "source",
+          "presignedAvailable",
+          "unavailableReason",
+          "blocked"
+        ],
+        "properties": {
+          "blocked": {
+            "type": "boolean",
+            "description": "A stored `presigned` that cannot apply here, so `proxy` is in effect."
+          },
+          "effective": {
+            "$ref": "#/components/schemas/TransferMode",
+            "description": "Mode for new upload sessions and original downloads of browser\nsessions; API-token requests always use `proxy`."
+          },
+          "presignedAvailable": {
+            "type": "boolean",
+            "description": "Whether this server's storage can serve `presigned`."
+          },
+          "source": {
+            "$ref": "#/components/schemas/TransferSource",
+            "description": "Where the configured mode comes from; `env` cannot be changed here."
+          },
+          "unavailableReason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TransferUnavailable"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "AdminEraseBody": {
         "type": "object",
         "description": "Source `adminEraseInput` (strict object).",
@@ -23416,9 +23709,13 @@
           "overridden",
           "restartRequired",
           "envApplied",
-          "eeFeatures"
+          "eeFeatures",
+          "attachmentTransfer"
         ],
         "properties": {
+          "attachmentTransfer": {
+            "$ref": "#/components/schemas/AdminAttachmentTransferOutput"
+          },
           "eeFeatures": {
             "type": "array",
             "items": {
@@ -24024,7 +24321,8 @@
             "format": "int32"
           },
           "url": {
-            "type": "string"
+            "type": "string",
+            "description": "`proxy`: the same-origin API path (PUT with the session). `presigned`:\nan absolute signed storage URL for one PUT of exactly this part's\nbytes, sent without cookies, `Authorization` or `Content-Type`; it\nstops working at `partUrlsExpireAt`."
           }
         }
       },
@@ -24064,6 +24362,19 @@
         "properties": {
           "mode": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AttachmentTransferSettings": {
+        "type": "object",
+        "description": "How attachment part uploads and original downloads travel: `proxy` through\nthe API, `presigned` directly between the browser and S3. The stored value\nis what the admin chose; the admin output's `attachmentTransfer` reports\nwhether this server's storage lets it apply.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/TransferMode"
           }
         },
         "additionalProperties": false
@@ -25463,6 +25774,8 @@
         "required": [
           "attachmentId",
           "partSizeBytes",
+          "transfer",
+          "partUrlsExpireAt",
           "parts"
         ],
         "properties": {
@@ -25473,11 +25786,23 @@
             "type": "integer",
             "format": "int64"
           },
+          "partUrlsExpireAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the presigned part URLs expire (resume re-issues them); null for\n`proxy`."
+          },
           "parts": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AttachmentPartUrlResponse"
             }
+          },
+          "transfer": {
+            "$ref": "#/components/schemas/TransferMode",
+            "description": "Transfer mode of this upload session, fixed for its whole life:\nthe mode in effect now for a browser session, always `proxy` for an\nAPI-token request."
           }
         }
       },
@@ -26269,7 +26594,8 @@
               "string",
               "null"
             ],
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Compared with the stored `dueAt` to the millisecond; finer digits are\nignored."
           },
           "dueDate": {
             "type": [
@@ -26334,6 +26660,32 @@
           }
         }
       },
+      "GanttCalendarOutput": {
+        "type": "object",
+        "description": "Non-working days, as the server applies them to `columns[].offDuty` and\nto dependency lag.",
+        "required": [
+          "weekend",
+          "holidays"
+        ],
+        "properties": {
+          "holidays": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/String"
+            },
+            "description": "Workspace holidays within `scale.start..=scale.end`, ascending."
+          },
+          "weekend": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Weekdays that are never working days, 0 = Sunday .. 6 = Saturday."
+          }
+        }
+      },
       "GanttLayoutItemOutput": {
         "type": "object",
         "required": [
@@ -26359,7 +26711,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "RFC 3339 UTC with milliseconds; send it back unchanged as\n`expectedDates.dueAt`, which PATCH compares to the millisecond."
           },
           "dueDate": {
             "oneOf": [
@@ -26416,6 +26769,10 @@
         "required": [
           "truncated",
           "items",
+          "canEdit",
+          "links",
+          "linkTotal",
+          "calendar",
           "scale",
           "laneHeight",
           "laneCount",
@@ -26436,6 +26793,13 @@
             "items": {
               "$ref": "#/components/schemas/GanttBarOutput"
             }
+          },
+          "calendar": {
+            "$ref": "#/components/schemas/GanttCalendarOutput"
+          },
+          "canEdit": {
+            "type": "boolean",
+            "description": "At least Edit on the project and the project not archived, read in the\nsame snapshot as `items`. A display hint: PATCH re-checks both under\nthe project row lock. Ignores API-token scopes; PATCH also needs\n`tasks.write`."
           },
           "columns": {
             "type": "array",
@@ -26466,6 +26830,18 @@
           "laneHeight": {
             "type": "integer",
             "format": "int32"
+          },
+          "linkTotal": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Dependencies among `items` before the cap."
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GanttLinkOutput"
+            },
+            "description": "Dependencies whose both ends are in `items`, ascending\n`(blockerId, blockedId)` and capped at 2048 (over the cap, the lowest\npairs)."
           },
           "monthBands": {
             "type": "array",
@@ -26508,6 +26884,41 @@
             "format": "double"
           }
         }
+      },
+      "GanttLinkOutput": {
+        "type": "object",
+        "description": "A dependency between two returned items. The server alone enforces it: a\nPATCH that breaks it is refused with `dependency_contradiction`.",
+        "required": [
+          "blockerId",
+          "blockedId",
+          "type",
+          "lagDays"
+        ],
+        "properties": {
+          "blockedId": {
+            "type": "string"
+          },
+          "blockerId": {
+            "type": "string"
+          },
+          "lagDays": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Working days the blocked task's date must trail the blocker's date by;\nweekends and workspace holidays do not count."
+          },
+          "type": {
+            "$ref": "#/components/schemas/GanttLinkType"
+          }
+        }
+      },
+      "GanttLinkType": {
+        "type": "string",
+        "description": "Dependency type: finish-to-start, start-to-start or finish-to-finish.",
+        "enum": [
+          "FS",
+          "SS",
+          "FF"
+        ]
       },
       "GanttScaleOutput": {
         "type": "object",
@@ -26837,6 +27248,16 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/AttachmentPreviewSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attachmentTransfer": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AttachmentTransferSettings"
               },
               {
                 "type": "null"
@@ -27898,6 +28319,35 @@
           }
         }
       },
+      "OidcAuthorizationOutput": {
+        "type": "object",
+        "description": "An OIDC start answered with JSON: the page navigates the browser to\n`authorizationUrl` itself. A form submission that redirects to the\nprovider would be blocked by the app's `form-action 'self'`.",
+        "required": [
+          "authorizationUrl"
+        ],
+        "properties": {
+          "authorizationUrl": {
+            "type": "string"
+          }
+        }
+      },
+      "OidcInviteStartForm": {
+        "type": "object",
+        "description": "Form body of the invite-mode start (`application/x-www-form-urlencoded`,\nthese fields once each and nothing else).",
+        "required": [
+          "invitation"
+        ],
+        "properties": {
+          "consents": {
+            "type": "string",
+            "description": "JSON array of `{kind, version}`: the legal documents accepted on the\ninvite page. Optional; absent means none."
+          },
+          "invitation": {
+            "type": "string",
+            "description": "Invitation token: accept the invitation with this identity."
+          }
+        }
+      },
       "OkResponse": {
         "type": "object",
         "required": [
@@ -28929,6 +29379,8 @@
         "required": [
           "attachmentId",
           "partSizeBytes",
+          "transfer",
+          "partUrlsExpireAt",
           "uploadedParts",
           "parts"
         ],
@@ -28940,11 +29392,23 @@
             "type": "integer",
             "format": "int64"
           },
+          "partUrlsExpireAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the freshly issued presigned part URLs expire; null for `proxy`."
+          },
           "parts": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AttachmentPartUrlResponse"
             }
+          },
+          "transfer": {
+            "$ref": "#/components/schemas/TransferMode",
+            "description": "The session's own transfer mode (not the current setting)."
           },
           "uploadedParts": {
             "type": "array",
@@ -29343,6 +29807,7 @@
           "embed",
           "features",
           "attachmentPreview",
+          "attachmentTransfer",
           "i18n",
           "security",
           "operator"
@@ -29350,6 +29815,9 @@
         "properties": {
           "attachmentPreview": {
             "$ref": "#/components/schemas/AttachmentPreviewSettings"
+          },
+          "attachmentTransfer": {
+            "$ref": "#/components/schemas/AttachmentTransferSettings"
           },
           "auth": {
             "$ref": "#/components/schemas/AuthSettings"
@@ -30580,6 +31048,30 @@
         },
         "additionalProperties": false
       },
+      "TransferMode": {
+        "type": "string",
+        "enum": [
+          "proxy",
+          "presigned"
+        ]
+      },
+      "TransferSource": {
+        "type": "string",
+        "description": "Where the configured attachment transfer mode comes from.",
+        "enum": [
+          "env",
+          "stored",
+          "default"
+        ]
+      },
+      "TransferUnavailable": {
+        "type": "string",
+        "description": "Why this process cannot hand out presigned URLs. Fixed for the life of the\nprocess: it follows `STORAGE_DRIVER` and `S3_PUBLIC_ENDPOINT`.",
+        "enum": [
+          "storage_local",
+          "public_endpoint_missing"
+        ]
+      },
       "TrashItemResponse": {
         "type": "object",
         "required": [
@@ -30968,6 +31460,79 @@
           }
         }
       },
+      "WorkspaceEventListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceEventOutput"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkspaceEventOutput": {
+        "type": "object",
+        "description": "Source `eventOutput` (packages/contracts/src/events.ts).",
+        "required": [
+          "id",
+          "verb",
+          "payload",
+          "channel",
+          "createdAt"
+        ],
+        "properties": {
+          "actorUserId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "targetId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "targetType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verb": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "WorkspaceListItemResponse": {
         "type": "object",
         "required": [
@@ -31086,11 +31651,12 @@
       },
       "WorkspaceOidcGetOutput": {
         "type": "object",
-        "description": "All null when the workspace has no configuration.",
+        "description": "`issuer`, `clientId` and `label` are all null when the workspace has no\nconfiguration.",
         "required": [
           "issuer",
           "clientId",
-          "label"
+          "label",
+          "redirectUri"
         ],
         "properties": {
           "clientId": {
@@ -31110,6 +31676,10 @@
               "string",
               "null"
             ]
+          },
+          "redirectUri": {
+            "type": "string",
+            "description": "The redirect URI to register at this workspace's identity provider,\nexactly as the server sends it (built from the public origin)."
           }
         }
       },

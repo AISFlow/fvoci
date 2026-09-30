@@ -8,10 +8,12 @@ import { WorkspaceMembersSection } from "@/features/settings/workspace-members";
 import { WorkspaceCalendarSection } from "@/features/settings/workspace-calendar";
 import { WorkspaceTokensSection } from "@/features/settings/workspace-tokens";
 import { WorkspaceSsoSection } from "@/features/settings/workspace-sso";
+import { showsWorkspaceSso } from "@/features/settings/workspace-sso-scope";
 import { WorkspaceWebhooksSection } from "@/features/settings/workspace-webhooks";
 import { WorkspaceGithubSection } from "@/features/settings/workspace-github";
 import { DeletedProjectsSection } from "@/features/settings/deleted-projects";
 import { WorkspaceExportSection } from "@/features/settings/workspace-export";
+import { WorkspaceEventsSection } from "@/features/settings/workspace-events";
 import { WorkspaceImportSection } from "@/features/settings/workspace-import";
 import { NotificationPrefsSection } from "@/features/notifications/notification-prefs";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
@@ -148,12 +150,15 @@ export function WorkspaceSettingsPage() {
         ) : null}
         <WorkspaceCalendarSection workspaceId={workspace.id} />
         {canManage ? <WorkspaceTokensSection workspaceId={workspace.id} /> : null}
-        {canManage ? <WorkspaceSsoSection workspaceId={workspace.id} /> : null}
+        {showsWorkspaceSso(workspace.kind, canManage) ? (
+          <WorkspaceSsoSection workspaceId={workspace.id} />
+        ) : null}
         {canManage ? <WorkspaceWebhooksSection workspaceId={workspace.id} /> : null}
         {canManage ? <WorkspaceGithubSection workspaceId={workspace.id} /> : null}
         {canManage && workspace.kind === "team" ? (
           <DeletedProjectsSection workspaceId={workspace.id} />
         ) : null}
+        {canManage ? <WorkspaceEventsSection workspaceId={workspace.id} /> : null}
       </div>
     </WorkspaceShell>
   );

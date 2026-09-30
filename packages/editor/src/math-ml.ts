@@ -1,0 +1,74 @@
+import { asSafeHtml, type SafeHtml } from "./safe-html.js";
+
+/*
+ * WHY: #638 · #616 — katex 는 76 KB gz 다. 정적으로 끌면 문서 라우트 예산(여유 23 KB gz)이
+ * 그 자리에서 터진다. 첫 수식 노드가 마운트될 때만 받는다.
+ * 출력은 MathML — 브라우저 네이티브라 katex CSS 24 KB 와 폰트 60개(.ttf 20개, web dist 가드가
+ * 금지)를 하나도 싣지 않는다. `trust: false` 라 SafeHtml 계약(safe-html.ts 주석)을 만족한다.
+ */
+
+/* WHY: #656 F9 — 1 MB latex 는 renderToString 이 메인 스레드를 2.9 초 잡고 11 MB HTML 을 만든다.
+ * 협업 문서에서 한 명이 동료 탭을 얼릴 수 있어 렌더 전에 자른다. maxSize 는 `\rule{99999em}` 류가
+ * 거대한 <mspace> 로 레이아웃을 밀어내는 것을 막는다(매크로 폭탄은 katex 기본 maxExpand 가 막는다). */
+const MAX_LATEX = 10_000;
+const MAX_SIZE = 100;
+
+/* WHY: #738 — 해시 기반 style-src('unsafe-inline'·'unsafe-hashes' 없음) 아래에서 style= 속성은
+ * CSP3 §6.7.3.3 상 해시로 구제되지 않는다. output:"mathml" 에서 katex 가 style= 을 내는
+ * 곳은 셋뿐이고 전부 장식이다 —
+ * \pmb(text-shadow) · \fcolorbox(border) · 그리고 렌더 전체가 중단되는 오류(`{`·`\frac{`)의
+ * <span class="katex-error" style="color:#cc0000">. 식 내부 오류(\thisisnotacommand 등)는
+ * <mstyle mathcolor> 즉 속성이라 애초에 CSP 밖이다. 간격·레이아웃도 전부 MathML 속성이라
+ * 스트립에 안 무너진다. 걷어내고 오류 색은 .katex-error 규칙이 준다 — \pmb 의 굵기
+ * 강조와 \fcolorbox 의 테두리는 style= 이 유일한 표현이라 이 정책 아래서는 지원하지 않는다.
+ * 걷어내기는 문자열로 한다. DOMParser·<template>·createHTMLDocument 로 페이지 안에서
+ * 파싱하면 그 문서도 페이지 CSP 를 물려받아, 지우기 전에 style= 을 만난 순간 위반 보고가 난다
+ * (`\frac{` 한 번에 한 건). katex 는 속성값과 텍스트의 `"` 를 전부 &quot; 로 이스케이프하므로
+ * (utils.escape) 따옴표 안의 ` style="…"` 는 속성으로만 나온다 — 이 정규식은 속성만 지운다. */
+const STYLE_ATTRIBUTE = /\sstyle="[^"]*"/g;
+
+export function withoutStyleAttributes(html: string): string {
+	return html.replace(STYLE_ATTRIBUTE, "");
+}
+
+export type MathRender = { html: SafeHtml | null; failed: boolean };
+
+/** The result for `latex` that must not reach KaTeX — empty source shows
+ * nothing, source over MAX_LATEX is refused (`failed`) — or null when it has to
+ * be rendered. Synchronous so a view can settle these cases without a tick. */
+export function mathMlWithoutKatex(latex: string): MathRender | null {
+	const tooLong = latex.length > MAX_LATEX;
+	if (latex.trim() === "" || tooLong) return { html: null, failed: tooLong };
+	return null;
+}
+
+/** Renders `latex` to style-free MathML, loading the KaTeX chunk on first use.
+ * Applies the same limits as {@link mathMlWithoutKatex}. Never rejects. */
+export function renderMathMl(
+	latex: string,
+	display: boolean,
+): Promise<MathRender> {
+	const settled = mathMlWithoutKatex(latex);
+	if (settled) return Promise.resolve(settled);
+	/* WHY: #656 F8 — throwOnError:false 여도 katex 는 던진다(중첩 중괄호 2000 개 → RangeError).
+	 * 청크 fetch 실패(재배포 후 stale·오프라인)도 같은 자리로 온다. 잡지 않으면 unhandled
+	 * rejection 이 나고 노드는 아무 표시 없이 원문에 머문다. */
+	return import("katex")
+		.then(({ default: katex }) =>
+			asSafeHtml(
+				withoutStyleAttributes(
+					katex.renderToString(latex, {
+						displayMode: display,
+						output: "mathml",
+						throwOnError: false,
+						trust: false,
+						maxSize: MAX_SIZE,
+					}),
+				),
+			),
+		)
+		.then(
+			(html): MathRender => ({ html, failed: false }),
+			(): MathRender => ({ html: null, failed: true }),
+		);
+}

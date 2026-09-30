@@ -599,8 +599,8 @@
 	background: var(--card);
 	min-height: 2.5rem;
 }
-/* WHY: #738 — 피어 색은 fvoci-editor.tsx 의 collabCaretRender 가 CSSOM 으로 넘기는
-   --afn-caret-color 하나로 들어온다(style= 속성은 nonce style-src 아래서 차단). 라벨은
+/* WHY: #738 — 피어 색은 editor-extensions.ts 의 collabCaretRender 가 CSSOM 으로 넘기는
+   --afn-caret-color 하나로 들어온다(style= 속성은 해시 기반 style-src 아래서 차단). 라벨은
    캐럿의 자식이라 같은 변수를 상속한다. 변수가 없으면 캐럿은 본문 색, 라벨은 브랜드 잉크로
    그려진다(사라지지 않는다). background 가 아니라 background-color 인 것은 의도다 —
    단축 속성은 <image> 를 받아 커스텀 속성이 url() 싱크가 될 수 있다.
@@ -677,9 +677,9 @@
 	background: var(--foreground);
 }
 
-/* WHY: #738 — Tiptap 기본 injectCSS 는 nonce 없는 <style> 을 head 에 꽂아 nonce style-src
-   아래서 통째로 차단된다. useEditor 에서 injectCSS:false 로 끄고 @tiptap/core 가 넣던 규칙을
-   여기로 옮긴다 — px 는 rem 으로, gapcursor 색은 토큰으로.
+/* WHY: #738 — Tiptap 기본 injectCSS 는 해시가 등록되지 않은 <style> 을 head 에 꽂아 해시 기반
+   style-src 아래서 통째로 차단된다. useEditor 에서 injectCSS:false 로 끄고 @tiptap/core 가
+   넣던 규칙을 여기로 옮긴다 — px 는 rem 으로, gapcursor 색은 토큰으로.
    옮기지 않은 것: 벤더 접두 사본(-webkit-font-variant-ligatures · ::-moz-selection)은
    표준 속성이 이미 보편이고, word-wrap 은 :293 의 현대 별칭 overflow-wrap 과 같으며,
    `pre { white-space: pre-wrap }` 은 스코프를 붙이면 스킨의 `white-space: pre`(:400)를
@@ -778,8 +778,8 @@
 .afn-math[data-failed="true"] {
 	color: var(--destructive);
 }
-/* WHY: #738 — katex 오류 스팬의 style="color:#cc0000" 은 nonce style-src 아래서 차단되므로
-   렌더 뒤 걷어낸다(packages/editor/src/react/katex.ts). 색은 여기가 정본이다. */
+/* WHY: #738 — katex 오류 스팬의 style="color:#cc0000" 은 해시 기반 style-src 아래서 차단되므로
+   렌더 뒤 걷어낸다(packages/editor/src/math-ml.ts). 색은 여기가 정본이다. */
 .katex-error {
 	color: var(--destructive);
 }

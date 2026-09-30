@@ -2,7 +2,7 @@
  * the native Selection while PM adopts it later via selectionchange, but PM
  * handles Delete/Backspace synchronously against state.selection. This pure gate
  * decides whether a keydown is eligible for aligning PM to the native caret; the
- * handler in fvoci-editor.tsx maps the native caret the way PM's own
+ * handler in editor-extensions.ts maps the native caret the way PM's own
  * selectionFromDOM does and falls through to the stock keymap. Kept separate from
  * the tsx graph so node:test can load it. */
 export type NativeDeleteKey = {

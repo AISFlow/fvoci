@@ -8,14 +8,18 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use super::sniff_mime_from_bytes;
-
 static UUID_KEY_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
         .expect("uuid regex")
 });
 
 const COPY_BUF: usize = 64 * 1024;
+/// Length of the longest well-formed `{n}.etag` sidecar,
+/// `<64 hex> <u64> <u64> <i64>.<i64>`: 64 hex digits, three spaces and a dot,
+/// and four numbers of at most 20 characters each (`u64::MAX` and `i64::MIN`
+/// both print as 20), so 64 + 4 + 4 × 20 = 148 bytes. Anything longer is not
+/// trusted.
+const ETAG_SIDECAR_MAX_BYTES: u64 = 64 + 4 + 4 * 20;
 
 #[derive(Debug, Clone)]
 pub struct PartInfo {
@@ -31,6 +35,8 @@ pub struct StagedPart {
     /// Local temp file awaiting publish; `None` once the bytes already live
     /// in remote multipart storage.
     writing_path: Option<PathBuf>,
+    /// Inode and mtime of the local file that staging wrote and hashed.
+    identity: Option<PartIdentity>,
     keep: bool,
 }
 
@@ -41,6 +47,7 @@ impl StagedPart {
             etag,
             size_bytes,
             writing_path: None,
+            identity: None,
             keep: true,
         }
     }
@@ -51,6 +58,140 @@ impl StagedPart {
         }
         self.keep = true;
     }
+}
+
+/// Which file a cached etag describes. A rename keeps the inode and mtime,
+/// while any republish (this version's or v0.1.0's after a rollback) renames
+/// a new inode over `{n}`, so a sidecar left behind by an older part, a
+/// cancelled publish or a restore does not match the current file in
+/// practice (a false match needs a reused inode with the same size and mtime
+/// tick). Even then `copy_hashed` re-hashes every part at assembly, so a false
+/// match can only fail complete with `EtagMismatch`, never store other bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PartIdentity {
+    ino: u64,
+    mtime_sec: i64,
+    mtime_nsec: i64,
+}
+
+impl PartIdentity {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            ino: meta.ino(),
+            mtime_sec: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+        }
+    }
+}
+
+/// Advisory cache of a published part's staging-time SHA-256, stored as
+/// `{n}.etag` next to part `{n}`: `<sha256 hex> <size> <inode> <mtime s>.<ns>`.
+/// It only saves the resume listing and the assembly pre-check from reading
+/// every part; `copy_hashed` still verifies the bytes at assembly. It is
+/// trusted only while size, inode and mtime match the part on disk, so a
+/// missing, torn or stale sidecar costs a re-hash and nothing else. Its name
+/// (and its temp name) is never all digits, which is what v0.1.0's
+/// `list_parts` requires of a part, so a rollback ignores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EtagSidecar {
+    etag: String,
+    size_bytes: u64,
+    identity: PartIdentity,
+}
+
+impl EtagSidecar {
+    fn encode(&self) -> String {
+        format!(
+            "{} {} {} {}.{}",
+            self.etag,
+            self.size_bytes,
+            self.identity.ino,
+            self.identity.mtime_sec,
+            self.identity.mtime_nsec
+        )
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        let mut fields = text.split(' ');
+        let etag = fields.next()?;
+        let size_bytes = fields.next()?.parse().ok()?;
+        let ino = fields.next()?.parse().ok()?;
+        let (mtime_sec, mtime_nsec) = fields.next()?.split_once('.')?;
+        if fields.next().is_some()
+            || etag.len() != 64
+            || !etag.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return None;
+        }
+        Some(Self {
+            etag: etag.to_string(),
+            size_bytes,
+            identity: PartIdentity {
+                ino,
+                mtime_sec: mtime_sec.parse().ok()?,
+                mtime_nsec: mtime_nsec.parse().ok()?,
+            },
+        })
+    }
+
+    fn describes(&self, meta: &std::fs::Metadata) -> bool {
+        meta.is_file() && meta.len() == self.size_bytes && PartIdentity::of(meta) == self.identity
+    }
+}
+
+fn etag_sidecar_path(dir: &Path, part_number: i32) -> PathBuf {
+    dir.join(format!("{part_number}.etag"))
+}
+
+fn etag_sidecar_tmp_path(dir: &Path, part_number: i32) -> PathBuf {
+    dir.join(format!("{part_number}.etag.{}.tmp", Uuid::now_v7()))
+}
+
+/// Writes the sidecar through a temp file and a rename, in one blocking
+/// task so a cancelled caller cannot leave the temp file behind. No fsync:
+/// after a crash a lost or torn sidecar fails validation and is re-hashed.
+async fn write_etag_sidecar(dir: &Path, part_number: i32, sidecar: &EtagSidecar) -> io::Result<()> {
+    let tmp = etag_sidecar_tmp_path(dir, part_number);
+    let path = etag_sidecar_path(dir, part_number);
+    let content = sidecar.encode();
+    tokio::task::spawn_blocking(move || {
+        let written = std::fs::write(&tmp, content).and_then(|()| std::fs::rename(&tmp, &path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// The cached etag and size of part `{n}` at `part`, or `None` (hash the
+/// part) unless its sidecar parses and describes the file on disk now.
+async fn cached_part_etag(dir: &Path, part_number: i32, part: &Path) -> Option<(String, u64)> {
+    use std::io::Read;
+
+    let sidecar = etag_sidecar_path(dir, part_number);
+    let part = part.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut text = String::new();
+        std::fs::File::open(&sidecar)
+            .ok()?
+            .take(ETAG_SIDECAR_MAX_BYTES + 1)
+            .read_to_string(&mut text)
+            .ok()?;
+        if text.len() as u64 > ETAG_SIDECAR_MAX_BYTES {
+            return None;
+        }
+        let cached = EtagSidecar::parse(&text)?;
+        let meta = std::fs::metadata(&part).ok()?;
+        cached
+            .describes(&meta)
+            .then_some((cached.etag, cached.size_bytes))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 struct WritingGuard {
@@ -119,6 +260,10 @@ pub enum StorageError {
     /// Nothing is stored; this is the client's failure, not the server's.
     #[error("client request body failed")]
     ClientBody,
+    /// This storage cannot sign browser URLs (local driver, or S3 without
+    /// `S3_PUBLIC_ENDPOINT`).
+    #[error("presigned transfer unavailable")]
+    PresignUnavailable,
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 }
@@ -226,6 +371,12 @@ impl LocalStorage {
         }
         file.flush().await?;
         file.sync_all().await?;
+        // The fd is the file just hashed; without it no sidecar is written.
+        let identity = file
+            .metadata()
+            .await
+            .ok()
+            .map(|meta| PartIdentity::of(&meta));
         drop(file);
         let etag = hex::encode(hasher.finalize());
         guard.disarm();
@@ -233,6 +384,7 @@ impl LocalStorage {
             etag,
             size_bytes,
             writing_path: Some(writing_path),
+            identity,
             keep: false,
         })
     }
@@ -254,6 +406,16 @@ impl LocalStorage {
             return Err(StorageError::UploadGone);
         }
         let final_path = dir.join(part_number.to_string());
+        // Drop the old part's cached etag before its bytes are replaced; the
+        // rename's directory fsync makes the removal durable with it.
+        match fs::remove_file(etag_sidecar_path(&dir, part_number)).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                let _ = fs::remove_file(&writing_path).await;
+                return Err(StorageError::Io(err));
+            }
+        }
         if let Err(err) = durable_rename(&writing_path, &final_path).await {
             let _ = fs::remove_file(&writing_path).await;
             return Err(if err.kind() == io::ErrorKind::NotFound {
@@ -263,15 +425,28 @@ impl LocalStorage {
             });
         }
         staged.keep = true;
+        if let Some(identity) = staged.identity {
+            let sidecar = EtagSidecar {
+                etag: staged.etag.clone(),
+                size_bytes: staged.size_bytes,
+                identity,
+            };
+            // The part is published either way; without a sidecar the
+            // listing hashes it as before.
+            if let Err(err) = write_etag_sidecar(&dir, part_number, &sidecar).await {
+                tracing::warn!(
+                    error = %err,
+                    key,
+                    part_number,
+                    "attachment.part_etag_cache_failed"
+                );
+            }
+        }
         Ok(PartInfo {
             part_number,
             etag: staged.etag.clone(),
             size_bytes: staged.size_bytes,
         })
-    }
-
-    pub async fn discard_staged_part(staged: &mut StagedPart) {
-        staged.discard().await;
     }
 
     pub async fn list_multipart_uploads(
@@ -286,6 +461,11 @@ impl LocalStorage {
         }
     }
 
+    /// Published parts with their etags. A part's etag comes from its
+    /// `{n}.etag` sidecar when that still describes the file, so a resume
+    /// does not read the upload; otherwise (legacy v0.1.0 parts, crash
+    /// leftovers, replaced parts) the part is hashed. Never writes sidecars:
+    /// it runs without the upload's transaction lock.
     pub async fn list_parts(&self, key: &str) -> Result<Vec<PartInfo>, StorageError> {
         Self::assert_key(key)?;
         let dir = self.parts_dir(key);
@@ -303,7 +483,11 @@ impl LocalStorage {
             if part_number < 1 {
                 continue;
             }
-            let (etag, size_bytes) = hash_file(&entry.path()).await?;
+            let path = entry.path();
+            let (etag, size_bytes) = match cached_part_etag(&dir, part_number, &path).await {
+                Some(cached) => cached,
+                None => hash_file(&path).await?,
+            };
             parts.push(PartInfo {
                 part_number,
                 etag,
@@ -432,16 +616,6 @@ impl LocalStorage {
         use tokio::io::{AsyncSeekExt, SeekFrom};
         file.seek(SeekFrom::Start(start)).await?;
         Ok(file)
-    }
-
-    pub async fn sniff_mime(&self, key: &str) -> Result<String, StorageError> {
-        let size = self.head(key).await?.unwrap_or(0);
-        if size == 0 {
-            return Ok("application/octet-stream".to_string());
-        }
-        let end = (size - 1).min(4095);
-        let sample = self.read_range(key, 0, end).await?;
-        Ok(sniff_mime_from_bytes(&sample))
     }
 }
 
@@ -802,6 +976,221 @@ mod tests {
             .publish_staged_part(key, 1, &mut staged)
             .await
             .unwrap()
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    /// Rewrites a published part's bytes in place (same inode, same length)
+    /// and puts its mtime back, so only a payload read can notice.
+    fn overwrite_in_place_keeping_mtime(path: &Path, bytes: &[u8]) {
+        let before = std::fs::metadata(path).unwrap();
+        assert_eq!(before.len(), bytes.len() as u64, "same-length overwrite");
+        let mtime = before.modified().unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        std::io::Write::write_all(&mut file, bytes).unwrap();
+        file.set_modified(mtime).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let after = std::fs::metadata(path).unwrap();
+        assert_eq!(after.modified().unwrap(), mtime);
+    }
+
+    #[tokio::test]
+    async fn list_parts_trusts_the_staged_etag_without_reading_the_payload() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        let part = publish_one(&storage, &key, b"payload-a").await;
+        assert_eq!(part.etag, sha256_hex(b"payload-a"));
+        let path = storage.parts_dir(&key).join("1");
+        overwrite_in_place_keeping_mtime(&path, b"PAYLOAD-X");
+
+        // The listing reports what staging hashed: it did not read the bytes.
+        let listed = storage.list_parts(&key).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].etag, part.etag);
+        assert_eq!(listed[0].size_bytes, 9);
+
+        // copy_hashed still checks the real bytes at assembly.
+        let err = storage
+            .assemble_multipart(&key, &[(1, part.etag.clone())])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::EtagMismatch), "{err:?}");
+        assert_eq!(storage.head(&key).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn list_parts_hashes_when_the_sidecar_is_missing_or_does_not_match() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        let part = publish_one(&storage, &key, b"payload-a").await;
+        let dir = storage.parts_dir(&key);
+        let path = dir.join("1");
+        let sidecar = dir.join("1.etag");
+        overwrite_in_place_keeping_mtime(&path, b"PAYLOAD-X");
+        let real = sha256_hex(b"PAYLOAD-X");
+        let valid = std::fs::read_to_string(&sidecar).expect("publish writes 1.etag");
+        let fields: Vec<&str> = valid.split(' ').collect();
+        assert_eq!(fields.len(), 4, "{valid:?}");
+        assert_eq!(fields[0], part.etag);
+        let (size, ino, mtime) = (fields[1], fields[2], fields[3]);
+        let other_ino = (ino.parse::<u64>().unwrap() + 1).to_string();
+
+        let bad: Vec<(&str, Option<String>)> = vec![
+            ("missing", None),
+            ("empty", Some(String::new())),
+            (
+                "short etag",
+                Some(format!("{} {size} {ino} {mtime}", &part.etag[1..])),
+            ),
+            (
+                "uppercase etag",
+                Some(format!("{} {size} {ino} {mtime}", part.etag.to_uppercase())),
+            ),
+            (
+                "non-hex etag",
+                Some(format!("{} {size} {ino} {mtime}", "g".repeat(64))),
+            ),
+            (
+                "size mismatch",
+                Some(format!("{} 10 {ino} {mtime}", part.etag)),
+            ),
+            (
+                "inode mismatch",
+                Some(format!("{} {size} {other_ino} {mtime}", part.etag)),
+            ),
+            (
+                "mtime mismatch",
+                Some(format!("{} {size} {ino} 1.0", part.etag)),
+            ),
+            ("extra field", Some(format!("{valid} x"))),
+            ("oversized", Some(format!("{valid}{}", " ".repeat(4096)))),
+        ];
+        for (case, content) in bad {
+            match content {
+                Some(content) => std::fs::write(&sidecar, content).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(&sidecar);
+                }
+            }
+            let listed = storage.list_parts(&key).await.unwrap();
+            assert_eq!(listed.len(), 1, "{case}");
+            assert_eq!(listed[0].etag, real, "{case}: must hash the payload");
+            assert_eq!(listed[0].size_bytes, 9, "{case}");
+        }
+
+        // A payload changed in place (mtime moves) is hashed as well.
+        std::fs::write(&sidecar, &valid).unwrap();
+        assert_eq!(storage.list_parts(&key).await.unwrap()[0].etag, part.etag);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(7))
+            .unwrap();
+        drop(file);
+        assert_eq!(storage.list_parts(&key).await.unwrap()[0].etag, real);
+    }
+
+    #[tokio::test]
+    async fn part_replaced_behind_the_sidecar_is_hashed() {
+        // v0.1.0 (after a rollback) republishes by renaming a new `{n}` and
+        // leaves `{n}.etag` alone; the new inode must not match it.
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        let part = publish_one(&storage, &key, b"payload-a").await;
+        let dir = storage.parts_dir(&key);
+        let replacement = dir.join("1.legacy.writing");
+        std::fs::write(&replacement, b"PAYLOAD-X").unwrap();
+        let old_mtime = std::fs::metadata(dir.join("1"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_modified(old_mtime)
+            .unwrap();
+        std::fs::rename(&replacement, dir.join("1")).unwrap();
+        assert!(dir.join("1.etag").exists());
+        let listed = storage.list_parts(&key).await.unwrap();
+        assert_ne!(listed[0].etag, part.etag);
+        assert_eq!(listed[0].etag, sha256_hex(b"PAYLOAD-X"));
+    }
+
+    #[tokio::test]
+    async fn republishing_a_part_replaces_its_cached_etag() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        publish_one(&storage, &key, b"payload-a").await;
+        let second = publish_one(&storage, &key, b"payload-b").await;
+        assert_eq!(second.etag, sha256_hex(b"payload-b"));
+        let sidecar = std::fs::read_to_string(storage.parts_dir(&key).join("1.etag")).unwrap();
+        assert!(
+            sidecar.starts_with(&format!("{} 9 ", second.etag)),
+            "{sidecar:?}"
+        );
+        let listed = storage.list_parts(&key).await.unwrap();
+        assert_eq!(listed[0].etag, second.etag);
+        let size = storage
+            .assemble_multipart(&key, &[(1, second.etag.clone())])
+            .await
+            .unwrap();
+        assert_eq!(size, 9);
+        assert_eq!(storage.read_range(&key, 0, 8).await.unwrap(), b"payload-b");
+    }
+
+    #[test]
+    fn widest_sidecar_fits_the_size_cap() {
+        let widest = EtagSidecar {
+            etag: "f".repeat(64),
+            size_bytes: u64::MAX,
+            identity: PartIdentity {
+                ino: u64::MAX,
+                mtime_sec: i64::MIN,
+                mtime_nsec: i64::MIN,
+            },
+        };
+        let text = widest.encode();
+        assert_eq!(text.len() as u64, ETAG_SIDECAR_MAX_BYTES, "{text:?}");
+        assert_eq!(EtagSidecar::parse(&text), Some(widest));
+    }
+
+    #[tokio::test]
+    async fn sidecar_names_are_never_part_names() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        publish_one(&storage, &key, b"payload-a").await;
+        let dir = storage.parts_dir(&key);
+        // A temp sidecar left by a crash between write and rename.
+        let stray = etag_sidecar_tmp_path(&dir, 1);
+        std::fs::write(&stray, "garbage").unwrap();
+        for n in [1, 42, 10_000] {
+            for path in [etag_sidecar_path(&dir, n), etag_sidecar_tmp_path(&dir, n)] {
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                assert!(
+                    !name.chars().all(|c| c.is_ascii_digit()),
+                    "{name} would be read as a part by v0.1.0"
+                );
+            }
+        }
+        // The v0.1.0 listing filter sees only the part itself.
+        let mut digit_names = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            if name.chars().all(|c| c.is_ascii_digit()) {
+                digit_names.push(name);
+            }
+        }
+        assert_eq!(digit_names, vec!["1".to_string()]);
+        let listed = storage.list_parts(&key).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].etag, sha256_hex(b"payload-a"));
     }
 
     #[tokio::test]

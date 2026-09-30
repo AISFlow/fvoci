@@ -17,8 +17,9 @@ use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
 use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
+use fvoci_server::http::probes::{MetricsAllowList, Observability, ObservabilitySettings};
 use fvoci_server::http::rate_limit::RateLimiter;
-use fvoci_server::http::{router_with_settings, state::AppState};
+use fvoci_server::http::{router_with_observability, state::AppState};
 use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings};
 use fvoci_server::integrations::webhooks::WebhookSenderHandle;
 use fvoci_server::jobs::{
@@ -105,6 +106,16 @@ static GLOBAL: fvoci_server::alloc_guard::RecordingAlloc =
     fvoci_server::alloc_guard::RecordingAlloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `fvoci-server --version`: build identity only. The release image build
+    // sets FVOCI_BUILD_SHA to the tagged commit; other builds report unknown.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--version")) {
+        println!(
+            "fvoci-server {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("FVOCI_BUILD_SHA").unwrap_or("unknown")
+        );
+        return Ok(());
+    }
     // The image preview, office and Markdown children are this binary in hidden modes: decide before
     // a runtime, logger or config exists, so the child holds nothing else.
     if let Some(code) = fvoci_server::attachments::preview::maybe_run_helper() {
@@ -116,18 +127,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(code) = fvoci_server::documents::markdown_helper::maybe_run_helper() {
         std::process::exit(code);
     }
+    // `fvoci-server healthcheck`: an HTTP client of the running server, so it
+    // branches before any config, credential or listener exists.
+    if let Some(code) = fvoci_server::healthcheck::maybe_run() {
+        std::process::exit(code);
+    }
     server_main()
 }
 
 #[tokio::main]
 async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
+    // Before any helper exists: the helpers run as this uid, and without this
+    // any of them could read this process's environ (keyrings,
+    // DATABASE_APP_URL), memory and fds through /proc. A uid-1000 `docker exec`
+    // is kept out of memory and fds too; its own environment already holds
+    // every value of the container configuration.
+    collab_engine::process::make_process_non_dumpable()
+        .map_err(|err| format!("cannot make fvoci-server non-dumpable: {err}"))?;
     collab_engine::process::raise_nofile_to_hard_limit();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("fvoci_server=info".parse()?))
         .init();
 
     let config = Config::from_env()?;
-    let app_pool_max = CollabConfig::from_env()
+    // A typo must not silently open or close the scrape surface: refuse to
+    // start (source `MetricsAllowListError`).
+    let metrics_allow = MetricsAllowList::from_env()?;
+    // Read once: the pool size, the hub and the revision engine follow it.
+    let collab_config = CollabConfig::from_env();
+    if collab_config.is_none() {
+        log_collab_disabled();
+    }
+    let app_pool_max = collab_config
+        .as_ref()
         .map(|cfg| fvoci_server::collab::config::derive_app_pool_max_connections(cfg.max_rooms))
         .unwrap_or(fvoci_server::collab::config::APP_POOL_MAX_CONNECTIONS);
     let pool = pool::connect_app_with_max(&config.app_database_url, app_pool_max).await?;
@@ -160,7 +192,25 @@ async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!("meilisearch disabled (FVOCI_MEILI_URL unset)");
     }
-    run_server(config, pool).await
+    run_server(config, metrics_allow, pool, collab_config).await
+}
+
+/// A disabled collaboration engine must be visible at startup: `/ready` still
+/// answers 200 while collaboration and the features that need the helper
+/// (seeding, duplicate, revision restore, imports) are unavailable.
+fn log_collab_disabled() {
+    match std::env::var("FVOCI_COLLAB_ENGINE") {
+        Ok(raw) if !raw.trim().is_empty() => tracing::error!(
+            event = "collab.disabled",
+            path = raw.trim(),
+            "FVOCI_COLLAB_ENGINE is not an existing regular file; collaboration disabled"
+        ),
+        Err(std::env::VarError::NotUnicode(_)) => tracing::error!(
+            event = "collab.disabled",
+            "FVOCI_COLLAB_ENGINE is not valid UTF-8; collaboration disabled"
+        ),
+        _ => tracing::info!("collaboration disabled (FVOCI_COLLAB_ENGINE unset)"),
+    }
 }
 
 struct InstalledShutdownSignals {
@@ -233,7 +283,12 @@ where
     .await
 }
 
-async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_server(
+    config: Config,
+    metrics_allow: MetricsAllowList,
+    pool: sqlx::PgPool,
+    collab_config: Option<CollabConfig>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let license = Arc::new(fvoci_server::license::from_env());
     // Replace the default SIGTERM/SIGINT handlers before bind or any readiness
     // advertisement. Tokio buffers signals received between install and recv.
@@ -244,7 +299,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let public_origin =
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
 
-    let collab = match CollabConfig::from_env() {
+    let collab = match collab_config {
         Some(mut cfg) => {
             cfg.revision_session_snapshot = config.revision.session_snapshot_enabled;
             if let Err(message) =
@@ -259,8 +314,17 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         None => None,
     };
     fvoci_server::config::ensure_storage_root(&config.storage)?;
-    let storage = ObjectStorage::from_settings(&config.storage)?;
+    let storage = ObjectStorage::from_settings(&config.storage)?
+        .with_presign_ttls(config.attachment_transfer.ttls);
     storage.probe().await?;
+    match fvoci_server::settings::attachment_transfer(&pool, storage.presign_unavailable()).await {
+        Ok(transfer) if transfer.blocked => tracing::warn!(
+            reason = transfer.unavailable.map(|r| r.as_str()),
+            "attachment.transfer_mode_unavailable: stored presigned mode cannot apply; using proxy"
+        ),
+        Ok(transfer) => tracing::info!(mode = transfer.mode.as_str(), "attachment transfer mode"),
+        Err(err) => tracing::warn!(%err, "attachment transfer mode not read at startup"),
+    }
     let search_embedder = fvoci_server::search::embed::Embedder::from_env()?;
     match search_embedder.as_ref() {
         Some(embedder) => tracing::info!(
@@ -371,6 +435,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     consumers.push(fvoci_server::integrations::github::github_sync_consumer(
         integrations.github.clone(),
     ));
+    let outbox_consumer_names: Vec<String> = consumers
+        .iter()
+        .map(|consumer| consumer.name().to_string())
+        .collect();
     let outbox_dispatcher = spawn_outbox_dispatcher(
         OutboxDispatcherSettings::from_env(),
         pool.clone(),
@@ -384,12 +452,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let revision_engine = collab.as_ref().map(|hub| RevisionMaintenanceEngine {
         engine_bin: hub.engine_bin(),
         limits: hub.limits(),
-    });
-    let revision_engine = revision_engine.or_else(|| {
-        CollabConfig::from_env().map(|cfg| RevisionMaintenanceEngine {
-            engine_bin: cfg.engine_bin,
-            limits: cfg.limits,
-        })
     });
     let maintenance_settings = MaintenanceSettings::from_env(
         config.upload_incomplete_ttl,
@@ -422,9 +484,8 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             None
         }
     };
-    // Imports no longer need the Node helper: parsing runs in the markdown
-    // child and the Yjs seed in the collab-engine child. The worker starts
-    // whenever the seed engine is configured.
+    // Imports parse in the markdown child and seed Yjs in the collab-engine
+    // child, so the worker runs only when the seed engine is configured.
     let import_settings = {
         let settings = ImportJobSettings::from_env_with_license(license.clone());
         if settings.seed.is_some() {
@@ -488,8 +549,18 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let serve = announce_after_first_pending_poll(
         axum::serve(
             listener,
-            router_with_settings(state, config.static_dir.clone(), integrations, identity)
-                .into_make_service_with_connect_info::<SocketAddr>(),
+            router_with_observability(
+                state,
+                config.static_dir.clone(),
+                integrations,
+                identity,
+                Arc::new(Observability::new(ObservabilitySettings {
+                    allow: metrics_allow,
+                    outbox_consumers: outbox_consumer_names,
+                    refresh_interval: fvoci_server::http::probes::METRICS_REFRESH_INTERVAL,
+                })),
+            )
+            .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
             wait_installed_shutdown_signals(shutdown_signals).await;

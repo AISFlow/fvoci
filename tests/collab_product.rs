@@ -20,12 +20,18 @@ use fvoci_server::auth::AuthService;
 use fvoci_server::collab::awareness::{decode_awareness, encode_awareness, AwarenessUpdate};
 use fvoci_server::collab::config::CollabConfig;
 use fvoci_server::collab::guard::RoomGuard;
-use fvoci_server::collab::hub::RoomLifecyclePhase;
+use fvoci_server::collab::hub::{
+    arm_hub_join_barrier, disarm_hub_join_barrier, room_start_count, RoomLifecyclePhase,
+    HUB_BORROW_BARRIER_AFTER_SLOT_READY, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN,
+    HUB_JOIN_BARRIER_AFTER_SLOT_READY,
+};
 use fvoci_server::collab::room::{
     arm_append_in_tx_reject_barrier, arm_append_revoke_barrier, arm_force_primary_apply_fail,
-    arm_force_primary_load_fail, arm_spawn_room_block, disarm_append_in_tx_reject_barrier,
-    disarm_append_revoke_barrier, disarm_force_primary_apply_fail, disarm_force_primary_load_fail,
-    disarm_spawn_room_block, AuthenticatedConnection, CollabSession, ConnectionLease, JoinError,
+    arm_force_primary_load_fail, arm_session_revision_persist_barrier, arm_spawn_room_block,
+    arm_teardown_barrier, disarm_append_in_tx_reject_barrier, disarm_append_revoke_barrier,
+    disarm_force_primary_apply_fail, disarm_force_primary_load_fail,
+    disarm_session_revision_persist_barrier, disarm_spawn_room_block, disarm_teardown_barrier,
+    spawn_room_block_reached, AuthenticatedConnection, CollabSession, ConnectionLease, JoinError,
     RoomClientEvent, RoomJoin,
 };
 use fvoci_server::collab::transport::take_data_frame_send_budget;
@@ -85,7 +91,13 @@ async fn fixture_password_hash() -> &'static str {
 }
 
 /// Parallel tests in one binary must not storm past the process-wide live-helper cap.
-/// Reserve one slot per hub/server (four for `collab_lifecycle_max_rooms_then_reuse_after_leave`).
+/// Reserve one slot per hub/server (four for the 4-room cap tests).
+///
+/// A test holds at most one reservation at a time: it releases the first
+/// before it takes a second. The semaphore is fair, so a queued four-slot
+/// reservation blocks every later one. A test that still holds a slot and
+/// queues for another waits behind that four-slot reservation, which can
+/// never be granted while the held slot is out.
 static HELPER_CHILD_CAPACITY: LazyLock<Mutex<(usize, Arc<Semaphore>)>> =
     LazyLock::new(|| Mutex::new((0, Arc::new(Semaphore::new(1)))));
 
@@ -109,17 +121,15 @@ impl HelperChildCapacityHold {
     async fn reserve(room_slots: usize, config: &CollabConfig) -> Self {
         let semaphore = helper_capacity_semaphore(config);
         let room_slots = room_slots.min(config.max_rooms);
-        let mut permits = Vec::with_capacity(room_slots);
-        for _ in 0..room_slots {
-            permits.push(
-                semaphore
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .expect("helper child capacity"),
-            );
+        // All at once: two tests taking permits one by one could each hold part
+        // of the cap and wait for the other forever.
+        let permits = semaphore
+            .acquire_many_owned(u32::try_from(room_slots).expect("room slots"))
+            .await
+            .expect("helper child capacity");
+        Self {
+            permits: vec![permits],
         }
-        Self { permits }
     }
 }
 
@@ -1411,13 +1421,16 @@ async fn collab_ws_missing_helper_closes_1011_then_valid_join() {
                 .await
                 .unwrap();
             wait_for_unavailable_close_without_auth_denied(&mut ws, Duration::from_secs(5)).await;
+            drop(ws);
+            // Release this server's capacity slot before the healthy server
+            // reserves its own (see HELPER_CHILD_CAPACITY).
+            server.shutdown().await;
 
             let healthy_server = start_product_test_server(&harness.app_url, true).await;
             let healthy_addr = healthy_server.addr;
             let other_key = room_key(other.session.workspace_id, other.document_id);
             let mut recovered = connect_member(healthy_addr, &other.session.session_token).await;
             auth_and_join(&mut recovered, &other_key, 42).await;
-            server.shutdown().await;
             healthy_server.shutdown().await;
             harness.cleanup().await;
         },
@@ -1943,6 +1956,765 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
 }
 
 #[tokio::test]
+async fn collab_room_cap_reclaims_empty_room_before_refusing() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaims_empty_room_before_refusing",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 5).await;
+            // Same cap as the other 4-room tests (the helper cap is process-wide). The idle
+            // timer is far away: only admission reclaim can free a slot here.
+            // The reclaim grace follows rpc_timeout_ms, which nothing else on the hub join
+            // path reads. At 120 s it is four times this test's whole time budget, so the
+            // within-grace refusal below cannot become a reclaim on a stalled runner; the
+            // past-grace case ages the room explicitly.
+            let (hub, _helper_capacity) = new_test_collab_hub(
+                CollabConfig {
+                    rpc_timeout_ms: 120_000,
+                    ..test_collab_config(4, 600_000)
+                },
+                docs[0].session.pool.clone(),
+                4,
+            )
+            .await;
+            let mut leases = DirectHubLeases::new();
+            let keys = docs
+                .iter()
+                .map(|doc| (doc.session.workspace_id, doc.document_id))
+                .collect::<Vec<_>>();
+
+            let mut conn_ids = Vec::new();
+            for doc in docs.iter().take(4) {
+                conn_ids.push(
+                    hub_join(&mut leases, &hub, doc, 1)
+                        .await
+                        .expect("join room"),
+                );
+            }
+            let refused = hub_join(&mut leases, &hub, &docs[4], 1).await;
+            assert!(
+                matches!(refused, Err(JoinError::RoomFull)),
+                "rooms with members are never reclaimed, got {refused:?}"
+            );
+            for key in &keys[..4] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(*key).await,
+                    RoomLifecyclePhase::Live
+                );
+            }
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[4]).await,
+                RoomLifecyclePhase::Absent
+            );
+
+            hub.leave_room(keys[1], conn_ids[1]).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while hub.room_member_count(keys[1]).await != 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("room 1 empty");
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[1]).await,
+                RoomLifecyclePhase::Live
+            );
+
+            // Within the reclaim grace the emptied room is kept for a returning
+            // member (reload or reconnect); the new document is refused.
+            let refused = hub_join(&mut leases, &hub, &docs[4], 2).await;
+            assert!(
+                matches!(refused, Err(JoinError::RoomFull)),
+                "a room emptied within the reclaim grace is not reclaimed, got {refused:?}"
+            );
+            let rejoined = hub_join(&mut leases, &hub, &docs[1], 3)
+                .await
+                .expect("returning member rejoins its live room");
+            assert_eq!(room_start_count(docs[1].document_id).await, 1);
+            hub.leave_room(keys[1], rejoined).await;
+            wait_for_member_count(&hub, keys[1], 0).await;
+
+            hub.age_room_past_reclaim_grace(keys[1]).await;
+            hub_join(&mut leases, &hub, &docs[4], 4)
+                .await
+                .expect("empty room 1 is reclaimed for room 4 after the grace");
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[1]).await,
+                RoomLifecyclePhase::Absent
+            );
+            for index in [0, 2, 3, 4] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(keys[index]).await,
+                    RoomLifecyclePhase::Live
+                );
+                assert_eq!(hub.room_member_count(keys[index]).await, 1);
+            }
+            assert_eq!(hub.available_room_slots(), 0);
+
+            let again = hub_join(&mut leases, &hub, &docs[1], 5).await;
+            assert!(
+                matches!(again, Err(JoinError::RoomFull)),
+                "every live room has a member, got {again:?}"
+            );
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// A 4-room hub whose idle timer never fires: only admission reclaim frees a slot.
+async fn room_cap_hub(
+    docs: &[WikiDocFixture],
+    revoke_poll_ms: u64,
+) -> (Arc<CollabHub>, HelperChildCapacityHold) {
+    new_test_collab_hub_arc(
+        test_collab_config_with_revoke(4, 600_000, revoke_poll_ms),
+        docs[0].session.pool.clone(),
+        4,
+    )
+    .await
+}
+
+fn hub_keys(docs: &[WikiDocFixture]) -> Vec<(Uuid, Uuid)> {
+    docs.iter()
+        .map(|doc| (doc.session.workspace_id, doc.document_id))
+        .collect()
+}
+
+async fn wait_for_member_count(hub: &CollabHub, key: (Uuid, Uuid), expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hub.room_member_count(key).await != expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("room member count did not reach expected value");
+}
+
+async fn await_barrier(reached: tokio::sync::oneshot::Receiver<()>, what: &str) {
+    tokio::time::timeout(Duration::from_secs(10), reached)
+        .await
+        .unwrap_or_else(|_| panic!("{what} not reached"))
+        .unwrap_or_else(|_| panic!("{what} signal dropped"));
+}
+
+/// The creator of a new room at the cap is paused after `get_or_create_room`
+/// returned its room Live. A concurrent admission for another document must not
+/// reclaim that room: it gets `RoomFull`, and the paused join joins its own room.
+#[tokio::test]
+async fn collab_room_cap_reclaim_skips_room_started_for_paused_join() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaim_skips_room_started_for_paused_join",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 5).await;
+            let (hub, _helper_capacity) = room_cap_hub(&docs, 5_000).await;
+            let keys = hub_keys(&docs);
+            let mut leases = DirectHubLeases::new();
+            for doc in docs.iter().take(3) {
+                hub_join(&mut leases, &hub, doc, 1)
+                    .await
+                    .expect("join room");
+            }
+
+            let (slot_ready, release) =
+                arm_hub_join_barrier(docs[3].document_id, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
+            let paused = tokio::spawn({
+                let hub = hub.clone();
+                let doc = docs[3].clone_fixture();
+                async move { hub_join_document(&hub, &doc, doc.document_id, 1).await }
+            });
+            await_barrier(slot_ready, "slot-ready barrier").await;
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[3]).await,
+                RoomLifecyclePhase::Live
+            );
+            // Past the reclaim grace: only the paused join's lease protects the room.
+            hub.age_room_past_reclaim_grace(keys[3]).await;
+            let joining_in_window = hub.room_joining_count(keys[3]).await;
+
+            let refused = hub_join(&mut leases, &hub, &docs[4], 1).await;
+            assert!(
+                matches!(refused, Err(JoinError::RoomFull)),
+                "a room returned Live to a paused join must not be reclaimed, got {refused:?}"
+            );
+            assert_eq!(
+                joining_in_window, 1,
+                "the creator's lease is registered when its room goes Live"
+            );
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[3]).await,
+                RoomLifecyclePhase::Live
+            );
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[4]).await,
+                RoomLifecyclePhase::Absent
+            );
+
+            release.send(()).expect("release slot-ready barrier");
+            let (_, lease) = tokio::time::timeout(Duration::from_secs(10), paused)
+                .await
+                .expect("paused join finishes")
+                .expect("paused join task")
+                .expect("paused join joins its own room");
+            leases.retain(lease);
+            assert_eq!(room_start_count(docs[3].document_id).await, 1);
+            assert_eq!(hub.room_member_count(keys[3]).await, 1);
+            disarm_hub_join_barrier(docs[3].document_id, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// Same window on an existing empty room: a rejoin paused after its room was
+/// observed Live keeps that room from being reclaimed.
+#[tokio::test]
+async fn collab_room_cap_reclaim_skips_empty_room_with_paused_rejoin() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaim_skips_empty_room_with_paused_rejoin",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 5).await;
+            let (hub, _helper_capacity) = room_cap_hub(&docs, 5_000).await;
+            let keys = hub_keys(&docs);
+            let mut leases = DirectHubLeases::new();
+            let mut conn_ids = Vec::new();
+            for doc in docs.iter().take(4) {
+                conn_ids.push(
+                    hub_join(&mut leases, &hub, doc, 1)
+                        .await
+                        .expect("join room"),
+                );
+            }
+            hub.leave_room(keys[3], conn_ids[3]).await;
+            wait_for_member_count(&hub, keys[3], 0).await;
+
+            let (slot_ready, release) =
+                arm_hub_join_barrier(docs[3].document_id, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
+            let paused = tokio::spawn({
+                let hub = hub.clone();
+                let doc = docs[3].clone_fixture();
+                async move { hub_join_document(&hub, &doc, doc.document_id, 2).await }
+            });
+            await_barrier(slot_ready, "slot-ready barrier").await;
+            hub.age_room_past_reclaim_grace(keys[3]).await;
+
+            let refused = hub_join(&mut leases, &hub, &docs[4], 1).await;
+            assert!(
+                matches!(refused, Err(JoinError::RoomFull)),
+                "a room observed Live by a paused rejoin must not be reclaimed, got {refused:?}"
+            );
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[3]).await,
+                RoomLifecyclePhase::Live
+            );
+
+            release.send(()).expect("release slot-ready barrier");
+            let (_, lease) = tokio::time::timeout(Duration::from_secs(10), paused)
+                .await
+                .expect("paused rejoin finishes")
+                .expect("paused rejoin task")
+                .expect("paused rejoin joins the live room");
+            leases.retain(lease);
+            assert_eq!(room_start_count(docs[3].document_id).await, 1);
+            assert_eq!(hub.room_member_count(keys[3]).await, 1);
+            disarm_hub_join_barrier(docs[3].document_id, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// HTTP borrow path: `project_live` starts a room at the cap and is paused after
+/// the room was returned Live. The room must not be reclaimed before the
+/// projection borrows the actor.
+#[tokio::test]
+async fn collab_room_cap_reclaim_skips_room_started_for_paused_borrow() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaim_skips_room_started_for_paused_borrow",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 5).await;
+            let (hub, _helper_capacity) = room_cap_hub(&docs, 5_000).await;
+            let keys = hub_keys(&docs);
+            let mut leases = DirectHubLeases::new();
+            for doc in docs.iter().take(3) {
+                hub_join(&mut leases, &hub, doc, 1)
+                    .await
+                    .expect("join room");
+            }
+
+            let (slot_ready, release) =
+                arm_hub_join_barrier(docs[3].document_id, HUB_BORROW_BARRIER_AFTER_SLOT_READY)
+                    .await;
+            let paused = tokio::spawn({
+                let hub = hub.clone();
+                let key = keys[3];
+                let user_id = docs[3].session.user_id;
+                let session_id = docs[3].session.session_id;
+                async move { hub.project_live(key, user_id, session_id).await }
+            });
+            await_barrier(slot_ready, "borrow slot-ready barrier").await;
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[3]).await,
+                RoomLifecyclePhase::Live
+            );
+            hub.age_room_past_reclaim_grace(keys[3]).await;
+
+            let refused = hub_join(&mut leases, &hub, &docs[4], 1).await;
+            assert!(
+                matches!(refused, Err(JoinError::RoomFull)),
+                "a room returned Live to a paused borrow must not be reclaimed, got {refused:?}"
+            );
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[3]).await,
+                RoomLifecyclePhase::Live
+            );
+
+            release.send(()).expect("release borrow barrier");
+            tokio::time::timeout(Duration::from_secs(10), paused)
+                .await
+                .expect("paused borrow finishes")
+                .expect("paused borrow task")
+                .expect("projection runs on the room it started");
+            assert_eq!(room_start_count(docs[3].document_id).await, 1);
+            disarm_hub_join_barrier(docs[3].document_id, HUB_BORROW_BARRIER_AFTER_SLOT_READY).await;
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// A real Yrs revision snapshot (`pending_u1.v1`) that differs from the one a
+/// fresh, unedited document captures.
+fn foreign_revision_snapshot() -> Vec<u8> {
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin: engine_bin(),
+        limits: collab_engine::Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .expect("spawn helper for a revision snapshot");
+    match session
+        .call(&Request::Load {
+            snapshot_b64: Some(engine_fixture("pending_u1.v1")),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        })
+        .outcome
+    {
+        EngineStatus::Ok { applied: true, .. } => {}
+        other => panic!("fixture load must apply, got {other:?}"),
+    }
+    match session.call(&Request::RevisionSnapshot).outcome {
+        EngineStatus::Ok {
+            update_b64: Some(encoded),
+            ..
+        } => collab_engine::b64::decode(&encoded).expect("revision snapshot bytes"),
+        other => panic!("RevisionSnapshot must return bytes, got {other:?}"),
+    }
+}
+
+async fn count_revisions(harness: &TestDb, doc: &WikiDocFixture, reason: &str) -> i64 {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin pool");
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.revisions \
+         WHERE workspace_id = $1 AND target_id = $2 AND reason = $3",
+    )
+    .bind(doc.session.workspace_id)
+    .bind(doc.document_id)
+    .bind(reason)
+    .fetch_one(&admin)
+    .await
+    .expect("count revisions");
+    admin.close().await;
+    count
+}
+
+/// A revision row committed by someone else between the session revision's
+/// head read and its insert, so the insert sees `StaleRevisionHead`.
+async fn insert_competing_revision(harness: &TestDb, doc: &WikiDocFixture, y_snapshot: Vec<u8>) {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin pool");
+    sqlx::query(
+        "INSERT INTO fvoci.revisions (id, workspace_id, target_kind, target_id, y_snapshot, \
+         encoding, content_json, text, reason, created_by) \
+         VALUES ($1, $2, 'document', $3, $4, 1, $5, '', 'manual', $6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(doc.session.workspace_id)
+    .bind(doc.document_id)
+    .bind(y_snapshot)
+    .bind(empty_document_json())
+    .bind(doc.session.user_id)
+    .execute(&admin)
+    .await
+    .expect("insert competing revision");
+    admin.close().await;
+}
+
+/// The last member leaves room 0 and its session revision is paused just before
+/// the insert. An admission at the cap reclaims room 0 meanwhile (queued
+/// shutdown, no cancel). With `stale_head`, a competing revision lands in that
+/// window, so the insert must take its head retry before the room stops.
+async fn reclaim_keeps_last_disconnect_session_revision(stale_head: bool) {
+    let harness = TestDb::bootstrap().await;
+    let docs = setup_wiki_doc_batch(&harness, 5).await;
+    // The ACL tick never fires, so no later loop iteration can run the retry.
+    let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+    let keys = hub_keys(&docs);
+    let mut leases = DirectHubLeases::new();
+    let mut conn_ids = Vec::new();
+    for doc in docs.iter().take(4) {
+        conn_ids.push(
+            hub_join(&mut leases, &hub, doc, 1)
+                .await
+                .expect("join room"),
+        );
+    }
+    let competing = stale_head.then(foreign_revision_snapshot);
+
+    let (persist_reached, persist_release) =
+        arm_session_revision_persist_barrier(docs[0].document_id).await;
+    // Leave through the hub and keep the connection lease, so no lease drop
+    // wakes the actor between the revision attempts.
+    hub.leave_room(keys[0], conn_ids[0]).await;
+    await_barrier(persist_reached, "session revision persist barrier").await;
+    assert_eq!(hub.room_member_count(keys[0]).await, 0);
+    hub.age_room_past_reclaim_grace(keys[0]).await;
+
+    let reclaiming = tokio::spawn({
+        let hub = hub.clone();
+        let doc = docs[4].clone_fixture();
+        async move { hub_join_document(&hub, &doc, doc.document_id, 1).await }
+    });
+    wait_for_phase(&hub, keys[0], RoomLifecyclePhase::Closing).await;
+    if let Some(snapshot) = competing {
+        insert_competing_revision(&harness, &docs[0], snapshot).await;
+    }
+    persist_release
+        .send(())
+        .expect("release session revision persist barrier");
+
+    let (_, lease) = tokio::time::timeout(Duration::from_secs(10), reclaiming)
+        .await
+        .expect("reclaiming join finishes")
+        .expect("reclaiming join task")
+        .expect("reclaiming join starts its room");
+    leases.retain(lease);
+    assert_eq!(
+        hub.room_lifecycle_phase(keys[0]).await,
+        RoomLifecyclePhase::Absent
+    );
+    assert_eq!(
+        count_revisions(&harness, &docs[0], "session").await,
+        1,
+        "the reclaimed room writes its last-disconnect session revision"
+    );
+    disarm_session_revision_persist_barrier(docs[0].document_id).await;
+    assert!(hub.shutdown().await.is_clean());
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_room_cap_reclaim_keeps_session_revision() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaim_keeps_session_revision",
+        reclaim_keeps_last_disconnect_session_revision(false),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_room_cap_reclaim_keeps_session_revision_after_stale_head() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaim_keeps_session_revision_after_stale_head",
+        reclaim_keeps_last_disconnect_session_revision(true),
+    )
+    .await;
+}
+
+async fn wait_for_joining_count(hub: &CollabHub, key: (Uuid, Uuid), expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hub.room_joining_count(key).await != expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("room joining count did not reach expected value");
+}
+
+/// An HTTP operation that borrowed the actor (`project_live`, queued behind a
+/// paused session revision) keeps its empty room from being reclaimed at the
+/// cap. Once the operation is done, the same room is reclaimable.
+#[tokio::test]
+async fn collab_room_cap_reclaim_skips_room_with_borrowed_operation() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaim_skips_room_with_borrowed_operation",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 5).await;
+            let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+            let keys = hub_keys(&docs);
+            let mut leases = DirectHubLeases::new();
+            let mut conn_ids = Vec::new();
+            for doc in docs.iter().take(4) {
+                conn_ids.push(
+                    hub_join(&mut leases, &hub, doc, 1)
+                        .await
+                        .expect("join room"),
+                );
+            }
+
+            let (persist_reached, persist_release) =
+                arm_session_revision_persist_barrier(docs[3].document_id).await;
+            hub.leave_room(keys[3], conn_ids[3]).await;
+            await_barrier(persist_reached, "session revision persist barrier").await;
+            let borrowed = tokio::spawn({
+                let hub = hub.clone();
+                let key = keys[3];
+                let user_id = docs[3].session.user_id;
+                let session_id = docs[3].session.session_id;
+                async move { hub.project_live(key, user_id, session_id).await }
+            });
+            wait_for_joining_count(&hub, keys[3], 1).await;
+            assert_eq!(hub.room_member_count(keys[3]).await, 0);
+            hub.age_room_past_reclaim_grace(keys[3]).await;
+
+            // Bounded only to report a wrong reclaim instead of hanging: that
+            // reclaim would wait for the actor held at the persist barrier.
+            let refused = tokio::time::timeout(
+                Duration::from_secs(5),
+                hub_join(&mut leases, &hub, &docs[4], 1),
+            )
+            .await;
+            assert!(
+                matches!(refused, Ok(Err(JoinError::RoomFull))),
+                "a room with a borrowed operation is not reclaimed, got {refused:?}"
+            );
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[3]).await,
+                RoomLifecyclePhase::Live
+            );
+
+            persist_release
+                .send(())
+                .expect("release session revision persist barrier");
+            tokio::time::timeout(Duration::from_secs(10), borrowed)
+                .await
+                .expect("borrowed operation finishes")
+                .expect("borrowed operation task")
+                .expect("projection completes on the live room");
+            wait_for_joining_count(&hub, keys[3], 0).await;
+
+            hub.age_room_past_reclaim_grace(keys[3]).await;
+            hub_join(&mut leases, &hub, &docs[4], 2)
+                .await
+                .expect("the room is reclaimable once the operation is done");
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[3]).await,
+                RoomLifecyclePhase::Absent
+            );
+            disarm_session_revision_persist_barrier(docs[3].document_id).await;
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// An admission cancelled while it waits for the room it reclaims leaks no
+/// capacity: the hub still finishes that room's teardown, frees its slot and
+/// removes it, and the next admission starts its room without reclaiming.
+#[tokio::test]
+async fn collab_room_cap_cancelled_reclaim_restores_capacity() {
+    run_lifecycle_test(
+        "collab_room_cap_cancelled_reclaim_restores_capacity",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 5).await;
+            let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+            let keys = hub_keys(&docs);
+            let mut leases = DirectHubLeases::new();
+            let mut conn_ids = Vec::new();
+            for doc in docs.iter().take(4) {
+                conn_ids.push(
+                    hub_join(&mut leases, &hub, doc, 1)
+                        .await
+                        .expect("join room"),
+                );
+            }
+            hub.leave_room(keys[0], conn_ids[0]).await;
+            wait_for_member_count(&hub, keys[0], 0).await;
+            hub.age_room_past_reclaim_grace(keys[0]).await;
+
+            let (teardown_reached, teardown_release) =
+                arm_teardown_barrier(docs[0].document_id).await;
+            let reclaiming = tokio::spawn({
+                let hub = hub.clone();
+                let doc = docs[4].clone_fixture();
+                async move { hub_join_document(&hub, &doc, doc.document_id, 1).await }
+            });
+            await_barrier(teardown_reached, "reclaimed room teardown barrier").await;
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[0]).await,
+                RoomLifecyclePhase::Closing
+            );
+            reclaiming.abort();
+            let aborted = reclaiming.await.expect_err("reclaiming join was aborted");
+            assert!(aborted.is_cancelled());
+
+            teardown_release
+                .send(())
+                .expect("release reclaimed room teardown");
+            wait_for_phase(&hub, keys[0], RoomLifecyclePhase::Absent).await;
+            assert_eq!(hub.available_room_slots(), 1);
+            assert_eq!(
+                hub.room_lifecycle_phase(keys[4]).await,
+                RoomLifecyclePhase::Absent
+            );
+            assert_eq!(room_start_count(docs[4].document_id).await, 0);
+
+            hub_join(&mut leases, &hub, &docs[4], 2)
+                .await
+                .expect("the freed slot admits the next room");
+            assert_eq!(hub.available_room_slots(), 0);
+            for key in &keys[1..] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(*key).await,
+                    RoomLifecyclePhase::Live
+                );
+            }
+            disarm_teardown_barrier(docs[0].document_id).await;
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// Two new-document admissions at the cap scan at the same time and choose the
+/// same oldest empty room. The one that loses the locked re-check must reclaim
+/// the other empty room past the grace instead of reporting `RoomFull`.
+#[tokio::test]
+async fn collab_room_cap_concurrent_admissions_reclaim_distinct_rooms() {
+    run_lifecycle_test(
+        "collab_room_cap_concurrent_admissions_reclaim_distinct_rooms",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 6).await;
+            let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+            let keys = hub_keys(&docs);
+            let mut leases = DirectHubLeases::new();
+            let mut conn_ids = Vec::new();
+            for doc in docs.iter().take(4) {
+                conn_ids.push(
+                    hub_join(&mut leases, &hub, doc, 1)
+                        .await
+                        .expect("join room"),
+                );
+            }
+            for index in [0, 1] {
+                hub.leave_room(keys[index], conn_ids[index]).await;
+                wait_for_member_count(&hub, keys[index], 0).await;
+                hub.age_room_past_reclaim_grace(keys[index]).await;
+            }
+
+            let (first_scanned, first_release) =
+                arm_hub_join_barrier(docs[4].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN)
+                    .await;
+            let (second_scanned, second_release) =
+                arm_hub_join_barrier(docs[5].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN)
+                    .await;
+            let first = tokio::spawn({
+                let hub = hub.clone();
+                let doc = docs[4].clone_fixture();
+                async move { hub_join_document(&hub, &doc, doc.document_id, 1).await }
+            });
+            await_barrier(first_scanned, "first admission reclaim scan").await;
+            let second = tokio::spawn({
+                let hub = hub.clone();
+                let doc = docs[5].clone_fixture();
+                async move { hub_join_document(&hub, &doc, doc.document_id, 1).await }
+            });
+            // Nothing changed between the two scans, so both chose the same room.
+            await_barrier(second_scanned, "second admission reclaim scan").await;
+            for key in &keys[..4] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(*key).await,
+                    RoomLifecyclePhase::Live
+                );
+            }
+
+            first_release
+                .send(())
+                .expect("release first admission reclaim scan");
+            let (_, lease) = tokio::time::timeout(Duration::from_secs(10), first)
+                .await
+                .expect("first admission finishes")
+                .expect("first admission task")
+                .expect("first admission reclaims an empty room");
+            leases.retain(lease);
+            let mut absent = 0;
+            for key in &keys[..2] {
+                if hub.room_lifecycle_phase(*key).await == RoomLifecyclePhase::Absent {
+                    absent += 1;
+                }
+            }
+            assert_eq!(absent, 1, "the first admission reclaimed one empty room");
+
+            // The second admission's candidate is gone; it must take the other one.
+            second_release
+                .send(())
+                .expect("release second admission reclaim scan");
+            let (_, lease) = tokio::time::timeout(Duration::from_secs(10), second)
+                .await
+                .expect("second admission finishes")
+                .expect("second admission task")
+                .expect("the admission that lost its candidate reclaims the other empty room");
+            leases.retain(lease);
+            for key in &keys[..2] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(*key).await,
+                    RoomLifecyclePhase::Absent
+                );
+            }
+            for key in &keys[2..] {
+                assert_eq!(
+                    hub.room_lifecycle_phase(*key).await,
+                    RoomLifecyclePhase::Live
+                );
+                assert_eq!(hub.room_member_count(*key).await, 1);
+            }
+            assert_eq!(room_start_count(docs[4].document_id).await, 1);
+            assert_eq!(room_start_count(docs[5].document_id).await, 1);
+            assert_eq!(hub.available_room_slots(), 0);
+            disarm_hub_join_barrier(docs[4].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN).await;
+            disarm_hub_join_barrier(docs[5].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN).await;
+            assert!(hub.shutdown().await.is_clean());
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn collab_memory_budget_refusal_frees_room_slot() {
     run_lifecycle_test("collab_memory_budget_refusal_frees_room_slot", async {
         let harness = TestDb::bootstrap().await;
@@ -2180,6 +2952,99 @@ async fn collab_memory_budget_uses_persisted_factor_not_floor_only() {
             collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES < tight_budget,
             "20 MiB budget would admit the 16 MiB floor alone; denial must come from 14× persisted"
         );
+            hub.shutdown().await;
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+/// A room's helper does not exist until its first load, so overlapping starts
+/// for different documents must be admitted against the memory already promised
+/// to rooms still starting, not only against live helper RSS. With a budget of
+/// two reservations, at most two of four concurrent starts may pass. Only that
+/// bound is asserted: live helper RSS is process-wide, so helpers of parallel
+/// tests can only make admission refuse more.
+#[tokio::test]
+async fn collab_memory_budget_counts_rooms_admitted_before_their_first_load() {
+    run_lifecycle_test(
+        "collab_memory_budget_counts_rooms_admitted_before_their_first_load",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 4).await;
+            let mut cfg = test_collab_config(4, 30_000);
+            cfg.memory_budget_bytes =
+                2 * collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES + 1024 * 1024;
+            let (hub, _helper_capacity) =
+                new_test_collab_hub_arc(cfg, docs[0].session.pool.clone(), 4).await;
+            let mut releases = Vec::new();
+            for doc in &docs {
+                releases.push(arm_spawn_room_block(doc.document_id).await);
+            }
+            let joins = docs
+                .iter()
+                .zip(1u32..)
+                .map(|(doc, client_id)| {
+                    let hub = hub.clone();
+                    let doc = doc.clone_fixture();
+                    tokio::spawn(async move {
+                        hub_join_document(&hub, &doc, doc.document_id, client_id).await
+                    })
+                })
+                .collect::<Vec<_>>();
+            // Each start is either refused or admitted and parked before its
+            // bridge (and so its helper) exists.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let mut settled = 0;
+                    for (join, doc) in joins.iter().zip(&docs) {
+                        if join.is_finished() || spawn_room_block_reached(doc.document_id).await {
+                            settled += 1;
+                        }
+                    }
+                    if settled == docs.len() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("every start was admitted or refused");
+
+            let mut refused = 0usize;
+            let mut admitted = Vec::new();
+            for ((join, release), doc) in joins.into_iter().zip(releases).zip(&docs) {
+                if join.is_finished() {
+                    let outcome = join.await.expect("join task");
+                    assert!(
+                        matches!(outcome, Err(JoinError::CapacityRetry)),
+                        "a start that did not reach its spawn must be a capacity refusal: {:?}",
+                        outcome.map(|(conn_id, _)| conn_id)
+                    );
+                    refused += 1;
+                    disarm_spawn_room_block(doc.document_id).await;
+                } else {
+                    let _ = release.send(());
+                    admitted.push(join);
+                }
+            }
+            assert!(
+                refused >= 2,
+                "only two reservations fit the budget; {refused} of 4 overlapping starts were refused"
+            );
+            assert_eq!(
+                hub.available_room_slots(),
+                4 - admitted.len(),
+                "refused starts must free their room slots"
+            );
+            let mut leases = DirectHubLeases::new();
+            for join in admitted {
+                let (_, lease) = join
+                    .await
+                    .expect("join task")
+                    .expect("an admitted start joins once its spawn proceeds");
+                leases.retain(lease);
+            }
             hub.shutdown().await;
             harness.cleanup().await;
         },
@@ -4418,7 +5283,7 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
         let wiki = setup_wiki_doc(&harness).await;
         let mut cfg = test_collab_config(4, 30_000);
         cfg.max_collab_sockets = 1;
-        let (hub, _hub_capacity) =
+        let (hub, hub_capacity) =
             new_test_collab_hub(cfg.clone(), wiki.session.pool.clone(), 1).await;
         assert_eq!(hub.available_collab_sockets(), 1);
         let held = hub
@@ -4428,6 +5293,10 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
         assert!(hub.try_acquire_socket(wiki.session.session_id).is_none());
         drop(held);
         assert_eq!(hub.available_collab_sockets(), 1);
+        // Release the hub's capacity slot before the server reserves its own
+        // (see HELPER_CHILD_CAPACITY).
+        hub.shutdown().await;
+        drop(hub_capacity);
 
         let server = start_configured_test_server(&harness.app_url, cfg).await;
         let addr = server.addr;
@@ -4445,7 +5314,6 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
                 .is_ok(),
             "released socket permit must allow a new upgrade"
         );
-        hub.shutdown().await;
         server.shutdown().await;
         harness.cleanup().await;
     })

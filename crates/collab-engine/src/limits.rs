@@ -3,8 +3,9 @@
 //! Grounded in original SHA `393795261322b916e588043cf94feca999175843`:
 //! `STATE_OVERSIZE_FACTOR = 8` × default `DOCUMENT_MAX_BODY_BYTES = 1048576`
 //! → 8 MiB per persistable completeV1 / candidate blob. Load may carry a
-//! committed snapshot plus a tail (aggregate 32 MiB). Product HTTP
-//! `DOCUMENT_MAX_BODY_BYTES` (1 MiB JSON) remains a later parent concern.
+//! committed snapshot plus a tail (aggregate 32 MiB). The product's 1 MiB
+//! `DOCUMENT_MAX_BODY_BYTES` bounds Project output here
+//! ([`MAX_PROJECT_JSON_BYTES`]) and body writes in the server.
 //! This crate never talks to a database or network.
 
 /// Per-blob CRDT cap (candidate update, committed snapshot, sync SV, output).

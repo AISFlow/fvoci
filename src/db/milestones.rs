@@ -2,10 +2,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
+use crate::db::context::{begin_read, set_tenant};
 use crate::db::documents::between;
-use crate::db::projects::{lock_project, project_permission, ProjectDbError};
-use crate::projects::ProjectPermission;
+use crate::db::projects::{require_project_edit, require_project_view, ProjectDbError};
 
 pub const MILESTONE_NAME_MAX: usize = 200;
 
@@ -23,68 +22,6 @@ pub struct MilestoneRow {
 pub fn milestone_name_is_valid(name: &str) -> bool {
     let trimmed = name.trim();
     !trimmed.is_empty() && trimmed.chars().count() <= MILESTONE_NAME_MAX
-}
-
-async fn workspace_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
-}
-
-async fn require_project_view(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    project_id: Uuid,
-) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
-    if !session_is_live(tx, actor_user_id, session_id).await? {
-        return Ok(Err(ProjectDbError::Forbidden));
-    }
-    if !workspace_is_live(tx, workspace_id).await? {
-        return Ok(Err(ProjectDbError::NotFound));
-    }
-    let Some(locked) = lock_project(tx, workspace_id, project_id).await? else {
-        return Ok(Err(ProjectDbError::NotFound));
-    };
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
-    if !permission.at_least(ProjectPermission::View) {
-        return Ok(Err(ProjectDbError::NotFound));
-    }
-    Ok(Ok(()))
-}
-
-async fn require_project_edit(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    project_id: Uuid,
-) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
-    lock_membership_users(tx, &[actor_user_id]).await?;
-    if !recheck_session(tx, actor_user_id, session_id).await? {
-        return Ok(Err(ProjectDbError::Forbidden));
-    }
-    if !workspace_is_live(tx, workspace_id).await? {
-        return Ok(Err(ProjectDbError::NotFound));
-    }
-    let Some(locked) = lock_project(tx, workspace_id, project_id).await? else {
-        return Ok(Err(ProjectDbError::NotFound));
-    };
-    if locked.status == "archived" {
-        return Ok(Err(ProjectDbError::Archived));
-    }
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
-    if !permission.at_least(ProjectPermission::Edit) {
-        return Ok(Err(ProjectDbError::NotFound));
-    }
-    Ok(Ok(()))
 }
 
 fn map_milestone_row(
@@ -153,7 +90,7 @@ pub async fn list_project_milestones(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<MilestoneRow>, ProjectDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     match require_project_view(&mut tx, workspace_id, actor_user_id, session_id, project_id).await?
     {

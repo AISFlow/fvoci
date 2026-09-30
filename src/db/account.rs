@@ -16,9 +16,8 @@ use crate::auth::token::{hash_token, new_token, token_hashes_eq};
 use crate::db::context::{
     clear_self_user, lock_membership_users, recheck_session, set_self_user, set_system, set_tenant,
 };
-use crate::db::identity::{append_audit, lock_sign_in, AuditAppend, INSTANCE_ADMIN_LOCK_KEY};
+use crate::db::identity::{append_audit, lock_instance_admin_changes, lock_sign_in, AuditAppend};
 use crate::db::magic::{MagicPayload, MAGIC_KIND_EMAIL_CHANGE, MAGIC_KIND_LOGIN};
-use crate::db::quota::acquire_admission_lock;
 use crate::settings::messages::Message;
 use crate::validate::normalize_email;
 
@@ -102,11 +101,7 @@ async fn lock_account_for(
     actor_admin: Option<Uuid>,
     user_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    acquire_admission_lock(tx).await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(INSTANCE_ADMIN_LOCK_KEY)
-        .execute(&mut **tx)
-        .await?;
+    lock_instance_admin_changes(tx).await?;
     match actor_admin {
         Some(actor) => lock_membership_users(tx, &[actor, user_id]).await?,
         None => lock_membership_users(tx, &[user_id]).await?,
@@ -463,19 +458,20 @@ pub enum AdminEraseOutcome {
 }
 
 /// Source `scheduleUserErasure({ actorAdminId, userId })`. `None` when the
-/// actor is not a live instance admin (checked under the locks). Unlike the
-/// user's own withdraw there is no confirmation, and an already withdrawn
-/// target replays its deadline.
+/// actor is not a live instance admin with a live session (checked under the
+/// locks). Unlike the user's own withdraw there is no confirmation, and an
+/// already withdrawn target replays its deadline.
 pub async fn schedule_user_erasure(
     pool: &PgPool,
     actor: Uuid,
+    session_id: Uuid,
     user_id: Uuid,
     ip: Option<&str>,
 ) -> Result<Option<AdminEraseOutcome>, sqlx::Error> {
     let cancel = new_token();
     let mut tx = pool.begin().await?;
     lock_account_for(&mut tx, Some(actor), user_id).await?;
-    if !crate::db::admin::require_live_instance_admin(&mut tx, actor).await? {
+    if !crate::db::admin::require_admin_session(&mut tx, actor, session_id).await? {
         tx.rollback().await?;
         return Ok(None);
     }
@@ -589,20 +585,21 @@ pub async fn cancel_withdraw(
 }
 
 /// Source `cancelUserErasure({ actorAdminId, userId })`. `None` when the
-/// actor is not a live instance admin. Same locks as the user's token cancel,
-/// so the two serialize on the target's row: the second one sees a live row
-/// and answers `NotFound`. The restore goes through
+/// actor is not a live instance admin with a live session. Same locks as the
+/// user's token cancel, so the two serialize on the target's row: the second
+/// one sees a live row and answers `NotFound`. The restore goes through
 /// `app_admin_user_restore_withdrawn`, which rechecks the admin and the
 /// deadline itself; sessions and tokens revoked by the withdraw stay revoked.
 pub async fn admin_cancel_user_erasure(
     pool: &PgPool,
     actor: Uuid,
+    session_id: Uuid,
     user_id: Uuid,
     ip: Option<&str>,
 ) -> Result<Option<CancelWithdrawOutcome>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     lock_account_for(&mut tx, Some(actor), user_id).await?;
-    if !crate::db::admin::require_live_instance_admin(&mut tx, actor).await? {
+    if !crate::db::admin::require_admin_session(&mut tx, actor, session_id).await? {
         tx.rollback().await?;
         return Ok(None);
     }

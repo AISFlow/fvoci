@@ -839,6 +839,7 @@ async fn write_export(
             ExportFailure::Storage
         })?
         else {
+            tracing::warn!(attachment_id = %row.id, "user_export.storage_object_missing");
             continue;
         };
         let name = format!("attachments/{}-{}", row.id, zip_safe_name(&row.name));
@@ -851,19 +852,31 @@ async fn write_export(
             .await
         {
             Ok(stream) => stream,
-            Err(err) => {
-                if storage
-                    .head(&row.storage_key)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_none()
-                {
+            // Only a recheck that proves the object gone is the source's
+            // ENOENT skip; an error there says nothing about the object, so
+            // the archive is aborted rather than finished without it.
+            Err(err) => match storage.head(&row.storage_key).await {
+                Ok(None) => {
+                    tracing::warn!(
+                        attachment_id = %row.id,
+                        error = %err,
+                        "user_export.storage_object_missing"
+                    );
                     continue;
                 }
-                tracing::error!(error = %err, "user_export.storage_open_failed");
-                return Err(ExportFailure::Storage);
-            }
+                Ok(Some(_)) => {
+                    tracing::error!(error = %err, "user_export.storage_open_failed");
+                    return Err(ExportFailure::Storage);
+                }
+                Err(head_err) => {
+                    tracing::error!(
+                        error = %err,
+                        head_error = %head_err,
+                        "user_export.storage_head_retry_failed"
+                    );
+                    return Err(ExportFailure::Storage);
+                }
+            },
         };
         writer.begin(&name).await?;
         while let Some(chunk) = stream.next().await {

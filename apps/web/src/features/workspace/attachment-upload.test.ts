@@ -678,6 +678,204 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     assert.deepEqual(completed.map((part) => part.partNumber).sort(), [1, 2, 3]);
   });
 
+  // ---- presigned sessions (#149 B): parts go to storage, never to the API.
+
+  const STORAGE = "https://files.example.test/fvoci/key";
+  const signedUrl = (n: number, gen = 1) =>
+    `${STORAGE}?partNumber=${n}&uploadId=u&X-Amz-Signature=sig${gen}`;
+  const presignedCreate = (partCount: number, expiresAt: number) => ({
+    attachmentId: ATT,
+    partSizeBytes: PART_SIZE,
+    transfer: "presigned",
+    partUrlsExpireAt: new Date(expiresAt).toISOString(),
+    parts: Array.from({ length: partCount }, (_, i) => ({ partNumber: i + 1, url: signedUrl(i + 1) })),
+  });
+  type StoragePut = { url: string; init?: RequestInit };
+  /** API routes through `globalThis.fetch`; storage PUTs through `fetchImpl`. */
+  function presignedServer(opts: {
+    create: unknown;
+    resume?: () => unknown;
+    storage: (put: StoragePut, n: number) => Response | Promise<Response>;
+  }) {
+    const state = { resumes: 0, apiParts: 0, completed: [] as { partNumber: number; etag: string }[], puts: [] as StoragePut[] };
+    installFetch(async (url, init) => {
+      if (url.endsWith("/uploads") && init?.method === "POST") return jsonResponse(opts.create, 201);
+      if (url.endsWith("/upload") && init?.method === "GET") {
+        state.resumes += 1;
+        return jsonResponse(opts.resume?.());
+      }
+      if (url.endsWith("/complete") && init?.method === "POST") {
+        state.completed = ((await readJsonBody(init)) as { parts: typeof state.completed }).parts;
+        return jsonResponse(storedOutput);
+      }
+      if (url.includes("/parts/")) state.apiParts += 1;
+      throw new Error(`unexpected API fetch: ${url}`);
+    });
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      assert.ok(url.startsWith(STORAGE), `storage PUT only: ${url}`);
+      const put = { url, init };
+      state.puts.push(put);
+      return opts.storage(put, Number(new URL(url).searchParams.get("partNumber")));
+    };
+    return { state, fetchImpl };
+  }
+  const stored = (n: number) =>
+    new Response(null, { status: 200, headers: { ETag: `"etag-${n}"` } });
+
+  await t.test("presigned parts go to storage with the signed URL alone", async () => {
+    const now = Date.now();
+    const { state, fetchImpl } = presignedServer({
+      create: presignedCreate(3, now + 900_000),
+      storage: (_put, n) => stored(n),
+    });
+    const bridge = await loadBridge({ fetchImpl, delay: () => Promise.resolve() });
+    // Untyped: Bun's Blob.slice keeps the File's type even when given "" as
+    // the content type, where browsers (File API) use "". That typed files'
+    // parts go without Content-Type is checked in Chromium by e2e-s3 (PNG,
+    // PDF and text files); here, that nothing adds a type.
+    const file = new File([new Uint8Array(PART_SIZE * 2 + 7)], "f.bin");
+    const result = await bridge.upload(file, () => undefined);
+    assert.equal(result.id, ATT);
+    assert.equal(state.apiParts, 0);
+    assert.equal(state.puts.length, 3);
+    for (const { init } of state.puts) {
+      assert.equal(init?.method, "PUT");
+      assert.equal(init?.credentials, "omit", "no FVOCI cookies to the storage origin");
+      assert.equal(init?.headers, undefined, "no Content-Type or Authorization");
+      assert.ok(init?.body instanceof Blob);
+      assert.equal((init.body as Blob).type, "", "a typed Blob would add Content-Type");
+    }
+    const sizes = state.puts.map((p) => (p.init?.body as Blob).size).sort((a, b) => a - b);
+    assert.deepEqual(sizes, [7, PART_SIZE, PART_SIZE]);
+    assert.deepEqual(
+      [...state.completed].sort((a, b) => a.partNumber - b.partNumber),
+      [1, 2, 3].map((n) => ({ partNumber: n, etag: `"etag-${n}"` })),
+    );
+    assert.equal(state.resumes, 0);
+  });
+
+  await t.test("a presigned part refused with 403 is re-issued through resume", async () => {
+    const now = Date.now();
+    const { state, fetchImpl } = presignedServer({
+      create: presignedCreate(2, now + 900_000),
+      resume: () => ({
+        ...presignedCreate(0, now + 900_000),
+        uploadedParts: [{ partNumber: 1, etag: "etag-1" }],
+        parts: [{ partNumber: 2, url: signedUrl(2, 2) }],
+      }),
+      storage: (put, n) => (n === 2 && put.url.endsWith("sig1") ? new Response(null, { status: 403 }) : stored(n)),
+    });
+    const bridge = await loadBridge({ fetchImpl, delay: () => Promise.resolve() });
+    await bridge.upload(new File([new Uint8Array(PART_SIZE * 2)], "f.bin"), () => undefined);
+    assert.equal(state.resumes, 1);
+    assert.equal(state.apiParts, 0);
+    assert.deepEqual(
+      state.puts.map((p) => p.url).filter((u) => u.includes("partNumber=2")),
+      [signedUrl(2, 1), signedUrl(2, 2)],
+    );
+    assert.deepEqual(
+      [...state.completed].sort((a, b) => a.partNumber - b.partNumber),
+      [
+        { partNumber: 1, etag: "etag-1" },
+        { partNumber: 2, etag: '"etag-2"' },
+      ],
+    );
+  });
+
+  await t.test("URLs close to expiry are re-issued before any byte is sent", async () => {
+    const t0 = 1_000_000;
+    // Create answered at t0; 850 s pass before the part is sent (the URL has
+    // 50 s left); the re-issued URLs arrive at t0 + 900 s.
+    const clock = [t0, t0 + 850_000, t0 + 900_000, t0 + 901_000];
+    const { state, fetchImpl } = presignedServer({
+      create: presignedCreate(1, t0 + 900_000),
+      resume: () => ({
+        ...presignedCreate(0, t0 + 1_800_000),
+        uploadedParts: [],
+        parts: [{ partNumber: 1, url: signedUrl(1, 2) }],
+      }),
+      storage: (_put, n) => stored(n),
+    });
+    const bridge = await loadBridge({
+      fetchImpl,
+      delay: () => Promise.resolve(),
+      now: () => (clock.length > 1 ? clock.shift()! : clock[0]!),
+    });
+    await bridge.upload(new File([new Uint8Array(10)], "f.bin"), () => undefined);
+    assert.equal(state.resumes, 1);
+    assert.deepEqual(
+      state.puts.map((p) => p.url),
+      [signedUrl(1, 2)],
+      "the stale URL is never used",
+    );
+  });
+
+  await t.test("a URL storage keeps refusing is re-issued once, not forever", async () => {
+    const now = Date.now();
+    const { state, fetchImpl } = presignedServer({
+      create: presignedCreate(1, now + 900_000),
+      resume: () => ({ ...presignedCreate(1, now + 900_000), uploadedParts: [] }),
+      storage: () => new Response(null, { status: 403 }),
+    });
+    const bridge = await loadBridge({ fetchImpl, delay: () => Promise.resolve() });
+    await assert.rejects(
+      bridge.upload(new File([new Uint8Array(10)], "f.bin"), () => undefined),
+      /part 1: storage refused the signed URL \(HTTP 403\)/,
+    );
+    assert.equal(state.resumes, 1);
+    assert.equal(state.puts.length, 2);
+    assert.equal(state.apiParts, 0);
+  });
+
+  await t.test("a stored part without an exposed ETag fails without resending", async () => {
+    const now = Date.now();
+    const { state, fetchImpl } = presignedServer({
+      create: presignedCreate(1, now + 900_000),
+      storage: () => new Response(null, { status: 200 }),
+    });
+    const bridge = await loadBridge({ fetchImpl, delay: () => Promise.resolve() });
+    await assert.rejects(
+      bridge.upload(new File([new Uint8Array(10)], "f.bin"), () => undefined),
+      /ExposeHeaders/,
+    );
+    assert.equal(state.puts.length, 1);
+    assert.equal(state.resumes, 0);
+  });
+
+  await t.test("presigned network failures retry, then resume once, still to storage", async () => {
+    const now = Date.now();
+    let failures = 0;
+    const { state, fetchImpl } = presignedServer({
+      create: presignedCreate(1, now + 900_000),
+      resume: () => ({ ...presignedCreate(1, now + 900_000), uploadedParts: [] }),
+      storage: (_put, n) => {
+        if (failures < 3) {
+          failures += 1;
+          throw new TypeError("Failed to fetch");
+        }
+        return stored(n);
+      },
+    });
+    const bridge = await loadBridge({ fetchImpl, delay: () => Promise.resolve() });
+    await bridge.upload(new File([new Uint8Array(10)], "f.bin"), () => undefined);
+    assert.equal(state.puts.length, 4);
+    assert.equal(state.resumes, 1);
+    assert.equal(state.apiParts, 0);
+  });
+
+  await t.test("a missing upload (404) is not resumed", async () => {
+    const now = Date.now();
+    const { state, fetchImpl } = presignedServer({
+      create: presignedCreate(1, now + 900_000),
+      storage: () => new Response("<Error><Code>NoSuchUpload</Code></Error>", { status: 404 }),
+    });
+    const bridge = await loadBridge({ fetchImpl, delay: () => Promise.resolve() });
+    await assert.rejects(bridge.upload(new File([new Uint8Array(10)], "f.bin"), () => undefined));
+    assert.equal(state.puts.length, 1);
+    assert.equal(state.resumes, 0);
+  });
+
   await t.test("downloadUrl uses the workspace attachment download route", async () => {
     const bridge = await loadBridge();
     assert.equal(

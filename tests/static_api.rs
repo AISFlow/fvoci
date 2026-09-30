@@ -467,3 +467,449 @@ async fn share_shell_head_on_the_wire_has_no_body_or_length() {
     assert!(body.is_empty(), "{body}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Source `server.ts` `ROBOTS_TXT` / `publicText`: exact body, public text
+/// headers, the global security headers, served ahead of the static fallback
+/// (a stray `robots.txt` in the web build cannot replace it). `/s/` stays
+/// crawlable for share-card unfurl bots.
+#[tokio::test]
+async fn robots_txt_is_the_source_policy_with_public_text_headers() {
+    let dir = std::env::temp_dir().join(format!("fvoci-static-robots-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::write(dir.join("index.html"), "<html></html>").unwrap();
+    std::fs::write(dir.join("robots.txt"), "User-agent: *\nDisallow: /\n").unwrap();
+    for static_dir in [None, Some(dir.clone())] {
+        let app: Router = router(app_state().await, static_dir.clone());
+        for method in ["GET", "HEAD"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/robots.txt")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let ctx = format!("{method} static={}", static_dir.is_some());
+            assert_eq!(response.status(), StatusCode::OK, "{ctx}");
+            let h = response.headers().clone();
+            assert_eq!(h["content-type"], "text/plain; charset=utf-8", "{ctx}");
+            assert_eq!(h["cache-control"], "public, max-age=3600", "{ctx}");
+            assert_eq!(h["x-content-type-options"], "nosniff", "{ctx}");
+            assert_eq!(h["referrer-policy"], "no-referrer", "{ctx}");
+            assert!(h.contains_key("content-security-policy"), "{ctx}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            if method == "HEAD" {
+                assert!(bytes.is_empty(), "{ctx}");
+                continue;
+            }
+            assert_eq!(
+                &bytes[..],
+                b"User-agent: *\nDisallow: /api/\nDisallow: /w/\nAllow: /legal/\n",
+                "{ctx}"
+            );
+            assert!(!std::str::from_utf8(&bytes).unwrap().contains("/s/"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Source `apiDocs` guard `access: { auth: "session" }`: no cookie and no
+/// bearer is 401 `authentication_required` as problem JSON on every docs path
+/// (page, JSON, every asset) with the global CSP, and nothing of the page or
+/// spec leaks, also when the SPA fallback is mounted.
+#[tokio::test]
+async fn api_docs_require_a_session() {
+    let dir = std::env::temp_dir().join(format!("fvoci-static-docs-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::write(dir.join("index.html"), "<html></html>").unwrap();
+    for static_dir in [None, Some(dir.clone())] {
+        let app: Router = router(app_state().await, static_dir.clone());
+        for uri in [
+            "/api/docs",
+            "/api/docs/json",
+            "/api/docs/static/fvoci-swagger-initializer.js",
+            "/api/docs/static/fvoci-swagger-theme.css",
+            "/api/docs/static/swagger-ui-bundle.js",
+            "/api/docs/static/swagger-ui.css",
+            "/api/docs/static/swagger-ui-bundle.js.LICENSE.txt",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            let h = response.headers().clone();
+            assert!(h["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("application/problem+json"));
+            assert!(h["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .starts_with("default-src 'self';"));
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json["code"], "authentication_required", "{uri}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+async fn probe_body(
+    app: &Router,
+    request: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+fn probe_request(uri: &str, peer: Option<[u8; 4]>) -> Request<Body> {
+    let mut request = Request::builder()
+        .uri(uri)
+        // A session cookie must not pull probes into the consent gate.
+        .header("cookie", "fvoci_session=synthProbeCookie")
+        .body(Body::empty())
+        .unwrap();
+    if let Some(ip) = peer {
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                ip, 40000,
+            ))));
+    }
+    request
+}
+
+/// `app_state` whose unreachable pool gives up quickly, so DB-backed
+/// routes fail fast instead of waiting out the default acquire timeout.
+async fn probe_state() -> AppState {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_millis(300))
+        .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/none")
+        .expect("lazy pool");
+    AppState {
+        auth: Arc::new(AuthService {
+            db: Db::new(pool),
+            password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
+        }),
+        ..app_state().await
+    }
+}
+
+async fn probe_router(allow: &str) -> Router {
+    use fvoci_server::http::probes::{MetricsAllowList, Observability, ObservabilitySettings};
+    fvoci_server::http::router_with_observability(
+        probe_state().await,
+        None,
+        Arc::new(fvoci_server::integrations::Integrations::disabled()),
+        Arc::new(fvoci_server::identity::Identity::disabled(
+            "http://localhost",
+        )),
+        Arc::new(Observability::new(ObservabilitySettings {
+            allow: MetricsAllowList::parse(Some(allow)).unwrap(),
+            outbox_consumers: Vec::new(),
+            refresh_interval: std::time::Duration::ZERO,
+        })),
+    )
+}
+
+/// Source `/health`: always `{"ok":true}`, no session lookup.
+#[tokio::test]
+async fn health_probe_is_ok_without_database_or_session() {
+    let app = probe_router("").await;
+    let (status, headers, body) = probe_body(&app, probe_request("/health", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("application/json"));
+    assert_eq!(body, r#"{"ok":true}"#);
+}
+
+/// Source `/ready` with PostgreSQL down: 503 and the failing check.
+#[tokio::test]
+async fn ready_probe_reports_database_down() {
+    let app = probe_router("").await;
+    let started = std::time::Instant::now();
+    let (status, _, body) = probe_body(&app, probe_request("/ready", None)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"ok": false, "checks": {"pg": false}})
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        !body.contains("127.0.0.1:1") && !body.contains("postgres"),
+        "{body}"
+    );
+}
+
+/// Source `metricsAllowed`: unset, a peer outside the list, or no socket
+/// peer at all get the generic 404 problem, never the metrics.
+#[tokio::test]
+async fn metrics_probe_is_hidden_outside_allow_list() {
+    for (allow, peer) in [
+        ("", Some([127, 0, 0, 1])),
+        ("10.0.0.0/8", Some([127, 0, 0, 1])),
+        ("127.0.0.1/32", None),
+    ] {
+        let app = probe_router(allow).await;
+        let mut request = probe_request("/metrics", peer);
+        request
+            .headers_mut()
+            .insert("x-forwarded-for", "10.1.1.1".parse().unwrap());
+        let (status, _, body) = probe_body(&app, request).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{allow} {peer:?}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["code"], "not_found");
+        assert!(!body.contains("fvoci_"), "{body}");
+    }
+}
+
+/// Non-GET/HEAD methods on the probes get the same generic 404 as a denied
+/// peer, never a 405 that would announce the route.
+#[tokio::test]
+async fn probe_other_methods_get_generic_not_found() {
+    let app = probe_router("127.0.0.1/32").await;
+    let (_, _, denied) = probe_body(&probe_router("").await, probe_request("/metrics", None)).await;
+    for (method, uri) in [
+        ("POST", "/metrics"),
+        ("DELETE", "/metrics"),
+        ("POST", "/health"),
+        ("PUT", "/ready"),
+    ] {
+        let mut request = probe_request(uri, Some([127, 0, 0, 1]));
+        *request.method_mut() = method.parse().unwrap();
+        let (status, headers, body) = probe_body(&app, request).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert!(headers.get("allow").is_none(), "{method} {uri}");
+        assert_eq!(body, denied, "{method} {uri}");
+    }
+}
+
+/// An allowed peer gets the Prometheus/OpenMetrics text with the source
+/// metric names; HTTP labels carry route templates, not concrete paths.
+#[tokio::test]
+async fn metrics_probe_exports_text_format_for_allowed_peer() {
+    let app = probe_router("172.30.0.0/24,127.0.0.1/32").await;
+    let (status, _, _) = probe_body(&app, probe_request("/health", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let secret_path = "/api/v1/share/synthProbeShareTok";
+    probe_body(&app, probe_request(secret_path, None)).await;
+    let (status, headers, body) =
+        probe_body(&app, probe_request("/metrics", Some([127, 0, 0, 1]))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        headers["content-type"],
+        "application/openmetrics-text; version=1.0.0; charset=utf-8"
+    );
+    for name in [
+        "# TYPE fvoci_http_request_duration_seconds histogram",
+        "# TYPE fvoci_outbox_lag_seconds gauge",
+        "# TYPE fvoci_outbox_xmin_stall_seconds gauge",
+        "# TYPE fvoci_task_stream_subscribers gauge",
+        "# TYPE fvoci_db_pool_connections gauge",
+        "# TYPE fvoci_db_metrics_refresh_failures counter",
+        "# TYPE fvoci_db_metrics_last_success_timestamp_seconds gauge",
+        "# TYPE fvoci_process_resident_memory_bytes gauge",
+        "# TYPE fvoci_collab_helper_resident_memory_bytes gauge",
+        "# TYPE fvoci_collab_helper_memory_budget_bytes gauge",
+        "fvoci_db_pool_max_connections 1",
+        "fvoci_task_stream_subscribers 0",
+        "fvoci_collab_helper_resident_memory_bytes 0",
+    ] {
+        assert!(body.contains(name), "{name} missing:\n{body}");
+    }
+    // PostgreSQL is unreachable: the outbox gauges are unknown, not a
+    // healthy 0, and the failed refresh is counted.
+    for (name, value) in [
+        ("fvoci_outbox_lag_seconds", "NaN"),
+        ("fvoci_outbox_xmin_stall_seconds", "NaN"),
+        ("fvoci_db_metrics_refresh_failures_total", "1"),
+        ("fvoci_db_metrics_last_success_timestamp_seconds", "0.0"),
+        // No collaboration hub in this router.
+        ("fvoci_collab_helper_memory_budget_bytes", "NaN"),
+    ] {
+        assert_eq!(metric_sample(&body, name), value, "{name}\n{body}");
+    }
+    let rss: f64 = metric_sample(&body, "fvoci_process_resident_memory_bytes")
+        .parse()
+        .unwrap();
+    assert!(rss > 1_000_000.0, "{rss}");
+    assert!(
+        body.contains(
+            r#"fvoci_http_request_duration_seconds_count{method="GET",route="/health",status="200"} 1"#
+        ),
+        "{body}"
+    );
+    assert!(body.contains(r#"route="/api/v1/share/{token}""#), "{body}");
+    assert!(!body.contains("synthProbeShareTok"), "{body}");
+    assert!(body.ends_with("# EOF\n"), "{body}");
+    // IPv4-mapped dual-stack peer inside the list.
+    let mut request = probe_request("/metrics", None);
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "[::ffff:172.30.0.7]:40000"
+            .parse::<std::net::SocketAddr>()
+            .unwrap(),
+    ));
+    let (status, _, _) = probe_body(&app, request).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+fn metric_sample<'a>(body: &'a str, name: &str) -> &'a str {
+    body.lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("{name} missing:\n{body}"))
+}
+
+/// Over real TCP the allowlist sees the socket peer (127.0.0.1): listed it
+/// scrapes, unlisted it gets the 404 even when `X-Forwarded-For` names an
+/// allowed address, and a listed peer is not refused by a foreign XFF.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_allow_list_uses_tcp_peer_not_forwarded_for() {
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for (allow, forwarded, expected) in [
+        ("127.0.0.1/32", None, 200),
+        ("127.0.0.1/32", Some("203.0.113.9"), 200),
+        ("10.0.0.0/8", Some("10.1.1.1"), 404),
+        ("10.0.0.0/8", Some("10.1.1.1, 127.0.0.1"), 404),
+        ("", Some("127.0.0.1"), 404),
+    ] {
+        let (addr, task) = serve_on_loopback(probe_router(allow).await).await;
+        let mut request = client.get(format!("http://{addr}/metrics"));
+        if let Some(xff) = forwarded {
+            request = request
+                .header("x-forwarded-for", xff)
+                .header("x-real-ip", xff)
+                .header("forwarded", format!("for={xff}"));
+        }
+        let response = request.send().await.unwrap();
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, expected, "{allow} {forwarded:?}: {body}");
+        assert_eq!(body.contains("fvoci_"), expected == 200, "{body}");
+        task.abort();
+    }
+}
+
+/// Source `SHELL_EXCLUDED_PREFIXES`: probe sub-paths never get the SPA shell.
+#[tokio::test]
+async fn probe_subpaths_do_not_serve_spa_shell() {
+    let dir = std::env::temp_dir().join(format!("fvoci-probe-shell-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<html>shell</html>").unwrap();
+    let app = router(app_state().await, Some(dir.clone()));
+    let (status, _, body) = probe_body(&app, probe_request("/health", None)).await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, r#"{"ok":true}"#));
+    for uri in ["/health/x", "/ready/", "/metrics/extra"] {
+        let (status, _, body) = probe_body(&app, probe_request(uri, None)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        assert!(!body.contains("shell"), "{uri}: {body}");
+    }
+    let (status, _, body) = probe_body(&app, probe_request("/projects", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("shell"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Serves `router` on an ephemeral loopback port.
+async fn serve_on_loopback(app: Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (addr, task)
+}
+
+/// `fvoci-server healthcheck` with only `FVOCI_BIND`: no database URL,
+/// keys or config, so exit codes prove it branches before server startup.
+fn healthcheck(bind: Option<&str>, mode: Option<&str>) -> std::process::Output {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_fvoci-server"));
+    command.env_clear().arg("healthcheck");
+    if let Some(mode) = mode {
+        command.arg(mode);
+    }
+    if let Some(bind) = bind {
+        command.env("FVOCI_BIND", bind);
+    }
+    command.output().expect("run healthcheck")
+}
+
+async fn healthcheck_async(
+    bind: Option<String>,
+    mode: Option<&'static str>,
+) -> std::process::Output {
+    tokio::task::spawn_blocking(move || healthcheck(bind.as_deref(), mode))
+        .await
+        .unwrap()
+}
+
+/// Source `cli.ts` healthcheck: 0 only for a 2xx `/ready`, 1 for 503, no
+/// listener, an unusable address or an unknown/split-role mode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthcheck_cli_exit_codes() {
+    let ok = Router::new().route(
+        "/ready",
+        axum::routing::get(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+    );
+    let (ok_addr, ok_task) = serve_on_loopback(ok).await;
+    let out = healthcheck_async(Some(ok_addr.to_string()), None).await;
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let wildcard = format!("0.0.0.0:{}", ok_addr.port());
+    let out = healthcheck_async(Some(wildcard), None).await;
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+
+    // The real router with PostgreSQL down answers 503.
+    let (down_addr, down_task) = serve_on_loopback(router(probe_state().await, None)).await;
+    let out = healthcheck_async(Some(down_addr.to_string()), None).await;
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("503"),
+        "{out:?}"
+    );
+
+    ok_task.abort();
+    down_task.abort();
+    let _ = ok_task.await;
+    let out = healthcheck_async(Some(ok_addr.to_string()), None).await;
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+
+    for (bind, mode) in [
+        (None, None),
+        (Some("127.0.0.1:0".to_string()), None),
+        (Some("garbage".to_string()), None),
+        (Some(down_addr.to_string()), Some("worker")),
+        (Some(down_addr.to_string()), Some("compact")),
+        (Some(down_addr.to_string()), Some("thumbnail")),
+        (Some(down_addr.to_string()), Some("bogus")),
+    ] {
+        let out = healthcheck_async(bind.clone(), mode).await;
+        assert_eq!(out.status.code(), Some(1), "{bind:?} {mode:?} {out:?}");
+        assert!(out.stdout.is_empty(), "{out:?}");
+    }
+}

@@ -1,21 +1,12 @@
 import type { ReactNode } from "react";
-import type { AttachmentMeta } from "./attachment-view.js";
+import type { AttachmentMeta, PreviewAttachment } from "../attachment-model.js";
 
-export const ATTACHMENT_ALIGNS = ["left", "center", "right"] as const;
-export type AttachmentAlign = (typeof ATTACHMENT_ALIGNS)[number];
-export const ATTACHMENT_WIDTH = { min: 25, max: 100, step: 5 } as const;
-
-export interface PreviewAttachment {
-	id: string;
-	name: string;
-	image: boolean;
-	width: number;
-	align: AttachmentAlign;
-	caption: string;
-	/** WHY: 0 = 아직 모름 — 편집 세션이 메타 폴링으로 받아 블록에 적는다(C3 치수 예약). */
-	previewWidth: number;
-	previewHeight: number;
-}
+export {
+	ATTACHMENT_ALIGNS,
+	ATTACHMENT_WIDTH,
+	type AttachmentAlign,
+	type PreviewAttachment,
+} from "../attachment-model.js";
 
 export interface PreviewContext {
 	downloadUrl: string;

@@ -200,6 +200,19 @@ fn workspace_provider(keys: &Keyring, row: &db::WorkspaceOidcRow) -> Option<Reso
     })
 }
 
+/// Workspace SSO answers on the workspace's own callback, instance providers
+/// on theirs (see [`crate::oidc::OidcSettings::workspace_redirect_uri`]).
+fn flow_redirect_uri(
+    settings: &crate::oidc::OidcSettings,
+    key: ProviderKey,
+    workspace_id: Option<Uuid>,
+) -> String {
+    match workspace_id {
+        Some(workspace_id) => settings.workspace_redirect_uri(workspace_id),
+        None => settings.redirect_uri(key),
+    }
+}
+
 async fn load_workspace_provider(
     pool: &PgPool,
     keys: &Keyring,
@@ -227,17 +240,17 @@ pub async fn begin(
     if workspace_sso && !license.has_feature("workspaceSso") {
         return Err(BeginError::NotConfigured);
     }
-    let provider = if workspace_sso {
-        load_workspace_provider(pool, keys, params.workspace_id.expect("checked")).await?
-    } else {
-        settings.find(params.provider).cloned()
+    let workspace_id = workspace_sso.then_some(params.workspace_id).flatten();
+    let provider = match workspace_id {
+        Some(workspace_id) => load_workspace_provider(pool, keys, workspace_id).await?,
+        None => settings.find(params.provider).cloned(),
     }
     .ok_or(BeginError::NotConfigured)?;
 
     let state = random_b64(32);
     let nonce = random_b64(32);
     let verifier = random_b64(32);
-    let redirect_uri = settings.redirect_uri(provider.key);
+    let redirect_uri = flow_redirect_uri(settings, provider.key, workspace_id);
     let authorization_url = match provider.kind {
         ProviderKind::OAuth2Naver => {
             let mut url = url::Url::parse(&format!("{}/oauth2.0/authorize", provider.issuer))
@@ -276,7 +289,7 @@ pub async fn begin(
         invitation_token_hash: params.invitation_token.as_deref().map(hash_token),
         user_id: params.user_id,
         consents: (!params.consents.is_empty()).then_some(params.consents),
-        workspace_id: workspace_sso.then_some(params.workspace_id).flatten(),
+        workspace_id,
         expires_at_ms: (now + Duration::seconds(STATE_TTL_SECS)).timestamp_millis(),
         issuer: provider.issuer.clone(),
         client_id: provider.client_id.clone(),
@@ -324,6 +337,10 @@ async fn oidc_session(
 
 pub struct CompleteParams<'a> {
     pub provider: ProviderKey,
+    /// The workspace of the callback route: `Some` on
+    /// `/api/v1/auth/sso/{workspace}/callback`, `None` on an instance
+    /// provider's `/api/v1/auth/oidc/{provider}/callback`.
+    pub workspace_id: Option<Uuid>,
     pub query: &'a HashMap<String, String>,
     pub signed_state: Option<&'a str>,
     /// Live session cookie at callback start: (user id, session id).
@@ -366,6 +383,12 @@ pub async fn complete(
     if stored.provider != params.provider.as_str() {
         return Ok(error(OidcErrorCode::StateMismatch, mode));
     }
+    // A response delivered to another flow's redirect URI came from another
+    // authorization server (IdP mix-up): refuse it before any discovery or
+    // token request can hand the code to the server of this state.
+    if stored.workspace_id != params.workspace_id {
+        return Ok(error(OidcErrorCode::StateMismatch, mode));
+    }
     // A valid state may outlive the license; never exchange it into a session
     // or an identity link after workspace SSO expires.
     if stored.workspace_id.is_some() && !license.has_feature("workspaceSso") {
@@ -386,7 +409,7 @@ pub async fn complete(
     let Some(code) = params.query.get("code").filter(|c| !c.is_empty()) else {
         return Ok(error(OidcErrorCode::ProviderError, mode));
     };
-    let redirect_uri = settings.redirect_uri(provider.key);
+    let redirect_uri = flow_redirect_uri(settings, provider.key, stored.workspace_id);
     let exchanged = match provider.kind {
         ProviderKind::OAuth2Naver => {
             client::naver_exchange(

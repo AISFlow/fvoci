@@ -28,8 +28,12 @@ pub struct WorkspacePurgeStats {
 /// commits only after every key for that workspace was cleaned.
 /// A crash mid-storage leaves the rows for the next sweep. A crash after
 /// storage and before the DB purge: the next sweep deletes missing objects
-/// (idempotent) and then removes the workspace. DB-first without a journal
-/// table would orphan objects; a tombstone table would need a migration.
+/// (idempotent) and then removes the workspace. Deleting the rows also
+/// journals every original and preview key through the migration-030 trigger,
+/// and `reclaim_attachment_objects` purges them again (as already missing).
+/// Storage-first predates that journal and stays; a DB-only purge would hand
+/// every key to the reclaimer's batched drain (`OBJECT_CLEANUP_BATCH` rows
+/// per upload-GC run).
 pub async fn run_workspace_purge(
     pool: &PgPool,
     storage: &ObjectStorage,

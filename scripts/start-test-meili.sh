@@ -23,7 +23,9 @@ CONTAINER="fvoci-rust-test-meili-${RUN_ID}"
 MASTER_KEY="$(openssl rand -hex 16)"
 
 cleanup() {
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  # -v is defensive: the pinned image declares no VOLUME today (its data stays
+  # in the container layer), but an image that did would leak one per run.
+  docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT

@@ -138,6 +138,23 @@ pub enum ChildSlotKind {
     Seed,
 }
 
+/// True when a spawn was refused because its live-child pool is at its cap, a
+/// transient condition worth retrying, as opposed to any other spawn failure.
+/// Meaningful only for an [`EngineSession::spawn`] or
+/// [`EngineSession::spawn_with_timings`] result: the helper reports its own
+/// per-session op and tail-row caps with the same `LimitKind::Ops`. The slot
+/// cap has no variant of its own because `LimitKind` is part of the serialized
+/// helper protocol and appears in logs.
+pub fn is_slot_cap_refusal(report: &EngineReport) -> bool {
+    matches!(
+        report.outcome,
+        EngineStatus::ResourceLimit {
+            kind: LimitKind::Ops,
+            ..
+        }
+    )
+}
+
 struct SlotGuard {
     kind: ChildSlotKind,
 }
@@ -180,13 +197,7 @@ impl SlotGuard {
             match Self::try_acquire(kind) {
                 Ok(guard) => return Ok(guard),
                 Err(report) => {
-                    if !matches!(
-                        report.outcome,
-                        EngineStatus::ResourceLimit {
-                            kind: LimitKind::Ops,
-                            ..
-                        }
-                    ) {
+                    if !is_slot_cap_refusal(&report) {
                         return Err(report);
                     }
                     if Instant::now() >= deadline {
@@ -289,9 +300,18 @@ struct LiveChild {
 /// Drop kills and reaps. A rejected or uncertain candidate must be recycled
 /// via [`EngineSession::kill_and_reap`] and a fresh load of the last committed
 /// snapshot — never Yrs undo as a DB rollback. Success here is not durable.
+///
+/// The child is spawned with `PR_SET_PDEATHSIG(SIGKILL)`, which Linux ties to
+/// the spawning *thread*, not the process: the helper dies when that thread
+/// exits. A session must therefore never outlive, or be used off, the thread
+/// that spawned it. The room bridge spawns, calls and reaps on its own worker
+/// thread; offline sessions spawn, call and reap inside one `spawn_blocking`
+/// closure. Debug builds assert this on every [`EngineSession::call`].
 pub struct EngineSession {
     live: Option<LiveChild>,
     pid: u32,
+    spawned_on: thread::ThreadId,
+    oom_checked: bool,
 }
 
 impl EngineSession {
@@ -342,6 +362,11 @@ impl EngineSession {
     }
 
     pub fn call(&mut self, request: &Request) -> EngineReport {
+        debug_assert_eq!(
+            thread::current().id(),
+            self.spawned_on,
+            "EngineSession used off its spawning thread; PDEATHSIG kills the helper when that thread exits"
+        );
         let (max_frame, timeout_ms, limits) = match self.live.as_ref() {
             Some(live) => (
                 live.limits.max_frame_bytes,
@@ -392,6 +417,7 @@ impl EngineSession {
         }
         match self.wait_frame(deadline) {
             Ok(report) => {
+                self.check_oom_score_adj_once();
                 if !matches!(report.outcome, EngineStatus::Ok { .. }) {
                     self.kill_and_reap();
                     EngineReport {
@@ -627,6 +653,19 @@ impl EngineSession {
         outcome
     }
 
+    /// After the helper's first reply its startup `oom_score_adj` write is done:
+    /// read it back once, while the child is still alive, and record a denied
+    /// write for the server's one-time warning.
+    fn check_oom_score_adj_once(&mut self) {
+        if std::mem::replace(&mut self.oom_checked, true) {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if child_oom_score_adj(self.pid).is_some_and(|value| value != 1000) {
+            OOM_BACKSTOP_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Kill, wait, join helpers. Safe to call twice. Session cannot be reused.
     pub fn kill_and_reap(&mut self) {
         if let Some(mut live) = self.live.take() {
@@ -734,10 +773,6 @@ fn spawn_child(req: SpawnRequest, slot: SlotGuard) -> Result<EngineSession, Engi
 
     let pid = child.id();
     register_live_child_pid(pid);
-    #[cfg(target_os = "linux")]
-    if child_oom_score_adj(pid).is_some_and(|value| value != 1000) {
-        OOM_BACKSTOP_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
     #[cfg(feature = "test-hang")]
     record_spawn(pid);
 
@@ -763,6 +798,8 @@ fn spawn_child(req: SpawnRequest, slot: SlotGuard) -> Result<EngineSession, Engi
             _slot: slot,
         }),
         pid,
+        spawned_on: thread::current().id(),
+        oom_checked: false,
     })
 }
 
@@ -1004,6 +1041,8 @@ fn worker_fail(reason: WorkerFailureReason, detail: impl Into<String>) -> Engine
 /// Raise the soft `RLIMIT_NOFILE` to the hard ceiling for the server process.
 pub fn raise_nofile_to_hard_limit() {
     #[cfg(target_os = "linux")]
+    // SAFETY: getrlimit and setrlimit only read or write the stack-local `lim`,
+    // which outlives both calls.
     unsafe {
         let mut lim = libc::rlimit {
             rlim_cur: 0,
@@ -1019,36 +1058,54 @@ pub fn raise_nofile_to_hard_limit() {
     }
 }
 
+/// Clear this process's dumpable flag (`PR_SET_DUMPABLE` 0). Same-uid
+/// processes (every helper the server spawns) can then no longer read its
+/// `/proc/<pid>/environ`, memory or fds, nor attach to it; the kernel owns its
+/// `/proc/<pid>/*` files by root. A uid-1000 `docker exec` is kept out of
+/// memory and fds too; its own environment already holds every value of the
+/// container configuration. Children become dumpable again at exec (readable
+/// binaries, no uid change), so the parent still reads their
+/// `/proc/<pid>/status` and `oom_score_adj`. A forked child before exec is not
+/// dumpable yet, which is why the collab helper sets its own `oom_score_adj`
+/// after exec. Linux only; a no-op elsewhere.
+pub fn make_process_non_dumpable() -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_DUMPABLE and PR_GET_DUMPABLE take only integer arguments
+    // and read or write no memory of this process.
+    unsafe {
+        let zero: libc::c_ulong = 0;
+        if libc::prctl(libc::PR_SET_DUMPABLE, zero, zero, zero, zero) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::prctl(libc::PR_GET_DUMPABLE, zero, zero, zero, zero) != 0 {
+            return Err(std::io::Error::other(
+                "PR_SET_DUMPABLE 0 did not take effect",
+            ));
+        }
+    }
+    Ok(())
+}
+
 static OOM_BACKSTOP_MISSING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// True once a spawned helper was observed without `oom_score_adj=1000` (the
-/// container profile denied it), i.e. cgroup OOM may pick the server instead.
+/// True once a helper answered its first request without `oom_score_adj=1000`
+/// (the container profile denied it), i.e. cgroup OOM may pick the server instead.
 pub fn oom_backstop_missing() -> bool {
     OOM_BACKSTOP_MISSING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Raise `oom_score_adj` so cgroup/kernel OOM prefers helpers over the parent server.
-fn apply_child_oom_score_adj() -> std::io::Result<()> {
+/// Raise this process's `oom_score_adj` to 1000 so cgroup/kernel OOM prefers
+/// a helper over the parent server. The collab helper calls this first thing
+/// after exec, before it reads a frame. It cannot happen between fork and exec:
+/// a non-dumpable server's forked child is not dumpable yet, so the kernel owns
+/// its `/proc/self` files by root and the write fails. Raising needs no
+/// capability; a container profile (e.g. AppArmor docker-default) may still
+/// deny it, and the helper must start anyway.
+pub fn raise_own_oom_score_adj() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // Runs between fork and exec: no allocation (static path, raw errno errors).
-        let path = c"/proc/self/oom_score_adj";
-        let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let value = b"1000";
-        let written =
-            unsafe { libc::write(fd, value.as_ptr() as *const libc::c_void, value.len()) };
-        let close_err = unsafe { libc::close(fd) };
-        if written < 0 || close_err != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if written as usize != value.len() {
-            return Err(std::io::Error::from_raw_os_error(libc::EIO));
-        }
-        Ok(())
+        std::fs::write("/proc/self/oom_score_adj", b"1000")
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1079,13 +1136,18 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         let as_bytes = limits.max_child_as_bytes;
         let stack_bytes = limits.max_child_stack_bytes;
         let cpu_secs = limits.cpu_budget_secs();
+        let expected_ppid = std::process::id() as libc::pid_t;
+        // SAFETY: the closure runs in the forked child of a multi-threaded
+        // process, before exec, where another thread may have held the
+        // allocator or any other lock at fork time. It captures only integers
+        // and calls apply_rlimits_now and apply_parent_death_signal, which make
+        // raw syscalls (setrlimit, prctl via syscall, getppid, raise, _exit)
+        // and build errors with io::Error::last_os_error; none of them
+        // allocates, takes a lock or reads the environment.
         unsafe {
             cmd.pre_exec(move || {
                 apply_rlimits_now(as_bytes, cpu_secs, stack_bytes)?;
-                // Best effort: container profiles (e.g. AppArmor docker-default)
-                // may deny writing oom_score_adj; the helper must still start.
-                let _ = apply_child_oom_score_adj();
-                Ok(())
+                apply_parent_death_signal(expected_ppid)
             });
         }
         Ok(())
@@ -1097,10 +1159,47 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
     }
 }
 
+/// Ask the kernel to SIGKILL this child when the forking thread dies, and cover
+/// the fork-to-prctl race where the parent is already gone (the forking thread
+/// itself is blocked in `spawn` until exec). Same contract as the
+/// document-extract client. A server that dies mid-request (SIGKILL, crash,
+/// shutdown deadline) must not leave a helper running until RLIMIT_CPU.
+///
+/// `expected_ppid` is the server's pid, read before fork; any other
+/// `getppid()` means the server died before PDEATHSIG was armed and the child
+/// was reparented.
+#[cfg(target_os = "linux")]
+fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<()> {
+    // SAFETY: runs between fork and exec (see apply_pre_exec_rlimits). Thin
+    // syscall wrappers only (`syscall(SYS_prctl)`, `getppid`, `raise`,
+    // `_exit`) with integer arguments: no allocation, no locks.
+    unsafe {
+        let rc = libc::syscall(
+            libc::SYS_prctl,
+            libc::PR_SET_PDEATHSIG as libc::c_long,
+            libc::SIGKILL as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
+        );
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::getppid() != expected_ppid {
+            let _ = libc::raise(libc::SIGKILL);
+            libc::_exit(127);
+        }
+    }
+    Ok(())
+}
+
 /// Apply OS ceilings in the current process. Used from `pre_exec` and the child
-/// binary before it reads frames.
+/// binary before it reads frames. Must stay allocation- and lock-free: the
+/// `pre_exec` closure calls it in the forked child.
 pub fn apply_rlimits_now(as_bytes: u64, cpu_secs: u64, stack_bytes: u64) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
+    // SAFETY: each setrlimit call reads a stack-local rlimit that outlives the
+    // call.
     unsafe {
         let stack_lim = libc::rlimit {
             rlim_cur: stack_bytes,

@@ -1,7 +1,7 @@
 import * as Popover from "@radix-ui/react-popover";
 import { type ReactNode, useEffect, useRef } from "react";
 import { leaveMenu, useRovingMenu } from "./menu-keyboard.js";
-import { overlayOwner } from "./overlay-owner.js";
+import { overlayOwner } from "../overlay-owner.js";
 
 export function PointMenu({
 	x,

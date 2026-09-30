@@ -5,6 +5,7 @@ import {
   SETTING_ENUM_OPTIONS,
   SETTINGS_CATALOG,
   SETTINGS_ENTRIES,
+  attachmentTransferView,
   optionKey,
   withoutAssets,
 } from "./settings-catalog.ts";
@@ -66,4 +67,53 @@ test("draft schemas mirror the server limits", () => {
   };
   assert.equal(op.safeParse({ ...empty, businessInfoUrl: "https://example.com" }).success, true);
   assert.equal(op.safeParse({ ...empty, businessInfoUrl: "javascript:alert(1)" }).success, false);
+});
+
+test("attachmentTransfer accepts only the two modes the server knows", () => {
+  const schema = SETTINGS_CATALOG.attachmentTransfer.schema;
+  assert.equal(schema.safeParse({ mode: "proxy" }).success, true);
+  assert.equal(schema.safeParse({ mode: "presigned" }).success, true);
+  assert.equal(schema.safeParse({ mode: "direct" }).success, false);
+  assert.equal(schema.safeParse({ mode: "proxy", ttl: 5 }).success, false);
+  assert.deepEqual(SETTING_ENUM_OPTIONS["attachmentTransfer.mode"], ["proxy", "presigned"]);
+});
+
+test("attachmentTransfer card: effective mode, unavailable reason and blocked value", () => {
+  const status = (over: Record<string, unknown>) => ({
+    effective: "proxy" as const,
+    source: "default" as const,
+    presignedAvailable: true,
+    unavailableReason: null,
+    blocked: false,
+    ...over,
+  });
+  const capable = attachmentTransferView(status({ effective: "presigned", source: "stored" }));
+  assert.equal(capable.effectiveOptionKey, "settings.attachmentTransfer.mode.option.presigned");
+  assert.equal(capable.disabledOptions.size, 0);
+  assert.equal(capable.unavailableKey, null);
+  assert.equal(capable.blocked, false);
+
+  for (const reason of ["storage_local", "public_endpoint_missing"] as const) {
+    const view = attachmentTransferView(
+      status({ presignedAvailable: false, unavailableReason: reason }),
+    );
+    assert.deepEqual([...view.disabledOptions], ["presigned"]);
+    assert.equal(view.unavailableKey, `settings.attachmentTransfer.unavailable.${reason}`);
+    assert.ok(Object.hasOwn(ko, view.unavailableKey!), reason);
+  }
+
+  const blocked = attachmentTransferView(
+    status({ source: "stored", presignedAvailable: false, unavailableReason: "public_endpoint_missing", blocked: true }),
+  );
+  assert.equal(blocked.blocked, true);
+  assert.equal(blocked.effectiveOptionKey, "settings.attachmentTransfer.mode.option.proxy");
+  for (const key of ["settings.attachmentTransfer.blocked", "settings.attachmentTransfer.effective"]) {
+    assert.ok(Object.hasOwn(ko, key), key);
+  }
+  assert.deepEqual(attachmentTransferView(undefined), {
+    effectiveOptionKey: null,
+    disabledOptions: new Set(),
+    unavailableKey: null,
+    blocked: false,
+  });
 });

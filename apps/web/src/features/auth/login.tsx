@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { problemMessage } from "@/lib/api";
 import { formFieldMessage } from "@/lib/form-issues";
 import type { LoginInput, ProviderOutput } from "@/lib/contracts";
-import { oidcStartHref, WORKSPACE_SSO_ACTION } from "@/lib/oidc";
+import { oidcStartHref, startWorkspaceSso, type WorkspaceSsoSlugIssue } from "@/lib/oidc";
 import { loginInput, magicLinkInput, passwordResetInput } from "@/lib/validators";
 import {
   AuthAlert,
@@ -91,12 +91,25 @@ function EmailActionForm({
   );
 }
 
-// Plain GET form: the server resolves the workspace slug and redirects the
-// browser to that workspace's IdP.
+// Not a form submission to the server: `startWorkspaceSso` navigates by
+// script, since the server's redirect to the IdP would break `form-action`.
 function SsoSlugForm() {
+  const [issue, setIssue] = useState<WorkspaceSsoSlugIssue | null>(null);
   return (
-    <form method="get" action={WORKSPACE_SSO_ACTION} className="auth-shell__stack">
-      <AuthField id="login-sso-slug" label={t("auth.sso.slug")}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        const slug = new FormData(event.currentTarget).get("slug");
+        setIssue(startWorkspaceSso(typeof slug === "string" ? slug : ""));
+      }}
+      noValidate
+      className="auth-shell__stack"
+    >
+      <AuthField
+        id="login-sso-slug"
+        label={t("auth.sso.slug")}
+        error={issue ? t(issue) : undefined}
+      >
         <AuthInput id="login-sso-slug" name="slug" autoComplete="off" maxLength={32} />
       </AuthField>
       <Button type="submit" variant="outline" size="lg" className={authOutlineButtonClass}>

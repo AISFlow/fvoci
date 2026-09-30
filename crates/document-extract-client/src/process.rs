@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::limits::{Limits, MAX_CHILD_CONCURRENCY, MAX_CHILD_STDOUT_BYTES, RSS_POLL_MS};
+use crate::limits::{Limits, CHILD_WAIT_POLL_MS, MAX_CHILD_CONCURRENCY, MAX_CHILD_STDOUT_BYTES};
 use crate::outcome::{ExtractReport, ExtractStatus, LimitKind, WorkerFailureReason};
 
 static CHILD_SLOTS: OnceLock<Mutex<usize>> = OnceLock::new();
@@ -181,8 +181,15 @@ fn cancelled(flag: &AtomicBool) -> bool {
     flag.load(Ordering::Acquire)
 }
 
-/// Run extraction in a killable child. This call is **synchronous**: the
-/// deadline is `limits.timeout_ms` from admission. There is no external
+/// Run extraction in a killable child. This call is **synchronous**. The wait
+/// for the single child slot is bounded by `limits.timeout_ms` from the call,
+/// and the child's watchdog gets `limits.timeout_ms` from slot admission, so
+/// one call takes up to about twice `timeout_ms` (plus spawn and reap). The
+/// trade-off: a request admitted late in its wait can then hold the only slot
+/// for a full `timeout_ms` when its document runs that long, so with three
+/// contenders the third one's slot wait can expire. That expiry is still
+/// `ResourceLimit { kind: Time }` ("timed out waiting for extract child
+/// slot"); a separate slot-busy outcome is deferred. There is no external
 /// cancel token; use [`extract_killable_with_cancel`] for an `AtomicBool`.
 /// Dropping a `JoinHandle` that wraps this function does **not** terminate
 /// the child; only the watchdog kill+reap path or Linux parent-death SIGKILL
@@ -246,8 +253,8 @@ pub fn extract_killable_with_cancel(
         if cancelled(cancel) {
             return Err(Cancelled { child_pid: None });
         }
-        let deadline = Instant::now() + Duration::from_millis(req.limits.timeout_ms);
-        let _slot = match SlotGuard::acquire(deadline, cancel) {
+        let timeout = Duration::from_millis(req.limits.timeout_ms);
+        let _slot = match SlotGuard::acquire(Instant::now() + timeout, cancel) {
             SlotWait::Ready(slot) => slot,
             SlotWait::Cancelled => return Err(Cancelled { child_pid: None }),
             SlotWait::Failed(report) => return Ok(report),
@@ -255,7 +262,9 @@ pub fn extract_killable_with_cancel(
         if cancelled(cancel) {
             return Err(Cancelled { child_pid: None });
         }
-        spawn_child(req, deadline, cancel)
+        // A fresh window from admission: time spent queued behind another
+        // extraction must not turn into a `Time` limit for this document.
+        spawn_child(req, Instant::now() + timeout, cancel)
     }
 }
 
@@ -309,6 +318,10 @@ fn spawn_child(
         // nothing from the server (database URLs, peppers, ENCRYPTION_KEYS,
         // SMTP or storage credentials). It reads no variables itself; the
         // test hang arrives as `--test-hang-ms`, never through the env.
+        // This clears only the child's own copy: the helper runs as the
+        // server's uid, and what keeps it from reading the server's
+        // /proc/<pid>/environ is that fvoci-server makes itself non-dumpable
+        // at startup.
         .env_clear();
     for key in CHILD_ENV_ALLOWLIST {
         if let Some(value) = std::env::var_os(key) {
@@ -378,14 +391,13 @@ fn spawn_child(
                     kill_and_reap(&mut child);
                     break;
                 }
-                if let Some(rss) = child_rss_bytes(pid) {
-                    if rss > req.limits.max_child_rss_bytes {
-                        limit = Some(LimitKind::Memory);
-                        kill_and_reap(&mut child);
-                        break;
-                    }
-                }
-                thread::sleep(Duration::from_millis(RSS_POLL_MS));
+                // No RSS poll: RLIMIT_AS, set before exec, already bounds
+                // RSS, and an allocation failure is classified from the exit.
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(CHILD_WAIT_POLL_MS)),
+                );
             }
             Err(err) => {
                 kill_and_reap(&mut child);
@@ -570,17 +582,6 @@ fn kill_and_reap(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn child_rss_bytes(pid: u32) -> Option<u64> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
-            return Some(kb.saturating_mul(1024));
-        }
-    }
-    None
-}
-
 fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -588,6 +589,11 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         let as_bytes = limits.max_child_rss_bytes;
         let cpu_secs = (limits.timeout_ms / 1000).max(1);
         let expected_ppid = std::process::id() as libc::pid_t;
+        // SAFETY: the closure runs in the forked child before exec. It
+        // captures only `Copy` integers and calls setrlimit, prctl, getppid,
+        // raise and _exit through `apply_rlimits_now` and
+        // `apply_parent_death_signal`, which allocate nothing and take no
+        // locks (an error is `io::Error::last_os_error`, an OS code).
         unsafe {
             cmd.pre_exec(move || {
                 apply_rlimits_now(as_bytes, cpu_secs)?;
@@ -634,6 +640,11 @@ pub fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<
 /// Apply OS ceilings in the current process. Used from `pre_exec` and the child
 /// binary before it reads input.
 pub fn apply_rlimits_now(as_bytes: u64, cpu_secs: u64) -> std::io::Result<()> {
+    // SAFETY: `as_lim` and `cpu_lim` are initialized locals that outlive the
+    // calls, and setrlimit only reads them. glibc's setrlimit is a thin
+    // prlimit64 syscall wrapper that neither allocates nor locks, which is why
+    // the `pre_exec` closure may call this between fork and exec (setrlimit is
+    // not on POSIX's async-signal-safe list).
     #[cfg(target_os = "linux")]
     unsafe {
         let as_lim = libc::rlimit {
@@ -659,6 +670,25 @@ pub fn apply_rlimits_now(as_bytes: u64, cpu_secs: u64) -> std::io::Result<()> {
             std::io::ErrorKind::Unsupported,
             "setrlimit is Linux-only",
         ))
+    }
+}
+
+/// Raise this process's `oom_score_adj` to 1000, the collaboration helpers'
+/// value, so a cgroup or kernel OOM kill ranks document children with them
+/// by size and ahead of the server: a runaway parser goes first instead of
+/// every smaller live room. Each document child calls this itself after exec:
+/// before exec, a non-dumpable server's child still has root-owned
+/// `/proc/self` files and the write fails. Raising needs no capability, but a
+/// container profile (e.g. AppArmor docker-default) may deny it; callers
+/// ignore the error and run anyway.
+pub fn raise_own_oom_score_adj() -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::write("/proc/self/oom_score_adj", b"1000")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(())
     }
 }
 

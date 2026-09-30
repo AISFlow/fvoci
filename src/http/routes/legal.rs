@@ -41,10 +41,18 @@ const PUBLIC_CACHE_CONTROL: &str = "public, max-age=60";
 
 /// Source `SECURITY_TXT_EXPIRES_MS` / RFC 9116 §2.5.5: regenerated per request.
 const SECURITY_TXT_EXPIRES_DAYS: i64 = 365;
-const SECURITY_TXT_CACHE_CONTROL: &str = "public, max-age=3600";
+/// Source `publicText` helper (`server.ts`), shared by `/robots.txt`.
+const PUBLIC_TEXT_CACHE_CONTROL: &str = "public, max-age=3600";
+
+/// Source `ROBOTS_TXT` (`server.ts`); `humanPaths.legalDir` is `/legal/`
+/// (`packages/contracts/src/human-paths.ts`). `/s/` is deliberately absent:
+/// unfurl bots that honour robots would drop Slack/Kakao share cards, and
+/// `/s/{token}` keeps `x-robots-tag: noindex` for indexing instead.
+pub const ROBOTS_TXT: &str = "User-agent: *\nDisallow: /api/\nDisallow: /w/\nAllow: /legal/\n";
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/robots.txt", get(get_robots_txt))
         .route("/.well-known/security.txt", get(get_security_txt))
         .route("/api/v1/legal/{kind}", get(get_legal))
         .route("/api/v1/legal/{kind}/versions", get(get_legal_versions))
@@ -80,6 +88,18 @@ fn security_txt_body(contact: &str) -> String {
     format!("Contact: {contact}\nExpires: {expires}\nPreferred-Languages: ko, en\n")
 }
 
+/// Public crawler policy (source `server.ts` `/robots.txt`, `publicText`).
+async fn get_robots_txt() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, PUBLIC_TEXT_CACHE_CONTROL),
+        ],
+        ROBOTS_TXT,
+    )
+        .into_response()
+}
+
 /// Public RFC 9116 security contact (source `server.ts` `/.well-known/security.txt`).
 async fn get_security_txt(State(state): State<AppState>) -> Result<Response, AppError> {
     let values = settings::current_values_with_license(
@@ -98,7 +118,7 @@ async fn get_security_txt(State(state): State<AppState>) -> Result<Response, App
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
-            (header::CACHE_CONTROL, SECURITY_TXT_CACHE_CONTROL),
+            (header::CACHE_CONTROL, PUBLIC_TEXT_CACHE_CONTROL),
         ],
         body,
     )

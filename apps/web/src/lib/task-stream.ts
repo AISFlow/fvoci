@@ -10,7 +10,9 @@ export type TaskStreamSubscription = {
 };
 
 /**
- * Project task invalidation stream. `open` / `reset` events trigger `onResync`.
+ * Project task invalidation stream. `open` / `reset` events trigger `onResync`,
+ * including the `open` of a source the pool reopened after a refused
+ * connection, which recovers hints missed in between.
  * `task` events carry invalidation hints only (never authoritative ACL).
  */
 export function subscribeTaskStream(

@@ -1,7 +1,6 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -21,18 +20,14 @@ use futures_util::Stream;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::db::context::{session_is_live, set_tenant};
-use crate::db::projects::{lock_project, project_permission};
-use crate::db::workspace::membership_role;
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
 use crate::http::routes::tasks::{internal, require_session};
 use crate::http::state::AppState;
-use crate::projects::ProjectPermission;
 use crate::streams::{
-    access_event_targets_user, initial_cursor, poll_access_events, poll_task_events,
-    task_stream_wire_hint, EventCursor, StreamAcquireError, StreamGuard, StreamHub,
-    STREAM_CHANNEL_CAPACITY, STREAM_HIGH_WATER_MARK, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
+    initial_cursor, poll_access_events, poll_task_events, project_stream_access,
+    task_stream_wire_hint, workspace_stream_access, EventCursor, StreamAccess, StreamAcquireError,
+    StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
 };
 
 #[cfg(feature = "db-tests")]
@@ -115,13 +110,20 @@ async fn project_task_stream(
         Some(workspace_id),
     )
     .await?;
-    admit_project_view(&state, workspace_id, project_id, user_id, session_id).await?;
+    admit(
+        project_stream_access(
+            &state.auth.db.pool,
+            workspace_id,
+            project_id,
+            user_id,
+            session_id,
+        )
+        .await,
+    )?;
 
     let pool = state.auth.db.pool.clone();
     let hub = state.streams.clone();
-    let cursor = initial_cursor(&pool, workspace_id)
-        .await
-        .map_err(internal)?;
+    let cursor = initial_cursor(&pool).await.map_err(internal)?;
     let stream = task_sse_stream(
         hub,
         pool,
@@ -157,75 +159,24 @@ async fn workspace_access_stream(
         Some(workspace_id),
     )
     .await?;
-    admit_workspace_member(&state, workspace_id, user_id, session_id).await?;
+    admit(workspace_stream_access(&state.auth.db.pool, workspace_id, user_id, session_id).await)?;
 
     let pool = state.auth.db.pool.clone();
     let hub = state.streams.clone();
-    let cursor = initial_cursor(&pool, workspace_id)
-        .await
-        .map_err(internal)?;
+    let cursor = initial_cursor(&pool).await.map_err(internal)?;
     let stream = access_sse_stream(hub, pool, workspace_id, user_id, session_id, cursor, guard);
     Ok(sse_response(stream))
 }
 
-async fn admit_project_view(
-    state: &AppState,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> Result<(), AppError> {
-    let pool = &state.auth.db.pool;
-    let mut tx = pool.begin().await.map_err(internal)?;
-    set_tenant(&mut tx, workspace_id).await.map_err(internal)?;
-    if !session_is_live(&mut tx, user_id, session_id)
-        .await
-        .map_err(internal)?
-    {
-        tx.rollback().await.ok();
-        return Err(AppError::from_code(ProblemCode::AuthenticationRequired));
+/// Admission keeps the 401 (credential gone) / 404 (no access) distinction.
+fn admit(access: Result<StreamAccess, sqlx::Error>) -> Result<(), AppError> {
+    match access.map_err(internal)? {
+        StreamAccess::Allowed => Ok(()),
+        StreamAccess::CredentialDead => {
+            Err(AppError::from_code(ProblemCode::AuthenticationRequired))
+        }
+        StreamAccess::Denied => Err(AppError::from_code(ProblemCode::NotFound)),
     }
-    let Some(locked) = lock_project(&mut tx, workspace_id, project_id)
-        .await
-        .map_err(internal)?
-    else {
-        tx.rollback().await.ok();
-        return Err(AppError::from_code(ProblemCode::NotFound));
-    };
-    let permission = project_permission(&mut tx, workspace_id, user_id, &locked)
-        .await
-        .map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
-    if !permission.at_least(ProjectPermission::View) {
-        return Err(AppError::from_code(ProblemCode::NotFound));
-    }
-    Ok(())
-}
-
-async fn admit_workspace_member(
-    state: &AppState,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> Result<(), AppError> {
-    let pool = &state.auth.db.pool;
-    let mut tx = pool.begin().await.map_err(internal)?;
-    set_tenant(&mut tx, workspace_id).await.map_err(internal)?;
-    if !session_is_live(&mut tx, user_id, session_id)
-        .await
-        .map_err(internal)?
-    {
-        tx.rollback().await.ok();
-        return Err(AppError::from_code(ProblemCode::AuthenticationRequired));
-    }
-    let role = membership_role(&mut tx, workspace_id, user_id)
-        .await
-        .map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
-    if role.is_none() {
-        return Err(AppError::from_code(ProblemCode::NotFound));
-    }
-    Ok(())
 }
 
 fn stream_stopped() -> Response {
@@ -278,9 +229,13 @@ struct TaskStreamAuth {
 }
 
 /// Single bounded hint queue; HTTP `Stream` polls hints and authorizes on consumption.
+/// Every item, `open` included, is checked against current project access
+/// when the body takes it, so a hint queued before a revocation commits is
+/// withheld (`task_stream_enqueue_before_revoke_discards_queued_hints`). The
+/// producer's poll checks only the credential, so lost project access ends
+/// the stream at its next item.
 struct TaskAuthorizedSseStream {
     queue_rx: tokio::sync::mpsc::Receiver<TaskStreamQueueItem>,
-    queue_body_bytes: Arc<AtomicUsize>,
     auth: TaskStreamAuth,
     pending: Option<TaskStreamQueueItem>,
     authorize: Option<Pin<Box<dyn Future<Output = bool> + Send>>>,
@@ -309,7 +264,9 @@ impl Stream for TaskAuthorizedSseStream {
         match authorize.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(false) => {
-                drain_task_queue(&mut this.queue_rx, &this.queue_body_bytes);
+                // Deny ends the stream. Closing the queue stops the producer at
+                // its next send; the queued hints go with the receiver.
+                this.queue_rx.close();
                 this.pending = None;
                 this.authorize = None;
                 Poll::Ready(None)
@@ -317,7 +274,6 @@ impl Stream for TaskAuthorizedSseStream {
             Poll::Ready(true) => {
                 let item = this.pending.take().expect("pending after auth");
                 this.authorize = None;
-                release_queue_body_bytes(&this.queue_body_bytes, task_item_body_bytes(&item));
                 Poll::Ready(Some(Ok(queue_item_to_event(item))))
             }
         }
@@ -335,8 +291,11 @@ fn authorize_queue_item(
     let session_id = auth.session_id;
     match item {
         TaskStreamQueueItem::Open | TaskStreamQueueItem::TaskHint { .. } => Box::pin(async move {
-            task_hint_delivery_authorized(&pool, workspace_id, project_id, user_id, session_id)
-                .await
+            // Fail closed: a DB error withholds the item like a denial.
+            matches!(
+                project_stream_access(&pool, workspace_id, project_id, user_id, session_id).await,
+                Ok(StreamAccess::Allowed)
+            )
         }),
     }
 }
@@ -351,54 +310,15 @@ fn queue_item_to_event(item: TaskStreamQueueItem) -> Event {
     }
 }
 
-fn task_item_body_bytes(item: &TaskStreamQueueItem) -> usize {
-    match item {
-        TaskStreamQueueItem::Open => "event: open\ndata: {}\n\n".len(),
-        TaskStreamQueueItem::TaskHint { wire_verb, task_id } => {
-            let data = json!({"verb": wire_verb, "taskId": task_id}).to_string();
-            format!("event: task\ndata: {data}\n\n").len()
-        }
-    }
-}
-
-fn reserve_queue_body_bytes(budget: &AtomicUsize, bytes: usize, limit: usize) -> bool {
-    loop {
-        let current = budget.load(Ordering::Acquire);
-        let projected = current + bytes;
-        if projected > limit {
-            return false;
-        }
-        if budget
-            .compare_exchange_weak(current, projected, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            return true;
-        }
-    }
-}
-
-fn release_queue_body_bytes(budget: &AtomicUsize, bytes: usize) {
-    budget
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            Some(current.saturating_sub(bytes))
-        })
-        .expect("queue byte budget");
-}
-
+/// `Err` when the bounded queue is full or closed; the producer then exits.
 fn try_enqueue_task_hint(
     queue_tx: &tokio::sync::mpsc::Sender<TaskStreamQueueItem>,
-    queue_body_bytes: &Arc<AtomicUsize>,
     workspace_id: Uuid,
     project_id: Uuid,
     item: TaskStreamQueueItem,
 ) -> Result<(), ()> {
-    let bytes = task_item_body_bytes(&item);
-    if !reserve_queue_body_bytes(queue_body_bytes, bytes, STREAM_HIGH_WATER_MARK) {
-        return Err(());
-    }
     let is_hint = matches!(&item, TaskStreamQueueItem::TaskHint { .. });
     if queue_tx.try_send(item).is_err() {
-        release_queue_body_bytes(queue_body_bytes, bytes);
         return Err(());
     }
     if is_hint {
@@ -409,26 +329,6 @@ fn try_enqueue_task_hint(
 
 #[cfg(not(feature = "db-tests"))]
 fn record_task_hint_enqueued(_workspace_id: Uuid, _project_id: Uuid) {}
-
-fn drain_task_queue(
-    queue_rx: &mut tokio::sync::mpsc::Receiver<TaskStreamQueueItem>,
-    queue_body_bytes: &Arc<AtomicUsize>,
-) {
-    while let Ok(item) = queue_rx.try_recv() {
-        release_queue_body_bytes(queue_body_bytes, task_item_body_bytes(&item));
-    }
-}
-
-async fn task_hint_delivery_authorized(
-    pool: &sqlx::PgPool,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> bool {
-    session_still_valid(pool, workspace_id, user_id, session_id).await
-        && project_still_viewable(pool, workspace_id, project_id, user_id).await
-}
 
 #[allow(clippy::too_many_arguments)]
 fn task_sse_stream(
@@ -442,7 +342,6 @@ fn task_sse_stream(
     guard: StreamGuard,
 ) -> TaskAuthorizedSseStream {
     let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
-    let queue_body_bytes = Arc::new(AtomicUsize::new(0));
     let auth = TaskStreamAuth {
         pool: pool.clone(),
         workspace_id,
@@ -451,11 +350,9 @@ fn task_sse_stream(
         session_id,
     };
 
-    let queue_body_bytes_producer = Arc::clone(&queue_body_bytes);
     tokio::spawn(async move {
         if try_enqueue_task_hint(
             &queue_tx,
-            &queue_body_bytes_producer,
             workspace_id,
             project_id,
             TaskStreamQueueItem::Open,
@@ -472,42 +369,49 @@ fn task_sse_stream(
             if !hub.accepting() {
                 return;
             }
-            if !session_still_valid(&pool, workspace_id, user_id, session_id).await {
-                return;
-            }
             tokio::select! {
                 _ = queue_tx.closed() => return,
                 _ = tokio::time::sleep(STREAM_POLL_INTERVAL) => {}
             }
-            match poll_task_events(&pool, workspace_id, project_id, &cursor, 50).await {
-                Ok(rows) => {
-                    for row in rows {
-                        let Some((wire_verb, task_id)) = task_stream_wire_hint(&row) else {
-                            cursor = EventCursor {
-                                xact: row.xact.clone(),
-                                seq: row.seq,
-                            };
+            // The credential check shares the poll transaction, so a revoked
+            // session or token ends the stream within one tick.
+            match poll_task_events(
+                &pool,
+                workspace_id,
+                project_id,
+                user_id,
+                session_id,
+                &cursor,
+                50,
+            )
+            .await
+            {
+                Ok(None) => return,
+                Ok(Some(page)) => {
+                    for row in &page.rows {
+                        let Some((wire_verb, task_id)) = task_stream_wire_hint(row) else {
                             continue;
                         };
                         if try_enqueue_task_hint(
                             &queue_tx,
-                            &queue_body_bytes_producer,
                             workspace_id,
                             project_id,
                             TaskStreamQueueItem::TaskHint { wire_verb, task_id },
                         )
                         .is_err()
                         {
+                            // A full queue ends the stream; the client resyncs on reconnect.
                             return;
                         }
-                        cursor = EventCursor {
-                            xact: row.xact.clone(),
-                            seq: row.seq,
-                        };
                     }
+                    // Only after every row was handled: past the page, or
+                    // past every settled event when the page was not full.
+                    cursor = page.next;
                 }
                 Err(err) => {
+                    // Fail closed: the credential could not be checked.
                     tracing::warn!("task stream poll failed: {}", err);
+                    return;
                 }
             }
         }
@@ -515,7 +419,6 @@ fn task_sse_stream(
 
     TaskAuthorizedSseStream {
         queue_rx,
-        queue_body_bytes,
         auth,
         pending: None,
         authorize: None,
@@ -546,47 +449,29 @@ fn access_sse_stream(
     workspace_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
-    mut cursor: EventCursor,
+    cursor: EventCursor,
     guard: StreamGuard,
 ) -> AccessSseStream {
     let (end_tx, end_rx) = tokio::sync::mpsc::channel(1);
     let (disconnect_tx, disconnect_rx) = tokio::sync::mpsc::channel::<()>(1);
     tokio::spawn(async move {
-        let mut finished = false;
-        while !finished {
+        let mut cursor = cursor;
+        loop {
             if !hub.accepting() {
-                break;
-            }
-            if !session_still_valid(&pool, workspace_id, user_id, session_id).await {
                 break;
             }
             tokio::select! {
                 _ = disconnect_tx.closed() => break,
                 _ = tokio::time::sleep(STREAM_POLL_INTERVAL) => {}
             }
-            match poll_access_events(&pool, workspace_id, user_id, &cursor, 50).await {
-                Ok(rows) => {
-                    for row in rows {
-                        cursor = EventCursor {
-                            xact: row.xact.clone(),
-                            seq: row.seq,
-                        };
-                        if !session_still_valid(&pool, workspace_id, user_id, session_id).await {
-                            finished = true;
-                            break;
-                        }
-                        if !membership_role_only(&pool, workspace_id, user_id).await {
-                            finished = true;
-                            break;
-                        }
-                        if access_event_targets_user(&row, user_id) {
-                            finished = true;
-                            break;
-                        }
-                    }
-                }
+            // Credential, membership and access events share one transaction.
+            match poll_access_events(&pool, workspace_id, user_id, session_id, &cursor).await {
+                Ok(Some(next)) => cursor = next,
+                Ok(None) => break,
                 Err(err) => {
+                    // Fail closed: the credential could not be checked.
                     tracing::warn!("access stream poll failed: {}", err);
+                    break;
                 }
             }
         }
@@ -596,112 +481,5 @@ fn access_sse_stream(
         end_rx,
         _disconnect_rx: disconnect_rx,
         _guard: guard,
-    }
-}
-
-async fn session_still_valid(
-    pool: &sqlx::PgPool,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> bool {
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return false,
-    };
-    if set_tenant(&mut tx, workspace_id).await.is_err() {
-        return false;
-    }
-    let live = session_is_live(&mut tx, user_id, session_id)
-        .await
-        .unwrap_or(false);
-    let _ = tx.commit().await;
-    live
-}
-
-async fn project_still_viewable(
-    pool: &sqlx::PgPool,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    user_id: Uuid,
-) -> bool {
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return false,
-    };
-    if set_tenant(&mut tx, workspace_id).await.is_err() {
-        return false;
-    }
-    let Some(locked) = lock_project(&mut tx, workspace_id, project_id)
-        .await
-        .ok()
-        .flatten()
-    else {
-        return false;
-    };
-    let ok = project_permission(&mut tx, workspace_id, user_id, &locked)
-        .await
-        .ok()
-        .is_some_and(|p| p.at_least(ProjectPermission::View));
-    let _ = tx.commit().await;
-    ok
-}
-
-async fn membership_role_only(pool: &sqlx::PgPool, workspace_id: Uuid, user_id: Uuid) -> bool {
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return false,
-    };
-    if set_tenant(&mut tx, workspace_id).await.is_err() {
-        return false;
-    }
-    let role = membership_role(&mut tx, workspace_id, user_id)
-        .await
-        .ok()
-        .flatten();
-    let _ = tx.commit().await;
-    role.is_some()
-}
-
-#[cfg(all(feature = "db-tests", test))]
-mod queue_budget_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::thread;
-
-    use super::{release_queue_body_bytes, reserve_queue_body_bytes};
-
-    #[test]
-    fn reserve_rolls_back_when_channel_send_fails() {
-        let budget = Arc::new(AtomicUsize::new(0));
-        let bytes = 40;
-        assert!(reserve_queue_body_bytes(&budget, bytes, 100));
-        assert_eq!(budget.load(Ordering::Acquire), bytes);
-        release_queue_body_bytes(&budget, bytes);
-        assert_eq!(budget.load(Ordering::Acquire), 0);
-    }
-
-    #[test]
-    fn concurrent_reserves_stay_within_limit() {
-        let budget = Arc::new(AtomicUsize::new(0));
-        let limit = 64;
-        let chunk = 8;
-        let threads: Vec<_> = (0..16)
-            .map(|_| {
-                let budget = Arc::clone(&budget);
-                thread::spawn(move || {
-                    for _ in 0..8 {
-                        reserve_queue_body_bytes(&budget, chunk, limit);
-                    }
-                })
-            })
-            .collect();
-        for t in threads {
-            t.join().expect("thread");
-        }
-        assert!(
-            budget.load(Ordering::Acquire) <= limit,
-            "budget must not exceed limit"
-        );
     }
 }

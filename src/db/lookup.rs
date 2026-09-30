@@ -1,12 +1,11 @@
 use uuid::Uuid;
 
 use crate::db::context::{session_is_live, set_tenant};
-use crate::db::documents::membership_role;
 use crate::db::projects::project_member_role;
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{membership_role, workspace_is_live};
 use crate::display_id::{format_display_id, parse_display_id, ParsedDisplayId};
 use crate::projects::{effective_permission, ProjectPermission};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 
 #[derive(Debug, Clone)]
 pub struct LookupItemRow {
@@ -46,8 +45,6 @@ pub async fn lookup_display_id(
         return Ok(Ok(Vec::new()));
     }
     let ParsedDisplayId { prefix, number } = parsed.unwrap();
-    let acl = search_project_acl(&mut tx, workspace_id, actor_user_id, role).await?;
-    let acl = restrict_search_acl(acl, project_filter);
     if prefix == "WIKI" {
         if project_filter.is_some() {
             tx.rollback().await?;
@@ -105,7 +102,9 @@ pub async fn lookup_display_id(
         tx.rollback().await?;
         return Ok(Ok(Vec::new()));
     };
-    if !acl.project_ids.contains(&project_id) {
+    // An invisible project and a filter mismatch both answer an empty list
+    // (not 404), so the response does not reveal whether the key exists.
+    if project_filter.is_some_and(|filter| filter != project_id) {
         tx.rollback().await?;
         return Ok(Ok(Vec::new()));
     }
@@ -163,86 +162,6 @@ pub async fn lookup_display_id(
     }
     tx.commit().await?;
     Ok(Ok(items))
-}
-
-#[derive(Debug, Clone)]
-struct SearchAcl {
-    project_ids: Vec<Uuid>,
-}
-
-fn restrict_search_acl(acl: SearchAcl, project_filter: Option<Uuid>) -> SearchAcl {
-    match project_filter {
-        None => acl,
-        Some(project_id) if acl.project_ids.contains(&project_id) => SearchAcl {
-            project_ids: vec![project_id],
-        },
-        Some(_) => SearchAcl {
-            project_ids: Vec::new(),
-        },
-    }
-}
-
-async fn search_project_acl(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    role: WorkspaceRole,
-) -> Result<SearchAcl, sqlx::Error> {
-    if role == WorkspaceRole::Guest {
-        let rows = sqlx::query_as::<_, (Uuid, String)>(
-            r#"
-            SELECT p.id, p.visibility
-            FROM fvoci.projects p
-            WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
-            ORDER BY p.key COLLATE "C"
-            "#,
-        )
-        .bind(workspace_id)
-        .fetch_all(&mut **tx)
-        .await?;
-        let mut project_ids = Vec::new();
-        for (project_id, vis) in rows {
-            let member_role =
-                project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
-            let permission = effective_permission(role, &vis, member_role);
-            if permission.at_least(ProjectPermission::View) {
-                project_ids.push(project_id);
-            }
-        }
-        return Ok(SearchAcl { project_ids });
-    }
-    let rows = sqlx::query_as::<_, (Uuid, String)>(
-        r#"
-        SELECT p.id, p.visibility
-        FROM fvoci.projects p
-        WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
-        ORDER BY p.key COLLATE "C"
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    let mut project_ids = Vec::new();
-    for (project_id, visibility) in rows {
-        let member_role = project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
-        let permission = effective_permission(role, &visibility, member_role);
-        if permission.at_least(ProjectPermission::View) {
-            project_ids.push(project_id);
-        }
-    }
-    Ok(SearchAcl { project_ids })
-}
-
-async fn workspace_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<chrono::DateTime<chrono::Utc>>,)> =
-        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

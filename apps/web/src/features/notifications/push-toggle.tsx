@@ -2,6 +2,14 @@ import { t } from "@fvoci/i18n";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Label } from "@/components/ui/label";
+import { subscribeWhenActive } from "@/features/notifications/push-activation";
+import {
+  currentSubscription,
+  localStore,
+  pushSupported,
+  rebindPushSession,
+  storeSubscription,
+} from "@/features/notifications/push-browser";
 import {
   attempted,
   boundTo,
@@ -11,50 +19,10 @@ import {
   pushBlocker,
   readPushOwner,
   SW_URL,
-  subscriptionBody,
   writePushOwner,
 } from "@/features/notifications/push-subscription";
-import { api, ensureOk } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
 import { publicInstanceQuery } from "@/lib/queries/admin";
-
-function localStore(): Storage | null {
-  try {
-    return typeof localStorage === "undefined" ? null : localStorage;
-  } catch {
-    return null;
-  }
-}
-
-function pushSupported(): boolean {
-  return (
-    typeof navigator !== "undefined" &&
-    "serviceWorker" in navigator &&
-    typeof window !== "undefined" &&
-    "PushManager" in window &&
-    "Notification" in window
-  );
-}
-
-async function currentSubscription(): Promise<PushSubscription | null> {
-  const registration = await navigator.serviceWorker.getRegistration(SW_URL);
-  return (await registration?.pushManager.getSubscription()) ?? null;
-}
-
-/** Stores (or re-binds to this session) the subscription for the signed-in user. */
-async function storeSubscription(
-  workspaceId: string,
-  subscription: PushSubscription,
-  userId: string,
-): Promise<void> {
-  ensureOk(
-    await api.PUT("/api/v1/workspaces/{workspace_id}/push-subscriptions", {
-      params: { path: { workspace_id: workspaceId } },
-      body: subscriptionBody(subscription.toJSON()),
-    }),
-  );
-  writePushOwner(localStore(), userId);
-}
 
 /** Subscribes this browser and stores it for the signed-in user. */
 async function subscribe(workspaceId: string, publicKey: string, userId: string): Promise<void> {
@@ -68,7 +36,9 @@ async function subscribe(workspaceId: string, publicKey: string, userId: string)
   if (leftover && readPushOwner(localStore()) !== userId) {
     await leftover.unsubscribe();
   }
-  const subscription = await registration.pushManager.subscribe({
+  // A first registration is still installing; subscribing before it is
+  // active fails, and nothing is stored until it succeeds.
+  const subscription = await subscribeWhenActive(registration, {
     userVisibleOnly: true,
     applicationServerKey: decodeKey(publicKey),
   });
@@ -191,11 +161,7 @@ export function PushToggle({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-/**
- * Once per session, re-binds this browser's own subscription to the current
- * session (sends need a live bound session). Another account's subscription
- * is left alone. Failures are ignored: the settings toggle shows the state.
- */
+/** {@link rebindPushSession} for the React workspace shell. */
 export function usePushSessionRebind(workspaceId: string): void {
   const instance = useQuery(publicInstanceQuery);
   const me = useQuery(meQuery);
@@ -203,23 +169,6 @@ export function usePushSessionRebind(workspaceId: string): void {
   const sessionId = me.data?.sessionId ?? null;
   const publicKey = instance.data?.values.webPushPublicKey ?? null;
   useEffect(() => {
-    if (!pushSupported() || publicKey === null || userId === null || sessionId === null) return;
-    if (readPushOwner(localStore()) !== userId) return;
-    const marker = `fvoci.push.rebound.${sessionId}`;
-    try {
-      if (sessionStorage.getItem(marker) !== null) return;
-    } catch {
-      /* fall through: re-binding twice is harmless */
-    }
-    void (async () => {
-      const subscription = await currentSubscription();
-      if (!subscription || !boundTo(subscription.options.applicationServerKey, publicKey)) return;
-      await storeSubscription(workspaceId, subscription, userId);
-      try {
-        sessionStorage.setItem(marker, "1");
-      } catch {
-        /* ignore */
-      }
-    })().catch(() => undefined);
+    rebindPushSession({ workspaceId, publicKey, userId, sessionId });
   }, [publicKey, sessionId, userId, workspaceId]);
 }

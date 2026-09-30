@@ -11,15 +11,16 @@ use crate::attachments::{
     initial_extract_status, is_hwp_attachment, is_image_mime, StagedPart, UploadLimits,
     ATTACHMENT_LOCK_NAMESPACE, MAX_PART_COUNT, STORAGE_LOCK_NAMESPACE,
 };
-use crate::attachments::{ObjectStorage, StorageError};
-use crate::db::context::{lock_key_from_uuid, restore_system, set_system, set_tenant};
-use crate::db::documents::{
-    document_permission, lock_membership_users, membership_role, membership_role_for_update,
-    recheck_session, session_is_live, workspace_is_live,
+use crate::attachments::{ObjectStorage, PartInfo, StorageError, TransferMode};
+use crate::db::context::{
+    lock_key_from_uuid, lock_membership_users, recheck_session, restore_system, session_is_live,
+    set_system, set_tenant,
 };
+use crate::db::documents::document_permission;
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::project_member_role;
 use crate::db::quota::{StorageQuota, StorageQuotaError};
+use crate::db::workspace::{membership_role, membership_role_for_update, workspace_is_live};
 use crate::projects::effective_permission;
 use crate::projects::ProjectPermission;
 
@@ -30,6 +31,50 @@ pub struct UploadMeta {
     pub declared_size_bytes: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_ref: Option<String>,
+    /// The transfer mode fixed when the session was created. Rows written
+    /// before #149 have no field and are proxy sessions. Nothing rewrites it,
+    /// so the session never changes path (the jsonb column has no CHECK and
+    /// is cleared when the row is stored, so this needs no migration).
+    #[serde(default)]
+    pub transfer: TransferMode,
+}
+
+impl UploadMeta {
+    /// Exact byte length of part `n` (1-based): `part_size_bytes` for every
+    /// part but the last, which carries the remainder.
+    pub fn part_len(&self, n: i32) -> u64 {
+        if n < self.part_count {
+            self.part_size_bytes as u64
+        } else {
+            (self.declared_size_bytes - self.part_size_bytes * (self.part_count as i64 - 1)) as u64
+        }
+    }
+
+    /// Whether storage holds exactly the parts a presigned session must have
+    /// before `CompleteMultipartUpload`: numbers `1..=part_count`, each of its
+    /// exact length, and `submitted` naming each one once with the ETag
+    /// storage reports. The server never saw these bytes, so this is checked
+    /// before anything is published rather than after.
+    pub fn listed_parts_match(&self, submitted: &[(i32, String)], listed: &[PartInfo]) -> bool {
+        if listed.len() != self.part_count as usize || submitted.len() != listed.len() {
+            return false;
+        }
+        let mut submitted: Vec<(i32, &str)> = submitted
+            .iter()
+            .map(|(n, etag)| (*n, etag.trim().trim_matches('"')))
+            .collect();
+        submitted.sort_by_key(|(n, _)| *n);
+        listed
+            .iter()
+            .zip(submitted)
+            .zip(1..)
+            .all(|((part, (n, etag)), expected)| {
+                part.part_number == expected
+                    && n == expected
+                    && part.size_bytes == self.part_len(expected)
+                    && part.etag == etag
+            })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -151,8 +196,10 @@ impl AttachmentSessionLock {
         // Fail-safe: close_on_drop before try-lock so cancellation during
         // acquisition cannot return a lock-holding connection to the pool.
         // Moving this after a successful lock would leak a session advisory lock
-        // if the task is cancelled between acquire and the flag. Connection churn
-        // while losers poll is a tracked follow-up (review N3), not this change.
+        // if the task is cancelled between acquire and the flag. The cost: every
+        // try_acquire, winner or loser, closes its connection on drop, and
+        // complete's loser repeats that every ASSEMBLE_POLL (100 ms) for up to
+        // ASSEMBLE_WAIT.
         conn.close_on_drop();
         let lock_key = lock_key_from_uuid(attachment_id);
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
@@ -414,7 +461,14 @@ async fn require_view_access(
     Ok(Ok(access))
 }
 
-async fn recheck_upload_write_access(
+/// Upload write access for one attachment, in the write-fence order: the
+/// membership advisory lock, the session row `FOR UPDATE` (the revocation
+/// fence), a live workspace, the row, then edit access and "the actor is the
+/// uploader". The part, resume and losing-complete entry points call it
+/// without the upload lock; writers take `with_upload_xact_lock` first and
+/// call it again right before they publish, so a revocation in between is
+/// seen. Callers check the status they need on the returned row.
+async fn check_upload_write_access(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -587,6 +641,7 @@ pub async fn create_upload(
     actor_user_id: Uuid,
     session_id: Uuid,
     input: CreateUploadInput,
+    transfer: TransferMode,
     _client_ip: Option<&str>,
 ) -> Result<Result<(AttachmentRow, UploadMeta), AttachmentDbError>, sqlx::Error> {
     if input.size_bytes > limits.max_file_size_bytes {
@@ -604,6 +659,7 @@ pub async fn create_upload(
         part_count,
         declared_size_bytes: input.size_bytes,
         upload_ref: None,
+        transfer,
     };
 
     let mut tx = pool.begin().await?;
@@ -771,29 +827,21 @@ pub async fn authorize_upload_part(
 ) -> Result<Result<(String, u64, Option<String>), AttachmentDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::Forbidden));
-    }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::NotFound));
-    }
-    let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
-        Some(att) => att,
-        None => {
-            tx.rollback().await?;
-            return Ok(Err(AttachmentDbError::NotFound));
-        }
-    };
-    match require_upload_access(&mut tx, workspace_id, actor_user_id, &att).await? {
-        Ok(()) => {}
+    let att = match check_upload_write_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        attachment_id,
+    )
+    .await?
+    {
+        Ok(att) => att,
         Err(err) => {
             tx.rollback().await?;
             return Ok(Err(err));
         }
-    }
+    };
     if att.status != "uploading" {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::UploadState));
@@ -805,15 +853,17 @@ pub async fn authorize_upload_part(
             return Ok(Err(err));
         }
     };
+    // A presigned session's parts go to storage directly; taking one here too
+    // would open a second path for the same part.
+    if meta.transfer != TransferMode::Proxy {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::UploadState));
+    }
     if part_number > meta.part_count {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::InvalidInput));
     }
-    let max_bytes = if part_number < meta.part_count {
-        meta.part_size_bytes as u64
-    } else {
-        (meta.declared_size_bytes - meta.part_size_bytes * (meta.part_count as i64 - 1)) as u64
-    };
+    let max_bytes = meta.part_len(part_number);
     let storage_key = att.storage_key.clone();
     let upload_ref = meta.upload_ref.clone();
     tx.commit().await?;
@@ -834,7 +884,7 @@ pub async fn commit_upload_part(
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
-    let att = match recheck_upload_write_access(
+    let att = match check_upload_write_access(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -846,20 +896,20 @@ pub async fn commit_upload_part(
         Ok(att) => att,
         Err(err) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Ok(Err(err));
         }
     };
     if att.status != "uploading" {
         tx.rollback().await?;
-        ObjectStorage::discard_staged_part(staged).await;
+        staged.discard().await;
         return Ok(Err(AttachmentDbError::UploadState));
     }
     let meta = parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&json!({})))
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     if part_number > meta.part_count {
         tx.rollback().await?;
-        ObjectStorage::discard_staged_part(staged).await;
+        staged.discard().await;
         return Ok(Err(AttachmentDbError::InvalidInput));
     }
     let storage_key = att.storage_key.clone();
@@ -870,17 +920,17 @@ pub async fn commit_upload_part(
         Ok(part) => part,
         Err(StorageError::UploadGone) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Ok(Err(AttachmentDbError::UploadState));
         }
         Err(StorageError::PartTooLarge) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Ok(Err(AttachmentDbError::PartTooLarge));
         }
         Err(err) => {
             tx.rollback().await?;
-            ObjectStorage::discard_staged_part(staged).await;
+            staged.discard().await;
             return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
         }
     };
@@ -901,29 +951,21 @@ pub async fn resume_upload(
 > {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::Forbidden));
-    }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::NotFound));
-    }
-    let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
-        Some(att) => att,
-        None => {
-            tx.rollback().await?;
-            return Ok(Err(AttachmentDbError::NotFound));
-        }
-    };
-    match require_upload_access(&mut tx, workspace_id, actor_user_id, &att).await? {
-        Ok(()) => {}
+    let att = match check_upload_write_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        attachment_id,
+    )
+    .await?
+    {
+        Ok(att) => att,
         Err(err) => {
             tx.rollback().await?;
             return Ok(Err(err));
         }
-    }
+    };
     if att.status != "uploading" {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::UploadState));
@@ -942,6 +984,11 @@ pub async fn resume_upload(
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     let done = uploaded
         .iter()
+        // A presigned part of the wrong length (storage that did not enforce
+        // the signed length) is sent again rather than reported as done.
+        .filter(|p| {
+            meta.transfer == TransferMode::Proxy || p.size_bytes == meta.part_len(p.part_number)
+        })
         .map(|p| (p.part_number, p.etag.clone()))
         .collect::<Vec<_>>();
     let done_set = done
@@ -1015,29 +1062,21 @@ async fn try_complete_owned(
     let Some(mut lock) = AttachmentSessionLock::try_acquire(pool, attachment_id).await? else {
         let mut tx = pool.begin().await?;
         set_tenant(&mut tx, workspace_id).await?;
-        lock_membership_users(&mut tx, &[actor_user_id]).await?;
-        if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-            tx.rollback().await?;
-            return Ok(CompleteAttempt::Denied(AttachmentDbError::Forbidden));
-        }
-        if !workspace_is_live(&mut tx, workspace_id).await? {
-            tx.rollback().await?;
-            return Ok(CompleteAttempt::Denied(AttachmentDbError::NotFound));
-        }
-        let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
-            Some(att) => att,
-            None => {
-                tx.rollback().await?;
-                return Ok(CompleteAttempt::Denied(AttachmentDbError::NotFound));
-            }
-        };
-        match require_upload_access(&mut tx, workspace_id, actor_user_id, &att).await? {
-            Ok(()) => {}
+        let att = match check_upload_write_access(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            attachment_id,
+        )
+        .await?
+        {
+            Ok(att) => att,
             Err(err) => {
                 tx.rollback().await?;
                 return Ok(CompleteAttempt::Denied(err));
             }
-        }
+        };
         if att.status == "stored" {
             tx.commit().await?;
             return Ok(CompleteAttempt::Done(att));
@@ -1075,7 +1114,7 @@ async fn complete_owned_inner(
     let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
-    let att = match recheck_upload_write_access(
+    let att = match check_upload_write_access(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -1092,6 +1131,9 @@ async fn complete_owned_inner(
     };
     if att.status == "stored" {
         tx.commit().await?;
+        // A retried or repeated complete also clears parts that an earlier
+        // run's finalize never removed (cancelled, crashed or failed).
+        finalize_stored_parts(storage, attachment_id, &att.storage_key).await;
         return Ok(CompleteAttempt::Done(att));
     }
 
@@ -1130,6 +1172,27 @@ async fn complete_owned_inner(
         return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
     };
     tx.commit().await?;
+
+    if needs_assembly && meta.transfer == TransferMode::Presigned {
+        match storage
+            .list_parts(&storage_key, meta.upload_ref.as_deref())
+            .await
+        {
+            Ok(listed) if meta.listed_parts_match(parts, &listed) => {}
+            Ok(_) => {
+                revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
+                return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
+            }
+            // Gone: an earlier attempt verified the parts and completed the
+            // upload before it could mark the row stored. Complete below
+            // reports the published object, or `UploadGone` if there is none.
+            Err(StorageError::UploadGone) => {}
+            Err(err) => {
+                revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
+                return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
+            }
+        }
+    }
 
     if needs_assembly {
         let assemble = storage
@@ -1188,7 +1251,7 @@ async fn complete_owned_inner(
     let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
-    let att = match recheck_upload_write_access(
+    let att = match check_upload_write_access(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -1205,7 +1268,7 @@ async fn complete_owned_inner(
     };
     if att.status == "stored" {
         tx.commit().await?;
-        let _ = storage.finalize_multipart(&storage_key).await;
+        finalize_stored_parts(storage, attachment_id, &storage_key).await;
         return Ok(CompleteAttempt::Done(att));
     }
     if att.status != "uploading" && att.status != "assembling" {
@@ -1235,7 +1298,7 @@ async fn complete_owned_inner(
         let stored = fetch_attachment(&mut tx, workspace_id, attachment_id).await?;
         if stored.as_ref().is_some_and(|row| row.status == "stored") {
             tx.commit().await?;
-            let _ = storage.finalize_multipart(&storage_key).await;
+            finalize_stored_parts(storage, attachment_id, &storage_key).await;
             return Ok(CompleteAttempt::Done(stored.expect("stored row")));
         }
         tx.rollback().await?;
@@ -1260,8 +1323,19 @@ async fn complete_owned_inner(
         .await?
         .expect("stored row");
     tx.commit().await?;
-    let _ = storage.finalize_multipart(&storage_key).await;
+    finalize_stored_parts(storage, attachment_id, &storage_key).await;
     Ok(CompleteAttempt::Done(row))
+}
+
+/// Removes the local part copies of an upload whose 'stored' row has
+/// committed (a no-op on S3). Never before that commit: an 'assembling'
+/// retry re-lists and re-checks the parts. The upload is complete either
+/// way, so a failure is logged rather than returned; the leftover copy is
+/// removed by the next complete of this upload or when it is deleted.
+async fn finalize_stored_parts(storage: &ObjectStorage, attachment_id: Uuid, storage_key: &str) {
+    if let Err(err) = storage.finalize_multipart(storage_key).await {
+        tracing::warn!(%attachment_id, error = %err, "attachment.finalize_parts_failed");
+    }
 }
 
 async fn delete_attachment_row(
@@ -2208,4 +2282,62 @@ pub async fn mark_import_attachment_stored(
     .await?;
     tx.commit().await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod upload_meta_tests {
+    use super::*;
+
+    fn meta(part_size: i64, part_count: i32, declared: i64) -> UploadMeta {
+        UploadMeta {
+            part_size_bytes: part_size,
+            part_count,
+            declared_size_bytes: declared,
+            upload_ref: Some("u".into()),
+            transfer: TransferMode::Presigned,
+        }
+    }
+
+    fn part(n: i32, etag: &str, size: u64) -> PartInfo {
+        PartInfo {
+            part_number: n,
+            etag: etag.into(),
+            size_bytes: size,
+        }
+    }
+
+    #[test]
+    fn rows_without_a_transfer_field_are_proxy_sessions() {
+        let legacy: UploadMeta = serde_json::from_value(json!({
+            "part_size_bytes": 5, "part_count": 1, "declared_size_bytes": 5, "upload_ref": "u"
+        }))
+        .unwrap();
+        assert_eq!(legacy.transfer, TransferMode::Proxy);
+        let bound = serde_json::to_value(meta(5, 1, 5)).unwrap();
+        assert_eq!(bound["transfer"], json!("presigned"));
+    }
+
+    #[test]
+    fn part_len_gives_the_remainder_to_the_last_part() {
+        let m = meta(10, 3, 25);
+        assert_eq!((m.part_len(1), m.part_len(2), m.part_len(3)), (10, 10, 5));
+        assert_eq!(meta(10, 2, 20).part_len(2), 10);
+    }
+
+    #[test]
+    fn listed_parts_must_match_numbers_lengths_and_etags() {
+        let m = meta(10, 2, 15);
+        let listed = [part(1, "a", 10), part(2, "b", 5)];
+        let ok = [(2, "\"b\"".to_string()), (1, "a".to_string())];
+        assert!(m.listed_parts_match(&ok, &listed));
+        // Wrong ETag, duplicate or missing numbers, wrong lengths, extra parts.
+        assert!(!m.listed_parts_match(&[(1, "a".into()), (2, "x".into())], &listed));
+        assert!(!m.listed_parts_match(&[(1, "a".into()), (1, "a".into())], &listed));
+        assert!(!m.listed_parts_match(&[(1, "a".into())], &listed));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10), part(2, "b", 6)]));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 9), part(2, "b", 5)]));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10)]));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10), part(2, "b", 5), part(3, "c", 1)]));
+        assert!(!m.listed_parts_match(&ok, &[part(1, "a", 10), part(3, "b", 5)]));
+    }
 }

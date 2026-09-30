@@ -5,7 +5,7 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::header::{
     ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
-    CONTENT_SECURITY_POLICY, CONTENT_TYPE, RANGE,
+    CONTENT_SECURITY_POLICY, CONTENT_TYPE, LOCATION, RANGE,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -21,15 +21,15 @@ use crate::api::dto::{
     CreateAttachmentUploadResponse, OkResponse, PutAttachmentPartResponse,
     ResumeAttachmentUploadResponse,
 };
-use crate::attachments::StorageError;
 use crate::attachments::{content_disposition_attachment, parse_range, ParsedRange};
 use crate::attachments::{PreviewParse, PREVIEW_BUSY_RETRY_AFTER_SECS};
+use crate::attachments::{StorageError, TransferMode};
 use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
 use crate::db::attachments::{
     attachment_edit_context, attachment_parent, authorize_upload_part, commit_upload_part,
     complete_upload, create_upload, delete_attachment, get_attachment_meta, list_task_attachments,
     open_download, reclaim_attachment_objects, resume_upload, AttachmentDbError, AttachmentParent,
-    AttachmentRow, CreateUploadInput, UploadReservation, UploadTarget,
+    AttachmentRow, CreateUploadInput, UploadMeta, UploadReservation, UploadTarget,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{Access, RequestAuth};
@@ -236,6 +236,82 @@ fn part_url(workspace_id: Uuid, attachment_id: Uuid, part_number: i32) -> String
     format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/parts/{part_number}")
 }
 
+/// Where the client PUTs each of `numbers` in the session's own mode: the API
+/// path for a proxy session, or a freshly signed storage URL per part for a
+/// presigned one, with the earliest expiry. Callers authorize first; signing
+/// does no I/O.
+fn part_targets(
+    state: &AppState,
+    workspace_id: Uuid,
+    att: &AttachmentRow,
+    meta: &UploadMeta,
+    numbers: impl IntoIterator<Item = i32>,
+) -> Result<
+    (
+        Vec<AttachmentPartUrlResponse>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ),
+    AppError,
+> {
+    let mut parts = Vec::new();
+    let mut expires_at = None::<chrono::DateTime<chrono::Utc>>;
+    for part_number in numbers {
+        let url = match meta.transfer {
+            TransferMode::Proxy => part_url(workspace_id, att.id, part_number),
+            TransferMode::Presigned => {
+                let signed = state
+                    .storage
+                    .presign_upload_part(
+                        &att.storage_key,
+                        meta.upload_ref.as_deref(),
+                        part_number,
+                        meta.part_len(part_number),
+                    )
+                    .map_err(presign_error)?;
+                expires_at =
+                    Some(expires_at.map_or(signed.expires_at, |t| t.min(signed.expires_at)));
+                signed.url
+            }
+        };
+        parts.push(AttachmentPartUrlResponse { part_number, url });
+    }
+    Ok((parts, expires_at))
+}
+
+/// The transfer mode for a new upload session or an original download
+/// requested with `auth`. Browser sessions get the mode in effect now.
+/// API-token requests always get `proxy`, whatever the admin selects: token
+/// clients keep the API part paths and streamed downloads they were written
+/// against, and a client that attaches `Authorization` to every request never
+/// sends its token to the storage origin. Resume follows the session's own
+/// mode instead, so a token resuming a session a browser created still gets
+/// signed URLs.
+async fn transfer_mode_for(state: &AppState, auth: &RequestAuth) -> Result<TransferMode, AppError> {
+    if auth.token_scopes.is_some() {
+        return Ok(TransferMode::Proxy);
+    }
+    crate::settings::attachment_transfer_mode(
+        &state.auth.db.pool,
+        state.storage.presign_unavailable(),
+    )
+    .await
+    .map_err(internal)
+}
+
+/// A presigned session on a process that can no longer sign (restarted
+/// without `S3_PUBLIC_ENDPOINT`) cannot continue: it is never moved to the
+/// proxy path. The upload fails; the uploader can delete it, otherwise the
+/// stale-upload sweep reclaims it.
+fn presign_error(err: StorageError) -> AppError {
+    match err {
+        StorageError::PresignUnavailable => AppError::problem(
+            StatusCode::CONFLICT,
+            ProblemCode::AttachmentTransferUnavailable,
+        ),
+        _ => AppError::internal(),
+    }
+}
+
 async fn create_wiki_upload(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -358,6 +434,9 @@ async fn create_upload_session(
         return Err(AppError::rate_limited(retry_after));
     }
     let ip = peer_ip(peer.ip());
+    // The session is bound to this mode for its whole life (see
+    // `UploadMeta::transfer`).
+    let transfer = transfer_mode_for(state, &auth).await?;
     let (att, meta) = create_upload(
         &state.auth.db.pool,
         &state.storage,
@@ -372,22 +451,21 @@ async fn create_upload_session(
             size_bytes: body.size_bytes,
             declared_mime: body.declared_mime,
         },
+        transfer,
         Some(&ip),
     )
     .await
     .map_err(internal)?
     .map_err(map_attachment_error)?;
-    let parts = (1..=meta.part_count)
-        .map(|part_number| AttachmentPartUrlResponse {
-            part_number,
-            url: part_url(workspace_id, att.id, part_number),
-        })
-        .collect::<Vec<_>>();
+    let (parts, part_urls_expire_at) =
+        part_targets(state, workspace_id, &att, &meta, 1..=meta.part_count)?;
     Ok((
         StatusCode::CREATED,
         Json(CreateAttachmentUploadResponse {
             attachment_id: att.id.to_string(),
             part_size_bytes: meta.part_size_bytes,
+            transfer: meta.transfer,
+            part_urls_expire_at,
             parts,
         }),
     )
@@ -639,13 +717,22 @@ async fn resume_upload_session(
     .map_err(internal)?;
     match result {
         Ok((att, meta, uploaded, remaining)) => {
-            let parts = remaining
-                .into_iter()
-                .map(|part_number| AttachmentPartUrlResponse {
-                    part_number,
-                    url: part_url(workspace_id, att.id, part_number),
-                })
-                .collect::<Vec<_>>();
+            // Resume is the re-issue path for expired presigned URLs; the
+            // limit bounds how often one user can have them signed.
+            if meta.transfer == TransferMode::Presigned {
+                if let Err(retry_after) = state
+                    .rate_limiter
+                    .allow(
+                        &format!("upload_resume:{user_id}"),
+                        state.upload.create_rate_per_5min,
+                    )
+                    .await
+                {
+                    return Err(AppError::rate_limited(retry_after));
+                }
+            }
+            let (parts, part_urls_expire_at) =
+                part_targets(&state, workspace_id, &att, &meta, remaining)?;
             let uploaded_parts = uploaded
                 .into_iter()
                 .map(|(part_number, etag)| AttachmentUploadedPartResponse { part_number, etag })
@@ -653,6 +740,8 @@ async fn resume_upload_session(
             Ok(Json(ResumeAttachmentUploadResponse {
                 attachment_id: att.id.to_string(),
                 part_size_bytes: meta.part_size_bytes,
+                transfer: meta.transfer,
+                part_urls_expire_at,
                 uploaded_parts,
                 parts,
             }))
@@ -829,6 +918,14 @@ async fn serve_download(
     let size = att.size_bytes.ok_or_else(AppError::internal)?;
     let range_header = headers.get(RANGE).and_then(|v| v.to_str().ok());
     let parsed = parse_range(range_header, size as u64);
+    // Presigned mode hands original bytes to storage after the same access
+    // check; HEAD (metadata only) and an unsatisfiable range stay here.
+    if !head_only
+        && !matches!(parsed, ParsedRange::Invalid)
+        && transfer_mode_for(state, &auth).await? == TransferMode::Presigned
+    {
+        return presigned_download(state, &att);
+    }
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         CONTENT_TYPE,
@@ -905,6 +1002,25 @@ async fn serve_download(
                 .into_response())
         }
     }
+}
+
+/// `302` to a signed storage GET of the original (see
+/// `ObjectStorage::presign_download`); the browser follows it and forwards
+/// `Range`. The redirect itself is never cached. Once issued, the URL works
+/// until it expires even if access is revoked meanwhile; every new request is
+/// authorized again before signing.
+fn presigned_download(state: &AppState, att: &AttachmentRow) -> Result<Response, AppError> {
+    let signed = state
+        .storage
+        .presign_download(&att.storage_key, &content_disposition_attachment(&att.name))
+        .map_err(|_| AppError::internal())?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        LOCATION,
+        HeaderValue::from_str(&signed.url).map_err(|_| AppError::internal())?,
+    );
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok((StatusCode::FOUND, headers).into_response())
 }
 
 const PART_SLOT_RETRY_AFTER_SECS: u32 = 2;

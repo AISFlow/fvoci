@@ -20,7 +20,8 @@ use crate::db::collections::{
     begin_member, load_fields, require_collection, validate_query_config, Actor, CollectionDbError,
     DbResult, Need,
 };
-use crate::db::documents::document_permission;
+use crate::db::context::begin_read;
+use crate::db::documents::document_permissions;
 use crate::db::view_query::{
     after_sort_tuple, compile_view_query, due_date_sql, scalar_value_sql, sort_tuple_hash_sql,
     CompileOptions, SqlArgs, ViewScope,
@@ -171,10 +172,7 @@ pub async fn query_collection(
     // The actor's validated zone, read once like the task list and layout;
     // an unknown stored name falls back to UTC instead of failing the query.
     let time_zone = crate::db::dashboard::user_time_zone(pool, actor.user_id).await?;
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
+    let mut tx = begin_read(pool).await?;
     // Bounds the correlated filter/sort subqueries of one user-built query.
     sqlx::query("SET LOCAL statement_timeout = '15s'")
         .execute(&mut *tx)
@@ -620,13 +618,17 @@ async fn run(
         .collect();
     if collection.project_id.is_none() && writable {
         let base = workspace_base_permission(role);
-        for doc in docs {
-            let level = if base.at_least(ProjectPermission::Edit) {
-                base
-            } else {
-                document_permission(tx, ws, actor.user_id, doc, true).await?
-            };
-            row_edit.insert(doc, level.at_least(ProjectPermission::Edit));
+        if base.at_least(ProjectPermission::Edit) {
+            row_edit.extend(docs.into_iter().map(|doc| (doc, true)));
+        } else {
+            // One set-based lookup for every wiki row, not one per document.
+            let docs: Vec<Uuid> = docs.into_iter().collect();
+            let levels = document_permissions(tx, ws, actor.user_id, &docs, true).await?;
+            row_edit.extend(
+                levels
+                    .into_iter()
+                    .map(|(doc, level)| (doc, level.at_least(ProjectPermission::Edit))),
+            );
         }
     }
     let edit_of = |row: &QueryRow| -> bool {

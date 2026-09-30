@@ -43,7 +43,7 @@ impl<B> MakeSpan<B> for SafeMakeSpan {
 }
 
 /// Standard methods by name; extension methods are client-chosen tokens.
-fn method_label(method: &Method) -> &'static str {
+pub(crate) fn method_label(method: &Method) -> &'static str {
     match *method {
         Method::GET => "GET",
         Method::HEAD => "HEAD",
@@ -64,14 +64,30 @@ pub fn layer() -> TraceLayer<SharedClassifier<ServerErrorsAsFailures>, SafeMakeS
     TraceLayer::new_for_http().make_span_with(SafeMakeSpan)
 }
 
-/// DEBUG-level log capture for trace redaction tests.
+/// Log capture for trace redaction tests: spans (creation and close, with
+/// their fields) and events at every level.
+///
+/// One global subscriber, installed once, serves every lib test. A per-thread
+/// `set_default` capture could miss events: tracing-core caches a callsite's
+/// interest process-wide when it is first reached and, while exactly one
+/// dispatcher is registered, asks only the default of the thread that reached
+/// it (tracing-core 0.1.36 `callsite.rs`, `Rebuilder::JustOne`). A lib test
+/// running on a thread without a capture would then cache `never` for a
+/// callsite the capturing test also reaches, and the capture would silently
+/// lose it; the redaction checks below would pass on a log that never saw the
+/// event. Here every callsite's interest is `sometimes` (a dynamic filter), and
+/// each span or event is recorded only on a thread with an active capture,
+/// which receives the formatted lines.
 #[cfg(test)]
 pub(crate) mod capture {
+    use std::cell::RefCell;
     use std::io;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Once};
 
-    use tracing::subscriber::DefaultGuard;
+    use tracing_subscriber::filter::dynamic_filter_fn;
     use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
 
     #[derive(Clone, Default)]
     pub(crate) struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -82,9 +98,38 @@ pub(crate) mod capture {
         }
     }
 
-    impl io::Write for Captured {
+    thread_local! {
+        static ACTIVE: RefCell<Option<Captured>> = const { RefCell::new(None) };
+    }
+
+    fn capturing() -> bool {
+        ACTIVE
+            .try_with(|active| active.borrow().is_some())
+            .unwrap_or(false)
+    }
+
+    /// Ends the capture on drop, restoring the thread's previous one (if any).
+    #[must_use = "dropping the guard ends the capture"]
+    pub(crate) struct CaptureGuard(Option<Captured>);
+
+    impl Drop for CaptureGuard {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            let _ = ACTIVE.try_with(|active| *active.borrow_mut() = previous);
+        }
+    }
+
+    /// Appends to the emitting thread's active capture; a span closed after
+    /// its capture ended is dropped.
+    struct Routed;
+
+    impl io::Write for Routed {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            let _ = ACTIVE.try_with(|active| {
+                if let Some(captured) = active.borrow().as_ref() {
+                    captured.0.lock().unwrap().extend_from_slice(buf);
+                }
+            });
             Ok(buf.len())
         }
         fn flush(&mut self) -> io::Result<()> {
@@ -92,18 +137,22 @@ pub(crate) mod capture {
         }
     }
 
-    /// Thread-local fmt subscriber at TRACE that also prints span creation
-    /// and close with their fields; use from a current-thread runtime.
-    pub(crate) fn logs() -> (Captured, DefaultGuard) {
+    /// Captures this thread's spans and events until the guard drops; use
+    /// from a current-thread runtime.
+    pub(crate) fn logs() -> (Captured, CaptureGuard) {
+        static ROUTER: Once = Once::new();
+        ROUTER.call_once(|| {
+            let layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+                .with_writer(|| Routed)
+                .with_filter(dynamic_filter_fn(|_, _| capturing()));
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                .expect("the capture router is the lib tests' only subscriber");
+        });
         let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-            .with_writer(move || writer.clone())
-            .finish();
-        (captured, tracing::subscriber::set_default(subscriber))
+        let previous = ACTIVE.with(|active| active.replace(Some(captured.clone())));
+        (captured, CaptureGuard(previous))
     }
 }
 

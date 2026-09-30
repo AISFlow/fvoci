@@ -1,0 +1,15 @@
+{
+  // The Vue editor host (src/vue) and its tests, checked by vue-tsc;
+  // tsconfig.json (tsc) checks the rest and excludes them.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "preserve"
+  },
+  "vueCompilerOptions": {
+    "checkUnknownComponents": true,
+    "checkUnknownDirectives": true,
+    "checkUnknownEvents": true
+  },
+  "include": ["src/vue/**/*.ts", "src/vue/**/*.vue", "test/vue-*.test.ts", "test/setup/*.ts"],
+  "exclude": []
+}

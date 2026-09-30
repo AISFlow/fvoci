@@ -1,26 +1,13 @@
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import {
-	Extension,
-	type MappablePosition,
-	type Editor as TiptapEditor,
-} from "@tiptap/core";
-import Collaboration, { isChangeOrigin } from "@tiptap/extension-collaboration";
-import CollaborationCaret from "@tiptap/extension-collaboration-caret";
-import { yCursorPluginKey } from "@tiptap/y-tiptap";
-import { FileHandler } from "@tiptap/extension-file-handler";
+import type { MappablePosition, Editor as TiptapEditor } from "@tiptap/core";
 import {
 	AllSelection,
 	type EditorState,
-	Plugin,
-	PluginKey,
 	TextSelection,
-	type Transaction,
 } from "@tiptap/pm/state";
 import { CellSelection } from "@tiptap/pm/tables";
-import type { EditorView } from "@tiptap/pm/view";
 import { EditorContent, ReactNodeViewRenderer, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
-import Suggestion from "@tiptap/suggestion";
 import {
 	memo,
 	type ReactNode,
@@ -32,24 +19,23 @@ import {
 	useState,
 } from "react";
 import * as Y from "yjs";
-import { FVOCI_YDOC_FRAGMENT } from "../collab/constants.js";
 import { tiptapJsonToYDoc } from "../collab-tiptap.js";
+import {
+	createFvociEditorExtensions,
+	createFvociEditorProps,
+	FILE_UPLOAD_META,
+	type FvociCollabUser,
+	type FvociNodeViews,
+	type MentionHit,
+	uploadAnchor,
+} from "../editor-extensions.js";
+import type { EntityResolver } from "../entities.js";
 import { isTiptapDoc } from "../json.js";
-import { Attachment } from "../nodes/attachment.js";
-import { Embed } from "../nodes/embed.js";
-import { MathBlock, MathInline } from "../nodes/math.js";
-import { Mention } from "../nodes/mention.js";
-import { Mermaid } from "../nodes/mermaid.js";
-import { createFvociExtensions, type EmojiMenuItem } from "../tiptap-schema.js";
 import {
 	AttachmentBlockContext,
 	AttachmentBlockView,
 } from "./attachment-view.js";
-import {
-	type EntityResolver,
-	EntityResolverContext,
-	isMentionEntity,
-} from "./blocks.js";
+import { EntityResolverContext } from "./blocks.js";
 import { CodeBlockChrome } from "./code-block-chrome.js";
 import { FormatToolbar } from "./format-toolbar.js";
 import { Gutter } from "./gutter.js";
@@ -61,211 +47,23 @@ import {
 	MathNodeView,
 	MermaidNodeView,
 } from "./node-views.js";
-import { shouldAdoptNativeOnAwareness } from "./awareness-selection-guard.js";
-import { isNativeOwnedDeleteKey } from "./native-delete-owner.js";
-import { overlayOwner } from "./overlay-owner.js";
-import { parseWorkspaceUrl, resolvePastedEmbed } from "./paste-embed.js";
-import {
-	embedSlashItems,
-	filterSlashItems,
-	type SlashItem,
-	suggestionFloatingUi,
-	suggestionRenderer,
-} from "./suggestion-menu.js";
-import { selectAllEscape, selectAllStep } from "./table-actions.js";
+import { overlayOwner } from "../overlay-owner.js";
+import { selectAllEscape, selectAllStep } from "../table-actions.js";
 import { TableHandles } from "./table-handles.js";
 
 export type { TiptapEditor };
 
-/** WHY: #749 — at textblock edges, block insertion happens outside the paragraph. */
-function uploadAnchor(editor: TiptapEditor, pos: number): MappablePosition {
-	const $pos = editor.state.doc.resolve(pos);
-	if ($pos.parent.isTextblock) {
-		if ($pos.parentOffset === 0) pos = $pos.before();
-		else if ($pos.parentOffset === $pos.parent.content.size) pos = $pos.after();
-	}
-	return editor.utils.createMappablePosition(pos);
-}
-
-/* WHY: #633 — CollaborationCaret 은 이 객체를 awareness 의 user 필드에 통째로 덮어쓴다.
- * 서버는 user.id 가 접속자와 다른 상태를 버리므로(apps/server/src/collab.ts) id 는 필수다. */
-export type FvociCollabUser = { id: string; name: string; color: string };
-
-/*
- * WHY: #738 — CollaborationCaret 기본 render 는 색을 setAttribute("style", …) 로 준다.
- * nonce 가 붙은 style-src 아래에서 style= 속성은 CSP3 §6.7.3.3 상 nonce 로 구제되지 않아
- * 통째로 차단되고, 피어 캐럿·라벨이 색을 잃는다. CSSOM 쓰기는 그 검사를 타지 않는다 —
- * 피어 색만 커스텀 속성으로 넘기고 규칙은 apps/web/src/index.css 의 에디터 스킨에 둔다.
- * 라벨은 캐럿의 자식이라 --afn-caret-color 를 상속한다.
- */
-export function collabCaretRender(peer: {
-	color: string;
-	name: string;
-}): HTMLElement {
-	const caret = document.createElement("span");
-	caret.classList.add("collaboration-carets__caret");
-	caret.style.setProperty("--afn-caret-color", peer.color);
-	const label = document.createElement("div");
-	label.classList.add("collaboration-carets__label");
-	label.textContent = peer.name;
-	caret.append(label);
-	return caret;
-}
-
-/* WHY: see native-delete-owner.ts. When PM's selection lags the native caret at
- * a Delete/Backspace keydown, dispatch one selection-only transaction and return
- * false so Tiptap's stock chain (undoInputRule, joins, atom handling) runs on the
- * caret the user sees. The native caret is mapped like PM's selectionFromDOM
- * (bias 1, TextSelection.between normalisation) and skipped inside
- * non-editable leaf DOM, where PM would pick a different position or a
- * NodeSelection. Awareness decoration updates are a second writer; they go
- * through createAwarenessSelectionGuardPlugin. */
-function handleNativeOwnedDeleteKeyDown(
-	view: EditorView,
-	event: KeyboardEvent,
-): boolean {
-	const selection = view.state.selection;
-	if (
-		!isNativeOwnedDeleteKey({
-			trusted: event.isTrusted,
-			editable: view.editable,
-			composing: event.isComposing,
-			keyCode: event.keyCode,
-			key: event.key,
-			pmIsTextSelection: selection instanceof TextSelection,
-		})
-	) {
-		return false;
-	}
-	const aligned = nativeTextSelectionFromDom(view, view.state.doc);
-	if (!aligned || aligned.eq(selection)) return false;
-	view.dispatch(view.state.tr.setSelection(aligned));
-	return false;
-}
-
-/* WHY: awareness-only yCursorPlugin transactions rebuild caret widgets. PM then
- * calls selectionToDOM because inner decorations changed, even when
- * state.selection did not. That can clobber a native caret PM has not read yet
- * (Arrow keys, then a peer awareness message before selectionchange). Adopt
- * native only when the live DOM selection differs from PM's last-synced
- * currentSelection — native ahead, not a browser focus reset that left PM
- * ahead. Do not wrap docView.setSelection or view.dispatch: those skips also
- * drop PM's own focus writes (view.focus rAF, 20ms restore, flush doc-start
- * kludge). Do not clear suppressingSelectionUpdates (desktop Chrome never
- * sets it from selectionToDOM; clearing it would undo PM #820 on Android).
- * Mapping matches handleNativeOwnedDeleteKeyDown. Do not patch y-tiptap.
- * domObserver.currentSelection / domSelectionRange are not in
- * prosemirror-view's .d.ts; this targets the pinned @tiptap/pm view
- * (prosemirror-view 1.42.x). */
-const awarenessSelectionGuardKey = new PluginKey("fvociAwarenessSelectionGuard");
-
-type ProseMirrorDomSelectionRange = {
-	anchorNode: Node | null;
-	anchorOffset: number;
-	focusNode: Node | null;
-	focusOffset: number;
-};
-
-type ProseMirrorViewInternals = EditorView & {
-	domObserver?: {
-		currentSelection: { eq(other: ProseMirrorDomSelectionRange): boolean };
-	};
-	domSelectionRange(): ProseMirrorDomSelectionRange;
-};
-
-function nativeTextSelectionFromDom(
-	view: EditorView,
-	doc: EditorState["doc"],
-): TextSelection | null {
-	const domSel = view.dom.ownerDocument.defaultView?.getSelection();
-	const anchorNode = domSel?.anchorNode;
-	const focusNode = domSel?.focusNode;
-	if (!domSel || !anchorNode || !focusNode) return null;
-	if (!view.dom.contains(anchorNode) || !view.dom.contains(focusNode)) {
-		return null;
-	}
-	for (const node of [anchorNode, focusNode]) {
-		const element = node instanceof Element ? node : node.parentElement;
-		const leaf = element?.closest('[contenteditable="false"]');
-		if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return null;
-	}
-	try {
-		return TextSelection.between(
-			doc.resolve(view.posAtDOM(anchorNode, domSel.anchorOffset, 1)),
-			doc.resolve(view.posAtDOM(focusNode, domSel.focusOffset, 1)),
-		) as TextSelection;
-	} catch {
-		return null;
-	}
-}
-
-function observedDomSelectionMatchesNative(view: EditorView): boolean {
-	const current = view as ProseMirrorViewInternals;
-	const observer = current.domObserver;
-	if (!observer) return true;
-	return observer.currentSelection.eq(current.domSelectionRange());
-}
-
-function createAwarenessSelectionGuardPlugin(): Plugin {
-	let view: EditorView | null = null;
-	return new Plugin({
-		key: awarenessSelectionGuardKey,
-		view: (editorView) => {
-			view = editorView;
-			return {
-				destroy() {
-					view = null;
-				},
-			};
-		},
-		appendTransaction(
-			transactions: readonly Transaction[],
-			_old: EditorState,
-			state: EditorState,
-		) {
-			const current = view;
-			if (!current) return null;
-			const awarenessUpdated = transactions.some((tr) => {
-				const meta = tr.getMeta(yCursorPluginKey) as
-					| { awarenessUpdated?: boolean }
-					| undefined;
-				return Boolean(meta?.awarenessUpdated);
-			});
-			if (
-				!shouldAdoptNativeOnAwareness({
-					awarenessUpdated,
-					docChanged: transactions.some((tr) => tr.docChanged),
-					selectionSet: transactions.some((tr) => tr.selectionSet),
-					composing: current.composing,
-					editable: current.editable,
-					pmIsTextSelection: state.selection instanceof TextSelection,
-					observedDomSelectionMatchesNative:
-						observedDomSelectionMatchesNative(current),
-				})
-			) {
-				return null;
-			}
-			const aligned = nativeTextSelectionFromDom(current, state.doc);
-			if (!aligned || !aligned.empty || aligned.eq(state.selection)) return null;
-			return state.tr.setSelection(aligned);
-		},
-	});
-}
-
-export type MentionHit = {
-	entity: string;
-	id: string;
-	label: string;
-	title: string;
-};
+export {
+	collabCaretRender,
+	type FvociCollabUser,
+	type MentionHit,
+} from "../editor-extensions.js";
 
 export type {
 	EntityResolver,
 	EntitySnapshot,
 	MentionEntity,
-} from "./blocks.js";
-
-const EMOJI_SUGGESTION_RENDER = () => suggestionRenderer<EmojiMenuItem>();
+} from "../entities.js";
 
 /* WHY: #571 — 열린 오버레이가 Escape 를 먹는다. 에디터까지 올라가면 selectAllEscape 가 함께 돈다. */
 const OVERLAY_SELECTOR =
@@ -282,9 +80,6 @@ const bubbleShouldShow = ({ state }: { state: EditorState }): boolean =>
 	!isNarrowViewport();
 const BUBBLE_OPTIONS = { placement: "bottom" as const };
 
-const slashKey = new PluginKey("fvociSlash");
-const mentionKey = new PluginKey("fvociMention");
-
 function isGuardedTextField(
 	target: EventTarget | null,
 	host: HTMLElement | null,
@@ -297,94 +92,13 @@ function isGuardedTextField(
 	return target.isContentEditable;
 }
 
-type MentionLoader =
-	| ((query: string) => Promise<MentionHit[]> | MentionHit[])
-	| undefined;
-
-/* WHY: #625 — 멘션 조회가 400·네트워크로 죽어도 슬래시 메뉴의 정적 항목은 살아야 한다.
- * @tiptap/suggestion 은 items() 가 reject 하면 목록 전체를 [] 로 재발행한다. */
-async function loadMentionHits(
-	load: MentionLoader,
-	query: string,
-): Promise<MentionHit[]> {
-	if (!load) return [];
-	try {
-		return await load(query);
-	} catch {
-		return [];
-	}
-}
-
-function slashExtension(items: () => MentionLoader) {
-	return Extension.create({
-		name: "fvociSlash",
-		addProseMirrorPlugins() {
-			return [
-				Suggestion<SlashItem, SlashItem>({
-					pluginKey: slashKey,
-					editor: this.editor,
-					char: "/",
-					// http(s) URL embed queries include `/` (`https://…`); without
-					// this the match stops at `https:` and "URL 임베드" never appears.
-					allowToIncludeChar: true,
-					floatingUi: suggestionFloatingUi,
-					/* WHY: #628 — 정적 항목은 renderer 가 쿼리에서 직접 만든다(먼저 그린다).
-					 * items() 는 네트워크에 달린 임베드 후보만 돌려주고 뒤에 합쳐진다. */
-					items: async ({ query, editor }) => {
-						const hits = await loadMentionHits(items(), query);
-						const selected = editor.state.doc.textBetween(
-							editor.state.selection.from,
-							editor.state.selection.to,
-						);
-						return embedSlashItems(query, hits, selected);
-					},
-					command: ({ editor, range, props }) => {
-						props.run(editor, range);
-					},
-					render: () => suggestionRenderer<SlashItem>(filterSlashItems),
-					shouldShow: ({ transaction }) => !isChangeOrigin(transaction),
-				}),
-			];
-		},
-	});
-}
-
-function mentionExtension(items: () => MentionLoader) {
-	return Extension.create({
-		name: "fvociMention",
-		addProseMirrorPlugins() {
-			return [
-				Suggestion<MentionHit, MentionHit>({
-					pluginKey: mentionKey,
-					editor: this.editor,
-					char: "@",
-					floatingUi: suggestionFloatingUi,
-					items: ({ query }) => loadMentionHits(items(), query),
-					command: ({ editor, range, props }) => {
-						editor
-							.chain()
-							.focus()
-							.deleteRange(range)
-							.insertContent([
-								{
-									type: "mention",
-									attrs: {
-										entity: props.entity,
-										id: props.id,
-										label: props.label,
-									},
-								},
-								{ type: "text", text: " " },
-							])
-							.run();
-					},
-					render: () => suggestionRenderer<MentionHit>(),
-					shouldShow: ({ transaction }) => !isChangeOrigin(transaction),
-				}),
-			];
-		},
-	});
-}
+const REACT_NODE_VIEWS: FvociNodeViews = {
+	mermaid: () => ReactNodeViewRenderer(MermaidNodeView),
+	math: () => ReactNodeViewRenderer(MathNodeView),
+	mathInline: () => ReactNodeViewRenderer(MathInlineNodeView),
+	embed: () => ReactNodeViewRenderer(EmbedNodeView),
+	attachment: () => ReactNodeViewRenderer(AttachmentNodeView),
+};
 
 export const FvociEditor = memo(function FvociEditor({
 	ydoc,
@@ -456,195 +170,29 @@ export const FvociEditor = memo(function FvociEditor({
 	/* WHY: #571 — 인라인 배열은 렌더마다 확장 30여 개를 새로 만들고, @tiptap/react 의
 	 * compareOptions 가 원소 identity 로 비교해 setOptions → view.updateState 를 강제한다. */
 	const extensions = useMemo(
-		() => [
-			...createFvociExtensions({
-				emojiSuggestionRender: EMOJI_SUGGESTION_RENDER,
-				emojiSuggestionFloatingUi: suggestionFloatingUi,
-			}).flatMap((ext) => {
-				if (ext.name === "mention") return [];
-				if (ext.name === "mermaid") {
-					return [
-						Mermaid.extend({
-							addNodeView() {
-								return ReactNodeViewRenderer(MermaidNodeView);
-							},
-						}),
-					];
-				}
-				if (ext.name === "math") {
-					return [
-						MathBlock.extend({
-							addNodeView() {
-								return ReactNodeViewRenderer(MathNodeView);
-							},
-						}),
-					];
-				}
-				if (ext.name === "mathInline") {
-					return [
-						MathInline.extend({
-							addNodeView() {
-								return ReactNodeViewRenderer(MathInlineNodeView);
-							},
-						}),
-					];
-				}
-				if (ext.name === "embed") {
-					return [
-						Embed.extend({
-							addNodeView() {
-								return ReactNodeViewRenderer(EmbedNodeView);
-							},
-						}),
-					];
-				}
-				if (ext.name === "attachment") {
-					return [
-						Attachment.extend({
-							addNodeView() {
-								return ReactNodeViewRenderer(AttachmentNodeView);
-							},
-						}),
-					];
-				}
-				return [ext];
+		() =>
+			createFvociEditorExtensions({
+				ydoc: doc,
+				nodeViews: REACT_NODE_VIEWS,
+				mentionItems: () => mentionRef.current,
+				entityResolver: () => entityRef.current,
+				workspaceSlug: () => workspaceRef.current,
+				uploads: { anchors: uploadAnchors.current, queue: queueUploads },
+				provider,
+				user,
 			}),
-			Mention.extend({
-				addNodeView() {
-					return ({ node }) => {
-						const dom = document.createElement("span");
-						dom.setAttribute("data-mention", "");
-						const entity = String(node.attrs.entity ?? "");
-						const id = String(node.attrs.id ?? "");
-						const stored = String(node.attrs.label ?? "");
-						dom.textContent = `@${stored}`;
-						const resolver = entityRef.current;
-						if (resolver && isMentionEntity(entity)) {
-							void resolver(entity, id).then((snap) => {
-								if (snap) dom.textContent = `@${snap.label}`;
-							});
-						}
-						return { dom };
-					};
-				},
-			}),
-			Collaboration.configure({
-				document: doc,
-				field: FVOCI_YDOC_FRAGMENT,
-			}),
-			slashExtension(() => mentionRef.current),
-			mentionExtension(() => mentionRef.current),
-			FileHandler.extend({
-				onTransaction({ editor: current, transaction }) {
-					if (!transaction.docChanged) return;
-					const completed: unknown = transaction.getMeta("fvociFileUpload");
-					// WHY: #749 — Map insertion order keeps earlier files before, and later files after, this completion.
-					let afterCompleted = false;
-					for (const [key, anchor] of uploadAnchors.current) {
-						if (key === completed) afterCompleted = true;
-						const pos = completed
-							? transaction.mapping.map(
-									anchor.position,
-									afterCompleted ? 1 : -1,
-								)
-							: current.utils.getUpdatedPosition(anchor, transaction).position
-									.position;
-						uploadAnchors.current.set(key, uploadAnchor(current, pos));
-					}
-				},
-			}).configure({
-				onDrop: (current, files, pos) => queueUploads(current, files, pos),
-				onPaste: (current, files) =>
-					queueUploads(current, files, current.state.selection.to),
-			}),
-			Extension.create({
-				name: "fvociPasteEmbed",
-				addProseMirrorPlugins() {
-					const current = this.editor;
-					return [
-						new Plugin({
-							props: {
-								handlePaste(_view, event) {
-									const text = event.clipboardData?.getData("text/plain") ?? "";
-									const ws = workspaceRef.current;
-									if (!ws) return false;
-									const parsed = parseWorkspaceUrl(text, ws);
-									if (!parsed) return false;
-									const resolve = entityRef.current ?? null;
-									if (!resolve) {
-										current
-											.chain()
-											.focus()
-											.insertContent({
-												type: "embed",
-												attrs: parsed,
-											})
-											.run();
-										return true;
-									}
-									const { from, to } = current.state.selection;
-									void resolvePastedEmbed(text, ws, resolve).then((attrs) => {
-										if (!attrs || current.isDestroyed) return;
-										current
-											.chain()
-											.focus()
-											.deleteRange({ from, to })
-											.insertContentAt(from, {
-												type: "embed",
-												attrs,
-											})
-											.run();
-									});
-									return true;
-								},
-							},
-						}),
-					];
-				},
-			}),
-			...(provider && user
-				? [
-						CollaborationCaret.extend({
-							addProseMirrorPlugins() {
-								return [
-									...(this.parent?.() ?? []),
-									createAwarenessSelectionGuardPlugin(),
-								];
-							},
-						}).configure({
-							provider,
-							user,
-							render: collabCaretRender,
-							/* WHY: #510 — y-tiptap 기본 selectionBuilder 는 `<color>70`(44% 알파)라
-							 * 피어가 잡은 블록의 본문이 읽히지 않는다. 8% 틴트만 남긴다. */
-							selectionRender: (peer: { color: string }) => ({
-								class: "ProseMirror-yjs-selection",
-								style: `background-color: color-mix(in srgb, ${peer.color} 8%, transparent)`,
-							}),
-						}),
-					]
-				: []),
-		],
 		[doc, provider, user, queueUploads],
 	);
 
-	/* WHY: #593 — 접근 가능한 이름은 ProseMirror 가 role=textbox 로 노출하는 .tiptap 에 붙어야 한다.
-	 * #571 — compareOptions 는 editorProps 를 identity 로 비교하므로 참조를 고정한다.
-	 * role 도 적는다 — setOptions 의 view.setProps(editorProps) 가 attributes 를 통째로 갈아끼워
-	 * Tiptap createView 의 role=textbox 를 지운다(EditorContent 마운트 경로). */
+	/* WHY: #571 — compareOptions 는 editorProps 를 identity 로 비교하므로 참조를 고정한다. */
 	const editorProps = useMemo(
-		() => ({
-			handleKeyDown: handleNativeOwnedDeleteKeyDown,
-			...(ariaLabel
-				? { attributes: { role: "textbox", "aria-label": ariaLabel } }
-				: {}),
-		}),
+		() => createFvociEditorProps(ariaLabel),
 		[ariaLabel],
 	);
 
-	/* WHY: #738 — Tiptap 기본값은 nonce 없는 <style data-tiptap-style> 을 head 에 꽂는다
-	 * (@tiptap/core createStyleTag). nonce 가 붙은 style-src 아래에서 'unsafe-inline' 은
-	 * 죽어 있으므로 그 <style> 은 통째로 차단된다 — 규칙은 apps/web/src/index.css 로 옮겼다. */
+	/* WHY: #738 — Tiptap 기본값은 <style data-tiptap-style> 을 head 에 꽂는다
+	 * (@tiptap/core createStyleTag). style-src 는 'self' 와 셸 인라인 블록의 빌드 시점 해시뿐이고
+	 * 'unsafe-inline' 이 없으므로 그 <style> 은 통째로 차단된다 — 규칙은 react/editor.css 로 옮겼다. */
 	const editor = useEditor({
 		immediatelyRender: false,
 		injectCSS: false,
@@ -748,7 +296,7 @@ export const FvociEditor = memo(function FvociEditor({
 									if (editor.isDestroyed || !anchor) return;
 									editor
 										.chain()
-										.setMeta("fvociFileUpload", key)
+										.setMeta(FILE_UPLOAD_META, key)
 										.insertContentAt(
 											anchor.position,
 											{ type: "attachment", attrs: result },

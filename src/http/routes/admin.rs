@@ -21,10 +21,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::api::dto::{
-    AdminEraseBody, AdminErasureScheduleOutput, AdminInstanceSettingsOutput, AdminSystemOutput,
-    AdminUserItemOutput, AdminUserListResponse, AdminUserPatchBody, AdminUserPatchOutput,
-    AdminWorkspaceItemOutput, AdminWorkspaceListResponse, AuditLogItemOutput, AuditLogListResponse,
-    AuditLogQuery, InstanceAdminBody, LegalDocumentOutput, LegalPublishBody, OkResponse,
+    AdminAttachmentTransferOutput, AdminEraseBody, AdminErasureScheduleOutput,
+    AdminInstanceSettingsOutput, AdminSystemOutput, AdminUserItemOutput, AdminUserListResponse,
+    AdminUserPatchBody, AdminUserPatchOutput, AdminWorkspaceItemOutput, AdminWorkspaceListResponse,
+    AuditLogItemOutput, AuditLogListResponse, AuditLogQuery, InstanceAdminBody,
+    LegalDocumentOutput, LegalPublishBody, OkResponse,
 };
 use crate::db::account::{
     admin_cancel_user_erasure, schedule_user_erasure, AdminEraseOutcome, CancelWithdrawOutcome,
@@ -279,6 +280,7 @@ async fn patch_users(
         &state.auth.db.pool,
         &state.auth.db.license,
         auth.user_id,
+        auth.credential_id,
         body.user_id,
         InstanceUserPatch {
             instance_admin: body.instance_admin,
@@ -311,6 +313,7 @@ async fn patch_instance_admins(
         &state.auth.db.pool,
         &state.auth.db.license,
         auth.user_id,
+        auth.credential_id,
         body.user_id,
         InstanceUserPatch {
             instance_admin: Some(body.value),
@@ -338,10 +341,16 @@ async fn erase_user(
     let auth = session(&state, &headers, &jar).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let ip = peer_ip(peer.ip());
-    let outcome = schedule_user_erasure(&state.auth.db.pool, auth.user_id, body.user_id, Some(&ip))
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?;
+    let outcome = schedule_user_erasure(
+        &state.auth.db.pool,
+        auth.user_id,
+        auth.credential_id,
+        body.user_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?;
     let scheduled = match outcome {
         AdminEraseOutcome::Scheduled(scheduled) => scheduled,
         AdminEraseOutcome::NotFound => return Err(not_found()),
@@ -375,10 +384,16 @@ async fn cancel_erase_user(
     let auth = session(&state, &headers, &jar).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let ip = peer_ip(peer.ip());
-    match admin_cancel_user_erasure(&state.auth.db.pool, auth.user_id, body.user_id, Some(&ip))
-        .await
-        .map_err(internal)?
-        .ok_or_else(not_found)?
+    match admin_cancel_user_erasure(
+        &state.auth.db.pool,
+        auth.user_id,
+        auth.credential_id,
+        body.user_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?
+    .ok_or_else(not_found)?
     {
         CancelWithdrawOutcome::Ok => Ok(Json(OkResponse { ok: true })),
         CancelWithdrawOutcome::NotFound => Err(not_found()),
@@ -437,6 +452,7 @@ async fn post_legal(
     let doc = publish_legal(
         &state.auth.db.pool,
         auth.user_id,
+        auth.credential_id,
         LegalPublishInput {
             kind: body.kind,
             title,
@@ -460,6 +476,7 @@ pub fn admin_settings_output(
     snapshot: &SettingsSnapshot,
 ) -> AdminInstanceSettingsOutput {
     let boot = settings::boot_values(&state.auth.db.settings_boot, &snapshot.values);
+    let transfer = settings::effective_transfer(snapshot, state.storage.presign_unavailable());
     AdminInstanceSettingsOutput {
         version: snapshot.revision,
         values: snapshot.values.clone(),
@@ -482,6 +499,13 @@ pub fn admin_settings_output(
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        attachment_transfer: AdminAttachmentTransferOutput {
+            effective: transfer.mode,
+            source: transfer.source,
+            presigned_available: transfer.unavailable.is_none(),
+            unavailable_reason: transfer.unavailable,
+            blocked: transfer.blocked,
+        },
     }
 }
 
@@ -541,6 +565,17 @@ fn parse_settings_patch(body: &Value) -> Result<Vec<(SettingsKey, Option<Value>)
     Ok(items)
 }
 
+fn requests_presigned(items: &[(SettingsKey, Option<Value>)]) -> bool {
+    items.iter().any(|(key, value)| {
+        *key == SettingsKey::AttachmentTransfer
+            && value
+                .as_ref()
+                .and_then(|v| v.get("mode"))
+                .and_then(Value::as_str)
+                == Some(crate::attachments::TransferMode::Presigned.as_str())
+    })
+}
+
 fn map_settings_write(err: SettingsWriteError) -> AppError {
     match err {
         SettingsWriteError::NotAdmin | SettingsWriteError::AssetMissing => not_found(),
@@ -567,14 +602,23 @@ async fn patch_instance_settings(
         require_admin_read(&state, auth.user_id).await?;
         return Err(AppError::from_code(ProblemCode::EnterpriseLicenseRequired));
     }
+    // The catalog cannot know the storage driver: storing `presigned` where it
+    // could never apply would only produce a blocked setting.
+    if requests_presigned(&items) && state.storage.presign_unavailable().is_some() {
+        require_admin_read(&state, auth.user_id).await?;
+        return Err(AppError::from_code(
+            ProblemCode::AttachmentTransferUnavailable,
+        ));
+    }
     let ip = peer_ip(peer.ip());
-    let outcome = settings::apply_change_with_license(
+    let outcome = settings::apply_change(
         &state.auth.db.pool,
         auth.user_id,
+        auth.credential_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::Patch(items),
-        &state.auth.db.license,
+        &state.auth.db.settings_boot,
     )
     .await
     .map_err(internal)?
@@ -716,16 +760,17 @@ async fn upload_branding_asset(
         mime: mime.to_string(),
     };
     let ip = peer_ip(peer.ip());
-    let outcome = settings::apply_change_with_license(
+    let outcome = settings::apply_change(
         &state.auth.db.pool,
         auth.user_id,
+        auth.credential_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::BrandingAsset {
             kind,
             asset: Some(record.clone()),
         },
-        &state.auth.db.license,
+        &state.auth.db.settings_boot,
     )
     .await;
     let outcome = match outcome {
@@ -760,13 +805,14 @@ async fn remove_branding_asset(
     }
     let kind = parse_asset_kind(&asset)?;
     let ip = peer_ip(peer.ip());
-    let outcome = settings::apply_change_with_license(
+    let outcome = settings::apply_change(
         &state.auth.db.pool,
         auth.user_id,
+        auth.credential_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::BrandingAsset { kind, asset: None },
-        &state.auth.db.license,
+        &state.auth.db.settings_boot,
     )
     .await
     .map_err(internal)?

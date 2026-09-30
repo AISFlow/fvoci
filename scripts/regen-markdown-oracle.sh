@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerates compat/fixtures/markdown-oracle/*.{json,roundtrip.md,html} from the
-# Node document convert helper (the TS `@fvoci/editor` oracle; dev/test only):
+# document convert helper (the TS `@fvoci/editor` oracle; dev/test only):
 #   <name>.json          mdToTiptapJson(<name>.md)
 #   <name>.roundtrip.md  tiptapDocToMd(mdToTiptapJson(<name>.md))
 #   <name>.html          tiptapDocToSafeHtml(mdToTiptapJson(<name>.md))

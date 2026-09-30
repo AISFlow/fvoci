@@ -1,6 +1,6 @@
 [package]
 name = "fvoci-server"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 publish = false
 
@@ -107,6 +107,10 @@ rustybuzz = { version = "=0.20.1", default-features = false, features = ["std"] 
 unicode-linebreak = "=0.1.5"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
 web-push-native = { version = "0.5.0", default-features = false, features = ["vapid"] }
+# `/metrics` exposition (source @prometheus-io/client registry): the official
+# prometheus/client_rust text encoder. Apache-2.0 OR MIT. No default features
+# (protobuf encodings stay off).
+prometheus-client = { version = "=0.25.1", default-features = false }
 
 [dev-dependencies]
 tokio-tungstenite = "=0.29.0"
