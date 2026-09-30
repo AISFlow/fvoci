@@ -128,6 +128,30 @@ test("late project create and clone responses stay scoped to their original work
   }
 });
 
+test("project creation and cloning remain retired after returning A to B to A", async ({ page }) => {
+  await login(page, owner.email, owner.password);
+  for (const kind of ["create", "clone"] as const) {
+    await prepareA(page, "projects");
+    const path = kind === "create" ? `/api/v1/workspaces/${a.id}/projects` : `/api/v1/workspaces/${a.id}/projects/${source.id}/clone`;
+    const gate = await holdResponse(page, path, "POST");
+    try {
+      if (kind === "create") await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
+      else await page.locator(".project-list__row").filter({ hasText: "A source" }).getByRole("button", { name: "복제", exact: true }).click();
+      const dialog = page.getByRole("dialog");
+      await dialog.getByLabel("키", { exact: true }).fill(kind === "create" ? "ABAPROJ" : "ABACOPY");
+      if (kind === "create") await dialog.getByLabel("이름", { exact: true }).fill("Retired creation");
+      await dialog.getByRole("button", { name: kind === "create" ? "새 프로젝트" : "복제", exact: true }).click();
+      await gate.ready;
+      await switchToB(page, "projects");
+      await page.locator("#workspace-switch").selectOption(a.id);
+      await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/projects$`));
+      await gate.finish();
+      await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/projects$`));
+      await expect(page.getByRole("button", { name: "새 프로젝트", exact: true })).toBeEnabled();
+    } finally { gate.release(); }
+  }
+});
+
 test("a genuine late project conflict cannot show an error in the next workspace", async ({ page }) => {
   await login(page, owner.email, owner.password);
   await prepareA(page, "projects");
@@ -162,6 +186,22 @@ test("late wiki creation cannot navigate to another workspace's matching documen
     await expect(page).toHaveURL(new RegExp(`/w/${b.slug}/wiki$`));
     expect(count()).toBe(baseline);
     await expect(page.getByText("B second wiki", { exact: true })).toBeVisible();
+  } finally { gate.release(); }
+});
+
+test("wiki creation remains retired after A to B to A", async ({ page }) => {
+  await login(page, owner.email, owner.password);
+  await prepareA(page, "wiki");
+  const gate = await holdResponse(page, `/api/v1/workspaces/${a.id}/documents`, "POST");
+  try {
+    await page.getByRole("button", { name: "새 문서", exact: true }).click();
+    await gate.ready;
+    await switchToB(page, "wiki");
+    await page.locator("#workspace-switch").selectOption(a.id);
+    await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/wiki$`));
+    await gate.finish();
+    await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/wiki$`));
+    await expect(page.getByRole("button", { name: "새 문서", exact: true })).toBeEnabled();
   } finally { gate.release(); }
 });
 
@@ -222,5 +262,81 @@ test("late notification open and read-all preserve the other workspace's unread 
       expect((await (await page.request.get(`/api/v1/workspaces/${b.id}/notifications/unread-count`)).json()).count).toBe(1);
       await expect(page.getByRole("button", { name: "전체 읽음", exact: true })).toBeEnabled();
     } finally { gate.release(); }
+  }
+});
+
+test("notification actions remain retired after A to B to A", async ({ page }) => {
+  await login(page, owner.email, owner.password);
+  for (const operation of ["open", "read-all"] as const) {
+    const notification = (await (await page.request.get(`/api/v1/workspaces/${a.id}/notifications`)).json()).items[0];
+    expect((await page.request.patch(`/api/v1/workspaces/${a.id}/notifications/${notification.id}`, { data: { read: false } })).ok()).toBe(true);
+    await prepareA(page, "notifications");
+    await expect(page.locator(".notifications-page__row")).toHaveCount(1);
+    const path = operation === "open" ? `/api/v1/workspaces/${a.id}/notifications/${notification.id}` : `/api/v1/workspaces/${a.id}/notifications/read-all`;
+    const gate = await holdResponse(page, path, operation === "open" ? "PATCH" : "POST");
+    try {
+      await (operation === "open" ? page.locator(".notifications-page__item") : page.getByRole("button", { name: "전체 읽음", exact: true })).click();
+      await gate.ready;
+      await switchToB(page, "notifications");
+      await page.locator("#workspace-switch").selectOption(a.id);
+      await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/notifications$`));
+      await gate.finish();
+      await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/notifications$`));
+      await expect(page.getByRole("button", { name: "전체 읽음", exact: true })).toBeEnabled();
+    } finally { gate.release(); }
+  }
+});
+
+test("departing the section retires a pending create even with the same workspace", async ({ page }) => {
+  await login(page, owner.email, owner.password);
+  await page.goto(`/w/${a.slug}/wiki`);
+  await page.getByRole("navigation", { name: "워크스페이스" }).getByRole("link", { name: "프로젝트", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/projects$`));
+  const gate = await holdResponse(page, `/api/v1/workspaces/${a.id}/projects`, "POST");
+  try {
+    await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("키", { exact: true }).fill("DETACHED");
+    await dialog.getByLabel("이름", { exact: true }).fill("Retired section");
+    await dialog.getByRole("button", { name: "새 프로젝트", exact: true }).click();
+    await gate.ready;
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/wiki$`));
+    await gate.finish();
+    await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/wiki$`));
+    await expect(page.getByRole("heading", { name: "위키", exact: true })).toBeVisible();
+  } finally { gate.release(); }
+});
+
+test("a real workspace role change retires an owner operation without late navigation", async ({ page, browser, baseURL }) => {
+  await login(page, owner.email, owner.password);
+  const userId = (await (await page.request.get("/api/v1/auth/me")).json()).userId;
+  createE2eUser("scope-owner@example.com", "scopeowner123", "관리", { workspaceSlug: a.slug, membershipRole: "owner" });
+  const context = await browser.newContext({ baseURL });
+  const actor = await context.newPage();
+  await login(actor, "scope-owner@example.com", "scopeowner123");
+  await page.goto(`/w/${a.slug}/projects`);
+  const gate = await holdResponse(page, `/api/v1/workspaces/${a.id}/projects`, "POST");
+  try {
+    await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("키", { exact: true }).fill("OLDROLE");
+    await dialog.getByLabel("이름", { exact: true }).fill("Retired authority");
+    await dialog.getByRole("button", { name: "새 프로젝트", exact: true }).click();
+    await gate.ready;
+    const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === "/api/v1/me/workspaces" && response.ok());
+    const changed = await actor.request.patch(`/api/v1/workspaces/${a.id}/members/${userId}`, { data: { role: "guest" } });
+    expect(changed.ok(), await changed.text()).toBe(true);
+    const list = await (await refreshed).json();
+    expect(list.items.find((workspace: { id: string }) => workspace.id === a.id).role).toBe("guest");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await gate.finish();
+    await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/projects$`));
+    await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0);
+  } finally {
+    gate.release();
+    const restored = await actor.request.patch(`/api/v1/workspaces/${a.id}/members/${userId}`, { data: { role: "owner" } });
+    expect(restored.ok(), await restored.text()).toBe(true);
+    await context.close();
   }
 });
