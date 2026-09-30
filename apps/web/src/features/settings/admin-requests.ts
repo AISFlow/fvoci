@@ -3,7 +3,7 @@
 // is not an instance admin on every /admin route.
 import type { QueryClient } from "@tanstack/query-core";
 import type { components } from "@/generated/api";
-import { api, ensureOk } from "@/lib/api";
+import { api, ensureOk, ProblemError } from "@/lib/api";
 import { legalDocQuery, legalVersionsQuery } from "@/lib/queries/admin";
 import type { BrandingAssetKind } from "./settings-catalog";
 
@@ -38,6 +38,10 @@ export async function saveBrandingAsset(
         params: { path: { asset: kind } },
       }),
     );
+  }
+  // Match the server's inclusive 512 KiB limit before allocating the byte copies.
+  if (file.size > 512 * 1024) {
+    throw new ProblemError(413, "invalid_input");
   }
   // The generated octet-stream schema is a byte array. Keep that real byte contract
   // through serialization instead of asserting that a File is an array.
