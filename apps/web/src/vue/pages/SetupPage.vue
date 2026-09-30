@@ -18,11 +18,29 @@ const setup = useQuery(setupStatusQuery);
 const brandingName = computed(() => setup.data.value?.branding.name);
 const leaving = computed(() => setup.data.value?.needed === false);
 
-watchEffect(() => {
+watchEffect((onCleanup) => {
+  let active = true;
+  onCleanup(() => {
+    active = false;
+  });
+  if (router.currentRoute.value.name !== "setup") return;
   if (setup.isLoading.value || setup.isError.value) return;
   if (setup.data.value && !setup.data.value.needed) {
     // /login is already a Vue page: stay in this app.
-    void router.replace("/login");
+    const sourceRoute = router.currentRoute.value;
+    router.replace("/login").catch(() => {
+      // A delayed failure must still belong to this page and redirect attempt.
+      if (
+        !active ||
+        router.currentRoute.value !== sourceRoute ||
+        setup.isLoading.value ||
+        setup.isError.value ||
+        setup.data.value?.needed !== false
+      )
+        return;
+      // Recover with a full load if the SPA navigation fails.
+      window.location.replace("/login");
+    });
   }
 });
 
@@ -46,7 +64,9 @@ async function onSubmit(input: SetupInput): Promise<void> {
 </script>
 
 <template>
-  <p v-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="setup.isError.value" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>

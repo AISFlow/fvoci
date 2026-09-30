@@ -35,7 +35,10 @@ function formatDeadline(iso: string): string {
 }
 
 async function copyText(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
+  if (
+    typeof navigator.clipboard !== "undefined" &&
+    typeof navigator.clipboard.writeText === "function"
+  ) {
     await navigator.clipboard.writeText(value);
     return;
   }
@@ -83,7 +86,9 @@ function handleCopy(): void {
         />
         <template v-if="scheduled && recoveryHref">
           <AuthStatus
-            :message="mailSent === false ? t('auth.erasure.mailNotSent') : t('auth.erasure.copyHint')"
+            :message="
+              mailSent === false ? t('auth.erasure.mailNotSent') : t('auth.erasure.copyHint')
+            "
           />
           <p class="break-all font-mono auth-shell__text">{{ recoveryHref }}</p>
           <UButton

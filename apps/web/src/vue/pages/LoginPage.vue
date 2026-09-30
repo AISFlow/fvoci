@@ -27,7 +27,10 @@ const mfaToken = ref<string | null>(null);
 const brandingName = computed(() => setup.data.value?.branding.name);
 const operator = computed(() => instance.data.value?.values.operator ?? null);
 const returnTo = computed(() =>
-  safeReturnTo(typeof route.query.returnTo === "string" ? route.query.returnTo : null, window.location.origin),
+  safeReturnTo(
+    typeof route.query.returnTo === "string" ? route.query.returnTo : null,
+    window.location.origin,
+  ),
 );
 const resetNotice = computed(() => route.query.reset === "1");
 const withdrawnNotice = computed(() => route.query.withdrawn === "1");
@@ -35,9 +38,7 @@ const notice = computed(() =>
   oidcErrorMessage(typeof route.query.error === "string" ? route.query.error : null),
 );
 
-const leaving = computed(
-  () => setup.data.value?.needed === true || me.data.value !== undefined,
-);
+const leaving = computed(() => setup.data.value?.needed === true || me.data.value !== undefined);
 
 watchEffect(() => {
   if (setup.isLoading.value || setup.isError.value) return;
@@ -54,7 +55,7 @@ watchEffect(() => {
   }
 });
 
-async function enterApp(): Promise<void> {
+function enterApp(): void {
   if (returnTo.value !== "/") {
     window.location.assign(returnTo.value);
     return;
@@ -72,7 +73,7 @@ async function onLogin(input: LoginInput): Promise<void> {
     mfaToken.value = result.mfaToken;
     return;
   }
-  await enterApp();
+  enterApp();
 }
 
 async function onMagicLink(email: string): Promise<void> {
@@ -97,7 +98,9 @@ async function onPasswordReset(email: string): Promise<void> {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>
   </div>
-  <p v-else-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-else-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <MfaStep
     v-else-if="mfaToken !== null"
     :mfa-token="mfaToken"

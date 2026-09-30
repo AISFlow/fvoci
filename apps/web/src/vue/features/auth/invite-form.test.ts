@@ -9,11 +9,11 @@ function source(file: string): string {
   return readFileSync(path.join(dir, file), "utf8");
 }
 
-test("the Vue invite form does not set method or action", () => {
+await test("the Vue invite form does not set method or action", () => {
   assert.doesNotMatch(source("InviteAcceptForm.vue"), /\b(method|action|formAction|formMethod)=/);
 });
 
-test("the Vue invite page starts OIDC by script, never by a native form", () => {
+await test("the Vue invite page starts OIDC by script, never by a native form", () => {
   const page = source("InviteAcceptForm.vue");
   assert.match(page, /clickOidcStart\([^;]*?\bstartOidcInvite\(/);
   assert.doesNotMatch(page, /\b(method|action|formAction|formMethod)=/);
@@ -21,7 +21,7 @@ test("the Vue invite page starts OIDC by script, never by a native form", () => 
   assert.doesNotMatch(page, /<form\b[^>]*(method|action)=/);
 });
 
-test("the invite page leaves the Vue app with a full load", () => {
+await test("the invite page leaves the Vue app with a full load", () => {
   const page = source("../../pages/InvitePage.vue");
   assert.match(page, /window\.location\.assign\("\/"\)/);
   assert.match(page, /window\.location\.assign\("\/login"\)/);
@@ -34,7 +34,7 @@ test("the invite page leaves the Vue app with a full load", () => {
   assert.doesNotMatch(page, /takeMfaFragment/);
 });
 
-test("invite consents and legal links are not Vue-router navigations", () => {
+await test("invite consents and legal links are not Vue-router navigations", () => {
   const page = source("InviteAcceptForm.vue");
   assert.match(page, /requiredLegal/);
   assert.match(page, /:href="`\/legal\/\$\{doc\.kind\}`"/);

@@ -3,11 +3,12 @@ import { reactive, ref } from "vue";
 
 /** The part of a zod schema the form uses (lib/validators.ts). */
 export interface FormSchema<O> {
-  safeParse(
-    data: unknown,
-  ):
+  safeParse(data: unknown):
     | { success: true; data: O }
-    | { success: false; error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] } };
+    | {
+        success: false;
+        error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] };
+      };
 }
 
 /** A validator message: `i18n:<key>` names a catalog message (lib/validators.ts). */
@@ -37,7 +38,10 @@ const BROWSER: AuthFormEnvironment = {
   focus: (id) => document.getElementById(id)?.focus(),
 };
 
-function readFormFields<F extends string>(form: HTMLFormElement, fields: readonly F[]): Record<F, string> {
+function readFormFields<F extends string>(
+  form: HTMLFormElement,
+  fields: readonly F[],
+): Record<F, string> {
   const data = new FormData(form);
   const values = {} as Record<F, string>;
   for (const field of fields) {
@@ -81,17 +85,17 @@ export function useAuthForm<F extends string, O = Record<F, string>>(options: {
   const submitting = ref(false);
 
   function clearErrors(): void {
-    for (const field of fields) delete errors[field];
+    for (const field of fields) Reflect.deleteProperty(errors, field);
   }
 
   function revalidate(field: F): void {
     if (!options.schema) {
-      delete errors[field];
+      Reflect.deleteProperty(errors, field);
       return;
     }
     const result = options.schema.safeParse({ ...values });
     const message = result.success ? undefined : firstIssues(result.error.issues, [field])[field];
-    if (message === undefined) delete errors[field];
+    if (message === undefined) Reflect.deleteProperty(errors, field);
     else errors[field] = message;
   }
 
@@ -101,7 +105,9 @@ export function useAuthForm<F extends string, O = Record<F, string>>(options: {
   }
 
   /** The submit listener: validates, then runs `onValid` with the parsed values. */
-  function handleSubmit(onValid: (data: O) => Promise<void> | void): (event?: Event) => Promise<void> {
+  function handleSubmit(
+    onValid: (data: O) => Promise<void> | void,
+  ): (event?: Event) => Promise<void> {
     return async (event) => {
       event?.preventDefault();
       if (isFormEventTarget(event?.target)) {

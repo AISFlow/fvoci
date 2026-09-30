@@ -25,7 +25,7 @@ function roleLabel(role: string): string {
 }
 
 function consentKey(doc: { kind: string; version: number }): string {
-  return `${doc.kind}:${doc.version}`;
+  return `${doc.kind}:${String(doc.version)}`;
 }
 
 const props = defineProps<{
@@ -69,8 +69,8 @@ const onSubmit = form.handleSubmit(async (values) => {
   }
 });
 
-function startProvider(provider: string): void {
-  void clickOidcStart(
+async function startProvider(provider: string): Promise<void> {
+  await clickOidcStart(
     provider,
     () => startOidcInvite(provider, { token: props.token, consents: consentItems.value }),
     {
@@ -97,9 +97,16 @@ function startProvider(provider: string): void {
         })
       "
     >
-      <div v-if="invitation.requiredLegal.length > 0" class="auth-shell__stack auth-shell__divided pb-5">
+      <div
+        v-if="invitation.requiredLegal.length > 0"
+        class="auth-shell__stack auth-shell__divided pb-5"
+      >
         <p class="auth-shell__text auth-shell__text--strong">{{ t("auth.invite.consents") }}</p>
-        <div v-for="doc in invitation.requiredLegal" :key="consentKey(doc)" class="auth-shell__check">
+        <div
+          v-for="doc in invitation.requiredLegal"
+          :key="consentKey(doc)"
+          class="auth-shell__check"
+        >
           <input
             :id="`invite-consent-${consentKey(doc)}`"
             type="checkbox"
@@ -107,7 +114,9 @@ function startProvider(provider: string): void {
             @change="consentChecked[consentKey(doc)] = ($event.target as HTMLInputElement).checked"
           />
           <div class="flex min-w-0 flex-col gap-1">
-            <label :for="`invite-consent-${consentKey(doc)}`" class="auth-shell__text">{{ doc.title }}</label>
+            <label :for="`invite-consent-${consentKey(doc)}`" class="auth-shell__text">{{
+              doc.title
+            }}</label>
             <a
               :href="`/legal/${doc.kind}`"
               target="_blank"
@@ -173,7 +182,9 @@ function startProvider(provider: string): void {
       </form>
       <template v-if="providers && providers.length > 0">
         <hr class="auth-shell__rule" />
-        <p class="auth-shell__text auth-shell__text--strong auth-shell__text--muted">{{ t("auth.invite.social") }}</p>
+        <p class="auth-shell__text auth-shell__text--strong auth-shell__text--muted">{{
+          t("auth.invite.social")
+        }}</p>
         <div class="auth-shell__stack">
           <UButton
             v-for="p in providers"

@@ -10,11 +10,11 @@ function source(file: string): string {
   return readFileSync(path.join(dir, file), "utf8");
 }
 
-test("the Vue setup form does not set method or action", () => {
+await test("the Vue setup form does not set method or action", () => {
   assert.doesNotMatch(source("SetupForm.vue"), /\b(method|action)=/);
 });
 
-test("setup fields are the React form's ids, and family name is optional", () => {
+await test("setup fields are the React form's ids, and family name is optional", () => {
   const form = source("SetupForm.vue");
   assert.match(form, /id="setup-family-name"/);
   assert.match(form, /id="setup-given-name"/);
@@ -33,7 +33,7 @@ test("setup fields are the React form's ids, and family name is optional", () =>
   assert.doesNotMatch(form, /from ["']react["']/);
 });
 
-test("the setup page posts the admin account, then loads home with fresh queries", () => {
+await test("the setup page posts the admin account, then loads home with fresh queries", () => {
   const page = source("../../pages/SetupPage.vue");
   assert.match(page, /api\.POST\("\/api\/v1\/setup"/);
   assert.match(page, /familyName: input\.familyName \|\| undefined/);
@@ -46,7 +46,7 @@ test("the setup page posts the admin account, then loads home with fresh queries
   assert.doesNotMatch(page, /redirectTo\("\/login"\)/);
 });
 
-test("setupInput accepts the first-instance admin form the React page posts", () => {
+await test("setupInput accepts the first-instance admin form the React page posts", () => {
   const parsed = setupInput.parse({
     email: "  Admin@Example.COM  ",
     password: "supersecret1",
@@ -62,7 +62,7 @@ test("setupInput accepts the first-instance admin form the React page posts", ()
   assert.equal(parsed.workspaceSlug, "vsetup");
 });
 
-test("setupInput refuses a short password and a non-slug workspace address", () => {
+await test("setupInput refuses a short password and a non-slug workspace address", () => {
   const short = setupInput.safeParse({
     email: "admin@example.com",
     password: "short",

@@ -61,10 +61,20 @@ const onSubmit = form.handleSubmit(async ({ code }) => {
           @input="form.onInput('code', $event)"
         />
         <AuthAlert v-if="serverError" :message="serverError" />
-        <UButton type="submit" size="lg" class="auth-shell__button" :disabled="form.submitting.value">
+        <UButton
+          type="submit"
+          size="lg"
+          class="auth-shell__button"
+          :disabled="form.submitting.value"
+        >
           {{ form.submitting.value ? t("auth.mfa.verifying") : t("auth.mfa.verify") }}
         </UButton>
-        <UButton type="button" variant="link" class="auth-shell__link-button auth-shell__button" @click="emit('back')">
+        <UButton
+          type="button"
+          variant="link"
+          class="auth-shell__link-button auth-shell__button"
+          @click="emit('back')"
+        >
           {{ t("auth.mfa.back") }}
         </UButton>
       </form>

@@ -19,7 +19,9 @@ withDefaults(
 
 <template>
   <div class="auth-shell">
-    <main :class="width === 'wide' ? 'auth-shell__main auth-shell__main--wide' : 'auth-shell__main'">
+    <main
+      :class="width === 'wide' ? 'auth-shell__main auth-shell__main--wide' : 'auth-shell__main'"
+    >
       <div v-if="showWordmark" class="mb-8 flex flex-col items-center gap-2 text-center">
         <p class="auth-shell__wordmark break-keep">{{ brandingName ?? t("auth.wordmark") }}</p>
         <p class="auth-shell__tagline break-keep">{{ t("auth.tagline") }}</p>

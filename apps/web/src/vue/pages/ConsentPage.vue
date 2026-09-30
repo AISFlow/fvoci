@@ -31,9 +31,20 @@ const unauthorized = computed(() => {
   return err instanceof ProblemError && err.status === 401;
 });
 
-watchEffect(() => {
+watchEffect((onCleanup) => {
+  let active = true;
+  onCleanup(() => {
+    active = false;
+  });
+  if (router.currentRoute.value.name !== "consent") return;
   if (unauthorized.value) {
-    void router.replace("/login");
+    const sourceRoute = router.currentRoute.value;
+    router.replace("/login").catch(() => {
+      // A delayed failure must still belong to this page and redirect attempt.
+      if (!active || router.currentRoute.value !== sourceRoute || !unauthorized.value) return;
+      // Recover with a full load if the SPA navigation fails.
+      window.location.replace("/login");
+    });
     return;
   }
   // Nothing (left) to accept: continue where the gate interrupted.

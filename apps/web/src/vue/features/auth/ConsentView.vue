@@ -23,7 +23,7 @@ const error = ref<string | null>(null);
 const submitting = ref(false);
 
 function consentKey(doc: { kind: string; version: number }): string {
-  return `${doc.kind}:${doc.version}`;
+  return `${doc.kind}:${String(doc.version)}`;
 }
 
 const allChecked = computed(
@@ -64,7 +64,10 @@ function onSubmit(event: Event): void {
             {{ t("consent.effectiveAt", { date: formatDateKo(doc.effectiveAt) }) }}
           </p>
         </div>
-        <SafeHtml class="auth-shell__doc-body break-keep auth-shell__text" :html="asSafeHtml(doc.bodyHtml)" />
+        <SafeHtml
+          class="auth-shell__doc-body break-keep auth-shell__text"
+          :html="asSafeHtml(doc.bodyHtml)"
+        />
         <div class="auth-shell__check">
           <input
             :id="`consent-${consentKey(doc)}`"
