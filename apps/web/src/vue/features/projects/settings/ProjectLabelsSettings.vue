@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
+import UInput from "@nuxt/ui/components/Input.vue";
+import UPageCard from "@nuxt/ui/components/PageCard.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref } from "vue";
 import { projectLabelsQuery } from "@/features/tasks/queries";
@@ -46,7 +48,7 @@ function submit(): void {
 </script>
 
 <template>
-  <section class="settings-section" data-testid="project-labels-settings">
+  <UPageCard as="section" variant="subtle" data-testid="project-labels-settings">
     <h2 class="settings-section__title">{{ t("project.labels") }}</h2>
     <QueryLoading v-if="labels.isPending.value" />
     <QueryError v-else-if="labels.isError.value" :message="loadErrorMessage(labels.error.value)" @retry="labels.refetch()" />
@@ -58,12 +60,12 @@ function submit(): void {
       </li>
     </ul>
     <form v-if="canEdit" class="mt-3 flex flex-wrap items-end gap-2" @submit.prevent="submit">
-      <input v-model="name" :aria-label="t('project.labels')" maxlength="100" :disabled="pending" class="h-10 rounded border px-3" />
+      <UInput v-model="name" :aria-label="t('project.labels')" maxlength="100" :disabled="pending" class="min-w-48" />
       <select v-model="color" :aria-label="t('project.labels.color')" :disabled="pending" class="collection-select">
         <option v-for="value in TAG_COLORS" :key="value" :value="value">{{ value }}</option>
       </select>
       <UButton type="submit" size="sm" :disabled="pending || !name.trim()">{{ t("project.labels.add") }}</UButton>
     </form>
     <p v-if="error" role="alert" class="text-sm text-error">{{ error }}</p>
-  </section>
+  </UPageCard>
 </template>
