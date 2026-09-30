@@ -6,6 +6,7 @@ import { computed, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { projectsQuery } from "@/features/projects/queries";
 import { api, ensureOk, loadErrorMessage } from "@/lib/api";
+import { FALLBACK_TZ, formatInstant } from "@/lib/datetime";
 import { wikiPath } from "@/lib/href";
 import { trashQuery } from "@/lib/queries/documents";
 import QueryError from "../components/QueryError.vue";
@@ -20,6 +21,7 @@ const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
 const workspaceId = computed(() => workspace.value?.id ?? "");
+const timeZone = computed(() => session.me.value?.timezone ?? FALLBACK_TZ);
 
 const trash = useQuery(() => ({
   ...trashQuery(workspaceId.value),
@@ -112,7 +114,7 @@ function onRestore(item: { id: string; projectId?: string | null }): void {
               {{ projectKeys.get(item.projectId) ?? t("nav.projects") }}
             </span>
             <time class="trash-page__when" :datetime="item.deletedAt">{{
-              new Date(item.deletedAt).toLocaleString()
+              formatInstant(item.deletedAt, timeZone, { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
             }}</time>
           </div>
           <UButton
