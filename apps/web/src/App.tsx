@@ -1,6 +1,5 @@
-import { t } from "@fvoci/i18n";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useEffect, type ComponentType } from "react";
+import { useEffect } from "react";
 import {
   createBrowserRouter,
   createRoutesFromElements,
@@ -35,35 +34,6 @@ function NoRoute() {
     if (vuePage) window.location.assign(`${pathname}${search}${hash}`);
   }, [vuePage, pathname, search, hash]);
   return vuePage ? null : <Navigate to="/" replace />;
-}
-
-function RouteLoading() {
-  return <p role="status">{t("load.loading")}</p>;
-}
-
-/**
- * A page kept out of the main bundle (admin, attachment viewers, legal). The router loads it before rendering the route: on a navigation
- * the current page stays until it is in, and on a page load only this route
- * shows `RouteLoading` while its parents render and fetch as usual. Not a
- * React.lazy Suspense boundary: React holds a boundary's reveal until 300 ms
- * after its fallback appeared.
- */
-function lazyPage(load: () => Promise<ComponentType>, options: { setupGuard?: boolean } = {}) {
-  return {
-    HydrateFallback: RouteLoading,
-    lazy: async () => {
-      const Page = await load();
-      return options.setupGuard
-        ? {
-            element: (
-              <SetupGuard>
-                <Page />
-              </SetupGuard>
-            ),
-          }
-        : { Component: Page };
-    },
-  };
 }
 
 // A data router, so pages can hold navigation behind unsaved edits (`useBlocker`).
