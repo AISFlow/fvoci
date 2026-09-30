@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   isNativeOwnedDeleteKey,
   type NativeDeleteKey,
-} from "../src/react/native-delete-owner.ts";
+} from "../src/native-delete-owner.ts";
 
 const base = (overrides: Partial<NativeDeleteKey> = {}): NativeDeleteKey => ({
   trusted: true,
