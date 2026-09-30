@@ -3,7 +3,7 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
   projectsQuery,
   type CloneProjectBody,
@@ -17,6 +17,7 @@ import ProjectsView from "../features/projects/ProjectsView.vue";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
 
 const route = useRoute();
+const router = useRouter();
 const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
@@ -28,39 +29,43 @@ const members = useQuery(() => membersQuery(workspaceId.value));
 const me = useQuery(meQuery);
 
 const createProject = useMutation({
-  mutationFn: async (body: CreateProjectBody) =>
+  mutationFn: async ({ workspaceId, body }: { workspaceId: string; body: CreateProjectBody }) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/projects", {
-        params: { path: { workspace_id: workspace.value!.id } },
+        params: { path: { workspace_id: workspaceId } },
         body,
       }),
     ),
-  onSuccess: async () => {
-    await queryClient.invalidateQueries({ queryKey: ["projects", workspace.value?.id] });
+  onSuccess: async (_data, scope) => {
+    await queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] });
   },
 });
 
 const cloneProject = useMutation({
-  mutationFn: async ({ projectId, body }: { projectId: string; body: CloneProjectBody }) =>
+  mutationFn: async ({ workspaceId, projectId, body }: { workspaceId: string; projectId: string; body: CloneProjectBody }) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/projects/{project_id}/clone", {
-        params: { path: { workspace_id: workspace.value!.id, project_id: projectId } },
+        params: { path: { workspace_id: workspaceId, project_id: projectId } },
         body,
       }),
     ),
-  onSuccess: async () => {
-    await queryClient.invalidateQueries({ queryKey: ["projects", workspace.value?.id] });
+  onSuccess: async (_data, scope) => {
+    await queryClient.invalidateQueries({ queryKey: ["projects", scope.workspaceId] });
   },
 });
 
 async function onCreate(input: CreateProjectBody): Promise<void> {
-  const project = await createProject.mutateAsync(input);
-  window.location.assign(projectTasksPath(slug.value, project.key));
+  const scope = { workspaceId: workspaceId.value, slug: slug.value };
+  const project = await createProject.mutateAsync({ workspaceId: scope.workspaceId, body: input });
+  if (workspaceId.value === scope.workspaceId && router.currentRoute.value.params.slug === scope.slug)
+    await router.push(projectTasksPath(scope.slug, project.key));
 }
 
 async function onClone(projectId: string, input: CloneProjectBody): Promise<void> {
-  const project = await cloneProject.mutateAsync({ projectId, body: input });
-  window.location.assign(projectTasksPath(slug.value, project.key));
+  const scope = { workspaceId: workspaceId.value, slug: slug.value };
+  const project = await cloneProject.mutateAsync({ ...scope, projectId, body: input });
+  if (workspaceId.value === scope.workspaceId && router.currentRoute.value.params.slug === scope.slug)
+    await router.push(projectTasksPath(scope.slug, project.key));
 }
 </script>
 
@@ -72,6 +77,7 @@ async function onClone(projectId: string, input: CloneProjectBody): Promise<void
   </div>
   <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="projects">
     <ProjectsView
+      :key="workspace.id"
       :slug="slug"
       :projects="listQuery.data.value?.items ?? []"
       :members="members.data.value?.items ?? []"

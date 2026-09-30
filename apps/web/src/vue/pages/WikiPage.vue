@@ -27,24 +27,29 @@ const queryClient = useQueryClient();
 const tree = useQuery(() => treeQuery(workspaceId.value));
 
 const createDocument = useMutation({
-  mutationFn: async () =>
+  mutationFn: async (scope: { workspaceId: string; slug: string }) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/documents", {
-        params: { path: { workspace_id: workspace.value!.id } },
+        params: { path: { workspace_id: scope.workspaceId } },
         body: { parentId: null, title: t("doc.title.untitled") },
       }),
     ),
-  onSuccess: async (doc) => {
-    await queryClient.invalidateQueries({ queryKey: ["tree", workspace.value?.id] });
-    if (doc.displayId) {
-      await router.push(documentPath(slug.value, doc.displayId));
+  onSuccess: async (doc, scope) => {
+    await queryClient.invalidateQueries({ queryKey: ["tree", scope.workspaceId] });
+    if (doc.displayId && workspaceId.value === scope.workspaceId && router.currentRoute.value.params.slug === scope.slug) {
+      await router.push(documentPath(scope.slug, doc.displayId));
     }
   },
 });
 
+function onCreateDocument(): void {
+  const id = workspaceId.value;
+  if (id) createDocument.mutate({ workspaceId: id, slug: slug.value });
+}
+
 const canCreate = computed(() => (workspace.value ? roleAtLeast(workspace.value.role, "member") : false));
 const createError = computed(() =>
-  createDocument.isError.value
+  createDocument.variables.value?.workspaceId === workspaceId.value && createDocument.isError.value
     ? createDocument.error.value instanceof ProblemError
       ? problemMessage(createDocument.error.value, "doc.create.failed")
       : t("error.network")
@@ -64,12 +69,12 @@ const createError = computed(() =>
       :nodes="tree.data.value?.items ?? []"
       :loading="tree.isLoading.value"
       :error="tree.isError.value ? loadErrorMessage(tree.error.value) : null"
-      :creating="createDocument.isPending.value"
+      :creating="createDocument.isPending.value && createDocument.variables.value?.workspaceId === workspace.id"
       :create-error="createError"
       :can-create="canCreate"
       :role="workspace.role"
       :on-retry="() => void tree.refetch()"
-      :on-create="() => createDocument.mutate()"
+      :on-create="onCreateDocument"
     />
   </WorkspaceShell>
 </template>
