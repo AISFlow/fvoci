@@ -8,10 +8,10 @@ import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-s
 import { projectsQuery } from "@/features/projects/queries";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { TaskListLoadMore } from "@/features/tasks/task-list-load-more";
-import { groupTasksByProject, OPEN_ASSIGNED_QUERY } from "@/features/tasks/my-tasks";
+import { groupTasksByProject, myTasksQuery, workspaceStatusesQuery } from "@/features/tasks/my-tasks";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
-import { api, ensureOk, ProblemError } from "@/lib/api";
+import { ProblemError } from "@/lib/api";
 import { FALLBACK_TZ, formatDateKo } from "@/lib/datetime";
 import { formatDisplayId, itemPath } from "@/lib/href";
 import { meQuery } from "@/lib/queries";
@@ -20,33 +20,8 @@ import "@/features/projects/projects.css";
 export function MyTasksPage() {
   const { slug, workspace } = useWorkspaceContext();
   const workspaceId = workspace?.id ?? "";
-  const tasks = useInfiniteQuery({
-    queryKey: ["workspace-tasks", workspaceId, OPEN_ASSIGNED_QUERY] as const,
-    queryFn: async ({ pageParam }) =>
-      ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/tasks", {
-          params: {
-            path: { workspace_id: workspaceId },
-            query: { query: OPEN_ASSIGNED_QUERY, ...(pageParam ? { cursor: pageParam } : {}) },
-          },
-        }),
-      ),
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.nextCursor,
-    enabled: Boolean(workspaceId),
-    retry: false,
-  });
-  const statuses = useQuery({
-    queryKey: ["workspace-statuses", workspaceId] as const,
-    queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/statuses", {
-          params: { path: { workspace_id: workspaceId } },
-        }),
-      ),
-    enabled: Boolean(workspaceId),
-    retry: false,
-  });
+  const tasks = useInfiniteQuery(myTasksQuery(workspaceId));
+  const statuses = useQuery(workspaceStatusesQuery(workspaceId));
   const projects = useQuery(projectsQuery(workspaceId));
   const me = useQuery(meQuery);
 

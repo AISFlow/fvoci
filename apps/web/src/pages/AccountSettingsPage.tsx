@@ -2,26 +2,23 @@ import { t } from "@fvoci/i18n";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import {
+  changePassword,
+  disableMfa,
+  downloadMeExport,
+  enableMfa,
+  requestEmailChange,
+  saveProfileName,
+  sendEmailVerification,
+  setUpMfa,
+  unlinkIdentity,
+  withdrawAccount,
+} from "@/features/settings/account-requests";
 import { AccountSettingsView } from "@/features/settings/settings-account";
 import { AuthenticatedLegalNav } from "@/features/legal/operator-info";
 import { MfaSection } from "@/features/settings/settings-account-mfa";
-import { api, ensureOk } from "@/lib/api";
-import { erasureRecoveryHash } from "@/lib/erasure-hash";
 import { oidcErrorMessage } from "@/lib/oidc";
 import { identitiesQuery, meQuery, mfaStatusQuery, providersQuery } from "@/lib/queries";
-
-async function downloadMeExport(): Promise<void> {
-  const blob = await ensureOk(await api.GET("/api/v1/me/export", { parseAs: "blob" }));
-  const href = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = href;
-  link.download = "fvoci-export.zip";
-  link.rel = "noopener";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(href);
-}
 
 export function AccountSettingsPage() {
   const queryClient = useQueryClient();
@@ -84,58 +81,22 @@ export function AccountSettingsPage() {
               magicLink={providers.data.magicLink}
               successNotice={successNotice}
               errorNotice={errorNotice}
-              onSaveName={async (input) => {
-                await ensureOk(await api.PATCH("/api/v1/auth/me", { body: input }));
-                await queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
-              }}
-              onSendVerification={async (email) => {
-                await ensureOk(await api.POST("/api/v1/auth/magic-link", { body: { email } }));
-              }}
-              onChangeEmail={async (newEmail) => {
-                await ensureOk(await api.PATCH("/api/v1/auth/email", { body: { newEmail } }));
-              }}
-              onChangePassword={async (input) => {
-                await ensureOk(await api.PATCH("/api/v1/auth/password", { body: input }));
-                await queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
-              }}
+              onSaveName={(input) => saveProfileName(queryClient, input)}
+              onSendVerification={sendEmailVerification}
+              onChangeEmail={requestEmailChange}
+              onChangePassword={(input) => changePassword(queryClient, input)}
               onWithdraw={async (input) => {
-                const result = await ensureOk(
-                  await api.POST("/api/v1/auth/withdraw", { body: input }),
-                );
-                // The response already cleared the session cookie; a full load
-                // drops every cached query of the withdrawn account.
-                window.location.assign(
-                  `/cancel-withdraw#${erasureRecoveryHash({
-                    token: result.cancelToken,
-                    eraseAt: result.eraseAt,
-                    mailSent: result.mailSent,
-                  })}`,
-                );
+                window.location.assign(await withdrawAccount(input));
               }}
               onExport={downloadMeExport}
-              onUnlink={async (provider) => {
-                await ensureOk(
-                  await api.POST("/api/v1/auth/oidc/{provider}/unlink", {
-                    params: { path: { provider } },
-                  }),
-                );
-                await queryClient.invalidateQueries({ queryKey: identitiesQuery.queryKey });
-              }}
+              onUnlink={(provider) => unlinkIdentity(queryClient, provider)}
               mfa={
                 <MfaSection
                   status={mfa.data}
                   hasPassword={me.data.hasPassword}
-                  onSetup={async (input) =>
-                    ensureOk(await api.POST("/api/v1/auth/mfa/setup", { body: input }))
-                  }
-                  onEnable={async (code) => {
-                    await ensureOk(await api.POST("/api/v1/auth/mfa/enable", { body: { code } }));
-                    await queryClient.invalidateQueries({ queryKey: mfaStatusQuery.queryKey });
-                  }}
-                  onDisable={async (input) => {
-                    await ensureOk(await api.POST("/api/v1/auth/mfa/disable", { body: input }));
-                    await queryClient.invalidateQueries({ queryKey: mfaStatusQuery.queryKey });
-                  }}
+                  onSetup={setUpMfa}
+                  onEnable={(code) => enableMfa(queryClient, code)}
+                  onDisable={(input) => disableMfa(queryClient, input)}
                 />
               }
             />

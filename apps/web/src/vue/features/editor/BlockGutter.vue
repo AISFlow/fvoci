@@ -36,6 +36,8 @@ function onKeyboardClick(event: MouseEvent): void {
   <Teleport :to="gutter.element">
     <UButton
       data-gutter="plus"
+      icon="i-lucide-plus"
+      size="sm"
       variant="ghost"
       color="neutral"
       :aria-label="t('editor.gutter.add')"
@@ -43,10 +45,13 @@ function onKeyboardClick(event: MouseEvent): void {
       @pointerup="plus.pointerup"
       @click="plus.click"
     >
-      +
     </UButton>
     <UButton
       data-gutter="drag"
+      icon="i-lucide-grip-vertical"
+      :active="menu !== null"
+      active-variant="soft"
+      size="sm"
       variant="ghost"
       color="neutral"
       :aria-label="t('editor.gutter.move')"
@@ -59,7 +64,6 @@ function onKeyboardClick(event: MouseEvent): void {
       @pointercancel="drag.pointercancel"
       @click="drag.click"
     >
-      ⠿
     </UButton>
   </Teleport>
   <BlockMenu

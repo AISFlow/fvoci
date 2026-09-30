@@ -11,10 +11,13 @@ export type SlashItem = {
 	title: string;
 	aliases: string[];
 	run: (editor: Editor, range: Range) => void;
+	/** Template menu presentation; command producers and ordering stay intact. */
+	group?: string;
+	badge?: string;
 };
 
 function slashItems(): SlashItem[] {
-	return [
+	const items: SlashItem[] = [
 		{
 			title: t("editor.block.heading1"),
 			aliases: ["h1", "heading"],
@@ -178,6 +181,12 @@ function slashItems(): SlashItem[] {
 			},
 		},
 	];
+	return items.map((item) => {
+		// Official useEditorSuggestions.ts groups generic styles separately
+		// from inserts. Keep FVOCI's localized titles, aliases and custom nodes.
+		const insert = item.aliases.some((alias) => ["table", "hr", "math", "mermaid", "attachment", "file"].includes(alias));
+		return { ...item, group: t(insert ? "editor.mobile.insert" : "editor.block.type"), badge: item.aliases[0] };
+	});
 }
 
 export function filterSlashItems(query: string): SlashItem[] {
@@ -316,7 +325,24 @@ export function suggestionRenderer<T extends MenuItem>(
 		root.tabIndex = 0;
 		root.setAttribute("aria-label", t("editor.slash.aria"));
 		root.className = "fvoci-suggestion";
+		let group: HTMLElement | null = null;
+		let groupLabel: string | null = null;
 		items.forEach((item, i) => {
+			const label = "group" in item && typeof item.group === "string" ? item.group : null;
+			if (label !== groupLabel || !group) {
+				groupLabel = label;
+				group = document.createElement("div");
+				group.className = "fvoci-suggestion-group";
+				group.setAttribute("role", "group");
+				if (label) {
+					group.setAttribute("aria-label", label);
+					const heading = document.createElement("div");
+					heading.className = "fvoci-suggestion-label";
+					heading.textContent = label;
+					group.append(heading);
+				}
+				root?.append(group);
+			}
 			const btn = document.createElement("button");
 			btn.type = "button";
 			btn.className = "fvoci-ui-button";
@@ -337,15 +363,24 @@ export function suggestionRenderer<T extends MenuItem>(
 						: item.title;
 				btn.append(mark, label);
 			} else {
-				btn.textContent = item.title;
+				if ("badge" in item && typeof item.badge === "string") {
+					const badge = document.createElement("span");
+					badge.className = "fvoci-suggestion-badge";
+					badge.setAttribute("aria-hidden", "true");
+					badge.textContent = item.badge;
+					btn.append(badge);
+				}
+				const label = document.createElement("span");
+				label.textContent = item.title;
+				btn.append(label);
 			}
 			btn.addEventListener("mousedown", (event) => {
 				event.preventDefault();
 			});
 			btn.addEventListener("click", () => latest?.command(item));
-			root?.append(btn);
+			group?.append(btn);
 		});
-		const active = root.children[selected];
+		const active = root.querySelectorAll("[role=option]")[selected];
 		if (active instanceof HTMLElement) {
 			editorDom?.setAttribute("aria-activedescendant", active.id);
 			root.scrollTop = Math.max(

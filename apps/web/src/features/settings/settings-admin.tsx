@@ -5,8 +5,9 @@ import { ConfirmActionButton } from "@/components/confirm-action";
 import { QueryLoading } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import type { components } from "@/generated/api";
-import { ProblemError } from "@/lib/api";
 import { formatDateKo } from "@/lib/datetime";
+import type { AdminUserPatch } from "./admin-requests";
+import { adminActionMessage, daysUntil } from "./admin-users";
 import type { BrandingAssetKind } from "./settings-catalog";
 import { InstanceSettingsView } from "./settings-instance";
 import "./settings-shell.css";
@@ -15,23 +16,6 @@ type AdminUser = components["schemas"]["AdminUserItemOutput"];
 type AdminWorkspace = components["schemas"]["AdminWorkspaceItemOutput"];
 type AdminSystem = components["schemas"]["AdminSystemOutput"];
 type AdminInstanceSettings = components["schemas"]["AdminInstanceSettingsOutput"];
-
-export type AdminUserPatch = { instanceAdmin?: boolean; suspended?: boolean };
-
-/** Codes the shared problem table does not title; this screen owns their wording. */
-export function adminActionMessage(err: unknown): string {
-  if (err instanceof ProblemError) {
-    if (err.code === "last_instance_admin") return t("admin.lastAdmin");
-    if (err.code === "self_suspension") return t("self_suspension");
-    return err.title;
-  }
-  return t("error.network");
-}
-
-/** Whole days left until `iso` (source `daysUntil`); 0 once the deadline passed. */
-export function daysUntil(iso: string, now: number = Date.now()): number {
-  return Math.max(0, Math.ceil((Date.parse(iso) - now) / 86_400_000));
-}
 
 const cellClass = "border-b border-border px-2 py-2 align-top text-ui";
 const headClass = "border-b border-border px-2 py-2 text-left text-caption font-medium text-muted-foreground";

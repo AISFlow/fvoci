@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { isVueAppPath } from "@/app-boundary";
-import { VUE_ROUTE_PATHS } from "./route-paths";
+import { VUE_SETTINGS_ROUTE_PATHS, VUE_ACCOUNT_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
 
 /** The Vue app's pages; src/app-boundary.ts sends exactly the live paths
  * (VUE_ROUTE_PATHS) here. Each page is its own chunk, so the Gantt page does not load the wiki
@@ -28,6 +28,25 @@ export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.serviceInfo, name: "service-info", component: () => import("./pages/ServiceInfoPage.vue") },
   { path: VUE_ROUTE_PATHS.invite, name: "invite", component: () => import("./pages/InvitePage.vue") },
   { path: VUE_ROUTE_PATHS.setup, name: "setup", component: () => import("./pages/SetupPage.vue") },
+  // More specific than `/w/:slug`. Coordinator-owned app-boundary.ts still
+  // boots the React app for these until its regexes include them.
+  { path: VUE_WORKSPACE_ROUTE_PATHS.projects, name: "projects", component: () => import("./pages/ProjectsPage.vue") },
+  { path: VUE_WORKSPACE_ROUTE_PATHS.wikiList, name: "wiki-list", component: () => import("./pages/WikiPage.vue") },
+  { path: VUE_WORKSPACE_ROUTE_PATHS.search, name: "search", component: () => import("./pages/SearchPage.vue") },
+  // More specific than `/w/:slug`. Boot still loads React until the
+  // coordinator regexes in route-paths.ts (VUE_NAV_ROUTE_PATHS) land.
+  { path: VUE_NAV_ROUTE_PATHS.myTasks, name: "my-tasks", component: () => import("./pages/MyTasksPage.vue") },
+  {
+    path: VUE_NAV_ROUTE_PATHS.notifications,
+    name: "notifications",
+    component: () => import("./pages/NotificationsPage.vue"),
+  },
+  { path: VUE_NAV_ROUTE_PATHS.trash, name: "trash", component: () => import("./pages/TrashPage.vue") },
+  {
+    path: VUE_WORKSPACE_ROUTE_PATHS.workspaceHome,
+    name: "workspace-home",
+    component: () => import("./pages/WorkspaceHomePage.vue"),
+  },
   {
     path: VUE_ROUTE_PATHS.attachmentView,
     name: "attachment-view",
@@ -38,6 +57,29 @@ export const routes: RouteRecordRaw[] = [
     name: "share-attachment-view",
     component: () => import("./pages/ShareAttachmentViewPage.vue"),
   },
+  { path: VUE_ACCOUNT_ROUTE_PATHS.accountSettings, name: "account-settings", component: () => import("./pages/AccountSettingsPage.vue") },
+  { path: VUE_ACCOUNT_ROUTE_PATHS.admin, name: "admin", component: () => import("./pages/AdminPage.vue") },
+  { path: VUE_ACCOUNT_ROUTE_PATHS.adminAudit, name: "admin-audit", component: () => import("./pages/AdminAuditPage.vue") },
+  { path: VUE_ACCOUNT_ROUTE_PATHS.adminLegal, name: "admin-legal", component: () => import("./pages/AdminLegalPage.vue") },
+  {
+    path: VUE_SETTINGS_ROUTE_PATHS.documentTagsSettings,
+    name: "workspace-settings-document-tags",
+    component: () => import("./pages/DocumentTagsSettingsPage.vue"),
+  },
+  {
+    path: VUE_SETTINGS_ROUTE_PATHS.templatesSettings,
+    name: "workspace-settings-templates",
+    component: () => import("./pages/TemplatesSettingsPage.vue"),
+  },
+  {
+    path: VUE_SETTINGS_ROUTE_PATHS.workspaceSettings,
+    name: "workspace-settings",
+    component: () => import("./pages/WorkspaceSettingsPage.vue"),
+  },
+  // Public share reader. apps/web/src/app-boundary.ts is owned elsewhere;
+  // boot still needs `/^\/s\/[^/]+\/?$/i` and must NOT match
+  // `/s/:token/attachments/...` (that stays a different route).
+  { path: "/s/:token", name: "public-share", component: () => import("./pages/PublicSharePage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

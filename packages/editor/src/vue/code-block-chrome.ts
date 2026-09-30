@@ -142,7 +142,7 @@ export function useCodeBlockChrome(editor: Editor) {
 			byId.value = { ...byId.value, [current.id]: { ...chrome.value, ...next } };
 		},
 		setLanguage(value: string): void {
-			if (editor.isDestroyed || !editor.isEditable) return;
+			if (editor.isDestroyed || !editor.isEditable || editor.view.composing) return;
 			editor.commands.updateAttributes("codeBlock", { language: languageOfFence(value) });
 		},
 		copy(): void {

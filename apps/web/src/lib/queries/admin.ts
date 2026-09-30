@@ -1,7 +1,8 @@
 // Adapted from source apps/web/src/lib/queries/admin.ts and the legal queries
-// in apps/web/src/lib/queries/auth.ts.
-import { queryOptions } from "@tanstack/react-query";
+// in apps/web/src/lib/queries/auth.ts. Framework-neutral: both web apps run
+// these (the React legal reader, the Vue admin pages).
 import { api, ensureOk, ProblemError } from "@/lib/api";
+import { queryOptions } from "@/lib/query-options";
 
 export {
   invalidateInstanceWrites,

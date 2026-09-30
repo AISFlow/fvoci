@@ -102,6 +102,7 @@ export function useTableHandles(editor: Editor) {
 		},
 		/** Any handle opens the menu below itself, except a table handle press that dragged. */
 		openMenu(event: MouseEvent): void {
+			if (!editor.isEditable || editor.view.composing) return;
 			const button = event.currentTarget;
 			if (!(button instanceof HTMLElement)) return;
 			if (button.dataset.tableHandle === "table" && suppressed && event.detail !== 0) {
@@ -115,6 +116,7 @@ export function useTableHandles(editor: Editor) {
 		/** Dragging the table handle. */
 		drag: {
 			pointerdown(event: PointerEvent): void {
+				if (!editor.isEditable || editor.view.composing) return;
 				const inside = caret.value;
 				const button = event.currentTarget;
 				if (!inside || !(button instanceof HTMLElement)) return;
@@ -137,7 +139,7 @@ export function useTableHandles(editor: Editor) {
 				drag = null;
 				if (!start) return;
 				suppressed = start.moved;
-				if (!start.moved) return;
+				if (!start.moved || !editor.isEditable || editor.view.composing) return;
 				const hit = editor.view.posAtCoords({ left: event.clientX, top: event.clientY });
 				if (!hit) return;
 				const $pos = editor.state.doc.resolve(hit.pos);
@@ -155,6 +157,7 @@ export function useTableHandles(editor: Editor) {
 		 * both items leave the document unchanged. moveBlock swaps the table
 		 * with its sibling, as the block menu's up/down do. */
 		moveTable(dir: -1 | 1): void {
+			if (!editor.isEditable || editor.view.composing) return;
 			const inside = caret.value;
 			if (!inside) return;
 			moveBlock(editor, inside.tablePos, dir);

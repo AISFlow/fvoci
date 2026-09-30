@@ -27,8 +27,8 @@ import AppLink from "../../components/AppLink.vue";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
 import CommentPanel from "../comments/CommentPanel.vue";
-import EditorBubble from "../editor/EditorBubble.vue";
-import EditorToolbar from "../editor/EditorToolbar.vue";
+import EditorControls from "../editor/EditorControls.vue";
+import TemplateToolbar from "../editor/TemplateToolbar.vue";
 import UnfurlCard from "../editor/UnfurlCard.vue";
 import CollabPresence from "./CollabPresence.vue";
 import DocumentAiMenu from "./DocumentAiMenu.vue";
@@ -444,10 +444,13 @@ function refOf(number: number): string {
         @ready="editor = $event"
       >
         <template #toolbar="{ editor: live }">
-          <EditorToolbar :editor="live" :disabled="readOnly" />
+          <TemplateToolbar :editor="live" mode="fixed" />
         </template>
         <template #bubble="{ editor: live }">
-          <EditorBubble :editor="live" />
+          <TemplateToolbar :editor="live" mode="selection" />
+        </template>
+        <template #controls="{ editor: live, gutter, editable }">
+          <EditorControls :editor="live" :gutter="gutter" :editable="editable" />
         </template>
       </FvociEditor>
     </section>

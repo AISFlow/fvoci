@@ -56,13 +56,23 @@ export function useBlockGutter(editor: Editor, handle: GutterHandle) {
 	});
 
 	function openAt(pos: number, x: number, y: number): void {
+		if (!editor.isEditable || editor.view.composing) return;
 		block.value = { node: editor.state.doc.nodeAt(pos), pos };
 		menu.value = { x, y, pos };
 	}
 
+	// Official useEditorDragHandle pattern: keep the hovered block fixed
+	// while its menu owns focus. The creation-time plugin remains the owner.
+	watch(menu, (value) => {
+		if (!editor.isDestroyed) editor.chain().setMeta("lockDragHandle", value !== null).run();
+	}, { flush: "sync" });
+	onScopeDispose(() => {
+		if (!editor.isDestroyed) editor.chain().setMeta("lockDragHandle", false).run();
+	});
+
 	const dom = editor.view.dom;
 	const onContextMenu = (event: MouseEvent) => {
-		if (!editor.isEditable) return;
+		if (!editor.isEditable || editor.view.composing) return;
 		if (!editor.state.selection.empty) return;
 		const hit = editor.view.posAtCoords({ left: event.clientX, top: event.clientY });
 		if (hit === null) return;
@@ -125,7 +135,7 @@ export function useBlockGutter(editor: Editor, handle: GutterHandle) {
 			},
 			click(event: MouseEvent): void {
 				event.preventDefault();
-				if (block.value.pos < 0) return;
+				if (block.value.pos < 0 || !editor.isEditable || editor.view.composing) return;
 				plusAt(editor, block.value.pos);
 			},
 		},
@@ -153,7 +163,7 @@ export function useBlockGutter(editor: Editor, handle: GutterHandle) {
 					suppressed = false;
 					return;
 				}
-				if (block.value.pos < 0) return;
+				if (block.value.pos < 0 || !editor.isEditable || editor.view.composing) return;
 				const button = event.currentTarget;
 				if (!(button instanceof HTMLElement)) return;
 				button.focus({ preventScroll: true });

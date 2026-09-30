@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { isVueAppPath } from "./app-boundary.ts";
@@ -85,6 +86,12 @@ const SAMPLES = [
   "/setup/extra",
   "/setups",
   "/w/acme",
+  "/w/acme/my-tasks",
+  "/w/acme/my-tasks/",
+  "/w/acme/notifications",
+  "/w/acme/notifications/",
+  "/w/acme/trash",
+  "/w/acme/trash/",
   "/w/acme/a/123/view",
   "/w/acme/a/123/view/",
   "/w/acme/A/123/VIEW",
@@ -117,6 +124,10 @@ const SAMPLES = [
   "/w/acme/WIKI-WIKI-1",
   "/w/acme/WIKI-1/extra",
   "/w/acme/wiki",
+  "/w/acme/wiki/",
+  "/w/acme/search",
+  "/w/acme/search/",
+  "/w/acme/Search",
   "/w/acme/PRJ-1",
   "/w//WIKI-1",
   "/w/acme/projects", "/w/acme/PROJECTS/", "/w/acme/search", "/w/acme/settings",
@@ -182,6 +193,18 @@ test("the boot module sends /setup, and only that path, to the Vue app", () => {
   assert.equal(isVueAppPath("/setups"), false);
 });
 
+test("boot still sends the wiki list and workspace search to the React app", () => {
+  assert.equal(isVueAppPath("/w/acme/wiki"), false);
+  assert.equal(isVueAppPath("/w/acme/wiki/"), false);
+  assert.equal(isVueAppPath("/w/acme/WIKI"), false);
+  assert.equal(isVueAppPath("/w/acme/search"), false);
+  assert.equal(isVueAppPath("/w/acme/search/"), false);
+  assert.equal(isVueAppPath("/w/acme/Search"), false);
+  // Wiki documents stay on the Vue app; the list path must not steal them.
+  assert.equal(isVueAppPath("/w/acme/WIKI-1"), true);
+  assert.equal(isVueAppPath("/w/acme/wiki-12"), true);
+});
+
 test("single-segment resource routes agree with the shared ref grammar", () => {
   for (const path of SAMPLES) {
     // React Router matches /w/:slug in any case, as the boundary does.
@@ -206,6 +229,17 @@ test("home and public pages enter Vue while admin policies remain React", () => 
   for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal"]) {
     assert.equal(isVueAppPath(path), false, path);
   }
+});
+
+test("workspace nav pages stay on the React boot until the coordinator regexes land", () => {
+  assert.equal(isVueAppPath("/w/acme/my-tasks"), false);
+  assert.equal(isVueAppPath("/w/acme/my-tasks/"), false);
+  assert.equal(isVueAppPath("/w/acme/notifications"), false);
+  assert.equal(isVueAppPath("/w/acme/trash"), false);
+  const boundary = readFileSync(new URL("./app-boundary.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/my-tasks/);
+  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/notifications/);
+  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/trash/);
 });
 
 test("attachment viewers boot Vue while public share and admin pages retain React", () => {
