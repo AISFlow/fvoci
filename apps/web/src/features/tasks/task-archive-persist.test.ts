@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { CollabSession, CollabUser } from "@/features/documents/collab-session";
+import type { CollabSession, CollabUser } from "@/features/documents/collab-model";
 import { persistTaskBodyBeforeArchive, runArchiveWithBodyPersist } from "./task-archive-persist.ts";
 
 const collabUser: CollabUser = { id: "u1", name: "Tester", color: "#000" };

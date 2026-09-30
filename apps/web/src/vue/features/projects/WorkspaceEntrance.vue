@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, useId } from "vue";
 import { RouterLink } from "vue-router";
-import { isVueAppPath } from "@/app-boundary";
+import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
 import { itemPath } from "@/lib/href";
 import { starItemDisplayId } from "@/lib/share-links";
 import QueryError from "../../components/QueryError.vue";

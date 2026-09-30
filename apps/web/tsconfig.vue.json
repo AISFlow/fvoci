@@ -1,6 +1,6 @@
 {
   // The Vue app (src/vue) and the shared modules it imports, checked by
-  // vue-tsc. tsconfig.app.json (tsc) checks the React app and excludes src/vue.
+  // vue-tsc. tsconfig.app.json (tsc) checks shared TypeScript outside src/vue.
   "compilerOptions": {
     "target": "ES2022",
     "useDefineForClassFields": true,

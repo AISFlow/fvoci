@@ -3,8 +3,8 @@ import test from "node:test";
 import { QueryClient, useQuery, VueQueryPlugin } from "@tanstack/vue-query";
 import { createApp, effectScope } from "vue";
 import { projectDocumentsQuery, projectQuery } from "@/features/projects/queries";
-import { isVueAppPath } from "@/app-boundary";
-import { PROJECT_HOME_PATH } from "@/app-boundary";
+import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
+import { PROJECT_HOME_PATH } from "@/vue/route-paths";
 import { VUE_ROUTE_PATHS } from "../../route-paths.ts";
 import { leaveTo } from "../../session/navigation.ts";
 import { projectHomeChildNodes } from "./project-home.ts";
@@ -108,8 +108,8 @@ test("project fields and workflow settings stay Vue and preserve query/hash navi
 
   const nested = "/w/acme/GNT/settings/fields/extra";
   leaveTo(nested, env);
-  assert.deepEqual(assigns, [nested]);
-  assert.deepEqual(pushes, [fields, workflow]);
+  assert.deepEqual(assigns, []);
+  assert.deepEqual(pushes, [fields, workflow, nested]);
 });
 
 test("project home lists the project's root children, nested ones stay in the tree", () => {

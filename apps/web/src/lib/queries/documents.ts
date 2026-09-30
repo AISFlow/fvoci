@@ -6,16 +6,30 @@ export type TreeNode = components["schemas"]["TreeNodeResponse"];
 export type DocumentMeta = components["schemas"]["DocumentMetaResponse"];
 export type DocumentBody = components["schemas"]["BodyResponse"];
 
-export function treeQuery(workspaceId: string) {
+export function treeQuery(workspaceId: string, tag?: string) {
   return queryOptions({
-    queryKey: ["tree", workspaceId] as const,
-    queryFn: async () =>
+    queryKey: tag ? ["tree", workspaceId, tag] as const : ["tree", workspaceId] as const,
+    queryFn: async ({ signal }) =>
       ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/tree", {
-          params: { path: { workspace_id: workspaceId } },
+          signal,
+          params: { path: { workspace_id: workspaceId }, query: tag ? { tag } : {} },
         }),
       ),
     enabled: Boolean(workspaceId),
+  });
+}
+
+/** Authorized workspace wiki/project discovery; the default tree remains wiki-only. */
+export function wikiDiscoveryQuery(workspaceId: string, tag?: string) {
+  return queryOptions({
+    queryKey: ["wiki-discovery", workspaceId, tag ?? ""] as const,
+    queryFn: async ({ signal }) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/wiki-discovery", {
+      signal,
+      params: { path: { workspace_id: workspaceId }, query: tag ? { tag } : {} },
+    })),
+    enabled: Boolean(workspaceId),
+    retry: false,
   });
 }
 
