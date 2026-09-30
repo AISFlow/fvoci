@@ -1,5 +1,4 @@
 // Adapted from source apps/web/src/lib/queries/auth.ts `aiEnabledQueryOptions`.
-import { queryOptions } from "@/lib/query-options";
 import { publicInstanceQuery, selectAiEnabled } from "@/lib/queries/instance";
 
 export { selectAiEnabled };
@@ -9,7 +8,7 @@ export { selectAiEnabled };
  * key, so the document screen adds no round trip and the admin settings save
  * (`invalidateInstanceWrites`) refreshes it.
  */
-export const aiEnabledQuery = queryOptions({
+export const aiEnabledQuery = {
   ...publicInstanceQuery,
   select: selectAiEnabled,
-});
+};
