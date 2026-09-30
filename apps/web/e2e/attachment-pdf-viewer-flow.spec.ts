@@ -215,8 +215,45 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   try {
     const signedOut = await anonymous.newPage();
     const target = `/w/acme/a/${pdfId}/view?chunk=0#document`;
-    await signedOut.goto(target);
-    await expect(signedOut).toHaveURL((url) => url.pathname === "/login" && url.searchParams.get("returnTo") === target);
+    // Deliver the real setup response after /auth/me's real 401 has started
+    // login navigation, while that first navigation is still uncommitted.
+    // A repeated redirect used to cancel it and reject the URL predicate.
+    let releaseSetup!: () => void;
+    const setupRelease = new Promise<void>((resolve) => { releaseSetup = resolve; });
+    let setupDelivered!: () => void;
+    const setupDelivery = new Promise<void>((resolve) => { setupDelivered = resolve; });
+    let releaseLogin!: () => void;
+    const loginRelease = new Promise<void>((resolve) => { releaseLogin = resolve; });
+    await signedOut.route("**/api/v1/setup", async (route) => {
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      await setupRelease;
+      await route.fulfill({ response });
+      setupDelivered();
+    });
+    const loginRequests: string[] = [];
+    const firstLogin = signedOut.waitForRequest((request) => new URL(request.url()).pathname === "/login");
+    await signedOut.route("**/login?returnTo=*", async (route) => {
+      loginRequests.push(route.request().url());
+      await loginRelease;
+      await route.continue().catch(() => undefined);
+    });
+    // The initial commit is the navigation precondition; the exact login URL
+    // and its loaded page are still required by the assertion below.
+    await signedOut.goto(target, { waitUntil: "commit" });
+    await firstLogin;
+    const redirected = expect(signedOut).toHaveURL((url) => url.pathname === "/login" && url.searchParams.get("returnTo") === target);
+    // Keep a rejected navigation assertion observed while the browser barrier
+    // completes; it is still awaited below and never treated as a success.
+    void redirected.catch(() => undefined);
+    const setupResponse = signedOut.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/setup");
+    releaseSetup();
+    await setupDelivery;
+    // Finish delivery of the real setup body before login can commit.
+    expect(await (await setupResponse).finished()).toBeNull();
+    releaseLogin();
+    await redirected;
+    expect(loginRequests).toEqual([new URL(`/login?returnTo=${encodeURIComponent(target)}`, signedOut.url()).href]);
     expect((await signedOut.request.get(`/api/v1/workspaces/${wsId}/attachments/${pdfId}`)).status()).toBe(401);
   } finally {
     await anonymous.close();

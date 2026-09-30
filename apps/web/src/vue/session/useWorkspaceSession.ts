@@ -45,10 +45,25 @@ export function useWorkspaceSession(slug: MaybeRefOrGetter<string>, env: Session
     () => me.data.value !== undefined && workspaces.isSuccess.value && workspace.value === undefined,
   );
 
+  let requestedRedirect: string | undefined;
   watchEffect(() => {
-    if (setup.data.value?.needed) env.redirect("/setup");
-    else if (signedOut.value) env.redirect(loginPath(env.location()));
-    else if (denied.value) env.redirect("/?denied=workspace");
+    const path = setup.data.value?.needed
+      ? "/setup"
+      : signedOut.value
+        ? loginPath(env.location())
+        : denied.value
+          ? "/?denied=workspace"
+          : undefined;
+    // Queries settle independently. Restarting the same pending navigation
+    // (e.g. me 401, then setup completion) cancels its first document request.
+    // A different destination still applies the guard priority above.
+    if (path === undefined) {
+      requestedRedirect = undefined;
+      return;
+    }
+    if (path === requestedRedirect) return;
+    requestedRedirect = path;
+    env.redirect(path);
   });
 
   // The server closes the access stream when membership or the session may

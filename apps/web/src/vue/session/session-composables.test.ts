@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
-import { createApp, effectScope } from "vue";
+import { createApp, effectScope, nextTick } from "vue";
+import { ProblemError } from "@/lib/api";
 import { useProjectRef } from "./useProjectRef.ts";
 import { useWikiDocumentRef } from "./useWikiDocumentRef.ts";
 import { type SessionEnvironment, useWorkspaceSession } from "./useWorkspaceSession.ts";
@@ -92,6 +93,79 @@ test("session: an error only when a failed query has nothing to show", async () 
   } finally {
     stop();
   }
+});
+
+test("session: late setup completion does not restart the signed-out redirect", async () => {
+  const client = queryClient();
+  let rejectMe!: (error: ProblemError) => void;
+  void client.fetchQuery({
+    queryKey: ["auth", "me"],
+    queryFn: () => new Promise<never>((_resolve, reject) => { rejectMe = reject; }),
+  }).catch(() => undefined);
+  // Keep the setup query pending until /auth/me has caused the redirect.
+  hangFetch(client, ["setup", "status"]);
+  const redirects: string[] = [];
+  const env = testEnvironment(redirects);
+  env.location = () => ({ pathname: "/w/acme/a/pdf/view", search: "?chunk=0", hash: "#document" });
+  const { result, stop } = mount(client, () => useWorkspaceSession("acme", env));
+  try {
+    rejectMe(new ProblemError(401));
+    await until(() => redirects.length > 0, "the signed-out redirect");
+    assert.equal(result.status.value, "loading");
+    client.setQueryData(["setup", "status"], { needed: false });
+    await nextTick();
+    assert.deepEqual(redirects, ["/login?returnTo=%2Fw%2Facme%2Fa%2Fpdf%2Fview%3Fchunk%3D0%23document"]);
+    assert.equal(result.status.value, "loading");
+    // Deduplication must not suppress a different, higher-priority guard.
+    client.setQueryData(["setup", "status"], { needed: true });
+    await nextTick();
+    assert.deepEqual(redirects, [
+      "/login?returnTo=%2Fw%2Facme%2Fa%2Fpdf%2Fview%3Fchunk%3D0%23document",
+      "/setup",
+    ]);
+  } finally {
+    stop();
+  }
+});
+
+test("session: cached user 401 redirects and teardown closes the access subscription", async () => {
+  const client = queryClient();
+  seedSession(client);
+  const redirects: string[] = [];
+  let closed = 0;
+  const env = testEnvironment(redirects);
+  env.watchAccess = () => ({ close: () => { closed += 1; } });
+  const { result, stop } = mount(client, () => useWorkspaceSession("acme", env));
+  try {
+    assert.equal(result.status.value, "ready");
+    await client.fetchQuery({
+      queryKey: ["auth", "me"],
+      staleTime: 0,
+      queryFn: () => Promise.reject(new ProblemError(401)),
+    }).catch(() => undefined);
+    await nextTick();
+    assert.equal(result.status.value, "loading");
+    assert.deepEqual(redirects, ["/login?returnTo=%2Fw%2Facme%2FWIKI-1"]);
+    assert.equal(closed, 0);
+    // A recovered session ends the pending redirect lifetime: another 401
+    // must still redirect, even when it has the same destination.
+    client.setQueryData(["auth", "me"], ME);
+    await nextTick();
+    assert.equal(result.status.value, "ready");
+    await client.fetchQuery({
+      queryKey: ["auth", "me"],
+      staleTime: 0,
+      queryFn: () => Promise.reject(new ProblemError(401)),
+    }).catch(() => undefined);
+    await nextTick();
+    assert.deepEqual(redirects, [
+      "/login?returnTo=%2Fw%2Facme%2FWIKI-1",
+      "/login?returnTo=%2Fw%2Facme%2FWIKI-1",
+    ]);
+  } finally {
+    stop();
+  }
+  assert.equal(closed, 1);
 });
 
 test("session: a failed me refetch plus a fresh list without the workspace redirects", async () => {
