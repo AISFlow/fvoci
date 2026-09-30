@@ -108,7 +108,7 @@ async function onCreateSubmit(values: TaskCreateBody): Promise<void> {
       statusId: createStatusId.value,
     });
     createStatusId.value = null;
-    window.location.assign(itemPath(props.slug, formatDisplayId(props.project.key, created.number)));
+    await router.push(itemPath(props.slug, formatDisplayId(props.project.key, created.number)));
   } catch {
     // Keep the dialog open; mutation error is shown in the form.
   }

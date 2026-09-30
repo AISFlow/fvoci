@@ -7,11 +7,12 @@ import type { TaskListItem } from "@/features/tasks/queries";
 import { visibleTaskStatusSections, type TaskListStatusCount } from "@/features/tasks/task-list-page";
 import { taskTypeLabel } from "@/features/tasks/task-types";
 import { formatDisplayId, itemPath } from "@/lib/href";
+import AppLink from "../../components/AppLink.vue";
 import "@/features/projects/projects.css";
 
 // The project's tasks grouped by workflow status (features/tasks/task-list.tsx):
 // server status counts, collapsible sections, create per status and "load
-// more" with its own error. A task opens the task page (the React app's).
+// more" with its own error. AppLink keeps connected task navigation in Vue.
 const props = defineProps<{
   slug: string;
   projectKey: string;
@@ -77,11 +78,11 @@ function toggle(id: string): void {
         </div>
         <ul v-if="!collapsed.has(section.id)" class="task-status-list">
           <li v-for="item in section.items" :key="item.id">
-            <a :href="itemPath(slug, formatDisplayId(projectKey, item.number))" class="task-row" :data-testid="`task-row-${item.id}`">
+            <AppLink :to="itemPath(slug, formatDisplayId(projectKey, item.number))" class="task-row" :data-testid="`task-row-${item.id}`">
               <span class="task-row__id">{{ formatDisplayId(projectKey, item.number) }}</span>
               <span class="task-row__title">{{ item.title }}</span>
               <span class="project-list__private">{{ taskTypeLabel(item.type) }}</span>
-            </a>
+            </AppLink>
           </li>
         </ul>
       </section>
