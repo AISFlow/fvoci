@@ -114,21 +114,31 @@ test("direct section URLs preserve query and hash across reload; foreign and sig
   expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).status()).toBe(404);
 });
 
-test("notification pagination reaches a third page, bell cache stays valid, and archive/read persist", async ({ page }) => {
+test("notification pagination reaches a third page, bell cache stays valid, and archive/read persist", async ({ page, browser, baseURL }) => {
   await login(page, owner.email, owner.password);
   createE2eUser("navigation-inbox@example.com", "inboxpass123", "수신", { workspaceSlug: "navigation", membershipRole: "member" });
   const members = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()).items;
   const memberId = members.find((item: { email: string }) => item.email === "navigation-inbox@example.com").userId;
   const copy = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items.find((item: { key: string }) => item.key === "COPY");
-  // Real task creation and assignment generate the inbox through the outbox.
-  for (let start = 0; start < 105; start += 5) {
-    await Promise.all(Array.from({ length: Math.min(5, 105 - start) }, async (_, offset) => {
-      const task = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/tasks`, { data: { title: `Paged inbox ${start + offset}` } });
-      expect(task.status()).toBe(201);
-      const id = (await task.json()).id;
-      const assigned = await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${id}`, { data: { assigneeIds: [memberId] } });
-      expect(assigned.status()).toBe(200);
-    }));
+  // Confirm outbox delivery for each bounded setup batch before producing more.
+  // This keeps relay backlog out of the paging assertion without longer waits.
+  const recipientContext = await browser.newContext({ baseURL });
+  const recipient = await recipientContext.newPage();
+  try {
+    await login(recipient, "navigation-inbox@example.com", "inboxpass123");
+    for (let start = 0; start < 105; start += 15) {
+      const count = Math.min(15, 105 - start);
+      await Promise.all(Array.from({ length: count }, async (_, offset) => {
+        const task = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/tasks`, { data: { title: `Paged inbox ${start + offset}` } });
+        expect(task.status()).toBe(201);
+        const id = (await task.json()).id;
+        const assigned = await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${id}`, { data: { assigneeIds: [memberId] } });
+        expect(assigned.status()).toBe(200);
+      }));
+      await expect.poll(async () => (await (await recipient.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(start + count);
+    }
+  } finally {
+    await recipientContext.close();
   }
   await logout(page);
   await login(page, "navigation-inbox@example.com", "inboxpass123");
