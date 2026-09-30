@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import type { SafeHtml } from "../safe-html.js";
 
-// The Vue app's only HTML sink (the React one is react/safe-html.tsx). It
-// takes SafeHtml only: KaTeX with trust:false and its style attributes
-// stripped (math-ml.ts), and HTML the server sanitized.
+// This native-tag sink accepts audited SafeHtml producers: KaTeX with
+// trust:false and style attributes stripped (math-ml.ts), server-rendered
+// legal HTML, and fixed sandbox iframe markup from the server unfurl path.
+// The brand records provenance; it does not sanitize arbitrary HTML.
 defineProps<{ html: SafeHtml; tag?: "div" | "span" }>();
 </script>
 
