@@ -41,7 +41,7 @@ export function loadRhwpModule(): Promise<WebAssembly.Module> {
     const response = await fetch(wasmUrl, { credentials: "same-origin" });
     if (!response.ok) {
       await response.body?.cancel();
-      throw new Error(`rhwp wasm ${response.status}`);
+      throw new Error(`rhwp wasm ${String(response.status)}`);
     }
     return WebAssembly.compile(await response.arrayBuffer());
   })();

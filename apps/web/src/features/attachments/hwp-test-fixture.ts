@@ -40,7 +40,7 @@ export function readZip(bytes: Uint8Array): Entry[] {
     const name = decoder.decode(bytes.subarray(at + 46, at + 46 + nameLen));
     const dataAt = local + 30 + u16(view, local + 26) + u16(view, local + 28);
     const raw = bytes.subarray(dataAt, dataAt + size);
-    if (method !== 0 && method !== 8) throw new Error(`zip: method ${method}`);
+    if (method !== 0 && method !== 8) throw new Error(`zip: method ${String(method)}`);
     entries.push({ name, data: method === 0 ? raw.slice() : new Uint8Array(inflateRawSync(raw)) });
     at += 46 + nameLen + extraLen + commentLen;
   }
@@ -130,16 +130,19 @@ export function buildFixtureHwpx(template: Uint8Array, pages: readonly string[])
       const first = xml.indexOf("<hp:p ");
       const close = xml.indexOf("</hp:p>", first) + "</hp:p>".length;
       const texts = [...xml.slice(first, close).matchAll(/<hp:t>[^<]*<\/hp:t>|<hp:t\/>/g)];
-      if (first < 0 || texts.length !== 1) throw new Error("unexpected template section");
+      const templateText = texts[0];
+      const firstPage = pages[0];
+      if (first < 0 || texts.length !== 1 || !templateText || firstPage === undefined)
+        throw new Error("unexpected template section");
       const head = xml
         .slice(first, close)
-        .replace(texts[0]![0], `<hp:t>${escapeXml(pages[0]!)}</hp:t>`)
+        .replace(templateText[0], `<hp:t>${escapeXml(firstPage)}</hp:t>`)
         .replace(/<hp:linesegarray>.*?<\/hp:linesegarray>/s, "");
       const rest = pages
         .slice(1)
         .map(
           (text, index) =>
-            `<hp:p id="${index + 1}" paraPrIDRef="0" styleIDRef="0" pageBreak="1" columnBreak="0" merged="0">` +
+            `<hp:p id="${String(index + 1)}" paraPrIDRef="0" styleIDRef="0" pageBreak="1" columnBreak="0" merged="0">` +
             `<hp:run charPrIDRef="0"><hp:t>${escapeXml(text)}</hp:t></hp:run></hp:p>`,
         )
         .join("");

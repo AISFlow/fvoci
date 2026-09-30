@@ -1,3 +1,4 @@
+import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomBytes } from "node:crypto";
@@ -15,7 +16,7 @@ async function open(bytes: Uint8Array, limits = XLSX_LIMITS): Promise<XlsxBook> 
   return (result as { book: XlsxBook }).book;
 }
 
-test("text cells: shared/inline strings, numbers, Korean and emoji, formula cached values", async () => {
+await test("text cells: shared/inline strings, numbers, Korean and emoji, formula cached values", async () => {
   const book = await open(
     await buildFixtureXlsx(
       [
@@ -44,7 +45,7 @@ test("text cells: shared/inline strings, numbers, Korean and emoji, formula cach
   ]);
 });
 
-test("merged ranges show the anchor value once, like the source", async () => {
+await test("merged ranges show the anchor value once, like the source", async () => {
   const book = await open(
     await buildFixtureXlsx([
       {
@@ -64,7 +65,7 @@ test("merged ranges show the anchor value once, like the source", async () => {
   ]);
 });
 
-test("chartsheet is an unsupported tab; the worksheets around it still read", async () => {
+await test("chartsheet is an unsupported tab; the worksheets around it still read", async () => {
   const book = await open(
     await buildFixtureXlsx([
       { name: "Chart", chart: true },
@@ -80,27 +81,27 @@ test("chartsheet is an unsupported tab; the worksheets around it still read", as
   assert.equal(book.page(2, 0, 0), null);
 });
 
-test("empty worksheet has no page", async () => {
+await test("empty worksheet has no page", async () => {
   const book = await open(await buildFixtureXlsx([{ name: "Empty", cells: [] }]));
   assert.equal(book.page(0, 0, 0), null);
 });
 
-test("row pages of 200 and column pages of 64 map to the right cells", async () => {
+await test("row pages of 200 and column pages of 64 map to the right cells", async () => {
   const book = await open(await buildFixtureXlsx([gridSheet("Grid", 401, 65)], { deflate: true }));
-  const first = book.page(0, 0, 0)!;
+  const first = assertPresent(book.page(0, 0, 0));
   assert.equal(first.rowPages, 3);
   assert.equal(first.colPages, 2);
   assert.equal(first.rows.length, 200);
-  assert.equal(first.rows[0]!.length, 64);
-  assert.equal(first.rows[0]![0], "R1C1");
-  assert.equal(first.rows[199]![63], "R200C64");
-  const last = book.page(0, 2, 1)!;
+  assert.equal(assertPresent(first.rows[0]).length, 64);
+  assert.equal(assertPresent(first.rows[0])[0], "R1C1");
+  assert.equal(assertPresent(first.rows[199])[63], "R200C64");
+  const last = assertPresent(book.page(0, 2, 1));
   assert.deepEqual(last.rows, [["R401C65"]]);
   // Out-of-range page indexes clamp to the last page.
-  assert.deepEqual(book.page(0, 9, 9)!.rows, [["R401C65"]]);
+  assert.deepEqual(assertPresent(book.page(0, 9, 9)).rows, [["R401C65"]]);
 });
 
-test("row, cell and inflated-byte caps reject the workbook as too large", async () => {
+await test("row, cell and inflated-byte caps reject the workbook as too large", async () => {
   const rows = await openXlsx(await buildFixtureXlsx([gridSheet("Rows", 20_001, 1)]));
   assert.equal(rows.status, "tooLarge");
   const cells = await openXlsx(await buildFixtureXlsx([gridSheet("Cells", 1001, 100)]));
@@ -109,13 +110,15 @@ test("row, cell and inflated-byte caps reject the workbook as too large", async 
   assert.equal(atCaps.status, "ok");
   // Stored (1:1) parts: only the total inflated-byte cap can trip.
   const bytes = await openXlsx(
-    await buildFixtureXlsx([{ name: "Big", cells: [{ ref: "A1", inline: "x".repeat(64 * 1024) }] }]),
+    await buildFixtureXlsx([
+      { name: "Big", cells: [{ ref: "A1", inline: "x".repeat(64 * 1024) }] },
+    ]),
     { ...XLSX_LIMITS, maxExpandedBytes: 32 * 1024 },
   );
   assert.equal(bytes.status, "tooLarge");
 });
 
-test("a highly compressed part is refused before it inflates in full", async () => {
+await test("a highly compressed part is refused before it inflates in full", async () => {
   const bomb = await buildFixtureXlsx(
     [{ name: "Bomb", cells: [{ ref: "A1", inline: "x".repeat(40 * 1024 * 1024) }] }],
     { deflate: true },
@@ -124,8 +127,11 @@ test("a highly compressed part is refused before it inflates in full", async () 
   assert.equal((await openXlsx(bomb)).status, "tooLarge");
 });
 
-test("non-XLSX bytes are invalid, not a crash", async () => {
-  assert.equal((await openXlsx(new TextEncoder().encode("plain text, not a zip"))).status, "invalid");
+await test("non-XLSX bytes are invalid, not a crash", async () => {
+  assert.equal(
+    (await openXlsx(new TextEncoder().encode("plain text, not a zip"))).status,
+    "invalid",
+  );
   assert.equal((await openXlsx(new Uint8Array(0))).status, "invalid");
   const truncated = (await buildFixtureXlsx([gridSheet("T", 2, 2)])).subarray(0, 200);
   assert.equal((await openXlsx(truncated)).status, "invalid");
@@ -134,7 +140,10 @@ test("non-XLSX bytes are invalid, not a crash", async () => {
 // --- Malformed directories: the library's unzipSync fallback ----------------
 
 /** The library alone, with the options `openXlsx` passes it. */
-async function libraryLoad(bytes: Uint8Array, limits: XlsxLimits): Promise<"ok" | "tooLarge" | "invalid"> {
+async function libraryLoad(
+  bytes: Uint8Array,
+  limits: XlsxLimits,
+): Promise<"ok" | "tooLarge" | "invalid"> {
   try {
     await loadWorkbook(fromArrayBuffer(bytes), {
       decompressionLimits: { maxTotalUncompressedBytes: limits.maxExpandedBytes },
@@ -183,7 +192,7 @@ function zip64Count(count: number): Uint8Array {
 
 const smallCap: XlsxLimits = { ...XLSX_LIMITS, maxExpandedBytes: 1024 * 1024 };
 
-test("negative control: with a broken directory the library inflates through its fallback", async () => {
+await test("negative control: with a broken directory the library inflates through its fallback", async () => {
   const zip = await buildFixtureXlsx([gridSheet("S", 3, 3)], { deflate: true });
   // The fallback still reads the workbook, so a lenient reader stays usable.
   assert.equal(await libraryLoad(brokenDirectory(zip), smallCap), "ok");
@@ -193,7 +202,7 @@ test("negative control: with a broken directory the library inflates through its
   assert.equal(await libraryLoad(brokenDirectory(zip, 2 * 1024 * 1024), smallCap), "ok");
 });
 
-test("declared sizes over the cap are refused before the fallback allocates or inflates", async () => {
+await test("declared sizes over the cap are refused before the fallback allocates or inflates", async () => {
   const zip = await buildFixtureXlsx([gridSheet("S", 3, 3)], { deflate: true });
   const overCap = brokenDirectory(zip, 2 * 1024 * 1024);
   assert.equal(checkXlsxPackage(overCap, smallCap), "tooLarge");
@@ -202,21 +211,26 @@ test("declared sizes over the cap are refused before the fallback allocates or i
   assert.equal(checkXlsxPackage(brokenDirectory(zip, 512 * 1024), smallCap), "ok");
 });
 
-test("compressed sizes are charged too, so a small declared size cannot hide a large stream", async () => {
+await test("compressed sizes are charged too, so a small declared size cannot hide a large stream", async () => {
   const data = randomBytes(12 * 1024);
-  const zip = writeZip([{ name: "xl/workbook.xml", deflated: deflateRawSync(data), crc: 0, size: 1 }]);
+  const zip = writeZip([
+    { name: "xl/workbook.xml", deflated: deflateRawSync(data), crc: 0, size: 1 },
+  ]);
   const limits = { ...XLSX_LIMITS, maxExpandedBytes: 8 * 1024 };
   assert.equal(await libraryLoad(brokenDirectory(zip), limits), "invalid");
   assert.equal(checkXlsxPackage(brokenDirectory(zip), limits), "tooLarge");
   assert.equal((await openXlsx(brokenDirectory(zip), limits)).status, "tooLarge");
 });
 
-test("negative control: the fallback's entry loop runs a ZIP64 count the strict reader ignored", async () => {
+await test("negative control: the fallback's entry loop runs a ZIP64 count the strict reader ignored", async () => {
   // 20,001 loop iterations end in a missing-part error, not a cap.
-  assert.equal(await libraryLoad(zip64Count(XLSX_LIMITS.maxEntries * 2 + 1), XLSX_LIMITS), "invalid");
+  assert.equal(
+    await libraryLoad(zip64Count(XLSX_LIMITS.maxEntries * 2 + 1), XLSX_LIMITS),
+    "invalid",
+  );
 });
 
-test("the part-count cap stops that loop before the library runs it", async () => {
+await test("the part-count cap stops that loop before the library runs it", async () => {
   assert.equal(checkXlsxPackage(zip64Count(XLSX_LIMITS.maxEntries)), "ok");
   assert.equal((await openXlsx(zip64Count(XLSX_LIMITS.maxEntries))).status, "invalid");
   assert.equal(checkXlsxPackage(zip64Count(XLSX_LIMITS.maxEntries + 1)), "tooLarge");

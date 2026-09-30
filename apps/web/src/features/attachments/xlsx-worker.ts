@@ -16,8 +16,12 @@ let book: XlsxBook | null = null;
 
 scope.onmessage = ({ data }) => {
   void handle(data).then(
-    (response) => scope.postMessage(response),
-    () => scope.postMessage({ type: "failed" }),
+    (response) => {
+      scope.postMessage(response);
+    },
+    () => {
+      scope.postMessage({ type: "failed" });
+    },
   );
 };
 
@@ -28,5 +32,9 @@ async function handle(request: XlsxWorkerRequest): Promise<XlsxWorkerResponse> {
     book = opened.book;
     return { type: "opened", status: "ok", sheets: opened.book.sheets };
   }
-  return { type: "page", id: request.id, page: book?.page(request.index, request.rowPage, request.colPage) ?? null };
+  return {
+    type: "page",
+    id: request.id,
+    page: book?.page(request.index, request.rowPage, request.colPage) ?? null,
+  };
 }

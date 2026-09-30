@@ -64,7 +64,10 @@ export function createXlsxWorker(): XlsxWorkerPort {
  * worker is also terminated when `signal` aborts, on `close`, and on any
  * worker error. One page request is answered at a time, in order.
  */
-export function openXlsxInWorker(bytes: Uint8Array, options: XlsxClientOptions = {}): Promise<RemoteXlsxOpenResult> {
+export function openXlsxInWorker(
+  bytes: Uint8Array,
+  options: XlsxClientOptions = {},
+): Promise<RemoteXlsxOpenResult> {
   const {
     signal,
     openTimeoutMs = XLSX_OPEN_TIMEOUT_MS,
@@ -74,8 +77,10 @@ export function openXlsxInWorker(bytes: Uint8Array, options: XlsxClientOptions =
   if (signal?.aborted) return Promise.resolve({ status: "invalid" });
   const worker = createWorker();
   let dead = false;
-  let pending: { resolve: (response: XlsxWorkerResponse) => void; reject: (error: XlsxWorkerError) => void } | null =
-    null;
+  let pending: {
+    resolve: (response: XlsxWorkerResponse) => void;
+    reject: (error: XlsxWorkerError) => void;
+  } | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let queue: Promise<unknown> = Promise.resolve();
   let nextId = 0;
@@ -91,13 +96,18 @@ export function openXlsxInWorker(bytes: Uint8Array, options: XlsxClientOptions =
     pending = null;
     waiting?.reject(new XlsxWorkerError(reason));
   };
-  const onAbort = () => kill("failed");
+  const onAbort = () => {
+    kill("failed");
+  };
   signal?.addEventListener("abort", onAbort);
   worker.onmessage = ({ data }) => {
     const waiting = pending;
     pending = null;
     clearTimeout(timer);
-    if (!waiting) return kill("failed");
+    if (!waiting) {
+      kill("failed");
+      return;
+    }
     if (data.type === "failed") {
       waiting.reject(new XlsxWorkerError("failed"));
       kill("failed");
@@ -105,29 +115,46 @@ export function openXlsxInWorker(bytes: Uint8Array, options: XlsxClientOptions =
       waiting.resolve(data);
     }
   };
-  worker.onerror = worker.onmessageerror = () => kill("failed");
+  worker.onerror = worker.onmessageerror = () => {
+    kill("failed");
+  };
 
   const request = (message: XlsxWorkerRequest, timeoutMs: number, transfer: Transferable[] = []) =>
     new Promise<XlsxWorkerResponse>((resolve, reject) => {
-      if (dead) return reject(new XlsxWorkerError("failed"));
+      if (dead) {
+        reject(new XlsxWorkerError("failed"));
+        return;
+      }
       pending = { resolve, reject };
-      timer = setTimeout(() => kill("timeout"), timeoutMs);
-      worker.postMessage(message, transfer);
+      timer = setTimeout(() => {
+        kill("timeout");
+      }, timeoutMs);
+      try {
+        worker.postMessage(message, transfer);
+      } catch {
+        kill("failed");
+      }
     });
 
   // Transfer, not copy, when `bytes` is its whole buffer.
-  const owned = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+  const owned =
+    bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
   return request({ type: "open", bytes: owned }, openTimeoutMs, [owned.buffer as ArrayBuffer]).then(
     (response) => {
       if (response.type !== "opened" || response.status !== "ok") {
         kill("failed");
-        return { status: response.type === "opened" && response.status === "tooLarge" ? "tooLarge" : "invalid" };
+        return {
+          status:
+            response.type === "opened" && response.status === "tooLarge" ? "tooLarge" : "invalid",
+        };
       }
       const book: RemoteXlsxBook = {
         sheets: response.sheets,
         page(index, rowPage, colPage) {
           const id = ++nextId;
-          const result = queue.then(() => request({ type: "page", id, index, rowPage, colPage }, pageTimeoutMs));
+          const result = queue.then(() =>
+            request({ type: "page", id, index, rowPage, colPage }, pageTimeoutMs),
+          );
           queue = result.catch(() => undefined);
           return result.then((reply) => {
             if (reply.type !== "page" || reply.id !== id) {
@@ -137,10 +164,16 @@ export function openXlsxInWorker(bytes: Uint8Array, options: XlsxClientOptions =
             return reply.page;
           });
         },
-        close: () => kill("failed"),
+        close: () => {
+          kill("failed");
+        },
       };
       return { status: "ok", book };
     },
-    (error: XlsxWorkerError) => ({ status: error.reason === "timeout" ? "tooLarge" : "invalid" }),
+    (error: unknown) => {
+      if (!(error instanceof XlsxWorkerError))
+        throw new Error("unexpected worker rejection", { cause: error });
+      return { status: error.reason === "timeout" ? "tooLarge" : "invalid" };
+    },
   );
 }

@@ -1,6 +1,7 @@
+import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { once } from "node:events";
+import { getEventListeners, once } from "node:events";
 import { Worker } from "node:worker_threads";
 import { createDeflateRaw } from "node:zlib";
 import { writeZip } from "./docx-test-fixture.ts";
@@ -32,7 +33,11 @@ await import(${JSON.stringify(WORKER_URL)});
 parentPort.postMessage("booted");
 `;
 
-type ThreadPort = XlsxWorkerPort & { booted: Promise<void>; exited: Promise<number>; terminated: () => boolean };
+type ThreadPort = XlsxWorkerPort & {
+  booted: Promise<void>;
+  exited: Promise<number>;
+  terminated: () => boolean;
+};
 
 function threadWorker(): ThreadPort {
   const thread = new Worker(new URL(`data:text/javascript,${encodeURIComponent(BOOT)}`));
@@ -42,10 +47,14 @@ function threadWorker(): ThreadPort {
     onmessage: null,
     onerror: null,
     onmessageerror: null,
-    postMessage: (message, transfer) => thread.postMessage(message, transfer as never),
+    postMessage: (message, transfer) => {
+      thread.postMessage(message, transfer as never);
+    },
     terminate: () => {
       terminated = true;
-      void thread.terminate();
+      thread.terminate().catch((error: unknown) => {
+        assert.fail(String(error));
+      });
     },
     booted: new Promise((resolve) => (booted = resolve)),
     exited: new Promise((resolve) => thread.once("exit", resolve)),
@@ -55,37 +64,48 @@ function threadWorker(): ThreadPort {
     if (data === "booted") booted();
     else port.onmessage?.({ data } as MessageEvent<XlsxWorkerResponse>);
   });
-  thread.on("error", (error) => port.onerror?.(error as unknown as ErrorEvent));
+  thread.on("error", (error) => port.onerror?.(error as ErrorEvent));
   return port;
 }
 
-test("the worker opens and pages a workbook, then close terminates it", async () => {
+await test("the worker opens and pages a workbook, then close terminates it", async () => {
   const worker = threadWorker();
-  const opened = await openXlsxInWorker(await buildFixtureXlsx([gridSheet("Grid", 401, 65)], { deflate: true }), {
-    createWorker: () => worker,
-  });
+  const opened = await openXlsxInWorker(
+    await buildFixtureXlsx([gridSheet("Grid", 401, 65)], { deflate: true }),
+    {
+      createWorker: () => worker,
+    },
+  );
   assert.equal(opened.status, "ok");
-  if (opened.status !== "ok") return;
   assert.deepEqual(opened.book.sheets, [{ name: "Grid", kind: "worksheet" }]);
-  const first = (await opened.book.page(0, 0, 0))!;
+  const first = assertPresent(await opened.book.page(0, 0, 0));
   assert.equal(first.rowPages, 3);
-  assert.equal(first.rows[199]![63], "R200C64");
+  assert.equal(assertPresent(first.rows[199])[63], "R200C64");
   // Out-of-range indexes still clamp to the last page, as in xlsx-workbook.ts.
-  assert.deepEqual((await opened.book.page(0, 9, 9))!.rows, [["R401C65"]]);
+  assert.deepEqual(assertPresent(await opened.book.page(0, 9, 9)).rows, [["R401C65"]]);
   assert.equal(await opened.book.page(5, 0, 0), null);
   opened.book.close();
   assert.ok(worker.terminated());
   await worker.exited;
-  await assert.rejects(opened.book.page(0, 0, 0), (error) => error instanceof XlsxWorkerError && error.reason === "failed");
+  await assert.rejects(
+    opened.book.page(0, 0, 0),
+    (error) => error instanceof XlsxWorkerError && error.reason === "failed",
+  );
 });
 
-test("cap and format failures come back from the worker, which is then terminated", async () => {
+await test("cap and format failures come back from the worker, which is then terminated", async () => {
   const large = threadWorker();
-  const rows = await openXlsxInWorker(await buildFixtureXlsx([gridSheet("Rows", 20_001, 1)]), { createWorker: () => large });
+  const rows = await openXlsxInWorker(await buildFixtureXlsx([gridSheet("Rows", 20_001, 1)]), {
+    createWorker: () => large,
+  });
   assert.equal(rows.status, "tooLarge");
   assert.ok(large.terminated());
   const bad = threadWorker();
-  assert.equal((await openXlsxInWorker(new TextEncoder().encode("not a zip"), { createWorker: () => bad })).status, "invalid");
+  assert.equal(
+    (await openXlsxInWorker(new TextEncoder().encode("not a zip"), { createWorker: () => bad }))
+      .status,
+    "invalid",
+  );
   assert.ok(bad.terminated());
 });
 
@@ -124,7 +144,7 @@ function hostileStream(): Promise<Uint8Array> {
   return hostile.then((zip) => zip.slice());
 }
 
-test("a stream that decodes far past its declared size passes the metadata check", async () => {
+await test("a stream that decodes far past its declared size passes the metadata check", async () => {
   const zip = await hostileStream();
   assert.ok(zip.byteLength < 4 * 1024 * 1024);
   // Declared sizes are within every cap; only decoding the stream costs.
@@ -133,25 +153,32 @@ test("a stream that decodes far past its declared size passes the metadata check
 
 // Decoding the 512 MiB takes about 1.3 s under V8 (Chromium, the e2e browser)
 // and 10 s under Bun's JavaScriptCore, past bun test's 5 s default.
-test("negative control: left to finish, the worker decodes it and reports invalid, off the main thread", { timeout: 60_000 }, async () => {
-  const worker = threadWorker();
-  await worker.booted;
-  let ticks = 0;
-  const interval = setInterval(() => (ticks += 1), 1);
-  try {
-    const opened = await openXlsxInWorker(await hostileStream(), { createWorker: () => worker });
-    assert.equal(opened.status, "invalid");
-    // This thread's timers kept firing while the worker decoded.
-    assert.ok(ticks > 0);
-  } finally {
-    clearInterval(interval);
-  }
-});
+await test(
+  "negative control: left to finish, the worker decodes it and reports invalid, off the main thread",
+  { timeout: 60_000 },
+  async () => {
+    const worker = threadWorker();
+    await worker.booted;
+    let ticks = 0;
+    const interval = setInterval(() => (ticks += 1), 1);
+    try {
+      const opened = await openXlsxInWorker(await hostileStream(), { createWorker: () => worker });
+      assert.equal(opened.status, "invalid");
+      // This thread's timers kept firing while the worker decoded.
+      assert.ok(ticks > 0);
+    } finally {
+      clearInterval(interval);
+    }
+  },
+);
 
-test("the open timeout terminates a booted worker in the middle of that decode", async () => {
+await test("the open timeout terminates a booted worker in the middle of that decode", async () => {
   const worker = threadWorker();
   await worker.booted;
-  const opened = await openXlsxInWorker(await hostileStream(), { createWorker: () => worker, openTimeoutMs: 50 });
+  const opened = await openXlsxInWorker(await hostileStream(), {
+    createWorker: () => worker,
+    openTimeoutMs: 50,
+  });
   // Neither the metadata check ("ok") nor the finished decode ("invalid", above)
   // answers tooLarge: only the timeout does.
   assert.equal(opened.status, "tooLarge");
@@ -160,6 +187,57 @@ test("the open timeout terminates a booted worker in the middle of that decode",
 });
 
 // --- Client protocol, with a scripted worker ----------------------------------
+
+await test("a synchronous transport failure resolves and immediately cleans up the worker", async (context) => {
+  const controller = new AbortController();
+  let terminated = 0;
+  const worker: XlsxWorkerPort = {
+    onmessage: null,
+    onerror: null,
+    onmessageerror: null,
+    postMessage() {
+      throw new DOMException("cannot transfer bytes", "DataCloneError");
+    },
+    terminate() {
+      terminated += 1;
+    },
+  };
+  const clearTimer = context.mock.method(globalThis, "clearTimeout");
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => {
+    unhandled.push(error);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const opening = openXlsxInWorker(new Uint8Array(8), {
+      createWorker: () => worker,
+      signal: controller.signal,
+    });
+    // Capture cleanup before yielding: the open deadline must not perform it later.
+    const immediate = {
+      terminated,
+      handlers: [worker.onmessage, worker.onerror, worker.onmessageerror],
+      abortListeners: getEventListeners(controller.signal, "abort").length,
+      clearedTimers: clearTimer.mock.callCount(),
+    };
+    assert.deepEqual(await opening, { status: "invalid" });
+    assert.deepEqual(immediate, {
+      terminated: 1,
+      handlers: [null, null, null],
+      abortListeners: 0,
+      clearedTimers: 1,
+    });
+    assert.ok(clearTimer.mock.calls[0]?.arguments[0]);
+    controller.abort();
+    assert.equal(terminated, 1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    controller.abort();
+    process.off("unhandledRejection", onUnhandled);
+    clearTimer.mock.restore();
+  }
+});
 
 /** Answers `open` with one worksheet and never answers anything else. */
 function silentPager(): XlsxWorkerPort & { requests: XlsxWorkerRequest[]; terminated: boolean } {
@@ -173,7 +251,9 @@ function silentPager(): XlsxWorkerPort & { requests: XlsxWorkerRequest[]; termin
       port.requests.push(message);
       if (message.type === "open") {
         queueMicrotask(() =>
-          port.onmessage?.({ data: { type: "opened", status: "ok", sheets: [{ name: "S", kind: "worksheet" }] } } as never),
+          port.onmessage?.({
+            data: { type: "opened", status: "ok", sheets: [{ name: "S", kind: "worksheet" }] },
+          } as never),
         );
       }
     },
@@ -184,15 +264,23 @@ function silentPager(): XlsxWorkerPort & { requests: XlsxWorkerRequest[]; termin
   return port;
 }
 
-test("a page request past its timeout terminates the worker", async () => {
+await test("a page request past its timeout terminates the worker", async () => {
   const worker = silentPager();
-  const opened = await openXlsxInWorker(new Uint8Array(8), { createWorker: () => worker, pageTimeoutMs: 20 });
+  const opened = await openXlsxInWorker(new Uint8Array(8), {
+    createWorker: () => worker,
+    pageTimeoutMs: 20,
+  });
   assert.equal(opened.status, "ok");
-  if (opened.status !== "ok") return;
   const first = opened.book.page(0, 0, 0);
   const queued = opened.book.page(0, 1, 0);
-  await assert.rejects(first, (error) => error instanceof XlsxWorkerError && error.reason === "timeout");
-  await assert.rejects(queued, (error) => error instanceof XlsxWorkerError && error.reason === "failed");
+  await assert.rejects(
+    first,
+    (error) => error instanceof XlsxWorkerError && error.reason === "timeout",
+  );
+  await assert.rejects(
+    queued,
+    (error) => error instanceof XlsxWorkerError && error.reason === "failed",
+  );
   assert.ok(worker.terminated);
   // Requests are answered one at a time: the queued one was never sent.
   assert.deepEqual(
@@ -201,21 +289,34 @@ test("a page request past its timeout terminates the worker", async () => {
   );
 });
 
-test("an abort, a worker error or a mismatched reply terminates the worker", async () => {
+await test("an abort, a worker error or a mismatched reply terminates the worker", async () => {
   const aborted = silentPager();
   const controller = new AbortController();
   controller.abort();
-  assert.equal((await openXlsxInWorker(new Uint8Array(8), { signal: controller.signal, createWorker: () => aborted })).status, "invalid");
+  assert.equal(
+    (
+      await openXlsxInWorker(new Uint8Array(8), {
+        signal: controller.signal,
+        createWorker: () => aborted,
+      })
+    ).status,
+    "invalid",
+  );
   assert.equal(aborted.requests.length, 0);
 
   const late = silentPager();
   const lateController = new AbortController();
-  const opened = await openXlsxInWorker(new Uint8Array(8), { signal: lateController.signal, createWorker: () => late });
+  const opened = await openXlsxInWorker(new Uint8Array(8), {
+    signal: lateController.signal,
+    createWorker: () => late,
+  });
   assert.equal(opened.status, "ok");
-  if (opened.status !== "ok") return;
   const page = opened.book.page(0, 0, 0);
   lateController.abort();
-  await assert.rejects(page, (error) => error instanceof XlsxWorkerError && error.reason === "failed");
+  await assert.rejects(
+    page,
+    (error) => error instanceof XlsxWorkerError && error.reason === "failed",
+  );
   assert.ok(late.terminated);
 
   const crashing = silentPager();
@@ -223,7 +324,10 @@ test("an abort, a worker error or a mismatched reply terminates the worker", asy
     crashing.requests.push(message);
     queueMicrotask(() => crashing.onerror?.({} as ErrorEvent));
   };
-  assert.equal((await openXlsxInWorker(new Uint8Array(8), { createWorker: () => crashing })).status, "invalid");
+  assert.equal(
+    (await openXlsxInWorker(new Uint8Array(8), { createWorker: () => crashing })).status,
+    "invalid",
+  );
   assert.ok(crashing.terminated);
 
   const confused = silentPager();
@@ -231,11 +335,14 @@ test("an abort, a worker error or a mismatched reply terminates the worker", asy
   if (book.status !== "ok") return assert.fail("expected ok");
   const reply = book.book.page(0, 0, 0);
   confused.onmessage?.({ data: { type: "page", id: 99, page: null } } as never);
-  await assert.rejects(reply, (error) => error instanceof XlsxWorkerError && error.reason === "failed");
+  await assert.rejects(
+    reply,
+    (error) => error instanceof XlsxWorkerError && error.reason === "failed",
+  );
   assert.ok(confused.terminated);
 });
 
-test("the default bounds", () => {
+await test("the default bounds", () => {
   assert.equal(XLSX_OPEN_TIMEOUT_MS, 20_000);
   assert.equal(XLSX_PAGE_TIMEOUT_MS, 10_000);
 });

@@ -14,17 +14,20 @@ function shipped(dir: (typeof PDFJS_ASSET_DIRS)[number]): string[] {
   return fs.readdirSync(path.join(pkgDir, dir)).filter((name) => isPdfjsAsset(dir, name));
 }
 
-test("pdfjsAssetBase is versioned and rejects odd versions", () => {
+await test("pdfjsAssetBase is versioned and rejects odd versions", () => {
   assert.equal(pdfjsAssetBase("6.3.289"), "assets/pdfjs-dist-6.3.289/");
   assert.throws(() => pdfjsAssetBase("../6"));
 });
 
-test("shipped pdf.js data covers every CMap, standard font, decoder and license, not scripting", () => {
+await test("shipped pdf.js data covers every CMap, standard font, decoder and license, not scripting", () => {
   const cmaps = fs.readdirSync(path.join(pkgDir, "cmaps"));
   assert.deepEqual(shipped("cmaps").sort(), cmaps.sort());
   assert.ok(shipped("cmaps").includes("UniKS-UCS2-H.bcmap"));
   assert.ok(shipped("cmaps").includes("Adobe-Korea1-UCS2.bcmap"));
-  assert.deepEqual(shipped("standard_fonts").sort(), fs.readdirSync(path.join(pkgDir, "standard_fonts")).sort());
+  assert.deepEqual(
+    shipped("standard_fonts").sort(),
+    fs.readdirSync(path.join(pkgDir, "standard_fonts")).sort(),
+  );
   const wasm = shipped("wasm");
   for (const name of [
     "jbig2.wasm",
@@ -52,7 +55,7 @@ async function koreanText(options: { cMapUrl?: string }): Promise<string> {
   }
 }
 
-test("non-embedded Korean text needs the shipped packed CMaps", async () => {
+await test("non-embedded Korean text needs the shipped packed CMaps", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fvoci-pdfjs-cmaps-"));
   try {
     for (const name of shipped("cmaps")) {

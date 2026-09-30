@@ -12,7 +12,7 @@ export interface TextChunk {
 
 /** Source `chunkPlainText`: UTF-16 `String.length` offsets, paragraph/page boundaries first. */
 function boundaries(text: string): number[] {
-  return [...text.matchAll(/(?:\f|\n[ \t]*\n)\s*/g)].map((m) => (m.index ?? 0) + m[0].length);
+  return [...text.matchAll(/(?:\f|\n[ \t]*\n)\s*/g)].map((m) => m.index + m[0].length);
 }
 
 export function chunkPlainText(text: string): TextChunk[] {

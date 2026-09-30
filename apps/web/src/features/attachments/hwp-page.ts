@@ -36,7 +36,9 @@ export function pageOfChunk(pages: readonly string[], chunk: number): number {
   if (pages.length === 0) return 0;
   const chunks = chunkPlainText(pages.join("\n"));
   if (chunks[chunk] === undefined) return 0;
-  const at = chunk === 0 ? 0 : chunks[chunk - 1]!.end;
+  const previous = chunks[chunk - 1];
+  if (chunk !== 0 && previous === undefined) return 0;
+  const at = previous === undefined ? 0 : previous.end;
   let seen = 0;
   for (const [index, text] of pages.entries()) {
     seen += text.length + 1;

@@ -66,8 +66,9 @@ export async function checkDocxPackage(
   let total = 0;
   for (const part of parts) {
     if (!isAlive()) return "invalid";
-    const internal = (part as unknown as { internalStream(type: "uint8array"): ByteStream })
-      .internalStream("uint8array");
+    const internal = (
+      part as unknown as { internalStream(type: "uint8array"): ByteStream }
+    ).internalStream("uint8array");
     const result = await new Promise<DocxPackageCheck>((resolve) => {
       internal
         .on("data", (chunk) => {
@@ -77,8 +78,12 @@ export async function checkDocxPackage(
             resolve(total > maxExpanded ? "tooLarge" : "invalid");
           }
         })
-        .on("error", () => resolve("invalid"))
-        .on("end", () => resolve("ok"))
+        .on("error", () => {
+          resolve("invalid");
+        })
+        .on("end", () => {
+          resolve("ok");
+        })
         .resume();
     });
     if (result !== "ok") return result;
