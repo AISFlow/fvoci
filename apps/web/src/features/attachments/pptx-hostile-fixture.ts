@@ -6,7 +6,14 @@
  * into the renderer's output. These decks are built with `@office-kit/pptx`'s
  * own writer: one column chart whose data labels use `numberFormat`.
  */
-import { addSlide, addSlideChart, createPresentation, emu, getSlideLayouts, savePresentation } from "@office-kit/pptx";
+import {
+  addSlide,
+  addSlideChart,
+  createPresentation,
+  emu,
+  getSlideLayouts,
+  savePresentation,
+} from "@office-kit/pptx";
 
 /** Payloads that passed the old regex sanitizer (review B1), plus plain ones. */
 export const HOSTILE_PPTX_MARKUP = {

@@ -12,7 +12,10 @@ import {
   rhwpWasmNoticeTitle,
 } from "./rhwp-notice.ts";
 
-const licensesRoot = path.resolve(import.meta.dirname, "../../../../../third-party/browser-licenses");
+const licensesRoot = path.resolve(
+  import.meta.dirname,
+  "../../../../../third-party/browser-licenses",
+);
 
 test("the rhwp wasm notice is the pinned wasm32 graph concatenation", () => {
   const bytes = fs.readFileSync(path.join(licensesRoot, RHWP_THIRD_PARTY_FILE));
@@ -25,7 +28,19 @@ test("the rhwp wasm notice is the pinned wasm32 graph concatenation", () => {
   assert.match(text, /^Applies to: unicode-ident 1\.0\.24 \(LICENSE-UNICODE\)$/m);
   assert.match(text, /Copyright © `2024`, `Volexity, Inc`/);
   // Native-only or non-default rhwp dependencies are not in the wasm.
-  for (const name of ["svg2pdf", "usvg", "pdf-writer", "subsetter", "resvg", "skia-safe", "vello", "gif", "libc", "r-efi", "cc"]) {
+  for (const name of [
+    "svg2pdf",
+    "usvg",
+    "pdf-writer",
+    "subsetter",
+    "resvg",
+    "skia-safe",
+    "vello",
+    "gif",
+    "libc",
+    "r-efi",
+    "cc",
+  ]) {
     assert.doesNotMatch(text, new RegExp(`^ {2}${name} `, "m"), name);
   }
 });

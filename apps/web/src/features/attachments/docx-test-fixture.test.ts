@@ -19,7 +19,11 @@ test("the fixture ZIP opens with CRC checks in an independent reader", async () 
     "word/styles.xml",
   ]);
   const document = await zip.file("word/document.xml")!.async("string");
-  for (const text of [DEFAULT_DOCX_TEXT.heading, DEFAULT_DOCX_TEXT.body.trim(), DEFAULT_DOCX_TEXT.secondPage]) {
+  for (const text of [
+    DEFAULT_DOCX_TEXT.heading,
+    DEFAULT_DOCX_TEXT.body.trim(),
+    DEFAULT_DOCX_TEXT.secondPage,
+  ]) {
     assert.ok(document.includes(text), text);
   }
   assert.match(document, /<w:br w:type="page"\/>/);
@@ -37,7 +41,11 @@ test("the fixture PNG has valid chunk CRCs and a decodable image stream", () => 
     const length = view.getUint32(at);
     const type = new TextDecoder().decode(png.subarray(at + 4, at + 8));
     const data = png.subarray(at + 8, at + 8 + length);
-    assert.equal(view.getUint32(at + 8 + length), crc32(png.subarray(at + 4, at + 8 + length)), type);
+    assert.equal(
+      view.getUint32(at + 8 + length),
+      crc32(png.subarray(at + 4, at + 8 + length)),
+      type,
+    );
     if (type === "IDAT") idat = data;
     types.push(type);
     at += 12 + length;

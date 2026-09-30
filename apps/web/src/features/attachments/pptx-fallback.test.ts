@@ -9,7 +9,8 @@ const alive = () => true;
 const NS = 'xmlns="http://www.w3.org/2000/svg"';
 const RECT = (x: string, y: string, w: string, h: string) =>
   `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="#F3F4F6"/>`;
-const LABEL = '<text x="24.00" y="24.00" text-anchor="middle">picture (link: https://example.com/a.png)</text>';
+const LABEL =
+  '<text x="24.00" y="24.00" text-anchor="middle">picture (link: https://example.com/a.png)</text>';
 
 function bounded(svg: string): string {
   const result = boundFallbackLabels(svg);
@@ -19,7 +20,10 @@ function bounded(svg: string): string {
 
 /** The output with the inserted viewport tags taken out: the input, byte for byte. */
 function withoutViewports(svg: string): string {
-  return svg.replace(/<svg (?:x="[^"]*" y="[^"]*" )?width="[^"]*" height="[^"]*"(?: viewBox="[^"]*" overflow="hidden")?>(<text[\s\S]*?<\/text>|<text[^>]*\/>)<\/svg>/g, "$1");
+  return svg.replace(
+    /<svg (?:x="[^"]*" y="[^"]*" )?width="[^"]*" height="[^"]*"(?: viewBox="[^"]*" overflow="hidden")?>(<text[\s\S]*?<\/text>|<text[^>]*\/>)<\/svg>/g,
+    "$1",
+  );
 }
 
 test("markup without a fallback group is returned as is, unparsed", () => {
@@ -33,7 +37,10 @@ test("a labelled fallback's text is wrapped in a viewport of exactly its rect, n
     const out = bounded(svg);
     assert.equal(
       out,
-      svg.replace(LABEL, `<svg x="0" y="0" width="48" height="48" viewBox="0 0 48 48" overflow="hidden">${LABEL}</svg>`),
+      svg.replace(
+        LABEL,
+        `<svg x="0" y="0" width="48" height="48" viewBox="0 0 48 48" overflow="hidden">${LABEL}</svg>`,
+      ),
     );
     assert.equal(withoutViewports(out), svg);
   }
@@ -45,8 +52,16 @@ test("offsets hold across non-BMP text, entities, CRLF and nested groups; every 
     `<g data-pptx-fallback="image">${RECT("-10.50", "7.25", "24.00", "12.00")}<text x="1">🙂 a&lt;b</text></g></g>` +
     `<g data-pptx-fallback="chart">${RECT("100.00", "0.00", "10.00", "10.00")}<text/></g></g></svg>`;
   const out = bounded(svg);
-  assert.ok(out.includes('<svg x="-10.5" y="7.25" width="24" height="12" viewBox="-10.5 7.25 24 12" overflow="hidden"><text x="1">🙂 a&lt;b</text></svg></g>'));
-  assert.ok(out.includes('<svg x="100" y="0" width="10" height="10" viewBox="100 0 10 10" overflow="hidden"><text/></svg></g>'));
+  assert.ok(
+    out.includes(
+      '<svg x="-10.5" y="7.25" width="24" height="12" viewBox="-10.5 7.25 24 12" overflow="hidden"><text x="1">🙂 a&lt;b</text></svg></g>',
+    ),
+  );
+  assert.ok(
+    out.includes(
+      '<svg x="100" y="0" width="10" height="10" viewBox="100 0 10 10" overflow="hidden"><text/></svg></g>',
+    ),
+  );
   assert.equal(withoutViewports(out), svg);
 });
 
@@ -56,7 +71,13 @@ test("offsets hold across CDATA sections, comments and processing instructions h
     `<?xml version="1.0"?>\r\n<!-- <g data-pptx-fallback="image"> 🚀 -->\r\n<svg ${NS}><?pi <text>?>` +
     `<text><![CDATA[😀\r\n</g>]]></text><g data-pptx-fallback="image">${RECT("1.00", "2.00", "3.00", "4.00")}<!-- 🙂 -->${label}</g></svg>`;
   const out = bounded(svg);
-  assert.equal(out, svg.replace(label, `<svg x="1" y="2" width="3" height="4" viewBox="1 2 3 4" overflow="hidden">${label}</svg>`));
+  assert.equal(
+    out,
+    svg.replace(
+      label,
+      `<svg x="1" y="2" width="3" height="4" viewBox="1 2 3 4" overflow="hidden">${label}</svg>`,
+    ),
+  );
 });
 
 test("a DOCTYPE's entities are not expanded and nothing is loaded: an entity reference is failed", () => {
@@ -68,7 +89,11 @@ test("a DOCTYPE's entities are not expanded and nothing is loaded: an entity ref
 });
 
 test("a box without area shows no label", () => {
-  for (const [w, h] of [["0.00", "48.00"], ["48.00", "0.00"], ["-4.00", "48.00"]]) {
+  for (const [w, h] of [
+    ["0.00", "48.00"],
+    ["48.00", "0.00"],
+    ["-4.00", "48.00"],
+  ]) {
     const svg = `<svg ${NS}><g data-pptx-fallback="image">${RECT("0.00", "0.00", w!, h!)}${LABEL}</g></svg>`;
     assert.equal(bounded(svg), svg.replace(LABEL, `<svg width="0" height="0">${LABEL}</svg>`));
   }
@@ -124,7 +149,10 @@ test("renderer placeholders: linked, grouped, rotated and missing pictures are c
     /<g data-pptx-fallback="image" transform="rotate\(90 424\.00 324\.00\)"><rect x="400\.00" y="300\.00" [^>]*\/><title>[^<]*<\/title><svg x="400" y="300" width="48" height="48" viewBox="400 300 48 48" overflow="hidden"><text /,
   );
   // Missing embed.
-  assert.match(svg, /<svg x="600" y="300" width="48" height="48" viewBox="600 300 48 48" overflow="hidden"><text [^>]*>picture \(no bytes\)<\/text><\/svg>/);
+  assert.match(
+    svg,
+    /<svg x="600" y="300" width="48" height="48" viewBox="600 300 48 48" overflow="hidden"><text [^>]*>picture \(no bytes\)<\/text><\/svg>/,
+  );
   // Nothing else changed, and the linked picture is still never referenced.
   assert.equal(withoutViewports(svg), raw);
   assert.ok(!new RegExp(`(href|src)="${FIXTURE_PPTX_EXTERNAL_IMAGE}`).test(svg));

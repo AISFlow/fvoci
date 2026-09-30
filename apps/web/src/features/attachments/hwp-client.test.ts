@@ -9,10 +9,13 @@ import { createHwpSession, type HwpRequest, type HwpResponse } from "./hwp-worke
 import { readZip, writeZip } from "./hwp-test-fixture.ts";
 
 const require = createRequire(import.meta.url);
-const wasm = fs.readFileSync(path.join(path.dirname(require.resolve("@rhwp/core")), "rhwp_bg.wasm"));
+const wasm = fs.readFileSync(
+  path.join(path.dirname(require.resolve("@rhwp/core")), "rhwp_bg.wasm"),
+);
 const module = new WebAssembly.Module(wasm);
 const repoRoot = path.resolve(import.meta.dirname, "../../../../..");
-const fixture = (name: string) => new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
+const fixture = (name: string) =>
+  new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
 
 /** Every fake worker started, so a test can tell which are still running. */
 class FakeWorker implements HwpWorkerPort {
@@ -32,7 +35,8 @@ class FakeWorker implements HwpWorkerPort {
   postMessage(message: HwpRequest, transfer: Transferable[] = []): void {
     this.received.push({ message, transfer });
     void Promise.resolve(this.answer(message)).then((response) => {
-      if (response && this.terminated === 0) this.onmessage?.({ data: response } as MessageEvent<HwpResponse>);
+      if (response && this.terminated === 0)
+        this.onmessage?.({ data: response } as MessageEvent<HwpResponse>);
     });
   }
 
@@ -60,16 +64,26 @@ const opened = (request: HwpRequest): HwpResponse =>
     ? { id: request.id, ok: true, op: "open", pageCount: 3 }
     : request.op === "startPage"
       ? { id: request.id, ok: true, op: "startPage", page: 2 }
-      : { id: request.id, ok: true, op: "render", svg: new Blob(["<svg/>"], { type: "image/svg+xml" }) };
+      : {
+          id: request.id,
+          ok: true,
+          op: "render",
+          svg: new Blob(["<svg/>"], { type: "image/svg+xml" }),
+        };
 
 async function rejectsWith(promise: Promise<unknown>, reason: string): Promise<void> {
-  await assert.rejects(promise, (error) => error instanceof HwpClientError && error.reason === reason);
+  await assert.rejects(
+    promise,
+    (error) => error instanceof HwpClientError && error.reason === reason,
+  );
 }
 
 test("open transfers the bytes, and requests are answered through the worker", async () => {
   const f = fake(opened);
   const bytes = new Uint8Array([1, 2, 3]);
-  const { client, pageCount } = await HwpDocumentClient.open(bytes, module, { createWorker: f.createWorker });
+  const { client, pageCount } = await HwpDocumentClient.open(bytes, module, {
+    createWorker: f.createWorker,
+  });
   assert.equal(pageCount, 3);
   assert.deepEqual(f.worker.received[0]!.transfer, [bytes.buffer]);
   assert.equal(await client.startPage(1), 2);
@@ -83,7 +97,10 @@ test("open transfers the bytes, and requests are answered through the worker", a
 test("a failed open terminates its worker", async () => {
   for (const error of ["tooLarge", "invalid", "failed"] as const) {
     const f = fake((request) => ({ id: request.id, ok: false, error }));
-    await rejectsWith(HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker }), error);
+    await rejectsWith(
+      HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker }),
+      error,
+    );
     assert.equal(f.worker.terminated, 1);
   }
 });
@@ -91,7 +108,10 @@ test("a failed open terminates its worker", async () => {
 test("a parse past its deadline is terminated", async () => {
   const f = fake(() => null);
   await rejectsWith(
-    HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker, openTimeoutMs: 5 }),
+    HwpDocumentClient.open(new Uint8Array(1), module, {
+      createWorker: f.createWorker,
+      openTimeoutMs: 5,
+    }),
     "timeout",
   );
   assert.equal(f.worker.terminated, 1);
@@ -121,7 +141,10 @@ test("an already aborted signal starts no worker; one aborted after the open lea
   const aborted = AbortSignal.abort();
   const f = fake(opened);
   await rejectsWith(
-    HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker, signal: aborted }),
+    HwpDocumentClient.open(new Uint8Array(1), module, {
+      createWorker: f.createWorker,
+      signal: aborted,
+    }),
     "closed",
   );
   assert.deepEqual(FakeWorker.all, []);
@@ -156,9 +179,13 @@ test("a render past its deadline terminates the worker and fails later requests"
 test("closing cancels pending requests; a worker error fails them", async () => {
   let release: (() => void) | null = null;
   const f = fake((request) =>
-    request.op === "open" ? opened(request) : new Promise<HwpResponse>((resolve) => (release = () => resolve(opened(request)))),
+    request.op === "open"
+      ? opened(request)
+      : new Promise<HwpResponse>((resolve) => (release = () => resolve(opened(request)))),
   );
-  const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker });
+  const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, {
+    createWorker: f.createWorker,
+  });
   const pending = client.renderPage(1);
   client.close();
   await rejectsWith(pending, "closed");
@@ -166,7 +193,9 @@ test("closing cancels pending requests; a worker error fails them", async () => 
   await rejectsWith(client.renderPage(1), "closed");
 
   const g = fake((request) => (request.op === "open" ? opened(request) : null));
-  const second = await HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: g.createWorker });
+  const second = await HwpDocumentClient.open(new Uint8Array(1), module, {
+    createWorker: g.createWorker,
+  });
   const waiting = second.client.renderPage(0);
   g.worker.onerror?.({} as ErrorEvent);
   await rejectsWith(waiting, "failed");
@@ -178,7 +207,9 @@ test("replacing documents leaves no worker running", async () => {
   const clients: HwpDocumentClient[] = [];
   for (let n = 0; n < 3; n += 1) {
     const f = fake(opened);
-    const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker });
+    const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, {
+      createWorker: f.createWorker,
+    });
     clients.at(-1)?.close();
     clients.push(client);
     assert.equal(FakeWorker.running().length, 1);
@@ -204,10 +235,16 @@ test("client and real-wasm session: the Scripts bomb is refused and its worker t
   };
   const bomb = writeZip([
     ...readZip(fixture("sample.hwpx")),
-    ...[0, 1, 2, 3].map((n) => ({ name: `Scripts/s${n}.js`, data: new Uint8Array(32 * 1024 * 1024) })),
+    ...[0, 1, 2, 3].map((n) => ({
+      name: `Scripts/s${n}.js`,
+      data: new Uint8Array(32 * 1024 * 1024),
+    })),
   ]);
   const f = real();
-  await rejectsWith(HwpDocumentClient.open(bomb, module, { createWorker: f.createWorker }), "tooLarge");
+  await rejectsWith(
+    HwpDocumentClient.open(bomb, module, { createWorker: f.createWorker }),
+    "tooLarge",
+  );
   assert.equal(api.opens, 0);
   assert.equal(f.worker.terminated, 1);
 
@@ -226,12 +263,21 @@ test("edits travel through the worker; a revert gets the open deadline, a replac
   const f = fake((request) => {
     if (request.op === "open") return { id: request.id, ok: true, op: "open", pageCount: 3 };
     if (request.op === "replace") {
-      return { id: request.id, ok: true, op: "replace", outcome: request.all ? "changed" : "rejected", pageCount: 4 };
+      return {
+        id: request.id,
+        ok: true,
+        op: "replace",
+        outcome: request.all ? "changed" : "rejected",
+        pageCount: 4,
+      };
     }
-    if (request.op === "export") return { id: request.id, ok: true, op: "export", bytes: new Uint8Array([7]) };
+    if (request.op === "export")
+      return { id: request.id, ok: true, op: "export", bytes: new Uint8Array([7]) };
     if (request.op === "revert") {
       // Answered after the request deadline but within the open deadline.
-      return new Promise((resolve) => setTimeout(() => resolve({ id: request.id, ok: true, op: "revert", pageCount: 3 }), 30));
+      return new Promise((resolve) =>
+        setTimeout(() => resolve({ id: request.id, ok: true, op: "revert", pageCount: 3 }), 30),
+      );
     }
     return new Promise((resolve) => (pending = resolve));
   });
@@ -242,7 +288,13 @@ test("edits travel through the worker; a revert gets the open deadline, a replac
   });
   assert.deepEqual(await client.replace("a", "b", true), { outcome: "changed", pageCount: 4 });
   assert.deepEqual(await client.replace("a", "b", false), { outcome: "rejected", pageCount: 4 });
-  assert.deepEqual(f.worker.received[1]!.message, { id: 2, op: "replace", find: "a", replacement: "b", all: true });
+  assert.deepEqual(f.worker.received[1]!.message, {
+    id: 2,
+    op: "replace",
+    find: "a",
+    replacement: "b",
+    all: true,
+  });
   assert.deepEqual([...(await client.exportDocument("hwpx"))], [7]);
   assert.deepEqual(f.worker.received[3]!.message, { id: 4, op: "export", format: "hwpx" });
   assert.equal(await client.revert(), 3);
@@ -262,7 +314,9 @@ test("a failed export rejects only that request; a failed replace terminates the
         ? { id: request.id, ok: false, error: "tooLarge" }
         : { id: request.id, ok: false, error: "failed" },
   );
-  const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker });
+  const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, {
+    createWorker: f.createWorker,
+  });
   await rejectsWith(client.exportDocument("hwp"), "tooLarge");
   assert.equal(client.closed, false);
   assert.equal(f.worker.terminated, 0);

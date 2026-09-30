@@ -29,7 +29,10 @@ test("renderScale lowers the scale so the canvas stays within the cap", () => {
   assert.ok(scale < 1);
 });
 
-function streamed(chunks: number[], headers: Record<string, string> = {}): {
+function streamed(
+  chunks: number[],
+  headers: Record<string, string> = {},
+): {
   response: Response;
   pulled: () => number;
   cancelled: () => boolean;

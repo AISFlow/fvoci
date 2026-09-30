@@ -100,11 +100,9 @@ export class HwpDocumentClient {
     const abort = () => client.close();
     signal?.addEventListener("abort", abort, { once: true });
     try {
-      const opened = await client.#request(
-        { op: "open", bytes, module },
-        openTimeoutMs,
-        [bytes.buffer as ArrayBuffer],
-      );
+      const opened = await client.#request({ op: "open", bytes, module }, openTimeoutMs, [
+        bytes.buffer as ArrayBuffer,
+      ]);
       if (opened.op !== "open") throw new HwpClientError("failed");
       return { client, pageCount: opened.pageCount };
     } catch (error) {
@@ -147,7 +145,10 @@ export class HwpDocumentClient {
   ): Promise<{ outcome: HwpReplaceOutcome; pageCount: number }> {
     let response: HwpResponse & { ok: true };
     try {
-      response = await this.#request({ op: "replace", find, replacement, all }, this.#requestTimeoutMs);
+      response = await this.#request(
+        { op: "replace", find, replacement, all },
+        this.#requestTimeoutMs,
+      );
     } catch (error) {
       this.close();
       throw error;

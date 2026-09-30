@@ -15,7 +15,10 @@ async function zip(files: Record<string, Uint8Array | string>): Promise<Uint8Arr
 const alive = () => true;
 
 test("a package within the inflated-size cap passes", async () => {
-  const bytes = await zip({ "word/document.xml": "<w:document/>", "[Content_Types].xml": "<Types/>" });
+  const bytes = await zip({
+    "word/document.xml": "<w:document/>",
+    "[Content_Types].xml": "<Types/>",
+  });
   assert.equal(await checkDocxPackage(bytes, alive, 1024), "ok");
 });
 
@@ -46,7 +49,9 @@ test("too many parts, non-ZIP bytes and a cancelled check are not rendered", asy
 /** One raw-DEFLATE part of `size` zero bytes with a deliberately wrong CRC. */
 function badCrcZip(size: number): Uint8Array {
   const data = Buffer.alloc(size);
-  return writeZip([{ name: "word/document.xml", deflated: deflateRawSync(data), crc: 0x12345678, size }]);
+  return writeZip([
+    { name: "word/document.xml", deflated: deflateRawSync(data), crc: 0x12345678, size },
+  ]);
 }
 
 /** Records the `checkCRC32` option of every JSZip.loadAsync call made by `run`. */
@@ -66,7 +71,10 @@ async function recordLoads<T>(run: () => Promise<T>): Promise<{ result: T; crcLo
 
 test("negative control: JSZip's CRC load inflates a whole part before any cap can apply", async () => {
   // This is the order the previous check used: the mismatch is only found after full inflation.
-  await assert.rejects(JSZip.loadAsync(badCrcZip(4 * 1024 * 1024), { checkCRC32: true }), /CRC32 mismatch/);
+  await assert.rejects(
+    JSZip.loadAsync(badCrcZip(4 * 1024 * 1024), { checkCRC32: true }),
+    /CRC32 mismatch/,
+  );
 });
 
 test("the inflated-size cap is enforced before, and instead of, the whole-package CRC pass", async () => {
@@ -96,13 +104,17 @@ test("a CRC mismatch alone is not a failure: CRC is not an authentication check"
 
 test("malformed DEFLATE data still fails the check", async () => {
   // BTYPE 11 is reserved in RFC 1951; the capped stream reports the error.
-  const bytes = writeZip([{ name: "word/document.xml", deflated: new Uint8Array([0xff, 0xff, 0xff]), crc: 0, size: 64 }]);
+  const bytes = writeZip([
+    { name: "word/document.xml", deflated: new Uint8Array([0xff, 0xff, 0xff]), crc: 0, size: 64 },
+  ]);
   assert.equal(await checkDocxPackage(bytes, alive), "invalid");
 });
 
 // --- Records shadowed in the renderer's view are neither budgeted nor inflated
 
-const flate = createRequire(import.meta.url)("jszip/lib/flate") as { uncompressWorker: () => unknown };
+const flate = createRequire(import.meta.url)("jszip/lib/flate") as {
+  uncompressWorker: () => unknown;
+};
 
 /** Counts every byte any JSZip DEFLATE stream produces while `run` is pending. */
 async function countInflated<T>(run: () => Promise<T>): Promise<{ result: T; inflated: number }> {
@@ -146,15 +158,23 @@ const CAP = 1024 * 1024;
 const TINY = 13;
 
 const shadowed: [string, ZipEntry[]][] = [
-  ["a duplicate name (earlier record shadowed)", [zeros("word/document.xml", BOMB), zeros("word/document.xml", TINY)]],
-  ["a normalised path collision", [zeros("x/../word/document.xml", BOMB), zeros("word/document.xml", TINY)]],
+  [
+    "a duplicate name (earlier record shadowed)",
+    [zeros("word/document.xml", BOMB), zeros("word/document.xml", TINY)],
+  ],
+  [
+    "a normalised path collision",
+    [zeros("x/../word/document.xml", BOMB), zeros("word/document.xml", TINY)],
+  ],
   ["a directory record with a payload", [zeros("hidden/", BOMB), zeros("word/document.xml", TINY)]],
 ];
 
 for (const [label, entries] of shadowed) {
   test(`${label} is never inflated by the check or the renderer`, async () => {
     const bytes = writeZip(entries);
-    const checked = await countInflated(() => recordLoads(() => checkDocxPackage(bytes, alive, CAP)));
+    const checked = await countInflated(() =>
+      recordLoads(() => checkDocxPackage(bytes, alive, CAP)),
+    );
     assert.equal(checked.inflated, TINY);
     assert.equal(checked.result.result, "ok");
     assert.deepEqual(checked.result.crcLoads, [false]);

@@ -109,7 +109,9 @@ test("row, cell and inflated-byte caps reject the workbook as too large", async 
   assert.equal(atCaps.status, "ok");
   // Stored (1:1) parts: only the total inflated-byte cap can trip.
   const bytes = await openXlsx(
-    await buildFixtureXlsx([{ name: "Big", cells: [{ ref: "A1", inline: "x".repeat(64 * 1024) }] }]),
+    await buildFixtureXlsx([
+      { name: "Big", cells: [{ ref: "A1", inline: "x".repeat(64 * 1024) }] },
+    ]),
     { ...XLSX_LIMITS, maxExpandedBytes: 32 * 1024 },
   );
   assert.equal(bytes.status, "tooLarge");
@@ -125,7 +127,10 @@ test("a highly compressed part is refused before it inflates in full", async () 
 });
 
 test("non-XLSX bytes are invalid, not a crash", async () => {
-  assert.equal((await openXlsx(new TextEncoder().encode("plain text, not a zip"))).status, "invalid");
+  assert.equal(
+    (await openXlsx(new TextEncoder().encode("plain text, not a zip"))).status,
+    "invalid",
+  );
   assert.equal((await openXlsx(new Uint8Array(0))).status, "invalid");
   const truncated = (await buildFixtureXlsx([gridSheet("T", 2, 2)])).subarray(0, 200);
   assert.equal((await openXlsx(truncated)).status, "invalid");
@@ -134,7 +139,10 @@ test("non-XLSX bytes are invalid, not a crash", async () => {
 // --- Malformed directories: the library's unzipSync fallback ----------------
 
 /** The library alone, with the options `openXlsx` passes it. */
-async function libraryLoad(bytes: Uint8Array, limits: XlsxLimits): Promise<"ok" | "tooLarge" | "invalid"> {
+async function libraryLoad(
+  bytes: Uint8Array,
+  limits: XlsxLimits,
+): Promise<"ok" | "tooLarge" | "invalid"> {
   try {
     await loadWorkbook(fromArrayBuffer(bytes), {
       decompressionLimits: { maxTotalUncompressedBytes: limits.maxExpandedBytes },
@@ -204,7 +212,9 @@ test("declared sizes over the cap are refused before the fallback allocates or i
 
 test("compressed sizes are charged too, so a small declared size cannot hide a large stream", async () => {
   const data = randomBytes(12 * 1024);
-  const zip = writeZip([{ name: "xl/workbook.xml", deflated: deflateRawSync(data), crc: 0, size: 1 }]);
+  const zip = writeZip([
+    { name: "xl/workbook.xml", deflated: deflateRawSync(data), crc: 0, size: 1 },
+  ]);
   const limits = { ...XLSX_LIMITS, maxExpandedBytes: 8 * 1024 };
   assert.equal(await libraryLoad(brokenDirectory(zip), limits), "invalid");
   assert.equal(checkXlsxPackage(brokenDirectory(zip), limits), "tooLarge");
@@ -213,7 +223,10 @@ test("compressed sizes are charged too, so a small declared size cannot hide a l
 
 test("negative control: the fallback's entry loop runs a ZIP64 count the strict reader ignored", async () => {
   // 20,001 loop iterations end in a missing-part error, not a cap.
-  assert.equal(await libraryLoad(zip64Count(XLSX_LIMITS.maxEntries * 2 + 1), XLSX_LIMITS), "invalid");
+  assert.equal(
+    await libraryLoad(zip64Count(XLSX_LIMITS.maxEntries * 2 + 1), XLSX_LIMITS),
+    "invalid",
+  );
 });
 
 test("the part-count cap stops that loop before the library runs it", async () => {

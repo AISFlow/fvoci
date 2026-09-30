@@ -24,7 +24,10 @@ test("shipped pdf.js data covers every CMap, standard font, decoder and license,
   assert.deepEqual(shipped("cmaps").sort(), cmaps.sort());
   assert.ok(shipped("cmaps").includes("UniKS-UCS2-H.bcmap"));
   assert.ok(shipped("cmaps").includes("Adobe-Korea1-UCS2.bcmap"));
-  assert.deepEqual(shipped("standard_fonts").sort(), fs.readdirSync(path.join(pkgDir, "standard_fonts")).sort());
+  assert.deepEqual(
+    shipped("standard_fonts").sort(),
+    fs.readdirSync(path.join(pkgDir, "standard_fonts")).sort(),
+  );
   const wasm = shipped("wasm");
   for (const name of [
     "jbig2.wasm",

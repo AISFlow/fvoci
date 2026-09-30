@@ -34,7 +34,11 @@ export const ORIGINAL_FETCH_CREDENTIALS: RequestCredentials = "same-origin";
  * Downloads a viewer's file with the session cookie, never buffering more
  * than `max` bytes. Network errors and aborts reject.
  */
-export async function downloadCapped(url: string, max: number, signal: AbortSignal): Promise<ViewerBytes> {
+export async function downloadCapped(
+  url: string,
+  max: number,
+  signal: AbortSignal,
+): Promise<ViewerBytes> {
   const response = await fetch(url, { credentials: ORIGINAL_FETCH_CREDENTIALS, signal });
   if (!response.ok) {
     await response.body?.cancel();

@@ -6,14 +6,23 @@ import test from "node:test";
 import { HwpDocument, initSync } from "@rhwp/core";
 import { hwpExportFormat } from "./hwp-edit.ts";
 import { decodePageText, HWP_MAX_BYTES } from "./hwp-page.ts";
-import { createHwpSession, type HwpRequest, type HwpResponse, type RhwpApi, type RhwpDocument } from "./hwp-worker-core.ts";
+import {
+  createHwpSession,
+  type HwpRequest,
+  type HwpResponse,
+  type RhwpApi,
+  type RhwpDocument,
+} from "./hwp-worker-core.ts";
 import { buildFixtureHwpx, FIXTURE_PAGES } from "./hwp-test-fixture.ts";
 
 const require = createRequire(import.meta.url);
-const wasm = fs.readFileSync(path.join(path.dirname(require.resolve("@rhwp/core")), "rhwp_bg.wasm"));
+const wasm = fs.readFileSync(
+  path.join(path.dirname(require.resolve("@rhwp/core")), "rhwp_bg.wasm"),
+);
 const module = new WebAssembly.Module(wasm);
 const repoRoot = path.resolve(import.meta.dirname, "../../../../..");
-const fixture = (name: string) => new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
+const fixture = (name: string) =>
+  new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
 
 const realApi: RhwpApi = {
   init: async (m) => void initSync({ module: m }),
@@ -73,11 +82,20 @@ test("HWPX: replace all on one page, export as HWPX, reopen: only that page chan
   const bytes = await exported(session, "hwpx");
   assert.deepEqual([...bytes.subarray(0, 4)], [0x50, 0x4b, 0x03, 0x04]);
   const pages = reopen(bytes);
-  assert.deepEqual(pages, [pagesText[0], pagesText[1]!.replaceAll("하늘과", "구름과"), pagesText[2]]);
+  assert.deepEqual(pages, [
+    pagesText[0],
+    pagesText[1]!.replaceAll("하늘과", "구름과"),
+    pagesText[2],
+  ]);
   assert.equal(occurrences(pages[1]!, "구름과"), hits);
   // The copy is itself a document the viewer opens.
   const again = createHwpSession(realApi);
-  assert.deepEqual(await call(again, { op: "open", bytes, module }), { id: nextId, ok: true, op: "open", pageCount: 3 });
+  assert.deepEqual(await call(again, { op: "open", bytes, module }), {
+    id: nextId,
+    ok: true,
+    op: "open",
+    pageCount: 3,
+  });
 });
 
 test("HWP: replace one and replace all, export as HWP 5.0, reopen", async () => {
@@ -114,7 +132,12 @@ test("revert re-parses the original and drops every edit", async () => {
   const session = await openSession(buildFixtureHwpx(fixture("sample.hwpx"), FIXTURE_PAGES));
   assert.equal(await replace(session, "첫째", "처음", true), "changed");
   assert.equal(await replace(session, "셋째", "끝", false), "changed");
-  assert.deepEqual(await call(session, { op: "revert" }), { id: nextId, ok: true, op: "revert", pageCount: 3 });
+  assert.deepEqual(await call(session, { op: "revert" }), {
+    id: nextId,
+    ok: true,
+    op: "revert",
+    pageCount: 3,
+  });
   assert.deepEqual(reopen(await exported(session, "hwpx")), pagesText);
   // Editing goes on from the original.
   assert.equal(await replace(session, "둘째", "두번째", false), "changed");
@@ -122,7 +145,10 @@ test("revert re-parses the original and drops every edit", async () => {
 });
 
 /** A stand-in document whose edit and export answers a test controls. */
-function stubApi(doc: Partial<RhwpDocument>, opens: { count: number; fail?: number } = { count: 0 }): RhwpApi {
+function stubApi(
+  doc: Partial<RhwpDocument>,
+  opens: { count: number; fail?: number } = { count: 0 },
+): RhwpApi {
   return {
     init: async () => undefined,
     open: () => {
@@ -182,7 +208,11 @@ test("a replace that traps drops the half-edited document: nothing renders, expo
     { op: "revert" },
     { op: "replace", find: "a", replacement: "b", all: false },
   ]) {
-    assert.deepEqual(await call(session, body), { id: nextId, ok: false, error: "failed" }, body.op);
+    assert.deepEqual(
+      await call(session, body),
+      { id: nextId, ok: false, error: "failed" },
+      body.op,
+    );
   }
   assert.deepEqual(exports, []);
 });
@@ -196,12 +226,33 @@ test("an export that throws, is empty, or exceeds the viewer's budget is refused
       },
     }),
   );
-  assert.deepEqual(await call(throwing, { op: "export", format: "hwp" }), { id: nextId, ok: false, error: "failed" });
-  const empty = await openSession(new Uint8Array([9]), stubApi({ exportHwpx: () => new Uint8Array(0) }));
-  assert.deepEqual(await call(empty, { op: "export", format: "hwpx" }), { id: nextId, ok: false, error: "failed" });
-  const huge = await openSession(new Uint8Array([9]), stubApi({ exportHwpx: () => new Uint8Array(HWP_MAX_BYTES + 1) }));
-  assert.deepEqual(await call(huge, { op: "export", format: "hwpx" }), { id: nextId, ok: false, error: "tooLarge" });
-  const exact = await openSession(new Uint8Array([9]), stubApi({ exportHwp: () => new Uint8Array(HWP_MAX_BYTES) }));
+  assert.deepEqual(await call(throwing, { op: "export", format: "hwp" }), {
+    id: nextId,
+    ok: false,
+    error: "failed",
+  });
+  const empty = await openSession(
+    new Uint8Array([9]),
+    stubApi({ exportHwpx: () => new Uint8Array(0) }),
+  );
+  assert.deepEqual(await call(empty, { op: "export", format: "hwpx" }), {
+    id: nextId,
+    ok: false,
+    error: "failed",
+  });
+  const huge = await openSession(
+    new Uint8Array([9]),
+    stubApi({ exportHwpx: () => new Uint8Array(HWP_MAX_BYTES + 1) }),
+  );
+  assert.deepEqual(await call(huge, { op: "export", format: "hwpx" }), {
+    id: nextId,
+    ok: false,
+    error: "tooLarge",
+  });
+  const exact = await openSession(
+    new Uint8Array([9]),
+    stubApi({ exportHwp: () => new Uint8Array(HWP_MAX_BYTES) }),
+  );
   const ok = await call(exact, { op: "export", format: "hwp" });
   assert.ok(ok.ok && ok.op === "export" && ok.bytes.byteLength === HWP_MAX_BYTES);
 });
@@ -209,13 +260,24 @@ test("an export that throws, is empty, or exceeds the viewer's budget is refused
 test("a revert whose re-parse fails keeps the edited document", async () => {
   const opens = { count: 0, fail: 2 };
   let freed = 0;
-  const session = await openSession(new Uint8Array([9]), stubApi({ free: () => void (freed += 1) }, opens));
-  assert.deepEqual(await call(session, { op: "revert" }), { id: nextId, ok: false, error: "failed" });
+  const session = await openSession(
+    new Uint8Array([9]),
+    stubApi({ free: () => void (freed += 1) }, opens),
+  );
+  assert.deepEqual(await call(session, { op: "revert" }), {
+    id: nextId,
+    ok: false,
+    error: "failed",
+  });
   assert.equal(freed, 0);
   assert.equal(await replace(session, "a", "b", true), "changed");
   // Before a document is open nothing is edited or exported.
   const empty = createHwpSession(realApi);
-  for (const body of [{ op: "revert" }, { op: "export", format: "hwp" }, { op: "replace", find: "a", replacement: "b", all: true }]) {
+  for (const body of [
+    { op: "revert" },
+    { op: "export", format: "hwp" },
+    { op: "replace", find: "a", replacement: "b", all: true },
+  ]) {
     assert.deepEqual(await call(empty, body), { id: nextId, ok: false, error: "failed" });
   }
 });

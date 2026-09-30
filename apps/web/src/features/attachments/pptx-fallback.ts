@@ -47,7 +47,8 @@ class Unexpected extends Error {}
 function number(tag: SaxesTagNS, name: string): number {
   const value = tag.attributes[name]?.value ?? "";
   const parsed = Number(value);
-  if (!(NUMBER.test(value) && Number.isFinite(parsed))) throw new Unexpected(`${name}=${value.slice(0, 32)}`);
+  if (!(NUMBER.test(value) && Number.isFinite(parsed)))
+    throw new Unexpected(`${name}=${value.slice(0, 32)}`);
   return parsed;
 }
 
@@ -90,7 +91,12 @@ export function boundFallbackLabels(svg: string): BoundedLabels {
       }
     }
     const kind = tag.attributes[MARKER];
-    const labelled = svgTag && tag.local === "g" && kind !== undefined && kind.uri === "" && LABELLED.has(kind.value);
+    const labelled =
+      svgTag &&
+      tag.local === "g" &&
+      kind !== undefined &&
+      kind.uri === "" &&
+      LABELLED.has(kind.value);
     stack.push({
       ...(labelled ? { fallback: { box: null, label: "pending" as const } } : {}),
       ...(label ? { label: true as const } : {}),
@@ -98,7 +104,8 @@ export function boundFallbackLabels(svg: string): BoundedLabels {
   });
   parser.on("closetag", () => {
     const frame = stack.pop()!;
-    if (frame.fallback && frame.fallback.label !== "done") throw new Unexpected("fallback without a label");
+    if (frame.fallback && frame.fallback.label !== "done")
+      throw new Unexpected("fallback without a label");
     if (frame.label) {
       stack[stack.length - 1]!.fallback!.label = "done";
       inserts.push({ at: parser.position, text: "</svg>" });

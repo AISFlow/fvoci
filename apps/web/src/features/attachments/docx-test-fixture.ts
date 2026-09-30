@@ -110,7 +110,13 @@ function zlibStored(data: Uint8Array): Uint8Array {
   for (let at = 0; at < data.length || at === 0; at += 0xffff) {
     const block = data.subarray(at, Math.min(data.length, at + 0xffff));
     const last = at + 0xffff >= data.length;
-    out.push(last ? 1 : 0, block.length & 0xff, block.length >> 8, ~block.length & 0xff, (~block.length >> 8) & 0xff);
+    out.push(
+      last ? 1 : 0,
+      block.length & 0xff,
+      block.length >> 8,
+      ~block.length & 0xff,
+      (~block.length >> 8) & 0xff,
+    );
     out.push(...block);
     if (data.length === 0) break;
   }
@@ -134,7 +140,11 @@ function pngChunk(type: string, data: Uint8Array): Uint8Array {
 }
 
 /** Solid RGB PNG. */
-export function solidPng(width: number, height: number, [r, g, b]: [number, number, number]): Uint8Array {
+export function solidPng(
+  width: number,
+  height: number,
+  [r, g, b]: [number, number, number],
+): Uint8Array {
   const rows: number[] = [];
   for (let y = 0; y < height; y += 1) {
     rows.push(0);
@@ -164,7 +174,11 @@ const A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture";
 
 function xmlText(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 const run = (text: string, props = "") =>
@@ -179,7 +193,8 @@ const picture = (id: number, blip: string, cx: number, cy: number) =>
 const cell = (text: string, fill?: string) =>
   `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/>${fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>` : ""}</w:tcPr><w:p>${run(text)}</w:p></w:tc>`;
 
-const border = (side: string) => `<w:${side} w:val="single" w:sz="8" w:space="0" w:color="000000"/>`;
+const border = (side: string) =>
+  `<w:${side} w:val="single" w:sz="8" w:space="0" w:color="000000"/>`;
 
 export type DocxFixtureText = {
   heading: string;

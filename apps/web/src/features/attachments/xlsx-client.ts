@@ -64,7 +64,10 @@ export function createXlsxWorker(): XlsxWorkerPort {
  * worker is also terminated when `signal` aborts, on `close`, and on any
  * worker error. One page request is answered at a time, in order.
  */
-export function openXlsxInWorker(bytes: Uint8Array, options: XlsxClientOptions = {}): Promise<RemoteXlsxOpenResult> {
+export function openXlsxInWorker(
+  bytes: Uint8Array,
+  options: XlsxClientOptions = {},
+): Promise<RemoteXlsxOpenResult> {
   const {
     signal,
     openTimeoutMs = XLSX_OPEN_TIMEOUT_MS,
@@ -74,8 +77,10 @@ export function openXlsxInWorker(bytes: Uint8Array, options: XlsxClientOptions =
   if (signal?.aborted) return Promise.resolve({ status: "invalid" });
   const worker = createWorker();
   let dead = false;
-  let pending: { resolve: (response: XlsxWorkerResponse) => void; reject: (error: XlsxWorkerError) => void } | null =
-    null;
+  let pending: {
+    resolve: (response: XlsxWorkerResponse) => void;
+    reject: (error: XlsxWorkerError) => void;
+  } | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let queue: Promise<unknown> = Promise.resolve();
   let nextId = 0;
@@ -116,18 +121,24 @@ export function openXlsxInWorker(bytes: Uint8Array, options: XlsxClientOptions =
     });
 
   // Transfer, not copy, when `bytes` is its whole buffer.
-  const owned = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+  const owned =
+    bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
   return request({ type: "open", bytes: owned }, openTimeoutMs, [owned.buffer as ArrayBuffer]).then(
     (response) => {
       if (response.type !== "opened" || response.status !== "ok") {
         kill("failed");
-        return { status: response.type === "opened" && response.status === "tooLarge" ? "tooLarge" : "invalid" };
+        return {
+          status:
+            response.type === "opened" && response.status === "tooLarge" ? "tooLarge" : "invalid",
+        };
       }
       const book: RemoteXlsxBook = {
         sheets: response.sheets,
         page(index, rowPage, colPage) {
           const id = ++nextId;
-          const result = queue.then(() => request({ type: "page", id, index, rowPage, colPage }, pageTimeoutMs));
+          const result = queue.then(() =>
+            request({ type: "page", id, index, rowPage, colPage }, pageTimeoutMs),
+          );
           queue = result.catch(() => undefined);
           return result.then((reply) => {
             if (reply.type !== "page" || reply.id !== id) {

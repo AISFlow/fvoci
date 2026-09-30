@@ -3,7 +3,12 @@ import test from "node:test";
 import { openPptx, renderSlide, renderSlideImage, type PptxDeck } from "./pptx-deck.ts";
 import { buildChartPptx, HOSTILE_PPTX_MARKUP } from "./pptx-hostile-fixture.ts";
 import { innerSlideSvg, slideImageSvg, toBase64 } from "./pptx-svg.ts";
-import { buildFixturePptx, DEFAULT_PPTX_TEXT, FIXTURE_PPTX_SLIDE_H, FIXTURE_PPTX_SLIDE_W } from "./pptx-test-fixture.ts";
+import {
+  buildFixturePptx,
+  DEFAULT_PPTX_TEXT,
+  FIXTURE_PPTX_SLIDE_H,
+  FIXTURE_PPTX_SLIDE_W,
+} from "./pptx-test-fixture.ts";
 
 async function deckOf(bytes: Uint8Array): Promise<PptxDeck> {
   const opened = await openPptx(bytes, () => true);
@@ -37,7 +42,11 @@ test("the served slide is exactly the fixed template around the renderer's SVG, 
   }
   // Korean text, links (inert as an image), foreignObject text and the embedded picture are all still inside.
   const inner = innerSlideSvg(imageSvg(deck, 0))!;
-  for (const part of [DEFAULT_PPTX_TEXT.title, DEFAULT_PPTX_TEXT.link, ...DEFAULT_PPTX_TEXT.table]) {
+  for (const part of [
+    DEFAULT_PPTX_TEXT.title,
+    DEFAULT_PPTX_TEXT.link,
+    ...DEFAULT_PPTX_TEXT.table,
+  ]) {
     assert.ok(inner.includes(part), part);
   }
   assert.match(inner, /<foreignObject/);
@@ -53,7 +62,10 @@ test("review B1 counterexamples: chart number-format markup reaches the renderer
     // Negative control: the renderer really does emit the deck's markup unescaped.
     assert.ok(raw.includes(markup), name);
     const outer = imageSvg(deck, 0);
-    const match = /^<svg [^<>]*><image [^<>]*href="data:image\/svg\+xml;base64,([A-Za-z0-9+/=]*)"\/><\/svg>$/.exec(outer);
+    const match =
+      /^<svg [^<>]*><image [^<>]*href="data:image\/svg\+xml;base64,([A-Za-z0-9+/=]*)"\/><\/svg>$/.exec(
+        outer,
+      );
     assert.ok(match, name);
     assert.equal(outer, TEMPLATE("1280", "720", match[1]!), name);
     assert.equal(innerSlideSvg(outer), raw, name);
@@ -80,7 +92,10 @@ test("UTF-8: multi-byte text round-trips, a lone surrogate becomes U+FFFD, the c
   assert.equal(innerSlideSvg((ok as { svg: string }).svg), inner);
 
   const lone = slideImageSvg('<svg viewBox="0 0 1 1"><text>a\uD800b</text></svg>', 1, 1, 1024);
-  assert.equal(innerSlideSvg((lone as { svg: string }).svg), '<svg viewBox="0 0 1 1"><text>a�b</text></svg>');
+  assert.equal(
+    innerSlideSvg((lone as { svg: string }).svg),
+    '<svg viewBox="0 0 1 1"><text>a�b</text></svg>',
+  );
 
   const bytes = new TextEncoder().encode(inner).byteLength;
   assert.ok(bytes > inner.length);
@@ -91,7 +106,13 @@ test("UTF-8: multi-byte text round-trips, a lone surrogate becomes U+FFFD, the c
 });
 
 test("only a renderer <svg> root and sane dimensions are wrapped", () => {
-  for (const inner of ["", "<html></html>", ' <svg viewBox="0 0 1 1"/>', "<svgx/>", '<?xml version="1.0"?><svg/>']) {
+  for (const inner of [
+    "",
+    "<html></html>",
+    ' <svg viewBox="0 0 1 1"/>',
+    "<svgx/>",
+    '<?xml version="1.0"?><svg/>',
+  ]) {
     assert.deepEqual(slideImageSvg(inner, 1, 1, 1024), { status: "failed" }, inner);
   }
   for (const [w, h] of [
@@ -107,9 +128,17 @@ test("only a renderer <svg> root and sane dimensions are wrapped", () => {
   }
   // The smallest dimension the template can write.
   const smallest = slideImageSvg("<svg></svg>", 0.005, 1e6, 1024);
-  assert.ok((smallest as { svg: string }).svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="0.01" height="1000000" '));
+  assert.ok(
+    (smallest as { svg: string }).svg.startsWith(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="0.01" height="1000000" ',
+    ),
+  );
   const fractional = slideImageSvg("<svg></svg>", 960.004, 540.126, 1024);
-  assert.ok((fractional as { svg: string }).svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540.13" '));
+  assert.ok(
+    (fractional as { svg: string }).svg.startsWith(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540.13" ',
+    ),
+  );
 });
 
 test("innerSlideSvg accepts the exact template only", () => {

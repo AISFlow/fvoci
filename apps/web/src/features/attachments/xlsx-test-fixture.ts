@@ -19,8 +19,7 @@ export type FixtureCell =
   | { ref: string; formula: string; cached: number | string };
 
 export type FixtureSheet =
-  | { name: string; cells: FixtureCell[]; merges?: string[] }
-  | { name: string; chart: true };
+  { name: string; cells: FixtureCell[]; merges?: string[] } | { name: string; chart: true };
 
 export type FixtureOptions = {
   /** Adds `xl/vbaProject.bin` (opaque bytes) with its workbook relationship. */
@@ -115,12 +114,18 @@ function writeZip(entries: ZipEntry[]): Uint8Array {
 }
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([data as BlobPart]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+  const stream = new Blob([data as BlobPart])
+    .stream()
+    .pipeThrough(new CompressionStream("deflate-raw"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 function escapeXml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 const NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -133,7 +138,11 @@ function rowOf(ref: string): number {
   return Number(/\d+$/.exec(ref)![0]);
 }
 
-function worksheetXml(cells: FixtureCell[], merges: string[], sharedIndex: Map<string, number>): string {
+function worksheetXml(
+  cells: FixtureCell[],
+  merges: string[],
+  sharedIndex: Map<string, number>,
+): string {
   const rows = new Map<number, string[]>();
   for (const cell of cells) {
     let xml: string;
@@ -162,7 +171,10 @@ function worksheetXml(cells: FixtureCell[], merges: string[], sharedIndex: Map<s
 }
 
 /** Builds the workbook package; parts are stored unless `deflate` is set. */
-export async function buildFixtureXlsx(sheets: FixtureSheet[], options: FixtureOptions = {}): Promise<Uint8Array> {
+export async function buildFixtureXlsx(
+  sheets: FixtureSheet[],
+  options: FixtureOptions = {},
+): Promise<Uint8Array> {
   const shared: string[] = [];
   const sharedIndex = new Map<string, number>();
   for (const sheet of sheets) {
@@ -190,13 +202,20 @@ export async function buildFixtureXlsx(sheets: FixtureSheet[], options: FixtureO
       overrides.push(
         `<Override PartName="/xl/chartsheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml"/>`,
       );
-      wbRels.push(`<Relationship Id="${rId}" Type="${REL}/chartsheet" Target="chartsheets/sheet${n}.xml"/>`);
+      wbRels.push(
+        `<Relationship Id="${rId}" Type="${REL}/chartsheet" Target="chartsheets/sheet${n}.xml"/>`,
+      );
     } else {
-      parts.push({ name: `xl/worksheets/sheet${n}.xml`, xml: worksheetXml(sheet.cells, sheet.merges ?? [], sharedIndex) });
+      parts.push({
+        name: `xl/worksheets/sheet${n}.xml`,
+        xml: worksheetXml(sheet.cells, sheet.merges ?? [], sharedIndex),
+      });
       overrides.push(
         `<Override PartName="/xl/worksheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`,
       );
-      wbRels.push(`<Relationship Id="${rId}" Type="${REL}/worksheet" Target="worksheets/sheet${n}.xml"/>`);
+      wbRels.push(
+        `<Relationship Id="${rId}" Type="${REL}/worksheet" Target="worksheets/sheet${n}.xml"/>`,
+      );
     }
     sheetEntries.push(`<sheet name="${escapeXml(sheet.name)}" sheetId="${n}" r:id="${rId}"/>`);
   });
@@ -213,7 +232,9 @@ export async function buildFixtureXlsx(sheets: FixtureSheet[], options: FixtureO
     overrides.push(
       '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>',
     );
-    wbRels.push(`<Relationship Id="rId${extraRel}" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/>`);
+    wbRels.push(
+      `<Relationship Id="rId${extraRel}" Type="${REL}/sharedStrings" Target="sharedStrings.xml"/>`,
+    );
   }
   let externalReferences = "";
   if (options.externalLink) {
@@ -229,15 +250,24 @@ export async function buildFixtureXlsx(sheets: FixtureSheet[], options: FixtureO
     overrides.push(
       '<Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/>',
     );
-    wbRels.push(`<Relationship Id="rId${extraRel}" Type="${REL}/externalLink" Target="externalLinks/externalLink1.xml"/>`);
+    wbRels.push(
+      `<Relationship Id="rId${extraRel}" Type="${REL}/externalLink" Target="externalLinks/externalLink1.xml"/>`,
+    );
     externalReferences = `<externalReferences><externalReference r:id="rId${extraRel}"/></externalReferences>`;
   }
   if (options.vba) {
     extraRel += 1;
     // Opaque bytes: a real VBA project is an OLE compound file; nothing may run it.
-    parts.push({ name: "xl/vbaProject.bin", xml: new TextEncoder().encode("FVOCI-FIXTURE-VBA-NOT-EXECUTABLE") });
-    overrides.push('<Override PartName="/xl/vbaProject.bin" ContentType="application/vnd.ms-office.vbaProject"/>');
-    wbRels.push(`<Relationship Id="rId${extraRel}" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>`);
+    parts.push({
+      name: "xl/vbaProject.bin",
+      xml: new TextEncoder().encode("FVOCI-FIXTURE-VBA-NOT-EXECUTABLE"),
+    });
+    overrides.push(
+      '<Override PartName="/xl/vbaProject.bin" ContentType="application/vnd.ms-office.vbaProject"/>',
+    );
+    wbRels.push(
+      `<Relationship Id="rId${extraRel}" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/>`,
+    );
   }
 
   const all: { name: string; xml: string | Uint8Array }[] = [

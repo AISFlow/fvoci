@@ -47,7 +47,8 @@ function dimension(value: number): string | null {
   return rounded > 0 ? String(rounded) : null;
 }
 
-export type SlideImageSvg = { status: "ok"; svg: string } | { status: "tooLarge" } | { status: "failed" };
+export type SlideImageSvg =
+  { status: "ok"; svg: string } | { status: "tooLarge" } | { status: "failed" };
 
 /**
  * Wraps renderer SVG `inner` for a `width` × `height` px slide. `inner` is
@@ -55,7 +56,12 @@ export type SlideImageSvg = { status: "ok"; svg: string } | { status: "tooLarge"
  * U+FFFD) and must start with the renderer's `<svg` root; more than
  * `maxBytes` of it is `tooLarge`.
  */
-export function slideImageSvg(inner: string, width: number, height: number, maxBytes: number): SlideImageSvg {
+export function slideImageSvg(
+  inner: string,
+  width: number,
+  height: number,
+  maxBytes: number,
+): SlideImageSvg {
   const w = dimension(width);
   const h = dimension(height);
   if (w === null || h === null || !/^<svg[\s>]/.test(inner)) return { status: "failed" };
@@ -71,7 +77,8 @@ export function slideImageSvg(inner: string, width: number, height: number, maxB
   };
 }
 
-const OUTER = /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="([0-9.]+)" height="([0-9.]+)" viewBox="0 0 \1 \2"><image width="\1" height="\2" href="data:image\/svg\+xml;base64,([A-Za-z0-9+/]*={0,2})"\/><\/svg>$/;
+const OUTER =
+  /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="([0-9.]+)" height="([0-9.]+)" viewBox="0 0 \1 \2"><image width="\1" height="\2" href="data:image\/svg\+xml;base64,([A-Za-z0-9+/]*={0,2})"\/><\/svg>$/;
 
 /**
  * The inner slide SVG of a served blob, or `null` unless `outer` is exactly

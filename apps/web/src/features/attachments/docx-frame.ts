@@ -22,7 +22,15 @@ export const DOCX_FRAME_BASE_CSS =
 const DENIED_ELEMENTS =
   "script,iframe,frame,frameset,object,embed,applet,link,meta,base,form,input,button,textarea,select,template,portal,noscript";
 
-const URL_ATTRIBUTES = new Set(["src", "href", "xlink:href", "srcset", "poster", "background", "data"]);
+const URL_ATTRIBUTES = new Set([
+  "src",
+  "href",
+  "xlink:href",
+  "srcset",
+  "poster",
+  "background",
+  "data",
+]);
 
 const SAFE_DATA_IMAGE = /^data:image\/(png|jpeg|gif|webp|bmp|x-emf|x-wmf|tiff|svg\+xml)[;,]/i;
 const SAFE_DATA_FONT = /^data:(font\/|application\/(font|x-font|octet-stream|vnd\.ms-))/i;
@@ -96,9 +104,17 @@ export function sanitizeRenderedDocx(root: Element | DocumentFragment): void {
   for (const el of root.querySelectorAll("*")) {
     for (const attr of [...el.attributes]) {
       const name = attr.name.toLowerCase();
-      if (name.startsWith("on") || name === "srcdoc" || name === "formaction" || name === "action") {
+      if (
+        name.startsWith("on") ||
+        name === "srcdoc" ||
+        name === "formaction" ||
+        name === "action"
+      ) {
         el.removeAttributeNode(attr);
-      } else if (el.localName === "a" && (name === "href" || name === "xlink:href" || name === "target")) {
+      } else if (
+        el.localName === "a" &&
+        (name === "href" || name === "xlink:href" || name === "target")
+      ) {
         el.removeAttributeNode(attr);
       } else if (URL_ATTRIBUTES.has(name) && !isSafeDataImageUrl(attr.value)) {
         el.removeAttributeNode(attr);

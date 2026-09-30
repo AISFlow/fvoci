@@ -38,9 +38,7 @@ export function renderScale(
   return Math.sqrt(maxPixels / (width * height));
 }
 
-export type CappedBytes =
-  | { status: "bytes"; bytes: Uint8Array }
-  | { status: "tooLarge" };
+export type CappedBytes = { status: "bytes"; bytes: Uint8Array } | { status: "tooLarge" };
 
 /**
  * Reads a response body without buffering more than `max` bytes. A declared

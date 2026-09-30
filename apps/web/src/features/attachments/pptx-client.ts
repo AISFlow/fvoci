@@ -1,7 +1,8 @@
 import { PPTX_OPEN_TIMEOUT_MS, PPTX_RENDER_TIMEOUT_MS } from "./pptx-limits.ts";
 import type { SlideImageSvg } from "./pptx-svg.ts";
 
-export type PptxWorkerRequest = { type: "open"; bytes: Uint8Array } | { type: "render"; id: number; index: number };
+export type PptxWorkerRequest =
+  { type: "open"; bytes: Uint8Array } | { type: "render"; id: number; index: number };
 
 export type PptxWorkerResponse =
   | { type: "opened"; status: "ok"; width: number; height: number; slideCount: number }
@@ -79,7 +80,10 @@ export function createPptxWorker(): PptxWorkerPort {
  * time, in order; once the worker is gone, every later request fails with
  * `closed`.
  */
-export function openPptxInWorker(bytes: Uint8Array, options: PptxClientOptions = {}): Promise<RemotePptxOpenResult> {
+export function openPptxInWorker(
+  bytes: Uint8Array,
+  options: PptxClientOptions = {},
+): Promise<RemotePptxOpenResult> {
   const {
     signal,
     openTimeoutMs = PPTX_OPEN_TIMEOUT_MS,
@@ -89,8 +93,10 @@ export function openPptxInWorker(bytes: Uint8Array, options: PptxClientOptions =
   if (signal?.aborted) return Promise.resolve({ status: "failed" });
   const worker = createWorker();
   let dead = false;
-  let pending: { resolve: (response: PptxWorkerResponse) => void; reject: (error: PptxWorkerError) => void } | null =
-    null;
+  let pending: {
+    resolve: (response: PptxWorkerResponse) => void;
+    reject: (error: PptxWorkerError) => void;
+  } | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let queue: Promise<unknown> = Promise.resolve();
   let nextId = 0;

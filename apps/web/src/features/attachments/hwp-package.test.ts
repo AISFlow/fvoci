@@ -10,7 +10,8 @@ import { readZip, writeZip } from "./hwp-test-fixture.ts";
 const require = createRequire(import.meta.url);
 const coreDir = path.dirname(require.resolve("@rhwp/core"));
 const repoRoot = path.resolve(import.meta.dirname, "../../../../..");
-const fixture = (name: string) => new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
+const fixture = (name: string) =>
+  new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures", name)));
 const MiB = 1024 * 1024;
 const alive = () => true;
 
@@ -26,7 +27,9 @@ function names(bytes: Uint8Array): string[] {
 test("the review's small Scripts bomb is rejected before rhwp runs", async () => {
   // Four unreferenced 32 MiB scripts: about 140 KB on disk, about 324 MiB of
   // wasm heap when rhwp 0.8.6 opens it directly (review B1 table).
-  const bomb = withExtra([0, 1, 2, 3].map((n) => ({ name: `Scripts/s${n}.js`, data: new Uint8Array(32 * MiB) })));
+  const bomb = withExtra(
+    [0, 1, 2, 3].map((n) => ({ name: `Scripts/s${n}.js`, data: new Uint8Array(32 * MiB) })),
+  );
   assert.ok(bomb.length < 256 * 1024);
   assert.equal(HWPX_MAX_EXPANDED_BYTES, 128 * MiB);
   assert.deepEqual(await prepareHwpBytes(bomb, alive), { status: "tooLarge" });
@@ -79,10 +82,16 @@ test("rhwp gets a re-written package holding only the measured parts", async () 
 
 test("the part count is capped and malformed or cancelled packages are invalid", async () => {
   const sample = fixture("sample.hwpx");
-  assert.deepEqual(await prepareHwpBytes(sample, alive, HWPX_MAX_EXPANDED_BYTES, names(sample).length - 1), {
-    status: "tooLarge",
-  });
-  assert.equal((await prepareHwpBytes(sample, alive, HWPX_MAX_EXPANDED_BYTES, names(sample).length)).status, "ok");
+  assert.deepEqual(
+    await prepareHwpBytes(sample, alive, HWPX_MAX_EXPANDED_BYTES, names(sample).length - 1),
+    {
+      status: "tooLarge",
+    },
+  );
+  assert.equal(
+    (await prepareHwpBytes(sample, alive, HWPX_MAX_EXPANDED_BYTES, names(sample).length)).status,
+    "ok",
+  );
   const truncated = sample.slice(0, sample.length - 30);
   assert.deepEqual(await prepareHwpBytes(truncated, alive), { status: "invalid" });
   assert.deepEqual(await prepareHwpBytes(sample, () => false), { status: "invalid" });

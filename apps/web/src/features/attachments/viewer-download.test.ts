@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { downloadCapped, startViewerPrefetch, VIEWER_MAX_BYTES, type ViewerBytes } from "./viewer-download.ts";
+import {
+  downloadCapped,
+  startViewerPrefetch,
+  VIEWER_MAX_BYTES,
+  type ViewerBytes,
+} from "./viewer-download.ts";
 import { DOCX_MAX_BYTES } from "./docx-limits.ts";
 import { HWP_MAX_BYTES } from "./hwp-page.ts";
 import { PDF_MAX_BYTES } from "./pdf-limits.ts";
@@ -34,7 +39,10 @@ test("downloadCapped sends the session cookie and caps the body", async () => {
     },
     async () => {
       const signal = new AbortController().signal;
-      assert.deepEqual(await downloadCapped("/f", 10, signal), { status: "bytes", bytes: new Uint8Array(10) });
+      assert.deepEqual(await downloadCapped("/f", 10, signal), {
+        status: "bytes",
+        bytes: new Uint8Array(10),
+      });
       assert.deepEqual(await downloadCapped("/f", 9, signal), { status: "tooLarge" });
       assert.equal(seen[0]?.credentials, "same-origin");
       assert.equal(seen[0]?.signal, signal);
@@ -52,7 +60,9 @@ test("downloadCapped reports a non-2xx response as failed and cancels its body",
   await withFetch(
     async () => new Response(body, { status: 403 }),
     async () => {
-      assert.deepEqual(await downloadCapped("/f", 10, new AbortController().signal), { status: "failed" });
+      assert.deepEqual(await downloadCapped("/f", 10, new AbortController().signal), {
+        status: "failed",
+      });
       assert.equal(cancelled, true);
     },
   );
@@ -61,10 +71,15 @@ test("downloadCapped reports a non-2xx response as failed and cancels its body",
 test("the prefetch starts at once and is handed to exactly one taker", async () => {
   const calls: { url: string; max: number; signal: AbortSignal }[] = [];
   const result: ViewerBytes = { status: "bytes", bytes: new Uint8Array([1]) };
-  const prefetch = startViewerPrefetch("/f", 7, new AbortController().signal, async (url, max, signal) => {
-    calls.push({ url, max, signal });
-    return result;
-  });
+  const prefetch = startViewerPrefetch(
+    "/f",
+    7,
+    new AbortController().signal,
+    async (url, max, signal) => {
+      calls.push({ url, max, signal });
+      return result;
+    },
+  );
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.url, "/f");
   assert.equal(calls[0]?.max, 7);
@@ -85,10 +100,15 @@ test("the parent's signal and the taker's signal both abort the download", async
   assert.equal((downloadSignal as AbortSignal | null)?.aborted, true);
 
   let second: AbortSignal | null = null;
-  const prefetch = startViewerPrefetch("/f", 1, new AbortController().signal, async (_u, _m, signal) => {
-    second = signal;
-    return { status: "tooLarge" };
-  });
+  const prefetch = startViewerPrefetch(
+    "/f",
+    1,
+    new AbortController().signal,
+    async (_u, _m, signal) => {
+      second = signal;
+      return { status: "tooLarge" };
+    },
+  );
   const taker = new AbortController();
   void prefetch.take(taker.signal);
   assert.equal((second as AbortSignal | null)?.aborted, false);
