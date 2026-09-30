@@ -36,11 +36,12 @@ async function save(deleted: boolean): Promise<void> {
     }));
     await props.onSaved();
   } catch (err) {
-    error.value = err instanceof ProblemError && err.status !== 409 && err.titleKnown ? err.title : t("collection.saveError");
     if (err instanceof ProblemError && err.status === 409) {
       // Refresh remounts this versioned row; keep the refusal visible in its parent.
       emit("conflict");
       await props.onSaved();
+    } else {
+      error.value = err instanceof ProblemError && err.titleKnown ? err.title : t("collection.saveError");
     }
   } finally {
     saving.value = false;
