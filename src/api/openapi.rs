@@ -231,6 +231,7 @@ impl Modify for CookieSecurityAddon {
         remove_task_dependency,
         create_document,
         list_tree,
+        list_wiki_discovery,
         get_document,
         patch_document,
         get_ancestors,
@@ -3195,13 +3196,35 @@ fn sort_project_document() {}
     path = "/api/v1/workspaces/{workspace_id}/tree",
     tag = "documents",
     security(("fvoci_session" = [])),
-    params(("workspace_id" = String, description = "Workspace id")),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("tag" = Option<String>, Query, description = "Optional document tag UUID; direct assignment only"),
+    ),
     responses(
         (status = 200, description = "Document tree", body = TreeResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
     )
 )]
 fn list_tree() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/wiki-discovery",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("tag" = Option<String>, Query, description = "Optional document tag UUID; direct assignment only"),
+    ),
+    responses(
+        (status = 200, description = "Authorized live wiki and project document discovery", body = TreeResponse),
+        (status = 400, description = "Invalid tag UUID", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_wiki_discovery() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

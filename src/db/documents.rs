@@ -6,11 +6,14 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{
-    lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+    begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
 };
-use crate::db::group_grants::{group_document_grant_roles_select_sql, group_members_join_sql};
+use crate::db::group_grants::{
+    group_document_grant_roles_select_sql, group_members_join_sql,
+    guest_wiki_document_ids_select_sql,
+};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
-use crate::db::projects::{lock_project, project_permission};
+use crate::db::projects::{lock_project, project_permission, visible_project_sql};
 use crate::db::workspace::{
     membership_role, membership_role_for_update, workspace_is_live, WorkspaceRole,
 };
@@ -758,6 +761,104 @@ pub async fn get_wiki_document(
         Some(row) => Ok(Ok(row_to_meta(row, false))),
         None => Ok(Err(DocumentDbError::NotFound)),
     }
+}
+
+/// Explicit cross-project wiki discovery, separate from the legacy wiki-only
+/// tree. Permission, live rows and direct tag assignments share one snapshot.
+pub async fn list_workspace_wiki_discovery(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    credential_id: Uuid,
+    tag: Option<Uuid>,
+) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
+    let mut tx = begin_read(pool).await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, credential_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    let Some(role) = membership_role(&mut tx, workspace_id, actor_user_id).await? else {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Forbidden));
+    };
+    let guest_wiki = guest_wiki_document_ids_select_sql(1, 3);
+    let visible_project = visible_project_sql("p", 2, 3);
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            Option<Uuid>,
+            Option<Uuid>,
+            String,
+            Option<String>,
+            String,
+            String,
+            i32,
+            String,
+        ),
+    >(&format!(
+        r#"
+        SELECT d.id, d.workspace_id, d.parent_id, d.project_id, d.title,
+               d.icon, d.path, d.sort_key, d.number, d.status
+        FROM fvoci.documents d
+        WHERE d.workspace_id = $1 AND d.deleted_at IS NULL
+          AND (
+            (d.project_id IS NULL AND ($2 = false OR d.id IN ({guest_wiki})))
+            OR EXISTS (
+                SELECT 1 FROM fvoci.projects p
+                WHERE p.workspace_id = d.workspace_id AND p.id = d.project_id
+                  AND p.deleted_at IS NULL AND {visible_project}
+            )
+          )
+          AND ($4::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM fvoci.document_tag_assignments a
+              WHERE a.workspace_id = d.workspace_id AND a.document_id = d.id
+                AND a.tag_id = $4
+          ))
+        ORDER BY d.sort_key COLLATE "C", d.id
+        "#
+    ))
+    .bind(workspace_id)
+    .bind(role == WorkspaceRole::Guest)
+    .bind(actor_user_id)
+    .bind(tag)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                workspace_id,
+                parent_id,
+                project_id,
+                title,
+                icon,
+                path,
+                sort_key,
+                number,
+                status,
+            )| TreeNode {
+                id,
+                workspace_id,
+                parent_id,
+                project_id,
+                title,
+                icon,
+                path,
+                sort_key,
+                number,
+                status,
+            },
+        )
+        .collect()))
 }
 
 pub async fn list_wiki_tree(
