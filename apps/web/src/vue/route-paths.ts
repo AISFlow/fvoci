@@ -1,9 +1,6 @@
 /**
  * The Vue app's route paths. src/app-boundary.ts must send exactly these
  * paths to the Vue app (src/app-boundary.test.ts checks both agree).
- * Coordinator-owned regex still needed for the attachment viewers:
- *   /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i
- *   /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i
  */
 export const VUE_ROUTE_PATHS = {
   projectGantt: "/w/:slug/:ref/gantt",

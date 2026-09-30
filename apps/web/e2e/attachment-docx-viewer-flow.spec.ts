@@ -1,3 +1,4 @@
+import { expectVueViewer } from "./viewer-app";
 import fs from "node:fs";
 import path from "node:path";
 import { crc32 as zlibCrc32, deflateRawSync } from "node:zlib";
@@ -199,6 +200,7 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
 
   // --- Layout of page 1 -------------------------------------------------------
   await page.goto(`/w/acme/a/${docxId}/view`);
+  await expectVueViewer(page);
   const viewer = page.locator('[data-docx-viewer][data-docx-state="ready"]');
   await expect(viewer).toBeVisible({ timeout: 20_000 });
   await expect(page.locator("[data-chunk-supplement]")).toHaveCount(0);

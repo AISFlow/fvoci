@@ -1,3 +1,4 @@
+import { expectVueViewer } from "./viewer-app";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -158,6 +159,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   const searchLink = page.getByRole("navigation", { name: "워크스페이스" }).getByRole("link", { name: "검색" });
 
   await page.goto(viewPath);
+  await expectVueViewer(page);
   await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
   await viewer.getByRole("button", { name: "간단 편집" }).click();
   await expect(bar).toBeVisible();

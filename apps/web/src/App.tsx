@@ -68,7 +68,7 @@ function RouteLoading() {
 }
 
 /**
- * A page kept out of the main bundle (admin, attachment viewers, legal). The router loads it before rendering the route: on a navigation
+ * A page kept out of the main bundle (admin, legal). The router loads it before rendering the route: on a navigation
  * the current page stays until it is in, and on a page load only this route
  * shows `RouteLoading` while its parents render and fetch as usual. Not a
  * React.lazy Suspense boundary: React holds a boundary's reveal until 300 ms
@@ -102,7 +102,7 @@ const router = createBrowserRouter(
       <Route path="/s/:token" element={<PublicSharePage />} />
       <Route
         path="/s/:token/attachments/:attachmentId/view"
-        {...lazyPage(() => import("@/pages/ShareAttachmentViewPage").then((m) => m.ShareAttachmentViewPage))}
+        element={<NoRoute />}
       />
       <Route
         path="/invite/:token"
@@ -203,7 +203,7 @@ const router = createBrowserRouter(
         <Route path="notifications" element={<NotificationsPage />} />
         <Route
           path="a/:attachmentId/view"
-          {...lazyPage(() => import("@/pages/AttachmentViewPage").then((m) => m.AttachmentViewPage))}
+          element={<NoRoute />}
         />
         <Route path=":ref/tasks" element={<ProjectTasksPage />} />
         <Route path=":ref/table" element={<ProjectCollectionPage type="table" />} />

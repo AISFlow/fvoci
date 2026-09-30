@@ -35,6 +35,15 @@ const SAMPLES = [
   "/S/tok/attachments/123/View",
   "/s/tok/attachments/123",
   "/s/tok/attachments/123/view/extra",
+  "/s/tok",
+  "/settings/admin",
+  "/settings/audit",
+  "/settings/legal",
+  "/legal/privacy",
+  "/w//a/123/view",
+  "/s//attachments/123/view",
+  "/w/acme/a//view",
+  "/s/tok/attachments//view",
   "/w/acme/WIKI-1",
   "/w/acme/WIKI-12/",
   "/w/acme/wiki-7",
@@ -78,21 +87,30 @@ test("the boot module sends wiki documents, and only them, to the Vue app", () =
   assert.equal(isVueAppPath("/w/acme/wiki"), false);
 });
 
+test("attachment viewers boot Vue while public share, admin and legal pages retain their app", () => {
+  for (const path of ["/w/acme/a/123/view", "/w/acme/a/123/view/", "/W/acme/A/123/VIEW",
+    "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View"]) {
+    assert.equal(isVueAppPath(path), true, path);
+  }
+  for (const path of ["/s/tok", "/settings/admin", "/settings/audit", "/settings/legal", "/legal/privacy",
+    "/w/acme/a/123", "/w/acme/a/123/view/extra", "/s/tok/attachments/123", "/s/tok/attachments/123/view/extra"]) {
+    assert.equal(isVueAppPath(path), false, path);
+  }
+});
+
 test("every wiki path the boundary sends parses as the React app's wiki ref", () => {
   for (const path of SAMPLES) {
     // React Router matches /w/:slug in any case, as the boundary does.
     const ref = /^\/w\/[^/]+\/([^/]+)\/?$/i.exec(path)?.[1];
     const wiki = ref ? parseWikiRef(ref) : null;
     const gantt = /\/gantt\/?$/i.test(path);
-    if (!gantt) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const attachment = /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
+      /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i.test(path);
+    if (!gantt && !attachment) assert.equal(isVueAppPath(path), wiki !== null, path);
   }
 });
 
 test("the Vue router matches exactly the paths the boundary sends it", () => {
-  // Attachment viewer paths live in VUE_ROUTE_PATHS. src/app-boundary.ts
-  // (coordinator-owned) still needs:
-  //   /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i
-  //   /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [

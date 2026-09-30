@@ -1,3 +1,4 @@
+import { expectVueViewer } from "./viewer-app";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import {
   buildFixtureXlsx,
@@ -150,6 +151,7 @@ test("XLSX attachment: sheets, paging, zoom, cached values, bounds, failures, st
 
   // Sheet 1: text cells, cached formula values (never recalculated), merge anchor.
   await page.goto(`/w/acme/a/${bookId}/view`);
+  await expectVueViewer(page);
   const viewer = page.getByTestId("xlsx-viewer");
   await expect(viewer).toBeVisible({ timeout: 20_000 });
   await expect(viewer.getByText("시트 선택: 요약 📊 (1/3)")).toBeVisible();

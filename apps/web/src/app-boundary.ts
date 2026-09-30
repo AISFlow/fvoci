@@ -17,6 +17,9 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   // that the React router decodes to one of these (percent-encoded) reach
   // WorkspaceRefPage, which reloads the canonical path.
   /^\/w\/[^/]+\/wiki-[1-9]\d{0,8}\/?$/i,
+  // Session and anonymous share attachment viewers.
+  /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i,
+  /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i,
 ];
 
 export function isVueAppPath(pathname: string): boolean {
