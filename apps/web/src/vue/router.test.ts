@@ -44,7 +44,7 @@ test("the login route is declared (the boundary regex sends /login to Vue)", () 
   );
 });
 
-test("home, legal, and service-info are declared but not live Vue paths", () => {
+test("home, legal, and service-info are declared live Vue paths", () => {
   assert.equal(
     routes.some((route) => route.name === "home" && route.path === "/"),
     true,

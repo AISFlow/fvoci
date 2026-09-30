@@ -1,20 +1,18 @@
 import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { isVueAppPath } from "@/app-boundary";
-import { STAGED_VUE_ROUTE_PATHS, VUE_ROUTE_PATHS } from "./route-paths";
+import { VUE_ROUTE_PATHS } from "./route-paths";
 
 /** The Vue app's pages; src/app-boundary.ts sends exactly the live paths
- * (VUE_ROUTE_PATHS) here. Staged paths are declared so the pages exist as
- * lazy chunks; afterEach still full-loads them to React until the boundary
- * moves. Each page is its own chunk, so the Gantt page does not load the wiki
+ * (VUE_ROUTE_PATHS) here. Each page is its own chunk, so the Gantt page does not load the wiki
  * editor (Tiptap, Yjs, the collab provider) or its stylesheets
  * (import-graph.test.ts and e2e/project-gantt-flow.spec.ts check this). */
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
   { path: VUE_ROUTE_PATHS.login, name: "login", component: () => import("./pages/LoginPage.vue") },
-  { path: STAGED_VUE_ROUTE_PATHS.home, name: "home", component: () => import("./pages/HomePage.vue") },
-  { path: STAGED_VUE_ROUTE_PATHS.legal, name: "legal", component: () => import("./pages/LegalPage.vue") },
-  { path: STAGED_VUE_ROUTE_PATHS.serviceInfo, name: "service-info", component: () => import("./pages/ServiceInfoPage.vue") },
+  { path: VUE_ROUTE_PATHS.home, name: "home", component: () => import("./pages/HomePage.vue") },
+  { path: VUE_ROUTE_PATHS.legal, name: "legal", component: () => import("./pages/LegalPage.vue") },
+  { path: VUE_ROUTE_PATHS.serviceInfo, name: "service-info", component: () => import("./pages/ServiceInfoPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

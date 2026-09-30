@@ -1,68 +1,18 @@
 import { t } from "@fvoci/i18n";
 import { Link } from "react-router-dom";
-import { AuthStatus } from "@/features/auth/auth-form";
-import { AuthLayout, AuthPanel } from "@/features/auth/auth-layout";
 import {
-  filledOperatorFields,
   hasOperatorInfo,
   LEGAL_DOCS,
-  operatorFieldHref,
   type OperatorInfo,
 } from "./operator-fields";
 
 export type { OperatorInfo } from "./operator-fields";
 export {
   filledOperatorFields,
+  operatorFieldHref,
   hasOperatorInfo,
   LEGAL_DOCS,
-  operatorFieldHref,
 } from "./operator-fields";
-
-function OperatorInfoList({ operator }: { operator: OperatorInfo | null | undefined }) {
-  const rows = filledOperatorFields(operator);
-  if (rows.length === 0) return null;
-  return (
-    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-3 break-keep text-ui text-foreground">
-      {rows.map((field) => {
-        const value = operator?.[field] ?? "";
-        const href = operatorFieldHref(field, value);
-        return (
-          <div className="contents" key={field}>
-            <dt className="text-muted-foreground">{t(`operator.${field}`)}</dt>
-            <dd className="min-w-0 break-words">
-              {href === null ? (
-                value
-              ) : (
-                <a
-                  className="auth-shell__link break-all"
-                  href={href}
-                  rel="noreferrer"
-                  target={field === "businessInfoUrl" ? "_blank" : undefined}
-                >
-                  {value}
-                </a>
-              )}
-            </dd>
-          </div>
-        );
-      })}
-    </dl>
-  );
-}
-
-export function OperatorInfoView({ operator }: { operator: OperatorInfo | null }) {
-  return (
-    <AuthLayout width="wide" showWordmark={false}>
-      <AuthPanel title={t("operator.title")}>
-        {hasOperatorInfo(operator) ? (
-          <OperatorInfoList operator={operator} />
-        ) : (
-          <AuthStatus>{t("operator.empty")}</AuthStatus>
-        )}
-      </AuthPanel>
-    </AuthLayout>
-  );
-}
 
 export function ServiceInfoFooter({
   operator,

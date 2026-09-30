@@ -49,7 +49,7 @@ watchEffect(() => {
   // survives a setup-error refresh. Take the fragment only on that same screen.
   if (mfaToken.value === null) mfaToken.value = takeMfaFragment();
   if (me.data.value) {
-    // Home and every other non-login page are the React app: a full load.
+    // Start the destination with its own app/query cache after login.
     window.location.replace(returnTo.value);
   }
 });

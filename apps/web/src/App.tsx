@@ -11,7 +11,6 @@ import {
 } from "react-router-dom";
 import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
-import { HomePage } from "@/pages/HomePage";
 import { SetupPage } from "@/pages/SetupPage";
 import { SearchPage } from "@/pages/SearchPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
@@ -37,7 +36,6 @@ import { ConfirmEmailPage } from "@/pages/ConfirmEmailPage";
 import { CancelWithdrawPage } from "@/pages/CancelWithdrawPage";
 import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
 import { ConsentPage } from "@/pages/ConsentPage";
-import { ServiceInfoPage } from "@/pages/ServiceInfoPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -120,8 +118,6 @@ const router = createBrowserRouter(
         }
       />
       <Route path="/consent" element={<ConsentPage />} />
-      <Route path="/service-info" element={<ServiceInfoPage />} />
-      <Route path="/legal/:kind" {...lazyPage(() => import("@/pages/LegalPage").then((m) => m.LegalPage))} />
       <Route
         path="/settings/admin"
         {...lazyPage(() => import("@/pages/AdminPage").then((m) => m.AdminPage), { setupGuard: true })}
@@ -163,14 +159,6 @@ const router = createBrowserRouter(
         element={
           <SetupGuard>
             <AccountSettingsPage />
-          </SetupGuard>
-        }
-      />
-      <Route
-        path="/"
-        element={
-          <SetupGuard>
-            <HomePage />
           </SetupGuard>
         }
       />

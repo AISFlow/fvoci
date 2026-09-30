@@ -10,6 +10,10 @@
  * routes). Case-insensitive, as vue-router and React Router match by default.
  */
 export const VUE_APP_PATHS: readonly RegExp[] = [
+  // Home workspace picker and public policies/operator information.
+  /^\/$/,
+  /^\/legal\/[^/]+\/?$/i,
+  /^\/service-info\/?$/i,
   // Project Gantt: /w/:slug/:ref/gantt
   /^\/w\/[^/]+\/[^/]+\/gantt\/?$/i,
   // Wiki document: /w/:slug/WIKI-<n>, the refs parseWikiRef (lib/href.ts)

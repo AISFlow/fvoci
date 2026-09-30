@@ -57,7 +57,7 @@ test("the boot module sends the Gantt path, and only it, to the Vue app", () => 
   assert.equal(isVueAppPath("/w/acme/GNT"), false);
   assert.equal(isVueAppPath("/w/acme/GNT/gantt/extra"), false);
   assert.equal(isVueAppPath("/w/acme/GNT/tasks"), false);
-  assert.equal(isVueAppPath("/"), false);
+  assert.equal(isVueAppPath("/"), true);
 });
 
 test("the boot module sends wiki documents, and only them, to the Vue app", () => {
@@ -89,16 +89,18 @@ test("every wiki path the boundary sends parses as the React app's wiki ref", ()
     const wiki = ref ? parseWikiRef(ref) : null;
     const gantt = /\/gantt\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
-    if (!gantt && !login) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const homeOrPublic = path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
+    if (!gantt && !login && !homeOrPublic) assert.equal(isVueAppPath(path), wiki !== null, path);
   }
 });
 
-test("staged home/legal/service-info paths stay on the React app", () => {
-  assert.equal(isVueAppPath("/"), false);
-  assert.equal(isVueAppPath("/legal/terms"), false);
-  assert.equal(isVueAppPath("/legal/privacy"), false);
-  assert.equal(isVueAppPath("/service-info"), false);
-  assert.equal(isVueAppPath("/service-info/"), false);
+test("home and public pages enter Vue while admin policies remain React", () => {
+  for (const path of ["/", "/legal/terms", "/legal/privacy/", "/LEGAL/unknown", "/service-info", "/SERVICE-INFO/"]) {
+    assert.equal(isVueAppPath(path), true, path);
+  }
+  for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal"]) {
+    assert.equal(isVueAppPath(path), false, path);
+  }
 });
 
 test("the Vue router matches exactly the paths the boundary sends it", () => {

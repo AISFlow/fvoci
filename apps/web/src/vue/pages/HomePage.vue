@@ -7,7 +7,7 @@ import { useRoute, useRouter } from "vue-router";
 import { logout as logoutRequest } from "@/features/notifications/push-logout";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { wikiPath } from "@/lib/href";
-import { meQuery, workspacesQuery } from "@/lib/queries";
+import { meQuery, setupStatusQuery, workspacesQuery } from "@/lib/queries";
 import AuthenticatedLegalNav from "../features/legal/AuthenticatedLegalNav.vue";
 import EmptyWorkspace from "../features/workspace/EmptyWorkspace.vue";
 import WorkspaceCreateDialog from "../features/workspace/WorkspaceCreateDialog.vue";
@@ -15,23 +15,29 @@ import { loginPath, redirectTo } from "../session/navigation";
 import "@/features/workspace/workspace-aux.css";
 import "../features/workspace/workspace-home.css";
 
-// / is not a live Vue path (src/app-boundary.ts). The page is a lazy chunk;
-// until the boundary moves, boot still loads the React HomePage.
+// The home picker preserves the installation gate before checking the session.
 
 const route = useRoute();
 const router = useRouter();
 const queryClient = useQueryClient();
 const createOpen = ref(false);
 const logoutError = ref<string | null>(null);
-const me = useQuery(meQuery);
-const workspaces = useQuery(workspacesQuery);
+const signingOut = ref(false);
+const setup = useQuery(setupStatusQuery);
+const ready = computed(() => setup.data.value?.needed === false && !setup.isError.value);
+const me = useQuery(() => ({ ...meQuery, enabled: ready.value }));
+const workspaces = useQuery(() => ({ ...workspacesQuery, enabled: ready.value }));
 
 const denied = computed(() => route.query.denied === "workspace");
 const items = computed(() => workspaces.data.value?.items ?? []);
-const leaving = computed(() => me.isError.value);
+const leaving = computed(() => setup.data.value?.needed === true || (ready.value && me.isError.value));
 
 watchEffect(() => {
-  if (me.isError.value) redirectTo(loginPath(window.location));
+  if (!ready.value) {
+    if (!setup.isError.value && setup.data.value?.needed) redirectTo("/setup");
+    return;
+  }
+  if (!signingOut.value && me.isError.value) redirectTo(loginPath(window.location));
 });
 
 function dismissDenied(): void {
@@ -53,7 +59,10 @@ async function logout(): Promise<void> {
     logoutError.value = problemMessage(new ProblemError(result.response.status), "error.auth.logout");
     return;
   }
-  await queryClient.resetQueries();
+  // Clear this app's cache without refetching the now-revoked session.
+  // The explicit logout destination wins over the session-expiry redirect.
+  signingOut.value = true;
+  queryClient.clear();
   redirectTo("/login");
 }
 
@@ -64,7 +73,11 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
 </script>
 
 <template>
-  <p v-if="workspaces.isLoading.value || me.isLoading.value || leaving" class="p-8 text-muted">
+  <div v-if="setup.isError.value" class="p-8">
+    <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
+    <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>
+  </div>
+  <p v-else-if="setup.isLoading.value || workspaces.isLoading.value || me.isLoading.value || leaving" role="status" class="p-8 text-muted">
     {{ t("load.loading") }}
   </p>
   <div v-else class="app-shell">
