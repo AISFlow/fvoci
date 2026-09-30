@@ -1,5 +1,6 @@
 {
   "extends": "./tsconfig.vue.json",
+  "compilerOptions": { "types": ["node", "bun"] },
   "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue", "test/**/*.ts"],
   "exclude": ["node_modules"]
 }
