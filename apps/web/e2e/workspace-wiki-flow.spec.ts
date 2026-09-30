@@ -93,7 +93,9 @@ async function documentIdFromOpenWikiPage(page: Page, wsId: string): Promise<str
 async function documentIdByTitle(page: Page, wsId: string, title: string): Promise<string> {
   const treeRes = await page.request.get(`/api/v1/workspaces/${wsId}/tree`);
   expect(treeRes.ok()).toBe(true);
-  const document = (await treeRes.json()).items.find((item: { title: string }) => item.title === title);
+  const document = (await treeRes.json()).items.find(
+    (item: { title: string }) => item.title === title,
+  );
   expect(document).toBeTruthy();
   return document.id;
 }
@@ -325,7 +327,9 @@ test("nested wiki tree preserves deep links and more than six children", async (
   const documents = [...levels, ...siblings];
 
   await page.goto("/w/acme/wiki");
-  await expect(page.getByTestId(`wiki-doc-WIKI-${root.number}`).locator("..").locator(":scope > ul > li")).toHaveCount(7);
+  await expect(
+    page.getByTestId(`wiki-doc-WIKI-${root.number}`).locator("..").locator(":scope > ul > li"),
+  ).toHaveCount(7);
   for (const document of documents) {
     const link = page.getByTestId(`wiki-doc-WIKI-${document.number}`);
     await expect(link).toBeVisible();
@@ -372,9 +376,7 @@ test("admin sees member document and guest cannot read wiki", async ({ page }) =
   expect(guestTreeRes.ok()).toBe(true);
   expect((await guestTreeRes.json()).items).toEqual([]);
 
-  const guestDocRes = await page.request.get(
-    `/api/v1/workspaces/${id}/documents/${document.id}`,
-  );
+  const guestDocRes = await page.request.get(`/api/v1/workspaces/${id}/documents/${document.id}`);
   expect(guestDocRes.status()).toBe(404);
   expect((await guestDocRes.json()).code).toBe("not_found");
 

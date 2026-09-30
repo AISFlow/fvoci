@@ -137,7 +137,9 @@ test("anonymous share attachment view: text, image and download inside the share
   await reader.goto(`${viewPath(textId)}?chunk=0`);
   const viewer = reader.locator("[data-attachment-viewer]");
   await expect(viewer.locator(".attachment-viewer__name")).toHaveText("메모.txt");
-  await expect(viewer.locator("pre.attachment-viewer__text")).toContainText("공유 첨부 본문 한글 ✅");
+  await expect(viewer.locator("pre.attachment-viewer__text")).toContainText(
+    "공유 첨부 본문 한글 ✅",
+  );
   await expect(viewer.locator("pre mark")).toContainText("공유 첨부 본문");
   await expectVueViewer(reader);
   await reader.reload();
@@ -164,20 +166,20 @@ test("anonymous share attachment view: text, image and download inside the share
   // Image: rendered from the share download URL, never a session URL.
   await reader.goto(viewPath(imageId));
   const image = reader.locator("img.attachment-viewer__image");
-  await expect(image).toHaveAttribute("src", `/api/v1/share/${token}/attachments/${imageId}/download`);
-  await expect
-    .poll(() => image.evaluate((el) => (el as HTMLImageElement).naturalWidth))
-    .toBe(1);
+  await expect(image).toHaveAttribute(
+    "src",
+    `/api/v1/share/${token}/attachments/${imageId}/download`,
+  );
+  await expect.poll(() => image.evaluate((el) => (el as HTMLImageElement).naturalWidth)).toBe(1);
 
   // Other kinds keep the download choice.
   await reader.goto(viewPath(binId));
   await expect(reader.getByRole("alert")).toHaveText(
     "이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.",
   );
-  await expect(reader.locator("[data-attachment-viewer]").getByRole("link", { name: "다운로드" }).first()).toHaveAttribute(
-    "href",
-    `/api/v1/share/${token}/attachments/${binId}/download`,
-  );
+  await expect(
+    reader.locator("[data-attachment-viewer]").getByRole("link", { name: "다운로드" }).first(),
+  ).toHaveAttribute("href", `/api/v1/share/${token}/attachments/${binId}/download`);
 
   // Outside the shared subtree and unknown ids: the same privacy-preserving denial.
   const notFound = "접근 권한이 없거나 존재하지 않는 항목입니다.";
@@ -194,7 +196,9 @@ test("anonymous share attachment view: text, image and download inside the share
   await reader.goto(viewPath(textId));
   await expect(reader.getByRole("alert")).toHaveText(notFound);
   await expect(reader.locator("pre.attachment-viewer__text")).toHaveCount(0);
-  const revokedBytes = await reader.request.get(`/api/v1/share/${token}/attachments/${textId}/download`);
+  const revokedBytes = await reader.request.get(
+    `/api/v1/share/${token}/attachments/${textId}/download`,
+  );
   expect(revokedBytes.status()).toBe(404);
 
   // Only the share API was called; no session attachment route, no token in the console.

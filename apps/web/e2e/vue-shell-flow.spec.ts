@@ -108,7 +108,11 @@ async function ganttProject(request: APIRequestContext, wsId: string): Promise<P
   expect(res.status(), await res.text()).toBe(201);
   const project = (await res.json()) as Project;
   // A bar in the Gantt's month, so the chart (not its empty state) shows.
-  await createTask(request, wsId, project.id, { title: "셸 막대", startDate: "2031-03-03", dueDate: "2031-03-05" });
+  await createTask(request, wsId, project.id, {
+    title: "셸 막대",
+    startDate: "2031-03-03",
+    dueDate: "2031-03-05",
+  });
   return project;
 }
 
@@ -118,13 +122,21 @@ async function createTask(
   projectId: string,
   data: Record<string, unknown>,
 ): Promise<Task> {
-  const res = await request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, { data });
+  const res = await request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, {
+    data,
+  });
   expect(res.status(), await res.text()).toBe(201);
   return res.json();
 }
 
-async function createDoc(request: APIRequestContext, wsId: string, title: string): Promise<WikiDoc> {
-  const res = await request.post(`/api/v1/workspaces/${wsId}/documents`, { data: { parentId: null, title } });
+async function createDoc(
+  request: APIRequestContext,
+  wsId: string,
+  title: string,
+): Promise<WikiDoc> {
+  const res = await request.post(`/api/v1/workspaces/${wsId}/documents`, {
+    data: { parentId: null, title },
+  });
   expect(res.status(), await res.text()).toBe(201);
   const doc = (await res.json()) as { id: string; number: number };
   return { ...doc, title, path: `/w/${admin.workspaceSlug}/WIKI-${doc.number}` };
@@ -154,7 +166,11 @@ async function markDocument(page: Page): Promise<void> {
 }
 
 async function sameDocument(page: Page): Promise<boolean> {
-  return (await page.evaluate(() => (window as unknown as { __sameDocument?: boolean }).__sameDocument)) === true;
+  return (
+    (await page.evaluate(
+      () => (window as unknown as { __sameDocument?: boolean }).__sameDocument,
+    )) === true
+  );
 }
 
 async function newSignedInPage(
@@ -183,7 +199,11 @@ test("the footer's service information and policy links load their public Vue pa
     { name: "wiki", open: (p) => openWiki(p, doc) },
   ];
   const targets = [
-    { link: "서비스 정보", path: "/service-info", shows: page.getByRole("heading", { name: "서비스 정보" }) },
+    {
+      link: "서비스 정보",
+      path: "/service-info",
+      shows: page.getByRole("heading", { name: "서비스 정보" }),
+    },
     { link: "이용약관", path: "/legal/terms", shows: page.getByText("문서가 없습니다") },
     { link: "개인정보처리방침", path: "/legal/privacy", shows: page.getByText("문서가 없습니다") },
   ];
@@ -192,10 +212,10 @@ test("the footer's service information and policy links load their public Vue pa
     await vuePage.open(page);
     const footer = page.locator("footer").getByRole("navigation", { name: "서비스 정보" });
     for (const target of targets) {
-      await expect(footer.getByRole("link", { name: target.link, exact: true }), vuePage.name).toHaveAttribute(
-        "href",
-        target.path,
-      );
+      await expect(
+        footer.getByRole("link", { name: target.link, exact: true }),
+        vuePage.name,
+      ).toHaveAttribute("href", target.path);
     }
     for (const target of targets) {
       await vuePage.open(page);
@@ -204,14 +224,18 @@ test("the footer's service information and policy links load their public Vue pa
       await expect(page).toHaveURL(new RegExp(`${target.path}$`));
       await expect(target.shows).toBeVisible();
       await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
-      expect(await sameDocument(page), `${vuePage.name} → ${target.path} is a full load`).toBe(false);
+      expect(await sameDocument(page), `${vuePage.name} → ${target.path} is a full load`).toBe(
+        false,
+      );
     }
   }
   expect(seen.csp).toEqual([]);
   expect(seen.icons).toEqual([]);
 });
 
-test("the search palette finds seeded documents and tasks and opens them from both Vue pages", async ({ page }) => {
+test("the search palette finds seeded documents and tasks and opens them from both Vue pages", async ({
+  page,
+}) => {
   test.setTimeout(120_000);
   await ensureSetup(page);
   const seen = watchPage(page);
@@ -241,7 +265,9 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   const searchRequest = () =>
     page.waitForRequest((request: Request) => {
       const url = new URL(request.url());
-      return url.pathname === `/api/v1/workspaces/${wsId}/search` && url.searchParams.get("q") === token;
+      return (
+        url.pathname === `/api/v1/workspaces/${wsId}/search` && url.searchParams.get("q") === token
+      );
     });
 
   // Gantt: Ctrl+K, the same search the React palette makes, then a wiki
@@ -252,13 +278,17 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   await expect(palette).toBeVisible();
   const input = palette.getByLabel("검색어");
   await expect(input).toBeFocused();
-  await expect(palette.getByText("문서·태스크·댓글·첨부 파일명을 검색합니다.", { exact: false })).toBeVisible();
+  await expect(
+    palette.getByText("문서·태스크·댓글·첨부 파일명을 검색합니다.", { exact: false }),
+  ).toBeVisible();
   const request = searchRequest();
   await input.fill(token);
   const url = new URL((await request).url());
   expect(url.searchParams.get("mode")).toBe("hybrid");
   expect(url.searchParams.get("type")).toBe("all");
-  await expect(palette.getByRole("link", { name: new RegExp(first.title) })).toBeVisible({ timeout: 10_000 });
+  await expect(palette.getByRole("link", { name: new RegExp(first.title) })).toBeVisible({
+    timeout: 10_000,
+  });
   await expect(palette.getByRole("link", { name: new RegExp(task.title) })).toBeVisible();
   await expect(palette.getByRole("link", { name: "모든 결과 보기" })).toHaveAttribute(
     "href",
@@ -339,9 +369,14 @@ test("the search palette finds seeded documents and tasks and opens them from bo
     await markDocument(page);
     await palette.getByLabel("검색어").press("Enter");
     await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/search\\?q=${token}$`));
-    await expect(page.getByRole("region", { name: "검색" }).getByText(first.title)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("region", { name: "검색" }).getByText(first.title)).toBeVisible({
+      timeout: 10_000,
+    });
     await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
-    expect(await sameDocument(page), "the search palette opens its Vue page with the existing full navigation").toBe(false);
+    expect(
+      await sameDocument(page),
+      "the search palette opens its Vue page with the existing full navigation",
+    ).toBe(false);
   }
 
   // No match.
@@ -490,9 +525,10 @@ test("the bell shows a notification created through the API and opens it from bo
       expect(bellBox).toBeTruthy();
       expect(panelBox!.x).toBeGreaterThanOrEqual(0);
       expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(390);
-      expect(panelBox!.y, "the notification panel must not cover its toggle").toBeGreaterThanOrEqual(
-        bellBox!.y + bellBox!.height,
-      );
+      expect(
+        panelBox!.y,
+        "the notification panel must not cover its toggle",
+      ).toBeGreaterThanOrEqual(bellBox!.y + bellBox!.height);
       await readBell.click();
       await expect(panel).toHaveCount(0);
     }
@@ -516,7 +552,9 @@ test("logout ends the session and lands on the login page from both Vue pages; a
   await openWiki(page, doc);
   await page.route("**/api/v1/auth/logout", (route) => route.abort("connectionfailed"));
   await page.getByRole("button", { name: "로그아웃" }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "연결을 확인하고 다시 시도해 주세요." })).toBeVisible();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "연결을 확인하고 다시 시도해 주세요." }),
+  ).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`${doc.path}$`));
   expect((await page.request.get("/api/v1/auth/me")).ok()).toBe(true);
   await page.unroute("**/api/v1/auth/logout");
@@ -525,7 +563,8 @@ test("logout ends the session and lands on the login page from both Vue pages; a
     await open(page);
     const returnTo = new URL(page.url());
     const logoutRequest = page.waitForRequest(
-      (request: Request) => request.url().endsWith("/api/v1/auth/logout") && request.method() === "POST",
+      (request: Request) =>
+        request.url().endsWith("/api/v1/auth/logout") && request.method() === "POST",
     );
     await page.getByRole("button", { name: "로그아웃" }).click();
     // No push subscription in this browser: nothing to report.
@@ -536,7 +575,9 @@ test("logout ends the session and lands on the login page from both Vue pages; a
     // The Vue page itself now sends the signed-out browser through login.
     await page.goto(`${returnTo.pathname}${returnTo.search}`);
     await expect(page).toHaveURL(/\/login\?returnTo=/);
-    expect(new URL(page.url()).searchParams.get("returnTo")).toBe(`${returnTo.pathname}${returnTo.search}`);
+    expect(new URL(page.url()).searchParams.get("returnTo")).toBe(
+      `${returnTo.pathname}${returnTo.search}`,
+    );
     await login(page, admin.email, admin.password);
   }
   expect(seen.csp).toEqual([]);
@@ -595,7 +636,10 @@ test("the Vue shell re-binds this browser's push subscription to a new session, 
     PushManager.prototype.subscribe = async function (options?: PushSubscriptionOptionsInit) {
       const key = options?.applicationServerKey;
       if (!(key instanceof Uint8Array)) throw new Error("expected raw applicationServerKey");
-      const stored = { endpoint: `https://push.e2e.invalid/send/${crypto.randomUUID()}`, key: toBase64Url(key) };
+      const stored = {
+        endpoint: `https://push.e2e.invalid/send/${crypto.randomUUID()}`,
+        key: toBase64Url(key),
+      };
       log("subscribe");
       sessionStorage.setItem(KEY, JSON.stringify(stored));
       return build(stored) as unknown as PushSubscription;
@@ -609,7 +653,8 @@ test("the Vue shell re-binds this browser's push subscription to a new session, 
     await ganttProject(page.request, wsId);
     const doc = await createDoc(page.request, wsId, "셸 푸시");
     const putPath = `/api/v1/workspaces/${wsId}/push-subscriptions`;
-    const isPut = (response: Response) => response.url().endsWith(putPath) && response.request().method() === "PUT";
+    const isPut = (response: Response) =>
+      response.url().endsWith(putPath) && response.request().method() === "PUT";
     const pushLog = async (): Promise<string[]> =>
       JSON.parse((await page.evaluate(() => sessionStorage.getItem("e2e-push-log"))) ?? "[]");
 
@@ -636,7 +681,8 @@ test("the Vue shell re-binds this browser's push subscription to a new session, 
 
     // Logout reports this browser's endpoint and drops the subscription.
     const logoutRequest = page.waitForRequest(
-      (request: Request) => request.url().endsWith("/api/v1/auth/logout") && request.method() === "POST",
+      (request: Request) =>
+        request.url().endsWith("/api/v1/auth/logout") && request.method() === "POST",
     );
     await page.getByRole("button", { name: "로그아웃" }).click();
     expect((await logoutRequest).postDataJSON()).toEqual({ pushEndpoint: endpoint });
@@ -685,7 +731,9 @@ test("the workspace switch lands on the same section of the other workspace from
   expect(seen.icons).toEqual([]);
 });
 
-test("long Korean workspace controls stay in the narrow viewport and search placeholder has light/dark contrast", async ({ page }) => {
+test("long Korean workspace controls stay in the narrow viewport and search placeholder has light/dark contrast", async ({
+  page,
+}) => {
   await ensureSetup(page);
   const wsId = await workspaceId(page.request);
   const original = await (await page.request.get(`/api/v1/workspaces/${wsId}`)).json();
@@ -698,27 +746,40 @@ test("long Korean workspace controls stay in the narrow viewport and search plac
     await page.setViewportSize({ width: 390, height: 844 });
     await openWiki(page, doc);
     const header = page.locator("header").first();
-    for (const control of [header.getByRole("button", { name: "검색", exact: true }), header.getByRole("button", { name: "알림", exact: true }), header.getByRole("link", { name: "계정", exact: true }), header.getByRole("button", { name: "로그아웃", exact: true })]) {
+    for (const control of [
+      header.getByRole("button", { name: "검색", exact: true }),
+      header.getByRole("button", { name: "알림", exact: true }),
+      header.getByRole("link", { name: "계정", exact: true }),
+      header.getByRole("button", { name: "로그아웃", exact: true }),
+    ]) {
       const bounds = await control.boundingBox();
       expect(bounds).not.toBeNull();
       expect(bounds!.x).toBeGreaterThanOrEqual(0);
       expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
       await control.focus();
-      expect(await page.locator(".document-page").evaluate((e) => e.getBoundingClientRect().left)).toBeGreaterThanOrEqual(0);
+      expect(
+        await page.locator(".document-page").evaluate((e) => e.getBoundingClientRect().left),
+      ).toBeGreaterThanOrEqual(0);
     }
     const search = header.getByRole("button", { name: "검색", exact: true });
-    await search.focus(); await search.press("Enter");
+    await search.focus();
+    await search.press("Enter");
     const dialog = page.getByRole("dialog", { name: "빠른 검색" });
     await expect(dialog).toBeVisible();
     for (const dark of [false, true]) {
-      await page.evaluate((enabled) => document.documentElement.classList.toggle("dark", enabled), dark);
+      await page.evaluate(
+        (enabled) => document.documentElement.classList.toggle("dark", enabled),
+        dark,
+      );
       const ratio = await dialog.evaluate((root) => {
         const canvas = document.createElement("canvas");
         const context = canvas.getContext("2d")!;
         const luminance = (css: string) => {
-          context.fillStyle = css; context.fillRect(0, 0, 1, 1);
+          context.fillStyle = css;
+          context.fillRect(0, 0, 1, 1);
           const rgb = [...context.getImageData(0, 0, 1, 1).data].slice(0, 3).map((v) => {
-            const n = v / 255; return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4;
+            const n = v / 255;
+            return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4;
           });
           return 0.2126 * rgb[0]! + 0.7152 * rgb[1]! + 0.0722 * rgb[2]!;
         };
@@ -729,8 +790,13 @@ test("long Korean workspace controls stay in the narrow viewport and search plac
       expect(ratio, dark ? "dark placeholder" : "light placeholder").toBeGreaterThanOrEqual(4.5);
     }
     await page.evaluate(() => document.documentElement.classList.remove("dark"));
-    await page.keyboard.press("Escape"); await expect(search).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(search).toBeFocused();
   } finally {
-    expect((await page.request.patch(`/api/v1/workspaces/${wsId}`, { data: { name: original.name } })).ok()).toBe(true);
+    expect(
+      (
+        await page.request.patch(`/api/v1/workspaces/${wsId}`, { data: { name: original.name } })
+      ).ok(),
+    ).toBe(true);
   }
 });

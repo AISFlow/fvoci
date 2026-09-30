@@ -129,7 +129,9 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
     mimeType: "text/markdown",
     buffer: Buffer.from("# 비동기 메모\n\n러너가 가져온 본문", "utf8"),
   });
-  await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({ timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({
+    timeout: 60_000,
+  });
   await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible();
 
   await page.goto("/w/acme/wiki");
@@ -161,7 +163,9 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
     mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     buffer: docx("워드 제목", "워드에서 가져온 본문"),
   });
-  await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({ timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({
+    timeout: 60_000,
+  });
   await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible();
   await page.goto("/w/acme/wiki");
   await page.getByRole("link", { name: "워드-회의록" }).click();
@@ -188,7 +192,9 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
       "Export/로드맵 0123456789abcdef/할 일 89abcdef01.csv": "이름,상태\n노션에서 온 태스크,완료\n",
     }),
   });
-  await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({ timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({
+    timeout: 60_000,
+  });
   await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible();
   const tasksRes = await page.request.get(`/api/v1/workspaces/${id}/projects/${project.id}/tasks`);
   expect(tasksRes.ok(), await tasksRes.text()).toBe(true);
@@ -213,7 +219,10 @@ test("member does not see workspace export in settings", async ({ page, browser 
   await ensureOwnerSession(page);
 
   await page.goto("/w/acme/settings");
-  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^멤버$/ })
+    .click();
   await page.getByLabel("초대할 이메일").fill(member.email);
   await page.getByRole("button", { name: "초대", exact: true }).click();
   const inviteLink = page.getByRole("link").filter({ hasText: "/invite/" });

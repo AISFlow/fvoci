@@ -18,7 +18,9 @@ async function linkTo(page: Page, href: string): Promise<void> {
   await page.locator("#merge-destination").click();
 }
 
-test("merged viewer guards auth, wiki and project destinations within the same Vue runtime", async ({ page }) => {
+test("merged viewer guards auth, wiki and project destinations within the same Vue runtime", async ({
+  page,
+}) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   // A Vue-to-Vue confirmation must never fall through to native unloading.
@@ -55,32 +57,55 @@ test("merged viewer guards auth, wiki and project destinations within the same V
   });
   expect(created.ok(), await created.text()).toBe(true);
   const document = await created.json();
-  const sample = fs.readFileSync(path.resolve(import.meta.dirname, "../../../compat/fixtures/sample.hwpx"));
+  const sample = fs.readFileSync(
+    path.resolve(import.meta.dirname, "../../../compat/fixtures/sample.hwpx"),
+  );
   const bytes = Buffer.from(buildFixtureHwpx(sample, FIXTURE_PAGES));
-  const reserved = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${document.id}/uploads`, {
-    data: { name: "merged.hwpx", sizeBytes: bytes.length },
-  });
+  const reserved = await page.request.post(
+    `/api/v1/workspaces/${wsId}/documents/${document.id}/uploads`,
+    {
+      data: { name: "merged.hwpx", sizeBytes: bytes.length },
+    },
+  );
   expect(reserved.ok(), await reserved.text()).toBe(true);
   const upload = await reserved.json();
   const parts: { partNumber: number; etag: string }[] = [];
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
-      data: bytes.subarray((part.partNumber - 1) * upload.partSizeBytes, part.partNumber * upload.partSizeBytes),
+      data: bytes.subarray(
+        (part.partNumber - 1) * upload.partSizeBytes,
+        part.partNumber * upload.partSizeBytes,
+      ),
     });
     expect(put.ok(), await put.text()).toBe(true);
     parts.push({ partNumber: part.partNumber, etag: put.headers()["etag"]! });
   }
-  const completed = await page.request.post(`/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`, {
-    data: { parts },
-  });
+  const completed = await page.request.post(
+    `/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`,
+    {
+      data: { parts },
+    },
+  );
   expect(completed.ok(), await completed.text()).toBe(true);
   const viewerPath = `/w/merged/a/${upload.attachmentId}/view`;
   const destinations = [
-    { href: "/reset-password?token=merge-only#form", ready: () => page.getByRole("button", { name: "비밀번호 변경", exact: true }) },
-    { href: `/w/merged/${document.displayId}?from=viewer#wiki`, ready: () => page.locator(".tiptap") },
-    { href: `${taskPath}?from=viewer#task-comments`, ready: () => page.getByRole("heading", { name: "Merged task" }) },
-    { href: "/w/merged/MERGE/tasks?from=viewer#list", ready: () => page.getByRole("heading", { name: "Merged project" }) },
+    {
+      href: "/reset-password?token=merge-only#form",
+      ready: () => page.getByRole("button", { name: "비밀번호 변경", exact: true }),
+    },
+    {
+      href: `/w/merged/${document.displayId}?from=viewer#wiki`,
+      ready: () => page.locator(".tiptap"),
+    },
+    {
+      href: `${taskPath}?from=viewer#task-comments`,
+      ready: () => page.getByRole("heading", { name: "Merged task" }),
+    },
+    {
+      href: "/w/merged/MERGE/tasks?from=viewer#list",
+      ready: () => page.getByRole("heading", { name: "Merged project" }),
+    },
   ];
   for (const { href, ready } of destinations) {
     await page.goto(viewerPath);
@@ -94,7 +119,9 @@ test("merged viewer guards auth, wiki and project destinations within the same V
     await bar.getByRole("button", { name: "모두 바꾸기" }).click();
     await expect(bar.getByRole("button", { name: "편집본 저장" })).toBeEnabled();
     const ink = await viewer.locator("img.hwp-viewer__page").getAttribute("src");
-    await page.evaluate(() => { (window as unknown as { mergeMarker: string }).mergeMarker = "same-runtime"; });
+    await page.evaluate(() => {
+      (window as unknown as { mergeMarker: string }).mergeMarker = "same-runtime";
+    });
     await linkTo(page, href);
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible();
@@ -107,7 +134,9 @@ test("merged viewer guards auth, wiki and project destinations within the same V
     await expect(page).toHaveURL(new URL(href, page.url()).href);
     await expect(ready()).toBeVisible();
     await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
-    expect(await page.evaluate(() => (window as unknown as { mergeMarker?: string }).mergeMarker)).toBe("same-runtime");
+    expect(
+      await page.evaluate(() => (window as unknown as { mergeMarker?: string }).mergeMarker),
+    ).toBe("same-runtime");
     await expect(page.locator("[data-hwp-viewer]")).toHaveCount(0);
     await expect(dialog).toHaveCount(0);
   }

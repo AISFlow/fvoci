@@ -1,10 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import {
-  buildFixturePdf,
-  FIXTURE_PAGE_W,
-} from "../src/features/attachments/pdf-test-fixture";
+import { buildFixturePdf, FIXTURE_PAGE_W } from "../src/features/attachments/pdf-test-fixture";
 import { watchCspViolations } from "./helpers";
 import { expectVueViewer } from "./viewer-app";
 
@@ -131,8 +128,16 @@ async function hangulCells(page: Page): Promise<{ dark: number; signature: strin
       for (let gy = 0; gy < grid; gy += 1) {
         for (let gx = 0; gx < grid; gx += 1) {
           let cellDark = 0;
-          for (let y = Math.floor((gy * (bottom - top)) / grid); y < Math.floor(((gy + 1) * (bottom - top)) / grid); y += 1) {
-            for (let x = Math.floor((gx * width) / grid); x < Math.floor(((gx + 1) * width) / grid); x += 1) {
+          for (
+            let y = Math.floor((gy * (bottom - top)) / grid);
+            y < Math.floor(((gy + 1) * (bottom - top)) / grid);
+            y += 1
+          ) {
+            for (
+              let x = Math.floor((gx * width) / grid);
+              x < Math.floor(((gx + 1) * width) / grid);
+              x += 1
+            ) {
               const at = (y * width + x) * 4;
               if (data[at]! < 90 && data[at + 1]! < 90 && data[at + 2]! < 90) cellDark += 1;
             }
@@ -219,11 +224,17 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
     // login navigation, while that first navigation is still uncommitted.
     // A repeated redirect used to cancel it and reject the URL predicate.
     let releaseSetup!: () => void;
-    const setupRelease = new Promise<void>((resolve) => { releaseSetup = resolve; });
+    const setupRelease = new Promise<void>((resolve) => {
+      releaseSetup = resolve;
+    });
     let setupDelivered!: () => void;
-    const setupDelivery = new Promise<void>((resolve) => { setupDelivered = resolve; });
+    const setupDelivery = new Promise<void>((resolve) => {
+      setupDelivered = resolve;
+    });
     let releaseLogin!: () => void;
-    const loginRelease = new Promise<void>((resolve) => { releaseLogin = resolve; });
+    const loginRelease = new Promise<void>((resolve) => {
+      releaseLogin = resolve;
+    });
     await signedOut.route("**/api/v1/setup", async (route) => {
       const response = await route.fetch();
       expect(response.status()).toBe(200);
@@ -232,7 +243,9 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
       setupDelivered();
     });
     const loginRequests: string[] = [];
-    const firstLogin = signedOut.waitForRequest((request) => new URL(request.url()).pathname === "/login");
+    const firstLogin = signedOut.waitForRequest(
+      (request) => new URL(request.url()).pathname === "/login",
+    );
     await signedOut.route("**/login?returnTo=*", async (route) => {
       loginRequests.push(route.request().url());
       await loginRelease;
@@ -242,19 +255,27 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
     // and its loaded page are still required by the assertion below.
     await signedOut.goto(target, { waitUntil: "commit" });
     await firstLogin;
-    const redirected = expect(signedOut).toHaveURL((url) => url.pathname === "/login" && url.searchParams.get("returnTo") === target);
+    const redirected = expect(signedOut).toHaveURL(
+      (url) => url.pathname === "/login" && url.searchParams.get("returnTo") === target,
+    );
     // Keep a rejected navigation assertion observed while the browser barrier
     // completes; it is still awaited below and never treated as a success.
     void redirected.catch(() => undefined);
-    const setupResponse = signedOut.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/setup");
+    const setupResponse = signedOut.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/setup",
+    );
     releaseSetup();
     await setupDelivery;
     // Finish delivery of the real setup body before login can commit.
     expect(await (await setupResponse).finished()).toBeNull();
     releaseLogin();
     await redirected;
-    expect(loginRequests).toEqual([new URL(`/login?returnTo=${encodeURIComponent(target)}`, signedOut.url()).href]);
-    expect((await signedOut.request.get(`/api/v1/workspaces/${wsId}/attachments/${pdfId}`)).status()).toBe(401);
+    expect(loginRequests).toEqual([
+      new URL(`/login?returnTo=${encodeURIComponent(target)}`, signedOut.url()).href,
+    ]);
+    expect(
+      (await signedOut.request.get(`/api/v1/workspaces/${wsId}/attachments/${pdfId}`)).status(),
+    ).toBe(401);
   } finally {
     await anonymous.close();
   }
@@ -318,7 +339,9 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   await expect(page.getByText("plain attachment body")).toBeVisible();
   releasePdf();
   await pdfSettled;
-  await expect(page.locator("[data-attachment-viewer]").getByText(textName, { exact: true })).toBeVisible();
+  await expect(
+    page.locator("[data-attachment-viewer]").getByText(textName, { exact: true }),
+  ).toBeVisible();
   await expect(page.locator("[data-pdf-viewer]")).toHaveCount(0);
   await expect(page.locator("canvas")).toHaveCount(0);
   await page.unroute(`**/api/v1/workspaces/${wsId}/attachments/${pdfId}/download`);
@@ -355,7 +378,10 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   if (evidenceDir) {
     fs.mkdirSync(evidenceDir, { recursive: true });
     fs.writeFileSync(path.join(evidenceDir, "korean-pdf-canvas.png"), koreanPng);
-    fs.writeFileSync(path.join(evidenceDir, "korean-pdf-cells.json"), `${JSON.stringify(cells, null, 2)}\n`);
+    fs.writeFileSync(
+      path.join(evidenceDir, "korean-pdf-cells.json"),
+      `${JSON.stringify(cells, null, 2)}\n`,
+    );
   }
 
   // Production asset URLs, types and the scripting exclusion.

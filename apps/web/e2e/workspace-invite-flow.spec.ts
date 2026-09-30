@@ -21,7 +21,10 @@ const invited = {
 
 async function inviteAccount(page: Page, email: string): Promise<string> {
   await page.goto("/w/acme/settings");
-  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^멤버$/ })
+    .click();
   await page.getByLabel("초대할 이메일").fill(email);
   await page.getByRole("button", { name: "초대", exact: true }).click();
   const link = page.getByRole("link").filter({ hasText: "/invite/" });
@@ -61,7 +64,10 @@ test("owner invites a second user who signs up, accepts, and appears in members"
   await expect(page).toHaveURL(/\/$/);
 
   await page.goto("/w/acme/settings");
-  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^멤버$/ })
+    .click();
   await page.getByLabel("초대할 이메일").fill(invited.email);
   await page.getByRole("button", { name: "초대", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "초대를 만들었습니다" })).toBeVisible();
@@ -82,11 +88,23 @@ test("owner invites a second user who signs up, accepts, and appears in members"
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
   if (!adminUrl || !container) throw new Error("isolated PostgreSQL fixture is required");
   const database = new URL(adminUrl).pathname.slice(1);
-  const updated = execFileSync("docker", [
-    "exec", container, "psql", "-U", "postgres", "-d", database,
-    "-v", "ON_ERROR_STOP=1", "-c",
-    "UPDATE fvoci.invitations SET expires_at = now() - interval '1 second' WHERE email = 'expired-invite@example.com' AND accepted_at IS NULL",
-  ], { encoding: "utf8", stdio: "pipe" });
+  const updated = execFileSync(
+    "docker",
+    [
+      "exec",
+      container,
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      database,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "UPDATE fvoci.invitations SET expires_at = now() - interval '1 second' WHERE email = 'expired-invite@example.com' AND accepted_at IS NULL",
+    ],
+    { encoding: "utf8", stdio: "pipe" },
+  );
   expect(updated.trim()).toBe("UPDATE 1");
 
   await logout(page);
@@ -108,9 +126,10 @@ test("owner invites a second user who signs up, accepts, and appears in members"
   await page.getByLabel("성").fill(invited.familyName);
   await page.getByLabel("이름", { exact: true }).fill(invited.givenName);
   await page.getByLabel("비밀번호").fill(invited.password);
-  const rejected = page.waitForResponse((response) =>
-    response.url().endsWith(`/api/v1/invitations/${token}/accept`) &&
-    response.request().method() === "POST",
+  const rejected = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/api/v1/invitations/${token}/accept`) &&
+      response.request().method() === "POST",
   );
   await page.getByRole("button", { name: "수락" }).click();
   const rejection = await rejected;
@@ -126,7 +145,10 @@ test("owner invites a second user who signs up, accepts, and appears in members"
   await expect(page.getByText(owner.workspaceName)).toBeVisible();
 
   await page.goto("/w/acme/settings");
-  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^멤버$/ })
+    .click();
   await expect(page.getByText(invited.email)).toBeVisible();
   await expect(page.getByText("박초대수락")).toBeVisible();
   await expect(page.getByText("멤버", { exact: true }).nth(1)).toBeVisible();
@@ -139,7 +161,11 @@ test("owner invites a second user who signs up, accepts, and appears in members"
 });
 
 test("an existing account accepts with its password and keeps its profile", async ({ page }) => {
-  const existing = { email: "existing-invite@example.com", password: "existingpass1", givenName: "기존사용자" };
+  const existing = {
+    email: "existing-invite@example.com",
+    password: "existingpass1",
+    givenName: "기존사용자",
+  };
   createE2eUser(existing.email, existing.password, existing.givenName, { familyName: "최" });
   await login(page, owner.email, owner.password);
   const href = await inviteAccount(page, existing.email);
@@ -151,8 +177,8 @@ test("an existing account accepts with its password and keeps its profile", asyn
   await expect(page.getByLabel("이메일")).toHaveValue("");
   await expect(page.getByLabel("이름", { exact: true })).toHaveValue("");
   await page.getByLabel("비밀번호").fill("wrongpassword1");
-  const rejected = page.waitForResponse((response) =>
-    response.url().endsWith("/accept") && response.request().method() === "POST",
+  const rejected = page.waitForResponse(
+    (response) => response.url().endsWith("/accept") && response.request().method() === "POST",
   );
   await page.getByRole("button", { name: "수락", exact: true }).click();
   expect((await rejected).status()).toBe(401);
@@ -163,15 +189,28 @@ test("an existing account accepts with its password and keeps its profile", asyn
   await expect(page).toHaveURL(/\/$/);
   const me = await page.request.get("/api/v1/auth/me");
   expect(me.status()).toBe(200);
-  expect(await me.json()).toMatchObject({ email: existing.email, givenName: existing.givenName, familyName: "최" });
+  expect(await me.json()).toMatchObject({
+    email: existing.email,
+    givenName: existing.givenName,
+    familyName: "최",
+  });
   await page.goto("/w/acme/settings");
-  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^멤버$/ })
+    .click();
   await expect(page.getByText(existing.email)).toBeVisible();
   await expect(page.getByText("최기존사용자")).toBeVisible();
 });
 
-test("required legal consent gates invitation acceptance before the real MFA challenge", async ({ page }) => {
-  const existing = { email: "mfa-invite@example.com", password: "mfainvitepass1", givenName: "초대MFA" };
+test("required legal consent gates invitation acceptance before the real MFA challenge", async ({
+  page,
+}) => {
+  const existing = {
+    email: "mfa-invite@example.com",
+    password: "mfainvitepass1",
+    givenName: "초대MFA",
+  };
   createE2eUser(existing.email, existing.password, existing.givenName);
   await login(page, existing.email, existing.password);
   await page.goto("/settings/account");
@@ -192,7 +231,9 @@ test("required legal consent gates invitation acceptance before the real MFA cha
   await login(page, owner.email, owner.password);
   await page.goto("/settings/legal");
   await page.getByLabel("법적 문서 제목").fill("초대 이용약관");
-  await page.getByLabel("본문(마크다운)").fill("## 초대 약관\n\n초대 수락에는 이 약관의 동의가 필요합니다.");
+  await page
+    .getByLabel("본문(마크다운)")
+    .fill("## 초대 약관\n\n초대 수락에는 이 약관의 동의가 필요합니다.");
   await page.getByLabel("발효일").fill("2026-01-01");
   await expect(page.getByLabel("필수 법적 문서")).toBeChecked();
   await page.getByRole("button", { name: "발행", exact: true }).click();
@@ -228,8 +269,8 @@ test("required legal consent gates invitation acceptance before the real MFA cha
   await consent.uncheck();
   await expect(accept).toBeDisabled();
   await consent.check();
-  const accepted = page.waitForResponse((response) =>
-    response.url().endsWith("/accept") && response.request().method() === "POST",
+  const accepted = page.waitForResponse(
+    (response) => response.url().endsWith("/accept") && response.request().method() === "POST",
   );
   await accept.click();
   const result = await accepted;

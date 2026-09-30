@@ -11,7 +11,9 @@ async function vue(page: Page): Promise<void> {
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
 }
 
-test("workspace entrance, project creation validation, clone and archived navigation survive reload", async ({ page }) => {
+test("workspace entrance, project creation validation, clone and archived navigation survive reload", async ({
+  page,
+}) => {
   const csp = watchCspViolations(page);
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/);
@@ -28,8 +30,15 @@ test("workspace entrance, project creation validation, clone and archived naviga
   ).id;
   await page.goto("/w/navigation?from=direct#entrance");
   await vue(page);
-  await expect(page.getByRole("navigation", { name: "워크스페이스" }).getByRole("link", { name: "홈", exact: true })).toHaveAttribute("aria-current", "page");
-  await page.getByRole("navigation", { name: "워크스페이스" }).getByRole("link", { name: "프로젝트", exact: true }).click();
+  await expect(
+    page
+      .getByRole("navigation", { name: "워크스페이스" })
+      .getByRole("link", { name: "홈", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await page
+    .getByRole("navigation", { name: "워크스페이스" })
+    .getByRole("link", { name: "프로젝트", exact: true })
+    .click();
   await vue(page);
   await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
   const dialog = page.getByRole("dialog");
@@ -41,16 +50,24 @@ test("workspace entrance, project creation validation, clone and archived naviga
   await dialog.getByRole("button", { name: "새 프로젝트", exact: true }).click();
   await expect(page).toHaveURL(/\/NAV\/tasks$/);
   await vue(page);
-  const projects = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items;
+  const projects = (
+    await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()
+  ).items;
   projectId = projects.find((item: { key: string }) => item.key === "NAV").id;
   await page.goto("/w/navigation/projects");
   await page.getByRole("button", { name: "복제", exact: true }).click();
   await dialog.getByLabel("키", { exact: true }).fill("COPY");
   await dialog.getByRole("button", { name: "복제", exact: true }).click();
   await expect(page).toHaveURL(/\/COPY\/tasks$/);
-  expect((await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${projectId}/archive`)).ok()).toBe(true);
+  expect(
+    (
+      await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${projectId}/archive`)
+    ).ok(),
+  ).toBe(true);
   await page.goto("/w/navigation/projects");
-  await expect(page.getByRole("list", { name: "보관됨" }).getByRole("link")).toContainText("Navigation project");
+  await expect(page.getByRole("list", { name: "보관됨" }).getByRole("link")).toContainText(
+    "Navigation project",
+  );
   await page.reload();
   await vue(page);
   await page.getByRole("list", { name: "보관됨" }).getByRole("link").click();
@@ -59,21 +76,43 @@ test("workspace entrance, project creation validation, clone and archived naviga
   expect(csp).toEqual([]);
 });
 
-test("wiki list creates documents and restores wiki and project trash through the live Rust endpoints", async ({ page }) => {
+test("wiki list creates documents and restores wiki and project trash through the live Rust endpoints", async ({
+  page,
+}) => {
   await login(page, owner.email, owner.password);
   await page.goto("/w/navigation/wiki");
   await vue(page);
   await page.getByRole("button", { name: "새 문서", exact: true }).click();
   await expect(page).toHaveURL(/\/WIKI-\d+$/);
   await vue(page);
-  const wiki = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/tree`)).json()).items[0];
-  expect((await page.request.patch(`/api/v1/workspaces/${workspaceId}/documents/${wiki.id}`, { data: { title: "Restorable wiki" } })).ok()).toBe(true);
-  expect((await page.request.delete(`/api/v1/workspaces/${workspaceId}/documents/${wiki.id}`)).ok()).toBe(true);
-  const copy = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items.find((item: { key: string }) => item.key === "COPY");
-  const created = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents`, { data: { parentId: copy.rootDocumentId, title: "Restorable project document" } });
+  const wiki = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/tree`)).json())
+    .items[0];
+  expect(
+    (
+      await page.request.patch(`/api/v1/workspaces/${workspaceId}/documents/${wiki.id}`, {
+        data: { title: "Restorable wiki" },
+      })
+    ).ok(),
+  ).toBe(true);
+  expect(
+    (await page.request.delete(`/api/v1/workspaces/${workspaceId}/documents/${wiki.id}`)).ok(),
+  ).toBe(true);
+  const copy = (
+    await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()
+  ).items.find((item: { key: string }) => item.key === "COPY");
+  const created = await page.request.post(
+    `/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents`,
+    { data: { parentId: copy.rootDocumentId, title: "Restorable project document" } },
+  );
   expect(created.status()).toBe(201);
   const document = await created.json();
-  expect((await page.request.delete(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${document.id}`)).ok()).toBe(true);
+  expect(
+    (
+      await page.request.delete(
+        `/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${document.id}`,
+      )
+    ).ok(),
+  ).toBe(true);
   await page.goto("/w/navigation/trash");
   await vue(page);
   await page.getByRole("button", { name: "복원 Restorable wiki", exact: true }).click();
@@ -82,32 +121,57 @@ test("wiki list creates documents and restores wiki and project trash through th
   await expect(page.getByText("Restorable project document", { exact: true })).toHaveCount(0);
   await page.reload();
   await vue(page);
-  expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/documents/${wiki.id}`)).ok()).toBe(true);
-  expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${document.id}`)).ok()).toBe(true);
+  expect(
+    (await page.request.get(`/api/v1/workspaces/${workspaceId}/documents/${wiki.id}`)).ok(),
+  ).toBe(true);
+  expect(
+    (
+      await page.request.get(
+        `/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${document.id}`,
+      )
+    ).ok(),
+  ).toBe(true);
   await page.getByRole("link", { name: "위키로", exact: true }).click();
   await expect(page.getByRole("link", { name: /Restorable wiki/ })).toBeVisible();
 });
 
-test("direct section URLs preserve query and hash across reload; foreign and signed-out workspaces are denied", async ({ page }) => {
+test("direct section URLs preserve query and hash across reload; foreign and signed-out workspaces are denied", async ({
+  page,
+}) => {
   await login(page, owner.email, owner.password);
-  for (const path of ["/w/navigation", "/w/navigation/projects", "/w/navigation/wiki", "/w/navigation/my-tasks", "/w/navigation/notifications", "/w/navigation/trash", "/w/navigation/search?q=missing&tab=task"]) {
+  for (const path of [
+    "/w/navigation",
+    "/w/navigation/projects",
+    "/w/navigation/wiki",
+    "/w/navigation/my-tasks",
+    "/w/navigation/notifications",
+    "/w/navigation/trash",
+    "/w/navigation/search?q=missing&tab=task",
+  ]) {
     const target = `${path}${path.includes("?") ? "&" : "?"}from=direct#section`;
     await page.goto(target);
     await vue(page);
     await page.reload();
     await vue(page);
-    expect(new URL(page.url()).pathname + new URL(page.url()).search + new URL(page.url()).hash).toBe(target);
+    expect(
+      new URL(page.url()).pathname + new URL(page.url()).search + new URL(page.url()).hash,
+    ).toBe(target);
     await expect(page.getByRole("main").getByRole("heading", { level: 1 })).toBeVisible();
   }
   await page.goto("/w/navigation/search?q=missing&tab=task");
   await page.getByRole("tab", { name: "문서", exact: true }).click();
   await expect(page).toHaveURL(/tab=document/);
   await page.reload();
-  await expect(page.getByRole("tab", { name: "문서", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "문서", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await logout(page);
   await page.goto("/w/navigation/my-tasks?from=login#mine");
   await expect(page).toHaveURL(/\/login\?returnTo=/);
-  expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/w/navigation/my-tasks?from=login#mine");
+  expect(new URL(page.url()).searchParams.get("returnTo")).toBe(
+    "/w/navigation/my-tasks?from=login#mine",
+  );
   createE2eUser("navigation-outsider@example.com", "outsiderpass123", "외부");
   await login(page, "navigation-outsider@example.com", "outsiderpass123");
   await page.goto("/w/navigation/projects");
@@ -115,28 +179,49 @@ test("direct section URLs preserve query and hash across reload; foreign and sig
   expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).status()).toBe(404);
 });
 
-test("notification pagination reaches a third page, bell cache stays valid, and archive/read persist", async ({ page, browser, baseURL }) => {
+test("notification pagination reaches a third page, bell cache stays valid, and archive/read persist", async ({
+  page,
+  browser,
+  baseURL,
+}) => {
   await login(page, owner.email, owner.password);
-  createE2eUser("navigation-inbox@example.com", "inboxpass123", "수신", { workspaceSlug: "navigation", membershipRole: "member" });
-  const members = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()).items;
-  const memberId = members.find((item: { email: string }) => item.email === "navigation-inbox@example.com").userId;
-  const copy = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items.find((item: { key: string }) => item.key === "COPY");
-  createE2eUser("navigation-mentions@example.com", "mentionspass123", "댓글", { workspaceSlug: "navigation", membershipRole: "member" });
+  createE2eUser("navigation-inbox@example.com", "inboxpass123", "수신", {
+    workspaceSlug: "navigation",
+    membershipRole: "member",
+  });
+  const members = (
+    await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()
+  ).items;
+  const memberId = members.find(
+    (item: { email: string }) => item.email === "navigation-inbox@example.com",
+  ).userId;
+  const copy = (
+    await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()
+  ).items.find((item: { key: string }) => item.key === "COPY");
+  createE2eUser("navigation-mentions@example.com", "mentionspass123", "댓글", {
+    workspaceSlug: "navigation",
+    membershipRole: "member",
+  });
   const authorContext = await browser.newContext({ baseURL });
   const coauthor = await authorContext.newPage();
   const commentIds: string[] = [];
   try {
     await login(coauthor, "navigation-mentions@example.com", "mentionspass123");
     for (let start = 0; start < 105; start += 5) {
-      await Promise.all(Array.from({ length: Math.min(5, 105 - start) }, async (_, offset) => {
-        // Two real members stay within the unchanged sixty-comments/user limit.
-        const author = start + offset < 53 ? page : coauthor;
-        const comment = await author.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${copy.rootDocumentId}/comments`, {
-          data: { body: `Paged inbox ${start + offset}`, mentionedUserIds: [memberId] },
-        });
-        expect(comment.status()).toBe(201);
-        commentIds.push((await comment.json()).id);
-      }));
+      await Promise.all(
+        Array.from({ length: Math.min(5, 105 - start) }, async (_, offset) => {
+          // Two real members stay within the unchanged sixty-comments/user limit.
+          const author = start + offset < 53 ? page : coauthor;
+          const comment = await author.request.post(
+            `/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${copy.rootDocumentId}/comments`,
+            {
+              data: { body: `Paged inbox ${start + offset}`, mentionedUserIds: [memberId] },
+            },
+          );
+          expect(comment.status()).toBe(201);
+          commentIds.push((await comment.json()).id);
+        }),
+      );
     }
   } finally {
     await authorContext.close();
@@ -159,10 +244,31 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
     ON CONFLICT (workspace_id, user_id, event_id) DO NOTHING;
     COMMIT;
   `;
-  execFileSync("docker", ["exec", "-i", container, "psql", "-U", "postgres", "-d", new URL(adminUrl).pathname.slice(1), "-v", "ON_ERROR_STOP=1"], { input: sql, stdio: ["pipe", "pipe", "pipe"] });
+  execFileSync(
+    "docker",
+    [
+      "exec",
+      "-i",
+      container,
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      new URL(adminUrl).pathname.slice(1),
+      "-v",
+      "ON_ERROR_STOP=1",
+    ],
+    { input: sql, stdio: ["pipe", "pipe", "pipe"] },
+  );
   await logout(page);
   await login(page, "navigation-inbox@example.com", "inboxpass123");
-  expect((await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(105);
+  expect(
+    (
+      await (
+        await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)
+      ).json()
+    ).count,
+  ).toBe(105);
   await page.goto("/w/navigation/notifications");
   await vue(page);
   const rows = page.locator(".notifications-page__row");
@@ -173,14 +279,22 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   await expect(rows).toHaveCount(105);
   await expect(page.getByRole("button", { name: "더 보기", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: /안 읽은 알림 105건/ }).click();
-  await expect(page.getByRole("region", { name: "알림", exact: true }).getByText("문서에 새 댓글이 달렸습니다", { exact: true }).first()).toBeVisible();
+  await expect(
+    page
+      .getByRole("region", { name: "알림", exact: true })
+      .getByText("문서에 새 댓글이 달렸습니다", { exact: true })
+      .first(),
+  ).toBeVisible();
   await page.getByRole("button", { name: /안 읽은 알림 105건/ }).click();
   await rows.first().getByRole("button", { name: "보관", exact: true }).click();
   await page.getByRole("tab", { name: "보관", exact: true }).click();
   await expect(rows).toHaveCount(1);
   await expect(page).toHaveURL(/\?tab=archived$/);
   await page.reload();
-  await expect(page.getByRole("tab", { name: "보관", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "보관", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await expect(rows).toHaveCount(1);
   await rows.first().getByRole("button", { name: "보관 해제", exact: true }).click();
   await expect(rows).toHaveCount(0);
@@ -188,7 +302,16 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   await page.getByRole("tab", { name: "안 읽음", exact: true }).click();
   await expect(page).toHaveURL(/\?tab=unread$/);
   await page.reload();
-  await expect(page.getByRole("tab", { name: "안 읽음", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "안 읽음", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await expect(rows).toHaveCount(0);
-  expect((await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(0);
+  expect(
+    (
+      await (
+        await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)
+      ).json()
+    ).count,
+  ).toBe(0);
 });

@@ -5,7 +5,10 @@ import { crc32 as zlibCrc32, deflateRawSync } from "node:zlib";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { unzipSync } from "fflate";
 import { writeZip } from "../src/features/attachments/docx-test-fixture";
-import { buildChartPptx, HOSTILE_PPTX_MARKUP } from "../src/features/attachments/pptx-hostile-fixture";
+import {
+  buildChartPptx,
+  HOSTILE_PPTX_MARKUP,
+} from "../src/features/attachments/pptx-hostile-fixture";
 import { PPTX_MAX_MARKUP_BYTES } from "../src/features/attachments/pptx-limits";
 import { innerSlideSvg } from "../src/features/attachments/pptx-svg";
 import {
@@ -165,7 +168,9 @@ async function probeSvg(page: Page): Promise<SvgProbe> {
 
 /** The dedicated PPTX workers (Vite names the built chunk after `pptx-worker.ts`). */
 function pptxWorkers(page: Page) {
-  return page.workers().filter((worker) => /\/assets\/pptx-worker-[^/]+\.js$/.test(new URL(worker.url()).pathname));
+  return page
+    .workers()
+    .filter((worker) => /\/assets\/pptx-worker-[^/]+\.js$/.test(new URL(worker.url()).pathname));
 }
 
 type Rgb = [number, number, number];
@@ -220,15 +225,28 @@ async function sampleSlide(page: Page, points: Record<string, [number, number]>)
       let offBlue = 0;
       for (let y = box.y; y < box.y + box.height; y += 1) {
         for (let x = box.x; x < box.x + box.width; x += 1) {
-          const rgb = ctx.getImageData(Math.round((x + 0.5) * px), Math.round((y + 0.5) * px), 1, 1).data;
+          const rgb = ctx.getImageData(
+            Math.round((x + 0.5) * px),
+            Math.round((y + 0.5) * px),
+            1,
+            1,
+          ).data;
           if (!blue.every((c, k) => Math.abs(rgb[k]! - c) <= 24)) offBlue += 1;
         }
       }
-      const count = (r: { x: number; y: number; width: number; height: number }, hit: (rgb: Uint8ClampedArray) => boolean) => {
+      const count = (
+        r: { x: number; y: number; width: number; height: number },
+        hit: (rgb: Uint8ClampedArray) => boolean,
+      ) => {
         let n = 0;
         for (let y = r.y; y < r.y + r.height; y += 1) {
           for (let x = r.x; x < r.x + r.width; x += 1) {
-            if (hit(ctx.getImageData(Math.round((x + 0.5) * px), Math.round((y + 0.5) * px), 1, 1).data)) n += 1;
+            if (
+              hit(
+                ctx.getImageData(Math.round((x + 0.5) * px), Math.round((y + 0.5) * px), 1, 1).data,
+              )
+            )
+              n += 1;
           }
         }
         return n;
@@ -240,9 +258,15 @@ async function sampleSlide(page: Page, points: Record<string, [number, number]>)
         beside: placeholderBox.beside.reduce((n, r) => n + count(r, notWhite), 0),
       };
       // Dark pixels in the title box: glyphs were drawn (whatever font the host has).
-      const title = ctx.getImageData(Math.round(40 * px), Math.round(24 * px), Math.round(880 * px), Math.round(60 * px)).data;
+      const title = ctx.getImageData(
+        Math.round(40 * px),
+        Math.round(24 * px),
+        Math.round(880 * px),
+        Math.round(60 * px),
+      ).data;
       let ink = 0;
-      for (let i = 0; i < title.length; i += 4) if (title[i]! + title[i + 1]! + title[i + 2]! < 240) ink += 1;
+      for (let i = 0; i < title.length; i += 4)
+        if (title[i]! + title[i + 1]! + title[i + 2]! < 240) ink += 1;
       return { colors: out, titleInk: ink, offBlue, placeholder };
     },
     {
@@ -300,7 +324,11 @@ async function chartPaint(page: Page, png: Buffer) {
       for (let i = 0; i < all.length; i += 4) {
         if (chart.bar.every((c, k) => Math.abs(all[i + k]! - c) <= 24)) bar += 1;
       }
-      return { inBars: chart.inBars.map(at), background: chart.background.map(at), barArea: bar / (px * px) };
+      return {
+        inBars: chart.inBars.map(at),
+        background: chart.background.map(at),
+        barArea: bar / (px * px),
+      };
     },
     { data: png.toString("base64"), chart: HOSTILE_CHART },
   );
@@ -309,7 +337,8 @@ async function chartPaint(page: Page, png: Buffer) {
 async function expectChartPainted(page: Page, png: Buffer) {
   const paint = await chartPaint(page, png);
   for (const rgb of paint.inBars) expect(near(rgb, HOSTILE_CHART.bar), `bar ${rgb}`).toBe(true);
-  for (const rgb of paint.background) expect(near(rgb, [255, 255, 255]), `background ${rgb}`).toBe(true);
+  for (const rgb of paint.background)
+    expect(near(rgb, [255, 255, 255]), `background ${rgb}`).toBe(true);
   expect(paint.barArea).toBeGreaterThan(25_000);
   expect(paint.barArea).toBeLessThan(40_000);
 }
@@ -384,11 +413,19 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   const pptxBytes = buildFixturePptx(text);
   const pptxName = `${token}-deck.pptx`;
   const pptxId = await uploadAttachment(page, wsId, documentId, pptxName, pptxBytes);
-  const meta = (await (await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${pptxId}`)).json()) as {
+  const meta = (await (
+    await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${pptxId}`)
+  ).json()) as {
     mime?: string;
   };
   const textName = "notes.txt";
-  const textId = await uploadAttachment(page, wsId, documentId, textName, Buffer.from("plain attachment body\n", "utf8"));
+  const textId = await uploadAttachment(
+    page,
+    wsId,
+    documentId,
+    textName,
+    Buffer.from("plain attachment body\n", "utf8"),
+  );
   const downloadPath = `/api/v1/workspaces/${wsId}/attachments/${pptxId}/download`;
 
   // --- Slide 1 layout ---------------------------------------------------------
@@ -402,20 +439,32 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   const img = viewer.locator("img.pptx-viewer__slide");
   await expect(img).toHaveAttribute("src", /^blob:/);
   await expect(img).toHaveAttribute("alt", "슬라이드 1 / 2");
-  await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
+  await expect
+    .poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0))
+    .toBe(true);
   const box1 = (await img.boundingBox())!;
   expect(Math.round(box1.width)).toBe(FIXTURE_PPTX_SLIDE_W);
   expect(Math.round(box1.height)).toBe(FIXTURE_PPTX_SLIDE_H);
 
   const first = await probeSvg(page);
   evidence("pptx-slide-1-probe.json", `${JSON.stringify({ ...first, meta }, null, 2)}\n`);
-  for (const part of [text.title, text.body.trim(), text.bold, text.link, text.scriptLink, ...text.list, ...text.table]) {
+  for (const part of [
+    text.title,
+    text.body.trim(),
+    text.bold,
+    text.link,
+    text.scriptLink,
+    ...text.list,
+    ...text.table,
+  ]) {
     expect(first.text).toContain(part);
   }
   expect(first.text).not.toContain(text.secondSlide);
   // The blob is only the fixed outer template; the renderer SVG (links included) is an image inside it.
   expect(first.inner).not.toBeNull();
-  expect(first.outer).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="960" height="540" viewBox="0 0 960 540"><image /);
+  expect(first.outer).toMatch(
+    /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="960" height="540" viewBox="0 0 960 540"><image /,
+  );
   expect(first.inner).toContain(`href="${FIXTURE_PPTX_EXTERNAL_LINK}"`);
   expect(first.images).toBe(1);
   expect(first.foreignObjects).toBeGreaterThan(0);
@@ -470,11 +519,15 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
 
   await viewer.getByRole("button", { name: "확대" }).click();
   await expect(viewer.getByText("125%")).toBeVisible();
-  await expect.poll(async () => Math.round((await img.boundingBox())!.width)).toBe(FIXTURE_PPTX_SLIDE_W * 1.25);
+  await expect
+    .poll(async () => Math.round((await img.boundingBox())!.width))
+    .toBe(FIXTURE_PPTX_SLIDE_W * 1.25);
   for (let i = 0; i < 3; i += 1) await viewer.getByRole("button", { name: "축소" }).click();
   await expect(viewer.getByText("50%")).toBeVisible();
   await expect(viewer.getByRole("button", { name: "축소" })).toBeDisabled();
-  await expect.poll(async () => Math.round((await img.boundingBox())!.width)).toBe(FIXTURE_PPTX_SLIDE_W / 2);
+  await expect
+    .poll(async () => Math.round((await img.boundingBox())!.width))
+    .toBe(FIXTURE_PPTX_SLIDE_W / 2);
   await viewer.getByRole("button", { name: "원래 크기" }).click();
   await expect(viewer.getByText("100%")).toBeVisible();
   await viewer.getByRole("button", { name: "이전 슬라이드" }).click();
@@ -495,13 +548,18 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
           `/api/v1/workspaces/${wsId}/search?q=${encodeURIComponent(token)}&type=attachment`,
         );
         const body = (await res.json()) as { items?: { type: string; title: string }[] };
-        return (body.items ?? []).some((item) => item.type === "attachment" && item.title === pptxName);
+        return (body.items ?? []).some(
+          (item) => item.type === "attachment" && item.title === pptxName,
+        );
       },
       { timeout: 30_000 },
     )
     .toBe(true);
   await page.goto(`/w/acme/search?q=${encodeURIComponent(token)}`);
-  await page.getByRole("region", { name: "검색" }).getByRole("link", { name: new RegExp(pptxName) }).click();
+  await page
+    .getByRole("region", { name: "검색" })
+    .getByRole("link", { name: new RegExp(pptxName) })
+    .click();
   await expect(page).toHaveURL(new RegExp(`/w/acme/a/${pptxId}/view(?:\\?chunk=\\d+)?$`));
   await expect(viewer).toBeVisible({ timeout: 20_000 });
 
@@ -510,7 +568,10 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   await expect(supplement.getByText("레이아웃 없음")).toBeVisible();
   await expect(supplement.locator("mark")).toContainText(token, { timeout: 20_000 });
   await expect(viewer).toBeVisible({ timeout: 20_000 });
-  evidence("pptx-chunk-supplement.png", await page.locator("[data-attachment-viewer]").screenshot());
+  evidence(
+    "pptx-chunk-supplement.png",
+    await page.locator("[data-attachment-viewer]").screenshot(),
+  );
 
   // An unavailable or failing supplement never hides the layout.
   const previewPath = `**/api/v1/workspaces/${wsId}/attachments/${pptxId}/preview-html`;
@@ -548,7 +609,9 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   }, IDLE_WORKER_DEATH);
   await expect.poll(() => pptxWorkers(page).includes(idleWorker)).toBe(false);
   await viewer.getByRole("button", { name: "다음 슬라이드" }).click();
-  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(loadFailed, { timeout: 2_000 });
+  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(loadFailed, {
+    timeout: 2_000,
+  });
   await expect(page.locator("[data-pptx-viewer]")).toHaveCount(0);
   expect(pptxWorkers(page)).toHaveLength(0);
   // Retry downloads and opens again, in exactly one new worker.
@@ -576,7 +639,9 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   await expect(page.getByText("plain attachment body")).toBeVisible();
   hold.release();
   await settled;
-  await expect(page.locator("[data-attachment-viewer]").getByText(textName, { exact: true })).toBeVisible();
+  await expect(
+    page.locator("[data-attachment-viewer]").getByText(textName, { exact: true }),
+  ).toBeVisible();
   await expect(page.locator("[data-pptx-viewer]")).toHaveCount(0);
   await expect(page.locator("img.pptx-viewer__slide")).toHaveCount(0);
   await page.unroute(downloadRoute);
@@ -590,18 +655,33 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
     "bomb.pptx",
     writeZip([
       { name: "[Content_Types].xml", bytes: new TextEncoder().encode("<Types/>") },
-      { name: "ppt/presentation.xml", deflated: deflateRawSync(inflated), crc: zlibCrc32(inflated), size: 16 },
+      {
+        name: "ppt/presentation.xml",
+        deflated: deflateRawSync(inflated),
+        crc: zlibCrc32(inflated),
+        size: 16,
+      },
     ]),
   );
   await page.goto(`/w/acme/a/${bombId}/view`);
-  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(unavailable, { timeout: 30_000 });
+  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(unavailable, {
+    timeout: 30_000,
+  });
   await expect(page.locator("[data-pptx-viewer]")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "다시 시도" })).toHaveCount(0);
 
   // --- Not a deck; and legacy PPT stays download-only -------------------------
-  const brokenId = await uploadAttachment(page, wsId, documentId, "broken.pptx", Buffer.from("not a zip", "utf8"));
+  const brokenId = await uploadAttachment(
+    page,
+    wsId,
+    documentId,
+    "broken.pptx",
+    Buffer.from("not a zip", "utf8"),
+  );
   await page.goto(`/w/acme/a/${brokenId}/view`);
-  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(unavailable, { timeout: 20_000 });
+  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(unavailable, {
+    timeout: 20_000,
+  });
   // The server sniffs MIME from content, so the legacy file carries an OLE compound-file header.
   const ole = Buffer.alloc(4096);
   Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(ole);
@@ -615,9 +695,17 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   const bigSlide = buildFixturePptx(DEFAULT_PPTX_TEXT, {
     slide2Paragraphs: Math.ceil(PPTX_MAX_MARKUP_BYTES / fillerBytes),
   });
-  const markupId = await uploadAttachment(page, wsId, documentId, "markup.pptx", deflateAll(bigSlide));
+  const markupId = await uploadAttachment(
+    page,
+    wsId,
+    documentId,
+    "markup.pptx",
+    deflateAll(bigSlide),
+  );
   await page.goto(`/w/acme/a/${markupId}/view`);
-  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(unavailable, { timeout: 30_000 });
+  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(unavailable, {
+    timeout: 30_000,
+  });
   await expect(page.getByRole("button", { name: "다시 시도" })).toHaveCount(0);
   await expect.poll(() => pptxWorkers(page).length).toBe(0);
 
@@ -640,7 +728,9 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   expect(hostile.inner).not.toBeNull();
   for (const markup of Object.values(HOSTILE_PPTX_MARKUP)) expect(hostile.inner).toContain(markup);
   expect(hostile.outer).not.toMatch(/script|iframe|meta|javascript/i);
-  await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
+  await expect
+    .poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0))
+    .toBe(true);
   const hostileShot = await img.screenshot();
   evidence("pptx-hostile-chart.png", hostileShot);
   // Positive control: the inner chart really painted, so the negatives below are not vacuous.
@@ -655,10 +745,18 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   await standalone.waitForTimeout(1_000);
   expect(standalone.url()).toBe(hostile.src);
   expect(standalone.frames()).toHaveLength(1);
-  expect(await standalone.evaluate(() => (window as unknown as { __pptxPwned?: number }).__pptxPwned)).toBeUndefined();
-  expect(await standalone.evaluate(() => document.documentElement.outerHTML.length)).toBeGreaterThan(0);
-  expect(await standalone.evaluate(() => document.querySelectorAll("script, iframe, a, meta").length)).toBe(0);
-  const standaloneShot = await standalone.screenshot({ clip: { x: 0, y: 0, width: HOSTILE_CHART.width, height: 720 } });
+  expect(
+    await standalone.evaluate(() => (window as unknown as { __pptxPwned?: number }).__pptxPwned),
+  ).toBeUndefined();
+  expect(
+    await standalone.evaluate(() => document.documentElement.outerHTML.length),
+  ).toBeGreaterThan(0);
+  expect(
+    await standalone.evaluate(() => document.querySelectorAll("script, iframe, a, meta").length),
+  ).toBe(0);
+  const standaloneShot = await standalone.screenshot({
+    clip: { x: 0, y: 0, width: HOSTILE_CHART.width, height: 720 },
+  });
   evidence("pptx-hostile-standalone.png", standaloneShot);
   await expectChartPainted(page, standaloneShot);
   await standalone.mouse.click(40, 40);
@@ -667,7 +765,9 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   expect(standaloneErrors).toEqual([]);
   expect(standaloneCsp).toEqual([]);
   await standalone.close();
-  expect(await page.evaluate(() => (window as unknown as { __pptxPwned?: number }).__pptxPwned)).toBeUndefined();
+  expect(
+    await page.evaluate(() => (window as unknown as { __pptxPwned?: number }).__pptxPwned),
+  ).toBeUndefined();
   expect(page.url()).toContain(`/a/${hostileId}/view`);
   expect(pwned).toEqual([]);
 
@@ -688,14 +788,19 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   await pane.getByRole("button", { name: "다음 슬라이드" }).click();
   await expect(pane).toHaveAttribute("data-pptx-slide-state", "loading");
   // The page stays responsive while the worker lays out slide 2.
-  const tick = await page.evaluate(() => new Promise<number>((resolve) => {
-    const started = performance.now();
-    setTimeout(() => resolve(performance.now() - started), 0);
-  }));
+  const tick = await page.evaluate(
+    () =>
+      new Promise<number>((resolve) => {
+        const started = performance.now();
+        setTimeout(() => resolve(performance.now() - started), 0);
+      }),
+  );
   expect(tick).toBeLessThan(500);
   // Back to slide 1 mid-layout: that worker is terminated and a new one shows slide 1.
   await pane.getByRole("button", { name: "이전 슬라이드" }).click();
-  await expect(page.locator('[data-pptx-viewer][data-pptx-slide="0"][data-pptx-slide-state="ready"]')).toBeVisible({
+  await expect(
+    page.locator('[data-pptx-viewer][data-pptx-slide="0"][data-pptx-slide-state="ready"]'),
+  ).toBeVisible({
     timeout: 20_000,
   });
   await expect.poll(() => pptxWorkers(page).includes(slowFirstWorker)).toBe(false);
@@ -703,18 +808,24 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   // Left alone, slide 2 hits the render bound: unavailable, and slide 1 still works.
   const boundStarted = Date.now();
   await pane.getByRole("button", { name: "다음 슬라이드" }).click();
-  await expect(page.locator('[data-pptx-viewer][data-pptx-slide="1"][data-pptx-slide-state="unavailable"]')).toBeVisible({
+  await expect(
+    page.locator('[data-pptx-viewer][data-pptx-slide="1"][data-pptx-slide-state="unavailable"]'),
+  ).toBeVisible({
     timeout: 30_000,
   });
   expect(Date.now() - boundStarted).toBeGreaterThanOrEqual(9_000);
   await expect(pane.getByRole("alert")).toHaveText(unavailable);
   await pane.getByRole("button", { name: "이전 슬라이드" }).click();
-  await expect(page.locator('[data-pptx-viewer][data-pptx-slide="0"][data-pptx-slide-state="ready"]')).toBeVisible({
+  await expect(
+    page.locator('[data-pptx-viewer][data-pptx-slide="0"][data-pptx-slide-state="ready"]'),
+  ).toBeVisible({
     timeout: 20_000,
   });
   // Not laid out again: slide 2 is unavailable at once.
   await pane.getByRole("button", { name: "다음 슬라이드" }).click();
-  await expect(page.locator('[data-pptx-viewer][data-pptx-slide="1"][data-pptx-slide-state="unavailable"]')).toBeVisible({
+  await expect(
+    page.locator('[data-pptx-viewer][data-pptx-slide="1"][data-pptx-slide-state="unavailable"]'),
+  ).toBeVisible({
     timeout: 2_000,
   });
   // Unmount mid-layout (switch attachments): no PPTX worker is left running.
@@ -737,14 +848,21 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
 
   expect(csp).toEqual([]);
   expect(foreign).toEqual([]);
-  expect(foreign.filter((url) => url.startsWith(new URL(FIXTURE_PPTX_EXTERNAL_LINK).origin))).toEqual([]);
-  expect(foreign.filter((url) => url.startsWith(new URL(FIXTURE_PPTX_EXTERNAL_IMAGE).origin))).toEqual([]);
+  expect(
+    foreign.filter((url) => url.startsWith(new URL(FIXTURE_PPTX_EXTERNAL_LINK).origin)),
+  ).toEqual([]);
+  expect(
+    foreign.filter((url) => url.startsWith(new URL(FIXTURE_PPTX_EXTERNAL_IMAGE).origin)),
+  ).toEqual([]);
   expect(pageErrors.filter((message) => !message.includes(IDLE_WORKER_DEATH))).toEqual([]);
 
   // --- Share: same viewer over share bytes; no session preview/edit calls -----
-  const shareRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${documentId}/share-links`, {
-    data: { expiresInDays: 7 },
-  });
+  const shareRes = await page.request.post(
+    `/api/v1/workspaces/${wsId}/documents/${documentId}/share-links`,
+    {
+      data: { expiresInDays: 7 },
+    },
+  );
   expect(shareRes.status(), await shareRes.text()).toBe(201);
   const share = (await shareRes.json()) as { id: string; url: string };
   const sharePath = new URL(share.url).pathname;
@@ -764,7 +882,10 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   await expect(shared).toBeVisible({ timeout: 20_000 });
   await expect(shared.getByText("슬라이드 1 / 2")).toBeVisible();
   await expect(reader.locator("[data-chunk-supplement]")).toHaveCount(0);
-  await expect(reader.locator("[data-attachment-viewer] header a[download]")).toHaveAttribute("href", shareDownload);
+  await expect(reader.locator("[data-attachment-viewer] header a[download]")).toHaveAttribute(
+    "href",
+    shareDownload,
+  );
   const sharedSvg = await probeSvg(reader);
   expect(sharedSvg.inner).not.toBeNull();
   expect(sharedSvg.text).toContain(text.title);
@@ -776,7 +897,9 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   const revoke = await page.request.delete(`/api/v1/workspaces/${wsId}/share-links/${share.id}`);
   expect(revoke.ok(), await revoke.text()).toBeTruthy();
   shareHold.release();
-  await expect(reader.locator("[data-attachment-viewer] [role=alert]")).toHaveText(loadFailed, { timeout: 20_000 });
+  await expect(reader.locator("[data-attachment-viewer] [role=alert]")).toHaveText(loadFailed, {
+    timeout: 20_000,
+  });
   await expect(reader.locator("img.pptx-viewer__slide")).toHaveCount(0);
   await reader.unroute(`**${shareDownload}`);
   expect((await reader.request.get(shareDownload)).status()).toBe(404);

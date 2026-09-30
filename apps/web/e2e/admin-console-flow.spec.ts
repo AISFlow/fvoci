@@ -46,7 +46,9 @@ test("instance admin edits settings and publishes terms; members consent before 
   const users = page.getByRole("region", { name: "사용자", exact: true });
   await expect(users.getByText("admin@example.com")).toBeVisible();
   await expect(users.getByText(member.email)).toBeVisible();
-  await expect(page.getByRole("region", { name: "워크스페이스", exact: true }).getByText(admin.workspaceName)).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "워크스페이스", exact: true }).getByText(admin.workspaceName),
+  ).toBeVisible();
 
   // The unlicensed instance keeps its default branding, and both UI and API
   // refuse branding changes without hiding ordinary admin settings.
@@ -65,13 +67,20 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(share.getByLabel("share.defaultExpiresDays")).toBeEnabled();
   await share.getByLabel("share.defaultExpiresDays").fill("14");
   const saved = page.waitForResponse(
-    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+    (res) =>
+      res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
   );
   await share.getByRole("button", { name: "저장" }).click();
   expect((await saved).status()).toBe(200);
   await page.reload();
-  await expect(page.getByRole("region", { name: "공유 링크", exact: true }).getByLabel("share.defaultExpiresDays")).toHaveValue("14");
-  await expect(page.getByRole("region", { name: "브랜딩", exact: true }).getByLabel("branding.name")).toHaveValue("FVOCI");
+  await expect(
+    page
+      .getByRole("region", { name: "공유 링크", exact: true })
+      .getByLabel("share.defaultExpiresDays"),
+  ).toHaveValue("14");
+  await expect(
+    page.getByRole("region", { name: "브랜딩", exact: true }).getByLabel("branding.name"),
+  ).toHaveValue("FVOCI");
   const instance = await page.request.get("/api/v1/instance");
   expect(instance.ok()).toBe(true);
   expect((await instance.json()).values.branding.name).toBe("FVOCI");
@@ -80,7 +89,9 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(page).toHaveURL(/\/settings\/audit$/);
   await expect(page.getByText("엔터프라이즈 기능 사용 권한이 필요합니다")).toBeVisible();
   await page.goto(`/w/${admin.workspaceSlug}/settings`);
-  const sso = page.locator("details").filter({ has: page.getByText("싱글 사인온", { exact: true }) });
+  const sso = page
+    .locator("details")
+    .filter({ has: page.getByText("싱글 사인온", { exact: true }) });
   await sso.locator("summary").click();
   await expect(sso.getByText("엔터프라이즈 기능 사용 권한이 필요합니다")).toBeVisible();
   await expect(sso.locator("form")).toHaveCount(0);
@@ -91,7 +102,9 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(page).toHaveURL(/\/settings\/legal$/);
   await expect(page.getByLabel("문서 종류")).toHaveValue("terms");
   await page.getByLabel("법적 문서 제목").fill("서비스 이용약관");
-  await page.getByLabel("본문(마크다운)").fill("## 제1조\n\n이 약관은 **서비스** 이용 조건을 정합니다.");
+  await page
+    .getByLabel("본문(마크다운)")
+    .fill("## 제1조\n\n이 약관은 **서비스** 이용 조건을 정합니다.");
   await page.getByLabel("발효일").fill("2026-01-01");
   await expect(page.getByLabel("필수 법적 문서")).toBeChecked();
   await page.getByRole("button", { name: "발행", exact: true }).click();
@@ -134,7 +147,10 @@ test("instance admin edits settings and publishes terms; members consent before 
   const submit = memberPage.getByRole("button", { name: "동의하고 계속" });
   await expect(submit).toBeDisabled();
   // The current query controls the destination even when this page is reused.
-  await navigateAuthQuery(memberPage, "/consent?returnTo=%2Fsettings%2Faccount%3Fconfirmed%3D1%23profile");
+  await navigateAuthQuery(
+    memberPage,
+    "/consent?returnTo=%2Fsettings%2Faccount%3Fconfirmed%3D1%23profile",
+  );
   await memberPage.getByRole("checkbox", { name: "동의합니다" }).check();
   await submit.click();
   await expect(memberPage).toHaveURL(/\/settings\/account\?confirmed=1#profile$/);
@@ -143,7 +159,11 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(memberPage).toHaveURL(/\/$/);
   await expect(memberPage.getByText("소속 워크스페이스가 없습니다.")).toBeVisible();
   expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(200);
-  expect(authSql("SELECT count(*) FROM fvoci.user_consents c JOIN fvoci.users u ON c.user_id = u.id WHERE u.email = 'console-member@example.com' AND c.kind = 'terms' AND c.version = 1")).toBe("1");
+  expect(
+    authSql(
+      "SELECT count(*) FROM fvoci.user_consents c JOIN fvoci.users u ON c.user_id = u.id WHERE u.email = 'console-member@example.com' AND c.kind = 'terms' AND c.version = 1",
+    ),
+  ).toBe("1");
   // Empty pending lists continue safely; foreign and recursive targets go home.
   for (const target of ["//evil.example/", "/consent", "/settings/account?confirmed=1#profile"]) {
     await memberPage.goto(`/consent?returnTo=${encodeURIComponent(target)}`);

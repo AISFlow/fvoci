@@ -34,7 +34,10 @@ async function runSetup(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/$/);
 }
 
-async function patchOperator(page: Page, operator: Record<string, string | null> | null): Promise<void> {
+async function patchOperator(
+  page: Page,
+  operator: Record<string, string | null> | null,
+): Promise<void> {
   const res = await page.request.patch("/api/v1/admin/instance-settings", {
     data: operator === null ? { operator: null } : { operator },
   });
@@ -78,7 +81,10 @@ test("operator settings persist through admin API and surface on public service-
     await expect(anonEmpty.getByText("등록된 서비스 운영 정보가 없습니다.")).toBeVisible();
     await anonEmpty.goto("/login");
     const emptyFooter = loginFooter(anonEmpty);
-    await expect(emptyFooter.getByRole("link", { name: "이용약관" })).toHaveAttribute("href", "/legal/terms");
+    await expect(emptyFooter.getByRole("link", { name: "이용약관" })).toHaveAttribute(
+      "href",
+      "/legal/terms",
+    );
     await expect(emptyFooter.getByRole("link", { name: "개인정보처리방침" })).toHaveAttribute(
       "href",
       "/legal/privacy",
@@ -94,10 +100,13 @@ test("operator settings persist through admin API and surface on public service-
 
   await page.goto("/settings/admin");
   const operatorSection = page.locator('section[aria-labelledby="setting-operator"]');
-  await expect(operatorSection.getByLabel("operator.businessName")).toHaveValue(fullOperator.businessName);
+  await expect(operatorSection.getByLabel("operator.businessName")).toHaveValue(
+    fullOperator.businessName,
+  );
   await operatorSection.getByLabel("operator.supportEmail").fill("ops@example.com");
   const saved = page.waitForResponse(
-    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+    (res) =>
+      res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
   );
   await operatorSection.getByRole("button", { name: "저장", exact: true }).click();
   expect((await saved).status()).toBe(200);
@@ -112,15 +121,17 @@ test("operator settings persist through admin API and surface on public service-
       "href",
       "mailto:ops@example.com",
     );
-    await expect(anonFull.getByRole("link", { name: fullOperator.businessInfoUrl })).toHaveAttribute(
-      "href",
-      fullOperator.businessInfoUrl,
-    );
+    await expect(
+      anonFull.getByRole("link", { name: fullOperator.businessInfoUrl }),
+    ).toHaveAttribute("href", fullOperator.businessInfoUrl);
     await expect(anonFull.getByText("javascript:")).toHaveCount(0);
 
     await anonFull.goto("/login");
     const fullFooter = loginFooter(anonFull);
-    await expect(fullFooter.getByRole("link", { name: "서비스 정보" })).toHaveAttribute("href", "/service-info");
+    await expect(fullFooter.getByRole("link", { name: "서비스 정보" })).toHaveAttribute(
+      "href",
+      "/service-info",
+    );
     await expect(fullFooter.getByRole("link", { name: "이용약관" })).toBeVisible();
   });
 
@@ -186,7 +197,9 @@ test("service-info surfaces load failure for public instance errors", async ({ p
   await expect(page.getByRole("button", { name: "다시 시도" })).toBeVisible();
 });
 
-test("service-info recovers after manual retry when instance fetch initially fails", async ({ page }) => {
+test("service-info recovers after manual retry when instance fetch initially fails", async ({
+  page,
+}) => {
   test.setTimeout(60_000);
   let failRequests = true;
   await page.route("**/api/v1/instance", async (route) => {

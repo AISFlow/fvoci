@@ -82,9 +82,11 @@ async function failSetupUntilRetry(page: Page): Promise<{ exhausted: Promise<unk
   let failures = 0;
   // Wait for the production query's initial request and three retries, so the
   // visible error assertion starts after the query enters its terminal state.
-  const exhausted = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === "/api/v1/setup" &&
-    response.status() === 503 && ++failures === 4,
+  const exhausted = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/setup" &&
+      response.status() === 503 &&
+      ++failures === 4,
   );
   return { exhausted };
 }
@@ -170,14 +172,17 @@ test("returnTo a Vue gantt path does a full load there after login", async ({ pa
   expect(icons).toEqual([]);
 });
 
-test("authenticated Vue login exposes setup failure and retries to home with its real session", async ({ page }) => {
+test("authenticated Vue login exposes setup failure and retries to home with its real session", async ({
+  page,
+}) => {
   await ensureSetup(page);
   const before = await page.request.get("/api/v1/auth/me");
   expect(before.status()).toBe(200);
   const user = await before.json();
   const { exhausted } = await failSetupUntilRetry(page);
-  const me = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === "/api/v1/auth/me" && response.status() === 200,
+  const me = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/auth/me" && response.status() === 200,
   );
 
   await page.goto("/login#mfa=setup-error-fragment");
@@ -192,8 +197,8 @@ test("authenticated Vue login exposes setup failure and retries to home with its
   await expect(page.getByLabel("인증 코드")).toHaveCount(0);
 
   await page.unroute("**/api/v1/setup");
-  const recovered = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === "/api/v1/setup" && response.status() === 200,
+  const recovered = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/api/v1/setup" && response.status() === 200,
   );
   await retry.click();
   expect((await recovered).status()).toBe(200);
@@ -206,12 +211,15 @@ test("authenticated Vue login exposes setup failure and retries to home with its
   expect(await after.json()).toEqual(user);
 });
 
-test("signed-out setup failure preserves the MFA fragment until a real setup retry succeeds", async ({ page }) => {
+test("signed-out setup failure preserves the MFA fragment until a real setup retry succeeds", async ({
+  page,
+}) => {
   await login(page, admin.email, admin.password);
   await logout(page);
   const { exhausted } = await failSetupUntilRetry(page);
-  const me = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === "/api/v1/auth/me" && response.status() === 401,
+  const me = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/auth/me" && response.status() === 401,
   );
 
   // This marker tests fragment gating and consumption; MFA verification itself
@@ -229,8 +237,8 @@ test("signed-out setup failure preserves the MFA fragment until a real setup ret
   await expect(page.getByLabel("인증 코드")).toHaveCount(0);
 
   await page.unroute("**/api/v1/setup");
-  const recovered = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === "/api/v1/setup" && response.status() === 200,
+  const recovered = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/api/v1/setup" && response.status() === 200,
   );
   await retry.click();
   expect((await recovered).status()).toBe(200);

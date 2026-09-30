@@ -49,7 +49,10 @@ function threePageHwp(): Buffer {
 const scriptsBombHwpx = Buffer.from(
   writeZip([
     ...readZip(new Uint8Array(hancomHwpx)),
-    ...[0, 1, 2, 3].map((n) => ({ name: `Scripts/s${n}.js`, data: new Uint8Array(32 * 1024 * 1024) })),
+    ...[0, 1, 2, 3].map((n) => ({
+      name: `Scripts/s${n}.js`,
+      data: new Uint8Array(32 * 1024 * 1024),
+    })),
   ]),
 );
 
@@ -61,13 +64,17 @@ const scriptsBombHwpx = Buffer.from(
 const slowHwpx = Buffer.from(
   buildFixtureHwpx(
     new Uint8Array(hancomHwpx),
-    Array.from({ length: 15_000 }, (_, n) => `${n + 1}쪽 ${"가나다라마바사아자차 ".repeat(90)}`.trim()),
+    Array.from({ length: 15_000 }, (_, n) =>
+      `${n + 1}쪽 ${"가나다라마바사아자차 ".repeat(90)}`.trim(),
+    ),
   ),
 );
 
 /** Running rhwp document workers (one per open HWP viewer). */
 function hwpWorkers(page: Page): number {
-  return page.workers().filter((worker) => /\/assets\/hwp-worker-[^/]+\.js$/.test(new URL(worker.url()).pathname))
+  return page
+    .workers()
+    .filter((worker) => /\/assets\/hwp-worker-[^/]+\.js$/.test(new URL(worker.url()).pathname))
     .length;
 }
 
@@ -235,7 +242,8 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   );
   const previewHtmlRequests: string[] = [];
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname.endsWith("/preview-html")) previewHtmlRequests.push(request.url());
+    if (new URL(request.url()).pathname.endsWith("/preview-html"))
+      previewHtmlRequests.push(request.url());
   });
 
   // HWPX: three laid-out pages with distinct Korean ink, page navigation and zoom.
@@ -271,13 +279,17 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
 
   await viewer.getByRole("button", { name: "확대" }).click();
   await expect(viewer.getByText("125%")).toBeVisible();
-  await expect.poll(async () => Math.round((await probePage(page)).cssWidth)).toBe(Math.round(first.naturalWidth * 1.25));
+  await expect
+    .poll(async () => Math.round((await probePage(page)).cssWidth))
+    .toBe(Math.round(first.naturalWidth * 1.25));
   await viewer.getByRole("button", { name: "축소" }).click();
   await viewer.getByRole("button", { name: "축소" }).click();
   await viewer.getByRole("button", { name: "축소" }).click();
   await expect(viewer.getByText("50%")).toBeVisible();
   await expect(viewer.getByRole("button", { name: "축소" })).toBeDisabled();
-  await expect.poll(async () => Math.round((await probePage(page)).cssWidth)).toBe(Math.round(first.naturalWidth * 0.5));
+  await expect
+    .poll(async () => Math.round((await probePage(page)).cssWidth))
+    .toBe(Math.round(first.naturalWidth * 0.5));
   await viewer.getByRole("button", { name: "원래 크기" }).click();
   await expect(viewer.getByText("100%")).toBeVisible();
 
@@ -292,8 +304,13 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
 
   // Original download is the uploaded file, byte for byte.
   const downloadLink = shell.getByRole("link", { name: "다운로드" }).first();
-  await expect(downloadLink).toHaveAttribute("href", `/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`);
-  const original = await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`);
+  await expect(downloadLink).toHaveAttribute(
+    "href",
+    `/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`,
+  );
+  const original = await page.request.get(
+    `/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`,
+  );
   expect(sha256(await original.body())).toBe(sha256(threePageHwpx));
 
   // Search chunk N opens page N+1 (one chunk per fixture page); unknown chunks open page 1.
@@ -315,7 +332,9 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   const hwpPage = await probePage(page);
   expect(hwpPage.dark).toBeGreaterThan(2_000);
   expect(hwpPage.signature).not.toBe(first.signature);
-  const hwpOriginal = await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpId}/download`);
+  const hwpOriginal = await page.request.get(
+    `/api/v1/workspaces/${wsId}/attachments/${hwpId}/download`,
+  );
   expect(sha256(await hwpOriginal.body())).toBe(sha256(binaryHwp));
 
   // A Hancom-authored HWP (body "안녕").
@@ -352,7 +371,9 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
     await expect(supplement).toContainText("레이아웃 없음", { timeout: 30_000 });
     await expect(viewer.getByText("2 / 3")).toBeVisible({ timeout: 30_000 });
     await expect(viewer.locator("img.hwp-viewer__page")).toBeVisible();
-    const preview = await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpxId}/preview-html`);
+    const preview = await page.request.get(
+      `/api/v1/workspaces/${wsId}/attachments/${hwpxId}/preview-html`,
+    );
     if (process.env.FVOCI_EXTRACTOR_BIN) {
       // Native extract helper configured: the server parses the HWPX and the
       // supplement highlights the chunk's own text above the layout.
@@ -361,7 +382,9 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
       expect(html).toContain("둘째 쪽 검색 대상");
       // Chunk 1 covers page 2 whichever paragraph separators the extractor emits.
       await expect(supplement.locator("mark")).toContainText("하늘과 바람과 별과 시");
-      test.info().annotations.push({ type: "supplement", description: "extracted text, chunk 1 marked" });
+      test
+        .info()
+        .annotations.push({ type: "supplement", description: "extracted text, chunk 1 marked" });
       if (evidenceDir) {
         fs.writeFileSync(
           path.join(evidenceDir, "server-mode-supplement.json"),
@@ -372,7 +395,12 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
       // No helper (the default CI job): no extract text, the supplement says so and the layout stays.
       expect([404, 413]).toContain(preview.status());
       await expect(supplement).toContainText("이 파일을 뷰어로 열 수 없습니다");
-      test.info().annotations.push({ type: "supplement", description: `no extractor, preview-html ${preview.status()}` });
+      test
+        .info()
+        .annotations.push({
+          type: "supplement",
+          description: `no extractor, preview-html ${preview.status()}`,
+        });
     }
     // Without a chunk the server mode adds nothing.
     previewHtmlRequests.length = 0;
@@ -464,14 +492,15 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   expect(shared.dark).toBeGreaterThan(2_000);
   await expect(reader.locator("[data-chunk-supplement]")).toHaveCount(0);
   await expect(reader.getByRole("button", { name: /편집/ })).toHaveCount(0);
-  await expect(reader.locator("[data-attachment-viewer]").getByRole("link", { name: "다운로드" }).first()).toHaveAttribute(
-    "href",
-    `/api/v1/share/${token}/attachments/${hwpxId}/download`,
-  );
+  await expect(
+    reader.locator("[data-attachment-viewer]").getByRole("link", { name: "다운로드" }).first(),
+  ).toHaveAttribute("href", `/api/v1/share/${token}/attachments/${hwpxId}/download`);
   const revoke = await page.request.delete(`/api/v1/workspaces/${wsId}/share-links/${share.id}`);
   expect(revoke.ok(), await revoke.text()).toBeTruthy();
   await reader.goto(`${sharePath}/attachments/${hwpxId}/view`);
-  await expect(reader.getByRole("alert")).toHaveText("접근 권한이 없거나 존재하지 않는 항목입니다.");
+  await expect(reader.getByRole("alert")).toHaveText(
+    "접근 권한이 없거나 존재하지 않는 항목입니다.",
+  );
   await expect(reader.locator("[data-hwp-viewer]")).toHaveCount(0);
   expect(readerApi.length).toBeGreaterThan(0);
   for (const apiPath of readerApi) {
@@ -484,9 +513,12 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   // The Scripts bomb stays download-only and leaves no worker behind.
   const bombId = await uploadAttachment(page, wsId, documentId, "스크립트.hwpx", scriptsBombHwpx);
   await page.goto(`/w/acme/a/${bombId}/view`);
-  await expect(shell.getByRole("alert")).toHaveText("이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.", {
-    timeout: 30_000,
-  });
+  await expect(shell.getByRole("alert")).toHaveText(
+    "이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.",
+    {
+      timeout: 30_000,
+    },
+  );
   await expect(page.locator("img.hwp-viewer__page")).toHaveCount(0);
   await expect.poll(() => hwpWorkers(page)).toBe(0);
 
@@ -514,7 +546,9 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   await expect(shell.getByRole("alert")).toHaveText("불러오지 못했습니다.", { timeout: 30_000 });
   await expect(page.locator("img.hwp-viewer__page")).toHaveCount(0);
   await page.unroute(hwpxDownload);
-  const denied = await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`);
+  const denied = await page.request.get(
+    `/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`,
+  );
   expect(denied.status()).toBe(401);
 
   // Everything the session page loaded (app, wasm, bytes, blobs) stayed on this origin.

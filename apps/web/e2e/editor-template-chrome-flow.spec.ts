@@ -3,19 +3,38 @@
 import { expect, test } from "@playwright/test";
 import { login, watchCspViolations } from "./helpers";
 import {
-  admin, member, blockAt, caretAtEndOf, createDoc, editorOf, newSignedInPage,
-  expectBlocks, openDoc, save, savedBody, setupInstance, watchIconRequests, workspaceId,
+  admin,
+  member,
+  blockAt,
+  caretAtEndOf,
+  createDoc,
+  editorOf,
+  newSignedInPage,
+  expectBlocks,
+  openDoc,
+  save,
+  savedBody,
+  setupInstance,
+  watchIconRequests,
+  workspaceId,
 } from "./workspace-wiki-vue-editor";
 
 test.describe.configure({ mode: "serial" });
-test.beforeAll(async ({ browser, baseURL }) => { await setupInstance(browser, baseURL); });
+test.beforeAll(async ({ browser, baseURL }) => {
+  await setupInstance(browser, baseURL);
+});
 
-test("non-editor Vue screens do not load the editor host or its collaboration plugins", async ({ page }) => {
+test("non-editor Vue screens do not load the editor host or its collaboration plugins", async ({
+  page,
+}) => {
   const assets = new Set<string>();
   const captureAssets = async () => {
-    const paths = await page.evaluate(() => performance.getEntriesByType("resource")
-      .map((entry) => new URL(entry.name).pathname)
-      .filter((path) => /^\/assets\/[^/]+\.(js|css)$/.test(path)));
+    const paths = await page.evaluate(() =>
+      performance
+        .getEntriesByType("resource")
+        .map((entry) => new URL(entry.name).pathname)
+        .filter((path) => /^\/assets\/[^/]+\.(js|css)$/.test(path)),
+    );
     expect(paths.some((path) => path.endsWith(".js"))).toBe(true);
     for (const path of paths) assets.add(path);
   };
@@ -43,17 +62,25 @@ test("non-editor Vue screens do not load the editor host or its collaboration pl
   await captureAssets();
   // The group serves an immutable copied build. Read the actual requested
   // assets after navigation, as the existing Gantt boundary regression does.
-  const loaded = await Promise.all([...assets].map(async (path) => {
-    const response = await page.request.get(path);
-    expect(response.ok()).toBe(true);
-    return { path, text: await response.text() };
-  }));
-  const editorAssets = loaded.filter(({ text }) => /ProseMirror|fvoci-editor|fvociSlash|fvociMention/.test(text));
+  const loaded = await Promise.all(
+    [...assets].map(async (path) => {
+      const response = await page.request.get(path);
+      expect(response.ok()).toBe(true);
+      return { path, text: await response.text() };
+    }),
+  );
+  const editorAssets = loaded.filter(({ text }) =>
+    /ProseMirror|fvoci-editor|fvociSlash|fvociMention/.test(text),
+  );
   expect(editorAssets.map(({ path }) => path)).toEqual([]);
   await expect(editorOf(page)).toHaveCount(0);
 });
 
-test("fixed insert and history use the existing room, selection and persisted document", async ({ browser, baseURL, page }) => {
+test("fixed insert and history use the existing room, selection and persisted document", async ({
+  browser,
+  baseURL,
+  page,
+}) => {
   const csp = watchCspViolations(page);
   const iconRequests = watchIconRequests(page);
   await login(page, admin.email, admin.password);
@@ -64,7 +91,10 @@ test("fixed insert and history use the existing room, selection and persisted do
     await openDoc(page, doc.path);
     await openDoc(peer.page, doc.path);
     const plugins = await editorOf(page).evaluate((root) =>
-      (root as HTMLElement & { editor: { state: { plugins: Array<{ key: string }> } } }).editor.state.plugins.map((plugin) => plugin.key));
+      (
+        root as HTMLElement & { editor: { state: { plugins: Array<{ key: string }> } } }
+      ).editor.state.plugins.map((plugin) => plugin.key),
+    );
     expect(plugins.filter((key) => key.startsWith("bubbleMenu$"))).toHaveLength(1);
     expect(plugins.filter((key) => key.startsWith("dragHandle$"))).toHaveLength(1);
     const toolbar = page.locator(".fvoci-template-toolbar--fixed");
@@ -102,10 +132,14 @@ test("fixed insert and history use the existing room, selection and persisted do
     await expect(editorOf(page).locator(".afn-math")).toHaveCount(1);
     expect(csp).toEqual([]);
     expect(iconRequests).toEqual([]);
-  } finally { await peer.context.close(); }
+  } finally {
+    await peer.context.close();
+  }
 });
 
-test("link popup keeps native selection and composing Enter cannot apply the URL", async ({ page }) => {
+test("link popup keeps native selection and composing Enter cannot apply the URL", async ({
+  page,
+}) => {
   const csp = watchCspViolations(page);
   await login(page, admin.email, admin.password);
   const wsId = await workspaceId(page.request);
@@ -128,7 +162,9 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
   await url.dispatchEvent("compositionend", { data: "한글" });
   await page.keyboard.press("Escape");
   await expect(trigger).toBeFocused();
-  expect(await editorOf(page).evaluate(() => window.getSelection()?.toString())).toBe("한글과 😀 링크");
+  expect(await editorOf(page).evaluate(() => window.getSelection()?.toString())).toBe(
+    "한글과 😀 링크",
+  );
   await trigger.click();
   await url.fill("https://example.com/한글");
   await url.press("Enter");
@@ -139,15 +175,23 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
   expect(csp).toEqual([]);
 });
 
-test("emoji insertion and mobile groups remain keyboard usable without viewport overflow", async ({ page }) => {
+test("emoji insertion and mobile groups remain keyboard usable without viewport overflow", async ({
+  page,
+}) => {
   const iconRequests = watchIconRequests(page);
   await login(page, admin.email, admin.password);
   const wsId = await workspaceId(page.request);
   const doc = await createDoc(page.request, wsId, "템플릿 이모지", { markdown: "문단\n" });
   await openDoc(page, doc.path);
   await caretAtEndOf(page, 0);
-  await page.locator(".fvoci-template-toolbar--fixed").getByRole("button", { name: "삽입", exact: true }).click();
-  await page.getByRole("menu", { name: "삽입", exact: true }).getByRole("menuitem", { name: ":", exact: true }).click();
+  await page
+    .locator(".fvoci-template-toolbar--fixed")
+    .getByRole("button", { name: "삽입", exact: true })
+    .click();
+  await page
+    .getByRole("menu", { name: "삽입", exact: true })
+    .getByRole("menuitem", { name: ":", exact: true })
+    .click();
   await page.keyboard.type("smile");
   const suggestions = page.locator(".fvoci-suggestion");
   await expect(suggestions).toBeVisible();

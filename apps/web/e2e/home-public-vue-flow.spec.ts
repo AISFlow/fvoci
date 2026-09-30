@@ -4,7 +4,10 @@ async function expectVue(page: Page): Promise<void> {
   expect(await page.locator("#root").evaluate((root) => "__vue_app__" in root)).toBe(true);
 }
 
-test("home and public pages boot Vue with real persisted workspaces, legal versions and operator settings", async ({ page, browser }) => {
+test("home and public pages boot Vue with real persisted workspaces, legal versions and operator settings", async ({
+  page,
+  browser,
+}) => {
   // The public route is accessible even before installation, without a session.
   await page.goto("/service-info");
   await expect(page.getByRole("heading", { name: "서비스 정보" })).toBeVisible();
@@ -26,35 +29,60 @@ test("home and public pages boot Vue with real persisted workspaces, legal versi
 
   // Writes go to the real Rust API; Markdown is rendered by its helper.
   for (const version of [1, 2]) {
-    const published = await page.request.post("/api/v1/admin/legal", { data: {
-      kind: "terms", title: `공개 약관 ${version}`, bodyMarkdown: `## 조항 ${version}\n\n**안전한 약관**과 [도움말](https://example.com/help).\n\n[위험한 링크](javascript:alert(1))\n\n<script>window.legalInjected = true</script>`,
-      effectiveAt: "2026-01-01T00:00:00Z", required: false,
-    } });
+    const published = await page.request.post("/api/v1/admin/legal", {
+      data: {
+        kind: "terms",
+        title: `공개 약관 ${version}`,
+        bodyMarkdown: `## 조항 ${version}\n\n**안전한 약관**과 [도움말](https://example.com/help).\n\n[위험한 링크](javascript:alert(1))\n\n<script>window.legalInjected = true</script>`,
+        effectiveAt: "2026-01-01T00:00:00Z",
+        required: false,
+      },
+    });
     expect(published.status()).toBe(201);
     expect((await published.json()).version).toBe(version);
   }
-  const operator = await page.request.patch("/api/v1/admin/instance-settings", { data: { operator: {
-    businessName: "공개 운영사", supportEmail: "support@example.com", phone: "02-1234-5678",
-    representative: null, registrationNumber: null, mailOrderNumber: null, address: null, businessInfoUrl: null, hostingProvider: null,
-  } } });
+  const operator = await page.request.patch("/api/v1/admin/instance-settings", {
+    data: {
+      operator: {
+        businessName: "공개 운영사",
+        supportEmail: "support@example.com",
+        phone: "02-1234-5678",
+        representative: null,
+        registrationNumber: null,
+        mailOrderNumber: null,
+        address: null,
+        businessInfoUrl: null,
+        hostingProvider: null,
+      },
+    },
+  });
   expect(operator.status()).toBe(200);
 
   const anonymous = await browser.newContext();
   const publicPage = await anonymous.newPage();
   try {
     await publicPage.goto("/legal/terms");
-    await expect(publicPage.getByRole("heading", { name: "공개 약관 2", exact: true })).toBeVisible();
+    await expect(
+      publicPage.getByRole("heading", { name: "공개 약관 2", exact: true }),
+    ).toBeVisible();
     await expect(publicPage.getByRole("heading", { name: "조항 2", exact: true })).toBeVisible();
     await expect(publicPage.locator("strong").filter({ hasText: "안전한 약관" })).toBeVisible();
-    await expect(publicPage.getByRole("link", { name: "도움말" })).toHaveAttribute("href", "https://example.com/help");
+    await expect(publicPage.getByRole("link", { name: "도움말" })).toHaveAttribute(
+      "href",
+      "https://example.com/help",
+    );
     await expect(publicPage.locator('a[href^="javascript:"]')).toHaveCount(0);
     expect(await publicPage.evaluate(() => "legalInjected" in window)).toBe(false);
     await expectVue(publicPage);
     await publicPage.reload();
-    await expect(publicPage.getByRole("heading", { name: "공개 약관 2", exact: true })).toBeVisible();
+    await expect(
+      publicPage.getByRole("heading", { name: "공개 약관 2", exact: true }),
+    ).toBeVisible();
     await publicPage.getByRole("link", { name: /^v1/ }).click();
     await expect(publicPage).toHaveURL(/\/legal\/terms\?version=1$/);
-    await expect(publicPage.getByRole("heading", { name: "공개 약관 1", exact: true })).toBeVisible();
+    await expect(
+      publicPage.getByRole("heading", { name: "공개 약관 1", exact: true }),
+    ).toBeVisible();
     await publicPage.reload();
     await expect(publicPage.getByRole("heading", { name: "조항 1", exact: true })).toBeVisible();
     await expectVue(publicPage);
@@ -63,7 +91,10 @@ test("home and public pages boot Vue with real persisted workspaces, legal versi
     await expectVue(publicPage);
     await publicPage.goto("/service-info");
     await expect(publicPage.getByText("공개 운영사")).toBeVisible();
-    await expect(publicPage.getByRole("link", { name: "support@example.com" })).toHaveAttribute("href", "mailto:support@example.com");
+    await expect(publicPage.getByRole("link", { name: "support@example.com" })).toHaveAttribute(
+      "href",
+      "mailto:support@example.com",
+    );
     await publicPage.reload();
     await expect(publicPage.getByText("공개 운영사")).toBeVisible();
     await expectVue(publicPage);
@@ -88,8 +119,10 @@ test("home and public pages boot Vue with real persisted workspaces, legal versi
   await page.getByLabel("본문(마크다운)").fill("## 조항 3\n\n관리자가 발행한 약관.");
   await page.getByLabel("발효일").fill("2026-01-01");
   await page.getByLabel("필수 법적 문서").uncheck();
-  const publication = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === "/api/v1/admin/legal" && response.request().method() === "POST",
+  const publication = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/admin/legal" &&
+      response.request().method() === "POST",
   );
   await page.getByRole("button", { name: "발행", exact: true }).click();
   expect((await publication).status()).toBe(201);

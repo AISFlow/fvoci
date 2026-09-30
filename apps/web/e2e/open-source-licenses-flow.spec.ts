@@ -15,7 +15,8 @@ function bundledIconSets(): string[] {
   const prefixes = new Set<string>();
   for (const file of fs.readdirSync(distAssets).filter((name) => name.endsWith(".js"))) {
     const code = fs.readFileSync(path.join(distAssets, file), "utf8");
-    for (const m of code.matchAll(/"prefix":"([a-z0-9]+(?:-[a-z0-9]+)*)","icons":\{/g)) prefixes.add(m[1]!);
+    for (const m of code.matchAll(/"prefix":"([a-z0-9]+(?:-[a-z0-9]+)*)","icons":\{/g))
+      prefixes.add(m[1]!);
   }
   return [...prefixes].sort();
 }

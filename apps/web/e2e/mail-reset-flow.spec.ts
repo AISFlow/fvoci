@@ -33,7 +33,10 @@ test("invitation email is delivered and password reset uses the captured link", 
   await expect(page).toHaveURL(/\/$/);
 
   await page.goto("/w/acme/settings");
-  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^멤버$/ })
+    .click();
   await page.getByLabel("초대할 이메일").fill(invited.email);
   await page.getByRole("button", { name: "초대", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "초대를 만들었습니다" })).toBeVisible();
@@ -74,7 +77,9 @@ test("invitation email is delivered and password reset uses the captured link", 
   await page.getByLabel("새 비밀번호").fill(owner.newPassword);
   await page.getByRole("button", { name: "비밀번호 변경" }).click();
   await expect(page).toHaveURL(/\/login\?reset=1/);
-  expect(authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${tokenHash(token)}'`)).toBe("0");
+  expect(
+    authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${tokenHash(token)}'`),
+  ).toBe("0");
   const replay = await page.request.post("/api/v1/auth/password-reset/confirm", {
     data: { token, newPassword: owner.newPassword },
   });

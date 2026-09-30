@@ -48,7 +48,9 @@ function verbOf(delivery: Delivery): string | null {
   }
 }
 
-test("owner creates a signed webhook, receives project.created, then deletes it", async ({ page }) => {
+test("owner creates a signed webhook, receives project.created, then deletes it", async ({
+  page,
+}) => {
   test.setTimeout(90_000);
   const receiver = await startReceiver();
   try {
@@ -83,7 +85,9 @@ test("owner creates a signed webhook, receives project.created, then deletes it"
     await webhooks.getByLabel("프로젝트 생성", { exact: true }).check();
     await webhooks.getByRole("button", { name: "추가", exact: true }).click();
 
-    await expect(page.getByRole("status").filter({ hasText: "시크릿은 지금만 보입니다" })).toBeVisible();
+    await expect(
+      page.getByRole("status").filter({ hasText: "시크릿은 지금만 보입니다" }),
+    ).toBeVisible();
     const revealed = page.getByRole("textbox", { name: "웹훅 서명 시크릿" });
     await expect(revealed).toBeVisible();
     const secret = await revealed.inputValue();
@@ -111,7 +115,8 @@ test("owner creates a signed webhook, receives project.created, then deletes it"
       .poll(
         () =>
           receiver.deliveries.some(
-            (delivery) => verbOf(delivery) === "project.created" && signatureMatches(delivery, secret),
+            (delivery) =>
+              verbOf(delivery) === "project.created" && signatureMatches(delivery, secret),
           ),
         { timeout: 20_000 },
       )
@@ -205,7 +210,8 @@ test("public features.ai gates the document AI menu; the server keeps its own AI
   await expect(features.getByLabel("features.ai")).not.toBeChecked();
   await features.getByLabel("features.ai").check();
   const saved = page.waitForResponse(
-    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+    (res) =>
+      res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
   );
   await features.getByRole("button", { name: "저장", exact: true }).click();
   expect((await saved).status()).toBe(200);
@@ -232,14 +238,17 @@ test("public features.ai gates the document AI menu; the server keeps its own AI
   expect(direct.status()).toBe(503);
   expect((await direct.json()).code).toBe("ai_unavailable");
   await aiMenu.getByRole("button", { name: "요약", exact: true }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "AI 기능을 지금 사용할 수 없습니다" })).toBeVisible();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "AI 기능을 지금 사용할 수 없습니다" }),
+  ).toBeVisible();
   await expect(aiMenu.getByRole("button", { name: "요약", exact: true })).toBeDisabled();
 
   // Back to the default: the card's reset writes null and the menu disappears again.
   await page.goto("/settings/admin");
   const reset = page.getByRole("region", { name: "기능 토글", exact: true });
   const cleared = page.waitForResponse(
-    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+    (res) =>
+      res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
   );
   await reset.getByRole("button", { name: "기본값으로", exact: true }).click();
   expect((await cleared).status()).toBe(200);
@@ -277,7 +286,9 @@ function blocksOf(root: BodyNode): string[] {
   );
 }
 
-test("confirmed AI results apply through the live editor and the project task route", async ({ page }) => {
+test("confirmed AI results apply through the live editor and the project task route", async ({
+  page,
+}) => {
   test.setTimeout(120_000);
   await signInOwner(page);
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
@@ -322,24 +333,31 @@ test("confirmed AI results apply through the live editor and the project task ro
     // with — the apply path below uses the real editor, collab persistence, task route and
     // authorization.
     const aiCalls: string[] = [];
-    await page.route(/\/api\/v1\/workspaces\/[^/]+\/ai\/(summarize|generate-tasks|suggest-links)$/, (route) => {
-      const kind = new URL(route.request().url()).pathname.split("/").pop()!;
-      expect(route.request().postDataJSON()).toEqual({ documentId: doc.id });
-      aiCalls.push(kind);
-      const body =
-        kind === "summarize"
-          ? { summary: "요약 첫 줄 🙂\n\n요약 둘째 줄" }
-          : kind === "generate-tasks"
-            ? { titles: ["AI 작업 가", "AI 작업 나", "AI 작업 다"] }
-            : {
-                documentIds: [linkDoc.id, projectLinkDoc.id],
-                documents: [
-                  { id: linkDoc.id, title: "연결 후보 문서" },
-                  { id: projectLinkDoc.id, title: "연결 후보 프로젝트 문서" },
-                ],
-              };
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
-    });
+    await page.route(
+      /\/api\/v1\/workspaces\/[^/]+\/ai\/(summarize|generate-tasks|suggest-links)$/,
+      (route) => {
+        const kind = new URL(route.request().url()).pathname.split("/").pop()!;
+        expect(route.request().postDataJSON()).toEqual({ documentId: doc.id });
+        aiCalls.push(kind);
+        const body =
+          kind === "summarize"
+            ? { summary: "요약 첫 줄 🙂\n\n요약 둘째 줄" }
+            : kind === "generate-tasks"
+              ? { titles: ["AI 작업 가", "AI 작업 나", "AI 작업 다"] }
+              : {
+                  documentIds: [linkDoc.id, projectLinkDoc.id],
+                  documents: [
+                    { id: linkDoc.id, title: "연결 후보 문서" },
+                    { id: projectLinkDoc.id, title: "연결 후보 프로젝트 문서" },
+                  ],
+                };
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(body),
+        });
+      },
+    );
 
     const bodyOf = async () => {
       const res = await page.request.get(
@@ -369,7 +387,9 @@ test("confirmed AI results apply through the live editor and the project task ro
     await expect(preview.getByText("요약 첫 줄 🙂")).toBeVisible();
     await expect(editor).not.toContainText("요약 첫 줄");
     await preview.getByRole("button", { name: "본문 끝에 삽입" }).dblclick();
-    await expect(page.getByRole("status").filter({ hasText: "본문에 삽입했습니다." })).toBeVisible();
+    await expect(
+      page.getByRole("status").filter({ hasText: "본문에 삽입했습니다." }),
+    ).toBeVisible();
     await expect(preview).toHaveCount(0);
 
     // Links: document mentions appended after the summary.
@@ -407,7 +427,12 @@ test("confirmed AI results apply through the live editor and the project task ro
         return route.fulfill({
           status: 422,
           contentType: "application/problem+json",
-          body: JSON.stringify({ type: "about:blank", title: "invalid", status: 422, code: "validation_failed" }),
+          body: JSON.stringify({
+            type: "about:blank",
+            title: "invalid",
+            status: 422,
+            code: "validation_failed",
+          }),
         });
       }
       return route.fallback();
@@ -415,14 +440,20 @@ test("confirmed AI results apply through the live editor and the project task ro
     await aiMenu.getByRole("button", { name: "태스크 생성", exact: true }).click();
     await expect(preview.getByText("AI 작업 가")).toBeVisible();
     await preview.getByRole("button", { name: "태스크 만들기" }).click();
-    await expect(page.getByRole("status").filter({ hasText: "태스크 1개를 만들었습니다." })).toBeVisible();
+    await expect(
+      page.getByRole("status").filter({ hasText: "태스크 1개를 만들었습니다." }),
+    ).toBeVisible();
     await expect(page.locator(".document-ai-menu [role=alert]")).toBeVisible();
     await expect(preview.locator('[data-ai-task-state="created"]')).toHaveCount(1);
     await preview.getByRole("button", { name: "태스크 만들기" }).click();
-    await expect(page.getByRole("status").filter({ hasText: "태스크 3개를 만들었습니다." })).toBeVisible();
+    await expect(
+      page.getByRole("status").filter({ hasText: "태스크 3개를 만들었습니다." }),
+    ).toBeVisible();
     await expect(preview).toHaveCount(0);
     expect(taskPosts).toEqual(["AI 작업 가", "AI 작업 나", "AI 작업 나", "AI 작업 다"]);
-    const tasksRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/tasks`);
+    const tasksRes = await page.request.get(
+      `/api/v1/workspaces/${wsId}/projects/${project.id}/tasks`,
+    );
     expect(tasksRes.ok()).toBe(true);
     const titles = ((await tasksRes.json()).items as Array<{ title: string }>)
       .map((item) => item.title)
@@ -441,7 +472,9 @@ test("confirmed AI results apply through the live editor and the project task ro
     await expect(preview).toHaveCount(0);
     // Wiki documents have no project: generating tasks stays locked there.
     await expect(aiMenu.getByRole("button", { name: "태스크 생성", exact: true })).toBeDisabled();
-    await expect(page.getByText("프로젝트에 속한 문서에서만 태스크를 만들 수 있습니다.")).toBeVisible();
+    await expect(
+      page.getByText("프로젝트에 속한 문서에서만 태스크를 만들 수 있습니다."),
+    ).toBeVisible();
     expect(aiCalls).toEqual(["summarize", "suggest-links", "generate-tasks", "summarize"]);
   } finally {
     const off = await page.request.patch("/api/v1/admin/instance-settings", {

@@ -56,7 +56,11 @@ async function workspaceId(request: APIRequestContext): Promise<string> {
 
 type WikiDoc = { id: string; number: number; path: string };
 
-async function createDoc(request: APIRequestContext, wsId: string, title: string): Promise<WikiDoc> {
+async function createDoc(
+  request: APIRequestContext,
+  wsId: string,
+  title: string,
+): Promise<WikiDoc> {
   const res = await request.post(`/api/v1/workspaces/${wsId}/documents`, {
     data: { parentId: null, title },
   });
@@ -88,7 +92,9 @@ test("star toggle persists after reload", async ({ page }) => {
   const starred = await page.request.get(`/api/v1/workspaces/${wsId}/stars`);
   expect(starred.ok()).toBe(true);
   expect(
-    ((await starred.json()) as { items: { targetId: string }[] }).items.map((item) => item.targetId),
+    ((await starred.json()) as { items: { targetId: string }[] }).items.map(
+      (item) => item.targetId,
+    ),
   ).toEqual([doc.id]);
 
   await page.reload();
@@ -96,7 +102,9 @@ test("star toggle persists after reload", async ({ page }) => {
   await expect(page.getByRole("button", { name: "즐겨찾기 해제" })).toBeVisible();
   const afterReload = await page.request.get(`/api/v1/workspaces/${wsId}/stars`);
   expect(
-    ((await afterReload.json()) as { items: { targetId: string }[] }).items.map((item) => item.targetId),
+    ((await afterReload.json()) as { items: { targetId: string }[] }).items.map(
+      (item) => item.targetId,
+    ),
   ).toEqual([doc.id]);
   expect(csp).toEqual([]);
 });
@@ -249,38 +257,89 @@ test("revisions: save a revision and restore it", async ({ page }) => {
     .toContain("첫 번째 버전");
 });
 
-test("long Korean wiki title wraps, metadata leaves body visible and Enter keeps single-line title persistence", async ({ page }) => {
+test("long Korean wiki title wraps, metadata leaves body visible and Enter keeps single-line title persistence", async ({
+  page,
+}) => {
   const wsId = await workspaceId(page.request);
-  const title = "한국어 협업 문서 제목이 길어질 때 탐색과 편집 작업을 안정적으로 유지하는 주간 업무 기록 및 검토 결과";
+  const title =
+    "한국어 협업 문서 제목이 길어질 때 탐색과 편집 작업을 안정적으로 유지하는 주간 업무 기록 및 검토 결과";
   const doc = await createDoc(page.request, wsId, title);
   const bodyUrl = `/api/v1/workspaces/${wsId}/documents/${doc.id}/body`;
-  expect((await page.request.put(bodyUrl, { data: { contentMd: "첫 번째 업무 본문입니다.\n\n두 번째 업무 본문입니다.\n\n세 번째 업무 본문입니다." } })).ok()).toBe(true);
+  expect(
+    (
+      await page.request.put(bodyUrl, {
+        data: {
+          contentMd:
+            "첫 번째 업무 본문입니다.\n\n두 번째 업무 본문입니다.\n\n세 번째 업무 본문입니다.",
+        },
+      })
+    ).ok(),
+  ).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
   await openDoc(page, doc);
   const field = page.getByLabel("문서 제목");
   await expect(field).toHaveValue(title);
-  await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
-  expect(await field.evaluate((e) => e.scrollWidth)).toBeLessThanOrEqual(await field.evaluate((e) => e.clientWidth));
-  expect(await page.locator(".ProseMirror > p").nth(2).evaluate((e) => e.getBoundingClientRect().bottom)).toBeLessThan(844);
+  await expect
+    .poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1))
+    .toBe(true);
+  expect(await field.evaluate((e) => e.scrollWidth)).toBeLessThanOrEqual(
+    await field.evaluate((e) => e.clientWidth),
+  );
+  expect(
+    await page
+      .locator(".ProseMirror > p")
+      .nth(2)
+      .evaluate((e) => e.getBoundingClientRect().bottom),
+  ).toBeLessThan(844);
   await page.setViewportSize({ width: 1280, height: 720 });
-  await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
-  expect(await page.locator(".ProseMirror > p").nth(2).evaluate((e) => e.getBoundingClientRect().bottom)).toBeLessThan(720);
+  await expect
+    .poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1))
+    .toBe(true);
+  expect(
+    await page
+      .locator(".ProseMirror > p")
+      .nth(2)
+      .evaluate((e) => e.getBoundingClientRect().bottom),
+  ).toBeLessThan(720);
   const options = page.getByRole("button", { name: "문서 옵션", exact: true });
   await expect(options).toHaveAttribute("aria-expanded", "false");
-  await options.focus(); await options.press("Enter");
+  await options.focus();
+  await options.press("Enter");
   await expect(options).toHaveAttribute("aria-expanded", "true");
   const icon = page.getByLabel("아이콘");
-  await icon.fill("📚"); await icon.press("Tab");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json()).icon).toBe("📚");
+  await icon.fill("📚");
+  await icon.press("Tab");
+  await expect
+    .poll(
+      async () =>
+        (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json())
+          .icon,
+    )
+    .toBe("📚");
   await page.getByLabel("문서 상태").selectOption("published");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json()).status).toBe("published");
+  await expect
+    .poll(
+      async () =>
+        (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json())
+          .status,
+    )
+    .toBe("published");
   await expect(icon).toBeEnabled();
-  await icon.focus(); await icon.press("Escape");
-  await expect(options).toBeFocused(); await expect(options).toHaveAttribute("aria-expanded", "false");
+  await icon.focus();
+  await icon.press("Escape");
+  await expect(options).toBeFocused();
+  await expect(options).toHaveAttribute("aria-expanded", "false");
   await expect(icon).toBeHidden();
   await field.fill("한국어 제목\n붙여넣기");
   await expect(field).toHaveValue("한국어 제목붙여넣기");
   await field.press("Enter");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json()).title).toBe("한국어 제목붙여넣기");
-  await page.reload(); await expect(field).toHaveValue("한국어 제목붙여넣기");
+  await expect
+    .poll(
+      async () =>
+        (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json())
+          .title,
+    )
+    .toBe("한국어 제목붙여넣기");
+  await page.reload();
+  await expect(field).toHaveValue("한국어 제목붙여넣기");
 });

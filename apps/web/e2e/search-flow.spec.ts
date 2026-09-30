@@ -20,7 +20,9 @@ const outsider = {
 type SearchHit = { type: string; id: string; title: string };
 
 async function searchItems(
-  page: { request: { get: (url: string) => Promise<{ ok: () => boolean; json: () => Promise<unknown> }> } },
+  page: {
+    request: { get: (url: string) => Promise<{ ok: () => boolean; json: () => Promise<unknown> }> };
+  },
   url: string,
 ): Promise<SearchHit[]> {
   const res = await page.request.get(url);
@@ -84,9 +86,12 @@ test("workspace and global search find a document, task, comment, and attachment
   const projectId = projects.items.find((item) => item.key === "SRC")?.id;
   expect(projectId).toBeTruthy();
 
-  const taskRes = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, {
-    data: { title: taskTitle },
-  });
+  const taskRes = await page.request.post(
+    `/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`,
+    {
+      data: { title: taskTitle },
+    },
+  );
   expect(taskRes.status()).toBe(201);
   await taskRes.json();
 
@@ -175,7 +180,9 @@ test("workspace and global search find a document, task, comment, and attachment
   await expect(results.getByText(taskTitle)).toBeVisible();
   await expect(results.getByText(attachmentName)).toBeVisible();
   await results.getByRole("link", { name: new RegExp(attachmentName) }).click();
-  await expect(page).toHaveURL(new RegExp(`/w/acme/a/${upload.attachmentId}/view(?:\\?chunk=\\d+)?$`));
+  await expect(page).toHaveURL(
+    new RegExp(`/w/acme/a/${upload.attachmentId}/view(?:\\?chunk=\\d+)?$`),
+  );
   await expect(page.locator("[data-attachment-viewer]")).toBeVisible();
   await expect(page.getByText(attachmentName, { exact: true })).toBeVisible();
 

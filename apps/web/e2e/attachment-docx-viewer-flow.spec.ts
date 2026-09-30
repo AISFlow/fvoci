@@ -89,32 +89,46 @@ async function probeLayout(page: Page, text: typeof DEFAULT_DOCX_TEXT): Promise<
     const doc = frame.contentDocument!;
     const win = frame.contentWindow!;
     const sections = [...doc.querySelectorAll<HTMLElement>(".docx-wrapper > section.docx")];
-    const visible = sections.flatMap((s, i) => (win.getComputedStyle(s).display === "none" ? [] : [i]));
+    const visible = sections.flatMap((s, i) =>
+      win.getComputedStyle(s).display === "none" ? [] : [i],
+    );
     const shown = sections[visible[0] ?? 0]!;
     const byText = (value: string) =>
-      [...doc.querySelectorAll<HTMLElement>("span, a, p, td")].find((el) => el.textContent?.trim() === value.trim());
+      [...doc.querySelectorAll<HTMLElement>("span, a, p, td")].find(
+        (el) => el.textContent?.trim() === value.trim(),
+      );
     const link = [...doc.querySelectorAll("a")].find((a) => a.textContent?.includes(text.link));
     // Paragraph content-box start: OOXML w:ind/@w:left as laid out (marker width excluded).
     const textLeft = (value: string) => {
       const p = [...doc.querySelectorAll("p")].find((el) => el.textContent?.includes(value))!;
       const css = win.getComputedStyle(p);
-      return p.getBoundingClientRect().left + parseFloat(css.borderLeftWidth) + parseFloat(css.paddingLeft);
+      return (
+        p.getBoundingClientRect().left +
+        parseFloat(css.borderLeftWidth) +
+        parseFloat(css.paddingLeft)
+      );
     };
-    const listParagraph = (value: string) => [...doc.querySelectorAll("p")].find((el) => el.textContent?.includes(value))!;
+    const listParagraph = (value: string) =>
+      [...doc.querySelectorAll("p")].find((el) => el.textContent?.includes(value))!;
     const firstCell = doc.querySelector("td")!;
     const nonDataUrls: string[] = [];
     for (const el of doc.querySelectorAll("*")) {
       for (const attr of ["src", "href", "xlink:href"]) {
         const value = el.getAttribute(attr);
-        if (value !== null && !value.startsWith("data:image/")) nonDataUrls.push(`${el.localName}[${attr}]=${value}`);
+        if (value !== null && !value.startsWith("data:image/"))
+          nonDataUrls.push(`${el.localName}[${attr}]=${value}`);
       }
     }
     return {
       sandbox: frame.getAttribute("sandbox"),
-      csp: doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content") ?? null,
+      csp:
+        doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content") ??
+        null,
       scripts: doc.querySelectorAll("script, iframe, object, embed, form, base").length,
       hrefs: doc.querySelectorAll("a[href]").length,
-      handlers: [...doc.querySelectorAll("*")].filter((el) => [...el.attributes].some((a) => a.name.startsWith("on"))).length,
+      handlers: [...doc.querySelectorAll("*")].filter((el) =>
+        [...el.attributes].some((a) => a.name.startsWith("on")),
+      ).length,
       nonDataUrls,
       pages: sections.length,
       visible,
@@ -129,7 +143,9 @@ async function probeLayout(page: Page, text: typeof DEFAULT_DOCX_TEXT): Promise<
           }
         : null,
       listIndent: text.list.map(textLeft),
-      listMarkers: text.list.map((value) => win.getComputedStyle(listParagraph(value), "::before").content),
+      listMarkers: text.list.map(
+        (value) => win.getComputedStyle(listParagraph(value), "::before").content,
+      ),
       cells: doc.querySelectorAll("table td").length,
       redCell: win.getComputedStyle(firstCell).backgroundColor,
       cellBorder: `${win.getComputedStyle(firstCell).borderTopStyle} ${win.getComputedStyle(firstCell).borderTopWidth}`,
@@ -195,7 +211,13 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   const docxName = `${token}-layout.docx`;
   const docxId = await uploadAttachment(page, wsId, documentId, docxName, docxBytes);
   const textName = "notes.txt";
-  const textId = await uploadAttachment(page, wsId, documentId, textName, Buffer.from("plain attachment body\n", "utf8"));
+  const textId = await uploadAttachment(
+    page,
+    wsId,
+    documentId,
+    textName,
+    Buffer.from("plain attachment body\n", "utf8"),
+  );
   const downloadPath = `/api/v1/workspaces/${wsId}/attachments/${docxId}/download`;
 
   // --- Layout of page 1 -------------------------------------------------------
@@ -223,7 +245,14 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   expect(first.nonDataUrls).toEqual([]);
   expect(first.pages).toBe(2);
   expect(first.visible).toEqual([0]);
-  for (const part of [text.heading, text.body.trim(), text.bold, text.link, ...text.list, ...text.table]) {
+  for (const part of [
+    text.heading,
+    text.body.trim(),
+    text.bold,
+    text.link,
+    ...text.list,
+    ...text.table,
+  ]) {
     expect(first.visibleText).toContain(part);
   }
   expect(first.visibleText).not.toContain(text.secondPage);
@@ -264,7 +293,9 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   const height100 = (await frameBox()).height;
   await viewer.getByRole("button", { name: "확대" }).click();
   await expect(viewer.getByText("125%")).toBeVisible();
-  await expect.poll(async () => Math.round((await frameBox()).height)).toBeGreaterThan(Math.round(height100 * 1.2));
+  await expect
+    .poll(async () => Math.round((await frameBox()).height))
+    .toBeGreaterThan(Math.round(height100 * 1.2));
   await viewer.getByRole("button", { name: "원래 크기" }).click();
   await expect(viewer.getByText("100%")).toBeVisible();
   await expect.poll(async () => Math.round((await frameBox()).height)).toBe(Math.round(height100));
@@ -286,7 +317,9 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
           `/api/v1/workspaces/${wsId}/search?q=${encodeURIComponent(token)}&type=attachment`,
         );
         const body = (await res.json()) as { items?: { type: string; title: string }[] };
-        return (body.items ?? []).some((item) => item.type === "attachment" && item.title === docxName);
+        return (body.items ?? []).some(
+          (item) => item.type === "attachment" && item.title === docxName,
+        );
       },
       { timeout: 30_000 },
     )
@@ -325,9 +358,9 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   const downloadRoute = `**${downloadPath}`;
   await page.route(downloadRoute, (route) => route.fulfill({ status: 403, body: "" }));
   await page.goto(`/w/acme/a/${docxId}/view`);
-  await expect(page.locator('[data-docx-viewer][data-docx-state="error"]').getByRole("alert")).toHaveText(
-    "불러오지 못했습니다.",
-  );
+  await expect(
+    page.locator('[data-docx-viewer][data-docx-state="error"]').getByRole("alert"),
+  ).toHaveText("불러오지 못했습니다.");
   await expect(page.locator("[data-docx-viewer] iframe")).toHaveCount(0);
   await page.unroute(downloadRoute);
   await page.getByRole("button", { name: "다시 시도" }).click();
@@ -363,7 +396,9 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   await expect(page.getByText("plain attachment body")).toBeVisible();
   release();
   await settled;
-  await expect(page.locator("[data-attachment-viewer]").getByText(textName, { exact: true })).toBeVisible();
+  await expect(
+    page.locator("[data-attachment-viewer]").getByText(textName, { exact: true }),
+  ).toBeVisible();
   await expect(page.locator("[data-docx-viewer]")).toHaveCount(0);
   await expect(page.locator("iframe")).toHaveCount(0);
   await page.unroute(downloadRoute);
@@ -377,21 +412,27 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
     "bomb.docx",
     writeZip([
       { name: "[Content_Types].xml", bytes: new TextEncoder().encode("<Types/>") },
-      { name: "word/document.xml", deflated: deflateRawSync(inflated), crc: zlibCrc32(inflated), size: inflated.byteLength },
+      {
+        name: "word/document.xml",
+        deflated: deflateRawSync(inflated),
+        crc: zlibCrc32(inflated),
+        size: inflated.byteLength,
+      },
     ]),
   );
   await page.goto(`/w/acme/a/${bombId}/view`);
-  await expect(page.locator('[data-docx-viewer][data-docx-state="error"]').getByRole("alert")).toHaveText(
-    "이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.",
-    { timeout: 30_000 },
-  );
+  await expect(
+    page.locator('[data-docx-viewer][data-docx-state="error"]').getByRole("alert"),
+  ).toHaveText("이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.", { timeout: 30_000 });
   await expect(page.locator("[data-docx-viewer] iframe")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "다시 시도" })).toHaveCount(0);
 
   // --- Other Office kinds still have no layout viewer here -----------------
   const pptxId = await uploadAttachment(page, wsId, documentId, "deck.pptx", docxBytes);
   await page.goto(`/w/acme/a/${pptxId}/view`);
-  await expect(page.getByText("이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.")).toBeVisible();
+  await expect(
+    page.getByText("이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요."),
+  ).toBeVisible();
   await expect(page.locator("[data-docx-viewer]")).toHaveCount(0);
 
   // --- Unknown (or unauthorized) attachment --------------------------------

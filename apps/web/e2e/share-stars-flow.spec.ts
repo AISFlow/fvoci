@@ -68,9 +68,9 @@ test("owner stars and shares a wiki document; the public link needs no session a
   await page.getByRole("button", { name: "즐겨찾기 추가" }).click();
   await expect(page.getByRole("button", { name: "즐겨찾기 해제" })).toBeVisible();
   const starsRes = await page.request.get(`/api/v1/workspaces/${wsId}/stars`);
-  expect(((await starsRes.json()) as { items: { targetId: string }[] }).items.map((s) => s.targetId)).toEqual([
-    root.id,
-  ]);
+  expect(
+    ((await starsRes.json()) as { items: { targetId: string }[] }).items.map((s) => s.targetId),
+  ).toEqual([root.id]);
 
   await page.getByRole("link", { name: "홈", exact: true }).click();
   await expect(page).toHaveURL(/\/w\/acme$/);
@@ -95,11 +95,11 @@ test("owner stars and shares a wiki document; the public link needs no session a
   await expect(dialog.getByText("공유 링크가 없습니다")).toBeVisible();
   const expires = dialog.getByLabel("만료 기간");
   await expect(expires).toHaveValue("14");
-  expect(await expires.locator("option").evaluateAll((els) => els.map((el) => (el as HTMLOptionElement).value))).toEqual([
-    "7",
-    "14",
-    "30",
-  ]);
+  expect(
+    await expires
+      .locator("option")
+      .evaluateAll((els) => els.map((el) => (el as HTMLOptionElement).value)),
+  ).toEqual(["7", "14", "30"]);
   await expires.selectOption("30");
   await dialog.getByRole("button", { name: "공유 링크", exact: true }).click();
   const urlBox = dialog.getByRole("textbox", { name: "공유 링크" });
@@ -116,7 +116,9 @@ test("owner stars and shares a wiki document; the public link needs no session a
   const shellHtml = await shell.text();
   expect(shellHtml).toContain(`<title>${rootTitle}</title>`);
   expect(shellHtml).toContain(`<meta property="og:title" content="${rootTitle}"/>`);
-  expect(shellHtml).toMatch(new RegExp(`<meta property="og:description" content="[^"]*${bodyText}`));
+  expect(shellHtml).toMatch(
+    new RegExp(`<meta property="og:description" content="[^"]*${bodyText}`),
+  );
 
   // Anonymous reader in a fresh context without cookies.
   const anon = await browser.newContext();

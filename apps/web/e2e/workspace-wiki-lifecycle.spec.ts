@@ -104,9 +104,7 @@ test("rename, move, trash, and restore wiki documents", async ({ page }) => {
   });
   const trashResponse = page.waitForResponse(
     (response) =>
-      response.request().method() === "POST" &&
-      response.url().includes("/trash") &&
-      response.ok(),
+      response.request().method() === "POST" && response.url().includes("/trash") && response.ok(),
   );
   await page.getByRole("button", { name: "휴지통으로 이동" }).click();
   await trashResponse;

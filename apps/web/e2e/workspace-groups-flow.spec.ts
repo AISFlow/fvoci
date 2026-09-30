@@ -32,7 +32,10 @@ test("owner grants a group; a group-only member sees the private project", async
   await expect(page).toHaveURL(/\/$/);
 
   await page.goto("/w/acme/settings");
-  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^멤버$/ })
+    .click();
   await page.getByLabel("초대할 이메일").fill(invited.email);
   await page.getByRole("button", { name: "초대", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "초대를 만들었습니다" })).toBeVisible();
@@ -61,17 +64,26 @@ test("owner grants a group; a group-only member sees the private project", async
   await expect(page).toHaveURL(/\/$/);
 
   await page.goto("/w/acme/settings");
-  await page.locator("summary").filter({ hasText: /^그룹$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^그룹$/ })
+    .click();
   await page.getByLabel("그룹 이름").fill("랩팀");
   await page.getByRole("button", { name: "만들기" }).click();
   await expect(page.getByRole("button", { name: "랩팀", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "랩팀", exact: true }).click();
   await expect(page.getByText("멤버가 없습니다", { exact: true })).toBeVisible();
-  await page.getByLabel("멤버", { exact: true }).selectOption({ label: "박초대수락 (second-human@example.com)" });
+  await page
+    .getByLabel("멤버", { exact: true })
+    .selectOption({ label: "박초대수락 (second-human@example.com)" });
   await page.getByRole("button", { name: "멤버 추가" }).click();
   await expect(page.getByText("멤버가 없습니다", { exact: true })).toHaveCount(0);
-  const groupsPanel = page.locator("details").filter({ has: page.locator("summary", { hasText: /^그룹$/ }) });
-  await expect(groupsPanel.getByText("박초대수락 (second-human@example.com)", { exact: true })).toBeVisible();
+  const groupsPanel = page
+    .locator("details")
+    .filter({ has: page.locator("summary", { hasText: /^그룹$/ }) });
+  await expect(
+    groupsPanel.getByText("박초대수락 (second-human@example.com)", { exact: true }),
+  ).toBeVisible();
 
   await page.goto("/w/acme/projects");
   await page.getByRole("button", { name: "새 프로젝트" }).click();
@@ -81,7 +93,10 @@ test("owner grants a group; a group-only member sees the private project", async
   await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
   await expect(page).toHaveURL(/\/w\/acme\/GRP\/tasks$/);
 
-  await page.locator("summary").filter({ hasText: /^프로젝트에 추가$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^프로젝트에 추가$/ })
+    .click();
   await page.getByLabel("그룹", { exact: true }).selectOption({ label: "랩팀" });
   await page.getByLabel("역할").selectOption("viewer");
   await page.getByRole("button", { name: "프로젝트에 추가" }).click();
@@ -100,7 +115,10 @@ test("owner grants a group; a group-only member sees the private project", async
   await expect(page.getByText("비공개")).toBeVisible();
   await page.getByRole("link", { name: /그룹프로젝트/ }).click();
   await expect(page).toHaveURL(/\/w\/acme\/GRP\/tasks$/);
-  await page.locator("summary").filter({ hasText: /^프로젝트에 추가$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^프로젝트에 추가$/ })
+    .click();
   await expect(page.getByText("랩팀 · 뷰어")).toBeVisible();
   await expect(page.getByRole("button", { name: "프로젝트에 추가" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "접근 권한 제거" })).toHaveCount(0);
@@ -116,18 +134,32 @@ test("owner grants a group; a group-only member sees the private project", async
   const group = (await groups.json()).items.find((row: { name: string }) => row.name === "랩팀");
   expect(group).toBeTruthy();
   const grantUrl = `/api/v1/workspaces/${ws.id}/projects/${project.id}/groups`;
-  expect((await page.request.post(grantUrl, { data: { groupId: group.id, role: "member" } })).status()).toBe(404);
+  expect(
+    (await page.request.post(grantUrl, { data: { groupId: group.id, role: "member" } })).status(),
+  ).toBe(404);
   expect((await page.request.delete(grantUrl, { data: { groupId: group.id } })).status()).toBe(404);
-  expect((await page.request.post(`/api/v1/workspaces/${ws.id}/projects/${project.id}/milestones`, { data: { name: "Denied" } })).status()).toBe(404);
+  expect(
+    (
+      await page.request.post(`/api/v1/workspaces/${ws.id}/projects/${project.id}/milestones`, {
+        data: { name: "Denied" },
+      })
+    ).status(),
+  ).toBe(404);
 
   await logout(page);
   await login(page, owner.email, owner.password);
   await page.goto("/w/acme/GRP/tasks");
-  await page.locator("summary").filter({ hasText: /^프로젝트에 추가$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^프로젝트에 추가$/ })
+    .click();
   await page.getByRole("button", { name: "접근 권한 제거" }).click();
   await expect(page.getByText("랩팀 · 뷰어")).toHaveCount(0);
   await page.reload();
-  await page.locator("summary").filter({ hasText: /^프로젝트에 추가$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^프로젝트에 추가$/ })
+    .click();
   await expect(page.getByText("랩팀 · 뷰어")).toHaveCount(0);
   const grants = await page.request.get(grantUrl);
   expect(grants.ok()).toBe(true);
@@ -137,5 +169,4 @@ test("owner grants a group; a group-only member sees the private project", async
   await page.goto("/w/acme/GRP/tasks");
   await expect(page.getByRole("alert")).toContainText("프로젝트를 찾을 수 없습니다");
   await expect(page.getByRole("heading", { name: "그룹프로젝트" })).toHaveCount(0);
-
 });

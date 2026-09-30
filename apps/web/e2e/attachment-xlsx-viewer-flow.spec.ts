@@ -81,9 +81,12 @@ function holdRoute() {
 }
 
 function cellTexts(page: Page) {
-  return page.getByTestId("xlsx-viewer").locator("table tr").evaluateAll((rows) =>
-    rows.map((row) => [...row.querySelectorAll("td")].map((cell) => cell.textContent ?? "")),
-  );
+  return page
+    .getByTestId("xlsx-viewer")
+    .locator("table tr")
+    .evaluateAll((rows) =>
+      rows.map((row) => [...row.querySelectorAll("td")].map((cell) => cell.textContent ?? "")),
+    );
 }
 
 test("XLSX attachment: sheets, paging, zoom, cached values, bounds, failures, stale URL and share revocation", async ({
@@ -166,7 +169,9 @@ test("XLSX attachment: sheets, paging, zoom, cached values, bounds, failures, st
   // Zoom: 50–300% in 25% steps, reset to 100%.
   await viewer.getByRole("button", { name: "확대" }).click();
   await expect(viewer.getByText("125%")).toBeVisible();
-  expect(await viewer.locator("table").evaluate((table) => getComputedStyle(table).zoom)).toBe("1.25");
+  expect(await viewer.locator("table").evaluate((table) => getComputedStyle(table).zoom)).toBe(
+    "1.25",
+  );
   await viewer.getByRole("button", { name: "원래 크기" }).click();
   await expect(viewer.getByText("100%")).toBeVisible();
 
@@ -175,7 +180,10 @@ test("XLSX attachment: sheets, paging, zoom, cached values, bounds, failures, st
   await expect(viewer.getByText("시트 선택: Chart (2/3)")).toBeVisible();
   const chartPane = viewer.locator("[data-xlsx-unsupported]");
   await expect(chartPane.getByText(unavailable)).toBeVisible();
-  await expect(chartPane.getByRole("link", { name: "다운로드" })).toHaveAttribute("href", downloadUrl(bookId));
+  await expect(chartPane.getByRole("link", { name: "다운로드" })).toHaveAttribute(
+    "href",
+    downloadUrl(bookId),
+  );
   await expect(viewer.locator("table")).toHaveCount(0);
 
   // Sheet 3: 201 rows × 65 columns → two row pages and two column pages.
@@ -304,14 +312,21 @@ test("XLSX attachment: sheets, paging, zoom, cached values, bounds, failures, st
 
   // Workbook content never triggers a fetch of its external link (or anything off-origin).
   const origin = new URL(page.url()).origin;
-  expect(requestUrls.filter((url) => url.startsWith(new URL(FIXTURE_EXTERNAL_WORKBOOK).origin))).toEqual([]);
-  expect(requestUrls.filter((url) => !/^(data|blob):/.test(url) && new URL(url).origin !== origin)).toEqual([]);
+  expect(
+    requestUrls.filter((url) => url.startsWith(new URL(FIXTURE_EXTERNAL_WORKBOOK).origin)),
+  ).toEqual([]);
+  expect(
+    requestUrls.filter((url) => !/^(data|blob):/.test(url) && new URL(url).origin !== origin),
+  ).toEqual([]);
   expect(csp).toEqual([]);
 
   // Share: the same viewer over share bytes; revocation during the download fails closed.
-  const shareRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${documentId}/share-links`, {
-    data: { expiresInDays: 7 },
-  });
+  const shareRes = await page.request.post(
+    `/api/v1/workspaces/${wsId}/documents/${documentId}/share-links`,
+    {
+      data: { expiresInDays: 7 },
+    },
+  );
   expect(shareRes.status(), await shareRes.text()).toBe(201);
   const share = (await shareRes.json()) as { id: string; url: string };
   const sharePath = new URL(share.url).pathname;
@@ -332,10 +347,9 @@ test("XLSX attachment: sheets, paging, zoom, cached values, bounds, failures, st
   await expect(reader.locator("[data-chunk-supplement]")).toHaveCount(0);
   await expect(shared.locator("td").first()).toHaveText("한글 셀 😀");
   await shared.getByRole("button", { name: "다음 시트" }).click();
-  await expect(shared.locator("[data-xlsx-unsupported]").getByRole("link", { name: "다운로드" })).toHaveAttribute(
-    "href",
-    shareDownload,
-  );
+  await expect(
+    shared.locator("[data-xlsx-unsupported]").getByRole("link", { name: "다운로드" }),
+  ).toHaveAttribute("href", shareDownload);
 
   const shareHold = holdRoute();
   await reader.route(`**${shareDownload}`, shareHold.handler);

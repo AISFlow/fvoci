@@ -80,7 +80,9 @@ export function watchCspViolations(page: Page): string[] {
   const violations: string[] = [];
   page.on("console", (message) => {
     const text = message.text();
-    if (/Content Security Policy|Refused to (load|execute|apply|connect|frame|create)/i.test(text)) {
+    if (
+      /Content Security Policy|Refused to (load|execute|apply|connect|frame|create)/i.test(text)
+    ) {
       violations.push(text);
     }
   });

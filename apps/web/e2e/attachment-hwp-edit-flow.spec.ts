@@ -19,9 +19,13 @@ const owner = {
 };
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const hancomHwpx = new Uint8Array(fs.readFileSync(path.join(repoRoot, "compat/fixtures/sample.hwpx")));
+const hancomHwpx = new Uint8Array(
+  fs.readFileSync(path.join(repoRoot, "compat/fixtures/sample.hwpx")),
+);
 initSync({
-  module: fs.readFileSync(path.join(path.dirname(createRequire(import.meta.url).resolve("@rhwp/core")), "rhwp_bg.wasm")),
+  module: fs.readFileSync(
+    path.join(path.dirname(createRequire(import.meta.url).resolve("@rhwp/core")), "rhwp_bg.wasm"),
+  ),
 });
 
 /** Three pages of Korean text in a real OWPML package (see `hwp-test-fixture.ts`). */
@@ -52,10 +56,19 @@ function readPages(bytes: Uint8Array): string[] {
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-async function uploadAttachment(page: Page, wsId: string, documentId: string, name: string, bytes: Buffer) {
-  const created = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${documentId}/uploads`, {
-    data: { name, sizeBytes: bytes.length },
-  });
+async function uploadAttachment(
+  page: Page,
+  wsId: string,
+  documentId: string,
+  name: string,
+  bytes: Buffer,
+) {
+  const created = await page.request.post(
+    `/api/v1/workspaces/${wsId}/documents/${documentId}/uploads`,
+    {
+      data: { name, sizeBytes: bytes.length },
+    },
+  );
   expect(created.ok(), await created.text()).toBeTruthy();
   const upload = (await created.json()) as {
     attachmentId: string;
@@ -66,14 +79,20 @@ async function uploadAttachment(page: Page, wsId: string, documentId: string, na
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
-      data: bytes.subarray((part.partNumber - 1) * upload.partSizeBytes, part.partNumber * upload.partSizeBytes),
+      data: bytes.subarray(
+        (part.partNumber - 1) * upload.partSizeBytes,
+        part.partNumber * upload.partSizeBytes,
+      ),
     });
     expect(put.ok(), await put.text()).toBeTruthy();
     parts.push({ partNumber: part.partNumber, etag: put.headers()["etag"]! });
   }
-  const complete = await page.request.post(`/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`, {
-    data: { parts },
-  });
+  const complete = await page.request.post(
+    `/api/v1/workspaces/${wsId}/attachments/${upload.attachmentId}/complete`,
+    {
+      data: { parts },
+    },
+  );
   expect(complete.ok(), await complete.text()).toBeTruthy();
   return upload.attachmentId;
 }
@@ -97,7 +116,8 @@ async function pageInk(page: Page): Promise<string> {
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const at = (y * width + x) * 4;
-        if (data[at]! < 110) cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)]! += 1;
+        if (data[at]! < 110)
+          cells[Math.floor((y * grid) / height) * grid + Math.floor((x * grid) / width)]! += 1;
       }
     }
     return cells.join(",");
@@ -114,7 +134,8 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const editCopyCalls: string[] = [];
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname.endsWith("/edit-copy")) editCopyCalls.push(request.method());
+    if (new URL(request.url()).pathname.endsWith("/edit-copy"))
+      editCopyCalls.push(request.method());
   });
   const editCopies: string[] = [];
   page.on("response", async (response) => {
@@ -156,7 +177,9 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   const replacement = bar.getByLabel("바꿀 문자열");
   const saveButton = bar.getByRole("button", { name: "편집본 저장" });
   const viewPath = `/w/acme/a/${hwpxId}/view`;
-  const searchLink = page.getByRole("navigation", { name: "워크스페이스" }).getByRole("link", { name: "검색" });
+  const searchLink = page
+    .getByRole("navigation", { name: "워크스페이스" })
+    .getByRole("link", { name: "검색" });
 
   await page.goto(viewPath);
   await expectVueViewer(page);
@@ -248,19 +271,33 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   // dismissed, and discard only after acceptance. Same-app history uses the
   // custom dialog below, after save-copy.
   const dirtyInk = await pageInk(page);
-  const dismissed = new Promise<void>((resolve, reject) => page.once("dialog", (prompt) => {
-    try { expect(prompt.type()).toBe("beforeunload"); } catch (error) { reject(error); return; }
-    void prompt.dismiss().then(resolve, reject);
-  }));
+  const dismissed = new Promise<void>((resolve, reject) =>
+    page.once("dialog", (prompt) => {
+      try {
+        expect(prompt.type()).toBe("beforeunload");
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      void prompt.dismiss().then(resolve, reject);
+    }),
+  );
   await page.evaluate(() => window.history.forward());
   await dismissed;
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(saveButton).toBeEnabled();
   expect(await pageInk(page)).toBe(dirtyInk);
-  const accepted = new Promise<void>((resolve, reject) => page.once("dialog", (prompt) => {
-    try { expect(prompt.type()).toBe("beforeunload"); } catch (error) { reject(error); return; }
-    void prompt.accept().then(resolve, reject);
-  }));
+  const accepted = new Promise<void>((resolve, reject) =>
+    page.once("dialog", (prompt) => {
+      try {
+        expect(prompt.type()).toBe("beforeunload");
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      void prompt.accept().then(resolve, reject);
+    }),
+  );
   await page.evaluate(() => window.history.forward());
   await accepted;
   await expect(page).toHaveURL(/\/w\/acme\/search/);
@@ -311,7 +348,9 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   });
   await saveButton.click();
   await completing;
-  const trashed = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${documentId}/trash`);
+  const trashed = await page.request.post(
+    `/api/v1/workspaces/${wsId}/documents/${documentId}/trash`,
+  );
   expect(trashed.ok(), await trashed.text()).toBeTruthy();
   release();
   await expect(bar.getByRole("alert")).toHaveText(
@@ -321,11 +360,15 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await page.unroute("**/api/v1/workspaces/*/attachments/*/complete");
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(saveButton).toBeEnabled();
-  const restored = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${documentId}/restore`);
+  const restored = await page.request.post(
+    `/api/v1/workspaces/${wsId}/documents/${documentId}/restore`,
+  );
   expect(restored.ok(), await restored.text()).toBeTruthy();
   // The refused copy never became a stored attachment.
   expect(editCopies).toHaveLength(1);
-  const refused = await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${editCopies[0]}/download`);
+  const refused = await page.request.get(
+    `/api/v1/workspaces/${wsId}/attachments/${editCopies[0]}/download`,
+  );
   expect(refused.ok()).toBe(false);
 
   // Save copy: a new HWPX attachment beside the original, opened in its place, no guard prompt.
@@ -340,11 +383,15 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
   await expect(viewer.getByRole("button", { name: "간단 편집" })).toBeVisible();
   const copy = new Uint8Array(
-    await (await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${copyId}/download`)).body(),
+    await (
+      await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${copyId}/download`)
+    ).body(),
   );
   expect(readPages(copy)).toEqual([pages[0], pages[1]!.replace("둘째", "두번째"), pages[2]]);
   const original = new Uint8Array(
-    await (await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`)).body(),
+    await (
+      await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`)
+    ).body(),
   );
   expect(sha256(original)).toBe(sha256(threePageHwpx));
   // History back from the copy with unsaved edits is held: Escape stays on the copy,
@@ -378,18 +425,29 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await bar.getByRole("button", { name: "모두 바꾸기" }).click();
   await expect(saveButton).toBeEnabled();
   await saveButton.click();
-  await expect(page.locator(".attachment-viewer__name")).toHaveText("보고서 (edited).hwp", { timeout: 30_000 });
+  await expect(page.locator(".attachment-viewer__name")).toHaveText("보고서 (edited).hwp", {
+    timeout: 30_000,
+  });
   const hwpCopyId = page.url().split("/a/")[1]!.split("/")[0]!;
   const hwpCopy = new Uint8Array(
-    await (await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpCopyId}/download`)).body(),
+    await (
+      await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpCopyId}/download`)
+    ).body(),
   );
   expect([...hwpCopy.subarray(0, 4)]).toEqual([0xd0, 0xcf, 0x11, 0xe0]);
-  expect(readPages(hwpCopy)).toEqual([pages[0], pages[1], pages[2]!.replaceAll("백두산이", "한라산이")]);
+  expect(readPages(hwpCopy)).toEqual([
+    pages[0],
+    pages[1],
+    pages[2]!.replaceAll("백두산이", "한라산이"),
+  ]);
 
   // A share view lays the file out but never offers editing or calls the edit APIs.
-  const shareRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${documentId}/share-links`, {
-    data: { expiresInDays: 7 },
-  });
+  const shareRes = await page.request.post(
+    `/api/v1/workspaces/${wsId}/documents/${documentId}/share-links`,
+    {
+      data: { expiresInDays: 7 },
+    },
+  );
   expect(shareRes.status(), await shareRes.text()).toBe(201);
   const sharePath = new URL(((await shareRes.json()) as { url: string }).url).pathname;
   const anon = await browser.newContext();
@@ -400,9 +458,12 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
     if (url.pathname.startsWith("/api/")) readerApi.push(url.pathname);
   });
   await reader.goto(`${sharePath}/attachments/${hwpxId}/view`);
-  await expect(reader.locator("[data-hwp-viewer]").getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect(reader.locator("[data-hwp-viewer]").getByText("1 / 3")).toBeVisible({
+    timeout: 30_000,
+  });
   await expect(reader.getByRole("button", { name: "간단 편집" })).toHaveCount(0);
-  for (const apiPath of readerApi) expect(apiPath).not.toMatch(/edit-context|edit-copy|preview-html/);
+  for (const apiPath of readerApi)
+    expect(apiPath).not.toMatch(/edit-context|edit-copy|preview-html/);
   await anon.close();
 
   // With unsaved edits, closing the tab asks first (beforeunload).

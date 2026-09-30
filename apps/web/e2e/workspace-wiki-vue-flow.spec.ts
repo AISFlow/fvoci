@@ -170,7 +170,11 @@ async function save(page: Page): Promise<void> {
   await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
 }
 
-async function newSignedInPage(browser: Browser, baseURL: string | undefined, who: { email: string; password: string }): Promise<{ context: BrowserContext; page: Page }> {
+async function newSignedInPage(
+  browser: Browser,
+  baseURL: string | undefined,
+  who: { email: string; password: string },
+): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
   await login(page, who.email, who.password);
@@ -211,7 +215,10 @@ test("direct URL and refresh serve the Vue page with the saved body", async ({ p
   await expectBlocks(page, ["새로 고쳐도 남는 본문"]);
 
   // The wiki list stays inside the Vue app.
-  await page.getByRole("navigation", { name: "상위 경로" }).getByRole("link", { name: "위키", exact: true }).click();
+  await page
+    .getByRole("navigation", { name: "상위 경로" })
+    .getByRole("link", { name: "위키", exact: true })
+    .click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/wiki$`));
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
@@ -239,7 +246,8 @@ type RemoteClickGate = {
 async function installRemoteClickGate(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const gate: RemoteClickGate = { hold: false, pending: [] };
-    (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate = gate;
+    (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate =
+      gate;
     const NativeSocket = window.WebSocket;
     window.WebSocket = class extends NativeSocket {
       constructor(url: string | URL, protocols?: string | string[]) {
@@ -258,7 +266,10 @@ async function installRemoteClickGate(page: Page): Promise<void> {
   });
 }
 
-test("undo and redo take back only this editor's own edits, on both peers", async ({ browser, baseURL }, testInfo) => {
+test("undo and redo take back only this editor's own edits, on both peers", async ({
+  browser,
+  baseURL,
+}, testInfo) => {
   const a = await newSignedInPage(browser, baseURL, admin);
   const b = await newSignedInPage(browser, baseURL, member);
   const csp = watchCspViolations(a.page);
@@ -271,52 +282,68 @@ test("undo and redo take back only this editor's own edits, on both peers", asyn
     await expectBlocks(a.page, ["첫 문단", "둘째 문단"]);
     await expectBlocks(b.page, ["첫 문단", "둘째 문단"]);
     await b.page.evaluate(() => {
-      (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate.hold = true;
+      (
+        window as unknown as { __fvociRemoteClickGate: RemoteClickGate }
+      ).__fvociRemoteClickGate.hold = true;
     });
 
     await caretAtEndOf(a.page, 0);
     await a.page.keyboard.type(" 에이");
     // Wait for an actual sync payload, not just a peer-awareness frame. Use
     // the existing bounded Hocuspocus observer, rather than a second codec.
-    await expect.poll(async () => {
-      const frames = await b.page.evaluate(() =>
-        (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate.pending
-          .map(({ data }) => [...new Uint8Array(data)]),
-      );
-      return frames.some((bytes) => {
-        const frame = decodeHocuspocusFrame(new Uint8Array(bytes));
-        return frame?.kind === "other" && frame.type === 0;
-      });
-    }).toBe(true);
+    await expect
+      .poll(async () => {
+        const frames = await b.page.evaluate(() =>
+          (
+            window as unknown as { __fvociRemoteClickGate: RemoteClickGate }
+          ).__fvociRemoteClickGate.pending.map(({ data }) => [...new Uint8Array(data)]),
+        );
+        return frames.some((bytes) => {
+          const frame = decodeHocuspocusFrame(new Uint8Array(bytes));
+          return frame?.kind === "other" && frame.type === 0;
+        });
+      })
+      .toBe(true);
     await b.page.evaluate(() => {
-      const gate = (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate;
-      const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & { editor: { view: EditorView } };
+      const gate = (window as unknown as { __fvociRemoteClickGate: RemoteClickGate })
+        .__fvociRemoteClickGate;
+      const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
+        editor: { view: EditorView };
+      };
       const snapshot = (): ClickCaret => {
         const native = document.getSelection();
         const selection = root.editor.view.state.selection;
         return {
-          nativeBlock: [...root.children].findIndex((block) => block.contains(native?.anchorNode ?? null)),
+          nativeBlock: [...root.children].findIndex((block) =>
+            block.contains(native?.anchorNode ?? null),
+          ),
           parent: selection.$from.parent.textContent,
           from: selection.from,
           to: selection.to,
         };
       };
-      document.addEventListener("click", () => {
-        gate.before = snapshot();
-        gate.hold = false;
-        for (const { socket, data } of gate.pending.splice(0)) {
-          socket.dispatchEvent(new MessageEvent("message", { data }));
-        }
-        gate.after = snapshot();
-      }, { capture: true, once: true });
+      document.addEventListener(
+        "click",
+        () => {
+          gate.before = snapshot();
+          gate.hold = false;
+          for (const { socket, data } of gate.pending.splice(0)) {
+            socket.dispatchEvent(new MessageEvent("message", { data }));
+          }
+          gate.after = snapshot();
+        },
+        { capture: true, once: true },
+      );
     });
     await caretAtEndOf(b.page, 1);
     const boundary = await b.page.evaluate(() => {
-      const { before, after } = (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate;
+      const { before, after } = (window as unknown as { __fvociRemoteClickGate: RemoteClickGate })
+        .__fvociRemoteClickGate;
       return { before, after };
     });
     await testInfo.attach("native-click-remote-boundary", {
-      body: JSON.stringify(boundary), contentType: "application/json",
+      body: JSON.stringify(boundary),
+      contentType: "application/json",
     });
     expect(boundary.before).toMatchObject({ nativeBlock: 1, parent: "둘째 문단" });
     expect(boundary.after).toMatchObject({ nativeBlock: 1, parent: "둘째 문단" });
@@ -390,7 +417,9 @@ test("a math block inserted with /math reaches the peer, the saved body and a re
 
     await expect(a.page.locator(".fvoci-editor .afn-math math mfrac")).toBeVisible();
     // The peer's editor renders the attribute it received through Yjs as MathML.
-    await expect(b.page.locator(".fvoci-editor .afn-math math mfrac")).toBeVisible({ timeout: 15_000 });
+    await expect(b.page.locator(".fvoci-editor .afn-math math mfrac")).toBeVisible({
+      timeout: 15_000,
+    });
     await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("\\frac{a}{b}");
 
     await save(a.page);
@@ -399,7 +428,9 @@ test("a math block inserted with /math reaches the peer, the saved body and a re
     expect(saved).toContain("\\\\frac{a}{b}");
 
     await a.page.reload();
-    await expect(a.page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+    await expect(a.page.locator('[data-collab-status="connected"]')).toBeVisible({
+      timeout: 15_000,
+    });
     await expect(a.page.locator(".fvoci-editor .afn-math math mfrac")).toBeVisible();
     expect(csp).toEqual([]);
     expect(cspPeer).toEqual([]);
@@ -444,8 +475,9 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     // The invented initial reference is intentionally missing; do not leak it
     // as an authorized identity. The positive draft below uses a real resource.
     for (const page of [a.page, b.page]) {
-      await expect(page.locator(".fvoci-editor .afn-embed-inaccessible .afn-embed-ref"))
-        .toHaveText("접근할 수 없는 문서");
+      await expect(page.locator(".fvoci-editor .afn-embed-inaccessible .afn-embed-ref")).toHaveText(
+        "접근할 수 없는 문서",
+      );
     }
 
     // Embed: A types a new reference; meanwhile B changes the embed's kind.
@@ -457,7 +489,10 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     await b.page.getByLabel("참조 종류").selectOption("task");
     await caretAtEndOf(b.page, 3);
     // A's form follows the node (its kind attribute is now B's)...
-    await expect(a.page.locator(".fvoci-editor .afn-embed-edit")).toHaveAttribute("data-entity", "task");
+    await expect(a.page.locator(".fvoci-editor .afn-embed-edit")).toHaveAttribute(
+      "data-entity",
+      "task",
+    );
     // ...and keeps what A typed and chose, as the React view's uncontrolled fields do.
     await expect(refA).toBeFocused();
     await expect(refA).toHaveValue(referenceRef);
@@ -482,12 +517,16 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     // B's later text edit reaches A after B's latex (one socket, in order).
     await caretAtEndOf(b.page, 3);
     await b.page.keyboard.type(" 끝");
-    await expect.poll(async () => (await blockTexts(a.page)).at(-1), { timeout: 15_000 }).toBe("뒤 끝");
+    await expect
+      .poll(async () => (await blockTexts(a.page)).at(-1), { timeout: 15_000 })
+      .toBe("뒤 끝");
     await expect(sourceA).toBeFocused();
     await expect(sourceA).toHaveValue("a+b");
     await sourceA.blur();
     await expect(a.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b");
-    await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b", { timeout: 15_000 });
+    await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b", {
+      timeout: 15_000,
+    });
 
     await save(a.page);
     const saved = JSON.parse(await bodyJson(a.page.request, wsId, doc.id)) as {
@@ -497,14 +536,19 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
       entity: "document",
       ref: referenceRef,
     });
-    expect(saved.content.find((node) => node.type === "math")?.attrs).toMatchObject({ latex: "a+b" });
+    expect(saved.content.find((node) => node.type === "math")?.attrs).toMatchObject({
+      latex: "a+b",
+    });
   } finally {
     await a.context.close();
     await b.context.close();
   }
 });
 
-test("a peer's change to the same inline math preserves the focused draft until commit", async ({ browser, baseURL }) => {
+test("a peer's change to the same inline math preserves the focused draft until commit", async ({
+  browser,
+  baseURL,
+}) => {
   const a = await newSignedInPage(browser, baseURL, admin);
   const b = await newSignedInPage(browser, baseURL, member);
   try {
@@ -527,7 +571,9 @@ test("a peer's change to the same inline math preserves the focused draft until 
       // The subsequent text travels on the same socket after the math update.
       await caretAtEndOf(b.page, 1);
       await b.page.keyboard.type(remote);
-      await expect.poll(async () => (await blockTexts(a.page))[1]).toBe(remote === "y" ? "끝y" : "끝yz");
+      await expect
+        .poll(async () => (await blockTexts(a.page))[1])
+        .toBe(remote === "y" ? "끝y" : "끝yz");
       await expect(draft).toBeFocused();
       await expect(draft).toHaveValue("a+b");
     }
@@ -557,7 +603,12 @@ test("a peer's change to the same inline math preserves the focused draft until 
     await expect(a.page.locator(".afn-math-inline annotation")).toHaveText(["q"]);
     await editorOf(b.page).evaluate((root, pos) => {
       const view = (root as HTMLElement & { editor: { view: EditorView } }).editor.view;
-      view.dispatch(view.state.tr.insert(pos, view.state.schema.nodes.mathInline!.create({ latex: "replacement" })));
+      view.dispatch(
+        view.state.tr.insert(
+          pos,
+          view.state.schema.nodes.mathInline!.create({ latex: "replacement" }),
+        ),
+      );
     }, removedAt);
     await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("replacement");
     await expect(draft).toHaveCount(0);
@@ -632,39 +683,92 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
   }
 });
 
-test("one Korean composition is one undo step despite pauses and a concurrent peer edit", async ({ browser, baseURL }, testInfo) => {
+test("one Korean composition is one undo step despite pauses and a concurrent peer edit", async ({
+  browser,
+  baseURL,
+}, testInfo) => {
   const a = await newSignedInPage(browser, baseURL, admin);
   const b = await newSignedInPage(browser, baseURL, member);
   try {
     const wsId = await workspaceId(a.page.request);
-    const doc = await createDoc(a.page.request, wsId, "조합 실행 취소 단위", "첫 문단\n\n둘째 문단\n");
+    const doc = await createDoc(
+      a.page.request,
+      wsId,
+      "조합 실행 취소 단위",
+      "첫 문단\n\n둘째 문단\n",
+    );
     await openDoc(a.page, doc.path);
     await openDoc(b.page, doc.path);
     await caretAtEndOf(a.page, 0);
     await editorOf(a.page).evaluate((root) => {
-      const editor = (root as HTMLElement & { editor: { view: EditorView; on: (event: string, callback: (props: { transaction: import("@tiptap/pm/state").Transaction }) => void) => void } }).editor;
+      const editor = (
+        root as HTMLElement & {
+          editor: {
+            view: EditorView;
+            on: (
+              event: string,
+              callback: (props: { transaction: import("@tiptap/pm/state").Transaction }) => void,
+            ) => void;
+          };
+        }
+      ).editor;
       const log: unknown[] = [];
       (root as HTMLElement & { compositionLog: unknown[] }).compositionLog = log;
-      const undoPlugin = editor.view.state.plugins.find((plugin) => plugin.key.startsWith("y-undo$"));
+      const undoPlugin = editor.view.state.plugins.find((plugin) =>
+        plugin.key.startsWith("y-undo$"),
+      );
       const manager = undoPlugin?.getState(editor.view.state).undoManager;
       manager.doc.on("beforeTransaction", (transaction: { origin: { key?: string } | null }) => {
-        const policy = editor.view.state.plugins.find((plugin) => plugin.key.startsWith("fvociCompositionUndo$"));
-        log.push({ type: "y-before", origin: transaction.origin?.key, composition: policy?.getState(editor.view.state), captureTimeout: manager.captureTimeout, lastChange: manager.lastChange, undo: manager.undoStack.length });
+        const policy = editor.view.state.plugins.find((plugin) =>
+          plugin.key.startsWith("fvociCompositionUndo$"),
+        );
+        log.push({
+          type: "y-before",
+          origin: transaction.origin?.key,
+          composition: policy?.getState(editor.view.state),
+          captureTimeout: manager.captureTimeout,
+          lastChange: manager.lastChange,
+          undo: manager.undoStack.length,
+        });
       });
-      manager.doc.on("afterTransaction", () => log.push({ type: "y-after", captureTimeout: manager.captureTimeout, lastChange: manager.lastChange, undo: manager.undoStack.length }));
+      manager.doc.on("afterTransaction", () =>
+        log.push({
+          type: "y-after",
+          captureTimeout: manager.captureTimeout,
+          lastChange: manager.lastChange,
+          undo: manager.undoStack.length,
+        }),
+      );
       for (const name of ["compositionstart", "compositionupdate", "compositionend"]) {
-        root.addEventListener(name, (event) => log.push({ type: name, data: (event as CompositionEvent).data, composing: editor.view.composing }));
+        root.addEventListener(name, (event) =>
+          log.push({
+            type: name,
+            data: (event as CompositionEvent).data,
+            composing: editor.view.composing,
+          }),
+        );
       }
       editor.on("transaction", ({ transaction }) => {
         const plugin = editor.view.state.plugins.find((plugin) => plugin.key.startsWith("y-undo$"));
         const manager = plugin?.getState(editor.view.state).undoManager;
-        log.push({ type: "transaction", composition: transaction.getMeta("composition"), changed: transaction.docChanged, text: editor.view.state.doc.textContent, undo: manager?.undoStack.length, captureTimeout: manager?.captureTimeout });
+        log.push({
+          type: "transaction",
+          composition: transaction.getMeta("composition"),
+          changed: transaction.docChanged,
+          text: editor.view.state.doc.textContent,
+          undo: manager?.undoStack.length,
+          captureTimeout: manager?.captureTimeout,
+        });
       });
     });
     const ime = await a.context.newCDPSession(a.page);
     // Chromium's synthetic CDP composition path, not an actual OS IME witness.
     const preedit = async (text: string) => {
-      await ime.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+      await ime.send("Input.imeSetComposition", {
+        text,
+        selectionStart: text.length,
+        selectionEnd: text.length,
+      });
       await expectBlocks(a.page, [`첫 문단${text}`, "둘째 문단 원격"]);
     };
     await ime.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
@@ -679,10 +783,20 @@ test("one Korean composition is one undo step despite pauses and a concurrent pe
     await preedit("한");
     await ime.send("Input.insertText", { text: "한" });
     await expectBlocks(b.page, ["첫 문단한", "둘째 문단 원격"]);
-    await testInfo.attach("paused-composition-transactions", { body: JSON.stringify(await editorOf(a.page).evaluate((root) => (root as HTMLElement & { compositionLog: unknown[] }).compositionLog)), contentType: "application/json" });
+    await testInfo.attach("paused-composition-transactions", {
+      body: JSON.stringify(
+        await editorOf(a.page).evaluate(
+          (root) => (root as HTMLElement & { compositionLog: unknown[] }).compositionLog,
+        ),
+      ),
+      contentType: "application/json",
+    });
     await a.page.keyboard.press("Control+z");
     const afterUndo = await blockTexts(a.page);
-    await testInfo.attach("paused-composition-after-one-undo", { body: JSON.stringify(afterUndo), contentType: "application/json" });
+    await testInfo.attach("paused-composition-after-one-undo", {
+      body: JSON.stringify(afterUndo),
+      contentType: "application/json",
+    });
     await expectBlocks(a.page, ["첫 문단", "둘째 문단 원격"]);
     await expectBlocks(b.page, ["첫 문단", "둘째 문단 원격"]);
     await a.page.keyboard.press("Control+Shift+z");
@@ -702,7 +816,9 @@ test("one Korean composition is one undo step despite pauses and a concurrent pe
 // (Web 36599369890 shard 5) failed with "Expected to fail, but passed".
 // Keep the assertion as a regression: "첫 문단" + 한글 must be "첫 문단한글",
 // not "첫 문단ㅎ한글".
-test("Korean composition with the caret after the marked text leaves no stray jamo", async ({ page }) => {
+test("Korean composition with the caret after the marked text leaves no stray jamo", async ({
+  page,
+}) => {
   await login(page, admin.email, admin.password);
   const wsId = await workspaceId(page.request);
   const doc = await createDoc(page.request, wsId, "한글 조합 캐럿", "첫 문단\n");
@@ -711,7 +827,11 @@ test("Korean composition with the caret after the marked text leaves no stray ja
   const ime = await page.context().newCDPSession(page);
   const compose = async (steps: string[], commit: string) => {
     for (const text of steps) {
-      await ime.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+      await ime.send("Input.imeSetComposition", {
+        text,
+        selectionStart: text.length,
+        selectionEnd: text.length,
+      });
     }
     await ime.send("Input.insertText", { text: commit });
   };
@@ -720,7 +840,9 @@ test("Korean composition with the caret after the marked text leaves no stray ja
   await expect.poll(() => blockTexts(page), { timeout: 5_000 }).toEqual(["첫 문단한글"]);
 });
 
-test("moving between five documents in the app keeps one room socket and every edit", async ({ page }, testInfo) => {
+test("moving between five documents in the app keeps one room socket and every edit", async ({
+  page,
+}, testInfo) => {
   await login(page, admin.email, admin.password);
   const csp = watchCspViolations(page);
   const sockets = watchCollabSockets(page);
@@ -730,9 +852,12 @@ test("moving between five documents in the app keeps one room socket and every e
   const docs: WikiDoc[] = [];
   for (let i = 1; i <= 5; i += 1) docs.push(await createDoc(page.request, wsId, `이동 ${i}`));
   for (let i = 0; i < 4; i += 1) {
-    const moved = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${docs[i]!.id}/move`, {
-      data: { newParentId: docs[i + 1]!.id },
-    });
+    const moved = await page.request.post(
+      `/api/v1/workspaces/${wsId}/documents/${docs[i]!.id}/move`,
+      {
+        data: { newParentId: docs[i + 1]!.id },
+      },
+    );
     expect(moved.ok(), await moved.text()).toBe(true);
   }
 
@@ -747,128 +872,202 @@ test("moving between five documents in the app keeps one room socket and every e
 
   await openDoc(page, docs[0]!.path);
   await expectRoom(docs[0]!);
-  await testInfo.attach("rapid-documents", { body: JSON.stringify({ wsId, docs }), contentType: "application/json" });
+  await testInfo.attach("rapid-documents", {
+    body: JSON.stringify({ wsId, docs }),
+    contentType: "application/json",
+  });
   type NativeReceipt = {
-    kind: string; at: number; trusted: boolean; key?: string; data?: string | null;
-    inEditor: boolean; href?: string;
+    kind: string;
+    at: number;
+    trusted: boolean;
+    key?: string;
+    data?: string | null;
+    inEditor: boolean;
+    href?: string;
   };
   // When the last keystroke and the link click reached the page.
   await page.evaluate(() => {
     const marks = window as unknown as {
-      lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
-      lastLinkTrusted: boolean; lastLinkHref: string; nativeEvents: NativeReceipt[];
+      lastKeyAt: number;
+      lastLinkAt: number;
+      lastKeyTrusted: boolean;
+      lastLinkTrusted: boolean;
+      lastLinkHref: string;
+      nativeEvents: NativeReceipt[];
     };
     marks.nativeEvents = [];
-    for (const kind of ["keydown", "beforeinput", "input", "keyup", "mousedown", "mouseup", "click"]) {
-      addEventListener(kind, (event) => {
-        const target = event.target as Element | null;
-        const inEditor = !!target?.closest(".fvoci-editor .ProseMirror");
-        const link = target?.closest("a");
-        const at = performance.now();
-        if (kind === "keydown") {
-          marks.lastKeyAt = at;
-          marks.lastKeyTrusted = event.isTrusted;
-        }
-        if (kind === "click" && link) {
-          marks.lastLinkAt = at;
-          marks.lastLinkTrusted = event.isTrusted;
-          marks.lastLinkHref = link.getAttribute("href") ?? "";
-        }
-        if (inEditor || link) marks.nativeEvents.push({ kind, at, trusted: event.isTrusted,
-          key: (event as KeyboardEvent).key, data: (event as InputEvent).data,
-          inEditor, href: link?.getAttribute("href") ?? undefined });
-      }, true);
+    for (const kind of [
+      "keydown",
+      "beforeinput",
+      "input",
+      "keyup",
+      "mousedown",
+      "mouseup",
+      "click",
+    ]) {
+      addEventListener(
+        kind,
+        (event) => {
+          const target = event.target as Element | null;
+          const inEditor = !!target?.closest(".fvoci-editor .ProseMirror");
+          const link = target?.closest("a");
+          const at = performance.now();
+          if (kind === "keydown") {
+            marks.lastKeyAt = at;
+            marks.lastKeyTrusted = event.isTrusted;
+          }
+          if (kind === "click" && link) {
+            marks.lastLinkAt = at;
+            marks.lastLinkTrusted = event.isTrusted;
+            marks.lastLinkHref = link.getAttribute("href") ?? "";
+          }
+          if (inEditor || link)
+            marks.nativeEvents.push({
+              kind,
+              at,
+              trusted: event.isTrusted,
+              key: (event as KeyboardEvent).key,
+              data: (event as InputEvent).data,
+              inEditor,
+              href: link?.getAttribute("href") ?? undefined,
+            });
+        },
+        true,
+      );
     }
   });
   const native = await page.context().newCDPSession(page);
   const frames: unknown[] = [];
-  for (const event of ["Network.webSocketCreated", "Network.webSocketFrameSent", "Network.webSocketFrameReceived", "Network.webSocketClosed"] as const) {
+  for (const event of [
+    "Network.webSocketCreated",
+    "Network.webSocketFrameSent",
+    "Network.webSocketFrameReceived",
+    "Network.webSocketClosed",
+  ] as const) {
     native.on(event, (data) => frames.push({ event, ...data }));
   }
   await native.send("Network.enable");
   const gaps: number[] = [];
   const gestures: unknown[] = [];
   try {
-  for (let i = 0; i < 4; i += 1) {
-    const next = docs[i + 1]!;
-    const editor = editorOf(page);
-    const link = page.getByRole("navigation", { name: "상위 경로" })
-      .getByRole("link", { name: `이동 ${i + 2}`, exact: true });
-    await editor.click();
-    await page.keyboard.type("떠나기 직전 ");
-    // Prepare the real target before the final edit. The digit below must still
-    // reach the editor immediately before native activation of its router link.
-    await expect(link).toHaveAttribute("href", next.path);
-    await link.click({ trial: true });
-    const { root } = await native.send("DOM.getDocument");
-    const { nodeId } = await native.send("DOM.querySelector", {
-      nodeId: root.nodeId, selector: `[aria-label="상위 경로"] a[href="${next.path}"]`,
-    });
-    expect(nodeId).not.toBe(0);
-    await expect(editor).toBeFocused();
-    await page.evaluate(() => {
-      (window as unknown as { nativeEvents: NativeReceipt[] }).nativeEvents = [];
-    });
-    // An in-app move (a router link) inside the editor's 200 ms update batch.
-    // Sequential Chromium input is the same native path as Playwright keyboard
-    // and mouse actions, without intervening actionability/DOM snapshots. Trace
-    // stays enabled and records these commands plus the ordered DOM receipts.
-    const digit = String(i + 1);
-    const key = { key: digit, code: `Digit${digit}`, windowsVirtualKeyCode: 49 + i };
-    await native.send("Input.dispatchKeyEvent", {
-      ...key, type: "keyDown", text: digit, unmodifiedText: digit,
-    });
-    await native.send("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
-    // Editing may scroll the focused editor. Read live geometry of the already
-    // prepared anchor, rather than reuse a point measured before that edit.
-    await native.send("DOM.scrollIntoViewIfNeeded", { nodeId });
-    const { quads } = await native.send("DOM.getContentQuads", { nodeId });
-    const quad = quads[0]!;
-    const point = { x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
-      y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4 };
-    await native.send("Input.dispatchMouseEvent", { ...point, type: "mouseMoved" });
-    await native.send("Input.dispatchMouseEvent", {
-      ...point, type: "mousePressed", button: "left", buttons: 1, clickCount: 1,
-    });
-    await native.send("Input.dispatchMouseEvent", {
-      ...point, type: "mouseReleased", button: "left", buttons: 0, clickCount: 1,
-    });
-    const gesture = await page.evaluate(() => {
-      const marks = window as unknown as {
-        lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
-        lastLinkTrusted: boolean; lastLinkHref: string; nativeEvents: NativeReceipt[];
+    for (let i = 0; i < 4; i += 1) {
+      const next = docs[i + 1]!;
+      const editor = editorOf(page);
+      const link = page
+        .getByRole("navigation", { name: "상위 경로" })
+        .getByRole("link", { name: `이동 ${i + 2}`, exact: true });
+      await editor.click();
+      await page.keyboard.type("떠나기 직전 ");
+      // Prepare the real target before the final edit. The digit below must still
+      // reach the editor immediately before native activation of its router link.
+      await expect(link).toHaveAttribute("href", next.path);
+      await link.click({ trial: true });
+      const { root } = await native.send("DOM.getDocument");
+      const { nodeId } = await native.send("DOM.querySelector", {
+        nodeId: root.nodeId,
+        selector: `[aria-label="상위 경로"] a[href="${next.path}"]`,
+      });
+      expect(nodeId).not.toBe(0);
+      await expect(editor).toBeFocused();
+      await page.evaluate(() => {
+        (window as unknown as { nativeEvents: NativeReceipt[] }).nativeEvents = [];
+      });
+      // An in-app move (a router link) inside the editor's 200 ms update batch.
+      // Sequential Chromium input is the same native path as Playwright keyboard
+      // and mouse actions, without intervening actionability/DOM snapshots. Trace
+      // stays enabled and records these commands plus the ordered DOM receipts.
+      const digit = String(i + 1);
+      const key = { key: digit, code: `Digit${digit}`, windowsVirtualKeyCode: 49 + i };
+      await native.send("Input.dispatchKeyEvent", {
+        ...key,
+        type: "keyDown",
+        text: digit,
+        unmodifiedText: digit,
+      });
+      await native.send("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
+      // Editing may scroll the focused editor. Read live geometry of the already
+      // prepared anchor, rather than reuse a point measured before that edit.
+      await native.send("DOM.scrollIntoViewIfNeeded", { nodeId });
+      const { quads } = await native.send("DOM.getContentQuads", { nodeId });
+      const quad = quads[0]!;
+      const point = {
+        x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
+        y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4,
       };
-      return { keyAt: marks.lastKeyAt, clickAt: marks.lastLinkAt,
-        gap: marks.lastLinkAt - marks.lastKeyAt, keyTrusted: marks.lastKeyTrusted,
-        clickTrusted: marks.lastLinkTrusted, href: marks.lastLinkHref, events: marks.nativeEvents };
+      await native.send("Input.dispatchMouseEvent", { ...point, type: "mouseMoved" });
+      await native.send("Input.dispatchMouseEvent", {
+        ...point,
+        type: "mousePressed",
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+      });
+      await native.send("Input.dispatchMouseEvent", {
+        ...point,
+        type: "mouseReleased",
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+      });
+      const gesture = await page.evaluate(() => {
+        const marks = window as unknown as {
+          lastKeyAt: number;
+          lastLinkAt: number;
+          lastKeyTrusted: boolean;
+          lastLinkTrusted: boolean;
+          lastLinkHref: string;
+          nativeEvents: NativeReceipt[];
+        };
+        return {
+          keyAt: marks.lastKeyAt,
+          clickAt: marks.lastLinkAt,
+          gap: marks.lastLinkAt - marks.lastKeyAt,
+          keyTrusted: marks.lastKeyTrusted,
+          clickTrusted: marks.lastLinkTrusted,
+          href: marks.lastLinkHref,
+          events: marks.nativeEvents,
+        };
+      });
+      gestures.push(gesture);
+      gaps.push(gesture.gap);
+      expect(gesture.keyTrusted).toBe(true);
+      expect(gesture.clickTrusted).toBe(true);
+      expect(gesture.href).toBe(next.path);
+      expect(gesture.events.map((event) => event.kind)).toEqual([
+        "keydown",
+        "beforeinput",
+        "input",
+        "keyup",
+        "mousedown",
+        "mouseup",
+        "click",
+      ]);
+      for (const event of gesture.events) expect(event.trusted).toBe(true);
+      expect(gesture.events[0]).toMatchObject({ key: digit, inEditor: true });
+      expect(gesture.events[1]).toMatchObject({ data: digit, inEditor: true });
+      expect(gesture.events[2]).toMatchObject({ data: digit, inEditor: true });
+      await expectRoom(next);
+    }
+    await testInfo.attach("rapid-navigation-input", {
+      body: JSON.stringify(gestures),
+      contentType: "application/json",
     });
-    gestures.push(gesture);
-    gaps.push(gesture.gap);
-    expect(gesture.keyTrusted).toBe(true);
-    expect(gesture.clickTrusted).toBe(true);
-    expect(gesture.href).toBe(next.path);
-    expect(gesture.events.map((event) => event.kind))
-      .toEqual(["keydown", "beforeinput", "input", "keyup", "mousedown", "mouseup", "click"]);
-    for (const event of gesture.events) expect(event.trusted).toBe(true);
-    expect(gesture.events[0]).toMatchObject({ key: digit, inEditor: true });
-    expect(gesture.events[1]).toMatchObject({ data: digit, inEditor: true });
-    expect(gesture.events[2]).toMatchObject({ data: digit, inEditor: true });
-    await expectRoom(next);
-  }
-  await testInfo.attach("rapid-navigation-input", { body: JSON.stringify(gestures), contentType: "application/json" });
-  // The fifth room connected: no socket leaked against the per-session cap.
-  expect(sockets.opened()).toBe(5);
-  for (const gap of gaps) expect(gap).toBeLessThan(200);
+    // The fifth room connected: no socket leaked against the per-session cap.
+    expect(sockets.opened()).toBe(5);
+    for (const gap of gaps) expect(gap).toBeLessThan(200);
 
-  for (let i = 3; i >= 0; i -= 1) {
-    await page.goBack();
-    await expectRoom(docs[i]!);
-    await expectBlocks(page, [`떠나기 직전 ${i + 1}`]);
-  }
-  expect(await bodyJson(page.request, wsId, docs[0]!.id)).toContain("떠나기 직전 1");
-  expect(csp).toEqual([]);
+    for (let i = 3; i >= 0; i -= 1) {
+      await page.goBack();
+      await expectRoom(docs[i]!);
+      await expectBlocks(page, [`떠나기 직전 ${i + 1}`]);
+    }
+    expect(await bodyJson(page.request, wsId, docs[0]!.id)).toContain("떠나기 직전 1");
+    expect(csp).toEqual([]);
   } finally {
-    await testInfo.attach("rapid-wire-frames", { body: JSON.stringify(frames), contentType: "application/json" });
+    await testInfo.attach("rapid-wire-frames", {
+      body: JSON.stringify(frames),
+      contentType: "application/json",
+    });
     await native.detach();
   }
 });

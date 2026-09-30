@@ -103,7 +103,9 @@ export async function newSignedInPage(
 export async function workspaceId(request: APIRequestContext): Promise<string> {
   const res = await request.get("/api/v1/me/workspaces");
   expect(res.ok()).toBe(true);
-  const workspace = (await res.json()).items.find((item: { slug: string }) => item.slug === admin.workspaceSlug);
+  const workspace = (await res.json()).items.find(
+    (item: { slug: string }) => item.slug === admin.workspaceSlug,
+  );
   expect(workspace).toBeTruthy();
   return workspace.id;
 }
@@ -131,7 +133,11 @@ export async function createDoc(
 }
 
 /** The saved body (REST), as Tiptap JSON. */
-export async function savedBody(request: APIRequestContext, wsId: string, docId: string): Promise<TiptapNode> {
+export async function savedBody(
+  request: APIRequestContext,
+  wsId: string,
+  docId: string,
+): Promise<TiptapNode> {
   const res = await request.get(`/api/v1/workspaces/${wsId}/documents/${docId}/body`);
   expect(res.ok()).toBe(true);
   return (await res.json()).contentJson as TiptapNode;

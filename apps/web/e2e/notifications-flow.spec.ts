@@ -45,9 +45,9 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
   expect(workspace).toBeTruthy();
   const membersRes = await page.request.get(`/api/v1/workspaces/${workspace.id}/members`);
   expect(membersRes.ok()).toBe(true);
-    let memberId = (await membersRes.json()).items.find(
-      (item: { email: string }) => item.email.toLowerCase() === member.email.toLowerCase(),
-    )?.userId;
+  let memberId = (await membersRes.json()).items.find(
+    (item: { email: string }) => item.email.toLowerCase() === member.email.toLowerCase(),
+  )?.userId;
   expect(memberId).toBeTruthy();
 
   const projRes = await page.request.post(`/api/v1/workspaces/${workspace.id}/projects`, {
@@ -62,9 +62,12 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
   );
   expect(taskRes.status()).toBe(201);
   const task = await taskRes.json();
-  const assignRes = await page.request.patch(`/api/v1/workspaces/${workspace.id}/tasks/${task.id}`, {
-    data: { assigneeIds: [memberId] },
-  });
+  const assignRes = await page.request.patch(
+    `/api/v1/workspaces/${workspace.id}/tasks/${task.id}`,
+    {
+      data: { assigneeIds: [memberId] },
+    },
+  );
   expect(assignRes.status()).toBe(200);
 
   const groupRes = await page.request.post(`/api/v1/workspaces/${workspace.id}/groups`, {
@@ -91,9 +94,7 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
   await expect
     .poll(
       async () => {
-        const res = await page.request.get(
-          `/api/v1/workspaces/${workspace.id}/notifications`,
-        );
+        const res = await page.request.get(`/api/v1/workspaces/${workspace.id}/notifications`);
         if (!res.ok()) return false;
         const items: { verb: string }[] = (await res.json()).items;
         return items.some((item) => item.verb.startsWith("comment."));
@@ -102,9 +103,9 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
     )
     .toBe(true);
   await page.goto(`/w/${owner.workspaceSlug}/wiki`);
-  await expect(
-    page.getByRole("button", { name: /안 읽은 알림 \d+건/ }),
-  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: /안 읽은 알림 \d+건/ })).toBeVisible({
+    timeout: 15_000,
+  });
 
   await page.goto(`/w/${owner.workspaceSlug}/notifications`);
   const item = page.getByText(
@@ -200,9 +201,7 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
 
   const instance = await (await page.request.get("/api/v1/instance")).json();
   const publicKey: string | null = instance.values.webPushPublicKey;
-  expect(publicKey, "server bootstraps VAPID with ENCRYPTION_KEYS").toMatch(
-    /^B[A-Za-z0-9_-]{86}$/,
-  );
+  expect(publicKey, "server bootstraps VAPID with ENCRYPTION_KEYS").toMatch(/^B[A-Za-z0-9_-]{86}$/);
 
   const pushLog = async (): Promise<string[]> =>
     JSON.parse((await page.evaluate(() => sessionStorage.getItem("e2e-push-log"))) ?? "[]");

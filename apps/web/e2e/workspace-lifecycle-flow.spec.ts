@@ -59,7 +59,10 @@ test("home counts and owner deletes a team workspace", async ({ page }) => {
   await page.getByRole("link", { name: "Beta 팀" }).click();
   await expect(page).toHaveURL(/\/w\/beta-team\/wiki$/);
   await page.goto("/w/beta-team/settings");
-  await page.locator("summary").filter({ hasText: /^워크스페이스 삭제$/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^워크스페이스 삭제$/ })
+    .click();
   await page.getByLabel("확인을 위해 주소(영문)를 입력하세요.").fill("beta-team");
   await page.getByRole("button", { name: "워크스페이스 삭제" }).click();
   await expect(page).toHaveURL(/\/$/);

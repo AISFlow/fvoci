@@ -47,7 +47,9 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await page.getByRole("link", { name: "계정", exact: true }).click();
   await expect(page).toHaveURL(/\/settings\/account$/);
   const mfa = page.getByTestId("mfa-section");
-  await expect(mfa.getByTestId("mfa-status")).toHaveText("사용 안 함 — 로그인에 비밀번호만 씁니다.");
+  await expect(mfa.getByTestId("mfa-status")).toHaveText(
+    "사용 안 함 — 로그인에 비밀번호만 씁니다.",
+  );
   await mfa.locator("#settings-mfa-confirm").fill(owner.password);
   await mfa.getByRole("button", { name: "설정", exact: true }).click();
   const secretText = (await mfa.getByTestId("mfa-secret").textContent())?.trim() ?? "";
@@ -70,8 +72,9 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await mfa.locator("#settings-mfa-code").fill(totp(secretText, enableStep));
   await mfa.getByRole("button", { name: "켜기" }).click();
   await expect(mfa.getByRole("status").filter({ hasText: "2단계 인증을 켰습니다." })).toBeVisible();
-  const recoveryCodes = (await mfa.getByTestId("mfa-recovery-codes").locator("li").allTextContents())
-    .map((code) => code.trim());
+  const recoveryCodes = (
+    await mfa.getByTestId("mfa-recovery-codes").locator("li").allTextContents()
+  ).map((code) => code.trim());
   expect(recoveryCodes).toHaveLength(10);
   for (const code of recoveryCodes) expect(code).toMatch(/^\S{4}-\S{4}-\S{4}$/);
   await mfa.getByRole("button", { name: "보관했습니다" }).click();
@@ -115,8 +118,8 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await page.getByRole("button", { name: "이메일로 로그인 링크 받기" }).click();
   await page.locator("#magic-link-email").fill(owner.email);
   await page.getByRole("button", { name: "링크 받기", exact: true }).click();
-  const magicMail = await waitForCapturedMail((mail) =>
-    mail.to === owner.email && mail.text.includes("/magic-link?token="),
+  const magicMail = await waitForCapturedMail(
+    (mail) => mail.to === owner.email && mail.text.includes("/magic-link?token="),
   );
   const magicToken = magicMail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
   expect(magicToken).toBeTruthy();
@@ -133,9 +136,14 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await navigateAuthQuery(page, "/magic-link?token=not-issued");
   await expect(page.getByRole("heading", { name: "2단계 인증" })).toHaveCount(0);
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
-  expect((await page.request.post("/api/v1/auth/magic-link", { data: { email: owner.email } })).status()).toBe(202);
-  const secondMail = await waitForCapturedMail((mail) =>
-    mail.to === owner.email && mail.text.includes("/magic-link?token=") && !mail.text.includes(magicToken!),
+  expect(
+    (await page.request.post("/api/v1/auth/magic-link", { data: { email: owner.email } })).status(),
+  ).toBe(202);
+  const secondMail = await waitForCapturedMail(
+    (mail) =>
+      mail.to === owner.email &&
+      mail.text.includes("/magic-link?token=") &&
+      !mail.text.includes(magicToken!),
   );
   const secondToken = secondMail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
   expect(secondToken).toBeTruthy();
@@ -150,7 +158,9 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
 
 // The first flow exercises password-login recovery replay. This distinct
 // account isolates the magic-page bad-code path from that account's rate limit.
-test("magic-link MFA rejects a bad code without a session and accepts a recovery code", async ({ page }) => {
+test("magic-link MFA rejects a bad code without a session and accepts a recovery code", async ({
+  page,
+}) => {
   const email = "magic-mfa-negative@example.com";
   const password = "magicnegative1";
   createE2eUser(email, password, "매직 MFA");
@@ -164,14 +174,20 @@ test("magic-link MFA rejects a bad code without a session and accepts a recovery
   await mfa.locator("#settings-mfa-code").fill(totp(secret, currentStep()));
   await mfa.getByRole("button", { name: "켜기" }).click();
   await expect(mfa.getByTestId("mfa-recovery-codes")).toBeVisible();
-  const recovery = (await mfa.getByTestId("mfa-recovery-codes").locator("li").first().textContent())!.trim();
+  const recovery = (await mfa
+    .getByTestId("mfa-recovery-codes")
+    .locator("li")
+    .first()
+    .textContent())!.trim();
   await mfa.getByRole("button", { name: "보관했습니다" }).click();
   await page.goto("/");
   await logout(page);
   await page.getByRole("button", { name: "이메일로 로그인 링크 받기" }).click();
   await page.locator("#magic-link-email").fill(email);
   await page.getByRole("button", { name: "링크 받기", exact: true }).click();
-  const mail = await waitForCapturedMail((item) => item.to === email && item.text.includes("/magic-link?token="));
+  const mail = await waitForCapturedMail(
+    (item) => item.to === email && item.text.includes("/magic-link?token="),
+  );
   const token = mail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
   expect(token).toBeTruthy();
   await page.goto(`/magic-link?token=${token}`);
