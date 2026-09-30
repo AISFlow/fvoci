@@ -115,21 +115,31 @@ test("direct section URLs preserve query and hash across reload; foreign and sig
   expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).status()).toBe(404);
 });
 
-test("notification pagination reaches a third page, bell cache stays valid, and archive/read persist", async ({ page }) => {
+test("notification pagination reaches a third page, bell cache stays valid, and archive/read persist", async ({ page, browser, baseURL }) => {
   await login(page, owner.email, owner.password);
   createE2eUser("navigation-inbox@example.com", "inboxpass123", "수신", { workspaceSlug: "navigation", membershipRole: "member" });
   const members = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()).items;
   const memberId = members.find((item: { email: string }) => item.email === "navigation-inbox@example.com").userId;
   const copy = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items.find((item: { key: string }) => item.key === "COPY");
+  createE2eUser("navigation-mentions@example.com", "mentionspass123", "댓글", { workspaceSlug: "navigation", membershipRole: "member" });
+  const authorContext = await browser.newContext({ baseURL });
+  const coauthor = await authorContext.newPage();
   const commentIds: string[] = [];
-  for (let start = 0; start < 105; start += 5) {
-    await Promise.all(Array.from({ length: Math.min(5, 105 - start) }, async (_, offset) => {
-      const comment = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${copy.rootDocumentId}/comments`, {
-        data: { body: `Paged inbox ${start + offset}`, mentionedUserIds: [memberId] },
-      });
-      expect(comment.status()).toBe(201);
-      commentIds.push((await comment.json()).id);
-    }));
+  try {
+    await login(coauthor, "navigation-mentions@example.com", "mentionspass123");
+    for (let start = 0; start < 105; start += 5) {
+      await Promise.all(Array.from({ length: Math.min(5, 105 - start) }, async (_, offset) => {
+        // Two real members stay within the unchanged sixty-comments/user limit.
+        const author = start + offset < 53 ? page : coauthor;
+        const comment = await author.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${copy.rootDocumentId}/comments`, {
+          data: { body: `Paged inbox ${start + offset}`, mentionedUserIds: [memberId] },
+        });
+        expect(comment.status()).toBe(201);
+        commentIds.push((await comment.json()).id);
+      }));
+    }
+  } finally {
+    await authorContext.close();
   }
   // Coordinator-approved DB fixture materializes these genuine API-created
   // events in the isolated inbox. The unchanged notifications-flow separately
