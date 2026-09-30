@@ -936,7 +936,30 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
-#### 최신 PR272 체크포인트 (2026-09-30 14:35 KST 원격 관측 / 14:46 KST 코디네이터 delta)
+#### 최신 PR272 실행 체크포인트 (2026-09-30 15:13 KST)
+
+아래 14:46 이하 기록은 해당 시각의 근거로 보존한다. **#272는 Draft이며 별도 사용자 승인 전 main 머지·릴리스 금지**다.
+
+- 원격 HEAD `9f05a907860d83313ff8493eb7300709e17d9977`, base main `50d95df1a98c2d88d28f09222c2985fbdb585623`. accepted6441/491/90ad 묶음을 정상 push했다. 별도 Sol 검토·검증 `ctx_48f8d77b5f65` ACCEPT: fresh Bun 타입/build, 단위41, 실제 Rust/app-role DB/Chromium9(수식2·고지1·셸6), 원본13개 변경 blob/319 assets/4 binaries 전후 확인. 이전90ad Gantt10은 동일 영향 범위의 재사용이며 새 실행이 아니다. 보고 `fvoci-front272-batch9f05-review-verify-sol61.txt`.
+- 이 SHA의 실제 원격 CI가 시작됐다: Web36676813448, Install36676813449, Native collaboration36676813454, Native documents36676813465, Rust36676813494. 진행/대기 상태이며 성공으로 표시하지 않는다. CI 동안 원격 HEAD를 고정한다. 이전 cd828 실패는 보존; main·v0.3.0에는 미반영.
+- 로컬 통합만 `774c160f956ee7a75502693f6f47d2dcd026afb7`: reviewed Editor17496449, undo260 ea00d043, native helper0bdc4ca7, noticec319 및 Calendar8b3c0434를 ordinary merge로 보존했다. staged9146994e 조상도 포함되므로 미연결 workspace/settings 전체를 수락했다고 보지 않는다. 원격 미push, 합본 전체 검증 미완료.
+
+| 기존 흐름 | 현재 고정 근거 / 담당 | 다음 수락 행동 |
+| --- | --- | --- |
+| Editor UI·수식/조합 undo | Editor17496449 scoped ACCEPT(18 real browser/50 unit), undo ea00d043 별도 ACCEPT(56 unit/9 real browser), #2596441 유지 | `ctx_987ed25c9963`가 고정 합본d2926b99의 새 Bun build·실제 private IBus 입력·wiki undo/협업·served full MIT를 검증. 이 SHA에는 이후 Calendar merge가 없음 |
+| 실제 한글 OS 입력 | product6441 + helper0bdc4ca7의 Linux IBus/XTest 1test/4case 저장·재조회 독립 ACCEPT | 이전 native 근거를 새 Editor/undo 성공으로 복사하지 않음. 일반 contenteditable과 Enter baseline 일치, Windows/물리 키보드 주장은 없음 |
+| Calendar | 8b3c0434 scoped ACCEPT: dueDate-first/unchanged-save 및 resize crossing correction; 31 unit, actual6+3 browser | 통합774c의 적절한 경계 검사·고지 산출물·최종 CI 필요. touch/타 브라우저 미검증 구분 |
+| Workspace/common routes | `ctx_4bc48944e4ac`, be91d0f9에서 A→B 늦은 callback scope 수정 검증 중 | home8tasks·wiki discovery/tag·search300ms/tag:name·notification URL·task metadata 원본 기능 복구와 실제 검증; 문서 count API와 연계 |
+| Account/admin | 681f83 검토 BLOCK; 후속 작성 `ctx_ecb473925431` | legal kind 입력 remount/focus와 PAT expiry account timezone 수정 후 별도 delta review, 그 뒤 React 전용 경로 제거 |
+| Workspace settings | 76980465 실제4browser/16unit; 별도 검토 `ctx_5b18b0660e20` | admin consent table 및 rename/delete lifecycle 수정 delta 수락, 기존15검사를 새로 실행한 것으로 표시하지 않음 |
+| Public share | 7bb4eff7 독립 BLOCK; 수정 `ctx_8ce781a4781a` | reconnect의 새404 뒤 이전 recovery가 reader를 다시 노출하는 경합 수정·실제 회귀·독립 delta review |
+| Editor entity 연결 | `ctx_701a3f170775`, Wiki/ProjectDocument/TaskBody 세 호출자 단독 소유 | 기존 Rust 권한 API mention/entity resolver, 실제 저장/권한/browser 검증. 공통 query helper 소유권 별도 조정 |
+| Project documentCount | `ctx_b5e72397e7cf`, backend956ca350 및 focused PG 검사 진행 | numeric/null PAT 계약·같은 read snapshot·실제47검사 결과 고정 후 독립 검토. 생성물 소유권은 완료까지 본인 |
+| Wiki discovery/search tag·실제 move500 | `ctx_78bc50455736`, 기존 source 조사 정본 재사용 | docs.rs의 wiki→project subtree renumber 충돌500 우선 재현/수정. 별도 명시적 discovery endpoint와 원본 tag 검색 semantics 구현, PG/Meili 검증. 기본tree·인가 보장 유지, count DTO/생성물 동시 편집 금지 |
+
+위 보고서들은 기존 `/home/kinesis/orca/fvoci-evidence/recovery-20260930/takeover-evidence/`에 SHA-256 대조 후 보존했다. 같은 이름의 이전 내용은 덮어쓰지 않았다. 신규 실제500 실패는 `/tmp/fvoci-front272-project-count-pg-final.log`와 담당자 재현으로 유지하고, 성공 fixture만으로 전체 이동 완료라고 표시하지 않는다. 기존 #284 회수·project settings d90·React 공통 제거·compat/비교·별도 사용자 요청은 아래 기존 TODO에 유지한다.
+
+#### 이전 PR272 체크포인트 (2026-09-30 14:35 KST 원격 관측 / 14:46 KST 코디네이터 delta)
 
 이 snapshot이 아래 13:00 배정 제안·최초 인수 TODO의 현재 단계보다 우선한다. 과거 SHA·검사·담당·실패는 당시 기록으로 유지하며 체크박스는 전체 수락 조건이 충족되기 전 닫지 않는다. 현재 권위는 Astra 코디네이터 / Orca Sol6.1 작성·별도 컨텍스트 검토이며 과거 Opus 전용 조건은 현 배정이 아니다. **어떤 로컬/원격 green 결과도 별도 사용자 승인 전 main 머지·릴리스를 허용하지 않는다.**
 
