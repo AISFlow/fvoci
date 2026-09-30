@@ -40,7 +40,7 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
   const archived = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, { data: { key: "OLD", name: "Archived project", visibility: "workspace" } });
   expect(archived.status()).toBe(201);
   const old = await archived.json();
-  expect((await page.request.patch(`/api/v1/workspaces/${workspaceId}/projects/${old.id}`, { data: { status: "archived" } })).ok()).toBe(true);
+  expect((await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${old.id}/archive`)).ok()).toBe(true);
   const preview = page.waitForResponse(response => {
     const url = new URL(response.url());
     return url.pathname === `/api/v1/workspaces/${workspaceId}/tasks` && url.searchParams.get("limit") === "8";
