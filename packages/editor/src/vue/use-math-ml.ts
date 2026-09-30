@@ -11,7 +11,7 @@ export function useMathMl(
   const render = shallowRef<MathRender>({ html: null, failed: false });
   watch(
     latex,
-    async (value, _previous, onCleanup) => {
+    (value, _previous, onCleanup) => {
       const settled = mathMlWithoutKatex(value);
       if (settled) {
         render.value = settled;
@@ -21,8 +21,10 @@ export function useMathMl(
       onCleanup(() => {
         alive = false;
       });
-      const next = await renderMathMl(value, display);
-      if (alive) render.value = next;
+      // Vue captures rejected work returned by a watcher; retain the cleanup guard.
+      return renderMathMl(value, display).then((next) => {
+        if (alive) render.value = next;
+      });
     },
     { immediate: true },
   );
