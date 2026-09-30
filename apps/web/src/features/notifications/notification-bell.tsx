@@ -5,11 +5,14 @@ import { Link, useNavigate } from "react-router-dom";
 import { QueryError, loadErrorMessage } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import {
+  markAllNotificationsRead,
+  markNotificationRead,
+} from "@/features/notifications/notification-actions";
+import {
   notificationHref,
   payloadRecord,
   type NotificationItem,
 } from "@/features/notifications/notification-target";
-import { api, ensureOk } from "@/lib/api";
 import { notificationsPath } from "@/lib/href";
 import { notificationListQuery, notificationUnreadCountQuery } from "@/lib/queries";
 import "@/features/notifications/notifications.css";
@@ -34,14 +37,7 @@ export function NotificationBell({
 
   async function markRead(item: NotificationItem) {
     if (!item.readAt) {
-      await ensureOk(
-        await api.PATCH("/api/v1/workspaces/{workspace_id}/notifications/{id}", {
-          params: { path: { workspace_id: workspaceId, id: item.id } },
-          body: { read: true },
-        }),
-      );
-      await queryClient.invalidateQueries({ queryKey: ["notifications", workspaceId] });
-      await queryClient.invalidateQueries({ queryKey: ["notifications-unread", workspaceId] });
+      await markNotificationRead(queryClient, workspaceId, item.id);
     }
     const href = notificationHref(slug, item);
     setOpen(false);
@@ -49,13 +45,7 @@ export function NotificationBell({
   }
 
   async function readAll() {
-    await ensureOk(
-      await api.POST("/api/v1/workspaces/{workspace_id}/notifications/read-all", {
-        params: { path: { workspace_id: workspaceId } },
-      }),
-    );
-    await queryClient.invalidateQueries({ queryKey: ["notifications", workspaceId] });
-    await queryClient.invalidateQueries({ queryKey: ["notifications-unread", workspaceId] });
+    await markAllNotificationsRead(queryClient, workspaceId);
   }
 
   return (
