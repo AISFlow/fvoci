@@ -202,17 +202,22 @@ function settleNativeTextClick(view: EditorView, pos: number, event: MouseEvent)
   return false;
 }
 
-/* Shift navigation changes the DOM range before selectionchange reaches PM.
- * PM's pending focus repair can otherwise restore the old collapsed caret in
- * that gap. Record the completed native range at keyup using public view APIs;
+/* Native navigation changes the DOM selection before selectionchange reaches
+ * PM. Its pending focus repair can otherwise restore the previous caret or
+ * range in that gap. Record the completed selection at keyup using public APIs;
  * leave composition, cell/node selections and native event handling alone. */
 function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): boolean {
-  if (!view.editable || view.composing || event.isComposing || !view.hasFocus() || !event.shiftKey ||
+  if (!view.editable || view.composing || event.isComposing || !view.hasFocus() ||
       !["Home", "End", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown"].includes(event.key) ||
       !(view.state.selection instanceof TextSelection)) return false;
   const native = view.dom.ownerDocument.getSelection();
-  if (!native || native.isCollapsed || !native.anchorNode || !native.focusNode ||
+  if (!native || !native.anchorNode || !native.focusNode ||
       !view.dom.contains(native.anchorNode) || !view.dom.contains(native.focusNode)) return false;
+  for (const node of [native.anchorNode, native.focusNode]) {
+    const element = node instanceof Element ? node : node.parentElement;
+    const leaf = element?.closest('[contenteditable="false"]');
+    if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return false;
+  }
   const anchor = view.posAtDOM(native.anchorNode, native.anchorOffset);
   const head = view.posAtDOM(native.focusNode, native.focusOffset);
   if (!view.state.doc.resolve(anchor).parent.isTextblock || !view.state.doc.resolve(head).parent.isTextblock) return false;
