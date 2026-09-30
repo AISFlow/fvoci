@@ -94,9 +94,16 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   await input.fill("2026-11-02T09:30");
   await context.setOffline(true); await expect(page.getByRole("status").filter({ hasText: "Offline · unsaved drafts" })).toBeVisible();
   await expect(editor.getByRole("button", { name: "저장 뷰 저장" })).toBeDisabled();
+  // Independent HTTP client commits while the browser is offline. Reconnect may
+  // refresh the grid but must retain both draft intent and the old conflict guard.
+  expect((await page.request.patch(`${f.base}/tasks/${point.id}`, { data: { dueAt: "2026-11-03T14:30:00Z" } })).ok()).toBe(true);
   await context.setOffline(false); await expect(input).toHaveValue("2026-11-02T09:30");
   const saved = page.waitForResponse(r => r.request().method() === "PATCH" && r.url().endsWith(`/tasks/${point.id}`));
-  await editor.getByRole("button", { name: "저장 뷰 저장" }).click(); expect((await saved).ok()).toBe(true);
+  await editor.getByRole("button", { name: "저장 뷰 저장" }).click(); expect((await saved).status()).toBe(409);
+  await expect(input).toHaveValue("2026-11-02T09:30");
+  await expect(page.locator('td[data-date="2026-11-03"]').getByTestId(`collection-preview-${point.displayId}`)).toBeVisible();
+  await editor.getByRole("button", { name: "최신 저장 뷰 불러오기" }).click();
+  await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
   await expect.poll(async () => (await f.stored(point.id)).dueAt).toBe("2026-11-02T14:30:00Z");
   await page.reload(); await page.locator('input[type="month"]').fill("2026-11"); await expect(page.locator('td[data-date="2026-11-02"]').getByTestId(`collection-preview-${point.displayId}`)).toBeVisible();
 });
