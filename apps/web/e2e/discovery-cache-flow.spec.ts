@@ -84,9 +84,23 @@ for (const host of ["wiki", "project"] as const) {
 }
 
 test("project restore refreshes retained discovery, project lists and workspace counts before 30s", async ({ browser, baseURL }) => {
-  const signed = await newSignedInPage(browser, baseURL, admin); const page = signed.page;
+  // Prepare the fixture before mounting the app: HomePage fetches workspace
+  // totals on login, which can otherwise cache the intermediate root-only count.
+  const context = await browser.newContext({ baseURL });
+  const page = await context.newPage();
   try {
-    const ws = await workspaceId(page.request); const prefix = `/api/v1/workspaces/${ws}/projects`;
+    expect((await page.request.post("/api/v1/auth/login", {
+      data: { email: admin.email, password: admin.password },
+    })).status()).toBe(200);
+    const ws = await workspaceId(page.request);
+    const workspaceCount = async () => {
+      const response = await page.request.get("/api/v1/me/workspaces");
+      expect(response.status()).toBe(200);
+      const data = await response.json();
+      return data.items.find((item: { id: string }) => item.id === ws).documentCount as number;
+    };
+    const deletedCount = await workspaceCount();
+    const prefix = `/api/v1/workspaces/${ws}/projects`;
     const created = await page.request.post(prefix, { data: { key: "DCR", name: "Discovery restored project", visibility: "workspace" } });
     expect(created.status()).toBe(201); const project = await created.json();
     const docResponse = await page.request.post(`${prefix}/${project.id}/documents`, { data: { title: "Discovery restored document", parentId: project.rootDocumentId } });
@@ -94,13 +108,16 @@ test("project restore refreshes retained discovery, project lists and workspace 
     const tagResponse = await page.request.post(`/api/v1/workspaces/${ws}/document-tags`, { data: { name: "Restore discovery tag", color: "gray" } });
     expect(tagResponse.status()).toBe(201); const tag = await tagResponse.json();
     expect((await page.request.post(`${prefix}/${project.id}/documents/${doc.id}/tags`, { data: { tagId: tag.id } })).status()).toBe(200);
+    expect(await workspaceCount()).toBe(deletedCount + 2); // Project root + child.
     expect((await page.request.delete(`${prefix}/${project.id}`)).ok()).toBe(true);
+    expect(await workspaceCount()).toBe(deletedCount);
     const list = `/w/${admin.workspaceSlug}/wiki`; const home = `/w/${admin.workspaceSlug}`;
-    await push(page, home); await expect(page.getByTestId("workspace-totals")).toBeVisible();
+    await page.goto(home); await expect(page.getByTestId("workspace-totals")).toBeVisible();
     const countsBefore = await page.getByTestId("workspace-totals").innerText();
     await push(page, list); await expect(page.getByTestId(`wiki-doc-DCR-${doc.number}`)).toHaveCount(0);
     await expect.poll(async () => (await discoverySnapshot(page, ws)).age).toBeLessThan(30_000);
     const before = await discoverySnapshot(page, ws);
+    expect(before.workspaceCount).toBe(deletedCount);
     await push(page, `${list}?tag=${tag.id}`);
     await expect(page.getByTestId(`wiki-doc-DCR-${doc.number}`)).toHaveCount(0);
     await expect.poll(async () => (await discoverySnapshot(page, ws, tag.id)).age).toBeLessThan(30_000);
@@ -113,8 +130,10 @@ test("project restore refreshes retained discovery, project lists and workspace 
     expect((await discoverySnapshot(page, ws)).updatedAt).toBeGreaterThan(before.updatedAt!);
     await push(page, `${list}?tag=${tag.id}`); await expect(page.getByTestId(`wiki-doc-DCR-${doc.number}`)).toContainText("Discovery restored document");
     await push(page, home); await expect(page.getByText("Discovery restored project", { exact: true })).toBeVisible();
+    expect(await workspaceCount()).toBe(before.workspaceCount! + 2);
     await expect.poll(async () => (await discoverySnapshot(page, ws)).workspaceCount).toBe(before.workspaceCount! + 2);
+    expect((await discoverySnapshot(page, ws)).countsUpdatedAt).toBeGreaterThan(before.countsUpdatedAt!);
     await expect(page.getByTestId("workspace-totals")).not.toHaveText(countsBefore);
     const active = await (await page.request.get(prefix)).json(); expect(active.items.some((p: { id: string }) => p.id === project.id)).toBe(true);
-  } finally { await signed.context.close(); }
+  } finally { await context.close(); }
 });
