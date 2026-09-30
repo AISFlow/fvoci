@@ -773,15 +773,7 @@ test("moving between five documents in the app keeps one room socket and every e
       if (!seen.has(editor)) {
         seen.add(editor);
         const capture = (kind: string) => marks.lifecycle.push({ kind, at: performance.now(), state: read(editor) });
-        editor.on("transaction", () => capture("pm-transaction"));
         editor.on("destroy", () => capture("editor-destroy"));
-        const extensions = editor.extensionManager.extensions;
-        const doc = extensions.find((extension) => extension.name === "collaboration")?.options.document as import("yjs").Doc | undefined;
-        const provider = extensions.find((extension) => extension.name === "collaborationCaret")?.options.provider as import("@hocuspocus/provider").HocuspocusProvider | undefined;
-        doc?.on("update", (update) => marks.lifecycle.push({ kind: "yjs-update", at: performance.now(),
-          update: btoa(String.fromCharCode(...update)), state: read(editor) }));
-        provider?.on("outgoingMessage", () => capture("provider-outgoing"));
-        provider?.on("unsyncedChanges", () => capture("provider-unsynced"));
       }
       return read(editor);
     };
@@ -802,7 +794,11 @@ test("moving between five documents in the app keeps one room socket and every e
         }
         if (inEditor || link) marks.nativeEvents.push({ kind, at, trusted: event.isTrusted,
           key: (event as KeyboardEvent).key, data: (event as InputEvent).data,
-          inEditor, href: link?.getAttribute("href") ?? undefined, state: marks.observeEditor() });
+          inEditor, href: link?.getAttribute("href") ?? undefined,
+          // Snapshot only the final native keyup and real click. Keep prefix
+          // transactions and other input events free of synchronous observers.
+          state: (kind === "keyup" && inEditor && /^[1-4]$/.test((event as KeyboardEvent).key))
+            || (kind === "click" && link) ? marks.observeEditor() : undefined });
       }, true);
     }
   });
