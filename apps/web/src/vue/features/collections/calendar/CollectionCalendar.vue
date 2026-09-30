@@ -138,7 +138,10 @@ onBeforeUnmount(() => { window.removeEventListener("online", reconnect); window.
         <UButton icon="i-lucide-chevron-right" color="neutral" variant="ghost" :aria-label="t('cal.nextMonth')" @click="shift(1)" />
         <input type="month" class="collection-select w-36" aria-label="Calendar month" :value="month" @change="select(($event.target as HTMLInputElement).value + '-01')" />
       </div>
-      <p v-if="!online || refreshing || pending" role="status" class="w-full text-sm text-muted">{{ !online ? 'Offline · unsaved drafts stay in this open editor; reconnect to save' : pending ? t('gantt.bar.saving') : 'Refreshing from server' }}</p>
+      <!-- Keep drop targets stationary as save/refetch status changes mid-drag. -->
+      <div class="w-full min-h-5">
+        <p v-if="!online || refreshing || pending" role="status" class="text-sm text-muted">{{ !online ? 'Offline · unsaved drafts stay in this open editor; reconnect to save' : pending ? t('gantt.bar.saving') : 'Refreshing from server' }}</p>
+      </div>
     </header>
     <div class="flex min-w-0">
       <aside class="calendar-sidebar w-52 shrink-0 flex-col gap-3 border-e border-default p-3" :class="sidebar ? 'flex' : 'hidden lg:flex'">

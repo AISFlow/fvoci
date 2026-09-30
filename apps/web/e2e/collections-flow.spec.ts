@@ -569,7 +569,49 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   // 1. Due basis: drag a preview to another day; dueDate changes and survives reload.
   await openMonth();
   await expect(cell("2027-05-10").getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
-  await preview(previewed.displayId).dragTo(cell("2027-05-14"));
+  // Hold delivery of a real Rust response so pending geometry is deterministic.
+  // Status must not move drop targets, even before the accepted write refetches.
+  const monthGrid = page.locator('table[data-testid="collection-calendar"]');
+  const calendarStatus = page.locator(".template-calendar header [role=status]");
+  await expect(calendarStatus).toHaveCount(0);
+  const idleGeometry = { month: await monthGrid.boundingBox(), unassigned: await unassigned.boundingBox() };
+  expect(idleGeometry.month).toBeTruthy();
+  expect(idleGeometry.unassigned).toBeTruthy();
+  let releasePatch!: () => void;
+  const patchGate = new Promise<void>(resolve => { releasePatch = resolve; });
+  let patchStarted = false;
+  let patchDelivered!: () => void;
+  const delivered = new Promise<void>(resolve => { patchDelivered = resolve; });
+  const taskPath = `${base}/tasks/${previewed.id}`;
+  const taskRoute = `**${taskPath}`;
+  await page.route(taskRoute, async route => {
+    patchStarted = true;
+    try {
+      const response = await route.fetch();
+      await patchGate;
+      await route.fulfill({ response });
+    } finally {
+      patchDelivered();
+    }
+  });
+  const acceptedMove = page.waitForResponse(res => res.request().method() === "PATCH" && new URL(res.url()).pathname === taskPath);
+  try {
+    await preview(previewed.displayId).dragTo(cell("2027-05-14"));
+    await expect(calendarStatus).toHaveText("일정을 저장하는 중…");
+    expect(await monthGrid.boundingBox()).toEqual(idleGeometry.month);
+    expect(await unassigned.boundingBox()).toEqual(idleGeometry.unassigned);
+  } finally {
+    releasePatch();
+    if (patchStarted) await delivered;
+    await page.unroute(taskRoute);
+  }
+  const accepted = await acceptedMove;
+  expect(accepted.status()).toBe(200);
+  expect(accepted.request().postDataJSON()).toMatchObject({ dueDate: "2027-05-14", expectedDates: { dueDate: "2027-05-10" } });
+  expect(await accepted.json()).toMatchObject({ dueDate: "2027-05-14", dueAt: null });
+  await expect(calendarStatus).toHaveCount(0);
+  expect(await monthGrid.boundingBox()).toEqual(idleGeometry.month);
+  expect(await unassigned.boundingBox()).toEqual(idleGeometry.unassigned);
   await expect(cell("2027-05-14").getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
   await expect(cell("2027-05-10").getByTestId(`collection-preview-${previewed.displayId}`)).toHaveCount(0);
   await expect.poll(async () => (await itemRow(previewed.displayId)).dueDate).toBe("2027-05-14");
@@ -600,6 +642,8 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   await expect(page.getByRole("heading", { name: "미지정 항목" })).toBeVisible();
   await expect(page.getByTestId(`collection-row-${listed.displayId}`)).toBeVisible();
   // Real pointer drag (mouse down, move, up) from the list onto a day cell above it.
+  await expect(listedHandle).toHaveAttribute("draggable", "true");
+  const returnMove = page.waitForResponse(res => res.request().method() === "PATCH" && new URL(res.url()).pathname === `${base}/tasks/${listed.id}`);
   const from = (await page.getByTestId(`collection-drag-${listed.displayId}`).boundingBox())!;
   const to = (await cell("2027-05-25").boundingBox())!;
   await page.mouse.move(from.x + 4, from.y + 4);
@@ -607,6 +651,10 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   await page.mouse.move(from.x + 40, from.y + 4, { steps: 4 });
   await page.mouse.move(to.x + to.width / 2, to.y + to.height - 8, { steps: 8 });
   await page.mouse.up();
+  const returned = await returnMove;
+  expect(returned.status()).toBe(200);
+  expect(returned.request().postDataJSON()).toMatchObject({ dueDate: "2027-05-25", expectedDates: { dueDate: null, dueAt: null } });
+  expect(await returned.json()).toMatchObject({ dueDate: "2027-05-25", dueAt: null });
   await expect(cell("2027-05-25").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
   await expect.poll(async () => (await itemRow(listed.displayId)).dueDate).toBe("2027-05-25");
 
