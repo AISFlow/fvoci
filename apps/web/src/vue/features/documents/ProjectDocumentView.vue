@@ -135,29 +135,51 @@ watch(
   },
 );
 
+type DocumentOperation = { scope: DocumentScope; slug: string; session: typeof session.value };
+function captureOperation(): DocumentOperation {
+  return { scope: { ...scope.value }, slug: props.slug, session: session.value };
+}
+function currentOperation(operation: DocumentOperation): boolean {
+  return props.workspaceId === operation.scope.workspaceId &&
+    props.documentId === operation.scope.documentId &&
+    scope.value.projectId === operation.scope.projectId &&
+    props.slug === operation.slug && session.value === operation.session;
+}
+
 const trashDoc = useMutation({
-  mutationFn: () => trashDocument(scope.value),
-  onSuccess: () => {
+  mutationFn: (operation: DocumentOperation) => trashDocument(operation.scope),
+  onSuccess: async (_result, operation) => {
+    await queryClient.invalidateQueries({ queryKey: ["projects", operation.scope.workspaceId] });
+    if (!currentOperation(operation)) return;
     lifecycleError.value = null;
-    window.location.assign(trashPath(props.slug));
+    window.location.assign(trashPath(operation.slug));
   },
-  onError: (error: unknown) => {
-    lifecycleError.value = loadErrorMessage(error);
+  onError: (error: unknown, operation) => {
+    if (currentOperation(operation)) lifecycleError.value = loadErrorMessage(error);
   },
 });
 
 const moveDoc = useMutation({
-  mutationFn: (newParentId: string) => moveDocument(scope.value, newParentId),
-  onSuccess: async () => {
+  mutationFn: (operation: DocumentOperation & { newParentId: string }) => moveDocument(operation.scope, operation.newParentId),
+  onSuccess: async (_result, operation) => {
+    const { workspaceId, documentId, projectId } = operation.scope;
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["project-documents", workspaceId, projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["project-document", workspaceId, projectId, documentId] }),
+    ]);
+    if (!currentOperation(operation)) return;
     lifecycleError.value = null;
     moveParentId.value = "";
-    await queryClient.invalidateQueries({ queryKey: treeKey.value });
-    await queryClient.invalidateQueries({ queryKey: metaKey.value });
   },
-  onError: (error: unknown) => {
-    lifecycleError.value = loadErrorMessage(error);
+  onError: (error: unknown, operation) => {
+    if (currentOperation(operation)) lifecycleError.value = loadErrorMessage(error);
   },
 });
+
+function move(newParentId: string): void {
+  moveDoc.mutate({ ...captureOperation(), newParentId });
+}
 
 const patchMeta = useMutation({
   mutationFn: (body: PatchDocumentBody) => patchDocument(scope.value, body),
@@ -283,7 +305,7 @@ function onTitleKeydown(event: KeyboardEvent): void {
 
 function trash(): void {
   if (!window.confirm(`${t("doc.trash.confirm.title")}\n${t("doc.trash.confirm.body")}`)) return;
-  trashDoc.mutate();
+  trashDoc.mutate(captureOperation());
 }
 
 function flashBlock(id: string): void {
@@ -384,7 +406,7 @@ function refOf(number: number): string {
             variant="outline"
             color="neutral"
             :disabled="!moveParentId || moveDoc.isPending.value || trashDoc.isPending.value"
-            @click="moveParentId && moveDoc.mutate(moveParentId)"
+            @click="moveParentId && move(moveParentId)"
           >
             {{ moveDoc.isPending.value ? t("doc.move.pending") : t("doc.move.submit") }}
           </UButton>
