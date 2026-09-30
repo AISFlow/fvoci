@@ -4,7 +4,7 @@ import "@fvoci/editor/styles.css";
 import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, type FunctionalComponent, h, markRaw, onScopeDispose, ref, shallowRef, watch } from "vue";
+import { computed, type FunctionalComponent, h, markRaw, nextTick, onScopeDispose, ref, shallowRef, watch } from "vue";
 import { RouterLink } from "vue-router";
 import { bindBlockPresence, isBlockPresenceAwareness } from "@/features/documents/block-presence";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
@@ -78,6 +78,26 @@ const { mentionItems, entityResolver } = useEditorEntities(
 );
 
 const title = ref("");
+const titleInput = ref<HTMLTextAreaElement | null>(null);
+// Keep long titles readable at the current width, including readonly titles.
+watch([titleInput, title], async ([input], _previous, onCleanup) => {
+  if (!input) return;
+  let width = 0;
+  const resize = () => {
+    input.style.height = "auto";
+    input.style.height = `${input.scrollHeight + 2}px`;
+  };
+  const observer = new ResizeObserver(([entry]) => {
+    if (entry && entry.contentRect.width !== width) {
+      width = entry.contentRect.width;
+      resize();
+    }
+  });
+  observer.observe(input);
+  onCleanup(() => observer.disconnect());
+  await nextTick();
+  if (titleInput.value === input) resize();
+}, { flush: "post" });
 const icon = ref("");
 const status = ref<string>("draft");
 const saveError = ref<string | null>(null);
@@ -300,8 +320,18 @@ function onTitleBlur(): void {
   void saveTitle();
 }
 
+function onTitleInput(event: Event): void {
+  const input = event.target as HTMLTextAreaElement & { composing?: boolean };
+  if (input.composing || (event as InputEvent).isComposing) return;
+  // Match the previous single-line input's paste behavior.
+  title.value = input.value.replace(/[\r\n]/g, "");
+}
+
 function onTitleKeydown(event: KeyboardEvent): void {
-  if (event.key === "Enter" && !event.isComposing) (event.target as HTMLInputElement).blur();
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    (event.target as HTMLTextAreaElement).blur();
+  }
 }
 
 function trash(): void {
@@ -336,8 +366,10 @@ function flashBlock(id: string): void {
         <span>{{ displayRef }}</span>
       </nav>
       <div class="document-page__meta">
-        <input
+        <textarea
+          ref="titleInput"
           v-model="title"
+          rows="1"
           class="document-page__title"
           :aria-label="t('doc.title')"
           :maxlength="TITLE_MAX"
@@ -345,6 +377,7 @@ function flashBlock(id: string): void {
           @focus="onTitleFocus"
           @blur="onTitleBlur"
           @keydown="onTitleKeydown"
+          @input="onTitleInput"
         />
         <div class="document-page__fields">
           <div class="document-page__field">

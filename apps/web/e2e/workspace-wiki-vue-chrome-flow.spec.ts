@@ -247,3 +247,26 @@ test("revisions: save a revision and restore it", async ({ page }) => {
     .poll(async () => JSON.stringify((await (await page.request.get(bodyUrl)).json()).contentJson))
     .toContain("첫 번째 버전");
 });
+
+test("long Korean wiki title wraps, metadata leaves body visible and Enter keeps single-line title persistence", async ({ page }) => {
+  const wsId = await workspaceId(page.request);
+  const title = "한국어 협업 문서 제목이 길어질 때 탐색과 편집 작업을 안정적으로 유지하는 주간 업무 기록 및 검토 결과";
+  const doc = await createDoc(page.request, wsId, title);
+  const bodyUrl = `/api/v1/workspaces/${wsId}/documents/${doc.id}/body`;
+  expect((await page.request.put(bodyUrl, { data: { contentMd: "첫 번째 업무 본문입니다." } })).ok()).toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openDoc(page, doc);
+  const field = page.getByLabel("문서 제목");
+  await expect(field).toHaveValue(title);
+  await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
+  expect(await field.evaluate((e) => e.scrollWidth)).toBeLessThanOrEqual(await field.evaluate((e) => e.clientWidth));
+  expect(await page.locator(".ProseMirror > p").first().evaluate((e) => e.getBoundingClientRect().bottom)).toBeLessThan(844);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
+  expect(await page.locator(".ProseMirror > p").first().evaluate((e) => e.getBoundingClientRect().bottom)).toBeLessThan(720);
+  await field.fill("한국어 제목\n붙여넣기");
+  await expect(field).toHaveValue("한국어 제목붙여넣기");
+  await field.press("Enter");
+  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/documents/${doc.id}`)).json()).title).toBe("한국어 제목붙여넣기");
+  await page.reload(); await expect(field).toHaveValue("한국어 제목붙여넣기");
+});

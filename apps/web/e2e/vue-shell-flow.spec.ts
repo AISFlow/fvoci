@@ -684,3 +684,53 @@ test("the workspace switch lands on the same section of the other workspace from
   expect(seen.csp).toEqual([]);
   expect(seen.icons).toEqual([]);
 });
+
+test("long Korean workspace controls stay in the narrow viewport and search placeholder has light/dark contrast", async ({ page }) => {
+  await ensureSetup(page);
+  const wsId = await workspaceId(page.request);
+  const original = await (await page.request.get(`/api/v1/workspaces/${wsId}`)).json();
+  const renamed = await page.request.patch(`/api/v1/workspaces/${wsId}`, {
+    data: { name: "한국어 팀 업무 계획과 문서 검토 워크스페이스" },
+  });
+  expect(renamed.ok()).toBe(true);
+  try {
+    const doc = await createDoc(page.request, wsId, "좁은 화면 셸 검토");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openWiki(page, doc);
+    const header = page.locator("header").first();
+    for (const control of [header.getByRole("button", { name: "검색", exact: true }), header.getByRole("button", { name: "알림", exact: true }), header.getByRole("link", { name: "계정", exact: true }), header.getByRole("button", { name: "로그아웃", exact: true })]) {
+      const bounds = await control.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+      await control.focus();
+      expect(await page.locator(".document-page").evaluate((e) => e.getBoundingClientRect().left)).toBeGreaterThanOrEqual(0);
+    }
+    const search = header.getByRole("button", { name: "검색", exact: true });
+    await search.focus(); await search.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "빠른 검색" });
+    await expect(dialog).toBeVisible();
+    for (const dark of [false, true]) {
+      await page.evaluate((enabled) => document.documentElement.classList.toggle("dark", enabled), dark);
+      const ratio = await dialog.evaluate((root) => {
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d")!;
+        const luminance = (css: string) => {
+          context.fillStyle = css; context.fillRect(0, 0, 1, 1);
+          const rgb = [...context.getImageData(0, 0, 1, 1).data].slice(0, 3).map((v) => {
+            const n = v / 255; return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * rgb[0]! + 0.7152 * rgb[1]! + 0.0722 * rgb[2]!;
+        };
+        const fg = luminance(getComputedStyle(root.querySelector("input")!, "::placeholder").color);
+        const bg = luminance(getComputedStyle(root).backgroundColor);
+        return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
+      });
+      expect(ratio, dark ? "dark placeholder" : "light placeholder").toBeGreaterThanOrEqual(4.5);
+    }
+    await page.evaluate(() => document.documentElement.classList.remove("dark"));
+    await page.keyboard.press("Escape"); await expect(search).toBeFocused();
+  } finally {
+    expect((await page.request.patch(`/api/v1/workspaces/${wsId}`, { data: { name: original.name } })).ok()).toBe(true);
+  }
+});
