@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed } from "vue";
+import { computed, ref, watch, onScopeDispose } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { loadErrorMessage, api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { documentPath } from "@/lib/href";
@@ -23,11 +23,19 @@ const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
 const workspaceId = computed(() => workspace.value?.id ?? "");
 const queryClient = useQueryClient();
+const lifetime = ref(0);
+let createVersion = 0;
+watch([workspaceId, slug, () => session.me.value?.userId, () => session.me.value?.sessionId,
+  () => session.me.value?.isInstanceAdmin, () => workspace.value?.role, () => session.status.value],
+  () => { lifetime.value++; }, { flush: "sync" });
+onScopeDispose(() => { lifetime.value++; });
+const currentLifetime = (scope: { workspaceId: string; lifetime: number }) =>
+  scope.workspaceId === workspaceId.value && scope.lifetime === lifetime.value;
 
 const tree = useQuery(() => treeQuery(workspaceId.value));
 
 const createDocument = useMutation({
-  mutationFn: async (scope: { workspaceId: string; slug: string }) =>
+  mutationFn: async (scope: { workspaceId: string; slug: string; lifetime: number; operation: number }) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/documents", {
         params: { path: { workspace_id: scope.workspaceId } },
@@ -36,7 +44,7 @@ const createDocument = useMutation({
     ),
   onSuccess: async (doc, scope) => {
     await queryClient.invalidateQueries({ queryKey: ["tree", scope.workspaceId] });
-    if (doc.displayId && workspaceId.value === scope.workspaceId && router.currentRoute.value.params.slug === scope.slug) {
+    if (doc.displayId && currentLifetime(scope) && scope.operation === createVersion && router.currentRoute.value.params.slug === scope.slug) {
       await router.push(documentPath(scope.slug, doc.displayId));
     }
   },
@@ -44,12 +52,12 @@ const createDocument = useMutation({
 
 function onCreateDocument(): void {
   const id = workspaceId.value;
-  if (id) createDocument.mutate({ workspaceId: id, slug: slug.value });
+  if (id) createDocument.mutate({ workspaceId: id, slug: slug.value, lifetime: lifetime.value, operation: ++createVersion });
 }
 
 const canCreate = computed(() => (workspace.value ? roleAtLeast(workspace.value.role, "member") : false));
 const createError = computed(() =>
-  createDocument.variables.value?.workspaceId === workspaceId.value && createDocument.isError.value
+  createDocument.variables.value && currentLifetime(createDocument.variables.value) && createDocument.variables.value.operation === createVersion && createDocument.isError.value
     ? createDocument.error.value instanceof ProblemError
       ? problemMessage(createDocument.error.value, "doc.create.failed")
       : t("error.network")
@@ -69,7 +77,7 @@ const createError = computed(() =>
       :nodes="tree.data.value?.items ?? []"
       :loading="tree.isLoading.value"
       :error="tree.isError.value ? loadErrorMessage(tree.error.value) : null"
-      :creating="createDocument.isPending.value && createDocument.variables.value?.workspaceId === workspace.id"
+      :creating="createDocument.isPending.value && Boolean(createDocument.variables.value && currentLifetime(createDocument.variables.value) && createDocument.variables.value.operation === createVersion)"
       :create-error="createError"
       :can-create="canCreate"
       :role="workspace.role"

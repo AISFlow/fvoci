@@ -2,7 +2,7 @@
 import { formatPersonName, notificationMessage, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, onScopeDispose } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   notificationHref,
@@ -39,23 +39,30 @@ const tab = computed<NotificationFilter>(() => {
 const actionError = ref<string | null>(null);
 const actionPending = ref(false);
 let actionVersion = 0;
-watch(workspaceId, () => {
+watch([workspaceId, slug, tab, () => session.me.value?.userId, () => session.me.value?.sessionId,
+  () => session.me.value?.isInstanceAdmin, () => workspace.value?.role, () => session.status.value], () => {
   actionVersion++;
   actionPending.value = false;
   actionError.value = null;
-});
+}, { flush: "sync" });
+onScopeDispose(() => { actionVersion++; actionPending.value = false; });
 
-const list = useInfiniteQuery(() => ({
-  ...notificationListQuery(workspaceId.value, tab.value),
-  queryKey: ["notifications", workspaceId.value, "inbox", tab.value] as const,
-  initialPageParam: undefined as string | undefined,
-  queryFn: async ({ pageParam }: { pageParam: string | undefined }) =>
-    ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {
-      params: { path: { workspace_id: workspaceId.value }, query: { filter: tab.value, cursor: pageParam } },
-    })),
-  getNextPageParam: (page: { nextCursor?: string | null }) => page.nextCursor ?? undefined,
-  enabled: Boolean(workspaceId.value),
-}));
+const list = useInfiniteQuery(() => {
+  const id = workspaceId.value;
+  const filter = tab.value;
+  return {
+    ...notificationListQuery(id, filter),
+    queryKey: ["notifications", id, "inbox", filter] as const,
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam, signal }: { pageParam: string | undefined; signal: AbortSignal }) =>
+      ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {
+        signal,
+        params: { path: { workspace_id: id }, query: { filter, cursor: pageParam } },
+      })),
+    getNextPageParam: (page: { nextCursor?: string | null }) => page.nextCursor ?? undefined,
+    enabled: Boolean(id),
+  };
+});
 const items = computed(() => {
   const seen = new Set<string>();
   return (list.data.value?.pages ?? []).flatMap((page) => page.items).filter((item) => {
@@ -100,6 +107,7 @@ function selectTab(value: NotificationFilter): void {
 async function openItem(item: NotificationItem): Promise<void> {
   const id = workspaceId.value;
   const currentSlug = slug.value;
+  const version = actionVersion;
   if (!id) return;
   if (!item.readAt) {
     await ensureOk(
@@ -111,7 +119,7 @@ async function openItem(item: NotificationItem): Promise<void> {
     await queryClient.invalidateQueries({ queryKey: ["notifications", id] });
     await queryClient.invalidateQueries({ queryKey: ["notifications-unread", id] });
   }
-  if (workspaceId.value !== id || router.currentRoute.value.params.slug !== currentSlug) return;
+  if (version !== actionVersion || workspaceId.value !== id || router.currentRoute.value.params.slug !== currentSlug) return;
   const href = notificationHref(currentSlug, item);
   if (href) followAppHref(href, router);
 }

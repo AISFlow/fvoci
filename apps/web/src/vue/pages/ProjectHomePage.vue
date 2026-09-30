@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, onScopeDispose } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { projectDocumentsQuery, projectQuery } from "@/features/projects/queries";
 import { api, ensureOk, loadErrorMessage } from "@/lib/api";
@@ -35,11 +35,16 @@ const project = useQuery(() => projectQuery(workspaceId.value, projectId.value))
 const documents = useQuery(() => projectDocumentsQuery(workspaceId.value, projectId.value));
 
 const lifecycleError = ref<string | null>(null);
-watch([workspaceId, projectId], () => { lifecycleError.value = null; });
-type ProjectScope = { workspaceId: string; projectId: string; slug: string };
-const matchesScope = (scope: ProjectScope) => workspaceId.value === scope.workspaceId && projectId.value === scope.projectId && slug.value === scope.slug;
+const lifetime = ref(0);
+let operationVersion = 0;
+watch([workspaceId, slug, refParam, () => session.me.value?.userId, () => session.me.value?.sessionId,
+  () => session.me.value?.isInstanceAdmin, () => workspace.value?.role, () => session.status.value],
+  () => { lifetime.value++; lifecycleError.value = null; }, { flush: "sync" });
+onScopeDispose(() => { lifetime.value++; });
+type ProjectScope = { workspaceId: string; projectId: string; slug: string; reference: string; lifetime: number; operation: number };
+const matchesScope = (scope: ProjectScope) => workspaceId.value === scope.workspaceId && slug.value === scope.slug && refParam.value === scope.reference && lifetime.value === scope.lifetime && scope.operation === operationVersion;
 function currentScope(): ProjectScope {
-  return { workspaceId: workspaceId.value, projectId: projectId.value, slug: slug.value };
+  return { workspaceId: workspaceId.value, projectId: projectId.value, slug: slug.value, reference: refParam.value, lifetime: lifetime.value, operation: ++operationVersion };
 }
 
 const lifecycle = useMutation({

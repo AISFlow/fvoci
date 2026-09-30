@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, onScopeDispose } from "vue";
 import { useRoute } from "vue-router";
 import { projectsQuery } from "@/features/projects/queries";
 import { api, ensureOk, loadErrorMessage } from "@/lib/api";
@@ -35,10 +35,17 @@ const projectKeys = computed(
   () => new Map((projects.data.value?.items ?? []).map((project) => [project.id, project.key] as const)),
 );
 const restoreError = ref<string | null>(null);
-watch(workspaceId, () => { restoreError.value = null; });
+const lifetime = ref(0);
+let restoreVersion = 0;
+watch([workspaceId, slug, () => session.me.value?.userId, () => session.me.value?.sessionId,
+  () => session.me.value?.isInstanceAdmin, () => workspace.value?.role, () => session.status.value],
+  () => { lifetime.value++; restoreError.value = null; }, { flush: "sync" });
+onScopeDispose(() => { lifetime.value++; });
+const currentRestore = (scope: { workspaceId: string; lifetime: number; operation: number }) =>
+  scope.workspaceId === workspaceId.value && scope.lifetime === lifetime.value && scope.operation === restoreVersion;
 
 const restore = useMutation({
-  mutationFn: async ({ workspaceId, item }: { workspaceId: string; item: { id: string; projectId?: string | null } }) =>
+  mutationFn: async ({ workspaceId, item }: { workspaceId: string; item: { id: string; projectId?: string | null }; lifetime: number; operation: number }) =>
     item.projectId
       ? ensureOk(
           await api.POST(
@@ -61,8 +68,9 @@ const restore = useMutation({
             },
           }),
         ),
-  onSuccess: async (_data, { workspaceId: id, item }) => {
-    if (workspaceId.value === id) restoreError.value = null;
+  onSuccess: async (_data, scope) => {
+    const { workspaceId: id, item } = scope;
+    if (currentRestore(scope)) restoreError.value = null;
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["trash", id] }),
       queryClient.invalidateQueries({ queryKey: ["tree", id] }),
@@ -77,13 +85,13 @@ const restore = useMutation({
     ]);
   },
   onError: (error: unknown, scope) => {
-    if (workspaceId.value === scope.workspaceId) restoreError.value = loadErrorMessage(error);
+    if (currentRestore(scope)) restoreError.value = loadErrorMessage(error);
   },
 });
 
 function onRestore(item: { id: string; projectId?: string | null }): void {
   restoreError.value = null;
-  restore.mutate({ workspaceId: workspaceId.value, item });
+  restore.mutate({ workspaceId: workspaceId.value, item, lifetime: lifetime.value, operation: ++restoreVersion });
 }
 </script>
 
@@ -124,7 +132,7 @@ function onRestore(item: { id: string; projectId?: string | null }): void {
             size="sm"
             variant="outline"
             color="neutral"
-            :disabled="restore.isPending.value && restore.variables.value?.workspaceId === workspace.id"
+            :disabled="restore.isPending.value && Boolean(restore.variables.value && currentRestore(restore.variables.value))"
             :aria-label="`${t('trash.restore')} ${item.title}`"
             @click="onRestore({ id: item.id, projectId: item.projectId })"
           >
