@@ -181,6 +181,21 @@ test("source tag:name search filters documents and leaves task hits in the real 
   await login(page, owner.email, owner.password);
   const tag = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/document-tags`)).json()).items.find((tag: { name: string }) => tag.name === "Planning");
   expect(tag).toBeTruthy();
+  // The preceding fixture writes many resources. Prove its real search
+  // readiness before timing recall of the next task; do not mix the existing
+  // outbox backlog with that task's five-second assertion.
+  await expect.poll(async () => {
+    const responses = await Promise.all([
+      page.request.get(`/api/v1/workspaces/${workspaceId}/search?q=Tagged&type=document`),
+      page.request.get(`/api/v1/workspaces/${workspaceId}/search?q=Due&type=task`),
+    ]);
+    for (const response of responses) expect(response.ok()).toBe(true);
+    const [documents, priorTasks] = await Promise.all(responses.map(response => response.json()));
+    return {
+      documents: documents.items.map((item: { title: string }) => item.title).sort(),
+      tasks: priorTasks.items.map((item: { id: string }) => item.id).sort(),
+    };
+  }).toEqual({ documents: ["Tagged child", "Tagged project child"], tasks: tasks.map(task => task.id).sort() });
   const created = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`, { data: { title: "Tagged task" } });
   expect(created.status()).toBe(201);
   const samples: unknown[] = [];
