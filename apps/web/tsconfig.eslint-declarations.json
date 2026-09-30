@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.vue.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "incremental": false,
+    "composite": false
+  },
+  // Plain TypeScript consumers need the root SFC's generated component type.
+  // Follow App's imports without forcing declaration emit for every route.
+  "include": ["src/vite-env.d.ts", "src/vue/App.vue"],
+  "exclude": []
+}

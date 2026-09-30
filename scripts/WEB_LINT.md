@@ -10,6 +10,16 @@ strictTypeChecked, and Vue flat recommended. `vue-eslint-parser` parses full
 SFCs with the TypeScript parser for scripts. Minimal `tsconfig.eslint.json`
 projects extend the existing strict projects and include source, tests, and
 configuration. They do not replace the existing tsc/vue-tsc typechecks.
+Before lint runs, `prepare-vue-lint-types.mjs` uses pinned vue-tsc to emit
+disposable declarations for the editor SFC project and the web `App.vue`
+import boundary. The web declaration project follows App's dependencies rather
+than emitting every route's declarations. Keep its roots aligned with direct
+SFC imports that need component types in plain TypeScript consumers; lazy route
+components remain checked by the full web vue-tsc project.
+Both lint projects resolve this generated layer through `rootDirs`; there is
+no ambient SFC shim or hand-written component declaration. Generation clears
+the whole cache first and removes all output if either project fails, so stale
+or partially refreshed types cannot let a failed source check pass lint.
 Template type errors, unknown components, typed props, emits, and slots remain
 the responsibility of vue-tsc; template syntax and directives are checked by
 the Vue plugin. Nuxt UI component/composable autoimports are disabled in FVOCI,
@@ -55,6 +65,10 @@ a verification dependency, not a product or CI dependency. The Python harness
 captures regular-file stdout because Bun 1.4.2 can truncate ESLint's large
 print-config output when piped. Full diagnostics should likewise use
 `bun run lint --format=json --output-file=/tmp/web-eslint.json`.
+The declaration fixtures cover the actual web/editor imports, generated prop
+types, genuine unsafe props, and a failed second project clearing both earlier
+and stale emissions. Run those proofs alone with
+`bash scripts/lint-nodefree-proof.sh VueToolchain.test_actual_web_and_editor_declaration_preparation_is_node_free VueToolchain.test_multiple_declaration_projects_fail_closed_together VueToolchain.test_generated_sfc_types_and_failed_refresh_have_no_waiver VueToolchain.test_unprepared_sfc_import_has_no_fake_fallback`.
 
 This setup is Phase A. Existing source diagnostics must be fixed in separate
 mechanical formatting, rule/import, and behavior commits with independent

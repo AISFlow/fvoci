@@ -322,11 +322,78 @@ test("typed Bun Transpiler and module mock", () => {
         self.assertNotEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
         self.assertIn("unhandled-promise-proof", runtime.stderr)
 
-    def test_actual_editor_declaration_preparation_is_node_free(self):
+    def test_actual_web_and_editor_declaration_preparation_is_node_free(self):
         prepared = run(["bun", "--bun", "scripts/prepare-vue-lint-types.mjs"])
         self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        output = ROOT / "node_modules/.cache/fvoci-vue-lint/types"
+        app = output / "apps/web/src/vue/App.vue.d.ts"
+        self.assertIn('import("vue").DefineComponent', app.read_text())
+        self.assertEqual(len(list((output / "packages/editor/src/vue").glob("*.vue.d.ts"))), 8)
         result = run([*ESLINT, "packages/editor/src/vue/node-views.ts", "--max-warnings=0", "--format=json"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Use the real main.ts import location and rootDirs, without its unrelated
+        # source diagnostics masking whether createApp receives a genuine type.
+        source = '''import { createApp } from "vue";
+import App from "./App.vue";
+export const app = createApp(App);'''
+        result = run([*ESLINT, "--stdin", "--stdin-filename", "apps/web/src/vue/main.ts",
+                      "--max-warnings=0", "--format=json"], input=source)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_multiple_declaration_projects_fail_closed_together(self):
+        app = self.source("ProofApp.vue", '''<script setup lang="ts">
+defineProps<{ label: string }>();
+</script><template><p>{{ label }}</p></template>''')
+        editor = self.source("ProofEditor.vue", '''<script setup lang="ts">
+import type { NodeViewProps } from "@tiptap/vue-3";
+defineProps<NodeViewProps>();
+</script><template><span /></template>''')
+        output = self.directory / "combined"
+        projects = []
+        for name, component, config in [
+            ("editor", editor, "packages/editor/tsconfig.vue.json"),
+            ("web", app, "apps/web/tsconfig.vue.json"),
+        ]:
+            project = self.directory / f"tsconfig.{name}.emit.json"
+            project.write_text(json.dumps({
+                "extends": str(ROOT / config),
+                "compilerOptions": {"rootDir": str(self.directory), "incremental": False, "composite": False},
+                "include": [str(component)], "exclude": [],
+            }))
+            projects.append(str(project))
+        prepare = self.source("prepare-combined.mjs", f'''import {{ prepareVueLintTypes }} from {json.dumps(str(ROOT / "scripts/prepare-vue-lint-types.mjs"))};
+prepareVueLintTypes({json.dumps(projects)}, {json.dumps(str(output))});''')
+        emitted = run(["bun", "--bun", str(prepare)])
+        self.assertEqual(emitted.returncode, 0, emitted.stdout + emitted.stderr)
+        for name in ["ProofApp.vue.d.ts", "ProofEditor.vue.d.ts"]:
+            self.assertTrue((output / name).is_file(), name)
+        consumer = self.source("ProofCombined.ts", '''import { createApp } from "vue";
+import { VueNodeViewRenderer } from "@tiptap/vue-3";
+import ProofApp from "./ProofApp.vue";
+import ProofEditor from "./ProofEditor.vue";
+export const app = createApp(ProofApp);
+export const renderer = VueNodeViewRenderer(ProofEditor);
+export function read(value: InstanceType<typeof ProofApp>): string { return value.$props.label; }''')
+        lint_project = self.directory / "tsconfig.combined.json"
+        lint_project.write_text(json.dumps({
+            "extends": str(ROOT / "apps/web/tsconfig.eslint.json"),
+            "compilerOptions": {"rootDirs": [str(self.directory), str(output)]},
+            "include": [str(consumer)], "exclude": [],
+        }))
+        args = [*ESLINT, str(consumer), "--max-warnings=0", "--format=json",
+                "--parser-options", json.dumps({"project": [str(lint_project)]})]
+        typed = run(args)
+        self.assertEqual(typed.returncode, 0, typed.stdout + typed.stderr)
+        # Reject the second project after the first has emitted fresh output.
+        app.write_text('<script setup lang="ts">const value: number = "bad";</script><template><p>{{ value }}</p></template>')
+        failed = run(["bun", "--bun", str(prepare)])
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("TS2322", failed.stdout + failed.stderr)
+        self.assertFalse(output.exists())
+        missing = run(args)
+        self.assertNotEqual(missing.returncode, 0)
+        messages = [m for f in json.loads(missing.stdout) for m in f["messages"]]
+        self.assertEqual(sum(m["ruleId"] == "@typescript-eslint/no-unsafe-argument" for m in messages), 2, messages)
 
     def test_generated_sfc_types_and_failed_refresh_have_no_waiver(self):
         component = self.source("ProofGenerated.vue", '''<script setup lang="ts">
