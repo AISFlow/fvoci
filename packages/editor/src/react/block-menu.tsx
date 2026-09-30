@@ -1,13 +1,13 @@
 import { type I18nKey, t } from "@fvoci/i18n";
 import type { Editor } from "@tiptap/core";
 import { type ReactNode, useState } from "react";
-import { copyText } from "./clipboard.js";
+import { copyText } from "../clipboard.js";
 import {
 	convertBlock,
 	deleteBlock,
 	duplicateBlock,
 	moveBlock,
-} from "./gutter-actions.js";
+} from "../gutter-actions.js";
 import { preventSelectionLoss } from "./menu-keyboard.js";
 import { PointMenu } from "./point-menu.js";
 import { Separator } from "./tiptap-ui-primitive/separator.js";

@@ -1,8 +1,8 @@
 import { t } from "@fvoci/i18n";
 import { Link } from "react-router-dom";
+import { LEGAL_DOCS } from "./legal-docs";
 import {
   hasOperatorInfo,
-  LEGAL_DOCS,
   type OperatorInfo,
 } from "./operator-fields";
 
@@ -11,8 +11,9 @@ export {
   filledOperatorFields,
   operatorFieldHref,
   hasOperatorInfo,
-  LEGAL_DOCS,
 } from "./operator-fields";
+
+export { LEGAL_DOCS } from "./legal-docs";
 
 export function ServiceInfoFooter({
   operator,

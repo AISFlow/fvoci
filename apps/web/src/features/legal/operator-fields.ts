@@ -1,4 +1,3 @@
-import { t } from "@fvoci/i18n";
 import type { components } from "@/generated/api";
 import { isSafeShareHref } from "@/lib/share-links";
 
@@ -41,8 +40,4 @@ export function operatorFieldHref(field: OperatorField, value: string): string |
 
 export { FIELDS as OPERATOR_FIELDS };
 
-/** The public legal documents every sign-in page and signed-in shell links to. */
-export const LEGAL_DOCS = [
-  { kind: "terms", label: t("legal.terms") },
-  { kind: "privacy", label: t("legal.privacy") },
-] as const;
+export { LEGAL_DOCS } from "./legal-docs";
