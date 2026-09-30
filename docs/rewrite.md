@@ -1056,19 +1056,19 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 기존 React 제거 조건: 각 설정 흐름 수락 후.
 
 - [ ] / · /legal/:kind · /service-info — [#272](https://github.com/AISFlow/fvoci/pull/272)
-  - 현재 단계: 로컬 후보 실제 Vue URL 연결·Rust/DB 검증 완료, 독립 full-PR 검토 중. 원격은 기존 c9b59494이며 미push·main/배포 미수락.
+  - 현재 단계: 로컬 통합 후보21ad5327 실제 Vue URL·Rust/DB21검사 및 별도 고정 merge 검토 ACCEPT. 원격은 기존 c9b59494이며 미push·main/배포 미수락.
   - 담당 Sol 6.1 워커: home_public_connect 구현·검증, review_invite_final 독립 검토.
-  - 기준 HEAD / PR / 선행 의존성: 로컬 `0676c812e8614e6143924752f19f9273d7687aab` / #272 / #269 f6fbb8df; 다음 차수 준비.
-  - 남은 구체적인 작업: full-PR 검토 지적 해결, 현재 원격 수락 대기열 이후 제출·CI·main 수락. 현재 협업 비교 고정 차수를 늘리지 않는다.
-  - 수락 검사: 로컬 unit80·fresh Bun build·실제 workspace7/공개페이지1/service4 통과. 서비스3개 controlled 검사는 primary 실제 API 검증과 구분.
+  - 기준 HEAD / PR / 선행 의존성: 로컬 `21ad53276510d96928b2b8f497695c8ea1eda495` / #272 / #271 54bcc682 및 #270/#269; 다음 차수 준비.
+  - 남은 구체적인 작업: CI288 수락 후 최신 기반 갱신·원격 제출·CI·main 수락. 현재 협업 비교 고정 차수를 늘리지 않는다.
+  - 수락 검사: 통합 unit110·Bun production build·별도 검토의 경계18검사, 실제 Rust/DB6그룹21pass/0fail/0skip. 서비스3개 controlled 검사는 primary 실제 API 검증과 구분.
   - 출시 차단: login 선행.
   - 기존 React 제거 조건: 대체 HomePage/public LegalPage/ServiceInfoPage·전용 route 제거 후보; 관리자 약관과 공통 코드는 유지.
 
 - [ ] /invite/:token — [#271](https://github.com/AISFlow/fvoci/pull/271)
   - 현재 단계: 실제 URL 연결·Rust/DB 검증·독립 최종 ACCEPT; 최신 CI 진행, main/배포 미수락.
   - 담당 Sol 6.1 워커: invite_connect 구현·검증; review_invite/review_invite_final 독립 검토.
-  - 기준 HEAD / PR / 선행 의존성: `f2623c4d7d5b3ba9b56857e26ae93a5e337bc56f` / #271 / #269.
-  - 남은 구체적인 작업: 최신 CI와 #269 통합 후 수락. 이 후보의 외부 IdP callback은 미실행이며 기존 Keycloak 검증과 구분.
+  - 기준 HEAD / PR / 선행 의존성: `54bcc682f50eb5b4457e479021603669ab781258` / #271 / #270 → #269.
+  - 남은 구체적인 작업: 최신 CI와 #270/#269 통합 후 수락. 이 후보의 외부 IdP callback은 미실행이며 기존 Keycloak 검증과 구분.
   - 수락 검사: invite3·기존MFA1 실제 Rust/DB 통과, 관련unit40·production build, 최종 독립 ACCEPT.
   - 출시 차단: login 선행.
   - 기존 React 제거 조건: 전용 React invite page/form과 route 제거 완료; 다른 계정·약관 흐름 유지.
@@ -1086,7 +1086,7 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 현재 단계: Vue login 실제 연결·제품 검토 ACCEPT; 후속 caret 검사 최종40통과/기존OSIME12skip·delta 독립 ACCEPT, 최신 CI 진행. main/배포 미수락.
   - 담당 Sol 6.1 워커: auth_acceptance/auth_guard_fix 제품·검증, caret_settle_recovery 후속; review_ci_auth_delta와 review_controls_final 독립 검토.
   - 기준 HEAD / PR / 선행 의존성: `f6fbb8df0a2c95e3ac21d11972e27ff8a81fe2fb` / #269 / main 및 #287 포함.
-  - 남은 구체적인 작업: caret delta 최종 수락·최신 CI·main 통합. setup 오류 spinner F1은 3fdd194b에서 해결·독립 ACCEPT.
+  - 남은 구체적인 작업: CI Web shard6의 setup→home 준비 경합 수정·독립 검토·관련 브라우저 회귀 후 최신 CI·main 통합. caret delta 및 setup 오류 spinner F1은 별도 검토 수락 완료.
   - 수락 검사: 로그인 제품 최종5실제E2E, 이전19흐름 근거 보존; caret deterministic red/green과 정확한 native selection 단언·최신 CI.
   - 출시 차단: 인증 전환 선행.
   - 기존 React 제거 조건: Vue 인증 수락 후 React LoginPage/전용 연결.
@@ -1109,11 +1109,11 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 출시 차단: 비기능 정리.
   - 기존 React 제거 조건: 제품 기능 제거 금지.
 
-- [ ] 위키 편집 컨트롤 — [#265](https://github.com/AISFlow/fvoci/pull/265)
-  - 현재 단계: 실제 Rust/DB 검증·독립 ACCEPT_WITH_NITS 완료; 최신 CI 진행, main/배포 미수락.
+- [x] 위키 편집 컨트롤 main 수락 — [#265](https://github.com/AISFlow/fvoci/pull/265)
+  - 현재 단계: main `5d5171a7d07f04fd8ef665617464a6ac8fe194a4` 수락. 후보5게이트 SUCCESS·실제 Rust/DB·독립 ACCEPT_WITH_NITS; 배포 미포함, main 후속 CI 별도 진행.
   - 담당 Sol 6.1 워커: wiki_controls_complete 구현·검증; review_controls_final 독립 검토.
   - 기준 HEAD / PR / 선행 의존성: `93425dadb878e5759ac162aadc48d1ba0c36969c` / #265 / main 및 #287 포함.
-  - 남은 구체적인 작업: 최신 CI 수락과 main 통합. 선택 복구 finally 수정·native drag/drop/paste 검증 완료; 업로드 gate filename 명시 nit은 비차단.
+  - 남은 구체적인 작업: main 후속 CI와 후속 배포 확인. 선택 복구 finally·native drag/drop/paste는 수락; 업로드 gate filename 명시 nit은 비차단.
   - 수락 검사: production build·unit11·controls6·native input3 통과, 실제 peer/저장재조회/download인가 포함. 통합 후 영향 검사.
   - 출시 차단: 261 / 0.4.0 차단.
   - 기존 React 제거 조건: Vue 컨트롤 수락 후 공통 PM 로직 보존.
