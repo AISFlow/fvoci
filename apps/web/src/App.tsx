@@ -1,6 +1,5 @@
-import { t } from "@fvoci/i18n";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useEffect, type ComponentType } from "react";
+import { useEffect } from "react";
 import {
   createBrowserRouter,
   createRoutesFromElements,
@@ -11,22 +10,8 @@ import {
 } from "react-router-dom";
 import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
-import { SearchPage } from "@/pages/SearchPage";
-import { ProjectsPage } from "@/pages/ProjectsPage";
-import { TrashPage } from "@/pages/TrashPage";
-import { WikiPage } from "@/pages/WikiPage";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
 import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
-import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
-import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
-import { TemplatesSettingsPage } from "@/pages/TemplatesSettingsPage";
-import { MyTasksPage } from "@/pages/MyTasksPage";
-import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
-import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
-import { NotificationsPage } from "@/pages/NotificationsPage";
-import { PublicSharePage } from "@/pages/PublicSharePage";
-import { WorkspaceHomePage } from "@/pages/WorkspaceHomePage";
-import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -51,62 +36,17 @@ function NoRoute() {
   return vuePage ? null : <Navigate to="/" replace />;
 }
 
-function RouteLoading() {
-  return <p role="status">{t("load.loading")}</p>;
-}
-
-/**
- * A page kept out of the main bundle (admin, attachment viewers, legal). The router loads it before rendering the route: on a navigation
- * the current page stays until it is in, and on a page load only this route
- * shows `RouteLoading` while its parents render and fetch as usual. Not a
- * React.lazy Suspense boundary: React holds a boundary's reveal until 300 ms
- * after its fallback appeared.
- */
-function lazyPage(load: () => Promise<ComponentType>, options: { setupGuard?: boolean } = {}) {
-  return {
-    HydrateFallback: RouteLoading,
-    lazy: async () => {
-      const Page = await load();
-      return options.setupGuard
-        ? {
-            element: (
-              <SetupGuard>
-                <Page />
-              </SetupGuard>
-            ),
-          }
-        : { Component: Page };
-    },
-  };
-}
-
 // A data router, so pages can hold navigation behind unsaved edits (`useBlocker`).
 // Built once per page load, outside React, so StrictMode does not start a second one.
 const router = createBrowserRouter(
   createRoutesFromElements(
     <>
       {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
-      <Route path="/s/:token" element={<PublicSharePage />} />
-      <Route
-        path="/settings/admin"
-        {...lazyPage(() => import("@/pages/AdminPage").then((m) => m.AdminPage), { setupGuard: true })}
-      />
-      <Route
-        path="/settings/audit"
-        {...lazyPage(() => import("@/pages/AdminAuditPage").then((m) => m.AdminAuditPage), { setupGuard: true })}
-      />
-      <Route
-        path="/settings/legal"
-        {...lazyPage(() => import("@/pages/AdminLegalPage").then((m) => m.AdminLegalPage), { setupGuard: true })}
-      />
-      <Route
-        path="/settings/account"
-        element={
-          <SetupGuard>
-            <AccountSettingsPage />
-          </SetupGuard>
-        }
-      />
+      <Route path="/s/:token" element={<NoRoute />} />
+      <Route path="/settings/admin" element={<NoRoute />} />
+      <Route path="/settings/audit" element={<NoRoute />} />
+      <Route path="/settings/legal" element={<NoRoute />} />
+      <Route path="/settings/account" element={<NoRoute />} />
       <Route
         path="/w/:slug"
         element={
@@ -115,18 +55,18 @@ const router = createBrowserRouter(
           </SetupGuard>
         }
       >
-        <Route index element={<WorkspaceHomePage />} />
-        <Route path="projects" element={<ProjectsPage />} />
-        <Route path="my-tasks" element={<MyTasksPage />} />
-        <Route path="wiki" element={<WikiPage />} />
-        <Route path="search" element={<SearchPage />} />
-        <Route path="trash" element={<TrashPage />} />
-        <Route path="settings" element={<WorkspaceSettingsPage />} />
-        <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
-        <Route path="settings/templates" element={<TemplatesSettingsPage />} />
-        <Route path="notifications" element={<NotificationsPage />} />
-        <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
-        <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
+        <Route index element={<NoRoute />} />
+        <Route path="projects" element={<NoRoute />} />
+        <Route path="my-tasks" element={<NoRoute />} />
+        <Route path="wiki" element={<NoRoute />} />
+        <Route path="search" element={<NoRoute />} />
+        <Route path="trash" element={<NoRoute />} />
+        <Route path="settings" element={<NoRoute />} />
+        <Route path="settings/document-tags" element={<NoRoute />} />
+        <Route path="settings/templates" element={<NoRoute />} />
+        <Route path="notifications" element={<NoRoute />} />
+        <Route path=":ref/settings/fields" element={<NoRoute />} />
+        <Route path=":ref/settings/workflow" element={<NoRoute />} />
         <Route path=":ref" element={<WorkspaceRefPage />} />
       </Route>
       <Route path="*" element={<NoRoute />} />

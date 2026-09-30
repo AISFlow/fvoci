@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref, watchEffect } from "vue";
+import { computed, ref, watch, watchEffect } from "vue";
 import { RouterLink, useRoute } from "vue-router";
 import { showsWorkspaceSso } from "@/features/settings/workspace-sso-scope";
 import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
@@ -26,12 +26,6 @@ import { roleAtLeast } from "../features/settings/workspace-role";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
 import "@/features/settings/settings-shell.css";
 
-// Coordinator-owned src/app-boundary.ts still sends these paths to React.
-// When accepting, add to VUE_APP_PATHS:
-//   /^\/w\/[^/]+\/settings(?:\/(?:document-tags|templates))?\/?$/i
-// and keep VUE_ROUTE_PATHS.workspaceSettings / documentTagsSettings / templatesSettings.
-// Do not claim the settings route is live until that boundary change.
-
 const route = useRoute();
 const queryClient = useQueryClient();
 const slug = computed(() => String(route.params.slug ?? ""));
@@ -45,7 +39,11 @@ const meta = useQuery(() => ({
 }));
 
 watchEffect(() => {
-  if (meta.isError.value && meta.data.value === undefined && workspace.value) {
+  if (
+    meta.error.value instanceof ProblemError &&
+    (meta.error.value.status === 403 || meta.error.value.status === 404) &&
+    workspace.value
+  ) {
     window.location.replace("/?denied=workspace");
   }
 });
@@ -59,6 +57,12 @@ const showSso = computed(() =>
 const nameError = ref<string | null>(null);
 const nameSaved = ref(false);
 const deleteError = ref<string | null>(null);
+
+watch(workspaceId, () => {
+  nameError.value = null;
+  nameSaved.value = false;
+  deleteError.value = null;
+});
 
 const rename = useMutation({
   mutationFn: async (name: string) =>
@@ -110,9 +114,10 @@ function onSaveName(name: string): void {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="settings">
+  <WorkspaceShell v-else-if="workspace" :key="`${workspace.id}:${workspace.role}`" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="settings">
     <div v-if="meta.isError.value && !meta.data.value">
       <p role="alert" class="text-muted">{{ loadErrorMessage(meta.error.value) }}</p>
+      <UButton size="sm" class="mt-2" @click="meta.refetch()">{{ t("load.retry") }}</UButton>
     </div>
     <div v-else class="settings-page">
       <nav :aria-label="t('nav.workspaceSettings')" class="mb-6 flex flex-wrap gap-3">

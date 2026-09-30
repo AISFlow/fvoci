@@ -75,12 +75,13 @@ async function submit(): Promise<void> {
             variant="outline"
             color="neutral"
             size="sm"
+            :disabled="form.submitting.value"
             @click="onKindChange(p.kind)"
           >
             {{ p.label }}({{ p.kind }})
           </UButton>
         </div>
-        <input id="legal-kind" :class="fieldClass" :value="kind" @input="onKindChange(inputText($event))" />
+        <input :disabled="form.submitting.value" id="legal-kind" :class="fieldClass" :value="kind" @input="onKindChange(inputText($event))" />
       </div>
 
       <div class="flex flex-col gap-1.5 border-t border-default pt-4">

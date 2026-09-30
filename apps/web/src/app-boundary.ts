@@ -15,14 +15,23 @@ export const WORKSPACE_ITEM_PATH =
   /^\/w\/[^/]+\/(?!wiki-[1-9]\d{0,8}\/?$)[A-Za-z0-9-]{2,32}-[1-9]\d{0,8}\/?$/i;
 
 export const VUE_APP_PATHS: readonly RegExp[] = [
+  // Workspace entrance and section lists, with no nested-path ownership.
+  /^\/w\/[^/]+\/?$/i,
+  /^\/w\/[^/]+\/(?:projects|wiki|search|my-tasks|notifications|trash)\/?$/i,
   // Home workspace picker and public policies/operator information.
   /^\/$/,
   /^\/legal\/[^/]+\/?$/i,
   /^\/service-info\/?$/i,
+  // Account and instance administration; nested paths stay outside ownership.
+  /^\/settings\/(?:account|admin|audit|legal)\/?$/i,
+  // Workspace settings and its exact tag/template screens.
+  /^\/w\/[^/]+\/settings(?:\/(?:document-tags|templates))?\/?$/i,
   // Existing project overview, task/document items and collection views.
   PROJECT_HOME_PATH,
   WORKSPACE_ITEM_PATH,
   /^\/w\/[^/]+\/[^/]+\/(?:tasks|table|board|calendar)\/?$/i,
+  // Existing project workflow and collection-field settings.
+  /^\/w\/[^/]+\/[^/]+\/settings\/(?:fields|workflow)\/?$/i,
   // Project Gantt: /w/:slug/:ref/gantt
   /^\/w\/[^/]+\/[^/]+\/gantt\/?$/i,
   // Wiki document: /w/:slug/WIKI-<n>, the refs parseWikiRef (lib/href.ts)
@@ -43,6 +52,8 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   /^\/invite\/[^/]+\/?$/i,
   // First-instance setup. /setup/extra and /setups stay React.
   /^\/setup\/?$/i,
+  // Anonymous public share reader; nested attachment paths retain their viewer.
+  /^\/s\/[^/]+\/?$/i,
   // Session and anonymous share attachment viewers.
   /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i,
   /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i,
