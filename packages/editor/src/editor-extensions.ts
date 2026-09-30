@@ -21,6 +21,7 @@ import Suggestion from "@tiptap/suggestion";
 import { yCursorPluginKey } from "@tiptap/y-tiptap";
 import type * as Y from "yjs";
 import { FVOCI_YDOC_FRAGMENT } from "./collab/constants.js";
+import { createCompositionUndoPlugin } from "./composition-undo.js";
 import { type EntityResolver, isMentionEntity } from "./entities.js";
 import { Attachment } from "./nodes/attachment.js";
 import { Embed } from "./nodes/embed.js";
@@ -447,6 +448,12 @@ export function createFvociEditorExtensions(
 		Collaboration.configure({
 			document: opts.ydoc,
 			field: FVOCI_YDOC_FRAGMENT,
+		}),
+		Extension.create({
+			name: "fvociCompositionUndo",
+			addProseMirrorPlugins() {
+				return [createCompositionUndoPlugin()];
+			},
 		}),
 		slashExtension(opts.mentionItems),
 		mentionExtension(opts.mentionItems),
