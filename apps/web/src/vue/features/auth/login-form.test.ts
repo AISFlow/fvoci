@@ -23,6 +23,7 @@ test("the Vue login forms do not set method or action", () => {
     "EmailActionForm.vue",
     "SsoSlugForm.vue",
     "MfaStep.vue",
+    "InviteAcceptForm.vue",
     "ResetPasswordView.vue",
     "MagicLinkView.vue",
     "ConfirmEmailView.vue",
@@ -55,7 +56,7 @@ test("the login page leaves the Vue app with a full load", () => {
   assert.doesNotMatch(page, /from ["']@\/lib\/queries\/admin["']/);
 });
 
-test("the service-info footer crosses to React with plain anchors", () => {
+test("the service-info footer opens public pages with plain anchors", () => {
   const page = source("ServiceInfoFooter.vue");
   assert.match(page, /href="\/service-info"/);
   assert.match(page, /:href="`\/legal\/\$\{doc\.kind\}`"/);

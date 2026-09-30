@@ -94,6 +94,11 @@ test("the Vue entry's static graph leaves the wiki editor to the wiki page's chu
     "ConfirmEmailPage.vue",
     "CancelWithdrawPage.vue",
     "ConsentPage.vue",
+    "HomePage.vue",
+    "LegalPage.vue",
+    "ServiceInfoPage.vue",
+    "InvitePage.vue",
+    "SetupPage.vue",
   ]) {
     assert.equal(seen.has(path.join(web, "src/vue/pages", page)), false, `${page} is a lazy route chunk`);
   }

@@ -1,5 +1,6 @@
 // /login is a page of the Vue app (logout landing, MFA step, OIDC error
-// query). Home, setup, invite, and reset-password stay on the React app.
+// query). Setup, invite, home and public information are also Vue pages;
+// reset-password stays on the React app.
 // These flows run against the production build served by the Rust server.
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { login, logout, watchCspViolations } from "./helpers";
@@ -105,7 +106,7 @@ test("logout lands on the Vue login page; a refresh stays there", async ({ page 
   const icons = watchIconRequests(page);
   await ensureSetup(page);
   await expect(page).toHaveURL(/\/$/);
-  await expect(vueRoot(page)).toHaveCount(0);
+  await expect(vueRoot(page)).toHaveCount(1);
 
   await logout(page);
   await expectVueLogin(page);
@@ -117,7 +118,7 @@ test("logout lands on the Vue login page; a refresh stays there", async ({ page 
   expect(icons).toEqual([]);
 });
 
-test("password login reaches the React home; a wrong password stays on Vue /login", async ({
+test("password login reaches the Vue home; a wrong password stays on Vue /login", async ({
   page,
 }) => {
   const csp = watchCspViolations(page);
@@ -134,7 +135,7 @@ test("password login reaches the React home; a wrong password stays on Vue /logi
   await page.getByLabel("비밀번호").fill(admin.password);
   await page.getByRole("button", { name: "로그인", exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
-  await expect(vueRoot(page)).toHaveCount(0);
+  await expect(vueRoot(page)).toHaveCount(1);
   await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
 
   expect(csp).toEqual([]);
@@ -197,7 +198,7 @@ test("authenticated Vue login exposes setup failure and retries to home with its
   await retry.click();
   expect((await recovered).status()).toBe(200);
   await expect(page).toHaveURL(/\/$/);
-  await expect(vueRoot(page)).toHaveCount(0);
+  await expect(vueRoot(page)).toHaveCount(1);
   await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
   expect((await (await page.request.get("/api/v1/setup")).json()).needed).toBe(false);
   const after = await page.request.get("/api/v1/auth/me");

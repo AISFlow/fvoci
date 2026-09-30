@@ -32,6 +32,37 @@ const SAMPLES = [
   "/confirm-email",
   "/cancel-withdraw",
   "/consent",
+  "/legal/terms",
+  "/legal/privacy",
+  "/LEGAL/unknown",
+  "/legal/privacy/",
+  "/legal",
+  "/legal/",
+  "/legal//",
+  "/legals/terms",
+  "/legal/terms/extra",
+  "/service-info",
+  "/service-info/",
+  "/SERVICE-INFO/",
+  "/service-infos",
+  "/service-info/extra",
+  "/settings/legal",
+  "/settings/legal/",
+  "/SETTINGS/LEGAL",
+  "/invite/tok",
+  "/invite/tok/",
+  "/INVITE/abc-DEF",
+  "/invite",
+  "/invite/",
+  "/invite//",
+  "/invites/tok",
+  "/invite/tok/extra",
+  "/invite/a%2Fb",
+  "/setup",
+  "/setup/",
+  "/SETUP",
+  "/setup/extra",
+  "/setups",
   "/w/acme",
   "/w/acme/a/123/view",
   "/w/acme/WIKI-1",
@@ -60,7 +91,7 @@ test("the boot module sends the Gantt path, and only it, to the Vue app", () => 
   assert.equal(isVueAppPath("/w/acme/GNT"), false);
   assert.equal(isVueAppPath("/w/acme/GNT/gantt/extra"), false);
   assert.equal(isVueAppPath("/w/acme/GNT/tasks"), false);
-  assert.equal(isVueAppPath("/"), false);
+  assert.equal(isVueAppPath("/"), true);
 });
 
 test("the boot module sends wiki documents, and only them, to the Vue app", () => {
@@ -85,6 +116,26 @@ test("the boot module sends /login, and only that path, to the Vue app", () => {
   assert.equal(isVueAppPath("/logins"), false);
 });
 
+test("the boot module sends exactly single-token invite paths to Vue", () => {
+  assert.equal(isVueAppPath("/invite/tok"), true);
+  assert.equal(isVueAppPath("/invite/tok/"), true);
+  assert.equal(isVueAppPath("/INVITE/tok"), true);
+  assert.equal(isVueAppPath("/invite/a%2Fb"), true);
+  assert.equal(isVueAppPath("/invite"), false);
+  assert.equal(isVueAppPath("/invite/"), false);
+  assert.equal(isVueAppPath("/invite//"), false);
+  assert.equal(isVueAppPath("/invite/tok/extra"), false);
+  assert.equal(isVueAppPath("/invites/tok"), false);
+});
+
+test("the boot module sends /setup, and only that path, to the Vue app", () => {
+  assert.equal(isVueAppPath("/setup"), true);
+  assert.equal(isVueAppPath("/setup/"), true);
+  assert.equal(isVueAppPath("/SETUP"), true);
+  assert.equal(isVueAppPath("/setup/extra"), false);
+  assert.equal(isVueAppPath("/setups"), false);
+});
+
 test("every wiki path the boundary sends parses as the React app's wiki ref", () => {
   for (const path of SAMPLES) {
     // React Router matches /w/:slug in any case, as the boundary does.
@@ -92,7 +143,19 @@ test("every wiki path the boundary sends parses as the React app's wiki ref", ()
     const wiki = ref ? parseWikiRef(ref) : null;
     const gantt = /\/gantt\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
-    if (!gantt && !login) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const homeOrPublic = path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
+    const invite = /^\/invite\/[^/]+\/?$/i.test(path);
+    const setup = /^\/setup\/?$/i.test(path);
+    if (!gantt && !login && !homeOrPublic && !invite && !setup) assert.equal(isVueAppPath(path), wiki !== null, path);
+  }
+});
+
+test("home and public pages enter Vue while admin policies remain React", () => {
+  for (const path of ["/", "/legal/terms", "/legal/privacy/", "/LEGAL/unknown", "/service-info", "/SERVICE-INFO/"]) {
+    assert.equal(isVueAppPath(path), true, path);
+  }
+  for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal"]) {
+    assert.equal(isVueAppPath(path), false, path);
   }
 });
 

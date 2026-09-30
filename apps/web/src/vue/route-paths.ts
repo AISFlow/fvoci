@@ -15,4 +15,9 @@ export const VUE_ROUTE_PATHS = {
   //   confirmEmail: "/confirm-email",    /^\/confirm-email\/?$/i
   //   cancelWithdraw: "/cancel-withdraw",/^\/cancel-withdraw\/?$/i
   //   consent: "/consent",               /^\/consent\/?$/i
+  home: "/",
+  legal: "/legal/:kind",
+  serviceInfo: "/service-info",
+  invite: "/invite/:token",
+  setup: "/setup",
 } as const;
