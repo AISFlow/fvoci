@@ -167,18 +167,19 @@ test("late trash restoration refreshes A while B remains independently trashed",
 test("late notification open and read-all preserve the other workspace's unread inbox", async ({ page, browser, baseURL }) => {
   await login(page, owner.email, owner.password);
   const userId = (await (await page.request.get("/api/v1/auth/me")).json()).userId;
-  for (const workspace of [a, b]) createE2eUser("scope-actor@example.com", "scopeactor123", "댓글", { workspaceSlug: workspace.slug, membershipRole: "member" });
-  const context = await browser.newContext({ baseURL });
-  const actor = await context.newPage();
   const commentIds: string[] = [];
-  try {
-    await login(actor, "scope-actor@example.com", "scopeactor123");
-    for (const [index, workspace] of [a, b].entries()) {
+  for (const [index, workspace] of [a, b].entries()) {
+    const email = `scope-actor-${index}@example.com`;
+    createE2eUser(email, "scopeactor123", "댓글", { workspaceSlug: workspace.slug, membershipRole: "member" });
+    const context = await browser.newContext({ baseURL });
+    try {
+      const actor = await context.newPage();
+      await login(actor, email, "scopeactor123");
       const response = await actor.request.post(`/api/v1/workspaces/${workspace.id}/documents/${[aWiki, bWiki][index].id}/comments`, { data: { body: "Scoped notification", mentionedUserIds: [userId] } });
       expect(response.status()).toBe(201);
       commentIds.push((await response.json()).id);
-    }
-  } finally { await context.close(); }
+    } finally { await context.close(); }
+  }
   // Same approved real-event fixture as workspace-navigation-vue: no outbox timing shortcut in the request paths under test.
   for (const id of [userId, ...commentIds]) expect(id).toMatch(/^[0-9a-f-]{36}$/i);
   execFileSync("docker", ["exec", "-i", process.env.FVOCI_TEST_PG_CONTAINER!, "psql", "-U", "postgres", "-d", new URL(process.env.FVOCI_E2E_ADMIN_DATABASE_URL!).pathname.slice(1), "-v", "ON_ERROR_STOP=1"], { input: `INSERT INTO fvoci.notifications (workspace_id,user_id,event_id,verb,actor_user_id,target_type,target_id,payload) SELECT e.workspace_id,'${userId}'::uuid,e.id,e.verb,e.actor_user_id,e.target_type,e.target_id,jsonb_build_object('commentId',c.id,'documentId',c.document_id,'parentId',NULL) FROM fvoci.events e JOIN fvoci.comments c ON c.id=e.target_id WHERE e.target_id IN (${commentIds.map((id) => `'${id}'::uuid`).join(",")}) AND e.verb='comment.created' ON CONFLICT (workspace_id,user_id,event_id) DO NOTHING;`, stdio: ["pipe", "pipe", "pipe"] });
