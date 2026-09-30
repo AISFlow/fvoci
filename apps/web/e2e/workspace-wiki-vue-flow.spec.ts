@@ -741,42 +741,15 @@ test("moving between five documents in the app keeps one room socket and every e
   await testInfo.attach("rapid-documents", { body: JSON.stringify({ wsId, docs }), contentType: "application/json" });
   type NativeReceipt = {
     kind: string; at: number; trusted: boolean; key?: string; data?: string | null;
-    inEditor: boolean; href?: string; state: unknown;
+    inEditor: boolean; href?: string;
   };
   // When the last keystroke and the link click reached the page.
   await page.evaluate(() => {
     const marks = window as unknown as {
       lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
       lastLinkTrusted: boolean; lastLinkHref: string; nativeEvents: NativeReceipt[];
-      lifecycle: unknown[]; observeEditor: () => unknown;
     };
     marks.nativeEvents = [];
-    marks.lifecycle = [];
-    const seen = new WeakSet<import("@tiptap/core").Editor>();
-    const views = new WeakMap<import("@tiptap/core").Editor, EditorView>();
-    const read = (editor: import("@tiptap/core").Editor) => {
-      const extensions = editor.extensionManager.extensions;
-      const doc = extensions.find((extension) => extension.name === "collaboration")?.options.document as import("yjs").Doc | undefined;
-      const provider = extensions.find((extension) => extension.name === "collaborationCaret")?.options.provider as import("@hocuspocus/provider").HocuspocusProvider | undefined;
-      const view = views.get(editor) ?? editor.view;
-      views.set(editor, view);
-      return { dom: view.dom.textContent, pm: view.state.doc.textContent,
-        yjs: doc?.share.get("prosemirror")?.toString(), room: provider?.configuration.name,
-        unsynced: provider?.unsyncedChanges, pending: (provider as unknown as { pendingUpdates?: unknown[] })?.pendingUpdates?.length,
-        observerQueued: view.domObserver.queue.length, flushingSoon: view.domObserver.flushingSoon,
-        connected: view.dom.isConnected, destroyed: editor.isDestroyed };
-    };
-    marks.observeEditor = () => {
-      const root = document.querySelector(".fvoci-editor .ProseMirror") as (HTMLElement & { editor?: import("@tiptap/core").Editor }) | null;
-      const editor = root?.editor;
-      if (!editor) return null;
-      if (!seen.has(editor)) {
-        seen.add(editor);
-        const capture = (kind: string) => marks.lifecycle.push({ kind, at: performance.now(), state: read(editor) });
-        editor.on("destroy", () => capture("editor-destroy"));
-      }
-      return read(editor);
-    };
     for (const kind of ["keydown", "beforeinput", "input", "keyup", "mousedown", "mouseup", "click"]) {
       addEventListener(kind, (event) => {
         const target = event.target as Element | null;
@@ -794,11 +767,7 @@ test("moving between five documents in the app keeps one room socket and every e
         }
         if (inEditor || link) marks.nativeEvents.push({ kind, at, trusted: event.isTrusted,
           key: (event as KeyboardEvent).key, data: (event as InputEvent).data,
-          inEditor, href: link?.getAttribute("href") ?? undefined,
-          // Snapshot only the final native keyup and real click. Keep prefix
-          // transactions and other input events free of synchronous observers.
-          state: (kind === "keyup" && inEditor && /^[1-4]$/.test((event as KeyboardEvent).key))
-            || (kind === "click" && link) ? marks.observeEditor() : undefined });
+          inEditor, href: link?.getAttribute("href") ?? undefined });
       }, true);
     }
   });
@@ -817,7 +786,6 @@ test("moving between five documents in the app keeps one room socket and every e
     const link = page.getByRole("navigation", { name: "상위 경로" })
       .getByRole("link", { name: `이동 ${i + 2}`, exact: true });
     await editor.click();
-    expect(await page.evaluate(() => (window as unknown as { observeEditor: () => unknown }).observeEditor())).not.toBeNull();
     await page.keyboard.type("떠나기 직전 ");
     // Prepare the real target before the final edit. The digit below must still
     // reach the editor immediately before native activation of its router link.
@@ -891,8 +859,6 @@ test("moving between five documents in the app keeps one room socket and every e
   expect(await bodyJson(page.request, wsId, docs[0]!.id)).toContain("떠나기 직전 1");
   expect(csp).toEqual([]);
   } finally {
-    const lifecycle = await page.evaluate(() => (window as unknown as { lifecycle: unknown[] }).lifecycle);
-    await testInfo.attach("rapid-editor-lifecycle", { body: JSON.stringify(lifecycle), contentType: "application/json" });
     await testInfo.attach("rapid-wire-frames", { body: JSON.stringify(frames), contentType: "application/json" });
     await native.detach();
   }
