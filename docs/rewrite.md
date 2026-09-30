@@ -922,6 +922,23 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 
 ### 6.5 Astra / Sol 6.1 실행 TODO (2026-09-30 인수)
+
+**2026-09-30 사용자 후속 지시: 코디네이터를 Sol 6.1 high로 전면 인계.** 새 Orca 터미널 `term_cc010fa2-f24c-4018-820f-16172de0e39f`는 기존 통합 worktree를 인수한다. 기존 코디네이터는 인계 prompt 수락 후 배정·통합·원격 쓰기를 중단한다. 기존 Run `run_496803f4d94f`와 #272 단일 후보·별도 승인 전 머지/릴리스 금지를 유지한다. Run 소유권 재바인딩은 새 터미널의 실제 권한으로 수행해야 하며 기존 세션의 대리 호출은 consumer_fenced로 거부돼 효과가 없었다. 실행 요청은 gpt-6.1-sol/high, 새 TUI 표시도 GPT-6.1-Sol high; 실제 turn_context는 수신자가 기록한다.
+
+새 실행 묶음은 고정 `95df21702748ed72269a16a6b169330591ff3cd5`에서 시작했다. 현재 전체 검사710파일·3660오류·43경고·fatal0(`/tmp/f272-lint-current-diagnostics.json`); 전체 lint 완료 아님. 각 워커는 별도 worktree와 단독 경로를 소유하며 설정/manifest/lockfile은 코디네이터 조정, 원격 push 금지. 무거운 browser lane은 현재 미배정이다.
+
+| 범위 | 활성 Dispatch | Task |
+|---|---|---|
+| planning | `ctx_05ef98fff945` | `task_d14f03dcf97f` |
+| documents | `ctx_016d7b64de7c` | `task_e717f5aa34fb` |
+| workspace | `ctx_5ec5ac9abeef` | `task_fd205a6b1c96` |
+| shell | `ctx_93073cd9cb9d` | `task_5b601ba25779` |
+| planning-tests | `ctx_8a5b22149d35` | `task_92ee124f0d79` |
+| flow-tests | `ctx_01c07cf7de7e` | `task_1a578ecd0f99` |
+| special-tests | `ctx_9743f470d8aa` | `task_fa673a8f8bb6` |
+
+각 정확한 소유 경로와 인계 지시는 `/tmp/f272-sol-coordinator-handoff.json`, 해당 dispatch 원문 및 `/tmp/f272-sol-coordinator-handoff.txt`에 연결한다. planning/docs/workspace/shell 제품 범위와 세 E2E 범위는 중복 배정하지 않는다. docs 담당은 comments도 소유한다. 검사 정상 종료 후 별도 Sol 검토→로컬 통합→필요 경계 검사→묶음 push를 이어가며 이번 묶음의 생성만으로 작업 완료를 선언하지 않는다.
+
 이 절이 현재 소유권·다음 실행의 정본이다. §6.3 기능표·기존 검증을 재사용하며 과거 Grok/Opus 담당·검사·요청은 당시 기록으로 보존한다. 아래 최초 인수 HEAD·check 집계는 과거 snapshot이며 실제 테스트 수나 최신 수락 상태가 아니다.
 
 상위 목표는 **현재 Astra 세션에서 사용자가 요청한 모든 작업과 진행 중 결과를 보존하고 끝까지 완료하는 것**이다. 합의된 전체 Vue 3 + Nuxt UI + Tiptap/Bun 프론트엔드를 실제 Rust/API/DB에 연결하고, 흐름별 연결 → production 브라우저·데이터/권한 검증 → 별도 Sol6.1 고정 HEAD 검토를 거친 결과와 최종 React 제거를 **기존 PR #272에 모두 누적**한다. 최종 통합 HEAD의 실제 CI·독립 검토 뒤 **별도 사용자 승인까지 main 머지·릴리스를 보류**하며 부분 프론트엔드 머지는 계획하지 않는다(2026-09-30 사용자 후속 지시). 대체된 React 경로와 임시 포팅 기반을 조건 충족 후 제거하되 사용자 데이터·보안·기능·라이선스·복구 근거를 보존하며, 승인된 비교와 0.x 시험 배포 증거까지 이어간다. 기존 PR·브랜치·검사 이력은 입력 근거로 보존하며 새 인수/reset이나 새 기능 자동 승인이 아니다.
