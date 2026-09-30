@@ -61,11 +61,12 @@ test("field definitions, options, labels and milestones save and reload in the V
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   expect(await page.evaluate(() => (window as unknown as { settingsMarker?: string }).settingsMarker)).toBe("same-runtime");
   const manager = page.getByTestId("collection-field-manager");
-  await manager.getByLabel("속성 이름", { exact: true }).fill("단계");
-  await manager.getByLabel("속성 키", { exact: true }).fill("stage");
-  await manager.getByLabel("속성 유형").selectOption("select");
-  await manager.getByLabel("선택지 (한 줄에 하나)").fill("설계\n구현\n설계");
-  await manager.getByRole("button", { name: "속성 추가" }).click();
+  const creation = manager.locator("form").first();
+  await creation.getByLabel("속성 이름", { exact: true }).fill("단계");
+  await creation.getByLabel("속성 키", { exact: true }).fill("stage");
+  await creation.getByLabel("속성 유형").selectOption("select");
+  await creation.getByLabel("선택지 (한 줄에 하나)").fill("설계\n구현\n설계");
+  await creation.getByRole("button", { name: "속성 추가" }).click();
   let field = page.getByTestId("field-settings-stage");
   await expect(field).toContainText("단계 · 단일 선택");
   await field.locator("summary").click();
@@ -91,11 +92,11 @@ test("field definitions, options, labels and milestones save and reload in the V
   await field.getByRole("button", { name: "저장", exact: true }).click();
   await expect.poll(async () => (await fields(page, base, collection)).find(item => item.key === "stage")?.options[1]?.deletedAt).toBeNull();
   await field.locator("summary").click();
-  await field.locator("div.flex.flex-wrap.gap-2").getByRole("button", { name: "보관", exact: true }).click();
+  await field.getByTestId("field-actions").getByRole("button", { name: "보관", exact: true }).click();
   await page.getByRole("alertdialog").getByRole("button", { name: "보관", exact: true }).click();
   await expect.poll(async () => (await fields(page, base, collection)).find(item => item.key === "stage")?.deletedAt).not.toBeNull();
   await field.locator("summary").click();
-  await field.locator("div.flex.flex-wrap.gap-2").getByRole("button", { name: "복원", exact: true }).click();
+  await field.getByTestId("field-actions").getByRole("button", { name: "복원", exact: true }).click();
   await expect.poll(async () => (await fields(page, base, collection)).find(item => item.key === "stage")?.deletedAt).toBeNull();
 
   const labels = page.getByTestId("project-labels-settings");
@@ -126,12 +127,13 @@ test("every existing field type and real version conflict are handled without lo
   const collection = await collectionId(page, base, project.id);
   await page.goto(`/w/${slug}/TYPES/settings/fields`);
   const manager = page.getByTestId("collection-field-manager");
+  const creation = manager.locator("form").first();
   for (const type of FIELD_TYPES) {
-    await manager.getByLabel("속성 이름", { exact: true }).fill(`Field ${type}`);
-    await manager.getByLabel("속성 키", { exact: true }).fill(type);
-    await manager.getByLabel("속성 유형").selectOption(type);
-    if (fieldTakesOptions(type)) await manager.getByLabel("선택지 (한 줄에 하나)").fill("A\nB");
-    await manager.getByRole("button", { name: "속성 추가" }).click();
+    await creation.getByLabel("속성 이름", { exact: true }).fill(`Field ${type}`);
+    await creation.getByLabel("속성 키", { exact: true }).fill(type);
+    await creation.getByLabel("속성 유형").selectOption(type);
+    if (fieldTakesOptions(type)) await creation.getByLabel("선택지 (한 줄에 하나)").fill("A\nB");
+    await creation.getByRole("button", { name: "속성 추가" }).click();
     await expect(page.getByTestId(`field-settings-${type}`)).toBeVisible();
   }
   expect((await fields(page, base, collection)).map(field => field.type)).toEqual([...FIELD_TYPES]);

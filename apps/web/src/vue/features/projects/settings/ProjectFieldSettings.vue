@@ -71,7 +71,7 @@ async function save(deleted: boolean): Promise<void> {
         </div>
         <UButton type="button" size="sm" variant="outline" color="neutral" class="w-fit" :disabled="disabled" @click="options.push({ label: '', deleted: false })">{{ t("collection.addOption") }}</UButton>
       </fieldset>
-      <div v-if="canManage" class="flex flex-wrap gap-2">
+      <div v-if="canManage" class="flex flex-wrap gap-2" data-testid="field-actions">
         <UButton type="button" size="sm" :disabled="saving || !name.trim()" @click="save(archived)">{{ t("collection.save") }}</UButton>
         <UButton v-if="archived" type="button" size="sm" variant="outline" color="neutral" :disabled="saving" @click="save(false)">{{ t("collection.restore") }}</UButton>
         <ConfirmActionButton v-else :title="t('collection.archive')" :description="t('collection.archiveDescription')" :action-label="t('collection.archive')" :disabled="saving" :action="() => save(true)">{{ t("collection.archive") }}</ConfirmActionButton>

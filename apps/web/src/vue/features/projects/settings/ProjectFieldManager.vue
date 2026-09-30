@@ -51,21 +51,21 @@ function preventComposingSubmit(event: KeyboardEvent): void {
     </div>
     <form v-if="canManage" class="flex flex-col gap-2" @submit.prevent="submit" @keydown="preventComposingSubmit">
       <div class="collection-toolbar">
-        <UFormField :label="t('collection.fieldName')" :name="'name'" :id="`${baseId}-name`">
+        <UFormField :label="t('collection.fieldName')" :name="'name'">
           <UInput :id="`${baseId}-name`" v-model="name" class="w-full" maxlength="100" :disabled="create.isPending.value" />
         </UFormField>
-        <UFormField :label="t('collection.fieldKey')" :name="'key'" :id="`${baseId}-key`">
+        <UFormField :label="t('collection.fieldKey')" :name="'key'">
           <UInput :id="`${baseId}-key`" v-model="keyValue" class="w-full" :aria-describedby="`${baseId}-key-hint`" :aria-invalid="keyValid ? undefined : true" maxlength="50" :disabled="create.isPending.value" />
         </UFormField>
-        <UFormField :label="t('collection.fieldType')" :name="'type'" :id="`${baseId}-type`">
-          <select :id="`${baseId}-type`" v-model="type" class="collection-select" :disabled="create.isPending.value">
+        <UFormField :label="t('collection.fieldType')" :name="'type'">
+          <select :aria-label="t('collection.fieldType')" :id="`${baseId}-type`" v-model="type" class="collection-select" :disabled="create.isPending.value">
             <option v-for="value in FIELD_TYPES" :key="value" :value="value">{{ fieldTypeLabel(value) }}</option>
           </select>
         </UFormField>
         <UButton type="submit" size="sm" :disabled="create.isPending.value || !name.trim() || !keyValid">{{ t("collection.addField") }}</UButton>
       </div>
       <p :id="`${baseId}-key-hint`" class="text-sm text-muted">{{ t("collection.fieldKey.hint") }}</p>
-      <UFormField v-if="fieldTakesOptions(type)" :label="t('collection.options')" name="options" :id="`${baseId}-options`">
+      <UFormField v-if="fieldTakesOptions(type)" :label="t('collection.options')" name="options">
         <UTextarea :id="`${baseId}-options`" v-model="options" class="w-full" :disabled="create.isPending.value" />
       </UFormField>
       <p v-if="error" role="alert" class="text-sm text-error">{{ error }}</p>
