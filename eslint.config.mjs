@@ -16,6 +16,7 @@ export default defineConfig(
     "vendor/**",
     "compat/fixtures/**",
     "apps/web/src/generated/api.ts",
+    "src/http/api_docs_assets/swagger-ui-bundle.js",
   ]),
   {
     files: code,
