@@ -936,7 +936,15 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
-#### 최신 전량 인수·통합 체크포인트 (2026-09-30 18:17 KST)
+#### 최신 전량 인수·통합 체크포인트 (2026-09-30 18:28 KST)
+
+로컬 누적 후보 `c0015734b4173bc660cf62b2c4ebe2db410cf770`: 독립 검토된 search fixture `24cf0abf`→`f1cba315`, wiki fixture `21ffce96`→`c0015734`를 충돌 없이 ordinary merge했다. a39 대비 제품 코드는 같고 변경은 두 E2E spec과 진행 문서뿐이다. 해당 spec은 각각 검증된 원본과 동일하며 이전 실패 커밋·근거도 ancestry에 보존했다. 원격은 아직 b0, 원본7PR closure HOLD이며 한 묶음 제출 뒤 실제 원격 CI를 확인한다. 이 문서의 다음 커밋은 기록만 추가한다.
+
+- 고정24cf의 실제 Rust/app-role DB workspace parity **6pass/0fail/0skip**, 13.7초. 기존 준비 prefix의 실제 search-index processed marker를 READ ONLY로 확인한 후 기존 API 준비·새 태스크 POST·정확한3결과·UI/URL/reload를 실행했다. 새 태스크5초 단언은 불변이고 독립 ctx_20e3fad27570가 source/실행6개를 수락했다. bbdf0/1/5 및 이전8e5/1은 당시 실패로 남긴다. prefix의 설정15초 poll은 sync child 최대5초 실행 때문에 엄밀한 벽시계 상한이 아니며, 전체30초 설정도 변경하지 않았다. indexing SLA·backend 제품 수정으로 표현하지 않는다.
+- 고정21ff의 실제 wiki **9pass/0fail/0skip**, 36.1초, retry0. 실제 인가된 문서를 생성해 참조 초안을 검사하도록 fourth fixture만 수정했고 원래 가상 ref의 접근 불가 표시도 명시적으로 확인했다. 원격 변경 중 block/inline math 초안, 조합/undo·redo 및 observer 없는 원래 rapid 입력·room/open socket·네 번 뒤로가기·전체 본문·REST/CSP 단언이 실행됐다. 마지막5문서는 제한된 앱 역할의 READ ONLY DB capture도 성공했다. source4548/21ff는 별도 ctx_f8a3fcec56bc 수락, 최종 합본 검토는 별도 Sol이 실제 trace/source/evidence로 진행한다. 앞선4548 OS IBus4scenarios/1test 성공은 동일 제품 범위로 재사용하며 CDP/OS·물리적 입력을 구분한다. 과거03ca 소실의 정확한 원인·제품 수정이 입증된 것은 아니다.
+- 실제 c7 이미지/설치·직접.env3서비스·백업복구와 문서41394는 독립 ctx_5d5263458f3a **범위 수락**을 마쳤다. 아래 정확한 source/version·AMD64·실패 이력·외부/ARM 한계를 유지한다. 최종 누적 원격 CI·합본 검토 완료 전 전체 완료로 표시하지 않으며, 완료 뒤에도 **사용자 별도 승인 전 머지·태그·릴리스·제품 배포 금지**다.
+
+#### 직전 전량 인수·통합 체크포인트 (2026-09-30 18:17 KST)
 
 현재 로컬 통합은 `a39fd72452a14739809ffdbff049e5ff34b145a0`이며 workspace 후보 `8e7352559a7373385fa682603b3bd95054a323c5`와 Git tree `920d27550f60271fc8bc69f5cdcc5ddbe0fee9fd`가 같다. 원격은 재조회에서도 `b0d258586e935977f683fd151b44e6d74785501c`, base `50d95df1a98c2d88d28f09222c2985fbdb585623`, Draft·auto-merge 없음이다. 현재 로컬 변경의 원격 CI는 아직 없으며 main 수락·배포가 아니다.
 
