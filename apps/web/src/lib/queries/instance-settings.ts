@@ -1,5 +1,5 @@
 // Adapted from source apps/web/src/lib/queries/auth.ts `aiEnabledQueryOptions`.
-import { queryOptions } from "@tanstack/react-query";
+import { queryOptions } from "@/lib/query-options";
 import { publicInstanceQuery, selectAiEnabled } from "@/lib/queries/instance";
 
 export { selectAiEnabled };
