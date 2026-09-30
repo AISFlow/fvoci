@@ -66,17 +66,20 @@ function fixture() {
     storageListeners,
     system: (next: boolean) => {
       dark = next;
-      mediaListeners.forEach((listener) => listener());
+      mediaListeners.forEach((listener) => {
+        listener();
+      });
     },
-    dispose: () =>
+    dispose: () => {
       descriptors.forEach((descriptor, key) => {
         if (descriptor) Object.defineProperty(globalThis, key, descriptor);
         else Reflect.deleteProperty(globalThis, key);
-      }),
+      });
+    },
   };
 }
 
-test("UI preferences restore valid settings, follow system theme, and release listeners", () => {
+await test("UI preferences restore valid settings, follow system theme, and release listeners", () => {
   const f = fixture();
   try {
     f.storage.set("fvoci-text-scale", "20");
@@ -88,7 +91,9 @@ test("UI preferences restore valid settings, follow system theme, and release li
     f.system(true);
     assert.equal(f.classes.has("dark"), false);
     f.storage.set("fvoci-theme", "dark");
-    f.storageListeners.forEach((listener) => listener({ key: "fvoci-theme" }));
+    f.storageListeners.forEach((listener) => {
+      listener({ key: "fvoci-theme" });
+    });
     assert.equal(f.classes.has("dark"), true);
     stop();
     assert.equal(f.mediaListeners.size, 0);
@@ -98,7 +103,7 @@ test("UI preferences restore valid settings, follow system theme, and release li
   }
 });
 
-test("UI preferences reject unsupported scales and tolerate denied browser storage", () => {
+await test("UI preferences reject unsupported scales and tolerate denied browser storage", () => {
   const f = fixture();
   try {
     applyTextScale(18);
@@ -114,9 +119,13 @@ test("UI preferences reject unsupported scales and tolerate denied browser stora
       },
     });
     assert.equal(readThemePreference(), "system");
-    assert.doesNotThrow(() => setThemePreference("dark"));
+    assert.doesNotThrow(() => {
+      setThemePreference("dark");
+    });
     assert.equal(f.classes.has("dark"), true);
-    assert.doesNotThrow(() => applyTextScale(16));
+    assert.doesNotThrow(() => {
+      applyTextScale(16);
+    });
     assert.equal(f.style.fontSize, "16px");
   } finally {
     f.dispose();

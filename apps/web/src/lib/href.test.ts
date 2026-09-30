@@ -12,7 +12,7 @@ import {
   COMMENTS_ANCHOR_ID,
 } from "./href.ts";
 
-test("parseRef distinguishes project keys from KEY-n items and wiki refs", () => {
+await test("parseRef distinguishes project keys from KEY-n items and wiki refs", () => {
   assert.deepEqual(parseRef("LAB"), { kind: "project", key: "LAB" });
   assert.deepEqual(parseRef("lab"), { kind: "project", key: "LAB" });
   assert.deepEqual(parseRef("LAB-2"), {
@@ -29,7 +29,7 @@ test("parseRef distinguishes project keys from KEY-n items and wiki refs", () =>
   assert.equal(parseRef("OPS-5")?.kind, "item");
 });
 
-test("project key validation matches source reserved and KEY-n rejection", () => {
+await test("project key validation matches source reserved and KEY-n rejection", () => {
   assert.equal(projectKeyIssue("LAB"), null);
   assert.equal(projectKeyIssue("lab"), null);
   assert.equal(canonicalizeProjectKey("lab"), "LAB");
@@ -39,7 +39,7 @@ test("project key validation matches source reserved and KEY-n rejection", () =>
   assert.equal(projectKeyIssue("L"), "pattern");
 });
 
-test("canonical project and task paths lower-case slug and upper-case key", () => {
+await test("canonical project and task paths lower-case slug and upper-case key", () => {
   assert.equal(projectsPath("Acme"), "/w/acme/projects");
   assert.equal(projectTasksPath("Acme", "lab"), "/w/acme/LAB/tasks");
   assert.equal(searchPath("Acme"), "/w/acme/search");

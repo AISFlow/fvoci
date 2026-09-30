@@ -23,7 +23,7 @@ test.afterEach(() => {
   mock.restoreAll();
 });
 
-test("close is idempotent per lease", () => {
+await test("close is idempotent per lease", () => {
   const url = "/api/v1/stream";
   const lease = openSharedEventSource(url, {});
   assert.equal(sharedEventSourceRefCount(url), 1);
@@ -35,7 +35,7 @@ test("close is idempotent per lease", () => {
   assert.equal(MockEventSource.instances[0]?.closed, true);
 });
 
-test("stale close does not affect a new pool entry", () => {
+await test("stale close does not affect a new pool entry", () => {
   const url = "/api/v1/stream";
   const first = openSharedEventSource(url, {});
   first.close();
@@ -52,7 +52,7 @@ test("stale close does not affect a new pool entry", () => {
   assert.equal(MockEventSource.instances[1]?.closed, true);
 });
 
-test("a refused connection is reopened after a jittered backoff", () => {
+await test("a refused connection is reopened after a jittered backoff", () => {
   const url = "/api/v1/stream";
   openSharedEventSource(url, {});
   latest().fail(MockEventSource.CLOSED);
@@ -65,7 +65,7 @@ test("a refused connection is reopened after a jittered backoff", () => {
   assert.equal(sharedEventSourceRefCount(url), 1);
 });
 
-test("the first reopen waits at least half the base delay", () => {
+await test("the first reopen waits at least half the base delay", () => {
   mock.method(Math, "random", () => 0);
   openSharedEventSource("/api/v1/stream", {});
   latest().fail(MockEventSource.CLOSED);
@@ -75,7 +75,7 @@ test("the first reopen waits at least half the base delay", () => {
   assert.equal(MockEventSource.instances.length, 2);
 });
 
-test("listeners move to the reopened source", () => {
+await test("listeners move to the reopened source", () => {
   const url = "/api/v1/stream";
   const opened: string[] = [];
   const hints: string[] = [];
@@ -99,13 +99,17 @@ test("listeners move to the reopened source", () => {
   assert.deepEqual(hints, ["hint", "again"]);
 });
 
-test("the backoff doubles to a 30 s cap and resets once a source opens", () => {
+await test("the backoff doubles to a 30 s cap and resets once a source opens", () => {
   openSharedEventSource("/api/v1/stream", {});
   const delays = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000];
   for (const [index, delay] of delays.entries()) {
     latest().fail(MockEventSource.CLOSED);
     mock.timers.tick(delay - 1);
-    assert.equal(MockEventSource.instances.length, index + 1, `attempt ${index} waits ${delay} ms`);
+    assert.equal(
+      MockEventSource.instances.length,
+      index + 1,
+      `attempt ${String(index)} waits ${String(delay)} ms`,
+    );
     mock.timers.tick(1);
     assert.equal(MockEventSource.instances.length, index + 2);
   }
@@ -115,7 +119,7 @@ test("the backoff doubles to a 30 s cap and resets once a source opens", () => {
   assert.equal(MockEventSource.instances.length, delays.length + 2, "open resets the backoff");
 });
 
-test("closing the last lease during the backoff cancels the reopen", () => {
+await test("closing the last lease during the backoff cancels the reopen", () => {
   const url = "/api/v1/stream";
   const lease = openSharedEventSource(url, {});
   latest().fail(MockEventSource.CLOSED);
@@ -125,7 +129,7 @@ test("closing the last lease during the backoff cancels the reopen", () => {
   assert.equal(sharedEventSourceRefCount(url), 0);
 });
 
-test("a lease that stays open keeps the reopen for the others", () => {
+await test("a lease that stays open keeps the reopen for the others", () => {
   const url = "/api/v1/stream";
   const first = openSharedEventSource(url, {});
   const hints: string[] = [];
@@ -141,14 +145,14 @@ test("a lease that stays open keeps the reopen for the others", () => {
   assert.equal(latest().closed, true);
 });
 
-test("an error while the browser retries by itself does not reopen", () => {
+await test("an error while the browser retries by itself does not reopen", () => {
   openSharedEventSource("/api/v1/stream", {});
   latest().fail(MockEventSource.CONNECTING);
   mock.timers.tick(60_000);
   assert.equal(MockEventSource.instances.length, 1);
 });
 
-test("the lease reports the pooled source's state", () => {
+await test("the lease reports the pooled source's state", () => {
   const lease = openSharedEventSource("/api/v1/stream", {});
   assert.equal(lease.readyState, MockEventSource.CONNECTING);
   latest().open();
@@ -159,7 +163,7 @@ test("the lease reports the pooled source's state", () => {
   assert.equal(lease.readyState, MockEventSource.CONNECTING);
 });
 
-test("resetting the pool cancels a pending reopen", () => {
+await test("resetting the pool cancels a pending reopen", () => {
   openSharedEventSource("/api/v1/stream", {});
   latest().fail(MockEventSource.CLOSED);
   resetSharedEventSourcePoolForTests();

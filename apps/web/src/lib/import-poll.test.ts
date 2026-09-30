@@ -2,19 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { IMPORT_POLL_MS, IMPORT_POLL_TRIES, pollImportJob } from "./import-poll.ts";
 
-const noSleep = async (_ms: number, signal?: AbortSignal) =>
-  signal?.aborted ? ("cancelled" as const) : ("ok" as const);
+const noSleep = (_ms: number, signal?: AbortSignal): Promise<"cancelled" | "ok"> =>
+  Promise.resolve(signal?.aborted ? "cancelled" : "ok");
 
-test("poll budget matches the source (1500 ms x 40)", () => {
+await test("poll budget matches the source (1500 ms x 40)", () => {
   assert.equal(IMPORT_POLL_MS, 1500);
   assert.equal(IMPORT_POLL_TRIES, 40);
 });
 
-test("poll stops at the first terminal status", async () => {
+await test("poll stops at the first terminal status", async () => {
   const seen: string[] = ["running", "running", "completed"];
   let calls = 0;
   const outcome = await pollImportJob({
-    fetchStatus: async () => ({ status: seen[calls++] ?? "running" }),
+    fetchStatus: () => Promise.resolve({ status: seen[calls++] ?? "running" }),
     intervalMs: 1,
     maxTries: 10,
     sleep: noSleep,
@@ -23,10 +23,10 @@ test("poll stops at the first terminal status", async () => {
   assert.equal(calls, 3);
 });
 
-test("failed job and spent budget are distinct outcomes", async () => {
+await test("failed job and spent budget are distinct outcomes", async () => {
   assert.deepEqual(
     await pollImportJob({
-      fetchStatus: async () => ({ status: "failed" }),
+      fetchStatus: () => Promise.resolve({ status: "failed" }),
       intervalMs: 1,
       maxTries: 3,
       sleep: noSleep,
@@ -36,9 +36,9 @@ test("failed job and spent budget are distinct outcomes", async () => {
   let calls = 0;
   assert.deepEqual(
     await pollImportJob({
-      fetchStatus: async () => {
+      fetchStatus: () => {
         calls += 1;
-        return { status: "running" };
+        return Promise.resolve({ status: "running" });
       },
       intervalMs: 1,
       maxTries: 3,
@@ -49,14 +49,14 @@ test("failed job and spent budget are distinct outcomes", async () => {
   assert.equal(calls, 3);
 });
 
-test("abort during the wait cancels without another fetch", async () => {
+await test("abort during the wait cancels without another fetch", async () => {
   const controller = new AbortController();
   let calls = 0;
   const outcome = await pollImportJob({
-    fetchStatus: async () => {
+    fetchStatus: () => {
       calls += 1;
       controller.abort();
-      return { status: "running" };
+      return Promise.resolve({ status: "running" });
     },
     signal: controller.signal,
     intervalMs: 60_000,

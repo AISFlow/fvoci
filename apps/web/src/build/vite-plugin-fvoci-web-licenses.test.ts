@@ -19,7 +19,7 @@ const webRoot = path.resolve(import.meta.dirname, "../..");
 const repoRoot = path.resolve(webRoot, "../..");
 const manifestPath = path.join(repoRoot, "third-party/browser-licenses/manifest.json");
 
-test("the worker collector records chunk module ids and skips assets", () => {
+await test("the worker collector records chunk module ids and skips assets", () => {
   const ids = new Set<string>();
   const plugin = collectWorkerModuleIds(ids);
   const generate = plugin.generateBundle as (
@@ -37,7 +37,7 @@ test("the worker collector records chunk module ids and skips assets", () => {
   assert.deepEqual([...ids], ["/a/node_modules/x/index.js", "/src/worker.ts"]);
 });
 
-test("package entries use the package root, like Vite's build.license", () => {
+await test("package entries use the package root, like Vite's build.license", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "fvoci-worker-licenses-"));
   try {
     const pkg = path.join(root, "node_modules", "@scope", "pkg");
@@ -73,7 +73,7 @@ test("package entries use the package root, like Vite's build.license", () => {
   }
 });
 
-test("worker-only packages join Vite's entries sorted by id; Vite's entry wins a duplicate", () => {
+await test("worker-only packages join Vite's entries sorted by id; Vite's entry wins a duplicate", () => {
   const vite = JSON.stringify([
     { name: "react", version: "19.3.0", identifier: "MIT", text: "from vite" },
     { name: "zod", version: "3.25.76", identifier: "MIT", text: "z" },
@@ -99,13 +99,13 @@ function installedPackageDir(name: string): string {
   }
 }
 
-test("installed XLSX worker packages reach the public notice, with the existing supplements", () => {
+await test("installed XLSX worker packages reach the public notice, with the existing supplements", () => {
   const modules = [
     ["@office-kit/xlsx", "dist/io.mjs"],
     ["fflate", "esm/browser.js"],
     ["saxes", "saxes.js"],
     ["@nodable/entities", "src/index.js"],
-  ].map(([name, file]) => path.join(installedPackageDir(name!), file!));
+  ].map(([name, file]) => path.join(installedPackageDir(name), file));
   const entries = packageLicenseEntries(modules);
   assert.deepEqual(
     entries.map((entry) => `${entry.name}@${entry.version}`),
@@ -128,7 +128,7 @@ test("installed XLSX worker packages reach the public notice, with the existing 
   assert.equal(notice.match(/^Supplement source: /gm)?.length, 2);
 });
 
-test("the icon module's bundled sets are read from the code @nuxt/icon generates", () => {
+await test("the icon module's bundled sets are read from the code @nuxt/icon generates", () => {
   const code = generateClientBundleCode([
     { prefix: "lucide", icons: { search: { body: '<path d="M1 1"/>' }, x: { body: "<path/>" } } },
     { prefix: "simple-icons", icons: { github: { body: "<path/>" } } },
@@ -143,7 +143,7 @@ test("the icon module's bundled sets are read from the code @nuxt/icon generates
   );
 });
 
-test("a bundled icon set joins the notice with its pinned license supplement", () => {
+await test("a bundled icon set joins the notice with its pinned license supplement", () => {
   const entries = iconSetLicenseEntries(["lucide"], webRoot);
   assert.deepEqual(entries, [
     { name: "@iconify-json/lucide", version: "1.2.137", identifier: "ISC" },
@@ -163,7 +163,7 @@ test("a bundled icon set joins the notice with its pinned license supplement", (
   assert.ok(notice.includes("Copyright (c) 2013-present Cole Bemis"));
 });
 
-test("an icon set without a pinned license fails the notice; one that is not installed fails earlier", () => {
+await test("an icon set without a pinned license fails the notice; one that is not installed fails earlier", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "fvoci-icon-licenses-"));
   try {
     const pkg = path.join(root, "node_modules", "@iconify-json", "newset");
@@ -190,7 +190,7 @@ test("an icon set without a pinned license fails the notice; one that is not ins
   }
 });
 
-test("the plugin takes icon sets only from a chunk that kept the icon module", () => {
+await test("the plugin takes icon sets only from a chunk that kept the icon module", () => {
   const plugin = fvociWebLicenseAdapt({ repoRoot, manifestPath, iconSetRoot: webRoot });
   const transform = plugin.transform as (code: string, id: string) => unknown;
   const generate = plugin.generateBundle as (

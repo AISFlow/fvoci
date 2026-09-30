@@ -14,7 +14,7 @@ import {
   viewQueriesEqual,
 } from "./view-query.ts";
 
-test("normalizeViewQuery drops empty values and fixes key order", () => {
+await test("normalizeViewQuery drops empty values and fixes key order", () => {
   const normalized = normalizeViewQuery({
     sort: [{ direction: "desc", field: "due" }],
     filters: { title: "  bug  ", openOnly: false, statusId: "", type: "task" },
@@ -29,7 +29,7 @@ test("normalizeViewQuery drops empty values and fixes key order", () => {
   );
 });
 
-test("normalizeViewQuery rejects shapes the server rejects", () => {
+await test("normalizeViewQuery rejects shapes the server rejects", () => {
   assert.equal(normalizeViewQuery({ filters: [] }), null);
   assert.equal(normalizeViewQuery({ sort: [{ field: "due", direction: "up" }] }), null);
   assert.equal(
@@ -51,7 +51,7 @@ test("normalizeViewQuery rejects shapes the server rejects", () => {
   assert.deepEqual(normalizeViewQuery(undefined), { filters: {}, sort: [] });
 });
 
-test("view query equality ignores key order and empty filters", () => {
+await test("view query equality ignores key order and empty filters", () => {
   const a = { filters: { title: "x", openOnly: true }, sort: [] };
   const b = { filters: { openOnly: true, title: "x", statusId: "" }, sort: [] } as never;
   assert.equal(viewQueriesEqual(a, b), true);
@@ -59,7 +59,7 @@ test("view query equality ignores key order and empty filters", () => {
   assert.equal(isEmptyViewQuery({ filters: { openOnly: false }, sort: [] }), true);
 });
 
-test("encode/parse round-trips and omits empty queries", () => {
+await test("encode/parse round-trips and omits empty queries", () => {
   assert.equal(encodeViewQueryParam(EMPTY_VIEW_QUERY), undefined);
   const query = setPrimarySort(patchViewFilter(EMPTY_VIEW_QUERY, "openOnly", true), "title", "asc");
   const encoded = encodeViewQueryParam(query);
@@ -72,7 +72,7 @@ test("encode/parse round-trips and omits empty queries", () => {
   assert.deepEqual(parseViewQueryParam(null), { filters: {}, sort: [] });
 });
 
-test("patch, sort and custom filter helpers", () => {
+await test("patch, sort and custom filter helpers", () => {
   let query = patchViewFilter(EMPTY_VIEW_QUERY, "statusId", "s1");
   assert.deepEqual(query.filters, { statusId: "s1" });
   query = patchViewFilter(query, "statusId", undefined);

@@ -17,12 +17,12 @@ const manifestPath = path.join(repoRoot, "third-party/browser-licenses/manifest.
 /** Build regression guardrails only — not product license policy. */
 const FORBIDDEN_NOTICE_PACKAGE_HEADINGS = ["@m2d/", "@playwright/", "vite - "] as const;
 
-test("hasLicenseText treats whitespace-only stubs as missing", () => {
+await test("hasLicenseText treats whitespace-only stubs as missing", () => {
   assert.equal(hasLicenseText("   "), false);
   assert.equal(hasLicenseText("upstream LICENSE body"), true);
 });
 
-test("applyBrowserLicenseSupplements fills only when upstream text is absent", () => {
+await test("applyBrowserLicenseSupplements fills only when upstream text is absent", () => {
   const supplements = loadBrowserLicenseManifest(manifestPath);
   const entries: LicenseEntry[] = [
     {
@@ -41,21 +41,22 @@ test("applyBrowserLicenseSupplements fills only when upstream text is absent", (
   assert.equal(filled[1]?.text, "preserve upstream bytes from Vite");
   assert.match(filled[0]?.text ?? "", /Kazuhiko Arase/);
   assert.match(filled[0]?.supplementSource ?? "", /^https:\/\//);
-  assert.doesNotThrow(() => assertBundledLicenseTexts(filled, supplements));
+  assert.doesNotThrow(() => {
+    assertBundledLicenseTexts(filled, supplements);
+  });
 });
 
-test("assertBundledLicenseTexts fails when a bundled id lacks text and supplement", () => {
+await test("assertBundledLicenseTexts fails when a bundled id lacks text and supplement", () => {
   const supplements = loadBrowserLicenseManifest(manifestPath);
   const entries: LicenseEntry[] = [
     { name: "example-missing", version: "1.0.0", identifier: "MIT" },
   ];
-  assert.throws(
-    () => assertBundledLicenseTexts(entries, supplements),
-    /no license text and no supplement/,
-  );
+  assert.throws(() => {
+    assertBundledLicenseTexts(entries, supplements);
+  }, /no license text and no supplement/);
 });
 
-test("finalizeBrowserOpenSourceNotice appends FVOCI LICENSE and editor font OFL files", () => {
+await test("finalizeBrowserOpenSourceNotice appends FVOCI LICENSE and editor font OFL files", () => {
   const sampleJson = JSON.stringify([
     {
       name: "react",
@@ -84,7 +85,7 @@ test("finalizeBrowserOpenSourceNotice appends FVOCI LICENSE and editor font OFL 
   }
 });
 
-test("finalizeBrowserOpenSourceNotice appends notices for copied runtime assets", () => {
+await test("finalizeBrowserOpenSourceNotice appends notices for copied runtime assets", () => {
   const sampleJson = JSON.stringify([
     { name: "react", version: "19.3.0", identifier: "MIT", text: "Permission is hereby granted" },
   ]);
@@ -101,7 +102,7 @@ test("finalizeBrowserOpenSourceNotice appends notices for copied runtime assets"
   );
 });
 
-test("published notice preserves web source provenance and full template permission text", () => {
+await test("published notice preserves web source provenance and full template permission text", () => {
   const sourceNotice = fs.readFileSync(path.join(repoRoot, "apps/web/NOTICE.md"), "utf8").trim();
   const notice = finalizeBrowserOpenSourceNotice(
     JSON.stringify([

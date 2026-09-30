@@ -20,7 +20,7 @@ import {
   workspaceSsoHref,
 } from "./oidc.ts";
 
-test("oidcErrorMessage maps each redirect code to its catalog message", () => {
+await test("oidcErrorMessage maps each redirect code to its catalog message", () => {
   for (const code of OIDC_ERROR_CODES) {
     const message = oidcErrorMessage(code);
     assert.equal(message, t(code));
@@ -34,7 +34,7 @@ test("oidcErrorMessage maps each redirect code to its catalog message", () => {
   );
 });
 
-test("oidcErrorMessage falls back for unknown codes and stays silent without one", () => {
+await test("oidcErrorMessage falls back for unknown codes and stays silent without one", () => {
   assert.equal(oidcErrorMessage("something_else"), t("oidc_fallback"));
   assert.equal(oidcErrorMessage("__proto__"), t("oidc_fallback"));
   assert.equal(oidcErrorMessage(null), null);
@@ -42,26 +42,26 @@ test("oidcErrorMessage falls back for unknown codes and stays silent without one
   assert.equal(oidcErrorMessage(""), null);
 });
 
-test("readMfaFragment returns the pending token from #mfa=", () => {
+await test("readMfaFragment returns the pending token from #mfa=", () => {
   assert.equal(readMfaFragment("#mfa=abc_DEF-123"), "abc_DEF-123");
   assert.equal(readMfaFragment("mfa=abc"), "abc");
   assert.equal(readMfaFragment("#other=1&mfa=tok%2Bx"), "tok+x");
 });
 
-test("readMfaFragment ignores empty or unrelated fragments", () => {
+await test("readMfaFragment ignores empty or unrelated fragments", () => {
   assert.equal(readMfaFragment(""), null);
   assert.equal(readMfaFragment("#"), null);
   assert.equal(readMfaFragment("#mfa="), null);
   assert.equal(readMfaFragment("#section-2"), null);
 });
 
-test("oidcStartHref is the plain sign-in start", () => {
+await test("oidcStartHref is the plain sign-in start", () => {
   assert.equal(oidcStartHref("google"), "/api/v1/auth/oidc/google/start");
   assert.equal(oidcStartHref("a/b"), "/api/v1/auth/oidc/a%2Fb/start");
   assert.equal(oidcLinkAction("a/b"), "/api/v1/auth/oidc/a%2Fb/link");
 });
 
-test("oidcInviteStartForm posts the invitation and consents as fields", () => {
+await test("oidcInviteStartForm posts the invitation and consents as fields", () => {
   const form = oidcInviteStartForm("google", {
     token: "inv123",
     consents: [{ kind: "terms", version: 2 }],
@@ -103,10 +103,10 @@ const AUTHORIZE = "https://idp.example/authorize?client_id=c&state=s";
  * `Origin` into `null`.
  */
 function assertCorsMode(init: RequestInit) {
-  assert.ok(init.mode === undefined || init.mode === "cors", `mode ${init.mode}`);
+  assert.ok(init.mode === undefined || init.mode === "cors", `mode ${String(init.mode)}`);
 }
 
-test("startOidcInvite posts the fields by fetch, then navigates to the provider", async () => {
+await test("startOidcInvite posts the fields by fetch, then navigates to the provider", async () => {
   const fake = fakeStart(() => json(200, { authorizationUrl: AUTHORIZE }));
   await startOidcInvite(
     "google",
@@ -114,14 +114,14 @@ test("startOidcInvite posts the fields by fetch, then navigates to the provider"
     fake.deps,
   );
   assert.equal(fake.sent.length, 1);
-  const { input, init } = fake.sent[0]!;
+  const { input, init } = fake.sent[0];
   assert.equal(input, "/api/v1/auth/oidc/google/start");
   assert.equal(init.method, "POST");
   // Same-origin only: the state cookie must be stored, nothing is sent elsewhere.
   assert.equal(init.credentials, "same-origin");
   assertCorsMode(init);
   assert.ok(init.body instanceof URLSearchParams);
-  const body = init.body as URLSearchParams;
+  const body = init.body;
   assert.deepEqual([...body.keys()], ["invitation", "consents"]);
   assert.equal(body.get("invitation"), "inv 1&2");
   assert.deepEqual(JSON.parse(body.get("consents") ?? ""), [{ kind: "terms", version: 2 }]);
@@ -133,18 +133,18 @@ test("startOidcInvite posts the fields by fetch, then navigates to the provider"
   assert.deepEqual(fake.navigated, [AUTHORIZE]);
 });
 
-test("startOidcLink posts without a body and navigates", async () => {
+await test("startOidcLink posts without a body and navigates", async () => {
   const fake = fakeStart(() => json(200, { authorizationUrl: AUTHORIZE }));
   await startOidcLink("a/b", fake.deps);
-  assert.equal(fake.sent[0]!.input, "/api/v1/auth/oidc/a%2Fb/link");
-  assert.equal(fake.sent[0]!.init.method, "POST");
-  assert.equal(fake.sent[0]!.init.credentials, "same-origin");
-  assertCorsMode(fake.sent[0]!.init);
-  assert.equal(fake.sent[0]!.init.body, undefined);
+  assert.equal(fake.sent[0].input, "/api/v1/auth/oidc/a%2Fb/link");
+  assert.equal(fake.sent[0].init.method, "POST");
+  assert.equal(fake.sent[0].init.credentials, "same-origin");
+  assertCorsMode(fake.sent[0].init);
+  assert.equal(fake.sent[0].init.body, undefined);
   assert.deepEqual(fake.navigated, [AUTHORIZE]);
 });
 
-test("a refused or malformed start throws and never navigates", async () => {
+await test("a refused or malformed start throws and never navigates", async () => {
   const refused = fakeStart(() => json(403, { code: "origin_mismatch", status: 403 }));
   await assert.rejects(
     startOidcInvite("google", { token: "t", consents: [] }, refused.deps),
@@ -173,11 +173,11 @@ test("a refused or malformed start throws and never navigates", async () => {
   );
 });
 
-test("the provider button click: pending while leaving, the problem on failure", async () => {
+await test("the provider button click: pending while leaving, the problem on failure", async () => {
   const events: string[] = [];
   const ui = {
-    setPending: (p: string | null) => void events.push(`pending:${p}`),
-    setError: (m: string | null) => void events.push(`error:${m}`),
+    setPending: (p: string | null) => void events.push(`pending:${String(p)}`),
+    setError: (m: string | null) => void events.push(`error:${String(m)}`),
   };
   const ok = fakeStart(() => json(200, { authorizationUrl: AUTHORIZE }));
   await clickOidcStart(
@@ -217,7 +217,7 @@ test("the provider button click: pending while leaving, the problem on failure",
   ]);
 });
 
-test("the SSO slug form navigates to the slug's start", () => {
+await test("the SSO slug form navigates to the slug's start", () => {
   assert.equal(WORKSPACE_SSO_ACTION, "/api/v1/auth/sso");
   assert.equal(workspaceSsoHref("a&b c"), "/api/v1/auth/sso?slug=a%26b%20c");
   const navigated: string[] = [];
@@ -240,7 +240,7 @@ test("the SSO slug form navigates to the slug's start", () => {
   assert.deepEqual(assigned, ["/api/v1/auth/sso?slug=acme"]);
 });
 
-test("the SSO slug form stays put on a slug the server would refuse", () => {
+await test("the SSO slug form stays put on a slug the server would refuse", () => {
   const navigated: string[] = [];
   const navigate = (url: string) => void navigated.push(url);
   assert.equal(startWorkspaceSso("", navigate), "form.too_small");
@@ -253,7 +253,7 @@ test("the SSO slug form stays put on a slug the server would refuse", () => {
   assert.equal(t("form.invalid"), "입력을 확인해 주세요.");
 });
 
-test("the Vue login page's SSO form submits through startWorkspaceSso, never to the server", () => {
+await test("the Vue login page's SSO form submits through startWorkspaceSso, never to the server", () => {
   const vueAuth = path.join(import.meta.dirname, "../vue/features/auth");
   const sso = readFileSync(path.join(vueAuth, "SsoSlugForm.vue"), "utf8");
   const login = readFileSync(path.join(vueAuth, "LoginForm.vue"), "utf8");
@@ -268,7 +268,7 @@ test("the Vue login page's SSO form submits through startWorkspaceSso, never to 
   assert.match(sso, /startWorkspaceSso\(/);
 });
 
-test("the Vue invite and account pages start OIDC by script, never by a native form", () => {
+await test("the Vue invite and account pages start OIDC by script, never by a native form", () => {
   for (const [file, start] of [
     ["../vue/features/auth/InviteAcceptForm.vue", "startOidcInvite"],
     ["../vue/features/settings/AccountSettingsView.vue", "startOidcLink"],
@@ -283,7 +283,7 @@ test("the Vue invite and account pages start OIDC by script, never by a native f
   }
 });
 
-test("the Vue account provider button calls the link handler and reflects its pending/error state", () => {
+await test("the Vue account provider button calls the link handler and reflects its pending/error state", () => {
   const page = readFileSync(
     path.join(import.meta.dirname, "../vue/features/settings/AccountSettingsView.vue"),
     "utf8",
