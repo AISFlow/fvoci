@@ -124,30 +124,26 @@ test("control: the IME composes Korean in a plain contenteditable of the same br
   }
 });
 
-// Known bug, in the React editor as well: the first composition after the
-// caret is placed keeps its first jamo on its own ("ㅎ한글" for 한글), at the
-// end of a text or in an empty paragraph, with or without a peer. The
-// synthetic counterpart is the test.fail in e2e/workspace-wiki-vue-flow.spec.ts.
-// Tracked in #258. Expected to fail until fixed; when it passes, drop test.fail.
-test.fail(
-  "the first composition after placing the caret leaves no stray jamo (known bug)",
-  async ({ collabApp }) => {
-    const a = await headedPage(collabApp.baseUrl);
-    try {
-      await ensureCollabFixture(a.page);
-      await login(a.page, member.email, member.password);
-      const doc = await documentWith(a.page, "OS IME 첫 조합", ["첫 문단"]);
-      await a.page.goto(doc.url);
-      await waitConnected(a.page);
-      await a.page.locator(".fvoci-editor .ProseMirror > *").first().click();
-      await a.page.keyboard.press("End");
-      keys("g", "k", "s", "r", "m", "f", "space");
-      await expect.poll(() => blocks(a.page), { timeout: 5_000 }).toEqual(["첫 문단한글 "]);
-    } finally {
-      await a.browser.close();
-    }
-  },
-);
+// Regression for #258: the first composition after caret placement must not
+// leave a stray initial jamo.
+test("the first composition after placing the caret leaves no stray jamo", async ({
+  collabApp,
+}) => {
+  const a = await headedPage(collabApp.baseUrl);
+  try {
+    await ensureCollabFixture(a.page);
+    await login(a.page, member.email, member.password);
+    const doc = await documentWith(a.page, "OS IME 첫 조합", ["첫 문단"]);
+    await a.page.goto(doc.url);
+    await waitConnected(a.page);
+    await a.page.locator(".fvoci-editor .ProseMirror > *").first().click();
+    await a.page.keyboard.press("End");
+    keys("g", "k", "s", "r", "m", "f", "space");
+    await expect.poll(() => blocks(a.page), { timeout: 5_000 }).toEqual(["첫 문단한글 "]);
+  } finally {
+    await a.browser.close();
+  }
+});
 
 test("a composition survives a peer's edit; preedit Backspace, undo, redo, save and a restart keep it", async ({
   browser,
