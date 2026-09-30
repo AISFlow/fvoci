@@ -110,7 +110,7 @@ test("late project create and clone responses stay scoped to their original work
     const gate = await holdResponse(page, path, "POST");
     try {
       if (kind === "create") await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
-      else await page.locator(".project-list__row").filter({ hasText: "A source" }).getByRole("button", { name: "복제", exact: true }).click();
+      else await page.locator(".project-list__row").filter({ has: page.locator(".project-list__key", { hasText: /^SAME$/ }) }).getByRole("button", { name: "복제", exact: true }).click();
       const dialog = page.getByRole("dialog");
       await dialog.getByLabel("키", { exact: true }).fill(kind === "create" ? "INFLIGHT" : "COPIED");
       if (kind === "create") await dialog.getByLabel("이름", { exact: true }).fill("A created");
@@ -136,7 +136,7 @@ test("project creation and cloning remain retired after returning A to B to A", 
     const gate = await holdResponse(page, path, "POST");
     try {
       if (kind === "create") await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
-      else await page.locator(".project-list__row").filter({ hasText: "A source" }).getByRole("button", { name: "복제", exact: true }).click();
+      else await page.locator(".project-list__row").filter({ has: page.locator(".project-list__key", { hasText: /^SAME$/ }) }).getByRole("button", { name: "복제", exact: true }).click();
       const dialog = page.getByRole("dialog");
       await dialog.getByLabel("키", { exact: true }).fill(kind === "create" ? "ABAPROJ" : "ABACOPY");
       if (kind === "create") await dialog.getByLabel("이름", { exact: true }).fill("Retired creation");
