@@ -99,6 +99,7 @@ const customOpen = ref(false);
 const moveError = ref<string | null>(null);
 const moving = ref(false);
 const draggedDate = ref<CalendarRow | null>(null);
+const calendarUI = ref<InstanceType<typeof CollectionCalendar>>();
 const dropDay = ref<string | null | undefined>(undefined);
 
 const effectiveMonth = computed(() =>
@@ -378,14 +379,16 @@ function canMoveDate(row: CalendarRow | null, target: string | null): boolean {
   );
 }
 
-function onDateDragStart(event: DragEvent, row: CalendarRow): void {
+function onDateDragStart(event: DragEvent, row: CollectionQueryItem): void {
   if (!calendarDrag.value || moving.value || !dateMovable(config.value.dateBy, row, active.value)) return;
   event.dataTransfer?.setData(CALENDAR_DRAG_TYPE, row.id);
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
   draggedDate.value = row;
+  calendarUI.value?.nativeStart(row);
 }
 
 function onDateDragEnd(): void {
+  calendarUI.value?.cancel();
   draggedDate.value = null;
   dropDay.value = undefined;
 }
@@ -622,7 +625,7 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
     <p v-if="moveError" role="alert" class="text-sm text-error">{{ moveError }}</p>
 
     <div v-if="type === 'calendar' && config.dateBy" @dragover="externalCalendarOver" @drop="externalCalendarDrop" @dragleave="onDateDragLeave">
-      <CollectionCalendar :month="effectiveMonth" :date-by="config.dateBy" :fields="active" :previews="calendarPreviews" :counts="dayCounts" :zone="timeZone" :week-starts-on="weekStartsOn" :slug="slug" :pending="moving" :refreshing="rows.isFetching.value" :can-edit="rows.data.value?.canEdit !== false" :save="saveCalendarDate"
+      <CollectionCalendar ref="calendarUI" :month="effectiveMonth" :date-by="config.dateBy" :fields="active" :previews="calendarPreviews" :counts="dayCounts" :zone="timeZone" :week-starts-on="weekStartsOn" :slug="slug" :pending="moving" :refreshing="rows.isFetching.value" :can-edit="rows.data.value?.canEdit !== false" :save="saveCalendarDate"
         @month="month = $event; day = undefined; cursor = undefined" @day="day = day === $event ? undefined : $event; cursor = undefined" @range="visibleRange = $event" @reconnect="refresh" />
     </div>
 
@@ -684,6 +687,7 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
                     :data-testid="calendarDrag ? `collection-drag-${row.displayId}` : undefined"
                     :aria-busy="calendarDrag && moving ? true : undefined"
                     :draggable="dateDraggable(row)"
+                    @pointerdown="calendarDrag && calendarUI?.pointerdown($event, row)"
                     @dragstart="onDateDragStart($event, row)"
                     @dragend="onDateDragEnd"
                   >

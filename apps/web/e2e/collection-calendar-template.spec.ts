@@ -100,3 +100,48 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   await expect.poll(async () => (await f.stored(point.id)).dueAt).toBe("2026-11-02T14:30:00Z");
   await page.reload(); await page.locator('input[type="month"]').fill("2026-11"); await expect(page.locator('td[data-date="2026-11-02"]').getByTestId(`collection-preview-${point.displayId}`)).toBeVisible();
 });
+
+test("custom date editor retains stale item guard, rolls back conflict and preserves draft for explicit retry", async ({ page }) => {
+  const f = await fixture(page, "VALUE"); const item = await f.task("Custom calendar date", {});
+  const collection = await (await page.request.get(`${f.base}/projects/${f.project.id}/collection`)).json();
+  const created = await page.request.post(`${f.base}/collections/${collection.id}/fields`, { data: { name: "Custom date", key: "custom_date", type: "date" } }); expect(created.status()).toBe(201);
+  const field = await created.json();
+  const query = async () => {
+    const res = await page.request.post(`${f.base}/collections/${collection.id}/query`, { data: { config: { query: { filters: {}, sort: [] }, dateBy: null, groupBy: null }, limit: 100 } }); expect(res.ok()).toBe(true);
+    return (await res.json()).items.find((r: { taskId: string }) => r.taskId === item.id);
+  };
+  const valuePath = `${f.base}/collections/${collection.id}/items/${(await query()).id}/values`;
+  async function put(date: string) { const row = await query(); const res = await page.request.put(valuePath, { data: { fieldId: field.id, expectedFieldVersion: field.version, expectedVersion: row.version, value: { date } } }); expect(res.ok()).toBe(true); }
+  await put("2027-05-08"); await f.open();
+  await page.getByLabel("날짜 기준", { exact: true }).selectOption({ label: "Custom date" });
+  await page.getByTestId(`collection-preview-${item.displayId}`).click();
+  const editor = page.getByRole("form", { name: "Calendar event editor" }); await editor.locator('input[type="date"]').fill("2027-05-12");
+  const snapshotVersion = (await query()).version;
+  await put("2027-05-10");
+  const conflict = page.waitForResponse(r => r.request().method() === "PUT" && r.url().endsWith(valuePath));
+  await editor.getByRole("button", { name: "저장 뷰 저장" }).click(); const response = await conflict;
+  expect(response.status()).toBe(409); expect(response.request().postDataJSON()).toMatchObject({ expectedVersion: snapshotVersion, expectedFieldVersion: field.version, value: { date: "2027-05-12" } });
+  await expect(editor.locator('input[type="date"]')).toHaveValue("2027-05-12");
+  await expect(page.locator('td[data-date="2027-05-10"]').getByTestId(`collection-preview-${item.displayId}`)).toBeVisible();
+  await expect(page.locator('td[data-date="2027-05-12"]').getByTestId(`collection-preview-${item.displayId}`)).toHaveCount(0);
+  expect((await query()).values[field.id]).toEqual({ date: "2027-05-10" });
+  await editor.getByRole("button", { name: "최신 저장 뷰 불러오기" }).click(); await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
+  await expect.poll(async () => (await query()).values[field.id]).toEqual({ date: "2027-05-12" });
+});
+
+test("archive during pending calendar write is refused by real Rust permission guard and rolls back", async ({ page }) => {
+  const f = await fixture(page, "DENY"); const item = await f.task("Permission changes", { dueDate: "2027-05-08" }); await f.open();
+  await page.getByTestId(`collection-preview-${item.displayId}`).click();
+  const editor = page.getByRole("form", { name: "Calendar event editor" }); await editor.locator('input[type="date"]').fill("2027-05-12");
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route(`**${f.base}/tasks/${item.id}`, async route => { if (route.request().method() === "PATCH") await gate; await route.continue(); });
+  await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
+  await expect(page.locator('td[data-date="2027-05-12"]').getByTestId(`collection-preview-${item.displayId}`)).toHaveAttribute("aria-busy", "true");
+  expect((await page.request.post(`${f.base}/projects/${f.project.id}/archive`)).ok()).toBe(true);
+  const refused = page.waitForResponse(r => r.request().method() === "PATCH" && r.url().endsWith(`/tasks/${item.id}`)); release();
+  expect((await refused).status()).toBe(409);
+  await expect(page.locator('td[data-date="2027-05-08"]').getByTestId(`collection-preview-${item.displayId}`)).toBeVisible();
+  await expect(page.locator('td[data-date="2027-05-12"]').getByTestId(`collection-preview-${item.displayId}`)).toHaveCount(0);
+  expect((await f.stored(item.id)).dueDate).toBe("2027-05-08");
+  await expect(editor.locator('input[type="date"]')).toHaveValue("2027-05-12"); await expect(editor.getByRole("button", { name: "저장 뷰 저장" })).toBeDisabled();
+});

@@ -116,6 +116,11 @@ function keydown(event: KeyboardEvent) {
 function offline() { online.value = false; cancel(); }
 function reconnect() { online.value = true; emit("reconnect"); }
 function reloadEditor() { const latest = events.value.find(event => event.id === editor.value?.id); if (latest) editor.value = { ...latest }; }
+defineExpose({
+  pointerdown: (event: PointerEvent, row: CollectionQueryPreview) => pointerdown(event, eventFor(row, props.dateBy, props.fields, props.zone)),
+  nativeStart: (row: CollectionQueryPreview) => { nativeDragging.value = true; gesture = null; dragged.value = eventFor(row, props.dateBy, props.fields, props.zone); resizeEdge.value = null; },
+  cancel,
+});
 onMounted(() => { window.addEventListener("online", reconnect); window.addEventListener("offline", offline); window.addEventListener("keydown", keydown); window.addEventListener("pointermove", pointermove); window.addEventListener("pointerup", pointerup); window.addEventListener("pointercancel", pointerup); window.addEventListener("blur", cancel); });
 onBeforeUnmount(() => { window.removeEventListener("online", reconnect); window.removeEventListener("offline", offline); window.removeEventListener("keydown", keydown); window.removeEventListener("pointermove", pointermove); window.removeEventListener("pointerup", pointerup); window.removeEventListener("pointercancel", pointerup); window.removeEventListener("blur", cancel); });
 </script>
