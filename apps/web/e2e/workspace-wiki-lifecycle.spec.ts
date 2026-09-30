@@ -80,6 +80,7 @@ test("rename, move, trash, and restore wiki documents", async ({ page }) => {
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("link", { name: "이동 대상 부모" })).toBeVisible();
   await page.goto(`/w/acme/WIKI-${doc.number}`);
+  await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
   const moveSelect = page.getByLabel("새 위치(부모 문서)");
   await expect(moveSelect).toBeVisible();
   await expect(moveSelect.locator('option[value=""]')).toHaveCount(1);

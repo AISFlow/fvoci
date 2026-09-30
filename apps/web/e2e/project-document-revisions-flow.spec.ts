@@ -140,7 +140,7 @@ test("project long title wraps and remains readable after archive without hiding
   const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents`, { data: { parentId: project.rootDocumentId, title } });
   expect(docRes.status()).toBe(201);
   const doc = await docRes.json();
-  expect((await page.request.put(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}/body`, { data: { contentMd: "첫 번째 업무 본문입니다." } })).ok()).toBe(true);
+  expect((await page.request.put(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}/body`, { data: { contentMd: "첫 번째 업무 본문입니다.\n\n두 번째 업무 본문입니다.\n\n세 번째 업무 본문입니다." } })).ok()).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/w/${admin.workspaceSlug}/${doc.displayId}`);
   await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
@@ -148,7 +148,7 @@ test("project long title wraps and remains readable after archive without hiding
   await expect(field).toHaveValue(title);
   await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
   expect(await field.evaluate((e) => e.scrollWidth)).toBeLessThanOrEqual(await field.evaluate((e) => e.clientWidth));
-  expect(await page.locator(".ProseMirror > p").first().evaluate((e) => e.getBoundingClientRect().bottom)).toBeLessThan(844);
+  expect(await page.locator(".ProseMirror > p").nth(2).evaluate((e) => e.getBoundingClientRect().bottom)).toBeLessThan(844);
   await field.fill("프로젝트 한국어 제목");
   await field.press("Enter");
   await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}`)).json()).title).toBe("프로젝트 한국어 제목");
@@ -159,4 +159,10 @@ test("project long title wraps and remains readable after archive without hiding
   await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
   await expect(field).toHaveValue(title);
   await expect(page.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
+  const options = page.getByRole("button", { name: "문서 옵션", exact: true });
+  await options.click(); await expect(page.getByLabel("아이콘")).toBeDisabled();
+  await expect(page.getByLabel("문서 상태")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Markdown", exact: true })).toBeEnabled();
+  await options.press("Escape"); await expect(options).toBeFocused();
+  await expect(options).toHaveAttribute("aria-expanded", "false");
 });

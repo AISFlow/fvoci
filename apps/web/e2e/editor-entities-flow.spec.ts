@@ -247,6 +247,7 @@ for (const host of ["wiki", "project"] as const) {
         if (request.url().endsWith("/api/v1/me/workspaces")) workspaceRefreshes += 1;
         if (request.url().endsWith(`/api/v1/workspaces/${f.ws}/projects`)) projectRefreshes += 1;
       });
+      await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
       const parentSelect = page.getByLabel("새 위치(부모 문서)");
       await parentSelect.selectOption(parent.id);
       const moved = await holdResponse(page, `${prefix}/${original.id}/move`); held.push(moved);
@@ -298,6 +299,7 @@ for (const host of ["wiki", "project"] as const) {
       const beforeTrash = await retainedCounts(page, f.ws, true);
       const lateTrash = await holdResponse(page, `${prefix}/${original.id}/trash`); held.push(lateTrash);
       page.once("dialog", (dialog) => dialog.accept());
+      await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
       await page.getByRole("button", { name: "휴지통으로 이동", exact: true }).click();
       expect(await lateTrash.response).toBe(200);
       await pushDocument(page, next.path);
@@ -313,6 +315,7 @@ for (const host of ["wiki", "project"] as const) {
       // Deleting a document may close its collab room. Hold the outgoing
       // request until the captured operation has observed a real persist ACK.
       page.once("dialog", (dialog) => dialog.accept());
+      await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
       await page.getByRole("button", { name: "휴지통으로 이동", exact: true }).click();
       await editorOf(page).click(); await page.keyboard.type("during trash ACK"); await save(page);
       await expect(editorOf(peer.page)).toContainText("during trash ACK");

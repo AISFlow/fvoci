@@ -89,6 +89,7 @@ test("project document: edit, trash, restore; project delete and admin restore",
       response.url().includes(`/projects/${project.id}/documents/${doc.id}/trash`) &&
       response.ok(),
   );
+  await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
   await page.getByRole("button", { name: "휴지통으로 이동" }).click();
   await trashed;
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/trash$`));
