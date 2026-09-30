@@ -119,3 +119,57 @@ test("trash timestamp follows the saved user zone instead of the browser zone", 
   await page.reload();
   await expect(time).toHaveText(expected);
 });
+
+test("wiki tag URLs include child-only matches and project documents; unfiltered drag moves and sorts persist", async ({ page }) => {
+  await login(page, owner.email, owner.password);
+  const wiki = [];
+  for (const title of ["Wiki parent", "Wiki second", "Wiki third"]) {
+    const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, { data: { title, parentId: null } });
+    expect(response.status()).toBe(201);
+    wiki.push(await response.json());
+  }
+  const childResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, { data: { title: "Tagged child", parentId: wiki[0].id } });
+  expect(childResponse.status()).toBe(201);
+  const child = await childResponse.json();
+  const projectResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents`, { data: { title: "Tagged project child", parentId: project.rootDocumentId } });
+  expect(projectResponse.status()).toBe(201);
+  const projectChild = await projectResponse.json();
+  const tagResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/document-tags`, { data: { name: "Planning", color: "gray" } });
+  expect(tagResponse.status()).toBe(201);
+  const tag = await tagResponse.json();
+  for (const [doc, path] of [[child, `/api/v1/workspaces/${workspaceId}/documents/${child.id}/tags`], [projectChild, `/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents/${projectChild.id}/tags`]] as const) {
+    expect((await page.request.post(path, { data: { tagId: tag.id } })).ok()).toBe(true);
+    expect(doc.id).toBeTruthy();
+  }
+  await page.goto(`/w/parity/wiki?tag=${tag.id}`);
+  const selected = page.getByRole("button", { name: "Planning", exact: true });
+  await expect(selected).toHaveAttribute("aria-pressed", "true");
+  const childLink = page.getByRole("link", { name: /Tagged child/ });
+  await expect(childLink).toBeVisible();
+  await expect(childLink).toHaveAttribute("draggable", "false");
+  await expect(page.getByRole("link", { name: /Tagged project child/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Wiki parent/ })).toHaveCount(0);
+  await page.reload();
+  await expect(childLink).toBeVisible();
+  await selected.click();
+  await expect(page).toHaveURL(/\/w\/parity\/wiki$/);
+  const parent = page.getByTestId(`wiki-doc-${wiki[0].displayId}`);
+  const second = page.getByTestId(`wiki-doc-${wiki[1].displayId}`);
+  const third = page.getByTestId(`wiki-doc-${wiki[2].displayId}`);
+  const sorted = page.waitForResponse(response => new URL(response.url()).pathname === `/api/v1/workspaces/${workspaceId}/documents/${wiki[2].id}/sort` && response.request().method() === "POST");
+  await third.dragTo(parent, { targetPosition: { x: 25, y: 1 } });
+  expect((await sorted).ok()).toBe(true);
+  const roots = page.locator(".wiki-home__section > ul > li > a");
+  await expect(roots.first()).toContainText("Wiki third");
+  const moved = page.waitForResponse(response => new URL(response.url()).pathname === `/api/v1/workspaces/${workspaceId}/documents/${wiki[1].id}/move` && response.request().method() === "POST");
+  await second.dragTo(parent);
+  expect((await moved).ok()).toBe(true);
+  const parentBranch = parent.locator("..");
+  await expect(parentBranch.getByRole("link", { name: /Wiki second/ })).toBeVisible();
+  await page.reload();
+  await expect(roots.first()).toContainText("Wiki third");
+  await expect(parentBranch.getByRole("link", { name: /Wiki second/ })).toBeVisible();
+  expect((await (await page.request.get(`/api/v1/workspaces/${workspaceId}/documents/${wiki[1].id}`)).json()).parentId).toBe(wiki[0].id);
+  await page.goto("/w/parity/wiki?tag=malformed");
+  await expect(page.getByRole("alert")).toBeVisible();
+});
