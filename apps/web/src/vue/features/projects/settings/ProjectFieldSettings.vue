@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
+import UInput from "@nuxt/ui/components/Input.vue";
 import { computed, ref, useId } from "vue";
 import { fieldTypeLabel } from "@/features/collections/field-type-label";
 import { api, ensureOk, ProblemError } from "@/lib/api";
@@ -53,17 +54,17 @@ async function save(deleted: boolean): Promise<void> {
     <div class="flex flex-col gap-3 py-3">
       <div class="collection-field">
         <label :for="`${baseId}-name`">{{ t("collection.fieldName") }}</label>
-        <input :id="`${baseId}-name`" v-model="name" class="h-9 rounded border px-3" maxlength="100" :disabled="disabled" />
+        <UInput :id="`${baseId}-name`" v-model="name" class="w-full" maxlength="100" :disabled="disabled" />
       </div>
       <div class="collection-field">
         <label :for="`${baseId}-description`">{{ t("project.description") }}</label>
-        <input :id="`${baseId}-description`" v-model="description" class="h-9 rounded border px-3" maxlength="1000" :disabled="disabled" />
+        <UInput :id="`${baseId}-description`" v-model="description" class="w-full" maxlength="1000" :disabled="disabled" />
       </div>
       <p class="text-sm text-muted">{{ t("collection.fieldKey") }}: <code>{{ field.key }}</code></p>
       <fieldset v-if="fieldTakesOptions(field.type)" class="flex flex-col gap-2">
         <legend class="text-sm font-medium">{{ t("collection.optionLabel") }}</legend>
         <div v-for="(option, index) in options" :key="option.id ?? `new-${index}`" class="flex flex-wrap items-center gap-2" data-testid="field-option">
-          <input v-model="option.label" class="h-9 min-w-0 flex-1 rounded border px-3" :aria-label="`${t('collection.optionLabel')} ${index + 1}`" maxlength="100" :disabled="disabled" />
+          <UInput v-model="option.label" class="min-w-0 flex-1" :aria-label="`${t('collection.optionLabel')} ${index + 1}`" maxlength="100" :disabled="disabled" />
           <span v-if="option.deleted" class="text-sm text-muted">{{ t("collection.archived") }}</span>
           <UButton type="button" size="sm" variant="outline" color="neutral" :disabled="disabled || index === 0" @click="moveUp(index)">{{ t("collection.moveUp") }}</UButton>
           <UButton type="button" size="sm" variant="outline" color="neutral" :disabled="disabled" @click="option.deleted = !option.deleted">{{ option.deleted ? t("collection.restore") : t("collection.archive") }}</UButton>

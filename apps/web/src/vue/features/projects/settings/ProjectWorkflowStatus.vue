@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
+import UInput from "@nuxt/ui/components/Input.vue";
 import { ref } from "vue";
 import type { WorkflowStatus } from "@/features/projects/queries";
 import { STATUS_CATEGORIES, asCategory, categoryLabel, statusPatch, type StatusPatch } from "./workflow";
@@ -19,7 +20,7 @@ function submit(): void {
 <template>
   <li class="flex flex-wrap items-end gap-2" :data-testid="`workflow-status-${row.id}`">
     <form class="flex min-w-0 flex-1 flex-wrap items-end gap-2" @submit.prevent="submit">
-      <input v-model="name" :aria-label="t('project.workflow.statusName')" maxlength="100" :disabled="pending || readOnly" class="h-10 rounded border px-3" />
+      <UInput v-model="name" :aria-label="t('project.workflow.statusName')" maxlength="100" :disabled="pending || readOnly" class="min-w-48" />
       <select v-model="category" :aria-label="categoryLabel(category)" :disabled="pending || readOnly" class="collection-select">
         <option v-for="value in STATUS_CATEGORIES" :key="value" :value="value">{{ categoryLabel(value) }}</option>
       </select>
