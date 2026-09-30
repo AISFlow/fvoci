@@ -44,7 +44,10 @@ test("normalizeViewQuery rejects shapes the server rejects", () => {
     null,
   );
   assert.equal(normalizeViewQuery({ filters: { dueBefore: "2026/01/01" } }), null);
-  assert.equal(normalizeViewQuery({ filters: { custom: [{ fieldId: "f", operator: "gt" }] } }), null);
+  assert.equal(
+    normalizeViewQuery({ filters: { custom: [{ fieldId: "f", operator: "gt" }] } }),
+    null,
+  );
   assert.deepEqual(normalizeViewQuery(undefined), { filters: {}, sort: [] });
 });
 
@@ -60,7 +63,10 @@ test("encode/parse round-trips and omits empty queries", () => {
   assert.equal(encodeViewQueryParam(EMPTY_VIEW_QUERY), undefined);
   const query = setPrimarySort(patchViewFilter(EMPTY_VIEW_QUERY, "openOnly", true), "title", "asc");
   const encoded = encodeViewQueryParam(query);
-  assert.equal(encoded, '{"filters":{"openOnly":true},"sort":[{"field":"title","direction":"asc"}]}');
+  assert.equal(
+    encoded,
+    '{"filters":{"openOnly":true},"sort":[{"field":"title","direction":"asc"}]}',
+  );
   assert.deepEqual(parseViewQueryParam(encoded), query);
   assert.equal(parseViewQueryParam("{not json"), null);
   assert.deepEqual(parseViewQueryParam(null), { filters: {}, sort: [] });

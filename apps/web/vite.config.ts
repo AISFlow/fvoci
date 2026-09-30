@@ -30,14 +30,9 @@ if (process.env.CI && !process.versions.bun) {
 }
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const browserLicenseManifest = path.join(
-  repoRoot,
-  "third-party/browser-licenses/manifest.json",
-);
+const browserLicenseManifest = path.join(repoRoot, "third-party/browser-licenses/manifest.json");
 
-const pdfjsDir = path.dirname(
-  createRequire(import.meta.url).resolve("pdfjs-dist/package.json"),
-);
+const pdfjsDir = path.dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json"));
 const pdfjsVersion = (
   JSON.parse(fs.readFileSync(path.join(pdfjsDir, "package.json"), "utf8")) as {
     version: string;
@@ -81,7 +76,14 @@ function pdfjsAssets(): Plugin {
           return next();
         }
         if (!shipped.has(rel)) return next();
-        res.setHeader("content-type", rel.endsWith(".wasm") ? "application/wasm" : rel.endsWith(".js") ? "text/javascript" : "application/octet-stream");
+        res.setHeader(
+          "content-type",
+          rel.endsWith(".wasm")
+            ? "application/wasm"
+            : rel.endsWith(".js")
+              ? "text/javascript"
+              : "application/octet-stream",
+        );
         res.end(fs.readFileSync(path.join(pdfjsDir, rel)));
       });
     },
@@ -100,9 +102,9 @@ function pdfjsAssets(): Plugin {
 /** Pinned full license texts for the Rust dependencies of @rhwp/core's wasm. */
 function rhwpWasmNotice() {
   const coreDir = path.dirname(createRequire(import.meta.url).resolve("@rhwp/core"));
-  const { version } = JSON.parse(
-    fs.readFileSync(path.join(coreDir, "package.json"), "utf8"),
-  ) as { version: string };
+  const { version } = JSON.parse(fs.readFileSync(path.join(coreDir, "package.json"), "utf8")) as {
+    version: string;
+  };
   return {
     title: rhwpWasmNoticeTitle(version),
     text: fs
@@ -121,9 +123,9 @@ function rhwpWasmNotice() {
  */
 function officeKitXlsxNotice() {
   const dir = installedPackageDir("@office-kit/xlsx");
-  const { version } = JSON.parse(
-    fs.readFileSync(path.join(dir, "package.json"), "utf8"),
-  ) as { version: string };
+  const { version } = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as {
+    version: string;
+  };
   return {
     title: `@office-kit/xlsx ${version}: THIRD_PARTY_NOTICES.md`,
     text: fs.readFileSync(path.join(dir, "THIRD_PARTY_NOTICES.md"), "utf8").trim(),
@@ -175,8 +177,7 @@ function nuxtUiColorsStyle(uiPlugins: readonly Plugin[]): Plugin {
 /** Modules of every web-worker bundle, for the license notice. */
 const workerModuleIds = new Set<string>();
 
-const apiProxyTarget =
-  process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
+const apiProxyTarget = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
 
 // Nuxt UI's plugin set registers @tailwindcss/vite itself; it is the only
 // Tailwind registration for the Vue app's stylesheets.
@@ -200,14 +201,7 @@ export default defineConfig({
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),
     },
-    dedupe: [
-      "vue",
-      "yjs",
-      "y-protocols",
-      "@tiptap/core",
-      "@tiptap/pm",
-      "@hocuspocus/provider",
-    ],
+    dedupe: ["vue", "yjs", "y-protocols", "@tiptap/core", "@tiptap/pm", "@hocuspocus/provider"],
   },
   server: {
     port: 5173,

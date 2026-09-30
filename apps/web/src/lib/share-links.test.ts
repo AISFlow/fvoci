@@ -17,10 +17,19 @@ test("shareTreeRoots treats a parent outside the shared subtree as a root", () =
     { id: "child", parentId: "root" },
     { id: "grand", parentId: "child" },
   ];
-  assert.deepEqual(shareTreeRoots(nodes).map((n) => n.id), ["root"]);
-  assert.deepEqual(shareTreeChildren(nodes, "root").map((n) => n.id), ["child"]);
   assert.deepEqual(
-    shareTreeRoots([{ id: "a", parentId: null }, { id: "b", parentId: "a" }]).map((n) => n.id),
+    shareTreeRoots(nodes).map((n) => n.id),
+    ["root"],
+  );
+  assert.deepEqual(
+    shareTreeChildren(nodes, "root").map((n) => n.id),
+    ["child"],
+  );
+  assert.deepEqual(
+    shareTreeRoots([
+      { id: "a", parentId: null },
+      { id: "b", parentId: "a" },
+    ]).map((n) => n.id),
     ["a"],
   );
   assert.deepEqual(shareTreeRoots([]), []);

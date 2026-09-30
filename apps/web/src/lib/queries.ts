@@ -21,9 +21,11 @@ export function workspaceMetaQuery(workspaceId: string) {
   return queryOptions({
     queryKey: ["workspaces", workspaceId],
     queryFn: async () =>
-      ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}", {
-        params: { path: { workspace_id: workspaceId } },
-      })),
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
   });
 }
 
@@ -86,7 +88,16 @@ export function searchQuery(
   options?: { tag?: string; limit?: number },
 ) {
   return queryOptions({
-    queryKey: ["search", workspaceId, q, tab, projectId ?? "", cursor ?? "", mode, ...(options ? [options.tag ?? "", options.limit ?? ""] : [])] as const,
+    queryKey: [
+      "search",
+      workspaceId,
+      q,
+      tab,
+      projectId ?? "",
+      cursor ?? "",
+      mode,
+      ...(options ? [options.tag ?? "", options.limit ?? ""] : []),
+    ] as const,
     queryFn: async ({ signal }) =>
       ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/search", {

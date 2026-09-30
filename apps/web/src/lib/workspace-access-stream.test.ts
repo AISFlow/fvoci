@@ -25,7 +25,12 @@ function serveWorkspace(status: number) {
     const body =
       status === 200
         ? { id: WS, slug: "acme", name: "Acme" }
-        : { type: "about:blank", title: "x", status, code: status === 401 ? "authentication_required" : "not_found" };
+        : {
+            type: "about:blank",
+            title: "x",
+            status,
+            code: status === 401 ? "authentication_required" : "not_found",
+          };
     return new Response(JSON.stringify(body), {
       status,
       headers: { "Content-Type": "application/json" },

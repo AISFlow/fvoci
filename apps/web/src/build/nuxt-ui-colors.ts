@@ -28,7 +28,8 @@ function shadeVars(key: string, value: string, prefix: string | undefined): stri
   const prefixStr = prefix ? `${prefix}-` : "";
   const name = value === "neutral" ? "old-neutral" : value;
   return SHADES.map(
-    (shade) => `--ui-color-${key}-${shade}: var(--${prefixStr}color-${name}-${shade}, ${colorValue(value, shade)});`,
+    (shade) =>
+      `--ui-color-${key}-${shade}: var(--${prefixStr}color-${name}-${shade}, ${colorValue(value, shade)});`,
   ).join("\n  ");
 }
 
@@ -66,7 +67,10 @@ export async function nuxtUiAppConfig(
   const id: unknown = await plugin.resolveId.call({}, "#build/app.config");
   if (typeof id !== "string") throw new Error("Nuxt UI app config did not resolve");
   const code: unknown = await plugin.load.call({}, id);
-  const json = typeof code === "string" ? /export default\s*(\{[\s\S]*\})\s*$/.exec(code.trim())?.[1] : undefined;
+  const json =
+    typeof code === "string"
+      ? /export default\s*(\{[\s\S]*\})\s*$/.exec(code.trim())?.[1]
+      : undefined;
   if (!json) throw new Error("Nuxt UI app config module has an unexpected shape");
   const config = JSON.parse(json) as { ui?: NuxtUiColorConfig };
   if (!config.ui?.colors) throw new Error("Nuxt UI app config has no ui.colors");

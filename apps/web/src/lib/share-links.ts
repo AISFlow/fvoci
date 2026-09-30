@@ -77,4 +77,3 @@ export function starItemDisplayId(
   const key = projectKeyById.get(item.projectId);
   return key ? `${key}-${item.number}` : null;
 }
-

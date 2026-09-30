@@ -12,26 +12,17 @@ function resolved(req: NodeJS.Require, spec: string): string {
 }
 
 test("web, Vue editor, and provider share Vue, Tiptap, and Yjs identities", async () => {
-  const editorReq = createRequire(
-    webRequire.resolve("@fvoci/editor/vue"),
-  );
-  const collabReq = createRequire(
-    webRequire.resolve("@fvoci/editor/collab-tiptap"),
-  );
+  const editorReq = createRequire(webRequire.resolve("@fvoci/editor/vue"));
+  const collabReq = createRequire(webRequire.resolve("@fvoci/editor/collab-tiptap"));
   const providerReq = createRequire(webRequire.resolve("@hocuspocus/provider"));
-  const tiptapVueReq = createRequire(
-    editorReq.resolve("@tiptap/vue-3"),
-  );
+  const tiptapVueReq = createRequire(editorReq.resolve("@tiptap/vue-3"));
 
   const webVue = resolved(webRequire, "vue");
   const webYjs = resolved(webRequire, "yjs");
 
   assert.equal(resolved(editorReq, "vue"), webVue);
   assert.equal(resolved(tiptapVueReq, "vue"), webVue);
-  assert.equal(
-    resolved(tiptapVueReq, "@tiptap/core"),
-    resolved(editorReq, "@tiptap/core"),
-  );
+  assert.equal(resolved(tiptapVueReq, "@tiptap/core"), resolved(editorReq, "@tiptap/core"));
   assert.equal(resolved(collabReq, "yjs"), webYjs);
   assert.equal(resolved(providerReq, "yjs"), webYjs);
 

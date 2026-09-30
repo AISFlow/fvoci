@@ -291,7 +291,10 @@ test("the Vue account provider button calls the link handler and reflects its pe
   // Follow the mounted button through its handler to the POST helper tested
   // above; checking an unused helper import would not protect this UI contract.
   assert.match(page, /<UButton\b[^>]*\btype="button"[^>]*@click="linkProvider\(p\.provider\)"/);
-  assert.match(page, /function linkProvider\(provider: string\): void\s*\{\s*void clickOidcStart\(provider, \(\) => startOidcLink\(provider\),/);
+  assert.match(
+    page,
+    /function linkProvider\(provider: string\): void\s*\{\s*void clickOidcStart\(provider, \(\) => startOidcLink\(provider\),/,
+  );
   assert.match(page, /setPending: \(next\) =>\s*\{\s*linkPending\.value = next;/);
   assert.match(page, /setError: \(message\) =>\s*\{\s*methodError\.value = message;/);
   assert.match(page, /\}, "error\.link"\);/);

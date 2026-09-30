@@ -8,10 +8,7 @@ export const IMPORT_POLL_TRIES = 40;
 export type ImportJobStatus = "pending" | "running" | "completed" | "failed";
 
 export type ImportPollOutcome =
-  | { kind: "completed" }
-  | { kind: "failed" }
-  | { kind: "cancelled" }
-  | { kind: "budget" };
+  { kind: "completed" } | { kind: "failed" } | { kind: "cancelled" } | { kind: "budget" };
 
 export function isImportActive(status: string): boolean {
   return status === "pending" || status === "running";

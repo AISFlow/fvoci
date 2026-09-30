@@ -46,6 +46,9 @@ test("index.html colors style is byte-identical to Nuxt UI's runtime style", asy
 });
 
 test("a prefix and an unknown color render as the plugin renders them", async () => {
-  const config = { colors: { primary: "teal", brand: "no-such-color", neutral: "neutral" }, prefix: "fv" };
+  const config = {
+    colors: { primary: "teal", brand: "no-such-color", neutral: "neutral" },
+    prefix: "fv",
+  };
   assert.equal(nuxtUiColorsCss(config), await pluginCss(config));
 });

@@ -25,7 +25,12 @@ test("poll stops at the first terminal status", async () => {
 
 test("failed job and spent budget are distinct outcomes", async () => {
   assert.deepEqual(
-    await pollImportJob({ fetchStatus: async () => ({ status: "failed" }), intervalMs: 1, maxTries: 3, sleep: noSleep }),
+    await pollImportJob({
+      fetchStatus: async () => ({ status: "failed" }),
+      intervalMs: 1,
+      maxTries: 3,
+      sleep: noSleep,
+    }),
     { kind: "failed" },
   );
   let calls = 0;

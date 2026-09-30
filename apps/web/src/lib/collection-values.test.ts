@@ -63,7 +63,10 @@ test("draft conversion per field type", () => {
   assert.deepEqual(valueFromDraft("datetime", "2026-09-26T10:00", "UTC"), {
     datetime: "2026-09-26T10:00:00Z",
   });
-  assert.equal(draftFromValue({ datetime: "2026-09-26T01:00:00Z" }, "Asia/Seoul"), "2026-09-26T10:00");
+  assert.equal(
+    draftFromValue({ datetime: "2026-09-26T01:00:00Z" }, "Asia/Seoul"),
+    "2026-09-26T10:00",
+  );
   assert.equal(draftFromValue({ number: 2 }, "UTC"), "2");
   assert.equal(draftFromValue(null, "UTC"), "");
 });
@@ -74,12 +77,24 @@ test("asCollectionValue narrows payloads and formatCollectionValue names options
   assert.equal(asCollectionValue(null), null);
   const labels = { yes: "참", no: "거짓" };
   assert.equal(
-    formatCollectionValue({ options: ["o1", "o2"] }, [{ id: "o1", label: "높음" }], [], "UTC", labels),
+    formatCollectionValue(
+      { options: ["o1", "o2"] },
+      [{ id: "o1", label: "높음" }],
+      [],
+      "UTC",
+      labels,
+    ),
     "높음, o2",
   );
   assert.equal(formatCollectionValue({ checkbox: true }, [], [], "UTC", labels), "참");
   assert.equal(
-    formatCollectionValue({ users: ["u1"] }, [], [{ userId: "u1", name: "김관리자" }], "UTC", labels),
+    formatCollectionValue(
+      { users: ["u1"] },
+      [],
+      [{ userId: "u1", name: "김관리자" }],
+      "UTC",
+      labels,
+    ),
     "김관리자",
   );
 });
@@ -93,11 +108,17 @@ test("month window and grid", () => {
   assert.equal(mondayFirst[0]![0]!.date, "2026-08-31");
   assert.equal(mondayFirst[0]![1]!.date, "2026-09-01");
   assert.equal(mondayFirst[0]![0]!.inMonth, false);
-  assert.equal(mondayFirst.every((week) => week.length === 7), true);
+  assert.equal(
+    mondayFirst.every((week) => week.length === 7),
+    true,
+  );
   const sundayFirst = monthGrid("2026-09", 0);
   assert.equal(sundayFirst[0]![0]!.date, "2026-08-30");
   const last = sundayFirst[sundayFirst.length - 1]!;
-  assert.equal(last.some((cell) => cell.date === "2026-09-30"), true);
+  assert.equal(
+    last.some((cell) => cell.date === "2026-09-30"),
+    true,
+  );
 });
 
 test("customEqualsValue types the filter value per field type", async () => {
@@ -107,6 +128,9 @@ test("customEqualsValue types the filter value per field type", async () => {
   assert.equal(customEqualsValue("checkbox", "false", "UTC"), false);
   assert.equal(customEqualsValue("select", "opt-id", "UTC"), "opt-id");
   assert.equal(customEqualsValue("date", "2026-9-1", "UTC"), null);
-  assert.equal(customEqualsValue("datetime", "2026-09-01T09:00", "Asia/Seoul"), "2026-09-01T00:00:00Z");
+  assert.equal(
+    customEqualsValue("datetime", "2026-09-01T09:00", "Asia/Seoul"),
+    "2026-09-01T00:00:00Z",
+  );
   assert.equal(customEqualsValue("text", "  ", "UTC"), null);
 });

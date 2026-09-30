@@ -46,7 +46,9 @@ export function parseWikiRef(raw: string): { prefix: string; number: number } | 
 }
 
 /** Source `parseDisplayId`: prefix 2–32 then `-n` without leading zeros. */
-export function parseItemRef(raw: string): { prefix: string; number: number; displayId: string } | null {
+export function parseItemRef(
+  raw: string,
+): { prefix: string; number: number; displayId: string } | null {
   const match = /^([A-Za-z0-9-]{2,32})-(\d{1,9})$/.exec(raw.trim());
   if (!match) return null;
   const digits = match[2];
@@ -72,11 +74,11 @@ export function workspaceHomePath(slug: string): string {
 }
 
 export function wikiPath(slug: string): string {
-    return `/w/${slug.toLowerCase()}/wiki`;
+  return `/w/${slug.toLowerCase()}/wiki`;
 }
 
 export function trashPath(slug: string): string {
-    return `/w/${slug.toLowerCase()}/trash`;
+  return `/w/${slug.toLowerCase()}/trash`;
 }
 
 export function documentPath(slug: string, displayId: string): string {

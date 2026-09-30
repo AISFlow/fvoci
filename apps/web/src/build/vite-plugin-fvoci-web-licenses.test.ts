@@ -22,11 +22,18 @@ const manifestPath = path.join(repoRoot, "third-party/browser-licenses/manifest.
 test("the worker collector records chunk module ids and skips assets", () => {
   const ids = new Set<string>();
   const plugin = collectWorkerModuleIds(ids);
-  const generate = plugin.generateBundle as (options: unknown, bundle: Record<string, unknown>) => void;
-  generate.call({}, {}, {
-    "worker.js": { type: "chunk", moduleIds: ["/a/node_modules/x/index.js", "/src/worker.ts"] },
-    "worker.css": { type: "asset" },
-  });
+  const generate = plugin.generateBundle as (
+    options: unknown,
+    bundle: Record<string, unknown>,
+  ) => void;
+  generate.call(
+    {},
+    {},
+    {
+      "worker.js": { type: "chunk", moduleIds: ["/a/node_modules/x/index.js", "/src/worker.ts"] },
+      "worker.css": { type: "asset" },
+    },
+  );
   assert.deepEqual([...ids], ["/a/node_modules/x/index.js", "/src/worker.ts"]);
 });
 
@@ -36,11 +43,17 @@ test("package entries use the package root, like Vite's build.license", () => {
     const pkg = path.join(root, "node_modules", "@scope", "pkg");
     fs.mkdirSync(path.join(pkg, "esm"), { recursive: true });
     fs.mkdirSync(path.join(pkg, "sub"), { recursive: true });
-    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@scope/pkg", version: "1.2.3", license: " MIT " }));
+    fs.writeFileSync(
+      path.join(pkg, "package.json"),
+      JSON.stringify({ name: "@scope/pkg", version: "1.2.3", license: " MIT " }),
+    );
     fs.writeFileSync(path.join(pkg, "LICENSE.md"), "\nMIT text\n");
     // Nested package.json files (a type marker, a named sub-entry) are not the package.
     fs.writeFileSync(path.join(pkg, "esm", "package.json"), JSON.stringify({ type: "module" }));
-    fs.writeFileSync(path.join(pkg, "sub", "package.json"), JSON.stringify({ name: "inner", version: "9.9.9" }));
+    fs.writeFileSync(
+      path.join(pkg, "sub", "package.json"),
+      JSON.stringify({ name: "inner", version: "9.9.9" }),
+    );
     const bare = path.join(root, "node_modules", "bare");
     fs.mkdirSync(bare, { recursive: true });
     fs.writeFileSync(path.join(bare, "package.json"), JSON.stringify({ name: "bare" }));
@@ -98,7 +111,11 @@ test("installed XLSX worker packages reach the public notice, with the existing 
     entries.map((entry) => `${entry.name}@${entry.version}`),
     ["@office-kit/xlsx@0.21.1", "fflate@0.8.3", "saxes@6.0.0", "@nodable/entities@3.0.0"],
   );
-  const notice = finalizeBrowserOpenSourceNotice(mergeLicenseEntries("[]", entries), repoRoot, manifestPath);
+  const notice = finalizeBrowserOpenSourceNotice(
+    mergeLicenseEntries("[]", entries),
+    repoRoot,
+    manifestPath,
+  );
   for (const heading of [
     "## @nodable/entities - 3.0.0 (MIT)",
     "## @office-kit/xlsx - 0.21.1 (MIT)",
@@ -120,15 +137,27 @@ test("the icon module's bundled sets are read from the code @nuxt/icon generates
   assert.deepEqual(bundledIconPrefixes(generateClientBundleCode([]).code), []);
   // A shape it does not know is an error, never "no icons".
   assert.throws(() => bundledIconPrefixes("export const icons = {}"), /unrecognised module/);
-  assert.throws(() => bundledIconPrefixes('const c = JSON.parse("[{\\"icons\\":{}}]")'), /valid prefix/);
+  assert.throws(
+    () => bundledIconPrefixes('const c = JSON.parse("[{\\"icons\\":{}}]")'),
+    /valid prefix/,
+  );
 });
 
 test("a bundled icon set joins the notice with its pinned license supplement", () => {
   const entries = iconSetLicenseEntries(["lucide"], webRoot);
-  assert.deepEqual(entries, [{ name: "@iconify-json/lucide", version: "1.2.137", identifier: "ISC" }]);
-  const notice = finalizeBrowserOpenSourceNotice(mergeLicenseEntries("[]", entries), repoRoot, manifestPath);
+  assert.deepEqual(entries, [
+    { name: "@iconify-json/lucide", version: "1.2.137", identifier: "ISC" },
+  ]);
+  const notice = finalizeBrowserOpenSourceNotice(
+    mergeLicenseEntries("[]", entries),
+    repoRoot,
+    manifestPath,
+  );
   assert.ok(notice.includes("## @iconify-json/lucide - 1.2.137 (ISC)"));
-  assert.match(notice, /Supplement source: https:\/\/raw\.githubusercontent\.com\/lucide-icons\/lucide\/[0-9a-f]{40}\/LICENSE/);
+  assert.match(
+    notice,
+    /Supplement source: https:\/\/raw\.githubusercontent\.com\/lucide-icons\/lucide\/[0-9a-f]{40}\/LICENSE/,
+  );
   assert.ok(notice.includes("Lucide Icons and Contributors"));
   // Feather-derived icons carry the MIT notice as well.
   assert.ok(notice.includes("Copyright (c) 2013-present Cole Bemis"));
@@ -139,14 +168,23 @@ test("an icon set without a pinned license fails the notice; one that is not ins
   try {
     const pkg = path.join(root, "node_modules", "@iconify-json", "newset");
     fs.mkdirSync(pkg, { recursive: true });
-    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@iconify-json/newset", version: "1.0.0", license: "MIT" }));
+    fs.writeFileSync(
+      path.join(pkg, "package.json"),
+      JSON.stringify({ name: "@iconify-json/newset", version: "1.0.0", license: "MIT" }),
+    );
     const entries = iconSetLicenseEntries(["newset"], path.join(root, "app"));
-    assert.deepEqual(entries, [{ name: "@iconify-json/newset", version: "1.0.0", identifier: "MIT" }]);
+    assert.deepEqual(entries, [
+      { name: "@iconify-json/newset", version: "1.0.0", identifier: "MIT" },
+    ]);
     assert.throws(
-      () => finalizeBrowserOpenSourceNotice(mergeLicenseEntries("[]", entries), repoRoot, manifestPath),
+      () =>
+        finalizeBrowserOpenSourceNotice(mergeLicenseEntries("[]", entries), repoRoot, manifestPath),
       /@iconify-json\/newset@1\.0\.0: bundled dependency has no license text and no supplement/,
     );
-    assert.throws(() => iconSetLicenseEntries(["absent"], path.join(root, "app")), /@iconify-json\/absent is not installed/);
+    assert.throws(
+      () => iconSetLicenseEntries(["absent"], path.join(root, "app")),
+      /@iconify-json\/absent is not installed/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -155,20 +193,36 @@ test("an icon set without a pinned license fails the notice; one that is not ins
 test("the plugin takes icon sets only from a chunk that kept the icon module", () => {
   const plugin = fvociWebLicenseAdapt({ repoRoot, manifestPath, iconSetRoot: webRoot });
   const transform = plugin.transform as (code: string, id: string) => unknown;
-  const generate = plugin.generateBundle as (options: unknown, bundle: Record<string, unknown>) => void;
+  const generate = plugin.generateBundle as (
+    options: unknown,
+    bundle: Record<string, unknown>,
+  ) => void;
   const write = (plugin.writeBundle as { handler: (options: { dir: string }) => void }).handler;
-  const code = generateClientBundleCode([{ prefix: "lucide", icons: { search: { body: "<path/>" } } }]).code;
+  const code = generateClientBundleCode([
+    { prefix: "lucide", icons: { search: { body: "<path/>" } } },
+  ]).code;
   transform.call({}, code, NUXT_UI_ICONS_MODULE_ID);
   const out = fs.mkdtempSync(path.join(os.tmpdir(), "fvoci-icon-notice-"));
   try {
     const notice = (bundle: Record<string, unknown>) => {
       generate.call({}, {}, bundle);
-      fs.writeFileSync(path.join(out, "open-source-license-data.json"), JSON.stringify([{ name: "vue", version: "3.5.43", identifier: "MIT", text: "MIT" }]));
+      fs.writeFileSync(
+        path.join(out, "open-source-license-data.json"),
+        JSON.stringify([{ name: "vue", version: "3.5.43", identifier: "MIT", text: "MIT" }]),
+      );
       write.call({}, { dir: out });
       return fs.readFileSync(path.join(out, "open-source-licenses.txt"), "utf8");
     };
-    assert.ok(notice({ "main.js": { type: "chunk", moduleIds: ["/src/vue/main.ts", NUXT_UI_ICONS_MODULE_ID] } }).includes("## @iconify-json/lucide - 1.2.137 (ISC)"));
-    assert.ok(!notice({ "main.js": { type: "chunk", moduleIds: ["/src/vue/main.ts"] } }).includes("@iconify-json/lucide"));
+    assert.ok(
+      notice({
+        "main.js": { type: "chunk", moduleIds: ["/src/vue/main.ts", NUXT_UI_ICONS_MODULE_ID] },
+      }).includes("## @iconify-json/lucide - 1.2.137 (ISC)"),
+    );
+    assert.ok(
+      !notice({ "main.js": { type: "chunk", moduleIds: ["/src/vue/main.ts"] } }).includes(
+        "@iconify-json/lucide",
+      ),
+    );
   } finally {
     fs.rmSync(out, { recursive: true, force: true });
   }

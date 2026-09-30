@@ -123,10 +123,9 @@ export async function downloadSharePdf(
   documentId: string | null,
 ): Promise<void> {
   const search = documentId ? `?documentId=${encodeURIComponent(documentId)}` : "";
-  const response = await fetch(
-    `/api/v1/share/${encodeURIComponent(token)}/pdf${search}`,
-    { credentials: "omit" },
-  );
+  const response = await fetch(`/api/v1/share/${encodeURIComponent(token)}/pdf${search}`, {
+    credentials: "omit",
+  });
   if (!response.ok) {
     throw new Error(`share pdf failed: ${response.status}`);
   }

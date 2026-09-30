@@ -11,7 +11,10 @@ test("datetime-local values convert in the user's time zone", () => {
     datetimeLocalInTimeZoneToIso("2026-09-01T09:30", "Asia/Seoul"),
     "2026-09-01T00:30:00.000Z",
   );
-  assert.equal(isoToDatetimeLocalInTimeZone("2026-09-01T00:30:00.000Z", "Asia/Seoul"), "2026-09-01T09:30");
+  assert.equal(
+    isoToDatetimeLocalInTimeZone("2026-09-01T00:30:00.000Z", "Asia/Seoul"),
+    "2026-09-01T09:30",
+  );
   assert.equal(datetimeLocalInTimeZoneToIso("2026-09-01", "Asia/Seoul"), "");
   // Skipped by the US spring-forward gap.
   assert.equal(datetimeLocalInTimeZoneToIso("2026-03-08T02:30", "America/New_York"), "");

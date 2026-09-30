@@ -55,14 +55,14 @@ test("project create payload matches source NFKC, reserved, KEY-n, and blank-to-
   });
   assert.equal(withLead.ok && withLead.body.leadUserId, "0199a1c2-3b4d-7e8f-9012-3456789abcdf");
 
-  assert.deepEqual(
-    projectCreatePayload({ key: "WIKI", name: "Wiki", visibility: "private" }),
-    { ok: false, issue: { field: "key", code: "reserved" } },
-  );
-  assert.deepEqual(
-    projectCreatePayload({ key: "OPS-5", name: "Ops", visibility: "workspace" }),
-    { ok: false, issue: { field: "key", code: "pattern" } },
-  );
+  assert.deepEqual(projectCreatePayload({ key: "WIKI", name: "Wiki", visibility: "private" }), {
+    ok: false,
+    issue: { field: "key", code: "reserved" },
+  });
+  assert.deepEqual(projectCreatePayload({ key: "OPS-5", name: "Ops", visibility: "workspace" }), {
+    ok: false,
+    issue: { field: "key", code: "pattern" },
+  });
   assert.equal(
     projectCreatePayload({
       key: "LAB",
@@ -105,7 +105,10 @@ test("task create payload trims title, defaults type, and never sends parentId",
   assert.deepEqual(created, { ok: true, body: { title: "첫 일", type: "task" } });
   assert.equal(created.ok && "parentId" in created.body, false);
   assert.equal(taskCreatePayload({ title: "   ", type: "bug" }).ok, false);
-  assert.equal(taskCreatePayload({ title: "x".repeat(TASK_TITLE_MAX + 1), type: "task" }).ok, false);
+  assert.equal(
+    taskCreatePayload({ title: "x".repeat(TASK_TITLE_MAX + 1), type: "task" }).ok,
+    false,
+  );
   assert.deepEqual(taskCreatePayload({ title: "하위", type: "subtask" }), {
     ok: false,
     issue: "parent",
