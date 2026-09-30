@@ -8,8 +8,21 @@ import { VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from 
  * (import-graph.test.ts and e2e/project-gantt-flow.spec.ts check this). */
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
+  // Wiki refs are more specific than project home's `/w/:slug/:ref` and must
+  // stay listed first so `/w/acme/wiki-3` is never the project overview.
   { path: VUE_ROUTE_PATHS.wikiDocument, name: "wiki-document", component: () => import("./pages/WikiDocumentPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectTasks, name: "project-tasks", component: () => import("./pages/ProjectTasksPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectTable, name: "project-table", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectBoard, name: "project-board", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectCalendar, name: "project-calendar", component: () => import("./pages/ProjectCollectionPage.vue") },
+  { path: VUE_ROUTE_PATHS.workspaceItem, name: "workspace-item", component: () => import("./pages/WorkspaceItemPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectHome, name: "project-home", component: () => import("./pages/ProjectHomePage.vue") },
   { path: VUE_ROUTE_PATHS.login, name: "login", component: () => import("./pages/LoginPage.vue") },
+  { path: VUE_ROUTE_PATHS.resetPassword, name: "reset-password", component: () => import("./pages/ResetPasswordPage.vue") },
+  { path: VUE_ROUTE_PATHS.magicLink, name: "magic-link", component: () => import("./pages/MagicLinkPage.vue") },
+  { path: VUE_ROUTE_PATHS.confirmEmail, name: "confirm-email", component: () => import("./pages/ConfirmEmailPage.vue") },
+  { path: VUE_ROUTE_PATHS.cancelWithdraw, name: "cancel-withdraw", component: () => import("./pages/CancelWithdrawPage.vue") },
+  { path: VUE_ROUTE_PATHS.consent, name: "consent", component: () => import("./pages/ConsentPage.vue") },
   { path: VUE_ROUTE_PATHS.home, name: "home", component: () => import("./pages/HomePage.vue") },
   { path: VUE_ROUTE_PATHS.legal, name: "legal", component: () => import("./pages/LegalPage.vue") },
   { path: VUE_ROUTE_PATHS.serviceInfo, name: "service-info", component: () => import("./pages/ServiceInfoPage.vue") },
@@ -33,6 +46,16 @@ export const routes: RouteRecordRaw[] = [
     path: VUE_WORKSPACE_ROUTE_PATHS.workspaceHome,
     name: "workspace-home",
     component: () => import("./pages/WorkspaceHomePage.vue"),
+  },
+  {
+    path: VUE_ROUTE_PATHS.attachmentView,
+    name: "attachment-view",
+    component: () => import("./pages/AttachmentViewPage.vue"),
+  },
+  {
+    path: VUE_ROUTE_PATHS.shareAttachmentView,
+    name: "share-attachment-view",
+    component: () => import("./pages/ShareAttachmentViewPage.vue"),
   },
 ];
 

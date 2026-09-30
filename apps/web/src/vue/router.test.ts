@@ -223,3 +223,74 @@ test(
     assert.deepEqual(loads, ["/w/acme/my-tasks", "/w/acme/notifications", "/w/acme/trash"]);
   }),
 );
+
+const AUTH_REST = [
+  { name: "reset-password", path: "/reset-password" },
+  { name: "magic-link", path: "/magic-link" },
+  { name: "confirm-email", path: "/confirm-email" },
+  { name: "cancel-withdraw", path: "/cancel-withdraw" },
+  { name: "consent", path: "/consent" },
+] as const;
+
+test("the remaining auth routes are declared live Vue paths", () => {
+  for (const { name, path } of AUTH_REST) {
+    assert.equal(
+      routes.some((route) => route.name === name && route.path === path),
+      true,
+      name,
+    );
+    // The boundary and router agree for case and trailing slash variants.
+    assert.equal(isVueAppPath(path), true, path);
+    assert.equal(isVueAppPath(`${path}/`), true, `${path}/`);
+    assert.equal(isVueAppPath(path.toUpperCase()), true, path.toUpperCase());
+  }
+});
+
+test(
+  "a completed navigation to a remaining auth page stays in Vue",
+  withLocation(async (loads) => {
+    for (const path of [
+      "/reset-password?token=tok",
+      "/magic-link?token=tok",
+      "/confirm-email?token=tok",
+      "/cancel-withdraw",
+      "/consent?returnTo=%2F",
+    ]) {
+      const router = createAppRouter(createMemoryHistory());
+      for (const route of routes) {
+        router.removeRoute(route.name!);
+        router.addRoute({ path: route.path, name: route.name, component: { render: () => null } });
+      }
+      await router.push(path);
+      assert.deepEqual(loads.splice(0), [], path);
+    }
+  }),
+);
+
+test("wiki documents stay wiki; project keys are project-home; gantt stays gantt", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/wiki-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/WIKI-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/GNT").name, "project-home");
+  assert.equal(router.resolve("/w/acme/gnt").name, "project-home");
+  assert.equal(router.resolve("/w/acme/GNT/gantt").name, "project-gantt");
+  assert.equal(router.resolve("/w/acme/GNT/tasks").name, "project-tasks");
+  assert.equal(router.resolve("/w/acme/GNT/board").name, "project-board");
+  // These resource routes now stay within Vue.
+  assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
+  assert.equal(isVueAppPath("/w/acme/GNT"), true);
+  assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
+});
+
+test("workspace-item is more specific than project-home; wiki stays wiki", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/GNT-1").name, "workspace-item");
+  assert.equal(router.resolve("/w/acme/gnt-12").name, "workspace-item");
+  assert.equal(router.resolve("/w/acme/wiki-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/WIKI-3").name, "wiki-document");
+  assert.equal(router.resolve("/w/acme/GNT").name, "project-home");
+  assert.equal(router.resolve("/w/acme/GNT/tasks").name, "project-tasks");
+  // These resource routes now stay within Vue.
+  assert.equal(isVueAppPath("/w/acme/GNT-1"), true);
+  assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
+});

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
-import { logout } from "./helpers";
+import { expectSpentMagic, expectVueAuth, navigateAuthQuery } from "./auth-link-evidence";
+import { createE2eUser, login, logout, waitForCapturedMail } from "./helpers";
 import { currentStep, freshCode, totp } from "./mfa-helpers";
 import { qrModules } from "../src/lib/qr";
 
@@ -108,4 +109,81 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await passwordStep(page);
   await submitMfaCode(page, recoveryCodes[1]);
   await expect(page).toHaveURL(/\/$/);
+
+  // Magic-link consumption must also stop at MFA without issuing a session.
+  await logout(page);
+  await page.getByRole("button", { name: "이메일로 로그인 링크 받기" }).click();
+  await page.locator("#magic-link-email").fill(owner.email);
+  await page.getByRole("button", { name: "링크 받기", exact: true }).click();
+  const magicMail = await waitForCapturedMail((mail) =>
+    mail.to === owner.email && mail.text.includes("/magic-link?token="),
+  );
+  const magicToken = magicMail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
+  expect(magicToken).toBeTruthy();
+  await page.goto(`/magic-link?token=${magicToken}`);
+  await expectVueAuth(page);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
+  await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "2단계 인증" })).toBeVisible();
+  await expect(page).toHaveURL(/\/magic-link\?token=/);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
+  await expectSpentMagic(page, "/api/v1/auth/magic-link/consume", magicToken!);
+  // Leaving this token query discards its challenge. A new link is still
+  // consumed explicitly and receives its own MFA challenge.
+  await navigateAuthQuery(page, "/magic-link?token=not-issued");
+  await expect(page.getByRole("heading", { name: "2단계 인증" })).toHaveCount(0);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
+  expect((await page.request.post("/api/v1/auth/magic-link", { data: { email: owner.email } })).status()).toBe(202);
+  const secondMail = await waitForCapturedMail((mail) =>
+    mail.to === owner.email && mail.text.includes("/magic-link?token=") && !mail.text.includes(magicToken!),
+  );
+  const secondToken = secondMail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
+  expect(secondToken).toBeTruthy();
+  await navigateAuthQuery(page, `/magic-link?token=${secondToken}`);
+  await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "2단계 인증" })).toBeVisible();
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
+  await submitMfaCode(page, recoveryCodes[2]);
+  await expect(page).toHaveURL(/\/$/);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(200);
+});
+
+// The first flow exercises password-login recovery replay. This distinct
+// account isolates the magic-page bad-code path from that account's rate limit.
+test("magic-link MFA rejects a bad code without a session and accepts a recovery code", async ({ page }) => {
+  const email = "magic-mfa-negative@example.com";
+  const password = "magicnegative1";
+  createE2eUser(email, password, "매직 MFA");
+  await login(page, email, password);
+  await page.goto("/settings/account");
+  const mfa = page.getByTestId("mfa-section");
+  await mfa.locator("#settings-mfa-confirm").fill(password);
+  await mfa.getByRole("button", { name: "설정", exact: true }).click();
+  const secret = (await mfa.getByTestId("mfa-secret").textContent())?.trim() ?? "";
+  expect(secret).toMatch(/^[A-Z2-7=\s]+$/i);
+  await mfa.locator("#settings-mfa-code").fill(totp(secret, currentStep()));
+  await mfa.getByRole("button", { name: "켜기" }).click();
+  await expect(mfa.getByTestId("mfa-recovery-codes")).toBeVisible();
+  const recovery = (await mfa.getByTestId("mfa-recovery-codes").locator("li").first().textContent())!.trim();
+  await mfa.getByRole("button", { name: "보관했습니다" }).click();
+  await page.goto("/");
+  await logout(page);
+  await page.getByRole("button", { name: "이메일로 로그인 링크 받기" }).click();
+  await page.locator("#magic-link-email").fill(email);
+  await page.getByRole("button", { name: "링크 받기", exact: true }).click();
+  const mail = await waitForCapturedMail((item) => item.to === email && item.text.includes("/magic-link?token="));
+  const token = mail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
+  expect(token).toBeTruthy();
+  await page.goto(`/magic-link?token=${token}`);
+  await expectVueAuth(page);
+  await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "2단계 인증" })).toBeVisible();
+  await submitMfaCode(page, "not-a-valid-code");
+  await expect(page.getByRole("alert")).toContainText("인증 코드가 맞지 않습니다");
+  await expect(page).toHaveURL(/\/magic-link\?token=/);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
+  await submitMfaCode(page, recovery);
+  await expect(page).toHaveURL(/\/$/);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(200);
+  await expectSpentMagic(page, "/api/v1/auth/magic-link/consume", token!);
 });

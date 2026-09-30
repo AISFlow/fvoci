@@ -1,4 +1,4 @@
-import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
+import { infiniteQueryOptions, queryOptions } from "@/lib/query-options";
 import type { components } from "@/generated/api";
 import { api, ensureOk } from "@/lib/api";
 
@@ -109,6 +109,46 @@ export function taskActivityQuery(
       ),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
+    enabled: Boolean(workspaceId) && Boolean(taskId),
+    retry: false,
+  });
+}
+
+export function taskAttachmentsQuery(workspaceId: string, taskId: string) {
+  return queryOptions({
+    queryKey: ["task-attachments", workspaceId, taskId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/attachments", {
+          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+        }),
+      ),
+  });
+}
+
+export function taskTimeEntriesQuery(workspaceId: string, taskId: string) {
+  return queryOptions({
+    queryKey: ["task-time-entries", workspaceId, taskId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/time-entries", {
+          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+        }),
+      ),
+    enabled: Boolean(workspaceId) && Boolean(taskId),
+    retry: false,
+  });
+}
+
+export function taskBacklinksQuery(workspaceId: string, taskId: string) {
+  return queryOptions({
+    queryKey: ["backlinks", "task", workspaceId, taskId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/backlinks", {
+          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+        }),
+      ),
     enabled: Boolean(workspaceId) && Boolean(taskId),
     retry: false,
   });

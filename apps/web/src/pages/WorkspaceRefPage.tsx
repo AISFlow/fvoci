@@ -1,20 +1,18 @@
 import { useEffect } from "react";
 import { useLocation, useParams } from "react-router-dom";
 import { t } from "@fvoci/i18n";
-import { ProjectHomePage } from "@/pages/ProjectHomePage";
-import { TaskDetailPage } from "@/pages/TaskDetailPage";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
-import { documentPath, parseRef } from "@/lib/href";
+import { itemPath, projectPath, parseRef } from "@/lib/href";
 import "@/features/projects/projects.css";
 
 /**
- * Wiki documents are the Vue app's page (src/app-boundary.ts). An in-app
+ * Project and wiki resources are the Vue app's pages (src/app-boundary.ts). An in-app
  * link lands here first, as does a spelling the boundary does not send to
- * Vue but the router decodes to a wiki ref (percent-encoded): load the
+ * Vue but the router decodes to a resource ref (percent-encoded): load the
  * canonical path as a new page so the boot module starts the Vue app.
  */
-function WikiDocumentHandoff({ path }: { path: string }) {
+function ResourceHandoff({ path }: { path: string }) {
   const { search, hash } = useLocation();
   useEffect(() => {
     window.location.replace(`${path}${search}${hash}`);
@@ -27,14 +25,11 @@ export function WorkspaceRefPage() {
   const { slug, workspace } = useWorkspaceContext();
   const parsed = parseRef(ref ?? "");
 
-  if (parsed?.kind === "item" && parsed.prefix === "WIKI") {
-    return <WikiDocumentHandoff path={documentPath(slug, parsed.displayId)} />;
-  }
   if (parsed?.kind === "item") {
-    return <TaskDetailPage />;
+    return <ResourceHandoff path={itemPath(slug, parsed.displayId)} />;
   }
   if (parsed?.kind === "project") {
-    return <ProjectHomePage />;
+    return <ResourceHandoff path={projectPath(slug, parsed.key)} />;
   }
   if (!workspace) return null;
   return (

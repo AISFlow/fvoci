@@ -1,3 +1,4 @@
+import { expectVueViewer } from "./viewer-app";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -158,6 +159,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   const searchLink = page.getByRole("navigation", { name: "워크스페이스" }).getByRole("link", { name: "검색" });
 
   await page.goto(viewPath);
+  await expectVueViewer(page);
   await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
   await viewer.getByRole("button", { name: "간단 편집" }).click();
   await expect(bar).toBeVisible();
@@ -174,8 +176,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await searchLink.click();
   await expect(page).toHaveURL(/\/w\/acme\/search/);
   await expect(dialog).toHaveCount(0);
-  // The router commits a route in a React transition after the URL changes: a
-  // history step before that commit would supersede it and keep this viewer.
+  // Wait until the boundary load has unmounted the viewer before history back.
   await expect(viewer).toHaveCount(0);
   await page.goBack();
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
@@ -194,6 +195,34 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await expect(viewer.getByText("2 / 3")).toBeVisible();
   await expect.poll(() => pageInk(page)).not.toBe(page2Before);
 
+  // A cancelled DOM click must remain cancelled; the dirty guard cannot
+  // navigate before the anchor's own event handlers have run.
+  const dirtyBeforeLinks = await pageInk(page);
+  await page.evaluate(() => {
+    const anchor = document.createElement("a");
+    anchor.href = "/w/acme/search";
+    anchor.addEventListener("click", (event) => event.preventDefault());
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+  });
+  await expect(dialog).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
+  await expect(saveButton).toBeEnabled();
+  expect(await pageInk(page)).toBe(dirtyBeforeLinks);
+
+  // Opening a new tab leaves this document and its dirty content intact.
+  await searchLink.evaluate((anchor) => anchor.setAttribute("target", "_blank"));
+  const newTab = page.context().waitForEvent("page");
+  await searchLink.click();
+  const other = await newTab;
+  await expect(other).toHaveURL(/\/w\/acme\/search/);
+  await other.close();
+  await searchLink.evaluate((anchor) => anchor.removeAttribute("target"));
+  await expect(dialog).toHaveCount(0);
+  await expect(saveButton).toBeEnabled();
+  expect(await pageInk(page)).toBe(dirtyBeforeLinks);
+
   // Unsaved edits hold in-app navigation: a link click stays put on 취소 (or Escape).
   await searchLink.click();
   await expect(dialog).toBeVisible();
@@ -208,12 +237,26 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await expect(dialog).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(saveButton).toBeEnabled();
-  // History forward to the search page (the router's own entry from the link click
-  // above) is held too; 나가기 discards the edits and goes. History back is checked
-  // after save-copy, whose navigation gives the viewer a router entry behind it.
+  // Forward to the prior React document crosses a browser document boundary.
+  // Its native beforeunload prompt must preserve the exact dirty content when
+  // dismissed, and discard only after acceptance. Same-app history uses the
+  // custom dialog below, after save-copy.
+  const dirtyInk = await pageInk(page);
+  const dismissed = new Promise<void>((resolve, reject) => page.once("dialog", (prompt) => {
+    try { expect(prompt.type()).toBe("beforeunload"); } catch (error) { reject(error); return; }
+    void prompt.dismiss().then(resolve, reject);
+  }));
   await page.evaluate(() => window.history.forward());
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "나가기" }).click();
+  await dismissed;
+  await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
+  await expect(saveButton).toBeEnabled();
+  expect(await pageInk(page)).toBe(dirtyInk);
+  const accepted = new Promise<void>((resolve, reject) => page.once("dialog", (prompt) => {
+    try { expect(prompt.type()).toBe("beforeunload"); } catch (error) { reject(error); return; }
+    void prompt.accept().then(resolve, reject);
+  }));
+  await page.evaluate(() => window.history.forward());
+  await accepted;
   await expect(page).toHaveURL(/\/w\/acme\/search/);
   await expect(viewer).toHaveCount(0);
   await page.goBack();

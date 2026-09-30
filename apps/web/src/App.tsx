@@ -13,7 +13,6 @@ import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
 import { SearchPage } from "@/pages/SearchPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
-import { ProjectTasksPage } from "@/pages/ProjectTasksPage";
 import { TrashPage } from "@/pages/TrashPage";
 import { WikiPage } from "@/pages/WikiPage";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
@@ -21,19 +20,13 @@ import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
 import { TemplatesSettingsPage } from "@/pages/TemplatesSettingsPage";
-import { ProjectCollectionPage } from "@/pages/ProjectCollectionPage";
 import { MyTasksPage } from "@/pages/MyTasksPage";
 import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
 import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
 import { NotificationsPage } from "@/pages/NotificationsPage";
-import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
 import { WorkspaceHomePage } from "@/pages/WorkspaceHomePage";
-import { MagicLinkPage } from "@/pages/MagicLinkPage";
-import { ConfirmEmailPage } from "@/pages/ConfirmEmailPage";
-import { CancelWithdrawPage } from "@/pages/CancelWithdrawPage";
 import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
-import { ConsentPage } from "@/pages/ConsentPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -95,19 +88,6 @@ const router = createBrowserRouter(
       {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
       <Route path="/s/:token" element={<PublicSharePage />} />
       <Route
-        path="/s/:token/attachments/:attachmentId/view"
-        {...lazyPage(() => import("@/pages/ShareAttachmentViewPage").then((m) => m.ShareAttachmentViewPage))}
-      />
-      <Route
-        path="/reset-password"
-        element={
-          <SetupGuard>
-            <ResetPasswordPage />
-          </SetupGuard>
-        }
-      />
-      <Route path="/consent" element={<ConsentPage />} />
-      <Route
         path="/settings/admin"
         {...lazyPage(() => import("@/pages/AdminPage").then((m) => m.AdminPage), { setupGuard: true })}
       />
@@ -118,30 +98,6 @@ const router = createBrowserRouter(
       <Route
         path="/settings/legal"
         {...lazyPage(() => import("@/pages/AdminLegalPage").then((m) => m.AdminLegalPage), { setupGuard: true })}
-      />
-      <Route
-        path="/magic-link"
-        element={
-          <SetupGuard>
-            <MagicLinkPage />
-          </SetupGuard>
-        }
-      />
-      <Route
-        path="/confirm-email"
-        element={
-          <SetupGuard>
-            <ConfirmEmailPage />
-          </SetupGuard>
-        }
-      />
-      <Route
-        path="/cancel-withdraw"
-        element={
-          <SetupGuard>
-            <CancelWithdrawPage />
-          </SetupGuard>
-        }
       />
       <Route
         path="/settings/account"
@@ -169,14 +125,6 @@ const router = createBrowserRouter(
         <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
         <Route path="settings/templates" element={<TemplatesSettingsPage />} />
         <Route path="notifications" element={<NotificationsPage />} />
-        <Route
-          path="a/:attachmentId/view"
-          {...lazyPage(() => import("@/pages/AttachmentViewPage").then((m) => m.AttachmentViewPage))}
-        />
-        <Route path=":ref/tasks" element={<ProjectTasksPage />} />
-        <Route path=":ref/table" element={<ProjectCollectionPage type="table" />} />
-        <Route path=":ref/board" element={<ProjectCollectionPage type="board" />} />
-        <Route path=":ref/calendar" element={<ProjectCollectionPage type="calendar" />} />
         <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
         <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
         <Route path=":ref" element={<WorkspaceRefPage />} />

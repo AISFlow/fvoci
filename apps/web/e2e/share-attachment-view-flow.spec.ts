@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { watchCspViolations } from "./helpers";
+import { expectVueViewer } from "./viewer-app";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -138,6 +139,10 @@ test("anonymous share attachment view: text, image and download inside the share
   await expect(viewer.locator(".attachment-viewer__name")).toHaveText("메모.txt");
   await expect(viewer.locator("pre.attachment-viewer__text")).toContainText("공유 첨부 본문 한글 ✅");
   await expect(viewer.locator("pre mark")).toContainText("공유 첨부 본문");
+  await expectVueViewer(reader);
+  await reader.reload();
+  await expect(viewer.locator("pre mark")).toContainText("공유 첨부 본문");
+  await expectVueViewer(reader);
   await expect(reader.getByRole("link", { name: "편집" })).toHaveCount(0);
   await expect(reader.getByRole("button", { name: /편집/ })).toHaveCount(0);
   const downloadLink = viewer.getByRole("link", { name: "다운로드" });

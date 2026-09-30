@@ -9,11 +9,20 @@
  * Path patterns the Vue app renders (src/vue/router.ts declares the same
  * routes). Case-insensitive, as vue-router and React Router match by default.
  */
+export const PROJECT_HOME_PATH =
+  /^\/w\/[^/]+\/(?!(?:projects|search|wiki|trash|my-tasks|notifications|settings|a)\/?$)(?![^/]*-\d+\/?$)[A-Za-z][A-Za-z0-9-]{1,31}\/?$/i;
+export const WORKSPACE_ITEM_PATH =
+  /^\/w\/[^/]+\/(?!wiki-[1-9]\d{0,8}\/?$)[A-Za-z0-9-]{2,32}-[1-9]\d{0,8}\/?$/i;
+
 export const VUE_APP_PATHS: readonly RegExp[] = [
   // Home workspace picker and public policies/operator information.
   /^\/$/,
   /^\/legal\/[^/]+\/?$/i,
   /^\/service-info\/?$/i,
+  // Existing project overview, task/document items and collection views.
+  PROJECT_HOME_PATH,
+  WORKSPACE_ITEM_PATH,
+  /^\/w\/[^/]+\/[^/]+\/(?:tasks|table|board|calendar)\/?$/i,
   // Project Gantt: /w/:slug/:ref/gantt
   /^\/w\/[^/]+\/[^/]+\/gantt\/?$/i,
   // Wiki document: /w/:slug/WIKI-<n>, the refs parseWikiRef (lib/href.ts)
@@ -21,6 +30,12 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   // that the React router decodes to one of these (percent-encoded) reach
   // WorkspaceRefPage, which reloads the canonical path.
   /^\/w\/[^/]+\/wiki-[1-9]\d{0,8}\/?$/i,
+  // Auth links consume tokens only after an explicit submission.
+  /^\/reset-password\/?$/i,
+  /^\/magic-link\/?$/i,
+  /^\/confirm-email\/?$/i,
+  /^\/cancel-withdraw\/?$/i,
+  /^\/consent\/?$/i,
   // Login: logout landing, MFA step, OIDC error query. Trailing slash and
   // any case, matching vue-router; /login/extra and /logins stay React.
   /^\/login\/?$/i,
@@ -28,6 +43,9 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   /^\/invite\/[^/]+\/?$/i,
   // First-instance setup. /setup/extra and /setups stay React.
   /^\/setup\/?$/i,
+  // Session and anonymous share attachment viewers.
+  /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i,
+  /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i,
 ];
 
 export function isVueAppPath(pathname: string): boolean {

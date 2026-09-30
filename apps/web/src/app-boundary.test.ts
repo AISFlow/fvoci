@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { isVueAppPath } from "./app-boundary.ts";
-import { parseWikiRef } from "./lib/href.ts";
+import { parseRef } from "./lib/href.ts";
 import { VUE_ROUTE_PATHS } from "./vue/route-paths.ts";
 
 const SAMPLES = [
@@ -26,6 +26,34 @@ const SAMPLES = [
   "/",
   "/login",
   "/login/",
+  "/reset-password",
+  "/reset-password/",
+  "/RESET-PASSWORD",
+  "/magic-link",
+  "/confirm-email",
+  "/cancel-withdraw",
+  "/consent",
+  "/reset-password/",
+  "/RESET-PASSWORD",
+  "/reset-password/extra",
+  "/reset-passwords",
+  "/magic-link/",
+  "/MAGIC-LINK",
+  "/magic-link/extra",
+  "/magic-links",
+  "/confirm-email/",
+  "/CONFIRM-EMAIL",
+  "/confirm-email/extra",
+  "/confirm-emails",
+  "/cancel-withdraw/",
+  "/CANCEL-WITHDRAW",
+  "/cancel-withdraw/extra",
+  "/cancel-withdraws",
+  "/consent/",
+  "/CONSENT",
+  "/consent/extra",
+  "/consents",
+
   "/legal/terms",
   "/legal/privacy",
   "/LEGAL/unknown",
@@ -65,6 +93,24 @@ const SAMPLES = [
   "/w/acme/trash",
   "/w/acme/trash/",
   "/w/acme/a/123/view",
+  "/w/acme/a/123/view/",
+  "/w/acme/A/123/VIEW",
+  "/w/acme/a/123",
+  "/w/acme/a/123/view/extra",
+  "/s/tok/attachments/123/view",
+  "/s/tok/attachments/123/view/",
+  "/S/tok/attachments/123/View",
+  "/s/tok/attachments/123",
+  "/s/tok/attachments/123/view/extra",
+  "/s/tok",
+  "/settings/admin",
+  "/settings/audit",
+  "/settings/legal",
+  "/legal/privacy",
+  "/w//a/123/view",
+  "/s//attachments/123/view",
+  "/w/acme/a//view",
+  "/s/tok/attachments//view",
   "/w/acme/WIKI-1",
   "/w/acme/WIKI-12/",
   "/w/acme/wiki-7",
@@ -84,31 +130,38 @@ const SAMPLES = [
   "/w/acme/Search",
   "/w/acme/PRJ-1",
   "/w//WIKI-1",
+  "/w/acme/projects", "/w/acme/PROJECTS/", "/w/acme/search", "/w/acme/settings",
+  "/w/acme/my-tasks", "/w/acme/notifications", "/w/acme/trash", "/w/acme/a",
+  "/w/acme/OPS-DEV", "/w/acme/OPS-DEV-1", "/w/acme/PRJ-01", "/w/acme/PRJ-0",
+  "/w/acme/GNT/table", "/w/acme/GNT/board", "/w/acme/GNT/calendar/",
+  "/w/acme/GNT/settings/fields", "/w/acme/GNT/settings/workflow",
+  "/w/acme/%47NT", "/w/acme/%47NT-1",
 ];
 
-test("the boot module sends the Gantt path, and only it, to the Vue app", () => {
+test("the boot module sends the Gantt path alongside connected project flows, to the Vue app", () => {
   assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
   assert.equal(isVueAppPath("/w/acme/GNT/gantt/"), true);
   // React Router matched the Gantt route in any case; the boundary does too.
   assert.equal(isVueAppPath("/w/acme/GNT/Gantt"), true);
   assert.equal(isVueAppPath("/W/acme/GNT/GANTT"), true);
-  assert.equal(isVueAppPath("/w/acme/GNT"), false);
+  assert.equal(isVueAppPath("/w/acme/GNT"), true);
   assert.equal(isVueAppPath("/w/acme/GNT/gantt/extra"), false);
-  assert.equal(isVueAppPath("/w/acme/GNT/tasks"), false);
+  assert.equal(isVueAppPath("/w/acme/GNT/tasks"), true);
   assert.equal(isVueAppPath("/"), true);
 });
 
-test("the boot module sends wiki documents, and only them, to the Vue app", () => {
+test("the boot module sends valid wiki and project items, to the Vue app", () => {
   assert.equal(isVueAppPath("/w/acme/WIKI-1"), true);
   assert.equal(isVueAppPath("/w/acme/wiki-12/"), true);
   assert.equal(isVueAppPath("/w/acme/WIKI-123456789"), true);
-  // parseWikiRef refuses these; the React app handles them as before.
+  // parseRef refuses these; the React app handles them as before.
   assert.equal(isVueAppPath("/w/acme/WIKI-0"), false);
   assert.equal(isVueAppPath("/w/acme/WIKI-01"), false);
   assert.equal(isVueAppPath("/w/acme/WIKI-1234567890"), false);
-  // Task and project-document refs stay React pages.
-  assert.equal(isVueAppPath("/w/acme/PRJ-1"), false);
-  assert.equal(isVueAppPath("/w/acme/XWIKI-1"), false);
+  // Task and project-document refs now render their Vue replacement.
+  assert.equal(isVueAppPath("/w/acme/PRJ-1"), true);
+  assert.equal(isVueAppPath("/w/acme/GNT-1"), true);
+  assert.equal(isVueAppPath("/w/acme/XWIKI-1"), true);
   assert.equal(isVueAppPath("/w/acme/wiki"), false);
 });
 
@@ -152,17 +205,20 @@ test("boot still sends the wiki list and workspace search to the React app", () 
   assert.equal(isVueAppPath("/w/acme/wiki-12"), true);
 });
 
-test("every wiki path the boundary sends parses as the React app's wiki ref", () => {
+test("single-segment resource routes agree with the shared ref grammar", () => {
   for (const path of SAMPLES) {
     // React Router matches /w/:slug in any case, as the boundary does.
     const ref = /^\/w\/[^/]+\/([^/]+)\/?$/i.exec(path)?.[1];
-    const wiki = ref ? parseWikiRef(ref) : null;
-    const gantt = /\/gantt\/?$/i.test(path);
+    const resource = ref ? parseRef(ref) : null;
+    const projectView = /\/(gantt|tasks|table|board|calendar)\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
     const homeOrPublic = path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
     const invite = /^\/invite\/[^/]+\/?$/i.test(path);
     const setup = /^\/setup\/?$/i.test(path);
-    if (!gantt && !login && !homeOrPublic && !invite && !setup) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const auth = /^\/(reset-password|magic-link|confirm-email|cancel-withdraw|consent)\/?$/i.test(path);
+    const attachment = /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
+      /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i.test(path);
+    if (!projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
   }
 });
 
@@ -184,6 +240,23 @@ test("workspace nav pages stay on the React boot until the coordinator regexes l
   assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/my-tasks/);
   assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/notifications/);
   assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/trash/);
+});
+
+test("attachment viewers boot Vue while public share and admin pages retain React", () => {
+  for (const path of ["/w/acme/a/123/view", "/w/acme/a/123/view/", "/W/acme/A/123/VIEW",
+    "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View"]) {
+    assert.equal(isVueAppPath(path), true, path);
+  }
+  for (const path of ["/s/tok", "/settings/admin", "/settings/audit", "/settings/legal",
+    "/w/acme/a/123", "/w/acme/a/123/view/extra", "/s/tok/attachments/123", "/s/tok/attachments/123/view/extra"]) {
+    assert.equal(isVueAppPath(path), false, path);
+  }
+});
+
+test("public policy pages remain Vue after the viewer merge", () => {
+  for (const path of ["/legal/privacy", "/LEGAL/terms/"]) {
+    assert.equal(isVueAppPath(path), true, path);
+  }
 });
 
 test("the Vue router matches exactly the paths the boundary sends it", () => {
