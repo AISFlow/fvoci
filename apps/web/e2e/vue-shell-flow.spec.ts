@@ -170,7 +170,7 @@ async function newSignedInPage(
 
 type Opener = { name: string; open: (page: Page) => Promise<void> };
 
-test("the footer's service information and policy links open their React pages from both Vue pages", async ({
+test("the footer's service information and policy links load their public Vue pages from both workspace pages", async ({
   page,
 }) => {
   await ensureSetup(page);
@@ -203,7 +203,7 @@ test("the footer's service information and policy links open their React pages f
       await page.locator("footer").getByRole("link", { name: target.link, exact: true }).click();
       await expect(page).toHaveURL(new RegExp(`${target.path}$`));
       await expect(target.shows).toBeVisible();
-      await expect(page.locator("#root[data-v-app]")).toHaveCount(0);
+      await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
       expect(await sameDocument(page), `${vuePage.name} → ${target.path} is a full load`).toBe(false);
     }
   }
