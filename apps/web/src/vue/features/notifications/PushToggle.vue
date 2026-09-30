@@ -9,7 +9,12 @@ import {
   subscribePush,
   unsubscribePush,
 } from "@/features/notifications/push-enable";
-import { attempted, type PushAttempted, type PushBlocker, pushBlocker } from "@/features/notifications/push-subscription";
+import {
+  attempted,
+  type PushAttempted,
+  type PushBlocker,
+  pushBlocker,
+} from "@/features/notifications/push-subscription";
 import { meQuery } from "@/lib/queries";
 import { publicInstanceQuery } from "@/lib/queries/instance";
 
@@ -51,7 +56,9 @@ const reason = computed<PushBlocker | null>(() =>
     attempted: failure.value,
   }),
 );
-const unavailable = computed(() => reason.value === "unsupported" || reason.value === "unavailable");
+const unavailable = computed(
+  () => reason.value === "unsupported" || reason.value === "unavailable",
+);
 
 function pushReasonMessage(value: PushBlocker): string {
   switch (value) {
@@ -98,5 +105,7 @@ function toggle(next: boolean): void {
     <span>{{ t("notif.prefs.push") }}</span>
   </label>
   <p class="settings-notice">{{ t("notif.prefs.pushHint") }}</p>
-  <p v-if="reason" role="alert" class="settings-notice settings-notice--danger">{{ pushReasonMessage(reason) }}</p>
+  <p v-if="reason" role="alert" class="settings-notice settings-notice--danger">{{
+    pushReasonMessage(reason)
+  }}</p>
 </template>

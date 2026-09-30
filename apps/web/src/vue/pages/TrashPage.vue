@@ -32,20 +32,48 @@ const projects = useQuery(() => ({
   enabled: Boolean(workspaceId.value),
 }));
 const projectKeys = computed(
-  () => new Map((projects.data.value?.items ?? []).map((project) => [project.id, project.key] as const)),
+  () =>
+    new Map(
+      (projects.data.value?.items ?? []).map((project) => [project.id, project.key] as const),
+    ),
 );
 const restoreError = ref<string | null>(null);
 const lifetime = ref(0);
 let restoreVersion = 0;
-watch([workspaceId, slug, () => session.me.value?.userId, () => session.me.value?.sessionId,
-  () => session.me.value?.isInstanceAdmin, () => workspace.value?.role, () => session.status.value],
-  () => { lifetime.value++; restoreError.value = null; }, { flush: "sync" });
-onScopeDispose(() => { lifetime.value++; });
+watch(
+  [
+    workspaceId,
+    slug,
+    () => session.me.value?.userId,
+    () => session.me.value?.sessionId,
+    () => session.me.value?.isInstanceAdmin,
+    () => workspace.value?.role,
+    () => session.status.value,
+  ],
+  () => {
+    lifetime.value++;
+    restoreError.value = null;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  lifetime.value++;
+});
 const currentRestore = (scope: { workspaceId: string; lifetime: number; operation: number }) =>
-  scope.workspaceId === workspaceId.value && scope.lifetime === lifetime.value && scope.operation === restoreVersion;
+  scope.workspaceId === workspaceId.value &&
+  scope.lifetime === lifetime.value &&
+  scope.operation === restoreVersion;
 
 const restore = useMutation({
-  mutationFn: async ({ workspaceId, item }: { workspaceId: string; item: { id: string; projectId?: string | null }; lifetime: number; operation: number }) =>
+  mutationFn: async ({
+    workspaceId,
+    item,
+  }: {
+    workspaceId: string;
+    item: { id: string; projectId?: string | null };
+    lifetime: number;
+    operation: number;
+  }) =>
     item.projectId
       ? ensureOk(
           await api.POST(
@@ -91,17 +119,30 @@ const restore = useMutation({
 
 function onRestore(item: { id: string; projectId?: string | null }): void {
   restoreError.value = null;
-  restore.mutate({ workspaceId: workspaceId.value, item, lifetime: lifetime.value, operation: ++restoreVersion });
+  restore.mutate({
+    workspaceId: workspaceId.value,
+    item,
+    lifetime: lifetime.value,
+    operation: ++restoreVersion,
+  });
 }
 </script>
 
 <template>
-  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="session.status.value === 'error'" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="trash">
+  <WorkspaceShell
+    v-else-if="workspace"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+    active="trash"
+  >
     <div class="trash-page">
       <div class="trash-page__head">
         <h1 class="trash-page__title">{{ t("trash.title") }}</h1>
@@ -116,7 +157,10 @@ function onRestore(item: { id: string; projectId?: string | null }): void {
         @retry="() => void trash.refetch()"
       />
       <p v-else-if="trash.data.value?.items.length === 0">{{ t("trash.empty") }}</p>
-      <ul v-else-if="trash.data.value && trash.data.value.items.length > 0" class="trash-page__list">
+      <ul
+        v-else-if="trash.data.value && trash.data.value.items.length > 0"
+        class="trash-page__list"
+      >
         <li v-for="item in trash.data.value.items" :key="item.id" class="trash-page__row">
           <div class="trash-page__copy">
             <span class="trash-page__name">{{ item.title }}</span>
@@ -124,7 +168,13 @@ function onRestore(item: { id: string; projectId?: string | null }): void {
               {{ projectKeys.get(item.projectId) ?? t("nav.projects") }}
             </span>
             <time class="trash-page__when" :datetime="item.deletedAt">{{
-              formatInstant(item.deletedAt, timeZone, { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
+              formatInstant(item.deletedAt, timeZone, {
+                year: "numeric",
+                month: "numeric",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })
             }}</time>
           </div>
           <UButton
@@ -132,7 +182,10 @@ function onRestore(item: { id: string; projectId?: string | null }): void {
             size="sm"
             variant="outline"
             color="neutral"
-            :disabled="restore.isPending.value && Boolean(restore.variables.value && currentRestore(restore.variables.value))"
+            :disabled="
+              restore.isPending.value &&
+              Boolean(restore.variables.value && currentRestore(restore.variables.value))
+            "
             :aria-label="`${t('trash.restore')} ${item.title}`"
             @click="onRestore({ id: item.id, projectId: item.projectId })"
           >

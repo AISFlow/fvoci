@@ -1,6 +1,12 @@
 import type { SearchTab } from "@/lib/queries";
 
-export const SEARCH_TABS: readonly SearchTab[] = ["all", "document", "task", "attachment", "comment"];
+export const SEARCH_TABS: readonly SearchTab[] = [
+  "all",
+  "document",
+  "task",
+  "attachment",
+  "comment",
+];
 
 const TAB_SET = new Set<string>(SEARCH_TABS);
 

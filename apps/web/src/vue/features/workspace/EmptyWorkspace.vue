@@ -32,7 +32,10 @@ const onSubmit = form.handleSubmit(async (values) => {
     if (err instanceof ProblemError && err.status === 403) {
       createError.value = t("unauthorized");
     } else if (err instanceof ProblemError && (err.status === 400 || err.status === 409)) {
-      form.setError("slug", issueMessage(err.status === 409 ? "i18n:slug taken" : "i18n:form.invalid"));
+      form.setError(
+        "slug",
+        issueMessage(err.status === 409 ? "i18n:slug taken" : "i18n:form.invalid"),
+      );
     } else if (err instanceof ProblemError) {
       createError.value = err.titleKnown ? err.title : t("error.workspace.create");
     } else {
@@ -50,7 +53,14 @@ const onSubmit = form.handleSubmit(async (values) => {
   <div v-else-if="!isAdmin" class="workspace-empty">
     <p class="workspace-empty__lead">{{ t("workspace.none.invite") }}</p>
     <div class="workspace-empty__actions">
-      <UButton type="button" variant="outline" color="neutral" size="sm" class="w-fit" @click="onLogout">
+      <UButton
+        type="button"
+        variant="outline"
+        color="neutral"
+        size="sm"
+        class="w-fit"
+        @click="onLogout"
+      >
         {{ t("nav.logout") }}
       </UButton>
     </div>
@@ -81,8 +91,17 @@ const onSubmit = form.handleSubmit(async (values) => {
     <p v-if="fieldError" role="alert" class="workspace-create__alert">{{ fieldError }}</p>
     <p v-if="createError" role="alert" class="workspace-create__alert">{{ createError }}</p>
     <div class="workspace-empty__actions">
-      <UButton type="submit" size="sm" :disabled="form.submitting.value">{{ t("workspace.create") }}</UButton>
-      <UButton type="button" variant="outline" color="neutral" size="sm" class="w-fit" @click="onLogout">
+      <UButton type="submit" size="sm" :disabled="form.submitting.value">{{
+        t("workspace.create")
+      }}</UButton>
+      <UButton
+        type="button"
+        variant="outline"
+        color="neutral"
+        size="sm"
+        class="w-fit"
+        @click="onLogout"
+      >
         {{ t("nav.logout") }}
       </UButton>
     </div>

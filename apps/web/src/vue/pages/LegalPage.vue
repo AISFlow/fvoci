@@ -25,7 +25,9 @@ const versions = useQuery(() => ({
   select: selectLegalVersions,
 }));
 
-const missing = computed(() => doc.error.value instanceof ProblemError && doc.error.value.status === 404);
+const missing = computed(
+  () => doc.error.value instanceof ProblemError && doc.error.value.status === 404,
+);
 const others = computed(() =>
   (versions.data.value ?? []).filter((entry) => entry.version !== doc.data.value?.version),
 );
@@ -48,9 +50,17 @@ const others = computed(() =>
   <AuthLayout v-else-if="doc.data.value">
     <AuthPanel
       :title="doc.data.value.title"
-      :lead="t('legal.meta', { version: doc.data.value.version, date: formatDateKo(doc.data.value.effectiveAt) })"
+      :lead="
+        t('legal.meta', {
+          version: doc.data.value.version,
+          date: formatDateKo(doc.data.value.effectiveAt),
+        })
+      "
     >
-      <SafeHtml class="auth-shell__doc-body break-keep" :html="asSafeHtml(doc.data.value.bodyHtml)" />
+      <SafeHtml
+        class="auth-shell__doc-body break-keep"
+        :html="asSafeHtml(doc.data.value.bodyHtml)"
+      />
       <div v-if="others.length > 0" class="auth-shell__stack border-t border-default pt-5">
         <p class="auth-shell__text auth-shell__text--strong">{{ t("legal.previous") }}</p>
         <a
