@@ -572,8 +572,70 @@ test("the selection bubble formats text and its menus and popovers follow the me
   await page.keyboard.press("Escape");
   await expect(listMenu).toHaveCount(0);
 
+  // Reproduce the focus-repair task arriving after native Shift+Home but before
+  // the browser delivers selectionchange. Keep the actual PM callback and native
+  // keyboard input; only control when that pending task runs.
+  await page.evaluate(() => {
+    const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
+      editor: { state: { selection: { from: number; to: number; $from: { parent: { textContent: string } } } } };
+    };
+    const snapshot = () => {
+      const native = document.getSelection();
+      const pm = root.editor.state.selection;
+      return { text: native?.toString(), from: pm.from, to: pm.to, parent: pm.$from.parent.textContent };
+    };
+    const gate = { captured: false, delivered: false, before: snapshot(), after: snapshot() };
+    Object.assign(window, { __fvociKeyboardFocusRepair: gate });
+    const nativeTimeout = window.setTimeout.bind(window);
+    let focusing = false;
+    let repair: (() => void) | undefined;
+    let timer: number | undefined;
+    root.addEventListener("focus", () => { focusing = true; }, { capture: true, once: true });
+    root.addEventListener("focusin", () => { focusing = false; }, { once: true });
+    window.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+      // Installed prosemirror-view schedules its selection-to-DOM focus repair
+      // synchronously in the root focus handler with a 20ms delay.
+      if (focusing && delay === 20 && typeof callback === "function") {
+        if (repair) throw new Error("multiple editor focus-repair tasks");
+        gate.captured = true;
+        repair = () => callback(...args);
+        timer = nativeTimeout(() => {}, delay);
+        return timer;
+      }
+      return nativeTimeout(callback, delay, ...args);
+    }) as typeof window.setTimeout;
+    const deliver = (event: KeyboardEvent) => {
+      if (event.key !== "Home" || !event.shiftKey) return;
+      window.setTimeout = nativeTimeout;
+      document.removeEventListener("keyup", deliver);
+      window.clearTimeout(timer);
+      if (!repair) throw new Error("missing pending editor focus repair");
+      gate.before = snapshot();
+      repair();
+      gate.delivered = true;
+      gate.after = snapshot();
+    };
+    // Bubble phase: the editor's supported keyup handler has completed, while
+    // the native selectionchange task has not yet run.
+    document.addEventListener("keyup", deliver);
+  });
   // The "⋮" menu: alignment (radio items that stay open) and clear formatting.
   await selectBlockText(page, 2);
+  const focusRepair = await page.evaluate(() =>
+    (window as unknown as { __fvociKeyboardFocusRepair: {
+      captured: boolean; delivered: boolean;
+      before: { text?: string; from: number; to: number; parent: string };
+      after: { text?: string; from: number; to: number; parent: string };
+    } }).__fvociKeyboardFocusRepair,
+  );
+  await test.info().attach("keyboard-focus-repair", { body: JSON.stringify(focusRepair), contentType: "application/json" });
+  expect(focusRepair.captured).toBe(true);
+  expect(focusRepair.delivered).toBe(true);
+  for (const boundary of [focusRepair.before, focusRepair.after]) {
+    expect(boundary.text).toBe("셋째 문단");
+    expect(boundary.parent).toBe("셋째 문단");
+    expect(boundary.to - boundary.from).toBe("셋째 문단".length);
+  }
   const more = toolbar.getByRole("button", { name: "서식", exact: true });
   await more.click();
   const moreMenu = page.getByRole("menu", { name: "서식" });

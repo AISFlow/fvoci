@@ -177,6 +177,7 @@ const editor = useEditor({
   editorProps: {
     ...createFvociEditorProps(props.ariaLabel),
     handleClick: settleNativeTextClick,
+    handleDOMEvents: { keyup: settleNativeKeyboardSelection },
   },
 });
 
@@ -198,6 +199,25 @@ function settleNativeTextClick(view: EditorView, pos: number, event: MouseEvent)
   if (!view.state.selection.eq(selection)) {
     view.dispatch(view.state.tr.setSelection(selection).setMeta("pointer", true));
   }
+  return false;
+}
+
+/* Shift navigation changes the DOM range before selectionchange reaches PM.
+ * PM's pending focus repair can otherwise restore the old collapsed caret in
+ * that gap. Record the completed native range at keyup using public view APIs;
+ * leave composition, cell/node selections and native event handling alone. */
+function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): boolean {
+  if (!view.editable || view.composing || event.isComposing || !view.hasFocus() || !event.shiftKey ||
+      !["Home", "End", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown"].includes(event.key) ||
+      !(view.state.selection instanceof TextSelection)) return false;
+  const native = view.dom.ownerDocument.getSelection();
+  if (!native || native.isCollapsed || !native.anchorNode || !native.focusNode ||
+      !view.dom.contains(native.anchorNode) || !view.dom.contains(native.focusNode)) return false;
+  const anchor = view.posAtDOM(native.anchorNode, native.anchorOffset);
+  const head = view.posAtDOM(native.focusNode, native.focusOffset);
+  if (!view.state.doc.resolve(anchor).parent.isTextblock || !view.state.doc.resolve(head).parent.isTextblock) return false;
+  const selection = TextSelection.create(view.state.doc, anchor, head);
+  if (!view.state.selection.eq(selection)) view.dispatch(view.state.tr.setSelection(selection));
   return false;
 }
 
