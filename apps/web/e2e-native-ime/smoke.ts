@@ -16,6 +16,10 @@ try {
   );
   await observe(page);
   const field = page.locator("textarea");
+  await field.waitFor({ state: "visible" });
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
   await focusNative(page, field, profile);
   keys("Shift+space");
   keys("g");
