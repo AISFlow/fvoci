@@ -1,7 +1,7 @@
 import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { once } from "node:events";
+import { getEventListeners, once } from "node:events";
 import { Worker } from "node:worker_threads";
 import { createDeflateRaw } from "node:zlib";
 import { writeZip } from "./docx-test-fixture.ts";
@@ -187,6 +187,57 @@ await test("the open timeout terminates a booted worker in the middle of that de
 });
 
 // --- Client protocol, with a scripted worker ----------------------------------
+
+await test("a synchronous transport failure resolves and immediately cleans up the worker", async (context) => {
+  const controller = new AbortController();
+  let terminated = 0;
+  const worker: XlsxWorkerPort = {
+    onmessage: null,
+    onerror: null,
+    onmessageerror: null,
+    postMessage() {
+      throw new DOMException("cannot transfer bytes", "DataCloneError");
+    },
+    terminate() {
+      terminated += 1;
+    },
+  };
+  const clearTimer = context.mock.method(globalThis, "clearTimeout");
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => {
+    unhandled.push(error);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const opening = openXlsxInWorker(new Uint8Array(8), {
+      createWorker: () => worker,
+      signal: controller.signal,
+    });
+    // Capture cleanup before yielding: the open deadline must not perform it later.
+    const immediate = {
+      terminated,
+      handlers: [worker.onmessage, worker.onerror, worker.onmessageerror],
+      abortListeners: getEventListeners(controller.signal, "abort").length,
+      clearedTimers: clearTimer.mock.callCount(),
+    };
+    assert.deepEqual(await opening, { status: "invalid" });
+    assert.deepEqual(immediate, {
+      terminated: 1,
+      handlers: [null, null, null],
+      abortListeners: 0,
+      clearedTimers: 1,
+    });
+    assert.ok(clearTimer.mock.calls[0]?.arguments[0]);
+    controller.abort();
+    assert.equal(terminated, 1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    controller.abort();
+    process.off("unhandledRejection", onUnhandled);
+    clearTimer.mock.restore();
+  }
+});
 
 /** Answers `open` with one worksheet and never answers anything else. */
 function silentPager(): XlsxWorkerPort & { requests: XlsxWorkerRequest[]; terminated: boolean } {

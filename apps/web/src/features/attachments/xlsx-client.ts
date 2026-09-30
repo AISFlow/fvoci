@@ -129,7 +129,11 @@ export function openXlsxInWorker(
       timer = setTimeout(() => {
         kill("timeout");
       }, timeoutMs);
-      worker.postMessage(message, transfer);
+      try {
+        worker.postMessage(message, transfer);
+      } catch {
+        kill("failed");
+      }
     });
 
   // Transfer, not copy, when `bytes` is its whole buffer.

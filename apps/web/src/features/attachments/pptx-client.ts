@@ -145,7 +145,11 @@ export function openPptxInWorker(
       timer = setTimeout(() => {
         kill("timeout");
       }, timeoutMs);
-      worker.postMessage(message, transfer);
+      try {
+        worker.postMessage(message, transfer);
+      } catch {
+        kill("failed");
+      }
     });
 
   const owned = bytes.slice();
