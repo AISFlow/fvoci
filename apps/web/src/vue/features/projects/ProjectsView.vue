@@ -33,6 +33,7 @@ const cloneTitleId = useId();
 const createOpen = ref(false);
 const cloneSource = ref<ProjectListItem | null>(null);
 const active = computed(() => props.projects.filter((project) => project.status === "active"));
+const archived = computed(() => props.projects.filter((project) => project.status === "archived"));
 
 function openCreate(): void {
   createOpen.value = true;
@@ -88,6 +89,30 @@ function onCloneClick(project: ProjectListItem, event: Event): void {
           <span class="project-list__key">{{ project.key }}</span>
           <span class="project-list__meta">
             <span class="project-list__name">{{ project.name }}</span>
+            <span v-if="project.visibility === 'private'" class="project-list__private">{{
+              t("project.visibility.private")
+            }}</span>
+          </span>
+          <span class="project-list__count">{{ t("entrance.openTaskCount", { count: project.openTaskCount }) }}</span>
+          <UButton
+            type="button"
+            variant="outline"
+            color="neutral"
+            class="project-list__clone"
+            @click="onCloneClick(project, $event)"
+          >
+            {{ t("project.clone") }}
+          </UButton>
+        </a>
+      </li>
+    </ul>
+    <ul v-if="!loading && !error && archived.length > 0" class="project-list" :aria-label="t('project.archived.badge')">
+      <li v-for="project in archived" :key="project.id">
+        <a :href="projectTasksPath(slug, project.key)" class="project-list__row">
+          <span class="project-list__key">{{ project.key }}</span>
+          <span class="project-list__meta">
+            <span class="project-list__name">{{ project.name }}</span>
+            <span>{{ t("project.archived.badge") }}</span>
             <span v-if="project.visibility === 'private'" class="project-list__private">{{
               t("project.visibility.private")
             }}</span>
