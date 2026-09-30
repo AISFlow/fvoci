@@ -1,4 +1,5 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { expect, test } from "@playwright/test";
 import { login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
@@ -7,28 +8,7 @@ let workspaceId: string;
 let project: { id: string; key: string; rootDocumentId: string };
 let tasks: { id: string; title: string }[] = [];
 
-// Finish each preceding resource's real search prerequisite before producing
-// the next one. This does not change the later new-task recall deadline.
-async function indexedSetupResource(page: Page, testInfo: TestInfo, resource: { id: string; title: string }, type: "task" | "document", tag?: string) {
-  const query = new URLSearchParams({ q: resource.title, type, ...(tag ? { tag } : {}) });
-  const started = Date.now();
-  const samples: { elapsedMs: number; ids: string[] }[] = [];
-  try {
-    await expect.poll(async () => {
-      const response = await page.request.get(`/api/v1/workspaces/${workspaceId}/search?${query}`);
-      expect(response.ok()).toBe(true);
-      const ids = (await response.json()).items.map((item: { id: string }) => item.id);
-      samples.push({ elapsedMs: Date.now() - started, ids });
-      return ids;
-    }, { timeout: 5_000 }).toContain(resource.id);
-  } finally {
-    await testInfo.attach(`setup-search-${resource.id}-${tag ?? "all"}-${testInfo.attachments.length}`, {
-      body: JSON.stringify({ workspaceId, resource, type, tag, samples }, null, 2), contentType: "application/json",
-    });
-  }
-}
-
-test("workspace landing has authorized projects, counts, and eight due-ordered assigned rows", async ({ page }, testInfo) => {
+test("workspace landing has authorized projects, counts, and eight due-ordered assigned rows", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("성").fill("김");
   await page.getByLabel("이름", { exact: true }).fill("동등");
@@ -56,9 +36,7 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
     expect(response.status()).toBe(201);
     const task = await response.json();
     tasks.push(task);
-    await indexedSetupResource(page, testInfo, task, "task");
     expect((await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${task.id}`, { data: { assigneeIds: [me.userId], labelIds: labels } })).ok()).toBe(true);
-    await indexedSetupResource(page, testInfo, task, "task");
   }
   const archived = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, { data: { key: "OLD", name: "Archived project", visibility: "workspace" } });
   expect(archived.status()).toBe(201);
@@ -146,31 +124,26 @@ test("trash timestamp follows the saved user zone instead of the browser zone", 
   await expect(time).toHaveText(expected);
 });
 
-test("wiki tag URLs include child-only matches and project documents; unfiltered drag moves and sorts persist", async ({ page }, testInfo) => {
+test("wiki tag URLs include child-only matches and project documents; unfiltered drag moves and sorts persist", async ({ page }) => {
   await login(page, owner.email, owner.password);
   const wiki = [];
   for (const title of ["Wiki parent", "Wiki second", "Wiki third"]) {
     const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, { data: { title, parentId: null } });
     expect(response.status()).toBe(201);
-    const doc = await response.json();
-    wiki.push(doc);
-    await indexedSetupResource(page, testInfo, doc, "document");
+    wiki.push(await response.json());
   }
   const childResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/documents`, { data: { title: "Tagged child", parentId: wiki[0].id } });
   expect(childResponse.status()).toBe(201);
   const child = await childResponse.json();
-  await indexedSetupResource(page, testInfo, child, "document");
   const projectResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents`, { data: { title: "Tagged project child", parentId: project.rootDocumentId } });
   expect(projectResponse.status()).toBe(201);
   const projectChild = await projectResponse.json();
-  await indexedSetupResource(page, testInfo, projectChild, "document");
   const tagResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/document-tags`, { data: { name: "Planning", color: "gray" } });
   expect(tagResponse.status()).toBe(201);
   const tag = await tagResponse.json();
   for (const [doc, path] of [[child, `/api/v1/workspaces/${workspaceId}/documents/${child.id}/tags`], [projectChild, `/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents/${projectChild.id}/tags`]] as const) {
     expect((await page.request.post(path, { data: { tagId: tag.id } })).ok()).toBe(true);
     expect(doc.id).toBeTruthy();
-    await indexedSetupResource(page, testInfo, doc, "document", tag.id);
   }
   await page.goto(`/w/parity/wiki?tag=${tag.id}`);
   const selected = page.getByRole("button", { name: "Planning", exact: true });
@@ -209,6 +182,56 @@ test("source tag:name search filters documents and leaves task hits in the real 
   await login(page, owner.email, owner.password);
   const tag = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/document-tags`)).json()).items.find((tag: { name: string }) => tag.name === "Planning");
   expect(tag).toBeTruthy();
+  // Complete only the already committed setup prefix through the actual
+  // search worker before starting the fresh task's unchanged recall window.
+  const container = process.env.FVOCI_TEST_PG_CONTAINER;
+  const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
+  if (!container || !adminUrl) throw new Error("isolated PostgreSQL fixture context is required");
+  const fixtureContainer = container;
+  const fixtureDatabase = new URL(adminUrl).pathname.slice(1);
+  expect(workspaceId).toMatch(/^[0-9a-f-]{36}$/i);
+  function fixtureJson<T>(sql: string): T {
+    const output = execFileSync("docker", ["exec", "-i", fixtureContainer, "psql", "-U", "postgres", "-d", fixtureDatabase, "-qAt", "-v", "ON_ERROR_STOP=1"], {
+      input: `BEGIN READ ONLY;\n${sql}\nCOMMIT;\n`, encoding: "utf8", timeout: 5_000, stdio: ["pipe", "pipe", "pipe"],
+    });
+    return JSON.parse(output.trim());
+  }
+  const watermark = fixtureJson<{ id: string; xact: string; seq: string }>(`
+    SELECT row_to_json(w) FROM (
+      SELECT id, xact::text AS xact, seq::text AS seq FROM fvoci.events
+      WHERE workspace_id = '${workspaceId}'::uuid ORDER BY xact DESC, seq DESC LIMIT 1
+    ) w;
+  `);
+  expect(watermark.id).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(watermark.xact).toMatch(/^\d+$/);
+  expect(watermark.seq).toMatch(/^\d+$/);
+  const setupStarted = Date.now();
+  const prefixSamples: { elapsedMs: number; total: number; pending: number; failures: number }[] = [];
+  try {
+    await expect.poll(() => {
+      const state = fixtureJson<{ total: number; pending: number; failures: number }>(`
+        WITH prior AS (
+          SELECT id FROM fvoci.events WHERE workspace_id = '${workspaceId}'::uuid
+            AND (xact, seq) <= ('${watermark.xact}'::xid8, ${watermark.seq}::bigint)
+        )
+        SELECT json_build_object(
+          'total', (SELECT count(*) FROM prior),
+          'pending', (SELECT count(*) FROM prior e WHERE NOT EXISTS (
+            SELECT 1 FROM fvoci.processed_events p WHERE p.consumer = 'search-index' AND p.event_id = e.id
+          )),
+          'failures', (SELECT count(*) FROM prior e JOIN fvoci.outbox_failures f ON f.event_id = e.id WHERE f.consumer = 'search-index')
+        );
+      `);
+      prefixSamples.push({ elapsedMs: Date.now() - setupStarted, ...state });
+      expect(state.total).toBeGreaterThan(0);
+      if (state.failures !== 0) throw new Error("preceding search setup has failed or dead-letter events");
+      return state.pending;
+    }, { timeout: 15_000 }).toBe(0);
+  } finally {
+    await testInfo.attach("prior-search-prefix-readiness", {
+      body: JSON.stringify({ workspaceId, watermark, prefixSamples }, null, 2), contentType: "application/json",
+    });
+  }
   // The preceding fixture writes many resources. Prove its real search
   // readiness before timing recall of the next task; do not mix the existing
   // outbox backlog with that task's five-second assertion.
