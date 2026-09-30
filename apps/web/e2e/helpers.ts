@@ -188,9 +188,7 @@ export const flowSchemas = {
     .passthrough(),
   trash: z
     .object({
-      items: z.array(
-        z.object({ id: z.string(), kind: z.string(), title: z.string() }).passthrough(),
-      ),
+      items: z.array(z.object({ id: z.string(), title: z.string() }).passthrough()),
     })
     .passthrough(),
   consents: z
