@@ -421,6 +421,9 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
   try {
     const wsId = await workspaceId(a.page.request);
     const doc = await createDoc(a.page.request, wsId, "편집 중 원격 변경");
+    const referenceTitle = "실제 참조 대상";
+    const reference = await createDoc(a.page.request, wsId, referenceTitle);
+    const referenceRef = `WIKI-${reference.number}`;
     const paragraph = (text: string) => ({ type: "paragraph", content: [{ type: "text", text }] });
     const put = await a.page.request.put(`/api/v1/workspaces/${wsId}/documents/${doc.id}/body`, {
       data: {
@@ -438,12 +441,18 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     expect(put.ok(), await put.text()).toBe(true);
     await openDoc(a.page, doc.path);
     await openDoc(b.page, doc.path);
+    // The invented initial reference is intentionally missing; do not leak it
+    // as an authorized identity. The positive draft below uses a real resource.
+    for (const page of [a.page, b.page]) {
+      await expect(page.locator(".fvoci-editor .afn-embed-inaccessible .afn-embed-ref"))
+        .toHaveText("접근할 수 없는 문서");
+    }
 
     // Embed: A types a new reference; meanwhile B changes the embed's kind.
     await a.page.getByRole("button", { name: "참조 편집" }).click();
     const refA = a.page.getByLabel("참조", { exact: true });
     await expect(refA).toBeFocused();
-    await refA.fill("WIKI-1234");
+    await refA.fill(referenceRef);
     await b.page.getByRole("button", { name: "참조 편집" }).click();
     await b.page.getByLabel("참조 종류").selectOption("task");
     await caretAtEndOf(b.page, 3);
@@ -451,14 +460,14 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     await expect(a.page.locator(".fvoci-editor .afn-embed-edit")).toHaveAttribute("data-entity", "task");
     // ...and keeps what A typed and chose, as the React view's uncontrolled fields do.
     await expect(refA).toBeFocused();
-    await expect(refA).toHaveValue("WIKI-1234");
+    await expect(refA).toHaveValue(referenceRef);
     await expect(a.page.getByLabel("참조 종류")).toHaveValue("document");
     // Leaving the form commits A's form: the last writer wins, on both peers.
     await caretAtEndOf(a.page, 0);
     for (const page of [a.page, b.page]) {
       const card = page.locator(".fvoci-editor .afn-embed-host .afn-embed");
       await expect(card).toHaveAttribute("data-entity", "document");
-      await expect(card.locator(".afn-embed-ref")).toHaveText("WIKI-1234");
+      await expect(card.locator(".afn-embed-ref")).toHaveText(referenceTitle);
     }
 
     // Block math: A types a new source while B commits another one.
@@ -486,7 +495,7 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     };
     expect(saved.content.find((node) => node.type === "embed")?.attrs).toMatchObject({
       entity: "document",
-      ref: "WIKI-1234",
+      ref: referenceRef,
     });
     expect(saved.content.find((node) => node.type === "math")?.attrs).toMatchObject({ latex: "a+b" });
   } finally {
@@ -711,7 +720,7 @@ test("Korean composition with the caret after the marked text leaves no stray ja
   await expect.poll(() => blockTexts(page), { timeout: 5_000 }).toEqual(["첫 문단한글"]);
 });
 
-test("moving between five documents in the app keeps one room socket and every edit", async ({ page }) => {
+test("moving between five documents in the app keeps one room socket and every edit", async ({ page }, testInfo) => {
   await login(page, admin.email, admin.password);
   const csp = watchCspViolations(page);
   const sockets = watchCollabSockets(page);
@@ -738,32 +747,115 @@ test("moving between five documents in the app keeps one room socket and every e
 
   await openDoc(page, docs[0]!.path);
   await expectRoom(docs[0]!);
+  await testInfo.attach("rapid-documents", { body: JSON.stringify({ wsId, docs }), contentType: "application/json" });
+  type NativeReceipt = {
+    kind: string; at: number; trusted: boolean; key?: string; data?: string | null;
+    inEditor: boolean; href?: string;
+  };
   // When the last keystroke and the link click reached the page.
   await page.evaluate(() => {
-    const marks = window as unknown as { lastKeyAt: number; lastLinkAt: number };
-    addEventListener("keydown", () => (marks.lastKeyAt = performance.now()), true);
-    addEventListener("click", (event) => {
-      if ((event.target as Element | null)?.closest("a")) marks.lastLinkAt = performance.now();
-    }, true);
+    const marks = window as unknown as {
+      lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
+      lastLinkTrusted: boolean; lastLinkHref: string; nativeEvents: NativeReceipt[];
+    };
+    marks.nativeEvents = [];
+    for (const kind of ["keydown", "beforeinput", "input", "keyup", "mousedown", "mouseup", "click"]) {
+      addEventListener(kind, (event) => {
+        const target = event.target as Element | null;
+        const inEditor = !!target?.closest(".fvoci-editor .ProseMirror");
+        const link = target?.closest("a");
+        const at = performance.now();
+        if (kind === "keydown") {
+          marks.lastKeyAt = at;
+          marks.lastKeyTrusted = event.isTrusted;
+        }
+        if (kind === "click" && link) {
+          marks.lastLinkAt = at;
+          marks.lastLinkTrusted = event.isTrusted;
+          marks.lastLinkHref = link.getAttribute("href") ?? "";
+        }
+        if (inEditor || link) marks.nativeEvents.push({ kind, at, trusted: event.isTrusted,
+          key: (event as KeyboardEvent).key, data: (event as InputEvent).data,
+          inEditor, href: link?.getAttribute("href") ?? undefined });
+      }, true);
+    }
   });
+  const native = await page.context().newCDPSession(page);
+  const frames: unknown[] = [];
+  for (const event of ["Network.webSocketCreated", "Network.webSocketFrameSent", "Network.webSocketFrameReceived", "Network.webSocketClosed"] as const) {
+    native.on(event, (data) => frames.push({ event, ...data }));
+  }
+  await native.send("Network.enable");
   const gaps: number[] = [];
+  const gestures: unknown[] = [];
+  try {
   for (let i = 0; i < 4; i += 1) {
     const next = docs[i + 1]!;
-    await editorOf(page).click();
-    await page.keyboard.type(`떠나기 직전 ${i + 1}`);
+    const editor = editorOf(page);
+    const link = page.getByRole("navigation", { name: "상위 경로" })
+      .getByRole("link", { name: `이동 ${i + 2}`, exact: true });
+    await editor.click();
+    await page.keyboard.type("떠나기 직전 ");
+    // Prepare the real target before the final edit. The digit below must still
+    // reach the editor immediately before native activation of its router link.
+    await expect(link).toHaveAttribute("href", next.path);
+    await link.click({ trial: true });
+    const { root } = await native.send("DOM.getDocument");
+    const { nodeId } = await native.send("DOM.querySelector", {
+      nodeId: root.nodeId, selector: `[aria-label="상위 경로"] a[href="${next.path}"]`,
+    });
+    expect(nodeId).not.toBe(0);
+    await expect(editor).toBeFocused();
+    await page.evaluate(() => {
+      (window as unknown as { nativeEvents: NativeReceipt[] }).nativeEvents = [];
+    });
     // An in-app move (a router link) inside the editor's 200 ms update batch.
-    await page
-      .getByRole("navigation", { name: "상위 경로" })
-      .getByRole("link", { name: `이동 ${i + 2}`, exact: true })
-      .click();
-    gaps.push(
-      await page.evaluate(() => {
-        const marks = window as unknown as { lastKeyAt: number; lastLinkAt: number };
-        return marks.lastLinkAt - marks.lastKeyAt;
-      }),
-    );
+    // Sequential Chromium input is the same native path as Playwright keyboard
+    // and mouse actions, without intervening actionability/DOM snapshots. Trace
+    // stays enabled and records these commands plus the ordered DOM receipts.
+    const digit = String(i + 1);
+    const key = { key: digit, code: `Digit${digit}`, windowsVirtualKeyCode: 49 + i };
+    await native.send("Input.dispatchKeyEvent", {
+      ...key, type: "keyDown", text: digit, unmodifiedText: digit,
+    });
+    await native.send("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
+    // Editing may scroll the focused editor. Read live geometry of the already
+    // prepared anchor, rather than reuse a point measured before that edit.
+    await native.send("DOM.scrollIntoViewIfNeeded", { nodeId });
+    const { quads } = await native.send("DOM.getContentQuads", { nodeId });
+    const quad = quads[0]!;
+    const point = { x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
+      y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4 };
+    await native.send("Input.dispatchMouseEvent", { ...point, type: "mouseMoved" });
+    await native.send("Input.dispatchMouseEvent", {
+      ...point, type: "mousePressed", button: "left", buttons: 1, clickCount: 1,
+    });
+    await native.send("Input.dispatchMouseEvent", {
+      ...point, type: "mouseReleased", button: "left", buttons: 0, clickCount: 1,
+    });
+    const gesture = await page.evaluate(() => {
+      const marks = window as unknown as {
+        lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
+        lastLinkTrusted: boolean; lastLinkHref: string; nativeEvents: NativeReceipt[];
+      };
+      return { keyAt: marks.lastKeyAt, clickAt: marks.lastLinkAt,
+        gap: marks.lastLinkAt - marks.lastKeyAt, keyTrusted: marks.lastKeyTrusted,
+        clickTrusted: marks.lastLinkTrusted, href: marks.lastLinkHref, events: marks.nativeEvents };
+    });
+    gestures.push(gesture);
+    gaps.push(gesture.gap);
+    expect(gesture.keyTrusted).toBe(true);
+    expect(gesture.clickTrusted).toBe(true);
+    expect(gesture.href).toBe(next.path);
+    expect(gesture.events.map((event) => event.kind))
+      .toEqual(["keydown", "beforeinput", "input", "keyup", "mousedown", "mouseup", "click"]);
+    for (const event of gesture.events) expect(event.trusted).toBe(true);
+    expect(gesture.events[0]).toMatchObject({ key: digit, inEditor: true });
+    expect(gesture.events[1]).toMatchObject({ data: digit, inEditor: true });
+    expect(gesture.events[2]).toMatchObject({ data: digit, inEditor: true });
     await expectRoom(next);
   }
+  await testInfo.attach("rapid-navigation-input", { body: JSON.stringify(gestures), contentType: "application/json" });
   // The fifth room connected: no socket leaked against the per-session cap.
   expect(sockets.opened()).toBe(5);
   for (const gap of gaps) expect(gap).toBeLessThan(200);
@@ -775,4 +867,8 @@ test("moving between five documents in the app keeps one room socket and every e
   }
   expect(await bodyJson(page.request, wsId, docs[0]!.id)).toContain("떠나기 직전 1");
   expect(csp).toEqual([]);
+  } finally {
+    await testInfo.attach("rapid-wire-frames", { body: JSON.stringify(frames), contentType: "application/json" });
+    await native.detach();
+  }
 });
