@@ -91,7 +91,7 @@ test("Vue settings commit identity, groups, tokens, holidays, preferences and re
   await expect(page.getByLabel("인앱 알림", { exact: true })).toBeChecked({ checked: initialPrefs.inApp });
   await page.unroute(prefsUrl);
   await page.getByLabel("메일 다이제스트").click();
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notification-prefs`)).json()).mailDigest).toBe(true);
+  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notification-prefs`)).json()).mailDigest).toBe(!initialPrefs.mailDigest);
 
   // Only the failed request is intercepted. Recovery downloads actual Rust output.
   const exportUrl = `**/api/v1/workspaces/${workspaceId}/export`;
@@ -114,6 +114,17 @@ test("Vue settings commit identity, groups, tokens, holidays, preferences and re
   await expect(importSection.getByRole("status")).toHaveText("가져오기를 시작했습니다", { timeout: 30_000 });
   const documents = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/documents`)).json();
   expect(documents.items.some((item: { title: string }) => item.title === "e2e-note")).toBe(true);
+  // An interrupted status read resumes the existing durable job, without reuploading.
+  const statusUrl = `**/api/v1/import/*?workspaceId=${workspaceId}`;
+  await page.route(statusUrl, (route) => route.abort("failed"));
+  await page.getByLabel("가져올 형식").selectOption("office-file");
+  await page.locator('input[type="file"]').setInputFiles({ name: "resume-settings.md", mimeType: "text/markdown", buffer: Buffer.from("# Resume settings\n\nDurable status recovery") });
+  await expect(importSection.getByRole("button", { name: "상태 다시 확인" })).toBeVisible();
+  await page.unroute(statusUrl);
+  await importSection.getByRole("button", { name: "상태 다시 확인" }).click();
+  await expect(importSection.getByRole("status")).toHaveText("가져오기를 시작했습니다", { timeout: 30_000 });
+  const afterResume = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/documents`)).json();
+  expect(afterResume.items.filter((item: { title: string }) => item.title === "resume-settings")).toHaveLength(1);
 
   const sso = page.locator("details").filter({ has: page.locator("summary", { hasText: /^싱글 사인온$/ }) });
   await sso.locator("summary").click();

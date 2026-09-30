@@ -118,10 +118,10 @@ test("owner creates a signed webhook, receives project.created, then deletes it"
       .toBe(true);
 
     await page.getByRole("button", { name: `삭제 ${hookUrl}` }).click();
-    const dialog = page.getByRole("alertdialog");
+    const dialog = page.getByRole("dialog");
     await expect(dialog.getByRole("heading", { name: "웹훅을 삭제할까요?" })).toBeVisible();
     await dialog.getByRole("button", { name: "삭제", exact: true }).click();
-    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(page.getByText("웹훅이 없습니다")).toBeVisible();
     await expect(page.getByText(hookUrl, { exact: true })).toHaveCount(0);
 
