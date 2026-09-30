@@ -39,7 +39,7 @@ function harness(file: string) {
     ...Vue, t: (key: string) => key, useRoute: () => route, useRouter: () => router,
     useWorkspaceSession: () => ({ workspace, me, status }), useQueryClient: Query.useQueryClient,
     useMutation: Query.useMutation, useQuery: fakeQuery, useInfiniteQuery: fakeQuery,
-    projectsQuery: options, membersQuery: options, meQuery: {}, treeQuery: options, trashQuery: options,
+    projectsQuery: options, membersQuery: options, meQuery: {}, treeQuery: options, wikiDiscoveryQuery: options, trashQuery: options,
     documentTagPoolQuery: options, notificationListQuery: options, moveDocument: options, resolveTreeDrop: options,
     ensureOk: (value: unknown) => value, loadErrorMessage: (error: Error) => error.message,
     problemMessage: (error: Error) => error.message, ProblemError: Error,

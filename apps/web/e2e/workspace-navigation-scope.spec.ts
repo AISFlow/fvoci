@@ -50,7 +50,7 @@ async function switchToB(page: Page, section: string): Promise<void> {
 }
 
 async function prepareA(page: Page, section: string): Promise<void> {
-  const resource = section === "wiki" ? "tree" : section;
+  const resource = section === "wiki" ? "wiki-discovery" : section;
   const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/workspaces/${b.id}/${resource}`);
   await page.goto(`/w/${b.slug}/${section}`);
   await (await loaded).finished();
@@ -151,7 +151,7 @@ test("a genuine late project conflict cannot show an error in the next workspace
 test("late wiki creation cannot navigate to another workspace's matching document ref", async ({ page }) => {
   await login(page, owner.email, owner.password);
   await prepareA(page, "wiki");
-  const count = countBRequests(page, "tree");
+  const count = countBRequests(page, "wiki-discovery");
   const gate = await holdResponse(page, `/api/v1/workspaces/${a.id}/documents`, "POST");
   try {
     await page.getByRole("button", { name: "새 문서", exact: true }).click();

@@ -8,6 +8,7 @@ import { useRoute } from "vue-router";
 import { projectsQuery } from "@/features/projects/queries";
 import { assignedTasksPreviewQuery, workspaceLabelsQuery, workspaceStatusesQuery } from "@/features/tasks/my-tasks";
 import { FALLBACK_TZ, formatInstant } from "@/lib/datetime";
+import { wikiDiscoveryQuery } from "@/lib/queries/documents";
 import { membersQuery } from "@/lib/queries";
 import { projectsPath, projectTasksPath } from "@/lib/href";
 import { loadErrorMessage } from "@/lib/api";
@@ -33,6 +34,8 @@ const stars = useQuery(() => starsQuery(workspaceId.value));
 const recent = useQuery(() => recentQuery(workspaceId.value, 8));
 const projects = useQuery(() => projectsQuery(workspaceId.value));
 
+const documents = useQuery(() => wikiDiscoveryQuery(workspaceId.value));
+const documentCount = computed(() => documents.isSuccess.value ? documents.data.value?.items.length : "—");
 const assigned = useQuery(() => assignedTasksPreviewQuery(workspaceId.value));
 const labels = useQuery(() => workspaceLabelsQuery(workspaceId.value));
 const statuses = useQuery(() => workspaceStatusesQuery(workspaceId.value));
@@ -84,9 +87,10 @@ const recentItems = computed(() =>
       <h1 class="project-home__title">{{ workspace.name }}</h1>
       <p class="flex flex-wrap gap-3 text-sm text-muted" data-testid="workspace-totals">
         <span>{{ t("entrance.projectCount", { count: projectCount ?? "—" }) }}</span>
-        <span>{{ t("entrance.documentCount", { count: workspace.documentCount }) }}</span>
+        <span>{{ t("entrance.documentCount", { count: documentCount ?? "—" }) }}</span>
         <span>{{ t("entrance.openTaskCount", { count: openTaskCount ?? "—" }) }}</span>
       </p>
+      <QueryError v-if="documents.isError.value" :message="loadErrorMessage(documents.error.value)" @retry="() => void documents.refetch()" />
       <div class="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,1fr)]">
         <UCard>
           <template #header>

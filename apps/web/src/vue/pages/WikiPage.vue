@@ -10,7 +10,7 @@ import { resolveTreeDrop, type TreeDrop } from "../features/wiki/tree-drop";
 import { documentTagPoolQuery } from "@/lib/queries/collections";
 import { loadErrorMessage, api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { documentPath } from "@/lib/href";
-import { treeQuery } from "@/lib/queries/documents";
+import { wikiDiscoveryQuery } from "@/lib/queries/documents";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
 import WikiHomeView from "../features/wiki/WikiHomeView.vue";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
@@ -38,7 +38,7 @@ watch([workspaceId, slug, tag, () => session.me.value?.userId, () => session.me.
 onScopeDispose(() => { lifetime.value++; });
 const currentLifetime = (scope: { workspaceId: string; lifetime: number }) =>
   scope.workspaceId === workspaceId.value && scope.lifetime === lifetime.value;
-const tree = useQuery(() => treeQuery(workspaceId.value, tag.value));
+const tree = useQuery(() => wikiDiscoveryQuery(workspaceId.value, tag.value));
 const projects = useQuery(() => projectsQuery(workspaceId.value));
 const tags = useQuery(() => documentTagPoolQuery(workspaceId.value));
 function selectTag(id?: string): void {

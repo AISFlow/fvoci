@@ -20,6 +20,19 @@ export function treeQuery(workspaceId: string, tag?: string) {
   });
 }
 
+/** Authorized workspace wiki/project discovery; the default tree remains wiki-only. */
+export function wikiDiscoveryQuery(workspaceId: string, tag?: string) {
+  return queryOptions({
+    queryKey: ["wiki-discovery", workspaceId, tag ?? ""] as const,
+    queryFn: async ({ signal }) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/wiki-discovery", {
+      signal,
+      params: { path: { workspace_id: workspaceId }, query: tag ? { tag } : {} },
+    })),
+    enabled: Boolean(workspaceId),
+    retry: false,
+  });
+}
+
 export function documentMetaQuery(workspaceId: string, documentId: string) {
   return queryOptions({
     queryKey: ["document", workspaceId, documentId] as const,
