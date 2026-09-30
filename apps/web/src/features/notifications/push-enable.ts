@@ -17,7 +17,11 @@ import {
 // disabling and reading this browser's subscription for the signed-in user.
 
 /** Subscribes this browser and stores it for the signed-in user. */
-export async function subscribePush(workspaceId: string, publicKey: string, userId: string): Promise<void> {
+export async function subscribePush(
+  workspaceId: string,
+  publicKey: string,
+  userId: string,
+): Promise<void> {
   if ((await Notification.requestPermission()) !== "granted") {
     throw new PermissionBlocked();
   }
@@ -74,7 +78,11 @@ export async function liveSubscribed(publicKey: string, userId: string): Promise
  * again). A subscription left by another account (or of unknown owner) is
  * not touched until this user enables push.
  */
-export async function refreshOwnSubscription(workspaceId: string, publicKey: string, userId: string): Promise<void> {
+export async function refreshOwnSubscription(
+  workspaceId: string,
+  publicKey: string,
+  userId: string,
+): Promise<void> {
   const subscription = await currentSubscription();
   if (!subscription || readPushOwner(localStore()) !== userId) return;
   if (!boundTo(subscription.options.applicationServerKey, publicKey)) {

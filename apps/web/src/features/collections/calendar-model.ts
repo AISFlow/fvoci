@@ -2,11 +2,7 @@
 // apps/web/src/features/collections/collection-panel.tsx (`move` with a date
 // target) decides the same writes; collection-calendar.tsx and
 // collection-drag.tsx provide the drop targets (a day or "none").
-import {
-  isoToZonedLocal,
-  zonedLocalToIso,
-  type CollectionValue,
-} from "@/lib/collection-values";
+import { isoToZonedLocal, zonedLocalToIso, type CollectionValue } from "@/lib/collection-values";
 import type { CollectionField } from "@/lib/queries/collections";
 import { patchDateBody, type PatchTaskBody } from "@/features/tasks/task-edit-payload";
 
@@ -101,7 +97,7 @@ export function dateMoveRequest(
   const previous = (row.values as Record<string, unknown>)[field.id];
   const previousLocal =
     previous && typeof previous === "object" && "datetime" in previous
-      ? isoToZonedLocal(String((previous as { datetime: unknown }).datetime), timeZone)
+      ? isoToZonedLocal(String(previous.datetime), timeZone)
       : "";
   const time = previousLocal ? previousLocal.slice(11, 16) : DEFAULT_LOCAL_TIME;
   const instant = zonedLocalToIso(`${target}T${time}`, timeZone);

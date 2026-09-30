@@ -19,14 +19,18 @@ export function defaultConfig(type: CollectionViewType, query?: ViewQuery): Coll
 
 /** Saved `config` → typed config (unknown shapes fall back to the type default). */
 export function collectionConfigOf(view: CollectionView): CollectionConfig {
-  const raw = view.config as unknown as Record<string, unknown>;
+  const config: unknown = view.config;
+  const raw =
+    typeof config === "object" && config !== null ? (config as Record<string, unknown>) : undefined;
   const query = normalizeViewQuery(raw?.query) ?? { filters: {}, sort: [] };
   const type = view.type === "board" || view.type === "calendar" ? view.type : "table";
   const base = defaultConfig(type, query);
   return {
     query,
-    groupBy: typeof raw?.groupBy === "string" ? raw.groupBy : raw?.groupBy === null ? null : base.groupBy,
-    dateBy: typeof raw?.dateBy === "string" ? raw.dateBy : raw?.dateBy === null ? null : base.dateBy,
+    groupBy:
+      typeof raw?.groupBy === "string" ? raw.groupBy : raw?.groupBy === null ? null : base.groupBy,
+    dateBy:
+      typeof raw?.dateBy === "string" ? raw.dateBy : raw?.dateBy === null ? null : base.dateBy,
   };
 }
 

@@ -28,7 +28,7 @@ export function isHttpUrl(value: string): boolean {
 
 function githubTitle(value: UnfurlOutput): string {
   if (value.owner && value.repo && value.number != null) {
-    return `${value.owner}/${value.repo}#${value.number}`;
+    return `${value.owner}/${value.repo}#${String(value.number)}`;
   }
   return "";
 }

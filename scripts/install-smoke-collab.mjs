@@ -215,11 +215,7 @@ async function completeSyncHandshake(ws, routingKey) {
 
 async function authAndJoin(ws, routingKey, clientId) {
   ws.send(encodeAuthToken(routingKey, clientId));
-  const frame = await waitForMessage(
-    ws,
-    (f) => f.type === 2 && f.auth === "authenticated",
-    10_000,
-  );
+  const frame = await waitForMessage(ws, (f) => f.type === 2 && f.auth === "authenticated", 10_000);
   if (!frame) {
     throw new Error("collab auth did not return authenticated");
   }
@@ -311,10 +307,7 @@ async function main() {
 
   const body = await fetchBody(baseUrl, origin, session, workspaceId, documentId);
   const expected = JSON.parse(
-    readFileSync(
-      join(ROOT, "crates/collab-engine/fixtures/expectations.json"),
-      "utf8",
-    ),
+    readFileSync(join(ROOT, "crates/collab-engine/fixtures/expectations.json"), "utf8"),
   ).delete_only.prosemirror_json_after;
   assert.deepEqual(body.contentJson, expected);
   process.stdout.write(JSON.stringify(body));

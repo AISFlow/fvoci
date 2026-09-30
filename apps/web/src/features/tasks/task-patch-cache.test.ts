@@ -47,18 +47,19 @@ function detail(overrides: Partial<TaskDetail> = {}): TaskDetail {
 }
 
 function metaOf(task: TaskDetail): TaskMeta {
-  const {
-    assigneeIds: _a,
-    canEdit: _c,
-    childProgress: _p,
-    children: _ch,
-    contentJson: _j,
-    dependencies: _d,
-    labelIds: _l,
-    parent: _pa,
-    ...meta
-  } = task;
-  return meta;
+  const detailKeys = new Set([
+    "assigneeIds",
+    "canEdit",
+    "childProgress",
+    "children",
+    "contentJson",
+    "dependencies",
+    "labelIds",
+    "parent",
+  ]);
+  return Object.fromEntries(
+    Object.entries(task).filter(([key]) => !detailKeys.has(key)),
+  ) as TaskMeta;
 }
 
 type Deferred = { resolve: (value: TaskDetail) => void; promise: Promise<TaskDetail> };
@@ -90,7 +91,7 @@ function mountTaskQuery(initial: TaskDetail) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-test("settled hierarchy PATCH is in the task cache even when stream invalidations overlap its refetch", async () => {
+await test("settled hierarchy PATCH is in the task cache even when stream invalidations overlap its refetch", async () => {
   const before = detail();
   const saved = detail({ type: "subtask", parentId: PARENT, updatedAt: "2026-01-01T00:00:05Z" });
   const { client, gets, cached, unsubscribe } = mountTaskQuery(before);
@@ -102,9 +103,9 @@ test("settled hierarchy PATCH is in the task cache even when stream invalidation
   await flush();
   // Two `task` stream hints (this write and an earlier one) arrive while the
   // PATCH-success refetch is still in flight; each restarts the GET.
-  void invalidateTaskCaches(client, WS, PROJECT, TASK);
+  const invalidation1 = invalidateTaskCaches(client, WS, PROJECT, TASK);
   await flush();
-  void invalidateTaskCaches(client, WS, PROJECT, TASK);
+  const invalidation2 = invalidateTaskCaches(client, WS, PROJECT, TASK);
   await flush();
 
   // Only the newest GET may land; it has not answered yet.
@@ -113,7 +114,7 @@ test("settled hierarchy PATCH is in the task cache even when stream invalidation
   assert.equal(cached()?.parentId, PARENT);
 
   gets.at(-1)?.resolve(saved);
-  await settle;
+  await Promise.all([settle, invalidation1, invalidation2]);
   await flush();
   assert.equal(cached()?.type, "subtask");
   assert.equal(cached()?.parentId, PARENT);
@@ -121,13 +122,13 @@ test("settled hierarchy PATCH is in the task cache even when stream invalidation
   client.clear();
 });
 
-test("a GET that started before the PATCH committed cannot overwrite the PATCH result", async () => {
+await test("a GET that started before the PATCH committed cannot overwrite the PATCH result", async () => {
   const before = detail();
   const saved = detail({ type: "subtask", parentId: PARENT, updatedAt: "2026-01-01T00:00:05Z" });
   const { client, gets, cached, unsubscribe } = mountTaskQuery(before);
 
   // Earlier write's stream hint: a GET that reads the pre-hierarchy row.
-  void invalidateTaskCaches(client, WS, PROJECT, TASK);
+  const invalidation = invalidateTaskCaches(client, WS, PROJECT, TASK);
   await flush();
   const staleGet = gets.at(-1);
   assert.ok(staleGet);
@@ -140,30 +141,36 @@ test("a GET that started before the PATCH committed cannot overwrite the PATCH r
   assert.equal(cached()?.parentId, PARENT);
 
   gets.at(-1)?.resolve(saved);
-  await settle;
+  await Promise.all([settle, invalidation]);
   assert.equal(cached()?.type, "subtask");
   assert.equal(cached()?.parentId, PARENT);
   unsubscribe();
   client.clear();
 });
 
-test("mergeTaskMeta keeps detail-only fields and drops a parent preview that no longer matches", () => {
+await test("mergeTaskMeta keeps detail-only fields and drops a parent preview that no longer matches", () => {
   const parent = { id: PARENT, number: 2, title: "부모 일", type: "task" };
   const cachedWithParent = detail({ type: "subtask", parentId: PARENT, parent });
 
   const cleared = mergeTaskMeta(cachedWithParent, metaOf(detail({ type: "task", parentId: null })));
-  assert.equal(cleared?.type, "task");
-  assert.equal(cleared?.parentId, null);
-  assert.equal(cleared?.parent, null);
-  assert.deepEqual(cleared?.assigneeIds, ["user-1"]);
-  assert.deepEqual(cleared?.labelIds, ["label-1"]);
-  assert.equal(cleared?.canEdit, true);
+  assert.equal(cleared.type, "task");
+  assert.equal(cleared.parentId, null);
+  assert.equal(cleared.parent, null);
+  assert.deepEqual(cleared.assigneeIds, ["user-1"]);
+  assert.deepEqual(cleared.labelIds, ["label-1"]);
+  assert.equal(cleared.canEdit, true);
 
-  const kept = mergeTaskMeta(cachedWithParent, metaOf(detail({ type: "subtask", parentId: PARENT, title: "새 제목" })));
-  assert.equal(kept?.parent, parent);
-  assert.equal(kept?.title, "새 제목");
+  const kept = mergeTaskMeta(
+    cachedWithParent,
+    metaOf(detail({ type: "subtask", parentId: PARENT, title: "새 제목" })),
+  );
+  assert.equal(kept.parent, parent);
+  assert.equal(kept.title, "새 제목");
 
-  const moved = mergeTaskMeta(cachedWithParent, metaOf(detail({ type: "subtask", parentId: "other" })));
+  const moved = mergeTaskMeta(
+    cachedWithParent,
+    metaOf(detail({ type: "subtask", parentId: "other" })),
+  );
   assert.equal(moved?.parent, null);
 
   assert.equal(mergeTaskMeta(undefined, metaOf(detail())), undefined);

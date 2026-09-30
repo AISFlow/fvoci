@@ -16,7 +16,7 @@ import {
 
 const KEY = `B${"A".repeat(85)}E`; // 65 bytes: 0x04, zeros, 0x01
 
-test("decodeKey turns unpadded base64url into raw bytes", () => {
+await test("decodeKey turns unpadded base64url into raw bytes", () => {
   const bytes = decodeKey(KEY);
   assert.equal(bytes.length, 65);
   assert.equal(bytes[0], 4);
@@ -24,7 +24,7 @@ test("decodeKey turns unpadded base64url into raw bytes", () => {
   assert.deepEqual([...decodeKey("-_8")], [0xfb, 0xff]);
 });
 
-test("boundTo compares the subscription key with the live public key", () => {
+await test("boundTo compares the subscription key with the live public key", () => {
   const same = decodeKey(KEY).buffer;
   assert.equal(boundTo(same, KEY), true);
   const other = decodeKey(KEY);
@@ -34,7 +34,7 @@ test("boundTo compares the subscription key with the live public key", () => {
   assert.equal(boundTo(null, KEY), false);
 });
 
-test("subscriptionBody drops expirationTime for the strict API body", () => {
+await test("subscriptionBody drops expirationTime for the strict API body", () => {
   assert.deepEqual(
     subscriptionBody({
       endpoint: "https://push.example.com/x",
@@ -46,7 +46,7 @@ test("subscriptionBody drops expirationTime for the strict API body", () => {
   assert.throws(() => subscriptionBody({ endpoint: "https://push.example.com/x" }));
 });
 
-test("blocker states: unsupported, unavailable after load only, then attempts", () => {
+await test("blocker states: unsupported, unavailable after load only, then attempts", () => {
   const base = { supported: true, instanceLoaded: true, publicKey: KEY, attempted: null };
   assert.equal(pushBlocker({ ...base, supported: false }), "unsupported");
   assert.equal(pushBlocker({ ...base, publicKey: null }), "unavailable");
@@ -66,28 +66,28 @@ function logoutHarness(options: {
   const calls: string[] = [];
   const run = () =>
     logoutWithPushDisconnect({
-      currentEndpoint: options.endpoint ?? (async () => "https://push.example/a"),
+      currentEndpoint: options.endpoint ?? (() => Promise.resolve("https://push.example/a")),
       postLogout: async (endpoint) => {
-        calls.push(`post:${endpoint}`);
-        return (options.post ?? (async () => ({ ok: true })))(endpoint);
+        calls.push(`post:${String(endpoint)}`);
+        return (options.post ?? (() => Promise.resolve({ ok: true })))(endpoint);
       },
       isOk: (result) => result.ok,
       unsubscribe: async () => {
         calls.push("unsubscribe");
-        await (options.unsubscribe ?? (async () => undefined))();
+        await (options.unsubscribe ?? (() => Promise.resolve(undefined)))();
       },
       clearOwner: () => calls.push("clearOwner"),
     });
   return { calls, run };
 }
 
-test("logout reports this browser's endpoint, then unsubscribes", async () => {
+await test("logout reports this browser's endpoint, then unsubscribes", async () => {
   const { calls, run } = logoutHarness({});
   assert.deepEqual(await run(), { ok: true });
   assert.deepEqual(calls, ["post:https://push.example/a", "clearOwner", "unsubscribe"]);
 });
 
-test("logout still completes when the endpoint lookup or unsubscribe fails", async () => {
+await test("logout still completes when the endpoint lookup or unsubscribe fails", async () => {
   const lookup = logoutHarness({ endpoint: async () => Promise.reject(new Error("sw")) });
   assert.deepEqual(await lookup.run(), { ok: true });
   assert.deepEqual(lookup.calls, ["post:null", "clearOwner", "unsubscribe"]);
@@ -97,8 +97,8 @@ test("logout still completes when the endpoint lookup or unsubscribe fails", asy
   assert.deepEqual(unsub.calls, ["post:https://push.example/a", "clearOwner", "unsubscribe"]);
 });
 
-test("a failed logout keeps the signed-in user's subscription", async () => {
-  const rejected = logoutHarness({ post: async () => ({ ok: false }) });
+await test("a failed logout keeps the signed-in user's subscription", async () => {
+  const rejected = logoutHarness({ post: () => Promise.resolve({ ok: false }) });
   assert.deepEqual(await rejected.run(), { ok: false });
   assert.deepEqual(rejected.calls, ["post:https://push.example/a"]);
 
@@ -107,12 +107,16 @@ test("a failed logout keeps the signed-in user's subscription", async () => {
   assert.deepEqual(offline.calls, ["post:https://push.example/a"]);
 });
 
-test("owner marker round-trips and tolerates unavailable storage", () => {
+await test("owner marker round-trips and tolerates unavailable storage", () => {
   const map = new Map<string, string>();
   const storage = {
     getItem: (key: string) => map.get(key) ?? null,
-    setItem: (key: string, value: string) => void map.set(key, value),
-    removeItem: (key: string) => void map.delete(key),
+    setItem: (key: string, value: string) => {
+      map.set(key, value);
+    },
+    removeItem: (key: string) => {
+      map.delete(key);
+    },
   };
   writePushOwner(storage, "user-a");
   assert.equal(map.get(PUSH_OWNER_KEY), "user-a");
@@ -135,7 +139,7 @@ test("owner marker round-trips and tolerates unavailable storage", () => {
   assert.equal(readPushOwner(null), null);
 });
 
-test("withTimeout falls back on a hung or failed promise", async () => {
+await test("withTimeout falls back on a hung or failed promise", async () => {
   assert.equal(await withTimeout(new Promise<string>(() => undefined), 10, "fallback"), "fallback");
   assert.equal(await withTimeout(Promise.reject(new Error("x")), 1000, "fallback"), "fallback");
   assert.equal(await withTimeout(Promise.resolve("value"), 1000, "fallback"), "value");

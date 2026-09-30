@@ -27,7 +27,10 @@ export async function downloadMeExport(): Promise<void> {
   URL.revokeObjectURL(href);
 }
 
-export async function saveProfileName(queryClient: QueryClient, input: ProfileNameInput): Promise<void> {
+export async function saveProfileName(
+  queryClient: QueryClient,
+  input: ProfileNameInput,
+): Promise<void> {
   await ensureOk(await api.PATCH("/api/v1/auth/me", { body: input }));
   await queryClient.invalidateQueries({ queryKey: meQuery.queryKey });
 }
@@ -40,7 +43,10 @@ export async function requestEmailChange(newEmail: string): Promise<void> {
   await ensureOk(await api.PATCH("/api/v1/auth/email", { body: { newEmail } }));
 }
 
-export async function changePassword(queryClient: QueryClient, input: PasswordChangeInput): Promise<void> {
+export async function changePassword(
+  queryClient: QueryClient,
+  input: PasswordChangeInput,
+): Promise<void> {
   await ensureOk(await api.PATCH("/api/v1/auth/password", { body: input }));
   await queryClient.invalidateQueries({ queryKey: meQuery.queryKey });
 }

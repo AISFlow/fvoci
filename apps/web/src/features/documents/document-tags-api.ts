@@ -43,7 +43,7 @@ export async function createDocumentTag(
     );
   } catch (err) {
     if (err instanceof ProblemError && err.status === 409) {
-      const page = await queryClient.fetchQuery({
+      const page = await queryClient.query({
         ...documentTagPoolQuery(workspaceId, name),
         staleTime: 0,
       });
@@ -74,13 +74,10 @@ export async function removeDocumentTag(
           },
         },
       )
-    : await api.DELETE(
-        "/api/v1/workspaces/{workspace_id}/documents/{document_id}/tags/{tag_id}",
-        {
-          params: {
-            path: { workspace_id: workspaceId, document_id: documentId, tag_id: tagId },
-          },
+    : await api.DELETE("/api/v1/workspaces/{workspace_id}/documents/{document_id}/tags/{tag_id}", {
+        params: {
+          path: { workspace_id: workspaceId, document_id: documentId, tag_id: tagId },
         },
-      );
+      });
   return ensureOk(result);
 }

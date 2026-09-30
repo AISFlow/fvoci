@@ -393,7 +393,15 @@ dialog.project-dialog::backdrop {
 }
 
 @media (max-width: 40rem) {
-  .project-list__row { grid-template-columns: 4rem minmax(0, 1fr) auto; }
-  .project-list__counts { grid-column: 2; justify-content: start; }
-  .project-list__clone { grid-column: 3; grid-row: 1 / 3; }
+  .project-list__row {
+    grid-template-columns: 4rem minmax(0, 1fr) auto;
+  }
+  .project-list__counts {
+    grid-column: 2;
+    justify-content: start;
+  }
+  .project-list__clone {
+    grid-column: 3;
+    grid-row: 1 / 3;
+  }
 }

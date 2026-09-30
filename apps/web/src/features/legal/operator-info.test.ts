@@ -19,7 +19,7 @@ const full: OperatorInfo = {
   hostingProvider: "AWS",
 };
 
-test("filledOperatorFields omits null leaves", () => {
+await test("filledOperatorFields omits null leaves", () => {
   const partial: OperatorInfo = {
     ...full,
     representative: null,
@@ -39,7 +39,7 @@ test("filledOperatorFields omits null leaves", () => {
   assert.equal(hasOperatorInfo({}), false);
 });
 
-test("operatorFieldHref builds safe mailto and https links only", () => {
+await test("operatorFieldHref builds safe mailto and https links only", () => {
   assert.equal(
     operatorFieldHref("supportEmail", "support@example.com"),
     "mailto:support@example.com",
@@ -54,7 +54,7 @@ test("operatorFieldHref builds safe mailto and https links only", () => {
   assert.equal(operatorFieldHref("phone", "02-1234"), null);
 });
 
-test("hasOperatorInfo treats all-null operator as empty", () => {
+await test("hasOperatorInfo treats all-null operator as empty", () => {
   const empty: OperatorInfo = {
     businessName: null,
     representative: null,

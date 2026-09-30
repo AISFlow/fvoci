@@ -10,10 +10,7 @@ export type LookupTarget =
   | { kind: "project-document"; item: LookupItem }
   | { kind: "miss" };
 
-export function resolveLookupTarget(
-  items: readonly LookupItem[],
-  displayId: string,
-): LookupTarget {
+export function resolveLookupTarget(items: readonly LookupItem[], displayId: string): LookupTarget {
   const want = displayId.trim().toUpperCase();
   if (want === "") return { kind: "miss" };
   const matches = items.filter((item) => item.displayId.toUpperCase() === want);
@@ -26,10 +23,7 @@ export function resolveLookupTarget(
   return { kind: "miss" };
 }
 
-export function pickLookupTask(
-  items: readonly LookupItem[],
-  displayId: string,
-): LookupItem | null {
+export function pickLookupTask(items: readonly LookupItem[], displayId: string): LookupItem | null {
   const target = resolveLookupTarget(items, displayId);
   return target.kind === "task" ? target.item : null;
 }

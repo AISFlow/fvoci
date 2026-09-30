@@ -38,7 +38,7 @@ export function authorLabel(
   item: RevisionMeta,
   authorById: Readonly<Record<string, string>>,
 ): string {
-  if (item.createdBy === null || item.createdBy === undefined) {
+  if (item.createdBy == null) {
     return t("version.author.system");
   }
   const name = authorById[item.createdBy];

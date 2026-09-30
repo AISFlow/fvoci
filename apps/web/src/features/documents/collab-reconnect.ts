@@ -10,8 +10,8 @@
  * 상태가 원래 연결 상태로 돌아간다 — 장애 내내 「서버 혼잡」이 남지 않는다. */
 
 import {
-	HocuspocusProviderWebsocket,
-	type HocuspocusProviderWebsocketConfiguration,
+  HocuspocusProviderWebsocket,
+  type HocuspocusProviderWebsocketConfiguration,
 } from "@hocuspocus/provider";
 
 /** Backoff of the socket's own retry loop (@lifeomic/attempt 3.1 via provider 4.6.0): retry n
@@ -19,11 +19,11 @@ import {
  * the first retry jittered; delay < minDelay would make connect() reject. A served session that
  * drops waits `delay` before its fresh loop starts again from the first step. */
 export const RECONNECT_BACKOFF = {
-	delay: 1_000,
-	minDelay: 500,
-	maxDelay: 10_000,
-	factor: 2,
-	jitter: true,
+  delay: 1_000,
+  minDelay: 500,
+  maxDelay: 10_000,
+  factor: 2,
+  jitter: true,
 } as const;
 
 /** Server close code for a capacity refusal ("try again later"). */
@@ -33,34 +33,34 @@ export type CollabRefusal = "capacity" | "unavailable";
 
 /** A socket that opened but was closed before any server frame is a refusal, not a dropped session. */
 export function refusalOf(
-	openedWithoutFrame: boolean,
-	code: number | undefined,
+  openedWithoutFrame: boolean,
+  code: number | undefined,
 ): CollabRefusal | null {
-	if (!openedWithoutFrame) return null;
-	return code === CLOSE_TRY_AGAIN_LATER ? "capacity" : "unavailable";
+  if (!openedWithoutFrame) return null;
+  return code === CLOSE_TRY_AGAIN_LATER ? "capacity" : "unavailable";
 }
 
 /** Tracks one socket generation: did it open, and did the server send anything since. */
 export class RefusalWatch {
-	private opened = false;
-	private framed = false;
+  private opened = false;
+  private framed = false;
 
-	open(): void {
-		this.opened = true;
-		this.framed = false;
-	}
+  open(): void {
+    this.opened = true;
+    this.framed = false;
+  }
 
-	frame(): void {
-		this.framed = true;
-	}
+  frame(): void {
+    this.framed = true;
+  }
 
-	/** Returns the refusal for this close and resets for the next attempt. */
-	close(code: number | undefined): CollabRefusal | null {
-		const refusal = refusalOf(this.opened && !this.framed, code);
-		this.opened = false;
-		this.framed = false;
-		return refusal;
-	}
+  /** Returns the refusal for this close and resets for the next attempt. */
+  close(code: number | undefined): CollabRefusal | null {
+    const refusal = refusalOf(this.opened && !this.framed, code);
+    this.opened = false;
+    this.framed = false;
+    return refusal;
+  }
 }
 
 /* WHY: 두 가지를 provider 4.6.0 위에서 고친다(공개 멤버만 재정의, index.d.ts:261-281).
@@ -71,42 +71,42 @@ export class RefusalWatch {
  *    shouldConnect 를 다시 켜서 파기된 인스턴스가 리스너 없는 소켓을 연다(좀비). retire() 나 파기 뒤
  *    connect 는 무시한다. retire() 는 지금 소켓을 닫지 않고 새 시도만 막는다(RoomConnection.release). */
 class OwnedSocket extends HocuspocusProviderWebsocket implements RefusalAwareSocket {
-	private retired = false;
+  private retired = false;
 
-	onOpen(event: Event): Promise<void> {
-		const loop = this.cancelWebsocketRetry;
-		const opened = super.onOpen(event);
-		/* super.onOpen has no await before it clears the handle, so this restore is in time. */
-		this.cancelWebsocketRetry = loop;
-		return opened;
-	}
+  onOpen(event: Event): Promise<void> {
+    const loop = this.cancelWebsocketRetry;
+    const opened = super.onOpen(event);
+    /* super.onOpen has no await before it clears the handle, so this restore is in time. */
+    this.cancelWebsocketRetry = loop;
+    return opened;
+  }
 
-	resolveConnectionAttempt(): void {
-		if (this.connectionAttempt) this.cancelWebsocketRetry = undefined;
-		super.resolveConnectionAttempt();
-	}
+  resolveConnectionAttempt(): void {
+    if (this.connectionAttempt) this.cancelWebsocketRetry = undefined;
+    super.resolveConnectionAttempt();
+  }
 
-	connect(): Promise<unknown> {
-		if (this.retired) return Promise.resolve();
-		return super.connect();
-	}
+  connect(): Promise<unknown> {
+    if (this.retired) return Promise.resolve();
+    return super.connect();
+  }
 
-	retire(): void {
-		this.retired = true;
-		/* The retry loop aborts before its next attempt and onClose schedules no connect. */
-		this.shouldConnect = false;
-	}
+  retire(): void {
+    this.retired = true;
+    /* The retry loop aborts before its next attempt and onClose schedules no connect. */
+    this.shouldConnect = false;
+  }
 
-	destroy(): void {
-		this.retire();
-		super.destroy();
-	}
+  destroy(): void {
+    this.retire();
+    super.destroy();
+  }
 }
 
 /** A room socket that can be retired: it never opens another WebSocket, and the current one
  * stays as it is until destroy(). */
 export interface RefusalAwareSocket extends HocuspocusProviderWebsocket {
-	retire(): void;
+  retire(): void;
 }
 
 /** The room's socket. It retries refusals itself with RECONNECT_BACKOFF (callers may
@@ -114,52 +114,58 @@ export interface RefusalAwareSocket extends HocuspocusProviderWebsocket {
  * refusal, or null for a close that was not one (a served session that dropped, or an
  * attempt that never opened), so a stale refusal never outlives the next close. */
 export function createRefusalAwareSocket(
-	configuration: HocuspocusProviderWebsocketConfiguration,
-	onClosed: (refusal: CollabRefusal | null) => void,
+  configuration: HocuspocusProviderWebsocketConfiguration,
+  onClosed: (refusal: CollabRefusal | null) => void,
 ): RefusalAwareSocket {
-	const watch = new RefusalWatch();
-	return new OwnedSocket({
-		...RECONNECT_BACKOFF,
-		...configuration,
-		onOpen: () => watch.open(),
-		onMessage: () => watch.frame(),
-		onClose: ({ event }) => onClosed(watch.close(event?.code)),
-	});
+  const watch = new RefusalWatch();
+  return new OwnedSocket({
+    ...RECONNECT_BACKOFF,
+    ...configuration,
+    onOpen: () => {
+      watch.open();
+    },
+    onMessage: () => {
+      watch.frame();
+    },
+    onClose: ({ event }) => {
+      onClosed(watch.close(event.code));
+    },
+  });
 }
 
 /** Timers the room controller defers socket teardown with (injected so tests drive them). */
 export interface RoomTimers {
-	setTimeout(callback: () => void, ms: number): unknown;
+  setTimeout(callback: () => void, ms: number): unknown;
 }
 
 /** What the controller touches on a socket generation. */
 export interface RoomSocketHandle {
-	readonly configuration: {
-		readonly providerMap: ReadonlyMap<string, { flushPendingUpdates(): void }>;
-	};
-	/** Stops opening WebSockets at once; leaves the current one open for the flush. */
-	retire(): void;
-	destroy(): void;
+  readonly configuration: {
+    readonly providerMap: ReadonlyMap<string, { flushPendingUpdates(): void }>;
+  };
+  /** Stops opening WebSockets at once; leaves the current one open for the flush. */
+  retire(): void;
+  destroy(): void;
 }
 
 export interface RoomConnectionState<S> {
-	/** The room's socket; it retries refusals on its own. */
-	readonly socket: S;
-	/** Changes only on a reclaim (#683): consumers remount on it, never on a refusal. */
-	readonly generation: number;
-	/** Pre-auth refusal of the latest close; cleared by a close that was not a refusal
-	 * (e.g. an attempt that never opened), by authenticating, or by a reclaim. */
-	readonly refusal: CollabRefusal | null;
+  /** The room's socket; it retries refusals on its own. */
+  readonly socket: S;
+  /** Changes only on a reclaim (#683): consumers remount on it, never on a refusal. */
+  readonly generation: number;
+  /** Pre-auth refusal of the latest close; cleared by a close that was not a refusal
+   * (e.g. an attempt that never opened), by authenticating, or by a reclaim. */
+  readonly refusal: CollabRefusal | null;
 }
 
 export interface RoomConnectionOptions<S extends RoomSocketHandle> {
-	/** Opens a socket that reports every close: its refusal, or null for any other close. */
-	open(onClosed: (refusal: CollabRefusal | null) => void): S;
-	onChange(state: RoomConnectionState<S>): void;
-	/** Runs before a reclaim opens the next socket: swap the Y.Doc clientID here (#683/#704). */
-	beforeReclaim(): void;
-	reclaimLimit: number;
-	timers: RoomTimers;
+  /** Opens a socket that reports every close: its refusal, or null for any other close. */
+  open(onClosed: (refusal: CollabRefusal | null) => void): S;
+  onChange(state: RoomConnectionState<S>): void;
+  /** Runs before a reclaim opens the next socket: swap the Y.Doc clientID here (#683/#704). */
+  beforeReclaim(): void;
+  reclaimLimit: number;
+  timers: RoomTimers;
 }
 
 /** One collab room's connection state machine, free of React.
@@ -172,71 +178,73 @@ export interface RoomConnectionOptions<S extends RoomSocketHandle> {
  *   after it), flush the attached rooms' batched edits while the socket is still open, then
  *   destroy it one task later; later events are ignored. */
 export class RoomConnection<S extends RoomSocketHandle> {
-	private readonly options: RoomConnectionOptions<S>;
-	private current: RoomConnectionState<S>;
-	private reclaims = 0;
-	private disposed = false;
+  private readonly options: RoomConnectionOptions<S>;
+  private current: RoomConnectionState<S>;
+  private reclaims = 0;
+  private disposed = false;
 
-	constructor(options: RoomConnectionOptions<S>) {
-		this.options = options;
-		this.current = { socket: this.open(0), generation: 0, refusal: null };
-	}
+  constructor(options: RoomConnectionOptions<S>) {
+    this.options = options;
+    this.current = { socket: this.open(0), generation: 0, refusal: null };
+  }
 
-	get state(): RoomConnectionState<S> {
-		return this.current;
-	}
+  get state(): RoomConnectionState<S> {
+    return this.current;
+  }
 
-	authenticated(): void {
-		if (this.disposed) return;
-		this.reclaims = 0;
-		this.record(null);
-	}
+  authenticated(): void {
+    if (this.disposed) return;
+    this.reclaims = 0;
+    this.record(null);
+  }
 
-	/** Returns false when disposed or the budget is spent (the room stays unauthorized). */
-	reclaim(): boolean {
-		if (this.disposed || this.reclaims >= this.options.reclaimLimit) return false;
-		this.reclaims += 1;
-		this.options.beforeReclaim();
-		this.release(this.current.socket);
-		const generation = this.current.generation + 1;
-		this.current = { socket: this.open(generation), generation, refusal: null };
-		this.options.onChange(this.current);
-		return true;
-	}
+  /** Returns false when disposed or the budget is spent (the room stays unauthorized). */
+  reclaim(): boolean {
+    if (this.disposed || this.reclaims >= this.options.reclaimLimit) return false;
+    this.reclaims += 1;
+    this.options.beforeReclaim();
+    this.release(this.current.socket);
+    const generation = this.current.generation + 1;
+    this.current = { socket: this.open(generation), generation, refusal: null };
+    this.options.onChange(this.current);
+    return true;
+  }
 
-	dispose(): void {
-		if (this.disposed) return;
-		this.disposed = true;
-		this.release(this.current.socket);
-	}
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.release(this.current.socket);
+  }
 
-	private open(generation: number): S {
-		return this.options.open((refusal) => {
-			if (this.disposed || generation !== this.current.generation) return;
-			this.record(refusal);
-		});
-	}
+  private open(generation: number): S {
+    return this.options.open((refusal) => {
+      if (this.disposed || generation !== this.current.generation) return;
+      this.record(refusal);
+    });
+  }
 
-	private record(refusal: CollabRefusal | null): void {
-		if (this.current.refusal === refusal) return;
-		this.current = { ...this.current, refusal };
-		this.options.onChange(this.current);
-	}
+  private record(refusal: CollabRefusal | null): void {
+    if (this.current.refusal === refusal) return;
+    this.current = { ...this.current, refusal };
+    this.options.onChange(this.current);
+  }
 
-	/* WHY: HocuspocusRoom destroys its provider from a passive-effect cleanup on a 0 ms timer that
-	 * fires after this one, when the socket is already gone: its flushPendingUpdates would only
-	 * queue the last ≤200 ms batch on a dead socket, and on unmount the Y.Doc is dropped with it.
-	 * Flush here, while the socket is still open. On a reclaim the flush is moot (a closed socket
-	 * only queues it; an unauthenticated one is ignored by the server, transport.rs Denied), and
-	 * nothing is lost: that Y.Doc survives and the next socket's sync carries the edits.
-	 * Retire first: until the deferred destroy runs (one task, far longer in a busy or throttled
-	 * tab) the socket's retry loop or a pending onClose connect would open a new WebSocket for a
-	 * room that is gone. Retiring leaves the current WebSocket open, so the flush still goes out. */
-	private release(socket: S): void {
-		socket.retire();
-		for (const provider of socket.configuration.providerMap.values()) {
-			provider.flushPendingUpdates();
-		}
-		this.options.timers.setTimeout(() => socket.destroy(), 0);
-	}
+  /* WHY: HocuspocusRoom destroys its provider from a passive-effect cleanup on a 0 ms timer that
+   * fires after this one, when the socket is already gone: its flushPendingUpdates would only
+   * queue the last ≤200 ms batch on a dead socket, and on unmount the Y.Doc is dropped with it.
+   * Flush here, while the socket is still open. On a reclaim the flush is moot (a closed socket
+   * only queues it; an unauthenticated one is ignored by the server, transport.rs Denied), and
+   * nothing is lost: that Y.Doc survives and the next socket's sync carries the edits.
+   * Retire first: until the deferred destroy runs (one task, far longer in a busy or throttled
+   * tab) the socket's retry loop or a pending onClose connect would open a new WebSocket for a
+   * room that is gone. Retiring leaves the current WebSocket open, so the flush still goes out. */
+  private release(socket: S): void {
+    socket.retire();
+    for (const provider of socket.configuration.providerMap.values()) {
+      provider.flushPendingUpdates();
+    }
+    this.options.timers.setTimeout(() => {
+      socket.destroy();
+    }, 0);
+  }
 }

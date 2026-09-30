@@ -6,7 +6,7 @@ import { reassertPresence } from "./collab-model.ts";
 
 const me = { id: "u-me", name: "나", color: "#1d4ed8" };
 
-test("provider 의 pagehide 처리 뒤 setLocalStateField 는 프레즌스를 못 되살린다", () => {
+await test("provider 의 pagehide 처리 뒤 setLocalStateField 는 프레즌스를 못 되살린다", () => {
   const awareness = new Awareness(new Y.Doc());
   awareness.setLocalState({ user: me, block: { id: "b1" } });
   removeAwarenessStates(awareness, [awareness.clientID], "page hide");
@@ -15,7 +15,7 @@ test("provider 의 pagehide 처리 뒤 setLocalStateField 는 프레즌스를 �
   awareness.destroy();
 });
 
-test("reassertPresence 는 user 와 마지막 block 을 함께 되살린다", () => {
+await test("reassertPresence 는 user 와 마지막 block 을 함께 되살린다", () => {
   const awareness = new Awareness(new Y.Doc());
   awareness.setLocalState({ user: me, block: { id: "b1" } });
   removeAwarenessStates(awareness, [awareness.clientID], "page hide");
@@ -27,7 +27,7 @@ test("reassertPresence 는 user 와 마지막 block 을 함께 되살린다", ()
   awareness.destroy();
 });
 
-test("reassertPresence 는 캐럿 블록이 없으면 user 만 넣는다", () => {
+await test("reassertPresence 는 캐럿 블록이 없으면 user 만 넣는다", () => {
   const awareness = new Awareness(new Y.Doc());
   awareness.setLocalState({ user: me, block: { id: "b1" } });
   removeAwarenessStates(awareness, [awareness.clientID], "page hide");
@@ -36,7 +36,7 @@ test("reassertPresence 는 캐럿 블록이 없으면 user 만 넣는다", () =>
   awareness.destroy();
 });
 
-test("reassertPresence 는 제목 편집 플래그를 되살린다", () => {
+await test("reassertPresence 는 제목 편집 플래그를 되살린다", () => {
   const awareness = new Awareness(new Y.Doc());
   awareness.setLocalState({ user: me, block: { id: "b1" } });
   removeAwarenessStates(awareness, [awareness.clientID], "page hide");
@@ -45,7 +45,7 @@ test("reassertPresence 는 제목 편집 플래그를 되살린다", () => {
   awareness.destroy();
 });
 
-test("reassertPresence 는 살아 있는 로컬 상태를 덮지 않는다", () => {
+await test("reassertPresence 는 살아 있는 로컬 상태를 덮지 않는다", () => {
   const awareness = new Awareness(new Y.Doc());
   awareness.setLocalState({ user: me, block: { id: "b1" } });
   awareness.setLocalStateField("cursor", { anchor: 1 });
