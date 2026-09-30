@@ -62,15 +62,30 @@ async function ensureSetup(page: Page): Promise<void> {
     await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
-    await expect(page).toHaveURL(/\/$/);
-    return;
-  }
-  if (
+  } else if (
     page.url().includes("/login") ||
     (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
   ) {
     await login(page, admin.email, admin.password);
   }
+  // Setup starts at '/', then may cross Vue /login before returning home.
+  // Require the authenticated home to mount before the caller navigates again.
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+}
+
+async function failSetupUntilRetry(page: Page): Promise<{ exhausted: Promise<unknown> }> {
+  await page.route("**/api/v1/setup", (route) =>
+    route.fulfill({ status: 503, contentType: "application/json", body: '{"code":"unavailable"}' }),
+  );
+  let failures = 0;
+  // Wait for the production query's initial request and three retries, so the
+  // visible error assertion starts after the query enters its terminal state.
+  const exhausted = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/v1/setup" &&
+    response.status() === 503 && ++failures === 4,
+  );
+  return { exhausted };
 }
 
 async function createProject(
@@ -152,4 +167,74 @@ test("returnTo a Vue gantt path does a full load there after login", async ({ pa
 
   expect(csp).toEqual([]);
   expect(icons).toEqual([]);
+});
+
+test("authenticated Vue login exposes setup failure and retries to home with its real session", async ({ page }) => {
+  await ensureSetup(page);
+  const before = await page.request.get("/api/v1/auth/me");
+  expect(before.status()).toBe(200);
+  const user = await before.json();
+  const { exhausted } = await failSetupUntilRetry(page);
+  const me = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/v1/auth/me" && response.status() === 200,
+  );
+
+  await page.goto("/login#mfa=setup-error-fragment");
+  expect(await (await me).json()).toEqual(user);
+  await exhausted;
+  await expect(vueRoot(page)).toHaveCount(1);
+  await expect(page.getByRole("alert")).toHaveText("불러오지 못했습니다.");
+  const retry = page.getByRole("button", { name: "다시 시도", exact: true });
+  await expect(retry).toBeEnabled();
+  expect(new URL(page.url()).hash).toBe("#mfa=setup-error-fragment");
+  await expect(page.getByLabel("이메일")).toHaveCount(0);
+  await expect(page.getByLabel("인증 코드")).toHaveCount(0);
+
+  await page.unroute("**/api/v1/setup");
+  const recovered = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/v1/setup" && response.status() === 200,
+  );
+  await retry.click();
+  expect((await recovered).status()).toBe(200);
+  await expect(page).toHaveURL(/\/$/);
+  await expect(vueRoot(page)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
+  expect((await (await page.request.get("/api/v1/setup")).json()).needed).toBe(false);
+  const after = await page.request.get("/api/v1/auth/me");
+  expect(after.status()).toBe(200);
+  expect(await after.json()).toEqual(user);
+});
+
+test("signed-out setup failure preserves the MFA fragment until a real setup retry succeeds", async ({ page }) => {
+  await login(page, admin.email, admin.password);
+  await logout(page);
+  const { exhausted } = await failSetupUntilRetry(page);
+  const me = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/v1/auth/me" && response.status() === 401,
+  );
+
+  // This marker tests fragment gating and consumption; MFA verification itself
+  // is covered by mfa-flow.spec.ts with a real server-issued challenge.
+  // Change the query too: from the logout landing, a hash-only goto would reuse
+  // the healthy setup query in the existing document instead of loading it anew.
+  await page.goto("/login?returnTo=%2F#mfa=setup-error-fragment");
+  await me;
+  await exhausted;
+  await expect(page.getByRole("alert")).toHaveText("불러오지 못했습니다.");
+  const retry = page.getByRole("button", { name: "다시 시도", exact: true });
+  await expect(retry).toBeEnabled();
+  expect(new URL(page.url()).hash).toBe("#mfa=setup-error-fragment");
+  await expect(page.getByLabel("이메일")).toHaveCount(0);
+  await expect(page.getByLabel("인증 코드")).toHaveCount(0);
+
+  await page.unroute("**/api/v1/setup");
+  const recovered = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/v1/setup" && response.status() === 200,
+  );
+  await retry.click();
+  expect((await recovered).status()).toBe(200);
+  await expect(page.getByLabel("인증 코드")).toBeVisible();
+  expect(new URL(page.url()).hash).toBe("");
+  expect((await (await page.request.get("/api/v1/setup")).json()).needed).toBe(false);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
 });

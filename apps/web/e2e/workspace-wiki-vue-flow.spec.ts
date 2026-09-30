@@ -10,8 +10,10 @@ import {
   type BrowserContext,
   type Locator,
   type Page,
-  type WebSocket,
+  type WebSocket as PlaywrightWebSocket,
 } from "@playwright/test";
+import type { EditorView } from "@tiptap/pm/view";
+import { decodeHocuspocusFrame } from "../e2e-pending/collab-wire";
 import { createE2eUser, login, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
@@ -45,8 +47,8 @@ function watchIconRequests(page: Page): string[] {
 }
 
 /** The page's /collab sockets that are open now. */
-function watchCollabSockets(page: Page): { open: Set<WebSocket>; opened: () => number } {
-  const open = new Set<WebSocket>();
+function watchCollabSockets(page: Page): { open: Set<PlaywrightWebSocket>; opened: () => number } {
+  const open = new Set<PlaywrightWebSocket>();
   let opened = 0;
   page.on("websocket", (socket) => {
     if (!new URL(socket.url()).pathname.endsWith("/collab")) return;
@@ -73,15 +75,16 @@ async function ensureSetup(page: Page): Promise<void> {
     await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
-    await expect(page).toHaveURL(/\/$/);
-    return;
-  }
-  if (
+  } else if (
     page.url().includes("/login") ||
     (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
   ) {
     await login(page, admin.email, admin.password);
   }
+  // Setup starts at '/', then may cross Vue /login before returning home.
+  // The URL alone can match before that redirect and interrupt a direct wiki goto.
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
 }
 
 async function workspaceId(request: APIRequestContext): Promise<string> {
@@ -222,20 +225,103 @@ test("direct URL and refresh serve the Vue page with the saved body", async ({ p
   expect(icons).toEqual([]);
 });
 
-test("undo and redo take back only this editor's own edits, on both peers", async ({ browser, baseURL }) => {
+type ClickCaret = { nativeBlock: number; parent: string; from: number; to: number };
+type RemoteClickGate = {
+  hold: boolean;
+  pending: { socket: WebSocket; data: ArrayBuffer }[];
+  before?: ClickCaret;
+  after?: ClickCaret;
+};
+
+/** Delay real incoming /collab payloads, then deliver them in the native click
+ * task, before selectionchange. This pins the caret/remote-update scheduling
+ * boundary without a sleep, mocked document, or a replacement Yjs update. */
+async function installRemoteClickGate(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const gate: RemoteClickGate = { hold: false, pending: [] };
+    (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate = gate;
+    const NativeSocket = window.WebSocket;
+    window.WebSocket = class extends NativeSocket {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        if (!new URL(url, location.href).pathname.endsWith("/collab")) return;
+        // Registered before the provider's listeners. Redispatch preserves the
+        // real server payload; only its delivery time is controlled by the test.
+        this.addEventListener("message", (event: MessageEvent<ArrayBuffer>) => {
+          if (!gate.hold) return;
+          event.stopImmediatePropagation();
+          if (gate.pending.length >= 32) throw new Error("remote click gate exceeded 32 frames");
+          gate.pending.push({ socket: this, data: event.data });
+        });
+      }
+    };
+  });
+}
+
+test("undo and redo take back only this editor's own edits, on both peers", async ({ browser, baseURL }, testInfo) => {
   const a = await newSignedInPage(browser, baseURL, admin);
   const b = await newSignedInPage(browser, baseURL, member);
   const csp = watchCspViolations(a.page);
   try {
     const wsId = await workspaceId(a.page.request);
     const doc = await createDoc(a.page.request, wsId, "되돌리기", "첫 문단\n\n둘째 문단\n");
+    await installRemoteClickGate(b.page);
     await openDoc(a.page, doc.path);
     await openDoc(b.page, doc.path);
     await expectBlocks(a.page, ["첫 문단", "둘째 문단"]);
+    await expectBlocks(b.page, ["첫 문단", "둘째 문단"]);
+    await b.page.evaluate(() => {
+      (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate.hold = true;
+    });
 
     await caretAtEndOf(a.page, 0);
     await a.page.keyboard.type(" 에이");
+    // Wait for an actual sync payload, not just a peer-awareness frame. Use
+    // the existing bounded Hocuspocus observer, rather than a second codec.
+    await expect.poll(async () => {
+      const frames = await b.page.evaluate(() =>
+        (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate.pending
+          .map(({ data }) => [...new Uint8Array(data)]),
+      );
+      return frames.some((bytes) => {
+        const frame = decodeHocuspocusFrame(new Uint8Array(bytes));
+        return frame?.kind === "other" && frame.type === 0;
+      });
+    }).toBe(true);
+    await b.page.evaluate(() => {
+      const gate = (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate;
+      const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & { editor: { view: EditorView } };
+      const snapshot = (): ClickCaret => {
+        const native = document.getSelection();
+        const selection = root.editor.view.state.selection;
+        return {
+          nativeBlock: [...root.children].findIndex((block) => block.contains(native?.anchorNode ?? null)),
+          parent: selection.$from.parent.textContent,
+          from: selection.from,
+          to: selection.to,
+        };
+      };
+      document.addEventListener("click", () => {
+        gate.before = snapshot();
+        gate.hold = false;
+        for (const { socket, data } of gate.pending.splice(0)) {
+          socket.dispatchEvent(new MessageEvent("message", { data }));
+        }
+        gate.after = snapshot();
+      }, { capture: true, once: true });
+    });
     await caretAtEndOf(b.page, 1);
+    const boundary = await b.page.evaluate(() => {
+      const { before, after } = (window as unknown as { __fvociRemoteClickGate: RemoteClickGate }).__fvociRemoteClickGate;
+      return { before, after };
+    });
+    await testInfo.attach("native-click-remote-boundary", {
+      body: JSON.stringify(boundary), contentType: "application/json",
+    });
+    expect(boundary.before).toMatchObject({ nativeBlock: 1, parent: "둘째 문단" });
+    expect(boundary.after).toMatchObject({ nativeBlock: 1, parent: "둘째 문단" });
+    expect(boundary.before?.from).toBe(boundary.before?.to);
+    expect(boundary.after?.from).toBe(boundary.after?.to);
     await b.page.keyboard.type(" 비");
     await expectBlocks(a.page, ["첫 문단 에이", "둘째 문단 비"]);
     await expectBlocks(b.page, ["첫 문단 에이", "둘째 문단 비"]);
@@ -426,8 +512,8 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
     // text, each step replacing the syllable being composed, then a commit.
     // The composing syllable is the selected block, as Korean IMEs show it.
     // Synthetic events: this is not the OS IME witness. With the caret at
-    // the end of the marked text instead, the first jamo stays behind (the
-    // known bug the next test pins); the real IBus witness shows that too.
+    // the end of the marked text previously left the first jamo behind.
+    // The next test pins the repaired path; the IBus witness recorded the bug.
     const ime = await a.context.newCDPSession(a.page);
     const setComposition = (text: string) =>
       ime.send("Input.imeSetComposition", { text, selectionStart: 0, selectionEnd: text.length });
@@ -472,17 +558,13 @@ test("Korean composition survives a concurrent remote edit, then undoes and redo
   }
 });
 
-// Known bug, in the React editor as well (it predates the Vue page): when
-// the IME reports the caret at the end of the marked text, as Chromium does
-// for the IBus Hangul engine on Linux, the first composition step's jamo is
-// committed on its own and the syllable is then composed after it:
-// "첫 문단" + 한글 gives "첫 문단ㅎ한글". A peer is not needed. The OS IME
-// witness (e2e-pending/workspace-wiki-vue-os-ime.spec.ts) shows the same on
-// the real input path. Tracked in #258. Suspected cause, to be confirmed
-// there: ProseMirror writes the DOM selection (selectionToDOM) on the first
-// composition update, which restarts the IME's composition. Expected to fail
-// until that is fixed; when it passes, drop test.fail.
-test.fail("Korean composition with the caret after the marked text leaves no stray jamo (known bug)", async ({ page }) => {
+// #268 (`83c01480`) skips UniqueID setNodeMarkup while a transaction has
+// composition meta, so Chromium/IBus no longer restarts the first Hangul
+// step. #258 is closed. This used to be test.fail; CI on main f3f53c90
+// (Web 36599369890 shard 5) failed with "Expected to fail, but passed".
+// Keep the assertion as a regression: "첫 문단" + 한글 must be "첫 문단한글",
+// not "첫 문단ㅎ한글".
+test("Korean composition with the caret after the marked text leaves no stray jamo", async ({ page }) => {
   await login(page, admin.email, admin.password);
   const wsId = await workspaceId(page.request);
   const doc = await createDoc(page.request, wsId, "한글 조합 캐럿", "첫 문단\n");
