@@ -35,7 +35,13 @@ watchEffect(() => {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-name="workspace.name" active="wiki">
+  <WorkspaceShell
+    v-else-if="workspace"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+    active="wiki"
+  >
     <div v-if="documentRef.failed.value">
       <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
       <UButton size="sm" class="mt-2" @click="documentRef.retry()">{{ t("load.retry") }}</UButton>
