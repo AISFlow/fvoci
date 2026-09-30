@@ -15,6 +15,7 @@ const STREAM = `/api/v1/workspaces/${WS}/access-stream`;
 const restoreNodeRequest = installNodeRelativeRequestShim();
 const { watchWorkspaceAccess } = await import("./workspace-access-stream.ts");
 const originalFetch = globalThis.fetch;
+const originalReportError = globalThis.reportError;
 let probes: string[] = [];
 
 /** The workspace endpoint the watcher probes answers `status`. */
@@ -60,6 +61,7 @@ test.afterEach(() => {
   mock.timers.reset();
   mock.restoreAll();
   globalThis.fetch = originalFetch;
+  globalThis.reportError = originalReportError;
 });
 
 test.after(() => {
@@ -200,4 +202,27 @@ await test("closing the watcher before the probe answers skips the reconcile", a
   sub.close();
   await settle();
   assert.equal(changes, 0);
+});
+
+await test("a throwing reconcile callback is reported after revoked access closes the watcher", async () => {
+  serveWorkspace(404);
+  const failure = new Error("reconcile callback failed");
+  const reported: unknown[] = [];
+  globalThis.reportError = (error: unknown) => {
+    reported.push(error);
+  };
+  watchWorkspaceAccess(WS, {
+    onAccessChange: () => {
+      throw failure;
+    },
+  });
+  const source = MockEventSource.latest();
+  source.fail(MockEventSource.CLOSED);
+  await settle();
+  assert.deepEqual(reported, [failure]);
+  assert.deepEqual(probes, [`GET /api/v1/workspaces/${WS}`]);
+  assert.equal(source.closed, true);
+  assert.equal(sharedEventSourceRefCount(STREAM), 0);
+  mock.timers.tick(60_000);
+  assert.equal(MockEventSource.instances.length, 1);
 });
