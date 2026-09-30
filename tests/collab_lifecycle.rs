@@ -789,6 +789,129 @@ async fn queued_final_edit_survives_lease_drop(send_leave: bool, revoke: bool) {
     .await;
 }
 
+// Socket teardown drops its event receiver even while previously admitted
+// frames are still waiting in the actor mailbox. Replay the standard-production
+// failure's exact updates with that receiver closed before prefix broadcast.
+async fn queued_final_edit_after_outbound_receiver_drop(send_leave: bool, revoke: bool) {
+    run_lifecycle_test("queued_final_edit_after_outbound_receiver_drop", |run| {
+        Box::pin(async move {
+            let wiki = setup_wiki_doc(&run.inner.harness).await;
+            let mut config = test_collab_config(4, 30_000);
+            config.max_queued_room_ops = 3;
+            let hub = run
+                .register_hub(Arc::new(CollabHub::new(config, wiki.session.pool.clone())))
+                .await;
+            let key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let admin = admin_pool(&run.inner.harness.admin_url).await;
+            let (conn_id, lease, events) = hub_join_with_events(&hub, &wiki, 1)
+                .await
+                .expect("writer join");
+            // Standard socket1072938.129 at667631.800366 and667631.815655.
+            let prefix = hex::decode("010ada8e8ce1040007010b70726f73656d6972726f7203097061726167726170680700da8e8ce10400060400da8e8ce1040103eb96a02800da8e8ce1040002696401772465613534306366622d323837662d346662332d386161392d30346537323637353339666584da8e8ce1040203eb829884da8e8ce1040403eab8b084da8e8ce10405012084da8e8ce1040603eca78184da8e8ce1040703eca08484da8e8ce10408012000").expect("standard prefix");
+            let digit = hex::decode("0101da8e8ce1040a84da8e8ce10409013200")
+                .expect("standard digit2");
+            let (reached, release) = arm_join_barrier(wiki.document_id).await;
+            let joining = tokio::spawn({
+                let hub = hub.clone();
+                let wiki = clone_wiki(&wiki);
+                async move { hub_join_with_lease(&hub, &wiki, 2).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), reached)
+                .await
+                .expect("actor barrier")
+                .expect("barrier signal");
+            for update in [&prefix, &digit] {
+                hub.send_frame(
+                    key,
+                    conn_id,
+                    sync_update_frame(
+                        &routing_key(wiki.session.workspace_id, wiki.document_id),
+                        update,
+                    ),
+                )
+                .await;
+            }
+            if send_leave {
+                hub.leave_room(key, conn_id).await;
+            }
+            if revoke {
+                fvoci_server::db::identity::revoke_session(
+                    &wiki.session.pool,
+                    &fvoci_server::auth::token::hash_token(&wiki.session.session_token),
+                    Some(wiki.session.user_id),
+                )
+                .await
+                .expect("revoke queued writer");
+            }
+            drop(events);
+            drop(lease);
+            arm_lease_drop_priority(wiki.document_id).await;
+            release.send(()).expect("release actor");
+            let observer = joining.await.expect("join task");
+            if !revoke {
+                let (observer_id, observer_lease) = observer.expect("observer join");
+                run.retain_lease(observer_lease);
+                wait_for_probe_connections(&hub, key, 1).await;
+                assert_eq!(
+                    tail_seq(&admin, wiki.document_id).await,
+                    2,
+                    "closed outbound receiver must not discard admitted final edit"
+                );
+                assert_eq!(tail_row_count(&admin, wiki.document_id).await, 2);
+                hub.leave_room(key, observer_id).await;
+                wait_for_probe_connections(&hub, key, 0).await;
+                hub.force_room_idle_eligible(key).await;
+                assert!(hub.execute_idle_evict_if_eligible(key).await);
+                let (_, reopened_lease) = hub_join_with_lease(&hub, &wiki, 3)
+                    .await
+                    .expect("reopen");
+                run.retain_lease(reopened_lease);
+                let recovered = hub
+                    .capture_if_live(key, wiki.session.user_id, wiki.session.session_id)
+                    .await
+                    .expect("live room")
+                    .expect("capture durable state");
+                assert_eq!(
+                    recovered.content_json,
+                    serde_json::json!({"type": "doc", "content": [
+                        {"type": "paragraph", "attrs": {"id": "ea540cfb-287f-4fb3-8aa9-04e7267539fe"}, "content": [{"type": "text", "text": "떠나기 직전 2"}]}
+                    ]}),
+                    "final digit must survive actor restart"
+                );
+            } else {
+                if let Ok((_, observer_lease)) = observer {
+                    run.retain_lease(observer_lease);
+                }
+                wait_for_probe_connections(&hub, key, 0).await;
+                assert_eq!(
+                    tail_seq(&admin, wiki.document_id).await,
+                    0,
+                    "closed receiver does not bypass revocation"
+                );
+                assert_eq!(tail_row_count(&admin, wiki.document_id).await, 0);
+            }
+            disarm_join_barrier(wiki.document_id).await;
+            admin.close().await;
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_queued_final_edit_closed_receiver_before_leave() {
+    queued_final_edit_after_outbound_receiver_drop(true, false).await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_queued_final_edit_closed_receiver_without_leave() {
+    queued_final_edit_after_outbound_receiver_drop(false, false).await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_queued_final_edit_closed_receiver_rechecks_revocation() {
+    queued_final_edit_after_outbound_receiver_drop(true, true).await;
+}
+
 #[tokio::test]
 async fn collab_lifecycle_queued_final_edit_before_leave_and_lease_drop() {
     queued_final_edit_survives_lease_drop(true, false).await;
