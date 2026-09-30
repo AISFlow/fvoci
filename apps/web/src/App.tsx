@@ -26,14 +26,9 @@ import { MyTasksPage } from "@/pages/MyTasksPage";
 import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
 import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
 import { NotificationsPage } from "@/pages/NotificationsPage";
-import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
 import { WorkspaceHomePage } from "@/pages/WorkspaceHomePage";
-import { MagicLinkPage } from "@/pages/MagicLinkPage";
-import { ConfirmEmailPage } from "@/pages/ConfirmEmailPage";
-import { CancelWithdrawPage } from "@/pages/CancelWithdrawPage";
 import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
-import { ConsentPage } from "@/pages/ConsentPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -99,15 +94,6 @@ const router = createBrowserRouter(
         {...lazyPage(() => import("@/pages/ShareAttachmentViewPage").then((m) => m.ShareAttachmentViewPage))}
       />
       <Route
-        path="/reset-password"
-        element={
-          <SetupGuard>
-            <ResetPasswordPage />
-          </SetupGuard>
-        }
-      />
-      <Route path="/consent" element={<ConsentPage />} />
-      <Route
         path="/settings/admin"
         {...lazyPage(() => import("@/pages/AdminPage").then((m) => m.AdminPage), { setupGuard: true })}
       />
@@ -118,30 +104,6 @@ const router = createBrowserRouter(
       <Route
         path="/settings/legal"
         {...lazyPage(() => import("@/pages/AdminLegalPage").then((m) => m.AdminLegalPage), { setupGuard: true })}
-      />
-      <Route
-        path="/magic-link"
-        element={
-          <SetupGuard>
-            <MagicLinkPage />
-          </SetupGuard>
-        }
-      />
-      <Route
-        path="/confirm-email"
-        element={
-          <SetupGuard>
-            <ConfirmEmailPage />
-          </SetupGuard>
-        }
-      />
-      <Route
-        path="/cancel-withdraw"
-        element={
-          <SetupGuard>
-            <CancelWithdrawPage />
-          </SetupGuard>
-        }
       />
       <Route
         path="/settings/account"
