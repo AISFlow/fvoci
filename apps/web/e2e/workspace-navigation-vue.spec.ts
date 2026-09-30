@@ -120,6 +120,8 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   const members = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()).items;
   const memberId = members.find((item: { email: string }) => item.email === "navigation-inbox@example.com").userId;
   const copy = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items.find((item: { key: string }) => item.key === "COPY");
+  // The recipient creates tasks, then the owner assigns them: creation excludes
+  // its actor, so each assignment contributes exactly one notification.
   // Confirm outbox delivery for each bounded setup batch before producing more.
   // This keeps relay backlog out of the paging assertion without longer waits.
   const recipientContext = await browser.newContext({ baseURL });
@@ -129,7 +131,7 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
     for (let start = 0; start < 105; start += 15) {
       const count = Math.min(15, 105 - start);
       await Promise.all(Array.from({ length: count }, async (_, offset) => {
-        const task = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/tasks`, { data: { title: `Paged inbox ${start + offset}` } });
+        const task = await recipient.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/tasks`, { data: { title: `Paged inbox ${start + offset}` } });
         expect(task.status()).toBe(201);
         const id = (await task.json()).id;
         const assigned = await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${id}`, { data: { assigneeIds: [memberId] } });
