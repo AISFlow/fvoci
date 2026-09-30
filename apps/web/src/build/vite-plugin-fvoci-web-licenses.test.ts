@@ -96,12 +96,12 @@ test("installed XLSX worker packages reach the public notice, with the existing 
   const entries = packageLicenseEntries(modules);
   assert.deepEqual(
     entries.map((entry) => `${entry.name}@${entry.version}`),
-    ["@office-kit/xlsx@0.21.1", "fflate@0.8.3", "saxes@6.0.0", "@nodable/entities@3.0.0"],
+    ["@office-kit/xlsx@0.22.0", "fflate@0.8.3", "saxes@6.0.0", "@nodable/entities@3.0.0"],
   );
   const notice = finalizeBrowserOpenSourceNotice(mergeLicenseEntries("[]", entries), repoRoot, manifestPath);
   for (const heading of [
     "## @nodable/entities - 3.0.0 (MIT)",
-    "## @office-kit/xlsx - 0.21.1 (MIT)",
+    "## @office-kit/xlsx - 0.22.0 (MIT)",
     "## fflate - 0.8.3 (MIT)",
     "## saxes - 6.0.0 (ISC)",
   ]) {

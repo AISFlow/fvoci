@@ -8,7 +8,7 @@ import {
   COLLAB_PERSIST_REQUEST,
   decodeHocuspocusFrame,
   persistParts,
-  PROVIDER_VERSION,
+  FIXTURE_PROVIDER_VERSION,
 } from "./collab-wire.ts";
 
 const fixturePath = path.resolve(
@@ -45,7 +45,7 @@ test("decoder keeps provider 4.6 persist strings and awareness token", () => {
   assert.equal(auth?.kind, "auth-token");
   if (auth?.kind === "auth-token") {
     assert.equal(auth.token, String(fixture.clientID));
-    assert.equal(auth.providerVersion, PROVIDER_VERSION);
+    assert.equal(auth.providerVersion, FIXTURE_PROVIDER_VERSION);
     assert.notEqual(auth.token, "fvoci_session");
   }
 
