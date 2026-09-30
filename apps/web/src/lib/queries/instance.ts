@@ -22,7 +22,7 @@ export const publicInstanceQuery = queryOptions({
  * For screens that act on a policy an admin may just have changed.
  */
 export function refreshPublicInstance(queryClient: QueryClient) {
-  return queryClient.fetchQuery({
+  return queryClient.query({
     queryKey: publicInstanceQuery.queryKey,
     queryFn: async () => ensureOk(await api.GET("/api/v1/instance", { cache: "no-cache" })),
     staleTime: 0,
