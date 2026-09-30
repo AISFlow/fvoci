@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Response } from "@playwright/test";
 import { login } from "./helpers";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
@@ -6,12 +6,12 @@ import { writeFileSync } from "node:fs";
 test.describe.configure({ mode: "serial" });
 async function fixture(page: Page, key: string) {
   const served: Promise<{ path: string; sha256: string }>[] = [];
-  page.on("response", response => {
+  const captureAsset = (response: Response) => {
     const path = new URL(response.url()).pathname;
     if (path.startsWith("/assets/") && /\.(js|css)$/.test(path)) {
       served.push(response.body().then(body => ({ path: path.slice(1), sha256: createHash("sha256").update(body).digest("hex") })));
     }
-  });
+  };
   await page.goto("/");
   await expect(page.getByRole("button", { name: "시작하기" }).or(page.getByRole("button", { name: "로그아웃" })).or(page.getByRole("button", { name: "로그인", exact: true }))).toBeVisible();
   if (await page.getByRole("button", { name: "시작하기" }).count()) {
@@ -31,7 +31,7 @@ async function fixture(page: Page, key: string) {
     const row = await created.json(); return { ...row, displayId: `${key}-${row.number}` };
   }
   async function stored(id: string) { const res = await page.request.get(`${base}/tasks/${id}`); expect(res.ok()).toBe(true); return res.json(); }
-  async function open(month = "2027-05") { await page.goto(`/w/caltemplate/${key}/calendar`); await expect(page).toHaveURL(`/w/caltemplate/${key}/calendar`); await expect(page.locator("[data-v-app]")).toHaveCount(1); await page.locator('input[type="month"]').fill(month); await expect(page.locator('table[data-testid="collection-calendar"]')).toBeVisible(); writeFileSync(`/tmp/fvoci-front272-calendar-served-${key}.json`, JSON.stringify({ head: process.env.FVOCI_CALENDAR_VERIFY_HEAD ?? "unbound", url: new URL(page.url()).pathname, assets: await Promise.all(served) }, null, 2)); }
+  async function open(month = "2027-05") { page.on("response", captureAsset); await page.goto(`/w/caltemplate/${key}/calendar`); await expect(page).toHaveURL(`/w/caltemplate/${key}/calendar`); await expect(page.locator("[data-v-app]")).toHaveCount(1); await page.locator('input[type="month"]').fill(month); await expect(page.locator('table[data-testid="collection-calendar"]')).toBeVisible(); writeFileSync(`/tmp/fvoci-front272-calendar-served-${key}.json`, JSON.stringify({ head: process.env.FVOCI_CALENDAR_VERIFY_HEAD ?? "unbound", url: new URL(page.url()).pathname, assets: await Promise.all(served) }, null, 2)); page.off("response", captureAsset); }
   return { base, project, task, stored, open };
 }
 
