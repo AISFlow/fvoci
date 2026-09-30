@@ -80,10 +80,97 @@ test("no-op writes do not absorb earlier typing, and another top item or undo br
   manager.destroy(); doc.destroy();
 });
 
+test("undoing a newer ordinary item cannot reopen the earlier composition item", () => {
+  const doc = new Y.Doc();
+  const text = doc.getText("text");
+  const manager = new Y.UndoManager(text);
+  const policy = compositionUndoCapture(manager);
+  try {
+    policy.capture(1); text.insert(0, "한"); policy.release();
+    const originalItem = manager.undoStack.at(-1);
+    manager.stopCapturing(); text.insert(text.length, "ordinary");
+    assert.equal(manager.undoStack.length, 2);
+    manager.undo();
+    assert.equal(text.toString(), "한");
+    assert.equal(manager.undoStack.at(-1), originalItem);
+    policy.capture(1); text.insert(text.length, "글"); policy.release();
+    assert.equal(manager.undoStack.length, 2);
+    manager.undo(); assert.equal(text.toString(), "한");
+    manager.redo(); assert.equal(text.toString(), "한글");
+    manager.undo(); manager.undo(); assert.equal(text.toString(), "");
+  } finally { manager.destroy(); doc.destroy(); }
+});
+
+test("the installed plugin respects historical undo even when the old item returns to the top", () => {
+  const doc = new Y.Doc();
+  const text = doc.getText("text");
+  const peer = doc.getText("peer");
+  const manager = new Y.UndoManager([text, peer], { trackedOrigins: new Set([ySyncPluginKey]) });
+  const plugin = createCompositionUndoPlugin();
+  let state = EditorState.create({ schema: getSchema(createFvociExtensions()), plugins: [new Plugin({ key: yUndoPluginKey, state: { init: () => ({ undoManager: manager }), apply: (_tr, value) => value } }), plugin] });
+  const host = { state };
+  const view = plugin.spec.view!(host as EditorView);
+  const apply = (tr: import("@tiptap/pm/state").Transaction) => { state = state.apply(tr); host.state = state; };
+  try {
+    apply(state.tr.insertText("한", 1).setMeta("composition", 1));
+    doc.transact(() => text.insert(0, "한"), ySyncPluginKey);
+    const originalItem = manager.undoStack.at(-1);
+    manager.stopCapturing();
+    apply(state.tr.insertText("ordinary", 2));
+    doc.transact(() => text.insert(text.length, "ordinary"), ySyncPluginKey);
+    assert.equal(manager.undoStack.length, 2);
+    manager.undo();
+    apply(state.tr.delete(2, 10).setMeta(ySyncPluginKey, { isChangeOrigin: true, isUndoRedoOperation: true }));
+    assert.equal(manager.undoStack.at(-1), originalItem);
+    doc.transact(() => peer.insert(0, "peer"), "peer");
+    apply(state.tr.insertText("글", 2).setMeta("composition", 1));
+    doc.transact(() => text.insert(text.length, "글"), ySyncPluginKey);
+    assert.equal(manager.undoStack.length, 2);
+    manager.undo(); assert.equal(text.toString(), "한");
+    assert.equal(peer.toString(), "peer");
+    manager.redo(); assert.equal(text.toString(), "한글");
+    assert.equal(peer.toString(), "peer");
+  } finally { view.destroy!(); manager.destroy(); doc.destroy(); }
+});
+
+test("a composition started after undo keeps grouping when Yjs clears the redo stack", () => {
+  const doc = new Y.Doc();
+  const text = doc.getText("text");
+  const manager = new Y.UndoManager(text, { captureTimeout: 37 });
+  const policy = compositionUndoCapture(manager);
+  try {
+    policy.capture(1); text.insert(0, "한"); policy.release();
+    const originalItem = manager.undoStack.at(-1);
+    manager.stopCapturing(); text.insert(text.length, "ordinary");
+    manager.undo(); manager.redo(); manager.undo();
+    assert.equal(manager.undoStack.at(-1), originalItem);
+    assert.equal(manager.redoStack.length, 1);
+    policy.capture(1); text.insert(text.length, "ㄱ"); policy.release();
+    assert.equal(manager.redoStack.length, 0);
+    assert.equal(manager.undoStack.length, 2);
+    // Remote selection repair still may stop capture after the history boundary.
+    manager.stopCapturing();
+    policy.capture(1); text.delete(1, 1); text.insert(1, "글"); policy.release();
+    assert.equal(manager.undoStack.length, 2);
+    assert.equal(manager.captureTimeout, 37);
+    manager.undo(); assert.equal(text.toString(), "한");
+    manager.redo(); assert.equal(text.toString(), "한글");
+    manager.clear();
+    policy.capture(1); text.insert(text.length, "새"); policy.release();
+    manager.undo(); assert.equal(text.toString(), "한글");
+  } finally { policy.destroy(); manager.destroy(); doc.destroy(); }
+});
+
 test("the plugin wraps actual local Yjs writes and ignores remote, unrecorded and ordinary edits", () => {
   const doc = new Y.Doc();
   const text = doc.getText("text");
   const manager = new Y.UndoManager(text, { captureTimeout: 37, trackedOrigins: new Set([ySyncPluginKey]) });
+  const registered: string[] = [];
+  const removed: string[] = [];
+  const on = manager.on.bind(manager);
+  const off = manager.off.bind(manager);
+  manager.on = (name, listener) => { registered.push(name); return on(name, listener); };
+  manager.off = (name, listener) => { removed.push(name); return off(name, listener); };
   const plugin = createCompositionUndoPlugin();
   const schema = getSchema(createFvociExtensions());
   let state = EditorState.create({ schema, plugins: [new Plugin({ key: yUndoPluginKey, state: { init: () => ({ undoManager: manager }), apply: (_tr, value) => value } }), plugin] });
@@ -113,6 +200,8 @@ test("the plugin wraps actual local Yjs writes and ignores remote, unrecorded an
   doc.transact(() => text.insert(0, "ordinary"), ySyncPluginKey);
   assert.equal(observed.at(-1), 37);
   view.destroy!();
+  assert.deepEqual(registered, ["stack-item-popped", "stack-cleared"]);
+  assert.deepEqual(removed, registered, "destroy removes both owned history listeners");
   apply(state.tr.insertText("한", 1).setMeta("composition", 2));
   doc.transact(() => text.insert(0, "한"), ySyncPluginKey);
   assert.equal(observed.at(-1), 37, "destroy removes the owned listeners");

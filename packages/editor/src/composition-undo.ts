@@ -12,6 +12,18 @@ export function compositionUndoCapture(manager: UndoManager) {
 	let composition: number | undefined;
 	let timeout: number | undefined;
 	let item: UndoManager["undoStack"][number] | undefined;
+	const reset = () => {
+		composition = undefined;
+		item = undefined;
+	};
+	const cleared = ({ undoStackCleared }: { undoStackCleared: boolean }) => {
+		if (undoStackCleared) reset();
+	};
+	// Undoing a newer item can expose this composition's old item again.
+	// Top identity and the transient undoing/redoing flags cannot detect that
+	// history boundary once the next local write starts.
+	manager.on("stack-item-popped", reset);
+	manager.on("stack-cleared", cleared);
 	return {
 		capture(id: number): void {
 			if (composition !== id || (item && manager.undoStack.at(-1) !== item)) {
@@ -36,6 +48,10 @@ export function compositionUndoCapture(manager: UndoManager) {
 			}
 			manager.captureTimeout = timeout;
 			timeout = undefined;
+		},
+		destroy(): void {
+			manager.off("stack-item-popped", reset);
+			manager.off("stack-cleared", cleared);
 		},
 	};
 }
@@ -72,6 +88,7 @@ export function createCompositionUndoPlugin(): Plugin<number | null> {
 					manager.doc.off("beforeTransaction", before);
 					manager.doc.off("afterTransaction", after);
 					capture.release();
+					capture.destroy();
 				},
 			};
 		},
