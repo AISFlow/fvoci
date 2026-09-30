@@ -10,8 +10,13 @@ import AdminShell from "../components/AdminShell.vue";
 import AuditSettingsView from "../features/settings/AuditSettingsView.vue";
 
 const me = useQuery(meQuery);
-const audit = useQuery(() => ({ ...adminAuditQuery, enabled: me.data.value?.isInstanceAdmin === true }));
-const eeRequired = computed(() => audit.error.value instanceof ProblemError && audit.error.value.status === 404);
+const audit = useQuery(() => ({
+  ...adminAuditQuery,
+  enabled: me.data.value?.isInstanceAdmin === true,
+}));
+const eeRequired = computed(
+  () => audit.error.value instanceof ProblemError && audit.error.value.status === 404,
+);
 const failure = computed(() => {
   if (eeRequired.value || !audit.error.value) return null;
   return audit.error.value instanceof ProblemError ? audit.error.value.title : t("error.network");

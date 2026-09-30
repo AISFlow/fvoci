@@ -33,9 +33,13 @@ const me = useQuery(meQuery);
 const identities = useQuery(identitiesQuery);
 const providers = useQuery(providersQuery);
 const mfa = useQuery(mfaStatusQuery);
-watch(() => me.data.value?.textScale, (scale) => {
-  if (scale !== undefined) applyTextScale(scale);
-}, { immediate: true });
+watch(
+  () => me.data.value?.textScale,
+  (scale) => {
+    if (scale !== undefined) applyTextScale(scale);
+  },
+  { immediate: true },
+);
 
 function queryString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
@@ -49,32 +53,44 @@ const successNotice = computed(() => {
 const errorNotice = computed(() => oidcErrorMessage(queryString(route.query.error)));
 
 watchEffect(() => {
-  if (me.error.value instanceof ProblemError && me.error.value.status === 401) redirectTo(loginPath(window.location));
+  if (me.error.value instanceof ProblemError && me.error.value.status === 401)
+    redirectTo(loginPath(window.location));
 });
 
-const failed = computed(() => me.isError.value || identities.isError.value || providers.isError.value || mfa.isError.value);
-const failure = computed(() => loadErrorMessage(me.error.value ?? identities.error.value ?? providers.error.value ?? mfa.error.value));
+const failed = computed(
+  () =>
+    me.isError.value || identities.isError.value || providers.isError.value || mfa.isError.value,
+);
+const failure = computed(() =>
+  loadErrorMessage(
+    me.error.value ?? identities.error.value ?? providers.error.value ?? mfa.error.value,
+  ),
+);
 const ready = computed(
   () => me.data.value && identities.data.value && providers.data.value && mfa.data.value,
 );
 
-function retry(): void {
-  void me.refetch();
-  void identities.refetch();
-  void providers.refetch();
-  void mfa.refetch();
+async function retry(): Promise<void> {
+  await Promise.all([me.refetch(), identities.refetch(), providers.refetch(), mfa.refetch()]);
 }
 
 async function onWithdraw(input: Parameters<typeof withdrawAccount>[0]): Promise<void> {
   window.location.assign(await withdrawAccount(input));
 }
 
-async function savePreferences(input: { locale: "ko"; timezone: string; weekStartsOn: number; textScale: number }): Promise<void> {
+async function savePreferences(input: {
+  locale: "ko";
+  timezone: string;
+  weekStartsOn: number;
+  textScale: number;
+}): Promise<void> {
   const current = me.data.value;
   if (!current) return;
-  const committed = await ensureOk(await api.PATCH("/api/v1/auth/me", {
-    body: { givenName: current.givenName, ...input },
-  }));
+  const committed = await ensureOk(
+    await api.PATCH("/api/v1/auth/me", {
+      body: { givenName: current.givenName, ...input },
+    }),
+  );
   queryClient.setQueryData(meQuery.queryKey, committed);
   await queryClient.invalidateQueries({ queryKey: meQuery.queryKey });
 }
@@ -89,11 +105,15 @@ async function savePreferences(input: { locale: "ko"; timezone: string; weekStar
       <div class="settings-page">
         <div v-if="failed">
           <p role="alert" class="text-muted">{{ failure }}</p>
-          <UButton type="button" size="sm" class="mt-2" @click="retry">{{ t("load.retry") }}</UButton>
+          <UButton type="button" size="sm" class="mt-2" @click="retry">{{
+            t("load.retry")
+          }}</UButton>
         </div>
         <QueryLoading v-else-if="!ready" />
         <AccountSettingsView
-          v-else-if="me.data.value && identities.data.value && providers.data.value && mfa.data.value"
+          v-else-if="
+            me.data.value && identities.data.value && providers.data.value && mfa.data.value
+          "
           :me="me.data.value"
           :identities="identities.data.value.items"
           :providers="providers.data.value.providers"
@@ -119,11 +139,18 @@ async function savePreferences(input: { locale: "ko"; timezone: string; weekStar
             />
           </template>
         </AccountSettingsView>
-        <AccountTokensSection v-if="ready && !failed && me.data.value" :timezone="me.data.value.timezone" class="mt-6" />
+        <AccountTokensSection
+          v-if="ready && !failed && me.data.value"
+          :timezone="me.data.value.timezone"
+          class="mt-6"
+        />
       </div>
     </main>
     <footer class="border-t border-default px-4 py-3">
-      <nav class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted" :aria-label="t('operator.title')">
+      <nav
+        class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted"
+        :aria-label="t('operator.title')"
+      >
         <a href="/service-info" class="underline underline-offset-2">{{ t("operator.title") }}</a>
         <a href="/legal/terms" class="underline underline-offset-2">{{ t("legal.terms") }}</a>
         <a href="/legal/privacy" class="underline underline-offset-2">{{ t("legal.privacy") }}</a>

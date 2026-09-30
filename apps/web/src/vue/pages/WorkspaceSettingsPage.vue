@@ -49,9 +49,13 @@ watchEffect(() => {
   }
 });
 
-const canManage = computed(() => (workspace.value ? roleAtLeast(workspace.value.role, "admin") : false));
+const canManage = computed(() =>
+  workspace.value ? roleAtLeast(workspace.value.role, "admin") : false,
+);
 const isOwner = computed(() => workspace.value?.role === "owner");
-const memberOrAbove = computed(() => (workspace.value ? roleAtLeast(workspace.value.role, "member") : false));
+const memberOrAbove = computed(() =>
+  workspace.value ? roleAtLeast(workspace.value.role, "member") : false,
+);
 const showSso = computed(() =>
   workspace.value ? showsWorkspaceSso(workspace.value.kind, canManage.value) : false,
 );
@@ -64,13 +68,19 @@ const lifecycle = ref(0);
 type WorkspaceMutation = { workspaceId: string; lifecycle: number };
 const isCurrent = (input: WorkspaceMutation) =>
   input.lifecycle === lifecycle.value && input.workspaceId === workspaceId.value;
-watch([slug, workspaceId, () => workspace.value?.role, () => session.me.value?.userId], () => {
+watch(
+  [slug, workspaceId, () => workspace.value?.role, () => session.me.value?.userId],
+  () => {
+    lifecycle.value += 1;
+    nameError.value = null;
+    nameSaved.value = false;
+    deleteError.value = null;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
   lifecycle.value += 1;
-  nameError.value = null;
-  nameSaved.value = false;
-  deleteError.value = null;
-}, { flush: "sync" });
-onScopeDispose(() => { lifecycle.value += 1; });
+});
 
 const rename = useMutation({
   mutationFn: async (input: WorkspaceMutation & { name: string }) =>
@@ -105,21 +115,27 @@ const remove = useMutation({
         body: { confirmSlug: input.confirmSlug },
       }),
     ),
-  onSuccess: (_data, input) => {
+  onSuccess: async (_data, input) => {
     if (isCurrent(input)) {
       deleteError.value = null;
       window.location.replace("/");
     }
-    void queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] });
-    void queryClient.invalidateQueries({ queryKey: ["workspaces", input.workspaceId] });
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["workspaces", input.workspaceId] }),
+    ]);
   },
   onError: (err: unknown, input) => {
     if (!isCurrent(input)) return;
     deleteError.value = err instanceof ProblemError ? err.title : t("error.network");
   },
 });
-const namePending = computed(() => rename.isPending.value && !!rename.variables.value && isCurrent(rename.variables.value));
-const deletePending = computed(() => remove.isPending.value && !!remove.variables.value && isCurrent(remove.variables.value));
+const namePending = computed(
+  () => rename.isPending.value && !!rename.variables.value && isCurrent(rename.variables.value),
+);
+const deletePending = computed(
+  () => remove.isPending.value && !!remove.variables.value && isCurrent(remove.variables.value),
+);
 
 function onSaveName(name: string): void {
   if (!canManage.value || workspace.value?.kind !== "team" || namePending.value) return;
@@ -136,12 +152,21 @@ function onDelete(confirmSlug: string): void {
 </script>
 
 <template>
-  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="session.status.value === 'error'" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :key="`${workspace.id}:${workspace.role}`" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="settings">
+  <WorkspaceShell
+    v-else-if="workspace"
+    :key="`${workspace.id}:${workspace.role}`"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+    active="settings"
+  >
     <div v-if="meta.isError.value && !meta.data.value">
       <p role="alert" class="text-muted">{{ loadErrorMessage(meta.error.value) }}</p>
       <UButton size="sm" class="mt-2" @click="meta.refetch()">{{ t("load.retry") }}</UButton>
@@ -175,7 +200,11 @@ function onDelete(confirmSlug: string): void {
         :current-user-id="session.me.value?.userId ?? null"
         :current-user-role="workspace.role"
       />
-      <WorkspaceGroupsSection v-if="memberOrAbove" :workspace-id="workspace.id" :can-manage="canManage" />
+      <WorkspaceGroupsSection
+        v-if="memberOrAbove"
+        :workspace-id="workspace.id"
+        :can-manage="canManage"
+      />
       <WorkspaceConsentsSection v-if="canManage" :workspace-id="workspace.id" />
       <WorkspaceExportSection :workspace-id="workspace.id" :can-manage="canManage" />
       <WorkspaceImportSection :workspace-id="workspace.id" :can-manage="canManage" />
@@ -185,7 +214,10 @@ function onDelete(confirmSlug: string): void {
       <WorkspaceSsoSection v-if="showSso" :workspace-id="workspace.id" />
       <WorkspaceWebhooksSection v-if="canManage" :workspace-id="workspace.id" />
       <WorkspaceGithubSection v-if="canManage" :workspace-id="workspace.id" />
-      <DeletedProjectsSection v-if="canManage && workspace.kind === 'team'" :workspace-id="workspace.id" />
+      <DeletedProjectsSection
+        v-if="canManage && workspace.kind === 'team'"
+        :workspace-id="workspace.id"
+      />
       <WorkspaceEventsSection v-if="canManage" :workspace-id="workspace.id" />
     </div>
   </WorkspaceShell>

@@ -15,8 +15,14 @@ const current = useQuery(() => ({
   ...legalDocQuery(kind.value),
   enabled: me.data.value?.isInstanceAdmin === true && /^[a-z0-9-]{1,50}$/.test(kind.value),
 }));
-const none = computed(() => current.error.value instanceof ProblemError && current.error.value.status === 404);
+const none = computed(
+  () => current.error.value instanceof ProblemError && current.error.value.status === 404,
+);
 const failed = computed(() => current.isError.value && !none.value);
+
+async function retry(): Promise<void> {
+  await current.refetch();
+}
 </script>
 
 <template>
@@ -27,7 +33,7 @@ const failed = computed(() => current.isError.value && !none.value);
       :current="current.isError.value ? null : (current.data.value ?? null)"
       :loading="current.isLoading.value"
       :error="failed ? loadErrorMessage(current.error.value) : null"
-      :on-retry="() => void current.refetch()"
+      :on-retry="retry"
       :on-publish="(input) => publishLegalDocument(queryClient, input)"
     />
   </AdminShell>
