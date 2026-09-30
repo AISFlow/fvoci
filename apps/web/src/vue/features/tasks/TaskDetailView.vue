@@ -171,7 +171,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
     />
     <div v-if="canEdit" class="flex flex-wrap gap-2" data-testid="task-detail-actions">
       <UButton
-        v-if="!readOnly"
+        v-if="!bodyReadOnly"
         size="sm"
         variant="outline"
         color="neutral"
@@ -208,7 +208,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
     <TaskAttachmentsPanel
       :workspace-id="workspaceId"
       :task-id="task.id"
-      :read-only="readOnly || task.archivedAt != null"
+      :read-only="bodyReadOnly || task.archivedAt != null"
     />
     <TaskTimeEntries
       :workspace-id="workspaceId"
