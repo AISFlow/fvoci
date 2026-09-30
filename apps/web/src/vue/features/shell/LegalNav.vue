@@ -3,7 +3,7 @@ import { t } from "@fvoci/i18n";
 import { LEGAL_DOCS } from "@/features/legal/legal-docs";
 
 // The signed-in footer (features/legal/operator-info.tsx AuthenticatedLegalNav):
-// service information and the policies, all React pages (full loads).
+// service information and the policies, public Vue pages (full loads).
 </script>
 
 <template>
