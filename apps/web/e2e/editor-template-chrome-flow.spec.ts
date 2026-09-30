@@ -30,7 +30,12 @@ test("non-editor Vue screens do not load the editor host or its collaboration pl
     data: { key: "TCL", name: "Editor lazy boundary", visibility: "workspace" },
   });
   expect(project.status()).toBe(201);
-  await page.goto(`/w/${admin.workspaceSlug}/TCL/gantt`);
+  const projectId = (await project.json()).id;
+  const task = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, {
+    data: { title: "Lazy route witness", startDate: "2026-09-28", dueDate: "2026-09-30" },
+  });
+  expect(task.status()).toBe(201);
+  await page.goto(`/w/${admin.workspaceSlug}/TCL/gantt?y=2026&m=9`);
   await expect(page.locator('[data-slot="gantt"]')).toBeVisible();
   await captureAssets();
   // The group serves an immutable copied build. Read the actual requested
@@ -55,6 +60,10 @@ test("fixed insert and history use the existing room, selection and persisted do
   try {
     await openDoc(page, doc.path);
     await openDoc(peer.page, doc.path);
+    const plugins = await editorOf(page).evaluate((root) =>
+      (root as HTMLElement & { editor: { state: { plugins: Array<{ key: string }> } } }).editor.state.plugins.map((plugin) => plugin.key));
+    expect(plugins.filter((key) => key.startsWith("bubbleMenu$"))).toHaveLength(1);
+    expect(plugins.filter((key) => key.startsWith("dragHandle$"))).toHaveLength(1);
     const toolbar = page.locator(".fvoci-template-toolbar--fixed");
     await expect(toolbar.locator('[role="group"]')).toHaveCount(2);
     await expect(toolbar.getByRole("button", { name: "실행 취소", exact: true })).toBeDisabled();
