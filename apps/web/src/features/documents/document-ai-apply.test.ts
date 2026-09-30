@@ -9,7 +9,7 @@ import {
   type TaskApplyState,
 } from "./document-ai-apply.ts";
 
-test("요약은 줄마다 문단, 링크 제안은 문서 멘션 한 문단이다", () => {
+await test("요약은 줄마다 문단, 링크 제안은 문서 멘션 한 문단이다", () => {
   assert.deepEqual(aiInsertNodes({ action: "summarize", lines: ["첫 줄 🙂", "", "둘째"] }), [
     { type: "paragraph", content: [{ type: "text", text: "첫 줄 🙂" }] },
     { type: "paragraph", content: [{ type: "text", text: "둘째" }] },
@@ -39,19 +39,21 @@ test("요약은 줄마다 문단, 링크 제안은 문서 멘션 한 문단이�
 class Rejected extends Error {
   readonly status: number;
   constructor(status: number) {
-    super(`status ${status}`);
+    super(`status ${String(status)}`);
     this.status = status;
   }
 }
 const definite = (error: unknown) =>
   isDefiniteStatus(error instanceof Rejected ? error.status : null);
 
-test("부분 실패 후 재시도는 이미 만든 태스크를 다시 만들지 않는다", async () => {
+await test("부분 실패 후 재시도는 이미 만든 태스크를 다시 만들지 않는다", async () => {
   const sent: string[] = [];
   let failB = true;
-  const create = async (title: string) => {
+  const create = (title: string) => {
     sent.push(title);
-    if (title === "B" && failB) throw new Rejected(422);
+    if (title === "B" && failB) return Promise.reject(new Rejected(422));
+
+    return Promise.resolve();
   };
   const first = await applyTaskTitles(["A", "B", "C"], [], create, definite);
   assert.deepEqual(first.states, ["created", "pending", "pending"]);
@@ -68,12 +70,14 @@ test("부분 실패 후 재시도는 이미 만든 태스크를 다시 만들지
   assert.equal(hasPendingTask(second.states), false);
 });
 
-test("응답이 없거나 5xx 면 커밋됐을 수 있으니 재시도 대상에서 뺀다", async () => {
+await test("응답이 없거나 5xx 면 커밋됐을 수 있으니 재시도 대상에서 뺀다", async () => {
   const sent: string[] = [];
-  const create = async (title: string) => {
+  const create = (title: string) => {
     sent.push(title);
-    if (title === "A") throw new TypeError("network");
-    if (title === "B") throw new Rejected(502);
+    if (title === "A") return Promise.reject(new TypeError("network"));
+    if (title === "B") return Promise.reject(new Rejected(502));
+
+    return Promise.resolve();
   };
   const first = await applyTaskTitles(["A", "B"], [], create, definite);
   assert.deepEqual(first.states, ["unknown", "pending"]);
@@ -85,13 +89,15 @@ test("응답이 없거나 5xx 면 커밋됐을 수 있으니 재시도 대상에
   assert.equal(hasPendingTask(states), false);
 });
 
-test("진행 콜백은 성공·실패마다 현재 상태 사본을 받는다", async () => {
+await test("진행 콜백은 성공·실패마다 현재 상태 사본을 받는다", async () => {
   const seen: TaskApplyState[][] = [];
   await applyTaskTitles(
     ["A", "B"],
     [],
-    async (title) => {
-      if (title === "B") throw new Rejected(403);
+    (title) => {
+      if (title === "B") return Promise.reject(new Rejected(403));
+
+      return Promise.resolve();
     },
     definite,
     (states) => seen.push(states),
@@ -102,7 +108,7 @@ test("진행 콜백은 성공·실패마다 현재 상태 사본을 받는다", 
   ]);
 });
 
-test("4xx 만 확정 거절이다", () => {
+await test("4xx 만 확정 거절이다", () => {
   assert.equal(isDefiniteStatus(400), true);
   assert.equal(isDefiniteStatus(409), true);
   assert.equal(isDefiniteStatus(500), false);
@@ -116,7 +122,7 @@ const block = (name: string, contentSize: number) => ({
   nodeSize: contentSize + 2,
 });
 
-test("추가 위치는 마지막 블록 뒤이고, 빈 마지막 문단만 대체한다", () => {
+await test("추가 위치는 마지막 블록 뒤이고, 빈 마지막 문단만 대체한다", () => {
   // "기존 본문" paragraph: text stays whole, the result goes after it.
   assert.deepEqual(appendRange({ content: { size: 7 }, lastChild: block("paragraph", 5) }), {
     from: 7,

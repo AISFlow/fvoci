@@ -40,7 +40,7 @@ export async function storeSubscription(
   subscription: PushSubscription,
   userId: string,
 ): Promise<void> {
-  ensureOk(
+  await ensureOk(
     await api.PUT("/api/v1/workspaces/{workspace_id}/push-subscriptions", {
       params: { path: { workspace_id: workspaceId } },
       body: subscriptionBody(subscription.toJSON()),
@@ -69,7 +69,7 @@ export function rebindPushSession(input: {
   } catch {
     /* fall through: re-binding twice is harmless */
   }
-  void (async () => {
+  (async () => {
     const subscription = await currentSubscription();
     if (!subscription || !boundTo(subscription.options.applicationServerKey, publicKey)) return;
     await storeSubscription(workspaceId, subscription, userId);

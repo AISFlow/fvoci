@@ -50,14 +50,16 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 const invalidations = [
   [
     "stream open resync",
-    (client: QueryClient) => invalidateTaskStreamResyncCaches(client, WS, PROJECT),
+    (client: QueryClient) => {
+      invalidateTaskStreamResyncCaches(client, WS, PROJECT);
+    },
   ],
-  ["task hint", (client: QueryClient) => void invalidateTaskCaches(client, WS, PROJECT, "task-1")],
+  ["task hint", (client: QueryClient) => invalidateTaskCaches(client, WS, PROJECT, "task-1")],
 ] as const;
 
 for (const [list, key] of LISTS) {
   for (const [name, invalidate] of invalidations) {
-    test(`${list}: ${name} during "load more" keeps the requested page and refetches every loaded page`, async () => {
+    await test(`${list}: ${name} during "load more" keeps the requested page and refetches every loaded page`, async () => {
       const { client, observer, gets, pages, unsubscribe } = mountList(key);
       await flush();
       assert.deepEqual(
@@ -67,11 +69,11 @@ for (const [list, key] of LISTS) {
       gets[0].resolve({ items: ["a"], nextCursor: "c1" });
       await flush();
 
-      void observer.fetchNextPage();
+      const nextPage = observer.fetchNextPage();
       await flush();
       assert.equal(gets.at(-1)?.cursor, "c1");
       // The EventSource `open` resync (or a task hint) lands while page 2 is in flight.
-      invalidate(client);
+      const invalidation = invalidate(client);
       await flush();
       gets[1].resolve({ items: ["b"], nextCursor: null });
       await flush();
@@ -99,6 +101,7 @@ for (const [list, key] of LISTS) {
         [["a2"], ["b2"]],
       );
       assert.equal(gets.length, 4);
+      await Promise.all([nextPage, invalidation]);
       unsubscribe();
       client.clear();
     });

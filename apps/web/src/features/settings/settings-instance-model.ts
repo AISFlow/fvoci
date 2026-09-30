@@ -90,11 +90,10 @@ export function withMessageOverride(
   const next: Record<string, string> = {};
   if (isRecord(map)) {
     for (const [k, v] of Object.entries(map)) {
-      if (typeof v === "string") next[k] = v;
+      if (typeof v === "string" && !(text === "" && k === key)) next[k] = v;
     }
   }
-  if (text === "") delete next[key];
-  else next[key] = text;
+  if (text !== "") next[key] = text;
   return next;
 }
 

@@ -55,7 +55,7 @@ function recorder(): {
   };
 }
 
-test("blockIdAt — 안쪽 블록 id 를 고르고, 없으면 null", () => {
+await test("blockIdAt — 안쪽 블록 id 를 고르고, 없으면 null", () => {
   assert.equal(blockIdAt(stateAt(BLOCK_A)), BLOCK_A);
   assert.equal(blockIdAt(stateAt(BLOCK_A, BLOCK_B)), BLOCK_B);
   assert.equal(blockIdAt(stateAt(BLOCK_A, undefined)), BLOCK_A);
@@ -64,7 +64,7 @@ test("blockIdAt — 안쪽 블록 id 를 고르고, 없으면 null", () => {
   assert.equal(blockIdAt(stateAt("")), null);
 });
 
-test("bindBlockPresence — 블록이 바뀔 때만 awareness 에 쓴다", () => {
+await test("bindBlockPresence — 블록이 바뀔 때만 awareness 에 쓴다", () => {
   const editor = new FakeEditor();
   const { awareness, writes } = recorder();
 
@@ -84,7 +84,7 @@ test("bindBlockPresence — 블록이 바뀔 때만 awareness 에 쓴다", () =>
   assert.deepEqual(writes.at(-1), ["block", null]);
 });
 
-test("bindBlockPresence — 해제하면 block 을 지우고 더는 쓰지 않는다", () => {
+await test("bindBlockPresence — 해제하면 block 을 지우고 더는 쓰지 않는다", () => {
   const editor = new FakeEditor();
   const { awareness, writes } = recorder();
 
@@ -97,7 +97,7 @@ test("bindBlockPresence — 해제하면 block 을 지우고 더는 쓰지 않�
   assert.equal(writes.length, after);
 });
 
-test("writer 가 쓴 상태를 peersFromStates 가 blockId 로 읽는다", () => {
+await test("writer 가 쓴 상태를 peersFromStates 가 blockId 로 읽는다", () => {
   const editor = new FakeEditor();
   const local: Record<string, unknown> = {
     user: { id: "u-ada", name: "Ada", color: "#b91c1c" },

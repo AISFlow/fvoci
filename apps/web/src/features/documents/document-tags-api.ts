@@ -43,7 +43,7 @@ export async function createDocumentTag(
     );
   } catch (err) {
     if (err instanceof ProblemError && err.status === 409) {
-      const page = await queryClient.fetchQuery({
+      const page = await queryClient.query({
         ...documentTagPoolQuery(workspaceId, name),
         staleTime: 0,
       });

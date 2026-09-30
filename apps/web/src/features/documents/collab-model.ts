@@ -3,6 +3,7 @@ import {
   COLLAB_PERSIST_FAILED,
   COLLAB_PERSIST_REQUEST,
 } from "@fvoci/editor/collab";
+import { WebSocketStatus } from "@hocuspocus/provider";
 import { presenceColorOf } from "../../lib/presence.ts";
 import type {
   HocuspocusProvider,
@@ -58,7 +59,7 @@ export interface CollabPeer {
 
 function str(value: unknown, key: string): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
-  const v = Reflect.get(value, key);
+  const v: unknown = Reflect.get(value, key);
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
@@ -105,7 +106,7 @@ export function peersFromStates(
   for (const [clientId, state] of states) {
     if (clientId === selfClientId) continue;
     if (typeof state !== "object" || state === null) continue;
-    const user = Reflect.get(state, "user");
+    const user: unknown = Reflect.get(state, "user");
     const id = str(user, "id");
     const name = str(user, "name");
     const color = str(user, "color");
@@ -191,15 +192,20 @@ export interface PersistNowOptions {
 
 /* WHY: 저장 응답은 요청별로 확인한다. timeout·실패·연결 세대 상실은 저장 성공이
  * 아니므로 보관·내보내기·버전 저장 호출자가 작업을 중단하고 오류를 표시한다. */
+/** Only the transport operations the persist barrier consumes; observers need no full provider. */
+export type PersistProvider = Pick<HocuspocusProvider, "flushPendingUpdates" | "sendStateless"> & {
+  [K in "on" | "off"]: (...args: Parameters<HocuspocusProvider[K]>) => unknown;
+};
+
 export function persistNow(
-  provider: HocuspocusProvider,
+  provider: PersistProvider,
   observer?: PersistNowObserver,
   options?: PersistNowOptions,
 ): Promise<void> {
   const requestId = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const isSettled = () => settled;
     const done = (kind: "ack" | "fail" | "timeout" | "abort", error?: Error) => {
       if (settled) return;
       settled = true;
@@ -226,12 +232,12 @@ export function persistNow(
       done("abort", new Error(PERSIST_DISCONNECTED_MESSAGE));
     };
     const onStatus = ({ status }: onStatusParameters) => {
-      if (status === "disconnected") onDisconnected();
+      if (status === WebSocketStatus.Disconnected) onDisconnected();
     };
     const onAbort = () => {
       done("abort", new Error(PERSIST_DISCONNECTED_MESSAGE));
     };
-    timer = globalThis.setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       done("timeout", new Error("collab persist timed out"));
     }, PERSIST_TIMEOUT_MS);
     provider.on("stateless", onStateless);
@@ -245,7 +251,7 @@ export function persistNow(
       }
       options.signal.addEventListener("abort", onAbort);
     }
-    if (settled) return;
+    if (isSettled()) return;
     /* WHY: flushDelay 배칭은 문서 업데이트만 묶고 stateless 는 직행이라 마지막 ≤200ms 편집을 추월한다 — 먼저 내보낸다. */
     try {
       provider.flushPendingUpdates();

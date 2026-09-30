@@ -40,9 +40,14 @@ export function invalidateTaskStreamResyncCaches(
   workspaceId: string,
   projectId: string,
 ): void {
-  void queryClient.invalidateQueries({ queryKey: ["task-layout", workspaceId, projectId] });
-  void invalidateKeepingLoadMore(queryClient, ["tasks", workspaceId, projectId]);
-  void queryClient.invalidateQueries({ queryKey: ["project-collection", workspaceId, projectId] });
-  void invalidateKeepingLoadMore(queryClient, ["collection", workspaceId]);
-  void queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] });
+  Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["task-layout", workspaceId, projectId] }),
+    invalidateKeepingLoadMore(queryClient, ["tasks", workspaceId, projectId]),
+    queryClient.invalidateQueries({ queryKey: ["project-collection", workspaceId, projectId] }),
+    invalidateKeepingLoadMore(queryClient, ["collection", workspaceId]),
+    queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] }),
+  ]).catch((error: unknown) => {
+    // Stream callbacks cannot await resync; retain the cache's error state and report failure.
+    console.error("task stream cache resync failed", error);
+  });
 }

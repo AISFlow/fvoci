@@ -94,7 +94,7 @@ class PartUploadError extends Error {
   readonly status: number;
 
   constructor(partNumber: number, status: number) {
-    super(`part ${partNumber}: ${status}`);
+    super(`part ${String(partNumber)}: ${String(status)}`);
     this.name = "PartUploadError";
     this.status = status;
   }
@@ -110,8 +110,8 @@ class PartUrlsExpiredError extends Error {
   constructor(partNumber: number, status: number | null) {
     super(
       status === null
-        ? `part ${partNumber}: presigned URL about to expire`
-        : `part ${partNumber}: storage refused the signed URL (HTTP ${status})`,
+        ? `part ${String(partNumber)}: presigned URL about to expire`
+        : `part ${String(partNumber)}: storage refused the signed URL (HTTP ${String(status)})`,
     );
     this.name = "PartUrlsExpiredError";
   }
@@ -120,7 +120,9 @@ class PartUrlsExpiredError extends Error {
 /** Storage accepted the part but the bucket CORS hides its ETag: resending cannot help. */
 class MissingEtagError extends Error {
   constructor(partNumber: number) {
-    super(`part ${partNumber}: storage did not expose the ETag header (bucket CORS ExposeHeaders)`);
+    super(
+      `part ${String(partNumber)}: storage did not expose the ETag header (bucket CORS ExposeHeaders)`,
+    );
     this.name = "MissingEtagError";
   }
 }
@@ -215,7 +217,9 @@ async function putPresignedPart(
       lastError = err;
     }
   }
-  throw lastError instanceof Error ? lastError : new Error(`part ${target.partNumber} failed`);
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`part ${String(target.partNumber)} failed`);
 }
 
 async function putProxyPart(
@@ -266,7 +270,9 @@ async function putProxyPart(
       lastError = err;
     }
   }
-  throw lastError instanceof Error ? lastError : new Error(`part ${target.partNumber} failed`);
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`part ${String(target.partNumber)} failed`);
 }
 
 async function putParts(
@@ -440,10 +446,11 @@ function uploadsBridge(
       const created = await createUpload(file, signal);
       const total = created.parts.length;
       let finished = 0;
-      let progressed = false;
+      const progress = { completed: false };
+      const hasProgress = () => progress.completed;
       const tick = (): void => {
         finished += 1;
-        progressed = true;
+        progress.completed = true;
         onProgress(total === 0 ? 1 : finished / total);
       };
       let targets: PartTargets = created;
@@ -457,7 +464,7 @@ function uploadsBridge(
       let expiredWithoutProgress = 0;
       let parts: { partNumber: number; etag: string }[];
       for (;;) {
-        progressed = false;
+        progress.completed = false;
         try {
           const rest = await putParts(targets, receivedAt, file, tick, deps, signal);
           parts = [...uploaded, ...rest];
@@ -465,7 +472,7 @@ function uploadsBridge(
         } catch (err) {
           if (isAbortError(err) || signal?.aborted) throw err;
           if (err instanceof PartUrlsExpiredError) {
-            expiredWithoutProgress = progressed ? 1 : expiredWithoutProgress + 1;
+            expiredWithoutProgress = hasProgress() ? 1 : expiredWithoutProgress + 1;
             if (expiredWithoutProgress > 1) throw err;
           } else {
             if (isPermanentUploadError(err) || failureResumed) throw err;

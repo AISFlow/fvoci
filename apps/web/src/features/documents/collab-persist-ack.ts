@@ -159,11 +159,21 @@ export function scopedPersistObserver(
 ): ScopedPersistObserver {
   const scope: PersistAckScope = { documentId, connectionId };
   return {
-    onRequest: (requestId) => dispatch({ type: "request", requestId, ...scope }),
-    onAck: (requestId) => dispatch({ type: "ack", requestId, ...scope }),
-    onFail: (requestId) => dispatch({ type: "fail", requestId, ...scope }),
-    onTimeout: (requestId) => dispatch({ type: "timeout", requestId, ...scope }),
-    onAbort: (requestId) => dispatch({ type: "abort", requestId, ...scope }),
+    onRequest: (requestId) => {
+      dispatch({ type: "request", requestId, ...scope });
+    },
+    onAck: (requestId) => {
+      dispatch({ type: "ack", requestId, ...scope });
+    },
+    onFail: (requestId) => {
+      dispatch({ type: "fail", requestId, ...scope });
+    },
+    onTimeout: (requestId) => {
+      dispatch({ type: "timeout", requestId, ...scope });
+    },
+    onAbort: (requestId) => {
+      dispatch({ type: "abort", requestId, ...scope });
+    },
   };
 }
 

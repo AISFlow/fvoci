@@ -23,11 +23,18 @@ function fakeRegistration(log: string[]) {
     installing: worker as FakeWorker | null,
     waiting: null as FakeWorker | null,
     pushManager: {
-      subscribe: async (options?: PushSubscriptionOptionsInit) => {
+      subscribe: (options?: PushSubscriptionOptionsInit) => {
         // Mirrors the browser: AbortError "no active Service Worker".
-        if (!registration.active) throw new Error("no active Service Worker");
-        log.push(`subscribe:${options?.userVisibleOnly}`);
-        return { endpoint: "https://push.example.com/x" } as unknown as PushSubscription;
+        if (!registration.active) return Promise.reject(new Error("no active Service Worker"));
+        log.push(`subscribe:${String(options?.userVisibleOnly)}`);
+        return Promise.resolve({
+          endpoint: "https://push.example.com/x",
+          expirationTime: null,
+          options: { applicationServerKey: null, userVisibleOnly: true },
+          getKey: () => null,
+          toJSON: () => ({ endpoint: "https://push.example.com/x" }),
+          unsubscribe: () => Promise.resolve(true),
+        } satisfies PushSubscription);
       },
     },
   };
@@ -64,7 +71,7 @@ async function enable(
   log.push(`put:${subscription.endpoint}`);
 }
 
-test("delayed activation: no subscribe or PUT until the worker is active", async () => {
+await test("delayed activation: no subscribe or PUT until the worker is active", async () => {
   const log: string[] = [];
   const { registration, worker, move } = fakeRegistration(log);
   const done = enable(registration, log, 1_000);
@@ -78,7 +85,7 @@ test("delayed activation: no subscribe or PUT until the worker is active", async
   assert.equal(worker.listeners, 0, "statechange listener removed");
 });
 
-test("already active registration subscribes at once", async () => {
+await test("already active registration subscribes at once", async () => {
   const log: string[] = [];
   const { registration, worker } = fakeRegistration(log);
   registration.installing = null;
@@ -88,7 +95,7 @@ test("already active registration subscribes at once", async () => {
   assert.equal(worker.listeners, 0);
 });
 
-test("a worker already redundant before the listener attached rejects at once", async () => {
+await test("a worker already redundant before the listener attached rejects at once", async () => {
   const log: string[] = [];
   const { registration, worker } = fakeRegistration(log);
   // Turned redundant between register() resolving and the wait starting.
@@ -98,7 +105,7 @@ test("a worker already redundant before the listener attached rejects at once", 
   assert.equal(worker.listeners, 0);
 });
 
-test("activation failure (redundant worker) rejects without subscribe or PUT", async () => {
+await test("activation failure (redundant worker) rejects without subscribe or PUT", async () => {
   const log: string[] = [];
   const { registration, worker, move } = fakeRegistration(log);
   const done = enable(registration, log, 1_000);
@@ -109,7 +116,7 @@ test("activation failure (redundant worker) rejects without subscribe or PUT", a
   assert.equal(worker.listeners, 0);
 });
 
-test("a stuck install is bounded: rejects after the timeout, no subscribe or PUT", async () => {
+await test("a stuck install is bounded: rejects after the timeout, no subscribe or PUT", async () => {
   const log: string[] = [];
   const { registration, worker } = fakeRegistration(log);
   const started = Date.now();
@@ -119,14 +126,14 @@ test("a stuck install is bounded: rejects after the timeout, no subscribe or PUT
   assert.equal(worker.listeners, 0);
 });
 
-test("no worker at all rejects immediately", async () => {
+await test("no worker at all rejects immediately", async () => {
   await assert.rejects(
     whenActive({ active: null, installing: null, waiting: null }, 1_000),
     /no service worker/,
   );
 });
 
-test("a waiting worker (installed, not yet active) is waited for", async () => {
+await test("a waiting worker (installed, not yet active) is waited for", async () => {
   const log: string[] = [];
   const { registration, move } = fakeRegistration(log);
   move("installed");

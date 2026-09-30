@@ -15,7 +15,7 @@ function row(id: string, group: string | null, patch: Partial<BoardRow> = {}): B
   return { id, group, canEdit: true, taskId: `task-${id}`, statusId: "s-1", values: {}, ...patch };
 }
 
-test("column body always names its group, including the unassigned column", () => {
+await test("column body always names its group, including the unassigned column", () => {
   assert.deepEqual(boardColumnBody(config, null), { config, group: null, limit: BOARD_PAGE_LIMIT });
   assert.deepEqual(boardColumnBody(config, "opt-a", "c1"), {
     config,
@@ -26,7 +26,7 @@ test("column body always names its group, including the unassigned column", () =
   assert.ok(Object.hasOwn(boardColumnBody(config, null), "group"));
 });
 
-test("column rows keep page order, drop duplicates and rows of another group", () => {
+await test("column rows keep page order, drop duplicates and rows of another group", () => {
   const pages = [
     { items: [row("1", "a"), row("2", "a")] },
     // Page 2 fetched after card 2 was re-sorted and card 3 moved to group b.
@@ -46,7 +46,7 @@ test("column rows keep page order, drop duplicates and rows of another group", (
   );
 });
 
-test("more than one page per column stays complete and unique", () => {
+await test("more than one page per column stays complete and unique", () => {
   const all = Array.from({ length: 120 }, (_, index) => row(String(index), "a"));
   const pages = [
     { items: all.slice(0, BOARD_PAGE_LIMIT) },
@@ -58,7 +58,7 @@ test("more than one page per column stays complete and unique", () => {
   assert.equal(new Set(rows.map((item) => item.id)).size, 120);
 });
 
-test("status move sends the CAS status and refuses unassigned or statusless rows", () => {
+await test("status move sends the CAS status and refuses unassigned or statusless rows", () => {
   assert.deepEqual(moveRequest("status", row("1", "s-1"), { id: "s-2", deleted: false }), {
     kind: "status",
     taskId: "task-1",
@@ -76,7 +76,7 @@ test("status move sends the CAS status and refuses unassigned or statusless rows
   );
 });
 
-test("select field move sets one option or clears to unassigned", () => {
+await test("select field move sets one option or clears to unassigned", () => {
   assert.deepEqual(moveRequest("field-1", row("1", null), { id: "opt-a", deleted: false }), {
     kind: "field",
     fieldId: "field-1",
@@ -89,7 +89,7 @@ test("select field move sets one option or clears to unassigned", () => {
   });
 });
 
-test("no move for read-only rows, archived options, the same group or no grouping", () => {
+await test("no move for read-only rows, archived options, the same group or no grouping", () => {
   assert.equal(
     moveRequest("field-1", row("1", null, { canEdit: false }), { id: "opt-a", deleted: false }),
     null,
@@ -99,7 +99,7 @@ test("no move for read-only rows, archived options, the same group or no groupin
   assert.equal(moveRequest(null, row("1", "opt-a"), { id: "opt-b", deleted: false }), null);
 });
 
-test("keyboard choices mirror the board groups; archived ones stay visible but disabled", () => {
+await test("keyboard choices mirror the board groups; archived ones stay visible but disabled", () => {
   const groups = [
     { id: "opt-a", name: "A", count: 1, deleted: false },
     { id: "opt-old", name: "Old", count: 1, deleted: true },

@@ -7,7 +7,7 @@ function mergeHolidayItems(current: string[] | undefined, date: string, remove: 
     : [...new Set([...(current ?? []), date])].sort();
 }
 
-test("holiday cache merge adds, sorts, and removes dates", () => {
+await test("holiday cache merge adds, sorts, and removes dates", () => {
   assert.deepEqual(mergeHolidayItems(["2026-09-02"], "2026-09-01", false), [
     "2026-09-01",
     "2026-09-02",

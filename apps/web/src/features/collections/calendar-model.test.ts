@@ -31,7 +31,7 @@ function row(patch: Partial<CalendarRow> = {}): CalendarRow {
 
 const expectedDates = { startDate: "2026-09-01", dueDate: "2026-09-10", dueAt: null };
 
-test("due moves send the new day, clear dueAt and guard every task date", () => {
+await test("due moves send the new day, clear dueAt and guard every task date", () => {
   assert.deepEqual(dateMoveRequest("due", row(), "2026-09-12", fields, "Asia/Seoul"), {
     kind: "task",
     taskId: "task-1",
@@ -49,7 +49,7 @@ test("due moves send the new day, clear dueAt and guard every task date", () => 
   });
 });
 
-test("start moves only change startDate", () => {
+await test("start moves only change startDate", () => {
   const moved = row({ date: "2026-09-01" });
   assert.deepEqual(dateMoveRequest("start", moved, "2026-09-03", fields, "UTC"), {
     kind: "task",
@@ -63,7 +63,7 @@ test("start moves only change startDate", () => {
   });
 });
 
-test("a date field stays a plain date with item and field versions", () => {
+await test("a date field stays a plain date with item and field versions", () => {
   assert.deepEqual(dateMoveRequest("f-date", row(), "2026-09-20", fields, "UTC"), {
     kind: "field",
     fieldId: "f-date",
@@ -80,7 +80,7 @@ test("a date field stays a plain date with item and field versions", () => {
   });
 });
 
-test("a datetime field keeps its wall time in the user's zone", () => {
+await test("a datetime field keeps its wall time in the user's zone", () => {
   // 2026-09-10 23:30 in Seoul is 14:30Z the same day.
   const timed = row({ values: { "f-dt": { datetime: "2026-09-10T14:30:00Z" } } as never });
   assert.deepEqual(dateMoveRequest("f-dt", timed, "2026-09-11", fields, "Asia/Seoul"), {
@@ -101,7 +101,7 @@ test("a datetime field keeps its wall time in the user's zone", () => {
   });
 });
 
-test("an undated datetime gets the default wall time; a DST gap is unavailable", () => {
+await test("an undated datetime gets the default wall time; a DST gap is unavailable", () => {
   const undated = row({ date: null });
   assert.equal(DEFAULT_LOCAL_TIME, "09:00");
   assert.deepEqual(dateMoveRequest("f-dt", undated, "2026-09-11", fields, "Asia/Seoul"), {
@@ -118,7 +118,7 @@ test("an undated datetime gets the default wall time; a DST gap is unavailable",
   });
 });
 
-test("moves that must not write are rejected", () => {
+await test("moves that must not write are rejected", () => {
   assert.equal(dateMoveRequest(null, row(), "2026-09-12", fields, "UTC"), null);
   assert.equal(dateMoveRequest("due", row({ canEdit: false }), "2026-09-12", fields, "UTC"), null);
   assert.equal(dateMoveRequest("due", row(), "2026-09-10", fields, "UTC"), null);
@@ -130,7 +130,7 @@ test("moves that must not write are rejected", () => {
   assert.equal(dateMoveRequest("f-missing", row(), "2026-09-12", fields, "UTC"), null);
 });
 
-test("only editable rows with a usable date basis are draggable", () => {
+await test("only editable rows with a usable date basis are draggable", () => {
   assert.equal(dateMovable("due", row(), fields), true);
   assert.equal(dateMovable("start", row({ date: null }), fields), true);
   assert.equal(dateMovable("f-dt", row({ taskId: null }), fields), true);

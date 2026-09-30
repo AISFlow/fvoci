@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { originCreateSurface } from "../collections/origin-create-surface.ts";
 
-test("empty picker lets a member create a project and hides the form from a guest", () => {
+await test("empty picker lets a member create a project and hides the form from a guest", () => {
   assert.equal(
     originCreateSurface({ isLoading: false, isError: false, itemCount: 0, canCreateProject: true }),
     "create-project",
@@ -18,7 +18,7 @@ test("empty picker lets a member create a project and hides the form from a gues
   );
 });
 
-test("editable projects show the create-task form", () => {
+await test("editable projects show the create-task form", () => {
   assert.equal(
     originCreateSurface({
       isLoading: false,

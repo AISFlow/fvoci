@@ -9,7 +9,7 @@ const nodes = [
   { id: "c", parentId: "b" },
 ];
 
-test("walks root-first and stops at the project root", () => {
+await test("walks root-first and stops at the project root", () => {
   assert.deepEqual(
     projectAncestors(nodes, "c", "root").map((node) => node.id),
     ["a", "b"],
@@ -17,7 +17,7 @@ test("walks root-first and stops at the project root", () => {
   assert.deepEqual(projectAncestors(nodes, "a", "root"), []);
 });
 
-test("unknown or cyclic data terminates", () => {
+await test("unknown or cyclic data terminates", () => {
   assert.deepEqual(projectAncestors(nodes, "missing", "root"), []);
   const cyclic = [
     { id: "x", parentId: "y" },

@@ -10,7 +10,7 @@ import {
   refusalOf,
 } from "./collab-reconnect.ts";
 
-test("열린 뒤 서버 프레임 없이 닫히면 거절이고 1013 만 수용 한도다", () => {
+await test("열린 뒤 서버 프레임 없이 닫히면 거절이고 1013 만 수용 한도다", () => {
   assert.equal(refusalOf(true, CLOSE_TRY_AGAIN_LATER), "capacity");
   assert.equal(refusalOf(true, 1011), "unavailable");
   assert.equal(refusalOf(true, 1012), "unavailable");
@@ -18,7 +18,7 @@ test("열린 뒤 서버 프레임 없이 닫히면 거절이고 1013 만 수용 
   assert.equal(refusalOf(false, CLOSE_TRY_AGAIN_LATER), null);
 });
 
-test("RefusalWatch: 프레임을 받은 세션의 끊김과 열리지 않은 실패는 거절이 아니다", () => {
+await test("RefusalWatch: 프레임을 받은 세션의 끊김과 열리지 않은 실패는 거절이 아니다", () => {
   const watch = new RefusalWatch();
   assert.equal(watch.close(1006), null, "never opened: provider backoff owns it");
   watch.open();
@@ -29,7 +29,7 @@ test("RefusalWatch: 프레임을 받은 세션의 끊김과 열리지 않은 실
   assert.equal(watch.close(1013), null, "reset after close");
 });
 
-test("RefusalWatch: 거절 뒤 열리지도 못한 시도(서버 다운·오프라인)는 null 이라 기록된 거절을 지운다", () => {
+await test("RefusalWatch: 거절 뒤 열리지도 못한 시도(서버 다운·오프라인)는 null 이라 기록된 거절을 지운다", () => {
   const watch = new RefusalWatch();
   watch.open();
   assert.equal(watch.close(CLOSE_TRY_AGAIN_LATER), "capacity");
@@ -64,7 +64,9 @@ class RefusingSocket extends EventTarget {
       this.readyState = 1;
       opened.push(performance.now());
       this.dispatchEvent(new Event("open"));
-      setTimeout(() => this.serverClose(), 1);
+      setTimeout(() => {
+        this.serverClose();
+      }, 1);
     }, 1);
     onMade?.(this);
   }
@@ -127,8 +129,15 @@ async function measure(
   return { live, leftOpen, madeAfterDestroy: made.length - before, afterDestroy: opened.length };
 }
 
-test("backoff 설정: 첫 재시도부터 jitter, 상한 있음, attempt 검증을 통과한다", () => {
-  const { delay, minDelay, maxDelay, factor, jitter } = RECONNECT_BACKOFF;
+await test("backoff 설정: 첫 재시도부터 jitter, 상한 있음, attempt 검증을 통과한다", () => {
+  const policy: {
+    delay: number;
+    minDelay: number;
+    maxDelay: number;
+    factor: number;
+    jitter: boolean;
+  } = RECONNECT_BACKOFF;
+  const { delay, minDelay, maxDelay, factor, jitter } = policy;
   for (const value of [delay, minDelay, maxDelay]) assert.ok(Number.isInteger(value) && value > 0);
   assert.ok(minDelay < delay, "minDelay == delay would give every client the same first retry");
   assert.ok(delay <= maxDelay);
@@ -147,19 +156,19 @@ test("backoff 설정: 첫 재시도부터 jitter, 상한 있음, attempt 검증�
   }
 });
 
-test("재현: provider 4.6.0 은 인증 전 거절마다 재시도 루프가 늘어 폭주한다", async () => {
+await test("재현: provider 4.6.0 은 인증 전 거절마다 재시도 루프가 늘어 폭주한다", async () => {
   const { live } = await measure(
     1_500,
     () => new HocuspocusProviderWebsocket({ ...FAST, WebSocketPolyfill: RefusingSocket }),
   );
   /* 루프 하나라면 backoff(20→200 ms 상한)로 1.5 s 에 많아야 ~20 번이다. */
-  assert.ok(live.length > 60, `expected a reconnect storm, got ${live.length} opens`);
+  assert.ok(live.length > 60, `expected a reconnect storm, got ${String(live.length)} opens`);
   const gaps = live.slice(1).map((at, i) => at - live[i]);
   const lateGaps = gaps.slice(-20).sort((a, b) => a - b);
-  assert.ok(lateGaps[10] < 20, `late gaps shrink below the base delay: ${lateGaps[10]} ms`);
+  assert.ok(lateGaps[10] < 20, `late gaps shrink below the base delay: ${String(lateGaps[10])} ms`);
 });
 
-test("재현: provider 4.6.0 은 파기 전에 예약된 재접속으로 파기 뒤에도 소켓을 연다", async () => {
+await test("재현: provider 4.6.0 은 파기 전에 예약된 재접속으로 파기 뒤에도 소켓을 연다", async () => {
   const { live, madeAfterDestroy, afterDestroy } = await measure(
     300,
     () =>
@@ -182,7 +191,7 @@ const REFUSE_FAST = {
   maxDelay: 120,
 };
 
-test("거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열고, 파기 뒤에는 열지 않는다", async () => {
+await test("거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열고, 파기 뒤에는 열지 않는다", async () => {
   const refusals: Array<CollabRefusal | null> = [];
   const { live, leftOpen, madeAfterDestroy, afterDestroy } = await measure(1_500, () =>
     createRefusalAwareSocket({ ...REFUSE_FAST, WebSocketPolyfill: RefusingSocket }, (refusal) =>
@@ -190,25 +199,28 @@ test("거절된 소켓은 새 소켓 없이 한 루프의 backoff 로 다시 열
     ),
   );
   /* 루프 하나: 매 간격이 minDelay 이상이라 1.5 s 에 많아야 50 번. 폭주는 수백 번이다. */
-  assert.ok(live.length >= 4, `the socket retries by itself: ${live.length} opens`);
-  assert.ok(live.length <= 1_500 / REFUSE_FAST.minDelay, `one bounded loop: ${live.length} opens`);
+  assert.ok(live.length >= 4, `the socket retries by itself: ${String(live.length)} opens`);
+  assert.ok(
+    live.length <= 1_500 / REFUSE_FAST.minDelay,
+    `one bounded loop: ${String(live.length)} opens`,
+  );
   const gaps = live.slice(1).map((at, i) => at - live[i]);
   const minGap = Math.min(...gaps);
   assert.ok(
     minGap >= REFUSE_FAST.minDelay - 3,
-    `a gap below minDelay means a second loop: ${minGap} ms`,
+    `a gap below minDelay means a second loop: ${String(minGap)} ms`,
   );
   assert.deepEqual([...new Set(refusals)], ["capacity"]);
   assert.ok(
     refusals.length >= live.length - 1,
-    `every open was refused: ${refusals.length}/${live.length}`,
+    `every open was refused: ${String(refusals.length)}/${String(live.length)}`,
   );
   assert.equal(leftOpen, 0, "destroy closes the socket it had, connecting or open");
   assert.equal(madeAfterDestroy, 0, "destroy stops the retry loop and the reconnect timer");
   assert.equal(afterDestroy, 0);
 });
 
-test("서비스 중 끊긴 세션은 provider 가 다시 붙고, 파기하면 예약된 재접속도 열지 않는다", async () => {
+await test("서비스 중 끊긴 세션은 provider 가 다시 붙고, 파기하면 예약된 재접속도 열지 않는다", async () => {
   const refusals: Array<CollabRefusal | null> = [];
   const { live, leftOpen, madeAfterDestroy, afterDestroy } = await measure(300, () =>
     createRefusalAwareSocket(
@@ -220,7 +232,7 @@ test("서비스 중 끊긴 세션은 provider 가 다시 붙고, 파기하면 �
   assert.ok(refusals.length >= 1, "the drop is reported so a stale refusal would be cleared");
   assert.ok(
     refusals.every((refusal) => refusal === null),
-    `a dropped served session is not a refusal: ${refusals}`,
+    `a dropped served session is not a refusal: ${String(refusals)}`,
   );
   assert.equal(leftOpen, 0);
   assert.equal(madeAfterDestroy, 0, "the pending 400 ms reconnect must not fire after destroy");
@@ -230,7 +242,7 @@ test("서비스 중 끊긴 세션은 provider 가 다시 붙고, 파기하면 �
 /* The race behind a CI flake of the refused-socket test above (afterDestroy 1 !== 0): the retry
  * timer constructs a socket and destroy() runs in the same timer pass, before that socket opens.
  * The old fake opened it anyway although destroy() had closed it; a browser socket does not. */
-test("파기 직전에 만든 연결 중 소켓은 파기가 닫아 열리지 않고, 파기 뒤 새 소켓은 없다", async () => {
+await test("파기 직전에 만든 연결 중 소켓은 파기가 닫아 열리지 않고, 파기 뒤 새 소켓은 없다", async () => {
   opened = [];
   made = [];
   let atDestroy = null as { state: number; closed: number; made: number } | null;

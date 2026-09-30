@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { searchItemHref } from "./search-target.ts";
 
-test("searchItemHref sends comments to the parent display id with the comments anchor", () => {
+await test("searchItemHref sends comments to the parent display id with the comments anchor", () => {
   assert.equal(
     searchItemHref("Acme", {
       type: "comment",
@@ -19,7 +19,7 @@ test("searchItemHref sends comments to the parent display id with the comments a
   assert.equal(searchItemHref("Acme", { type: "comment", id: "c1" }), null);
 });
 
-test("searchItemHref opens attachment hits on the viewer with an optional chunk", () => {
+await test("searchItemHref opens attachment hits on the viewer with an optional chunk", () => {
   assert.equal(
     searchItemHref("Acme", { type: "attachment", id: "a1", displayId: "LAB-7", chunkNo: 3 }),
     "/w/acme/a/a1/view?chunk=3",

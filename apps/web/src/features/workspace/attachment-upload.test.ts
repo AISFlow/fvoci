@@ -10,7 +10,7 @@ const ATT = "33333333-3333-7333-8333-333333333333";
 const PART_SIZE = 1024;
 
 function partUrl(n: number): string {
-  return `/api/v1/workspaces/${WS}/attachments/${ATT}/parts/${n}`;
+  return `/api/v1/workspaces/${WS}/attachments/${ATT}/parts/${String(n)}`;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -93,7 +93,7 @@ async function loadBridge(
   return createAttachmentBridge(WS, DOC, pipelineDeps);
 }
 
-test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
+await test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
   t.after(() => {
     restoreNodeRequest();
   });
@@ -120,7 +120,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
         const bodyBlob = init?.body;
         assert.ok(bodyBlob instanceof Blob);
         sizes.set(n, bodyBlob.size);
-        return jsonResponse({ etag: `etag-${n}` });
+        return jsonResponse({ etag: `etag-${String(n)}` });
       }
       throw new Error(`unexpected fetch: ${url}`);
     });
@@ -141,7 +141,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
       }
       if (url.endsWith("/complete")) return jsonResponse(storedOutput);
       const n = Number(url.split("/").at(-1));
-      return jsonResponse({ etag: `etag-${n}` });
+      return jsonResponse({ etag: `etag-${String(n)}` });
     });
     let inFlight = 0;
     let maxInFlight = 0;
@@ -152,8 +152,8 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
         maxInFlight = Math.max(maxInFlight, inFlight);
         await new Promise((resolve) => setTimeout(resolve, 5));
         inFlight -= 1;
-        const n = Number(String(input).split("/").at(-1));
-        return jsonResponse({ etag: `etag-${n}` });
+        const n = Number(requestUrl(input).split("/").at(-1));
+        return jsonResponse({ etag: `etag-${String(n)}` });
       },
     });
     const file = new File([new Uint8Array(PART_SIZE * 8)], "f.bin");
@@ -275,7 +275,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     await assert.rejects(bridge.upload(file, () => undefined));
     // 120 one-second capacity waits per putPart round at most, then the
     // transport retries; the whole upload must give up.
-    assert.ok(partCalls < 1000, `part calls ${partCalls}`);
+    assert.ok(partCalls < 1000, `part calls ${String(partCalls)}`);
     assert.ok(waitedMs > 0);
   });
 
@@ -293,14 +293,16 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     });
     const bridge = await loadBridge({
       delay: (ms) =>
-        new Promise((resolve, reject) => {
+        new Promise((resolve) => {
           setTimeout(resolve, ms);
         }),
     });
     const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
     const controller = new AbortController();
     const upload = bridge.upload(file, () => undefined, controller.signal);
-    setTimeout(() => controller.abort(), 5);
+    setTimeout(() => {
+      controller.abort();
+    }, 5);
     await assert.rejects(upload, (err: unknown) => isAbortError(err));
     assert.equal(partCalls, 1);
   });
@@ -324,7 +326,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
           });
         }
         const n = Number(url.split("/").at(-1));
-        return jsonResponse({ etag: `etag-${n}` });
+        return jsonResponse({ etag: `etag-${String(n)}` });
       });
       const bridge = await loadBridge({ delay: () => Promise.resolve() });
       const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
@@ -338,22 +340,26 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     "ambiguous complete reuses stored metadata instead of retrying complete",
     async () => {
       let completeCalls = 0;
-      installFetch(async (url, init) => {
+      installFetch((url, init) => {
         if (url.endsWith("/uploads") && init?.method === "POST") {
-          return jsonResponse(createOutput(1), 201);
+          return Promise.resolve(jsonResponse(createOutput(1), 201));
         }
         if (url.endsWith("/complete") && init?.method === "POST") {
           completeCalls += 1;
-          return jsonResponse({ code: "upload_is_not_in_the_required_state" }, 409);
+          return Promise.resolve(
+            jsonResponse({ code: "upload_is_not_in_the_required_state" }, 409),
+          );
         }
         if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
-          return jsonResponse({
-            ...storedOutput,
-            completedAt: new Date(0).toISOString(),
-          });
+          return Promise.resolve(
+            jsonResponse({
+              ...storedOutput,
+              completedAt: new Date(0).toISOString(),
+            }),
+          );
         }
         const n = Number(url.split("/").at(-1));
-        return jsonResponse({ etag: `etag-${n}` });
+        return Promise.resolve(jsonResponse({ etag: `etag-${String(n)}` }));
       });
       const bridge = await loadBridge({ delay: () => Promise.resolve() });
       const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
@@ -365,7 +371,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
 
   // Cloudflare-style gateway failures answer with an HTML page, not a problem body.
   function gatewayResponse(status: number): Response {
-    return new Response(`<html><body>error code: ${status}</body></html>`, {
+    return new Response(`<html><body>error code: ${String(status)}</body></html>`, {
       status,
       headers: { "Content-Type": "text/html" },
     });
@@ -380,20 +386,22 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     async () => {
       let completeCalls = 0;
       let metaCalls = 0;
-      installFetch(async (url, init) => {
+      installFetch((url, init) => {
         if (url.endsWith("/uploads") && init?.method === "POST") {
-          return jsonResponse(createOutput(2), 201);
+          return Promise.resolve(jsonResponse(createOutput(2), 201));
         }
         if (url.endsWith("/complete") && init?.method === "POST") {
           completeCalls += 1;
-          return completeCalls === 1 ? gatewayResponse(524) : jsonResponse(storedOutput);
+          return Promise.resolve(
+            completeCalls === 1 ? gatewayResponse(524) : jsonResponse(storedOutput),
+          );
         }
         if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
           metaCalls += 1;
-          return notYetStored();
+          return Promise.resolve(notYetStored());
         }
         const n = Number(url.split("/").at(-1));
-        return jsonResponse({ etag: `etag-${n}` });
+        return Promise.resolve(jsonResponse({ etag: `etag-${String(n)}` }));
       });
       const bridge = await loadBridge({ delay: () => Promise.resolve() });
       const file = new File([new Uint8Array(PART_SIZE * 2)], "f.bin");
@@ -421,7 +429,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
         return Promise.reject(new TypeError("Failed to fetch"));
       }
       const n = Number(url.split("/").at(-1));
-      return jsonResponse({ etag: `etag-${n}` });
+      return jsonResponse({ etag: `etag-${String(n)}` });
     });
     const bridge = await loadBridge({ delay: () => Promise.resolve() });
     const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
@@ -433,19 +441,19 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
 
   await t.test("complete gateway failures are retried a bounded number of times", async () => {
     let completeCalls = 0;
-    installFetch(async (url, init) => {
+    installFetch((url, init) => {
       if (url.endsWith("/uploads") && init?.method === "POST") {
-        return jsonResponse(createOutput(1), 201);
+        return Promise.resolve(jsonResponse(createOutput(1), 201));
       }
       if (url.endsWith("/complete") && init?.method === "POST") {
         completeCalls += 1;
-        return gatewayResponse(524);
+        return Promise.resolve(gatewayResponse(524));
       }
       if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
-        return notYetStored();
+        return Promise.resolve(notYetStored());
       }
       const n = Number(url.split("/").at(-1));
-      return jsonResponse({ etag: `etag-${n}` });
+      return Promise.resolve(jsonResponse({ etag: `etag-${String(n)}` }));
     });
     const bridge = await loadBridge({ delay: () => Promise.resolve() });
     const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
@@ -463,24 +471,24 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
   await t.test("complete denials and quota refusals are not re-sent", async () => {
     for (const status of [400, 402, 403, 409, 413, 500]) {
       let completeCalls = 0;
-      installFetch(async (url, init) => {
+      installFetch((url, init) => {
         if (url.endsWith("/uploads") && init?.method === "POST") {
-          return jsonResponse(createOutput(1), 201);
+          return Promise.resolve(jsonResponse(createOutput(1), 201));
         }
         if (url.endsWith("/complete") && init?.method === "POST") {
           completeCalls += 1;
-          return jsonResponse({ code: "invalid_input" }, status);
+          return Promise.resolve(jsonResponse({ code: "invalid_input" }, status));
         }
         if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
-          return notYetStored();
+          return Promise.resolve(notYetStored());
         }
         const n = Number(url.split("/").at(-1));
-        return jsonResponse({ etag: `etag-${n}` });
+        return Promise.resolve(jsonResponse({ etag: `etag-${String(n)}` }));
       });
       const bridge = await loadBridge({ delay: () => Promise.resolve() });
       const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
       await assert.rejects(bridge.upload(file, () => undefined));
-      assert.equal(completeCalls, 1, `status ${status}`);
+      assert.equal(completeCalls, 1, `status ${String(status)}`);
     }
   });
 
@@ -511,20 +519,24 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
             return meta();
           }
           const n = Number(url.split("/").at(-1));
-          return jsonResponse({ etag: `etag-${n}` });
+          return jsonResponse({ etag: `etag-${String(n)}` });
         });
         const bridge = await loadBridge({ delay: () => Promise.resolve() });
         const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
         await assert.rejects(
           bridge.upload(file, () => undefined),
           (err: unknown) => {
-            assert.equal((err as Error).name, "ProblemError", `${status} / ${label}`);
-            assert.equal((err as { status?: number }).status, status, `${status} / ${label}`);
+            assert.equal((err as Error).name, "ProblemError", `${String(status)} / ${label}`);
+            assert.equal(
+              (err as { status?: number }).status,
+              status,
+              `${String(status)} / ${label}`,
+            );
             return true;
           },
         );
-        assert.equal(completeCalls, 1, `${status} / ${label}`);
-        assert.equal(metaCalls, 1, `${status} / ${label}`);
+        assert.equal(completeCalls, 1, `${String(status)} / ${label}`);
+        assert.equal(metaCalls, 1, `${String(status)} / ${label}`);
       }
     }
   });
@@ -541,7 +553,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
         return Promise.reject(new TypeError("Failed to fetch"));
       }
       const n = Number(url.split("/").at(-1));
-      return jsonResponse({ etag: `etag-${n}` });
+      return jsonResponse({ etag: `etag-${String(n)}` });
     });
     const bridge = await loadBridge({ delay: () => Promise.resolve() });
     const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
@@ -571,7 +583,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
             return meta();
           }
           const n = Number(url.split("/").at(-1));
-          return jsonResponse({ etag: `etag-${n}` });
+          return jsonResponse({ etag: `etag-${String(n)}` });
         });
         const bridge = await loadBridge({ delay: () => Promise.resolve() });
         const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
@@ -602,12 +614,14 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
       if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
         const signal = init.signal;
         return new Promise<Response>((_, reject) => {
-          signal?.addEventListener("abort", () => reject(signal.reason));
+          signal?.addEventListener("abort", () => {
+            reject(signal.reason instanceof Error ? signal.reason : new Error("Aborted"));
+          });
           controller.abort();
         });
       }
       const n = Number(url.split("/").at(-1));
-      return jsonResponse({ etag: `etag-${n}` });
+      return jsonResponse({ etag: `etag-${String(n)}` });
     });
     const bridge = await loadBridge({ delay: () => Promise.resolve() });
     const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
@@ -619,21 +633,23 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
   await t.test("abort during the complete retry delay stops without another complete", async () => {
     let completeCalls = 0;
     const controller = new AbortController();
-    installFetch(async (url, init) => {
+    installFetch((url, init) => {
       if (url.endsWith("/uploads") && init?.method === "POST") {
-        return jsonResponse(createOutput(1), 201);
+        return Promise.resolve(jsonResponse(createOutput(1), 201));
       }
       if (url.endsWith("/complete") && init?.method === "POST") {
         completeCalls += 1;
         // Aborts inside the (real, 1 s) retry delay that follows.
-        setTimeout(() => controller.abort(), 20);
-        return gatewayResponse(502);
+        setTimeout(() => {
+          controller.abort();
+        }, 20);
+        return Promise.resolve(gatewayResponse(502));
       }
       if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
-        return notYetStored();
+        return Promise.resolve(notYetStored());
       }
       const n = Number(url.split("/").at(-1));
-      return jsonResponse({ etag: `etag-${n}` });
+      return Promise.resolve(jsonResponse({ etag: `etag-${String(n)}` }));
     });
     const bridge = await loadBridge();
     const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
@@ -646,17 +662,17 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     "a part answered 524 after the server stored it is re-sent and completes",
     async () => {
       const putCounts = new Map<number, number>();
-      installFetch(async (url, init) => {
+      installFetch((url, init) => {
         if (url.endsWith("/uploads") && init?.method === "POST") {
-          return jsonResponse(createOutput(2), 201);
+          return Promise.resolve(jsonResponse(createOutput(2), 201));
         }
         if (url.endsWith("/complete") && init?.method === "POST") {
-          return jsonResponse(storedOutput);
+          return Promise.resolve(jsonResponse(storedOutput));
         }
         const n = Number(url.split("/").at(-1));
         putCounts.set(n, (putCounts.get(n) ?? 0) + 1);
-        if (n === 2 && putCounts.get(2) === 1) return gatewayResponse(524);
-        return jsonResponse({ etag: `etag-${n}` });
+        if (n === 2 && putCounts.get(2) === 1) return Promise.resolve(gatewayResponse(524));
+        return Promise.resolve(jsonResponse({ etag: `etag-${String(n)}` }));
       });
       const bridge = await loadBridge({ delay: () => Promise.resolve() });
       const file = new File([new Uint8Array(PART_SIZE * 2)], "f.bin");
@@ -697,7 +713,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
       if (n === 2 && (putCounts.get(2) ?? 0) <= 3) {
         return new Response("boom", { status: 500 });
       }
-      return jsonResponse({ etag: `etag-${n}` });
+      return jsonResponse({ etag: `etag-${String(n)}` });
     });
     const bridge = await loadBridge({ delay: () => Promise.resolve() });
     const file = new File([new Uint8Array(PART_SIZE * 3)], "f.bin");
@@ -713,7 +729,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
 
   const STORAGE = "https://files.example.test/fvoci/key";
   const signedUrl = (n: number, gen = 1) =>
-    `${STORAGE}?partNumber=${n}&uploadId=u&X-Amz-Signature=sig${gen}`;
+    `${STORAGE}?partNumber=${String(n)}&uploadId=u&X-Amz-Signature=sig${String(gen)}`;
   const presignedCreate = (partCount: number, expiresAt: number) => ({
     attachmentId: ATT,
     partSizeBytes: PART_SIZE,
@@ -752,7 +768,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
       throw new Error(`unexpected API fetch: ${url}`);
     });
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const url = String(input);
+      const url = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
       assert.ok(url.startsWith(STORAGE), `storage PUT only: ${url}`);
       const put = { url, init };
       state.puts.push(put);
@@ -761,7 +777,7 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     return { state, fetchImpl };
   }
   const stored = (n: number) =>
-    new Response(null, { status: 200, headers: { ETag: `"etag-${n}"` } });
+    new Response(null, { status: 200, headers: { ETag: `"etag-${String(n)}"` } });
 
   await t.test("presigned parts go to storage with the signed URL alone", async () => {
     const now = Date.now();
@@ -781,16 +797,16 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     assert.equal(state.puts.length, 3);
     for (const { init } of state.puts) {
       assert.equal(init?.method, "PUT");
-      assert.equal(init?.credentials, "omit", "no FVOCI cookies to the storage origin");
-      assert.equal(init?.headers, undefined, "no Content-Type or Authorization");
-      assert.ok(init?.body instanceof Blob);
-      assert.equal((init.body as Blob).type, "", "a typed Blob would add Content-Type");
+      assert.equal(init.credentials, "omit", "no FVOCI cookies to the storage origin");
+      assert.equal(init.headers, undefined, "no Content-Type or Authorization");
+      assert.ok(init.body instanceof Blob);
+      assert.equal(init.body.type, "", "a typed Blob would add Content-Type");
     }
     const sizes = state.puts.map((p) => (p.init?.body as Blob).size).sort((a, b) => a - b);
     assert.deepEqual(sizes, [7, PART_SIZE, PART_SIZE]);
     assert.deepEqual(
       [...state.completed].sort((a, b) => a.partNumber - b.partNumber),
-      [1, 2, 3].map((n) => ({ partNumber: n, etag: `"etag-${n}"` })),
+      [1, 2, 3].map((n) => ({ partNumber: n, etag: `"etag-${String(n)}"` })),
     );
     assert.equal(state.resumes, 0);
   });
@@ -841,7 +857,11 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     const bridge = await loadBridge({
       fetchImpl,
       delay: () => Promise.resolve(),
-      now: () => (clock.length > 1 ? clock.shift()! : clock[0]!),
+      now: () => {
+        const instant = clock.length > 1 ? clock.shift() : clock[0];
+        assert.ok(instant !== undefined, "clock fixture has an instant");
+        return instant;
+      },
     });
     await bridge.upload(new File([new Uint8Array(10)], "f.bin"), () => undefined);
     assert.equal(state.resumes, 1);

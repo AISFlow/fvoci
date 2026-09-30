@@ -8,21 +8,20 @@ import {
 import {
   HocuspocusProvider,
   HocuspocusProviderWebsocket,
-  type HocuspocusProvider as Provider,
   type onDisconnectParameters,
   type onStatelessParameters,
 } from "@hocuspocus/provider";
 import * as Y from "yjs";
-import { PERSIST_DISCONNECTED_MESSAGE, persistNow } from "./collab-model.ts";
+import { PERSIST_DISCONNECTED_MESSAGE, persistNow, type PersistProvider } from "./collab-model.ts";
 
 function fakeProvider(): {
-  provider: Provider;
+  provider: PersistProvider;
   calls: string[];
   emit(payload: string): void;
 } {
   const listeners = new Set<(params: onStatelessParameters) => void>();
   const calls: string[] = [];
-  const provider = {
+  const provider: PersistProvider = {
     flushPendingUpdates() {
       calls.push("flush");
     },
@@ -37,7 +36,7 @@ function fakeProvider(): {
       if (event === "stateless") listeners.delete(fn);
       return provider;
     },
-  } as unknown as Provider;
+  };
   return {
     provider,
     calls,
@@ -101,7 +100,7 @@ function liveProvider(name = "workspace:document:doc"): {
   };
 }
 
-test("persistNow 는 배칭된 편집을 먼저 내보내고 요청별 응답을 기다린다", async () => {
+await test("persistNow 는 배칭된 편집을 먼저 내보내고 요청별 응답을 기다린다", async () => {
   const fake = fakeProvider();
   const persisted = persistNow(fake.provider);
   assert.equal(fake.calls[0], "flush");
@@ -110,28 +109,28 @@ test("persistNow 는 배칭된 편집을 먼저 내보내고 요청별 응답을
     new RegExp(`^stateless:${COLLAB_PERSIST_REQUEST}:[0-9a-f-]{36}$`),
   );
   const requestId = fake.calls[1]?.slice(`stateless:${COLLAB_PERSIST_REQUEST}:`.length);
-  fake.emit(`${COLLAB_PERSIST_DONE}:${requestId}`);
+  fake.emit(`${COLLAB_PERSIST_DONE}:${String(requestId)}`);
   await persisted;
 });
 
-test("persist-failed 는 성공으로 접히지 않는다", async () => {
+await test("persist-failed 는 성공으로 접히지 않는다", async () => {
   const fake = fakeProvider();
   const persisted = persistNow(fake.provider);
   const requestId = fake.calls[1]?.slice(`stateless:${COLLAB_PERSIST_REQUEST}:`.length);
-  fake.emit(`${COLLAB_PERSIST_FAILED}:${requestId}`);
+  fake.emit(`${COLLAB_PERSIST_FAILED}:${String(requestId)}`);
   await assert.rejects(persisted, /collab persist failed/);
 });
 
-test("다른 요청 id 의 persisted 응답은 이 저장을 끝내지 않는다", async () => {
+await test("다른 요청 id 의 persisted 응답은 이 저장을 끝내지 않는다", async () => {
   const fake = fakeProvider();
   const persisted = persistNow(fake.provider);
   fake.emit(`${COLLAB_PERSIST_DONE}:${crypto.randomUUID()}`);
   const requestId = fake.calls[1]?.slice(`stateless:${COLLAB_PERSIST_REQUEST}:`.length);
-  fake.emit(`${COLLAB_PERSIST_DONE}:${requestId}`);
+  fake.emit(`${COLLAB_PERSIST_DONE}:${String(requestId)}`);
   await persisted;
 });
 
-test("timeout 은 저장 성공이 아니다", async () => {
+await test("timeout 은 저장 성공이 아니다", async () => {
   const fake = fakeProvider();
   const realSetTimeout = globalThis.setTimeout;
   const realClearTimeout = globalThis.clearTimeout;
@@ -139,7 +138,7 @@ test("timeout 은 저장 성공이 아니다", async () => {
     queueMicrotask(fn);
     return 0;
   }) as typeof setTimeout;
-  globalThis.clearTimeout = (() => undefined) as typeof clearTimeout;
+  globalThis.clearTimeout = () => undefined;
   try {
     await assert.rejects(persistNow(fake.provider), /collab persist timed out/);
   } finally {
@@ -148,7 +147,7 @@ test("timeout 은 저장 성공이 아니다", async () => {
   }
 });
 
-test("persistNow observer 는 요청 id 만 알리고 외국 ack 는 성공으로 부르지 않는다", async () => {
+await test("persistNow observer 는 요청 id 만 알리고 외국 ack 는 성공으로 부르지 않는다", async () => {
   const fake = fakeProvider();
   const seen: string[] = [];
   const persisted = persistNow(fake.provider, {
@@ -158,15 +157,15 @@ test("persistNow observer 는 요청 id 만 알리고 외국 ack 는 성공으�
     onTimeout: (id) => seen.push(`timeout:${id}`),
   });
   const requestId = fake.calls[1]?.slice(`stateless:${COLLAB_PERSIST_REQUEST}:`.length);
-  assert.deepEqual(seen, [`request:${requestId}`]);
+  assert.deepEqual(seen, [`request:${String(requestId)}`]);
   fake.emit(`${COLLAB_PERSIST_DONE}:${crypto.randomUUID()}`);
-  assert.deepEqual(seen, [`request:${requestId}`]);
-  fake.emit(`${COLLAB_PERSIST_DONE}:${requestId}`);
+  assert.deepEqual(seen, [`request:${String(requestId)}`]);
+  fake.emit(`${COLLAB_PERSIST_DONE}:${String(requestId)}`);
   await persisted;
-  assert.deepEqual(seen, [`request:${requestId}`, `ack:${requestId}`]);
+  assert.deepEqual(seen, [`request:${String(requestId)}`, `ack:${String(requestId)}`]);
 });
 
-test("real provider persistNow succeeds only on matching persisted:<id>", async () => {
+await test("real provider persistNow succeeds only on matching persisted:<id>", async () => {
   const live = liveProvider();
   try {
     live.doc.getText("t").insert(0, "본문");
@@ -176,13 +175,13 @@ test("real provider persistNow succeeds only on matching persisted:<id>", async 
     live.provider.receiveStateless(`${COLLAB_PERSIST_DONE}:${crypto.randomUUID()}`);
     live.provider.receiveStateless(`${COLLAB_PERSIST_DONE}:${requestId}`);
     await persisted;
-    assert.equal(live.doc.getText("t").toString(), "본문");
+    assert.equal(live.doc.getText("t").toJSON(), "본문");
   } finally {
     live.destroy();
   }
 });
 
-test("real provider disconnect before ack rejects and delayed persisted cannot succeed", async () => {
+await test("real provider disconnect before ack rejects and delayed persisted cannot succeed", async () => {
   const live = liveProvider();
   try {
     const clientId = live.doc.clientID;
@@ -201,14 +200,14 @@ test("real provider disconnect before ack rejects and delayed persisted cannot s
     live.provider.receiveStateless(`${COLLAB_PERSIST_DONE}:${requestId}`);
     assert.deepEqual(seen, [`abort:${requestId}`]);
     assert.equal(live.doc.clientID, clientId);
-    assert.equal(live.doc.getText("t").toString(), "미전송 한글");
+    assert.equal(live.doc.getText("t").toJSON(), "미전송 한글");
     assert.deepEqual(Y.encodeStateAsUpdate(live.doc), pending);
   } finally {
     live.destroy();
   }
 });
 
-test("real provider reconnect old persisted ack cannot complete the aborted save", async () => {
+await test("real provider reconnect old persisted ack cannot complete the aborted save", async () => {
   const live = liveProvider();
   try {
     live.doc.getText("t").insert(0, "offline");
@@ -225,13 +224,13 @@ test("real provider reconnect old persisted ack cannot complete the aborted save
     live.provider.receiveStateless(`${COLLAB_PERSIST_FAILED}:${oldId}`);
     live.provider.receiveStateless(`${COLLAB_PERSIST_DONE}:${newId}`);
     await second;
-    assert.equal(live.doc.getText("t").toString(), "offline");
+    assert.equal(live.doc.getText("t").toJSON(), "offline");
   } finally {
     live.destroy();
   }
 });
 
-test("real provider persist-failed and timeout still reject", async () => {
+await test("real provider persist-failed and timeout still reject", async () => {
   const live = liveProvider();
   const realSetTimeout = globalThis.setTimeout;
   const realClearTimeout = globalThis.clearTimeout;
@@ -245,7 +244,7 @@ test("real provider persist-failed and timeout still reject", async () => {
       queueMicrotask(fn);
       return 0;
     }) as typeof setTimeout;
-    globalThis.clearTimeout = (() => undefined) as typeof clearTimeout;
+    globalThis.clearTimeout = () => undefined;
     await assert.rejects(persistNow(live.provider), /collab persist timed out/);
   } finally {
     globalThis.setTimeout = realSetTimeout;
@@ -254,7 +253,7 @@ test("real provider persist-failed and timeout still reject", async () => {
   }
 });
 
-test("independent repeated persistNow requests clean up without crossing acks", async () => {
+await test("independent repeated persistNow requests clean up without crossing acks", async () => {
   const live = liveProvider();
   try {
     const first = persistNow(live.provider);
@@ -282,7 +281,7 @@ test("independent repeated persistNow requests clean up without crossing acks", 
   }
 });
 
-test("aborting one persistNow leaves the other request and Y.Doc intact", async () => {
+await test("aborting one persistNow leaves the other request and Y.Doc intact", async () => {
   const live = liveProvider();
   try {
     live.doc.getText("t").insert(0, "남겨둘 편집");
@@ -297,7 +296,7 @@ test("aborting one persistNow leaves the other request and Y.Doc intact", async 
     live.provider.receiveStateless(`${COLLAB_PERSIST_DONE}:${firstId}`);
     live.provider.receiveStateless(`${COLLAB_PERSIST_DONE}:${secondId}`);
     await second;
-    assert.equal(live.doc.getText("t").toString(), "남겨둘 편집");
+    assert.equal(live.doc.getText("t").toJSON(), "남겨둘 편집");
   } finally {
     live.destroy();
   }

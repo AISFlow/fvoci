@@ -17,7 +17,7 @@ const ko = JSON.parse(
   ),
 ) as Record<string, string>;
 
-test("every catalog label, help, group and enum option has a Korean string", () => {
+await test("every catalog label, help, group and enum option has a Korean string", () => {
   for (const [key, entry] of SETTINGS_ENTRIES) {
     for (const k of [entry.labelKey, entry.helpKey, entry.group]) {
       assert.ok(Object.hasOwn(ko, k), `missing ${k} for ${key}`);
@@ -36,7 +36,7 @@ test("every catalog label, help, group and enum option has a Korean string", () 
   }
 });
 
-test("withoutAssets drops only the upload-route leaves", () => {
+await test("withoutAssets drops only the upload-route leaves", () => {
   assert.deepEqual(
     withoutAssets("branding", {
       name: "N",
@@ -50,7 +50,7 @@ test("withoutAssets drops only the upload-route leaves", () => {
   assert.deepEqual(withoutAssets("share", { enabled: true }), { enabled: true });
 });
 
-test("draft schemas mirror the server limits", () => {
+await test("draft schemas mirror the server limits", () => {
   const share = SETTINGS_CATALOG.share.schema;
   assert.equal(
     share.safeParse({ enabled: true, defaultExpiresDays: 7, maxExpiresDays: 30 }).success,
@@ -81,7 +81,7 @@ test("draft schemas mirror the server limits", () => {
   assert.equal(op.safeParse({ ...empty, businessInfoUrl: "javascript:alert(1)" }).success, false);
 });
 
-test("attachmentTransfer accepts only the two modes the server knows", () => {
+await test("attachmentTransfer accepts only the two modes the server knows", () => {
   const schema = SETTINGS_CATALOG.attachmentTransfer.schema;
   assert.equal(schema.safeParse({ mode: "proxy" }).success, true);
   assert.equal(schema.safeParse({ mode: "presigned" }).success, true);
@@ -90,7 +90,7 @@ test("attachmentTransfer accepts only the two modes the server knows", () => {
   assert.deepEqual(SETTING_ENUM_OPTIONS["attachmentTransfer.mode"], ["proxy", "presigned"]);
 });
 
-test("attachmentTransfer card: effective mode, unavailable reason and blocked value", () => {
+await test("attachmentTransfer card: effective mode, unavailable reason and blocked value", () => {
   const status = (over: Record<string, unknown>) => ({
     effective: "proxy" as const,
     source: "default" as const,
@@ -111,7 +111,7 @@ test("attachmentTransfer card: effective mode, unavailable reason and blocked va
     );
     assert.deepEqual([...view.disabledOptions], ["presigned"]);
     assert.equal(view.unavailableKey, `settings.attachmentTransfer.unavailable.${reason}`);
-    assert.ok(Object.hasOwn(ko, view.unavailableKey!), reason);
+    assert.ok(Object.hasOwn(ko, view.unavailableKey), reason);
   }
 
   const blocked = attachmentTransferView(

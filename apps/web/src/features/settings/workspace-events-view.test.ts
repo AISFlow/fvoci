@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
 import { renderToString } from "vue/server-renderer";
-import ts from "typescript";
+import { evaluate, compiledComponent, renderFunction } from "./compiled-component-test";
 import * as Vue from "vue";
 import { t } from "@fvoci/i18n";
 import * as api from "@/lib/api";
@@ -17,8 +17,9 @@ const filename = new URL("../../vue/features/settings/WorkspaceEventsSection.vue
   .pathname;
 const { descriptor } = parse(readFileSync(filename, "utf8"), { filename });
 const script = compileScript(descriptor, { id: "events-contract" });
+assert.ok(descriptor.template, "actual component has a template");
 const template = compileTemplate({
-  source: descriptor.template!.content,
+  source: descriptor.template.content,
   filename,
   id: "events-contract",
   compilerOptions: { bindingMetadata: script.bindings },
@@ -27,21 +28,6 @@ assert.deepEqual(template.errors, []);
 
 // Compile the actual Vue script and template; substitute query snapshots and
 // leaf controls only. Policy computations, event handlers and rendering are real.
-function evaluate(code: string, imports: Record<string, unknown>) {
-  const js = ts.transpileModule(code, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const module = { exports: {} as any };
-  new Function("require", "module", "exports", js)(
-    (name: string) => {
-      assert.ok(name in imports, `unmapped component import: ${name}`);
-      return imports[name];
-    },
-    module,
-    module.exports,
-  );
-  return module.exports;
-}
 
 const button = Vue.defineComponent({
   setup:
@@ -120,14 +106,14 @@ async function render(
       },
     },
   };
-  const component = evaluate(script.content, imports).default;
-  component.render = evaluate(template.code, imports).render;
+  const component = compiledComponent(evaluate(script.content, imports).default);
+  component.render = renderFunction(evaluate(template.code, imports).render);
   return renderToString(
     Vue.createSSRApp(component, { workspaceId: "01900000-0000-7000-8000-000000000001" }),
   );
 }
 
-test("Vue event rows show verb and Seoul-local time under the Korean activity title", async () => {
+await test("Vue event rows show verb and Seoul-local time under the Korean activity title", async () => {
   const html = await render({
     pages: [
       { items: [event("a", "workspace.created", "2026-09-27T15:30:00.000Z")] },
@@ -152,7 +138,7 @@ test("Vue event rows show verb and Seoul-local time under the Korean activity ti
   );
 });
 
-test("Vue empty, loading and first-page error states remain distinct", async () => {
+await test("Vue empty, loading and first-page error states remain distinct", async () => {
   assert.match(await render(), /활동이 없습니다/);
   const loading = await render({ loading: true });
   assert.match(loading, /role="status"[^>]*>불러오는 중…/);
@@ -164,7 +150,7 @@ test("Vue empty, loading and first-page error states remain distinct", async () 
   assert.doesNotMatch(failed, /더 보기/);
 });
 
-test("Vue next cursor offers load-more; later-page failure preserves rows and permits retry", async () => {
+await test("Vue next cursor offers load-more; later-page failure preserves rows and permits retry", async () => {
   const pages = [{ items: [event("a", "task.created", "2026-09-28T00:00:00.000Z")] }];
   const more = await render({ pages, hasMore: true });
   assert.match(more, /더 보기/);

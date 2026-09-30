@@ -126,8 +126,13 @@ function snapshot(
   status?: string,
 ): EntitySnapshot | null {
   const name = named(label);
+  const normalizedStatus = named(status);
   return name
-    ? { label: name, icon: named(icon) ?? "", ...(named(status) ? { status: status!.trim() } : {}) }
+    ? {
+        label: name,
+        icon: named(icon) ?? "",
+        ...(normalizedStatus ? { status: normalizedStatus } : {}),
+      }
     : null;
 }
 
@@ -137,8 +142,9 @@ function entityHit(
   label: string | null,
   title: string,
 ): MentionHit | null {
-  if ((kind !== "task" && kind !== "document") || !id || !named(label)) return null;
-  return { entity: kind, id, label: label!, title };
+  if ((kind !== "task" && kind !== "document") || !id || label === null || !named(label))
+    return null;
+  return { entity: kind, id, label, title };
 }
 
 export function createWorkspaceEditorEntities(
@@ -146,6 +152,7 @@ export function createWorkspaceEditorEntities(
   transport: EditorEntityTransport = editorEntityTransport,
 ) {
   let alive = Boolean(workspaceId);
+  const isAlive = () => alive;
   let mentionEpoch = 0;
   let mention: {
     query: string;
@@ -325,7 +332,7 @@ export function createWorkspaceEditorEntities(
             const page = lookup(id);
             const hit = page ? (await page).items.find((item) => item.kind === "document") : null;
             if (!hit || !alive) return null;
-            doc = await request(`document:${hit.projectId}:${hit.id}`, (signal) =>
+            doc = await request(`document:${String(hit.projectId)}:${hit.id}`, (signal) =>
               transport.document(workspaceId, hit.id, hit.projectId, signal),
             );
           }
@@ -342,7 +349,7 @@ export function createWorkspaceEditorEntities(
           const task = await request(`task:${taskId}`, (signal) =>
             transport.task(workspaceId, taskId, signal),
           );
-          if (!alive || task.workspaceId !== workspaceId) return null;
+          if (!isAlive() || task.workspaceId !== workspaceId) return null;
           const wf = await optional(
             () =>
               request(`workflow:${task.projectId}`, (signal) =>

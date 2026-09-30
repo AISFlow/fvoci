@@ -7,7 +7,6 @@ import { api, ensureOk } from "@/lib/api";
 import { legalDocQuery, legalVersionsQuery } from "@/lib/queries/admin";
 import type { BrandingAssetKind } from "./settings-catalog";
 
-type SettingsPatch = components["schemas"]["InstanceSettingsPatchInput"];
 export type AdminInstanceSettings = components["schemas"]["AdminInstanceSettingsOutput"];
 export type LegalPublishInput = components["schemas"]["LegalPublishBody"];
 
@@ -20,7 +19,7 @@ export async function patchInstanceSettings(
   return ensureOk(
     await api.PATCH("/api/v1/admin/instance-settings", {
       // The catalog form builds the body key by key; the server checks it strictly.
-      body: patch as SettingsPatch,
+      body: patch,
     }),
   );
 }
@@ -33,20 +32,24 @@ export async function saveBrandingAsset(
   kind: BrandingAssetKind,
   file: File | null,
 ): Promise<AdminInstanceSettings> {
-  return file === null
-    ? ensureOk(
-        await api.DELETE("/api/v1/admin/branding/assets/{asset}", {
-          params: { path: { asset: kind } },
-        }),
-      )
-    : ensureOk(
-        await api.POST("/api/v1/admin/branding/assets/{asset}", {
-          params: { path: { asset: kind } },
-          body: file as unknown as number[],
-          bodySerializer: (body: unknown) => body as BodyInit,
-          headers: { "Content-Type": "application/octet-stream" },
-        }),
-      );
+  if (file === null) {
+    return ensureOk(
+      await api.DELETE("/api/v1/admin/branding/assets/{asset}", {
+        params: { path: { asset: kind } },
+      }),
+    );
+  }
+  // The generated octet-stream schema is a byte array. Keep that real byte contract
+  // through serialization instead of asserting that a File is an array.
+  const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+  return ensureOk(
+    await api.POST("/api/v1/admin/branding/assets/{asset}", {
+      params: { path: { asset: kind } },
+      body: bytes,
+      bodySerializer: () => new Uint8Array(bytes),
+      headers: { "Content-Type": "application/octet-stream" },
+    }),
+  );
 }
 
 export async function patchAdminUser(input: { userId: string } & AdminUserPatch): Promise<void> {

@@ -3,7 +3,7 @@ import test from "node:test";
 import { githubIssueLinkForm, webhookCreateInput } from "@/lib/validators";
 import { WEBHOOK_EVENTS, webhookCreateProblemKey, webhookEventLabel } from "./webhook-events.ts";
 
-test("every offered webhook event has a Korean label; unknown verbs pass through", () => {
+await test("every offered webhook event has a Korean label; unknown verbs pass through", () => {
   for (const verb of WEBHOOK_EVENTS) {
     assert.notEqual(webhookEventLabel(verb), verb, verb);
   }
@@ -11,7 +11,7 @@ test("every offered webhook event has a Korean label; unknown verbs pass through
   assert.equal(webhookEventLabel("custom.verb"), "custom.verb");
 });
 
-test("webhook form accepts http(s) URLs up to 2048 chars with at least one event", () => {
+await test("webhook form accepts http(s) URLs up to 2048 chars with at least one event", () => {
   assert.equal(
     webhookCreateInput.safeParse({ url: "https://example.com/hook", events: ["task.created"] })
       .success,
@@ -35,7 +35,7 @@ test("webhook form accepts http(s) URLs up to 2048 chars with at least one event
   );
 });
 
-test("webhook create problems map to specific messages", () => {
+await test("webhook create problems map to specific messages", () => {
   assert.equal(webhookCreateProblemKey("integration_unavailable", null), "webhook.unavailable");
   assert.equal(webhookCreateProblemKey("invalid_input", "/url"), "webhook.url.refused");
   assert.equal(webhookCreateProblemKey("invalid_input", "/events"), "webhook.events.required");
@@ -43,7 +43,7 @@ test("webhook create problems map to specific messages", () => {
   assert.equal(webhookCreateProblemKey("not_found", "/url"), null);
 });
 
-test("github issue link form requires a task UUID, owner/name repo and positive number", () => {
+await test("github issue link form requires a task UUID, owner/name repo and positive number", () => {
   const ok = {
     taskId: "0190a3b2-1c2d-7e3f-8a4b-5c6d7e8f9a0b",
     repo: "octo-org/hello.world",

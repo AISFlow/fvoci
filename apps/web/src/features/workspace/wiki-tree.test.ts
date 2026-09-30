@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { childrenByParent, childrenOf } from "./wiki-tree.ts";
 
-test("childrenByParent indexes nested wiki nodes for recursive rendering", () => {
+await test("childrenByParent indexes nested wiki nodes for recursive rendering", () => {
   const nodes = [
     { id: "root", parentId: null },
     { id: "child", parentId: "root" },

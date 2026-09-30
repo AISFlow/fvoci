@@ -54,13 +54,12 @@ export function isRecurrenceKind(value: string): value is RecurrenceKind {
 }
 
 export function parseRecurrence(value: unknown): RecurrenceKind | null {
-  if (value == null) return null;
   if (typeof value !== "object" || value === null) return null;
   const kind = (value as { kind?: unknown }).kind;
   return typeof kind === "string" && isRecurrenceKind(kind) ? kind : null;
 }
 
-export function recurrenceBody(kind: RecurrenceKind | null): unknown | null {
+export function recurrenceBody(kind: RecurrenceKind | null): unknown {
   return kind ? { kind } : null;
 }
 

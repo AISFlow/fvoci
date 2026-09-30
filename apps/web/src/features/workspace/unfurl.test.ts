@@ -23,13 +23,13 @@ function og(partial: Partial<UnfurlOutput>): UnfurlOutput {
   };
 }
 
-test("http(s)만 허용", () => {
+await test("http(s)만 허용", () => {
   assert.equal(isHttpUrl("https://github.com/fvoci/FVOCI"), true);
   assert.equal(isHttpUrl("javascript:alert(1)"), false);
   assert.equal(isHttpUrl("not-a-url"), false);
 });
 
-test("OG 필드·비http 이미지는 버린다", () => {
+await test("OG 필드·비http 이미지는 버린다", () => {
   assert.deepEqual(
     unfurlCardDataOf(
       og({
@@ -47,7 +47,7 @@ test("OG 필드·비http 이미지는 버린다", () => {
   });
 });
 
-test("GitHub 제목 폴백 owner/repo#n", () => {
+await test("GitHub 제목 폴백 owner/repo#n", () => {
   assert.equal(
     unfurlCardDataOf(
       og({
@@ -61,11 +61,11 @@ test("GitHub 제목 폴백 owner/repo#n", () => {
   );
 });
 
-test("제목 없으면 호스트", () => {
+await test("제목 없으면 호스트", () => {
   assert.equal(unfurlDisplayTitle("", "https://github.com/fvoci/FVOCI"), "github.com");
 });
 
-test("sandbox iframe HTML만 임베드로 쓴다", () => {
+await test("sandbox iframe HTML만 임베드로 쓴다", () => {
   assert.equal(
     isSandboxedIframeHtml(
       '<iframe src="https://www.youtube.com/embed/x" sandbox="allow-scripts allow-same-origin"></iframe>',

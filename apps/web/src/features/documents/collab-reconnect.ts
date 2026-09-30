@@ -121,9 +121,15 @@ export function createRefusalAwareSocket(
   return new OwnedSocket({
     ...RECONNECT_BACKOFF,
     ...configuration,
-    onOpen: () => watch.open(),
-    onMessage: () => watch.frame(),
-    onClose: ({ event }) => onClosed(watch.close(event?.code)),
+    onOpen: () => {
+      watch.open();
+    },
+    onMessage: () => {
+      watch.frame();
+    },
+    onClose: ({ event }) => {
+      onClosed(watch.close(event.code));
+    },
   });
 }
 
@@ -237,6 +243,8 @@ export class RoomConnection<S extends RoomSocketHandle> {
     for (const provider of socket.configuration.providerMap.values()) {
       provider.flushPendingUpdates();
     }
-    this.options.timers.setTimeout(() => socket.destroy(), 0);
+    this.options.timers.setTimeout(() => {
+      socket.destroy();
+    }, 0);
   }
 }

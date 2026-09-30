@@ -121,33 +121,39 @@ function searchItem(
     updatedAt: "",
   };
 }
+const firstLookup = lookupItems[0];
+const secondLookup = lookupItems[1];
+assert.ok(firstLookup && secondLookup, "lookup fixture contains task and document");
+
 function transport(overrides: Partial<EditorEntityTransport> = {}): EditorEntityTransport {
   return {
-    members: async () => ({ items: [member] }),
-    groups: async () => ({ items: [group] }),
-    lookup: async () => ({ items: lookupItems }),
-    search: async (_w, _q, kind) => ({
-      items: [searchItem(kind, kind === "task" ? taskId : docId, "PRJ-1")],
-      nextCursor: null,
-    }),
-    projects: async () => ({ items: [project] }),
-    task: async () => task,
-    documentUuid: async () => doc,
-    document: async () => doc,
-    workflow: async () => ({
-      id: "wf",
-      projectId,
-      statuses: [
-        {
-          id: "status",
-          name: "Doing",
-          category: "active",
-          sortKey: "",
-          wipLimit: null,
-          workflowId: "wf",
-        },
-      ],
-    }),
+    members: () => Promise.resolve({ items: [member] }),
+    groups: () => Promise.resolve({ items: [group] }),
+    lookup: () => Promise.resolve({ items: lookupItems }),
+    search: (_w, _q, kind) =>
+      Promise.resolve({
+        items: [searchItem(kind, kind === "task" ? taskId : docId, "PRJ-1")],
+        nextCursor: null,
+      }),
+    projects: () => Promise.resolve({ items: [project] }),
+    task: () => Promise.resolve(task),
+    documentUuid: () => Promise.resolve(doc),
+    document: () => Promise.resolve(doc),
+    workflow: () =>
+      Promise.resolve({
+        id: "wf",
+        projectId,
+        statuses: [
+          {
+            id: "status",
+            name: "Doing",
+            category: "active",
+            sortKey: "",
+            wipLimit: null,
+            workflowId: "wf",
+          },
+        ],
+      }),
     ...overrides,
   };
 }
@@ -161,7 +167,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-test("all four menu types preserve task/document/user/group ordering and casefolded person filtering", async () => {
+await test("all four menu types preserve task/document/user/group ordering and casefolded person filtering", async () => {
   const scope = createWorkspaceEditorEntities(ws, transport());
   assert.deepEqual(
     (await scope.mentionItems("  aLiCe ")).map((x) => x.entity),
@@ -174,17 +180,17 @@ test("all four menu types preserve task/document/user/group ordering and casefol
   scope.dispose();
 });
 
-test("blank loads only people; display ID loads canonical lookup rather than search", async () => {
+await test("blank loads only people; display ID loads canonical lookup rather than search", async () => {
   const queries: string[] = [];
   const scope = createWorkspaceEditorEntities(
     ws,
     transport({
-      search: async () => {
-        throw new Error("search must not run");
+      search: () => {
+        return Promise.reject(new Error("search must not run"));
       },
-      lookup: async (_w, q) => {
+      lookup: (_w, q) => {
         queries.push(q);
-        return { items: lookupItems };
+        return Promise.resolve({ items: lookupItems });
       },
     }),
   );
@@ -200,26 +206,27 @@ test("blank loads only people; display ID loads canonical lookup rather than sea
   scope.dispose();
 });
 
-test("member denial and a failed search retain independent authorized hits, never attachments or null IDs", async () => {
+await test("member denial and a failed search retain independent authorized hits, never attachments or null IDs", async () => {
   const scope = createWorkspaceEditorEntities(
     ws,
     transport({
-      members: async () => {
-        throw new ProblemError(403);
+      members: () => {
+        return Promise.reject(new ProblemError(403));
       },
-      search: async (_w, _q, kind) => ({
-        items:
-          kind === "task"
-            ? []
-            : [
-                searchItem("document", docId, "WIKI-1"),
-                searchItem("document", docId, null),
-                searchItem("attachment", docId, "PRJ-1"),
-                searchItem("comment", docId, "PRJ-1"),
-                searchItem("task", "", "PRJ-1"),
-              ],
-        nextCursor: null,
-      }),
+      search: (_w, _q, kind) =>
+        Promise.resolve({
+          items:
+            kind === "task"
+              ? []
+              : [
+                  searchItem("document", docId, "WIKI-1"),
+                  searchItem("document", docId, null),
+                  searchItem("attachment", docId, "PRJ-1"),
+                  searchItem("comment", docId, "PRJ-1"),
+                  searchItem("task", "", "PRJ-1"),
+                ],
+          nextCursor: null,
+        }),
     }),
   );
   assert.deepEqual(
@@ -229,34 +236,35 @@ test("member denial and a failed search retain independent authorized hits, neve
   scope.dispose();
 });
 
-test("empty and unknown lookup kinds never expand the menu", async () => {
+await test("empty and unknown lookup kinds never expand the menu", async () => {
   const scope = createWorkspaceEditorEntities(
     ws,
     transport({
-      lookup: async () => ({
-        items: [
-          { ...lookupItems[0]!, kind: "project" },
-          { ...lookupItems[0]!, id: "" },
-        ],
-      }),
+      lookup: () =>
+        Promise.resolve({
+          items: [
+            { ...firstLookup, kind: "project" },
+            { ...firstLookup, id: "" },
+          ],
+        }),
     }),
   );
   assert.deepEqual(await scope.mentionItems("PRJ-1"), []);
   scope.dispose();
 });
 
-test("UUID and display resolvers use true title/icon/status, requested kind and project affiliation", async () => {
+await test("UUID and display resolvers use true title/icon/status, requested kind and project affiliation", async () => {
   const calls: string[] = [];
   const scope = createWorkspaceEditorEntities(
     ws,
     transport({
-      document: async (_w, id, p) => {
-        calls.push(`document:${id}:${p}`);
-        return doc;
+      document: (_w, id, p) => {
+        calls.push(`document:${id}:${String(p)}`);
+        return Promise.resolve(doc);
       },
-      task: async (_w, id) => {
+      task: (_w, id) => {
         calls.push(`task:${id}`);
-        return task;
+        return Promise.resolve(task);
       },
     }),
   );
@@ -276,26 +284,26 @@ test("UUID and display resolvers use true title/icon/status, requested kind and 
     status: "Doing",
   });
   const byKey = await scope.entityResolver("project", "prj");
-  assert.equal(byKey?.label, "Real project");
-  assert.equal(byKey?.icon, "🪴");
-  assert.ok(byKey?.status);
+  assert.equal(byKey.label, "Real project");
+  assert.equal(byKey.icon, "🪴");
+  assert.ok(byKey.status);
   assert.deepEqual(await scope.entityResolver("project", projectId), byKey);
   assert.deepEqual(calls, [`document:${docId}:${projectId}`, `task:${taskId}`]);
   scope.dispose();
 });
 
-test("wiki display references use wiki metadata and task status failure retains task card", async () => {
+await test("wiki display references use wiki metadata and task status failure retains task card", async () => {
   let affiliation: string | null | undefined;
   const scope = createWorkspaceEditorEntities(
     ws,
     transport({
-      lookup: async () => ({ items: [{ ...lookupItems[1]!, projectId: null }] }),
-      document: async (_w, _id, p) => {
+      lookup: () => Promise.resolve({ items: [{ ...secondLookup, projectId: null }] }),
+      document: (_w, _id, p) => {
         affiliation = p;
-        return { ...doc, projectId: null };
+        return Promise.resolve({ ...doc, projectId: null });
       },
-      workflow: async () => {
-        throw new ProblemError(503);
+      workflow: () => {
+        return Promise.reject(new ProblemError(503));
       },
     }),
   );
@@ -306,16 +314,16 @@ test("wiki display references use wiki metadata and task status failure retains 
   scope.dispose();
 });
 
-test("foreign-workspace UUIDs, blank metadata, absent and invalid refs are inaccessible", async () => {
+await test("foreign-workspace UUIDs, blank metadata, absent and invalid refs are inaccessible", async () => {
   let count = 0;
   const scope = createWorkspaceEditorEntities(
     ws,
     transport({
-      documentUuid: async () => {
+      documentUuid: () => {
         count++;
-        return { ...doc, workspaceId: projectId };
+        return Promise.resolve({ ...doc, workspaceId: projectId });
       },
-      task: async () => ({ ...task, title: "  " }),
+      task: () => Promise.resolve({ ...task, title: "  " }),
     }),
   );
   assert.equal(await scope.entityResolver("document", docId), null);
@@ -328,16 +336,16 @@ test("foreign-workspace UUIDs, blank metadata, absent and invalid refs are inacc
   scope.dispose();
 });
 
-test("a later permission denial is revalidated without any positive title cache", async () => {
+await test("a later permission denial is revalidated without any positive title cache", async () => {
   let permitted = true;
   let count = 0;
   const scope = createWorkspaceEditorEntities(
     ws,
     transport({
-      documentUuid: async () => {
+      documentUuid: () => {
         count++;
-        if (!permitted) throw new ProblemError(404);
-        return doc;
+        if (!permitted) return Promise.reject(new ProblemError(404));
+        return Promise.resolve(doc);
       },
     }),
   );
@@ -348,7 +356,7 @@ test("a later permission denial is revalidated without any positive title cache"
   scope.dispose();
 });
 
-test("slow A / fast B typeahead aborts real A signal and drops A even if transport ignores abort", async () => {
+await test("slow A / fast B typeahead aborts real A signal and drops A even if transport ignores abort", async () => {
   const a = deferred<Schema["SearchListResponse"]>();
   const signals: AbortSignal[] = [];
   const scope = createWorkspaceEditorEntities(
@@ -373,7 +381,7 @@ test("slow A / fast B typeahead aborts real A signal and drops A even if transpo
   scope.dispose();
 });
 
-test("different nodes finish independently; same entity and shared display lookup dedupe only inflight", async () => {
+await test("different nodes finish independently; same entity and shared display lookup dedupe only inflight", async () => {
   const pending = deferred<Schema["LookupListResponse"]>();
   let lookups = 0;
   const scope = createWorkspaceEditorEntities(
@@ -397,7 +405,7 @@ test("different nodes finish independently; same entity and shared display looku
   scope.dispose();
 });
 
-test("dispose cancels all requests and rejects late node/mention/paste enrichment", async () => {
+await test("dispose cancels all requests and rejects late node/mention/paste enrichment", async () => {
   const pending = deferred<Schema["DocumentMetaResponse"]>();
   const signals: AbortSignal[] = [];
   const scope = createWorkspaceEditorEntities(
@@ -420,7 +428,7 @@ test("dispose cancels all requests and rejects late node/mention/paste enrichmen
   assert.equal(await scope.entityResolver("document", docId), null);
 });
 
-test("401 terminates scope and suppresses other late authorized metadata", async () => {
+await test("401 terminates scope and suppresses other late authorized metadata", async () => {
   const pending = deferred<Schema["DocumentMetaResponse"]>();
   let signal!: AbortSignal;
   const scope = createWorkspaceEditorEntities(
@@ -430,8 +438,8 @@ test("401 terminates scope and suppresses other late authorized metadata", async
         signal = s;
         return pending.promise;
       },
-      members: async () => {
-        throw new ProblemError(401);
+      members: () => {
+        return Promise.reject(new ProblemError(401));
       },
     }),
   );
@@ -441,11 +449,11 @@ test("401 terminates scope and suppresses other late authorized metadata", async
   pending.resolve({
     ...doc,
     title: "must not appear",
-  } as unknown as Schema["DocumentMetaResponse"]);
+  });
   assert.equal(await result, null);
 });
 
-test("actual openapi transport forwards AbortSignals and both lexical limits=50 without cursor", async () => {
+await test("actual openapi transport forwards AbortSignals and both lexical limits=50 without cursor", async () => {
   const original = globalThis.fetch;
   const originalGet = api.GET;
   // Browser Requests accept relative URLs; Bun needs a test origin.
@@ -453,10 +461,10 @@ test("actual openapi transport forwards AbortSignals and both lexical limits=50 
   api.GET = ((path: string, options: object) =>
     get(path, { ...options, baseUrl: "http://localhost" })) as typeof api.GET;
   const requests: Request[] = [];
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = ((input: RequestInfo | URL) => {
     const request = input as Request;
     requests.push(request);
-    return Response.json({ items: [], nextCursor: null });
+    return Promise.resolve(Response.json({ items: [], nextCursor: null }));
   }) as typeof fetch;
   try {
     const controller = new AbortController();
@@ -471,7 +479,9 @@ test("actual openapi transport forwards AbortSignals and both lexical limits=50 
       assert.equal(url.searchParams.has("cursor"), false);
       assert.equal(url.searchParams.has("projectId"), false);
     }
-    assert.ok(requests[2]!.url.endsWith(`/api/v1/documents/${docId}`));
+    const documentRequest = requests[2];
+    assert.ok(documentRequest);
+    assert.ok(documentRequest.url.endsWith(`/api/v1/documents/${docId}`));
     controller.abort();
     assert.ok(requests.every((r) => r.signal.aborted));
   } finally {

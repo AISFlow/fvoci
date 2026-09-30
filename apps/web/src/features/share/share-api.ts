@@ -72,7 +72,7 @@ export function formatShareDate(iso: string): string {
 }
 
 export async function copyText(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
+  if ("clipboard" in navigator && typeof navigator.clipboard.writeText === "function") {
     await navigator.clipboard.writeText(value);
     return;
   }

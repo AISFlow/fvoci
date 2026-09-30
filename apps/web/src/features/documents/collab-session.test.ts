@@ -8,7 +8,7 @@ import { collabStatusOf, collabUserOf } from "./collab-model.ts";
 const sessionPath = path.join(import.meta.dirname, "../../vue/collab/useCollabRoom.ts");
 const cssPath = path.join(import.meta.dirname, "../../styles/presence.css");
 
-test("Vue collab room binds the provider and preserves durable persist state", () => {
+await test("Vue collab room binds the provider and preserves durable persist state", () => {
   const src = readFileSync(sessionPath, "utf8");
   assert.equal(src.includes("@hocuspocus/provider-react"), false);
   assert.equal(src.includes("new HocuspocusProvider"), true);
@@ -18,12 +18,12 @@ test("Vue collab room binds the provider and preserves durable persist state", (
   assert.equal(src.includes("scopedPersistObserver"), true);
 });
 
-test("collab-session 에 hex 리터럴이 없다", () => {
+await test("collab-session 에 hex 리터럴이 없다", () => {
   const src = readFileSync(sessionPath, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
   assert.equal(/#[0-9a-fA-F]{3,8}/.test(src), false);
 });
 
-test("collabUserOf 색은 .afn-label-* --afn-label-ink 이다", () => {
+await test("collabUserOf 색은 .afn-label-* --afn-label-ink 이다", () => {
   const user = collabUserOf("01a01f00-0000-7000-8000-000000000001", "김연구");
   assert.match(user.color, /^#[0-9a-fA-F]{6}$/);
   const css = readFileSync(cssPath, "utf8");
@@ -53,7 +53,7 @@ function labelInk(css: string, key: string): string | undefined {
   )?.[1];
 }
 
-test("presenceColorOf 는 옛 클라이언트 인덱스와 같은 .afn-label-* 잉크를 고른다", () => {
+await test("presenceColorOf 는 옛 클라이언트 인덱스와 같은 .afn-label-* 잉크를 고른다", () => {
   const css = readFileSync(cssPath, "utf8");
   assert.equal(PRESENCE_COLORS.length, OLD_LABEL_KEYS.length);
   for (let i = 0; i < OLD_LABEL_KEYS.length; i += 1) {
@@ -65,7 +65,7 @@ test("presenceColorOf 는 옛 클라이언트 인덱스와 같은 .afn-label-* �
   }
 });
 
-test("다른 uuid 뒷자리는 다른 라벨 색을 고른다", () => {
+await test("다른 uuid 뒷자리는 다른 라벨 색을 고른다", () => {
   const a = collabUserOf("01a01f00-0000-7000-8000-000000000001", "김");
   const b = collabUserOf("01a01f00-0000-7000-8000-00000000000b", "박");
   assert.notEqual(a.color, b.color);
@@ -73,7 +73,7 @@ test("다른 uuid 뒷자리는 다른 라벨 색을 고른다", () => {
   assert.match(b.color, /^#[0-9a-fA-F]{6}$/);
 });
 
-test("collabStatusOf: unauthorized > 방 거절 > 연결 상태 순이다", () => {
+await test("collabStatusOf: unauthorized > 방 거절 > 연결 상태 순이다", () => {
   for (const connection of ["connecting", "connected", "disconnected"] as const) {
     assert.equal(
       collabStatusOf(false, null, connection),
@@ -86,7 +86,7 @@ test("collabStatusOf: unauthorized > 방 거절 > 연결 상태 순이다", () =
       assert.equal(
         collabStatusOf(true, refusal, connection),
         "unauthorized",
-        `a refusal must not hide the unauthorized note: ${refusal}/${connection}`,
+        `a refusal must not hide the unauthorized note: ${String(refusal)}/${connection}`,
       );
     }
   }
@@ -105,7 +105,7 @@ function between(src: string, start: string, end: string): string {
   return src.slice(from, to);
 }
 
-test("Vue collab room rebinds only socket generation, never refusal state", () => {
+await test("Vue collab room rebinds only socket generation, never refusal state", () => {
   const src = stripComments(readFileSync(sessionPath, "utf8"));
   const binding = between(src, "function bindGeneration(", "function retire(");
   assert.equal(binding.match(/new HocuspocusProvider\(/g)?.length, 1);
@@ -116,7 +116,7 @@ test("Vue collab room rebinds only socket generation, never refusal state", () =
   assert.doesNotMatch(watch, /refusal/);
 });
 
-test("Vue collab room sends authentication results to the state machine and exposes refusal in session status", () => {
+await test("Vue collab room sends authentication results to the state machine and exposes refusal in session status", () => {
   const src = stripComments(readFileSync(sessionPath, "utf8"));
   const binding = between(src, "function bindGeneration(", "function retire(");
   assert.match(binding, /onAuthenticated = \(\) => connection\.authenticated\(\);/);
@@ -131,7 +131,7 @@ test("Vue collab room sends authentication results to the state machine and expo
   );
 });
 
-test("Vue collab room computes status with collabStatusOf and releases its generation on teardown", () => {
+await test("Vue collab room computes status with collabStatusOf and releases its generation on teardown", () => {
   const src = stripComments(readFileSync(sessionPath, "utf8"));
   assert.match(src, /return computed<CollabRoomSession>\(\(\) => \(/);
   assert.match(

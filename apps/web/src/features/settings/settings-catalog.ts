@@ -274,11 +274,12 @@ export const EE_GATED: Partial<Record<SettingsKey, string>> = { branding: "brand
 /** Asset leaves are written by the upload route only; the PATCH body omits them. */
 export function withoutAssets(key: SettingsKey, doc: unknown): unknown {
   if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return doc;
-  const out: Record<string, unknown> = { ...(doc as Record<string, unknown>) };
-  for (const [leaf, widget] of Object.entries(SETTINGS_CATALOG[key].widgets)) {
-    if (widget === "asset") delete out[leaf];
-  }
-  return out;
+  const assets = new Set(
+    Object.entries(SETTINGS_CATALOG[key].widgets)
+      .filter(([, widget]) => widget === "asset")
+      .map(([leaf]) => leaf),
+  );
+  return Object.fromEntries(Object.entries(doc).filter(([leaf]) => !assets.has(leaf)));
 }
 
 type AdminAttachmentTransfer = components["schemas"]["AdminAttachmentTransferOutput"];

@@ -97,7 +97,7 @@ export function dateMoveRequest(
   const previous = (row.values as Record<string, unknown>)[field.id];
   const previousLocal =
     previous && typeof previous === "object" && "datetime" in previous
-      ? isoToZonedLocal(String((previous as { datetime: unknown }).datetime), timeZone)
+      ? isoToZonedLocal(String(previous.datetime), timeZone)
       : "";
   const time = previousLocal ? previousLocal.slice(11, 16) : DEFAULT_LOCAL_TIME;
   const instant = zonedLocalToIso(`${target}T${time}`, timeZone);

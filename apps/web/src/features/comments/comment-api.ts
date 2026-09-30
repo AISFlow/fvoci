@@ -51,8 +51,8 @@ export async function createComment(
   let mentionGroups: ReadonlyArray<MentionGroup> = [];
   if (body.text.includes("@")) {
     const [membersResult, groupsResult] = await Promise.allSettled([
-      queryClient.fetchQuery(membersQuery(workspaceId)),
-      queryClient.fetchQuery(groupsQuery(workspaceId)),
+      queryClient.query(membersQuery(workspaceId)),
+      queryClient.query(groupsQuery(workspaceId)),
     ]);
     if (membersResult.status === "fulfilled") {
       members = membersResult.value.items.map((member) => ({

@@ -7,7 +7,7 @@ import {
   FVOCI_YDOC_FRAGMENT,
 } from "@fvoci/editor/collab";
 
-test("persist strings and fragment stay on the original contract", () => {
+await test("persist strings and fragment stay on the original contract", () => {
   assert.equal(FVOCI_YDOC_FRAGMENT, "prosemirror");
   assert.equal(COLLAB_PERSIST_REQUEST, "persist");
   assert.equal(COLLAB_PERSIST_DONE, "persisted");

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
 import { renderToString } from "vue/server-renderer";
-import ts from "typescript";
+import { evaluate, compiledComponent, renderFunction, callCopy } from "./compiled-component-test";
 import * as Vue from "vue";
 import { t } from "@fvoci/i18n";
 import * as api from "@/lib/api";
@@ -20,8 +20,9 @@ const filename = new URL("../../vue/features/settings/WorkspaceSsoSection.vue", 
   .pathname;
 const { descriptor } = parse(readFileSync(filename, "utf8"), { filename });
 const script = compileScript(descriptor, { id: "sso-contract" });
+assert.ok(descriptor.template, "actual component has a template");
 const template = compileTemplate({
-  source: descriptor.template!.content,
+  source: descriptor.template.content,
   filename,
   id: "sso-contract",
   compilerOptions: { bindingMetadata: script.bindings },
@@ -30,21 +31,6 @@ assert.deepEqual(template.errors, []);
 
 // Compile the actual Vue script and template; substitute query snapshots and
 // leaf controls only. Policy computations, event handlers and rendering are real.
-function evaluate(code: string, imports: Record<string, unknown>) {
-  const js = ts.transpileModule(code, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const module = { exports: {} as any };
-  new Function("require", "module", "exports", js)(
-    (name: string) => {
-      assert.ok(name in imports, `unmapped component import: ${name}`);
-      return imports[name];
-    },
-    module,
-    module.exports,
-  );
-  return module.exports;
-}
 
 const button = Vue.defineComponent({
   setup:
@@ -74,7 +60,14 @@ async function render(copy?: "copied" | "failed") {
       value:
         copy === "failed"
           ? {}
-          : { clipboard: { writeText: async (value: string) => void written.push(value) } },
+          : {
+              clipboard: {
+                writeText: (value: string) => {
+                  written.push(value);
+                  return Promise.resolve();
+                },
+              },
+            },
     });
     const idle = () => ({ isPending: Vue.ref(false) });
     const imports = {
@@ -102,12 +95,12 @@ async function render(copy?: "copied" | "failed") {
       "./workspace-oidc": oidcForm,
       "@/features/settings/settings-shell.css": {},
     };
-    const component = evaluate(script.content, imports).default;
-    component.render = evaluate(template.code, imports).render;
+    const component = compiledComponent(evaluate(script.content, imports).default);
+    component.render = renderFunction(evaluate(template.code, imports).render);
     const setup = component.setup;
-    component.setup = (props: unknown, context: unknown) => {
+    component.setup = (props: Record<string, unknown>, context: Vue.SetupContext) => {
       const state = setup(props, context);
-      if (copy) Vue.onServerPrefetch(() => state.onCopy());
+      if (copy) Vue.onServerPrefetch(() => callCopy(state));
       return state;
     };
     const html = await renderToString(Vue.createSSRApp(component, { workspaceId: WORKSPACE_ID }));
@@ -130,7 +123,7 @@ function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-test("redirect URI is the per-workspace SSO callback on the public origin", () => {
+await test("redirect URI is the per-workspace SSO callback on the public origin", () => {
   const expected = `https://fvoci.example/api/v1/auth/sso/${WORKSPACE_ID}/callback`;
   assert.equal(workspaceSsoRedirectUri("https://fvoci.example", WORKSPACE_ID), expected);
   assert.equal(workspaceSsoRedirectUri("https://fvoci.example/", WORKSPACE_ID), expected);
@@ -140,7 +133,7 @@ test("redirect URI is the per-workspace SSO callback on the public origin", () =
   );
 });
 
-test("the shown URI is the server's; the browser origin is only a fallback", () => {
+await test("the shown URI is the server's; the browser origin is only a fallback", () => {
   const server = `https://fvoci.example/api/v1/auth/sso/${WORKSPACE_ID}/callback`;
   // An admin on another host name still sees the public-origin URI.
   assert.equal(displayedRedirectUri(server, "http://intranet:8080", WORKSPACE_ID), server);
@@ -152,7 +145,7 @@ test("the shown URI is the server's; the browser origin is only a fallback", () 
   }
 });
 
-test("the Vue section shows the server URI read-only with Korean help and a copy button", async () => {
+await test("the Vue section shows the server URI read-only with Korean help and a copy button", async () => {
   const html = await render();
   assert.match(html, /<label[^>]*>리디렉션 URI<\/label>/);
   const input = html.match(/<input[^>]*>/)?.[0] ?? "";
@@ -174,7 +167,7 @@ test("the Vue section shows the server URI read-only with Korean help and a copy
   assert.doesNotMatch(html, /role="alert"/);
 });
 
-test("the actual Vue copy handler sets copied text or an alert to copy by hand", async () => {
+await test("the actual Vue copy handler sets copied text or an alert to copy by hand", async () => {
   assert.match(await render("copied"), /<button type="button"[^>]*>복사됨<\/button>/);
   const failed = await render("failed");
   assert.match(failed, /<button type="button"[^>]*>복사<\/button>/);
@@ -184,13 +177,20 @@ test("the actual Vue copy handler sets copied text or an alert to copy by hand",
   );
 });
 
-test("copyText writes to the clipboard and fails without one", async () => {
+await test("copyText writes to the clipboard and fails without one", async () => {
   const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const written: string[] = [];
   try {
     Object.defineProperty(globalThis, "navigator", {
       configurable: true,
-      value: { clipboard: { writeText: async (value: string) => void written.push(value) } },
+      value: {
+        clipboard: {
+          writeText: (value: string) => {
+            written.push(value);
+            return Promise.resolve();
+          },
+        },
+      },
     });
     await copyText("https://fvoci.example/api/v1/auth/sso/x/callback");
     assert.deepEqual(written, ["https://fvoci.example/api/v1/auth/sso/x/callback"]);

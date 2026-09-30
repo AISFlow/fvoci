@@ -30,6 +30,8 @@ export function logout() {
         undefined,
       );
     },
-    clearOwner: () => writePushOwner(localStore(), null),
+    clearOwner: () => {
+      writePushOwner(localStore(), null);
+    },
   });
 }
