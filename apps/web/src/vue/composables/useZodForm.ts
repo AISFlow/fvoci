@@ -1,4 +1,4 @@
-import { nextTick, reactive, ref, watch } from "vue";
+import { nextTick, reactive, ref, shallowRef, watch } from "vue";
 import type { z } from "zod";
 import { issueMessage } from "@/lib/issue-message";
 
@@ -22,7 +22,7 @@ export function useZodForm<T extends FieldValues, O>(options: {
   fieldIds: Partial<Record<keyof T & string, string>>;
 }) {
   const values = reactive({ ...options.defaults() }) as T;
-  const errors = ref<Partial<Record<keyof T & string, string>>>({});
+  const errors = shallowRef<Partial<Record<string, string>>>({});
   const submitting = ref(false);
   let checked = false;
 
@@ -35,9 +35,10 @@ export function useZodForm<T extends FieldValues, O>(options: {
     const next: Partial<Record<string, string>> = {};
     for (const issue of parsed.error.issues) {
       const field = issue.path[0];
-      if (typeof field === "string" && next[field] === undefined) next[field] = issueMessage(issue.message);
+      if (typeof field === "string" && next[field] === undefined)
+        next[field] = issueMessage(issue.message);
     }
-    errors.value = next as Partial<Record<keyof T & string, string>>;
+    errors.value = next;
     return { ok: false };
   }
 
@@ -50,10 +51,10 @@ export function useZodForm<T extends FieldValues, O>(options: {
 
   async function focusFirstError(): Promise<void> {
     await nextTick();
-    const doc = globalThis.document;
+    const doc = (globalThis as { document?: Document }).document;
     if (!doc) return;
     for (const [field, id] of Object.entries(options.fieldIds) as [string, string][]) {
-      if (errors.value[field as keyof T & string] === undefined) continue;
+      if (errors.value[field] === undefined) continue;
       doc.getElementById(id)?.focus();
       return;
     }

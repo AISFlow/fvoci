@@ -12,7 +12,11 @@ export type AdminNav = "admin" | "audit" | "legal";
 
 const props = defineProps<{ active: AdminNav }>();
 
-const NAV: { key: AdminNav; to: string; labelKey: "settings.admin" | "audit.title" | "settings.legal" }[] = [
+const NAV: {
+  key: AdminNav;
+  to: string;
+  labelKey: "settings.admin" | "audit.title" | "settings.legal";
+}[] = [
   { key: "admin", to: "/settings/admin", labelKey: "settings.admin" },
   { key: "audit", to: "/settings/audit", labelKey: "audit.title" },
   { key: "legal", to: "/settings/legal", labelKey: "settings.legal" },
@@ -30,7 +34,9 @@ watchEffect(() => {
 <template>
   <QueryLoading v-if="me.isLoading.value || !ready" />
   <div v-else-if="ready.isInstanceAdmin" class="flex min-h-screen flex-col">
-    <header class="flex flex-wrap items-center justify-between gap-3 border-b border-default px-4 py-3">
+    <header
+      class="flex flex-wrap items-center justify-between gap-3 border-b border-default px-4 py-3"
+    >
       <div class="flex flex-wrap items-center gap-4">
         <a href="/" class="underline underline-offset-2">{{ t("nav.backHome") }}</a>
         <nav class="flex flex-wrap items-center gap-3" :aria-label="t('admin.console')">

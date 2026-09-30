@@ -47,19 +47,26 @@ function onKeydown(event: KeyboardEvent): void {
   close();
 }
 
-function onConfirm(): void {
+async function onConfirm(): Promise<void> {
   busy.value = true;
-  void Promise.resolve()
-    .then(() => props.action())
-    .finally(() => {
-      busy.value = false;
-      close();
-    });
+  try {
+    await Promise.resolve().then(() => props.action());
+  } finally {
+    busy.value = false;
+    close();
+  }
 }
 </script>
 
 <template>
-  <UButton ref="trigger" size="sm" variant="outline" color="neutral" :disabled="props.disabled" @click="show">
+  <UButton
+    ref="trigger"
+    size="sm"
+    variant="outline"
+    color="neutral"
+    :disabled="props.disabled"
+    @click="show"
+  >
     <slot />
   </UButton>
   <div
@@ -74,8 +81,16 @@ function onConfirm(): void {
       <h2 :id="titleId" class="text-xl font-semibold">{{ title }}</h2>
       <p class="mt-2 text-sm break-keep text-muted">{{ description }}</p>
       <div class="mt-4 flex justify-end gap-2">
-        <UButton size="sm" variant="outline" color="neutral" @click="close">{{ t("common.cancel") }}</UButton>
-        <UButton ref="confirmButton" size="sm" :color="destructive ? 'error' : 'primary'" :disabled="busy" @click="onConfirm">
+        <UButton size="sm" variant="outline" color="neutral" @click="close">{{
+          t("common.cancel")
+        }}</UButton>
+        <UButton
+          ref="confirmButton"
+          size="sm"
+          :color="destructive ? 'error' : 'primary'"
+          :disabled="busy"
+          @click="onConfirm"
+        >
           {{ actionLabel }}
         </UButton>
       </div>

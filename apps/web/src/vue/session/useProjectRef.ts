@@ -5,13 +5,18 @@ import { ProblemError } from "@/lib/api";
 import { parseRef } from "@/lib/href";
 
 /** `/w/:slug/:ref/...` to the workspace's project (the React useProjectRef's rules). */
-export function useProjectRef(workspaceId: MaybeRefOrGetter<string | undefined>, ref: MaybeRefOrGetter<string>) {
+export function useProjectRef(
+  workspaceId: MaybeRefOrGetter<string | undefined>,
+  ref: MaybeRefOrGetter<string>,
+) {
   const projectKey = computed(() => {
     const parsed = parseRef(toValue(ref));
     return parsed?.kind === "project" ? parsed.key : null;
   });
   const projects = useQuery(() => projectsQuery(toValue(workspaceId) ?? ""));
-  const project = computed(() => findProjectByKey(projects.data.value?.items, projectKey.value ?? ""));
+  const project = computed(() =>
+    findProjectByKey(projects.data.value?.items, projectKey.value ?? ""),
+  );
   const notFound = computed(
     () =>
       projectKey.value === null ||
@@ -28,7 +33,10 @@ export function useProjectRef(workspaceId: MaybeRefOrGetter<string | undefined>,
    */
   const failed = computed(
     () =>
-      projects.isError.value && project.value === undefined && !notFound.value && !projects.isFetching.value,
+      projects.isError.value &&
+      project.value === undefined &&
+      !notFound.value &&
+      !projects.isFetching.value,
   );
   return { projects, project, notFound, failed, retry: () => projects.refetch() };
 }

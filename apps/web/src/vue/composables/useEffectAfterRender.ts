@@ -10,21 +10,26 @@ import { onMounted, onUnmounted, watch, type WatchSource } from "vue";
  */
 export function useEffectAfterRender(
   sources: WatchSource<unknown>[],
-  effect: () => void | (() => void),
+  effect: (() => void) | (() => () => void),
 ): void {
-  let cleanup: void | (() => void);
+  let cleanup: (() => void) | undefined;
   let mounted = false;
   const run = () => {
     if (cleanup) cleanup();
-    cleanup = effect();
+    const result = effect();
+    cleanup = typeof result === "function" ? result : undefined;
   };
   onMounted(() => {
     mounted = true;
     run();
   });
-  watch(sources, () => {
-    if (mounted) run();
-  }, { flush: "post" });
+  watch(
+    sources,
+    () => {
+      if (mounted) run();
+    },
+    { flush: "post" },
+  );
   onUnmounted(() => {
     mounted = false;
     if (cleanup) cleanup();

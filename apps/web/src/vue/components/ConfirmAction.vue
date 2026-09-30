@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { computed, nextTick, ref, useId, useTemplateRef, watch, type ComponentPublicInstance } from "vue";
+import {
+  computed,
+  nextTick,
+  ref,
+  useId,
+  useTemplateRef,
+  watch,
+  type ComponentPublicInstance,
+} from "vue";
 import NativeModal from "./NativeModal.vue";
 import "@/features/projects/projects.css";
 
@@ -26,14 +34,18 @@ const titleId = useId();
 const confirmBtn = useTemplateRef<ComponentPublicInstance>("confirmBtn");
 
 const triggerColor = computed(() =>
-  props.triggerVariant === "destructive" ? "error" : props.triggerVariant === "outline" ? "neutral" : "primary",
+  props.triggerVariant === "destructive"
+    ? "error"
+    : props.triggerVariant === "outline"
+      ? "neutral"
+      : "primary",
 );
 const triggerVariant = computed(() => (props.triggerVariant === "outline" ? "outline" : "solid"));
 
 watch(open, async (isOpen) => {
   if (!isOpen) return;
   await nextTick();
-  const el = confirmBtn.value?.$el;
+  const el: unknown = confirmBtn.value?.$el;
   if (el instanceof HTMLButtonElement) el.focus();
   else if (el instanceof HTMLElement) el.querySelector("button")?.focus();
 });
@@ -42,13 +54,15 @@ function close(): void {
   open.value = false;
 }
 
-function confirm(): void {
+async function confirm(): Promise<void> {
   if (busy.value) return;
   busy.value = true;
-  void Promise.resolve(props.onConfirm()).finally(() => {
+  try {
+    await props.onConfirm();
+  } finally {
     busy.value = false;
     close();
-  });
+  }
 }
 </script>
 

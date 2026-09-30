@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
-import { createApp, effectScope, nextTick } from "vue";
+import { createApp, effectScope, nextTick, ref } from "vue";
 import { ProblemError } from "@/lib/api";
 import { useProjectRef } from "./useProjectRef.ts";
 import { useWikiDocumentRef } from "./useWikiDocumentRef.ts";
@@ -16,13 +16,19 @@ function queryClient(): QueryClient {
 }
 
 /** Runs `use` as a component setup would: inside an app (for inject) and an effect scope. */
-function mount<T>(client: QueryClient, use: () => T): { result: T; stop: () => void } {
+function mount<T>(
+  client: QueryClient,
+  use: () => T,
+): { result: T; stop: () => void; dispose: () => void } {
   const app = createApp({ render: () => null });
   app.use(VueQueryPlugin, { queryClient: client });
   const scope = effectScope();
   const result = app.runWithContext(() => scope.run(use)) as T;
   return {
     result,
+    dispose: () => {
+      scope.stop();
+    },
     stop: () => {
       scope.stop();
       client.clear();
@@ -40,7 +46,9 @@ async function until(condition: () => boolean, what: string): Promise<void> {
 
 /** Starts a fetch of `queryKey` that never settles, as a slow retry would. */
 function hangFetch(client: QueryClient, queryKey: readonly unknown[]): void {
-  void client.fetchQuery({ queryKey, queryFn: () => new Promise<never>(() => {}) }).catch(() => undefined);
+  void client
+    .query({ queryKey, queryFn: () => new Promise<never>(() => {}) })
+    .catch(() => undefined);
 }
 
 const WORKSPACE = { id: "11111111-1111-7111-8111-111111111111", slug: "acme", name: "Acme" };
@@ -60,11 +68,13 @@ function testEnvironment(redirects: string[]): SessionEnvironment {
   };
 }
 
-test("session: stays ready when refetches fail with cached data", async () => {
+await test("session: stays ready when refetches fail with cached data", async () => {
   const client = queryClient();
   seedSession(client);
   const redirects: string[] = [];
-  const { result, stop } = mount(client, () => useWorkspaceSession("acme", testEnvironment(redirects)));
+  const { result, stop } = mount(client, () =>
+    useWorkspaceSession("acme", testEnvironment(redirects)),
+  );
   try {
     assert.equal(result.status.value, "ready");
     await client.refetchQueries({ queryKey: ["me", "workspaces"] });
@@ -79,14 +89,19 @@ test("session: stays ready when refetches fail with cached data", async () => {
   }
 });
 
-test("session: an error only when a failed query has nothing to show", async () => {
+await test("session: an error only when a failed query has nothing to show", async () => {
   const client = queryClient();
   client.setQueryData(["setup", "status"], { needed: false });
   client.setQueryData(["me", "workspaces"], { items: [WORKSPACE] });
   const redirects: string[] = [];
-  const { result, stop } = mount(client, () => useWorkspaceSession("acme", testEnvironment(redirects)));
+  const { result, stop } = mount(client, () =>
+    useWorkspaceSession("acme", testEnvironment(redirects)),
+  );
   try {
-    await until(() => client.getQueryState(["auth", "me"])?.status === "error", "the me request to fail");
+    await until(
+      () => client.getQueryState(["auth", "me"])?.status === "error",
+      "the me request to fail",
+    );
     await until(() => result.status.value === "error", "the error status");
     // A transport failure is not a sign-out: no login redirect.
     assert.deepEqual(redirects, []);
@@ -95,13 +110,18 @@ test("session: an error only when a failed query has nothing to show", async () 
   }
 });
 
-test("session: late setup completion does not restart the signed-out redirect", async () => {
+await test("session: late setup completion does not restart the signed-out redirect", async () => {
   const client = queryClient();
   let rejectMe!: (error: ProblemError) => void;
-  void client.fetchQuery({
-    queryKey: ["auth", "me"],
-    queryFn: () => new Promise<never>((_resolve, reject) => { rejectMe = reject; }),
-  }).catch(() => undefined);
+  void client
+    .query({
+      queryKey: ["auth", "me"],
+      queryFn: () =>
+        new Promise<never>((_resolve, reject) => {
+          rejectMe = reject;
+        }),
+    })
+    .catch(() => undefined);
   // Keep the setup query pending until /auth/me has caused the redirect.
   hangFetch(client, ["setup", "status"]);
   const redirects: string[] = [];
@@ -114,7 +134,9 @@ test("session: late setup completion does not restart the signed-out redirect", 
     assert.equal(result.status.value, "loading");
     client.setQueryData(["setup", "status"], { needed: false });
     await nextTick();
-    assert.deepEqual(redirects, ["/login?returnTo=%2Fw%2Facme%2Fa%2Fpdf%2Fview%3Fchunk%3D0%23document"]);
+    assert.deepEqual(redirects, [
+      "/login?returnTo=%2Fw%2Facme%2Fa%2Fpdf%2Fview%3Fchunk%3D0%23document",
+    ]);
     assert.equal(result.status.value, "loading");
     // Deduplication must not suppress a different, higher-priority guard.
     client.setQueryData(["setup", "status"], { needed: true });
@@ -128,21 +150,27 @@ test("session: late setup completion does not restart the signed-out redirect", 
   }
 });
 
-test("session: cached user 401 redirects and teardown closes the access subscription", async () => {
+await test("session: cached user 401 redirects and teardown closes the access subscription", async () => {
   const client = queryClient();
   seedSession(client);
   const redirects: string[] = [];
   let closed = 0;
   const env = testEnvironment(redirects);
-  env.watchAccess = () => ({ close: () => { closed += 1; } });
+  env.watchAccess = () => ({
+    close: () => {
+      closed += 1;
+    },
+  });
   const { result, stop } = mount(client, () => useWorkspaceSession("acme", env));
   try {
     assert.equal(result.status.value, "ready");
-    await client.fetchQuery({
-      queryKey: ["auth", "me"],
-      staleTime: 0,
-      queryFn: () => Promise.reject(new ProblemError(401)),
-    }).catch(() => undefined);
+    await client
+      .query({
+        queryKey: ["auth", "me"],
+        staleTime: 0,
+        queryFn: () => Promise.reject(new ProblemError(401)),
+      })
+      .catch(() => undefined);
     await nextTick();
     assert.equal(result.status.value, "loading");
     assert.deepEqual(redirects, ["/login?returnTo=%2Fw%2Facme%2FWIKI-1"]);
@@ -152,11 +180,13 @@ test("session: cached user 401 redirects and teardown closes the access subscrip
     client.setQueryData(["auth", "me"], ME);
     await nextTick();
     assert.equal(result.status.value, "ready");
-    await client.fetchQuery({
-      queryKey: ["auth", "me"],
-      staleTime: 0,
-      queryFn: () => Promise.reject(new ProblemError(401)),
-    }).catch(() => undefined);
+    await client
+      .query({
+        queryKey: ["auth", "me"],
+        staleTime: 0,
+        queryFn: () => Promise.reject(new ProblemError(401)),
+      })
+      .catch(() => undefined);
     await nextTick();
     assert.deepEqual(redirects, [
       "/login?returnTo=%2Fw%2Facme%2FWIKI-1",
@@ -168,11 +198,13 @@ test("session: cached user 401 redirects and teardown closes the access subscrip
   assert.equal(closed, 1);
 });
 
-test("session: a failed me refetch plus a fresh list without the workspace redirects", async () => {
+await test("session: a failed me refetch plus a fresh list without the workspace redirects", async () => {
   const client = queryClient();
   seedSession(client);
   const redirects: string[] = [];
-  const { result, stop } = mount(client, () => useWorkspaceSession("acme", testEnvironment(redirects)));
+  const { result, stop } = mount(client, () =>
+    useWorkspaceSession("acme", testEnvironment(redirects)),
+  );
   try {
     await client.refetchQueries({ queryKey: ["auth", "me"] });
     assert.equal(client.getQueryState(["auth", "me"])?.status, "error");
@@ -187,7 +219,7 @@ test("session: a failed me refetch plus a fresh list without the workspace redir
 
 const PROJECT = { id: "33333333-3333-7333-8333-333333333333", key: "GNT", name: "Gantt" };
 
-test("project ref: stays on the project when a refetch fails with cached data", async () => {
+await test("project ref: stays on the project when a refetch fails with cached data", async () => {
   const client = queryClient();
   client.setQueryData(["projects", WORKSPACE.id], { items: [PROJECT] });
   const { result, stop } = mount(client, () => useProjectRef(WORKSPACE.id, "GNT"));
@@ -195,7 +227,7 @@ test("project ref: stays on the project when a refetch fails with cached data", 
     assert.equal(result.project.value?.id, PROJECT.id);
     await result.retry();
     assert.equal(result.projects.isError.value, true);
-    assert.equal(result.project.value?.id, PROJECT.id);
+    assert.equal(result.project.value.id, PROJECT.id);
     assert.equal(result.failed.value, false);
     assert.equal(result.notFound.value, false);
   } finally {
@@ -203,7 +235,7 @@ test("project ref: stays on the project when a refetch fails with cached data", 
   }
 });
 
-test("project ref: an error only without data", async () => {
+await test("project ref: an error only without data", async () => {
   const client = queryClient();
   const { result, stop } = mount(client, () => useProjectRef(WORKSPACE.id, "GNT"));
   try {
@@ -215,7 +247,7 @@ test("project ref: an error only without data", async () => {
   }
 });
 
-test("project ref: a failed refetch after not found offers a retry", async () => {
+await test("project ref: a failed refetch after not found offers a retry", async () => {
   const client = queryClient();
   client.setQueryData(["projects", WORKSPACE.id], { items: [] });
   const { result, stop } = mount(client, () => useProjectRef(WORKSPACE.id, "GNT"));
@@ -245,7 +277,7 @@ const TREE_NODE = {
   status: "published",
 };
 
-test("wiki document ref: stays on the document when a refetch fails with cached data", async () => {
+await test("wiki document ref: stays on the document when a refetch fails with cached data", async () => {
   const client = queryClient();
   client.setQueryData(["tree", WORKSPACE.id], { items: [TREE_NODE] });
   const { result, stop } = mount(client, () => useWikiDocumentRef(WORKSPACE.id, "WIKI-7"));
@@ -253,7 +285,7 @@ test("wiki document ref: stays on the document when a refetch fails with cached 
     assert.equal(result.node.value?.id, TREE_NODE.id);
     await result.retry();
     assert.equal(result.tree.isError.value, true);
-    assert.equal(result.node.value?.id, TREE_NODE.id);
+    assert.equal(result.node.value.id, TREE_NODE.id);
     assert.equal(result.failed.value, false);
     assert.equal(result.notFound.value, false);
   } finally {
@@ -261,7 +293,7 @@ test("wiki document ref: stays on the document when a refetch fails with cached 
   }
 });
 
-test("wiki document ref: an error only without data", async () => {
+await test("wiki document ref: an error only without data", async () => {
   const client = queryClient();
   const { result, stop } = mount(client, () => useWikiDocumentRef(WORKSPACE.id, "WIKI-7"));
   try {
@@ -273,7 +305,7 @@ test("wiki document ref: an error only without data", async () => {
   }
 });
 
-test("wiki document ref: not found, then a failed refetch offers a retry", async () => {
+await test("wiki document ref: not found, then a failed refetch offers a retry", async () => {
   const client = queryClient();
   client.setQueryData(["tree", WORKSPACE.id], { items: [{ ...TREE_NODE, number: 8 }] });
   const { result, stop } = mount(client, () => useWikiDocumentRef(WORKSPACE.id, "WIKI-7"));
@@ -292,7 +324,7 @@ test("wiki document ref: not found, then a failed refetch offers a retry", async
   }
 });
 
-test("wiki document ref: a project document or a malformed ref is not a wiki document", () => {
+await test("wiki document ref: a project document or a malformed ref is not a wiki document", () => {
   const client = queryClient();
   client.setQueryData(["tree", WORKSPACE.id], {
     items: [{ ...TREE_NODE, projectId: PROJECT.id }],
@@ -307,3 +339,125 @@ test("wiki document ref: a project document or a malformed ref is not a wiki doc
     malformed.stop();
   }
 });
+
+await test("access refresh failure remains on the query cache and keeps the cached workspace", async () => {
+  const client = queryClient();
+  seedSession(client);
+  const redirects: string[] = [];
+  const reported: unknown[] = [];
+  const env = testEnvironment(redirects);
+  let accessChanged: (() => void) | undefined;
+  env.watchAccess = (_workspaceId, handlers) => {
+    accessChanged = handlers.onAccessChange;
+    return {
+      close: () => {
+        accessChanged = undefined;
+      },
+    };
+  };
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "reportError");
+  Object.defineProperty(globalThis, "reportError", {
+    configurable: true,
+    value: (error: unknown) => {
+      reported.push(error);
+    },
+  });
+  const { result, stop } = mount(client, () => useWorkspaceSession("acme", env));
+  try {
+    assert.ok(accessChanged, "workspace access subscription is active");
+    accessChanged();
+    await until(
+      () => client.getQueryState(["me", "workspaces"])?.status === "error",
+      "the access refresh to fail",
+    );
+    await nextTick();
+    assert.ok(
+      client.getQueryState(["me", "workspaces"])?.error,
+      "the query cache owns the failure",
+    );
+    assert.equal(result.status.value, "ready");
+    assert.equal(result.workspace.value?.id, WORKSPACE.id);
+    assert.deepEqual(redirects, []);
+    assert.deepEqual(
+      reported,
+      [],
+      "a cache-owned query failure is not an uncaught consumer failure",
+    );
+  } finally {
+    stop();
+    if (previous) Object.defineProperty(globalThis, "reportError", previous);
+    else Reflect.deleteProperty(globalThis, "reportError");
+  }
+});
+
+function deferred<T>() {
+  let complete: ((value: T) => void) | undefined;
+  const promise = new Promise<T>((resolve) => {
+    complete = resolve;
+  });
+  return {
+    promise,
+    resolve(value: T) {
+      assert.ok(complete);
+      complete(value);
+    },
+  };
+}
+
+for (const transition of ["switch", "dispose", "current denial", "setup priority"]) {
+  await test(`access refresh: ${transition} keeps redirect ownership on the current session guard`, async () => {
+    const client = queryClient();
+    const other = { ...WORKSPACE, id: "99999999-9999-7999-8999-999999999999", slug: "other" };
+    seedSession(client, [WORKSPACE, other]);
+    const redirects: string[] = [];
+    const slug = ref(WORKSPACE.slug);
+    const env = testEnvironment(redirects);
+    let onAccessChange: (() => void) | undefined;
+    let closed = 0;
+    env.watchAccess = (_id, handlers) => {
+      onAccessChange = handlers.onAccessChange;
+      return {
+        close: () => {
+          closed += 1;
+        },
+      };
+    };
+    const { stop, dispose } = mount(client, () => useWorkspaceSession(slug, env));
+    try {
+      const list = deferred<{ items: (typeof WORKSPACE)[] }>();
+      // A real QueryClient request owns this deferred list; the access refresh
+      // joins the same in-flight query exactly as it would join a slow HTTP GET.
+      const fetching = client.query({
+        queryKey: ["me", "workspaces"],
+        staleTime: 0,
+        queryFn: () => list.promise,
+      });
+      assert.ok(onAccessChange);
+      const oldCallback = onAccessChange;
+      oldCallback();
+      if (transition === "switch") {
+        slug.value = "other";
+        await nextTick();
+        assert.equal(closed, 1);
+        oldCallback(); // A closed lease cannot start a new refresh.
+      }
+      if (transition === "dispose") dispose();
+      if (transition === "setup priority") {
+        client.setQueryData(["setup", "status"], { needed: true });
+        await nextTick();
+      }
+      list.resolve({ items: [other] });
+      await fetching;
+      await nextTick();
+      const expected =
+        transition === "current denial"
+          ? ["/?denied=workspace"]
+          : transition === "setup priority"
+            ? ["/setup"]
+            : [];
+      assert.deepEqual(redirects, expected);
+    } finally {
+      stop();
+    }
+  });
+}

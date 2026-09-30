@@ -110,10 +110,7 @@ export function collabRoomName(workspaceId: string, kind: "document" | "task", i
  * signed-in user's awareness identity; the room connects without it, but
  * presence and awareness wait for it.
  */
-export function useCollabRoom(
-  name: string,
-  user: MaybeRefOrGetter<CollabUser | null>,
-): CollabRoom {
+export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | null>): CollabRoom {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${window.location.host}/collab`;
   const doc = markRaw(new Y.Doc({ gc: false }));
@@ -121,9 +118,6 @@ export function useCollabRoom(
   /* WHY: #664 — 서버는 연결이 접속 때 선언한 awareness clientId 하나만 받는다. clientId 는
    * Y.Doc 의 것이라 우리가 만들어 token 으로 넘긴다. #683 — 선언이 거부되면 clientID 를 갈고
    * 소켓 층부터 다시 세운다. Y.Doc 은 살아남아 미전송 편집을 다음 동기화에 싣는다(#704). */
-  const room: ShallowRef<RoomConnectionState<RefusalAwareSocket>> = shallowRef(
-    undefined as unknown as RoomConnectionState<RefusalAwareSocket>,
-  );
   const connection = new RoomConnection<RefusalAwareSocket>({
     open: (onClosed) => markRaw(createRefusalAwareSocket({ url }, onClosed)),
     onChange: (state) => {
@@ -136,7 +130,8 @@ export function useCollabRoom(
     reclaimLimit: CLAIM_RETRY_LIMIT,
     timers: BROWSER_TIMERS,
   });
-  room.value = connection.state;
+  // Construction opens the socket; onChange starts with later socket events.
+  const room: ShallowRef<RoomConnectionState<RefusalAwareSocket>> = shallowRef(connection.state);
 
   interface Generation {
     provider: HocuspocusProvider;
@@ -166,8 +161,12 @@ export function useCollabRoom(
       // Registered after the session's own listeners, as the React room's
       // handlers run after its children's: the state machine sees the result
       // last. Removed with the scope, before the provider's delayed destroy.
-      const onAuthenticated = () => connection.authenticated();
-      const onAuthenticationFailed = () => connection.reclaim();
+      const onAuthenticated = () => {
+        connection.authenticated();
+      };
+      const onAuthenticationFailed = () => {
+        connection.reclaim();
+      };
       provider.on("authenticated", onAuthenticated);
       provider.on("authenticationFailed", onAuthenticationFailed);
       onScopeDispose(() => {
@@ -175,7 +174,8 @@ export function useCollabRoom(
         provider.off("authenticationFailed", onAuthenticationFailed);
       });
       return bound;
-    })!;
+    });
+    if (!session) throw new Error("Collaboration generation scope did not run");
     provider.attach();
     current.value = { provider, scope, session };
     if (previous) retire(previous);
@@ -183,10 +183,15 @@ export function useCollabRoom(
 
   function retire(generation: Generation): void {
     generation.scope.stop();
-    window.setTimeout(() => generation.provider.destroy(), 0);
+    window.setTimeout(() => {
+      generation.provider.destroy();
+    }, 0);
   }
 
-  function bindSession(provider: HocuspocusProvider, generation: number): ComputedRef<CollabRoomSession> {
+  function bindSession(
+    provider: HocuspocusProvider,
+    generation: number,
+  ): ComputedRef<CollabRoomSession> {
     const documentId = roomNameOf(provider);
     // WHY: #653 — a provider that already synced must not fold back to "not loaded".
     const synced = shallowRef(provider.synced);
@@ -195,7 +200,7 @@ export function useCollabRoom(
     const unauthorized = shallowRef(false);
     const peers = shallowRef<CollabPeer[]>([]);
     const connectionStatus = shallowRef<CollabConnectionStatus>(
-      provider.configuration.websocketProvider.status as CollabConnectionStatus,
+      provider.configuration.websocketProvider.status,
     );
     const first = createConnectionGeneration(provider, connectionStatus.value);
     const bind = shallowRef<PersistBindState>({
@@ -206,25 +211,36 @@ export function useCollabRoom(
     const persistAborts = new Set<AbortController>();
 
     // Removed with the generation's scope (React: useHocuspocusEvent cleanups).
-    const listen = <T>(event: string, handler: (payload: T) => void) => {
+    interface SessionEvents {
+      synced: { state: boolean };
+      authenticated: { scope: string };
+      authenticationFailed: unknown;
+      unsyncedChanges: { number: number };
+      status: unknown;
+      disconnect: unknown;
+    }
+    const listen = <K extends keyof SessionEvents>(
+      event: K,
+      handler: (payload: SessionEvents[K]) => void,
+    ) => {
       provider.on(event, handler);
       onScopeDispose(() => provider.off(event, handler));
     };
-    listen<{ state: boolean }>("synced", ({ state }) => {
+    listen("synced", ({ state }) => {
       if (state) synced.value = true;
     });
-    listen<{ scope: string }>("authenticated", ({ scope }) => {
+    listen("authenticated", ({ scope }) => {
       readOnly.value = scope === "readonly";
       unauthorized.value = false;
     });
     listen("authenticationFailed", () => {
       unauthorized.value = true;
     });
-    listen<{ number: number }>("unsyncedChanges", ({ number }) => {
+    listen("unsyncedChanges", ({ number }) => {
       unsent.value = number > 0;
     });
     listen("status", () => {
-      connectionStatus.value = provider.configuration.websocketProvider.status as CollabConnectionStatus;
+      connectionStatus.value = provider.configuration.websocketProvider.status;
     });
     listen("disconnect", () => {
       bind.value = syncPersistBind(bind.value, { provider, status: "disconnected", documentId });
@@ -247,7 +263,9 @@ export function useCollabRoom(
       bind.value = reducePersistBind(bind.value, { type: "edit" });
     };
     doc.on("update", onUpdate);
-    onScopeDispose(() => doc.off("update", onUpdate));
+    onScopeDispose(() => {
+      doc.off("update", onUpdate);
+    });
 
     watch(
       () => toValue(user),

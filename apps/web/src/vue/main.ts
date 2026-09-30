@@ -19,7 +19,8 @@ export function start(): void {
     },
   });
 
-  const root = document.getElementById("root")!;
+  const root = document.getElementById("root");
+  if (!root) throw new Error("FVOCI app root element is missing");
   root.classList.add("isolate");
 
   createApp(App).use(createAppRouter()).use(ui).use(VueQueryPlugin, { queryClient }).mount(root);
