@@ -129,6 +129,7 @@ for (const host of ["wiki", "project"] as const) {
       await title.press("Tab");
       await mutation;
       await expect(title).toBeEnabled();
+      await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
       const icon = page.locator(host === "wiki" ? "#document-icon" : "#project-document-icon");
       await icon.fill("📘");
       mutation = page.waitForResponse(
