@@ -3,7 +3,10 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import UInput from "@nuxt/ui/components/Input.vue";
 import { computed, nextTick, ref, shallowRef } from "vue";
-import { createEditedAttachmentBridge, editedCopyName } from "@/features/workspace/attachment-upload";
+import {
+  createEditedAttachmentBridge,
+  editedCopyName,
+} from "@/features/workspace/attachment-upload";
 import { HwpClientError, HwpDocumentClient } from "@/features/attachments/hwp-client";
 import { hwpExportFormat } from "@/features/attachments/hwp-edit";
 import { clampPage, HWP_MAX_BYTES } from "@/features/attachments/hwp-page";
@@ -28,16 +31,7 @@ type PageImage = { url: string; page: number; width: number } | null;
 /** A page for one document and search chunk: the chunk's start page or the user's choice. */
 type PageChoice = { client: HwpDocumentClient; chunk: number | undefined; page: number } | null;
 
-/**
- * Session edit context (source `hwpEditable` + `onSavedCopy`). `editable`
- * comes from `GET …/edit-context`; `save` is present only in a workspace
- * session, and the server re-checks edit access when the copy is written.
- * A share view passes none of it.
- */
-export type HwpEditProps = {
-  editable: boolean;
-  save?: { workspaceId: string; attachmentId: string; onSavedCopy: (attachmentId: string) => void };
-};
+import type { HwpEditProps } from "./hwp-edit-props";
 
 /** An edit step waiting on the "discard edits?" dialog. */
 type Discard = "undo" | "exit" | "retry" | null;
@@ -97,6 +91,7 @@ let liveClient: HwpDocumentClient | null = null;
 useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch], () => {
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   let client: HwpDocumentClient | null = null;
   state.value = { status: "loading" };
   image.value = null;
@@ -106,42 +101,42 @@ useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch]
   editError.value = null;
   busy.value = null;
   discard.value = null;
-  void (async () => {
-    try {
-      const body = await (props.prefetch?.take(controller.signal) ??
-        downloadCapped(props.downloadUrl, HWP_MAX_BYTES, controller.signal));
-      if (!alive) return;
-      if (body.status === "failed") {
-        state.value = { status: "error", message: t("load.failed"), retry: true };
-        return;
-      }
-      if (body.status === "tooLarge") {
-        state.value = unavailable();
-        return;
-      }
-      const module = await loadRhwpModule();
-      if (!alive) return;
-      // The signal terminates the worker mid-parse, before a client exists here.
-      const opened = await HwpDocumentClient.open(body.bytes, module, { signal: controller.signal });
-      if (!alive) {
-        opened.client.close();
-        return;
-      }
-      client = opened.client;
-      liveClient = client;
-      state.value = { status: "ready", client, pageCount: opened.pageCount };
-    } catch (error) {
-      if (!alive || (error instanceof Error && error.name === "AbortError")) return;
-      // A file rhwp will not lay out, or one too costly to, stays download-only;
-      // fetching and parsing it again will not help.
-      const reason = error instanceof HwpClientError ? error.reason : null;
-      if (reason === "tooLarge" || reason === "invalid" || reason === "timeout") {
-        state.value = unavailable();
-        return;
-      }
+  (async () => {
+    const body = await (props.prefetch?.take(controller.signal) ??
+      downloadCapped(props.downloadUrl, HWP_MAX_BYTES, controller.signal));
+    if (!isAlive()) return;
+    if (body.status === "failed") {
       state.value = { status: "error", message: t("load.failed"), retry: true };
+      return;
     }
-  })();
+    if (body.status === "tooLarge") {
+      state.value = unavailable();
+      return;
+    }
+    const module = await loadRhwpModule();
+    if (!isAlive()) return;
+    // The signal terminates the worker mid-parse, before a client exists here.
+    const opened = await HwpDocumentClient.open(body.bytes, module, {
+      signal: controller.signal,
+    });
+    if (!isAlive()) {
+      opened.client.close();
+      return;
+    }
+    client = opened.client;
+    liveClient = client;
+    state.value = { status: "ready", client, pageCount: opened.pageCount };
+  })().catch((error: unknown) => {
+    if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
+    // A file rhwp will not lay out, or one too costly to, stays download-only;
+    // fetching and parsing it again will not help.
+    const reason = error instanceof HwpClientError ? error.reason : null;
+    if (reason === "tooLarge" || reason === "invalid" || reason === "timeout") {
+      state.value = unavailable();
+      return;
+    }
+    state.value = { status: "error", message: t("load.failed"), retry: true };
+  });
   return () => {
     alive = false;
     controller.abort();
@@ -163,14 +158,16 @@ useEffectAfterRender([client, () => props.chunk, pageCount], () => {
     return;
   }
   let alive = true;
+  const isAlive = (): boolean => alive;
   const chunk = props.chunk;
   current.startPage(chunk).then(
     (page) => {
-      if (alive) start.value = { client: current, chunk, page: clampPage(page, pageCount.value) };
+      if (isAlive())
+        start.value = { client: current, chunk, page: clampPage(page, pageCount.value) };
     },
     () => {
       // The worker is gone; the page render below reports it.
-      if (alive) start.value = { client: current, chunk, page: 0 };
+      if (isAlive()) start.value = { client: current, chunk, page: 0 };
     },
   );
   return () => {
@@ -178,21 +175,24 @@ useEffectAfterRender([client, () => props.chunk, pageCount], () => {
   };
 });
 
-function matches(choice: PageChoice): boolean {
+function matches(choice: PageChoice): choice is NonNullable<PageChoice> {
   return choice !== null && choice.client === client.value && choice.chunk === props.chunk;
 }
 
 const chosen = computed(() => {
-  if (matches(nav.value)) return nav.value!.page;
-  if (matches(start.value)) return start.value!.page;
+  if (matches(nav.value)) return nav.value.page;
+  if (matches(start.value)) return start.value.page;
   return null;
 });
 // An edit may have shortened the document under the chosen page.
-const page = computed(() => (chosen.value === null ? null : clampPage(chosen.value, pageCount.value)));
+const page = computed(() =>
+  chosen.value === null ? null : clampPage(chosen.value, pageCount.value),
+);
 
 function go(next: number): void {
   const current = client.value;
-  if (current) nav.value = { client: current, chunk: props.chunk, page: clampPage(next, pageCount.value) };
+  if (current)
+    nav.value = { client: current, chunk: props.chunk, page: clampPage(next, pageCount.value) };
 }
 
 useEffectAfterRender([client, page, revision], () => {
@@ -200,17 +200,18 @@ useEffectAfterRender([client, page, revision], () => {
   const target = page.value;
   if (!current || target === null) return;
   let alive = true;
+  const isAlive = (): boolean => alive;
   let url: string | null = null;
   image.value = null;
   current.renderPage(target).then(
     (svg) => {
-      if (!alive) return;
+      if (!isAlive()) return;
       url = URL.createObjectURL(svg);
       image.value = { url, page: target, width: 0 };
       renderFailed.value = false;
     },
     () => {
-      if (alive) renderFailed.value = true;
+      if (isAlive()) renderFailed.value = true;
     },
   );
   return () => {
@@ -228,7 +229,9 @@ const save = computed(() => props.edit?.save);
 const exportMeta = computed(() => hwpExportFormat(props.name));
 const locked = computed(() => busy.value !== null);
 const label = computed(() =>
-  page.value === null ? "" : t("attachment.viewer.page", { current: page.value + 1, total: pageCount.value }),
+  page.value === null
+    ? ""
+    : t("attachment.viewer.page", { current: page.value + 1, total: pageCount.value }),
 );
 
 const discardLabel = computed(() =>
@@ -273,8 +276,8 @@ async function run(
   }
 }
 
-function replace(all: boolean): void {
-  void run(
+async function replace(all: boolean): Promise<void> {
+  await run(
     "replace",
     async (doc, live) => {
       const result = await doc.replace(findText.value, replaceText.value, all);
@@ -285,15 +288,17 @@ function replace(all: boolean): void {
       } else {
         // Nothing replaced, so nothing to save or guard.
         editError.value =
-          result.outcome === "unchanged" ? t("attachment.viewer.edit.notFound") : t("attachment.viewer.edit.failed");
+          result.outcome === "unchanged"
+            ? t("attachment.viewer.edit.notFound")
+            : t("attachment.viewer.edit.failed");
       }
     },
     t("attachment.viewer.edit.failed"),
   );
 }
 
-function revert(then?: () => void): void {
-  void run(
+async function revert(then?: () => void): Promise<void> {
+  await run(
     "revert",
     async (doc, live) => {
       const count = await doc.revert();
@@ -306,28 +311,32 @@ function revert(then?: () => void): void {
   );
 }
 
-function download(): void {
-  void run(
+async function download(): Promise<void> {
+  await run(
     "download",
     async (doc, live) => {
       const bytes = await doc.exportDocument(exportMeta.value.format);
       if (!live()) return;
-      const href = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: exportMeta.value.mime }));
+      const href = URL.createObjectURL(
+        new Blob([bytes as Uint8Array<ArrayBuffer>], { type: exportMeta.value.mime }),
+      );
       const link = document.createElement("a");
       link.href = href;
       link.download = editedCopyName(props.name);
       link.click();
       // The download has taken the bytes by the next task.
-      setTimeout(() => URL.revokeObjectURL(href), 0);
+      setTimeout(() => {
+        URL.revokeObjectURL(href);
+      }, 0);
     },
     t("attachment.viewer.edit.failed"),
   );
 }
 
-function saveCopy(): void {
+async function saveCopy(): Promise<void> {
   const dest = save.value;
   if (!dest) return;
-  void run(
+  await run(
     "save",
     async (doc, live) => {
       const bytes = await doc.exportDocument(exportMeta.value.format);
@@ -347,17 +356,20 @@ function saveCopy(): void {
       // Clear the guard before leaving for the copy.
       dirty.value = false;
       await nextTick();
-      dest.onSavedCopy(saved.id);
+      await dest.onSavedCopy(saved.id);
     },
     t("attachment.viewer.edit.saveFailed"),
   );
 }
 
-function confirmDiscard(): void {
+async function confirmDiscard(): Promise<void> {
   const action = discard.value;
   discard.value = null;
-  if (action === "undo") revert();
-  else if (action === "exit") revert(() => (editing.value = false));
+  if (action === "undo") await revert();
+  else if (action === "exit")
+    await revert(() => {
+      editing.value = false;
+    });
   else if (action === "retry") retry();
 }
 
@@ -393,13 +405,28 @@ function onPageLoad(event: Event): void {
   </template>
   <template v-else-if="renderFailed">
     <PendingEditsGuard v-if="dirty" />
-    <DiscardEditsDialog v-if="discard" :action-label="discardLabel" @confirm="confirmDiscard" @cancel="discard = null" />
-    <ViewerErrorPane :message="t('load.failed')" :download-url="downloadUrl" retryable @retry="retryRender" />
+    <DiscardEditsDialog
+      v-if="discard"
+      :action-label="discardLabel"
+      @confirm="confirmDiscard"
+      @cancel="discard = null"
+    />
+    <ViewerErrorPane
+      :message="t('load.failed')"
+      :download-url="downloadUrl"
+      retryable
+      @retry="retryRender"
+    />
   </template>
   <ViewerLoadingPane v-else-if="state.status === 'loading' || page === null" />
   <div v-else class="attachment-viewer__pane" data-hwp-viewer="">
     <PendingEditsGuard v-if="dirty" />
-    <DiscardEditsDialog v-if="discard" :action-label="discardLabel" @confirm="confirmDiscard" @cancel="discard = null" />
+    <DiscardEditsDialog
+      v-if="discard"
+      :action-label="discardLabel"
+      @confirm="confirmDiscard"
+      @cancel="discard = null"
+    />
     <ViewerZoomToolbar
       :zoom="zoom"
       :can-zoom-out="zoom > PDF_ZOOM_MIN"
@@ -408,7 +435,13 @@ function onPageLoad(event: Event): void {
       @zoom-out="zoom = zoomOut(zoom)"
       @reset="zoom = 1"
     >
-      <UButton size="sm" variant="outline" color="neutral" :disabled="page <= 0" @click="go(page - 1)">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="page <= 0"
+        @click="go(page - 1)"
+      >
         {{ t("attachment.viewer.prevPage") }}
       </UButton>
       <p class="attachment-viewer__page-label">{{ label }}</p>
@@ -425,7 +458,12 @@ function onPageLoad(event: Event): void {
         {{ t("attachment.viewer.edit.start") }}
       </UButton>
     </ViewerZoomToolbar>
-    <div v-if="canEdit && editing" class="hwp-viewer__edit-bar" data-hwp-edit-bar="" :aria-busy="locked">
+    <div
+      v-if="canEdit && editing"
+      class="hwp-viewer__edit-bar"
+      data-hwp-edit-bar=""
+      :aria-busy="locked"
+    >
       <UInput
         v-model="findText"
         class="hwp-viewer__edit-input"
@@ -458,13 +496,29 @@ function onPageLoad(event: Event): void {
       >
         {{ t("attachment.viewer.edit.replaceAll") }}
       </UButton>
-      <UButton size="sm" variant="outline" color="neutral" :disabled="!dirty || locked" @click="discard = 'undo'">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="!dirty || locked"
+        @click="discard = 'undo'"
+      >
         {{ t("attachment.viewer.edit.undo") }}
       </UButton>
       <UButton v-if="save" size="sm" :disabled="!dirty || locked" @click="saveCopy">
-        {{ busy === "save" ? t("attachment.viewer.edit.saving") : t("attachment.viewer.edit.saveCopy") }}
+        {{
+          busy === "save"
+            ? t("attachment.viewer.edit.saving")
+            : t("attachment.viewer.edit.saveCopy")
+        }}
       </UButton>
-      <UButton size="sm" variant="outline" color="neutral" :disabled="!dirty || locked" @click="download">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="!dirty || locked"
+        @click="download"
+      >
         {{ t("attachment.viewer.edit.download") }}
       </UButton>
       <UButton size="sm" variant="outline" color="neutral" :disabled="locked" @click="exitEditing">

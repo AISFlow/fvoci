@@ -9,7 +9,13 @@ import { menuContent } from "./menu-content";
 // items, Escape closes it and returns focus to where it was, Tab closes it
 // and moves on from there, and scrolling anything but the menu closes it.
 // After a command the editor keeps the focus the command gave it.
-const props = defineProps<{ x: number; y: number; owner: HTMLElement; label: string; id?: string }>();
+const props = defineProps<{
+  x: number;
+  y: number;
+  owner: HTMLElement;
+  label: string;
+  id?: string;
+}>();
 const emit = defineEmits<{ close: [] }>();
 
 const menu = useTemplateRef<HTMLElement>("menu");
@@ -39,12 +45,15 @@ const onScroll = (event: Event) => {
   emit("close");
 };
 doc.addEventListener("scroll", onScroll, true);
-onBeforeUnmount(() => doc.removeEventListener("scroll", onScroll, true));
+onBeforeUnmount(() => {
+  doc.removeEventListener("scroll", onScroll, true);
+});
 
-watch(menu, (el) => {
+watch(menu, async (el) => {
   if (!el) return;
   armScrollClose();
-  void nextTick(() => focusFirstMenuItem(el));
+  await nextTick();
+  focusFirstMenuItem(el);
 });
 
 const content = menuContent({
@@ -52,7 +61,11 @@ const content = menuContent({
   sideOffset: 0,
   onOpenAutoFocus: (event) => {
     event.preventDefault();
-    void nextTick(() => focusFirstMenuItem(menu.value));
+    nextTick(() => {
+      focusFirstMenuItem(menu.value);
+    }).catch((error: unknown) => {
+      console.error("Point menu focus failed", error);
+    });
   },
   onEscapeKeyDown: () => {
     escaped = true;
@@ -69,7 +82,9 @@ const content = menuContent({
 function onTab(event: KeyboardEvent): void {
   if (event.key !== "Tab") return;
   tabbed = true;
-  leaveMenu(event, restore, () => emit("close"));
+  leaveMenu(event, restore, () => {
+    emit("close");
+  });
 }
 </script>
 

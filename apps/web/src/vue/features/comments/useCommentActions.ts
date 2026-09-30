@@ -1,3 +1,4 @@
+import { nextReplyTarget } from "@/features/comments/comment-drafts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, type Ref } from "vue";
 import {
@@ -113,6 +114,25 @@ export function useCommentActions(target: {
     unresolve,
     react,
     pending,
+    toggleReply(id: string): void {
+      replyToId.value = nextReplyTarget(replyToId.value, id);
+      replyDraft.value = "";
+    },
+    startEdit(id: string, body: string): void {
+      replyToId.value = null;
+      editingId.value = id;
+      editDraft.value = body;
+    },
+    cancelEdit(): void {
+      editingId.value = null;
+      editDraft.value = "";
+    },
+    setEditDraft(value: string): void {
+      editDraft.value = value;
+    },
+    setReplyDraft(value: string): void {
+      replyDraft.value = value;
+    },
   };
 }
 

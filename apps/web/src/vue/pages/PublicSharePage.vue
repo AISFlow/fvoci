@@ -29,30 +29,49 @@ const accessError = ref<string | null>(null);
 let queryGeneration = 0;
 let recoveryGeneration = 0;
 let denialGeneration = 0;
-watch([token, selectedDocumentId], () => { queryGeneration += 1; }, { flush: "sync" });
-watch(token, () => {
-  recoveryGeneration += 1;
-  refreshing.value = false;
-  selectedDocumentId.value = null;
-  accessError.value = null;
-}, { flush: "sync" });
+watch(
+  [token, selectedDocumentId],
+  () => {
+    queryGeneration += 1;
+  },
+  { flush: "sync" },
+);
+watch(
+  token,
+  () => {
+    recoveryGeneration += 1;
+    refreshing.value = false;
+    selectedDocumentId.value = null;
+    accessError.value = null;
+  },
+  { flush: "sync" },
+);
 const meta = useQuery(() => ({ ...sharePublicMetaQuery(token.value), staleTime: 0 }));
-const tree = useQuery(() => ({ ...sharePublicTreeQuery(token.value, meta.isSuccess.value), staleTime: 0 }));
+const tree = useQuery(() => ({
+  ...sharePublicTreeQuery(token.value, meta.isSuccess.value),
+  staleTime: 0,
+}));
 const body = useQuery(() => ({
   ...sharePublicBodyQuery(token.value, selectedDocumentId.value, meta.isSuccess.value),
   staleTime: 0,
 }));
 
 // Once a current body read is denied, no other cached share content remains visible.
-watch(body.error, (error) => {
-  if (error instanceof ProblemError && error.status === 404) onDenied(error);
-}, { flush: "sync", immediate: true });
+watch(
+  body.error,
+  (error) => {
+    if (error instanceof ProblemError && error.status === 404) onDenied(error);
+  },
+  { flush: "sync", immediate: true },
+);
 
 const share = computed(() => meta.data.value);
 const metaError = computed(() => (meta.error.value ? failMessage(meta.error.value) : null));
 const treeError = computed(() => (tree.error.value ? failMessage(tree.error.value) : null));
 const bodyError = computed(() => (body.error.value ? failMessage(body.error.value) : null));
-const activeDocumentId = computed(() => selectedDocumentId.value ?? share.value?.documentId ?? null);
+const activeDocumentId = computed(
+  () => selectedDocumentId.value ?? share.value?.documentId ?? null,
+);
 
 function onSelectDocument(documentId: string): void {
   const rootId = share.value?.documentId;
@@ -65,14 +84,23 @@ function onDenied(error: unknown): void {
   accessError.value = failMessage(error);
 }
 
+function settledAndAuthorized(): boolean {
+  return [meta, tree, body].every(
+    (query) => !query.error.value && query.isSuccess.value && !query.isFetching.value,
+  );
+}
+
 async function refresh(): Promise<void> {
   const recovering = accessError.value !== null;
   const refreshToken = token.value;
   const recovery = ++recoveryGeneration;
   const denial = denialGeneration;
   let query = queryGeneration;
-  const isCurrent = () => token.value === refreshToken && recovery === recoveryGeneration &&
-    denial === denialGeneration && query === queryGeneration;
+  const isCurrent = () =>
+    token.value === refreshToken &&
+    recovery === recoveryGeneration &&
+    denial === denialGeneration &&
+    query === queryGeneration;
   refreshing.value = true;
   try {
     const result = await meta.refetch();
@@ -84,16 +112,20 @@ async function refresh(): Promise<void> {
       await nextTick();
       if (!isCurrent()) return;
       const [freshTree, freshBody] = await Promise.all([
-        tree.refetch(), body.refetch(),
+        tree.refetch(),
+        body.refetch(),
         queryClient.refetchQueries({ queryKey: ["share-search", refreshToken], type: "active" }),
       ]);
       // Refetch results are snapshots. Reconnect can deny the root again while
       // the earlier tree is pending; only current, settled queries may reopen it.
-      if (recovering && isCurrent() && selectedDocumentId.value === null &&
-        freshTree.isSuccess && freshBody.isSuccess &&
-        meta.isSuccess.value && tree.isSuccess.value && body.isSuccess.value &&
-        !meta.error.value && !tree.error.value && !body.error.value &&
-        !meta.isFetching.value && !tree.isFetching.value && !body.isFetching.value) {
+      if (
+        recovering &&
+        isCurrent() &&
+        selectedDocumentId.value === null &&
+        freshTree.isSuccess &&
+        freshBody.isSuccess &&
+        settledAndAuthorized()
+      ) {
         accessError.value = null;
       }
     }
@@ -129,7 +161,9 @@ async function refresh(): Promise<void> {
     :body="body.data.value ?? null"
     :body-loading="body.isFetching.value"
     :body-error="bodyError"
-    :refreshing="refreshing || meta.isFetching.value || tree.isFetching.value || body.isFetching.value"
+    :refreshing="
+      refreshing || meta.isFetching.value || tree.isFetching.value || body.isFetching.value
+    "
     @select-document="onSelectDocument"
     @retry-body="() => void body.refetch()"
     @refresh="refresh"

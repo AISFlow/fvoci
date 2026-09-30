@@ -42,7 +42,11 @@ useEffectAfterRender([() => props.kind, () => props.downloadUrl, generation], ()
   const controller = new AbortController();
   let alive = true;
   state.value = { status: "loading" };
-  const prefetch = startViewerPrefetch(props.downloadUrl, VIEWER_MAX_BYTES[props.kind], controller.signal);
+  const prefetch = startViewerPrefetch(
+    props.downloadUrl,
+    VIEWER_MAX_BYTES[props.kind],
+    controller.signal,
+  );
   viewerLoaders[props.kind]().then(
     (mod) => {
       if (alive) state.value = { status: "ready", component: mod.default, prefetch };

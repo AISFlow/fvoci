@@ -3,18 +3,14 @@ import { isSafeShareHref } from "@/lib/share-links";
 const ANCHOR_OPEN = /<a\b([^>]*?)>/gi;
 
 function readAttr(attrs: string, name: string): string | null {
-  const match = new RegExp(
-    `\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
-    "i",
-  ).exec(attrs);
+  const match = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(
+    attrs,
+  );
   return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
 }
 
 function stripAttr(attrs: string, name: string): string {
-  return attrs.replace(
-    new RegExp(`\\s*\\b${name}\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s>]+)`, "gi"),
-    "",
-  );
+  return attrs.replace(new RegExp(`\\s*\\b${name}\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s>]+)`, "gi"), "");
 }
 
 /**

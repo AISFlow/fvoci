@@ -19,7 +19,7 @@ function source(file: string): string {
   return readFileSync(path.join(dir, file), "utf8");
 }
 
-test("failMessage: 404 is expired, known title, else share failed or network", () => {
+await test("failMessage: 404 is expired, known title, else share failed or network", () => {
   assert.equal(failMessage(new ProblemError(404)), t("share.expired"));
   assert.equal(failMessage(new ProblemError(404, "not_found")), t("share.expired"));
   const known = new ProblemError(403, "forbidden");
@@ -29,7 +29,7 @@ test("failMessage: 404 is expired, known title, else share failed or network", (
   assert.equal(failMessage(new Error("offline")), t("error.network"));
 });
 
-test("tree and body queries stay disabled until enabled is true", () => {
+await test("tree and body queries stay disabled until enabled is true", () => {
   assert.equal(sharePublicTreeQuery("tok", false).enabled, false);
   assert.equal(sharePublicTreeQuery("tok", true).enabled, true);
   assert.equal(sharePublicBodyQuery("tok", null, false).enabled, false);
@@ -38,11 +38,14 @@ test("tree and body queries stay disabled until enabled is true", () => {
   assert.equal(sharePublicMetaQuery("tok").enabled, undefined);
 });
 
-test("the Vue public share page is an anonymous reader of /api/v1/share/{token}", () => {
+await test("the Vue public share page is an anonymous reader of /api/v1/share/{token}", () => {
   const page = source("../../pages/PublicSharePage.vue");
   assert.match(page, /sharePublicMetaQuery/);
   assert.match(page, /sharePublicTreeQuery\(token\.value, meta\.isSuccess\.value\)/);
-  assert.match(page, /sharePublicBodyQuery\(token\.value, selectedDocumentId\.value, meta\.isSuccess\.value\)/);
+  assert.match(
+    page,
+    /sharePublicBodyQuery\(token\.value, selectedDocumentId\.value, meta\.isSuccess\.value\)/,
+  );
   assert.match(page, /failMessage/);
   assert.match(page, /from ["']@\/lib\/queries\/share["']/);
   assert.doesNotMatch(page, /from ["']react["']/);
@@ -54,7 +57,7 @@ test("the Vue public share page is an anonymous reader of /api/v1/share/{token}"
   assert.doesNotMatch(page, /RouterLink/);
 });
 
-test("the public share view reuses share.css and keeps tree select and body retry", () => {
+await test("the public share view reuses share.css and keeps tree select and body retry", () => {
   const view = source("PublicShareView.vue");
   assert.match(view, /shareTreeRoots/);
   assert.match(view, /downloadSharePdf/);
@@ -70,7 +73,7 @@ test("the public share view reuses share.css and keeps tree select and body retr
   assert.match(page, /body\.refetch\(\)/);
 });
 
-test("hardenShareFragmentHtml strips unsafe hrefs before v-html", () => {
+await test("hardenShareFragmentHtml strips unsafe hrefs before v-html", () => {
   const out = hardenShareFragmentHtml(
     `<p><a href="javascript:alert(1)">x</a><a href="https://ok.example/a">y</a></p>`,
   );
@@ -87,14 +90,14 @@ test("hardenShareFragmentHtml strips unsafe hrefs before v-html", () => {
   assert.doesNotMatch(body, /watchPostEffect/);
 });
 
-test("share attachment view is not this page", () => {
+await test("share attachment view is not this page", () => {
   const page = source("../../pages/PublicSharePage.vue");
   assert.doesNotMatch(page, /shareAttachmentQuery|ShareAttachmentViewPage/);
   const branch = source("PublicTreeBranch.vue");
   assert.doesNotMatch(branch, /shareAttachment/);
 });
 
-test("anonymous search requires a bounded nonempty query and does not retry denial or throttling", () => {
+await test("anonymous search requires a bounded nonempty query and does not retry denial or throttling", () => {
   assert.equal(publicShareSearchQuery("", "word").enabled, false);
   assert.equal(publicShareSearchQuery("token", "  ").enabled, false);
   assert.equal(publicShareSearchQuery("token", "x".repeat(201)).enabled, false);

@@ -3,7 +3,11 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, ref, shallowRef } from "vue";
 import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, zoomIn, zoomOut } from "@/features/attachments/pdf-limits";
-import { openPptxInWorker, PptxWorkerError, type RemotePptxDeck } from "@/features/attachments/pptx-client";
+import {
+  openPptxInWorker,
+  PptxWorkerError,
+  type RemotePptxDeck,
+} from "@/features/attachments/pptx-client";
 import { PPTX_MAX_BYTES } from "@/features/attachments/pptx-limits";
 import { SLIDE_IMAGE_TYPE } from "@/features/attachments/pptx-svg";
 import { downloadCapped, type ViewerPrefetch } from "@/features/attachments/viewer-download";
@@ -61,31 +65,30 @@ const retired = new WeakSet<RemotePptxDeck>();
 useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch], () => {
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   const fail = (message: string, retry: boolean) => {
-    if (alive) state.value = { status: "error", message, retry };
+    if (isAlive()) state.value = { status: "error", message, retry };
   };
   state.value = { status: "loading" };
   source.value = null;
   slide.value = 0;
-  void (async () => {
-    try {
-      const body = await (props.prefetch?.take(controller.signal) ??
-        downloadCapped(props.downloadUrl, PPTX_MAX_BYTES, controller.signal));
-      if (!alive) return;
-      if (body.status === "failed") {
-        fail(t("load.failed"), true);
-        return;
-      }
-      if (body.status === "tooLarge") {
-        fail(t("attachment.viewer.previewUnavailable"), false);
-        return;
-      }
-      source.value = { bytes: body.bytes };
-    } catch (error) {
-      if (!alive || (error instanceof Error && error.name === "AbortError")) return;
+  (async () => {
+    const body = await (props.prefetch?.take(controller.signal) ??
+      downloadCapped(props.downloadUrl, PPTX_MAX_BYTES, controller.signal));
+    if (!isAlive()) return;
+    if (body.status === "failed") {
       fail(t("load.failed"), true);
+      return;
     }
-  })();
+    if (body.status === "tooLarge") {
+      fail(t("attachment.viewer.previewUnavailable"), false);
+      return;
+    }
+    source.value = { bytes: body.bytes };
+  })().catch((error: unknown) => {
+    if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
+    fail(t("load.failed"), true);
+  });
   return () => {
     alive = false;
     controller.abort();
@@ -103,24 +106,34 @@ useEffectAfterRender([source, epoch], () => {
   }
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   let opened: RemotePptxDeck | null = null;
-  void openPptxInWorker(current.bytes, { signal: controller.signal }).then((result) => {
-    if (result.status === "ok") opened = result.deck;
-    if (!alive) {
-      opened?.close();
-      return;
-    }
-    if (result.status === "ok") {
-      const { width, height, slideCount } = result.deck;
-      state.value = { status: "ready", width, height, slideCount };
-      deck.value = result.deck;
-    } else if (result.status === "failed") {
+  openPptxInWorker(current.bytes, { signal: controller.signal })
+    .then((result) => {
+      if (result.status === "ok") opened = result.deck;
+      if (!isAlive()) {
+        opened?.close();
+        return;
+      }
+      if (result.status === "ok") {
+        const { width, height, slideCount } = result.deck;
+        state.value = { status: "ready", width, height, slideCount };
+        deck.value = result.deck;
+      } else if (result.status === "failed") {
+        state.value = { status: "error", message: t("load.failed"), retry: true };
+      } else {
+        // Over a cap, too slow, or not a deck the renderer can read: fetching again will not help.
+        state.value = {
+          status: "error",
+          message: t("attachment.viewer.previewUnavailable"),
+          retry: false,
+        };
+      }
+    })
+    .catch((error: unknown) => {
+      if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
       state.value = { status: "error", message: t("load.failed"), retry: true };
-    } else {
-      // Over a cap, too slow, or not a deck the renderer can read: fetching again will not help.
-      state.value = { status: "error", message: t("attachment.viewer.previewUnavailable"), retry: false };
-    }
-  });
+    });
   return () => {
     alive = false;
     controller.abort();
@@ -138,7 +151,8 @@ useEffectAfterRender([deck, slide], () => {
     // A retired deck is about to be replaced by the open effect. Any other closed deck lost its
     // worker while idle, with no render to report it: reopening could repeat without end, so
     // this is a load failure whose retry downloads again.
-    if (!retired.has(currentDeck)) state.value = { status: "error", message: t("load.failed"), retry: true };
+    if (!retired.has(currentDeck))
+      state.value = { status: "error", message: t("load.failed"), retry: true };
     return;
   }
   if (failed.slides.has(slide.value)) {
@@ -146,13 +160,14 @@ useEffectAfterRender([deck, slide], () => {
     return;
   }
   let alive = true;
+  const isAlive = (): boolean => alive;
   let settled = false;
   let url: string | null = null;
   const index = slide.value;
   currentDeck.render(index).then(
     (rendered) => {
       settled = true;
-      if (!alive) return;
+      if (!isAlive()) return;
       if (rendered.status === "ok") {
         url = URL.createObjectURL(new Blob([rendered.svg], { type: SLIDE_IMAGE_TYPE }));
         image.value = { deck: currentDeck, index, status: "ready", url };
@@ -163,7 +178,7 @@ useEffectAfterRender([deck, slide], () => {
     (error: unknown) => {
       settled = true;
       // `closed`: whoever closed the worker also opens the next one, or the viewer is gone.
-      if (!alive || (error instanceof PptxWorkerError && error.reason === "closed")) return;
+      if (!isAlive() || (error instanceof PptxWorkerError && error.reason === "closed")) return;
       failed.slides.add(index);
       retired.add(currentDeck);
       image.value = { deck: currentDeck, index, status: "unavailable" };
@@ -190,13 +205,17 @@ function retry(): void {
 const current = computed(() => {
   const shown = image.value;
   const currentDeck = deck.value;
-  return shown && currentDeck && shown.deck === currentDeck && shown.index === slide.value ? shown : null;
+  return shown && currentDeck && shown.deck === currentDeck && shown.index === slide.value
+    ? shown
+    : null;
 });
 
 const slideCount = computed(() => (state.value.status === "ready" ? state.value.slideCount : 0));
 const slideWidth = computed(() => (state.value.status === "ready" ? state.value.width : 0));
 const slideHeight = computed(() => (state.value.status === "ready" ? state.value.height : 0));
-const label = computed(() => t("attachment.viewer.slide", { current: slide.value + 1, total: slideCount.value }));
+const label = computed(() =>
+  t("attachment.viewer.slide", { current: slide.value + 1, total: slideCount.value }),
+);
 
 function onSlideError(): void {
   const shown = current.value;
@@ -230,7 +249,13 @@ function onSlideError(): void {
       @zoom-out="zoom = zoomOut(zoom)"
       @reset="zoom = 1"
     >
-      <UButton size="sm" variant="outline" color="neutral" :disabled="slide <= 0" @click="slide = Math.max(0, slide - 1)">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="slide <= 0"
+        @click="slide = Math.max(0, slide - 1)"
+      >
         {{ t("attachment.viewer.prevSlide") }}
       </UButton>
       <p class="attachment-viewer__page-label">{{ label }}</p>
@@ -255,7 +280,11 @@ function onSlideError(): void {
         :height="Math.round(slideHeight * zoom)"
         @error="onSlideError"
       />
-      <p v-else-if="current?.status === 'unavailable'" role="alert" class="attachment-viewer__alert">
+      <p
+        v-else-if="current?.status === 'unavailable'"
+        role="alert"
+        class="attachment-viewer__alert"
+      >
         {{ t("attachment.viewer.previewUnavailable") }}
       </p>
     </div>

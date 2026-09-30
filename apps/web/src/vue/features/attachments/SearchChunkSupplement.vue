@@ -12,39 +12,48 @@ import ChunkText from "./ChunkText.vue";
  */
 const props = defineProps<{ previewHtmlUrl: string; chunk: number }>();
 
-type State = { status: "loading" } | { status: "unavailable" } | { status: "error" } | { status: "text"; text: string };
+type State =
+  | { status: "loading" }
+  | { status: "unavailable" }
+  | { status: "error" }
+  | { status: "text"; text: string };
 const state = shallowRef<State>({ status: "loading" });
 
 useEffectAfterRender([() => props.previewHtmlUrl], () => {
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   state.value = { status: "loading" };
-  void (async () => {
-    try {
-      const response = await fetch(props.previewHtmlUrl, { credentials: "include", signal: controller.signal });
-      if (!response.ok) {
-        await response.body?.cancel();
-        if (alive) {
-          state.value = { status: response.status === 404 || response.status === 413 ? "unavailable" : "error" };
-        }
-        return;
+  (async () => {
+    const response = await fetch(props.previewHtmlUrl, {
+      credentials: "include",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (isAlive()) {
+        state.value = {
+          status: response.status === 404 || response.status === 413 ? "unavailable" : "error",
+        };
       }
-      const payload: unknown = await response.json();
-      const html = typeof payload === "object" && payload !== null && "html" in payload ? payload.html : null;
-      if (!alive) return;
-      if (typeof html !== "string") {
-        state.value = { status: "error" };
-        return;
-      }
-      // The server escapes the text into one <pre> with no attributes; only
-      // its text is used, never markup.
-      const text = new DOMParser().parseFromString(html, "text/html").body.textContent ?? "";
-      state.value = { status: "text", text };
-    } catch (error) {
-      if (!alive || (error instanceof Error && error.name === "AbortError")) return;
-      state.value = { status: "error" };
+      return;
     }
-  })();
+    const payload: unknown = await response.json();
+    const html =
+      typeof payload === "object" && payload !== null && "html" in payload ? payload.html : null;
+    if (!isAlive()) return;
+    if (typeof html !== "string") {
+      state.value = { status: "error" };
+      return;
+    }
+    // The server escapes the text into one <pre> with no attributes; only
+    // its text is used, never markup.
+    const text = new DOMParser().parseFromString(html, "text/html").body.textContent;
+    state.value = { status: "text", text };
+  })().catch((error: unknown) => {
+    if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
+    state.value = { status: "error" };
+  });
   return () => {
     alive = false;
     controller.abort();
@@ -53,12 +62,21 @@ useEffectAfterRender([() => props.previewHtmlUrl], () => {
 </script>
 
 <template>
-  <section class="attachment-viewer__pane attachment-viewer__pane--supplement" data-chunk-supplement="">
+  <section
+    class="attachment-viewer__pane attachment-viewer__pane--supplement"
+    data-chunk-supplement=""
+  >
     <p class="attachment-viewer__status">{{ t("attachment.viewer.layoutNone") }}</p>
-    <p v-if="state.status === 'loading'" class="attachment-viewer__status">{{ t("attachment.preview.loading") }}</p>
+    <p v-if="state.status === 'loading'" class="attachment-viewer__status">{{
+      t("attachment.preview.loading")
+    }}</p>
     <ChunkText v-else-if="state.status === 'text'" :text="state.text" :chunk="chunk" />
     <p v-else class="attachment-viewer__status">
-      {{ state.status === "unavailable" ? t("attachment.viewer.previewUnavailable") : t("load.failed") }}
+      {{
+        state.status === "unavailable"
+          ? t("attachment.viewer.previewUnavailable")
+          : t("load.failed")
+      }}
     </p>
   </section>
 </template>

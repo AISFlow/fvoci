@@ -1,4 +1,4 @@
-import type { PopoverProps } from "@nuxt/ui/components/Popover.vue";
+import type { PopoverProps } from "@nuxt/ui";
 
 type PopoverContent = NonNullable<PopoverProps["content"]>;
 
@@ -13,7 +13,12 @@ type PopoverContent = NonNullable<PopoverProps["content"]>;
 export function menuContent(
   options: Pick<
     PopoverContent,
-    "side" | "sideOffset" | "onOpenAutoFocus" | "onEscapeKeyDown" | "onCloseAutoFocus" | "onFocusOutside"
+    | "side"
+    | "sideOffset"
+    | "onOpenAutoFocus"
+    | "onEscapeKeyDown"
+    | "onCloseAutoFocus"
+    | "onFocusOutside"
   >,
 ): PopoverContent {
   return { align: "start", collisionPadding: 8, ...options, asChild: true } as PopoverContent;

@@ -45,81 +45,79 @@ useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch]
   if (!target) return;
   const controller = new AbortController();
   let alive = true;
-  const isAlive = () => alive;
+  const isAlive = (): boolean => alive;
   const fail = (message: string, retry: boolean) => {
-    if (alive) state.value = { status: "error", message, retry };
+    if (isAlive()) state.value = { status: "error", message, retry };
   };
   state.value = { status: "loading" };
   page.value = 0;
-  void (async () => {
-    try {
-      const body = await (props.prefetch?.take(controller.signal) ??
-        downloadCapped(props.downloadUrl, DOCX_MAX_BYTES, controller.signal));
-      if (!alive) return;
-      if (body.status === "failed") {
-        fail(t("load.failed"), true);
-        return;
-      }
-      if (body.status === "tooLarge") {
-        fail(t("attachment.viewer.previewUnavailable"), false);
-        return;
-      }
-      const check = await checkDocxPackage(body.bytes, isAlive);
-      if (!alive) return;
-      if (check !== "ok") {
-        fail(t("attachment.viewer.previewUnavailable"), false);
-        return;
-      }
-
-      const scratch = document.implementation.createHTMLDocument("");
-      const styleHost = scratch.createElement("div");
-      await renderAsync(body.bytes, scratch.body, styleHost, {
-        breakPages: true,
-        inWrapper: true,
-        ignoreWidth: false,
-        ignoreHeight: false,
-        ignoreFonts: false,
-        renderHeaders: true,
-        renderFooters: true,
-        renderFootnotes: true,
-        renderEndnotes: true,
-        renderAltChunks: false,
-        renderChanges: false,
-        renderComments: false,
-        useBase64URL: true,
-        experimental: false,
-        h: inertElementFactory(scratch),
-      });
-      if (!alive) return;
-      sanitizeRenderedDocx(styleHost);
-      sanitizeRenderedDocx(scratch.body);
-
-      const { frame, ready } = createDocxFrame(document);
-      target.replaceChildren(frame);
-      await ready;
-      const doc = frame.contentDocument;
-      const win = frame.contentWindow;
-      if (!alive || !doc || !win) return;
-      adoptFrameStyles(doc, win, [
-        DOCX_FRAME_BASE_CSS,
-        ...[...styleHost.querySelectorAll("style")].map((style) => style.textContent ?? ""),
-      ]);
-      for (const child of [...scratch.body.children]) {
-        const copy = doc.importNode(child, true);
-        doc.body.appendChild(copy);
-        transferInlineStyles(child, copy);
-      }
-      const pages = [...doc.querySelectorAll<HTMLElement>(PAGE_SELECTOR)];
-      if (pages.length === 0) {
-        fail(t("attachment.viewer.previewUnavailable"), false);
-        return;
-      }
-      state.value = { status: "ready", frame, pages };
-    } catch (error) {
-      if (!alive || (error instanceof Error && error.name === "AbortError")) return;
-      fail(t("attachment.viewer.previewUnavailable"), true);
+  (async () => {
+    const body = await (props.prefetch?.take(controller.signal) ??
+      downloadCapped(props.downloadUrl, DOCX_MAX_BYTES, controller.signal));
+    if (!isAlive()) return;
+    if (body.status === "failed") {
+      fail(t("load.failed"), true);
+      return;
     }
-  })();
+    if (body.status === "tooLarge") {
+      fail(t("attachment.viewer.previewUnavailable"), false);
+      return;
+    }
+    const check = await checkDocxPackage(body.bytes, isAlive);
+    if (!isAlive()) return;
+    if (check !== "ok") {
+      fail(t("attachment.viewer.previewUnavailable"), false);
+      return;
+    }
+
+    const scratch = document.implementation.createHTMLDocument("");
+    const styleHost = scratch.createElement("div");
+    await renderAsync(body.bytes, scratch.body, styleHost, {
+      breakPages: true,
+      inWrapper: true,
+      ignoreWidth: false,
+      ignoreHeight: false,
+      ignoreFonts: false,
+      renderHeaders: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderEndnotes: true,
+      renderAltChunks: false,
+      renderChanges: false,
+      renderComments: false,
+      useBase64URL: true,
+      experimental: false,
+      h: inertElementFactory(scratch),
+    });
+    if (!isAlive()) return;
+    sanitizeRenderedDocx(styleHost);
+    sanitizeRenderedDocx(scratch.body);
+
+    const { frame, ready } = createDocxFrame(document);
+    target.replaceChildren(frame);
+    await ready;
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow;
+    if (!isAlive() || !doc || !win) return;
+    adoptFrameStyles(doc, win, [
+      DOCX_FRAME_BASE_CSS,
+      ...[...styleHost.querySelectorAll("style")].map((style) => style.textContent),
+    ]);
+    for (const child of [...scratch.body.children]) {
+      const copy = doc.importNode(child, true);
+      doc.body.appendChild(copy);
+      transferInlineStyles(child, copy);
+    }
+    const pages = [...doc.querySelectorAll<HTMLElement>(PAGE_SELECTOR)];
+    if (pages.length === 0) {
+      fail(t("attachment.viewer.previewUnavailable"), false);
+      return;
+    }
+    state.value = { status: "ready", frame, pages };
+  })().catch((error: unknown) => {
+    if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
+    fail(t("attachment.viewer.previewUnavailable"), true);
+  });
   return () => {
     alive = false;
     controller.abort();
@@ -139,7 +137,7 @@ useEffectAfterRender([ready, page, zoom], () => {
   });
   doc.documentElement.style.zoom = String(zoom.value);
   // The frame never scrolls vertically: it takes the laid-out page height.
-  current.frame.style.height = `${Math.ceil(doc.documentElement.getBoundingClientRect().height * zoom.value)}px`;
+  current.frame.style.height = `${String(Math.ceil(doc.documentElement.getBoundingClientRect().height * zoom.value))}px`;
 });
 
 const pageCount = computed(() => ready.value?.pages.length ?? 0);
@@ -168,7 +166,13 @@ function retry(): void {
       @zoom-out="zoom = zoomOut(zoom)"
       @reset="zoom = 1"
     >
-      <UButton size="sm" variant="outline" color="neutral" :disabled="page <= 0" @click="page = Math.max(0, page - 1)">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="page <= 0"
+        @click="page = Math.max(0, page - 1)"
+      >
         {{ t("attachment.viewer.prevPage") }}
       </UButton>
       <p class="attachment-viewer__page-label">

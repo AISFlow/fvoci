@@ -124,7 +124,8 @@ export function displayValue(field: string, value: ActivityValue): string {
       .map((entry) => entry.label ?? t("task.activity.value.unavailable"))
       .join(", ");
     const remaining = value.totalCount - value.items.length;
-    const suffix = remaining > 0 ? ` ${t("task.activity.value.additional", { count: remaining })}` : "";
+    const suffix =
+      remaining > 0 ? ` ${t("task.activity.value.additional", { count: remaining })}` : "";
     return value.totalCount === 0 ? t("task.activity.value.none") : `${labels}${suffix}`;
   }
   return value.label ?? t("task.activity.value.unavailable");

@@ -11,5 +11,7 @@ const hardened = computed(() => hardenShareFragmentHtml(props.html));
 </script>
 
 <template>
+  <!-- Server fragment is sanitized; hardenShareFragmentHtml removes unsafe anchors before mount. -->
+  <!-- eslint-disable-next-line vue/no-v-html -->
   <div class="share-page__body" data-testid="share-body" v-html="hardened" />
 </template>

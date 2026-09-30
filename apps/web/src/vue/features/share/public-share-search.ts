@@ -10,10 +10,14 @@ export function publicShareSearchQuery(token: string, q: string) {
     queryKey: ["share-search", token, q] as const,
     staleTime: 0,
     enabled: Boolean(token) && q.trim().length > 0 && q.length <= 200,
-    queryFn: async ({ signal }) => ensureOk(await api.GET("/api/v1/share/{token}/search", {
-      params: { path: { token }, query: { q } },
-      signal,
-    })),
-    retry: (count, error) => !(error instanceof ProblemError && [404, 429].includes(error.status)) && count < 2,
+    queryFn: async ({ signal }) =>
+      ensureOk(
+        await api.GET("/api/v1/share/{token}/search", {
+          params: { path: { token }, query: { q } },
+          signal,
+        }),
+      ),
+    retry: (count, error) =>
+      !(error instanceof ProblemError && [404, 429].includes(error.status)) && count < 2,
   });
 }

@@ -10,27 +10,62 @@ import { useEditorEntities } from "./useEditorEntities";
 const id = "22222222-2222-4222-8222-222222222222";
 type Doc = components["schemas"]["DocumentMetaResponse"];
 function doc(workspaceId: string): Doc {
-  return { id, workspaceId, title: "Authorized", icon: "📄", projectId: null, number: 1,
-    parentId: null, path: "", status: "draft", schemaVersion: 2, sortKey: "", version: 1,
-    createdAt: "", updatedAt: "", createdBy: id };
+  return {
+    id,
+    workspaceId,
+    title: "Authorized",
+    icon: "📄",
+    projectId: null,
+    number: 1,
+    parentId: null,
+    path: "",
+    status: "draft",
+    schemaVersion: 2,
+    sortKey: "",
+    version: 1,
+    createdAt: "",
+    updatedAt: "",
+    createdBy: id,
+  };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((ok) => { resolve = ok; });
+  const promise = new Promise<T>((ok) => {
+    resolve = ok;
+  });
   return { promise, resolve };
 }
 function transport(documentUuid: EditorEntityTransport["documentUuid"]): EditorEntityTransport {
-  const unused = async (): Promise<never> => { throw new Error("unexpected endpoint"); };
-  return { documentUuid, members: unused, groups: unused, projects: unused, lookup: unused,
-    search: unused, document: unused, task: unused, workflow: unused };
+  const unused = (): Promise<never> => Promise.reject(new Error("unexpected endpoint"));
+  return {
+    documentUuid,
+    members: unused,
+    groups: unused,
+    projects: unused,
+    lookup: unused,
+    search: unused,
+    document: unused,
+    task: unused,
+    workflow: unused,
+  };
 }
 
-test("scope teardown aborts real requests and stable callbacks cannot enrich after unmount", async () => {
-  const pending = deferred<Doc>(); let signal!: AbortSignal;
+await test("scope teardown aborts real requests and stable callbacks cannot enrich after unmount", async () => {
+  const pending = deferred<Doc>();
+  let signal!: AbortSignal;
   const scope = effectScope();
-  const callbacks = scope.run(() => useEditorEntities(() => "ws", () => "room", transport(async (_id, s) => {
-    signal = s; return pending.promise;
-  })))!;
+  const callbacks = required(
+    scope.run(() =>
+      useEditorEntities(
+        () => "ws",
+        () => "room",
+        transport(async (_id, s) => {
+          signal = s;
+          return pending.promise;
+        }),
+      ),
+    ),
+  );
   const result = callbacks.entityResolver("document", id);
   scope.stop();
   assert.equal(signal.aborted, true);
@@ -40,46 +75,90 @@ test("scope teardown aborts real requests and stable callbacks cannot enrich aft
   assert.deepEqual(await callbacks.mentionItems(""), []);
 });
 
-test("workspace and room/session changes retire old requests synchronously without replacing callback identities", async () => {
-  const workspace = ref("old"); const room = ref("doc:1:user-a");
+await test("workspace and room/session changes retire old requests synchronously without replacing callback identities", async () => {
+  const workspace = ref("old");
+  const room = ref("doc:1:user-a");
   const pending: ReturnType<typeof deferred<Doc>>[] = [];
   const signals: AbortSignal[] = [];
   const scope = effectScope();
-  const callbacks = scope.run(() => useEditorEntities(() => workspace.value, () => room.value, transport(async (_id, signal) => {
-    const result = deferred<Doc>(); pending.push(result); signals.push(signal); return result.promise;
-  })))!;
-  const resolver = callbacks.entityResolver; const mentions = callbacks.mentionItems;
+  const callbacks = required(
+    scope.run(() =>
+      useEditorEntities(
+        () => workspace.value,
+        () => room.value,
+        transport(async (_id, signal) => {
+          const result = deferred<Doc>();
+          pending.push(result);
+          signals.push(signal);
+          return result.promise;
+        }),
+      ),
+    ),
+  );
+  const resolver = callbacks.entityResolver;
+  const mentions = callbacks.mentionItems;
   const old = resolver("document", id);
   workspace.value = "new";
-  assert.equal(signals[0]!.aborted, true);
-  pending[0]!.resolve(doc("old")); assert.equal(await old, null);
+  assert.equal(required(signals[0]).aborted, true);
+  required(pending[0]).resolve(doc("old"));
+  assert.equal(await old, null);
   const retiredRoom = resolver("document", id);
   room.value = "doc:2:user-b";
-  assert.equal(signals[1]!.aborted, true);
-  pending[1]!.resolve(doc("new")); assert.equal(await retiredRoom, null);
+  assert.equal(required(signals[1]).aborted, true);
+  required(pending[1]).resolve(doc("new"));
+  assert.equal(await retiredRoom, null);
   const current = resolver("document", id);
-  pending[2]!.resolve(doc("new")); assert.equal((await current)?.label, "Authorized");
-  assert.equal(callbacks.entityResolver, resolver); assert.equal(callbacks.mentionItems, mentions);
+  required(pending[2]).resolve(doc("new"));
+  assert.equal((await current)?.label, "Authorized");
+  assert.equal(callbacks.entityResolver, resolver);
+  assert.equal(callbacks.mentionItems, mentions);
   scope.stop();
 });
 
-test("remount gets fresh metadata and cannot revive an old callback", async () => {
-  const first = effectScope(); let calls = 0;
-  const api = transport(async () => { calls++; return doc("ws"); });
-  const one = first.run(() => useEditorEntities(() => "ws", () => "room", api))!;
-  assert.ok(await one.entityResolver("document", id)); first.stop();
+await test("remount gets fresh metadata and cannot revive an old callback", async () => {
+  const first = effectScope();
+  let calls = 0;
+  const api = transport(() => {
+    calls++;
+    return Promise.resolve(doc("ws"));
+  });
+  const one = required(
+    first.run(() =>
+      useEditorEntities(
+        () => "ws",
+        () => "room",
+        api,
+      ),
+    ),
+  );
+  assert.ok(await one.entityResolver("document", id));
+  first.stop();
   const second = effectScope();
-  const two = second.run(() => useEditorEntities(() => "ws", () => "room", api))!;
+  const two = required(
+    second.run(() =>
+      useEditorEntities(
+        () => "ws",
+        () => "room",
+        api,
+      ),
+    ),
+  );
   assert.ok(await two.entityResolver("document", id));
   assert.equal(await one.entityResolver("document", id), null);
-  assert.equal(calls, 2); second.stop();
+  assert.equal(calls, 2);
+  second.stop();
 });
 
-test("all three compiled consumers supply callbacks before their one existing editor mount", () => {
-  for (const rel of ["../documents/WikiDocumentView.vue", "../documents/ProjectDocumentView.vue", "../tasks/TaskBodyEditor.vue"]) {
+await test("all three compiled consumers supply callbacks before their one existing editor mount", () => {
+  for (const rel of [
+    "../documents/WikiDocumentView.vue",
+    "../documents/ProjectDocumentView.vue",
+    "../tasks/TaskBodyEditor.vue",
+  ]) {
     const filename = new URL(rel, import.meta.url).pathname;
     const source = readFileSync(filename, "utf8");
-    const { descriptor, errors } = parse(source, { filename }); assert.deepEqual(errors, []);
+    const { descriptor, errors } = parse(source, { filename });
+    assert.deepEqual(errors, []);
     const compiled = compileScript(descriptor, { id: rel, inlineTemplate: true }).content;
     assert.match(compiled, /useEditorEntities\(/);
     assert.match(compiled, /"mention-items": _unref\(mentionItems\)/);
@@ -91,3 +170,8 @@ test("all three compiled consumers supply callbacks before their one existing ed
     assert.equal(source.includes("new Y.Doc"), false);
   }
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert.ok(value !== null && value !== undefined, "required fixture value");
+  return value;
+}

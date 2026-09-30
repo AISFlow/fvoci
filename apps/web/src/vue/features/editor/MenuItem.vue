@@ -5,7 +5,11 @@ import UButton from "@nuxt/ui/components/Button.vue";
 // command runs on click, react/menu-keyboard.ts preventSelectionLoss); a
 // radio or checkbox item says whether it is on with aria-checked.
 const props = withDefaults(
-  defineProps<{ role?: "menuitem" | "menuitemradio" | "menuitemcheckbox"; checked?: boolean; label?: string }>(),
+  defineProps<{
+    role?: "menuitem" | "menuitemradio" | "menuitemcheckbox";
+    checked?: boolean;
+    label?: string;
+  }>(),
   { role: "menuitem", checked: false, label: undefined },
 );
 const emit = defineEmits<{ select: [] }>();

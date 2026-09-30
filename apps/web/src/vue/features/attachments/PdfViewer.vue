@@ -44,47 +44,55 @@ const canvas = useTemplateRef<HTMLCanvasElement>("canvas");
 useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch], () => {
   const controller = new AbortController();
   let alive = true;
+  const isAlive = (): boolean => alive;
   let task: PDFDocumentLoadingTask | null = null;
   state.value = { status: "loading" };
   page.value = 1;
   renderFailed.value = false;
-  void (async () => {
-    try {
-      const body = await (props.prefetch?.take(controller.signal) ??
-        downloadCapped(props.downloadUrl, PDF_MAX_BYTES, controller.signal));
-      if (!alive) return;
-      if (body.status === "failed") {
-        state.value = { status: "error", message: t("load.failed"), retry: true };
-        return;
-      }
-      if (body.status === "tooLarge") {
-        state.value = { status: "error", message: t("attachment.viewer.previewUnavailable"), retry: false };
-        return;
-      }
-      const pdfjs = await loadPdfJs();
-      if (!alive) return;
-      const assets = new URL(`${import.meta.env.BASE_URL}${pdfjsAssetBase(pdfjs.version)}`, window.location.href).href;
-      task = pdfjs.getDocument({
-        data: body.bytes,
-        enableXfa: false,
-        maxImageSize: PDF_MAX_IMAGE_PIXELS,
-        cMapUrl: `${assets}cmaps/`,
-        cMapPacked: true,
-        standardFontDataUrl: `${assets}standard_fonts/`,
-        wasmUrl: `${assets}wasm/`,
-        iccUrl: `${assets}iccs/`,
-      });
-      const doc = await task.promise;
-      if (alive) state.value = { status: "ready", doc };
-    } catch (error) {
-      if (!alive || (error instanceof Error && error.name === "AbortError")) return;
+  (async () => {
+    const body = await (props.prefetch?.take(controller.signal) ??
+      downloadCapped(props.downloadUrl, PDF_MAX_BYTES, controller.signal));
+    if (!isAlive()) return;
+    if (body.status === "failed") {
       state.value = { status: "error", message: t("load.failed"), retry: true };
+      return;
     }
-  })();
+    if (body.status === "tooLarge") {
+      state.value = {
+        status: "error",
+        message: t("attachment.viewer.previewUnavailable"),
+        retry: false,
+      };
+      return;
+    }
+    const pdfjs = await loadPdfJs();
+    if (!isAlive()) return;
+    const assets = new URL(
+      `${import.meta.env.BASE_URL}${pdfjsAssetBase(pdfjs.version)}`,
+      window.location.href,
+    ).href;
+    task = pdfjs.getDocument({
+      data: body.bytes,
+      enableXfa: false,
+      maxImageSize: PDF_MAX_IMAGE_PIXELS,
+      cMapUrl: `${assets}cmaps/`,
+      cMapPacked: true,
+      standardFontDataUrl: `${assets}standard_fonts/`,
+      wasmUrl: `${assets}wasm/`,
+      iccUrl: `${assets}iccs/`,
+    });
+    const doc = await task.promise;
+    if (isAlive()) state.value = { status: "ready", doc };
+  })().catch((error: unknown) => {
+    if (!isAlive() || (error instanceof Error && error.name === "AbortError")) return;
+    state.value = { status: "error", message: t("load.failed"), retry: true };
+  });
   return () => {
     alive = false;
     controller.abort();
-    void task?.destroy();
+    task?.destroy().catch((error: unknown) => {
+      console.error("PDF worker cleanup failed", error);
+    });
   };
 });
 
@@ -95,26 +103,25 @@ useEffectAfterRender([doc, page, zoom], () => {
   const current = doc.value;
   if (!current || !target) return;
   let alive = true;
+  const isAlive = (): boolean => alive;
   let render: RenderTask | null = null;
   renderFailed.value = false;
-  void (async () => {
-    try {
-      const pdfPage = await current.getPage(page.value);
-      if (!alive) return;
-      const base = pdfPage.getViewport({ scale: 1 });
-      const scale = renderScale(base.width, base.height, zoom.value, window.devicePixelRatio);
-      const viewport = pdfPage.getViewport({ scale });
-      target.width = Math.floor(viewport.width);
-      target.height = Math.floor(viewport.height);
-      target.style.width = `${Math.floor(base.width * zoom.value)}px`;
-      render = pdfPage.render({ canvas: target, viewport });
-      await render.promise;
-    } catch (error) {
-      if (alive && !(error instanceof Error && error.name === "RenderingCancelledException")) {
-        renderFailed.value = true;
-      }
+  (async () => {
+    const pdfPage = await current.getPage(page.value);
+    if (!isAlive()) return;
+    const base = pdfPage.getViewport({ scale: 1 });
+    const scale = renderScale(base.width, base.height, zoom.value, window.devicePixelRatio);
+    const viewport = pdfPage.getViewport({ scale });
+    target.width = Math.floor(viewport.width);
+    target.height = Math.floor(viewport.height);
+    target.style.width = `${String(Math.floor(base.width * zoom.value))}px`;
+    render = pdfPage.render({ canvas: target, viewport });
+    await render.promise;
+  })().catch((error: unknown) => {
+    if (isAlive() && !(error instanceof Error && error.name === "RenderingCancelledException")) {
+      renderFailed.value = true;
     }
-  })();
+  });
   return () => {
     alive = false;
     render?.cancel();
@@ -153,7 +160,13 @@ function retry(): void {
       @zoom-out="zoom = zoomOut(zoom)"
       @reset="zoom = 1"
     >
-      <UButton size="sm" variant="outline" color="neutral" :disabled="page <= 1" @click="page = Math.max(1, page - 1)">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="page <= 1"
+        @click="page = Math.max(1, page - 1)"
+      >
         {{ t("attachment.viewer.prevPage") }}
       </UButton>
       <p class="attachment-viewer__page-label">
@@ -170,7 +183,11 @@ function retry(): void {
       </UButton>
     </ViewerZoomToolbar>
     <div class="attachment-viewer__page-wrap">
-      <canvas ref="canvas" class="attachment-viewer__pdf-canvas" :aria-label="t('attachment.viewer.pdf')" />
+      <canvas
+        ref="canvas"
+        class="attachment-viewer__pdf-canvas"
+        :aria-label="t('attachment.viewer.pdf')"
+      />
     </div>
   </div>
 </template>

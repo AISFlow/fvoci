@@ -36,6 +36,8 @@ function warn(event: BeforeUnloadEvent): void {
   if (discardApproved) return;
   event.preventDefault();
   // Chromium before 119 and Safari only prompt when returnValue is set.
+  // Older Chromium and Safari require returnValue for the unsaved-edits prompt.
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
   event.returnValue = "";
 }
 
@@ -45,14 +47,20 @@ function warn(event: BeforeUnloadEvent): void {
 function onLink(event: MouseEvent): void {
   const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
   if (!(anchor instanceof HTMLAnchorElement)) return;
-  const path = guardedViewerLink(event, {
-    href: anchor.href,
-    target: anchor.target || document.querySelector("base")?.target || "",
-    download: anchor.hasAttribute("download"),
-  }, window.location.href);
+  const path = guardedViewerLink(
+    event,
+    {
+      href: anchor.href,
+      target: anchor.target || document.querySelector("base")?.target || "",
+      download: anchor.hasAttribute("download"),
+    },
+    window.location.href,
+  );
   if (!path) return;
   event.preventDefault();
-  void router.push(path);
+  router.push(path).catch((error: unknown) => {
+    console.error("Attachment navigation failed", error);
+  });
 }
 
 const removeAfterEach = router.afterEach((to, _from, failure) => {
