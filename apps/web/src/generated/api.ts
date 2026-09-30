@@ -3704,6 +3704,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/wiki-discovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_wiki_discovery"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/workflows/{workflow_id}/statuses": {
         parameters: {
             query?: never;
@@ -5225,6 +5241,12 @@ export interface components {
             createdAt: string;
             createdBy: string;
             description: string | null;
+            /**
+             * Format: int64
+             * @description Live project documents, including the root; unavailable for deleted rows
+             *     or API tokens without document read access.
+             */
+            documentCount: number | null;
             icon: string | null;
             id: string;
             key: string;
@@ -9138,7 +9160,7 @@ export interface operations {
                 q: string;
                 /** @description Result kind filter */
                 type?: string;
-                /** @description Optional tag filter */
+                /** @description Optional document tag UUID: direct tagged documents and unchanged tasks; excludes comments and attachments */
                 tag?: string;
                 /** @description Pagination cursor */
                 cursor?: string;
@@ -19484,7 +19506,7 @@ export interface operations {
                 type?: string;
                 /** @description Optional project scope */
                 projectId?: string;
-                /** @description Optional tag filter */
+                /** @description Optional document tag UUID: direct tagged documents and unchanged tasks; excludes comments and attachments */
                 tag?: string;
                 /** @description Pagination cursor */
                 cursor?: string;
@@ -21470,7 +21492,10 @@ export interface operations {
     };
     list_tree: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Optional document tag UUID; direct assignment only */
+                tag?: string;
+            };
             header?: never;
             path: {
                 /** @description Workspace id */
@@ -21807,6 +21832,59 @@ export interface operations {
                 };
             };
             /** @description Not found or not a workspace admin */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_wiki_discovery: {
+        parameters: {
+            query?: {
+                /** @description Optional document tag UUID; direct assignment only */
+                tag?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Authorized live wiki and project document discovery */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TreeResponse"];
+                };
+            };
+            /** @description Invalid tag UUID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
             404: {
                 headers: {
                     [name: string]: unknown;

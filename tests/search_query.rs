@@ -281,6 +281,261 @@ fn urlencoding(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
+#[tokio::test]
+async fn search_tag_hydration_types_sparse_cursor_and_live_assignments() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, owner, ws) = setup_session(&harness).await;
+    let meili = test_meili_config();
+    ensure_meili_index(&meili).await.unwrap();
+    let app = search_router(search_state(&harness.app_url, Some(meili.clone())).await);
+    let admin = admin_pool(&harness).await;
+    let token = format!("tag{}", Uuid::now_v7().simple());
+    let title = format!("{token} document");
+    let mut sources = Vec::new();
+    for number in 100..165 {
+        let id = Uuid::now_v7();
+        insert_wiki_document(&admin, ws, id, owner, number, &title, &token).await;
+        sources.push(document_source(ws, None, id, &title, &token));
+    }
+    let wiki: Uuid = sources[0].document_id.as_ref().unwrap().parse().unwrap();
+    let project = create_project(app.clone(), &cookie, ws, "TAG", "workspace").await;
+    let pid: Uuid = project["id"].as_str().unwrap().parse().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{pid}/tasks"),
+        Some(json!({"title": format!("{token} task")})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    let task_id: Uuid = task["id"].as_str().unwrap().parse().unwrap();
+    sources.push(task_source(ws, pid, task_id, &format!("{token} task")));
+    let (status, comment) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/documents/{wiki}/comments"),
+        Some(json!({"body": token})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{comment}");
+    let comment_id: Uuid = comment["id"].as_str().unwrap().parse().unwrap();
+    sources.push(comment_source(
+        ws,
+        None,
+        Some(wiki),
+        None,
+        comment_id,
+        &title,
+        &token,
+    ));
+    let attachment = insert_stored_attachment(&admin, ws, wiki, owner).await;
+    sqlx::query("UPDATE fvoci.attachments SET name=$2, extract_text=$2 WHERE id=$1")
+        .bind(attachment)
+        .bind(&token)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sources.push(attachment_source(
+        ws, None, wiki, attachment, &token, &token,
+    ));
+    upsert_meili_sources(&meili, &sources).await.unwrap();
+    let (status, first) = search(app.clone(), &cookie, ws, &token, "type=document&limit=50").await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(ids_of(&first).len(), 50);
+    let cursor = first["nextCursor"].as_str().expect("unfiltered cursor");
+    let (status, last) = search(
+        app.clone(),
+        &cookie,
+        ws,
+        &token,
+        &format!("type=document&limit=50&cursor={}", urlencoding(cursor)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{last}");
+    assert_eq!(ids_of(&last).len(), 15);
+    let selected: Vec<Uuid> = ids_of(&last)[10..12]
+        .iter()
+        .map(|id| id.parse().unwrap())
+        .collect();
+    let tag = Uuid::now_v7();
+    let other_tag = Uuid::now_v7();
+    for (id, name) in [(tag, "match"), (other_tag, "other")] {
+        sqlx::query("INSERT INTO fvoci.document_tags (id, workspace_id, name, color) VALUES ($1,$2,$3,'blue')")
+            .bind(id).bind(ws).bind(name).execute(&admin).await.unwrap();
+    }
+    for doc in &selected {
+        sqlx::query("INSERT INTO fvoci.document_tag_assignments (workspace_id, document_id, tag_id) VALUES ($1,$2,$3)")
+            .bind(ws).bind(doc).bind(tag).execute(&admin).await.unwrap();
+    }
+    let (status, tagged) = search(
+        app.clone(),
+        &cookie,
+        ws,
+        &token,
+        &format!("type=document&tag={tag}&limit=1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tagged}");
+    assert_eq!(
+        ids_of(&tagged).len(),
+        1,
+        "sparse matches beyond first50 candidates"
+    );
+    let tagged_cursor = tagged["nextCursor"].as_str().expect("tagged cursor");
+    let (status, second) = search(
+        app.clone(),
+        &cookie,
+        ws,
+        &token,
+        &format!(
+            "type=document&tag={tag}&limit=1&cursor={}",
+            urlencoding(tagged_cursor)
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let mut paged = ids_of(&tagged);
+    paged.extend(ids_of(&second));
+    paged.sort();
+    let mut expected = selected.iter().map(Uuid::to_string).collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(paged, expected);
+    for change in [
+        format!("tag={other_tag}&type=document"),
+        format!("tag={tag}&type=task"),
+        format!("tag={tag}&type=document&projectId={pid}"),
+        format!("tag={tag}&type=document&mode=hybrid"),
+        "type=document".to_string(),
+    ] {
+        let (status, _) = search(
+            app.clone(),
+            &cookie,
+            ws,
+            &token,
+            &format!("{change}&cursor={}", urlencoding(tagged_cursor)),
+        )
+        .await;
+        // No configured embedder means hybrid actually executes lexically, as
+        // existing cursor-mode policy specifies; tag/type/scope always bind.
+        if change.ends_with("mode=hybrid") {
+            assert_eq!(status, StatusCode::OK);
+        } else {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{change}");
+        }
+    }
+    for kind in ["all", "document", "task", "comment", "attachment"] {
+        let (status, result) = search(
+            app.clone(),
+            &cookie,
+            ws,
+            &token,
+            &format!("type={kind}&tag={tag}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        let mut expected = match kind {
+            "document" => selected.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+            "task" => vec![task_id.to_string()],
+            "all" => selected
+                .iter()
+                .map(Uuid::to_string)
+                .chain([task_id.to_string()])
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut actual = ids_of(&result);
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected, "type={kind}: {result}");
+    }
+    let (status, global) = global_search(app.clone(), &cookie, &token, &format!("tag={tag}")).await;
+    assert_eq!(status, StatusCode::OK, "{global}");
+    assert_eq!(ids_of(&global).len(), 3);
+    let (status, other) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({"slug": "tag-other", "name": "Other"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+    let other_ws: Uuid = other["id"].as_str().unwrap().parse().unwrap();
+    let foreign_doc = Uuid::now_v7();
+    let foreign_tag = Uuid::now_v7();
+    insert_wiki_document(&admin, other_ws, foreign_doc, owner, 100, &title, &token).await;
+    sqlx::query("INSERT INTO fvoci.document_tags (id,workspace_id,name,color) VALUES ($1,$2,'foreign','blue')")
+        .bind(foreign_tag).bind(other_ws).execute(&admin).await.unwrap();
+    sqlx::query("INSERT INTO fvoci.document_tag_assignments (workspace_id,document_id,tag_id) VALUES ($1,$2,$3)")
+        .bind(other_ws).bind(foreign_doc).bind(foreign_tag).execute(&admin).await.unwrap();
+    upsert_meili_sources(
+        &meili,
+        &[document_source(other_ws, None, foreign_doc, &title, &token)],
+    )
+    .await
+    .unwrap();
+    let (status, foreign_scoped) = search(
+        app.clone(),
+        &cookie,
+        ws,
+        &token,
+        &format!("tag={foreign_tag}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids_of(&foreign_scoped), vec![task_id.to_string()]);
+    let (status, foreign_global) =
+        global_search(app.clone(), &cookie, &token, &format!("tag={foreign_tag}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut foreign_ids = ids_of(&foreign_global);
+    foreign_ids.sort();
+    let mut foreign_expected = vec![foreign_doc.to_string(), task_id.to_string()];
+    foreign_expected.sort();
+    assert_eq!(foreign_ids, foreign_expected);
+    let doc_token = create_scoped_token(app.clone(), &cookie, ws, &["documents.read"]).await;
+    let task_token = create_scoped_token(app.clone(), &cookie, ws, &["tasks.read"]).await;
+    for (pat, expected) in [(&doc_token, 2), (&task_token, 1)] {
+        let (status, body) = bearer_get(
+            app.clone(),
+            pat,
+            &format!("/api/v1/workspaces/{ws}/search?q={token}&tag={tag}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids_of(&body).len(), expected);
+    }
+    // Assignment changes become authoritative without touching the stale index.
+    sqlx::query("DELETE FROM fvoci.document_tag_assignments WHERE workspace_id=$1 AND tag_id=$2")
+        .bind(ws)
+        .bind(tag)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, unassigned) =
+        search(app.clone(), &cookie, ws, &token, &format!("tag={tag}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids_of(&unassigned), vec![task_id.to_string()]);
+    sqlx::query("DELETE FROM fvoci.document_tags WHERE id=$1")
+        .bind(tag)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, deleted) =
+        global_search(app.clone(), &cookie, &token, &format!("tag={tag}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids_of(&deleted), vec![task_id.to_string()]);
+    for raw in ["bad", ""] {
+        let (status, _) = search(app.clone(), &cookie, ws, &token, &format!("tag={raw}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = global_search(app.clone(), &cookie, &token, &format!("tag={raw}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 /// Seeds Meili with `upsert_meili_sources` (SearchSource via src/search/meili.rs).
 #[tokio::test]
 async fn search_workspace_query_contract_and_leak_matrix() {
@@ -786,6 +1041,11 @@ async fn search_guest_wiki_group_grant_is_hydrated() {
         "guest wiki body",
     )
     .await;
+    let tag = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.document_tags (id,workspace_id,name,color) VALUES ($1,$2,'guest search','blue')")
+        .bind(tag).bind(workspace_id).execute(&admin).await.unwrap();
+    sqlx::query("INSERT INTO fvoci.document_tag_assignments (workspace_id,document_id,tag_id) VALUES ($1,$2,$3)")
+        .bind(workspace_id).bind(wiki_id).bind(tag).execute(&admin).await.unwrap();
     upsert_meili_sources(
         &meili,
         &[document_source(
@@ -799,7 +1059,14 @@ async fn search_guest_wiki_group_grant_is_hydrated() {
     .await
     .unwrap_or_else(|e| panic!("upsert_meili_sources: {e}"));
 
-    let (status, before) = search(app.clone(), &guest.cookie, workspace_id, &token, "").await;
+    let (status, before) = search(
+        app.clone(),
+        &guest.cookie,
+        workspace_id,
+        &token,
+        &format!("tag={tag}"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{before:?}");
     assert!(
         !contains_id(&before, wiki_id),
@@ -835,11 +1102,37 @@ async fn search_guest_wiki_group_grant_is_hydrated() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    let (status, after) = search(app, &guest.cookie, workspace_id, &token, "").await;
+    let (status, after) = search(
+        app.clone(),
+        &guest.cookie,
+        workspace_id,
+        &token,
+        &format!("tag={tag}"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{after:?}");
     assert!(
         contains_id(&after, wiki_id),
         "guest wiki group grant missing from search: {after:?}"
+    );
+    sqlx::query("DELETE FROM fvoci.group_members WHERE workspace_id=$1 AND user_id=$2")
+        .bind(workspace_id)
+        .bind(guest.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, revoked) = search(
+        app,
+        &guest.cookie,
+        workspace_id,
+        &token,
+        &format!("tag={tag}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        ids_of(&revoked).is_empty(),
+        "stale tagged index hit survived grant revocation: {revoked}"
     );
 
     admin.close().await;

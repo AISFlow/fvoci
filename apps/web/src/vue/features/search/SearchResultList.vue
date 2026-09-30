@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import { computed } from "vue";
 import { RouterLink } from "vue-router";
-import { isVueAppPath } from "@/app-boundary";
+import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
 import { searchItemHref } from "@/features/workspace/search-target";
 import SearchResultBody from "./SearchResultBody.vue";
 import type { SearchHit } from "./search-hit";

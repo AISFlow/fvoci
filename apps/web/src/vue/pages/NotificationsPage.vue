@@ -2,7 +2,7 @@
 import { formatPersonName, notificationMessage, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, ref, watch, onScopeDispose } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   notificationHref,
@@ -32,21 +32,37 @@ const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
 const workspaceId = computed(() => workspace.value?.id ?? "");
-const tab = ref<NotificationFilter>("all");
+const tab = computed<NotificationFilter>(() => {
+  const value = route.query.tab;
+  return value === "unread" || value === "archived" ? value : "all";
+});
 const actionError = ref<string | null>(null);
 const actionPending = ref(false);
+let actionVersion = 0;
+watch([workspaceId, slug, tab, () => session.me.value?.userId, () => session.me.value?.sessionId,
+  () => session.me.value?.isInstanceAdmin, () => workspace.value?.role, () => session.status.value], () => {
+  actionVersion++;
+  actionPending.value = false;
+  actionError.value = null;
+}, { flush: "sync" });
+onScopeDispose(() => { actionVersion++; actionPending.value = false; });
 
-const list = useInfiniteQuery(() => ({
-  ...notificationListQuery(workspaceId.value, tab.value),
-  queryKey: ["notifications", workspaceId.value, "inbox", tab.value] as const,
-  initialPageParam: undefined as string | undefined,
-  queryFn: async ({ pageParam }: { pageParam: string | undefined }) =>
-    ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {
-      params: { path: { workspace_id: workspaceId.value }, query: { filter: tab.value, cursor: pageParam } },
-    })),
-  getNextPageParam: (page: { nextCursor?: string | null }) => page.nextCursor ?? undefined,
-  enabled: Boolean(workspaceId.value),
-}));
+const list = useInfiniteQuery(() => {
+  const id = workspaceId.value;
+  const filter = tab.value;
+  return {
+    ...notificationListQuery(id, filter),
+    queryKey: ["notifications", id, "inbox", filter] as const,
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam, signal }: { pageParam: string | undefined; signal: AbortSignal }) =>
+      ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {
+        signal,
+        params: { path: { workspace_id: id }, query: { filter, cursor: pageParam } },
+      })),
+    getNextPageParam: (page: { nextCursor?: string | null }) => page.nextCursor ?? undefined,
+    enabled: Boolean(id),
+  };
+});
 const items = computed(() => {
   const seen = new Set<string>();
   return (list.data.value?.pages ?? []).flatMap((page) => page.items).filter((item) => {
@@ -58,36 +74,40 @@ const items = computed(() => {
 
 async function perform(action: () => Promise<unknown>): Promise<void> {
   if (actionPending.value) return;
+  const id = workspaceId.value;
+  const version = ++actionVersion;
   actionError.value = null;
   actionPending.value = true;
   try {
     await action();
   } catch (error) {
-    actionError.value = loadErrorMessage(error);
+    if (version === actionVersion && id === workspaceId.value) actionError.value = loadErrorMessage(error);
   } finally {
-    actionPending.value = false;
+    if (version === actionVersion && id === workspaceId.value) actionPending.value = false;
   }
 }
 
 const readAll = useMutation({
-  mutationFn: async () =>
+  mutationFn: async (id: string) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/notifications/read-all", {
-        params: { path: { workspace_id: workspaceId.value } },
+        params: { path: { workspace_id: id } },
       }),
     ),
-  onSuccess: async () => {
-    await queryClient.invalidateQueries({ queryKey: ["notifications", workspaceId.value] });
-    await queryClient.invalidateQueries({ queryKey: ["notifications-unread", workspaceId.value] });
+  onSuccess: async (_data, id) => {
+    await queryClient.invalidateQueries({ queryKey: ["notifications", id] });
+    await queryClient.invalidateQueries({ queryKey: ["notifications-unread", id] });
   },
 });
 
 function selectTab(value: NotificationFilter): void {
-  tab.value = value;
+  void router.replace({ query: { ...route.query, tab: value === "all" ? undefined : value }, hash: route.hash });
 }
 
 async function openItem(item: NotificationItem): Promise<void> {
   const id = workspaceId.value;
+  const currentSlug = slug.value;
+  const version = actionVersion;
   if (!id) return;
   if (!item.readAt) {
     await ensureOk(
@@ -99,7 +119,8 @@ async function openItem(item: NotificationItem): Promise<void> {
     await queryClient.invalidateQueries({ queryKey: ["notifications", id] });
     await queryClient.invalidateQueries({ queryKey: ["notifications-unread", id] });
   }
-  const href = notificationHref(slug.value, item);
+  if (version !== actionVersion || workspaceId.value !== id || router.currentRoute.value.params.slug !== currentSlug) return;
+  const href = notificationHref(currentSlug, item);
   if (href) followAppHref(href, router);
 }
 
@@ -129,7 +150,7 @@ async function toggleArchive(item: NotificationItem): Promise<void> {
     <div class="notifications-page">
       <div class="notifications-page__head">
         <h1 class="notifications-page__title">{{ t("notif.list.title") }}</h1>
-        <UButton type="button" variant="outline" color="neutral" size="sm" :disabled="actionPending" @click="perform(() => readAll.mutateAsync())">
+        <UButton type="button" variant="outline" color="neutral" size="sm" :disabled="actionPending" @click="perform(() => readAll.mutateAsync(workspaceId))">
           {{ t("notif.readAllFull") }}
         </UButton>
       </div>

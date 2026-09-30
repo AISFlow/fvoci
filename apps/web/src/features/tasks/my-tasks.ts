@@ -28,6 +28,31 @@ export function myTasksQuery(workspaceId: string) {
   });
 }
 
+/** A separate, bounded home preview; never share a single-page key with the infinite list. */
+export function assignedTasksPreviewQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["workspace-tasks", workspaceId, OPEN_ASSIGNED_QUERY, "preview", 8] as const,
+    queryFn: async ({ signal }) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/tasks", {
+      signal,
+      params: { path: { workspace_id: workspaceId }, query: { query: OPEN_ASSIGNED_QUERY, limit: 8 } },
+    })),
+    enabled: Boolean(workspaceId),
+    retry: false,
+  });
+}
+
+export function workspaceLabelsQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["workspace-labels", workspaceId] as const,
+    queryFn: async ({ signal }) => ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/labels", {
+      signal,
+      params: { path: { workspace_id: workspaceId } },
+    })),
+    enabled: Boolean(workspaceId),
+    retry: false,
+  });
+}
+
 /** Every workflow status in the workspace, for the status names of cross-project rows. */
 export function workspaceStatusesQuery(workspaceId: string) {
   return queryOptions({

@@ -151,7 +151,7 @@ test("wiki shell logout transport failure keeps the current session visible", as
 });
 
 
-test("settings with revoked session redirects without a React hook crash", async ({ page }) => {
+test("settings with revoked session preserves its login return destination without a page error", async ({ page }) => {
   await login(page, admin.email, admin.password);
   await page.goto("/w/acme/settings");
   await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toBeVisible();
@@ -163,7 +163,7 @@ test("settings with revoked session redirects without a React hook crash", async
   expect(result.ok()).toBe(true);
   await page.context().addCookies(cookies);
   await page.reload();
-  await expect(page).toHaveURL(/\/login$/);
+  await expect(page).toHaveURL(/\/login\?returnTo=%2Fw%2Facme%2Fsettings$/);
   await expect(page.getByRole("button", { name: "로그인", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });

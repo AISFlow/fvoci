@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import { onMounted, onUnmounted, ref } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from "vue-router";
-import { isVueAppPath } from "@/app-boundary";
+import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
 import DiscardEditsDialog from "./DiscardEditsDialog.vue";
 import { guardedViewerLink } from "./viewer-navigation";
 

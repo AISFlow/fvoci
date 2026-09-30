@@ -2,10 +2,11 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, ref, watch, onScopeDispose } from "vue";
 import { useRoute } from "vue-router";
 import { projectsQuery } from "@/features/projects/queries";
 import { api, ensureOk, loadErrorMessage } from "@/lib/api";
+import { FALLBACK_TZ, formatInstant } from "@/lib/datetime";
 import { wikiPath } from "@/lib/href";
 import { trashQuery } from "@/lib/queries/documents";
 import QueryError from "../components/QueryError.vue";
@@ -20,6 +21,7 @@ const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
 const workspaceId = computed(() => workspace.value?.id ?? "");
+const timeZone = computed(() => session.me.value?.timezone ?? FALLBACK_TZ);
 
 const trash = useQuery(() => ({
   ...trashQuery(workspaceId.value),
@@ -33,9 +35,17 @@ const projectKeys = computed(
   () => new Map((projects.data.value?.items ?? []).map((project) => [project.id, project.key] as const)),
 );
 const restoreError = ref<string | null>(null);
+const lifetime = ref(0);
+let restoreVersion = 0;
+watch([workspaceId, slug, () => session.me.value?.userId, () => session.me.value?.sessionId,
+  () => session.me.value?.isInstanceAdmin, () => workspace.value?.role, () => session.status.value],
+  () => { lifetime.value++; restoreError.value = null; }, { flush: "sync" });
+onScopeDispose(() => { lifetime.value++; });
+const currentRestore = (scope: { workspaceId: string; lifetime: number; operation: number }) =>
+  scope.workspaceId === workspaceId.value && scope.lifetime === lifetime.value && scope.operation === restoreVersion;
 
 const restore = useMutation({
-  mutationFn: async (item: { id: string; projectId?: string | null }) =>
+  mutationFn: async ({ workspaceId, item }: { workspaceId: string; item: { id: string; projectId?: string | null }; lifetime: number; operation: number }) =>
     item.projectId
       ? ensureOk(
           await api.POST(
@@ -43,7 +53,7 @@ const restore = useMutation({
             {
               params: {
                 path: {
-                  workspace_id: workspaceId.value,
+                  workspace_id: workspaceId,
                   project_id: item.projectId,
                   document_id: item.id,
                 },
@@ -54,30 +64,34 @@ const restore = useMutation({
       : ensureOk(
           await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore", {
             params: {
-              path: { workspace_id: workspaceId.value, document_id: item.id },
+              path: { workspace_id: workspaceId, document_id: item.id },
             },
           }),
         ),
-  onSuccess: async (_data, item) => {
-    restoreError.value = null;
+  onSuccess: async (_data, scope) => {
+    const { workspaceId: id, item } = scope;
+    if (currentRestore(scope)) restoreError.value = null;
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["trash", workspaceId.value] }),
-      queryClient.invalidateQueries({ queryKey: ["tree", workspaceId.value] }),
+      queryClient.invalidateQueries({ queryKey: ["trash", id] }),
+      queryClient.invalidateQueries({ queryKey: ["tree", id] }),
+      queryClient.invalidateQueries({ queryKey: ["projects", id] }),
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", id] }),
       item.projectId
         ? queryClient.invalidateQueries({
-            queryKey: ["project-documents", workspaceId.value, item.projectId],
+            queryKey: ["project-documents", id, item.projectId],
           })
         : Promise.resolve(),
     ]);
   },
-  onError: (error: unknown) => {
-    restoreError.value = loadErrorMessage(error);
+  onError: (error: unknown, scope) => {
+    if (currentRestore(scope)) restoreError.value = loadErrorMessage(error);
   },
 });
 
 function onRestore(item: { id: string; projectId?: string | null }): void {
   restoreError.value = null;
-  restore.mutate(item);
+  restore.mutate({ workspaceId: workspaceId.value, item, lifetime: lifetime.value, operation: ++restoreVersion });
 }
 </script>
 
@@ -87,7 +101,7 @@ function onRestore(item: { id: string; projectId?: string | null }): void {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="wiki">
+  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="trash">
     <div class="trash-page">
       <div class="trash-page__head">
         <h1 class="trash-page__title">{{ t("trash.title") }}</h1>
@@ -110,7 +124,7 @@ function onRestore(item: { id: string; projectId?: string | null }): void {
               {{ projectKeys.get(item.projectId) ?? t("nav.projects") }}
             </span>
             <time class="trash-page__when" :datetime="item.deletedAt">{{
-              new Date(item.deletedAt).toLocaleString()
+              formatInstant(item.deletedAt, timeZone, { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
             }}</time>
           </div>
           <UButton
@@ -118,7 +132,7 @@ function onRestore(item: { id: string; projectId?: string | null }): void {
             size="sm"
             variant="outline"
             color="neutral"
-            :disabled="restore.isPending.value"
+            :disabled="restore.isPending.value && Boolean(restore.variables.value && currentRestore(restore.variables.value))"
             :aria-label="`${t('trash.restore')} ${item.title}`"
             @click="onRestore({ id: item.id, projectId: item.projectId })"
           >

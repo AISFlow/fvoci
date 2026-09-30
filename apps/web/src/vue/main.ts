@@ -6,10 +6,10 @@ import App from "./App.vue";
 import { createAppRouter } from "./router";
 import "./styles.css";
 
-/** Mounts the Vue app (src/boot.ts calls this for the Vue pages). */
+/** Mounts the app from the single Vue entry. */
 export function start(): void {
   startUiPreferences();
-  // The React app's query defaults (src/App.tsx).
+  // Shared query defaults for all app routes.
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: {

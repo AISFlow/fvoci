@@ -24,9 +24,11 @@ test("the Vue my-tasks page uses the shared infinite query and does not import R
 
   const row = source("MyTaskRow.vue");
   assert.match(row, /itemPath/);
-  assert.match(row, /isVueAppPath/);
-  assert.match(row, /RouterLink/);
-  assert.match(row, /:href="href"/);
+  assert.match(row, /AppLink/);
+  const link = readFileSync(new URL("../../components/AppLink.vue", import.meta.url), "utf8");
+  assert.match(link, /isVueAppPath/);
+  assert.match(link, /RouterLink/);
+  assert.match(link, /:href="to"/);
   assert.doesNotMatch(row, /from ["']react["']/);
   assert.doesNotMatch(row, /from ["']@tanstack\/react-query["']/);
 });
