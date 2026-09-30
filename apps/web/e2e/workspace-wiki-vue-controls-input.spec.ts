@@ -70,11 +70,12 @@ async function writeClipboardImage(page: Page): Promise<void> {
       throw new Error('Missing fixture value: canvas.getContext("2d")');
     }
     required1.fillRect(0, 0, 2, 2);
-    const blob = await new Promise<Blob>((resolve) => {
+    const blob = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob((blob) => {
         const required2 = blob;
         if (required2 === null) {
-          throw new Error("Missing fixture value: blob");
+          reject(new Error("Missing fixture value: blob"));
+          return;
         }
         resolve(required2);
       }, "image/png");
