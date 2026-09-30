@@ -41,10 +41,22 @@ async function holdResponse(page: Page, path: string, method: string) {
 }
 
 async function switchToB(page: Page, section: string): Promise<void> {
-  await page.locator("#workspace-switch").selectOption(b.id);
+  // Browser Back can change workspace while a native modal makes the header inert.
+  await page.goBack();
   await expect(page).toHaveURL(new RegExp(`/w/${b.slug}/${section}$`));
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   await expect(page.locator("main h1")).toBeVisible();
+  await expect(page.locator("#workspace-switch")).toHaveValue(b.id);
+}
+
+async function prepareA(page: Page, section: string): Promise<void> {
+  const resource = section === "wiki" ? "tree" : section;
+  const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/workspaces/${b.id}/${resource}`);
+  await page.goto(`/w/${b.slug}/${section}`);
+  await (await loaded).finished();
+  await page.locator("#workspace-switch").selectOption(a.id);
+  await expect(page).toHaveURL(new RegExp(`/w/${a.slug}/${section}$`));
+  await expect(page.locator("#workspace-switch")).toHaveValue(a.id);
 }
 
 function countBRequests(page: Page, resource: string): () => number {
@@ -93,19 +105,18 @@ test("late project create and clone responses stay scoped to their original work
   await login(page, owner.email, owner.password);
   const count = countBRequests(page, "projects");
   for (const kind of ["create", "clone"] as const) {
-    await page.goto(`/w/${a.slug}/projects`);
+    await prepareA(page, "projects");
     const path = kind === "create" ? `/api/v1/workspaces/${a.id}/projects` : `/api/v1/workspaces/${a.id}/projects/${source.id}/clone`;
     const gate = await holdResponse(page, path, "POST");
     try {
-      await page.getByRole("button", { name: kind === "create" ? "새 프로젝트" : "복제", exact: true }).first().click();
+      if (kind === "create") await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
+      else await page.locator(".project-list__row").filter({ hasText: "A source" }).getByRole("button", { name: "복제", exact: true }).click();
       const dialog = page.getByRole("dialog");
       await dialog.getByLabel("키", { exact: true }).fill(kind === "create" ? "INFLIGHT" : "COPIED");
       if (kind === "create") await dialog.getByLabel("이름", { exact: true }).fill("A created");
       await dialog.getByRole("button", { name: kind === "create" ? "새 프로젝트" : "복제", exact: true }).click();
       await gate.ready;
-      const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/workspaces/${b.id}/projects`);
       await switchToB(page, "projects");
-      await loaded;
       const baseline = count();
       await gate.finish();
       await expect(page).toHaveURL(new RegExp(`/w/${b.slug}/projects$`));
@@ -119,15 +130,13 @@ test("late project create and clone responses stay scoped to their original work
 
 test("late wiki creation cannot navigate to another workspace's matching document ref", async ({ page }) => {
   await login(page, owner.email, owner.password);
-  await page.goto(`/w/${a.slug}/wiki`);
+  await prepareA(page, "wiki");
   const count = countBRequests(page, "tree");
   const gate = await holdResponse(page, `/api/v1/workspaces/${a.id}/documents`, "POST");
   try {
     await page.getByRole("button", { name: "새 문서", exact: true }).click();
     await gate.ready;
-    const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/workspaces/${b.id}/tree`);
     await switchToB(page, "wiki");
-    await loaded;
     const baseline = count();
     await gate.finish();
     await expect(page).toHaveURL(new RegExp(`/w/${b.slug}/wiki$`));
@@ -140,15 +149,13 @@ test("late trash restoration refreshes A while B remains independently trashed",
   await login(page, owner.email, owner.password);
   const docs = [await createWiki(page, a.id, "Scoped restore"), await createWiki(page, b.id, "Scoped restore")];
   for (let i = 0; i < 2; i++) expect((await page.request.post(`/api/v1/workspaces/${[a, b][i].id}/documents/${docs[i].id}/trash`)).ok()).toBe(true);
-  await page.goto(`/w/${a.slug}/trash`);
+  await prepareA(page, "trash");
   const count = countBRequests(page, "trash");
   const gate = await holdResponse(page, `/api/v1/workspaces/${a.id}/documents/${docs[0].id}/restore`, "POST");
   try {
     await page.getByRole("button", { name: "복원 Scoped restore", exact: true }).click();
     await gate.ready;
-    const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/workspaces/${b.id}/trash`);
     await switchToB(page, "trash");
-    await loaded;
     const baseline = count();
     await gate.finish();
     expect(count()).toBe(baseline);
@@ -178,7 +185,7 @@ test("late notification open and read-all preserve the other workspace's unread 
   for (const operation of ["open", "read-all"] as const) {
     const notification = (await (await page.request.get(`/api/v1/workspaces/${a.id}/notifications`)).json()).items[0];
     expect((await page.request.patch(`/api/v1/workspaces/${a.id}/notifications/${notification.id}`, { data: { read: false } })).ok()).toBe(true);
-    await page.goto(`/w/${a.slug}/notifications`);
+    await prepareA(page, "notifications");
     await expect(page.locator(".notifications-page__row")).toHaveCount(1);
     const count = countBRequests(page, "notifications");
     const path = operation === "open" ? `/api/v1/workspaces/${a.id}/notifications/${notification.id}` : `/api/v1/workspaces/${a.id}/notifications/read-all`;
@@ -186,9 +193,7 @@ test("late notification open and read-all preserve the other workspace's unread 
     try {
       await (operation === "open" ? page.locator(".notifications-page__item") : page.getByRole("button", { name: "전체 읽음", exact: true })).click();
       await gate.ready;
-      const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/workspaces/${b.id}/notifications`);
       await switchToB(page, "notifications");
-      await loaded;
       const baseline = count();
       await gate.finish();
       await expect(page).toHaveURL(new RegExp(`/w/${b.slug}/notifications$`));
