@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
+import { QueryClient } from "@tanstack/vue-query";
 import { computed, effectScope, onScopeDispose, reactive, shallowRef, watch } from "vue";
 
 // Execute the actual SFC callbacks AND useCollabRoom's computed session return.
@@ -20,7 +21,7 @@ type Mutation = {
   onError: (error: unknown, op: Operation) => void;
 };
 function assertCapturedKeys(name: string, keys: unknown[][]) {
-  const counts = [["projects", "old-workspace"], ["me", "workspaces"]];
+  const counts = [["projects", "old-workspace"], ["wiki-discovery", "old-workspace"], ["me", "workspaces"]];
   const documentKeys = name.startsWith("Project")
     ? [["project-documents", "old-workspace", "old-project"], ["project-document", "old-workspace", "old-project", "old-document"]]
     : [["tree", "old-workspace"], ["document", "old-workspace", "old-document"], ["ancestors", "old-workspace", "old-document"]];
@@ -50,14 +51,18 @@ function harness(name: string) {
   let complete!: () => void;
   const pending = new Promise<void>((resolve) => { complete = resolve; });
   const load = async (operation: unknown) => { requests.push(operation); await pending; return {}; };
+  const queryClient = new QueryClient();
+  for (const workspaceId of ["old-workspace", "new-workspace"]) {
+    for (const tag of ["", "tag"]) queryClient.setQueryData(["wiki-discovery", workspaceId, tag], { totalCount: 2 });
+  }
   const setup = new Function("props", "scope", "session", "collabUser", "watch", "onScopeDispose", "lifecycleError", "moveParentId", "useMutation", "trashDocument", "moveDocument", "queryClient", "window", "trashPath", "loadErrorMessage", `${script}\nreturn {captureOperation, currentOperation};`);
   const lifetime = effectScope();
   const operations = lifetime.run(() => setup(props, scope, session, collabUser, watch, onScopeDispose, lifecycleError, moveParentId,
     (options: Mutation) => { mutations.push(options); return { mutate: () => undefined }; }, load, load,
-    { invalidateQueries: async ({ queryKey }: { queryKey: unknown[] }) => { invalidated.push(queryKey); } },
+    { invalidateQueries: async ({ queryKey }: { queryKey: unknown[] }) => { invalidated.push(queryKey); await queryClient.invalidateQueries({ queryKey }); } },
     { location: { assign: (path: string) => navigation.push(path) } }, (slug: string) => `/w/${slug}/trash`, () => "failed",
   )) as { captureOperation: () => Operation; currentOperation: (op: Operation) => boolean };
-  return { source, props, projectId, collabUser, scope, peers, unsent, bind, active, session, createSession, lifecycleError, moveParentId, invalidated, navigation, requests, mutations, complete, lifetime, ...operations };
+  return { source, props, projectId, collabUser, queryClient, scope, peers, unsent, bind, active, session, createSession, lifecycleError, moveParentId, invalidated, navigation, requests, mutations, complete, lifetime, ...operations };
 }
 
 for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
@@ -89,7 +94,11 @@ for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
         assert.equal(h.invalidated.filter((key) => key[0] === "projects").length, 2);
         assert.equal(h.invalidated.filter((key) => JSON.stringify(key) === '["me","workspaces"]').length, 2);
         assertCapturedKeys(name, h.invalidated);
-      } finally { h.lifetime.stop(); }
+        for (const tag of ["", "tag"]) {
+          assert.equal(h.queryClient.getQueryState(["wiki-discovery", "old-workspace", tag])?.isInvalidated, true);
+          assert.equal(h.queryClient.getQueryState(["wiki-discovery", "new-workspace", tag])?.isInvalidated, false);
+        }
+      } finally { h.lifetime.stop(); h.queryClient.clear(); }
     });
   }
   for (const change of ["workspace", "document", "project", "slug", "provider", "doc", "generation", "actor", "actor roundtrip", "disposal"]) {
@@ -117,14 +126,18 @@ for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
         assert.equal(h.invalidated.filter((key) => key[0] === "projects").length, 2);
         assert.equal(h.invalidated.filter((key) => JSON.stringify(key) === '["me","workspaces"]').length, 2);
         assertCapturedKeys(name, h.invalidated);
+        for (const tag of ["", "tag"]) {
+          assert.equal(h.queryClient.getQueryState(["wiki-discovery", "old-workspace", tag])?.isInvalidated, true);
+          assert.equal(h.queryClient.getQueryState(["wiki-discovery", "new-workspace", tag])?.isInvalidated, false);
+        }
         assert.deepEqual(h.navigation, []); assert.equal(h.lifecycleError.value, "previous error"); assert.equal(h.moveParentId.value, "parent");
         if (change !== "disposal") {
           await h.mutations[0]!.onSuccess({}, h.captureOperation());
           assert.deepEqual(h.navigation, [`/w/${h.props.slug}/trash`]);
         }
         const meta = h.source.slice(h.source.indexOf("const patchMeta ="), h.source.indexOf("const notFound ="));
-        assert.equal(meta.includes('["projects"'), false); assert.equal(meta.includes('["me", "workspaces"]'), false);
-      } finally { h.lifetime.stop(); }
+        assert.equal(meta.includes('["projects"'), false); assert.equal(meta.includes('["me", "workspaces"]'), false); assert.equal(meta.includes('["wiki-discovery"'), false);
+      } finally { h.lifetime.stop(); h.queryClient.clear(); }
     });
   }
 }

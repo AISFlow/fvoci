@@ -166,6 +166,7 @@ const trashDoc = useMutation({
   onSuccess: async (_result, operation) => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["projects", operation.scope.workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", operation.scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
     ]);
     if (!currentOperation(operation)) return;
@@ -183,6 +184,7 @@ const moveDoc = useMutation({
     const { workspaceId, documentId, projectId } = operation.scope;
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-discovery", workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
       queryClient.invalidateQueries({ queryKey: ["project-documents", workspaceId, projectId] }),
       queryClient.invalidateQueries({ queryKey: ["project-document", workspaceId, projectId, documentId] }),
