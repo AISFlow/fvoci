@@ -89,7 +89,7 @@ test("the remaining auth pages call the React pages' APIs and do not consume on 
   assert.doesNotMatch(source("ConfirmEmailView.vue"), /onMounted|watchEffect/);
 
   const cancel = source("../../pages/CancelWithdrawPage.vue");
-  assert.match(cancel, /parseErasureHash\(window\.location\.hash\)/);
+  assert.match(cancel, /parseErasureHash\(route\.hash\)/);
   assert.match(cancel, /api\.POST\("\/api\/v1\/auth\/cancel-withdraw"/);
   assert.match(cancel, /window\.history\.replaceState\(null, "", "\/cancel-withdraw"\)/);
   assert.doesNotMatch(source("CancelWithdrawView.vue"), /onMounted/);

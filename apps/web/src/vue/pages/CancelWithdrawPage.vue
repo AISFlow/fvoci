@@ -3,6 +3,7 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery } from "@tanstack/vue-query";
 import { computed, watchEffect } from "vue";
+import { useRoute } from "vue-router";
 import { api, ensureOk } from "@/lib/api";
 import { parseErasureHash } from "@/lib/erasure-hash";
 import { setupStatusQuery } from "@/lib/queries";
@@ -10,11 +11,15 @@ import { redirectTo } from "../session/navigation";
 import CancelWithdrawView from "../features/auth/CancelWithdrawView.vue";
 
 const setup = useQuery(setupStatusQuery);
-const fragment = parseErasureHash(window.location.hash);
-const recoveryHref =
-  fragment.scheduled && fragment.token
-    ? `${window.location.origin}/cancel-withdraw${window.location.hash}`
-    : null;
+const route = useRoute();
+// Fragment navigation can reuse this page. Read the new link and reset the
+// view's pending/error/done state instead of keeping the previous token.
+const fragment = computed(() => parseErasureHash(route.hash));
+const recoveryHref = computed(() =>
+  fragment.value.scheduled && fragment.value.token
+    ? `${window.location.origin}/cancel-withdraw${route.hash}`
+    : null,
+);
 const leaving = computed(() => setup.data.value?.needed === true);
 
 watchEffect(() => {
@@ -43,6 +48,7 @@ async function onCancel(token: string): Promise<void> {
   </div>
   <CancelWithdrawView
     v-else
+    :key="route.hash"
     :token="fragment.token"
     :erase-at="fragment.eraseAt"
     :scheduled="fragment.scheduled"
