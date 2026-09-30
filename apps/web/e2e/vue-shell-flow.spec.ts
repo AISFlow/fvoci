@@ -306,7 +306,7 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   await expect(bellPanel).toHaveCount(0);
   expect(await sameDocument(page), "wiki → wiki stays in the Vue app").toBe(true);
 
-  // A task result is a React page: a full load.
+  // Task results now share the Vue runtime with wiki documents.
   await page.keyboard.press("Control+k");
   await palette.getByLabel("검색어").fill(token);
   const taskLink = palette.getByRole("link", { name: new RegExp(task.title) });
@@ -314,7 +314,9 @@ test("the search palette finds seeded documents and tasks and opens them from bo
   await taskLink.click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${taskRef}$`));
   await expect(page.getByRole("heading", { name: task.title })).toBeVisible();
-  expect(await sameDocument(page), "task result is a full load").toBe(false);
+  await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
+  await expect(palette).toHaveCount(0);
+  expect(await sameDocument(page), "wiki → task stays in the Vue app").toBe(true);
 
   // Enter opens the search page (React) with the query, from either Vue page;
   // a click on the backdrop closes the palette. A drag that started in the
@@ -334,9 +336,12 @@ test("the search palette finds seeded documents and tasks and opens them from bo
     await expect(palette).toHaveCount(0);
     await page.keyboard.press("Control+k");
     await palette.getByLabel("검색어").fill(token);
+    await markDocument(page);
     await palette.getByLabel("검색어").press("Enter");
     await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/search\\?q=${token}$`));
     await expect(page.getByRole("region", { name: "검색" }).getByText(first.title)).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#root[data-v-app]")).toHaveCount(0);
+    expect(await sameDocument(page), "search page crosses into React with a full load").toBe(false);
   }
 
   // No match.
@@ -417,7 +422,7 @@ test("the bell shows a notification created through the API and opens it from bo
 
   try {
     // Gantt: the unread count names the bell; opening the notification marks
-    // it read and goes to its task (a React page).
+    // it read and goes to its task in the same Vue runtime.
     const { task: first, item: firstItem } = await assign("셸 알림 태스크 하나");
     const unread = await unreadCount();
     expect(unread).toBeGreaterThan(0);
@@ -444,7 +449,9 @@ test("the bell shows a notification created through the API and opens it from bo
     expect((await patched).status()).toBe(200);
     await expect(m.page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${firstItem.displayId}$`));
     await expect(m.page.getByRole("heading", { name: first.title })).toBeVisible();
-    expect(await sameDocument(m.page), "the task is a React page: a full load").toBe(false);
+    await expect(m.page.locator("#root[data-v-app]")).toHaveCount(1);
+    await expect(panel).toHaveCount(0);
+    expect(await sameDocument(m.page), "notification → task stays in the Vue app").toBe(true);
     expect((await notifications()).find((item) => item.id === firstItem.id)?.readAt).toBeTruthy();
 
     // Wiki: read all clears the count; "see all" opens the inbox (React).

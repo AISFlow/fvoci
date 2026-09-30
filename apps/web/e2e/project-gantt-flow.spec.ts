@@ -655,7 +655,7 @@ test("a project list that fails to load offers a retry", async ({ page }) => {
   await expect(bar(page, task.id)).toHaveAttribute("data-start", day(3));
 });
 
-test("the Vue Gantt and the React pages link to each other with full page loads", async ({ page }) => {
+test("Vue project tabs stay in one runtime and links to React pages fully load", async ({ page }) => {
   test.setTimeout(120_000);
   const csp = watchCspViolations(page);
   await ensureSetup(page);
@@ -674,6 +674,7 @@ test("the Vue Gantt and the React pages link to each other with full page loads"
   await page.locator('[data-slot="project-link"]').click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${project.key}$`));
   await expect(page.getByRole("heading", { level: 1, name: project.name })).toBeVisible();
+  await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   expect(await marker()).toBeUndefined();
 
   await page.goto(`/w/${admin.workspaceSlug}/${project.key}/tasks`);
@@ -682,13 +683,24 @@ test("the Vue Gantt and the React pages link to each other with full page loads"
   await page.getByRole("link", { name: "간트", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${project.key}/gantt$`));
   await expect(page.locator('[data-slot="gantt"]').or(page.locator('[data-slot="gantt-empty"]'))).toBeVisible();
-  expect(await marker()).toBeUndefined();
+  await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
+  expect(await marker(), "tasks → Gantt stays in the Vue app").toBe(true);
 
-  // A Vue tab back into the React app.
+  // The tasks tab also stays in the Vue app.
   await markDocument();
   await page.getByRole("link", { name: "태스크", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${project.key}/tasks$`));
   await expect(page.getByRole("heading", { level: 1, name: project.name })).toBeVisible();
-  expect(await marker()).toBeUndefined();
+  await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
+  expect(await marker(), "Gantt → tasks stays in the Vue app").toBe(true);
+
+  // The workspace project list is still a React page.
+  await markDocument();
+  await page.locator(`a[href="/w/${admin.workspaceSlug}/projects"]`).first().click();
+  await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/projects$`));
+  await expect(page.getByRole("button", { name: "새 프로젝트", exact: true })).toBeVisible();
+  await expect(page.getByText(project.name, { exact: true })).toBeVisible();
+  await expect(page.locator("#root[data-v-app]")).toHaveCount(0);
+  expect(await marker(), "project list crosses into React with a full load").toBeUndefined();
   expect(csp).toEqual([]);
 });
