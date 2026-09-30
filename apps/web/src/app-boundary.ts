@@ -22,6 +22,8 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   /^\/$/,
   /^\/legal\/[^/]+\/?$/i,
   /^\/service-info\/?$/i,
+  // Workspace settings and its exact tag/template screens.
+  /^\/w\/[^/]+\/settings(?:\/(?:document-tags|templates))?\/?$/i,
   // Existing project overview, task/document items and collection views.
   PROJECT_HOME_PATH,
   WORKSPACE_ITEM_PATH,

@@ -219,7 +219,7 @@ test("single-segment resource routes agree with the shared ref grammar", () => {
     const attachment = /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
       /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i.test(path);
     const workspaceSection = /^\/w\/[^/]+(?:\/(?:projects|wiki|search|my-tasks|notifications|trash))?\/?$/i.test(path);
-    if (!workspaceSection && !projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
+    if (!/^\/w\/[^/]+\/settings(?:\/(document-tags|templates))?\/?$/i.test(path) && !workspaceSection && !projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
   }
 });
 
@@ -238,7 +238,7 @@ test("workspace navigation owns exact section paths and excludes nested private 
     assert.equal(isVueAppPath(path), true, path);
     assert.equal(isVueAppPath(`${path}/`.toUpperCase()), true, path);
   }
-  for (const path of ["/w", "/w//", "/w/acme/wiki/extra", "/w/acme/search/extra", "/w/acme/settings", "/settings/account"]) {
+  for (const path of ["/w", "/w//", "/w/acme/wiki/extra", "/w/acme/search/extra", "/settings/account"]) {
     assert.equal(isVueAppPath(path), false, path);
   }
 });
@@ -280,5 +280,13 @@ test("project settings retain exact fields/workflow route ownership", () => {
     assert.equal(isVueAppPath(`/w/acme/GNT/settings/${section}`), true);
     assert.equal(isVueAppPath(`/W/acme/gnt/SETTINGS/${section.toUpperCase()}/`), true);
     assert.equal(isVueAppPath(`/w/acme/GNT/settings/${section}/extra`), false);
+  }
+});
+
+test("workspace settings owns only its exact three supported pages", () => {
+  for (const part of ["", "/document-tags", "/templates"]) {
+    assert.equal(isVueAppPath(`/w/acme/settings${part}`), true);
+    assert.equal(isVueAppPath(`/W/acme/SETTINGS${part.toUpperCase()}/`), true);
+    assert.equal(isVueAppPath(`/w/acme/settings${part}/extra`), false);
   }
 });

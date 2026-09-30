@@ -13,9 +13,6 @@ import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
 import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
-import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
-import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
-import { TemplatesSettingsPage } from "@/pages/TemplatesSettingsPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
 import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
 
@@ -112,9 +109,9 @@ const router = createBrowserRouter(
         <Route path="wiki" element={<NoRoute />} />
         <Route path="search" element={<NoRoute />} />
         <Route path="trash" element={<NoRoute />} />
-        <Route path="settings" element={<WorkspaceSettingsPage />} />
-        <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
-        <Route path="settings/templates" element={<TemplatesSettingsPage />} />
+        <Route path="settings" element={<NoRoute />} />
+        <Route path="settings/document-tags" element={<NoRoute />} />
+        <Route path="settings/templates" element={<NoRoute />} />
         <Route path="notifications" element={<NoRoute />} />
         <Route path=":ref/settings/fields" element={<NoRoute />} />
         <Route path=":ref/settings/workflow" element={<NoRoute />} />

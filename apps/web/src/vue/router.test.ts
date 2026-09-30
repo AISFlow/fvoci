@@ -25,8 +25,8 @@ test(
   "a completed navigation to a React page is a full page load",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
-    await router.push("/w/acme/settings");
-    assert.deepEqual(loads, ["/w/acme/settings"]);
+    await router.push("/settings/account");
+    assert.deepEqual(loads, ["/settings/account"]);
   }),
 );
 
@@ -132,10 +132,10 @@ test(
     assert.deepEqual(loads, []);
 
     const slow = router.push("/slow");
-    await router.push("/w/acme/settings");
+    await router.push("/settings/account");
     release();
     assert.ok(await slow, "the later navigation superseded it");
-    assert.deepEqual(loads, ["/w/acme/settings"]);
+    assert.deepEqual(loads, ["/settings/account"]);
   }),
 );
 
@@ -295,15 +295,15 @@ test("workspace-item is more specific than project-home; wiki stays wiki", () =>
   assert.equal(isVueAppPath("/w/acme/wiki-3"), true);
 });
 
-test("workspace settings routes exist but the boundary still sends them to React", () => {
+test("workspace settings routes are live Vue paths", () => {
   const router = createAppRouter(createMemoryHistory());
   assert.equal(router.resolve("/w/acme/settings").name, "workspace-settings");
   assert.equal(router.resolve("/w/acme/settings/document-tags").name, "workspace-settings-document-tags");
   assert.equal(router.resolve("/w/acme/settings/templates").name, "workspace-settings-templates");
   // Boot still loads the React app for these paths (src/app-boundary.ts).
-  assert.equal(isVueAppPath("/w/acme/settings"), false);
-  assert.equal(isVueAppPath("/w/acme/settings/document-tags"), false);
-  assert.equal(isVueAppPath("/w/acme/settings/templates"), false);
+  assert.equal(isVueAppPath("/w/acme/settings"), true);
+  assert.equal(isVueAppPath("/w/acme/settings/document-tags"), true);
+  assert.equal(isVueAppPath("/w/acme/settings/templates"), true);
 });
 
 test("project fields and workflow settings resolve to their own lazy pages", () => {

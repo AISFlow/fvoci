@@ -56,7 +56,7 @@ export const VUE_ACCOUNT_ROUTE_PATHS = {
   adminLegal: "/settings/legal",
 } as const;
 
-/** Staged workspace settings; boot remains React. */
+/** Connected workspace settings paths. */
 export const VUE_SETTINGS_ROUTE_PATHS = {
   workspaceSettings: "/w/:slug/settings",
   documentTagsSettings: "/w/:slug/settings/document-tags",
@@ -67,4 +67,5 @@ export const VUE_ROUTE_PATHS = {
   ...VUE_BASE_ROUTE_PATHS,
   ...VUE_WORKSPACE_ROUTE_PATHS,
   ...VUE_NAV_ROUTE_PATHS,
+  ...VUE_SETTINGS_ROUTE_PATHS,
 } as const;
