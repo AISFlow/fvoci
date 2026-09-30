@@ -11,7 +11,7 @@ let aWiki: { id: string };
 let bWiki: { id: string };
 
 // Send the real request and hold only its genuine response while the user switches.
-async function holdResponse(page: Page, path: string, method: string) {
+async function holdResponse(page: Page, path: string, method: string, succeeds = true) {
   let received!: () => void;
   let release!: () => void;
   const ready = new Promise<void>((resolve) => { received = resolve; });
@@ -20,7 +20,7 @@ async function holdResponse(page: Page, path: string, method: string) {
   const handler = async (route: import("@playwright/test").Route) => {
     if (route.request().method() !== method) return route.continue();
     const response = await route.fetch();
-    expect(response.ok()).toBe(true);
+    expect(response.ok()).toBe(succeeds);
     received();
     await released;
     await route.fulfill({ response });
@@ -126,6 +126,26 @@ test("late project create and clone responses stay scoped to their original work
       expect(projects.some((project: { key: string }) => project.key === (kind === "create" ? "INFLIGHT" : "COPIED"))).toBe(true);
     } finally { gate.release(); }
   }
+});
+
+test("a genuine late project conflict cannot show an error in the next workspace", async ({ page }) => {
+  await login(page, owner.email, owner.password);
+  await prepareA(page, "projects");
+  const gate = await holdResponse(page, `/api/v1/workspaces/${a.id}/projects`, "POST", false);
+  try {
+    await page.getByRole("button", { name: "새 프로젝트", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("키", { exact: true }).fill("SAME");
+    await dialog.getByLabel("이름", { exact: true }).fill("Genuine duplicate");
+    await dialog.getByRole("button", { name: "새 프로젝트", exact: true }).click();
+    await gate.ready;
+    await switchToB(page, "projects");
+    await gate.finish();
+    await expect(page).toHaveURL(new RegExp(`/w/${b.slug}/projects$`));
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "새 프로젝트", exact: true })).toBeEnabled();
+  } finally { gate.release(); }
 });
 
 test("late wiki creation cannot navigate to another workspace's matching document ref", async ({ page }) => {
