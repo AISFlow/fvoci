@@ -4,7 +4,9 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,7 +28,7 @@ use fvoci_server::jobs::{
     run_revision_maintenance_sweep, run_stale_upload_gc, run_stale_upload_sweep,
     run_workspace_purge, spawn_maintenance, DocumentPurgeLimits, JobClaim, MaintenanceSettings,
     RevisionMaintenanceEngine, RevisionMaintenanceParams, RevisionMaintenanceResume, JOB_KEY_DAILY,
-    JOB_KEY_REVISIONS, JOB_KEY_UPLOADS, REVISION_GC_ROUNDS,
+    JOB_KEY_REVISIONS, JOB_KEY_UPLOADS, JOB_LOCK_NAMESPACE, REVISION_GC_ROUNDS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
 use project_harness::{
@@ -48,35 +50,134 @@ struct CapturedMail {
 struct SmtpSink {
     port: u16,
     mails: Arc<Mutex<Vec<CapturedMail>>>,
+    sessions: Arc<AtomicUsize>,
+    script: Arc<SinkScript>,
     handle: tokio::task::JoinHandle<()>,
+}
+
+/// How a scripted sink answers one `RCPT TO`.
+#[derive(Clone, Copy)]
+enum RcptReply {
+    /// This reply line.
+    Reply(&'static str),
+    /// No reply: the session hangs until the client gives up (see
+    /// `SmtpSink::hung`).
+    Hang,
+}
+
+/// What a scripted sink answers.
+struct SinkScript {
+    /// A greeting other than 220 ends the session.
+    greeting: &'static str,
+    /// Replies to the next `RCPT TO` commands, whatever the address, in
+    /// arrival order; checked before `by_address`.
+    in_order: Mutex<std::collections::VecDeque<RcptReply>>,
+    /// `RCPT TO` replies per address, every time; other addresses get 250.
+    by_address: HashMap<String, RcptReply>,
+    /// Every `RCPT TO` address, in arrival order.
+    rcpt_log: Mutex<Vec<String>>,
+    hung: tokio::sync::Notify,
+}
+
+impl SinkScript {
+    fn new(greeting: &'static str) -> Self {
+        Self {
+            greeting,
+            in_order: Mutex::new(Default::default()),
+            by_address: HashMap::new(),
+            rcpt_log: Mutex::new(Vec::new()),
+            hung: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn rcpt_reply(&self, address: &str) -> Option<RcptReply> {
+        self.rcpt_log
+            .lock()
+            .expect("rcpt log")
+            .push(address.to_string());
+        let next = self.in_order.lock().expect("in order").pop_front();
+        next.or_else(|| self.by_address.get(address).copied())
+    }
 }
 
 impl SmtpSink {
     async fn spawn() -> Self {
+        Self::spawn_with(SinkScript::new("220 fvoci-test")).await
+    }
+
+    /// A sink that greets with `greeting` and answers `RCPT TO` per address
+    /// from `rcpt`.
+    async fn spawn_scripted(greeting: &'static str, rcpt: Vec<(String, RcptReply)>) -> Self {
+        let mut script = SinkScript::new(greeting);
+        script.by_address = rcpt.into_iter().collect();
+        Self::spawn_with(script).await
+    }
+
+    /// A sink that answers the first `RCPT TO` commands with `replies` in
+    /// arrival order, whatever the address, and 250 after them.
+    async fn spawn_in_order(replies: Vec<RcptReply>) -> Self {
+        let script = SinkScript::new("220 fvoci-test");
+        *script.in_order.lock().expect("in order") = replies.into();
+        Self::spawn_with(script).await
+    }
+
+    async fn spawn_with(script: SinkScript) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind smtp");
         let port = listener.local_addr().expect("addr").port();
         let mails = Arc::new(Mutex::new(Vec::new()));
+        let sessions = Arc::new(AtomicUsize::new(0));
+        let script = Arc::new(script);
         let captured = mails.clone();
+        let opened = sessions.clone();
+        let serving = script.clone();
         let handle = tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else {
                     break;
                 };
+                opened.fetch_add(1, Ordering::SeqCst);
                 let captured = captured.clone();
+                let script = serving.clone();
                 tokio::spawn(async move {
-                    let _ = serve_smtp(socket, captured).await;
+                    let _ = serve_smtp(socket, captured, &script).await;
                 });
             }
         });
         Self {
             port,
             mails,
+            sessions,
+            script,
             handle,
         }
     }
 
     fn count(&self) -> usize {
         self.mails.lock().expect("mails").len()
+    }
+
+    fn count_to(&self, address: &str) -> usize {
+        self.mails
+            .lock()
+            .expect("mails")
+            .iter()
+            .filter(|mail| mail.to == address)
+            .count()
+    }
+
+    /// SMTP sessions opened so far.
+    fn sessions(&self) -> usize {
+        self.sessions.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once a session has reached a `RcptReply::Hang` recipient.
+    async fn hung(&self) {
+        self.script.hung.notified().await;
+    }
+
+    /// Every `RCPT TO` address so far, in arrival order.
+    fn rcpt_log(&self) -> Vec<String> {
+        self.script.rcpt_log.lock().expect("rcpt log").clone()
     }
 
     /// Decoded plain body of the last captured mail.
@@ -100,10 +201,16 @@ impl Drop for SmtpSink {
 async fn serve_smtp(
     socket: tokio::net::TcpStream,
     captured: Arc<Mutex<Vec<CapturedMail>>>,
+    script: &SinkScript,
 ) -> Result<(), std::io::Error> {
     let (reader, mut writer) = socket.into_split();
     let mut reader = BufReader::new(reader);
-    writer.write_all(b"220 fvoci-test\r\n").await?;
+    writer
+        .write_all(format!("{}\r\n", script.greeting).as_bytes())
+        .await?;
+    if !script.greeting.starts_with("220") {
+        return Ok(());
+    }
     let mut rcpt = String::new();
     loop {
         let mut line = String::new();
@@ -125,7 +232,16 @@ async fn serve_smtp(
                 .trim()
                 .trim_matches(|c| c == '<' || c == '>')
                 .to_string();
-            writer.write_all(b"250 ok\r\n").await?;
+            match script.rcpt_reply(&rcpt) {
+                Some(RcptReply::Reply(reply)) => {
+                    writer.write_all(format!("{reply}\r\n").as_bytes()).await?;
+                }
+                Some(RcptReply::Hang) => {
+                    script.hung.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                None => writer.write_all(b"250 ok\r\n").await?,
+            }
         } else if upper == "DATA" {
             writer.write_all(b"354 go\r\n").await?;
             let mut data = String::new();
@@ -600,6 +716,54 @@ async fn two_runners_only_one_claims_daily_sweep() {
     harness.cleanup().await;
 }
 
+/// Maintenance-claim advisory locks (key, holder pid) granted in this database.
+async fn granted_job_locks(admin: &PgPool) -> Vec<(i64, i32)> {
+    sqlx::query_as(
+        r#"
+        SELECT objid::int8, pid FROM pg_locks
+        WHERE locktype = 'advisory' AND granted AND objsubid = 2
+          AND classid::int8 = $1::int8
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        ORDER BY objid
+        "#,
+    )
+    .bind(JOB_LOCK_NAMESPACE)
+    .fetch_all(admin)
+    .await
+    .expect("job locks")
+}
+
+/// `release` must leave the key free when it returns, not when the closed
+/// backend exits later: callers reclaim right away (the next sweep, a check
+/// after scheduler shutdown). Repeated because a close-only release loses
+/// that race only sometimes.
+#[tokio::test]
+async fn job_claim_is_free_when_release_returns() {
+    let harness = TestDb::bootstrap().await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    for round in 0..200 {
+        let Some(claim) = JobClaim::try_claim(&pool, JOB_KEY_UPLOADS)
+            .await
+            .expect("claim")
+        else {
+            panic!(
+                "round {round}: key held before claim: {:?}",
+                granted_job_locks(&admin).await
+            );
+        };
+        claim.release().await;
+        let held = granted_job_locks(&admin).await;
+        assert!(
+            held.is_empty(),
+            "round {round}: advisory lock still granted after release: {held:?}"
+        );
+    }
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn shutdown_drains_the_scheduler_loop() {
     let harness = TestDb::bootstrap().await;
@@ -886,8 +1050,13 @@ async fn scheduler_runs_stale_upload_gc_under_its_own_claim() {
     // Idempotent once drained.
     let again = run_stale_upload_sweep(&pool, &storage, ttl, None, &CancellationToken::new())
         .await
-        .unwrap()
-        .expect("claim free after shutdown");
+        .unwrap();
+    let Some(again) = again else {
+        panic!(
+            "claim free after shutdown; granted job locks: {:?}",
+            granted_job_locks(&admin).await
+        );
+    };
     assert_eq!(again.purged, 0);
 
     let _ = std::fs::remove_dir_all(&root);
@@ -2461,6 +2630,474 @@ async fn gc_retains_manual_when_promotion_races_row_lock() {
     .expect("count");
     assert_eq!(remaining, 1);
     drop_gc_promotion_race_gate(&admin).await;
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// `count` opted-in digest recipients in one workspace, each with one unread
+/// notification and no digest sent yet.
+async fn seed_digest_recipients(admin: &PgPool, workspace_id: Uuid, count: i32) {
+    sqlx::query(
+        r#"
+        WITH u AS (
+            INSERT INTO fvoci.users (id, email, given_name)
+            SELECT gen_random_uuid(), 'digest-' || g || '@example.com', 'Digest ' || g
+            FROM generate_series(1, $2) AS g
+            RETURNING id
+        ), m AS (
+            INSERT INTO fvoci.memberships (workspace_id, user_id, role)
+            SELECT $1, id, 'member' FROM u
+            RETURNING workspace_id, user_id
+        ), p AS (
+            INSERT INTO fvoci.notification_prefs (
+                workspace_id, user_id, in_app, mail_immediate, mail_digest
+            )
+            SELECT workspace_id, user_id, true, true, true FROM m
+            RETURNING workspace_id, user_id
+        )
+        INSERT INTO fvoci.notifications (id, workspace_id, user_id, event_id, verb, payload)
+        SELECT gen_random_uuid(), workspace_id, user_id, gen_random_uuid(), 'task.updated', '{}'::jsonb
+        FROM p
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(count)
+    .execute(admin)
+    .await
+    .expect("seed digest recipients");
+}
+
+async fn digest_rows_due(admin: &PgPool, now: chrono::DateTime<Utc>) -> i64 {
+    sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM fvoci.notification_prefs
+        WHERE mail_digest
+          AND (last_digest_at IS NULL OR last_digest_at <= $1 - interval '24 hours')
+        "#,
+    )
+    .bind(now)
+    .fetch_one(admin)
+    .await
+    .expect("due digest rows")
+}
+
+/// More opted-in rows than one claim batch: one sweep serves all of them,
+/// and the next day's sweep serves all of them again.
+#[tokio::test]
+async fn digest_sweep_serves_every_due_row_beyond_one_batch() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+
+    let now = Utc::now();
+    let sent = send_due_digests(&pool, &Mailer::disabled(), now, &CancellationToken::new())
+        .await
+        .expect("first sweep");
+    assert_eq!(sent, 150, "every due row is served in one sweep");
+    assert_eq!(digest_rows_due(&admin, now).await, 0);
+    let claimed_now: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.notification_prefs WHERE mail_digest AND last_digest_at = $1",
+    )
+    .bind(now)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(claimed_now, 150);
+
+    // A new unread notification for everyone, then the next day's sweep.
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.notifications (id, workspace_id, user_id, event_id, verb, payload)
+        SELECT gen_random_uuid(), workspace_id, user_id, gen_random_uuid(), 'task.updated', '{}'::jsonb
+        FROM fvoci.notification_prefs
+        WHERE mail_digest
+        "#,
+    )
+    .execute(&admin)
+    .await
+    .expect("next day's notifications");
+    let next_day = now + ChronoDuration::hours(25);
+    let sent = send_due_digests(
+        &pool,
+        &Mailer::disabled(),
+        next_day,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("next sweep");
+    assert_eq!(sent, 150, "the next day serves every row again");
+    assert_eq!(digest_rows_due(&admin, next_day).await, 0);
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// SMTP down with more due rows than one batch: the sweep returns, and every
+/// claimed row gets its previous `last_digest_at` back for the next sweep.
+#[tokio::test]
+async fn digest_sweep_with_smtp_down_restores_every_claim() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let now = Utc::now();
+    let started = std::time::Instant::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(dead_port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep with failing smtp");
+    assert_eq!(sent, 0);
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "sweep took {:?}",
+        started.elapsed()
+    );
+    let claimed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.notification_prefs WHERE mail_digest AND last_digest_at IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(claimed, 0, "every failed claim is handed back");
+    assert_eq!(digest_rows_due(&admin, now).await, 150);
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A recipient whose address SMTP cannot take is a refusal of that one
+/// recipient, not a sign that SMTP is down: even when it is the only send in
+/// a batch, the sweep goes on to the next batch.
+#[tokio::test]
+async fn digest_sweep_continues_past_a_batch_with_only_a_refused_recipient() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+    let users: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM fvoci.notification_prefs WHERE workspace_id = $1 AND mail_digest ORDER BY user_id",
+    )
+    .bind(workspace_id)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    let (refused, served) = (users[0], users[149]);
+    sqlx::query("DELETE FROM fvoci.notifications WHERE workspace_id = $1 AND user_id <> ALL($2)")
+        .bind(workspace_id)
+        .bind(vec![refused, served])
+        .execute(&admin)
+        .await
+        .unwrap();
+    // Stored, but not an address lettre can send to (invalid_recipient).
+    sqlx::query("UPDATE fvoci.users SET email = 'digest..refused@example.com' WHERE id = $1")
+        .bind(refused)
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let sink = SmtpSink::spawn().await;
+    let now = Utc::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sent, 1, "the second batch's recipient is served");
+    assert_eq!(sink.count(), 1);
+    let refused_last: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT last_digest_at FROM fvoci.notification_prefs WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(refused)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(refused_last, None, "the refused claim is handed back");
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+async fn digest_last_sent(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Option<chrono::DateTime<Utc>> {
+    sqlx::query_scalar(
+        "SELECT last_digest_at FROM fvoci.notification_prefs WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_one(admin)
+    .await
+    .expect("last_digest_at")
+}
+
+/// The digest users of `workspace_id` in claim order; the notifications of
+/// everyone else in `keep` are deleted, so only they have a digest to send.
+async fn digest_users_keeping_notifications_of(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    keep: impl Fn(&[Uuid]) -> Vec<Uuid>,
+) -> Vec<Uuid> {
+    let users: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM fvoci.notification_prefs WHERE workspace_id = $1 AND mail_digest ORDER BY user_id",
+    )
+    .bind(workspace_id)
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM fvoci.notifications WHERE workspace_id = $1 AND user_id <> ALL($2)")
+        .bind(workspace_id)
+        .bind(keep(&users))
+        .execute(admin)
+        .await
+        .unwrap();
+    users
+}
+
+async fn digest_address(admin: &PgPool, user_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT email FROM fvoci.users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(admin)
+        .await
+        .expect("digest address")
+}
+
+/// A claim whose send failed is handed back right away, not after its
+/// batch: when the sweep is dropped part way through the batch (the task
+/// aborted, the process past its shutdown deadline), that user is still due
+/// for the next sweep.
+#[tokio::test]
+async fn digest_failed_claim_is_handed_back_before_its_batch_ends() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 2).await;
+    let users = digest_users_keeping_notifications_of(&admin, workspace_id, |u| u.to_vec()).await;
+    // A batch is sent in no fixed order: the first send fails, the second
+    // hangs, whichever user each one is.
+    let sink = SmtpSink::spawn_in_order(vec![
+        RcptReply::Reply("452 4.2.2 mailbox full"),
+        RcptReply::Hang,
+    ])
+    .await;
+
+    // Microseconds, as stored.
+    let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 6);
+    let mailer = mailer_for(sink.port);
+    let cancel = CancellationToken::new();
+    // Drop the sweep while the second send hangs, as an abort would.
+    let mut sweep = Box::pin(send_due_digests(&pool, &mailer, now, &cancel));
+    tokio::select! {
+        result = &mut sweep => panic!("the sweep must still be in the batch: {result:?}"),
+        () = sink.hung() => {}
+    }
+    drop(sweep);
+    let rcpts = sink.rcpt_log();
+    assert_eq!(rcpts.len(), 2, "both sends were started: {rcpts:?}");
+    let mut by_address = HashMap::new();
+    for user in &users {
+        by_address.insert(digest_address(&admin, *user).await, *user);
+    }
+    let (failed, stuck) = (by_address[&rcpts[0]], by_address[&rcpts[1]]);
+    assert_eq!(
+        digest_last_sent(&admin, workspace_id, stuck).await,
+        Some(now),
+        "the send in flight keeps its claim"
+    );
+    assert_eq!(
+        digest_last_sent(&admin, workspace_id, failed).await,
+        None,
+        "the failed claim is handed back before the batch ends"
+    );
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A 4xx for one recipient says SMTP is up, like a refusal does: when that
+/// is the only send in a batch, the sweep still goes on to the next batch.
+#[tokio::test]
+async fn digest_sweep_continues_past_a_batch_whose_only_send_gets_a_4xx() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+    let users =
+        digest_users_keeping_notifications_of(&admin, workspace_id, |u| vec![u[0], u[149]]).await;
+    let (deferred, served) = (users[0], users[149]);
+    let sink = SmtpSink::spawn_scripted(
+        "220 fvoci-test",
+        vec![(
+            digest_address(&admin, deferred).await,
+            RcptReply::Reply("452 4.2.2 mailbox full"),
+        )],
+    )
+    .await;
+
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        Utc::now(),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sent, 1, "the second batch's recipient is served");
+    assert_eq!(sink.count(), 1);
+    assert_eq!(sink.count_to(&digest_address(&admin, served).await), 1);
+    assert_eq!(
+        digest_last_sent(&admin, workspace_id, deferred).await,
+        None,
+        "the deferred claim is handed back"
+    );
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A relay that answers every session with 421 is down for the sweep: it
+/// stops after a short streak of failed sends instead of trying the whole
+/// batch, and every claim is handed back.
+#[tokio::test]
+async fn digest_sweep_stops_after_a_streak_of_relay_failures() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+    let sink = SmtpSink::spawn_scripted("421 4.3.2 service not available", Vec::new()).await;
+
+    let now = Utc::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sent, 0);
+    assert_eq!(sink.sessions(), 5, "the sweep stops after the streak");
+    let claimed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.notification_prefs WHERE mail_digest AND last_digest_at IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(claimed, 0, "every claim is handed back");
+    assert_eq!(digest_rows_due(&admin, now).await, 150);
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A relay without enhanced status codes (Exim by default, cPanel, qmail)
+/// refuses an unknown user with a bare 550. The relay answered, so a run of
+/// such bounces is not taken as SMTP down: the sweep goes on past five of
+/// them, and a sent digest starts the refusal count again.
+#[tokio::test]
+async fn digest_sweep_goes_on_past_a_run_of_bare_550_bounces() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 45).await;
+    let bounce = RcptReply::Reply("550 No such user here");
+    let mut replies = vec![bounce; 19];
+    replies.push(RcptReply::Reply("250 ok"));
+    replies.extend([bounce; 19]);
+    let sink = SmtpSink::spawn_in_order(replies).await;
+
+    let now = Utc::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sink.rcpt_log().len(), 45, "every due row is tried");
+    assert_eq!(sent, 7, "the accepted sends between and after the bounces");
+    assert_eq!(sink.count(), 7);
+    assert_eq!(
+        digest_rows_due(&admin, now).await,
+        38,
+        "the bounced claims are handed back"
+    );
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A relay that refuses every recipient with a 5xx that is not a mailbox
+/// code (here cPanel's hourly limit, a bare 550) is refusing everyone: the
+/// sweep stops after a longer streak of such refusals, and every claim is
+/// handed back.
+#[tokio::test]
+async fn digest_sweep_stops_after_a_streak_of_unclassified_refusals() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    seed_digest_recipients(&admin, workspace_id, 150).await;
+    let limit = RcptReply::Reply(
+        "550 Domain example.com has exceeded the max emails per hour (100/100 (100%)) allowed.",
+    );
+    let sink = SmtpSink::spawn_in_order(vec![limit; 150]).await;
+
+    let now = Utc::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep");
+    assert_eq!(sent, 0);
+    assert_eq!(
+        sink.rcpt_log().len(),
+        20,
+        "the sweep stops after the streak"
+    );
+    let claimed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.notification_prefs WHERE mail_digest AND last_digest_at IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(claimed, 0, "every claim is handed back");
+    assert_eq!(digest_rows_due(&admin, now).await, 150);
+
     admin.close().await;
     pool.close().await;
     harness.cleanup().await;

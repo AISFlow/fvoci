@@ -34,6 +34,7 @@ pub mod notifications;
 pub mod oidc;
 pub mod outbox;
 pub mod outbox_recover;
+pub mod outbox_reset;
 pub mod pool;
 pub mod project_clone;
 pub mod project_documents;
@@ -54,6 +55,7 @@ pub mod user_export;
 pub mod view_query;
 pub mod workflow_statuses;
 pub mod workspace;
+pub mod workspace_events;
 pub mod workspace_export;
 
 use sqlx::PgPool;

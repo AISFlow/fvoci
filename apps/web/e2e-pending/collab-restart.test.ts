@@ -93,6 +93,13 @@ test("owned server child env forwards an explicit storage directory", () => {
   assert.equal(env.DATABASE_URL, undefined);
 });
 
+test("owned server child env takes the room cap only from the scenario's options", () => {
+  const source = { PATH: "/bin", DATABASE_APP_URL: "postgres://app/db", FVOCI_COLLAB_MAX_ROOMS: "7" };
+  assert.equal(ownedServerChildEnv("127.0.0.1:4321", source).FVOCI_COLLAB_MAX_ROOMS, undefined);
+  assert.equal(ownedServerChildEnv("127.0.0.1:4321", source, { maxRooms: 1 }).FVOCI_COLLAB_MAX_ROOMS, "1");
+  assert.throws(() => ownedServerChildEnv("127.0.0.1:4321", source, { maxRooms: 0 }), /positive integer/);
+});
+
 test("liveCollabHelpers selects collab-engine members from a group snapshot", () => {
   const group = [
     { pid: 1, comm: "fvoci-server", starttime: "1", pgrp: 10 },

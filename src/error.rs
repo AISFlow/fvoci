@@ -53,6 +53,7 @@ pub enum ProblemCode {
     ImportFailed,
     UnsupportedMediaType,
     UploadCapacityExceeded,
+    AttachmentTransferUnavailable,
     AiUnavailable,
     IntegrationUnavailable,
     ConfirmInvalid,
@@ -127,6 +128,7 @@ impl ProblemCode {
             Self::ImportFailed => "import_failed",
             Self::UnsupportedMediaType => "unsupported_media_type",
             Self::UploadCapacityExceeded => "upload_capacity_exceeded",
+            Self::AttachmentTransferUnavailable => "attachment_transfer_unavailable",
             Self::AiUnavailable => "ai_unavailable",
             Self::IntegrationUnavailable => "integration_unavailable",
             Self::ConfirmInvalid => "confirm_invalid",
@@ -205,6 +207,7 @@ impl ProblemCode {
             Self::ImportFailed => "import failed",
             Self::UnsupportedMediaType => "unsupported media type",
             Self::UploadCapacityExceeded => "upload capacity exceeded — retry",
+            Self::AttachmentTransferUnavailable => "attachment transfer mode unavailable",
             Self::AiUnavailable => "ai unavailable",
             Self::IntegrationUnavailable => "integration unavailable",
             Self::ConfirmInvalid => "confirm_invalid",
@@ -242,6 +245,7 @@ impl ProblemCode {
             | Self::MagicInvalid
             | Self::ConfirmInvalid
             | Self::RawApplicationOctetStreamBodyRequired
+            | Self::AttachmentTransferUnavailable
             | Self::AssigneeIsNotAMember => StatusCode::BAD_REQUEST,
             Self::InstanceSetupAlreadyCompleted
             | Self::NotFound

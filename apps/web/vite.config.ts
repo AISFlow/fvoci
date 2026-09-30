@@ -1,18 +1,34 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import tailwindcss from "@tailwindcss/vite";
+import ui from "@nuxt/ui/vite";
 import react from "@vitejs/plugin-react";
+import vue from "@vitejs/plugin-vue";
 import { defineConfig, type Plugin } from "vite";
+import { nuxtUiAppConfig, nuxtUiColorsCss } from "./src/build/nuxt-ui-colors.ts";
+import { nuxtUiUserOptions } from "./src/build/nuxt-ui-options.ts";
 import {
   isPdfjsAsset,
   PDFJS_ASSET_DIRS,
   pdfjsAssetBase,
 } from "./src/features/attachments/pdf-assets.ts";
 import {
+  RHWP_THIRD_PARTY_FILE,
+  rhwpWasmNoticeTitle,
+} from "./src/features/attachments/rhwp-notice.ts";
+import {
+  collectWorkerModuleIds,
   fvociWebLicenseAdapt,
   VITE_LICENSE_DATA_FILE,
 } from "./vite-plugin-fvoci-web-licenses.ts";
+
+// GitHub runners also have Node on PATH. `bun --bun` runs Vite's
+// `#!/usr/bin/env node` binary through a node -> bun shim in
+// /tmp/bun-node-<revision> and silently skips the shim when that directory is
+// unusable, so CI fails here rather than building on Node.
+if (process.env.CI && !process.versions.bun) {
+  throw new Error("Vite must run under Bun in CI (bun --bun run build)");
+}
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 const browserLicenseManifest = path.join(
@@ -29,9 +45,12 @@ const pdfjsVersion = (
   }
 ).version;
 const pdfjsBase = pdfjsAssetBase(pdfjsVersion);
+// Sorted: readdir order varies by filesystem and installer, and the license
+// notices built from this list go into the public notice in this order.
 const pdfjsFiles = PDFJS_ASSET_DIRS.flatMap((dir) =>
   fs
     .readdirSync(path.join(pdfjsDir, dir))
+    .sort()
     .filter((name) => isPdfjsAsset(dir, name))
     .map((name) => `${dir}/${name}`),
 );
@@ -79,17 +98,103 @@ function pdfjsAssets(): Plugin {
   };
 }
 
+/** Pinned full license texts for the Rust dependencies of @rhwp/core's wasm. */
+function rhwpWasmNotice() {
+  const coreDir = path.dirname(createRequire(import.meta.url).resolve("@rhwp/core"));
+  const { version } = JSON.parse(
+    fs.readFileSync(path.join(coreDir, "package.json"), "utf8"),
+  ) as { version: string };
+  return {
+    title: rhwpWasmNoticeTitle(version),
+    text: fs
+      .readFileSync(
+        path.join(repoRoot, "third-party/browser-licenses", RHWP_THIRD_PARTY_FILE),
+        "utf8",
+      )
+      .trim(),
+  };
+}
+
+/**
+ * `@office-kit/xlsx` ships THIRD_PARTY_NOTICES.md (the openpyxl MIT notice
+ * for its derived code) next to its LICENSE; build.license takes only the
+ * LICENSE, so the sidecar is added here.
+ */
+function officeKitXlsxNotice() {
+  const dir = installedPackageDir("@office-kit/xlsx");
+  const { version } = JSON.parse(
+    fs.readFileSync(path.join(dir, "package.json"), "utf8"),
+  ) as { version: string };
+  return {
+    title: `@office-kit/xlsx ${version}: THIRD_PARTY_NOTICES.md`,
+    text: fs.readFileSync(path.join(dir, "THIRD_PARTY_NOTICES.md"), "utf8").trim(),
+  };
+}
+
+/**
+ * The directory `name` is installed in for this app: the first
+ * node_modules/`name` up from apps/web, where the bundle resolves it from. For
+ * packages that export no ./package.json (createRequire cannot resolve them);
+ * import.meta.resolve is avoided because Vite 8.3's default config loader
+ * serves it through Node module hooks that Bun 1.4 lacks (oven-sh/bun#27369).
+ */
+function installedPackageDir(name: string): string {
+  for (let dir = import.meta.dirname; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, "node_modules", name);
+    if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
+    if (path.dirname(dir) === dir) throw new Error(`${name} is not installed`);
+  }
+}
+
+/**
+ * Writes Nuxt UI's runtime colors style into index.html, byte-identical, so
+ * the server's CSP (style-src 'self' plus hashes of the inline styles in
+ * index.html, src/http/security_headers.rs) allows the copies the colors
+ * plugin injects when the Vue app starts. See src/build/nuxt-ui-colors.ts.
+ */
+function nuxtUiColorsStyle(uiPlugins: readonly Plugin[]): Plugin {
+  let css: Promise<string> | undefined;
+  return {
+    name: "fvoci-nuxt-ui-colors-style",
+    transformIndexHtml: {
+      order: "post",
+      async handler() {
+        css ??= nuxtUiAppConfig(uiPlugins).then(nuxtUiColorsCss);
+        return [
+          {
+            tag: "style",
+            attrs: { "data-fvoci-ui-colors": "" },
+            children: await css,
+            injectTo: "head",
+          },
+        ];
+      },
+    },
+  };
+}
+
+/** Modules of every web-worker bundle, for the license notice. */
+const workerModuleIds = new Set<string>();
+
 const apiProxyTarget =
   process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
+
+// Nuxt UI's plugin set registers @tailwindcss/vite itself; it is the only
+// Tailwind registration and also compiles the React app's stylesheet.
+const uiPlugins = ui(nuxtUiUserOptions).flat() as Plugin[];
 
 export default defineConfig({
   plugins: [
     react(),
-    tailwindcss(),
+    vue(),
+    ...uiPlugins,
+    nuxtUiColorsStyle(uiPlugins),
     fvociWebLicenseAdapt({
       repoRoot,
       manifestPath: browserLicenseManifest,
-      assetNotices: pdfjsAssetNotices,
+      assetNotices: () => [...pdfjsAssetNotices(), officeKitXlsxNotice(), rhwpWasmNotice()],
+      workerModuleIds: () => workerModuleIds,
+      iconSetRoot: import.meta.dirname,
     }),
     pdfjsAssets(),
   ],
@@ -100,7 +205,11 @@ export default defineConfig({
     dedupe: [
       "react",
       "react-dom",
+      "vue",
       "yjs",
+      "y-protocols",
+      "@tiptap/core",
+      "@tiptap/pm",
       "@hocuspocus/provider",
       "@hocuspocus/provider-react",
     ],
@@ -115,6 +224,9 @@ export default defineConfig({
         ws: true,
       },
     },
+  },
+  worker: {
+    plugins: () => [collectWorkerModuleIds(workerModuleIds)],
   },
   build: {
     outDir: "dist",

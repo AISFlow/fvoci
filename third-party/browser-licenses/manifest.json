@@ -1,4 +1,12 @@
 {
+  "@iconify-json/lucide@1.2.137": {
+    "file": "supplements/iconify-json-lucide-1.2.137-LICENSE",
+    "source": "https://raw.githubusercontent.com/lucide-icons/lucide/e715245d62667c800e7f54c94b1b023692e900a3/LICENSE"
+  },
+  "@nodable/entities@3.0.0": {
+    "file": "supplements/nodable-entities-3.0.0-LICENSE",
+    "source": "https://raw.githubusercontent.com/nodable/val-parsers/4fe544c219e52cb6e302c43a88824a8333babe3e/LICENSE"
+  },
   "is-emoji-supported@0.0.5": {
     "file": "supplements/is-emoji-supported-0.0.5-LICENSE.md",
     "source": "https://raw.githubusercontent.com/koala-interactive/is-emoji-supported/4afc4ca0a4ff406ef885287a0bfcb2906b965a9d/LICENSE.md"
@@ -7,8 +15,16 @@
     "file": "supplements/qrcode-generator-1.4.4-LICENSE",
     "source": "https://raw.githubusercontent.com/kazuhikoarase/qrcode-generator/9bd2163ddc1628d1ec8ff22ea288a747275ef442/LICENSE"
   },
+  "qrcode-generator@2.0.4": {
+    "file": "supplements/qrcode-generator-2.0.4-LICENSE",
+    "source": "https://raw.githubusercontent.com/kazuhikoarase/qrcode-generator/83b7e8fe3fddd3b0368dbafd6ce56995bd25e3c8/LICENSE"
+  },
   "react-remove-scroll-bar@2.3.8": {
     "file": "supplements/react-remove-scroll-bar-2.3.8-LICENSE",
     "source": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/8ca9ba5ea52de03308fe8ced94f7b159a44d28ff/LICENSE"
+  },
+  "saxes@6.0.0": {
+    "file": "supplements/saxes-6.0.0-LICENSE",
+    "source": "https://raw.githubusercontent.com/lddubeau/saxes/211fa0ebec9b628affc09219199639887174bfc3/LICENSE"
   }
 }

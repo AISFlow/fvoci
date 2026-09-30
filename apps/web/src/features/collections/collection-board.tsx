@@ -8,7 +8,7 @@ import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
-import { api, ensureOk, ProblemError } from "@/lib/api";
+import { api, ensureOk, isInvalidCursor } from "@/lib/api";
 import {
   asJsonObject,
   collectionPrefix,
@@ -100,7 +100,7 @@ function BoardColumn({
   });
 
   // A cursor from an older snapshot (fields/catalog changed) restarts only this column.
-  const invalidCursor = pages.error instanceof ProblemError && pages.error.code === "invalid_cursor";
+  const invalidCursor = isInvalidCursor(pages.error);
   useEffect(() => {
     if (invalidCursor) void queryClient.resetQueries({ queryKey, exact: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps

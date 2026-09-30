@@ -1,4 +1,4 @@
-import { type I18nKey, t } from "@fvoci/i18n";
+import { t } from "@fvoci/i18n";
 import {
 	type ChangeEvent,
 	createContext,
@@ -9,6 +9,19 @@ import {
 	useRef,
 	useState,
 } from "react";
+import {
+	EMBED_ICON,
+	EMBED_KIND_KEY as EMBED_KEY,
+	type EmbedCardState,
+	resolveEmbedProps,
+} from "../embed-model.js";
+import {
+	EMBED_ENTITIES,
+	type EmbedEntity,
+	type EntityResolver,
+	isEmbedEntity,
+	type MentionEntity,
+} from "../entities.js";
 import { type SafeHtml, SafeHtmlView } from "./safe-html.js";
 
 /** WHY: autoFocus 와 같은 마운트 시 focus() — 모듈 상수라 마운트에 한 번만 불린다(noAutofocus 는 dialog/popover 만 예외). */
@@ -237,40 +250,7 @@ export function MermaidBlockView({
 	);
 }
 
-const EMBED_ENTITIES = ["document", "task", "project", "url"] as const;
-export type EmbedEntity = (typeof EMBED_ENTITIES)[number];
-
-const EMBED_KEY = {
-	document: "editor.embed.document",
-	task: "editor.embed.task",
-	project: "editor.embed.project",
-	url: "editor.link",
-} as const satisfies Record<EmbedEntity, I18nKey>;
-
-export function isEmbedEntity(value: string): value is EmbedEntity {
-	for (const entity of EMBED_ENTITIES) {
-		if (entity === value) return true;
-	}
-	return false;
-}
-
-function isEmbedHttpUrl(value: string): boolean {
-	try {
-		const parsed = new URL(value);
-		return parsed.protocol === "http:" || parsed.protocol === "https:";
-	} catch {
-		return false;
-	}
-}
-
-export function resolveEmbedProps(
-	raw: string,
-	selected: EmbedEntity,
-): { entity: EmbedEntity; ref: string } {
-	const ref = raw.trim();
-	if (isEmbedHttpUrl(ref)) return { entity: "url", ref };
-	return { entity: selected, ref };
-}
+export { type EmbedCardState, resolveEmbedProps };
 
 function readEmbedEdit(container: HTMLElement): {
 	entity: EmbedEntity;
@@ -286,50 +266,11 @@ function readEmbedEdit(container: HTMLElement): {
 	return resolveEmbedProps(raw, selected);
 }
 
-const MENTION_ENTITIES = [
-	"user",
-	"document",
-	"task",
-	"project",
-	"group",
-] as const;
-export type MentionEntity = (typeof MENTION_ENTITIES)[number];
-
-export function isMentionEntity(value: string): value is MentionEntity {
-	for (const entity of MENTION_ENTITIES) {
-		if (entity === value) return true;
-	}
-	return false;
-}
-
-export type EntitySnapshot = {
-	label: string;
-	icon: string;
-	status?: string;
-};
-
-export type EntityResolver = (
-	entity: MentionEntity,
-	id: string,
-) => Promise<EntitySnapshot | null>;
-
 export const EntityResolverContext = createContext<EntityResolver | null>(null);
-
-const EMBED_ICON: Record<Exclude<EmbedEntity, "url">, string> = {
-	document: "📄",
-	task: "☑",
-	project: "📁",
-};
 
 export type UrlEmbedRenderer = (url: string) => ReactNode;
 
 export const UrlEmbedContext = createContext<UrlEmbedRenderer | null>(null);
-
-export type EmbedCardState =
-	| { state: "loading" }
-	| { state: "inaccessible" }
-	| { state: "plain"; ref: string }
-	| { state: "resolved"; snapshot: EntitySnapshot };
 
 export function EmbedCardView({
 	entity,

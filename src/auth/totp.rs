@@ -20,12 +20,13 @@ pub fn base32_encode(bytes: &[u8]) -> String {
     Secret::from(bytes).to_base32()
 }
 
-/// SHA-1 / 6 digits / skew ±1 / 30 s. None for a secret under 128 bits.
+/// SHA-1 / 6 digits / 30 s, checking exactly one step (the ±1 window is
+/// [`match_totp`]'s). None for a secret under 128 bits.
 fn engine(secret: &[u8]) -> Option<Totp> {
     Builder::new()
         .with_algorithm(Algorithm::SHA1)
         .with_digits(TOTP_DIGITS as u8)
-        .with_skew(1)
+        .with_skew(0)
         .with_step_duration(TOTP_STEP_SECONDS as u64)
         .with_secret(secret)
         .build()
@@ -48,13 +49,21 @@ pub fn is_totp_shape(code: &str) -> bool {
     code.len() == TOTP_DIGITS && code.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The step in now±1 whose code matches, or None. When two steps share a
-/// code the oldest wins (`totp-rs` scans ascending); claiming the older step
-/// is the stricter replay bound.
+/// The newest step in now±1 whose code matches, or None; `totp-rs` parses
+/// the code and compares it with each step's in constant time. The caller
+/// claims the step and `claim_step` then refuses every step up to it, so
+/// claiming the newest match is the strict replay bound: a code that two
+/// adjacent steps share is accepted once (RFC 6238 §5.2).
 pub fn match_totp(secret: &[u8], code: &str, now_ms: i64) -> Option<i64> {
-    let time = u64::try_from(now_ms.div_euclid(1000)).ok()?;
-    let step = engine(secret)?.check(code, time)?;
-    i64::try_from(step).ok()
+    if now_ms < 0 {
+        return None;
+    }
+    let totp = engine(secret)?;
+    let now = totp_step(now_ms);
+    [now + 1, now, now - 1].into_iter().find(|&step| {
+        u64::try_from(step)
+            .is_ok_and(|step| totp.check(code, step * TOTP_STEP_SECONDS as u64).is_some())
+    })
 }
 
 pub fn new_secret() -> [u8; SECRET_BYTES] {
@@ -155,15 +164,34 @@ mod tests {
     }
 
     #[test]
-    fn match_prefers_oldest_step_on_shared_code() {
-        // Steps 910737 and 910738 share a code for the RFC secret; the crate
-        // scans now-1..=now+1 ascending, so the older step is claimed.
-        let now_ms = 910_738 * TOTP_STEP_SECONDS * 1000;
+    fn match_claims_newest_step_on_shared_code() {
+        // Steps 910737 and 910738 share a code for the RFC secret. The newest
+        // matching step is returned: claiming it blocks the code for the rest
+        // of the window (claim_step accepts only later steps).
         let code = totp_code(RFC_SECRET, 910_738);
         assert_eq!(code, totp_code(RFC_SECRET, 910_737));
+        for now_step in [910_737, 910_738, 910_739] {
+            let now_ms = now_step * TOTP_STEP_SECONDS * 1000;
+            assert_eq!(match_totp(RFC_SECRET, &code, now_ms), Some(910_738));
+        }
+        // At 910736 only 910737 is in the window.
+        let now_ms = 910_736 * TOTP_STEP_SECONDS * 1000;
         assert_eq!(match_totp(RFC_SECRET, &code, now_ms), Some(910_737));
+        assert_eq!(match_totp(RFC_SECRET, &code, 910_740 * 30_000), None);
         assert_eq!(match_totp(RFC_SECRET, &code, -1), None);
-        assert_eq!(match_totp(b"short", &code, now_ms), None);
+        assert_eq!(match_totp(b"short", &code, 910_738 * 30_000), None);
+    }
+
+    #[test]
+    fn match_at_step_zero_has_no_earlier_step() {
+        assert_eq!(
+            match_totp(RFC_SECRET, &totp_code(RFC_SECRET, 0), 0),
+            Some(0)
+        );
+        assert_eq!(
+            match_totp(RFC_SECRET, &totp_code(RFC_SECRET, 1), 0),
+            Some(1)
+        );
     }
 
     #[test]

@@ -3,6 +3,19 @@ use std::sync::Arc;
 
 use crate::streams::MAX_CONCURRENT_STREAMS;
 
+/// Process-wide SSE admission: a slot count capped at
+/// [`MAX_CONCURRENT_STREAMS`] and a shutdown flag.
+///
+/// A [`StreamGuard`] owns one slot. The routes take it before authentication,
+/// so a rejected request holds it only until the handler returns; an admitted
+/// stream moves it into the response body, which frees it when dropped
+/// (stream end or client disconnect). Past the cap a request gets 429; after
+/// [`begin_shutdown`](Self::begin_shutdown) it gets 503 `stream_stopped`.
+///
+/// Shutdown: `begin_shutdown` refuses new streams. A running producer exits at
+/// the top of its next loop, after finishing its current sleep and at most one
+/// more poll. The body then drains any queued items, each still authorized,
+/// and ends, which lets the graceful HTTP drain finish.
 pub struct StreamHub {
     active: AtomicUsize,
     shutting_down: AtomicBool,
@@ -56,6 +69,7 @@ pub enum StreamAcquireError {
     Stopped,
 }
 
+/// One stream slot; dropping it frees the slot.
 pub struct StreamGuard {
     hub: Arc<StreamHub>,
 }

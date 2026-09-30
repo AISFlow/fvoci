@@ -31,14 +31,13 @@ use crate::auth::password::Keyring;
 use crate::db::context::{
     lock_membership_users, recheck_session, restore_system, set_system, set_tenant,
 };
-use crate::db::documents::{
-    between, empty_document_json, workspace_is_live, DOCUMENT_SCHEMA_VERSION,
-};
+use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
 use crate::db::identity::{append_audit, append_event_channel, AuditAppend, EventAppend};
 use crate::db::integrations::{require_manager_read, require_manager_write, IntegrationDbError};
 use crate::db::outbox::{advance_cursor_tx, OutboxEvent};
 use crate::db::projects::{lock_project, project_permission};
 use crate::db::task_activity::record_task_activity;
+use crate::db::workspace::workspace_is_live;
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
 use crate::projects::ProjectPermission;
 use crate::tasks::activity::ActivitySnapshot;
@@ -49,7 +48,7 @@ const GITHUB_WEB: &str = "https://github.com";
 const STATE_TTL_MS: i64 = 600_000;
 pub const STATE_SECRET_MIN_BYTES: usize = 32;
 /// Serializes webhook and link writes for one `(workspace, repo, issue)`.
-const ISSUE_LOCK_NAMESPACE: i32 = 1_907_030;
+pub(crate) const ISSUE_LOCK_NAMESPACE: i32 = 1_907_030;
 const TITLE_MAX: usize = 500;
 /// Source 15 s; two calls per synced event must fit the 30 s outbox lease.
 const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);

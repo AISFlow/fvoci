@@ -3,6 +3,7 @@
 *.swp
 .DS_Store
 /.cargo-target/
+/node_modules/
 /scripts/document-convert/node_modules/
 
 # CodeGraph dev-tool index (local exploration aid, never a build input)

@@ -7,11 +7,12 @@
 # and fvoci in pg_dump custom format as the owner role, then archives the
 # storage volume.
 #
-# Meilisearch data is not included. The index is derived; restore recreates a
-# scoped key and index settings. Product search-rebuild is not in this slice.
+# Meilisearch data is not included. The index is derived; restore creates a
+# new scoped key and rebuilds the index from PostgreSQL (--rebuild-search).
 # Pepper keys, ENCRYPTION_KEYS, DB passwords, and the Meili master key stay in
-# the operator env file — they are not copied into the archive (beyond whatever
-# the database dump already contains). The manifest records only fingerprints
+# the operator env file (`.env` of the standalone compose.user.yml) — they are
+# not copied into the archive (beyond whatever the database dump already
+# contains). The manifest records only fingerprints
 # of the pepper keyring and of each ENCRYPTION_KEYS key id, which restore
 # compares before touching volumes.
 set -euo pipefail
@@ -108,6 +109,10 @@ if [[ ! -d "$PARENT" ]]; then
 fi
 
 COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT" --env-file "$ENV_FILE")
+# The app service publishes container port 8080 (`server` in compose.yml,
+# `fvoci` in compose.user.yml).
+SERVER="$("${COMPOSE[@]}" config --format json \
+  | jq -er '[.services | to_entries[] | select(any(.value.ports[]?; .target == 8080)) | .key] | if length == 1 then .[0] else error("expected one service publishing 8080") end')"
 STAGING="${OUTPUT}.partial-$$"
 SERVER_STOPPED=0
 
@@ -117,7 +122,7 @@ cleanup() {
     rm -rf "$STAGING"
   fi
   if (( SERVER_STOPPED == 1 && LEAVE_STOPPED == 0 )); then
-    "${COMPOSE[@]}" up -d --wait server >/dev/null 2>&1 || true
+    "${COMPOSE[@]}" up -d --wait "$SERVER" >/dev/null 2>&1 || true
   fi
   exit "$status"
 }
@@ -132,7 +137,7 @@ if [[ -z "$PG_CID" ]]; then
   echo "postgres service is not running for project ${PROJECT}" >&2
   exit 1
 fi
-SERVER_CID="$("${COMPOSE[@]}" ps -a -q server | head -1)"
+SERVER_CID="$("${COMPOSE[@]}" ps -a -q "$SERVER" | head -1)"
 if [[ -z "$SERVER_CID" ]]; then
   echo "server container is missing for project ${PROJECT}" >&2
   exit 1
@@ -158,38 +163,49 @@ fi
 docker volume inspect "$STORAGE_VOL" >/dev/null
 # Use the exact installed product image that is running this server. No pull or
 # alternate host executable may decide the backup key/manifest policy.
-SELECTED_IMAGE="$("${COMPOSE[@]}" config --format json | jq -er '.services.server.image')"
+SELECTED_IMAGE="$("${COMPOSE[@]}" config --format json | jq -er --arg s "$SERVER" '.services[$s].image')"
 PRODUCT_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$SELECTED_IMAGE")"
 if [[ "$(docker inspect -f '{{.Image}}' "$SERVER_CID")" != "$PRODUCT_IMAGE_ID" ]]; then
   echo "running server image differs from the selected Compose product image" >&2
   exit 1
 fi
-runtime_key() {
-  local name="$1"
-  docker inspect "$SERVER_CID" | jq -r --arg name "$name" \
+# The keys the running server was created with, from its container
+# configuration (both stacks pass them as environment).
+config_env() {
+  docker inspect "$SERVER_CID" | jq -r --arg name "$1" \
     '.[0].Config.Env | map(select(startswith($name + "="))) | last | if . == null then "" else .[($name | length) + 1:] end'
 }
-PEPPER_KEYS="$(runtime_key PASSWORD_PEPPER_KEYS)"
-PEPPER_ACTIVE="$(runtime_key PASSWORD_PEPPER_ACTIVE_KEY_ID)"
-ENCRYPTION_KEYS_VALUE="$(runtime_key ENCRYPTION_KEYS)"
-ENCRYPTION_ACTIVE="$(runtime_key ENCRYPTION_ACTIVE_KEY_ID)"
+PEPPER_KEYS="$(config_env PASSWORD_PEPPER_KEYS)"
+PEPPER_ACTIVE="$(config_env PASSWORD_PEPPER_ACTIVE_KEY_ID)"
+ENCRYPTION_KEYS_VALUE="$(config_env ENCRYPTION_KEYS)"
+ENCRYPTION_ACTIVE="$(config_env ENCRYPTION_ACTIVE_KEY_ID)"
+if [[ -z "$PEPPER_KEYS" ]]; then
+  # A container of an older release that took the keyrings as secret files.
+  echo "the running $SERVER container has no PASSWORD_PEPPER_KEYS in its configuration; back it up with scripts/backup.sh from the release it runs" >&2
+  exit 1
+fi
 
 # Keep restart (including error cleanup) on the exact image and keys we backed
 # up, even if the original tag or env file changes during the operation.
 export FVOCI_IMAGE="$PRODUCT_IMAGE_ID"
 export PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE"
 export ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE"
-if ! "${COMPOSE[@]}" config --format json | jq -e '
-  .services.server.image == env.FVOCI_IMAGE and
-  (.services.server.environment as $settings |
-    all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
-      . as $key | $settings[$key] == env[$key]))' >/dev/null; then
+# Each key the server environment gets is the exported value (it wins over
+# the env file).
+# shellcheck disable=SC2016 # a jq program
+SNAPSHOT_KEPT='(.services[$s].environment // {}) as $settings |
+  all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
+    . as $key | $settings[$key] == env[$key])'
+# A release compose pins the image instead of reading FVOCI_IMAGE: compare ids.
+CONFIG_IMAGE="$("${COMPOSE[@]}" config --format json | jq -er --arg s "$SERVER" '.services[$s].image')"
+if [[ "$(docker image inspect -f '{{.Id}}' "$CONFIG_IMAGE")" != "$PRODUCT_IMAGE_ID" ]] ||
+   ! "${COMPOSE[@]}" config --format json | jq -e --arg s "$SERVER" "$SNAPSHOT_KEPT" >/dev/null; then
   echo "Compose must preserve the selected product image and key snapshot" >&2
   exit 1
 fi
 
 echo "stopping server so dump and storage share a quiesced point"
-"${COMPOSE[@]}" stop -t 45 server
+"${COMPOSE[@]}" stop -t 45 "$SERVER"
 SERVER_STOPPED=1
 STOP_STATE="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$SERVER_CID")"
 if [[ "$STOP_STATE" != "exited 0 false" ]]; then
@@ -264,7 +280,7 @@ mv --no-target-directory --no-clobber "$STAGING" "$OUTPUT"
 chmod 700 "$OUTPUT"
 
 if (( LEAVE_STOPPED == 0 )); then
-  "${COMPOSE[@]}" up -d --wait server
+  "${COMPOSE[@]}" up -d --wait "$SERVER"
   SERVER_STOPPED=0
 fi
 

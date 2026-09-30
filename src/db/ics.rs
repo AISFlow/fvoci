@@ -6,9 +6,8 @@ use crate::auth::token::{hash_token, new_token, token_hashes_eq};
 use crate::db::context::{
     lock_membership_users, recheck_session, restore_system, set_system, set_tenant,
 };
-use crate::db::documents::{membership_role, workspace_is_live};
 use crate::db::projects::visible_project_sql;
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::ics::{ics_etag, render_ics, IcsTask};
 
 const ICS_TOKEN_TTL_SECS: i64 = 365 * 24 * 60 * 60;

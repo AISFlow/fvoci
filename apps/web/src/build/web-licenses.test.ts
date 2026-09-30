@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { packageLicenseEntries } from "../../vite-plugin-fvoci-web-licenses.ts";
 import {
   applyBrowserLicenseSupplements,
   assertBundledLicenseTexts,
@@ -19,6 +21,25 @@ const FORBIDDEN_NOTICE_PACKAGE_HEADINGS = ["@m2d/", "@playwright/", "vite - "] a
 test("hasLicenseText treats whitespace-only stubs as missing", () => {
   assert.equal(hasLicenseText("   "), false);
   assert.equal(hasLicenseText("upstream LICENSE body"), true);
+});
+
+test("installed QR 2.0.4 gets its complete MIT notice from the verified supplement", () => {
+  const entries = packageLicenseEntries([fileURLToPath(import.meta.resolve("qrcode-generator"))]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]?.name, "qrcode-generator");
+  assert.equal(entries[0]?.version, "2.0.4");
+  assert.equal(entries[0]?.identifier, "MIT");
+  assert.equal(hasLicenseText(entries[0]?.text), false);
+  assert.throws(
+    () => assertBundledLicenseTexts(entries, {}),
+    /qrcode-generator@2\.0\.4: bundled dependency has no license text and no supplement/,
+  );
+  const notice = finalizeBrowserOpenSourceNotice(JSON.stringify(entries), repoRoot, manifestPath);
+  assert.match(notice, /## qrcode-generator - 2\.0\.4 \(MIT\)/);
+  assert.match(notice, /Copyright \(c\) 2009 Kazuhiko Arase/);
+  assert.match(notice, /Permission is hereby granted, free of charge/);
+  assert.match(notice, /THE SOFTWARE IS PROVIDED "AS IS"/);
+  assert.ok(notice.includes("Supplement source: https://raw.githubusercontent.com/kazuhikoarase/qrcode-generator/83b7e8fe3fddd3b0368dbafd6ce56995bd25e3c8/LICENSE"));
 });
 
 test("applyBrowserLicenseSupplements fills only when upstream text is absent", () => {

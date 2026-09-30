@@ -6,7 +6,16 @@ import {
 	useHocuspocusEvent,
 	useHocuspocusProvider,
 } from "@hocuspocus/provider-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+	createContext,
+	type ReactNode,
+	useContext,
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import * as Y from "yjs";
 import {
 	createConnectionGeneration,
@@ -20,6 +29,7 @@ import {
 import {
 	blockIdOf,
 	CLAIM_RETRY_LIMIT,
+	collabStatusOf,
 	type CollabPeer,
 	type CollabSession,
 	type CollabStatus,
@@ -30,6 +40,14 @@ import {
 	reassertPresence,
 	titleEditingOf,
 } from "./collab-model";
+import {
+	type CollabRefusal,
+	createRefusalAwareSocket,
+	type RefusalAwareSocket,
+	RoomConnection,
+	type RoomConnectionState,
+	type RoomTimers,
+} from "./collab-reconnect";
 
 export type { CollabPeer, CollabSession, CollabStatus, CollabUser };
 export {
@@ -43,6 +61,10 @@ export {
 	setTitleEditing,
 } from "./collab-model";
 export { isDurablySaved } from "./collab-persist-ack";
+
+/** Pre-auth refusal of this room socket's latest close, cleared by a close that was not a refusal
+ * or once the room authenticates. */
+const CollabRefusalContext = createContext<CollabRefusal | null>(null);
 
 function roomNameOf(provider: { configuration?: { name?: string } }): string {
 	const name = provider.configuration?.name;
@@ -72,7 +94,9 @@ export function CollabRoom({
 /* WHY: #664 — 서버는 연결이 접속 때 선언한 awareness clientId 하나만 받는다(선언 없으면 거절).
  * clientId 는 Y.Doc 의 것이라 provider 에 맡기면 접속 뒤에야 알 수 있다 — 우리가 만들어 넘긴다.
  * #683 — 선언이 거부되면 clientID 를 갈고 소켓 층부터 다시 세운다. Y.Doc 은 이 층에 있어 살아남고
- * (#704 미전송 편집 보존), Awareness 는 provider 가 새로 만들어 새 id 로 굳는다. */
+ * (#704 미전송 편집 보존), Awareness 는 provider 가 새로 만들어 새 id 로 굳는다.
+ * 인증 전 거절(방 한도 1013 등)은 소켓이 같은 자리에서 backoff 로 다시 연다 — 사유만 기록하고
+ * 아래 페이지(초안·포커스·불러온 편집기)는 그대로 둔다. 상태 기계는 RoomConnection(collab-reconnect.ts). */
 function ClaimedRoom({
 	name,
 	children,
@@ -81,47 +105,62 @@ function ClaimedRoom({
 	children: ReactNode;
 }) {
 	const proto = window.location.protocol === "https:" ? "wss" : "ws";
+	const url = `${proto}://${window.location.host}/collab`;
 	const [doc] = useState(() => new Y.Doc({ gc: false }));
-	const [claim, setClaim] = useState(0);
-	const attempts = useRef(0);
-	const reclaim = () => {
-		if (attempts.current >= CLAIM_RETRY_LIMIT) return;
-		attempts.current += 1;
-		/* WHY: #704 — Yjs 도 clientID 충돌을 보면 같은 자리를 이렇게 갈아 낀다(yjs.mjs:3342).
-		 * 구조체는 옛 id 통에 그대로 남아 다음 동기화에 실린다 — 미전송 편집이 살아남는다. */
-		doc.clientID = new Y.Doc().clientID;
-		setClaim((n) => n + 1);
-	};
+	const [room, setRoom] = useState<RoomConnectionState<RefusalAwareSocket> | null>(null);
+	const connection = useRef<RoomConnection<RefusalAwareSocket> | null>(null);
+	/* Built in a layout effect so StrictMode's double run cannot leave a connected socket behind. */
+	useLayoutEffect(() => {
+		const next = new RoomConnection<RefusalAwareSocket>({
+			open: (onClosed) => createRefusalAwareSocket({ url }, onClosed),
+			onChange: setRoom,
+			/* WHY: #704 — Yjs 도 clientID 충돌을 보면 같은 자리를 이렇게 갈아 낀다(yjs.mjs:3342).
+			 * 구조체는 옛 id 통에 그대로 남아 다음 동기화에 실린다 — 미전송 편집이 살아남는다. */
+			beforeReclaim: () => {
+				doc.clientID = new Y.Doc().clientID;
+			},
+			reclaimLimit: CLAIM_RETRY_LIMIT,
+			timers: BROWSER_TIMERS,
+		});
+		connection.current = next;
+		setRoom(next.state);
+		return () => {
+			if (connection.current === next) connection.current = null;
+			next.dispose();
+		};
+	}, [url, doc]);
+	if (room === null) return null;
 	return (
 		/* WHY: #683 — provider 만 갈아끼우면 업스트림 detach 가 방 이름만 보고 지워(provider 4.6.0
 		 * hocuspocus-provider.esm.js:204-208) 옛 연결의 지연 destroy 가 새 연결을 라우팅 맵에서
-		 * 밀어낸다. providerMap 은 소켓마다 따로라 소켓째 갈아끼우면 그 사고가 성립하지 않는다. */
-		<HocuspocusProviderWebsocketComponent
-			key={claim}
-			url={`${proto}://${window.location.host}/collab`}
-		>
+		 * 밀어낸다. providerMap 은 소켓마다 따로라 재선언은 소켓째 갈아끼운다(세대 key). 거절은
+		 * 세대를 바꾸지 않는다. */
+		<HocuspocusProviderWebsocketComponent key={room.generation} websocketProvider={room.socket}>
 			<HocuspocusRoom
 				name={name}
 				document={doc}
 				token={String(doc.clientID)}
 				/* WHY: #517 — 배칭이 없으면 타건마다 unsynced 가 +1·−1 로 배지가 스트로브한다. */
 				flushDelay={200}
-				onAuthenticated={() => {
-					attempts.current = 0;
-				}}
-				onAuthenticationFailed={reclaim}
+				onAuthenticated={() => connection.current?.authenticated()}
+				onAuthenticationFailed={() => connection.current?.reclaim()}
 			>
-				{children}
+				<CollabRefusalContext.Provider value={room.refusal}>{children}</CollabRefusalContext.Provider>
 			</HocuspocusRoom>
 		</HocuspocusProviderWebsocketComponent>
 	);
 }
+
+const BROWSER_TIMERS: RoomTimers = {
+	setTimeout: (callback, ms) => window.setTimeout(callback, ms),
+};
 
 export function useCollabSession(
 	user: CollabUser | null,
 ): CollabSession | null {
 	const provider = useHocuspocusProvider();
 	const connectionStatus = useHocuspocusConnectionStatus();
+	const refusal = useContext(CollabRefusalContext);
 	const documentId = roomNameOf(provider);
 	// WHY: #653 — provider 가 살아있는 채 리마운트되면 synced 를 다시 미동기화로 접으면 안 된다.
 	const [synced, setSynced] = useState(() => provider.synced);
@@ -239,7 +278,7 @@ export function useCollabSession(
 			provider,
 			doc: provider.document,
 			fragment: provider.document.getXmlFragment(FVOCI_YDOC_FRAGMENT),
-			status: unauthorized ? "unauthorized" : connectionStatus,
+			status: collabStatusOf(unauthorized, refusal, connectionStatus),
 			synced,
 			// WHY: #517 — readOnly 연결은 서버가 update 에 ack 를 주지 않아 카운터가 내려가지 않는다.
 			pending: unsent && !readOnly,
@@ -265,7 +304,7 @@ export function useCollabSession(
 				});
 			},
 		}),
-		[provider, unauthorized, connectionStatus, synced, unsent, readOnly, peers, ack],
+		[provider, unauthorized, refusal, connectionStatus, synced, unsent, readOnly, peers, ack],
 	);
 
 	if (!user) return null;

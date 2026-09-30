@@ -15,18 +15,24 @@ use fvoci_server::db::pool;
 use fvoci_server::http::routes::streams::{
     reset_task_stream_task_hint_enqueue_count, task_stream_task_hint_enqueue_count,
 };
-use fvoci_server::streams::{initial_cursor, poll_task_events, StreamHub};
+use fvoci_server::streams::{
+    initial_cursor, poll_access_events, poll_task_events, EventCursor, EventPage, StreamHub,
+};
 use project_harness::{
     add_workspace_user, admin_pool, app_state, count_rows, create_project,
     drop_insert_fail_trigger, insert_minimal_project, insert_project_document,
-    install_insert_fail_trigger, json_request, setup_session, test_peer, wait_for_query_blocked_by,
-    wait_for_user_for_update_blocked, TestDb,
+    install_insert_fail_trigger, json_request, session_id_for_user, setup_session, test_peer,
+    wait_for_query_blocked_by, wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::json;
 use tokio::time::timeout;
 use tower::ServiceExt;
 use url::form_urlencoded;
 use uuid::Uuid;
+
+/// `pg_stat_activity` row reported when the snapshot xmin fails to settle:
+/// (datname, pid, backend_xid, backend_xmin).
+type XidHolder = (Option<String>, i32, Option<String>, Option<String>);
 
 async fn json_request_bearer(
     app: axum::Router,
@@ -3892,6 +3898,715 @@ async fn task_layout_year_one_month_one_and_due_at_window() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+async fn get_task_layout(
+    app: axum::Router,
+    workspace_id: Uuid,
+    project_id: &str,
+    query: &str,
+    cookie: &str,
+) -> serde_json::Value {
+    let (status, layout) = json_request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout?{query}"),
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{layout}");
+    layout
+}
+
+fn layout_item<'a>(layout: &'a serde_json::Value, task_id: &str) -> &'a serde_json::Value {
+    layout["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == task_id)
+        .unwrap_or_else(|| panic!("task {task_id} missing from layout {layout}"))
+}
+
+fn layout_links(layout: &serde_json::Value) -> Vec<(String, String, String, i64)> {
+    let mut links: Vec<_> = layout["links"]
+        .as_array()
+        .unwrap_or_else(|| panic!("links missing from layout {layout}"))
+        .iter()
+        .map(|link| {
+            (
+                link["blockerId"].as_str().unwrap().to_string(),
+                link["blockedId"].as_str().unwrap().to_string(),
+                link["type"].as_str().unwrap().to_string(),
+                link["lagDays"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    links.sort();
+    links
+}
+
+#[tokio::test]
+async fn task_layout_can_edit_follows_project_permission_and_archive() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let viewer = add_workspace_user(&admin, workspace_id, "member", "viewer").await;
+    let editor = add_workspace_user(&admin, workspace_id, "member", "editor").await;
+    let prv = create_project(app.clone(), &owner_cookie, workspace_id, "PRV", "private").await;
+    let project_id = prv["id"].as_str().unwrap();
+    for (user, role) in [(&viewer, "viewer"), (&editor, "member")] {
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/members"),
+            Some(json!({"userId": user.user_id.to_string(), "role": role})),
+            Some(&owner_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let task = create_task_with_title(
+        app.clone(),
+        &owner_cookie,
+        workspace_id,
+        project_id,
+        json!({"title": "Gate", "dueDate": "2026-09-10"}),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap();
+    let month = "year=2026&month=9";
+
+    for (who, cookie, can_edit) in [
+        ("lead", &owner_cookie, true),
+        ("member", &editor.cookie, true),
+        ("viewer", &viewer.cookie, false),
+    ] {
+        let layout = get_task_layout(app.clone(), workspace_id, project_id, month, cookie).await;
+        assert_eq!(layout["canEdit"], can_edit, "{who}");
+        assert_eq!(layout["items"].as_array().unwrap().len(), 1, "{who}");
+    }
+    // `false` matches what PATCH does for the same actor.
+    let (status, _) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({"dueDate": "2026-09-11"}),
+        &viewer.cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The hint ignores API-token scopes: a tasks.read token of the lead sees
+    // `true` although PATCH also needs tasks.write.
+    let (status, token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "read", "scopes": ["tasks.read"]})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{token}");
+    let (status, layout) = json_request_bearer(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout?{month}"),
+        token["token"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{layout}");
+    assert_eq!(layout["canEdit"], true);
+
+    // On a workspace-visibility project the workspace role decides for
+    // non-guests: the workspace member who only views PRV may edit here. A
+    // guest added as a project viewer may not.
+    let guest = add_workspace_user(&admin, workspace_id, "guest", "guest").await;
+    let wsp = create_project(app.clone(), &owner_cookie, workspace_id, "WSP", "workspace").await;
+    let wsp_id = wsp["id"].as_str().unwrap();
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{wsp_id}/members"),
+        Some(json!({"userId": guest.user_id.to_string(), "role": "viewer"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for (who, cookie, can_edit) in [
+        ("workspace member", &viewer.cookie, true),
+        ("guest viewer", &guest.cookie, false),
+    ] {
+        let layout = get_task_layout(app.clone(), workspace_id, wsp_id, month, cookie).await;
+        assert_eq!(layout["canEdit"], can_edit, "{who}");
+    }
+
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/archive"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for (who, cookie) in [
+        ("lead", &owner_cookie),
+        ("member", &editor.cookie),
+        ("viewer", &viewer.cookie),
+    ] {
+        // Archived projects stay readable, but nobody may reschedule.
+        let layout = get_task_layout(app.clone(), workspace_id, project_id, month, cookie).await;
+        assert_eq!(layout["canEdit"], false, "{who}");
+        assert_eq!(layout["items"].as_array().unwrap().len(), 1, "{who}");
+    }
+    let (status, body) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({"dueDate": "2026-09-11"}),
+        &owner_cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "project_archived");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_links_are_limited_to_returned_items() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let mut ids = Vec::new();
+    for (title, start, due) in [
+        ("Link A", "2026-09-01", "2026-09-03"),
+        ("Link B", "2026-09-08", "2026-09-09"),
+        ("Other C", "2026-09-10", "2026-09-11"),
+        ("Link D", "2026-11-02", "2026-11-03"),
+    ] {
+        let task = create_task_with_title(
+            app.clone(),
+            &cookie,
+            ws,
+            &project_id,
+            json!({"title": title, "startDate": start, "dueDate": due}),
+        )
+        .await;
+        ids.push(task["id"].as_str().unwrap().to_string());
+    }
+    let (a, b, c, d) = (&ids[0], &ids[1], &ids[2], &ids[3]);
+    for (blocker, blocked, kind, lag) in [(a, b, "FS", 2), (a, c, "SS", 0), (b, d, "FF", 1)] {
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/tasks/{blocker}/dependencies"),
+            Some(json!({"blockedId": blocked, "type": kind, "lagDays": lag})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    // D lies outside September, so B -> D is not returned.
+    let month = get_task_layout(app.clone(), ws, &project_id, "year=2026&month=9", &cookie).await;
+    let mut expected = vec![
+        (a.clone(), b.clone(), "FS".to_string(), 2),
+        (a.clone(), c.clone(), "SS".to_string(), 0),
+    ];
+    expected.sort();
+    assert_eq!(layout_links(&month), expected);
+    assert_eq!(month["linkTotal"], 2);
+
+    // The title filter drops C, and with it A -> C.
+    let q = form_urlencoded::Serializer::new(String::new())
+        .append_pair("year", "2026")
+        .append_pair("month", "9")
+        .append_pair("query", r#"{"filters":{"title":"Link"},"sort":[]}"#)
+        .finish();
+    let filtered = get_task_layout(app.clone(), ws, &project_id, &q, &cookie).await;
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        layout_links(&filtered),
+        vec![(a.clone(), b.clone(), "FS".to_string(), 2)]
+    );
+    assert_eq!(filtered["linkTotal"], 1);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_links_cap_keeps_lowest_pairs_and_reports_total() {
+    let (harness, app, cookie, ws, admin, project_id, pid) = review_setup().await;
+    let (_, wf) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/workflow"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    let status_id = Uuid::parse_str(wf["statuses"][0]["id"].as_str().unwrap()).unwrap();
+    let owner_id: Uuid = sqlx::query_scalar("SELECT id FROM fvoci.users LIMIT 1")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    // 65 tasks with every forward pair linked: 65 * 64 / 2 = 2080 links, over
+    // the 2048 cap. Written directly: the API would take one request per link.
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.tasks (
+            id, workspace_id, project_id, number, title, type, priority, status_id,
+            content_json, created_by, start_date, due_date
+        )
+        SELECT gen_random_uuid(), $1, $2, n, 'cap ' || n, 'task', 'none', $3,
+               '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, $4,
+               '2026-09-07'::date, '2026-09-08'::date
+        FROM generate_series(1, 65) AS n
+        "#,
+    )
+    .bind(ws)
+    .bind(pid)
+    .bind(status_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.task_dependencies (workspace_id, blocker_id, blocked_id, type, lag_days)
+        SELECT $1, a.id, b.id, 'FS', 0
+        FROM fvoci.tasks a
+        JOIN fvoci.tasks b ON b.project_id = a.project_id AND a.number < b.number
+        WHERE a.project_id = $2
+        "#,
+    )
+    .bind(ws)
+    .bind(pid)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let lowest: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT blocker_id, blocked_id
+        FROM fvoci.task_dependencies
+        WHERE workspace_id = $1
+        ORDER BY blocker_id, blocked_id
+        LIMIT 2048
+        "#,
+    )
+    .bind(ws)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+
+    let layout = get_task_layout(app.clone(), ws, &project_id, "year=2026&month=9", &cookie).await;
+    assert_eq!(layout["items"].as_array().unwrap().len(), 65);
+    assert_eq!(layout["linkTotal"], 2080);
+    assert_eq!(layout["pathTotal"], 2080);
+    assert_eq!(layout["paths"].as_array().unwrap().len(), 2048);
+    let kept: Vec<(String, String)> = layout_links(&layout)
+        .into_iter()
+        .map(|(blocker, blocked, _, _)| (blocker, blocked))
+        .collect();
+    let mut lowest: Vec<(String, String)> = lowest
+        .into_iter()
+        .map(|(blocker, blocked)| (blocker.to_string(), blocked.to_string()))
+        .collect();
+    lowest.sort();
+    assert_eq!(kept, lowest);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_calendar_lists_workspace_holidays_within_scale() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    for date in [
+        "2026-08-29",
+        "2026-08-30",
+        "2026-09-02",
+        "2026-10-03",
+        "2026-10-04",
+    ] {
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/holidays"),
+            Some(json!({"date": date})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    // Another tenant's holiday inside the range must not leak in.
+    let other_ws = insert_other_workspace(&admin).await;
+    sqlx::query(
+        "INSERT INTO fvoci.workspace_holidays (workspace_id, date) VALUES ($1, '2026-09-10')",
+    )
+    .bind(other_ws)
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    // Sunday weeks: the scale is 2026-08-30..=2026-10-03, both ends included.
+    let sunday = get_task_layout(
+        app.clone(),
+        ws,
+        &project_id,
+        "year=2026&month=9&weekStartsOn=0",
+        &cookie,
+    )
+    .await;
+    assert_eq!(sunday["scale"]["start"], "2026-08-30");
+    assert_eq!(sunday["scale"]["end"], "2026-10-03");
+    assert_eq!(
+        sunday["calendar"],
+        json!({"weekend": [0, 6], "holidays": ["2026-08-30", "2026-09-02", "2026-10-03"]})
+    );
+
+    // Monday weeks shift the window to 2026-08-31..=2026-10-04.
+    let monday = get_task_layout(
+        app.clone(),
+        ws,
+        &project_id,
+        "year=2026&month=9&weekStartsOn=1",
+        &cookie,
+    )
+    .await;
+    assert_eq!(monday["scale"]["start"], "2026-08-31");
+    assert_eq!(monday["scale"]["end"], "2026-10-04");
+    assert_eq!(
+        monday["calendar"]["holidays"],
+        json!(["2026-09-02", "2026-10-03", "2026-10-04"])
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// The Gantt reschedules through PATCH /tasks/{id}, sending the layout item's
+/// dates back as `expectedDates`. Pins the rules it relies on: only the sent
+/// date fields change, a sent `dueAt` keeps the time of day the client chose,
+/// a stale snapshot is 409 and a dependency contradiction is 400, and neither
+/// refusal writes anything.
+#[tokio::test]
+async fn task_patch_gantt_reschedule_through_expected_dates() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let month = "year=2026&month=9";
+    let expected_of = |item: &serde_json::Value| {
+        json!({
+            "startDate": item["startDate"],
+            "dueDate": item["dueDate"],
+            "dueAt": item["dueAt"],
+        })
+    };
+    let due_only = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Due only", "dueDate": "2026-09-10"}),
+    )
+    .await;
+    let due_only = due_only["id"].as_str().unwrap().to_string();
+    let timed = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Timed", "startDate": "2026-09-14"}),
+    )
+    .await;
+    let timed = timed["id"].as_str().unwrap().to_string();
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &timed,
+        json!({"dueAt": "2026-09-15T09:30:00Z"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+
+    // (a) Moving a due-date-only bar by three days writes only dueDate.
+    let due_item = layout_item(&before, &due_only);
+    assert_eq!(due_item["inferred"], "from-due");
+    let stale_due_only = expected_of(due_item);
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &due_only,
+        json!({"dueDate": "2026-09-13", "expectedDates": stale_due_only}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["startDate"], serde_json::Value::Null);
+    assert_eq!(body["dueDate"], "2026-09-13");
+    assert_eq!(body["dueAt"], serde_json::Value::Null);
+
+    // (b) Moving a start + dueAt bar by three days: the client shifts dueAt by
+    // whole days, and the stored value keeps 09:30 UTC.
+    let timed_item = layout_item(&before, &timed);
+    assert_eq!(timed_item["dueAt"], "2026-09-15T09:30:00.000Z");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &timed,
+        json!({
+            "startDate": "2026-09-17",
+            "dueAt": "2026-09-18T09:30:00.000Z",
+            "expectedDates": expected_of(timed_item),
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["dueDate"], serde_json::Value::Null);
+
+    let after = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let due_item = layout_item(&after, &due_only);
+    assert_eq!(due_item["startDate"], serde_json::Value::Null);
+    assert_eq!(due_item["dueDate"], "2026-09-13");
+    assert_eq!(due_item["dueAt"], serde_json::Value::Null);
+    assert_eq!(due_item["start"], "2026-09-13");
+    assert_eq!(due_item["end"], "2026-09-13");
+    let timed_item = layout_item(&after, &timed);
+    assert_eq!(timed_item["startDate"], "2026-09-17");
+    assert_eq!(timed_item["dueDate"], serde_json::Value::Null);
+    assert_eq!(timed_item["dueAt"], "2026-09-18T09:30:00.000Z");
+    assert_eq!(timed_item["start"], "2026-09-17");
+    assert_eq!(timed_item["end"], "2026-09-18");
+
+    // (c) A stale snapshot is refused and writes nothing.
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &due_only,
+        json!({"dueDate": "2026-09-20", "expectedDates": stale_due_only}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "document_version_mismatch");
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+
+    // (d) Moving the blocked task before its blocker's due date is refused
+    // even with a current snapshot, and writes nothing.
+    let blocker = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Blocker", "startDate": "2026-09-01", "dueDate": "2026-09-10"}),
+    )
+    .await;
+    let blocker = blocker["id"].as_str().unwrap();
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{blocker}/dependencies"),
+        Some(json!({"blockedId": timed, "type": "FS"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &timed,
+        json!({
+            "startDate": "2026-09-08",
+            "dueAt": "2026-09-09T09:30:00.000Z",
+            "expectedDates": expected_of(timed_item),
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "dependency_contradiction");
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+    let unchanged = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let timed_item = layout_item(&unchanged, &timed);
+    assert_eq!(timed_item["startDate"], "2026-09-17");
+    assert_eq!(timed_item["dueAt"], "2026-09-18T09:30:00.000Z");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// PATCH compares `expectedDates.dueAt` with the stored value to the
+/// millisecond. Browsers hold `dueAt` in a JS `Date`, and the layout and
+/// collection rows render it with milliseconds, so a `dueAt` an API client set
+/// with sub-millisecond digits must not turn every reschedule into a 409; a
+/// different millisecond is still a stale snapshot and writes nothing.
+#[tokio::test]
+async fn task_patch_expected_due_at_compares_to_the_millisecond() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let month = "year=2026&month=9";
+    let task = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "Micros", "startDate": "2026-09-14"}),
+    )
+    .await;
+    let id = task["id"].as_str().unwrap().to_string();
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({"dueAt": "2026-09-15T09:30:00.123456Z"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let expected =
+        |due_at: &str| json!({"startDate": "2026-09-14", "dueDate": null, "dueAt": due_at});
+
+    // A neighbouring millisecond is a stale snapshot and writes nothing.
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    for stale in ["2026-09-15T09:30:00.122Z", "2026-09-15T09:30:00.124Z"] {
+        let (status, body) = patch_task(
+            app.clone(),
+            ws,
+            &id,
+            json!({"title": "Stale", "expectedDates": expected(stale)}),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}: {body}");
+        assert_eq!(body["code"], "document_version_mismatch");
+    }
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+
+    // The same millisecond, as a browser sends it, matches.
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({
+            "dueAt": "2026-09-16T09:30:00.123456Z",
+            "expectedDates": expected("2026-09-15T09:30:00.123Z"),
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The layout keeps its millisecond form, and sending it back matches.
+    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let item = layout_item(&layout, &id);
+    assert_eq!(item["dueAt"], "2026-09-16T09:30:00.123Z");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({
+            "dueAt": "2026-09-17T09:30:00.123Z",
+            "expectedDates": {
+                "startDate": item["startDate"],
+                "dueDate": item["dueDate"],
+                "dueAt": item["dueAt"],
+            },
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    assert_eq!(
+        layout_item(&layout, &id)["dueAt"],
+        "2026-09-17T09:30:00.123Z"
+    );
+
+    // Finer digits of .5 ms or more are truncated, not rounded, on both sides:
+    // a stored .123756 is .123 in the layout and in the comparison, and .124
+    // is a stale snapshot.
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({"dueAt": "2026-09-18T09:30:00.123756Z"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (pool, task_id) = (&admin, id.as_str());
+    let stored_due_at = move || async move {
+        sqlx::query_scalar::<_, String>(
+            r#"SELECT to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US')
+               FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2::uuid"#,
+        )
+        .bind(ws)
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(stored_due_at().await, "2026-09-18T09:30:00.123756");
+    let events = count_rows(&admin, "events").await;
+    let activity = count_rows(&admin, "task_activity").await;
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({"title": "Stale", "expectedDates": expected("2026-09-18T09:30:00.124Z")}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "document_version_mismatch");
+    assert_eq!(count_rows(&admin, "events").await, events);
+    assert_eq!(count_rows(&admin, "task_activity").await, activity);
+
+    // Neither match below changes dueAt, so both compare with .123756.
+    let layout = get_task_layout(app.clone(), ws, &project_id, month, &cookie).await;
+    let item = layout_item(&layout, &id);
+    assert_eq!(item["dueAt"], "2026-09-18T09:30:00.123Z");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({
+            "title": "Layout",
+            "expectedDates": {
+                "startDate": item["startDate"],
+                "dueDate": item["dueDate"],
+                "dueAt": item["dueAt"],
+            },
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = patch_task(
+        app.clone(),
+        ws,
+        &id,
+        json!({"title": "Browser", "expectedDates": expected("2026-09-18T09:30:00.123Z")}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(stored_due_at().await, "2026-09-18T09:30:00.123756");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 async fn wait_for_hub_active(hub: &StreamHub, expected: usize, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     while Instant::now() < deadline {
@@ -4319,24 +5034,54 @@ async fn task_stream_notifies_other_viewer_on_task_meta_date_and_status_patch() 
     harness.cleanup().await;
 }
 
-async fn poll_task_updates_until(
+/// The credential a direct poll checks, as the stream producer does.
+#[derive(Clone, Copy)]
+struct StreamCredential {
+    user_id: Uuid,
+    session_id: Uuid,
+}
+
+async fn stream_credential(admin: &sqlx::PgPool, user_id: Uuid) -> StreamCredential {
+    StreamCredential {
+        user_id,
+        session_id: session_id_for_user(admin, user_id).await,
+    }
+}
+
+/// One producer poll with a live credential.
+async fn poll_task_page(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     project_id: Uuid,
-    cursor: &fvoci_server::streams::EventCursor,
-    min: usize,
+    credential: StreamCredential,
+    cursor: &EventCursor,
+    limit: i32,
+) -> EventPage {
+    poll_task_events(
+        pool,
+        workspace_id,
+        project_id,
+        credential.user_id,
+        credential.session_id,
+        cursor,
+        limit,
+    )
+    .await
+    .expect("poll")
+    .expect("live credential")
+}
+
+async fn poll_task_rows(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    credential: StreamCredential,
+    cursor: &EventCursor,
+    limit: i32,
 ) -> Vec<fvoci_server::streams::StreamEventRow> {
-    let mut rows = Vec::new();
-    for _ in 0..30 {
-        rows = poll_task_events(pool, workspace_id, project_id, cursor, 100)
-            .await
-            .expect("poll");
-        if rows.len() >= min {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    rows
+    poll_task_page(pool, workspace_id, project_id, credential, cursor, limit)
+        .await
+        .rows
 }
 
 #[tokio::test]
@@ -4368,9 +5113,7 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
         .0
         .clone();
     let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
-    let cursor = initial_cursor(&app_pool, workspace_id)
-        .await
-        .expect("cursor");
+    let cursor = initial_cursor(&app_pool).await.expect("cursor");
     let events_before = count_rows(&admin, "events").await;
 
     // Denied, conflicting and no-op patches must not manufacture events.
@@ -4443,7 +5186,20 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let rows = poll_task_updates_until(&app_pool, workspace_id, project_a_id, &cursor, 4).await;
+    // Wait for the updates to pass the xmin gate, then poll once. The cursor is
+    // itself xmin-bounded, so `task.created` can land in the window when another
+    // test pinned xmin as it was taken: count updates only.
+    settle_committed_events(&admin).await;
+    let credential = stream_credential(&admin, owner_id).await;
+    let rows = poll_task_rows(
+        &app_pool,
+        workspace_id,
+        project_a_id,
+        credential,
+        &cursor,
+        100,
+    )
+    .await;
     let updates: Vec<&serde_json::Value> = rows
         .iter()
         .filter(|r| r.verb == "task.updated")
@@ -4461,10 +5217,114 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
     assert_eq!(updates[3]["from"], next_status);
     assert_eq!(updates[3]["to"], current_status);
 
-    let foreign = poll_task_events(&app_pool, workspace_id, project_b, &cursor, 100)
-        .await
-        .expect("poll other project");
+    let foreign =
+        poll_task_rows(&app_pool, workspace_id, project_b, credential, &cursor, 100).await;
     assert!(foreign.is_empty(), "{foreign:?}");
+
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_update_poll_waits_for_update_held_behind_xmin() {
+    // An update committed above the cluster-wide xmin stays hidden until xmin
+    // passes it (CI once saw `task.created` + three updates at that point).
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "XMH", "workspace").await;
+    let project = lab["id"].as_str().unwrap().to_string();
+    let project_id = Uuid::parse_str(&project).unwrap();
+    let task = create_task_with_title(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        &project,
+        json!({"title": "held"}),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap();
+    let current_status = task["statusId"].as_str().unwrap().to_string();
+    let statuses = workflow_status_ids(app.clone(), &cookie, workspace_id, &project).await;
+    let next_status = statuses
+        .iter()
+        .find(|(id, _)| *id != current_status)
+        .unwrap()
+        .0
+        .clone();
+    for body in [
+        json!({"dueDate": "2026-05-01"}),
+        json!({"statusId": next_status}),
+        json!({"assigneeIds": [owner_id.to_string()]}),
+    ] {
+        let (status, _) =
+            patch_task(app.clone(), workspace_id, task_id, body.clone(), &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    // Settle everything committed so far, then hold an xid so the move
+    // commits above xmin until the hold ends.
+    settle_committed_events(&admin).await;
+    let mut hold = admin.begin().await.expect("hold tx");
+    sqlx::query("SELECT pg_current_xact_id()")
+        .execute(&mut *hold)
+        .await
+        .expect("hold xid");
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move"),
+        Some(json!({"statusId": current_status})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let cursor = fvoci_server::streams::EventCursor::default();
+    let credential = stream_credential(&admin, owner_id).await;
+    let pending = poll_task_rows(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &cursor,
+        100,
+    )
+    .await;
+    let verbs: Vec<&str> = pending.iter().map(|r| r.verb.as_str()).collect();
+    assert_eq!(
+        verbs,
+        [
+            "task.created",
+            "task.updated",
+            "task.updated",
+            "task.updated"
+        ],
+        "move must stay hidden while the hold is open: {pending:?}"
+    );
+
+    hold.commit().await.expect("release hold");
+    settle_committed_events(&admin).await;
+    let rows = poll_task_rows(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &cursor,
+        100,
+    )
+    .await;
+    let updates: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| r.verb == "task.updated")
+        .map(|r| &r.payload)
+        .collect();
+    assert_eq!(updates.len(), 4, "{rows:?}");
+    assert_eq!(updates[3]["from"], next_status);
+    assert_eq!(updates[3]["to"], current_status);
+    assert_eq!(updates[3]["projectId"], project);
 
     app_pool.close().await;
     admin.close().await;
@@ -4710,6 +5570,44 @@ async fn task_stream_slow_reader_does_not_block_fast_reader() {
     harness.cleanup().await;
 }
 
+/// Wait (bounded, read-only) until every transaction started so far has ended,
+/// so committed events pass the stream's `xact < snapshot xmin` filter. xmin is
+/// cluster-wide; on timeout, report the oldest holders.
+async fn settle_committed_events(admin: &sqlx::PgPool) {
+    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(admin)
+        .await
+        .expect("current xid");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !sqlx::query_scalar::<_, bool>(
+        "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8",
+    )
+    .bind(&horizon)
+    .fetch_one(admin)
+    .await
+    .expect("snapshot xmin")
+    {
+        if Instant::now() >= deadline {
+            let xmin: String =
+                sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot())::text")
+                    .fetch_one(admin)
+                    .await
+                    .expect("snapshot xmin");
+            let holders: Vec<XidHolder> = sqlx::query_as(
+                "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
+                     FROM pg_stat_activity \
+                     WHERE backend_xid IS NOT NULL OR backend_xmin IS NOT NULL \
+                     ORDER BY age(COALESCE(backend_xid, backend_xmin)) DESC LIMIT 5",
+            )
+            .fetch_all(admin)
+            .await
+            .expect("xmin holders");
+            panic!("events never settled: xmin {xmin} <= {horizon}; oldest holders {holders:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     let harness = TestDb::bootstrap().await;
@@ -4727,10 +5625,12 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let task_id = task["id"].as_str().unwrap();
+    // Precondition: the baseline cursor must sit past `task.created`. Both the
+    // cursor and poll read only settled events (xact < cluster-wide xmin), so
+    // an unsettled create would reappear in the poll below as a committed row.
+    settle_committed_events(&admin).await;
     let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
-    let cursor = initial_cursor(&app_pool, workspace_id)
-        .await
-        .expect("cursor");
+    let cursor = initial_cursor(&app_pool).await.expect("cursor");
     let mut tx = admin.begin().await.expect("tx");
     sqlx::query("SELECT set_config('fvoci.workspace_id', $1::text, true)")
         .bind(workspace_id)
@@ -4752,26 +5652,262 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     .execute(&mut *tx)
     .await
     .expect("insert uncommitted");
-    let pending = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 10)
-        .await
-        .expect("poll");
+    let credential = stream_credential(&admin, owner_id).await;
+    let pending =
+        poll_task_rows(&app_pool, workspace_id, project_id, credential, &cursor, 10).await;
     assert!(
         pending.is_empty(),
-        "uncommitted event must not appear in poll snapshot"
+        "uncommitted event must not appear in poll snapshot \
+         (uncommitted {event_id}, cursor {cursor:?}): {pending:?}"
     );
     tx.commit().await.expect("commit");
+    settle_committed_events(&admin).await;
     let mut seen = false;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let rows = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 10)
-            .await
-            .expect("poll");
+        let rows =
+            poll_task_rows(&app_pool, workspace_id, project_id, credential, &cursor, 10).await;
         if rows.iter().any(|r| r.verb == "task.updated") {
             seen = true;
             break;
         }
     }
     assert!(seen, "committed event should become visible to poll");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+fn cursor_of(row: &fvoci_server::streams::StreamEventRow) -> EventCursor {
+    EventCursor {
+        xact: row.xact.clone(),
+        seq: row.seq,
+    }
+}
+
+/// Workspace events after `cursor`, as the admin sees them.
+async fn events_after(admin: &sqlx::PgPool, workspace_id: Uuid, cursor: &EventCursor) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.events WHERE workspace_id = $1 AND (xact, seq) > ($2::xid8, $3)",
+    )
+    .bind(workspace_id)
+    .bind(&cursor.xact)
+    .bind(cursor.seq)
+    .fetch_one(admin)
+    .await
+    .expect("count events")
+}
+
+/// Inserts `count` events in one committed transaction: `task.created` rows
+/// of `task_project`, or, with `None`, collab updates that no stream matches.
+async fn insert_workspace_events(
+    admin: &sqlx::PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    count: i32,
+    task_project: Option<Uuid>,
+) {
+    let (verb, target_type) = match task_project {
+        Some(_) => ("task.created", "task"),
+        None => ("document.collab_update_appended", "document"),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        SELECT gen_random_uuid(), $1, $2, $3, gen_random_uuid(), $4,
+               CASE WHEN $6::uuid IS NULL THEN '{}'::jsonb
+                    ELSE jsonb_build_object('taskId', gen_random_uuid()::text, 'projectId', $6::text)
+               END,
+               'web'
+        FROM generate_series(1, $5)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(verb)
+    .bind(target_type)
+    .bind(actor_user_id)
+    .bind(count)
+    .bind(task_project)
+    .execute(admin)
+    .await
+    .expect("insert events");
+}
+
+/// `next` may jump to the settled horizon but never past an event whose
+/// transaction is still open: polling from it after the commit returns it.
+#[tokio::test]
+async fn task_stream_next_cursor_keeps_an_in_flight_event() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "SAF", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    settle_committed_events(&admin).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let credential = stream_credential(&admin, owner_id).await;
+    let start = initial_cursor(&app_pool).await.expect("cursor");
+    let task_id = Uuid::now_v7().to_string();
+    let mut tx = admin.begin().await.expect("tx");
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        VALUES ($1, $2, 'task.updated', 'task', gen_random_uuid(), $3, $4::jsonb, 'web')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(owner_id)
+    .bind(json!({"taskId": task_id, "projectId": project_id.to_string()}))
+    .execute(&mut *tx)
+    .await
+    .expect("insert uncommitted");
+    let in_flight: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("event xid");
+    // A later transaction commits while the event's is still open, so the
+    // newest completed xid is past the open one.
+    sqlx::query("SELECT pg_current_xact_id()")
+        .execute(&admin)
+        .await
+        .expect("later xid");
+    let held = poll_task_page(&app_pool, workspace_id, project_id, credential, &start, 10).await;
+    assert!(held.rows.is_empty(), "{:?}", held.rows);
+    assert!(
+        held.next.xact.parse::<u64>().expect("xid8") <= in_flight.parse::<u64>().expect("xid8"),
+        "next {:?} passed the open transaction {in_flight}",
+        held.next
+    );
+    tx.commit().await.expect("commit");
+    settle_committed_events(&admin).await;
+    let page = poll_task_page(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &held.next,
+        10,
+    )
+    .await;
+    assert!(
+        page.rows.iter().any(|row| row.payload["taskId"] == task_id),
+        "event committed after the poll must follow its next cursor {:?}: {:?}",
+        held.next,
+        page.rows
+    );
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Polls that match nothing still advance, so no poll rescans events it has
+/// already passed (the access stream matches almost nothing).
+#[tokio::test]
+async fn stream_polls_advance_past_non_matching_events() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "PRG", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    settle_committed_events(&admin).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let credential = stream_credential(&admin, owner_id).await;
+    let start = initial_cursor(&app_pool).await.expect("cursor");
+    insert_workspace_events(&admin, workspace_id, owner_id, 2_000, None).await;
+    settle_committed_events(&admin).await;
+    assert_eq!(events_after(&admin, workspace_id, &start).await, 2_000);
+
+    let page = poll_task_page(&app_pool, workspace_id, project_id, credential, &start, 50).await;
+    assert!(page.rows.is_empty(), "{:?}", page.rows);
+    assert_eq!(
+        events_after(&admin, workspace_id, &page.next).await,
+        0,
+        "task stream next cursor {:?}",
+        page.next
+    );
+    let next = poll_access_events(
+        &app_pool,
+        workspace_id,
+        credential.user_id,
+        credential.session_id,
+        &start,
+    )
+    .await
+    .expect("access poll")
+    .expect("still a member");
+    assert_eq!(
+        events_after(&admin, workspace_id, &next).await,
+        0,
+        "access stream next cursor {next:?}"
+    );
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// A full page continues from its last row, so a burst larger than the
+/// limit is read in order across polls. The limit is clamped to 100: a
+/// larger request must not jump past the rows it did not return.
+#[tokio::test]
+async fn task_stream_full_page_continues_from_its_last_row() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LIM", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    settle_committed_events(&admin).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let credential = stream_credential(&admin, owner_id).await;
+    let start = initial_cursor(&app_pool).await.expect("cursor");
+    insert_workspace_events(&admin, workspace_id, owner_id, 25, Some(project_id)).await;
+    settle_committed_events(&admin).await;
+
+    let mut cursor = start;
+    let mut seen = Vec::new();
+    for expected in [10, 10, 5] {
+        let page =
+            poll_task_page(&app_pool, workspace_id, project_id, credential, &cursor, 10).await;
+        assert_eq!(page.rows.len(), expected, "{:?}", page.rows);
+        if expected == 10 {
+            assert_eq!(
+                page.next,
+                cursor_of(&page.rows[9]),
+                "a full page ends at its 10th row"
+            );
+        }
+        seen.extend(page.rows.iter().map(cursor_of));
+        cursor = page.next;
+    }
+    assert_eq!(events_after(&admin, workspace_id, &cursor).await, 0);
+    let order: Vec<(u64, i64)> = seen
+        .iter()
+        .map(|c| (c.xact.parse().expect("xid8"), c.seq))
+        .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+
+    insert_workspace_events(&admin, workspace_id, owner_id, 105, Some(project_id)).await;
+    settle_committed_events(&admin).await;
+    let clamped = poll_task_page(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &cursor,
+        1_000,
+    )
+    .await;
+    assert_eq!(clamped.rows.len(), 100);
+    assert_eq!(clamped.next, cursor_of(&clamped.rows[99]));
+    let rest = poll_task_page(
+        &app_pool,
+        workspace_id,
+        project_id,
+        credential,
+        &clamped.next,
+        1_000,
+    )
+    .await;
+    assert_eq!(rest.rows.len(), 5);
+    app_pool.close().await;
     admin.close().await;
     harness.cleanup().await;
 }
@@ -4859,6 +5995,253 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
         "enqueue-before-revoke hints must not reach the response body after authorization loss"
     );
     let _ = owner_id;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Opens an SSE stream with one credential header and returns once the server
+/// answered: `Some(reader)` for an admitted stream, where `reader` finishes when
+/// the server ends the body; `None` for any other status.
+async fn sse_admit(
+    app: axum::Router,
+    path: &str,
+    credential: (&str, String),
+) -> Option<tokio::task::JoinHandle<()>> {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(credential.0, credential.1)
+        .header("origin", "http://localhost")
+        .body(Body::empty())
+        .expect("request");
+    request.extensions_mut().insert(ConnectInfo(test_peer()));
+    let response = app.oneshot(request).await.expect("sse response");
+    if response.status() != StatusCode::OK {
+        return None;
+    }
+    let mut body = response.into_body().into_data_stream();
+    Some(tokio::spawn(
+        async move { while body.next().await.is_some() {} },
+    ))
+}
+
+fn session_cookie_header(cookie: &str) -> (&'static str, String) {
+    ("cookie", format!("fvoci_session={cookie}"))
+}
+
+/// Inserts a committed `task.created` event for `project_id` as the admin
+/// (no project lock), the shape `record_task_event_and_audit` writes.
+async fn insert_task_created_event(
+    admin: &sqlx::PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+) -> Uuid {
+    let task_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        VALUES ($1, $2, 'task.created', 'task', $3, $4, $5::jsonb, 'web')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(actor_user_id)
+    .bind(json!({"taskId": task_id.to_string(), "projectId": project_id.to_string()}))
+    .execute(admin)
+    .await
+    .expect("insert task event");
+    task_id
+}
+
+/// Stream admission and per-hint delivery read the project without a row
+/// lock, so a writer holding the project row (here: every row, since any row
+/// lock needs ROW SHARE and EXCLUSIVE refuses it) cannot stall them. The table
+/// lock takes no xid, so the inserted event still settles past the xmin gate.
+#[tokio::test]
+async fn task_stream_admits_and_delivers_while_project_rows_are_locked() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "NRL", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    let mut hold = admin.begin().await.expect("hold tx");
+    sqlx::query("LOCK TABLE fvoci.projects IN EXCLUSIVE MODE")
+        .execute(&mut *hold)
+        .await
+        .expect("lock projects");
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let (open_tx, open_rx) = tokio::sync::oneshot::channel();
+    let listener = tokio::spawn(sse_listen(
+        app.clone(),
+        path,
+        cookie.clone(),
+        Some(b"event: open".to_vec()),
+        Some(open_tx),
+        Some(b"event: task".to_vec()),
+        Duration::from_secs(20),
+    ));
+    assert!(
+        timeout(Duration::from_secs(5), open_rx)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .is_some(),
+        "stream admission and the open frame must not wait for a project row lock"
+    );
+    let task_id = insert_task_created_event(&admin, workspace_id, project_id, owner_id).await;
+    assert!(
+        listener.await.expect("listener"),
+        "hint for {task_id} must be delivered while the project rows are locked"
+    );
+    hold.rollback().await.expect("release");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_access_stream_closes_when_workspace_trashed() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "trash-member").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let reader = sse_admit(app.clone(), &path, session_cookie_header(&member.cookie))
+        .await
+        .expect("member admitted to the access stream");
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{workspace_id}"),
+        Some(json!({"confirmSlug": "acme"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "a member's access stream must end once the workspace is trashed"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_access_stream_closes_when_member_role_changed() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "role-member").await;
+    let bystander = add_workspace_user(&admin, workspace_id, "member", "role-bystander").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let reader = sse_admit(app.clone(), &path, session_cookie_header(&member.cookie))
+        .await
+        .expect("member admitted to the access stream");
+    let bystander_reader = sse_admit(app.clone(), &path, session_cookie_header(&bystander.cookie))
+        .await
+        .expect("bystander admitted to the access stream");
+    let (status, body) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/members/{}",
+            member.user_id
+        ),
+        Some(json!({"role": "admin"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "the member's access stream must end after its role changed"
+    );
+    assert!(
+        !bystander_reader.is_finished(),
+        "another member's role change must not end this member's stream"
+    );
+    bystander_reader.abort();
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_access_stream_closes_when_user_suspended() {
+    let harness = TestDb::bootstrap().await;
+    let (app, admin_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "suspend-member").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let reader = sse_admit(app.clone(), &path, session_cookie_header(&member.cookie))
+        .await
+        .expect("member admitted to the access stream");
+    let (status, body) = json_request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/admin/users",
+        Some(json!({"userId": member.user_id, "suspended": true})),
+        Some(&admin_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "a suspended user's access stream must end"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// api_tokens has RLS: the per-tick credential check must run under the
+/// workspace tenant or a live token reads as dead (and a dead one as live).
+#[tokio::test]
+async fn task_stream_with_bearer_token_closes_when_token_deleted() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "BTK", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "stream", "scopes": ["tasks.read"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{token}");
+    let secret = token["token"].as_str().expect("secret").to_string();
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let reader = sse_admit(
+        app.clone(),
+        &path,
+        ("authorization", format!("Bearer {secret}")),
+    )
+    .await
+    .expect("bearer admitted to the task stream");
+    // A live token keeps the stream open across several ticks.
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    assert!(
+        !reader.is_finished(),
+        "a live token's stream must stay open"
+    );
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/api-tokens/{}",
+            token["id"].as_str().unwrap()
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        timeout(Duration::from_secs(10), reader).await.is_ok(),
+        "the stream must end once its bearer token is deleted"
+    );
     admin.close().await;
     harness.cleanup().await;
 }

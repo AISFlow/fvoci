@@ -2044,3 +2044,151 @@ async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+async fn grant_group_on_document(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    group_id: Uuid,
+    document_id: &str,
+    role: &str,
+) {
+    sqlx::query(
+        "INSERT INTO fvoci.document_members (id, workspace_id, document_id, group_id, role)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(Uuid::parse_str(document_id).unwrap())
+    .bind(group_id)
+    .bind(role)
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+/// A wiki grant is not inherited, so edit on a page does not mean view on its
+/// subpages. A public link serves the whole live subtree: creating one needs
+/// view on every document it would expose.
+#[tokio::test]
+async fn wiki_share_needs_view_on_every_exposed_document() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let guest = add_workspace_user(&admin, ws, "guest", "subtree-guest").await;
+    let parent = create_wiki_doc(&app, &cookie, ws, None, "공유 상위").await;
+    let child = create_wiki_doc(&app, &cookie, ws, Some(&parent), "비공개 하위").await;
+    let group_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.groups (id, workspace_id, name) VALUES ($1, $2, 'guests')")
+        .bind(group_id)
+        .bind(ws)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.group_members (workspace_id, group_id, user_id) VALUES ($1, $2, $3)",
+    )
+    .bind(ws)
+    .bind(group_id)
+    .bind(guest.user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    grant_group_on_document(&admin, ws, group_id, &parent, "member").await;
+    // The guest edits the parent but cannot open the child.
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/documents/{child}"),
+        None,
+        Some(&guest.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let links = |h: &PgPool| {
+        let admin = h.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.share_links")
+                .fetch_one(&admin)
+                .await
+                .unwrap()
+        }
+    };
+
+    // Both create routes refuse exactly as for a page the guest may only view,
+    // and nothing is stored.
+    let viewed = create_wiki_doc(&app, &cookie, ws, None, "열람 전용").await;
+    grant_group_on_document(&admin, ws, group_id, &viewed, "viewer").await;
+    let (status, view_only) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/documents/{viewed}/share-links"),
+        Some(json!({})),
+        Some(&guest.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{view_only}");
+    let refused = |label: &'static str| {
+        let app = app.clone();
+        let cookie = guest.cookie.clone();
+        let parent = parent.clone();
+        let view_only = view_only.clone();
+        async move {
+            for (path, body) in [
+                (
+                    format!("/api/v1/workspaces/{ws}/documents/{parent}/share-links"),
+                    json!({}),
+                ),
+                (
+                    format!("/api/v1/workspaces/{ws}/share-links"),
+                    json!({"documentId": parent}),
+                ),
+            ] {
+                let (status, body) =
+                    json_request(app.clone(), "POST", &path, Some(body), Some(&cookie)).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{label} {path}: {body}");
+                assert_eq!(body, view_only, "{label}");
+            }
+        }
+    };
+    refused("hidden child").await;
+    assert_eq!(links(&admin).await, 0);
+
+    // A trashed subpage is not served, so it does not block the link.
+    let hidden = create_wiki_doc(&app, &cookie, ws, Some(&parent), "휴지통 하위").await;
+    sqlx::query("UPDATE fvoci.documents SET deleted_at = now() WHERE id = $1")
+        .bind(Uuid::parse_str(&hidden).unwrap())
+        .execute(&admin)
+        .await
+        .unwrap();
+    // View on the child is not enough while a page below it stays hidden:
+    // every depth of the subtree is checked, not only direct subpages.
+    grant_group_on_document(&admin, ws, group_id, &child, "viewer").await;
+    let grandchild = create_wiki_doc(&app, &cookie, ws, Some(&child), "비공개 손자").await;
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/documents/{grandchild}"),
+        None,
+        Some(&guest.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    refused("hidden grandchild").await;
+    assert_eq!(links(&admin).await, 0);
+    // With view on every live page the link is allowed and serves all three.
+    grant_group_on_document(&admin, ws, group_id, &grandchild, "viewer").await;
+    let (_, token) = share_document(&app, &guest.cookie, ws, &parent).await;
+    let (status, tree) = public_json(app.clone(), &format!("/api/v1/share/{token}/tree")).await;
+    assert_eq!(status, StatusCode::OK, "{tree}");
+    let mut tree_ids = ids(&tree);
+    tree_ids.sort();
+    let mut expected = vec![parent.clone(), child.clone(), grandchild.clone()];
+    expected.sort();
+    assert_eq!(tree_ids, expected);
+    // Members hold base edit on every wiki page and are unaffected.
+    let (_, _) = share_document(&app, &cookie, ws, &parent).await;
+    assert_eq!(links(&admin).await, 2);
+
+    admin.close().await;
+    harness.cleanup().await;
+}

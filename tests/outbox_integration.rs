@@ -1,8 +1,13 @@
 #![cfg(feature = "db-tests")]
 
+#[allow(dead_code)]
+#[path = "support/project_harness.rs"]
+mod project_harness;
+
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1398,8 +1403,8 @@ async fn xid_epoch_mismatch_refuses_advance_and_recover_rebases() {
         .1
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
 
-    app.close().await;
-    admin.close().await;
+    project_harness::close_pool(app).await;
+    project_harness::close_pool(admin).await;
     wait_for_client_backends_gone(&harness.admin_url, &harness.db_name).await;
     let report = recover_outbox(
         &harness.admin_url,
@@ -2144,5 +2149,1271 @@ async fn cursor_never_passes_an_undelivered_event_ahead_of_processed_ones() {
     );
     app.close().await;
     admin.close().await;
+    harness.cleanup().await;
+}
+
+/// `fvoci-server healthcheck` with only `FVOCI_BIND` set.
+fn run_healthcheck(bind: std::net::SocketAddr) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_fvoci-server"))
+        .env_clear()
+        .env("FVOCI_BIND", bind.to_string())
+        .arg("healthcheck")
+        .output()
+        .expect("run healthcheck")
+}
+
+fn metric_sample<'a>(body: &'a str, name: &str) -> &'a str {
+    body.lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("{name} missing:\n{body}"))
+}
+
+/// A finite sample truncated to whole units; NaN (unknown) panics.
+fn metric_value(body: &str, name: &str) -> i64 {
+    let value: f64 = metric_sample(body, name).parse().expect("numeric sample");
+    assert!(value.is_finite(), "{name} is {value}:\n{body}");
+    value as i64
+}
+
+/// Probes on the real app role over TCP: `/ready` 200 and healthcheck exit
+/// 0; `/metrics` reports the oldest undelivered event age of a registered
+/// consumer; once PostgreSQL is unreachable `/ready` answers 503, the CLI
+/// exits 1 and `/metrics` still answers, with the outbox gauges unknown
+/// (NaN), the failure counted and the last success time kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probes_report_real_database_and_outbox_lag() {
+    use fvoci_server::http::probes::{MetricsAllowList, Observability, ObservabilitySettings};
+
+    let harness = TestDb::bootstrap().await;
+    let state = project_harness::app_state(&harness.app_url).await;
+    let app_pool = state.auth.db.pool.clone();
+    let consumer = "probe-lag";
+    ensure_consumer(&app_pool, consumer).await.expect("ensure");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    sqlx::query(
+        "INSERT INTO fvoci.events (id, verb, payload, channel, created_at) \
+         VALUES ($1, 'probe', '{}', 'system', now() - interval '2 hours')",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&admin)
+    .await
+    .expect("old event");
+
+    let router = fvoci_server::http::router_with_observability(
+        state,
+        None,
+        Arc::new(fvoci_server::integrations::Integrations::disabled()),
+        Arc::new(fvoci_server::identity::Identity::disabled(
+            "http://localhost",
+        )),
+        Arc::new(Observability::new(ObservabilitySettings {
+            allow: MetricsAllowList::parse(Some("127.0.0.1/32")).unwrap(),
+            outbox_consumers: vec![consumer.to_string(), "probe-absent".to_string()],
+            refresh_interval: Duration::ZERO,
+        })),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let get = |path: &'static str| {
+        let client = client.clone();
+        async move {
+            let response = client
+                .get(format!("http://{addr}{path}"))
+                .send()
+                .await
+                .expect("request");
+            let status = response.status().as_u16();
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap().to_string())
+                .unwrap_or_default();
+            (status, content_type, response.text().await.unwrap())
+        }
+    };
+
+    assert_eq!(get("/ready").await.0, 200);
+    assert_eq!(get("/ready").await.2, r#"{"ok":true}"#);
+    let out = tokio::task::spawn_blocking(move || run_healthcheck(addr))
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+
+    // The lag has no snapshot-xmin filter, so this is normally the first
+    // scrape; the bounded poll only guards the refresh.
+    let deadline = std::time::Instant::now() + DISPATCHER_WAIT;
+    let (body, lag) = loop {
+        let (status, content_type, body) = get("/metrics").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            content_type.starts_with("application/openmetrics-text"),
+            "{content_type}"
+        );
+        let lag = metric_value(&body, "fvoci_outbox_lag_seconds");
+        if lag > 0 || std::time::Instant::now() > deadline {
+            break (body, lag);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!((7_190..7_400).contains(&lag), "lag {lag}\n{body}");
+    assert_eq!(
+        metric_value(&body, "fvoci_db_metrics_refresh_failures_total"),
+        0,
+        "{body}"
+    );
+    let last_success = metric_value(&body, "fvoci_db_metrics_last_success_timestamp_seconds");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert!((now - 60..=now).contains(&last_success), "{last_success}");
+    // Two direct calls and the healthcheck's.
+    assert!(
+        body.contains(r#"fvoci_http_request_duration_seconds_count{method="GET",route="/ready",status="200"} 3"#),
+        "{body}"
+    );
+    assert!(
+        metric_value(&body, "fvoci_db_pool_max_connections") > 0,
+        "{body}"
+    );
+    assert!(
+        !body.contains(consumer),
+        "consumer names stay out of labels:\n{body}"
+    );
+
+    app_pool.close().await;
+    let (status, _, body) = get("/ready").await;
+    assert_eq!(status, 503);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        json!({"ok": false, "checks": {"pg": false}})
+    );
+    let out = tokio::task::spawn_blocking(move || run_healthcheck(addr))
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let (status, _, body) = get("/metrics").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        metric_sample(&body, "fvoci_outbox_lag_seconds"),
+        "NaN",
+        "{body}"
+    );
+    assert_eq!(
+        metric_sample(&body, "fvoci_outbox_xmin_stall_seconds"),
+        "NaN",
+        "{body}"
+    );
+    assert!(
+        metric_value(&body, "fvoci_db_metrics_refresh_failures_total") >= 1,
+        "{body}"
+    );
+    assert_eq!(
+        metric_value(&body, "fvoci_db_metrics_last_success_timestamp_seconds"),
+        last_success,
+        "{body}"
+    );
+
+    server.abort();
+    let _ = server.await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// A transaction holding an xid pins the snapshot xmin, so an event committed
+/// after it is not yet deliverable (`app_outbox_read` returns nothing). The
+/// lag metric still counts it, as the source `lagSeconds()` did, and the
+/// xmin-stall gauge reports the holder's age. Neither exposes the event's
+/// workspace, actor or target, the consumer name, the database or the role.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_see_outbox_lag_and_xmin_stall_behind_an_xid_holder() {
+    use fvoci_server::http::probes::{MetricsAllowList, Observability, ObservabilitySettings};
+
+    const HOLD: Duration = Duration::from_secs(6);
+
+    let harness = TestDb::bootstrap().await;
+    let state = project_harness::app_state(&harness.app_url).await;
+    let app_pool = state.auth.db.pool.clone();
+    let consumer = "stall-lag";
+    ensure_consumer(&app_pool, consumer).await.expect("ensure");
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    install_pin_table(&admin).await;
+
+    let holder = begin_xmin_pin(&admin).await;
+    let held_since = std::time::Instant::now();
+    let (workspace_id, actor_id, target_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    sqlx::query(
+        "INSERT INTO fvoci.events \
+         (id, workspace_id, actor_user_id, verb, target_type, target_id, payload, channel, created_at) \
+         VALUES ($1, $2, $3, 'probe', 'document', $4, '{}', 'system', now() - interval '1 hour')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(actor_id)
+    .bind(target_id)
+    .execute(&admin)
+    .await
+    .expect("event behind the holder");
+    let deliverable: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.app_outbox_read($1, 10)")
+        .bind(consumer)
+        .fetch_one(&app_pool)
+        .await
+        .expect("read");
+    assert_eq!(
+        deliverable, 0,
+        "the holder must keep the event undeliverable"
+    );
+
+    let router = fvoci_server::http::router_with_observability(
+        state,
+        None,
+        Arc::new(fvoci_server::integrations::Integrations::disabled()),
+        Arc::new(fvoci_server::identity::Identity::disabled(
+            "http://localhost",
+        )),
+        Arc::new(Observability::new(ObservabilitySettings {
+            allow: MetricsAllowList::parse(Some("127.0.0.1/32")).unwrap(),
+            outbox_consumers: vec![consumer.to_string()],
+            refresh_interval: Duration::ZERO,
+        })),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let scrape = || {
+        let client = client.clone();
+        async move {
+            let response = client
+                .get(format!("http://{addr}/metrics"))
+                .send()
+                .await
+                .expect("scrape");
+            assert_eq!(response.status().as_u16(), 200);
+            response.text().await.unwrap()
+        }
+    };
+
+    let body = scrape().await;
+    let lag = metric_value(&body, "fvoci_outbox_lag_seconds");
+    assert!((3_590..3_700).contains(&lag), "lag {lag}\n{body}");
+
+    tokio::time::sleep(HOLD.saturating_sub(held_since.elapsed())).await;
+    let body = scrape().await;
+    let stall = metric_value(&body, "fvoci_outbox_xmin_stall_seconds");
+    // Other tests on the shared cluster can only hold older xids, never
+    // lower the maximum below this holder's age.
+    assert!(stall >= 5, "stall {stall}\n{body}");
+    let lag = metric_value(&body, "fvoci_outbox_lag_seconds");
+    assert!((3_590..3_700).contains(&lag), "lag {lag}\n{body}");
+    for secret in [
+        workspace_id.to_string(),
+        workspace_id.simple().to_string(),
+        actor_id.to_string(),
+        target_id.to_string(),
+        consumer.to_string(),
+        harness.db_name.clone(),
+        harness.role_name.clone(),
+    ] {
+        assert!(!body.contains(&secret), "{secret} leaked:\n{body}");
+    }
+
+    holder.commit().await.expect("release holder");
+    server.abort();
+    let _ = server.await;
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// External consumer that takes `delay` per event, asks for `cap` events per
+/// `deliver_batch` and counts each completed delivery per event.
+struct SlowExternal {
+    name: String,
+    cap: usize,
+    delay_ms: AtomicU64,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+}
+
+impl SlowExternal {
+    fn new(name: &str, cap: usize, delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            cap,
+            delay_ms: AtomicU64::new(delay.as_millis() as u64),
+            deliveries: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn count(&self, id: Uuid) -> u32 {
+        self.deliveries
+            .lock()
+            .expect("deliveries")
+            .get(&id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn total(&self) -> u32 {
+        self.deliveries.lock().expect("deliveries").values().sum()
+    }
+}
+
+impl OutboxConsumer for SlowExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn batch_event_cap(&self) -> usize {
+        self.cap
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            let delay = self.delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            *self
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .entry(event.id)
+                .or_default() += 1;
+            Ok(())
+        })
+    }
+}
+
+async fn insert_test_events(app: &PgPool, verb: &str, n: usize) -> Vec<Uuid> {
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        ids.push(
+            insert_test_event(app, verb, json!({ "n": i }))
+                .await
+                .expect("insert event"),
+        );
+    }
+    ids
+}
+
+async fn all_processed(pool: &PgPool, consumer: &str, ids: &[Uuid]) -> bool {
+    for id in ids {
+        if !is_processed(pool, consumer, *id).await.unwrap_or(false) {
+            return false;
+        }
+    }
+    true
+}
+
+async fn processed_count(pool: &PgPool, consumer: &str, ids: &[Uuid]) -> usize {
+    let mut n = 0;
+    for id in ids {
+        if is_processed(pool, consumer, *id)
+            .await
+            .expect("is_processed")
+        {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Shutdown stops External delivery between events: the event in flight
+/// finishes, nothing else is delivered after the cancel, the lease is
+/// released, and a restarted dispatcher delivers the rest exactly once.
+#[tokio::test]
+async fn external_shutdown_stops_between_events_and_releases_the_lease() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let consumer = SlowExternal::new("slowshut", 1, Duration::from_secs(1));
+    let ids = insert_test_events(&app, "test.slowshut", 20).await;
+    ensure_consumer(&app, "slowshut").await.expect("ensure");
+    wait_until_readable(&app, "slowshut", ids[19]).await;
+
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    let probe = consumer.clone();
+    wait_until(DISPATCHER_WAIT, || {
+        let probe = probe.clone();
+        Box::pin(async move { probe.total() >= 1 })
+    })
+    .await;
+    let started = std::time::Instant::now();
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    let elapsed = started.elapsed();
+    let delivered_at_shutdown = consumer.total();
+    assert!(
+        elapsed < Duration::from_millis(2_500),
+        "join took {elapsed:?}; {delivered_at_shutdown} events delivered by then"
+    );
+    assert!(
+        delivered_at_shutdown <= 2,
+        "only the event in flight may finish after the cancel, got {delivered_at_shutdown}"
+    );
+    assert!(processed_count(&app, "slowshut", &ids).await <= 2);
+    let released: bool = sqlx::query_scalar(
+        "SELECT lease_owner IS NULL AND lease_until IS NULL FROM fvoci.outbox_consumers WHERE consumer = 'slowshut'",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("lease row");
+    assert!(released, "shutdown must release the lease");
+
+    consumer.delay_ms.store(0, Ordering::SeqCst);
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let ids = ids.clone();
+        Box::pin(async move { all_processed(&pool, "slowshut", &ids).await })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join 2");
+    for id in &ids {
+        assert_eq!(
+            consumer.count(*id),
+            1,
+            "event {id} delivered more than once"
+        );
+    }
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// One dispatcher task serves every consumer in turn: a slow External
+/// consumer stops starting new chunks once its lease budget is spent, so the
+/// next consumer is not held for the slow consumer's whole backlog.
+#[tokio::test]
+async fn external_lease_budget_hands_the_dispatcher_to_the_next_consumer() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    install_delivery_table(&admin, &harness.role_name).await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let slow = SlowExternal::new("slowfair", 1, Duration::from_millis(500));
+    let fast = Arc::new(PgOnlyTestConsumer::new("fastfair"));
+    let ids = insert_test_events(&app, "test.fair", 20).await;
+    ensure_consumer(&app, "slowfair")
+        .await
+        .expect("ensure slow");
+    ensure_consumer(&app, "fastfair")
+        .await
+        .expect("ensure fast");
+    wait_until_readable(&app, "slowfair", ids[19]).await;
+
+    let dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(2),
+            batch_limit: 50,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app.clone(),
+        vec![
+            slow.clone() as Arc<dyn OutboxConsumer>,
+            fast as Arc<dyn OutboxConsumer>,
+        ],
+    )
+    .expect("dispatcher");
+    let started = std::time::Instant::now();
+    wait_until(Duration::from_secs(30), || {
+        let pool = app.clone();
+        Box::pin(async move { delivery_count(&pool, "fastfair").await >= 20 })
+    })
+    .await;
+    let elapsed = started.elapsed();
+    let slow_done = slow.total();
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "PgOnly consumer waited {elapsed:?} behind the slow External consumer ({slow_done} slow events done)"
+    );
+    for id in &ids {
+        assert!(slow.count(*id) <= 1, "event {id} delivered more than once");
+    }
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Native all-or-nothing batch (like search): any chunk that contains the
+/// poison event fails with `done == 0`. The failure must end up on the poison
+/// event only; the innocent events before it are delivered, not dead-lettered.
+struct AllOrNothingExternal {
+    name: String,
+    poison: Uuid,
+    max_attempts: i32,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+    batch_sizes: Mutex<Vec<usize>>,
+}
+
+impl OutboxConsumer for AllOrNothingExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn max_attempts(&self) -> i32 {
+        self.max_attempts
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            let (done, err) = self
+                .deliver_batch(pool, lease_owner, std::slice::from_ref(event))
+                .await;
+            match err {
+                Some(err) => Err(err),
+                None if done == 1 => Ok(()),
+                None => Err(OutboxProcessError::Delivery("nothing delivered".into())),
+            }
+        })
+    }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        events: &'a [fvoci_server::db::outbox::OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        self.batch_sizes
+            .lock()
+            .expect("batch sizes")
+            .push(events.len());
+        Box::pin(async move {
+            if events.iter().any(|event| event.id == self.poison) {
+                return (
+                    0,
+                    Some(OutboxProcessError::Delivery(
+                        "batch rejected: poison event in chunk".into(),
+                    )),
+                );
+            }
+            let mut deliveries = self.deliveries.lock().expect("deliveries");
+            for event in events {
+                *deliveries.entry(event.id).or_default() += 1;
+            }
+            (events.len(), None)
+        })
+    }
+}
+
+#[tokio::test]
+async fn all_or_nothing_batch_failure_dead_letters_only_the_poison_event() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let ids = insert_test_events(&app, "test.poison", 6).await;
+    let poison = ids[3];
+    let consumer = Arc::new(AllOrNothingExternal {
+        name: "aonpoison".into(),
+        poison,
+        max_attempts: 3,
+        deliveries: Mutex::new(HashMap::new()),
+        batch_sizes: Mutex::new(Vec::new()),
+    });
+    ensure_consumer(&app, "aonpoison").await.expect("ensure");
+    wait_until_readable(&app, "aonpoison", ids[5]).await;
+
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let tail = [ids[4], ids[5]];
+        Box::pin(async move {
+            all_processed(&pool, "aonpoison", &tail).await
+                && fetch_failure_state(&pool, "aonpoison", poison)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|row| row.dead_at.is_some())
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    for (i, id) in ids.iter().enumerate().take(3) {
+        let failure = fetch_failure_state(&app, "aonpoison", *id)
+            .await
+            .expect("failure state");
+        assert!(
+            is_processed(&app, "aonpoison", *id).await.expect("p") && failure.is_none(),
+            "innocent event {i} must be delivered with no failure row, got {failure:?}"
+        );
+    }
+    assert!(!is_processed(&app, "aonpoison", poison)
+        .await
+        .expect("poison"));
+    let dead = fetch_failure_state(&app, "aonpoison", poison)
+        .await
+        .expect("poison state")
+        .expect("poison row");
+    assert!(dead.dead_at.is_some());
+    assert_eq!(dead.attempts, 3);
+    let dead_letters: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.outbox_failures WHERE consumer = 'aonpoison' AND dead_at IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("dead letters");
+    assert_eq!(dead_letters, 1, "only the poison event is dead-lettered");
+    let last = fetch_event_by_id(&app, ids[5])
+        .await
+        .expect("last")
+        .expect("row");
+    assert_eq!(
+        fetch_cursor(&admin, "aonpoison").await.expect("cursor"),
+        Some((last.xact, last.seq))
+    );
+    for id in &ids {
+        assert!(
+            consumer
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .get(id)
+                .copied()
+                .unwrap_or(0)
+                <= 1,
+            "event {id} delivered more than once"
+        );
+    }
+    let sizes = consumer.batch_sizes.lock().expect("sizes").clone();
+    assert!(
+        sizes.iter().any(|&n| n > 1),
+        "the poison must first be seen inside a chunk larger than 1, got {sizes:?}"
+    );
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[derive(Clone, Copy)]
+enum LeaseLoss {
+    /// The lease runs out while the batch is in flight (same owner).
+    Expire,
+    /// Another owner takes the lease while the batch is in flight.
+    Steal,
+}
+
+/// Delivers every event of a batch, then loses the lease before returning.
+struct LeaseLossExternal {
+    name: String,
+    admin: PgPool,
+    loss: LeaseLoss,
+    fired: AtomicBool,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+}
+
+impl OutboxConsumer for LeaseLossExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            *self
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .entry(event.id)
+                .or_default() += 1;
+            Ok(())
+        })
+    }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        events: &'a [fvoci_server::db::outbox::OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            {
+                let mut deliveries = self.deliveries.lock().expect("deliveries");
+                for event in events {
+                    *deliveries.entry(event.id).or_default() += 1;
+                }
+            }
+            if events.len() > 1 && !self.fired.swap(true, Ordering::SeqCst) {
+                let sql = match self.loss {
+                    LeaseLoss::Expire => {
+                        "UPDATE fvoci.outbox_consumers \
+                         SET lease_until = now() - interval '1 second' \
+                         WHERE consumer = $1 AND $2::uuid IS NOT NULL"
+                    }
+                    LeaseLoss::Steal => {
+                        "UPDATE fvoci.outbox_consumers \
+                         SET lease_owner = $2, lease_until = now() + interval '3 seconds' \
+                         WHERE consumer = $1"
+                    }
+                };
+                sqlx::query(sql)
+                    .bind(&self.name)
+                    .bind(Uuid::now_v7())
+                    .execute(&self.admin)
+                    .await
+                    .expect("lose the lease");
+            }
+            (events.len(), None)
+        })
+    }
+}
+
+async fn assert_batch_survives_lease_loss(loss: LeaseLoss, consumer_name: &str) {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let ids = insert_test_events(&app, "test.leaseloss", 5).await;
+    ensure_consumer(&app, consumer_name).await.expect("ensure");
+    wait_until_readable(&app, consumer_name, ids[4]).await;
+    let consumer = Arc::new(LeaseLossExternal {
+        name: consumer_name.to_string(),
+        admin: admin.clone(),
+        loss,
+        fired: AtomicBool::new(false),
+        deliveries: Mutex::new(HashMap::new()),
+    });
+
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    let last = fetch_event_by_id(&app, ids[4])
+        .await
+        .expect("last")
+        .expect("row");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let admin = admin.clone();
+        let ids = ids.clone();
+        let name = consumer_name.to_string();
+        let last = (last.xact.clone(), last.seq);
+        Box::pin(async move {
+            all_processed(&pool, &name, &ids).await
+                && fetch_cursor(&admin, &name).await.ok().flatten() == Some(last)
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(
+        consumer.fired.load(Ordering::SeqCst),
+        "lease loss not injected"
+    );
+    let deliveries = consumer.deliveries.lock().expect("deliveries").clone();
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            deliveries.get(id).copied().unwrap_or(0),
+            1,
+            "event {i} delivered {:?} times after the lease was lost",
+            deliveries.get(id)
+        );
+    }
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// The lease expires while a batch is in flight: every delivered event of
+/// the batch is still marked and none is delivered again.
+#[tokio::test]
+async fn expired_lease_after_the_batch_still_marks_every_event() {
+    assert_batch_survives_lease_loss(LeaseLoss::Expire, "leaseexpire").await;
+}
+
+/// Another owner takes the lease while a batch is in flight: the delivered
+/// events are marked anyway, so the new owner skips them.
+#[tokio::test]
+async fn stolen_lease_after_the_batch_still_marks_every_event() {
+    assert_batch_survives_lease_loss(LeaseLoss::Steal, "leasesteal").await;
+}
+
+/// `--recover-outbox` rewinds every cursor into the replay window. A window
+/// event's mark older than the processed_events GC window (a restore from an
+/// older snapshot) must survive the GC that runs at startup, or the replay
+/// delivers the event again.
+#[tokio::test]
+async fn recover_keeps_old_window_marks_through_processed_gc() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    // `mail` is one of the consumers the processed_events GC sweeps.
+    let consumer_name = "mail";
+    let old = insert_test_event(&app, "test.window.old", json!({}))
+        .await
+        .expect("old");
+    let new = insert_test_event(&app, "test.window.new", json!({}))
+        .await
+        .expect("new");
+    ensure_consumer(&app, consumer_name).await.expect("ensure");
+    wait_until_readable(&app, consumer_name, new).await;
+    assert!(mark_processed(&app, consumer_name, old)
+        .await
+        .expect("mark old"));
+    assert!(mark_processed(&app, consumer_name, new)
+        .await
+        .expect("mark new"));
+    let new_row = fetch_event_by_id(&app, new)
+        .await
+        .expect("new row")
+        .expect("new");
+    sqlx::query(
+        "UPDATE fvoci.outbox_consumers SET last_xact = $2::xid8, last_seq = $3 WHERE consumer = $1",
+    )
+    .bind(consumer_name)
+    .bind(&new_row.xact)
+    .bind(new_row.seq)
+    .execute(&admin)
+    .await
+    .expect("cursor past both events");
+    // A snapshot taken 5 days ago whose 29-day window starts 34 days ago: the
+    // old event was created and delivered 33 days ago, the new one 6 days ago.
+    sqlx::query(
+        "UPDATE fvoci.events SET created_at = CASE WHEN id = $1 THEN now() - interval '33 days' ELSE now() - interval '6 days' END",
+    )
+    .bind(old)
+    .execute(&admin)
+    .await
+    .expect("age events");
+    sqlx::query(
+        "UPDATE fvoci.processed_events AS p SET processed_at = e.created_at FROM fvoci.events AS e WHERE e.id = p.event_id",
+    )
+    .execute(&admin)
+    .await
+    .expect("age marks");
+    let bounds: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "SELECT now() - interval '5 days' - interval '29 days' + interval '1 hour', now() - interval '5 days'",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("recovery bounds");
+    let since = bounds
+        .0
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let snapshot_at = bounds
+        .1
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+
+    project_harness::close_pool(app).await;
+    project_harness::close_pool(admin).await;
+    wait_for_client_backends_gone(&harness.admin_url, &harness.db_name).await;
+    let report = recover_outbox(
+        &harness.admin_url,
+        RecoverOutboxOptions {
+            since,
+            snapshot_at,
+            apply: true,
+            reason: Some("test restore from an older snapshot".into()),
+            acknowledge_external_replay: true,
+        },
+    )
+    .await
+    .expect("recover");
+    assert!(report.applied);
+    assert_eq!(report.eligible, 2, "{report:?}");
+
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin after recover");
+    let app = pool::connect_app(&harness.app_url)
+        .await
+        .expect("app after recover");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let deleted = fvoci_server::jobs::run_processed_gc(&app, &cancel)
+        .await
+        .expect("processed gc");
+    assert_eq!(
+        deleted, 0,
+        "GC deleted a mark the recovery replay still needs"
+    );
+    assert!(is_processed(&app, consumer_name, old)
+        .await
+        .expect("old mark"));
+    assert!(is_processed(&app, consumer_name, new)
+        .await
+        .expect("new mark"));
+
+    // The replay then skips both events instead of delivering them again.
+    wait_until_readable(&app, consumer_name, new).await;
+    let replay = SlowExternal::new(consumer_name, 1, Duration::ZERO);
+    let dispatcher = run_dispatcher(app.clone(), replay.clone(), 20);
+    let new_row = fetch_event_by_id(&app, new)
+        .await
+        .expect("new row")
+        .expect("new");
+    wait_until(DISPATCHER_WAIT, || {
+        let admin = admin.clone();
+        let target = (new_row.xact.clone(), new_row.seq);
+        Box::pin(async move { fetch_cursor(&admin, "mail").await.ok().flatten() == Some(target) })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    assert_eq!(replay.count(old), 0, "old window event delivered again");
+    assert_eq!(replay.count(new), 0, "new window event delivered again");
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Delivers every event of a batch, then arms a fault that fails the next
+/// update of this consumer's row with a database error once: the lease
+/// renewal after the batch.
+struct RenewalFaultExternal {
+    name: String,
+    admin: PgPool,
+    fired: AtomicBool,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+}
+
+impl OutboxConsumer for RenewalFaultExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            *self
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .entry(event.id)
+                .or_default() += 1;
+            Ok(())
+        })
+    }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        events: &'a [fvoci_server::db::outbox::OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            {
+                let mut deliveries = self.deliveries.lock().expect("deliveries");
+                for event in events {
+                    *deliveries.entry(event.id).or_default() += 1;
+                }
+            }
+            if events.len() > 1 && !self.fired.swap(true, Ordering::SeqCst) {
+                sqlx::query("SELECT setval('public.outbox_renewal_fault', 1, false)")
+                    .execute(&self.admin)
+                    .await
+                    .expect("arm the renewal fault");
+            }
+            (events.len(), None)
+        })
+    }
+}
+
+/// The lease renewal after a batch fails with a database error (not a lost
+/// lease): the delivered events are already marked, so the next cycle does
+/// not deliver them again.
+#[tokio::test]
+async fn renewal_error_after_the_batch_still_marks_every_event() {
+    let consumer_name = "renewfault";
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    // nextval is not rolled back with the failed statement, so an armed
+    // fault (setval to 1) fires once. Unarmed, the sequence never returns 1.
+    for sql in [
+        "CREATE SEQUENCE public.outbox_renewal_fault START WITH 100".to_string(),
+        r#"
+        CREATE FUNCTION public.outbox_renewal_fault() RETURNS trigger
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        BEGIN
+            IF NEW.consumer = TG_ARGV[0] THEN
+                IF nextval('public.outbox_renewal_fault') = 1 THEN
+                    RAISE EXCEPTION 'injected lease renewal failure';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#
+        .to_string(),
+        format!(
+            "CREATE TRIGGER outbox_renewal_fault BEFORE UPDATE ON fvoci.outbox_consumers \
+             FOR EACH ROW EXECUTE FUNCTION public.outbox_renewal_fault('{consumer_name}')"
+        ),
+    ] {
+        sqlx::query(&sql)
+            .execute(&admin)
+            .await
+            .expect("install fault");
+    }
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let ids = insert_test_events(&app, "test.renewfault", 5).await;
+    ensure_consumer(&app, consumer_name).await.expect("ensure");
+    wait_until_readable(&app, consumer_name, ids[4]).await;
+    let consumer = Arc::new(RenewalFaultExternal {
+        name: consumer_name.to_string(),
+        admin: admin.clone(),
+        fired: AtomicBool::new(false),
+        deliveries: Mutex::new(HashMap::new()),
+    });
+
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    let last = fetch_event_by_id(&app, ids[4])
+        .await
+        .expect("last")
+        .expect("row");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let admin = admin.clone();
+        let ids = ids.clone();
+        let last = (last.xact.clone(), last.seq);
+        Box::pin(async move {
+            all_processed(&pool, consumer_name, &ids).await
+                && fetch_cursor(&admin, consumer_name).await.ok().flatten() == Some(last)
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(
+        consumer.fired.load(Ordering::SeqCst),
+        "renewal fault not armed"
+    );
+    let fault_fired: bool = sqlx::query_scalar(
+        "SELECT is_called AND last_value < 100 FROM public.outbox_renewal_fault",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("fault sequence");
+    assert!(fault_fired, "the armed fault must have fired");
+    let deliveries = consumer.deliveries.lock().expect("deliveries").clone();
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            deliveries.get(id).copied().unwrap_or(0),
+            1,
+            "event {i} delivered {:?} times after the renewal failed",
+            deliveries.get(id)
+        );
+    }
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Delivers at most `per_call` events per `deliver_batch` call and returns
+/// that count without an error; logs each call under its name.
+struct PrefixExternal {
+    name: String,
+    per_call: usize,
+    calls: Arc<Mutex<Vec<String>>>,
+    deliveries: Mutex<HashMap<Uuid, u32>>,
+}
+
+impl OutboxConsumer for PrefixExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            *self
+                .deliveries
+                .lock()
+                .expect("deliveries")
+                .entry(event.id)
+                .or_default() += 1;
+            Ok(())
+        })
+    }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        lease_owner: Uuid,
+        events: &'a [fvoci_server::db::outbox::OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        self.calls.lock().expect("calls").push(self.name.clone());
+        Box::pin(async move {
+            let take = events.len().min(self.per_call);
+            for event in &events[..take] {
+                if let Err(err) = self.deliver(pool, lease_owner, event).await {
+                    return (0, Some(err));
+                }
+            }
+            (take, None)
+        })
+    }
+}
+
+/// A `deliver_batch` that ends early without an error (done < chunk) is not
+/// a reason to end the consumer's cycle: the dispatcher passes the rest in
+/// the next call right away, before it serves the next consumer.
+#[tokio::test]
+async fn partial_batch_without_error_continues_in_the_same_cycle() {
+    let harness = TestDb::bootstrap().await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let partial = Arc::new(PrefixExternal {
+        name: "prefixone".to_string(),
+        per_call: 1,
+        calls: calls.clone(),
+        deliveries: Mutex::new(HashMap::new()),
+    });
+    let whole = Arc::new(PrefixExternal {
+        name: "prefixall".to_string(),
+        per_call: usize::MAX,
+        calls: calls.clone(),
+        deliveries: Mutex::new(HashMap::new()),
+    });
+    let ids = insert_test_events(&app, "test.prefix", 4).await;
+    for name in ["prefixone", "prefixall"] {
+        ensure_consumer(&app, name).await.expect("ensure");
+        wait_until_readable(&app, name, ids[3]).await;
+    }
+
+    let dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(2),
+            batch_limit: 50,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app.clone(),
+        vec![
+            partial.clone() as Arc<dyn OutboxConsumer>,
+            whole.clone() as Arc<dyn OutboxConsumer>,
+        ],
+    )
+    .expect("dispatcher");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let ids = ids.clone();
+        Box::pin(async move {
+            all_processed(&pool, "prefixone", &ids).await
+                && all_processed(&pool, "prefixall", &ids).await
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let calls = calls.lock().expect("calls").clone();
+    let first_whole = calls
+        .iter()
+        .position(|name| name == "prefixall")
+        .expect("the second consumer was served");
+    assert_eq!(
+        &calls[..first_whole],
+        vec!["prefixone"; 4].as_slice(),
+        "every partial call of one cycle comes before the next consumer: {calls:?}"
+    );
+    for consumer in [&partial, &whole] {
+        let deliveries = consumer.deliveries.lock().expect("deliveries").clone();
+        for id in &ids {
+            assert_eq!(deliveries.get(id).copied(), Some(1), "{}", consumer.name);
+        }
+    }
+
+    app.close().await;
     harness.cleanup().await;
 }

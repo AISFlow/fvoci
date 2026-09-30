@@ -2,7 +2,10 @@
 
 This slice initializes a new PostgreSQL database. Importing an existing TypeScript FVOCI installation is not supported.
 The Rust server has forward schema migrations (see "Migrate and grant before server" and, for the Compose
-install, "Upgrade", including its unexecuted image-to-image validation scope). Downgrading a migrated database is not supported.
+install, "Upgrade"; the developer smoke in "Upgrade validation" exercises one image pair per run with local
+storage or, with `--storage s3`, the documented S3 procedure against a local run-owned bucket, one injected init
+failure and old-image rollback; ordinary PR and main CI does not run it, only an optional manual
+`workflow_dispatch`). Downgrading a migrated database is not supported.
 
 ## Toolchain
 
@@ -17,9 +20,10 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `PASSWORD_PEPPER_KEYS` | JSON map of pepper key id → 64-char hex. |
 | `PASSWORD_PEPPER_ACTIVE_KEY_ID` | Active pepper id. |
 | `FVOCI_BIND` | Listen address (default `127.0.0.1:0`). |
+| `METRICS_ALLOW_IPS` | `/metrics` allowlist (source contract): comma-separated IPv4 addresses or CIDRs with a required `/1`–`/32` prefix; IPv4-mapped IPv6 peers compare as IPv4, IPv6 entries are refused. Unset or empty denies every peer (404). Only the direct socket peer counts; `X-Forwarded-For` is ignored. List the scraper's direct address; a reverse proxy must not forward `/metrics` (or must restrict it itself), because listing the proxy's address makes `/metrics` public to everyone the proxy forwards. One malformed entry refuses startup. `/health` and `/ready` are not affected. |
 | `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). Trailing slashes are normalized. An explicit port `0` follows the actual bound port. |
 | `FVOCI_COOKIE_SECURE` | `true`/`1` to set `Secure` on session cookies; defaults from `FVOCI_PUBLIC_ORIGIN` scheme. |
-| `FVOCI_LICENSE_KEY` | Optional secret FVOCI2 enterprise entitlement. Absent, malformed, untrusted, or expired tokens do not block startup: audit, branding, and workspace SSO remain disabled; seats default to 10 and storage/upload limits to unlimited. The server verifies offline using only the public keys compiled into `src/license-trust.json`, which is currently empty, matching the fixed source. No issued token can activate enterprise features until issuer public keys are supplied in a reviewed release build; there is no environment trust-key override. Rotate the token by restarting the server; its validity window is rechecked during use. Keep the token out of logs and backups shared outside the operator boundary. Instance OIDC remains available without an enterprise license. |
+| `FVOCI_LICENSE_KEY` | Optional secret FVOCI2 enterprise entitlement. Absent, malformed, untrusted, or expired tokens do not block startup: audit, branding, and workspace SSO remain disabled; seats default to 10 and storage/upload limits to unlimited. The server verifies offline using only the public keys compiled into `src/license-trust.json`, which is currently empty, matching the fixed source. No issued token can activate enterprise features until issuer public keys are supplied in a reviewed release build; there is no environment trust-key override. Rotate the token by recreating the server (`docker compose up -d`); its validity window is rechecked during use. Keep the token out of logs and backups shared outside the operator boundary. Instance OIDC remains available without an enterprise license. |
 | `FVOCI_STATIC_DIR` | Optional built frontend directory containing index.html; validated at startup. |
 | `FVOCI_STORAGE_DIR` | Required persistent local attachment directory when `STORAGE_DRIVER=local` (the default). Writable by the server. Reuse the same directory across restarts and preserve it with the database. |
 | `STORAGE_LOCAL_PATH` | Source-compatible storage path alias, used only when `FVOCI_STORAGE_DIR` is absent. |
@@ -29,7 +33,10 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `S3_BUCKET` | Bucket name. Required when `STORAGE_DRIVER=s3`. The server probes with HeadBucket at startup and does not create the bucket. |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | Credentials. Required when `STORAGE_DRIVER=s3`. Never logged. |
 | `S3_FORCE_PATH_STYLE` | Path-style URLs unless set to `0` (default matches the source: on). |
-| `S3_PUBLIC_ENDPOINT` | Optional; validated (HTTP(S), no credentials/query/fragment) but **currently unused**. Only the proxied mode is implemented: parts and downloads go through the API, so no bucket CORS or public S3 endpoint is needed. **Not done** (source parity, tracked separately): presigned direct part PUT, 302 presigned download signed against `S3_PUBLIC_ENDPOINT`, the matching CSP `connect-src` and bucket CORS. |
+| `S3_PUBLIC_ENDPOINT` | Optional browser-facing origin of the same bucket; enables the `presigned` attachment transfer mode (see "Attachment transfer modes"). HTTP(S), no credentials/query/fragment; it must be https when `FVOCI_PUBLIC_ORIGIN` is https and must not use the host of `FVOCI_PUBLIC_ORIGIN` (any port), or startup is refused. When set, its origin is added to the page CSP `connect-src` and `img-src`. The server never sends its own requests there. |
+| `FVOCI_ATTACHMENT_TRANSFER_MODE` | Optional `proxy` or `presigned` (exact, lower case; empty = unset). Wins over the admin setting `attachmentTransfer.mode`, which the admin page then shows as fixed. `presigned` requires `STORAGE_DRIVER=s3` and `S3_PUBLIC_ENDPOINT`; any other value, or `presigned` without them, refuses startup. |
+| `FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS` | Lifetime of presigned part PUT URLs, 5–3600 s (default 900). An issued URL works until it expires; resume issues fresh ones. |
+| `FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS` | Lifetime of the presigned download URL behind a `302`, 5–300 s (default 60). |
 | `UPLOAD_INCOMPLETE_TTL_HOURS` | Abandoned `uploading`/`assembling` rows older than this are removed by the maintenance scheduler's upload-cleanup job: every open multipart upload for the key is aborted, any object deleted, then the row removed (default 24). A row whose storage cleanup fails is kept for the next run. Must be a positive integer. |
 | `FVOCI_UPLOAD_GC_INTERVAL_SECS` | Cadence of that upload-cleanup job (default 600). Each run takes its own cluster-wide advisory claim, examines at most 200 rows, and stops early on shutdown; leftovers wait for the next run. Runs walk the stale rows in global `(created_at, id)` order, each resuming after the previous batch and wrapping at the end, so rows that are skipped or fail every time cannot starve the rest. |
 | `FVOCI_UPLOAD_MAX_CONCURRENT_PARTS` | Part PUTs in flight per server process (default 64, positive). Each holds an inbound connection and, with S3, an outbound one while the client streams its body. When no slot is free, a part PUT is refused before its body is read with `503` problem `upload_capacity_exceeded` and `Retry-After: 2`; the web client waits out `Retry-After` (up to 2 minutes per part) without using its transport retries. On every driver a part body must arrive within 95 s plus its length at 64 KiB/s (35 s more than the S3 driver's own deadline), or its slot is released: with the local driver the PUT fails with `400`; with S3 the driver's own deadline fires first and the PUT fails with a logged `500`, which the web client retries. |
@@ -40,10 +47,10 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
 | `FVOCI_MEILI_URL` | Meilisearch HTTP origin. Unset disables search (later routes return a problem). |
 | `FVOCI_MEILI_KEY` | API key used when `FVOCI_MEILI_KEY_FILE` is unset. Required (with the file form) if the URL is set. Never logged. |
-| `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. |
+| `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. The file must be a regular file of at most 4 KiB and is opened without following a symlink: a path that is a symlink (for example a Kubernetes Secret or projected volume entry, which points into `..data/`) is refused at startup. |
 | `FVOCI_MEILI_INDEX` | Index uid (default `fvoci`). Tests may set a per-run uid. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | Outgoing mail (invitations, password reset). All three or none; unset disables mail and invitation links are shown instead. No AUTH (same as the source). STARTTLS is used whenever the relay offers it, with certificate verification against public roots, so an internal relay needs a publicly trusted certificate or must not offer STARTTLS. |
-| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --verify-secrets` lists the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
+| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --secrets-rotate` re-seals them under the active key; `--secrets-audit` and `--verify-secrets` list the key ids in use). Back it up (apart from the database backup); restore checks it (see Backup and restore). |
 | `FVOCI_WEBHOOK_ALLOW_TARGETS` | Comma list of host names / IP addresses that webhook URLs may use despite the outbound rules (default empty). A listed URL host skips the port (80/443) and host-name rules; a listed IP is accepted as a literal or resolved private address. Meant for local receivers (tests, e2e); leave empty in production. `0.0.0.0` / `::` are refused. |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET` | Optional GitHub App (all three or none; the PEM may use literal `\n`). Enables `/github/install`, `/api/v1/github/callback`, the signed `/api/v1/github/webhook` endpoint and the `github` outbox consumer that closes/reopens linked issues. The install `state` is single use and bound to the admin session that started it (the callback needs that session cookie); the callback confirms the installation with `GET /app/installations/{id}` and never replaces an existing link to another installation (uninstall first). While the app is not configured the `github` cursor still advances, so enabling it later does not replay older status changes. |
 | `GITHUB_STATE_SECRET` | Server-only key (at least 32 bytes) for the install `state` MAC. If unset it is derived (HKDF-SHA256) from the active `ENCRYPTION_KEYS` key; with neither, a configured GitHub App fails at boot. The webhook secret is not used because GitHub App managers also hold it. |
@@ -56,6 +63,12 @@ Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. Th
 
 ## Migrate and grant before server
 
+This section and the next two are for running the binaries yourself (a source
+checkout, or your own orchestration). The user Compose install
+(`compose.user.yml`, "Container install") does the same steps on every start of
+its `fvoci` container, before the server starts, and needs none of the commands
+below; the developer Compose stack runs them in its `init` service.
+
 Run migrations and app-role grants **before** starting or upgrading `fvoci-server`. Stop old
 instances first: old binaries refuse a newer `fvoci.schema_migrations` version and cannot restart
 after migrate. Upgrade order is stop old → `fvoci-migrate` → `fvoci-migrate --grant-app-role` →
@@ -64,8 +77,9 @@ start new; mixed-version rolling restart is not supported. The server connects o
 with an operator message if the schema is missing, behind, newer than this binary, or unreadable.
 A newer database needs a matching or newer `fvoci-server`; do not run migrate from the old
 binary. The gate does not detect stale grants after a later migration; re-run `--grant-app-role`
-after every upgrade that applies new migrations. The server does not run migrations and ignores
-`DATABASE_URL` / `FVOCI_MIGRATION_URL` if set.
+after every upgrade that applies new migrations. `fvoci-server` itself does not run migrations and
+ignores `DATABASE_URL` / `FVOCI_MIGRATION_URL` if set; in the user install the image entrypoint
+(`fvoci-migrate --start`) migrates and grants before it starts the server.
 
 ## Create role, migrate, then grant
 
@@ -176,6 +190,135 @@ The app pool is closed explicitly on shutdown and before exiting on startup gate
 
 Rate limits use the direct socket peer. Forwarded headers are ignored; behind a reverse proxy, clients share the proxy's IP bucket. Trusted-proxy configuration and distributed limits are not implemented yet.
 
+## Attachment transfer modes
+
+Two ways for attachment bytes to travel; exactly one is in effect at a time:
+
+- `proxy` (default): part uploads and original downloads go through the API,
+  which authorizes every request and streams to or from storage. Works with
+  every storage driver and needs no bucket CORS or public endpoint.
+- `presigned`: after the same authorization the API signs short-lived S3 URLs.
+  The browser PUTs each part straight to the bucket and follows a `302` from
+  `GET .../download` to a signed GET of the original. Only `STORAGE_DRIVER=s3`
+  with `S3_PUBLIC_ENDPOINT` can do this.
+
+`HEAD .../download`, an unsatisfiable `Range` (`416`), `variant=preview`, the
+preview route, share-link downloads, `--verify-storage` and restore always stay
+on the API. So do upload sessions created and original downloads requested
+with an API token: token clients keep the API part paths and streamed
+downloads whatever the mode. (A token that resumes a session a browser
+created still gets that session's own mode.)
+
+Choosing the mode: `FVOCI_ATTACHMENT_TRANSFER_MODE` wins over the admin
+setting `attachmentTransfer.mode` (Instance settings → 첨부 전송 방식), which
+wins over the `proxy` default. An admin change is recorded in the audit log
+(key path only) and reaches every server process on its next request; Reset
+deletes the stored value. Saving `presigned` on a server whose storage cannot
+presign is refused (`400 attachment_transfer_unavailable`). A stored
+`presigned` that can no longer apply (the driver changed to local, or
+`S3_PUBLIC_ENDPOINT` was removed) falls back to `proxy`: startup logs
+`attachment.transfer_mode_unavailable` and the admin page says why.
+
+Each upload session keeps the mode it was created with. A switch affects new
+sessions and new downloads only; a presigned session refuses API part PUTs
+(`409`), and a presigned session on a server that can no longer presign
+cannot be resumed (`409 attachment_transfer_unavailable`): it is never moved to
+the proxy path. The browser never retries a failed presigned transfer through
+the API, and never sends FVOCI cookies, `Authorization` or `Content-Type` to
+the bucket. Rolling back to a server version without this feature is not
+supported while presigned sessions are open: an older binary does not know the
+binding.
+
+What the server still checks in `presigned` mode: create, resume (the re-issue
+path for expired URLs) and complete re-check the session, workspace, edit
+permission, uploader and writable parent, and complete checks them again right
+before the attachment is marked stored. Before `CompleteMultipartUpload`, the
+bucket must list exactly parts 1..N, each of its exact length, with the
+submitted ETags; otherwise nothing is published and the session stays open.
+Each part URL signs the part's exact `content-length`, and the final object
+size must equal the declared size. Every download request is authorized
+before a URL is signed.
+
+What cannot be revoked: an issued part URL works until it expires
+(`FVOCI_ATTACHMENT_PRESIGN_PART_TTL_SECS`, default 15 minutes); its holder can
+stage bytes into that upload but cannot publish them. An issued download URL
+works until it expires (`FVOCI_ATTACHMENT_PRESIGN_DOWNLOAD_TTL_SECS`, default
+60 s), even after the session or permission is revoked, the mode is switched
+back, or the attachment is deleted (until the object is reclaimed). The
+emergency lever is rotating the S3 access key, which invalidates every
+outstanding URL at once. Keep the server clock NTP-synchronized: URLs are
+signed with the server's time. Signed URLs appear only in the create/resume
+response bodies and the `302` `Location`; the server does not log them, and
+audit and event payloads never contain them. Browser traces or HAR files of
+presigned transfers contain them; treat those as secrets.
+
+Setting up `presigned`:
+
+1. Serve the bucket to browsers under its own host, for example
+   `https://files.example.com`, and set `S3_PUBLIC_ENDPOINT` to it. It must
+   reach the same S3 service with the `Host` header and path unchanged (a
+   reverse proxy must not rewrite either, or signatures fail). Do not let a CDN
+   cache signed URLs. The host must differ from the app's: cookies are scoped
+   by host, not port, and the storage origin cannot send the app's
+   `nosniff`/sandbox headers (downloads are forced to
+   `Content-Disposition: attachment` and `application/octet-stream` instead).
+2. Give the bucket this CORS configuration (AWS JSON form). No CORS request to
+   the bucket carries credentials: part PUTs use credentials mode `omit`, and
+   the in-app viewers fetch the download with `same-origin`, so the session
+   cookie reaches the API but not the redirected storage request. Image loads
+   and download navigations are not CORS requests, and they carry no FVOCI
+   cookie because the storage host differs from the app's. The bucket
+   therefore needs no `Access-Control-Allow-Credentials`. Still list the exact
+   `FVOCI_PUBLIC_ORIGIN` rather than `*`, so only the app's pages can read
+   the responses:
+
+   ```json
+   [{
+     "AllowedOrigins": ["https://fvoci.example.com"],
+     "AllowedMethods": ["PUT", "GET"],
+     "AllowedHeaders": ["range"],
+     "ExposeHeaders": ["ETag", "Content-Range", "Accept-Ranges", "Content-Length"],
+     "MaxAgeSeconds": 3600
+   }]
+   ```
+
+   `ETag` must be exposed: the browser reads it from each part response, and
+   an upload whose ETag is hidden fails (it is not retried through the API).
+   Community MinIO has no per-bucket CORS; it answers CORS for every origin
+   unless `MINIO_API_CORS_ALLOW_ORIGIN` narrows it.
+3. Add a lifecycle rule that aborts incomplete multipart uploads (AWS
+   `AbortIncompleteMultipartUpload`, `DaysAfterInitiation` at least 2, longer
+   than `UPLOAD_INCOMPLETE_TTL_HOURS`). The server's upload cleanup aborts every
+   upload of an abandoned key, but a part PUT still in flight during an abort
+   can land afterwards.
+4. Keep the access key least-privilege and Block Public Access on; the bucket
+   needs no public ACL or policy.
+5. Switch the mode on the admin page, or pin it with
+   `FVOCI_ATTACHMENT_TRANSFER_MODE=presigned`. An empty
+   `FVOCI_ATTACHMENT_TRANSFER_MODE` counts as unset; an empty TTL refuses
+   startup. Compose passes the server only the variables its files name:
+   - Developer stack: the S3 overlay (`infra/rust/compose.s3.yml`) passes
+     `FVOCI_ATTACHMENT_TRANSFER_MODE` and the two TTL variables from `.env`
+     (commented in `infra/rust/.env.example`). Left out, the mode is unset, so
+     the admin page decides, and the TTLs are 900 and 60 s.
+   - User install: list them in `compose.override.yml` beside the other S3
+     settings, only the ones you set ("Optional settings"). Leave the mode
+     out to choose it on the admin page.
+
+Upgrading: earlier versions validated `S3_PUBLIC_ENDPOINT` but did not use
+it. A value left set from then now makes `presigned` available (the mode stays
+`proxy` until chosen) and adds its origin to the CSP, and startup is refused
+when it is plain http under an https `FVOCI_PUBLIC_ORIGIN` or uses the app's
+host. Correct or remove it before upgrading.
+
+Verified against the pinned MinIO-compatible silo (Rust integration tests and
+Chromium cross-origin checks, `scripts/run-web-e2e-s3.sh` with and without
+`--narrow-cors`). Not run: real AWS S3
+(CORS on the redirected fetch, enforcement of the signed `content-length`, virtual-host style,
+`response-*` overrides, lifecycle rules), other S3-compatible services,
+reverse proxies or CDNs in front of the bucket, Firefox and Safari, and clock
+skew.
+
 ## Tests
 
 Pure unit tests:
@@ -205,6 +348,18 @@ S3 driver + abandoned-upload GC against a pinned MinIO-compatible silo (loopback
 scripts/start-test-minio.sh scripts/start-test-postgres.sh cargo test --locked --offline --no-fail-fast --features db-tests --test attachment_s3_integration
 ```
 
+The presigned transfer mode in Chromium, with MinIO as a separate storage
+origin (after `scripts/prepare-web-e2e.sh`; not part of the normal e2e shards,
+which have no MinIO). The first run covers presigned and proxy transfers and
+the viewers without `Access-Control-Allow-Credentials`; the second starts MinIO
+with CORS for another origin only and expects the presigned upload to fail with
+no fallback to the API:
+
+```sh
+scripts/run-web-e2e-s3.sh
+scripts/run-web-e2e-s3.sh --narrow-cors
+```
+
 Integration tests always create and drop their own UUID database and app role; they never reuse or drop an externally supplied database.
 
 ## HTTP entry points
@@ -217,6 +372,121 @@ Integration tests always create and drop their own UUID database and app role; t
 | POST | `/api/v1/auth/logout` | Revoke current session and clear cookie |
 
 PATCH requires `givenName`; `familyName` omitted preserves the value, null or an empty string clears it. Other optional fields are `locale` (`ko`), `timezone`, `weekStartsOn` (0/1), and `textScale` (16/18/20). Unknown fields are rejected. Use the bound address printed at startup; default port 0 is selected by the listening socket.
+
+### Probes
+
+Outside `/api/v1`, not in `apps/web/openapi.json`, and never behind the session,
+consent or bearer checks (source `INFRA_PATHS`):
+
+| URL | Result |
+| --- | --- |
+| `GET /health` | Liveness: always `200 {"ok":true}`. |
+| `GET /ready` | `200 {"ok":true}`, or `503 {"ok":false,"checks":{"pg":false,...}}`. Checks the app-role PostgreSQL pool (`SELECT 1`) and, when collaboration is enabled, that the hub is not shutting down (`collab`). Each check is bounded by 2 s. There is no Redis to check. |
+| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers and other methods get the generic `404 not_found` problem. Metrics and scrape setup: "Prometheus scrape" below. |
+
+`fvoci-server healthcheck` requests `GET /ready` from the address in `FVOCI_BIND`
+(a wildcard bind is probed on loopback) and exits 0 on a 2xx answer within 4 s,
+otherwise 1. It reads no other configuration or secrets. The source modes
+`worker`, `compact` and `thumbnail` exit 1 with a message because those roles
+run inside the server here. The Compose server healthcheck runs
+`/opt/fvoci/bin/fvoci-server healthcheck` every 2 s with a 5 s timeout (the
+source Compose used its binary's `healthcheck` with the same timeout), so the
+container is healthy only once `/ready` reports PostgreSQL (and collab, when
+enabled) ready.
+
+### Prometheus scrape
+
+`/metrics` is the only monitoring surface: the server adds no exporter, and
+neither Compose file starts Prometheus, Grafana or a collector. Point an
+existing Prometheus at it.
+
+**Access.** Every response is OpenMetrics 1.0.0 text whatever the `Accept`
+header (Prometheus 2.x/3.x parse it by the response `Content-Type`). Only a
+direct TCP peer inside `METRICS_ALLOW_IPS` (Environment table) gets it; an
+unset or empty list, any other peer and any method other than GET/HEAD get the
+same `404 not_found` problem. `X-Forwarded-For`, `X-Real-IP` and `Forwarded`
+are never read, so a proxy cannot vouch for a client. The user install passes
+`METRICS_ALLOW_IPS` from the `fvoci` service environment through the preparation
+to the server process unchanged; `.env` alone does not reach the container, so
+set it with the override below.
+
+**Compose override.** `infra/rust/compose.metrics.yml` (optional, next to
+`compose.yml`) adds `METRICS_ALLOW_IPS` from `.env` and joins `fvoci` to an
+internal network with no outside route and no published port. In `.env`:
+
+```sh
+FVOCI_METRICS_SUBNET=172.31.250.0/29   # a free private range on this host
+METRICS_ALLOW_IPS=172.31.250.6/32      # the Prometheus address in it
+```
+
+`docker compose -f compose.yml -f compose.metrics.yml up -d`, then attach the
+existing Prometheus container to network `fvoci_metrics` with that address
+(`docker network connect --ip 172.31.250.6 fvoci_metrics <prometheus>`, or
+`networks: {fvoci_metrics: {ipv4_address: 172.31.250.6}}` with the network
+declared `external` in its own Compose file). Use the highest address: `fvoci`
+takes a low dynamic one and the host holds the first. List that single
+address, not the subnet, or every host process can reach `/metrics` from the
+bridge address. Scraping through the
+published `127.0.0.1` port instead arrives from the default network's gateway,
+so allowing that address lets every local process read `/metrics`.
+
+The override targets the `fvoci` service of the user install (`compose.user.yml`
+rendered as `compose.yml`); it is not a release asset and does not apply to the
+developer `infra/rust/compose.yml`, where `docker compose config` fails closed.
+
+**Scrape config** (Prometheus 2.49 or newer for `scrape_protocols`):
+
+```yaml
+scrape_configs:
+  - job_name: fvoci
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    scrape_protocols: [OpenMetricsText1.0.0, PrometheusText0.0.4]
+    static_configs:
+      - targets: ["fvoci:8080"]
+```
+
+**Metrics.** No label holds a workspace, user, document, room, token, URL or
+concrete path. Database-derived values are refreshed at most every 15 s by one
+bounded (2 s) query; everything else is read on each scrape.
+
+| Name | Type | Meaning | On failure |
+| --- | --- | --- | --- |
+| `fvoci_http_request_duration_seconds{method,route,status}` | histogram | Request duration; `route` is the router template or `unmatched`, `method` one of the standard verbs or `OTHER` | In-process, cannot fail |
+| `fvoci_outbox_lag_seconds` | gauge | Age of the oldest event some outbox consumer cursor has not passed, including events committed behind a long-running or idle-in-transaction session (source `lagSeconds()`) | `NaN` before the first successful refresh and after a failed or timed-out one |
+| `fvoci_outbox_xmin_stall_seconds` | gauge | Age of the oldest transaction holding an xid anywhere in the PostgreSQL cluster, prepared transactions included; outbox delivery waits for it (replaces the source counter `fvoci_outbox_xmin_stall_total`; alert on a threshold) | As above |
+| `fvoci_db_metrics_last_success_timestamp_seconds` | gauge | Unix time of the last successful outbox refresh | `0` until the first; kept on failure |
+| `fvoci_db_metrics_refresh_failures_total` | counter | Outbox refreshes that failed or timed out | — |
+| `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections` | gauge | This server's application-role connection pool and its limit. Not total PostgreSQL connections: collab room locks (one per live room, detached from the pool), the preparation, other servers and tools are outside it; use `pg_stat_activity` for totals | In-process, cannot fail |
+| `fvoci_task_stream_subscribers` | gauge | Open project task SSE streams | In-process |
+| `fvoci_process_resident_memory_bytes` | gauge | Observed RSS (`VmRSS`) of the server process, helpers excluded | `NaN` when `/proc/self/status` is unreadable |
+| `fvoci_collab_helper_resident_memory_bytes` | gauge | Observed RSS summed over live collaboration helper processes, the same sum collab admission reads | A helper exiting mid-read is skipped; a helper whose `/proc/<pid>/status` cannot be read contributes 0, so the sum can under-report |
+| `fvoci_collab_helper_memory_budget_bytes` | gauge | Configured helper budget `FVOCI_COLLAB_MEMORY_BUDGET` (not an observation) | `NaN` when collaboration is off |
+
+Collab admission refuses a room start when helper RSS plus the start's own
+estimate (`max(16 MiB, factor × persisted bytes)`) would exceed the budget;
+that per-start estimate, room occupancy and refusals by reason are not
+exported yet.
+
+**PromQL examples.**
+
+```promql
+# request rate and 5xx ratio
+sum(rate(fvoci_http_request_duration_seconds_count[5m]))
+sum(rate(fvoci_http_request_duration_seconds_count{status=~"5.."}[5m]))
+  / sum(rate(fvoci_http_request_duration_seconds_count[5m]))
+# p95 latency per route
+histogram_quantile(0.95, sum by (le, route) (rate(fvoci_http_request_duration_seconds_bucket[5m])))
+# outbox stuck (NaN compares false, so pair it with the staleness rule)
+fvoci_outbox_lag_seconds > 300
+time() - fvoci_db_metrics_last_success_timestamp_seconds > 120
+increase(fvoci_db_metrics_refresh_failures_total[10m]) > 0
+fvoci_outbox_xmin_stall_seconds > 600
+# app pool saturation and helper memory against the budget
+fvoci_db_pool_connections{state="active"} / fvoci_db_pool_max_connections > 0.9
+fvoci_collab_helper_resident_memory_bytes / fvoci_collab_helper_memory_budget_bytes > 0.8
+```
 
 ### Response security headers
 
@@ -281,7 +551,7 @@ Optional tuning:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `FVOCI_COLLAB_MAX_ROOMS` | 30 (clamp 1–512) | Hub room slots; immediate refusal when full. Default fits stock PostgreSQL `max_connections=100`; the 64-room capacity probe sets `64` and needs a higher Postgres limit. |
+| `FVOCI_COLLAB_MAX_ROOMS` | 30 (clamp 1–512) | Hub room slots. When full, a new room first reclaims the least recently active room that has no members, no join in flight and no HTTP body operation, and whose last activity is older than `max(COLLAB_RPC_TIMEOUT_MS, 3 s)` (5 s by default, at most the idle timer); it waits for that room to close. With no such room the join is refused (WebSocket close 1013, the editor retries with bounded backoff). Default fits stock PostgreSQL `max_connections=100`; the 64-room capacity probe sets `64` and needs a higher Postgres limit. |
 | `FVOCI_COLLAB_MAX_CHILDREN` | primary + validator headroom | Bounds the validator helper pool only. Primary cap is `max_rooms + 4` for offline revision capture headroom. |
 | `FVOCI_COLLAB_MEMORY_BUDGET` | 2 GiB | Aggregate admission: sum live helper VmRSS plus `max(16 MiB, 14× persisted bytes)` per room start |
 | `FVOCI_COLLAB_MAX_CONNECTIONS` | 32 | Per-room WebSocket members |
@@ -300,7 +570,7 @@ snapshots and automatic retention in the hourly maintenance sweep):
 
 Capacity refusals close WebSocket clients with **1013** “try again later” (retryable).
 Per-child limits stay unchanged (AS 1 GiB, observed RSS kill 512 MiB, 8 s wall, 256-op recycle).
-Helpers try to set `oom_score_adj=1000` so cgroup OOM prefers a helper over `fvoci-server`; where the container profile denies it (e.g. AppArmor docker-default), the helper still starts without it.
+Collaboration helpers and document children (HWP, office, Markdown, image preview) try to set `oom_score_adj=1000` so cgroup OOM prefers them over `fvoci-server`; where the container profile denies it (e.g. AppArmor docker-default), they still start without it, and only a collaboration helper's denial is logged (once per server process).
 The server raises soft `RLIMIT_NOFILE` to the hard limit at startup.
 
 Heavy load probe (not in default CI; Linux + PostgreSQL via `scripts/start-test-postgres.sh`):
@@ -352,7 +622,7 @@ export FVOCI_COLLAB_ENGINE=/path/to/collab-engine
 cargo test --features db-tests --test collab_product
 ```
 
-## Web UI (React)
+## Web UI (React and Vue)
 
 Generate the OpenAPI contract and TypeScript client from Rust DTOs:
 
@@ -360,18 +630,60 @@ Generate the OpenAPI contract and TypeScript client from Rust DTOs:
 scripts/generate-api.sh
 ```
 
+The web workspace (`apps/web`, `packages/*`, `scripts/document-convert`) is
+installed and run with Bun: the version in `.bun-version`, `bun ci` at the
+repository root for the locked `bun.lock`, and `--bun` so package binaries run
+on Bun even where Node is installed. `bunfig.toml` keeps the hoisted linker (one
+root `node_modules`), which the type paths and scripts rely on.
+
+A checkout last installed with npm (before the Bun switch) still has npm's
+`node_modules` in `apps/web`, `packages/editor` and `scripts/document-convert`.
+Delete those three before the first `bun ci`: npm's `install-links` copied
+`@fvoci/editor` and `@fvoci/i18n` into `apps/web/node_modules`, and imports
+from `apps/web` would resolve to those stale copies instead of the workspace
+packages.
+
 Development (Vite proxy to a running `fvoci-server` API):
 
 ```sh
+bun ci
 cd apps/web
-npm install
-API_PROXY_TARGET=http://127.0.0.1:8080 npm run dev
+API_PROXY_TARGET=http://127.0.0.1:8080 bun --bun run dev
 ```
+
+The React app and the Vue app (`src/vue`, Nuxt UI) share one `index.html`;
+`src/boot.ts` loads the Vue app for the paths in `src/app-boundary.ts` (the
+project Gantt, `/w/:slug/:ref/gantt`, and wiki documents, `/w/:slug/WIKI-<n>`)
+and the React app for every other path.
+
+Type checking runs both checkers under Bun (`build` runs them before `vite build`):
+
+```sh
+cd apps/web && bun --bun run typecheck   # tsc -b (React) and vue-tsc -b tsconfig.vue.json (Vue)
+cd packages/editor && bun --bun run typecheck   # tsc, and vue-tsc for the Vue editor host (src/vue)
+```
+
+The editor package's tests load the Vue editor's single-file components
+through `test/setup/vue-sfc.ts` (a `bun test --preload` plugin that compiles
+them with Vue's own compiler, as the build does).
+
+vue-tsc under Bun needs `patches/@volar%2Ftypescript@2.4.28.patch` (Bun
+`patchedDependencies` in the root `package.json`, applied by `bun ci`/`bun
+install`): without it Volar's `runTsc` cannot hook the TypeScript compiler
+under Bun, every `.vue` import fails with TS2307 and errors inside `.vue` files
+are not reported (vuejs/language-tools#4082). The patch is the upstream fix,
+volarjs/volar.js#310. The patch is keyed to `@volar/typescript` 2.4.28: after
+a vue-tsc (or Volar) bump that changes that version it no longer applies and
+vue-tsc under Bun fails with TS2307 again, so update or drop it with the bump.
+Once a Volar release contains volarjs/volar.js#310, remove the
+`patchedDependencies` entry and the patch file, then check that vue-tsc still
+fails on a deliberate type error in a `.vue` script and template under Bun
+with no `node` on PATH.
 
 Production-style serving from the Rust binary (built assets required):
 
 ```sh
-(cd apps/web && npm ci && npm run build)
+bun ci && (cd apps/web && bun --bun run build)
 export FVOCI_STATIC_DIR="$PWD/apps/web/dist"
 export FVOCI_PUBLIC_ORIGIN=http://127.0.0.1:8080
 export FVOCI_BIND=127.0.0.1:8080
@@ -434,7 +746,7 @@ PDF run in the same child as the Markdown conversions
 (`--op tiptap-to-md-export|tiptap-to-docx|tiptap-to-pdf|tiptap-to-pptx`), see "DOCX export",
 "PDF export" and "PPTX and Markdown export" below. The server no longer runs the Node document
 convert helper; the final image contains no Node/Bun/Deno or bundled JavaScript engine.
-Node is used only to build the web assets and run development oracles/tests.
+Bun is used only to build the web assets and run development oracles/tests.
 `scripts/document-convert` remains only
 as the development oracle for the fixture regeneration scripts (`scripts/regen-*-oracle.sh`).
 The installed document smoke uses a host-side Python standard-library client;
@@ -567,13 +879,27 @@ RSS on the same bodies.
 
 ## Container install
 
-The install artifact is a multi-stage Docker image plus a small Compose stack under
-`infra/rust/`. It builds release `fvoci-server`, `fvoci-migrate`, the production
+There are two Compose files under `infra/rust/`:
+
+- **User install:** `compose.user.yml` with `compose.user.env.example` (a release
+  ships them as `compose.yml` and `env.example`). Services `fvoci`, `postgres`,
+  `meilisearch`; the `fvoci` container prepares the database and search on every
+  start and then runs the server. This is the install for anyone running FVOCI;
+  see "Install (compose.yml and .env)", "Release images (0.x)" and "Backup and
+  restore".
+- **Developer stack:** `compose.yml` with `.env.example` (or
+  `fvoci-migrate --init-env`), built from the checkout, with a separate one-shot
+  `init` service before `server` and the optional `compose.s3.yml` overlay. It
+  is what `scripts/install-smoke.sh`, `backup-restore-smoke.sh` and
+  `upgrade-smoke.sh` exercise; see "Developer stack (compose.yml with init)".
+
+The install artifact is a multi-stage Docker image used by both. It builds release `fvoci-server`, `fvoci-migrate`, the production
 `collab-engine` helper (`--features worker`), the production `document-extract`
 helper (same rhwp pin as `scripts/prepare-extract-helper.sh` / `rust.yml`, without
 `test-hang`), and the `apps/web` production bundle (same steps as
-`scripts/prepare-web-e2e.sh` + `npm run build`). Runtime images pin base digests,
-run as uid/gid `1000` (`fvoci`), and set:
+`bun ci` + `bun --bun run build`). Runtime images pin base digests,
+run as uid/gid `1000` (`fvoci`) by default (the user install below starts the
+container as root and runs the server as `1000`), and set:
 
 | Variable | Installed path / note |
 | --- | --- |
@@ -585,7 +911,203 @@ run as uid/gid `1000` (`fvoci`), and set:
 Unset any helper env to disable that feature (API-only). The published image ships
 all three helpers and enables them via the defaults above.
 
-### Bootstrap
+### Install (compose.yml and .env)
+
+The user install is `infra/rust/compose.user.yml` with
+`infra/rust/compose.user.env.example`; a release ships them as `compose.yml`
+(image pinned by digest) and `env.example`, with a short `INSTALL.md`. In an
+empty folder:
+
+```sh
+cp env.example .env      # fill in each empty value with the command shown above it
+docker compose up -d --wait
+```
+
+Open `FVOCI_PUBLIC_ORIGIN` (<http://localhost:8080>) and create the first
+administrator (no administrator is created automatically). Services: `fvoci`,
+`postgres`, `meilisearch`; there is no separate init service.
+
+`.env` holds nine values: `FVOCI_PUBLIC_ORIGIN` and `FVOCI_PUBLISH_PORT`
+(filled in: change both together; the server never derives the origin from
+`Host` or `Forwarded`), `PASSWORD_PEPPER_ACTIVE_KEY_ID` and
+`ENCRYPTION_ACTIVE_KEY_ID` (filled in: `install`), and five values to generate:
+`POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
+(`openssl rand -hex 32` each) and the keyrings `PASSWORD_PEPPER_KEYS` and
+`ENCRYPTION_KEYS` (`{"install":"<openssl rand -hex 32>"}`, the same format as
+`fvoci-migrate --init-env`). Compose requires each value, so an unfilled `.env`
+stops before any container is created. Keep `.env` private (`chmod 600 .env`)
+and back it up apart from the database backups; PostgreSQL keeps the owner and
+app passwords from the first start, and the pepper and encryption keys open
+existing accounts and sealed secrets.
+
+Compose passes the values as container environment, each service only those
+it names (no `env_file`): `fvoci` all of them except `FVOCI_PUBLISH_PORT`
+(the published port), `postgres` only `POSTGRES_PASSWORD`, `meilisearch` only
+`MEILI_MASTER_KEY`. A container keeps the environment it was created with:
+after editing `.env`, run `docker compose up -d`, which recreates the
+containers whose values changed (`docker compose restart` keeps the old
+values). That applies a changed setting; it does not change a password or key
+already in use. PostgreSQL keeps both passwords from its first start (a
+different value is refused, below), and a keyring changes by adding a key and
+switching its active id, keeping the old key while anything still uses it
+(`--secrets-audit`, `--secrets-rotate` in "Operator commands").
+
+The image entrypoint is `fvoci-migrate --start`. The `fvoci` service starts it
+as root (`user: "0:0"`). It first refuses any `<VAR>_FILE` setting of the five
+generated values (`POSTGRES_PASSWORD_FILE` and the like, from the `compose.yml`
+of an older release; nothing reads them any more): it names each and exits 2,
+with or without the owner password. Given the owner password
+(`POSTGRES_PASSWORD`), it then runs, on every start of `fvoci`:
+
+1. **Settings check.** Every required value is set, not empty and not an
+   example placeholder (`<…>`, `change-me`, …); passwords and the master key
+   are at least 16 characters and the app password differs from the owner's;
+   the keyrings parse with their active ids; the origin is valid. Errors name
+   the variable, never the value, and exit 2.
+2. **Readiness.** It waits for PostgreSQL (as the owner) and Meilisearch
+   (`/health`) until `FVOCI_PREPARE_TIMEOUT_SECS` (default 120) and exits 1
+   after it; SIGTERM/SIGINT end the wait at once (exit 143/130). A wrong owner
+   password is reported as such, without waiting.
+3. **Preparation**, under a PostgreSQL advisory lock (concurrent starts run one
+   after another). If migrations are pending while sessions of the app role are
+   open (another server is still running), it refuses and points to "Upgrade".
+   Otherwise it creates the `NOBYPASSRLS` app role if missing, migrates (the
+   same locked, transactional path as `fvoci-migrate`), applies the grants,
+   checks that `FVOCI_APP_PASSWORD` opens the app role, and ensures the scoped
+   search key in `/run/fvoci/meili/api_key` (the `meili_key` volume). Root
+   first makes that directory `root:root` `0755` (through the open directory;
+   one owned by any other user than uid 1000, or writable by others, is
+   refused), then writes the key to a new, unpredictably named file, sets it to
+   `root:1000` `0640` on the open descriptor and renames it into place, so the
+   server can read the key but not replace, redirect or change it; a symlink
+   left in the directory is replaced, never followed. Key files are read
+   without following a symlink.
+4. **Server.** It closes every preparation connection and `exec`s
+   `fvoci-server` in the same process (pid 1, so signals, graceful shutdown and
+   child reaping are the server's, as before), as uid/gid `1000` with no
+   supplementary groups and so no capabilities. Its environment is the
+   container's without `POSTGRES_PASSWORD`, `DATABASE_URL`,
+   `FVOCI_MIGRATION_URL`, `MEILI_MASTER_KEY`, `FVOCI_MEILI_MASTER_KEY` and
+   `FVOCI_APP_PASSWORD`, plus `DATABASE_APP_URL` (the app role; it contains
+   the app password, which the server needs) and `HOME=/nonexistent`: it keeps
+   the keyrings and never holds the owner password or the master key. This
+   removes them from the server process only; the container configuration
+   still holds them (below). The service has `no-new-privileges`, and the
+   image has no setuid or setgid file. Descriptors the preparation opened are
+   close-on-exec.
+
+If any step fails the server does not start; the container restarts and tries
+again (`docker compose logs fvoci` names the problem).
+
+**The boundary is the uid, inside one container.** The server and everything it
+starts run as uid 1000; the preparation is root's. Every `docker exec` and
+healthcheck process starts from the container configuration, so it holds every
+value Compose passes to `fvoci`, the owner password and master key included;
+they run as root (the service's user). So a compromised server cannot read
+those processes' environment, the preparation's memory or environment (another
+uid, and root's processes are not traceable by it), or redirect root's search
+key write (above). The exception is a session you start as uid 1000
+(`docker compose exec -u 1000:1000 fvoci …`): it holds every configured value
+in an environment the server's uid can read while it runs.
+`scripts/standalone-install-smoke.sh` checks each of these on a running
+install. What the server does hold: the app role password (in
+`DATABASE_APP_URL`), the pepper and encryption keyrings, and the scoped search
+key; that is what it needs to run.
+
+The server also makes itself non-dumpable at startup (`PR_SET_DUMPABLE` 0) and
+refuses to start if the kernel does not allow it. The kernel then owns the
+files under its `/proc/<pid>` by root, so the helpers it starts (collaboration, document
+extraction, preview, Office and Markdown conversion, all uid 1000) and a uid-1000
+`docker compose exec` session (which starts with the configured values itself)
+can read neither its environment (the keyrings, `DATABASE_APP_URL`) nor its
+memory or open descriptors, and cannot attach to it. For the same reason the server writes no core dump at all, whatever
+`fs.suid_dumpable` is set to (that setting only applies after a credential
+change, which the server never makes), and `gdb -p`, `strace -p` and `lsof` on
+the server no longer work from a uid-1000 session. Run them as root with
+`CAP_SYS_PTRACE` (`docker compose exec --privileged fvoci …`); the image ships
+none of these tools, so install them in the container first or attach from the
+host. `perf -p` additionally needs a container created with `CAP_PERFMON` or
+`CAP_SYS_ADMIN`, since `exec --privileged` does not change the container's
+seccomp profile. The helpers do still share uid
+1000 file access with the server: the attachment store (`/data/storage`,
+every workspace's files) and the scoped search key
+(`/run/fvoci/meili/api_key`, readable by group 1000). The helpers themselves
+stay dumpable, so where the host allows same-uid ptrace one helper can attach
+to another. What is **not** separated:
+
+- It is one container, not two: root in it (`docker compose exec fvoci …`,
+  which defaults to root, and the healthcheck) starts with every configured
+  value. Under Docker's default capabilities (no `CAP_SYS_PTRACE`) that root cannot
+  read the server's `/proc/1/environ` either, and neither can uid 1000 since
+  the server is non-dumpable; inspect the server with
+  `docker compose exec --privileged fvoci …` (root with `CAP_SYS_PTRACE`). A
+  kernel or container escape from uid 1000 is outside this boundary.
+- Anyone who can run Docker commands on the host can read every value:
+  `docker inspect`, `docker compose config` and `docker compose exec` show
+  them, as `.env` itself does. Do not paste their raw output into logs,
+  issues or reviews.
+- `postgres` and `meilisearch` hold their own value (the owner password, the
+  master key) in their container configuration and process environment;
+  neither gets the app's passwords or keyrings.
+
+The owner never reaches the network beyond the Compose network: PostgreSQL and
+Meilisearch publish no port.
+
+Without the owner password the entrypoint, after that `<VAR>_FILE` check, only
+execs `fvoci-server` (the developer stack, `infra/rust/compose.yml`, prepares in
+its separate `init` service instead); started as root, it still runs the server
+as uid 1000.
+
+Other defaults come from the image and the Rust loader: helper paths, static
+and storage directories, bind address, shutdown deadline (30 s), collaboration
+memory budget (2 GiB), extraction poll interval (30 s), secure cookies for an
+`https` origin, and the database names `fvoci`, `fvoci_owner`, `fvoci_app`
+(PostgreSQL service `postgres:5432`, Meilisearch `http://meilisearch:7700`).
+The file keeps one capacity setting: `FVOCI_COLLAB_MAX_ROOMS: "64"` with
+PostgreSQL `max_connections=150`, the verified pair (64 room fences + app pool
+64 + reserve 10 = 138). The image default is 30 rooms, which fits a stock
+PostgreSQL; change both together.
+
+#### Optional settings
+
+Put optional settings in a `compose.override.yml` next to `compose.yml`;
+`docker compose` merges it automatically. List only what you use, then
+`docker compose up -d`:
+
+```yaml
+services:
+  fvoci:
+    environment:
+      SMTP_HOST: smtp.example.com
+      SMTP_PORT: "587"
+      SMTP_FROM: fvoci@example.com
+```
+
+| Topic | Variables (details in this file) |
+| --- | --- |
+| Domain, HTTPS, proxy | `FVOCI_PUBLIC_ORIGIN=https://…` in `.env` (also turns on secure cookies) and the published address; see "Developer stack (compose.yml with init)" below for the proxy rules, which apply to both stacks |
+| S3 storage | `STORAGE_DRIVER=s3`, `S3_*` ("S3 storage backup"); for direct browser transfer `S3_PUBLIC_ENDPOINT` and optionally `FVOCI_ATTACHMENT_TRANSFER_MODE`, `FVOCI_ATTACHMENT_PRESIGN_*_TTL_SECS` ("Attachment transfer modes") |
+| Mail | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` |
+| OIDC sign-in | providers are set up in the app, sealed with `ENCRYPTION_KEYS`; `OIDC_ALLOW_INSECURE=1` only for a local http provider |
+| GitHub integration | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_STATE_SECRET` |
+| AI | `FVOCI_AI_ENABLED`, `FVOCI_AI_SECRET`, `FVOCI_AI_EMBEDDINGS_*` |
+| Prometheus scrape | `METRICS_ALLOW_IPS` via `compose.metrics.yml` ("Prometheus scrape"); no monitoring service is added |
+| Tuning | `FVOCI_COLLAB_*`, `FVOCI_EXTRACT_POLL_SECS`, `FVOCI_SHUTDOWN_DEADLINE_MS`, `FVOCI_UPLOAD_*`, `FVOCI_PREPARE_TIMEOUT_SECS`, `RUST_LOG` |
+
+Unset variables keep the product default; an empty value is a value, so do not
+add empty entries. `docker compose down` and `up -d` keep data; `down -v`
+deletes the database, files and search index. Back up with `scripts/backup.sh`
+(see "Backup and restore").
+
+### Developer stack (compose.yml with init)
+
+`infra/rust/compose.yml` is the developer and source-build stack, not the user
+install: the image is built from the checkout, the settings are the longer
+`infra/rust/.env.example` (owner and app role names, `FVOCI_IMAGE`,
+`FVOCI_COOKIE_SECURE`, `FVOCI_PUBLISH_ADDR`, the optional integrations) passed as
+environment, and preparation runs in a separate one-shot `init` service. The
+steps below, "Verification" and "Upgrade" are for this stack; a user install
+upgrades as in "Release images (0.x)".
 
 1. Generate `infra/rust/.env` with `fvoci-migrate --init-env` (above), or copy
    `infra/rust/.env.example` to `infra/rust/.env` and replace placeholders.
@@ -633,7 +1155,9 @@ use. Beyond local evaluation, terminate TLS in a reverse proxy, set
 Compose always passes `FVOCI_COOKIE_SECURE` (default `false`), so the server's
 https-scheme default does not apply: set `true` in `.env` yourself when you
 switch an existing file to https (`--init-env` does it for new files). Keep the
-published address reachable only by the proxy. The proxy must pass the
+published address reachable only by the proxy. The same proxy rules
+apply to the user install, where `FVOCI_PUBLIC_ORIGIN=https://…` in `.env`
+also turns on secure cookies. The proxy must pass the
 browser's `Origin` header unchanged (mutating routes and `/collab` compare it
 with `FVOCI_PUBLIC_ORIGIN`) and forward the WebSocket upgrade for `/collab`.
 An https origin also sends HSTS with `includeSubDomains`, so serve every
@@ -652,17 +1176,24 @@ wiki collab body projection, HWPX upload + extraction, `/collab` availability,
 a graceful `docker compose stop server` (stopped container must report exit code 0),
 a recreated server container on the same volumes, and post-recreate reads.
 CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
-`.github/workflows/install.yml` (no secrets, no image publish).
+`.github/workflows/install.yml` (no secrets, no image publish). This is the
+developer stack. The user install is exercised by
+`scripts/standalone-install-smoke.sh` (a local, manual run: fresh `.env`,
+first admin, each service's environment, the uid boundary, restart, recreate,
+backup and restore) and, for
+a published release, by `scripts/release-smoke.sh` in `release.yml`
+(`docs/RELEASING.md`).
 
 ### Upgrade
 
-This moves a Compose install to a newer build of this Rust server on the same
-volumes. Each migration commits on its own, so a failed or interrupted migrate
+This moves a developer-stack install (`infra/rust/compose.yml` with `init`) to
+a newer build of this Rust server on the same volumes. A user install from a
+release upgrades by replacing `compose.yml`; see "Release images (0.x)". Each migration commits on its own, so a failed or interrupted migrate
 can leave the database between versions, and an older image then refuses to
 start against it.
 
 Use the existing install's Compose project name (`fvoci-rust-install` for the
-Bootstrap example, or the name passed to `restore.sh --project`), env file and
+developer stack example, or the name passed to `restore.sh --project`), env file and
 all `-f` files throughout. For S3, omitting `infra/rust/compose.s3.yml` silently
 selects local storage; a storage doctor probe cannot detect that wrong choice.
 
@@ -674,8 +1205,9 @@ selects local storage; a storage doctor probe cannot detect that wrong choice.
 2. From the old checkout, with its `.env` unchanged, back up and leave the server
    stopped (old servers must not run during migrate):
    `scripts/backup.sh --project <name> --env-file infra/rust/.env --output <new-dir> --leave-stopped`.
-   Keep a protected copy of the env file with the backup (file mode 0600,
-   directory 0700); the archive omits the pepper, encryption keys and passwords.
+   Keep a protected copy of the env file (file mode 0600, directory 0700),
+   stored apart from the backup; the archive omits the pepper, encryption keys
+   and passwords.
    With S3 the script refuses. First stop the server using the existing flags:
    `docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml --project-name <name> --env-file infra/rust/.env stop -t 45 server`,
    then take the quiesced dump and protect bucket objects as in "S3 storage backup".
@@ -692,19 +1224,184 @@ selects local storage; a storage doctor probe cannot detect that wrong choice.
 
 If init fails, leave the server stopped. Run `logs init` with the same Compose
 flags, fix the cause and repeat step 3: already applied migrations are skipped
-and the grant commits all or nothing. To go back to the old build, stop the
-upgraded server first; do not start the old image on the migrated database.
+and the grant commits all or nothing. If init fails with `outbox consumer seed
+repair: newest event xid ... is not settled`, a transaction on the same
+PostgreSQL cluster (any database, or a prepared transaction) is older than the
+newest event. Let it end or roll it back (`pg_stat_activity`,
+`pg_prepared_xacts`), then repeat step 3. Migration 041 adds the outbox cursors
+an earlier upgrade left missing, so notifications and mail do not replay past
+events. Migration 043 builds the index `events_workspace_relay_idx` on
+`fvoci.events (workspace_id, xact, seq)` inside the migrate transaction, so it
+cannot use `CONCURRENTLY`. While it builds, it holds a SHARE lock on
+`fvoci.events`: reads continue, but every write that records an event waits.
+The server is stopped during migrate, so this only affects other clients of the
+same database. The build is one scan and sort of the table, so its time grows with the
+number of rows in `fvoci.events`; check `SELECT count(*) FROM fvoci.events` and
+plan the maintenance window accordingly. To go back
+to the old build, stop the upgraded server first; do not start the old image on the migrated database.
 Restore the pre-upgrade backup into a new project with the old image (local
 storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback
-loses writes made after that backup; preserve the failed install for diagnosis.
-CI does not run this image-to-image upgrade; `install-smoke.sh` recreates the
-server on the same image.
+loses writes made after that backup; preserve the failed install for diagnosis,
+but with S3 keep it stopped and never start it again with the same `S3_*`
+settings, since its sweeps would delete objects the restored install uses.
+Ordinary PR and main CI does not run this image-to-image upgrade;
+`install-smoke.sh` recreates the server on the same image. An optional manual
+run is described under "Upgrade validation".
+
+#### Upgrade validation
+
+`scripts/upgrade-smoke.sh --old <sha> --new <sha>` runs these steps with local
+storage in isolated Compose projects. Both SHAs must be on the first-parent
+history of `origin/main` (`--main-ref`), and old must be an ancestor of new. New
+must add at least two migrations, including its newest one. Each image is built
+from a `git archive` of its SHA, not the working tree. It is labelled with
+`org.opencontainers.image.revision` and the Dockerfile and recipe hashes. The
+recipe differs from that SHA's Dockerfile only by `ENV CARGO_BUILD_JOBS`
+(`--build-jobs`, default 2). A tag with matching labels is reused, and the
+images are kept. The script refuses equal image IDs and stops before a build if
+the Docker root has less than `--min-free-gib` free. `--plan-only` runs only the
+source, migration and recipe checks, plus that disk gate for each image that
+would need a build (a reused image is not built, so no disk claim is made for
+it); it builds, starts and tears down nothing. A reused tag is trusted on its
+revision and recipe labels, which anyone with Docker access can set.
+
+The smoke seeds the old image with a login, a collab wiki body, an HWPX
+attachment (sha256 and extraction), a comment, and a TOTP secret sealed with
+`ENCRYPTION_KEYS`. It runs the old checkout's `backup.sh --leave-stopped`, then
+pre-creates the first table of the newest migration so the new image's `init`
+fails. The server must stay stopped: no running container and no HTTP answer.
+Only that migration may be missing. After the table is dropped, one rerun of
+step 3 must succeed. The server then runs the new image, with no old-image
+container left in the project. Doctor passes, the seeded data and extraction are
+intact, and `--verify-secrets` opens the secret. The same probe with a different
+k1 must fail and report the MFA secret `invalid`, not a missing key or a
+database error. Next the smoke stops the upgraded server and runs the old
+checkout's `restore.sh` into a fresh project on the old image. The seeded data
+must be back and the write made after the upgrade must be gone. The old image
+never runs on the migrated database.
+
+`--storage s3` runs the same flow with `infra/rust/compose.s3.yml`. It follows
+"Upgrade" step 2 for S3 and "S3 storage backup", not `backup.sh`/`restore.sh`.
+It uses the project's own pinned silo and a run-owned bucket and credentials.
+It enables bucket versioning before seeding and stores two HWPX attachments.
+
+1. **Backup:** the old `backup.sh` must refuse the S3 install. It must write no
+   output and leave the server running. The smoke then runs the documented
+   `stop -t 45 server`, checks that no other client sessions remain, and takes
+   the same `pg_dump` as `backup.sh`. It records each object's checkpoint
+   version ID.
+2. **Upgrade:** the upgrade and its checks are unchanged. In addition, the new
+   image's `--verify-storage` must report both objects.
+3. **Damage:** the upgrade project's `postgres` and `meilisearch` are stopped,
+   so only its silo runs. Then one object is deleted (a delete marker) and the
+   other is overwritten with other bytes.
+4. **Restore:** the dump is restored into a fresh database on the old image with
+   the old `restore.sh` steps minus the volume archive (app role, `pg_restore`,
+   `init`, `--recover-outbox`, `--rebuild-search`). That project's server joins
+   the upgrade project's local Docker network and points at the same bucket.
+5. **Checks before start:** `--verify-storage` must fail at HeadBucket for a
+   wrong bucket. For the damaged bucket it must exit non-zero with exactly the
+   deleted attachment `missing` and the overwritten one in `sizeMismatch`. No
+   server container may exist and nothing may answer HTTP.
+6. **Version restore:** the smoke removes the delete marker and copies the
+   checkpoint version back. `--verify-storage` and `--verify-secrets` must then
+   pass before the server starts. Both attachments must download with their
+   original sha256.
+
+On success the trap runs `down -v` for each project with the compose file of
+the source tree that started it, then checks that no container, volume or
+network with that project label remains. Only then does it delete the work dir
+and its 0600 env files. A failed `down` or a leftover fails the run and keeps
+the work dir. On any other failure after a project started, it keeps the
+projects and the work dir for diagnosis and prints the cleanup commands. The
+evidence dir holds logs with the generated secrets redacted. It is kept on
+success and on failure, including build failures. It defaults to a new 0700
+directory under `TMPDIR`, and `--evidence-dir` overrides it. Generated secrets
+reach the redactor through its environment, not argv. The wrong key of the
+negative control does appear in a `docker compose run -e` argument, and the
+fixed test login appears in curl arguments. Use a single-user host.
+
+A run proves only what it ran: one old/new pair, the host architecture, the
+selected storage, and one injected failure (a pre-created table of the newest
+migration, not an interrupted migrate or a crash). It does not compare search
+indexes or doctor output with the old install. The S3 mode proves that restore
+works from versions of the same local silo bucket. It does not cover
+replication, a second region, a cloud provider's versioning or backup service,
+lifecycle rules, or the presigned transfer mode.
+`--verify-storage` compares attachment sizes only, so a same-size overwrite is
+not detected before start. Ordinary PR and main CI does not run this smoke. A manual dispatch of the
+Container install workflow with `run_upgrade_smoke_arm=true`
+(`gh workflow run install.yml --ref <branch> -f run_upgrade_smoke_arm=true`) runs it once on native
+`ubuntu-24.04-arm` with local storage, for the fixed pair in the `upgrade-smoke-arm64` job and the
+tested commit as `--main-ref`. The job being registered is not a result. Record the pair, image IDs,
+architecture and logs of a run with the change it supports; this guide does not.
+
+### Release images (0.x)
+
+Trial releases are published by `.github/workflows/release.yml` as
+`ghcr.io/aisflow/fvoci:0.y.z` (linux/amd64 and linux/arm64) with a GitHub
+pre-release holding `compose.yml` pinned to the image digest, `env.example`,
+`INSTALL.md`, `release.json` and `SHA256SUMS`; maintainer steps are in
+`docs/RELEASING.md`. Nothing updates an install on its own. To move a release
+install to a newer 0.y.z, back it up, check the new release's `SHA256SUMS`,
+replace `compose.yml` in the same directory (same Compose project name, so the
+same volumes; keep `.env`) and run `docker compose up -d --wait --wait-timeout 900`
+(a long migration such as 043 can outlast the healthcheck's two minutes; if
+`--wait` still gives up, the preparation keeps going: follow
+`docker compose logs -f fvoci` until `prepared; starting the server`). Compose
+recreates `fvoci`, so the old server has stopped before the new container
+migrates. Stopping it during a migration is safe (that migration rolls back),
+but the next start waits until PostgreSQL has ended the interrupted statement; the preparation refuses to migrate while any other server still has
+app-role sessions open, and a failure leaves the server stopped as described
+above. From a release whose `compose.yml` passed the passwords and keyrings
+as Compose secret files (0.1.x and 0.2.0), the same steps apply: the new file
+reads the same `.env`, Compose recreates all three containers on the same
+volumes, and those files existed only inside the old containers. An old
+`compose.yml` with only its image line changed does not start: the new image
+names each `<VAR>_FILE` setting it no longer reads and exits 2. 0.x releases make no compatibility promise between minor versions and
+there is no downgrade: going back means restoring the pre-upgrade backup.
+`docker compose down -v` deletes the data; the keys stay in `.env`.
+`fvoci-server --version` (for example
+`docker compose exec fvoci /opt/fvoci/bin/fvoci-server --version`) prints the
+version and source commit.
 
 ## Backup and restore
 
-This is the logical backup for the Compose install above (the source advanced
-install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
+This is the logical backup for both Compose stacks above (PostgreSQL +
+attachment storage). It is not a stopped-stack copy
 of every volume, and it is not PITR.
+
+### Install from compose.yml and .env
+
+`scripts/backup.sh` and `scripts/restore.sh` take the user install like the
+developer stack: its `.env` is the env file, and the app service is found as
+the one publishing port 8080. Run them from a checkout of the same release:
+
+```sh
+scripts/backup.sh --project fvoci --env-file /path/to/.env --compose-file /path/to/compose.yml --output /backups/fvoci-1
+scripts/restore.sh --project fvoci-restored --env-file /path/to/.env --compose-file /path/to/compose.yml --input /backups/fvoci-1
+```
+
+The keys stay in `.env` and are not copied into the backup; keep a copy of
+`.env`, stored apart from it. Without an init service, restore runs the preparation with
+`fvoci-migrate --prepare` and the owner commands in the `fvoci` service. As
+with every restore the target is a new project name; run it with
+`docker compose -p fvoci-restored …` (or change `name:`).
+
+`restore.sh` takes the keyrings from `docker compose config` (what the server
+will get) and reads the app role and its password from the env file the way
+Compose does for these forms: `KEY=value`, `KEY='value'` and `KEY="value"`
+(the whole value in one pair of quotes, with no `\`, `$` or inner quote of the
+same kind inside double quotes). It refuses anything whose Compose meaning
+could differ from the text (escapes, `$` interpolation, an inline `#` comment,
+spaces, `export`, a key set twice) instead of guessing. The shipped
+`env.example` values are unquoted. `bash scripts/test-restore-env.sh` checks
+these cases and, when `docker compose` is available, compares the accepted
+ones with Compose's own parse.
+
+The remaining examples in this section use the developer stack
+(`infra/rust/compose.yml`, project `fvoci-rust-install`); for the user install
+add `--compose-file` as above.
 
 Run `scripts/backup.sh` and `scripts/restore.sh` on the operator's Linux host
 with Bash, Docker Compose, jq, GNU coreutils and tar. The scripts check their
@@ -771,9 +1468,10 @@ scripts/restore.sh \
 ```
 
 Restore starts postgres and Meilisearch on empty volumes, creates the
-application role, restores the dump, restores storage, then runs the one-shot
-`init` job (`fvoci-migrate`, `--grant-app-role`, `--ensure-meili-key`; all
-idempotent on this path), rebases the outbox, rebuilds search, and runs
+application role, restores the dump, restores storage, then runs the
+preparation (`fvoci-migrate`, `--grant-app-role`, `--ensure-meili-key`; all
+idempotent on this path): the developer stack's one-shot `init` job, or
+`fvoci-migrate --prepare` in the user install's `fvoci` service, rebases the outbox, rebuilds search, and runs
 `fvoci-migrate --verify-storage` with the server's own environment: every
 `stored` attachment and its published preview in the restored database must
 exist in the configured storage with their recorded sizes (a missing preview
@@ -822,6 +1520,67 @@ a 2048 to 4096 bit modulus; shorter keys are dropped from the key set) or ES256,
 eligible key, name only this client in `aud`, and send `email_verified` as a
 JSON boolean; anything else fails the sign-in with `oidc_provider_error`.
 
+Redirect URIs to register at the provider: an instance provider
+(`OIDC_<KEY>_*`) uses `<FVOCI_PUBLIC_ORIGIN>/api/v1/auth/oidc/<key>/callback`
+(`google`, `microsoft`, `kakao`, `naver`, `generic`). A workspace SSO provider
+(enterprise `workspaceSso`) uses its own
+`<FVOCI_PUBLIC_ORIGIN>/api/v1/auth/sso/<workspace id>/callback`, where the
+workspace id is the `id` from `GET /api/v1/me/workspaces`. A callback only
+completes a sign-in or link started for the same workspace (the instance path
+only instance flows), so a response from one provider cannot finish another
+provider's flow; anything else ends with `oidc_state_mismatch` before a token
+request is made. **Upgrading:** a workspace SSO configuration made before this
+release was registered with the instance `/api/v1/auth/oidc/generic/callback`
+URI. Add the workspace URI at that provider (the provider refuses an
+unregistered redirect URI) and remove the old one once no instance `generic`
+provider shares that client. Sign-ins started before the upgrade fail once
+with `oidc_state_mismatch`. Instance providers keep their URIs.
+
+Local check against a real Keycloak (opt-in, not in CI): the official image
+in `start-dev` with one imported test realm (`scripts/keycloak/`), published on
+`127.0.0.1` only, as the instance `generic` provider of the release server built
+from the checkout, driven by Playwright Chromium through the web UI
+(`apps/web/e2e-keycloak/`; its pages, sign-in included, are React pages, since
+the Vue app only renders the paths in `src/app-boundary.ts`). Secrets are
+generated per run; the Keycloak compose project is removed on exit. It does not cover external providers, HTTPS or a
+reverse proxy, or the container deployment path. Workspace SSO needs a
+`workspaceSso` license, which published builds cannot load; `--workspace-sso`
+adds two workspace realms and runs the ignored Rust test
+`keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
+license, not the release server) against them.
+
+Needs docker with compose, openssl, python3, git, cargo, bun, setsid
+(util-linux), the web dependencies and Chromium from
+`scripts/prepare-web-e2e.sh` (`bun ci`), and access to quay.io for the first
+image pull. As in the web e2e harness, the web build (`bun --bun run build`)
+and Playwright (`bun --bun x --no-install playwright test`) run under Bun;
+node and npm are not used. The script exits non-zero when a group
+fails or when its compose project `fvoci-kc-e2e-<run id>` could not be removed
+completely; the last command below removes a leftover one (the two variables
+only satisfy the compose file). A failing group's
+Playwright output and server log are copied, redacted, to
+`$FVOCI_KC_E2E_EVIDENCE_DIR/failure-<group>/`. The groups run with a TMPDIR
+inside the run directory (`$TMPDIR/fvoci-kc-e2e.*/tmp`, so `$TMPDIR` must be
+at most 36 characters), which is removed on exit together with the raw copies
+the web e2e harness keeps; Ctrl-C stops the run once the current group has
+cleaned up; a further Ctrl-C, or a closed pipe on stderr, during the script's
+own cleanup is ignored, so the run directory (per-run secrets) and the
+Keycloak project are always removed. The
+script refuses to run under `set -x`. `--skip-build` checks only that
+`fvoci-server --version` reports the checked-out commit; `fvoci-migrate` (no
+version output) and `apps/web/dist` are used as they are. The clean-tree
+check (`versions.json`) looks at tracked files only; untracked files under
+`apps/web/public` still end up in `dist`.
+
+```sh
+bash scripts/prepare-web-e2e.sh    # once
+TMPDIR=/tmp FVOCI_KC_E2E_EVIDENCE_DIR=/tmp/kc-evidence bash scripts/keycloak-oidc-e2e.sh
+bash scripts/keycloak-oidc-e2e.sh --skip-build    # reuse target/release and apps/web/dist
+bash scripts/keycloak-oidc-e2e.sh --workspace-sso    # also the workspace SSO test
+KC_BOOTSTRAP_ADMIN_PASSWORD=x FVOCI_KC_REALM_DIR=/nonexistent \
+  docker compose -p fvoci-kc-e2e-<run id> -f scripts/keycloak/compose.yml down -v
+```
+
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
 project/task, a document comment, an MFA secret sealed with `ENCRYPTION_KEYS`),
@@ -848,23 +1607,83 @@ with `STORAGE_DRIVER=s3`. The supported model for S3 is:
    server-generated UUIDs.
 2. **Database:** a `pg_dump` of schemas `public` and `fvoci` taken the same way
    as `scripts/backup.sh` does (custom format, owner role, server stopped so the
-   dump is quiesced). Objects deleted by workspace purge after the dump are
-   recoverable only from bucket versions.
-3. **Restore:** restore the dump, point the server at the bucket (or the
-   replica), and before starting the server run the storage check with the
-   server's environment:
+   dump is quiesced). Record the UTC time, in whole seconds, at which the dump
+   finished; restore needs it. Objects deleted by workspace purge after the dump
+   are recoverable only from bucket versions.
+3. **Restore:** `scripts/restore.sh` needs a volume archive and a manifest, so
+   run its database steps by hand into a **fresh** Compose project. Use the
+   image that took the dump (`FVOCI_IMAGE` in the env file set to that tag), and
+   run the commands below from the checkout that built it so `$C` uses its
+   Compose files. After a failed upgrade this is the old image and checkout;
+   never start it on the migrated database.
 
-   ```sh
-   docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml \
-     --project-name <project> --env-file <env> \
-     run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
-   ```
+   Only one install may use a bucket. Its background sweeps (abandoned-upload
+   cleanup, trashed-document and workspace purge) delete bucket objects based on
+   its own database, so two installs whose databases diverged delete objects
+   the other still references, silently and after `--verify-storage` has
+   passed. Before starting the restored server, stop every other install that
+   uses these `S3_*` settings (the source, or a failed or migrated upgrade), and
+   never start that install again with them. A restore drill must use an
+   independent replica or copy of the bucket, never the live one, and must not
+   hold production integration credentials: `--ack-external-replay` below
+   re-sends external events. You need these inputs:
+   - the dump;
+   - `<dump-utc>`: the UTC time recorded when the dump finished, truncated to
+     the second (`date -u +%Y-%m-%dT%H:%M:%SZ`). There is no manifest to
+     recover it from. If it was not recorded, stop instead of guessing;
+   - an env file with the original `POSTGRES_USER`, `POSTGRES_DB` and
+     `FVOCI_APP_ROLE` names;
+   - the same `PASSWORD_PEPPER_KEYS` / `PASSWORD_PEPPER_ACTIVE_KEY_ID`;
+   - `ENCRYPTION_KEYS` with every original key id unchanged (a superset is
+     fine). Nothing compares a fingerprint here; only `--verify-secrets` below
+     checks the keyring;
+   - `S3_*` pointing at the bucket (or the replica), used by no other install.
 
-   It prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
-   and exits non-zero when any stored attachment is missing or has a different
-   size, when a branding asset referenced by the instance settings
-   (`logo`/`favicon`, uploaded in the admin console) is missing or does not
-   match its recorded SHA-256, or when the bucket cannot be read (credentials,
+   Then, with `C="docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml --project-name <new-project> --env-file <env>"`:
+
+   1. Run `$C up -d --wait postgres meilisearch`. Then, as `scripts/restore.sh`
+      does:
+      - confirm the database is empty (no user relations outside
+        `pg_catalog`/`information_schema`); stop if it is not;
+      - create `FVOCI_APP_ROLE` (`LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`, password
+        `FVOCI_APP_PASSWORD`);
+      - copy the dump into the postgres container;
+      - run `pg_restore --exit-on-error --single-transaction --no-owner` with a
+        `--use-list` that drops the `SCHEMA - public` entry.
+   2. Run `$C run --rm init`. This does migrate, `--grant-app-role` and
+      `--ensure-meili-key`. Only the `init` service receives the owner
+      `DATABASE_URL`. (These commands name the developer stack's `init` and
+      `server` services. With the user compose, run
+      `$C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate fvoci --prepare`
+      here and use `fvoci` in place of both `init` and `server` below.)
+   3. Rebase the outbox and rebuild search with the same bounds `restore.sh`
+      derives from its manifest. Set `<snapshot>` = `<dump-utc>` + 1 s, and
+      `<since>` = `<snapshot>` − 29 days (the widest window
+      `--recover-outbox` accepts):
+
+      ```sh
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
+        --recover-outbox --since <since> --snapshot-at <snapshot> \
+        --apply --reason "restore into <new-project>" --ack-external-replay
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --rebuild-search
+      ```
+
+   4. Before any server starts, run the storage check and then the secrets
+      check. Both use the server's environment (app role only, no owner URL):
+
+      ```sh
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-secrets
+      ```
+
+   5. Start the server with `$C up -d --wait server`, and only after both
+      checks pass.
+
+   `--verify-storage` prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"previewChecked":P,"previewMissing":[...],"previewSizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
+   and exits non-zero when any stored attachment or published preview is
+   missing or has a different size, when a branding asset referenced by the
+   instance settings (`logo`/`favicon`, uploaded in the admin console) is
+   missing or does not match its recorded SHA-256, or when the bucket cannot be read (credentials,
    wrong bucket, network). Restore the listed objects from bucket versions
    before starting the server. Branding assets are stored like attachments
    (same driver, key from the setting), so the local volume archive and the S3
@@ -912,8 +1731,9 @@ job submission and are not yet a released support claim.
 ## Operator commands (`fvoci-migrate`)
 
 The source's `fvoci <command>` CLI maps onto `fvoci-migrate`, the one-shot
-operator binary already shipped in the image and used by the Compose `init`
-job, backup and restore (the server binary stays single-purpose):
+operator binary shipped in the image. It is the user install's entrypoint
+(`--start`: prepare, then exec the server), the developer stack's `init` job,
+and what backup and restore run (the server binary stays single-purpose):
 
 | Source | Rust | Environment |
 | --- | --- | --- |
@@ -922,13 +1742,130 @@ job, backup and restore (the server binary stays single-purpose):
 | `fvoci bootstrap` (migrate) | `fvoci-migrate`, then `--grant-app-role <role>` | owner `DATABASE_URL` |
 | `fvoci search-rebuild [workspaceId]` | `fvoci-migrate --rebuild-search [workspace-id]` | owner `DATABASE_URL`, Meili |
 | `fvoci outbox-recover` | `fvoci-migrate --recover-outbox ...` | owner `DATABASE_URL` |
+| `fvoci outbox-reset [--override-reason=...]` | `fvoci-migrate --outbox-reset [--consumer <name>]... [--apply --reason <text> [--override-reason <text>] [--ack-external-replay]]` | owner `DATABASE_URL` (see below) |
 | `fvoci backup <collect\|restore\|...>` | `scripts/backup.sh`, `scripts/restore.sh` (below) | Compose project |
 | — (restore check) | `fvoci-migrate --verify-storage` | the server's |
 | `fvoci secrets rotate-vapid` | `fvoci-migrate --rotate-vapid` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
+| `fvoci secrets audit` | `fvoci-migrate --secrets-audit` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`, `PASSWORD_PEPPER_KEYS`) |
+| `fvoci secrets rotate` | `fvoci-migrate --secrets-rotate` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
 
-Not ported: `secrets audit/rotate`, `reindex` (extract re-enqueue), `healthcheck`
-and the split worker roles (`worker`, `compact`, `thumbnail`, `collab`); the Rust
-server runs those jobs in-process.
+`fvoci healthcheck` is `fvoci-server healthcheck` (see "Probes"; it probes the
+server, not a `fvoci-migrate` mode).
+
+Not ported: `reindex` (extract re-enqueue) and the split worker roles (`worker`,
+`compact`, `thumbnail`, `collab`) with their `healthcheck <role>` heartbeat
+checks; the Rust server runs those jobs in-process.
+
+**`--secrets-audit` / `--secrets-rotate`** (source `fvoci secrets audit|rotate`)
+run as the app role in the system context, like the server; they refuse a
+superuser, `BYPASSRLS` or schema-owner URL and a schema that is not current.
+Both walk the webhook signing secrets, workspace SSO client secrets, TOTP
+secrets and the VAPID private key, 100 rows per transaction, with each value's
+row-bound AAD. Output is one JSON line of key ids and counts; secret values,
+password hashes and key material are never printed.
+
+- `--secrets-audit` prints `secrets` (`<class>:<key id>` → count, `invalid` for
+  a malformed value), `passwords` (pepper key id → count, `unknown` for a hash
+  in no known format), `problems`, `activeKeyId`, `notActive` (values that
+  open but are not under the active key), `missingKeyIds` and
+  `missingPasswordKeyIds`. It exits 1 when `problems` is nonzero: a value that
+  does not open (missing key id, wrong key, corrupted or moved value) or a
+  password hash whose pepper key is missing or whose format is invalid.
+- `--secrets-rotate` re-seals every value not under `ENCRYPTION_ACTIVE_KEY_ID`
+  and prints `{"changed":n,"unchanged":m}`. It first opens every value and
+  refuses before writing anything if one does not open (the source re-seals
+  earlier batches and then stops). Each write is a compare-and-set on the value
+  it read (the VAPID key through `app_replace_vapid_private`), so a concurrent
+  change fails the command with a conflict instead of being overwritten;
+  committed batches are valid, and re-running finishes the rest. A second run
+  reports `changed: 0`. Password hashes are re-peppered at sign-in, not here.
+
+Key rotation: add the new key to `ENCRYPTION_KEYS`, switch
+`ENCRYPTION_ACTIVE_KEY_ID`, recreate the server with `docker compose up -d` (a
+plain `restart` keeps the old keyring), run `--secrets-rotate`, then
+`--secrets-audit`; drop the old key only once `secrets` no longer names it.
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --secrets-audit
+```
+
+**`--outbox-reset`** (source `fvoci outbox-reset`) puts outbox consumer
+cursors back at the point their `processed_events` marks show, without
+replaying everything or deleting anything. The source had one relay cursor and
+moved it to just before the first event of the last 29 days that the
+`notifications` consumer had not marked; the Rust server keeps one cursor per
+consumer, so the same rule runs per consumer against that consumer's own marks
+(no mark in the window: the newest event of the window; no events in the
+window: unchanged). Use it when a cursor was hand-edited, lost or moved past
+events that were never delivered on the same cluster. After a restore, or when
+a consumer reports an outbox xid epoch mismatch, use `--recover-outbox`
+instead; `--outbox-reset` refuses an epoch mismatch.
+
+- Without `--apply` it only diagnoses: a read-only transaction that is safe
+  while the server runs. It prints one JSON line: `mode`, `windowDays` (29),
+  per consumer `before`, `target`, `direction` (`forward`, `backward`,
+  `unchanged`), `leaseActive`, `externalEffects`, `redelivered` (unmarked
+  events a backward move hands to the consumer again), `deadLettered` (unmarked
+  events in the same range with a dead-letter failure row: the dispatcher passes
+  them without delivery while that row stays, so they are not in `redelivered`),
+  `externalReplay` (see below) and `skip` (unmarked events older than the
+  window that a forward move passes: `skippedCount`, the `(xact, seq)` lexical
+  `min`/`max`, `oldestCreatedAt`, up to 100 `sample` ids and verbs), and
+  `excluded` with the reason for each consumer left out.
+- The default set is every consumer of this build that marks each event it
+  passes: `notifications`, `mail`, `push`, `webhooks`, and `search-index` when
+  `FVOCI_MEILI_URL` is configured in the environment. `github` is left out
+  because it does not mark events while the GitHub app is unconfigured (a reset
+  would rewind it and replay up to 29 days of status changes once configured).
+  `--consumer <name>` (repeatable) selects exactly the named cursors, `github`
+  included.
+- Consumers with external effects (`mail`, `push`, `webhooks`, `github`, and
+  any name this build does not know) are not rewound past their replay floor:
+  just before the first event they marked, and never behind their current cursor
+  when they marked nothing. Migrations 027/040/041 seed such consumers at the
+  tail on upgrade, so they hold no marks for older events; the per-consumer rule
+  alone would move them back to the start of the window and send up to 29 days
+  of pre-upgrade events to devices and external URLs again. When the rule asks
+  for more than the floor, the consumer reports `externalReplay` with the
+  `floor`, the rule's `target`, its `redelivered`/`deadLettered` counts and
+  `acknowledged`. By default the move stops at the floor (events after the floor
+  that are unmarked are still redelivered). `--apply --ack-external-replay`
+  (the same flag as `--recover-outbox`) moves them to the rule's target and
+  accepts that at-least-once external replay; the top-level `ackExternalReplay`
+  records it. `notifications` writes only this database and `search-index`
+  only re-indexes Meilisearch, which is idempotent, so both follow the rule
+  without a floor.
+- `--apply --reason <text>` moves the cursors in one transaction. It refuses
+  unless the `DATABASE_URL` role is a superuser or has the privileges of
+  `pg_read_all_stats` (membership through a `NOINHERIT` role or an
+  `INHERIT FALSE` grant does not count; a plain schema owner cannot see other
+  roles' sessions in `pg_stat_activity`, so the next check would pass
+  blindly); while any other
+  session is connected to the database (stop the server and every other client
+  first); while a selected consumer holds a live lease; when a forward target is
+  at or above the cluster snapshot xmin (a transaction in any database that may
+  still commit an earlier event is running, including prepared transactions:
+  retry after it ends); and when a move would skip unmarked events older than
+  the window unless `--override-reason <text>` acknowledges them. Both reasons
+  are echoed in the JSON report. Events, marks and failure rows are never
+  deleted; a second run reports every consumer `unchanged`.
+- `fvoci-migrate` installs no log subscriber, so the JSON line on stdout is the
+  only record of an apply: keep it with the ticket.
+- Unlike the source, which ran as the app role, this runs as the owner
+  `DATABASE_URL` like `--recover-outbox`: the app role has no access to the
+  consumer cursor tables by design (`scripts/grant-app-role.sql`), and this
+  operator path does not widen it. Consumers that moved backward redeliver only
+  events without their mark; delivery stays at-least-once for external effects.
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --outbox-reset
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env stop server
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
+  --outbox-reset --apply --reason "cursor ahead of marks, ticket 123"
+```
 
 **`--init-env`** writes the Compose env file from `infra/rust/.env.example` with
 fresh secrets: `POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
@@ -936,14 +1873,14 @@ fresh secrets: `POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
 `FVOCI_PUBLIC_ORIGIN`, and `FVOCI_COOKIE_SECURE=true` for an https origin (a
 loopback `http://` origin also sets `FVOCI_PUBLISH_PORT` to its port). The file
 is created mode 0600 and renamed into place; an existing file is kept unless
-`--yes`. Only the path is printed. It replaces step 1 of "Bootstrap" below:
+`--yes`. Only the path is printed. It replaces step 1 of "Developer stack (compose.yml with init)":
 
 ```sh
 cargo run --release --bin fvoci-migrate -- --init-env \
   --public-origin https://fvoci.example.com --out infra/rust/.env
 ```
 
-Back up the generated file with the database backups: the pepper and
+Back up the generated file, apart from the database backups: the pepper and
 encryption keys cannot be regenerated.
 
 **`--doctor`** checks the server's environment without starting it and prints

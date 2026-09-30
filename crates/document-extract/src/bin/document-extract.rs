@@ -3,9 +3,12 @@ use std::io::{self, Read, Write};
 
 use document_extract::limits::Limits;
 use document_extract::parse::extract_bytes;
-use document_extract::process::apply_rlimits_now;
+use document_extract::process::{apply_rlimits_now, raise_own_oom_score_adj};
 
 fn main() {
+    // First, before any argument or input: best effort, a denied write
+    // (container profile) does not stop the extraction.
+    let _ = raise_own_oom_score_adj();
     let mut name = String::from("document.hwp");
     let mut limits = Limits::default();
     #[cfg(feature = "test-hang")]

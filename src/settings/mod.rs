@@ -2,9 +2,18 @@
 //!
 //! The source keeps a per-process cache invalidated over Redis. This server
 //! has no Redis, so every read resolves the (tiny) `instance_settings` table:
-//! a write is visible to the next request in every process. The first
-//! resolution in a process is kept as the boot snapshot, which answers "which
-//! restart-required keys changed since this process started".
+//! a write is visible to the next request in every process.
+//!
+//! The boot snapshot is recorded once per process, by whichever of two calls
+//! first resolves the settings: [`load`] (`GET /api/v1/instance` and
+//! `GET /api/v1/admin/instance-settings`) records the values it resolved, and
+//! [`apply_change`] (the admin settings PATCH and branding asset upload and
+//! removal) records the values it resolved before the change; a change
+//! refused before that point (admin-session or licence check) records
+//! nothing. The other readers here never record it. The admin output's `restartRequired` lists
+//! the restart-required keys whose current value differs from that snapshot:
+//! changes since this process's first recording call, not since it started, so
+//! a change another process committed before that call is not listed.
 
 pub mod catalog;
 pub mod messages;
@@ -22,7 +31,8 @@ pub use catalog::{
     SettingsValues, SharePolicy, BRANDING_ASSET_MIME, SETTINGS_KEYS,
 };
 
-use crate::db::admin::{record_instance_change, require_live_instance_admin, InstanceChange};
+use crate::attachments::{TransferMode, TransferUnavailable};
+use crate::db::admin::{record_instance_change, require_admin_session, InstanceChange};
 use crate::db::context::set_system;
 
 /// Process-local boot snapshot shared by every clone of one `Db`.
@@ -173,7 +183,7 @@ where
         .await
 }
 
-/// Current settings; records the boot snapshot on the first call.
+/// Current settings; records them as the boot snapshot if none is recorded.
 pub async fn load(
     pool: &PgPool,
     boot: &SettingsBoot,
@@ -208,6 +218,90 @@ pub async fn attachment_preview_mode(pool: &PgPool) -> Result<String, sqlx::Erro
         .values
         .attachment_preview
         .mode)
+}
+
+/// Where the configured attachment transfer mode comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "api-schema", derive(utoipa::ToSchema))]
+pub enum TransferSource {
+    /// `FVOCI_ATTACHMENT_TRANSFER_MODE`; admin writes cannot change it.
+    Env,
+    /// The admin-stored `attachmentTransfer` row.
+    Stored,
+    Default,
+}
+
+/// The attachment transfer mode for new upload sessions and download
+/// requests of this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveTransfer {
+    pub mode: TransferMode,
+    pub source: TransferSource,
+    /// Why this process cannot presign (`None`: it can).
+    pub unavailable: Option<TransferUnavailable>,
+    /// The configured mode is `presigned` but `unavailable` holds, so `proxy`
+    /// applies. Only a stored row can get here: an environment value that
+    /// cannot apply refuses startup instead.
+    pub blocked: bool,
+}
+
+/// Resolves the effective transfer mode from a settings snapshot and the
+/// storage capability. A stored `presigned` whose capability disappeared
+/// (driver switched to local, public endpoint removed) falls back to `proxy`
+/// and reports `blocked`, so a stale row never keeps uploads from working;
+/// the admin sees why and can reset it.
+pub fn effective_transfer(
+    snapshot: &SettingsSnapshot,
+    unavailable: Option<TransferUnavailable>,
+) -> EffectiveTransfer {
+    let configured = snapshot.values.attachment_transfer.mode;
+    let env_leaf = format!("{}.mode", SettingsKey::AttachmentTransfer.as_str());
+    let source = if snapshot.env_applied.contains(&env_leaf) {
+        TransferSource::Env
+    } else if snapshot
+        .overridden
+        .contains(&SettingsKey::AttachmentTransfer)
+    {
+        TransferSource::Stored
+    } else {
+        TransferSource::Default
+    };
+    let blocked = configured == TransferMode::Presigned && unavailable.is_some();
+    EffectiveTransfer {
+        mode: if blocked {
+            TransferMode::Proxy
+        } else {
+            configured
+        },
+        source,
+        unavailable,
+        blocked,
+    }
+}
+
+/// Read API: the transfer status for storage with capability `unavailable`,
+/// resolved from the current rows (no boot snapshot).
+pub async fn attachment_transfer(
+    pool: &PgPool,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<EffectiveTransfer, sqlx::Error> {
+    let rows = load_rows(pool).await?;
+    let snapshot = resolve(rows, 0, "FVOCI", &crate::license::absent());
+    Ok(effective_transfer(&snapshot, unavailable))
+}
+
+/// Read API for upload creation and original downloads: the mode in effect
+/// now, read per request so an admin change reaches every process on its next
+/// request. Storage that cannot presign is always `proxy`, without a read.
+pub async fn attachment_transfer_mode(
+    pool: &PgPool,
+    unavailable: Option<TransferUnavailable>,
+) -> Result<TransferMode, sqlx::Error> {
+    if unavailable.is_some() {
+        return Ok(TransferMode::Proxy);
+    }
+    Ok(attachment_transfer(pool, None).await?.mode)
 }
 
 /// Effective values without touching the boot snapshot.
@@ -305,39 +399,24 @@ fn without_env_leaves(key: SettingsKey, mut value: Value, base: &Value, env: &[S
     value
 }
 
-/// Applies a settings change as one transaction: the actor's instance-admin
-/// status is rechecked under a row lock, writers serialize on the settings
-/// revision row, and the rows, revision and `instance_settings.updated`
-/// event + audit commit together. Audit payloads carry key paths only, never
-/// the values (source spec §10).
+/// Applies a settings change as one transaction: the actor's session and
+/// instance-admin status are rechecked under row locks, writers serialize on
+/// the settings revision row, and the rows, revision and
+/// `instance_settings.updated` event + audit commit together. Audit payloads
+/// carry key paths only, never the values (source spec §10). The values read
+/// before the change become the boot snapshot if none is recorded yet.
 pub async fn apply_change(
     pool: &PgPool,
     actor: Uuid,
+    session_id: Uuid,
     ip: Option<&str>,
     brand_default: &str,
     change: SettingsChange,
+    boot: &SettingsBoot,
 ) -> Result<Result<SettingsWriteOutcome, SettingsWriteError>, sqlx::Error> {
-    apply_change_with_license(
-        pool,
-        actor,
-        ip,
-        brand_default,
-        change,
-        &crate::license::absent(),
-    )
-    .await
-}
-
-pub async fn apply_change_with_license(
-    pool: &PgPool,
-    actor: Uuid,
-    ip: Option<&str>,
-    brand_default: &str,
-    change: SettingsChange,
-    license: &crate::license::Entitlements,
-) -> Result<Result<SettingsWriteOutcome, SettingsWriteError>, sqlx::Error> {
+    let license = &*boot.license;
     let mut tx = pool.begin().await?;
-    if !require_live_instance_admin(&mut tx, actor).await? {
+    if !require_admin_session(&mut tx, actor, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(SettingsWriteError::NotAdmin));
     }
@@ -356,6 +435,9 @@ pub async fn apply_change_with_license(
     .fetch_one(&mut *tx)
     .await?;
     let current = resolve(load_rows(&mut *tx).await?, revision, brand_default, license);
+    // A write can be this process's first settings call; without this the
+    // next read would record the post-change values and hide the restart.
+    let _ = boot.values.get_or_init(|| current.values.clone());
 
     let mut previous_asset = None;
     let mut extra = Map::new();
@@ -525,6 +607,59 @@ mod tests {
         assert_eq!(href, "/api/v1/branding/logo?v=aaaaaaaaaaaa");
         assert!(!href.contains(&Uuid::nil().to_string()));
         assert_eq!(asset_href(BrandingAssetKind::Favicon, None), None);
+    }
+
+    #[test]
+    fn transfer_mode_precedence_and_blocked_fallback() {
+        let row = |mode: &str| vec![("attachmentTransfer".to_string(), json!({"mode": mode}))];
+        let absent = crate::license::absent();
+
+        let default = resolve(Vec::new(), 1, "F", &absent);
+        let status = effective_transfer(&default, None);
+        assert_eq!(
+            (status.mode, status.source, status.blocked),
+            (TransferMode::Proxy, TransferSource::Default, false)
+        );
+
+        let stored = resolve(row("presigned"), 1, "F", &absent);
+        let status = effective_transfer(&stored, None);
+        assert_eq!(
+            (status.mode, status.source, status.blocked),
+            (TransferMode::Presigned, TransferSource::Stored, false)
+        );
+        for reason in [
+            TransferUnavailable::StorageLocal,
+            TransferUnavailable::PublicEndpointMissing,
+        ] {
+            let status = effective_transfer(&stored, Some(reason));
+            assert_eq!(
+                (
+                    status.mode,
+                    status.source,
+                    status.blocked,
+                    status.unavailable
+                ),
+                (
+                    TransferMode::Proxy,
+                    TransferSource::Stored,
+                    true,
+                    Some(reason)
+                )
+            );
+        }
+        // A stored `proxy` is never blocked.
+        let proxy = resolve(row("proxy"), 1, "F", &absent);
+        assert!(!effective_transfer(&proxy, Some(TransferUnavailable::StorageLocal)).blocked);
+
+        // The environment leaf wins over the row (`resolve` records it).
+        let mut env = resolve(row("proxy"), 1, "F", &absent);
+        env.values.attachment_transfer.mode = TransferMode::Presigned;
+        env.env_applied.push("attachmentTransfer.mode".into());
+        let status = effective_transfer(&env, None);
+        assert_eq!(
+            (status.mode, status.source),
+            (TransferMode::Presigned, TransferSource::Env)
+        );
     }
 
     #[test]

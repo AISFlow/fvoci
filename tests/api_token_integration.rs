@@ -1086,3 +1086,210 @@ async fn project_workflow_requires_tasks_read_scope_like_the_source() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+async fn raw_get(
+    app: axum::Router,
+    path: &str,
+    cookie: Option<&str>,
+    bearer: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder().method("GET").uri(path);
+    if let Some(cookie) = cookie {
+        builder = builder.header("cookie", format!("fvoci_session={cookie}"));
+    }
+    if let Some(secret) = bearer {
+        builder = builder.header("authorization", format!("Bearer {secret}"));
+    }
+    let mut request = builder.body(Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(test_peer()));
+    let response = app.oneshot(request).await.expect("response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, headers, bytes.to_vec())
+}
+
+/// Source `platform/api-docs.ts` guard `access: { auth: "session" }`: a
+/// session reads the Swagger UI page, the live OpenAPI export and the page's
+/// assets; an API token (even a valid scoped one) gets 404, an unknown or
+/// logged-out session 401, and a session owing a required consent 428. The
+/// page is static and runs under the application CSP: no inline code and no
+/// `'unsafe-inline'`, while `connect-src 'self'` lets "Try it out" call the API.
+#[tokio::test]
+async fn api_docs_are_session_only_and_serve_the_live_export() {
+    use fvoci_server::http::routes::api_docs::{
+        INITIALIZER_JS, OPENAPI_JSON, PAGE_HTML, SWAGGER_UI_BUNDLE, SWAGGER_UI_BUNDLE_LICENSE,
+        SWAGGER_UI_CSS, THEME_CSS,
+    };
+    const DOCS_PATHS: [&str; 7] = [
+        "/api/docs",
+        "/api/docs/json",
+        "/api/docs/static/fvoci-swagger-initializer.js",
+        "/api/docs/static/fvoci-swagger-theme.css",
+        "/api/docs/static/swagger-ui-bundle.js",
+        "/api/docs/static/swagger-ui.css",
+        "/api/docs/static/swagger-ui-bundle.js.LICENSE.txt",
+    ];
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let admin = harness.admin().await;
+    let ws = acme_id(&admin).await;
+
+    let (status, headers, body) = raw_get(app.clone(), "/api/docs/json", Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "application/json");
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(body, OPENAPI_JSON.as_bytes());
+    let spec: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(spec["openapi"], "3.1.0");
+    assert_eq!(spec["info"]["title"], "FVOCI API");
+    assert_eq!(
+        spec["components"]["securitySchemes"]["fvoci_session"],
+        json!({"type": "apiKey", "in": "cookie", "name": "fvoci_session"})
+    );
+    assert_eq!(
+        spec["components"]["securitySchemes"]["bearer_api_token"]["scheme"],
+        "bearer"
+    );
+
+    for (path, content_type, cache_control, expected) in [
+        (
+            "/api/docs/static/fvoci-swagger-initializer.js",
+            "text/javascript; charset=utf-8",
+            "private, no-cache",
+            INITIALIZER_JS,
+        ),
+        (
+            "/api/docs/static/fvoci-swagger-theme.css",
+            "text/css; charset=utf-8",
+            "private, no-cache",
+            THEME_CSS,
+        ),
+        (
+            "/api/docs/static/swagger-ui-bundle.js",
+            "text/javascript; charset=utf-8",
+            "private, max-age=31536000, immutable",
+            SWAGGER_UI_BUNDLE,
+        ),
+        (
+            "/api/docs/static/swagger-ui.css",
+            "text/css; charset=utf-8",
+            "private, max-age=31536000, immutable",
+            SWAGGER_UI_CSS,
+        ),
+        (
+            "/api/docs/static/swagger-ui-bundle.js.LICENSE.txt",
+            "text/plain; charset=utf-8",
+            "private, max-age=31536000, immutable",
+            SWAGGER_UI_BUNDLE_LICENSE,
+        ),
+    ] {
+        let (status, headers, body) = raw_get(app.clone(), path, Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(headers["content-type"], content_type, "{path}");
+        assert_eq!(headers["cache-control"], cache_control, "{path}");
+        assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
+        assert_eq!(body, expected, "{path}");
+    }
+
+    let (status, headers, body) = raw_get(app.clone(), "/api/docs", Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(headers["x-frame-options"], "SAMEORIGIN");
+    assert_eq!(body, PAGE_HTML);
+    // The page gets the application policy stamped by the global layer.
+    let (_, api_headers, _) = raw_get(app.clone(), "/api/v1/auth/me", Some(&cookie), None).await;
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    assert_eq!(
+        csp,
+        api_headers["content-security-policy"].to_str().unwrap()
+    );
+    assert!(
+        !csp.contains("unsafe-inline") && !csp.contains("'unsafe-eval'"),
+        "{csp}"
+    );
+    assert!(!csp.contains("nonce-") && !csp.contains("sha256-"), "{csp}");
+    for directive in [
+        "default-src 'self';",
+        "script-src 'self' 'wasm-unsafe-eval';",
+        "script-src-attr 'none';",
+        "style-src 'self';",
+        "connect-src 'self';",
+    ] {
+        assert!(csp.contains(directive), "{directive} in {csp}");
+    }
+
+    let (status, created) = create_token(
+        app.clone(),
+        &cookie,
+        ws,
+        "docs",
+        &["documents.read"],
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let secret = created["token"].as_str().unwrap().to_string();
+    for path in DOCS_PATHS {
+        let (status, body) = bearer_get(app.clone(), path, &secret).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(body["code"], "not_found", "{path}");
+
+        let (status, _, body) = raw_get(app.clone(), path, Some("not-a-session"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "authentication_required", "{path}");
+    }
+
+    // A newly required legal document gates the docs like every API route.
+    let (status, published, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/admin/legal",
+        Some(json!({
+            "kind": "terms",
+            "title": "약관",
+            "bodyMarkdown": "# 약관",
+            "required": true,
+            "effectiveAt": "2026-10-01T00:00:00Z"
+        })),
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    for path in DOCS_PATHS {
+        let (status, _, body) = raw_get(app.clone(), path, Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{path}");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "consent_required", "{path}");
+    }
+
+    // A logged-out session no longer reads anything.
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/logout",
+        None,
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    for path in DOCS_PATHS {
+        let (status, _, body) = raw_get(app.clone(), path, Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "authentication_required", "{path}");
+    }
+
+    admin.close().await;
+    harness.cleanup().await;
+}

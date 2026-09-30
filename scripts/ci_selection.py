@@ -17,7 +17,7 @@ from typing import Literal
 ROOT = Path(__file__).resolve().parent.parent
 
 Mode = Literal["full", "narrow"]
-NarrowFamily = Literal["docs", "frontend_web_install"]
+NarrowFamily = Literal["docs", "frontend_web_install", "web_tests"]
 
 PLAN_VERSION = 3
 
@@ -26,8 +26,16 @@ WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
     "rust": ("fast", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
-    "install": ("install-smoke", "backup-restore-smoke"),
+    "install": ("install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"),
 }
+
+# Manual opt-in jobs: no path or event policy selects them (not even full mode or
+# a fatal plan). Only a workflow_dispatch whose boolean input of the same name is
+# exactly true selects the job; the gate re-derives that from the event file.
+OPT_IN_JOBS: dict[str, dict[str, str]] = {
+    "install": {"upgrade-smoke-arm64": "run_upgrade_smoke_arm"},
+}
+OPT_IN_RUNNER: dict[str, str] = {"upgrade-smoke-arm64": "ubuntu-24.04-arm"}
 
 WORKFLOW_YAML: dict[str, str] = {
     "web": "web.yml",
@@ -35,6 +43,17 @@ WORKFLOW_YAML: dict[str, str] = {
     "documents": "documents.yml",
     "collab-engine": "collab-engine.yml",
     "install": "install.yml",
+}
+
+# Tag-driven release workflow (docs/RELEASING.md). It is not a PR/merge
+# selection workflow, so it has no ci-plan/gate; it is allowed only while it
+# cannot run for untrusted refs and write scopes stay in the listed jobs.
+RELEASE_WORKFLOW_FILE = "release.yml"
+RELEASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
+    "build": frozenset({"packages"}),
+    "index": frozenset({"packages"}),
+    "publish": frozenset({"packages"}),
+    "release": frozenset({"contents"}),
 }
 
 PLAN_JOB_ID = "ci-plan"
@@ -82,6 +101,8 @@ _BROADEN_PREFIXES: tuple[str, ...] = (
     ".agents/",
     "packages/",
     "crates/",
+    # Bun `patchedDependencies` (package.json), applied by every install.
+    "patches/",
 )
 
 _BROADEN_EXACT: frozenset[str] = frozenset(
@@ -91,12 +112,18 @@ _BROADEN_EXACT: frozenset[str] = frozenset(
         "rust-toolchain.toml",
         "Dockerfile",
         ".dockerignore",
+        # The Bun workspace root: apps/web, packages/* and scripts/document-convert.
+        "package.json",
+        "bun.lock",
+        "bunfig.toml",
+        ".bun-version",
     }
 )
 
 _MANIFEST_MARKERS: tuple[str, ...] = (
     "/package.json",
     "/package-lock.json",
+    "/bun.lock",
     "/Cargo.toml",
     "/Cargo.lock",
     "/pnpm-lock.yaml",
@@ -111,6 +138,8 @@ _EXPLICIT_DOCS: frozenset[str] = frozenset(
         "README.md",
         "RUNNING.md",
         "docs/rewrite.md",
+        "docs/RELEASING.md",
+        "docs/collab-engine-comparison.md",
         "AGENTS.md",
         ".agents/environment.md",
     }
@@ -121,13 +150,35 @@ _WEB_BROADEN_PREFIXES: tuple[str, ...] = (
     "apps/web/openapi.json",
     "apps/web/src/generated/",
     "apps/web/package.json",
-    "apps/web/package-lock.json",
     "apps/web/playwright.config.ts",
-    "apps/web/e2e/",
-    "apps/web/e2e-pending/",
 )
 
 _FRONTEND_NARROW_PREFIX = "apps/web/src/"
+
+# Browser UI code consumed by Web unit/type checks, production browser builds,
+# and the install image. Other editor paths retain full validation: schema,
+# serialization, CRDT adapters and exports mirror Rust contracts; fonts are also
+# read by the native export child. Do not narrow the entire packages/ workspace
+# (i18n/ko.json is include_str! input to a Rust test).
+_EDITOR_UI_PREFIXES = ("packages/editor/src/react/", "packages/editor/src/vue/")
+_EDITOR_UI_EXACT = frozenset({
+    "packages/editor/src/clipboard.ts",
+    "packages/editor/src/gutter-actions.ts",
+    "packages/editor/src/menu-roving.ts",
+})
+_UI_SUFFIXES = (".ts", ".tsx", ".vue", ".css")
+
+# The browser suites exercise API/DB/CRDT behavior with the actual Rust server.
+# Only flat specs and reviewed UI helpers narrow. Fixtures, server lifecycle,
+# wire codecs/oracles, configs and arbitrary new harness files remain full.
+_BROWSER_SPEC_RE = re.compile(r"^apps/web/(?:e2e|e2e-pending)/[^/]+\.spec\.ts$")
+_BROWSER_UI_HELPERS = frozenset({
+    "apps/web/e2e/helpers.ts",
+    "apps/web/e2e/mfa-helpers.ts",
+    "apps/web/e2e/workspace-wiki-vue-editor.ts",
+    "apps/web/e2e-pending/collab-helpers.ts",
+    "apps/web/e2e-pending/collab-helpers.test.ts",
+})
 
 
 def _starts_with(path: str, prefix: str) -> bool:
@@ -175,8 +226,22 @@ def _script_lines(text: str) -> list[str]:
 
 
 def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unknown"]:
+    # Git paths are relative and canonical. Reject unexpected separators or
+    # traversal before any allowlist/prefix match, including synthetic inputs.
+    if not path or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
+        return "unknown"
     if path in _EXPLICIT_DOCS:
         return "docs"
+    if _BROWSER_SPEC_RE.fullmatch(path) or path in _BROWSER_UI_HELPERS:
+        return "web_tests"
+    if path == "packages/editor/src/react/schema.tsx":
+        return "broaden"
+    if path in _EDITOR_UI_EXACT or (
+        path.startswith(_EDITOR_UI_PREFIXES) and path.endswith(_UI_SUFFIXES)
+    ):
+        return "frontend_web_install"
+    if re.fullmatch(r"packages/editor/test/[^/]+\.test\.ts", path):
+        return "web_tests"
     if path in _BROADEN_EXACT:
         return "broaden"
     for prefix in _BROADEN_PREFIXES:
@@ -191,6 +256,10 @@ def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unk
         if _starts_with(path, prefix):
             return "broaden"
     if _starts_with(path, _FRONTEND_NARROW_PREFIX):
+        if not path.endswith(_UI_SUFFIXES):
+            return "broaden"
+        if path.endswith((".test.ts", ".test.tsx")):
+            return "web_tests"
         return "frontend_web_install"
     if _starts_with(path, "apps/web/"):
         return "broaden"
@@ -345,14 +414,23 @@ def git_commit_parents(repo: Path, sha: str) -> tuple[list[str] | None, str | No
 def pr_checkout_narrow_block(
     repo: Path, tested_sha: str, base_sha: str, head_sha: str
 ) -> str | None:
-    """Return a force-full reason when the tested commit is not the event merge."""
+    """Bind the tested merge to the exact PR head and a trusted base lineage.
+
+    GitHub can regenerate refs/pull/N/merge after the event base advanced. Only
+    a descendant of the event's trusted base may replace the first parent. The
+    caller must still classify both the cumulative PR and actual merge diffs.
+    """
     parents, err = git_commit_parents(repo, tested_sha)
     if err:
         return err
     if len(parents) != 2:
         return "FULL_PR_CHECKOUT_NOT_MERGE"
-    if parents[0] != base_sha or parents[1] != head_sha:
+    if parents[1] != head_sha:
         return "FULL_PR_MERGE_PARENTS_MISMATCH"
+    if parents[0] != base_sha:
+        ancestry = _git(repo, "merge-base", "--is-ancestor", base_sha, parents[0])
+        if ancestry.returncode != 0:
+            return "FULL_PR_MERGE_PARENTS_MISMATCH"
     return None
 
 
@@ -385,25 +463,24 @@ def decide_from_paths(paths: list[str]) -> SelectionDecision:
         if kind == "unknown":
             return SelectionDecision("full", "FULL_UNKNOWN_PATH", frozenset())
         families.add(kind)
-    if len(families) != 1:
-        return SelectionDecision("full", "FULL_MIXED_NARROW", frozenset())
-    family = next(iter(families))
-    if family == "docs":
-        return SelectionDecision("narrow", "NARROW_DOCS", frozenset({family}))
-    return SelectionDecision("narrow", "NARROW_FRONTEND_WEB_INSTALL", frozenset({family}))
+    # Known impact families compose by union; explanatory docs add no jobs.
+    if "frontend_web_install" in families:
+        reason = "NARROW_FRONTEND_WEB_INSTALL"
+    elif "web_tests" in families:
+        reason = "NARROW_WEB_TESTS"
+    else:
+        reason = "NARROW_DOCS"
+    return SelectionDecision("narrow", reason, frozenset(families))
 
 
 def workflow_job_selected(workflow: str, job: str, decision: SelectionDecision) -> bool:
+    if job in OPT_IN_JOBS.get(workflow, {}):
+        return False
     if decision.mode == "full":
         return True
-    family = next(iter(decision.families))
-    if family == "docs":
-        return False
-    if family == "frontend_web_install":
-        if workflow in ("web", "install"):
-            return job in WORKFLOW_JOBS[workflow]
-        return False
-    return False
+    return (
+        workflow in ("web", "install") and "frontend_web_install" in decision.families
+    ) or (workflow == "web" and "web_tests" in decision.families)
 
 
 def build_plan(
@@ -417,6 +494,7 @@ def build_plan(
     paths: list[str] | None,
     fatal_error: str | None = None,
     force_full_reason: str | None = None,
+    opt_in_inputs: frozenset[str] = frozenset(),
 ) -> dict:
     if workflow not in WORKFLOW_JOBS:
         raise SystemExit(f"unknown workflow: {workflow}")
@@ -444,6 +522,10 @@ def build_plan(
         job: {"selected": workflow_job_selected(workflow, job, decision)}
         for job in WORKFLOW_JOBS[workflow]
     }
+    if plan_ok and event_name == "workflow_dispatch":
+        for job, input_name in OPT_IN_JOBS.get(workflow, {}).items():
+            if input_name in opt_in_inputs:
+                jobs[job]["selected"] = True
 
     return {
         "version": PLAN_VERSION,
@@ -474,6 +556,34 @@ def event_shas(event: dict, event_name: str) -> tuple[str | None, str | None]:
 
 def load_event(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def dispatch_opt_ins(workflow: str, event_name: str, event: object) -> tuple[frozenset[str], str | None]:
+    """Boolean opt-in inputs chosen by a workflow_dispatch event, fail closed.
+
+    Every other event selects nothing, whatever its payload carries. GitHub writes
+    dispatch booleans into the event file as the strings "true"/"false"; a missing
+    input is not chosen, while an unknown input or any other value is an error.
+    """
+    if event_name != "workflow_dispatch":
+        return frozenset(), None
+    if not isinstance(event, dict):
+        return frozenset(), "DISPATCH_EVENT_INVALID"
+    raw = event.get("inputs")
+    if raw is None:
+        return frozenset(), None
+    if not isinstance(raw, dict):
+        return frozenset(), "DISPATCH_INPUTS_INVALID"
+    allowed = set(OPT_IN_JOBS.get(workflow, {}).values())
+    if set(raw) - allowed:
+        return frozenset(), "DISPATCH_INPUTS_UNKNOWN"
+    chosen: set[str] = set()
+    for name, value in raw.items():
+        if value is True or value == "true":
+            chosen.add(name)
+        elif not (value is False or value == "false"):
+            return frozenset(), "DISPATCH_INPUT_VALUE_INVALID"
+    return frozenset(chosen), None
 
 
 def resolve_selection_inputs(
@@ -518,6 +628,17 @@ def resolve_selection_inputs(
     paths, diff_err, merge_base = diff_paths_for_pr(repo, base_sha, head_sha)
     if diff_err:
         return ResolvedInputs(None, diff_err, None, base_sha, head_sha, merge_base, tested_sha)
+
+    # A merge can contain conflict resolutions or injected files absent from the
+    # PR head. Inspect the exact tested tree relative to its trusted first parent
+    # even when both parents equal the event. Never accept an external path list.
+    parents, parent_err = git_commit_parents(repo, tested_sha)
+    if parent_err:
+        return ResolvedInputs(None, parent_err, None, base_sha, head_sha, merge_base, tested_sha)
+    merged_paths, diff_err = git_diff_paths(repo, parents[0], tested_sha)
+    if diff_err:
+        return ResolvedInputs(None, diff_err, None, base_sha, head_sha, merge_base, tested_sha)
+    paths = sorted(set(paths or []) | set(merged_paths))
 
     return ResolvedInputs(paths, None, None, base_sha, head_sha, merge_base, tested_sha)
 
@@ -1171,7 +1292,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
-    allowed_files = set(WORKFLOW_YAML.values())
+    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE}
     discovered_files = list_workflow_files(repo_root)
     if not workflows_dir.is_dir():
         errors.append("missing .github/workflows directory")
@@ -1190,6 +1311,11 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         if parse_err:
             errors.append(f"{workflow}: {parse_err}")
             continue
+        triggers = data.get("on", data.get(True))
+        if not isinstance(triggers, dict) or "pull_request" not in triggers:
+            errors.append(f"{workflow}: pull_request trigger is required for the stable gate")
+        elif triggers["pull_request"] is not None:
+            errors.append(f"{workflow}: pull_request must be unfiltered so required gates always run")
         jobs = data.get("jobs")
         if not isinstance(jobs, dict) or not jobs:
             errors.append(f"{workflow}: jobs mapping missing")
@@ -1219,6 +1345,21 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
 
         plan_job = jobs.get(PLAN_JOB_ID)
         if isinstance(plan_job, dict):
+            # The ancestry exception trusts only GitHub's merge SHA for this
+            # event. Pin that assumption to normal checkout (no alternate ref
+            # or repository) and prevent YAML from replacing the runner SHA.
+            plan_steps = plan_job.get("steps", [])
+            checkouts = [
+                step for step in plan_steps
+                if isinstance(step, dict) and str(step.get("uses", "")).startswith("actions/checkout@")
+            ] if isinstance(plan_steps, list) else []
+            if len(checkouts) != 1 or checkouts[0].get("with") != {"fetch-depth": 0}:
+                errors.append(f"{workflow}: ci-plan must checkout the event merge with fetch-depth: 0 and no ref override")
+            envs = [data.get("env"), plan_job.get("env")]
+            if isinstance(plan_steps, list):
+                envs.extend(step.get("env") for step in plan_steps if isinstance(step, dict))
+            if any(isinstance(env, dict) and "GITHUB_SHA" in env for env in envs):
+                errors.append(f"{workflow}: ci-plan must not override trusted GITHUB_SHA")
             if "if" in plan_job:
                 errors.append(f"{workflow}: {PLAN_JOB_ID} must not have an if condition")
             outputs = plan_job.get("outputs")
@@ -1321,7 +1462,104 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         elif reserved_gate in jobs:
             errors.append(f"{workflow}: {reserved_gate} must be a mapping")
 
+        errors.extend(_verify_opt_in_wiring(workflow, data, jobs))
+
+    release_path = workflows_dir / RELEASE_WORKFLOW_FILE
+    if release_path.is_file():
+        errors.extend(verify_release_workflow(release_path))
+
     errors.extend(verify_rust_suite_registry(repo_root))
+    return errors
+
+
+def verify_release_workflow(path: Path) -> list[str]:
+    """Only tag pushes and manual dispatch; read-only default token; scoped writes."""
+    name = path.name
+    data, parse_err = _load_yaml_mapping(path)
+    if parse_err:
+        return [f"{name}: {parse_err}"]
+    errors: list[str] = []
+    triggers = data.get("on", data.get(True))
+    if not isinstance(triggers, dict) or set(triggers) != {"push", "workflow_dispatch"}:
+        errors.append(f"{name}: triggers must be exactly push (tags) and workflow_dispatch")
+    else:
+        push = triggers["push"]
+        tags = push.get("tags") if isinstance(push, dict) else None
+        if (
+            not isinstance(push, dict)
+            or set(push) != {"tags"}
+            or not isinstance(tags, list)
+            or not tags
+            or not all(isinstance(tag, str) and tag.startswith("v0.") for tag in tags)
+        ):
+            errors.append(f"{name}: push must list only v0.* tags")
+    if data.get("permissions") != {"contents": "read"}:
+        errors.append(f"{name}: top-level permissions must be exactly contents: read")
+    # One queue for every tag: runs for two patch tags must not race on :0.y.
+    concurrency = data.get("concurrency")
+    if (
+        not isinstance(concurrency, dict)
+        or not isinstance(concurrency.get("group"), str)
+        or "${{" in concurrency["group"]
+        or concurrency.get("cancel-in-progress") is not False
+    ):
+        errors.append(
+            f"{name}: concurrency must be one fixed group with cancel-in-progress: false"
+        )
+    jobs = data.get("jobs")
+    if not isinstance(jobs, dict) or not jobs:
+        return [*errors, f"{name}: jobs mapping missing"]
+    for job_id, spec in jobs.items():
+        if not isinstance(spec, dict):
+            errors.append(f"{name}: {job_id} must be a mapping")
+            continue
+        permissions = spec.get("permissions", {})
+        if not isinstance(permissions, dict):
+            errors.append(f"{name}: {job_id} permissions must be a scope mapping")
+            continue
+        writes = {scope for scope, level in permissions.items() if level == "write"}
+        allowed = RELEASE_WRITE_SCOPES.get(job_id, frozenset())
+        if not writes <= allowed:
+            errors.append(
+                f"{name}: {job_id} may not write {sorted(writes - allowed)}"
+            )
+    return errors
+
+
+def _verify_opt_in_wiring(workflow: str, data: dict, jobs: dict) -> list[str]:
+    """workflow_dispatch declares exactly the opt-in booleans (default false)."""
+    errors: list[str] = []
+    triggers = data.get("on", data.get(True))
+    dispatch = triggers.get("workflow_dispatch") if isinstance(triggers, dict) else None
+    if not isinstance(triggers, dict) or "workflow_dispatch" not in triggers:
+        errors.append(f"{workflow}: workflow_dispatch trigger missing")
+        return errors
+    if dispatch is not None and not isinstance(dispatch, dict):
+        errors.append(f"{workflow}: workflow_dispatch must be a mapping")
+        return errors
+    inputs = (dispatch or {}).get("inputs")
+    if inputs is not None and not isinstance(inputs, dict):
+        errors.append(f"{workflow}: workflow_dispatch inputs must be a mapping")
+        return errors
+    opt_ins = OPT_IN_JOBS.get(workflow, {})
+    expected_inputs = set(opt_ins.values())
+    if set(inputs or {}) != expected_inputs:
+        errors.append(
+            f"{workflow}: workflow_dispatch inputs must be exactly {sorted(expected_inputs)}"
+        )
+        return errors
+    for name in expected_inputs:
+        spec = inputs[name]
+        if not isinstance(spec, dict) or spec.get("type") != "boolean" or spec.get("default") is not False:
+            errors.append(f"{workflow}: input {name} must be type boolean with default false")
+    for job in opt_ins:
+        spec = jobs.get(job)
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("runs-on") != OPT_IN_RUNNER[job]:
+            errors.append(f"{workflow}: {job} runs-on must be {OPT_IN_RUNNER[job]}")
+        if "strategy" in spec:
+            errors.append(f"{workflow}: {job} must be a single job without a matrix")
     return errors
 
 
@@ -1348,6 +1586,7 @@ def cmd_plan(argv: list[str] | None = None) -> int:
 
     event = load_event(args.event_json)
     resolved = resolve_selection_inputs(args.repo_root, event, event_name)
+    opt_ins, opt_in_err = dispatch_opt_ins(args.workflow, event_name, event)
 
     plan = build_plan(
         workflow=args.workflow,
@@ -1357,8 +1596,9 @@ def cmd_plan(argv: list[str] | None = None) -> int:
         merge_base_sha=resolved.merge_base_sha,
         tested_sha=resolved.tested_sha,
         paths=resolved.paths,
-        fatal_error=resolved.fatal_error,
+        fatal_error=resolved.fatal_error or opt_in_err,
         force_full_reason=resolved.force_full_reason,
+        opt_in_inputs=opt_ins,
     )
     args.output_plan.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     write_github_outputs(plan, args.github_output)
@@ -1480,6 +1720,30 @@ def _load_needs_context(raw: str, workflow: str) -> tuple[dict | None, dict[str,
     return plan, results, None
 
 
+def _gate_opt_in_error(workflow: str, plan: dict) -> str | None:
+    """Re-derive manual opt-ins from this run's event file; the plan cannot override them."""
+    opt_ins = OPT_IN_JOBS.get(workflow)
+    if not opt_ins:
+        return None
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip()
+    if event_name not in KNOWN_EVENTS:
+        return "EVENT_NAME"
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
+    if not event_path:
+        return "EVENT_PATH_MISSING"
+    try:
+        event = load_event(Path(event_path))
+    except (OSError, ValueError):
+        return "EVENT_MALFORMED"
+    chosen, err = dispatch_opt_ins(workflow, event_name, event)
+    if err:
+        return err
+    for job, input_name in opt_ins.items():
+        if plan["jobs"][job]["selected"] is not (input_name in chosen):
+            return f"OPT_IN_MISMATCH {job}"
+    return None
+
+
 def cmd_gate(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fail-closed gate for one workflow.")
     parser.add_argument("--workflow", required=True, choices=sorted(WORKFLOW_JOBS))
@@ -1509,6 +1773,11 @@ def cmd_gate(argv: list[str] | None = None) -> int:
 
     if plan.get("tested_sha") != args.tested_sha:
         print("gate: tested_sha mismatch", file=sys.stderr)
+        return 1
+
+    opt_in_err = _gate_opt_in_error(args.workflow, plan)
+    if opt_in_err:
+        print(f"gate: opt-in error {opt_in_err}", file=sys.stderr)
         return 1
 
     expected_jobs = WORKFLOW_JOBS[args.workflow]

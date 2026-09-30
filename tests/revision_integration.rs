@@ -16,7 +16,8 @@ use fvoci_server::collab::room::CapturedRevision;
 use fvoci_server::collab::room::{
     arm_append_revoke_barrier, arm_join_channel_admission_witness,
     arm_session_revision_persist_barrier, disarm_join_channel_admission_witness,
-    disarm_session_revision_persist_barrier, AuthenticatedConnection, CollabSession, RoomJoin,
+    disarm_session_revision_persist_barrier, session_revision_persist_barrier_armed,
+    AuthenticatedConnection, CollabSession, RoomJoin,
 };
 use fvoci_server::collab::seed::SeedEngine;
 use fvoci_server::collab::wire::{CollabKind, CollabRoomName};
@@ -43,9 +44,10 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use support::{
     auth_and_join, collab_app_state, complete_sync_handshake, connect_member, engine_fixture,
-    setup_owner_session, setup_wiki_doc, setup_wiki_doc_batch, stateless_frame, sync_update_frame,
-    test_collab_config, wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update,
-    wait_for_ws_close_code, SessionFixture, TestRun, WikiDocFixture, PEPPER, PUBLIC_ORIGIN,
+    setup_owner_session, setup_wiki_doc, setup_wiki_doc_batch, stateless_frame, sync_step1_frame,
+    sync_update_frame, test_collab_config, wait_for_stateless_exact, wait_for_sync_applied,
+    wait_for_sync_update, wait_for_ws_close_code, SessionFixture, TestRun, WikiDocFixture, PEPPER,
+    PUBLIC_ORIGIN,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -77,6 +79,31 @@ async fn hub_join_with_conn(
 ) -> Result<fvoci_server::collab::room::ConnectionLease, fvoci_server::collab::room::JoinError> {
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
     tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
+    hub_join_with_events(
+        hub,
+        workspace_id,
+        document_id,
+        session_id,
+        user_id,
+        client_id,
+        conn_id,
+        events_tx,
+    )
+    .await
+}
+
+/// Hub join whose outbound events go to `events`; the caller decides whether they are drained.
+#[allow(clippy::too_many_arguments)]
+async fn hub_join_with_events(
+    hub: &CollabHub,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    session_id: Uuid,
+    user_id: Uuid,
+    client_id: u32,
+    conn_id: Uuid,
+    events_tx: tokio::sync::mpsc::Sender<fvoci_server::collab::room::RoomClientEvent>,
+) -> Result<fvoci_server::collab::room::ConnectionLease, fvoci_server::collab::room::JoinError> {
     let routing_key = routing_key(workspace_id, document_id);
     let join = RoomJoin {
         conn: AuthenticatedConnection {
@@ -971,6 +998,44 @@ async fn wait_session_revision_count(
     }
 }
 
+/// Bounded wait for the armed last-leave persist barrier; on timeout names the stage that stopped short.
+async fn await_session_persist_barrier(
+    hub: &CollabHub,
+    harness: &support::TestDb,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    reached: tokio::sync::oneshot::Receiver<()>,
+) {
+    let Ok(reached) = tokio::time::timeout(Duration::from_secs(8), reached).await else {
+        let armed = session_revision_persist_barrier_armed(document_id).await;
+        let probe = tokio::time::timeout(
+            Duration::from_secs(5),
+            hub.probe_actor(room_key(workspace_id, document_id)),
+        )
+        .await;
+        let count = tokio::time::timeout(
+            Duration::from_secs(5),
+            count_session_revisions(harness, workspace_id, document_id),
+        )
+        .await
+        .ok();
+        let stage = match (armed, &probe) {
+            (false, _) => "barrier consumed without a reached signal",
+            (true, Err(_)) => "room actor stalled before the persist pause (capture/recycle/head read)",
+            (true, Ok(_)) if count.is_some_and(|count| count > 0) => {
+                "last-leave work deduped against an existing session revision before the persist pause"
+            }
+            (true, Ok(_)) => {
+                "last-leave work never scheduled or aborted before the persist pause (capture/compare/text)"
+            }
+        };
+        panic!(
+            "session revision persist barrier not reached: {stage}; armed={armed} probe={probe:?} session_count={count:?}"
+        );
+    };
+    reached.expect("session revision persist barrier");
+}
+
 #[tokio::test]
 async fn session_revision_on_last_disconnect_two_clients() {
     run_test("session_revision_on_last_disconnect_two_clients", async {
@@ -1438,9 +1503,14 @@ async fn session_revision_persists_through_immediate_reconnect() {
             let (persist_reached, persist_proceed) =
                 arm_session_revision_persist_barrier(wiki.document_id).await;
             let _ = ws.close(None).await;
-            persist_reached
-                .await
-                .expect("session revision persist barrier");
+            await_session_persist_barrier(
+                &hub,
+                &run.harness,
+                workspace_id,
+                document_id,
+                persist_reached,
+            )
+            .await;
             assert_eq!(
                 count_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id,)
                     .await,
@@ -1522,6 +1592,235 @@ async fn session_revision_persists_through_immediate_reconnect() {
                     .await,
                 1,
                 "unchanged content after reconnect leave must dedupe, not erase prior snapshot"
+            );
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// Transport enqueues `Leave` and then drops the lease; the actor may select the lease drop first.
+/// The trailing `Leave` for the already-evicted connection must not schedule another capture.
+#[tokio::test]
+async fn session_revision_stale_leave_after_lease_drop_does_not_reschedule() {
+    run_test(
+        "session_revision_stale_leave_after_lease_drop_does_not_reschedule",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let hub = hub.clone();
+            let addr = run.spawn_router_state(state, hub.clone()).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+            apply_and_persist(
+                addr,
+                &wiki.session.session_token,
+                &key,
+                1,
+                &engine_fixture("structured.v1"),
+            )
+            .await;
+            wait_session_revision_count(
+                &run.harness,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                1,
+            )
+            .await;
+
+            let room = room_key(wiki.session.workspace_id, wiki.document_id);
+            let conn_id = Uuid::now_v7();
+            let lease = hub_join_with_conn(
+                &hub,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                wiki.session.session_id,
+                wiki.session.user_id,
+                20,
+                conn_id,
+            )
+            .await
+            .expect("hub join");
+            drop(lease);
+            // The first probe drains the lease drop; the second is served only after that
+            // turn's session revision work has finished.
+            hub.probe_actor(room).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            assert_eq!(
+                count_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id)
+                    .await,
+                1,
+                "unchanged lease-drop leave must dedupe"
+            );
+
+            clear_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id)
+                .await;
+            hub.leave_room(room, conn_id).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            assert_eq!(
+                count_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id)
+                    .await,
+                0,
+                "stale leave for an evicted connection must not schedule a session revision"
+            );
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+async fn assert_session_revision_matches(
+    harness: &support::TestDb,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    expected: &CapturedRevision,
+) {
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let row: (Vec<u8>, Value) = sqlx::query_as(
+        r#"
+        SELECT y_snapshot, content_json FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_id = $2 AND reason = 'session'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    assert_eq!(row.0, expected.y_snapshot);
+    assert_eq!(row.1, expected.content_json);
+}
+
+/// The sole connection is evicted with 1009 because a sync reply exceeds its outbound byte
+/// budget. The transport then sends a stale `Leave`; the eviction itself must schedule the
+/// last-disconnect session revision.
+#[tokio::test]
+async fn session_revision_on_last_connection_backpressure_close() {
+    run_test(
+        "session_revision_on_last_connection_backpressure_close",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let workspace_id = wiki.session.workspace_id;
+            let document_id = wiki.document_id;
+            append_outside_room(&wiki.session, document_id, "structured.v1").await;
+            let mut cfg = test_collab_config(4, 60_000);
+            // Step2 carries the whole document (> 831 bytes); small frames still fit.
+            cfg.max_outbound_bytes_per_connection = 512;
+            let expected = expected_committed_session_capture(
+                &wiki.session.pool,
+                workspace_id,
+                document_id,
+                &cfg,
+            )
+            .await;
+            let (state, hub) = collab_app_state(&run.harness.app_url, cfg).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            let key = routing_key(workspace_id, document_id);
+
+            let mut ws = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut ws, &key, 30).await;
+            ws.send(Message::Binary(sync_step1_frame(&key, &[0, 0]).into()))
+                .await
+                .unwrap();
+            wait_for_ws_close_code(
+                &mut ws,
+                1009,
+                Duration::from_secs(8),
+                false,
+                Some("outbound queue full"),
+            )
+            .await;
+
+            wait_session_revision_count(&run.harness, workspace_id, document_id, 1).await;
+            assert_session_revision_matches(&run.harness, workspace_id, document_id, &expected)
+                .await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// Frame-permit backpressure evicts the last hub connection, then the lease drop and a stale
+/// `Leave` arrive in that order. The eviction turn captures the session revision; the lease drop
+/// and the stale `Leave` must not schedule another one.
+#[tokio::test]
+async fn session_revision_backpressure_eviction_then_lease_drop_then_stale_leave() {
+    run_test(
+        "session_revision_backpressure_eviction_then_lease_drop_then_stale_leave",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let workspace_id = wiki.session.workspace_id;
+            let document_id = wiki.document_id;
+            append_outside_room(&wiki.session, document_id, "structured.v1").await;
+            let mut cfg = test_collab_config(4, 60_000);
+            // Step1 is answered with Step2 then Step1; the undrained second frame has no permit.
+            cfg.max_outbound_frames_per_connection = 1;
+            let expected = expected_committed_session_capture(
+                &wiki.session.pool,
+                workspace_id,
+                document_id,
+                &cfg,
+            )
+            .await;
+            let (state, hub) = collab_app_state(&run.harness.app_url, cfg).await;
+            let hub = hub.clone();
+            let _addr = run.spawn_router_state(state, hub.clone()).await;
+            let room = room_key(workspace_id, document_id);
+            let key = routing_key(workspace_id, document_id);
+
+            let conn_id = Uuid::now_v7();
+            let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
+            let lease = hub_join_with_events(
+                &hub,
+                workspace_id,
+                document_id,
+                wiki.session.session_id,
+                wiki.session.user_id,
+                31,
+                conn_id,
+                events_tx,
+            )
+            .await
+            .expect("hub join");
+            let handle = hub.ensure_live_room(room).await.expect("live room");
+            handle.frame(conn_id, sync_step1_frame(&key, &[0, 0])).await;
+            // Served after the frame turn, including its loop-tail session revision work.
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            let mut saw_close = false;
+            while let Ok(event) = events_rx.try_recv() {
+                if let fvoci_server::collab::room::RoomClientEvent::Close { code, .. } = event {
+                    assert_eq!(code, 1009);
+                    saw_close = true;
+                }
+            }
+            assert!(saw_close, "backpressure eviction must close with 1009");
+            assert_eq!(
+                count_session_revisions(&run.harness, workspace_id, document_id).await,
+                1,
+                "last-connection backpressure eviction must capture a session revision"
+            );
+            assert_session_revision_matches(&run.harness, workspace_id, document_id, &expected)
+                .await;
+
+            clear_session_revisions(&run.harness, workspace_id, document_id).await;
+            drop(lease);
+            // The first probe drains the lease drop; the second follows that turn's loop tail.
+            hub.probe_actor(room).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            hub.leave_room(room, conn_id).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            assert_eq!(
+                count_session_revisions(&run.harness, workspace_id, document_id).await,
+                0,
+                "lease drop and stale leave after eviction must not schedule another capture"
             );
             run.finish().await.expect("cleanup");
         },
@@ -2835,6 +3134,352 @@ async fn scheduled_revision_continues_past_empty_workspaces() {
             }
             assert!(batches >= 2);
             pool.close().await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Manual revision creation is fenced against credential and member revocation
+// ---------------------------------------------------------------------------
+
+async fn admin_pool_of(harness: &support::TestDb) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap()
+}
+
+/// Pid of the backend running a statement like `query_like` that waits on a
+/// lock held by `blocker_pid`.
+async fn wait_for_revision_write_blocked(
+    admin: &PgPool,
+    blocker_pid: i32,
+    query_like: &str,
+) -> i32 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        let blocked: Option<i32> = sqlx::query_scalar(
+            r#"
+            SELECT activity.pid
+            FROM pg_stat_activity AS activity
+            WHERE activity.datname = current_database()
+              AND activity.wait_event_type = 'Lock'
+              AND activity.state = 'active'
+              AND activity.query ILIKE $2
+              AND $1 = ANY(pg_blocking_pids(activity.pid))
+            LIMIT 1
+            "#,
+        )
+        .bind(blocker_pid)
+        .bind(query_like)
+        .fetch_optional(admin)
+        .await
+        .unwrap();
+        if let Some(pid) = blocked {
+            return pid;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the manual revision write never waited on {query_like} held by pid {blocker_pid}");
+}
+
+async fn count_target_revisions(admin: &PgPool, workspace_id: Uuid, target_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.revisions WHERE workspace_id = $1 AND target_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(target_id)
+    .fetch_one(admin)
+    .await
+    .unwrap()
+}
+
+async fn hold_users_row(
+    admin: &PgPool,
+    user_id: Uuid,
+) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let mut barrier = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
+        .bind(user_id)
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    (barrier, pid)
+}
+
+/// A logout that commits while a manual revision POST waits on the actor's
+/// credential row is seen by the write: 404 and no revision row.
+#[tokio::test]
+async fn manual_revision_refuses_session_revoked_while_waiting() {
+    run_test(
+        "manual_revision_refuses_session_revoked_while_waiting",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            append_outside_room(&wiki.session, wiki.document_id, "structured.v1").await;
+            let admin = admin_pool_of(&run.harness).await;
+            let workspace_id = wiki.session.workspace_id;
+            let before = count_target_revisions(&admin, workspace_id, wiki.document_id).await;
+
+            let (mut barrier, blocker_pid) = hold_users_row(&admin, wiki.session.user_id).await;
+            let path = revision_path(&wiki, "");
+            let token = wiki.session.session_token.clone();
+            let post = tokio::spawn(async move {
+                http_json(addr, reqwest::Method::POST, &path, &token, None).await
+            });
+            wait_for_revision_write_blocked(&admin, blocker_pid, "%fvoci.users%FOR UPDATE%").await;
+            sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE id = $1")
+                .bind(wiki.session.session_id)
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            barrier.commit().await.unwrap();
+
+            let (status, body) = tokio::time::timeout(Duration::from_secs(10), post)
+                .await
+                .expect("post finished")
+                .expect("join");
+            assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(
+                count_target_revisions(&admin, workspace_id, wiki.document_id).await,
+                before
+            );
+            admin.close().await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// Same fence for a task revision created with an API token (the token branch
+/// of the credential recheck): the token owner is suspended while the POST
+/// waits.
+#[tokio::test]
+async fn manual_task_revision_refuses_token_owner_suspended_while_waiting() {
+    run_test(
+        "manual_task_revision_refuses_token_owner_suspended_while_waiting",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let owner = setup_owner_session(&run.harness).await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let addr = run.spawn_router_state(state, hub.clone()).await;
+            let project = create_project(
+                &owner.pool,
+                owner.workspace_id,
+                owner.user_id,
+                owner.session_id,
+                CreateProjectInput {
+                    key: "REVPAT",
+                    name: "Revision token project",
+                    visibility: "workspace",
+                    description: None,
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+            .expect("create project")
+            .expect("ok");
+            let task = create_task(
+                &owner.pool,
+                owner.workspace_id,
+                project.id,
+                owner.user_id,
+                owner.session_id,
+                CreateTaskInput {
+                    title: "token revision task",
+                    task_type: "task",
+                    priority: "none",
+                    status_id: None,
+                    start_date: None,
+                    due_date: None,
+                    parent_id: None,
+                    milestone_id: None,
+                    recurrence: None,
+                },
+                None,
+                "api",
+            )
+            .await
+            .expect("create task")
+            .expect("ok");
+            let update = SeedEngine::from_hub(&hub)
+                .tiptap_to_yjs_update(&json!({
+                    "type": "doc",
+                    "content": [{
+                        "type": "paragraph",
+                        "attrs": {"id": "rev-pat-1"},
+                        "content": [{"type": "text", "text": "token revision body"}]
+                    }]
+                }))
+                .await
+                .expect("task seed update");
+            let claim = fvoci_server::db::collab::claim_writer_and_load_kind(
+                &owner.pool,
+                CollabKind::Task,
+                owner.workspace_id,
+                owner.user_id,
+                owner.session_id,
+                task.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let appended = fvoci_server::db::collab::append_collab_update_kind(
+                &owner.pool,
+                CollabKind::Task,
+                AppendCollabInput {
+                    workspace_id: owner.workspace_id,
+                    actor_user_id: owner.user_id,
+                    session_id: owner.session_id,
+                    document_id: task.id,
+                    writer_generation: claim.writer_generation,
+                    expected_tail_seq: claim.load.tail_seq,
+                    op_id: Uuid::now_v7(),
+                    payload: &update,
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(matches!(appended, AppendCollabResult::Committed { .. }));
+            let created = fvoci_server::db::api_tokens::create_api_token(
+                &owner.pool,
+                owner.workspace_id,
+                owner.user_id,
+                owner.session_id,
+                fvoci_server::db::api_tokens::CreateApiTokenInput {
+                    name: "revision writer",
+                    scopes: &[
+                        fvoci_server::auth::scopes::ApiTokenScope::TasksRead,
+                        fvoci_server::auth::scopes::ApiTokenScope::TasksWrite,
+                    ],
+                    unlimited: false,
+                    service: false,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("token");
+            let admin = admin_pool_of(&run.harness).await;
+            let before = count_target_revisions(&admin, owner.workspace_id, task.id).await;
+
+            let (mut barrier, blocker_pid) = hold_users_row(&admin, owner.user_id).await;
+            let url = format!(
+                "http://{addr}/api/v1/workspaces/{}/tasks/{}/revisions",
+                owner.workspace_id, task.id
+            );
+            let secret = created.token.clone();
+            let post = tokio::spawn(async move {
+                let response = reqwest::Client::new()
+                    .post(url)
+                    .header("origin", PUBLIC_ORIGIN)
+                    .header("authorization", format!("Bearer {secret}"))
+                    .send()
+                    .await
+                    .expect("http");
+                let status = response.status();
+                (
+                    status,
+                    response.json::<Value>().await.unwrap_or(Value::Null),
+                )
+            });
+            wait_for_revision_write_blocked(&admin, blocker_pid, "%fvoci.users%FOR UPDATE%").await;
+            sqlx::query("UPDATE fvoci.users SET suspended_at = now() WHERE id = $1")
+                .bind(owner.user_id)
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            barrier.commit().await.unwrap();
+
+            let (status, body) = tokio::time::timeout(Duration::from_secs(10), post)
+                .await
+                .expect("post finished")
+                .expect("join");
+            assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(
+                count_target_revisions(&admin, owner.workspace_id, task.id).await,
+                before
+            );
+            admin.close().await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// A member removal that holds the member's membership lock while a manual
+/// revision POST starts is serialized before the write: the POST waits, then
+/// sees the removal (404, no revision row).
+#[tokio::test]
+async fn manual_revision_refuses_member_removed_while_waiting() {
+    run_test(
+        "manual_revision_refuses_member_removed_while_waiting",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let workspace_id = wiki.session.workspace_id;
+            let member =
+                create_member_session(&run.harness, workspace_id, "rev-member@example.com").await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            append_outside_room(&wiki.session, wiki.document_id, "structured.v1").await;
+            let admin = admin_pool_of(&run.harness).await;
+            let before = count_target_revisions(&admin, workspace_id, wiki.document_id).await;
+
+            let mut barrier = admin.begin().await.unwrap();
+            sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+                .bind(fvoci_server::db::context::MEMBERSHIP_LOCK_NAMESPACE)
+                .bind(fvoci_server::db::context::lock_key_from_uuid(
+                    member.user_id,
+                ))
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *barrier)
+                .await
+                .unwrap();
+            let path = revision_path(&wiki, "");
+            let token = member.session_token.clone();
+            let post = tokio::spawn(async move {
+                http_json(addr, reqwest::Method::POST, &path, &token, None).await
+            });
+            wait_for_revision_write_blocked(&admin, blocker_pid, "%pg_advisory_xact_lock%").await;
+            sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
+                .bind(workspace_id)
+                .bind(member.user_id)
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            barrier.commit().await.unwrap();
+
+            let (status, body) = tokio::time::timeout(Duration::from_secs(10), post)
+                .await
+                .expect("post finished")
+                .expect("join");
+            assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(
+                count_target_revisions(&admin, workspace_id, wiki.document_id).await,
+                before
+            );
+            member.pool.close().await;
+            admin.close().await;
             run.finish().await.expect("cleanup");
         },
     )

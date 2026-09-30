@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { LoginForm } from "@/features/auth/login";
 import { MfaStep } from "@/features/auth/mfa";
 import { api, ensureOk } from "@/lib/api";
+import { safeReturnTo } from "@/lib/consent";
 import { oidcErrorMessage, takeMfaFragment } from "@/lib/oidc";
 import { publicInstanceQuery } from "@/lib/queries/admin";
 import { meQuery, providersQuery, setupStatusQuery } from "@/lib/queries";
@@ -22,14 +23,25 @@ export function LoginPage() {
   // it once and drop it from the address bar.
   const [mfaToken, setMfaToken] = useState<string | null>(takeMfaFragment);
   const brandingName = setupQuery.data?.branding.name;
+  // A page that sent the signed-out user here (the Vue app's pages do) is
+  // reopened with a full page load, since it may belong to either app.
+  const returnTo = safeReturnTo(searchParams.get("returnTo"), window.location.origin);
+  const signedInWithReturnTo = Boolean(meQueryState.data) && returnTo !== "/";
+  useEffect(() => {
+    if (signedInWithReturnTo) window.location.replace(returnTo);
+  }, [signedInWithReturnTo, returnTo]);
 
   async function enterApp(): Promise<void> {
     await queryClient.invalidateQueries();
+    if (returnTo !== "/") {
+      window.location.assign(returnTo);
+      return;
+    }
     await navigate("/", { replace: true });
   }
 
   if (meQueryState.data) {
-    return <Navigate to="/" replace />;
+    return signedInWithReturnTo ? null : <Navigate to="/" replace />;
   }
 
   if (mfaToken !== null) {

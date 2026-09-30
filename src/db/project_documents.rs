@@ -5,7 +5,9 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_tree, set_tenant};
+use crate::db::context::{
+    begin_read, lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::documents::{
     assert_document_writable, between, depth_of, empty_document_json, fetch_document_row,
     format_display_id, is_descendant, list_live_siblings_in, lock_document_rows, move_subtree,
@@ -13,12 +15,15 @@ use crate::db::documents::{
     trash_document_row, trash_expired, CreateDocumentInput, DocumentDbError, DocumentMeta,
     TrashChildrenMode, TreeNode, UpdateDocumentMetaInput, DOCUMENT_SCHEMA_VERSION, MAX_TREE_DEPTH,
 };
-use crate::db::documents::{
-    lock_membership_users, recheck_session, session_is_live, workspace_is_live,
-};
-use crate::db::projects::{lock_project, project_permission};
+use crate::db::projects::{load_live_project, lock_project, project_permission};
+use crate::db::workspace::workspace_is_live;
 use crate::projects::ProjectPermission;
 
+/// Live credential and workspace, then at least `min` on the live project.
+/// `lock` takes the project row `FOR NO KEY UPDATE` for a caller that writes
+/// in this transaction (archive, trash and member changes then serialize with
+/// the write); a read passes `false` and runs in [`begin_read`], whose single
+/// snapshot covers the check and the rows it returns.
 pub(crate) async fn require_project_document_access(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -26,6 +31,7 @@ pub(crate) async fn require_project_document_access(
     session_id: Uuid,
     project_id: Uuid,
     min: ProjectPermission,
+    lock: bool,
 ) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
     if !session_is_live(tx, actor_user_id, session_id).await? {
         return Ok(Err(DocumentDbError::Forbidden));
@@ -33,13 +39,18 @@ pub(crate) async fn require_project_document_access(
     if !workspace_is_live(tx, workspace_id).await? {
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let Some(locked) = lock_project(tx, workspace_id, project_id).await? else {
+    let project = if lock {
+        lock_project(tx, workspace_id, project_id).await?
+    } else {
+        load_live_project(tx, workspace_id, project_id).await?
+    };
+    let Some(project) = project else {
         return Ok(Err(DocumentDbError::NotFound));
     };
-    if locked.status == "archived" && min >= ProjectPermission::Edit {
+    if project.status == "archived" && min >= ProjectPermission::Edit {
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
     if !permission.at_least(min) {
         return Ok(Err(DocumentDbError::NotFound));
     }
@@ -148,7 +159,7 @@ pub async fn list_project_document_tree(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<Vec<TreeNode>, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     match require_project_document_access(
         &mut tx,
@@ -157,6 +168,7 @@ pub async fn list_project_document_tree(
         session_id,
         project_id,
         ProjectPermission::View,
+        false,
     )
     .await?
     {
@@ -221,6 +233,7 @@ pub async fn create_project_document(
         session_id,
         project_id,
         ProjectPermission::Edit,
+        true,
     )
     .await?
     {
@@ -379,7 +392,7 @@ pub async fn get_project_document(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
     match require_project_document_access(
         &mut tx,
@@ -388,6 +401,7 @@ pub async fn get_project_document(
         session_id,
         project_id,
         ProjectPermission::View,
+        false,
     )
     .await?
     {
@@ -453,6 +467,7 @@ pub async fn update_project_document_meta(
         session_id,
         project_id,
         ProjectPermission::Edit,
+        true,
     )
     .await?
     {
@@ -578,6 +593,7 @@ pub async fn move_project_document(
         session_id,
         project_id,
         ProjectPermission::Edit,
+        true,
     )
     .await?
     {
@@ -751,6 +767,7 @@ async fn begin_project_tree_write(
         session_id,
         project_id,
         ProjectPermission::Edit,
+        true,
     )
     .await
 }

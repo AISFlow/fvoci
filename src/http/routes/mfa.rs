@@ -22,7 +22,7 @@ use crate::api::dto::{
     OkResponse, SessionIssuedOutput,
 };
 use crate::auth::password::verify_password;
-use crate::auth::token::hash_token;
+use crate::auth::token::{hash_token, token_hashes_eq};
 use crate::auth::totp;
 use crate::db::identity::password_hash_by_id;
 use crate::db::mfa::{
@@ -296,11 +296,21 @@ async fn enable(
         return Err(problem(ProblemCode::MfaCodeInvalid));
     };
     let ip = peer_ip(peer.ip());
+    // The stored value may be re-sealed meanwhile (`--secrets-rotate`): the
+    // same secret under a new ciphertext still enables; a new setup does not.
+    let keyring = keys(&identity)?;
+    let expected_hex = hex::encode(&secret);
+    let context = user_mfa_context(auth.user_id);
+    let same_secret = |sealed: &str| {
+        sealed == row.totp_secret
+            || secret_box::open(keyring, sealed, &context)
+                .is_ok_and(|hex_secret| token_hashes_eq(&hex_secret, &expected_hex))
+    };
     match mfa::enable(
         pool,
         auth.user_id,
         auth.credential_id,
-        &row.totp_secret,
+        same_secret,
         step,
         Some(&ip),
     )
@@ -407,7 +417,7 @@ async fn verify(
         return Err(AppError::rate_limited(retry_after));
     }
     let row = mfa::find(pool, user_id).await.map_err(internal)?;
-    let Some(row) = row.filter(|r| r.enabled_at.is_some()) else {
+    let Some((row, enabled_at)) = row.and_then(|r| r.enabled_at.map(|at| (r, at))) else {
         return Err(problem(ProblemCode::MfaInvalid));
     };
     let Some((factor, recovery_hash)) = check_code(&identity, &row, &code)? else {
@@ -419,7 +429,7 @@ async fn verify(
             token_hash: &token_hash,
             user_id,
             generation,
-            secret: &row.totp_secret,
+            enabled_at,
             factor,
             recovery_hash: recovery_hash.as_deref(),
         },

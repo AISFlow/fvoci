@@ -461,7 +461,7 @@ export interface paths {
         };
         get: operations["oidc_start"];
         put?: never;
-        post?: never;
+        post: operations["oidc_start_invite"];
         delete?: never;
         options?: never;
         head?: never;
@@ -556,6 +556,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["auth_sso"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/sso/{workspace_id}/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["sso_callback"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1230,6 +1246,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Publishes the upload after re-checking the session and permissions (again right before the row is marked stored). For a `presigned` session storage must first list exactly parts 1..N, each of its exact length, with the submitted ETags; otherwise nothing is published and the session stays open. */
         post: operations["complete_attachment_upload"];
         delete?: never;
         options?: never;
@@ -1325,6 +1342,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Re-checks the session, workspace, edit permission, uploader and writable parent, lists the parts storage holds, and returns targets for the rest in the session's own transfer mode. For a `presigned` session every call signs fresh part URLs (the re-issue path after expiry). */
         get: operations["resume_attachment_upload"];
         put?: never;
         post?: never;
@@ -2032,6 +2050,22 @@ export interface paths {
         get: operations["list_wiki_document_share_links"];
         put?: never;
         post: operations["create_wiki_document_share_link"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_workspace_events"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3753,6 +3787,24 @@ export interface components {
             /** Format: uuid */
             userId: string;
         };
+        /**
+         * @description The attachment transfer mode this process applies, next to the configured
+         *     `values.attachmentTransfer.mode`.
+         */
+        AdminAttachmentTransferOutput: {
+            /** @description A stored `presigned` that cannot apply here, so `proxy` is in effect. */
+            blocked: boolean;
+            /**
+             * @description Mode for new upload sessions and original downloads of browser
+             *     sessions; API-token requests always use `proxy`.
+             */
+            effective: components["schemas"]["TransferMode"];
+            /** @description Whether this server's storage can serve `presigned`. */
+            presignedAvailable: boolean;
+            /** @description Where the configured mode comes from; `env` cannot be changed here. */
+            source: components["schemas"]["TransferSource"];
+            unavailableReason: components["schemas"]["TransferUnavailable"] | null;
+        };
         /** @description Source `adminEraseInput` (strict object). */
         AdminEraseBody: {
             /** Format: uuid */
@@ -3769,6 +3821,7 @@ export interface components {
             ok: boolean;
         };
         AdminInstanceSettingsOutput: {
+            attachmentTransfer: components["schemas"]["AdminAttachmentTransferOutput"];
             eeFeatures: string[];
             envApplied: string[];
             overridden: string[];
@@ -3922,6 +3975,12 @@ export interface components {
         AttachmentPartUrlResponse: {
             /** Format: int32 */
             partNumber: number;
+            /**
+             * @description `proxy`: the same-origin API path (PUT with the session). `presigned`:
+             *     an absolute signed storage URL for one PUT of exactly this part's
+             *     bytes, sent without cookies, `Authorization` or `Content-Type`; it
+             *     stops working at `partUrlsExpireAt`.
+             */
             url: string;
         };
         AttachmentPreviewHtmlOutput: {
@@ -3935,6 +3994,15 @@ export interface components {
         };
         AttachmentPreviewSettings: {
             mode: string;
+        };
+        /**
+         * @description How attachment part uploads and original downloads travel: `proxy` through
+         *     the API, `presigned` directly between the browser and S3. The stored value
+         *     is what the admin chose; the admin output's `attachmentTransfer` reports
+         *     whether this server's storage lets it apply.
+         */
+        AttachmentTransferSettings: {
+            mode: components["schemas"]["TransferMode"];
         };
         AttachmentUploadedPartResponse: {
             etag: string;
@@ -4292,7 +4360,19 @@ export interface components {
             attachmentId: string;
             /** Format: int64 */
             partSizeBytes: number;
+            /**
+             * Format: date-time
+             * @description When the presigned part URLs expire (resume re-issues them); null for
+             *     `proxy`.
+             */
+            partUrlsExpireAt: string | null;
             parts: components["schemas"]["AttachmentPartUrlResponse"][];
+            /**
+             * @description Transfer mode of this upload session, fixed for its whole life:
+             *     the mode in effect now for a browser session, always `proxy` for an
+             *     API-token request.
+             */
+            transfer: components["schemas"]["TransferMode"];
         };
         CreateCommentBody: {
             body: string;
@@ -4504,7 +4584,11 @@ export interface components {
             ok: boolean;
         };
         ExpectedDatesBody: {
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Compared with the stored `dueAt` to the millisecond; finer digits are
+             *     ignored.
+             */
             dueAt: string | null;
             /** Format: date */
             dueDate: string | null;
@@ -4525,8 +4609,22 @@ export interface components {
             /** Format: double */
             x: number;
         };
+        /**
+         * @description Non-working days, as the server applies them to `columns[].offDuty` and
+         *     to dependency lag.
+         */
+        GanttCalendarOutput: {
+            /** @description Workspace holidays within `scale.start..=scale.end`, ascending. */
+            holidays: components["schemas"]["String"][];
+            /** @description Weekdays that are never working days, 0 = Sunday .. 6 = Saturday. */
+            weekend: number[];
+        };
         GanttLayoutItemOutput: {
             assigneeIds: string[];
+            /**
+             * @description RFC 3339 UTC with milliseconds; send it back unchanged as
+             *     `expectedDates.dueAt`, which PATCH compares to the millisecond.
+             */
             dueAt?: string | null;
             dueDate?: components["schemas"]["String"] | null;
             end: components["schemas"]["String"];
@@ -4543,6 +4641,14 @@ export interface components {
         };
         GanttLayoutOutput: {
             bars: components["schemas"]["GanttBarOutput"][];
+            calendar: components["schemas"]["GanttCalendarOutput"];
+            /**
+             * @description At least Edit on the project and the project not archived, read in the
+             *     same snapshot as `items`. A display hint: PATCH re-checks both under
+             *     the project row lock. Ignores API-token scopes; PATCH also needs
+             *     `tasks.write`.
+             */
+            canEdit: boolean;
             columns: components["schemas"]["ScaleTickOutput"][];
             dropped: string[];
             /** Format: double */
@@ -4552,6 +4658,17 @@ export interface components {
             laneCount: number;
             /** Format: int32 */
             laneHeight: number;
+            /**
+             * Format: int32
+             * @description Dependencies among `items` before the cap.
+             */
+            linkTotal: number;
+            /**
+             * @description Dependencies whose both ends are in `items`, ascending
+             *     `(blockerId, blockedId)` and capped at 2048 (over the cap, the lowest
+             *     pairs).
+             */
+            links: components["schemas"]["GanttLinkOutput"][];
             monthBands: components["schemas"]["MonthBandOutput"][];
             overflow: string[];
             pack: string;
@@ -4564,6 +4681,26 @@ export interface components {
             /** Format: double */
             width: number;
         };
+        /**
+         * @description A dependency between two returned items. The server alone enforces it: a
+         *     PATCH that breaks it is refused with `dependency_contradiction`.
+         */
+        GanttLinkOutput: {
+            blockedId: string;
+            blockerId: string;
+            /**
+             * Format: int32
+             * @description Working days the blocked task's date must trail the blocker's date by;
+             *     weekends and workspace holidays do not count.
+             */
+            lagDays: number;
+            type: components["schemas"]["GanttLinkType"];
+        };
+        /**
+         * @description Dependency type: finish-to-start, start-to-start or finish-to-finish.
+         * @enum {string}
+         */
+        GanttLinkType: "FS" | "SS" | "FF";
         GanttScaleOutput: {
             end: components["schemas"]["String"];
             /** Format: double */
@@ -4658,6 +4795,7 @@ export interface components {
          */
         InstanceSettingsPatchInput: {
             attachmentPreview?: components["schemas"]["AttachmentPreviewSettings"] | null;
+            attachmentTransfer?: components["schemas"]["AttachmentTransferSettings"] | null;
             auth?: components["schemas"]["AuthSettings"] | null;
             branding?: components["schemas"]["BrandingPatchInput"] | null;
             "defaults.user"?: components["schemas"]["DefaultsUserSettings"] | null;
@@ -4918,6 +5056,27 @@ export interface components {
         NotificationUnreadCountResponse: {
             /** Format: int64 */
             count: number;
+        };
+        /**
+         * @description An OIDC start answered with JSON: the page navigates the browser to
+         *     `authorizationUrl` itself. A form submission that redirects to the
+         *     provider would be blocked by the app's `form-action 'self'`.
+         */
+        OidcAuthorizationOutput: {
+            authorizationUrl: string;
+        };
+        /**
+         * @description Form body of the invite-mode start (`application/x-www-form-urlencoded`,
+         *     these fields once each and nothing else).
+         */
+        OidcInviteStartForm: {
+            /**
+             * @description JSON array of `{kind, version}`: the legal documents accepted on the
+             *     invite page. Optional; absent means none.
+             */
+            consents?: string;
+            /** @description Invitation token: accept the invitation with this identity. */
+            invitation: string;
         };
         OkResponse: {
             ok: boolean;
@@ -5189,7 +5348,14 @@ export interface components {
             attachmentId: string;
             /** Format: int64 */
             partSizeBytes: number;
+            /**
+             * Format: date-time
+             * @description When the freshly issued presigned part URLs expire; null for `proxy`.
+             */
+            partUrlsExpireAt: string | null;
             parts: components["schemas"]["AttachmentPartUrlResponse"][];
+            /** @description The session's own transfer mode (not the current setting). */
+            transfer: components["schemas"]["TransferMode"];
             uploadedParts: components["schemas"]["AttachmentUploadedPartResponse"][];
         };
         RevisionCreateResponse: {
@@ -5288,6 +5454,7 @@ export interface components {
         /** @description The effective value of every key (serialized as the admin `values`). */
         SettingsValues: {
             attachmentPreview: components["schemas"]["AttachmentPreviewSettings"];
+            attachmentTransfer: components["schemas"]["AttachmentTransferSettings"];
             auth: components["schemas"]["AuthSettings"];
             branding: components["schemas"]["BrandingSettings"];
             "defaults.user": components["schemas"]["DefaultsUserSettings"];
@@ -5608,6 +5775,19 @@ export interface components {
         TokenBody: {
             token: string;
         };
+        /** @enum {string} */
+        TransferMode: "proxy" | "presigned";
+        /**
+         * @description Where the configured attachment transfer mode comes from.
+         * @enum {string}
+         */
+        TransferSource: "env" | "stored" | "default";
+        /**
+         * @description Why this process cannot hand out presigned URLs. Fixed for the life of the
+         *     process: it follows `STORAGE_DRIVER` and `S3_PUBLIC_ENDPOINT`.
+         * @enum {string}
+         */
+        TransferUnavailable: "storage_local" | "public_endpoint_missing";
         TrashItemResponse: {
             /** Format: date-time */
             deletedAt: string;
@@ -5703,6 +5883,23 @@ export interface components {
         WorkspaceConsentsResponse: {
             members: components["schemas"]["WorkspaceMemberConsentsOutput"][];
         };
+        WorkspaceEventListResponse: {
+            items: components["schemas"]["WorkspaceEventOutput"][];
+            nextCursor?: string | null;
+        };
+        /** @description Source `eventOutput` (packages/contracts/src/events.ts). */
+        WorkspaceEventOutput: {
+            actorUserId?: string | null;
+            channel: string;
+            /** Format: date-time */
+            createdAt: string;
+            id: string;
+            payload: Record<string, never>;
+            targetId?: string | null;
+            targetType?: string | null;
+            verb: string;
+            workspaceId?: string | null;
+        };
         WorkspaceListItemResponse: {
             /** Format: int32 */
             assignedCount: number;
@@ -5734,11 +5931,19 @@ export interface components {
             issuer: string;
             label?: string | null;
         };
-        /** @description All null when the workspace has no configuration. */
+        /**
+         * @description `issuer`, `clientId` and `label` are all null when the workspace has no
+         *     configuration.
+         */
         WorkspaceOidcGetOutput: {
             clientId: string | null;
             issuer: string | null;
             label: string | null;
+            /**
+             * @description The redirect URI to register at this workspace's identity provider,
+             *     exactly as the server sends it (built from the public origin).
+             */
+            redirectUri: string;
         };
         WorkspaceOidcOutput: {
             clientId: string;
@@ -6098,7 +6303,7 @@ export interface operations {
                     "application/json": components["schemas"]["AdminInstanceSettingsOutput"];
                 };
             };
-            /** @description Invalid input */
+            /** @description Invalid input, or `attachment_transfer_unavailable`: `attachmentTransfer.mode` = `presigned` on a server whose storage cannot presign (local driver, or S3 without `S3_PUBLIC_ENDPOINT`) */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -7286,15 +7491,35 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Redirect to the provider; sets fvoci_oidc_state */
-            303: {
+            /** @description Link started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["OidcAuthorizationOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
             };
             /** @description Authentication required */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description origin_mismatch: another origin, or no `Origin` header at all */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7325,10 +7550,6 @@ export interface operations {
     oidc_start: {
         parameters: {
             query?: {
-                /** @description Invitation token: accept with this identity */
-                invitation?: string;
-                /** @description JSON array of {kind, version} */
-                consents?: string;
                 /** @description Workspace SSO (generic) */
                 workspaceId?: string;
             };
@@ -7341,15 +7562,79 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Redirect to the provider; sets fvoci_oidc_state */
+            /** @description Sign-in only: redirect to the provider; sets fvoci_oidc_state. Accepting an invitation is the POST on this path; an `invitation` or `consents` query answers 400 */
             302: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Invalid input or invalid_consents_query */
+            /** @description Invalid input (including any other query parameter) */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description provider_not_configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    oidc_start_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description google | microsoft | kakao | naver | generic */
+                provider: string;
+            };
+            cookie?: never;
+        };
+        /** @description Same-origin `fetch` from the invite page; no query string */
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["OidcInviteStartForm"];
+            };
+        };
+        responses: {
+            /** @description Invite mode started; sets fvoci_oidc_state. The page then navigates to `authorizationUrl` by script (a form submission redirected to the provider would break the page's `form-action 'self'`) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcAuthorizationOutput"];
+                };
+            };
+            /** @description Invalid input (not a form, unknown or repeated field, missing invitation, any query) or invalid_consents_query */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description origin_mismatch: another origin, or no `Origin` header at all */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7594,14 +7879,35 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Redirect to the workspace identity provider; sets fvoci_oidc_state */
+            /** @description A browser navigation, answered only by redirects. Success: to the workspace identity provider, setting fvoci_oidc_state. Any refusal: to `/login?error=<problem code>` without state, e.g. `provider_not_configured` (unknown slug, a workspace without SSO, a personal workspace, or a build without the `workspaceSso` license feature), `invalid_input`, `rate_limit_exceeded`, `encryption_unavailable` or `internal_error` */
             302: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Invalid input */
+        };
+    };
+    sso_callback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id: the redirect URI its SSO provider registers */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace SSO callback. Completes only a flow started for this workspace (otherwise error `oidc_state_mismatch`, before any request to the provider). To `/` with a session, `/login#mfa=<token>`, `/settings/account?linked=1`, or `/login?error=<oidc code>` / `/settings/account?error=<oidc code>` */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid workspace id */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -7610,8 +7916,17 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description provider_not_configured */
-            404: {
+            /** @description The session that asked for the link is gone */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Seat limit */
+            402: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8331,6 +8646,15 @@ export interface operations {
             };
             /** @description Consent required */
             428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited: per address, per address and token, or (existing account) the login password budget */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10201,7 +10525,7 @@ export interface operations {
                     "application/json": components["schemas"]["AttachmentOutput"];
                 };
             };
-            /** @description Invalid parts */
+            /** @description Invalid parts (`submitted_parts_do_not_match_uploaded_parts` when storage holds other parts than submitted) */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -10282,6 +10606,15 @@ export interface operations {
                 content: {
                     "application/octet-stream": unknown;
                 };
+            };
+            /** @description Presigned transfer mode, browser sessions and the original only (API-token requests always get the bytes here): `Location` is a short-lived signed storage URL that serves the bytes with `Content-Disposition: attachment` and `application/octet-stream`; clients forward `Range` to it. HEAD, an unsatisfiable range and `variant=preview` are always answered here. */
+            302: {
+                headers: {
+                    /** @description Signed storage URL */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Preview not modified (If-None-Match) */
             304: {
@@ -10551,7 +10884,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description Upload is not in the required state */
+            /** @description Upload is not in the required state, or a `presigned` session (its parts go to the signed storage URLs only) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -10691,8 +11024,17 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description Upload is not in the required state */
+            /** @description Upload is not in the required state, or `attachment_transfer_unavailable`: a `presigned` session on a server that can no longer presign (it is never moved to the proxy path) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Presigned URL re-issue rate limited */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13897,7 +14239,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Upload session created */
+            /** @description Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -14051,6 +14393,61 @@ export interface operations {
                 };
             };
             /** @description Not found or no edit permission */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_workspace_events: {
+        parameters: {
+            query?: {
+                /** @description Page size 1-100 (default 50) */
+                limit?: number;
+                /** @description Relay-order cursor from nextCursor */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace event log, oldest first (owners and admins) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceEventListResponse"];
+                };
+            };
+            /** @description Invalid query or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -15444,6 +15841,15 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description personal_workspace_is_immutable: a personal workspace takes no SSO configuration */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17604,7 +18010,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Upload session created */
+            /** @description Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -20796,7 +21202,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Upload session created */
+            /** @description Upload session created and bound to its transfer mode: the mode in effect now for a browser session, always `proxy` for an API-token request */
             201: {
                 headers: {
                     [name: string]: unknown;

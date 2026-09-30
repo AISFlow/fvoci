@@ -141,6 +141,16 @@ def run_cli(
     )
 
 
+def is_opt_in(workflow: str, job: str) -> bool:
+    return job in SEL.OPT_IN_JOBS.get(workflow, {})
+
+
+def assert_full_selection(case: unittest.TestCase, workflow: str, plan: dict, context: object) -> None:
+    """Full mode selects every job except manual opt-ins, which stay unselected."""
+    for job, meta in plan["jobs"].items():
+        case.assertIs(meta["selected"], not is_opt_in(workflow, job), (workflow, job, context))
+
+
 def dummy_event_path(directory: Path) -> Path:
     path = directory / "event.json"
     path.write_text("{}", encoding="utf-8")
@@ -158,8 +168,8 @@ class ClassifyPathsTest(unittest.TestCase):
     def test_generated_broadens(self) -> None:
         self.assertEqual(SEL.classify_path("apps/web/src/generated/api.ts"), "broaden")
 
-    def test_e2e_broadens(self) -> None:
-        self.assertEqual(SEL.classify_path("apps/web/e2e/foo.spec.ts"), "broaden")
+    def test_e2e_specs_select_web(self) -> None:
+        self.assertEqual(SEL.classify_path("apps/web/e2e/foo.spec.ts"), "web_tests")
 
     def test_packages_broaden(self) -> None:
         self.assertEqual(SEL.classify_path("packages/editor/x.ts"), "broaden")
@@ -450,7 +460,7 @@ class PrCheckoutBindingTest(unittest.TestCase):
         self.assertEqual(plan["reason_code"], "FULL_PR_MERGE_PARENTS_MISMATCH")
         self.assertTrue(plan["jobs"]["web-checks"]["selected"])
 
-    def test_base_advance_mismatch_cannot_narrow(self) -> None:
+    def test_base_advance_with_exact_head_can_narrow(self) -> None:
         fx = PrCheckoutFixture()
         docs_head = fx.commit_on_branch("docs-pr", "README.md", "docs only\n")
         git(fx.origin, "checkout", "main")
@@ -465,8 +475,10 @@ class PrCheckoutBindingTest(unittest.TestCase):
         proc = fx.plan_cli(tested_sha=tested, event_path=event, output=output)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         plan = json.loads(output.read_text(encoding="utf-8"))
-        self.assertEqual(plan["mode"], "full")
-        self.assertEqual(plan["reason_code"], "FULL_PR_MERGE_PARENTS_MISMATCH")
+        self.assertEqual(plan["mode"], "narrow")
+        self.assertEqual(plan["reason_code"], "NARROW_DOCS")
+        self.assertEqual(plan["base_sha"], fx.base_sha)
+        self.assertEqual(plan["tested_sha"], tested)
 
     def test_direct_head_checkout_cannot_narrow(self) -> None:
         fx = PrCheckoutFixture()
@@ -534,21 +546,41 @@ class GateSchemaTest(unittest.TestCase):
         results: dict[str, str] | None = None,
         tested: str = "a" * 40,
         needs_json: str | None = None,
+        event_name: str | None = None,
+        event: object = None,
         **needs_kwargs: object,
     ) -> int:
         payload = needs_json if needs_json is not None else self._needs(
             plan, workflow, results, **needs_kwargs
         )
-        return SEL.cmd_gate(
-            [
-                "--workflow",
-                workflow,
-                "--needs-json",
-                payload,
-                "--tested-sha",
-                tested,
-            ]
-        )
+        if event_name is None:
+            # Default: the event that legitimately produced this plan's opt-ins.
+            chosen = {
+                name: "true"
+                for job, name in SEL.OPT_IN_JOBS.get(workflow, {}).items()
+                if isinstance(plan, dict)
+                and isinstance(plan.get("jobs"), dict)
+                and (plan["jobs"].get(job) or {}).get("selected") is True
+            }
+            event_name, event = ("workflow_dispatch", {"inputs": chosen}) if chosen else ("pull_request", {})
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / "event.json"
+            event_path.write_text(
+                event if isinstance(event, str) else json.dumps(event), encoding="utf-8"
+            )
+            with mock.patch.dict(
+                os.environ, {"GITHUB_EVENT_NAME": event_name, "GITHUB_EVENT_PATH": str(event_path)}
+            ):
+                return SEL.cmd_gate(
+                    [
+                        "--workflow",
+                        workflow,
+                        "--needs-json",
+                        payload,
+                        "--tested-sha",
+                        tested,
+                    ]
+                )
 
     def test_unselected_must_be_skipped(self) -> None:
         plan = self._plan("web", {"web-checks": False})
@@ -706,6 +738,120 @@ class GateSchemaTest(unittest.TestCase):
         plan["mode"] = "full"
         rc = self._gate(plan, "documents", {"native-extraction": "success"}, tested="b" * 40)
         self.assertEqual(rc, 1)
+
+
+class OptInSelectionTest(unittest.TestCase):
+    """upgrade-smoke-arm64 runs only on an explicit manual dispatch opt-in."""
+
+    def _install_plan(self, event_name: str, *, event: object = None, paths=None, **kwargs: object) -> dict:
+        opt_ins, err = SEL.dispatch_opt_ins("install", event_name, event if event is not None else {})
+        return SEL.build_plan(
+            workflow="install",
+            event_name=event_name,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            merge_base_sha="c" * 40,
+            tested_sha="b" * 40,
+            paths=paths,
+            fatal_error=kwargs.pop("fatal_error", None) or err,
+            opt_in_inputs=opt_ins,
+            **kwargs,
+        )
+
+    def test_ordinary_events_never_select_upgrade(self) -> None:
+        opt_in_event = {"inputs": {"run_upgrade_smoke_arm": "true"}}
+        cases = [
+            ("pull_request", ["apps/web/src/x.ts"]),
+            ("pull_request", ["docs/rewrite.md"]),
+            ("pull_request", ["src/main.rs"]),
+            ("pull_request", ["scripts/upgrade-smoke.sh"]),
+            ("push", ["src/main.rs"]),
+            ("merge_group", ["src/main.rs"]),
+        ]
+        for event_name, paths in cases:
+            for event in ({}, opt_in_event):
+                plan = self._install_plan(event_name, event=event, paths=paths)
+                self.assertFalse(plan["jobs"]["upgrade-smoke-arm64"]["selected"], (event_name, paths))
+        frontend = self._install_plan("pull_request", paths=["apps/web/src/x.ts"])
+        self.assertTrue(frontend["jobs"]["install-smoke"]["selected"])
+        self.assertTrue(frontend["jobs"]["backup-restore-smoke"]["selected"])
+
+    def test_manual_dispatch_off_by_default(self) -> None:
+        for event in ({}, {"inputs": None}, {"inputs": {}}, {"inputs": {"run_upgrade_smoke_arm": "false"}},
+                      {"inputs": {"run_upgrade_smoke_arm": False}}):
+            plan = self._install_plan("workflow_dispatch", event=event)
+            self.assertTrue(plan["plan_ok"], event)
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_WORKFLOW_DISPATCH")
+            self.assertFalse(plan["jobs"]["upgrade-smoke-arm64"]["selected"], event)
+            self.assertTrue(plan["jobs"]["install-smoke"]["selected"])
+            self.assertTrue(plan["jobs"]["backup-restore-smoke"]["selected"])
+
+    def test_manual_dispatch_opt_in_selects_upgrade(self) -> None:
+        for value in ("true", True):
+            plan = self._install_plan("workflow_dispatch", event={"inputs": {"run_upgrade_smoke_arm": value}})
+            self.assertTrue(plan["plan_ok"])
+            self.assertEqual(
+                {job: meta["selected"] for job, meta in plan["jobs"].items()},
+                {"install-smoke": True, "backup-restore-smoke": True, "upgrade-smoke-arm64": True},
+            )
+
+    def test_opt_in_input_ignored_by_other_workflows_and_fatal_plans(self) -> None:
+        plan = SEL.build_plan(
+            workflow="install",
+            event_name="workflow_dispatch",
+            base_sha=None,
+            head_sha=None,
+            merge_base_sha=None,
+            tested_sha="b" * 40,
+            paths=None,
+            fatal_error="TESTED_SHA_MISMATCH",
+            opt_in_inputs=frozenset({"run_upgrade_smoke_arm"}),
+        )
+        self.assertFalse(plan["plan_ok"])
+        self.assertFalse(plan["jobs"]["upgrade-smoke-arm64"]["selected"])
+        _, err = SEL.dispatch_opt_ins("web", "workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": "true"}})
+        self.assertEqual(err, "DISPATCH_INPUTS_UNKNOWN")
+
+    def test_malformed_dispatch_inputs_fail_plan(self) -> None:
+        for event, code in (
+            ([], "DISPATCH_EVENT_INVALID"),
+            ({"inputs": "true"}, "DISPATCH_INPUTS_INVALID"),
+            ({"inputs": {"run_upgrade_smoke_arm": "TRUE"}}, "DISPATCH_INPUT_VALUE_INVALID"),
+            ({"inputs": {"run_upgrade_smoke_arm": 1}}, "DISPATCH_INPUT_VALUE_INVALID"),
+            ({"inputs": {"run_upgrade_smoke_arm": None}}, "DISPATCH_INPUT_VALUE_INVALID"),
+            ({"inputs": {"run_upgrade_smoke_arm": "true", "old": "d" * 40}}, "DISPATCH_INPUTS_UNKNOWN"),
+        ):
+            plan = self._install_plan("workflow_dispatch", event=event)
+            self.assertFalse(plan["plan_ok"], event)
+            self.assertEqual(plan["reason_code"], code)
+            self.assertFalse(plan["jobs"]["upgrade-smoke-arm64"]["selected"], event)
+
+    def test_plan_cli_dispatch_opt_in_outputs(self) -> None:
+        with GitRepoFixture() as fx:
+            copy_workflows(fx.repo)
+            write_minimal_rust_registry_stub(fx.repo)
+            sha = fx.commit_file("README.md")
+            for inputs, expected, plan_ok in (
+                ({"run_upgrade_smoke_arm": "true"}, "true", "true"),
+                ({"run_upgrade_smoke_arm": "false"}, "false", "true"),
+                ({"run_upgrade_smoke_arm": "maybe"}, "false", "false"),
+            ):
+                event = fx.repo / "event.json"
+                event.write_text(json.dumps({"inputs": inputs}), encoding="utf-8")
+                gh_out = fx.repo / "gh-out.txt"
+                proc = run_cli(
+                    [
+                        "plan", "--workflow", "install", "--repo-root", str(fx.repo),
+                        "--event-json", str(event), "--output-plan", str(fx.repo / "plan.json"),
+                        "--github-output", str(gh_out),
+                    ],
+                    env={"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": sha},
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                lines = gh_out.read_text(encoding="utf-8").splitlines()
+                self.assertIn(f"select_upgrade_smoke_arm64={expected}", lines, inputs)
+                self.assertIn(f"plan_ok={plan_ok}", lines, inputs)
+                self.assertIn("select_install_smoke=true", lines)
 
 
 class WorkflowRegistryTest(unittest.TestCase):
@@ -1060,6 +1206,29 @@ class RegistryMutationCliTest(unittest.TestCase):
         github_output = output.parent / "github-output.txt"
         self.assertFalse(github_output.exists(), "GITHUB_OUTPUT must stay empty after registry failure")
 
+    def test_pr_path_filters_cannot_leave_gate_pending(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github/workflows/web.yml"
+        path.write_text(path.read_text().replace("  pull_request:\n", "  pull_request:\n    paths: ['apps/web/**']\n", 1))
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "pull_request must be unfiltered")
+
+    def test_checkout_ref_and_repository_overrides_rejected(self) -> None:
+        for override in ("ref: attacker-head", "repository: attacker/repo", "fetch-depth: 1"):
+            with self.subTest(override=override):
+                root = self._mutated_root()
+                path = root / ".github/workflows/web.yml"
+                path.write_text(path.read_text().replace("          fetch-depth: 0", "          " + override, 1))
+                proc, output = self._plan_against(root)
+                self._assert_no_green_outputs(proc, output, "ci-plan must checkout the event merge")
+
+    def test_runner_sha_yaml_override_rejected(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github/workflows/web.yml"
+        path.write_text(path.read_text().replace("          GITHUB_EVENT_NAME:", "          GITHUB_SHA: attacker-head\n          GITHUB_EVENT_NAME:", 1))
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "must not override trusted GITHUB_SHA")
+
     def test_new_job_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         web = root / ".github" / "workflows" / "web.yml"
@@ -1076,6 +1245,63 @@ class RegistryMutationCliTest(unittest.TestCase):
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "unregistered job id new-suite")
 
+    def _mutate_install(self, root: Path, old: str, new: str) -> None:
+        path = root / ".github" / "workflows" / "install.yml"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text.count(old), 1, old)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+
+    def test_install_opt_in_wiring_mutations_rejected_before_outputs(self) -> None:
+        cases = (
+            ("        default: false\n", "        default: true\n", "input run_upgrade_smoke_arm must be"),
+            ("        type: boolean\n", "        type: string\n", "input run_upgrade_smoke_arm must be"),
+            (
+                "      run_upgrade_smoke_arm:\n",
+                "      upgrade_old:\n        type: string\n      run_upgrade_smoke_arm:\n",
+                "workflow_dispatch inputs must be exactly",
+            ),
+            (
+                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-24.04-arm\n",
+                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-24.04\n",
+                "upgrade-smoke-arm64 runs-on must be ubuntu-24.04-arm",
+            ),
+            (
+                "    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n",
+                "    if: github.event_name == 'workflow_dispatch'\n",
+                "upgrade-smoke-arm64 if must be",
+            ),
+            (
+                "    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]\n",
+                "    needs: [ci-plan, install-smoke, backup-restore-smoke]\n",
+                "install-ci-gate needs must be",
+            ),
+            (
+                "      select_upgrade_smoke_arm64: ${{ steps.plan.outputs.select_upgrade_smoke_arm64 }}\n",
+                "",
+                "missing selector output select_upgrade_smoke_arm64",
+            ),
+        )
+        for old, new, needle in cases:
+            root = self._mutated_root()
+            self._mutate_install(root, old, new)
+            proc, output = self._plan_against(root)
+            self._assert_no_green_outputs(proc, output, needle)
+
+    def test_opt_in_input_on_other_workflow_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        web = root / ".github" / "workflows" / "web.yml"
+        text = web.read_text(encoding="utf-8")
+        web.write_text(
+            text.replace(
+                "  workflow_dispatch:\n",
+                "  workflow_dispatch:\n    inputs:\n      run_upgrade_smoke_arm:\n        type: boolean\n        default: false\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "web: workflow_dispatch inputs must be exactly []")
+
     def test_gate_suffixed_product_job_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         web = root / ".github" / "workflows" / "web.yml"
@@ -1091,6 +1317,48 @@ class RegistryMutationCliTest(unittest.TestCase):
         web.write_text(text.replace("  web-ci-gate:", injected + "  web-ci-gate:"), encoding="utf-8")
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "unregistered job id sneaky-ci-gate")
+
+    def test_release_workflow_must_stay_tag_only(self) -> None:
+        root = self._mutated_root()
+        release = root / ".github" / "workflows" / "release.yml"
+        text = release.read_text(encoding="utf-8")
+        release.write_text(text.replace("  workflow_dispatch:", "  pull_request:\n  workflow_dispatch:", 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "release.yml: triggers must be exactly push (tags) and workflow_dispatch")
+
+    def test_release_workflow_write_scope_outside_listed_job_rejected(self) -> None:
+        root = self._mutated_root()
+        release = root / ".github" / "workflows" / "release.yml"
+        text = release.read_text(encoding="utf-8")
+        marker = "      contents: read\n      checks: read\n"
+        self.assertIn(marker, text)
+        release.write_text(text.replace(marker, "      contents: write\n      checks: read\n", 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "release.yml: verify may not write ['contents']")
+
+    def test_release_workflow_per_tag_concurrency_rejected(self) -> None:
+        root = self._mutated_root()
+        release = root / ".github" / "workflows" / "release.yml"
+        text = release.read_text(encoding="utf-8")
+        marker = "  group: release-ghcr-fvoci\n"
+        self.assertIn(marker, text)
+        release.write_text(text.replace(marker, "  group: release-${{ github.ref_name }}\n", 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(
+            proc, output, "release.yml: concurrency must be one fixed group with cancel-in-progress: false"
+        )
+
+    def test_release_publish_job_may_not_write_contents(self) -> None:
+        root = self._mutated_root()
+        release = root / ".github" / "workflows" / "release.yml"
+        text = release.read_text(encoding="utf-8")
+        marker = "  publish:\n    needs: [verify, index, smoke]\n"
+        self.assertIn(marker, text)
+        publish = text.index(marker)
+        scope = text.index("      packages: write\n", publish)
+        release.write_text(text[:scope] + "      contents: write\n" + text[scope:], encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "release.yml: publish may not write ['contents']")
 
     def test_new_workflow_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
@@ -1253,6 +1521,202 @@ def plan_all_workflows(paths: list[str] | None, event_name: str = "pull_request"
     }
 
 
+class ImpactUnionTest(unittest.TestCase):
+    def assert_selected_workflows(self, paths: list[str], selected: set[str]) -> None:
+        for workflow, plan in plan_all_workflows(paths).items():
+            self.assertEqual(plan["mode"], "narrow", paths)
+            for job, meta in plan["jobs"].items():
+                self.assertIs(meta["selected"], workflow in selected and not is_opt_in(workflow, job), (paths, workflow, job))
+
+    def test_browser_and_unit_tests_run_web_without_install(self) -> None:
+        for path in (
+            "apps/web/e2e/new-flow.spec.ts",
+            "apps/web/e2e-pending/workspace-wiki-vue-collab.spec.ts",
+            "apps/web/e2e/helpers.ts",
+            "apps/web/e2e/mfa-helpers.ts",
+            "apps/web/e2e/workspace-wiki-vue-editor.ts",
+            "apps/web/e2e-pending/collab-helpers.ts",
+            "apps/web/e2e-pending/collab-helpers.test.ts",
+            "apps/web/src/vue/router.test.ts",
+            "packages/editor/test/vue-menu-selection.test.ts",
+        ):
+            self.assert_selected_workflows([path], {"web"})
+            self.assert_selected_workflows(["docs/rewrite.md", path], {"web"})
+
+    def test_editor_ui_keeps_browser_and_install(self) -> None:
+        for path in (
+            "packages/editor/src/vue/FvociEditor.vue",
+            "packages/editor/src/react/block-menu.tsx",
+            "packages/editor/src/react/editor.css",
+            "packages/editor/src/clipboard.ts",
+            "packages/editor/src/gutter-actions.ts",
+            "packages/editor/src/menu-roving.ts",
+        ):
+            self.assert_selected_workflows([path], {"web", "install"})
+            self.assert_selected_workflows(["README.md", "apps/web/e2e/foo.spec.ts", path], {"web", "install"})
+
+    def test_new_explanatory_docs_are_exact(self) -> None:
+        self.assert_selected_workflows(["docs/RELEASING.md", "docs/collab-engine-comparison.md"], set())
+        for path in ("docs/fixtures/example.md", "docs/generated/api.md", "docs/other.md", "docs/collab-engine-comparison.md.bak"):
+            self.assertEqual(SEL.decide_from_paths([path]).mode, "full", path)
+
+    def test_backend_contracts_harness_and_unknown_stay_full(self) -> None:
+        for path in (
+            "packages/editor/src/tiptap-schema.ts",
+            "packages/editor/src/collab-tiptap.ts",
+            "packages/editor/src/json.ts",
+            "packages/editor/src/export/pdf.tsx",
+            "packages/editor/src/fonts/NotoSansKR.ttf",
+            "packages/editor/src/react/schema.tsx",
+            "packages/editor/src/vue/new.wasm",
+            "packages/editor/test/schema-dump.ts",
+            "packages/editor/test/setup/vue-sfc.ts",
+            "packages/editor/tsconfig.json",
+            "packages/i18n/src/locales/ko.json",
+            "apps/web/e2e/fixtures/markdown-import.zip",
+            "apps/web/e2e/nested/foo.spec.ts",
+            "apps/web/e2e/new-harness.ts",
+            "apps/web/e2e-pending/collab-restart.ts",
+            "apps/web/e2e-pending/collab-wire.ts",
+            "apps/web/e2e-pending/collab-attachment-oracle.ts",
+            "apps/web/e2e-pending/collab-playwright.config.ts",
+            "apps/web/src/generated/api.test.ts",
+            "apps/web/src/fixtures/backend.sql",
+            "apps/web/src/new-contract.json",
+            "scripts/run-web-e2e.sh",
+            "scripts/ci_selection.py",
+            "src/auth.rs",
+            "migrations/045.sql",
+            "new-unknown-file.ts",
+            "apps/web/src/../../src/main.rs",
+            "apps/web//src/test.ts",
+        ):
+            for workflow, plan in plan_all_workflows(["README.md", "apps/web/e2e/foo.spec.ts", path]).items():
+                self.assertEqual(plan["mode"], "full", path)
+                assert_full_selection(self, workflow, plan, path)
+
+    def test_candidate_golden_plans(self) -> None:
+        # Frozen GitHub API inventories are regression evidence, never planner
+        # input. Production derives its paths exclusively from verified Git.
+        snapshot = json.loads((ROOT / "scripts/fixtures/ci-selection/candidates.json").read_text())
+        self.assertEqual({item["number"] for item in snapshot["candidates"]}, {265, 267, 269, 270, 271, 263, 280})
+        for item in snapshot["candidates"]:
+            self.assertTrue(SEL.validate_sha(item["head_sha"]))
+            paths = item["paths"]
+            expected = set() if item["number"] in {263, 280} else {"web", "install"}
+            with self.subTest(pr=item["number"], head=item["head_sha"]):
+                self.assert_selected_workflows(paths, expected)
+
+
+class PrMergeImpactTest(unittest.TestCase):
+    def resolve(self, fx: PrCheckoutFixture, base: str, head: str, tested: str):
+        with mock.patch.dict(os.environ, {"GITHUB_SHA": tested}):
+            return SEL.resolve_selection_inputs(fx.work, {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}, "pull_request")
+
+    def test_exact_parents_merge_only_add_delete_rename_force_full(self) -> None:
+        for operation in ("add", "delete", "rename"):
+            with self.subTest(operation=operation), PrCheckoutFixture() as fx:
+                write_file(fx.origin, "src/keep.rs", "base backend\n")
+                git(fx.origin, "add", ".")
+                git(fx.origin, "commit", "-m", "backend base")
+                base = git_sha(fx.origin)
+                head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+                fx.clone_work()
+                fx.merge_checkout(base, head)
+                if operation == "add":
+                    write_file(fx.work, "src/injected.rs", "merge only\n")
+                elif operation == "delete":
+                    git(fx.work, "rm", "src/keep.rs")
+                else:
+                    (fx.work / "apps/web/src").mkdir(parents=True, exist_ok=True)
+                    git(fx.work, "mv", "src/keep.rs", "apps/web/src/disguised.ts")
+                git(fx.work, "add", ".")
+                git(fx.work, "commit", "--amend", "--no-edit")
+                tested = git_sha(fx.work)
+                inputs = self.resolve(fx, base, head, tested)
+                self.assertIsNone(inputs.fatal_error)
+                self.assertIsNone(inputs.force_full_reason)
+                self.assertIn("README.md", inputs.paths)
+                self.assertEqual(SEL.decide_from_paths(inputs.paths).mode, "full")
+
+    def test_advanced_base_merge_resolution_only_change_is_classified(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+            write_file(fx.origin, "src/advanced.rs", "base backend\n")
+            git(fx.origin, "add", ".")
+            git(fx.origin, "commit", "-m", "advanced base")
+            advanced = git_sha(fx.origin)
+            fx.clone_work()
+            fx.merge_checkout(advanced, head)
+            write_file(fx.work, "src/advanced.rs", "merge resolution\n")
+            git(fx.work, "add", ".")
+            git(fx.work, "commit", "--amend", "--no-edit")
+            inputs = self.resolve(fx, fx.base_sha, head, git_sha(fx.work))
+            self.assertIsNone(inputs.force_full_reason)
+            self.assertIn("src/advanced.rs", inputs.paths)
+            self.assertEqual(SEL.decide_from_paths(inputs.paths).mode, "full")
+
+    def test_cumulative_head_changes_survive_merge_tree_omission(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("backend", "src/new.rs", "backend change\n")
+            fx.clone_work()
+            fx.merge_checkout(fx.base_sha, head)
+            git(fx.work, "rm", "src/new.rs")
+            write_file(fx.work, "README.md", "merge omitted backend\n")
+            git(fx.work, "add", ".")
+            git(fx.work, "commit", "--amend", "--no-edit")
+            inputs = self.resolve(fx, fx.base_sha, head, git_sha(fx.work))
+            self.assertIn("src/new.rs", inputs.paths)
+            self.assertEqual(SEL.decide_from_paths(inputs.paths).mode, "full")
+
+    def test_unrelated_or_older_first_parent_cannot_narrow(self) -> None:
+        for kind in ("unrelated", "older"):
+            with self.subTest(kind=kind), PrCheckoutFixture() as fx:
+                head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+                write_file(fx.origin, "src/advanced.rs", "advance\n")
+                git(fx.origin, "add", ".")
+                git(fx.origin, "commit", "-m", "advance")
+                event_base = git_sha(fx.origin)
+                fx.clone_work()
+                if kind == "older":
+                    tested = fx.merge_checkout(fx.base_sha, head)
+                else:
+                    git(fx.work, "checkout", "--orphan", "unrelated")
+                    git(fx.work, "rm", "-rf", ".")
+                    write_file(fx.work, "unrelated", "x\n")
+                    git(fx.work, "add", ".")
+                    git(fx.work, "commit", "-m", "unrelated root")
+                    tree = git_sha(fx.work, f"{head}^{{tree}}")
+                    unrelated = git_sha(fx.work)
+                    tested = git(fx.work, "commit-tree", tree, "-p", unrelated, "-p", head, "-m", "spoofed merge").stdout.strip()
+                    git(fx.work, "checkout", "--detach", tested)
+                inputs = self.resolve(fx, event_base, head, tested)
+                self.assertEqual(inputs.force_full_reason, "FULL_PR_MERGE_PARENTS_MISMATCH")
+                self.assertIsNone(inputs.paths)
+
+    def test_missing_history_and_tested_sha_mismatch_fail_closed(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            inputs = self.resolve(fx, fx.base_sha, head, head)
+            self.assertEqual(inputs.fatal_error, "TESTED_SHA_MISMATCH")
+            with mock.patch.object(SEL, "git_fetch_origin", return_value="FETCH_FAILED"):
+                inputs = self.resolve(fx, "f" * 40, head, tested)
+            self.assertEqual(inputs.fatal_error, "FETCH_FAILED")
+            self.assertIsNone(inputs.paths)
+
+    def test_actual_merge_diff_failure_is_fatal(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("docs", "README.md", "changed docs\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            with mock.patch.object(SEL, "git_diff_paths", side_effect=[(["README.md"], None), ([], "GIT_DIFF_FAILED")]):
+                inputs = self.resolve(fx, fx.base_sha, head, tested)
+            self.assertEqual(inputs.fatal_error, "GIT_DIFF_FAILED")
+            self.assertIsNone(inputs.paths)
+
+
 class AgentDocsSelectionTest(unittest.TestCase):
     """AGENTS.md and .agents/environment.md are role/environment records only."""
 
@@ -1269,8 +1733,7 @@ class AgentDocsSelectionTest(unittest.TestCase):
             self.assertEqual(plan["mode"], "full", (workflow, paths))
             if reason is not None:
                 self.assertEqual(plan["reason_code"], reason, (workflow, paths))
-            for job, meta in plan["jobs"].items():
-                self.assertTrue(meta["selected"], (workflow, job, paths))
+            assert_full_selection(self, workflow, plan, paths)
 
     def test_exact_agent_docs_classify_as_docs(self) -> None:
         for path in AGENT_DOCS:
@@ -1283,13 +1746,13 @@ class AgentDocsSelectionTest(unittest.TestCase):
             ".agents/environment.md.bak",
             ".agents/environment.mdx",
             ".agents/other.md",
-            ".agents/",
             ".agents/sub/environment.md",
         ):
             self.assertEqual(SEL.classify_path(path), "broaden", path)
         for path in ("agents/environment.md", "AGENTS.MD", "apps/AGENTS.md", "AGENTS.md.orig"):
             self.assertEqual(SEL.classify_path(path), "unknown", path)
         self.assertEqual(SEL.classify_path("docs/AGENTS.md"), "broaden")
+        self.assertEqual(SEL.classify_path(".agents/"), "unknown")
         self.assertEqual(SEL.classify_path("scripts/AGENTS.md"), "broaden")
 
     def test_explicit_docs_never_overlap_build_inputs(self) -> None:
@@ -1333,6 +1796,12 @@ class AgentDocsSelectionTest(unittest.TestCase):
             "apps/web/playwright.config.ts",
             "crates/collab-engine/Cargo.toml",
             "packages/editor/package.json",
+            "package.json",
+            "bun.lock",
+            "bunfig.toml",
+            ".bun-version",
+            "patches/@volar%2Ftypescript@2.4.28.patch",
+            "scripts/document-convert/package.json",
         ):
             self.assert_full([*AGENT_DOCS, extra], "FULL_PATH_BROADEN")
 
@@ -1343,8 +1812,12 @@ class AgentDocsSelectionTest(unittest.TestCase):
         for extra in (".gitignore", "LICENSE", "third-party/x.md", "apps/AGENTS.md", "notes.md"):
             self.assert_full([*AGENT_DOCS, extra], "FULL_UNKNOWN_PATH")
 
-    def test_agent_docs_with_frontend_is_mixed_full(self) -> None:
-        self.assert_full([*AGENT_DOCS, "apps/web/src/x.ts"], "FULL_MIXED_NARROW")
+    def test_agent_docs_with_frontend_unions_impacts(self) -> None:
+        for workflow, plan in plan_all_workflows([*AGENT_DOCS, "apps/web/src/x.ts"]).items():
+            self.assertEqual(plan["mode"], "narrow")
+            self.assertEqual(plan["reason_code"], "NARROW_FRONTEND_WEB_INSTALL")
+            for job, meta in plan["jobs"].items():
+                self.assertIs(meta["selected"], workflow in {"web", "install"} and not is_opt_in(workflow, job))
 
     def test_always_full_events_ignore_agent_docs(self) -> None:
         for event_name, reason in (
@@ -1356,7 +1829,7 @@ class AgentDocsSelectionTest(unittest.TestCase):
                 self.assertEqual(plan["mode"], "full", (event_name, workflow))
                 self.assertEqual(plan["reason_code"], reason)
                 self.assertTrue(plan["plan_ok"])
-                self.assertTrue(all(meta["selected"] for meta in plan["jobs"].values()))
+                assert_full_selection(self, workflow, plan, event_name)
 
     def test_diff_failure_fails_closed(self) -> None:
         for fatal in ("GIT_DIFF_FAILED", "DIFF_TRUNCATED", "DIFF_TRUNCATED_RENAME", "FETCH_FAILED"):
@@ -1364,7 +1837,7 @@ class AgentDocsSelectionTest(unittest.TestCase):
                 self.assertEqual(plan["mode"], "full", (fatal, workflow))
                 self.assertEqual(plan["reason_code"], fatal)
                 self.assertFalse(plan["plan_ok"])
-                self.assertTrue(all(meta["selected"] for meta in plan["jobs"].values()))
+                assert_full_selection(self, workflow, plan, fatal)
         for workflow, plan in plan_all_workflows(None).items():
             self.assertEqual(plan["reason_code"], "FULL_MISSING_PATHS", workflow)
             self.assertFalse(plan["plan_ok"])
@@ -1478,6 +1951,86 @@ class AgentDocsGateTest(unittest.TestCase):
     _plan = GateSchemaTest._plan
     _needs = GateSchemaTest._needs
     _gate = GateSchemaTest._gate
+
+    def test_opt_in_gate_selected_bad_result_or_missing_rejected(self) -> None:
+        plan = self._plan("install", {"upgrade-smoke-arm64": True})
+        ok = {"upgrade-smoke-arm64": "success"}
+        self.assertEqual(self._gate(plan, "install", ok), 0)
+        for result in ("failure", "cancelled", "skipped"):
+            self.assertEqual(self._gate(plan, "install", {"upgrade-smoke-arm64": result}), 1, result)
+        self.assertEqual(
+            self._gate(plan, "install", ok, omit_jobs=frozenset({"upgrade-smoke-arm64"})), 1
+        )
+
+    def test_opt_in_gate_unchosen_ran_rejected(self) -> None:
+        plan = self._plan("install", {})
+        for event_name, event in (
+            ("pull_request", {}),
+            ("push", {}),
+            ("merge_group", {}),
+            ("workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": "false"}}),
+        ):
+            self.assertEqual(self._gate(plan, "install", event_name=event_name, event=event), 0)
+            for result in ("success", "failure", "cancelled"):
+                rc = self._gate(
+                    plan,
+                    "install",
+                    {"upgrade-smoke-arm64": result},
+                    event_name=event_name,
+                    event=event,
+                )
+                self.assertEqual(rc, 1, (event_name, result))
+
+    def test_opt_in_gate_rejects_plan_override(self) -> None:
+        # A plan that selects the job without the event opt-in, or drops a real
+        # opt-in, fails even when the job result matches the plan.
+        forced = self._plan("install", {"upgrade-smoke-arm64": True})
+        for event_name, event in (
+            ("pull_request", {"inputs": {"run_upgrade_smoke_arm": "true"}}),
+            ("push", {}),
+            ("merge_group", {}),
+            ("workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": "false"}}),
+            ("workflow_dispatch", {}),
+        ):
+            rc = self._gate(
+                forced,
+                "install",
+                {"upgrade-smoke-arm64": "success"},
+                event_name=event_name,
+                event=event,
+            )
+            self.assertEqual(rc, 1, (event_name, event))
+        dropped = self._plan("install", {})
+        rc = self._gate(
+            dropped,
+            "install",
+            event_name="workflow_dispatch",
+            event={"inputs": {"run_upgrade_smoke_arm": "true"}},
+        )
+        self.assertEqual(rc, 1)
+
+    def test_opt_in_gate_malformed_event_rejected(self) -> None:
+        plan = self._plan("install", {})
+        for event_name, event in (
+            ("workflow_dispatch", "{bad"),
+            ("workflow_dispatch", []),
+            ("workflow_dispatch", {"inputs": []}),
+            ("workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": "yes"}}),
+            ("workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": 1}}),
+            ("workflow_dispatch", {"inputs": {"other": "true"}}),
+            ("schedule", {}),
+        ):
+            self.assertEqual(
+                self._gate(plan, "install", event_name=event_name, event=event), 1, (event_name, event)
+            )
+        payload = self._needs(plan, "install")
+        for missing in ("GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH"):
+            with mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": "/nonexistent"}):
+                os.environ.pop(missing)
+                rc = SEL.cmd_gate(
+                    ["--workflow", "install", "--needs-json", payload, "--tested-sha", "a" * 40]
+                )
+            self.assertEqual(rc, 1, missing)
 
     def test_docs_plan_all_skipped_passes(self) -> None:
         for workflow in SEL.WORKFLOW_JOBS:

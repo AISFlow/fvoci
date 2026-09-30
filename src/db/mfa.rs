@@ -144,11 +144,15 @@ pub enum EnableOutcome {
 }
 
 /// Source `enableMfa` transaction: the verified step becomes the replay floor.
+///
+/// `same_secret` tells whether a stored (sealed) value holds the secret the
+/// code was checked against. The sealed text alone cannot tell: a concurrent
+/// setup replaces the secret, but `--secrets-rotate` re-seals the same one.
 pub async fn enable(
     pool: &PgPool,
     user_id: Uuid,
     session_id: Uuid,
-    expected_secret: &str,
+    same_secret: impl Fn(&str) -> bool,
     step: i64,
     ip: Option<&str>,
 ) -> Result<EnableOutcome, sqlx::Error> {
@@ -158,22 +162,36 @@ pub async fn enable(
         return Ok(EnableOutcome::SessionGone);
     }
     set_self_user(&mut tx, user_id).await?;
-    // The secret must still be the one the code was checked against: a
-    // concurrent setup replaced it otherwise.
-    let enabled = sqlx::query(
+    // Locked, so neither setup nor a re-seal can change it before the UPDATE.
+    let current: Option<(String,)> = sqlx::query_as(
         r#"
-        UPDATE fvoci.user_mfa
-        SET enabled_at = now(), last_used_step = $2, updated_at = now()
-        WHERE user_id = $1 AND enabled_at IS NULL AND totp_secret = $3
+        SELECT totp_secret FROM fvoci.user_mfa
+        WHERE user_id = $1 AND enabled_at IS NULL
+        FOR UPDATE
         "#,
     )
     .bind(user_id)
-    .bind(step as i32)
-    .bind(expected_secret)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        == 1;
+    .fetch_optional(&mut *tx)
+    .await?;
+    let enabled = match current.filter(|(sealed,)| same_secret(sealed)) {
+        Some((sealed,)) => {
+            sqlx::query(
+                r#"
+                UPDATE fvoci.user_mfa
+                SET enabled_at = now(), last_used_step = $2, updated_at = now()
+                WHERE user_id = $1 AND enabled_at IS NULL AND totp_secret = $3
+                "#,
+            )
+            .bind(user_id)
+            .bind(step as i32)
+            .bind(&sealed)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                == 1
+        }
+        None => false,
+    };
     clear_self_user(&mut tx).await?;
     if !enabled {
         tx.rollback().await?;
@@ -463,8 +481,11 @@ pub struct ChallengeCheck<'a> {
     pub token_hash: &'a str,
     pub user_id: Uuid,
     pub generation: i32,
-    /// The sealed secret the code was verified against.
-    pub secret: &'a str,
+    /// `enabled_at` of the MFA row the code was verified against. It marks
+    /// that secret: disable deletes the row and a later enable stamps a new
+    /// time, while re-sealing the same secret (`--secrets-rotate`) keeps it,
+    /// so the sealed text itself is not compared.
+    pub enabled_at: DateTime<Utc>,
     pub factor: SecondFactor,
     pub recovery_hash: Option<&'a str>,
 }
@@ -490,7 +511,7 @@ pub async fn complete_challenge(
     } else {
         None
     };
-    let row_ok = row.is_some_and(|r| r.enabled_at.is_some() && r.totp_secret == check.secret);
+    let row_ok = row.is_some_and(|r| r.enabled_at == Some(check.enabled_at));
     if !row_ok || !claim_factor(&mut tx, check.user_id, check.factor, check.recovery_hash).await? {
         tx.rollback().await?;
         return Ok(None);
@@ -507,18 +528,4 @@ pub async fn complete_challenge(
     let token = issue_session_in_tx(&mut tx, check.user_id, check.factor.method()).await?;
     tx.commit().await?;
     Ok(Some((check.user_id, token)))
-}
-
-/// Maintenance GC of expired challenges and OIDC flow state.
-pub async fn purge_expired_ephemeral(
-    pool: &PgPool,
-    now: DateTime<Utc>,
-    limit: i32,
-) -> Result<u32, sqlx::Error> {
-    let deleted: i32 = sqlx::query_scalar("SELECT fvoci.app_auth_ephemeral_purge_expired($1, $2)")
-        .bind(now)
-        .bind(limit)
-        .fetch_one(pool)
-        .await?;
-    Ok(deleted.max(0) as u32)
 }

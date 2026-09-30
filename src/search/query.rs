@@ -4,8 +4,10 @@
 //! `packages/search/src/query.ts` (RRF) and `packages/search/src/snippet.ts` at
 //! source SHA `393795261322b916e588043cf94feca999175843`.
 //!
-//! Scope uses `project_permission` / `document_permission`. The Meili filter
-//! is recall only; hydrate re-checks the current DB state.
+//! The scope (`load_search_acl`) uses the SQL project visibility predicate
+//! shared with the project list. The Meili filter is recall only; hydrate
+//! re-checks every hit with `project_permission` / `document_permission`
+//! against the current DB state.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -19,10 +21,12 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::db::context::{session_is_live, set_tenant};
-use crate::db::documents::{document_permission, membership_role, workspace_is_live};
+use crate::db::documents::document_permission;
 use crate::db::group_grants::guest_wiki_document_ids_select_sql;
-use crate::db::projects::{project_permission, LockedProject};
-use crate::db::workspace::{list_workspaces_for_user, WorkspaceRole};
+use crate::db::projects::{load_live_project, project_permission, visible_project_sql_for_guest};
+use crate::db::workspace::{
+    list_workspaces_for_user, membership_role, workspace_is_live, WorkspaceRole,
+};
 use crate::display_id::format_display_id;
 use crate::projects::ProjectPermission;
 use crate::search::embed::Embedder;
@@ -248,7 +252,7 @@ pub async fn query_workspace_search(
     pool: &PgPool,
     input: WorkspaceSearchRequest<'_>,
 ) -> Result<Result<SearchResultPage, SearchQueryError>, sqlx::Error> {
-    let prepared = match prepare_query(&input) {
+    let prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
         Ok(Some(prepared)) => prepared,
         Ok(None) => {
             return Ok(Ok(SearchResultPage {
@@ -321,7 +325,7 @@ pub async fn query_global_search(
     pool: &PgPool,
     input: GlobalSearchRequest<'_>,
 ) -> Result<Result<SearchResultPage, SearchQueryError>, sqlx::Error> {
-    let prepared = match prepare_global_query(&input) {
+    let prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
         Ok(Some(prepared)) => prepared,
         Ok(None) => {
             return Ok(Ok(SearchResultPage {
@@ -363,56 +367,17 @@ pub async fn query_global_search(
     Ok(Ok(SearchResultPage { items, next_cursor }))
 }
 
-fn prepare_global_query(
-    input: &GlobalSearchRequest<'_>,
-) -> Result<Option<PreparedQuery>, SearchQueryError> {
-    let limit = input.limit.clamp(1, 50);
-    let raw = input.q.trim();
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    let raw: String = raw.chars().take(200).collect();
-    let title_prefix = raw
-        .strip_prefix('^')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.chars().take(200).collect::<String>());
-    let q = title_prefix.clone().unwrap_or(raw);
-    if q.is_empty() {
-        return Ok(None);
-    }
-    let chosung = is_chosung_query(&q);
-    if chosung && q.chars().filter(|c| !c.is_whitespace()).count() < CHOSUNG_MIN_LENGTH {
-        return Ok(None);
-    }
-    if chosung && input.r#type == SearchTypeFilter::Attachment {
-        return Ok(None);
-    }
-    let stem = if chosung {
-        String::new()
-    } else {
-        stem_text(&q)
-    };
-    let offset = match input.cursor {
-        None => 0,
-        Some(cursor) => decode_cursor_offset(cursor)?,
-    };
-    Ok(Some(PreparedQuery {
-        q,
-        stem,
-        chosung,
-        title_prefix,
-        r#type: input.r#type,
-        limit,
-        offset,
-    }))
-}
-
+/// Normalizes a search request the same way for workspace and global search
+/// (length cap, `^` title prefix, chosung rules, cursor offset). `Ok(None)`
+/// means nothing can match, so the caller answers an empty page.
 fn prepare_query(
-    input: &WorkspaceSearchRequest<'_>,
+    q: &str,
+    r#type: SearchTypeFilter,
+    limit: u32,
+    cursor: Option<&str>,
 ) -> Result<Option<PreparedQuery>, SearchQueryError> {
-    let limit = input.limit.clamp(1, 50);
-    let raw = input.q.trim();
+    let limit = limit.clamp(1, 50);
+    let raw = q.trim();
     if raw.is_empty() {
         return Ok(None);
     }
@@ -430,7 +395,7 @@ fn prepare_query(
     if chosung && q.chars().filter(|c| !c.is_whitespace()).count() < CHOSUNG_MIN_LENGTH {
         return Ok(None);
     }
-    if chosung && input.r#type == SearchTypeFilter::Attachment {
+    if chosung && r#type == SearchTypeFilter::Attachment {
         return Ok(None);
     }
     let stem = if chosung {
@@ -438,7 +403,7 @@ fn prepare_query(
     } else {
         stem_text(&q)
     };
-    let offset = match input.cursor {
+    let offset = match cursor {
         None => 0,
         Some(cursor) => decode_cursor_offset(cursor)?,
     };
@@ -447,12 +412,18 @@ fn prepare_query(
         stem,
         chosung,
         title_prefix,
-        r#type: input.r#type,
+        r#type,
         limit,
         offset,
     }))
 }
 
+/// Loads the [`SearchAcl`] in the caller's `set_tenant` transaction; `role` is
+/// the actor's membership role read in that transaction. The projects come
+/// from one statement on the visibility predicate the project list uses
+/// (`visible_project_sql`): archived projects are in, trashed ones are not.
+/// `project_filter` narrows the scope to that one project without wiki, or to
+/// nothing when that project is not visible.
 pub(crate) async fn load_search_acl(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -460,54 +431,20 @@ pub(crate) async fn load_search_acl(
     role: WorkspaceRole,
     project_filter: Option<Uuid>,
 ) -> Result<SearchAcl, sqlx::Error> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<Uuid>,
-            String,
-            Uuid,
-            DateTime<Utc>,
-            DateTime<Utc>,
-        ),
-    >(
+    let project_ids: Vec<Uuid> = sqlx::query_scalar(&format!(
         r#"
-        SELECT id, key, name, description, icon, visibility, root_document_id, status,
-               created_by, created_at, updated_at
-        FROM fvoci.projects
-        WHERE workspace_id = $1 AND deleted_at IS NULL
-        ORDER BY key COLLATE "C"
+        SELECT p.id
+        FROM fvoci.projects p
+        WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
+          AND {visible}
+        ORDER BY p.key COLLATE "C"
         "#,
-    )
+        visible = visible_project_sql_for_guest("p", role == WorkspaceRole::Guest, 2),
+    ))
     .bind(workspace_id)
+    .bind(actor_user_id)
     .fetch_all(&mut **tx)
     .await?;
-
-    let mut project_ids = Vec::new();
-    for row in rows {
-        let locked = LockedProject {
-            id: row.0,
-            key: row.1,
-            name: row.2,
-            description: row.3,
-            icon: row.4,
-            visibility: row.5,
-            root_document_id: row.6,
-            status: row.7,
-            created_by: row.8,
-            created_at: row.9,
-            updated_at: row.10,
-        };
-        let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
-        if permission.at_least(ProjectPermission::View) {
-            project_ids.push(locked.id);
-        }
-    }
     let wiki_document_ids = if role == WorkspaceRole::Guest {
         sqlx::query_as::<_, (Uuid,)>(&guest_wiki_document_ids_select_sql(1, 2))
             .bind(workspace_id)
@@ -761,18 +698,13 @@ struct ScannedPage {
     next_off: Option<u32>,
 }
 
-struct ScannedGlobalPage {
-    items: Vec<(MeiliHit, HydratedRow)>,
-    next_off: Option<u32>,
-}
-
 async fn scan_lexical_global(
     pool: &PgPool,
     meili: &MeiliConfig,
     input: &GlobalSearchRequest<'_>,
     visible: &[VisibleWorkspaceAcl],
     prepared: &PreparedQuery,
-) -> Result<ScannedGlobalPage, ScanError> {
+) -> Result<ScannedPage, ScanError> {
     let workspace_ids: HashSet<String> = visible
         .iter()
         .map(|entry| entry.workspace_id.to_string())
@@ -896,7 +828,7 @@ async fn scan_lexical_global(
             items.push((hit.clone(), row.clone()));
         }
         if stopped_mid {
-            return Ok(ScannedGlobalPage {
+            return Ok(ScannedPage {
                 items,
                 next_off: Some(next_off),
             });
@@ -915,7 +847,7 @@ async fn scan_lexical_global(
     } else {
         None
     };
-    Ok(ScannedGlobalPage { items, next_off })
+    Ok(ScannedPage { items, next_off })
 }
 
 async fn scan_lexical(
@@ -1708,10 +1640,10 @@ async fn visible_after_hydrate(
             if !acl.project_ids.contains(&pid) {
                 return Ok(false);
             }
-            let Some(locked) = load_live_project(tx, workspace_id, pid).await? else {
+            let Some(project) = load_live_project(tx, workspace_id, pid).await? else {
                 return Ok(false);
             };
-            let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+            let permission = project_permission(tx, workspace_id, actor_user_id, &project).await?;
             Ok(permission.at_least(ProjectPermission::View))
         }
         None => {
@@ -1726,67 +1658,6 @@ async fn visible_after_hydrate(
             Ok(permission.at_least(ProjectPermission::View))
         }
     }
-}
-
-pub(crate) async fn load_live_project(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    project_id: Uuid,
-) -> Result<Option<LockedProject>, sqlx::Error> {
-    let row = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<Uuid>,
-            String,
-            Uuid,
-            DateTime<Utc>,
-            DateTime<Utc>,
-        ),
-    >(
-        r#"
-        SELECT id, key, name, description, icon, visibility, root_document_id, status,
-               created_by, created_at, updated_at
-        FROM fvoci.projects
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.map(
-        |(
-            id,
-            key,
-            name,
-            description,
-            icon,
-            visibility,
-            root_document_id,
-            status,
-            created_by,
-            created_at,
-            updated_at,
-        )| LockedProject {
-            id,
-            key,
-            name,
-            description,
-            icon,
-            visibility,
-            root_document_id,
-            status,
-            created_by,
-            created_at,
-            updated_at,
-        },
-    ))
 }
 
 fn escape_html(s: &str) -> String {

@@ -11,9 +11,10 @@ use uuid::Uuid;
 use crate::db::context::{
     lock_membership_users, recheck_session, session_is_live, set_system, set_tenant,
 };
-use crate::db::documents::{membership_role, membership_role_for_update, workspace_is_live};
 use crate::db::identity::{append_audit, AuditAppend};
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{
+    membership_role, membership_role_for_update, workspace_is_live, WorkspaceRole,
+};
 use crate::projects::{workspace_base_permission, ProjectPermission};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

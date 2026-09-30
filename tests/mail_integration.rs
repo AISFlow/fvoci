@@ -775,7 +775,7 @@ async fn mail_consumer_is_at_least_once_and_skips_after_processed_events() {
         .iter()
         .find(|event| event.id == event_id)
         .expect("mail consumer can read identity.linked");
-    let consumer = fvoci_server::mail::mail_consumer(mailer);
+    let consumer = fvoci_server::mail::mail_consumer(mailer.clone());
     consumer
         .deliver(&app_pool, Uuid::now_v7(), event)
         .await
@@ -784,7 +784,17 @@ async fn mail_consumer_is_at_least_once_and_skips_after_processed_events() {
         .await;
     assert_eq!(sink.snapshot().len(), 1);
 
+    // The same process remembers the recipient SMTP accepted: a replay
+    // before the mark (a failed mark or lease renewal) does not send again.
     consumer
+        .deliver(&app_pool, Uuid::now_v7(), event)
+        .await
+        .expect("replay in the same process");
+    assert_eq!(sink.snapshot().len(), 1);
+
+    // A new process (restart, or another replica taking the lease) starts
+    // without that memory: a replay before the mark sends again.
+    fvoci_server::mail::mail_consumer(mailer)
         .deliver(&app_pool, Uuid::now_v7(), event)
         .await
         .expect("replay before mark");
@@ -1055,5 +1065,948 @@ async fn i18n_overrides_reach_the_next_mail_live_and_reset() {
     invite("fourth@example.com").await;
     let mail = sink.wait_for(|m| m.to == "fourth@example.com").await;
     assert!(mail.text().contains("Subject: 워크스페이스 초대"));
+    harness.cleanup().await;
+}
+
+/// How the scripted SMTP server answers `RCPT TO` for one address.
+#[derive(Clone)]
+struct RcptRule {
+    reply: &'static str,
+    /// `None`: every time; `Some(n)`: the next `n` times, then `250`.
+    times: Option<u32>,
+}
+
+/// SMTP sink with a per-session delay and per-recipient `RCPT` replies.
+struct ScriptedSmtp {
+    port: u16,
+    mails: Arc<Mutex<Vec<CapturedMail>>>,
+    handle: JoinHandle<()>,
+}
+
+impl ScriptedSmtp {
+    async fn spawn(session_delay: Duration, rules: Vec<(String, RcptRule)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind smtp");
+        let port = listener.local_addr().expect("addr").port();
+        let mails = Arc::new(Mutex::new(Vec::new()));
+        let rules = Arc::new(Mutex::new(
+            rules
+                .into_iter()
+                .collect::<std::collections::HashMap<String, RcptRule>>(),
+        ));
+        let captured = mails.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let captured = captured.clone();
+                let rules = rules.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(session_delay).await;
+                    let _ = serve_scripted_smtp(socket, captured, rules).await;
+                });
+            }
+        });
+        Self {
+            port,
+            mails,
+            handle,
+        }
+    }
+
+    fn count_to(&self, address: &str) -> usize {
+        self.mails
+            .lock()
+            .expect("mails")
+            .iter()
+            .filter(|mail| mail.to == address)
+            .count()
+    }
+
+    fn count_text(&self, needle: &str) -> usize {
+        self.mails
+            .lock()
+            .expect("mails")
+            .iter()
+            .filter(|mail| mail.text().contains(needle))
+            .count()
+    }
+}
+
+impl Drop for ScriptedSmtp {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+async fn serve_scripted_smtp(
+    socket: tokio::net::TcpStream,
+    captured: Arc<Mutex<Vec<CapturedMail>>>,
+    rules: Arc<Mutex<std::collections::HashMap<String, RcptRule>>>,
+) -> Result<(), std::io::Error> {
+    let (reader, mut writer) = socket.into_split();
+    let mut reader = BufReader::new(reader);
+    writer.write_all(b"220 fvoci-test\r\n").await?;
+    let mut rcpt = String::new();
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            break;
+        }
+        let command = line.trim_end_matches(['\r', '\n']);
+        let upper = command.to_ascii_uppercase();
+        if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+            writer.write_all(b"250 fvoci\r\n").await?;
+        } else if upper.starts_with("RCPT TO:") {
+            let address = command
+                .split(':')
+                .nth(1)
+                .unwrap_or("")
+                .trim()
+                .trim_matches(|c| c == '<' || c == '>')
+                .to_string();
+            let reply = {
+                let mut rules = rules.lock().expect("rules");
+                match rules.get_mut(&address) {
+                    Some(rule) => match rule.times {
+                        None => Some(rule.reply),
+                        Some(0) => None,
+                        Some(ref mut left) => {
+                            *left -= 1;
+                            Some(rule.reply)
+                        }
+                    },
+                    None => None,
+                }
+            };
+            match reply {
+                Some(reply) => {
+                    writer.write_all(format!("{reply}\r\n").as_bytes()).await?;
+                }
+                None => {
+                    rcpt = address;
+                    writer.write_all(b"250 ok\r\n").await?;
+                }
+            }
+        } else if upper == "DATA" {
+            writer.write_all(b"354 go\r\n").await?;
+            let mut body = String::new();
+            loop {
+                let mut data_line = String::new();
+                reader.read_line(&mut data_line).await?;
+                if data_line == ".\r\n" || data_line == ".\n" {
+                    break;
+                }
+                body.push_str(&data_line);
+            }
+            captured.lock().expect("mails").push(CapturedMail {
+                to: rcpt.clone(),
+                data: body,
+            });
+            writer.write_all(b"250 ok\r\n").await?;
+        } else if upper == "QUIT" {
+            writer.write_all(b"221 bye\r\n").await?;
+            break;
+        } else {
+            writer.write_all(b"250 ok\r\n").await?;
+        }
+    }
+    Ok(())
+}
+
+/// Move the `mail` cursor past every event recorded so far, so a test's
+/// dispatcher only sees the events the test adds next.
+async fn start_mail_cursor_at_latest_event(admin: &PgPool) {
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.outbox_consumers (consumer, last_xact, last_seq)
+        SELECT 'mail', e.xact, e.seq
+        FROM fvoci.events AS e
+        ORDER BY e.xact DESC, e.seq DESC
+        LIMIT 1
+        ON CONFLICT (consumer) DO UPDATE
+        SET last_xact = EXCLUDED.last_xact, last_seq = EXCLUDED.last_seq
+        "#,
+    )
+    .execute(admin)
+    .await
+    .expect("mail cursor");
+}
+
+fn run_mail_dispatcher(
+    app_pool: PgPool,
+    mailer: Arc<Mailer>,
+    lease_ttl: Duration,
+) -> fvoci_server::outbox::OutboxDispatcherHandle {
+    fvoci_server::outbox::spawn_outbox_dispatcher(
+        fvoci_server::outbox::OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl,
+            batch_limit: 100,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app_pool,
+        vec![fvoci_server::mail::mail_consumer(mailer)],
+    )
+    .expect("dispatcher")
+}
+
+/// Wait until every event is processed by `mail` or dead-lettered, or the
+/// deadline passes (the caller's assertions then report what happened).
+async fn wait_mail_settled(app_pool: &PgPool, ids: &[Uuid], deadline: Duration) {
+    let until = std::time::Instant::now() + deadline;
+    loop {
+        let mut settled = true;
+        for id in ids {
+            let processed = is_processed(app_pool, "mail", *id).await.unwrap_or(false);
+            let dead = fvoci_server::db::outbox::fetch_failure_state(app_pool, "mail", *id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.dead_at.is_some());
+            if !processed && !dead {
+                settled = false;
+                break;
+            }
+        }
+        if settled || std::time::Instant::now() >= until {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn mail_failure_rows(admin: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM fvoci.outbox_failures WHERE consumer = 'mail'")
+        .fetch_one(admin)
+        .await
+        .expect("mail failure rows")
+}
+
+/// A comment on a project document that mentions three members. Returns the
+/// comment.created event id and the three recipient addresses in the order
+/// the mail consumer sends them (recipient user id order).
+async fn comment_event_for_three_recipients(
+    harness: &TestDb,
+    owner_id: Uuid,
+) -> (Uuid, Vec<String>) {
+    let admin = harness.admin().await;
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .expect("workspace");
+    let mut recipients: Vec<(Uuid, String)> = Vec::new();
+    for label in ["rcpt-a", "rcpt-b", "rcpt-c"] {
+        let user_id = Uuid::now_v7();
+        let email = format!("{label}@example.com");
+        sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, $3)")
+            .bind(user_id)
+            .bind(&email)
+            .bind(label)
+            .execute(&admin)
+            .await
+            .expect("insert user");
+        sqlx::query(
+            "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(&admin)
+        .await
+        .expect("insert membership");
+        recipients.push((user_id, email));
+    }
+    recipients.sort();
+    let project_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.projects (
+            id, workspace_id, key, name, visibility, status, next_number, created_by
+        ) VALUES ($1, $2, 'MAIL', 'MAIL', 'workspace', 'active', 1, $3)
+        "#,
+    )
+    .bind(project_id)
+    .bind(workspace_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .expect("insert project");
+    let document_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, parent_id, sort_key, project_id, number, status,
+            schema_version, content_json, created_by
+        ) VALUES (
+            $1, $2, 'Mail doc', $3, NULL, 'V', $4, 1, 'published', 2,
+            '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, $5
+        )
+        "#,
+    )
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(document_id.simple().to_string())
+    .bind(project_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .expect("insert document");
+    let comment_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fvoci.comments (id, workspace_id, document_id, created_by, body) VALUES ($1, $2, $3, $4, 'three-recipient comment')",
+    )
+    .bind(comment_id)
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .expect("insert comment");
+    start_mail_cursor_at_latest_event(&admin).await;
+
+    let event_id = Uuid::now_v7();
+    let mentioned: Vec<String> = recipients.iter().map(|(id, _)| id.to_string()).collect();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (
+            id, workspace_id, actor_user_id, verb, target_type, target_id, payload, channel
+        ) VALUES ($1, $2, $3, 'comment.created', 'comment', $4, $5, 'web')
+        "#,
+    )
+    .bind(event_id)
+    .bind(workspace_id)
+    .bind(owner_id)
+    .bind(comment_id)
+    .bind(json!({
+        "commentId": comment_id,
+        "documentId": document_id,
+        "mentionedUserIds": mentioned,
+    }))
+    .execute(&mut *tx)
+    .await
+    .expect("insert comment event");
+    tx.commit().await.expect("commit event");
+    admin.close().await;
+    (
+        event_id,
+        recipients.into_iter().map(|(_, email)| email).collect(),
+    )
+}
+
+/// SMTP sessions slow enough that several mail events do not fit in one
+/// lease: each mail is still sent exactly once and nothing is dead-lettered.
+#[tokio::test]
+async fn slow_smtp_sends_each_mail_event_once() {
+    let harness = TestDb::bootstrap().await;
+    let sink = ScriptedSmtp::spawn(Duration::from_millis(700), Vec::new()).await;
+    let mailer = mailer_for(sink.port);
+    let (app, _cookie, user_id) = setup_session(&harness, mailer.clone()).await;
+    drop(app);
+    let admin = harness.admin().await;
+    start_mail_cursor_at_latest_event(&admin).await;
+    let providers = ["slow-p0", "slow-p1", "slow-p2", "slow-p3"];
+    let mut ids = Vec::new();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    for provider in providers {
+        let event_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.events (id, actor_user_id, verb, payload, channel)
+            VALUES ($1, $2, 'identity.linked', $3, 'web')
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .bind(json!({ "provider": provider }))
+        .execute(&mut *tx)
+        .await
+        .expect("identity event");
+        ids.push(event_id);
+    }
+    tx.commit().await.expect("commit events");
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(app_pool.clone(), mailer, Duration::from_secs(2));
+    wait_mail_settled(&app_pool, &ids, Duration::from_secs(25)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let counts: Vec<usize> = providers.iter().map(|p| sink.count_text(p)).collect();
+    assert_eq!(counts, vec![1; providers.len()], "mails per event");
+    assert_eq!(sink.count_to("admin@example.com"), providers.len());
+    for id in &ids {
+        assert!(is_processed(&app_pool, "mail", *id).await.unwrap());
+    }
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A 550 5.1.1 (no such user) for one of three recipients is final for that
+/// recipient: the other two get one mail each and the event is processed,
+/// not retried.
+#[tokio::test]
+async fn permanent_rejection_of_one_recipient_does_not_resend_to_the_others() {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let sink = ScriptedSmtp::spawn(
+        Duration::ZERO,
+        vec![(
+            to[1].clone(),
+            RcptRule {
+                reply: "550 5.1.1 no such user",
+                times: None,
+            },
+        )],
+    )
+    .await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let counts: Vec<usize> = to.iter().map(|address| sink.count_to(address)).collect();
+    assert_eq!(counts, vec![1, 0, 1], "mails per recipient");
+    assert_eq!(sink.count_text("three-recipient comment"), 2);
+    assert!(is_processed(&app_pool, "mail", event_id).await.unwrap());
+    let admin = harness.admin().await;
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A transient 451 for the second of three recipients retries the event, but
+/// the retry does not send the first recipient's mail again.
+#[tokio::test]
+async fn transient_rejection_retry_does_not_resend_to_accepted_recipients() {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let sink = ScriptedSmtp::spawn(
+        Duration::ZERO,
+        vec![(
+            to[1].clone(),
+            RcptRule {
+                reply: "451 4.7.1 try again later",
+                times: Some(1),
+            },
+        )],
+    )
+    .await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let counts: Vec<usize> = to.iter().map(|address| sink.count_to(address)).collect();
+    assert_eq!(counts, vec![1, 1, 1], "mails per recipient");
+    assert_eq!(sink.count_text("three-recipient comment"), 3);
+    assert!(is_processed(&app_pool, "mail", event_id).await.unwrap());
+    let admin = harness.admin().await;
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// When every recipient is rejected (a relay-wide refusal looks like this),
+/// the event still fails and dead-letters where an operator can see it.
+#[tokio::test]
+async fn every_recipient_rejected_still_dead_letters_the_event() {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let rules = to
+        .iter()
+        .map(|address| {
+            (
+                address.clone(),
+                RcptRule {
+                    reply: "550 5.7.1 relaying denied",
+                    times: None,
+                },
+            )
+        })
+        .collect();
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, rules).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(!is_processed(&app_pool, "mail", event_id).await.unwrap());
+    let dead = fvoci_server::db::outbox::fetch_failure_state(&app_pool, "mail", event_id)
+        .await
+        .unwrap()
+        .expect("failure row");
+    assert!(dead.dead_at.is_some(), "{dead:?}");
+    for address in &to {
+        assert_eq!(sink.count_to(address), 0);
+    }
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A relay-wide 5xx that starts after the first recipient was accepted (a
+/// daily relay limit) is not a refusal of the later recipients' mailboxes:
+/// the event fails and dead-letters where it can be requeued, and the
+/// accepted recipient is not sent the mail again on the retries.
+#[tokio::test]
+async fn relay_limit_after_an_accepted_recipient_dead_letters_the_event() {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let rules = to[1..]
+        .iter()
+        .map(|address| {
+            (
+                address.clone(),
+                RcptRule {
+                    reply: "550 5.4.5 Daily SMTP relay limit exceeded",
+                    times: None,
+                },
+            )
+        })
+        .collect();
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, rules).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(!is_processed(&app_pool, "mail", event_id).await.unwrap());
+    let dead = fvoci_server::db::outbox::fetch_failure_state(&app_pool, "mail", event_id)
+        .await
+        .unwrap()
+        .expect("failure row");
+    assert!(dead.dead_at.is_some(), "{dead:?}");
+    let counts: Vec<usize> = to.iter().map(|address| sink.count_to(address)).collect();
+    assert_eq!(counts, vec![1, 0, 0], "mails per recipient");
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// What happened to a three-recipient comment event sent through
+/// `ScriptedSmtp`.
+struct ScriptedOutcome {
+    /// Mails per recipient, in send order.
+    counts: Vec<usize>,
+    processed: bool,
+    dead: bool,
+    failure_rows: i64,
+}
+
+/// Send a three-recipient comment event through a scripted SMTP server that
+/// answers `RCPT TO` for recipient `i` with `replies[i]` every time (`None`
+/// accepts it), and wait until the event is processed or dead-lettered.
+async fn deliver_three_recipient_comment(replies: [Option<&'static str>; 3]) -> ScriptedOutcome {
+    let harness = TestDb::bootstrap().await;
+    let sink0 = SmtpSink::spawn().await;
+    let (app, _cookie, owner_id) = setup_session(&harness, mailer_for(sink0.port)).await;
+    drop(app);
+    let (event_id, to) = comment_event_for_three_recipients(&harness, owner_id).await;
+    let rules = to
+        .iter()
+        .zip(replies)
+        .filter_map(|(address, reply)| {
+            let reply = reply?;
+            Some((address.clone(), RcptRule { reply, times: None }))
+        })
+        .collect();
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, rules).await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(
+        app_pool.clone(),
+        mailer_for(sink.port),
+        Duration::from_secs(5),
+    );
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let processed = is_processed(&app_pool, "mail", event_id).await.unwrap();
+    let dead = fvoci_server::db::outbox::fetch_failure_state(&app_pool, "mail", event_id)
+        .await
+        .unwrap()
+        .is_some_and(|row| row.dead_at.is_some());
+    let admin = harness.admin().await;
+    let failure_rows = mail_failure_rows(&admin).await;
+    admin.close().await;
+    app_pool.close().await;
+    let counts = to.iter().map(|address| sink.count_to(address)).collect();
+    harness.cleanup().await;
+    ScriptedOutcome {
+        counts,
+        processed,
+        dead,
+        failure_rows,
+    }
+}
+
+const POLICY_REFUSAL: &str = "554 5.7.1 Recipient address rejected: Access denied";
+const RELAY_LIMIT: &str = "550 5.4.5 Daily SMTP relay limit exceeded";
+
+/// A 5xx outside the mailbox codes that refuses one recipient (a Postfix
+/// `check_recipient_access` REJECT) does not hold back the recipients after
+/// it: the next recipient is accepted, which shows the relay still serves,
+/// so the refusal is final for that recipient and the event is processed.
+#[tokio::test]
+async fn policy_refusal_of_one_recipient_does_not_hold_back_the_later_ones() {
+    let outcome = deliver_three_recipient_comment([None, Some(POLICY_REFUSAL), None]).await;
+    assert_eq!(outcome.counts, vec![1, 0, 1], "mails per recipient");
+    assert!(outcome.processed);
+    assert!(!outcome.dead);
+    assert_eq!(outcome.failure_rows, 0);
+}
+
+/// A policy refusal that no accepted recipient follows is not shown to be
+/// about that recipient: here a relay limit refuses the last recipient too,
+/// so the event dead-letters where it can be requeued, and the recipient
+/// accepted first is not sent the mail again on the retries.
+#[tokio::test]
+async fn relay_limit_after_a_policy_refusal_dead_letters_the_event() {
+    let outcome =
+        deliver_three_recipient_comment([None, Some(POLICY_REFUSAL), Some(RELAY_LIMIT)]).await;
+    assert_eq!(outcome.counts, vec![1, 0, 0], "mails per recipient");
+    assert!(!outcome.processed);
+    assert!(outcome.dead);
+}
+
+/// Only an acceptance after the last refusal shows the relay still serves:
+/// a recipient accepted between a policy refusal and a relay limit proves
+/// the policy refusal but not the relay limit, so the event dead-letters.
+#[tokio::test]
+async fn acceptance_before_a_relay_limit_does_not_clear_it() {
+    let outcome =
+        deliver_three_recipient_comment([Some(POLICY_REFUSAL), None, Some(RELAY_LIMIT)]).await;
+    assert_eq!(outcome.counts, vec![0, 1, 0], "mails per recipient");
+    assert!(!outcome.processed);
+    assert!(outcome.dead);
+}
+
+/// cPanel's hourly sending limit is a bare 550 with no enhanced status code.
+/// Starting after the first recipient was accepted, it is not taken as a
+/// refusal of the later recipients' mailboxes: the event dead-letters where
+/// it can be requeued, and the accepted recipient is not sent the mail again.
+#[tokio::test]
+async fn bare_550_relay_limit_after_an_accepted_recipient_dead_letters_the_event() {
+    const CPANEL_LIMIT: &str =
+        "550 Domain example.com has exceeded the max emails per hour (100/100 (100%)) allowed.";
+    let outcome =
+        deliver_three_recipient_comment([None, Some(CPANEL_LIMIT), Some(CPANEL_LIMIT)]).await;
+    assert_eq!(outcome.counts, vec![1, 0, 0], "mails per recipient");
+    assert!(!outcome.processed);
+    assert!(outcome.dead);
+}
+
+/// Marking the event fails once with a database error after its mail was
+/// accepted: the event is delivered again, and the recipient SMTP already
+/// accepted is skipped, not sent the mail a second time.
+#[tokio::test]
+async fn failed_mark_after_the_sends_does_not_resend_the_mail() {
+    let harness = TestDb::bootstrap().await;
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, Vec::new()).await;
+    let mailer = mailer_for(sink.port);
+    let (app, _cookie, user_id) = setup_session(&harness, mailer.clone()).await;
+    drop(app);
+    let admin = harness.admin().await;
+    // nextval is not rolled back with the failed insert, so the fault fires
+    // on the first mark of the mail consumer only.
+    for sql in [
+        "CREATE SEQUENCE public.mail_mark_fault",
+        r#"
+        CREATE FUNCTION public.mail_mark_fault() RETURNS trigger
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        BEGIN
+            IF NEW.consumer = 'mail' THEN
+                IF nextval('public.mail_mark_fault') = 1 THEN
+                    RAISE EXCEPTION 'injected mark failure';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#,
+        "CREATE TRIGGER mail_mark_fault BEFORE INSERT ON fvoci.processed_events \
+         FOR EACH ROW EXECUTE FUNCTION public.mail_mark_fault()",
+    ] {
+        sqlx::query(sql)
+            .execute(&admin)
+            .await
+            .expect("install fault");
+    }
+    start_mail_cursor_at_latest_event(&admin).await;
+    let event_id = Uuid::now_v7();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, actor_user_id, verb, payload, channel)
+        VALUES ($1, $2, 'identity.linked', $3, 'web')
+        "#,
+    )
+    .bind(event_id)
+    .bind(user_id)
+    .bind(json!({ "provider": "mark-fault" }))
+    .execute(&mut *tx)
+    .await
+    .expect("identity event");
+    tx.commit().await.expect("commit event");
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(app_pool.clone(), mailer, Duration::from_secs(5));
+    wait_mail_settled(&app_pool, &[event_id], Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let fired: bool = sqlx::query_scalar("SELECT last_value > 1 FROM public.mail_mark_fault")
+        .fetch_one(&admin)
+        .await
+        .expect("fault sequence");
+    assert!(
+        fired,
+        "the mark fault must have fired and the event been marked after it"
+    );
+    assert!(is_processed(&app_pool, "mail", event_id).await.unwrap());
+    assert_eq!(sink.count_text("mark-fault"), 1, "mails for the event");
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// The mail consumer passes a run of events without mail in one call and
+/// takes at most one mail event per call, so a lease timeout can only drop
+/// one mail event's progress (and is charged to that event). Through the
+/// dispatcher every event, with or without mail, is marked processed.
+#[tokio::test]
+async fn mail_consumer_batches_other_events_and_takes_one_mail_event_per_call() {
+    let harness = TestDb::bootstrap().await;
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, Vec::new()).await;
+    let mailer = mailer_for(sink.port);
+    let (app, _cookie, user_id) = setup_session(&harness, mailer.clone()).await;
+    drop(app);
+    let admin = harness.admin().await;
+    start_mail_cursor_at_latest_event(&admin).await;
+    let verbs = [
+        ("task.updated", "batch-n0"),
+        ("task.updated", "batch-n1"),
+        ("identity.linked", "batch-m2"),
+        ("identity.linked", "batch-m3"),
+        ("task.updated", "batch-n4"),
+    ];
+    let mut ids = Vec::new();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    for (verb, provider) in verbs {
+        let event_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.events (id, actor_user_id, verb, payload, channel)
+            VALUES ($1, $2, $3, $4, 'web')
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .bind(verb)
+        .bind(json!({ "provider": provider }))
+        .execute(&mut *tx)
+        .await
+        .expect("event");
+        ids.push(event_id);
+    }
+    tx.commit().await.expect("commit events");
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let events = loop {
+        let events = read_events(&app_pool, "mail", 100).await.unwrap();
+        if events.len() == ids.len() {
+            break events;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mail consumer can read the events: {}",
+            events.len()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(events.iter().map(|event| event.id).collect::<Vec<_>>(), ids);
+
+    let consumer = fvoci_server::mail::mail_consumer(mailer);
+    let owner = Uuid::now_v7();
+    let mut calls = Vec::new();
+    let mut offset = 0;
+    while offset < events.len() {
+        let (done, err) = consumer
+            .deliver_batch(&app_pool, owner, &events[offset..])
+            .await;
+        assert!(err.is_none(), "{err:?}");
+        let mails: Vec<usize> = ["batch-m2", "batch-m3"]
+            .iter()
+            .map(|p| sink.count_text(p))
+            .collect();
+        calls.push((done, mails));
+        offset += done;
+    }
+    assert_eq!(
+        calls,
+        vec![
+            (2, vec![0, 0]),
+            (1, vec![1, 0]),
+            (1, vec![1, 1]),
+            (1, vec![1, 1])
+        ],
+        "(events done, mails sent so far) per call"
+    );
+
+    // The dispatcher marks every event; the accepted recipients are not
+    // sent the mail again.
+    let dispatcher = fvoci_server::outbox::spawn_outbox_dispatcher(
+        fvoci_server::outbox::OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(5),
+            batch_limit: 100,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app_pool.clone(),
+        vec![consumer],
+    )
+    .expect("dispatcher");
+    wait_mail_settled(&app_pool, &ids, Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    for id in &ids {
+        assert!(is_processed(&app_pool, "mail", *id).await.unwrap());
+    }
+    assert_eq!(sink.count_text("batch-m2"), 1);
+    assert_eq!(sink.count_text("batch-m3"), 1);
+    assert_eq!(mail_failure_rows(&admin).await, 0);
+    admin.close().await;
+    app_pool.close().await;
+    harness.cleanup().await;
+}
+
+/// Every recipient's mailbox refused with a mailbox code (`550 5.1.1`) and
+/// none accepted: the event still fails and dead-letters where it is
+/// visible, as it would for a relay that refuses everyone that way.
+#[tokio::test]
+async fn every_mailbox_refused_still_dead_letters_the_event() {
+    const NO_SUCH_USER: &str = "550 5.1.1 no such user";
+    let outcome = deliver_three_recipient_comment([Some(NO_SUCH_USER); 3]).await;
+    assert_eq!(outcome.counts, vec![0, 0, 0], "mails per recipient");
+    assert!(!outcome.processed);
+    assert!(outcome.dead);
+}
+
+/// An address `users.email` can hold but that does not parse as a mailbox
+/// never reaches the relay, so it says nothing about the relay: an event
+/// whose only recipient it is completes (no failure row, no dead letter)
+/// instead of holding back the mail cursor, and the mail event after it is
+/// sent once.
+#[tokio::test]
+async fn unsendable_lone_recipient_does_not_hold_the_mail_cursor() {
+    let harness = TestDb::bootstrap().await;
+    let sink = ScriptedSmtp::spawn(Duration::ZERO, Vec::new()).await;
+    let mailer = mailer_for(sink.port);
+    let (app, _cookie, user_id) = setup_session(&harness, mailer.clone()).await;
+    drop(app);
+    let admin = harness.admin().await;
+    let unsendable_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, 'unsendable')")
+        .bind(unsendable_id)
+        .bind("a..b@example.com")
+        .execute(&admin)
+        .await
+        .expect("insert user");
+    start_mail_cursor_at_latest_event(&admin).await;
+    let mut ids = Vec::new();
+    let mut tx = admin.begin().await.expect("event tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    for (actor, provider) in [(unsendable_id, "unsendable-p0"), (user_id, "after-p1")] {
+        let event_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.events (id, actor_user_id, verb, payload, channel)
+            VALUES ($1, $2, 'identity.linked', $3, 'web')
+            "#,
+        )
+        .bind(event_id)
+        .bind(actor)
+        .bind(json!({ "provider": provider }))
+        .execute(&mut *tx)
+        .await
+        .expect("identity event");
+        ids.push(event_id);
+    }
+    tx.commit().await.expect("commit events");
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let dispatcher = run_mail_dispatcher(app_pool.clone(), mailer, Duration::from_secs(5));
+    wait_mail_settled(&app_pool, &ids, Duration::from_secs(15)).await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(
+        is_processed(&app_pool, "mail", ids[0]).await.unwrap(),
+        "the event with only an unsendable recipient completes"
+    );
+    assert!(is_processed(&app_pool, "mail", ids[1]).await.unwrap());
+    assert_eq!(mail_failure_rows(&admin).await, 0, "no failure row");
+    assert_eq!(sink.count_text("unsendable-p0"), 0);
+    assert_eq!(sink.count_text("after-p1"), 1);
+    admin.close().await;
+    app_pool.close().await;
     harness.cleanup().await;
 }

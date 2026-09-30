@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Minimal collab client for install-smoke: auth, sync handshake, apply pinned
  * engine fixtures, persist barrier, and return the projected HTTP body JSON.

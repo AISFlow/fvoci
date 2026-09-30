@@ -4,6 +4,21 @@ import { expect, test, type Page } from "@playwright/test";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const distLicense = path.join(repoRoot, "apps/web/dist/open-source-licenses.txt");
+const distAssets = path.join(repoRoot, "apps/web/dist/assets");
+
+/**
+ * Icon sets whose data the built JavaScript inlines (Nuxt UI's bundled icons:
+ * `{"prefix":"lucide","icons":{...}}`). They come through a virtual module,
+ * so this checks the output rather than the module graph.
+ */
+function bundledIconSets(): string[] {
+  const prefixes = new Set<string>();
+  for (const file of fs.readdirSync(distAssets).filter((name) => name.endsWith(".js"))) {
+    const code = fs.readFileSync(path.join(distAssets, file), "utf8");
+    for (const m of code.matchAll(/"prefix":"([a-z0-9]+(?:-[a-z0-9]+)*)","icons":\{/g)) prefixes.add(m[1]!);
+  }
+  return [...prefixes].sort();
+}
 
 /** Build regression guardrails only — not product license policy. */
 const FORBIDDEN_NOTICE_PACKAGE_HEADINGS = ["@m2d/", "@playwright/", "vite - "] as const;
@@ -36,9 +51,16 @@ test("open-source-licenses.txt is discoverable, served verbatim, and linked from
   for (const forbidden of FORBIDDEN_NOTICE_PACKAGE_HEADINGS) {
     expect(distText).not.toMatch(new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
-  expect(distText).toMatch(/qrcode-generator - 1\.4\.4/);
+  expect(distText).toMatch(/qrcode-generator - 2\.0\.4/);
   expect(distText).toMatch(/Permission is hereby granted/);
   expect(distText).toMatch(/packages\/editor\/src\/fonts\/NotoSansKR-OFL\.txt/);
+  // Every icon set in the bundle is in the notice (the Vue app bundles Lucide).
+  const iconSets = bundledIconSets();
+  expect(iconSets).toContain("lucide");
+  for (const prefix of iconSets) {
+    expect(distText, `icon set ${prefix}`).toContain(`## @iconify-json/${prefix} - `);
+  }
+  expect(distText).toContain("Lucide Icons and Contributors");
 
   await runSetup(page);
 

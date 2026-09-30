@@ -15,7 +15,18 @@ else
   CMD=("$ROOT/scripts/run-db-tests.sh")
 fi
 
-IMAGE="postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db"
+# Source-supported PostgreSQL majors; keep pins in sync with the postgres job
+# matrix in .github/workflows/rust.yml.
+PG_MAJOR="${FVOCI_TEST_PG_MAJOR-18}"
+case "$PG_MAJOR" in
+  16) IMAGE="postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54" ;;
+  17) IMAGE="postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f" ;;
+  18) IMAGE="postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db" ;;
+  *)
+    echo "FVOCI_TEST_PG_MAJOR must be 16, 17 or 18 (got '$PG_MAJOR')" >&2
+    exit 2
+    ;;
+esac
 RUN_ID="$(openssl rand -hex 16)"
 CONTAINER="fvoci-rust-test-pg-${RUN_ID}"
 ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/fvoci-pg-env.XXXXXX")"
@@ -24,7 +35,9 @@ PASSWORD="$(openssl rand -hex 24)"
 printf 'POSTGRES_PASSWORD=%s\n' "$PASSWORD" >"$ENV_FILE"
 
 cleanup() {
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  # -v: the image declares a VOLUME; without it every run leaves an anonymous
+  # volume behind (the --rm auto-removal does not run after an explicit rm).
+  docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
   rm -f "$ENV_FILE"
 }
 trap cleanup EXIT
@@ -49,6 +62,12 @@ until docker exec "$cid" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; do
   fi
   sleep 1
 done
+
+server_version_num="$(docker exec "$cid" psql -U postgres -tAc 'SHOW server_version_num')"
+if [[ ! "$server_version_num" =~ ^${PG_MAJOR}[0-9]{4}$ ]]; then
+  echo "expected PostgreSQL ${PG_MAJOR}, got server_version_num ${server_version_num}" >&2
+  exit 1
+fi
 
 port="$(docker port "$cid" 5432 | head -1 | awk -F: '{print $NF}')"
 export TEST_DATABASE_URL="postgres://postgres:${PASSWORD}@127.0.0.1:${port}/postgres"

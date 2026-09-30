@@ -71,7 +71,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-require_cmd docker openssl curl node python3 sha256sum
+require_cmd docker openssl curl bun python3 sha256sum
 if [[ ! -f "$FIXTURE_HWPX" ]]; then
   echo "missing HWPX fixture: $FIXTURE_HWPX" >&2
   exit 1
@@ -189,7 +189,7 @@ DOC_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H 
 DOCUMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$DOC_CREATE")"
 log_assert "workspace document create: ok (${DOCUMENT_ID})"
 
-BODY_BEFORE="$(node "$ROOT/scripts/install-smoke-collab.mjs" \
+BODY_BEFORE="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --base-url "$SOURCE_BASE" \
   --origin "$SOURCE_BASE" \
   --session "$SESSION" \

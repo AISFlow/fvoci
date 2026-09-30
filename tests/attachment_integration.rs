@@ -147,11 +147,6 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
         .expect("grant");
 }
 
-async fn app_state(app_url: &str) -> AppState {
-    let storage_root = std::env::temp_dir().join(format!("fvoci-att-store-{}", Uuid::now_v7()));
-    app_state_with_storage(app_url, storage_root).await
-}
-
 async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
     std::fs::create_dir_all(&storage_root).expect("storage root");
@@ -271,7 +266,16 @@ fn extract_session_cookie(set_cookie: &str) -> String {
 }
 
 async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid, Uuid) {
-    let app = app_router(app_state(&harness.app_url).await);
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-store-{}", Uuid::now_v7()));
+    setup_session_with_storage(harness, storage_root).await
+}
+
+/// `setup_session` with the local driver rooted at `storage_root`.
+async fn setup_session_with_storage(
+    harness: &TestDb,
+    storage_root: PathBuf,
+) -> (axum::Router, String, Uuid, Uuid) {
+    let app = app_router(app_state_with_storage(&harness.app_url, storage_root).await);
     let (_, _, cookie_hdr) = json_request(
         app.clone(),
         "POST",
@@ -2379,6 +2383,218 @@ async fn stale_upload_gc_skips_stored_and_yields_to_in_flight_complete() {
             .unwrap();
     assert_eq!(status_after, "stored");
     admin.close().await;
+    harness.cleanup().await;
+}
+
+async fn storage_key_of(harness: &TestDb, attachment_id: &str) -> String {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let key: String = sqlx::query_scalar("SELECT storage_key FROM fvoci.attachments WHERE id = $1")
+        .bind(Uuid::parse_str(attachment_id).unwrap())
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    key
+}
+
+async fn complete_one_part(
+    app: &axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    attachment_id: &str,
+    etag: &str,
+) -> (StatusCode, Value) {
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(cookie),
+    )
+    .await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn completing_a_stored_upload_again_removes_leftover_parts() {
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-final-{}", Uuid::now_v7()));
+    let (app, cookie, _owner, workspace_id) =
+        setup_session_with_storage(&harness, storage_root.clone()).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"stored-once";
+    let uploaded = upload_bytes(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "final.bin",
+        payload,
+        None,
+    )
+    .await;
+    let key = storage_key_of(&harness, &uploaded.attachment_id).await;
+    let parts_dir = storage_root.join("tmp").join(&key);
+    let object = storage_root.join("objects").join(&key).join("payload");
+    assert!(!parts_dir.exists(), "complete finalizes the parts");
+    // What a finalize skipped after the stored commit (cancelled request,
+    // crash, failed removal) leaves behind: a full copy of the upload.
+    std::fs::create_dir_all(&parts_dir).unwrap();
+    std::fs::write(parts_dir.join("1"), payload).unwrap();
+
+    let (status, body) = complete_one_part(
+        &app,
+        &cookie,
+        workspace_id,
+        &uploaded.attachment_id,
+        &uploaded.etag,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !parts_dir.exists(),
+        "a repeated complete of a stored upload must finalize its leftover parts"
+    );
+    assert_eq!(std::fs::read(&object).unwrap(), payload);
+    harness.cleanup().await;
+}
+
+/// Messages the attachment code logs when removing parts after the stored
+/// commit fails, keyed by attachment id. One process-wide layer: a
+/// thread-local dispatcher can miss events once another test thread cached
+/// the callsite's interest.
+static FINALIZE_FAILURES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+struct FinalizeFailureLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for FinalizeFailureLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        #[derive(Default)]
+        struct Fields {
+            message: String,
+            attachment_id: String,
+        }
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                match field.name() {
+                    "message" => self.message = format!("{value:?}"),
+                    "attachment_id" => self.attachment_id = format!("{value:?}"),
+                    _ => {}
+                }
+            }
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        if fields.message == "attachment.finalize_parts_failed" {
+            FINALIZE_FAILURES.lock().unwrap().push(fields.attachment_id);
+        }
+    }
+}
+
+fn capture_finalize_failures() {
+    use tracing_subscriber::layer::SubscriberExt;
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(FinalizeFailureLayer),
+        )
+        .expect("the only global subscriber in this test binary");
+    });
+}
+
+fn finalize_failures_for(attachment_id: &str) -> usize {
+    FINALIZE_FAILURES
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|id| id.as_str() == attachment_id)
+        .count()
+}
+
+#[tokio::test]
+async fn finalize_failure_after_the_stored_commit_is_logged_and_retried() {
+    capture_finalize_failures();
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-final-err-{}", Uuid::now_v7()));
+    let (app, cookie, _owner, workspace_id) =
+        setup_session_with_storage(&harness, storage_root.clone()).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"finalize";
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "finalize.bin",
+        payload,
+    )
+    .await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers.get("etag").unwrap().to_str().unwrap().to_string();
+    let key = storage_key_of(&harness, &attachment_id).await;
+    let parts_dir = storage_root.join("tmp").join(&key);
+    let object = storage_root.join("objects").join(&key).join("payload");
+
+    let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
+    let mut barrier = test_barrier::arm_pre_mark_stored(attachment_uuid);
+    let complete = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let attachment_id = attachment_id.clone();
+        let etag = etag.clone();
+        async move { complete_one_part(&app, &cookie, workspace_id, &attachment_id, &etag).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
+        .await
+        .expect("complete should reach the pre-mark barrier")
+        .expect("barrier entered");
+    // Assembly is done; make the post-commit part removal fail.
+    std::fs::remove_dir_all(&parts_dir).unwrap();
+    std::fs::write(&parts_dir, b"not a directory").unwrap();
+    barrier.proceed();
+    let (status, body) = complete.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "the upload is stored: {body}");
+    assert_eq!(std::fs::read(&object).unwrap(), payload);
+    assert_eq!(
+        finalize_failures_for(&attachment_id),
+        1,
+        "a failed part removal after the stored commit must be logged"
+    );
+
+    // A repeated complete tries again, and logs again while it still fails.
+    let (status, body) =
+        complete_one_part(&app, &cookie, workspace_id, &attachment_id, &etag).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(finalize_failures_for(&attachment_id), 2);
+
+    // Once removal can succeed, a repeated complete clears the leftover.
+    std::fs::remove_file(&parts_dir).unwrap();
+    std::fs::create_dir(&parts_dir).unwrap();
+    std::fs::write(parts_dir.join("1"), payload).unwrap();
+    let (status, body) =
+        complete_one_part(&app, &cookie, workspace_id, &attachment_id, &etag).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!parts_dir.exists());
+    assert_eq!(finalize_failures_for(&attachment_id), 2);
+    assert_eq!(std::fs::read(&object).unwrap(), payload);
     harness.cleanup().await;
 }
 

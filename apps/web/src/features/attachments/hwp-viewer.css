@@ -1,0 +1,27 @@
+/* HWP/HWPX page image (rhwp SVG in an <img>). Zoom sets an explicit width. */
+.hwp-viewer__page {
+  display: block;
+  flex-shrink: 0;
+  max-width: none;
+  height: auto;
+  margin: 0 auto;
+  background: #fff;
+  box-shadow: 0 1px 3px color-mix(in oklab, var(--foreground) 12%, transparent);
+}
+
+/* 간단 편집: find/replace inputs and actions, wrapping on narrow screens. */
+.hwp-viewer__edit-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.hwp-viewer__edit-input {
+  flex: 1 1 10rem;
+  width: auto;
+}
+
+.hwp-viewer__edit-bar .attachment-viewer__alert {
+  flex-basis: 100%;
+}

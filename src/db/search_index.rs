@@ -3,6 +3,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{restore_system, set_system, set_tenant};
+use crate::db::workspace::workspace_is_live;
 use crate::search::chunk::TextChunk;
 use crate::search::embed::embedding_from_json;
 use crate::search::meili::SearchSourceKind;
@@ -67,18 +68,6 @@ fn parse_kind(raw: &str) -> Option<SearchSourceKind> {
     }
 }
 
-async fn workspace_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let live: Option<(bool,)> =
-        sqlx::query_as("SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id = $1")
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    Ok(live.map(|(v,)| v).unwrap_or(false))
-}
-
 fn map_row(row: sqlx::postgres::PgRow) -> Option<SearchIndexRow> {
     use sqlx::Row;
     let kind = parse_kind(row.get::<String, _>("kind").as_str())?;
@@ -109,7 +98,7 @@ pub async fn load_sources(
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     let previous = set_system(&mut tx).await?;
-    if !workspace_live(&mut tx, workspace_id).await? {
+    if !workspace_is_live(&mut tx, workspace_id).await? {
         restore_system(&mut tx, &previous).await?;
         tx.commit().await?;
         return Ok(Vec::new());
@@ -270,7 +259,7 @@ pub async fn list_sources(
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     let previous = set_system(&mut tx).await?;
-    if !workspace_live(&mut tx, workspace_id).await? {
+    if !workspace_is_live(&mut tx, workspace_id).await? {
         restore_system(&mut tx, &previous).await?;
         tx.commit().await?;
         return Ok(Vec::new());

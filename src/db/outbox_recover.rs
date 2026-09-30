@@ -1,3 +1,27 @@
+//! `fvoci-migrate --recover-outbox`: after a database restore, rebase every
+//! outbox cursor so the relay replays the events of a recent window instead
+//! of failing closed on the restored cluster's xid epoch.
+//!
+//! It refuses, in this order: boundaries that are not explicit UTC;
+//! `--apply` without a reason and `--ack-external-replay`; PostgreSQL before
+//! 16; a role that is not a superuser; `since` after `snapshot_at` or more
+//! than `RESET_SCAN_WINDOW_DAYS` before it, or `snapshot_at` in the future;
+//! any other client session on the database; outbox tables it cannot lock
+//! at once (`ACCESS EXCLUSIVE ... NOWAIT`); a live lease; and an event newer
+//! than `snapshot_at`. Without `--apply` it only reports.
+//!
+//! With `--apply`, in one transaction: events from `since` on get this
+//! transaction's xid and older events xid 0; the processed marks of the
+//! window's events are re-dated to now, so the processed GC keeps them
+//! through the replay; every cursor moves to just before the window with its
+//! lease cleared; and every `outbox_failures` row, dead letters included, is
+//! deleted, not only the window's.
+//!
+//! Every consumer then delivers the window again. A replayed event is
+//! skipped only by a consumer that holds its mark; anything else is
+//! delivered again, so external effects (mail, push, webhooks, GitHub) may
+//! repeat, which `--ack-external-replay` acknowledges.
+
 use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
@@ -7,7 +31,13 @@ use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
+/// The window of `--recover-outbox` (`since` at most this long before
+/// `snapshot_at`) and of the `--outbox-reset` rule. Both read the processed
+/// marks of the window's events, so it must stay below the processed GC
+/// window: a mark is written after its event, so the GC has kept every mark
+/// of an event in the window.
 pub const RESET_SCAN_WINDOW_DAYS: i32 = 29;
+const _: () = assert!(RESET_SCAN_WINDOW_DAYS < crate::jobs::PROCESSED_GC_WINDOW_DAYS);
 const PG_MIN_VERSION_NUM: i32 = 160_000;
 
 static RECOVERY_UTC: LazyLock<Regex> = LazyLock::new(|| {
@@ -115,10 +145,9 @@ async fn recover_outbox_on(
     }
     let valid: bool = clock.get("valid");
     if !valid {
-        return Err(RecoverOutboxError::Rejected(
-            "unknown or future recovery boundary; since must be within 29 days before the snapshot"
-                .into(),
-        ));
+        return Err(RecoverOutboxError::Rejected(format!(
+            "unknown or future recovery boundary; since must be within {RESET_SCAN_WINDOW_DAYS} days before the snapshot"
+        )));
     }
 
     let other_sessions: i64 = sqlx::query_scalar(
@@ -232,6 +261,25 @@ async fn recover_outbox_on(
         .execute(&mut *tx)
         .await?;
 
+        // The rewound cursors replay the window, and a window event's mark is
+        // what keeps an External consumer (mail) from sending it again. The
+        // processed_events GC deletes marks older than
+        // `PROCESSED_GC_WINDOW_DAYS`, so a restore from an older snapshot
+        // would lose them before the replay reaches them. Date the window's
+        // marks from this recovery.
+        sqlx::query(
+            r#"
+            UPDATE fvoci.processed_events AS p
+            SET processed_at = now()
+            FROM fvoci.events AS e
+            WHERE e.id = p.event_id
+              AND e.created_at >= $1::timestamptz
+            "#,
+        )
+        .bind(since)
+        .execute(&mut *tx)
+        .await?;
+
         let updated = sqlx::query(
             r#"
             UPDATE fvoci.outbox_consumers
@@ -292,16 +340,12 @@ async fn relation_exists(
 }
 
 fn parse_recovery_utc(label: &str, value: &str) -> Result<DateTime<Utc>, RecoverOutboxError> {
-    if !RECOVERY_UTC.is_match(value) || value.parse::<DateTime<Utc>>().is_err() {
-        return Err(RecoverOutboxError::Rejected(format!(
+    match value.parse::<DateTime<Utc>>() {
+        Ok(parsed) if RECOVERY_UTC.is_match(value) => Ok(parsed),
+        _ => Err(RecoverOutboxError::Rejected(format!(
             "recovery requires explicit UTC {label} and snapshot-at boundaries"
-        )));
+        ))),
     }
-    value.parse::<DateTime<Utc>>().map_err(|_| {
-        RecoverOutboxError::Rejected(
-            "recovery requires explicit UTC since and snapshot-at boundaries".into(),
-        )
-    })
 }
 
 pub fn parse_recover_outbox_args(
@@ -388,4 +432,30 @@ pub fn parse_recover_outbox_args(
         reason,
         acknowledge_external_replay,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_boundaries_are_explicit_utc() {
+        for ok in ["2026-09-01T00:00:00Z", "2026-09-01T00:00:00.123456Z"] {
+            assert!(parse_recovery_utc("since", ok).is_ok(), "{ok}");
+        }
+        // Outside the pattern, or matching it but not a calendar time.
+        for bad in [
+            "2026-09-01T00:00:00+00:00",
+            "2026-09-01 00:00:00Z",
+            "2026-09-01T00:00:00.1234567Z",
+            "2026-02-30T00:00:00Z",
+            "2026-09-01T24:00:00Z",
+        ] {
+            let err = parse_recovery_utc("since", bad).expect_err(bad);
+            assert_eq!(
+                err.to_string(),
+                "recovery requires explicit UTC since and snapshot-at boundaries"
+            );
+        }
+    }
 }

@@ -5,10 +5,11 @@
 //! no credentials in the URL, every resolved address public, the connection
 //! pinned to the checked address, no redirects, no proxy, a total deadline
 //! and a capped body. `OIDC_ALLOW_INSECURE` admits plain http to loopback
-//! only (local development and tests). The address rules follow the
-//! integrations branch's outbound policy (source `isPrivateV4/V6`).
+//! only (local development and tests). The private-address table is the
+//! outbound one ([`is_private_ip`], source `isPrivateV4/V6`); the host-name
+//! rules and the loopback exception here are OIDC's own.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -18,6 +19,8 @@ use openidconnect::http::{
 use openidconnect::{HttpRequest, HttpResponse};
 use serde::de::DeserializeOwned;
 use url::{Host, Url};
+
+use crate::integrations::outbound::is_private_ip;
 
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Discovery documents, JWKS and token responses are small.
@@ -45,47 +48,6 @@ pub enum FetchError {
 #[derive(Debug, Clone, Copy)]
 pub struct FetchPolicy {
     pub allow_insecure_loopback: bool,
-}
-
-pub fn is_private_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    a == 0
-        || a == 10
-        || a == 127
-        || (a == 169 && b == 254)
-        || (a == 172 && (16..=31).contains(&b))
-        || (a == 192 && b == 168)
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 192 && b == 0 && (c == 0 || c == 2))
-        || (a == 192 && b == 88 && c == 99)
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113)
-        || a >= 224
-}
-
-pub fn is_private_ipv6(ip: Ipv6Addr) -> bool {
-    let n = u128::from(ip);
-    let prefix = |bits: u32| n >> (128 - bits);
-    prefix(96) == 0
-        || prefix(10) == 0x3fa
-        || prefix(7) == 0x7e
-        || prefix(10) == 0x3fb
-        || prefix(8) == 0xff
-        || prefix(16) == 0x2002
-        || prefix(96) == ((0x64u128 << 80) | (0xff9bu128 << 64))
-        || prefix(48) == 0x0064_ff9b_0001
-        || prefix(96) == 0xffff
-        || prefix(96) == 0xffff_0000
-        || prefix(32) == 0x2001_0000
-        || prefix(32) == 0x2001_0db8
-}
-
-pub fn is_private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_private_ipv4(v4),
-        IpAddr::V6(v6) => is_private_ipv6(v6),
-    }
 }
 
 fn is_loopback(ip: IpAddr) -> bool {

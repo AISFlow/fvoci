@@ -21,13 +21,13 @@ use crate::collections::{
     QueryConfig, ValueInput, Visibility, FIELDS_PER_COLLECTION_MAX, WINDOW_DAYS_MAX,
 };
 use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
-use crate::db::documents::{document_permission, membership_role, workspace_is_live};
+use crate::db::documents::document_permission;
 use crate::db::identity::{append_audit, AuditAppend};
 use crate::db::projects::{lock_project, project_permission, project_permission_by_id};
 use crate::db::view_query::{compile_view_query, CompileOptions, RootKind, SqlArgs, ViewScope};
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{membership_role, workspace_is_live, WorkspaceRole};
 use crate::projects::{workspace_base_permission, ProjectPermission};
-use crate::search::query::load_search_acl;
+use crate::search::query::{load_search_acl, SearchAcl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectionDbError {
@@ -261,14 +261,13 @@ async fn find_collection(
 }
 
 /// A guest reads a wiki collection only through an item document it can read
-/// (source `collections.readable`).
+/// (source `collections.readable`); `acl` is the guest's workspace ACL.
 async fn guest_can_read_wiki_collection(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
-    user_id: Uuid,
+    acl: &SearchAcl,
     collection_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let acl = load_search_acl(tx, workspace_id, user_id, WorkspaceRole::Guest, None).await?;
     sqlx::query_scalar(
         r#"
         SELECT EXISTS (
@@ -325,11 +324,11 @@ pub(crate) async fn require_collection(
     else {
         return Ok(Err(CollectionDbError::NotFound));
     };
-    let readable = access.permission.at_least(ProjectPermission::View)
-        || (collection.project_id.is_none()
-            && role == WorkspaceRole::Guest
-            && guest_can_read_wiki_collection(tx, workspace_id, actor.user_id, collection.id)
-                .await?);
+    let mut readable = access.permission.at_least(ProjectPermission::View);
+    if !readable && collection.project_id.is_none() && role == WorkspaceRole::Guest {
+        let acl = load_search_acl(tx, workspace_id, actor.user_id, role, None).await?;
+        readable = guest_can_read_wiki_collection(tx, workspace_id, &acl, collection.id).await?;
+    }
     if !readable {
         return Ok(Err(CollectionDbError::NotFound));
     }
@@ -391,13 +390,8 @@ pub async fn list_collections(
             Some(project_id) => acl.project_ids.contains(&project_id),
             None => {
                 role != WorkspaceRole::Guest
-                    || guest_can_read_wiki_collection(
-                        &mut tx,
-                        workspace_id,
-                        actor.user_id,
-                        collection.id,
-                    )
-                    .await?
+                    || guest_can_read_wiki_collection(&mut tx, workspace_id, &acl, collection.id)
+                        .await?
             }
         };
         if visible {

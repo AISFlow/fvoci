@@ -16,17 +16,20 @@ use tokio::time::MissedTickBehavior;
 use collab_engine::b64;
 use collab_engine::outcome::EngineStatus;
 use collab_engine::outcome::LimitKind;
+use collab_engine::process::is_slot_cap_refusal;
 use collab_engine::protocol::Request;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPool;
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
-use crate::collab::admission::warn_join_db_error;
+use crate::collab::admission::{warn_join_db_error, MemoryReservation};
 use crate::collab::awareness::{decode_awareness, AwarenessRegistry};
 use crate::collab::config::CollabConfig;
 use crate::collab::derived_body::prepare_derived_body;
-use crate::collab::engine_bridge::{warn_engine_not_applied, BridgeError, EngineBridge};
+use crate::collab::engine_bridge::{
+    warn_engine_not_applied, BridgeError, EngineBridge, RecycleError,
+};
 use crate::collab::guard::RoomGuard;
 use crate::collab::revision::prepare_revision_text;
 use crate::collab::validation::{
@@ -79,6 +82,13 @@ pub async fn arm_spawn_room_block(document_id: Uuid) -> tokio::sync::oneshot::Se
 #[cfg(feature = "db-tests")]
 pub async fn disarm_spawn_room_block(document_id: Uuid) {
     SPAWN_ROOM_BLOCKS.lock().await.remove(&document_id);
+}
+
+/// Whether a start armed with [`arm_spawn_room_block`] has reached the block
+/// (it was admitted and now waits before its bridge exists).
+#[cfg(feature = "db-tests")]
+pub async fn spawn_room_block_reached(document_id: Uuid) -> bool {
+    !SPAWN_ROOM_BLOCKS.lock().await.contains_key(&document_id)
 }
 
 #[cfg(feature = "db-tests")]
@@ -437,6 +447,14 @@ pub async fn disarm_session_revision_persist_barrier(document_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
+pub async fn session_revision_persist_barrier_armed(document_id: Uuid) -> bool {
+    SESSION_REVISION_PERSIST_BARRIERS
+        .lock()
+        .await
+        .contains_key(&document_id)
+}
+
+#[cfg(feature = "db-tests")]
 async fn pause_for_session_revision_persist_barrier(document_id: Uuid) {
     let barrier = SESSION_REVISION_PERSIST_BARRIERS
         .lock()
@@ -646,6 +664,12 @@ impl From<LiveSession> for CollabSession {
 }
 
 struct ConnectionOutboundBudget {
+    /// Counts the frames queued for this connection plus the one the transport
+    /// is sending (a permit drops only after the send). The events channel has
+    /// the same capacity, so while the transport is blocked mid-send a slot
+    /// stays free for `enqueue_close_ordered` to queue Close behind the data
+    /// (unaccounted pre-auth frames aside); otherwise Close falls back to the
+    /// cancel watch.
     frame_sem: Arc<Semaphore>,
     queued_bytes: AtomicUsize,
     max_bytes: usize,
@@ -839,8 +863,12 @@ pub struct ActorProbe {
 pub enum JoinError {
     AdmissionDenied,
     UnsupportedKind,
+    /// Hub room cap, room-permit semaphore closed, actor queue full, or the
+    /// per-room connection cap.
     RoomFull,
-    /// Hub room count, helper child cap, or aggregate memory budget exhausted.
+    /// Aggregate helper memory budget, or the primary helper pool at its cap.
+    /// The WebSocket transport closes this and `RoomFull` with 1013 (1012
+    /// while the hub shuts down).
     CapacityRetry,
     EngineUnavailable,
     WriterStale,
@@ -974,6 +1002,14 @@ impl RoomHandle {
         let _ = self.tx.send(RoomCommand::Shutdown).await;
     }
 
+    /// Close an empty room after the work already queued before it (no cancel
+    /// signal). The last-disconnect session revision, with its bounded head
+    /// retries, runs in the actor iteration that emptied the room, so this
+    /// Shutdown is handled only after it.
+    pub async fn shutdown_after_queued(&self) {
+        let _ = self.tx.send(RoomCommand::Shutdown).await;
+    }
+
     pub async fn capture_revision(
         &self,
         actor_user_id: Uuid,
@@ -1098,7 +1134,6 @@ struct ConnectionState {
     poisoned: bool,
     pending_persist: VecDeque<PersistBarrier>,
     in_flight: bool,
-    revoked: bool,
 }
 
 struct PersistBarrier {
@@ -1154,7 +1189,6 @@ struct RoomActor {
     committed_loaded: bool,
     primary_dirty: bool,
     client_id_owner: HashMap<u32, (Uuid, Instant)>,
-    shutting_down: bool,
     pending_awareness: VecDeque<Vec<u8>>,
     flushing_awareness: bool,
     /// Set when the dedicated fence connection is lost; actor exits once empty.
@@ -1163,6 +1197,9 @@ struct RoomActor {
     session_cancel_rx: watch::Receiver<bool>,
     /// Last-disconnect session snapshot (`captured` set after durable reload + primary capture).
     session_revision: Option<SessionRevisionState>,
+    /// Hub memory admission for this room, held until the first helper load
+    /// makes the helper's RSS visible to later admissions.
+    admission_reservation: Option<MemoryReservation>,
 }
 
 struct SessionRevisionState {
@@ -1173,27 +1210,19 @@ struct SessionRevisionState {
 }
 
 pub async fn spawn_room(
-    workspace_id: Uuid,
-    document_id: Uuid,
-    kind: CollabKind,
+    key: RoomKey,
     config: CollabConfig,
     pool: PgPool,
     room_guard: RoomGuard,
     live_conns: Arc<AtomicUsize>,
+    admission_reservation: MemoryReservation,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
+    let RoomKey(workspace_id, document_id, kind) = key;
     wait_spawn_room_block(document_id).await;
-    let engine = match EngineBridge::spawn(config.engine_bin.clone(), config.limits) {
-        Ok(engine) => engine,
-        Err(report) => {
-            if matches!(
-                report.outcome,
-                collab_engine::EngineStatus::ResourceLimit { .. }
-            ) {
-                return Err(JoinError::CapacityRetry);
-            }
-            return Err(JoinError::EngineUnavailable);
-        }
-    };
+    // Starts only the bridge thread (it fails only if the OS refuses a thread);
+    // the helper spawns on the actor's first reload.
+    let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
+        .map_err(|_| JoinError::EngineUnavailable)?;
     let (tx, mut rx) = mpsc::channel(config.max_queued_room_ops);
     let (session_cancel_tx, session_cancel_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = oneshot::channel();
@@ -1223,13 +1252,13 @@ pub async fn spawn_room(
         committed_loaded: false,
         primary_dirty: false,
         client_id_owner: HashMap::new(),
-        shutting_down: false,
         pending_awareness: VecDeque::new(),
         flushing_awareness: false,
         fence_lost: false,
         user_reject_budgets: HashMap::new(),
         session_cancel_rx,
         session_revision: None,
+        admission_reservation: Some(admission_reservation),
     };
     tokio::spawn(async move {
         let mut actor = actor;
@@ -1268,6 +1297,17 @@ enum LockingAuth {
     Allow,
     Deny,
     DbError,
+}
+
+/// How a server-side close is queued relative to frames already queued for
+/// the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseOrder {
+    /// Signal the transport's cancel watch at once, ahead of queued data.
+    Preempt,
+    /// Queue Close behind queued data so a committed ack is delivered first
+    /// (see [`RoomActor::enqueue_close_ordered`]).
+    AfterQueued,
 }
 
 impl RoomActor {
@@ -1379,7 +1419,6 @@ impl RoomActor {
                                 .send(self.handle_project_live(actor_user_id, session_id).await);
                         }
                         Some(RoomCommand::Shutdown) => {
-                            self.shutting_down = true;
                             self.abort_session_revision_work();
                             break;
                         }
@@ -1402,13 +1441,18 @@ impl RoomActor {
                 }
             }
             self.publish_live_conns();
-            if self.session_revision.is_some() && !self.shutting_down {
-                let _ = self.advance_session_revision().await;
+            // Finish the bounded `StaleRevisionHead` retries in this iteration: a
+            // Shutdown queued behind it (admission reclaim) must not drop a
+            // revision that only waits for its head retry.
+            for _ in 0..SYSTEM_REVISION_HEAD_RETRIES {
+                if self.session_revision.is_none() {
+                    break;
+                }
+                if self.advance_session_revision().await {
+                    break;
+                }
             }
             if self.fence_lost && self.connections.is_empty() {
-                break;
-            }
-            if self.connections.is_empty() && self.shutting_down {
                 break;
             }
         }
@@ -1517,15 +1561,15 @@ impl RoomActor {
         }
     }
 
+    /// Remove the connection and queue its Close; returns its awareness
+    /// tombstone for the caller's flush.
     async fn evict_connection(
         &mut self,
         conn_id: Uuid,
         code: u16,
         reason: &str,
+        order: CloseOrder,
     ) -> Option<Vec<u8>> {
-        if let Some(conn) = self.connections.get_mut(&conn_id) {
-            conn.revoked = true;
-        }
         let tombstone = if let Some(conn) = self.connections.get(&conn_id) {
             self.awareness
                 .remove_client(conn.client_id, conn.conn_generation)
@@ -1533,42 +1577,36 @@ impl RoomActor {
             None
         };
         if let Some(conn) = self.connections.remove(&conn_id) {
-            Self::enqueue_close(&conn.events, &conn.cancel, code, reason);
-        }
-        tombstone
-    }
-
-    async fn evict_connection_ordered(
-        &mut self,
-        conn_id: Uuid,
-        code: u16,
-        reason: &str,
-    ) -> Option<Vec<u8>> {
-        if let Some(conn) = self.connections.get_mut(&conn_id) {
-            conn.revoked = true;
-        }
-        let tombstone = if let Some(conn) = self.connections.get(&conn_id) {
-            self.awareness
-                .remove_client(conn.client_id, conn.conn_generation)
-        } else {
-            None
-        };
-        if let Some(conn) = self.connections.remove(&conn_id) {
-            Self::enqueue_close_ordered(&conn.events, &conn.cancel, code, reason);
+            match order {
+                CloseOrder::Preempt => {
+                    Self::enqueue_close(&conn.events, &conn.cancel, code, reason);
+                }
+                CloseOrder::AfterQueued => {
+                    Self::enqueue_close_ordered(&conn.events, &conn.cancel, code, reason);
+                }
+            }
         }
         tombstone
     }
 
     async fn close_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
-        if let Some(encoded) = self.evict_connection(conn_id, code, reason).await {
-            self.pending_awareness.push_back(encoded);
-        }
-        self.flush_pending_awareness().await;
-        self.try_schedule_session_revision();
+        self.close_connection_in_order(conn_id, code, reason, CloseOrder::Preempt)
+            .await;
     }
 
     async fn close_connection_ordered(&mut self, conn_id: Uuid, code: u16, reason: &str) {
-        if let Some(encoded) = self.evict_connection_ordered(conn_id, code, reason).await {
+        self.close_connection_in_order(conn_id, code, reason, CloseOrder::AfterQueued)
+            .await;
+    }
+
+    async fn close_connection_in_order(
+        &mut self,
+        conn_id: Uuid,
+        code: u16,
+        reason: &str,
+        order: CloseOrder,
+    ) {
+        if let Some(encoded) = self.evict_connection(conn_id, code, reason, order).await {
             self.pending_awareness.push_back(encoded);
         }
         self.flush_pending_awareness().await;
@@ -1583,14 +1621,11 @@ impl RoomActor {
     }
 
     fn session_revision_scheduling_blocked(&self) -> bool {
-        self.shutting_down
-            || self.fence_lost
-            || !self.connections.is_empty()
-            || !self.committed_loaded
+        self.fence_lost || !self.connections.is_empty() || !self.committed_loaded
     }
 
     fn session_revision_cancelled(&self) -> bool {
-        self.shutting_down || self.fence_lost || *self.session_cancel_rx.borrow()
+        self.fence_lost || *self.session_cancel_rx.borrow()
     }
 
     fn abort_session_revision_work(&mut self) {
@@ -1903,9 +1938,6 @@ impl RoomActor {
     }
 
     async fn handle_join(&mut self, join: RoomJoin) -> Result<JoinAdmission, JoinError> {
-        if self.shutting_down {
-            return Err(JoinError::EngineUnavailable);
-        }
         if self.fence_lost {
             return Err(JoinError::EngineUnavailable);
         }
@@ -2049,9 +2081,10 @@ impl RoomActor {
                 poisoned: false,
                 pending_persist: VecDeque::new(),
                 in_flight: false,
-                revoked: false,
             },
         );
+        // Published before the join reply lets the hub drop its joining lease,
+        // so reclaim never sees an empty admitted room.
         self.publish_live_conns();
         let encoded = self.awareness.encode_all();
         if !encoded.is_empty() {
@@ -2199,6 +2232,11 @@ impl RoomActor {
     }
 
     async fn handle_leave(&mut self, conn_id: Uuid) {
+        // The lease drop may already have evicted this connection; a stale Leave must not
+        // schedule another session revision capture.
+        if !self.connections.contains_key(&conn_id) {
+            return;
+        }
         self.close_connection(conn_id, 1000, "client leave").await;
     }
 
@@ -2629,7 +2667,7 @@ impl RoomActor {
                 let committed = match append {
                     Ok(result) => result,
                     Err(CollabDbError::StaleWriter) => {
-                        self.fatal_writer_stale().await;
+                        self.fatal_writer_stale(CloseOrder::Preempt).await;
                         self.reject_candidate(conn_id, routing_key).await;
                         return;
                     }
@@ -2725,7 +2763,7 @@ impl RoomActor {
                     .await
                 {
                     ProjectDerivedOutcome::StaleWriter => {
-                        self.fatal_writer_stale_ordered().await;
+                        self.fatal_writer_stale(CloseOrder::AfterQueued).await;
                         return;
                     }
                     _ if !self.primary_loaded => {
@@ -2848,21 +2886,13 @@ impl RoomActor {
         }
     }
 
-    async fn fatal_writer_stale(&mut self) {
+    async fn fatal_writer_stale(&mut self, order: CloseOrder) {
         self.writer_generation = None;
         // A newer writer owns durable state; `committed` may lag it, so the next
         // capture/join must reload instead of trusting the in-memory bundle.
         self.committed_loaded = false;
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
-            self.close_connection(conn_id, 1008, "writer stale").await;
-        }
-    }
-
-    async fn fatal_writer_stale_ordered(&mut self) {
-        self.writer_generation = None;
-        self.committed_loaded = false;
-        for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
-            self.close_connection_ordered(conn_id, 1008, "writer stale")
+            self.close_connection_in_order(conn_id, 1008, "writer stale", order)
                 .await;
         }
     }
@@ -3175,7 +3205,7 @@ impl RoomActor {
             Ok(Ok(ProjectDerivedBodyResult::SkippedSeed)) => ProjectDerivedOutcome::SkippedSeed,
             Ok(Err(CollabDbError::StaleWriter)) => {
                 if preemptive_stale_close {
-                    self.fatal_writer_stale().await;
+                    self.fatal_writer_stale(CloseOrder::Preempt).await;
                 }
                 ProjectDerivedOutcome::StaleWriter
             }
@@ -3275,20 +3305,47 @@ impl RoomActor {
     }
 
     async fn reload_primary_from_committed(&mut self) -> Result<(), JoinError> {
-        if self.engine.recycle().await.is_err() {
-            tracing::warn!(
-                workspace_id = %self.workspace_id,
-                document_id = %self.document_id,
-                "collab primary recycle failed: engine bridge dead"
-            );
+        if let Err(err) = self.engine.recycle().await {
             self.primary_loaded = false;
             self.primary_dirty = true;
-            return Err(JoinError::EngineUnavailable);
+            return Err(match err {
+                // Every primary slot taken is transient: the client retries
+                // (1013) and the next reload spawns again. Debug, like the
+                // transport's capacity refusals: a line per retry would grow
+                // with the waiting clients.
+                RecycleError::Spawn(report) if is_slot_cap_refusal(&report) => {
+                    tracing::debug!(
+                        workspace_id = %self.workspace_id,
+                        document_id = %self.document_id,
+                        "collab primary helper spawn refused at capacity"
+                    );
+                    JoinError::CapacityRetry
+                }
+                RecycleError::Spawn(report) => {
+                    warn_engine_not_applied(
+                        "room.reload_primary_spawn",
+                        Some(self.workspace_id),
+                        Some(self.document_id),
+                        &report.outcome,
+                    );
+                    JoinError::EngineUnavailable
+                }
+                RecycleError::Dead => {
+                    tracing::warn!(
+                        workspace_id = %self.workspace_id,
+                        document_id = %self.document_id,
+                        "collab primary recycle failed: engine bridge dead"
+                    );
+                    JoinError::EngineUnavailable
+                }
+            });
         }
         match self.load_engine_primary().await {
             Ok(()) => {
                 self.primary_loaded = true;
                 self.primary_dirty = false;
+                // The loaded helper's RSS is now in the live-child sum.
+                self.admission_reservation = None;
                 Ok(())
             }
             Err(err) => {
@@ -3876,7 +3933,7 @@ impl RoomActor {
         let committed = match append {
             Ok(Ok(result)) => result,
             Ok(Err(CollabDbError::StaleWriter)) => {
-                self.fatal_writer_stale().await;
+                self.fatal_writer_stale(CloseOrder::Preempt).await;
                 return Err(ForwardWriteError::Unavailable);
             }
             Ok(Err(CollabDbError::PayloadTooLarge | CollabDbError::StateBudgetExceeded)) => {
@@ -3985,14 +4042,19 @@ impl RoomActor {
         self.flushing_awareness = false;
     }
 
-    async fn deliver_outbound(&mut self, conn_id: Uuid, bytes: Vec<u8>, kind: OutboundKind) {
-        if self
-            .connections
-            .get(&conn_id)
-            .is_none_or(|conn| conn.revoked)
+    /// 1009 eviction from `deliver_outbound`. The tombstone is left for the caller's awareness
+    /// flush (this runs inside it); the session revision is scheduled like any other close.
+    async fn evict_for_backpressure(&mut self, conn_id: Uuid) {
+        if let Some(tombstone) = self
+            .evict_connection(conn_id, 1009, "outbound queue full", CloseOrder::Preempt)
+            .await
         {
-            return;
+            self.pending_awareness.push_back(tombstone);
         }
+        self.try_schedule_session_revision();
+    }
+
+    async fn deliver_outbound(&mut self, conn_id: Uuid, bytes: Vec<u8>, kind: OutboundKind) {
         let accounted_bytes = bytes.len().saturating_add(OUTBOUND_FRAME_OVERHEAD);
         let budget = self
             .connections
@@ -4002,33 +4064,18 @@ impl RoomActor {
             return;
         };
         if accounted_bytes > budget.max_bytes {
-            if let Some(tombstone) = self
-                .evict_connection(conn_id, 1009, "outbound queue full")
-                .await
-            {
-                self.pending_awareness.push_back(tombstone);
-            }
+            self.evict_for_backpressure(conn_id).await;
             return;
         }
         let current = budget.queued_bytes.load(Ordering::Relaxed);
         if current + accounted_bytes > budget.max_bytes {
-            if let Some(tombstone) = self
-                .evict_connection(conn_id, 1009, "outbound queue full")
-                .await
-            {
-                self.pending_awareness.push_back(tombstone);
-            }
+            self.evict_for_backpressure(conn_id).await;
             return;
         }
         let frame_permit = match budget.frame_sem.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                if let Some(tombstone) = self
-                    .evict_connection(conn_id, 1009, "outbound queue full")
-                    .await
-                {
-                    self.pending_awareness.push_back(tombstone);
-                }
+                self.evict_for_backpressure(conn_id).await;
                 return;
             }
         };
@@ -4050,12 +4097,7 @@ impl RoomActor {
             permit: Some(delivery_permit),
         };
         if events.try_send(RoomClientEvent::Outbound(frame)).is_err() {
-            if let Some(tombstone) = self
-                .evict_connection(conn_id, 1009, "outbound queue full")
-                .await
-            {
-                self.pending_awareness.push_back(tombstone);
-            }
+            self.evict_for_backpressure(conn_id).await;
         }
     }
 
