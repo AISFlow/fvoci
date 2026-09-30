@@ -1091,11 +1091,11 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 출시 차단: 인증 전환 선행.
   - 기존 React 제거 조건: Vue 인증 수락 후 React LoginPage/전용 연결.
 
-- [ ] Vue 공통 셸 — [#267](https://github.com/AISFlow/fvoci/pull/267)
-  - 현재 단계: 모바일 알림 겹침 수정과 독립 delta ACCEPT 완료; 최신 CI 진행, main/배포 미수락.
+- [x] Vue 공통 셸 main 수락 — [#267](https://github.com/AISFlow/fvoci/pull/267)
+  - 현재 단계: main `f18f2b2bf40d2fe67b01089b807aecf54e695ec5` 수락; 독립 ACCEPT·후보5게이트 SUCCESS. main 후속 CI·배포 미완료.
   - 담당 Sol 6.1 워커: shell_ci_recovery 구현·검증; review_invite_final 별도 컨텍스트 delta 검토.
   - 기준 HEAD / PR / 선행 의존성: `fa7dac746fdf5e6852bdb70fffe467794bfe96e2` / #267 / main 및 #287 포함.
-  - 남은 구체적인 작업: 최신 CI 수락과 main 통합. 이전 a446a7c3 원격 timeout은 수정 SHA의 성공으로 덮어쓰지 않는다.
+  - 남은 구체적인 작업: main 통합 후 셸/위키 관련 회귀·CI와 배포 확인. 이전 a446a7c3 원격 timeout은 수정 SHA의 성공으로 덮어쓰지 않는다.
   - 수락 검사: 원래 독립 full-shell 검토와 새 3경로 delta ACCEPT, 실패 재현 후 실제 shell6통과·production build.
   - 출시 차단: 261 / 0.4.0 차단.
   - 기존 React 제거 조건: Vue 셸 수락 후.
@@ -1334,3 +1334,5 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
 - 홈21ad5327: 별도 Orca Sol6.1/high 고정 merge 독립 ACCEPT(경계/라우터18검사)와 실제 production Rust/PG/Meili 6그룹21pass/0fail/0skip 수령. 단위110/build 및 부모 구현 검토 재사용; 새 HEAD 브라우저 증거를 별도 보존. 로컬 수락 후보, PR272 원격 갱신은 CI288 수락 후 계획에 유지.
 - 인증269 실패 원인: 테스트 setup 완료가 원래 `/` URL만 보고 반환해 Vue login의 늦은 home redirect와 위키 goto가 경합. 실제 me200/document201, 네트워크변동0. shell CSS 문제 아님. `/tmp/fvoci-auth-ci-shard6-orca-sol61.txt` 및 durable artifact 보존. 다음 Sol 수정은 setup helper의 실제 authenticated-home 준비 완료 보장과 관련 회귀; timeout/skip/retry 우회 금지.
 - Orca 재시작 체크포인트: 본 세션이 띄운 직접 실행 워커5개 모두 최종 결과·세션 근거·로그 회수 후 종료된 셸만 close. 현재 이 파동의 활성 워커 없음. 기존 타 세션/앱/DB는 종료하지 않음. 화면 연결 복구를 위한 앱 정상 종료/재시작은 사용자 수행 필요; CLI open이 desktop_activation_blocked를 반환했다.
+
+- #267 fa7dac74 후보5게이트 SUCCESS와 독립 ACCEPT 후 expected-head merge. main f18f2b2b; controls 수락 main5d5171a7과 공통 merge-base 이후 변경 경로 겹침0, 예상 merge tree5ba62cfd와 실제 main tree 일치. 통합 후 셸/컨트롤 상호작용 검증은 후속 CI/브라우저로 별도 확인하며 배포 완료로 표시하지 않는다.
