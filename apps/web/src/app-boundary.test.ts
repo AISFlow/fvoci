@@ -208,7 +208,7 @@ test("home and public pages enter Vue while admin policies remain React", () => 
   }
 });
 
-test("attachment viewers boot Vue while public share, public share and admin pages retain React", () => {
+test("attachment viewers boot Vue while public share and admin pages retain React", () => {
   for (const path of ["/w/acme/a/123/view", "/w/acme/a/123/view/", "/W/acme/A/123/VIEW",
     "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View"]) {
     assert.equal(isVueAppPath(path), true, path);
