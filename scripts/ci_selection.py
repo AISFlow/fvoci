@@ -115,6 +115,8 @@ _BROADEN_EXACT: frozenset[str] = frozenset(
         # The Bun workspace root: apps/web, packages/* and scripts/document-convert.
         "package.json",
         "bun.lock",
+        "biome.json",
+        "biome.jsonc",
         "bunfig.toml",
         ".bun-version",
     }

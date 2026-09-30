@@ -65,5 +65,12 @@
   },
   "patchedDependencies": {
     "@volar/typescript@2.4.28": "patches/@volar%2Ftypescript@2.4.28.patch"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14"
+  },
+  "scripts": {
+    "lint": "bash scripts/lint-web.sh",
+    "lint:fixtures": "python3 scripts/test_biome.py"
   }
 }

@@ -595,6 +595,11 @@ class GateSchemaTest(unittest.TestCase):
         )
         self.assertEqual(rc, 1)
 
+    def test_web_lint_job_failure_reaches_required_gate(self) -> None:
+        plan = self._plan("web", {"web-checks": True})
+        self.assertEqual(self._gate(plan, "web", {"web-checks": "failure"}), 1)
+        self.assertEqual(self._gate(plan, "web", {"web-checks": "success"}), 0)
+
     def test_selected_missing_needs_key_rejected(self) -> None:
         plan = self._plan("documents", {"native-extraction": True})
         plan["mode"] = "full"
@@ -855,6 +860,29 @@ class OptInSelectionTest(unittest.TestCase):
 
 
 class WorkflowRegistryTest(unittest.TestCase):
+    def test_biome_runs_once_in_locked_web_checks(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/web.yml")
+        self.assertIsNone(error)
+        jobs = data["jobs"]
+        lint_steps = [
+            (job_id, step)
+            for job_id, job in jobs.items()
+            for step in SEL._run_steps(job)
+            if "bun run lint" in step["run"]
+        ]
+        self.assertEqual(len(lint_steps), 1)
+        job_id, step = lint_steps[0]
+        self.assertEqual(job_id, "web-checks")
+        self.assertEqual(step["run"].splitlines(), [
+            "set -euo pipefail", "bun run lint:fixtures", "bun run lint",
+        ])
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("if", step)
+        steps = jobs[job_id]["steps"]
+        install_index = next(i for i, entry in enumerate(steps) if "bun ci" in entry.get("run", ""))
+        self.assertLess(install_index, steps.index(step))
+        self.assertIn("web-checks", jobs["web-ci-gate"]["needs"])
+
     def test_workflows_match_planner(self) -> None:
         errors = SEL.verify_workflow_registry()
         self.assertEqual(errors, [], msg="\n".join(errors))
@@ -1798,6 +1826,8 @@ class AgentDocsSelectionTest(unittest.TestCase):
             "packages/editor/package.json",
             "package.json",
             "bun.lock",
+            "biome.json",
+            "biome.jsonc",
             "bunfig.toml",
             ".bun-version",
             "patches/@volar%2Ftypescript@2.4.28.patch",

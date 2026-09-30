@@ -78,6 +78,14 @@ jobs:
         run: |
           cargo fetch --locked
           bun ci
+      - name: Strict pinned Biome and Vue support proofs
+        run: |
+          set -euo pipefail
+          bun run lint:fixtures
+          bun run lint
+      - name: Strict web TypeScript and Vue template types
+        working-directory: apps/web
+        run: bun --bun run typecheck
       - name: Generate and verify the API contract
         run: |
           bash scripts/generate-api.sh
