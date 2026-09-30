@@ -322,7 +322,64 @@ test("typed Bun Transpiler and module mock", () => {
         self.assertNotEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
         self.assertIn("unhandled-promise-proof", runtime.stderr)
 
-    def test_sfc_import_gap_remains_with_strict_vue_compiler(self):
+    def test_actual_editor_declaration_preparation_is_node_free(self):
+        prepared = run(["bun", "--bun", "scripts/prepare-vue-lint-types.mjs"])
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        result = run([*ESLINT, "packages/editor/src/vue/node-views.ts", "--max-warnings=0", "--format=json"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_generated_sfc_types_and_failed_refresh_have_no_waiver(self):
+        component = self.source("ProofGenerated.vue", '''<script setup lang="ts">
+defineProps<{ label: string }>();
+</script><template><p>{{ label }}</p></template>''')
+        output = self.directory / "generated"
+        project = self.directory / "tsconfig.emit.json"
+        project.write_text(json.dumps({
+            "extends": str(ROOT / "apps/web/tsconfig.vue.json"),
+            "compilerOptions": {"rootDir": str(self.directory), "incremental": False, "composite": False},
+            "include": [str(component)], "exclude": [],
+        }))
+        prepare = self.source("prepare.mjs", f'''import {{ prepareVueLintTypes }} from {json.dumps(str(ROOT / "scripts/prepare-vue-lint-types.mjs"))};
+prepareVueLintTypes({json.dumps(str(project))}, {json.dumps(str(output))});''')
+        emitted = run(["bun", "--bun", str(prepare)])
+        self.assertEqual(emitted.returncode, 0, emitted.stdout + emitted.stderr)
+        declaration = output / "ProofGenerated.vue.d.ts"
+        self.assertTrue(declaration.is_file())
+        consumer = self.source("ProofGeneratedConsumer.ts", '''import ProofGenerated from "./ProofGenerated.vue";
+export function read(value: InstanceType<typeof ProofGenerated>): string { return value.$props.label; }''')
+        lint_project = self.directory / "tsconfig.generated.json"
+        lint_project.write_text(json.dumps({
+            "extends": str(ROOT / "apps/web/tsconfig.eslint.json"),
+            "compilerOptions": {"rootDirs": [str(self.directory), str(output)]},
+            "include": [str(consumer)], "exclude": [],
+        }))
+        args = [*ESLINT, str(consumer), "--max-warnings=0", "--format=json",
+                "--parser-options", json.dumps({"project": [str(lint_project)]})]
+        typed = run(args)
+        self.assertEqual(typed.returncode, 0, typed.stdout + typed.stderr)
+        consumer.write_text(consumer.read_text().replace("value.$props.label", "value.$props.label.missing"))
+        invalid = run(["bun", "--bun", str(ROOT / "node_modules/.bin/tsc"), "--noEmit", "-p", str(lint_project)])
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("TS2339", invalid.stdout + invalid.stderr)
+        consumer.write_text(consumer.read_text().replace("value.$props.label.missing", "value.$props.label"))
+        # Real unsafe props remain unsafe even through compiler-generated types.
+        component.write_text(component.read_text().replace("label: string", "label: any"))
+        emitted = run(["bun", "--bun", str(prepare)])
+        self.assertEqual(emitted.returncode, 0, emitted.stdout + emitted.stderr)
+        unsafe = run(args)
+        self.assertNotEqual(unsafe.returncode, 0)
+        self.assertIn("@typescript-eslint/no-unsafe-return", {m["ruleId"] for f in json.loads(unsafe.stdout) for m in f["messages"]})
+        # Failed refresh clears stale successful output before checking source.
+        component.write_text('<script setup lang="ts">defineProps<{ label: string }>();</script><template><p>{{ label.toFixed() }}</p></template>')
+        failed = run(["bun", "--bun", str(prepare)])
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("TS2551", failed.stdout + failed.stderr)
+        self.assertFalse(declaration.exists())
+        missing = run(args)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("@typescript-eslint/no-unsafe-return", {m["ruleId"] for f in json.loads(missing.stdout) for m in f["messages"]})
+
+    def test_unprepared_sfc_import_has_no_fake_fallback(self):
         self.source("ProofNode.vue", '''<script setup lang="ts">
 import type { NodeViewProps } from "@tiptap/vue-3";
 defineProps<NodeViewProps>();
