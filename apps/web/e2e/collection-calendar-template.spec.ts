@@ -13,7 +13,7 @@ async function fixture(page: Page, key: string) {
   } else if (await page.getByRole("button", { name: "로그인", exact: true }).count()) await login(page, "calendar@example.com", "supersecret1");
   const ws = (await (await page.request.get("/api/v1/me/workspaces")).json()).items.find((w: { slug: string }) => w.slug === "caltemplate");
   const base = `/api/v1/workspaces/${ws.id}`;
-  expect((await page.request.patch("/api/v1/auth/me", { data: { timezone: "America/New_York" } })).ok()).toBe(true);
+  expect((await page.request.patch("/api/v1/auth/me", { data: { givenName: "달력", timezone: "America/New_York" } })).ok()).toBe(true);
   const res = await page.request.post(`${base}/projects`, { data: { key, name: key, visibility: "workspace" } }); expect(res.status()).toBe(201);
   const project = await res.json();
   const wf = await (await page.request.get(`${base}/projects/${project.id}/workflow`)).json();
@@ -22,24 +22,25 @@ async function fixture(page: Page, key: string) {
     const row = await created.json(); return { ...row, displayId: `${key}-${row.number}` };
   }
   async function stored(id: string) { const res = await page.request.get(`${base}/tasks/${id}`); expect(res.ok()).toBe(true); return res.json(); }
-  async function open(month = "2027-05") { await page.goto(`/w/caltemplate/${key}/calendar`); await page.locator('input[type="month"]').fill(month); await expect(page.getByTestId("collection-calendar")).toBeVisible(); }
+  async function open(month = "2027-05") { await page.goto(`/w/caltemplate/${key}/calendar`); await expect(page).toHaveURL(`/w/caltemplate/${key}/calendar`); await expect(page.locator("[data-v-app]")).toHaveCount(1); await page.locator('input[type="month"]').fill(month); await expect(page.locator('table[data-testid="collection-calendar"]')).toBeVisible(); }
   return { base, project, task, stored, open };
 }
 
 test("template day/week/month, mini calendar, keyboard and responsive sidebar connect to real timed task API", async ({ page }) => {
   const f = await fixture(page, "VIEW"); const timed = await f.task("Point deadline", {});
   expect((await page.request.patch(`${f.base}/tasks/${timed.id}`, { data: { dueAt: "2027-05-05T13:30:00Z" } })).ok()).toBe(true);
-  await f.open(); await page.getByTestId("calendar-mini").getByLabel("2027-05-05", { exact: true }).click();
+  await f.open(); await page.screenshot({ path: "/tmp/fvoci-front272-calendar-month.png" }); await page.getByTestId("calendar-mini").getByLabel("2027-05-05", { exact: true }).click();
   await page.getByRole("tab", { name: "Week", exact: true }).click();
   const grid = page.getByTestId("calendar-time-grid");
   await expect(grid.getByTestId(`collection-preview-${timed.displayId}`)).toContainText("09:30");
+  await page.screenshot({ path: "/tmp/fvoci-front272-calendar-week.png" });
   await grid.getByTestId(`collection-preview-${timed.displayId}`).dragTo(grid.locator('[data-calendar-target="2027-05-06"][data-hour="14"]'));
   await expect.poll(async () => (await f.stored(timed.id)).dueAt).toBe("2027-05-06T18:30:00Z");
   expect((await f.stored(timed.id)).dueDate).toBeNull();
   await page.getByTestId("calendar-mini").getByLabel("2027-05-06", { exact: true }).click();
   await page.getByRole("tab", { name: "Day", exact: true }).click();
   await expect(grid.getByTestId(`collection-preview-${timed.displayId}`)).toBeVisible();
-  await page.locator('.template-calendar').focus(); await page.keyboard.press("m"); await expect(page.getByTestId("collection-calendar")).toBeVisible();
+  await page.locator('.template-calendar').focus(); await page.keyboard.press("m"); await expect(page.locator('table[data-testid="collection-calendar"]')).toBeVisible();
   await page.keyboard.press("w"); await expect(grid).toBeVisible(); await page.keyboard.press("d"); await expect(page.getByRole("tab", { name: "Day", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("ArrowRight"); await expect(grid.getByRole("button", { name: "2027-05-07", exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });

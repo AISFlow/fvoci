@@ -7,6 +7,7 @@ import UButton from "@nuxt/ui/components/Button.vue";
 import UTabs from "@nuxt/ui/components/Tabs.vue";
 import UPopover from "@nuxt/ui/components/Popover.vue";
 import { t } from "@fvoci/i18n";
+import { isIsoDate } from "@/features/tasks/task-edit-payload";
 import { monthGrid, shiftMonth, todayInTimeZone } from "@/lib/collection-values";
 import { weekdayNames } from "@/features/collections/collection-view";
 import { CALENDAR_DRAG_TYPE, dateMovable } from "@/features/collections/calendar-model";
@@ -15,7 +16,7 @@ import { addDays, dayMove, editorWrite, eventFor, resizable, resizeWrite, weekDa
 import CalendarMini from "./CalendarMini.vue";
 import CalendarEventEditor from "./CalendarEventEditor.vue";
 import "./calendar.css";
-const props = defineProps<{ month: string; dateBy: string; fields: readonly CollectionField[]; previews: readonly CollectionQueryPreview[]; counts: Map<string | null, number>; zone: string; weekStartsOn: number; slug: string; pending: boolean; refreshing: boolean; save: (row: CollectionQueryPreview, write: CalendarWrite) => Promise<void> }>();
+const props = defineProps<{ month: string; dateBy: string; fields: readonly CollectionField[]; previews: readonly CollectionQueryPreview[]; counts: Map<string | null, number>; zone: string; weekStartsOn: number; slug: string; pending: boolean; refreshing: boolean; canEdit: boolean; save: (row: CollectionQueryPreview, write: CalendarWrite) => Promise<void> }>();
 const emit = defineEmits<{ month: [month: string]; day: [day: string | null]; range: [range: { from: string; to: string }]; reconnect: [] }>();
 const view = ref<CalendarView>("month");
 const anchor = ref(props.month + "-01");
@@ -23,10 +24,13 @@ const sidebar = ref(false);
 const online = ref(typeof navigator === "undefined" || navigator.onLine);
 const editor = ref<CalendarEvent | null>(null);
 const editorOpen = ref(false);
+const editorBasis = ref(props.dateBy);
+const editorEvent = computed(() => editor.value ? { ...editor.value, canEdit: editor.value.canEdit && props.canEdit && (events.value.find(event => event.id === editor.value?.id)?.canEdit ?? true) } : null);
 const dragged = ref<CalendarEvent | null>(null);
 const resizeEdge = ref<"start" | "end" | null>(null);
 const over = ref<string | null | undefined>();
 const suppressed = ref(false);
+const nativeDragging = ref(false);
 const root = ref<HTMLElement>();
 const popoverReference = ref<{ getBoundingClientRect: () => DOMRect }>();
 const today = computed(() => todayInTimeZone(props.zone));
@@ -41,15 +45,15 @@ watch([view, anchor, weeks], () => {
   const range = view.value === "month" ? weeks.value.flat().map(cell => cell.date) : days.value;
   emit("range", { from: range[0]!, to: addDays(range.at(-1)!, 1) });
 }, { immediate: true });
-function select(day: string) { anchor.value = day; emit("month", day.slice(0, 7)); sidebar.value = false; }
+function select(day: string) { if (!isIsoDate(day)) return; anchor.value = day; emit("month", day.slice(0, 7)); sidebar.value = false; }
 function shift(delta: number) { select(view.value === "month" ? shiftMonth(props.month, delta) + "-01" : addDays(anchor.value, delta * (view.value === "week" ? 7 : 1))); }
-function open(event: CalendarEvent, trigger?: Event) { if (suppressed.value) return; const rect = (trigger?.currentTarget as HTMLElement | undefined)?.getBoundingClientRect(); if (rect) popoverReference.value = { getBoundingClientRect: () => rect }; editor.value = { ...event }; editorOpen.value = true; }
+function open(event: CalendarEvent, trigger?: Event, edge?: "start" | "end") { if (suppressed.value) return; const rect = (trigger?.currentTarget as HTMLElement | undefined)?.getBoundingClientRect(); if (rect) popoverReference.value = { getBoundingClientRect: () => rect }; editorBasis.value = edge === "start" ? "start" : edge === "end" ? "due" : props.dateBy; editor.value = { ...event, local: edge === "start" ? event.startDate! : edge === "end" ? event.dueDate! : event.local, timed: edge ? false : event.timed }; editorOpen.value = true; }
 function list(day: string) { select(day); emit("day", day); }
 function eventsAt(day: string, hour?: number) { return events.value.filter(event => event.date === day && (hour === undefined || (hour === -1 ? !event.timed : event.timed && Number(event.local.slice(11, 13)) === hour))); }
-function movable(event: CalendarEvent) { return online.value && !props.pending && dateMovable(props.dateBy, event, props.fields); }
+function movable(event: CalendarEvent) { return online.value && props.canEdit && !props.pending && dateMovable(props.dateBy, event, props.fields); }
 function start(event: DragEvent, row: CalendarEvent, edge: "start" | "end" | null = null) {
   if (!movable(row)) { event.preventDefault(); return; }
-  gesture = null; dragged.value = row; resizeEdge.value = edge;
+  nativeDragging.value = true; gesture = null; dragged.value = row; resizeEdge.value = edge;
   event.dataTransfer?.setData(CALENDAR_DRAG_TYPE, row.id);
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
 }
@@ -75,7 +79,7 @@ async function drop(event: DragEvent, day: string | null, hour?: number) {
   event.preventDefault(); event.stopPropagation(); reset();
   if (write && online.value && !props.pending) { try { await props.save(row, write); } catch { /* parent shows error and rolls back */ } }
 }
-function reset() { dragged.value = null; resizeEdge.value = null; over.value = undefined; }
+function reset() { nativeDragging.value = false; dragged.value = null; resizeEdge.value = null; over.value = undefined; }
 let gesture: { row: CalendarEvent; edge: "start" | "end" | null; x: number; y: number; moved: boolean } | null = null;
 function pointerdown(event: PointerEvent, row: CalendarEvent, edge: "start" | "end" | null = null) {
   if (event.button !== 0 || event.pointerType === "touch" || !movable(row)) return;
@@ -88,6 +92,8 @@ function pointermove(event: PointerEvent) {
   if (cell && root.value?.contains(cell)) over.value = cell.dataset.calendarTarget || null;
 }
 function pointerup(event: PointerEvent) {
+  // Native HTML drag dispatches pointercancel at dragstart; it owns drop/end.
+  if (nativeDragging.value) return;
   const row = gesture?.row;
   const moved = gesture?.moved;
   const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-calendar-target]");
@@ -126,7 +132,7 @@ onBeforeUnmount(() => { window.removeEventListener("online", reconnect); window.
         <UButton icon="i-lucide-chevron-right" color="neutral" variant="ghost" :aria-label="t('cal.nextMonth')" @click="shift(1)" />
         <input type="month" class="collection-select w-36" aria-label="Calendar month" :value="month" @change="select(($event.target as HTMLInputElement).value + '-01')" />
       </div>
-      <p v-if="!online || refreshing || pending" role="status" class="w-full text-sm text-muted">{{ !online ? 'Offline · unsaved drafts stay in this open editor; reconnect to save' : pending ? t('gantt.bar.saving') : 'Reconnecting · refreshing from server' }}</p>
+      <p v-if="!online || refreshing || pending" role="status" class="w-full text-sm text-muted">{{ !online ? 'Offline · unsaved drafts stay in this open editor; reconnect to save' : pending ? t('gantt.bar.saving') : 'Refreshing from server' }}</p>
     </header>
     <div class="flex min-w-0">
       <aside class="calendar-sidebar w-52 shrink-0 flex-col gap-3 border-e border-default p-3" :class="sidebar ? 'flex' : 'hidden lg:flex'">
@@ -142,7 +148,7 @@ onBeforeUnmount(() => { window.removeEventListener("online", reconnect); window.
             <button type="button" class="collection-calendar__day" :aria-label="`${cell.date} · ${t('collection.count', { count: counts.get(cell.date) ?? 0 })}`" :data-today="cell.date === today ? true : undefined" @click="list(cell.date)">{{ Number(cell.date.slice(8)) }}</button>
             <div v-for="event in eventsAt(cell.date)" :key="event.id" class="calendar-event-wrap">
               <button type="button" data-event class="calendar-chip" :class="event.timed ? 'calendar-chip--timed' : ''" :data-testid="`collection-preview-${event.displayId}`" :draggable="movable(event)" :aria-busy="pending || undefined" @dragstart="start($event, event)" @pointerdown="pointerdown($event, event)" @click.stop="open(event, $event)"><span class="truncate">{{ event.title }}</span><time v-if="event.timed" class="text-muted">{{ event.local.slice(11) }}</time></button>
-              <span v-if="resizable(event, dateBy)" class="calendar-range text-muted">{{ event.startDate }} ~ {{ event.dueDate }}<button v-for="edge in (['start', 'end'] as const)" :key="edge" type="button" :aria-label="`Resize ${edge} · ${event.title}`" :disabled="!movable(event)" :draggable="movable(event)" @dragstart.stop="start($event, event, edge)" @pointerdown.stop="pointerdown($event, event, edge)" @click="open(event, $event)">{{ edge === 'start' ? '↤' : '↦' }}</button></span>
+              <span v-if="resizable(event, dateBy)" class="calendar-range text-muted">{{ event.startDate }} ~ {{ event.dueDate }}<button v-for="edge in (['start', 'end'] as const)" :key="edge" type="button" :aria-label="`Resize ${edge} · ${event.title}`" :disabled="!movable(event)" :draggable="movable(event)" @dragstart.stop="start($event, event, edge)" @pointerdown.stop="pointerdown($event, event, edge)" @click="open(event, $event, edge)">{{ edge === 'start' ? '↤' : '↦' }}</button></span>
             </div>
             <button v-if="(counts.get(cell.date) ?? 0) > eventsAt(cell.date).length" type="button" class="text-xs text-muted" @click="list(cell.date)">{{ t('collection.more', { count: (counts.get(cell.date) ?? 0) - eventsAt(cell.date).length }) }}</button>
           </td></tr></tbody>
@@ -159,7 +165,7 @@ onBeforeUnmount(() => { window.removeEventListener("online", reconnect); window.
     <!-- Stable host: refetch and moving a chip cannot discard the editor's draft. -->
     <UPopover :reference="popoverReference" :open="editorOpen" :ui="{ content: 'p-0' }" @update:open="editorOpen = $event">
       <button v-if="editor" type="button" class="sr-only" aria-label="Selected calendar event">{{ editor.title }}</button>
-      <template #content><CalendarEventEditor v-if="editor" :key="editor.id" :event="editor" :date-by="dateBy" :fields="fields" :zone="zone" :slug="slug" :pending="pending" :online="online" :save="save" @close="editorOpen = false" @reload="reloadEditor" /></template>
+      <template #content><CalendarEventEditor v-if="editorEvent" :key="`${editorEvent.id}-${editorBasis}`" :event="editorEvent" :date-by="editorBasis" :fields="fields" :zone="zone" :slug="slug" :pending="pending" :online="online" :save="save" @close="editorOpen = false" @reload="reloadEditor" /></template>
     </UPopover>
   </div>
 </template>

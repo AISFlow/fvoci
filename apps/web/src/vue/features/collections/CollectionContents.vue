@@ -622,7 +622,7 @@ const emptyCount = computed(() => (groupedBoard.value ? (rows.data.value?.count 
     <p v-if="moveError" role="alert" class="text-sm text-error">{{ moveError }}</p>
 
     <div v-if="type === 'calendar' && config.dateBy" @dragover="externalCalendarOver" @drop="externalCalendarDrop" @dragleave="onDateDragLeave">
-      <CollectionCalendar :month="effectiveMonth" :date-by="config.dateBy" :fields="active" :previews="calendarPreviews" :counts="dayCounts" :zone="timeZone" :week-starts-on="weekStartsOn" :slug="slug" :pending="moving" :refreshing="rows.isFetching.value" :save="saveCalendarDate"
+      <CollectionCalendar :month="effectiveMonth" :date-by="config.dateBy" :fields="active" :previews="calendarPreviews" :counts="dayCounts" :zone="timeZone" :week-starts-on="weekStartsOn" :slug="slug" :pending="moving" :refreshing="rows.isFetching.value" :can-edit="rows.data.value?.canEdit !== false" :save="saveCalendarDate"
         @month="month = $event; day = undefined; cursor = undefined" @day="day = day === $event ? undefined : $event; cursor = undefined" @range="visibleRange = $event" @reconnect="refresh" />
     </div>
 
