@@ -5,6 +5,8 @@ import UInput from "@nuxt/ui/components/Input.vue";
 import { useQuery } from "@tanstack/vue-query";
 import { computed, ref, watch, onScopeDispose } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { documentTagPoolQuery } from "@/lib/queries/collections";
+import { parseSearchTagPrefix } from "../features/search/search-tag";
 import { projectsQuery } from "@/features/projects/queries";
 import { api, ensureOk, loadErrorMessage } from "@/lib/api";
 import { searchPath } from "@/lib/href";
@@ -64,10 +66,18 @@ const nextCursor = ref<string | undefined>(undefined);
 const loadingMore = ref(false);
 const moreError = ref<string | null>(null);
 
-const page = useQuery(() => searchQuery(workspaceId.value, q.value, tab.value, projectId.value));
+const tags = useQuery(() => documentTagPoolQuery(workspaceId.value));
+const tagPrefix = computed(() => /^tag:\S+/i.test(q.value.trim()));
+const parsed = computed(() => parseSearchTagPrefix(q.value, tags.data.value?.items ?? []));
+const tagPoolPending = computed(() => tagPrefix.value && tags.isLoading.value);
+const tagPoolError = computed(() => tagPrefix.value && tags.isError.value);
+const page = useQuery(() => ({
+  ...searchQuery(workspaceId.value, parsed.value.q, tab.value, projectId.value, undefined, "lexical", { tag: parsed.value.tag }),
+  enabled: Boolean(workspaceId.value) && parsed.value.q.trim().length > 0 && (!tagPrefix.value || tags.isSuccess.value),
+}));
 
 watch(
-  [workspaceId, q, tab, projectId, () => page.data.value],
+  [workspaceId, q, tab, projectId, parsed, () => page.data.value],
   () => {
     pageGeneration++;
     loadingMore.value = false;
@@ -117,10 +127,11 @@ async function loadMore(): Promise<void> {
         params: {
           path: { workspace_id: current.id },
           query: {
-            q: q.value,
+            q: parsed.value.q,
             type: tab.value,
             cursor,
             ...(projectId.value ? { projectId: projectId.value } : {}),
+            ...(parsed.value.tag ? { tag: parsed.value.tag } : {}),
           },
         },
       }),
@@ -184,13 +195,14 @@ async function loadMore(): Promise<void> {
         </button>
       </div>
       <p v-if="!q" class="search-page__status">{{ t("search.hint") }}</p>
-      <QueryLoading v-if="q && page.isLoading.value" />
+      <QueryLoading v-if="q && (page.isLoading.value || tagPoolPending)" />
+      <QueryError v-if="tagPoolError" :message="loadErrorMessage(tags.error.value)" @retry="() => void tags.refetch()" />
       <QueryError
         v-if="q && page.isError.value"
         :message="loadErrorMessage(page.error.value)"
         @retry="() => void page.refetch()"
       />
-      <p v-if="q && !page.isLoading.value && !page.isError.value && items.length === 0" class="search-page__status">
+      <p v-if="q && !tagPoolPending && !tagPoolError && !page.isLoading.value && !page.isError.value && items.length === 0" class="search-page__status">
         {{ t("search.empty") }}
       </p>
       <SearchResultList v-if="items.length > 0" :slug="slug" :items="items" labelled-by="search-page-title" />

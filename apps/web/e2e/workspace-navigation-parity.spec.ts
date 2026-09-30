@@ -176,3 +176,25 @@ test("wiki tag URLs include child-only matches and project documents; unfiltered
   await page.goto("/w/parity/wiki?tag=malformed");
   await expect(page.getByRole("alert")).toBeVisible();
 });
+
+test("source tag:name search filters documents and leaves task hits in the real API", async ({ page }) => {
+  await login(page, owner.email, owner.password);
+  const tag = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/document-tags`)).json()).items.find((tag: { name: string }) => tag.name === "Planning");
+  expect(tag).toBeTruthy();
+  const created = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`, { data: { title: "Tagged task" } });
+  expect(created.status()).toBe(201);
+  await expect.poll(async () => {
+    const result = await page.request.get(`/api/v1/workspaces/${workspaceId}/search?q=Tagged&type=all&tag=${tag.id}`);
+    expect(result.ok()).toBe(true);
+    return (await result.json()).items.map((item: { title: string }) => item.title).sort();
+  }).toEqual(["Tagged child", "Tagged project child", "Tagged task"]);
+  await page.goto("/w/parity/search?q=tag%3Aplanning%20Tagged");
+  await expect(page.getByRole("link", { name: /Tagged child/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Tagged task/ })).toBeVisible();
+  await page.getByRole("tab", { name: "댓글", exact: true }).click();
+  await expect(page.getByText("결과가 없습니다", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "태스크", exact: true }).click();
+  await expect(page.getByRole("link", { name: /Tagged task/ })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("link", { name: /Tagged task/ })).toBeVisible();
+});
