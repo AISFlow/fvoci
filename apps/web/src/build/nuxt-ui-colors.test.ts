@@ -9,7 +9,7 @@ type HeadInput = { style: { innerHTML: { value: string } }[] };
 
 let current: NuxtUiColorConfig | undefined;
 let head: HeadInput | undefined;
-mock.module("#imports", () => ({
+await mock.module("#imports", () => ({
   defineNuxtPlugin: (plugin: () => void) => plugin,
   useAppConfig: () => ({ ui: current }),
   // Not hydrating: the plugin only registers the head entry.
