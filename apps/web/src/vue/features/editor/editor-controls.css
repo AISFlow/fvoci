@@ -1,3 +1,5 @@
+@import "../../../../../../packages/editor/src/vue/chrome/editor-template.css";
+
 /* The Vue editing controls (EditorControls.vue). The shared editor
    stylesheet (@fvoci/editor/styles.css) styles the gutter, the table
    handles, the mobile toolbar and the code chrome as in the React host;

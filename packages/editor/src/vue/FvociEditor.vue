@@ -22,7 +22,6 @@ import type { EntityResolver } from "../entities.js";
 import { overlayOwner } from "../overlay-owner.js";
 import { selectAllEscape, selectAllStep } from "../table-actions.js";
 import AttachmentBlock from "./AttachmentBlock.vue";
-import "./chrome/editor-template.css";
 import type { GutterBlock, GutterHandle } from "./block-gutter.js";
 import {
   attachmentBridgeKey,
