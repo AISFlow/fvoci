@@ -3,6 +3,9 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery } from "@tanstack/vue-query";
 import { computed } from "vue";
+import { useRouter } from "vue-router";
+import AppLink from "./AppLink.vue";
+import { followAppHref } from "../session/navigation";
 import { landingPath, type WorkspaceNav } from "@/features/workspace/workspace-nav";
 import {
   myTasksPath,
@@ -34,6 +37,7 @@ const props = withDefaults(
   { active: "projects" },
 );
 
+const router = useRouter();
 const workspaces = useQuery(workspacesQuery);
 const items = computed(() => workspaces.data.value?.items ?? []);
 const { error: logoutError, logout } = useLogout();
@@ -42,7 +46,7 @@ usePushSessionRebind(() => props.workspaceId);
 function onSwitch(event: Event): void {
   const select = event.target as HTMLSelectElement;
   const next = items.value.find((item) => item.id === select.value);
-  if (next) window.location.assign(landingPath(next.slug, props.active));
+  if (next) followAppHref(landingPath(next.slug, props.active), router);
   // Keep the current workspace selected until the next page actually loads.
   select.value = props.workspaceId;
 }
@@ -55,29 +59,29 @@ function onSwitch(event: Event): void {
     </div>
     <header class="relative flex flex-wrap items-center justify-between gap-3 border-b border-default px-4 py-3">
       <div class="flex flex-wrap items-center gap-4">
-        <a href="/" class="underline underline-offset-2">{{ t("nav.backHome") }}</a>
+        <AppLink to="/" class="underline underline-offset-2">{{ t("nav.backHome") }}</AppLink>
         <nav class="flex flex-wrap items-center gap-3" :aria-label="t('nav.workspace')">
-          <a :href="workspaceHomePath(slug)" :aria-current="active === 'home' ? 'page' : undefined">{{ t("nav.home") }}</a>
+          <AppLink :to="workspaceHomePath(slug)" :aria-current="active === 'home' ? 'page' : undefined">{{ t("nav.home") }}</AppLink>
           <a
-            :href="wikiPath(slug)"
+            :to="wikiPath(slug)"
             :class="active === 'wiki' ? 'font-medium text-highlighted' : undefined"
             :aria-current="active === 'wiki' ? 'page' : undefined"
             >{{ t("nav.wiki") }}</a
           >
           <a
-            :href="projectsPath(slug)"
+            :to="projectsPath(slug)"
             :class="active === 'projects' ? 'font-medium text-highlighted' : undefined"
             :aria-current="active === 'projects' ? 'page' : undefined"
             >{{ t("nav.projects") }}</a
           >
           <a
-            :href="myTasksPath(slug)"
+            :to="myTasksPath(slug)"
             :class="active === 'myTasks' ? 'font-medium text-highlighted' : undefined"
             :aria-current="active === 'myTasks' ? 'page' : undefined"
             >{{ t("task.mine") }}</a
           >
-          <a :href="searchPath(slug)" :aria-current="active === 'search' ? 'page' : undefined">{{ t("nav.search") }}</a>
-          <a :href="settingsPath(slug)" :aria-current="active === 'settings' ? 'page' : undefined">{{ t("nav.settings") }}</a>
+          <AppLink :to="searchPath(slug)" :aria-current="active === 'search' ? 'page' : undefined">{{ t("nav.search") }}</AppLink>
+          <AppLink :to="settingsPath(slug)" :aria-current="active === 'settings' ? 'page' : undefined">{{ t("nav.settings") }}</AppLink>
         </nav>
       </div>
       <div class="flex flex-wrap items-center gap-3">
@@ -95,9 +99,9 @@ function onSwitch(event: Event): void {
         <span v-else class="font-medium" data-slot="workspace-name">{{ workspaceName }}</span>
         <SearchPalette :slug="slug" :workspace-id="workspaceId" />
         <NotificationBell :slug="slug" :workspace-id="workspaceId" />
-        <a href="/settings/account" class="underline underline-offset-2">
+        <AppLink to="/settings/account" class="underline underline-offset-2">
           {{ t("settings.account") }}
-        </a>
+        </AppLink>
         <UButton size="sm" variant="outline" color="neutral" @click="logout">{{ t("nav.logout") }}</UButton>
       </div>
     </header>

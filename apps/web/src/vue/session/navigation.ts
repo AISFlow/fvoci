@@ -11,7 +11,7 @@ export function redirectTo(path: string): void {
 
 /** A live Vue-app path stays in this app; any other href is a full page load. */
 export function followAppHref(href: string, router: Router): void {
-  if (isVueAppPath(href)) void router.push(href);
+  if (isVueAppPath(href.split(/[?#]/, 1)[0] ?? "")) void router.push(href);
   else window.location.assign(href);
 }
 
