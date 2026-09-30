@@ -90,6 +90,21 @@ export default defineConfig(
     },
   },
   {
+    // Exact Bun development-oracle exports; the browser never imports these.
+    // Buffer is their byte contract. Every other Node/Bun global stays banned.
+    files: ["packages/editor/src/export/docx.ts", "packages/editor/src/export/pptx.ts"],
+    languageOptions: { globals: { Buffer: "readonly" } },
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        {
+          globals: nodeRuntimeGlobals.filter((name) => name !== "Buffer"),
+          checkGlobalObject: true,
+        },
+      ],
+    },
+  },
+  {
     files: ["apps/web/src/features/attachments/{hwp,pptx,xlsx}-worker.ts", "apps/web/public/sw.js"],
     languageOptions: { globals: globals.worker },
     rules: {

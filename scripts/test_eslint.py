@@ -227,6 +227,36 @@ window.Bun.version, self.Bun.version];'''
                 self.assertEqual(len(restricted), 6, report)
                 self.assertTrue(all(m["severity"] == 2 for m in restricted))
 
+    def test_exact_development_export_buffer_contract(self):
+        for path in ["packages/editor/src/export/docx.ts", "packages/editor/src/export/pptx.ts"]:
+            with self.subTest(path=path):
+                args = [*ESLINT, "--stdin", "--stdin-filename", path,
+                        "--max-warnings=0", "--format=json"]
+                positive = 'export const bytes = Buffer.from("oracle", "utf8");'
+                valid = run(args, input=positive)
+                self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+                config = json.loads(run([*ESLINT, "--print-config", path]).stdout)
+                self.assertEqual(config["languageOptions"]["globals"]["Buffer"], "readonly")
+                names = {"Bun", "process", "require", "__dirname", "__filename",
+                         "module", "exports", "setImmediate", "clearImmediate"}
+                self.assertEqual(set(config["rules"]["no-restricted-globals"][1]["globals"]), names)
+                negative = 'export const forbidden = [process.pid, Bun.version, globalThis.process.pid, globalThis.Bun.version];'
+                invalid = run(args, input=negative)
+                report = json.loads(invalid.stdout)
+                self.assertNotEqual(invalid.returncode, 0, report)
+                self.assertEqual(sum(f["fatalErrorCount"] for f in report), 0, report)
+                restricted = [m for f in report for m in f["messages"]
+                              if m["ruleId"] == "no-restricted-globals"]
+                self.assertEqual(len(restricted), 4, report)
+        for path in ["packages/editor/src/json.ts", "packages/editor/src/export/limits.ts",
+                     "apps/web/src/features/attachments/hwp-worker.ts", "packages/i18n/src/index.ts"]:
+            with self.subTest(browser_path=path):
+                result = run([*ESLINT, "--stdin", "--stdin-filename", path,
+                              "--max-warnings=0", "--format=json"], input='export const bytes = Buffer.alloc(0);')
+                report = json.loads(result.stdout)
+                self.assertNotEqual(result.returncode, 0, report)
+                self.assertIn("no-restricted-globals", {m["ruleId"] for f in report for m in f["messages"]}, report)
+
     def test_bun_development_types_and_runtime(self):
         source = '''import assert from "node:assert/strict";
 import { mock, test } from "bun:test";
