@@ -3,6 +3,7 @@ import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { Editor, MappablePosition } from "@tiptap/core";
 import { AllSelection, type EditorState, TextSelection } from "@tiptap/pm/state";
 import { CellSelection } from "@tiptap/pm/tables";
+import type { EditorView } from "@tiptap/pm/view";
 import BubbleMenu from "@tiptap/extension-bubble-menu";
 import DragHandle from "@tiptap/extension-drag-handle";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
@@ -173,8 +174,32 @@ const editor = useEditor({
         ]
       : []),
   ],
-  editorProps: createFvociEditorProps(props.ariaLabel),
+  editorProps: {
+    ...createFvociEditorProps(props.ariaLabel),
+    handleClick: settleNativeTextClick,
+  },
 });
+
+/* A native click places the DOM caret before selectionchange records it in PM.
+ * A remote Yjs update in that gap restores PM's previous selection over the
+ * clicked caret. Record an ordinary collapsed text click at PM's mouseup
+ * boundary, before a subsequent remote update can snapshot the old position.
+ * Returning false leaves native click handling and other plugins in control;
+ * this changes only the selection, using PM's pointer transaction semantics. */
+function settleNativeTextClick(view: EditorView, pos: number, event: MouseEvent): boolean {
+  if (!view.editable || view.composing || !view.hasFocus() || event.button !== 0 ||
+      event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return false;
+  const native = view.dom.ownerDocument.getSelection();
+  if (!native?.isCollapsed || !native.anchorNode || !view.dom.contains(native.anchorNode)) return false;
+  if (event.target instanceof Element && event.target.closest('[contenteditable="false"]')) return false;
+  const $pos = view.state.doc.resolve(pos);
+  if (!$pos.parent.isTextblock) return false;
+  const selection = TextSelection.create(view.state.doc, pos);
+  if (!view.state.selection.eq(selection)) {
+    view.dispatch(view.state.tr.setSelection(selection).setMeta("pointer", true));
+  }
+  return false;
+}
 
 watch(
   () => props.editable,

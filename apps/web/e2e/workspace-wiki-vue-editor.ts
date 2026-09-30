@@ -42,6 +42,7 @@ export function watchIconRequests(page: Page): string[] {
 /** First run of the group: the setup form creates the admin and the workspace
  * (true); later runs sign in (false). */
 export async function ensureSetup(page: Page): Promise<boolean> {
+  let created = false;
   await page.goto("/");
   await expect(
     page
@@ -57,16 +58,18 @@ export async function ensureSetup(page: Page): Promise<boolean> {
     await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
-    await expect(page).toHaveURL(/\/$/);
-    return true;
-  }
-  if (
+    created = true;
+  } else if (
     page.url().includes("/login") ||
     (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
   ) {
     await login(page, admin.email, admin.password);
   }
-  return false;
+  // Setup starts at '/', then may cross Vue /login before returning home.
+  // Do not close the setup context until authenticated home has rendered.
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+  return created;
 }
 
 /** The instance, its admin and a workspace member, made on the group's
