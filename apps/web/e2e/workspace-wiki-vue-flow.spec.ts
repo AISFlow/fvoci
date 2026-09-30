@@ -495,6 +495,71 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
   }
 });
 
+test("a peer's change to the same inline math preserves the focused draft until commit", async ({ browser, baseURL }) => {
+  const a = await newSignedInPage(browser, baseURL, admin);
+  const b = await newSignedInPage(browser, baseURL, member);
+  try {
+    const wsId = await workspaceId(a.page.request);
+    const doc = await createDoc(a.page.request, wsId, "인라인 수식 초안", "앞 $x$ 뒤 $q$\n\n끝\n");
+    await openDoc(a.page, doc.path);
+    await openDoc(b.page, doc.path);
+    await a.page.locator("button.afn-math-inline").first().click();
+    const draft = a.page.getByLabel("수식 LaTeX");
+    await draft.fill("a+b");
+    for (const remote of ["y", "z"]) {
+      await b.page.locator("button.afn-math-inline").first().click();
+      await b.page.getByLabel("수식 LaTeX").fill(remote);
+      await b.page.getByLabel("수식 LaTeX").press("Enter");
+      await expect(b.page.locator(".afn-math-inline annotation").first()).toHaveText(remote);
+      // Changing text before the atom shifts its position and its left boundary.
+      await caretAtEndOf(b.page, 0);
+      await b.page.keyboard.press("Home");
+      await b.page.keyboard.type(remote);
+      // The subsequent text travels on the same socket after the math update.
+      await caretAtEndOf(b.page, 1);
+      await b.page.keyboard.type(remote);
+      await expect.poll(async () => (await blockTexts(a.page))[1]).toBe(remote === "y" ? "끝y" : "끝yz");
+      await expect(draft).toBeFocused();
+      await expect(draft).toHaveValue("a+b");
+    }
+    await draft.press("Enter");
+    await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("a+b");
+    await expect(b.page.locator(".afn-math-inline annotation").first()).toHaveText("a+b");
+    await expect(a.page.locator(".afn-math-inline annotation").last()).toHaveText("q");
+    await save(a.page);
+    expect(await bodyJson(a.page.request, wsId, doc.id)).toContain('"latex":"a+b"');
+    await a.page.reload();
+    await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("a+b");
+
+    // Deletion and insertion at the very same position are a different atom.
+    await a.page.locator("button.afn-math-inline").first().click();
+    await draft.fill("must-not-resurrect");
+    const removedAt = await editorOf(b.page).evaluate((root) => {
+      const view = (root as HTMLElement & { editor: { view: EditorView } }).editor.view;
+      let pos = -1;
+      view.state.doc.descendants((node, at) => {
+        if (pos < 0 && node.type.name === "mathInline") pos = at;
+      });
+      if (pos < 0) throw new Error("inline math missing");
+      view.dispatch(view.state.tr.delete(pos, pos + 1));
+      return pos;
+    });
+    await expect(draft).toHaveCount(0);
+    await expect(a.page.locator(".afn-math-inline annotation")).toHaveText(["q"]);
+    await editorOf(b.page).evaluate((root, pos) => {
+      const view = (root as HTMLElement & { editor: { view: EditorView } }).editor.view;
+      view.dispatch(view.state.tr.insert(pos, view.state.schema.nodes.mathInline!.create({ latex: "replacement" })));
+    }, removedAt);
+    await expect(a.page.locator(".afn-math-inline annotation").first()).toHaveText("replacement");
+    await expect(draft).toHaveCount(0);
+    await save(a.page);
+    expect(await bodyJson(a.page.request, wsId, doc.id)).not.toContain("must-not-resurrect");
+  } finally {
+    await a.context.close();
+    await b.context.close();
+  }
+});
+
 test("Korean composition survives a concurrent remote edit, then undoes and redoes", async ({
   browser,
   baseURL,
