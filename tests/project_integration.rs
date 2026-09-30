@@ -103,7 +103,8 @@ async fn wiki_subtree_move_renumbers_affiliation_atomically() {
     .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert_eq!(body["projectId"], project_id.to_string());
-    let moved: Vec<(Uuid, Option<Uuid>, Option<Uuid>, i32, String)> = sqlx::query_as(
+    type MovedDocumentRow = (Uuid, Option<Uuid>, Option<Uuid>, i32, String);
+    let moved: Vec<MovedDocumentRow> = sqlx::query_as(
         "SELECT id, project_id, parent_id, number, path FROM fvoci.documents WHERE workspace_id=$1 AND id=ANY($2) ORDER BY number"
     ).bind(ws).bind(docs[..3].iter().map(|id| id.parse::<Uuid>().unwrap()).collect::<Vec<_>>())
         .fetch_all(&admin).await.unwrap();
