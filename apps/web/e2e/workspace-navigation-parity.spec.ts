@@ -177,17 +177,28 @@ test("wiki tag URLs include child-only matches and project documents; unfiltered
   await expect(page.getByRole("alert")).toBeVisible();
 });
 
-test("source tag:name search filters documents and leaves task hits in the real API", async ({ page }) => {
+test("source tag:name search filters documents and leaves task hits in the real API", async ({ page }, testInfo) => {
   await login(page, owner.email, owner.password);
   const tag = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/document-tags`)).json()).items.find((tag: { name: string }) => tag.name === "Planning");
   expect(tag).toBeTruthy();
   const created = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`, { data: { title: "Tagged task" } });
   expect(created.status()).toBe(201);
-  await expect.poll(async () => {
-    const result = await page.request.get(`/api/v1/workspaces/${workspaceId}/search?q=Tagged&type=all&tag=${tag.id}`);
-    expect(result.ok()).toBe(true);
-    return (await result.json()).items.map((item: { title: string }) => item.title).sort();
-  }).toEqual(["Tagged child", "Tagged project child", "Tagged task"]);
+  const samples: unknown[] = [];
+  try {
+    await expect.poll(async () => {
+      const responses = await Promise.all([
+        page.request.get(`/api/v1/workspaces/${workspaceId}/search?q=Tagged&type=all&tag=${tag.id}`),
+        page.request.get(`/api/v1/workspaces/${workspaceId}/search?q=Tagged&type=all`),
+        page.request.get(`/api/v1/workspaces/${workspaceId}/search?q=Tagged&type=task`),
+      ]);
+      for (const response of responses) expect(response.ok()).toBe(true);
+      const [tagged, untagged, taskOnly] = await Promise.all(responses.map(response => response.json()));
+      samples.push({ at: new Date().toISOString(), tagged, untagged, taskOnly });
+      return tagged.items.map((item: { title: string }) => item.title).sort();
+    }).toEqual(["Tagged child", "Tagged project child", "Tagged task"]);
+  } finally {
+    await testInfo.attach("real-tag-and-untagged-recall", { body: JSON.stringify({ createdTask: await created.json(), workspaceId, project, tag, samples }, null, 2), contentType: "application/json" });
+  }
   await page.goto("/w/parity/search?q=tag%3Aplanning%20Tagged");
   await expect(page.getByRole("link", { name: /Tagged child/ })).toBeVisible();
   await expect(page.getByRole("link", { name: /Tagged task/ })).toBeVisible();
