@@ -72,15 +72,37 @@ test("home and public pages boot Vue with real persisted workspaces, legal versi
     await expect(publicPage.getByLabel("이메일")).toBeVisible();
     await publicPage.reload();
     await expect(publicPage.getByLabel("이메일")).toBeVisible();
+    await publicPage.goto("/settings/legal");
+    await expect(publicPage).toHaveURL(/\/login(?:\?|$)/);
+    await expect(publicPage.getByLabel("이메일")).toBeVisible();
+    await expect(publicPage.getByLabel("본문(마크다운)")).toHaveCount(0);
   } finally {
     await anonymous.close();
   }
 
   await page.goto("/settings/legal");
   await expect(page.getByRole("heading", { name: "법적 문서 관리" })).toBeVisible();
-  expect(await page.locator("#root").evaluate((root) => "__vue_app__" in root)).toBe(false);
+  await expectVue(page);
+  await expect(page.getByRole("list", { name: "현재 발행본" })).toContainText("공개 약관 2");
+  await page.getByLabel("법적 문서 제목").fill("공개 약관 3");
+  await page.getByLabel("본문(마크다운)").fill("## 조항 3\n\n관리자가 발행한 약관.");
+  await page.getByLabel("발효일").fill("2026-01-01");
+  await page.getByLabel("필수 법적 문서").uncheck();
+  const publication = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/v1/admin/legal" && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "발행", exact: true }).click();
+  expect((await publication).status()).toBe(201);
+  await expect(page.getByRole("status").filter({ hasText: "발행되었습니다." })).toBeVisible();
+  await expect(page.getByRole("list", { name: "현재 발행본" })).toContainText("v3");
+  await page.reload();
+  await expectVue(page);
+  await expect(page.getByRole("list", { name: "현재 발행본" })).toContainText("공개 약관 3");
   await page.goto("/");
   await page.locator("footer").getByRole("link", { name: "이용약관" }).click();
+  await expect(page.getByRole("heading", { name: "공개 약관 3", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: /^v2/ }).click();
+  await expect(page).toHaveURL(/\/legal\/terms\?version=2$/);
   await expect(page.getByRole("heading", { name: "공개 약관 2", exact: true })).toBeVisible();
   await expectVue(page);
 });
