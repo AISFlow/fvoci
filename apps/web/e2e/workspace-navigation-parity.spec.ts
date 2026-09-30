@@ -25,8 +25,8 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
   project = await created.json();
   const labels = [];
   for (let index = 0; index < 3; index++) {
-    const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/labels`, { data: { name: `Label ${index}`, color: "#0284c7" } });
-    expect(response.status()).toBe(201);
+    const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${project.id}/labels`, { data: { name: `Label ${index}`, color: "blue" } });
+    expect(response.status(), await response.text()).toBe(201);
     labels.push((await response.json()).id);
   }
   // Reverse insertion order witnesses the actual server due-date ordering and limit.
