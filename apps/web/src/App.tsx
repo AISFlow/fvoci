@@ -11,7 +11,6 @@ import {
 } from "react-router-dom";
 import { isVueAppPath } from "@/app-boundary";
 import { SetupGuard } from "@/components/setup-guard";
-import { SetupPage } from "@/pages/SetupPage";
 import { SearchPage } from "@/pages/SearchPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { ProjectTasksPage } from "@/pages/ProjectTasksPage";
@@ -27,7 +26,6 @@ import { MyTasksPage } from "@/pages/MyTasksPage";
 import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
 import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
 import { NotificationsPage } from "@/pages/NotificationsPage";
-import { InvitePage } from "@/pages/InvitePage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
 import { WorkspaceHomePage } from "@/pages/WorkspaceHomePage";
@@ -94,20 +92,11 @@ function lazyPage(load: () => Promise<ComponentType>, options: { setupGuard?: bo
 const router = createBrowserRouter(
   createRoutesFromElements(
     <>
-      <Route path="/setup" element={<SetupPage />} />
       {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
       <Route path="/s/:token" element={<PublicSharePage />} />
       <Route
         path="/s/:token/attachments/:attachmentId/view"
         {...lazyPage(() => import("@/pages/ShareAttachmentViewPage").then((m) => m.ShareAttachmentViewPage))}
-      />
-      <Route
-        path="/invite/:token"
-        element={
-          <SetupGuard>
-            <InvitePage />
-          </SetupGuard>
-        }
       />
       <Route
         path="/reset-password"

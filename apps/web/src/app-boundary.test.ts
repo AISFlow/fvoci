@@ -27,8 +27,35 @@ const SAMPLES = [
   "/login/",
   "/legal/terms",
   "/legal/privacy",
+  "/LEGAL/unknown",
+  "/legal/privacy/",
+  "/legal",
+  "/legal/",
+  "/legal//",
+  "/legals/terms",
+  "/legal/terms/extra",
   "/service-info",
   "/service-info/",
+  "/SERVICE-INFO/",
+  "/service-infos",
+  "/service-info/extra",
+  "/settings/legal",
+  "/settings/legal/",
+  "/SETTINGS/LEGAL",
+  "/invite/tok",
+  "/invite/tok/",
+  "/INVITE/abc-DEF",
+  "/invite",
+  "/invite/",
+  "/invite//",
+  "/invites/tok",
+  "/invite/tok/extra",
+  "/invite/a%2Fb",
+  "/setup",
+  "/setup/",
+  "/SETUP",
+  "/setup/extra",
+  "/setups",
   "/w/acme",
   "/w/acme/a/123/view",
   "/w/acme/WIKI-1",
@@ -82,6 +109,26 @@ test("the boot module sends /login, and only that path, to the Vue app", () => {
   assert.equal(isVueAppPath("/logins"), false);
 });
 
+test("the boot module sends exactly single-token invite paths to Vue", () => {
+  assert.equal(isVueAppPath("/invite/tok"), true);
+  assert.equal(isVueAppPath("/invite/tok/"), true);
+  assert.equal(isVueAppPath("/INVITE/tok"), true);
+  assert.equal(isVueAppPath("/invite/a%2Fb"), true);
+  assert.equal(isVueAppPath("/invite"), false);
+  assert.equal(isVueAppPath("/invite/"), false);
+  assert.equal(isVueAppPath("/invite//"), false);
+  assert.equal(isVueAppPath("/invite/tok/extra"), false);
+  assert.equal(isVueAppPath("/invites/tok"), false);
+});
+
+test("the boot module sends /setup, and only that path, to the Vue app", () => {
+  assert.equal(isVueAppPath("/setup"), true);
+  assert.equal(isVueAppPath("/setup/"), true);
+  assert.equal(isVueAppPath("/SETUP"), true);
+  assert.equal(isVueAppPath("/setup/extra"), false);
+  assert.equal(isVueAppPath("/setups"), false);
+});
+
 test("every wiki path the boundary sends parses as the React app's wiki ref", () => {
   for (const path of SAMPLES) {
     // React Router matches /w/:slug in any case, as the boundary does.
@@ -90,7 +137,9 @@ test("every wiki path the boundary sends parses as the React app's wiki ref", ()
     const gantt = /\/gantt\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
     const homeOrPublic = path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
-    if (!gantt && !login && !homeOrPublic) assert.equal(isVueAppPath(path), wiki !== null, path);
+    const invite = /^\/invite\/[^/]+\/?$/i.test(path);
+    const setup = /^\/setup\/?$/i.test(path);
+    if (!gantt && !login && !homeOrPublic && !invite && !setup) assert.equal(isVueAppPath(path), wiki !== null, path);
   }
 });
 

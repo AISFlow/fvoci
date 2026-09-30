@@ -70,6 +70,12 @@
 	gap: 1.5rem;
 }
 
+.auth-shell__name-row {
+	display: grid;
+	grid-template-columns: 6rem minmax(0, 1fr);
+	gap: 0.75rem;
+}
+
 .auth-shell__field {
 	display: flex;
 	flex-direction: column;

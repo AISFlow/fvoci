@@ -9,7 +9,7 @@ const noticeShipped = import.meta.env.PROD;
 </script>
 
 <template>
-  <!-- /service-info and /legal/:kind are React pages: a full page load. -->
+  <!-- Public Vue pages use full loads to start with fresh queries. -->
   <footer class="auth-shell__footer">
     <a v-if="hasOperatorInfo(operator)" class="auth-shell__footer-link" href="/service-info">
       {{ t("operator.title") }}

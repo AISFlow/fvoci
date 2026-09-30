@@ -11,4 +11,6 @@ export const VUE_ROUTE_PATHS = {
   home: "/",
   legal: "/legal/:kind",
   serviceInfo: "/service-info",
+  invite: "/invite/:token",
+  setup: "/setup",
 } as const;
