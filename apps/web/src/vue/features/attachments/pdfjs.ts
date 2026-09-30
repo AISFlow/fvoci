@@ -8,12 +8,13 @@ let pdfJs: Promise<PdfJs> | null = null;
  * A failed load is not cached, so a retry loads again.
  */
 export function loadPdfJs(): Promise<PdfJs> {
-  pdfJs ??= Promise.all([import("pdfjs-dist"), import("pdfjs-dist/build/pdf.worker.min.mjs?url")]).then(
-    ([mod, worker]) => {
-      mod.GlobalWorkerOptions.workerSrc = worker.default;
-      return mod;
-    },
-  );
+  pdfJs ??= Promise.all([
+    import("pdfjs-dist"),
+    import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
+  ]).then(([mod, worker]) => {
+    mod.GlobalWorkerOptions.workerSrc = worker.default;
+    return mod;
+  });
   pdfJs.catch(() => {
     pdfJs = null;
   });

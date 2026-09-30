@@ -108,13 +108,16 @@ function copy(url: string): void {
 }
 
 function revokeRow(id: string): void {
-  if (!window.confirm(`${t("share.revoke.confirm.title")}\n${t("share.revoke.confirm.body")}`)) return;
+  if (!window.confirm(`${t("share.revoke.confirm.title")}\n${t("share.revoke.confirm.body")}`))
+    return;
   revoke.mutate(id);
 }
 </script>
 
 <template>
-  <UButton size="sm" variant="outline" color="neutral" @click="openDialog">{{ t("share.create") }}</UButton>
+  <UButton size="sm" variant="outline" color="neutral" @click="openDialog">{{
+    t("share.create")
+  }}</UButton>
   <NativeModal :open="open" :labelled-by="titleId" @close="close">
     <div class="share-dialog">
       <div>
@@ -131,10 +134,17 @@ function revokeRow(id: string): void {
             :disabled="!createEnabled || pending"
             @change="expiresInDays = Number(($event.target as HTMLSelectElement).value)"
           >
-            <option v-for="days in expiresOptions" :key="days" :value="String(days)">{{ expiresLabel(days) }}</option>
+            <option v-for="days in expiresOptions" :key="days" :value="String(days)">{{
+              expiresLabel(days)
+            }}</option>
           </select>
         </div>
-        <UButton size="sm" class="w-fit" :disabled="pending || !createEnabled" @click="create.mutate(selectedExpires)">
+        <UButton
+          size="sm"
+          class="w-fit"
+          :disabled="pending || !createEnabled"
+          @click="create.mutate(selectedExpires)"
+        >
           {{ t("share.create") }}
         </UButton>
         <!-- WHY: 공유 링크 원문은 생성 직후 한 번만 보여 준다. 목록은 id·만료만 둔다. -->
@@ -152,8 +162,13 @@ function revokeRow(id: string): void {
         <p v-if="error" class="share-dialog__alert" role="alert">{{ error }}</p>
       </section>
       <section class="share-dialog__stack">
-        <p v-if="list.isLoading.value" role="status" class="share-dialog__empty">{{ t("load.loading") }}</p>
-        <p v-if="!list.isLoading.value && !list.isError.value && links.length === 0" class="share-dialog__empty">
+        <p v-if="list.isLoading.value" role="status" class="share-dialog__empty">{{
+          t("load.loading")
+        }}</p>
+        <p
+          v-if="!list.isLoading.value && !list.isError.value && links.length === 0"
+          class="share-dialog__empty"
+        >
           {{ t("share.empty") }}
         </p>
         <table v-if="links.length > 0" class="share-dialog__table">
@@ -161,7 +176,9 @@ function revokeRow(id: string): void {
             <tr>
               <th scope="col">{{ t("share.document") }}</th>
               <th scope="col">{{ t("share.expires") }}</th>
-              <th scope="col"><span class="sr-only">{{ t("share.revoke") }}</span></th>
+              <th scope="col"
+                ><span class="sr-only">{{ t("share.revoke") }}</span></th
+              >
             </tr>
           </thead>
           <tbody>
@@ -169,7 +186,13 @@ function revokeRow(id: string): void {
               <td>{{ row.documentId ? t("share.document") : t("share.project") }}</td>
               <td>{{ formatShareDate(row.expiresAt) }}</td>
               <td class="text-right">
-                <UButton size="sm" variant="outline" color="error" :disabled="pending" @click="revokeRow(row.id)">
+                <UButton
+                  size="sm"
+                  variant="outline"
+                  color="error"
+                  :disabled="pending"
+                  @click="revokeRow(row.id)"
+                >
                   {{ t("share.revoke") }}
                 </UButton>
               </td>
@@ -178,7 +201,9 @@ function revokeRow(id: string): void {
         </table>
       </section>
       <div class="flex justify-end">
-        <UButton size="sm" variant="outline" color="neutral" @click="close">{{ t("common.dismiss") }}</UButton>
+        <UButton size="sm" variant="outline" color="neutral" @click="close">{{
+          t("common.dismiss")
+        }}</UButton>
       </div>
     </div>
   </NativeModal>

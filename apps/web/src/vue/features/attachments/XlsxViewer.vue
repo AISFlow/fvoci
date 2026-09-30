@@ -4,7 +4,11 @@ import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, ref, shallowRef } from "vue";
 import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, zoomIn, zoomOut } from "@/features/attachments/pdf-limits";
 import { downloadCapped, type ViewerPrefetch } from "@/features/attachments/viewer-download";
-import { openXlsxInWorker, XlsxWorkerError, type RemoteXlsxBook } from "@/features/attachments/xlsx-client";
+import {
+  openXlsxInWorker,
+  XlsxWorkerError,
+  type RemoteXlsxBook,
+} from "@/features/attachments/xlsx-client";
 import { XLSX_MAX_BYTES } from "@/features/attachments/xlsx-limits";
 import type { XlsxPage } from "@/features/attachments/xlsx-workbook";
 import { useEffectAfterRender } from "../../composables/useEffectAfterRender";
@@ -68,7 +72,11 @@ useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch]
         return;
       }
       if (body.status === "tooLarge") {
-        state.value = { status: "error", message: t("attachment.viewer.previewUnavailable"), retry: false };
+        state.value = {
+          status: "error",
+          message: t("attachment.viewer.previewUnavailable"),
+          retry: false,
+        };
         return;
       }
       const opened = await openXlsxInWorker(body.bytes, { signal: controller.signal });
@@ -82,7 +90,12 @@ useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch]
         let first: PageState | null = null;
         if (opened.book.sheets[0]?.kind === "worksheet") {
           try {
-            first = { sheetIndex: 0, rowPage: 0, colPage: 0, page: await opened.book.page(0, 0, 0) };
+            first = {
+              sheetIndex: 0,
+              rowPage: 0,
+              colPage: 0,
+              page: await opened.book.page(0, 0, 0),
+            };
           } catch (error) {
             if (alive) state.value = pageError(error);
             return;
@@ -92,7 +105,11 @@ useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch]
         shown.value = first;
         state.value = { status: "ready", book: opened.book };
       } else if (opened.status === "tooLarge") {
-        state.value = { status: "error", message: t("attachment.viewer.previewUnavailable"), retry: false };
+        state.value = {
+          status: "error",
+          message: t("attachment.viewer.previewUnavailable"),
+          retry: false,
+        };
       } else {
         state.value = { status: "error", message: t("load.failed"), retry: true };
       }
@@ -177,11 +194,19 @@ function showSheet(index: number): void {
       @zoom-out="zoom = zoomOut(zoom)"
       @reset="zoom = 1"
     >
-      <UButton size="sm" variant="outline" color="neutral" :disabled="sheetIndex <= 0" @click="showSheet(sheetIndex - 1)">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="sheetIndex <= 0"
+        @click="showSheet(sheetIndex - 1)"
+      >
         {{ t("attachment.viewer.prevSheet") }}
       </UButton>
       <p class="attachment-viewer__page-label" aria-live="polite">
-        {{ t("attachment.viewer.sheet") }}: {{ sheet.name }} ({{ sheetIndex + 1 }}/{{ sheets.length }})
+        {{ t("attachment.viewer.sheet") }}: {{ sheet.name }} ({{ sheetIndex + 1 }}/{{
+          sheets.length
+        }})
       </p>
       <UButton
         size="sm"

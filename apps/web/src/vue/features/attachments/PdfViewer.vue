@@ -58,12 +58,19 @@ useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch]
         return;
       }
       if (body.status === "tooLarge") {
-        state.value = { status: "error", message: t("attachment.viewer.previewUnavailable"), retry: false };
+        state.value = {
+          status: "error",
+          message: t("attachment.viewer.previewUnavailable"),
+          retry: false,
+        };
         return;
       }
       const pdfjs = await loadPdfJs();
       if (!alive) return;
-      const assets = new URL(`${import.meta.env.BASE_URL}${pdfjsAssetBase(pdfjs.version)}`, window.location.href).href;
+      const assets = new URL(
+        `${import.meta.env.BASE_URL}${pdfjsAssetBase(pdfjs.version)}`,
+        window.location.href,
+      ).href;
       task = pdfjs.getDocument({
         data: body.bytes,
         enableXfa: false,
@@ -153,7 +160,13 @@ function retry(): void {
       @zoom-out="zoom = zoomOut(zoom)"
       @reset="zoom = 1"
     >
-      <UButton size="sm" variant="outline" color="neutral" :disabled="page <= 1" @click="page = Math.max(1, page - 1)">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="page <= 1"
+        @click="page = Math.max(1, page - 1)"
+      >
         {{ t("attachment.viewer.prevPage") }}
       </UButton>
       <p class="attachment-viewer__page-label">
@@ -170,7 +183,11 @@ function retry(): void {
       </UButton>
     </ViewerZoomToolbar>
     <div class="attachment-viewer__page-wrap">
-      <canvas ref="canvas" class="attachment-viewer__pdf-canvas" :aria-label="t('attachment.viewer.pdf')" />
+      <canvas
+        ref="canvas"
+        class="attachment-viewer__pdf-canvas"
+        :aria-label="t('attachment.viewer.pdf')"
+      />
     </div>
   </div>
 </template>

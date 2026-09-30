@@ -26,8 +26,12 @@ const chunk = computed(() => {
 const query = useQuery(() => shareAttachmentQuery(token.value, attachmentId.value));
 const downloadUrl = computed(() => shareAttachmentDownloadUrl(token.value, attachmentId.value));
 
-const notFound = computed(() => query.error.value instanceof ProblemError && query.error.value.status === 404);
-const forbidden = computed(() => query.error.value instanceof ProblemError && query.error.value.status === 403);
+const notFound = computed(
+  () => query.error.value instanceof ProblemError && query.error.value.status === 404,
+);
+const forbidden = computed(
+  () => query.error.value instanceof ProblemError && query.error.value.status === 403,
+);
 const retryable = computed(
   () =>
     query.isError.value &&

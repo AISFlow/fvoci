@@ -168,7 +168,13 @@ function retry(): void {
       @zoom-out="zoom = zoomOut(zoom)"
       @reset="zoom = 1"
     >
-      <UButton size="sm" variant="outline" color="neutral" :disabled="page <= 0" @click="page = Math.max(0, page - 1)">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="page <= 0"
+        @click="page = Math.max(0, page - 1)"
+      >
         {{ t("attachment.viewer.prevPage") }}
       </UButton>
       <p class="attachment-viewer__page-label">

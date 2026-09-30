@@ -37,7 +37,8 @@ const officeKind = computed(() => {
   return current === "docx" || current === "pptx" || current === "xlsx" ? current : null;
 });
 const wantsOfficeSupplement = computed(
-  () => props.chunk !== undefined && props.previewHtmlUrl !== undefined && officeKind.value !== null,
+  () =>
+    props.chunk !== undefined && props.previewHtmlUrl !== undefined && officeKind.value !== null,
 );
 
 /**
@@ -47,12 +48,16 @@ const wantsOfficeSupplement = computed(
  * share view never calls `/instance` or `preview-html`, and the layout does
  * not wait for it.
  */
-const wantsHwpSupplement = computed(() => props.previewHtmlUrl !== undefined && props.chunk !== undefined);
+const wantsHwpSupplement = computed(
+  () => props.previewHtmlUrl !== undefined && props.chunk !== undefined,
+);
 const instance = useQuery(() => ({
   ...publicInstanceQuery,
   enabled: kind.value === "hwp" && wantsHwpSupplement.value,
 }));
-const hwpServerExtract = computed(() => instance.data.value?.values.attachmentPreview.mode === "server");
+const hwpServerExtract = computed(
+  () => instance.data.value?.values.attachmentPreview.mode === "server",
+);
 </script>
 
 <template>
@@ -73,15 +78,28 @@ const hwpServerExtract = computed(() => instance.data.value?.values.attachmentPr
         v-else-if="kind === 'download'"
         class="attachment-viewer__pane attachment-viewer__pane--center"
       >
-        <ViewerErrorPane :message="t('attachment.viewer.previewUnavailable')" :download-url="downloadUrl" />
+        <ViewerErrorPane
+          :message="t('attachment.viewer.previewUnavailable')"
+          :download-url="downloadUrl"
+        />
       </div>
       <div v-else-if="kind === 'image'" class="attachment-viewer__pane">
         <img class="attachment-viewer__image" :src="downloadUrl" :alt="name" />
       </div>
-      <LayoutLoader v-else-if="kind === 'pdf'" :key="downloadUrl" kind="pdf" :download-url="downloadUrl" />
+      <LayoutLoader
+        v-else-if="kind === 'pdf'"
+        :key="downloadUrl"
+        kind="pdf"
+        :download-url="downloadUrl"
+      />
       <template v-else-if="kind === 'hwp'">
         <SearchChunkSupplement
-          v-if="wantsHwpSupplement && hwpServerExtract && previewHtmlUrl !== undefined && chunk !== undefined"
+          v-if="
+            wantsHwpSupplement &&
+            hwpServerExtract &&
+            previewHtmlUrl !== undefined &&
+            chunk !== undefined
+          "
           :preview-html-url="previewHtmlUrl"
           :chunk="chunk"
         />
@@ -100,7 +118,11 @@ const hwpServerExtract = computed(() => instance.data.value?.values.attachmentPr
           :preview-html-url="previewHtmlUrl"
           :chunk="chunk"
         />
-        <LayoutLoader :key="`${officeKind}:${downloadUrl}`" :kind="officeKind" :download-url="downloadUrl" />
+        <LayoutLoader
+          :key="`${officeKind}:${downloadUrl}`"
+          :kind="officeKind"
+          :download-url="downloadUrl"
+        />
       </template>
       <TextBytesPane v-else :download-url="downloadUrl" :chunk="chunk" />
     </div>

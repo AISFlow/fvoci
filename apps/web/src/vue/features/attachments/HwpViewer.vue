@@ -3,7 +3,10 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import UInput from "@nuxt/ui/components/Input.vue";
 import { computed, nextTick, ref, shallowRef } from "vue";
-import { createEditedAttachmentBridge, editedCopyName } from "@/features/workspace/attachment-upload";
+import {
+  createEditedAttachmentBridge,
+  editedCopyName,
+} from "@/features/workspace/attachment-upload";
 import { HwpClientError, HwpDocumentClient } from "@/features/attachments/hwp-client";
 import { hwpExportFormat } from "@/features/attachments/hwp-edit";
 import { clampPage, HWP_MAX_BYTES } from "@/features/attachments/hwp-page";
@@ -122,7 +125,9 @@ useEffectAfterRender([() => props.downloadUrl, generation, () => props.prefetch]
       const module = await loadRhwpModule();
       if (!alive) return;
       // The signal terminates the worker mid-parse, before a client exists here.
-      const opened = await HwpDocumentClient.open(body.bytes, module, { signal: controller.signal });
+      const opened = await HwpDocumentClient.open(body.bytes, module, {
+        signal: controller.signal,
+      });
       if (!alive) {
         opened.client.close();
         return;
@@ -188,11 +193,14 @@ const chosen = computed(() => {
   return null;
 });
 // An edit may have shortened the document under the chosen page.
-const page = computed(() => (chosen.value === null ? null : clampPage(chosen.value, pageCount.value)));
+const page = computed(() =>
+  chosen.value === null ? null : clampPage(chosen.value, pageCount.value),
+);
 
 function go(next: number): void {
   const current = client.value;
-  if (current) nav.value = { client: current, chunk: props.chunk, page: clampPage(next, pageCount.value) };
+  if (current)
+    nav.value = { client: current, chunk: props.chunk, page: clampPage(next, pageCount.value) };
 }
 
 useEffectAfterRender([client, page, revision], () => {
@@ -228,7 +236,9 @@ const save = computed(() => props.edit?.save);
 const exportMeta = computed(() => hwpExportFormat(props.name));
 const locked = computed(() => busy.value !== null);
 const label = computed(() =>
-  page.value === null ? "" : t("attachment.viewer.page", { current: page.value + 1, total: pageCount.value }),
+  page.value === null
+    ? ""
+    : t("attachment.viewer.page", { current: page.value + 1, total: pageCount.value }),
 );
 
 const discardLabel = computed(() =>
@@ -285,7 +295,9 @@ function replace(all: boolean): void {
       } else {
         // Nothing replaced, so nothing to save or guard.
         editError.value =
-          result.outcome === "unchanged" ? t("attachment.viewer.edit.notFound") : t("attachment.viewer.edit.failed");
+          result.outcome === "unchanged"
+            ? t("attachment.viewer.edit.notFound")
+            : t("attachment.viewer.edit.failed");
       }
     },
     t("attachment.viewer.edit.failed"),
@@ -312,7 +324,9 @@ function download(): void {
     async (doc, live) => {
       const bytes = await doc.exportDocument(exportMeta.value.format);
       if (!live()) return;
-      const href = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: exportMeta.value.mime }));
+      const href = URL.createObjectURL(
+        new Blob([bytes as Uint8Array<ArrayBuffer>], { type: exportMeta.value.mime }),
+      );
       const link = document.createElement("a");
       link.href = href;
       link.download = editedCopyName(props.name);
@@ -393,13 +407,28 @@ function onPageLoad(event: Event): void {
   </template>
   <template v-else-if="renderFailed">
     <PendingEditsGuard v-if="dirty" />
-    <DiscardEditsDialog v-if="discard" :action-label="discardLabel" @confirm="confirmDiscard" @cancel="discard = null" />
-    <ViewerErrorPane :message="t('load.failed')" :download-url="downloadUrl" retryable @retry="retryRender" />
+    <DiscardEditsDialog
+      v-if="discard"
+      :action-label="discardLabel"
+      @confirm="confirmDiscard"
+      @cancel="discard = null"
+    />
+    <ViewerErrorPane
+      :message="t('load.failed')"
+      :download-url="downloadUrl"
+      retryable
+      @retry="retryRender"
+    />
   </template>
   <ViewerLoadingPane v-else-if="state.status === 'loading' || page === null" />
   <div v-else class="attachment-viewer__pane" data-hwp-viewer="">
     <PendingEditsGuard v-if="dirty" />
-    <DiscardEditsDialog v-if="discard" :action-label="discardLabel" @confirm="confirmDiscard" @cancel="discard = null" />
+    <DiscardEditsDialog
+      v-if="discard"
+      :action-label="discardLabel"
+      @confirm="confirmDiscard"
+      @cancel="discard = null"
+    />
     <ViewerZoomToolbar
       :zoom="zoom"
       :can-zoom-out="zoom > PDF_ZOOM_MIN"
@@ -408,7 +437,13 @@ function onPageLoad(event: Event): void {
       @zoom-out="zoom = zoomOut(zoom)"
       @reset="zoom = 1"
     >
-      <UButton size="sm" variant="outline" color="neutral" :disabled="page <= 0" @click="go(page - 1)">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="page <= 0"
+        @click="go(page - 1)"
+      >
         {{ t("attachment.viewer.prevPage") }}
       </UButton>
       <p class="attachment-viewer__page-label">{{ label }}</p>
@@ -425,7 +460,12 @@ function onPageLoad(event: Event): void {
         {{ t("attachment.viewer.edit.start") }}
       </UButton>
     </ViewerZoomToolbar>
-    <div v-if="canEdit && editing" class="hwp-viewer__edit-bar" data-hwp-edit-bar="" :aria-busy="locked">
+    <div
+      v-if="canEdit && editing"
+      class="hwp-viewer__edit-bar"
+      data-hwp-edit-bar=""
+      :aria-busy="locked"
+    >
       <UInput
         v-model="findText"
         class="hwp-viewer__edit-input"
@@ -458,13 +498,29 @@ function onPageLoad(event: Event): void {
       >
         {{ t("attachment.viewer.edit.replaceAll") }}
       </UButton>
-      <UButton size="sm" variant="outline" color="neutral" :disabled="!dirty || locked" @click="discard = 'undo'">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="!dirty || locked"
+        @click="discard = 'undo'"
+      >
         {{ t("attachment.viewer.edit.undo") }}
       </UButton>
       <UButton v-if="save" size="sm" :disabled="!dirty || locked" @click="saveCopy">
-        {{ busy === "save" ? t("attachment.viewer.edit.saving") : t("attachment.viewer.edit.saveCopy") }}
+        {{
+          busy === "save"
+            ? t("attachment.viewer.edit.saving")
+            : t("attachment.viewer.edit.saveCopy")
+        }}
       </UButton>
-      <UButton size="sm" variant="outline" color="neutral" :disabled="!dirty || locked" @click="download">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="!dirty || locked"
+        @click="download"
+      >
         {{ t("attachment.viewer.edit.download") }}
       </UButton>
       <UButton size="sm" variant="outline" color="neutral" :disabled="locked" @click="exitEditing">

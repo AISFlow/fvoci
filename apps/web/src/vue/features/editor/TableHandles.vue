@@ -47,7 +47,12 @@ function run(command: () => void): void {
     v-if="box"
     class="fvoci-table-handles"
     data-table-handles=""
-    :style="{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` }"
+    :style="{
+      left: `${box.left}px`,
+      top: `${box.top}px`,
+      width: `${box.width}px`,
+      height: `${box.height}px`,
+    }"
   >
     <UButton
       data-table-handle="table"
@@ -124,30 +129,56 @@ function run(command: () => void): void {
   >
     <div class="fvoci-vue-menu__group">
       <MenuItem @select="run(() => addColumn(editor))">{{ t("editor.table.insertCol") }}</MenuItem>
-      <MenuItem @select="run(() => editor.chain().focus().deleteColumn().run())">{{ t("editor.table.deleteCol") }}</MenuItem>
+      <MenuItem @select="run(() => editor.chain().focus().deleteColumn().run())">{{
+        t("editor.table.deleteCol")
+      }}</MenuItem>
       <MenuItem @select="run(() => addRow(editor))">{{ t("editor.table.insertRow") }}</MenuItem>
-      <MenuItem @select="run(() => editor.chain().focus().deleteRow().run())">{{ t("editor.table.deleteRow") }}</MenuItem>
+      <MenuItem @select="run(() => editor.chain().focus().deleteRow().run())">{{
+        t("editor.table.deleteRow")
+      }}</MenuItem>
     </div>
     <hr class="fvoci-vue-menu__separator" />
     <div class="fvoci-vue-menu__group">
       <MenuItem @select="run(() => moveTable(-1))">{{ t("editor.table.moveUp") }}</MenuItem>
       <MenuItem @select="run(() => moveTable(1))">{{ t("editor.table.moveDown") }}</MenuItem>
-      <MenuItem @select="run(() => toggleTableHeaderRow(editor))">{{ t("editor.table.headerRow") }}</MenuItem>
-      <MenuItem @select="run(() => toggleTableHeaderColumn(editor))">{{ t("editor.table.headerCol") }}</MenuItem>
+      <MenuItem @select="run(() => toggleTableHeaderRow(editor))">{{
+        t("editor.table.headerRow")
+      }}</MenuItem>
+      <MenuItem @select="run(() => toggleTableHeaderColumn(editor))">{{
+        t("editor.table.headerCol")
+      }}</MenuItem>
     </div>
     <hr class="fvoci-vue-menu__separator" />
     <div class="fvoci-vue-menu__group">
-      <MenuItem @select="run(() => setCellAlign(editor, 'left'))">{{ t("editor.align.left") }}</MenuItem>
-      <MenuItem @select="run(() => setCellAlign(editor, 'center'))">{{ t("editor.align.center") }}</MenuItem>
-      <MenuItem @select="run(() => setCellAlign(editor, 'right'))">{{ t("editor.align.right") }}</MenuItem>
-      <MenuItem v-for="item in BACKGROUNDS" :key="item.key" @select="run(() => setCellBackground(editor, item.value))">
+      <MenuItem @select="run(() => setCellAlign(editor, 'left'))">{{
+        t("editor.align.left")
+      }}</MenuItem>
+      <MenuItem @select="run(() => setCellAlign(editor, 'center'))">{{
+        t("editor.align.center")
+      }}</MenuItem>
+      <MenuItem @select="run(() => setCellAlign(editor, 'right'))">{{
+        t("editor.align.right")
+      }}</MenuItem>
+      <MenuItem
+        v-for="item in BACKGROUNDS"
+        :key="item.key"
+        @select="run(() => setCellBackground(editor, item.value))"
+      >
         {{ t("editor.table.background", { name: t(item.key) }) }}
       </MenuItem>
-      <MenuItem @select="run(() => mergeSelectedCells(editor))">{{ t("editor.table.merge") }}</MenuItem>
-      <MenuItem @select="run(() => splitSelectedCells(editor))">{{ t("editor.table.split") }}</MenuItem>
-      <MenuItem @select="run(() => equalizeColumns(editor))">{{ t("editor.table.equalize") }}</MenuItem>
+      <MenuItem @select="run(() => mergeSelectedCells(editor))">{{
+        t("editor.table.merge")
+      }}</MenuItem>
+      <MenuItem @select="run(() => splitSelectedCells(editor))">{{
+        t("editor.table.split")
+      }}</MenuItem>
+      <MenuItem @select="run(() => equalizeColumns(editor))">{{
+        t("editor.table.equalize")
+      }}</MenuItem>
     </div>
     <hr class="fvoci-vue-menu__separator" />
-    <MenuItem @select="run(() => deleteCurrentTable(editor))">{{ t("editor.table.delete") }}</MenuItem>
+    <MenuItem @select="run(() => deleteCurrentTable(editor))">{{
+      t("editor.table.delete")
+    }}</MenuItem>
   </PointMenu>
 </template>

@@ -9,7 +9,10 @@ import { shallowRef } from "vue";
 import ToolbarPopover from "./ToolbarPopover.vue";
 import { canUseToolbar } from "./useEditorToolbar";
 const props = defineProps<{ editor: TiptapEditor; side: "top" | "bottom" }>();
-const state = useEditorState(props.editor, (editor) => ({ editable: editor.isEditable, active: editor.isActive("link") }));
+const state = useEditorState(props.editor, (editor) => ({
+  editable: editor.isEditable,
+  active: editor.isActive("link"),
+}));
 const url = shallowRef("");
 const composing = shallowRef<boolean>(false);
 function readLink(): void {
@@ -28,29 +31,78 @@ function setLink(close: () => void): void {
 }
 function removeLink(close: () => void): void {
   if (!canUseToolbar(props.editor)) return;
-  props.editor.chain().focus().extendMarkRange("link").unsetLink().setMeta("preventAutolink", true).run();
+  props.editor
+    .chain()
+    .focus()
+    .extendMarkRange("link")
+    .unsetLink()
+    .setMeta("preventAutolink", true)
+    .run();
   close();
 }
 function onKeydown(event: KeyboardEvent, close: () => void): void {
   if (event.key !== "Enter") return;
   // Enter confirms Korean IME before it can apply a URL. keyCode 229 also
   // covers browsers that finish composition before reporting the key.
-  if (event.isComposing || composing.value || event.keyCode === 229) { event.preventDefault(); return; }
+  if (event.isComposing || composing.value || event.keyCode === 229) {
+    event.preventDefault();
+    return;
+  }
   event.preventDefault();
   setLink(close);
 }
 </script>
 
 <template>
-  <ToolbarPopover :editor="editor" kind="dialog" :label="t('editor.link')" :side="side" @opening="readLink">
+  <ToolbarPopover
+    :editor="editor"
+    kind="dialog"
+    :label="t('editor.link')"
+    :side="side"
+    @opening="readLink"
+  >
     <template #trigger="{ open, id }">
-      <UButton icon="i-lucide-link" color="neutral" variant="ghost" :aria-label="t('editor.link')" :aria-pressed="state.active" :disabled="!state.editable" aria-haspopup="dialog" :aria-expanded="open" :aria-controls="id" />
+      <UButton
+        icon="i-lucide-link"
+        color="neutral"
+        variant="ghost"
+        :aria-label="t('editor.link')"
+        :aria-pressed="state.active"
+        :disabled="!state.editable"
+        aria-haspopup="dialog"
+        :aria-expanded="open"
+        :aria-controls="id"
+      />
     </template>
     <template #default="{ close }">
       <form class="flex flex-wrap items-center gap-1" @submit.prevent="setLink(close)">
-        <UInput v-model="url" name="url" type="text" aria-label="URL" placeholder="https://" size="sm" @keydown="onKeydown($event, close)" @compositionstart="composing = true" @compositionend="composing = false" />
-        <UButton type="submit" icon="i-lucide-corner-down-left" size="sm" :aria-label="t('editor.link.apply')">{{ t('editor.link.apply') }}</UButton>
-        <UButton v-if="state.active" type="button" icon="i-lucide-unlink" color="neutral" variant="ghost" :aria-label="t('editor.format.clear')" @click="removeLink(close)" />
+        <UInput
+          v-model="url"
+          name="url"
+          type="text"
+          aria-label="URL"
+          placeholder="https://"
+          size="sm"
+          @keydown="onKeydown($event, close)"
+          @compositionstart="composing = true"
+          @compositionend="composing = false"
+        />
+        <UButton
+          type="submit"
+          icon="i-lucide-corner-down-left"
+          size="sm"
+          :aria-label="t('editor.link.apply')"
+          >{{ t("editor.link.apply") }}</UButton
+        >
+        <UButton
+          v-if="state.active"
+          type="button"
+          icon="i-lucide-unlink"
+          color="neutral"
+          variant="ghost"
+          :aria-label="t('editor.format.clear')"
+          @click="removeLink(close)"
+        />
       </form>
     </template>
   </ToolbarPopover>

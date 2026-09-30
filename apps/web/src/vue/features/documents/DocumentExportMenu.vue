@@ -28,7 +28,12 @@ const DOWNLOAD = {
   pptx: downloadDocumentPptx,
 } as const;
 const KINDS: readonly ExportKind[] = ["md", "pdf", "docx", "pptx"];
-const LABEL = { md: "export.md", pdf: "export.pdf", docx: "export.docx", pptx: "export.pptx" } as const;
+const LABEL = {
+  md: "export.md",
+  pdf: "export.pdf",
+  docx: "export.docx",
+  pptx: "export.pptx",
+} as const;
 const FAILED = {
   md: "export.md.failed",
   pdf: "export.pdf.failed",

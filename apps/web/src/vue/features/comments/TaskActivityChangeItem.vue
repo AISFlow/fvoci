@@ -36,7 +36,9 @@ defineProps<{
           <span class="font-medium text-highlighted">{{ fieldLabel(change.field) }}</span>
           <span class="break-words">{{ displayValue(change.field, change.from) }}</span>
           <span aria-hidden="true">→</span>
-          <span class="break-words text-highlighted">{{ displayValue(change.field, change.to) }}</span>
+          <span class="break-words text-highlighted">{{
+            displayValue(change.field, change.to)
+          }}</span>
         </li>
       </ul>
       <p class="text-xs tabular-nums text-muted">

@@ -48,21 +48,48 @@ const pool = computed(() => poolQuery.data.value?.items ?? []);
 const needle = computed(() => filter.value.trim().toLowerCase());
 const candidates = computed(() =>
   pool.value.filter(
-    (tag) => !assignedIds.value.has(tag.id) && (needle.value === "" || tag.name.toLowerCase().includes(needle.value)),
+    (tag) =>
+      !assignedIds.value.has(tag.id) &&
+      (needle.value === "" || tag.name.toLowerCase().includes(needle.value)),
   ),
 );
 const exact = computed(() => pool.value.find((tag) => tag.name.toLowerCase() === needle.value));
 const canCreate = computed(
-  () => (poolQuery.data.value?.canCreate ?? false) && needle.value !== "" && exact.value === undefined,
+  () =>
+    (poolQuery.data.value?.canCreate ?? false) && needle.value !== "" && exact.value === undefined,
 );
 
-type TagOperation = { workspaceId: string; documentId: string; projectId: string | null; lifecycle: number };
+type TagOperation = {
+  workspaceId: string;
+  documentId: string;
+  projectId: string | null;
+  lifecycle: number;
+};
 let operationLifecycle = 0;
-watch([() => props.workspaceId, () => props.documentId, () => props.projectId, () => props.readOnly,
-  () => me.data.value?.userId, () => me.data.value?.sessionId], () => { operationLifecycle++; }, { flush: "sync" });
-onScopeDispose(() => { operationLifecycle++; });
+watch(
+  [
+    () => props.workspaceId,
+    () => props.documentId,
+    () => props.projectId,
+    () => props.readOnly,
+    () => me.data.value?.userId,
+    () => me.data.value?.sessionId,
+  ],
+  () => {
+    operationLifecycle++;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  operationLifecycle++;
+});
 function captureOperation(): TagOperation {
-  return { workspaceId: props.workspaceId, documentId: props.documentId, projectId: props.projectId, lifecycle: operationLifecycle };
+  return {
+    workspaceId: props.workspaceId,
+    documentId: props.documentId,
+    projectId: props.projectId,
+    lifecycle: operationLifecycle,
+  };
 }
 function currentOperation(operation: TagOperation): boolean {
   return operation.lifecycle === operationLifecycle;
@@ -82,30 +109,40 @@ function close(): void {
 }
 
 const assign = useMutation({
-  mutationFn: (operation: TagOperation & { tagId: string }) => assignDocumentTag(operation.workspaceId, operation.documentId, operation.projectId, operation.tagId),
+  mutationFn: (operation: TagOperation & { tagId: string }) =>
+    assignDocumentTag(
+      operation.workspaceId,
+      operation.documentId,
+      operation.projectId,
+      operation.tagId,
+    ),
   onMutate: (operation) => {
     if (currentOperation(operation)) mutationError.value = null;
   },
   onError: (err: unknown, operation) => {
-    if (currentOperation(operation)) mutationError.value = problemMessage(err, "error.http.fallback");
+    if (currentOperation(operation))
+      mutationError.value = problemMessage(err, "error.http.fallback");
   },
   onSuccess: async (tag: DocumentTag, operation) => {
-    queryClient.setQueryData(documentAssignedTagsQuery(operation.workspaceId, operation.documentId, operation.projectId).queryKey, (items: DocumentTag[] = []) => [
-      ...items.filter((item) => item.id !== tag.id),
-      tag,
-    ]);
+    queryClient.setQueryData(
+      documentAssignedTagsQuery(operation.workspaceId, operation.documentId, operation.projectId)
+        .queryKey,
+      (items: DocumentTag[] = []) => [...items.filter((item) => item.id !== tag.id), tag],
+    );
     await invalidate(operation);
     if (currentOperation(operation)) close();
   },
 });
 
 const create = useMutation({
-  mutationFn: (operation: TagOperation & { name: string }) => createDocumentTag(queryClient, operation.workspaceId, operation.name),
+  mutationFn: (operation: TagOperation & { name: string }) =>
+    createDocumentTag(queryClient, operation.workspaceId, operation.name),
   onMutate: (operation) => {
     if (currentOperation(operation)) mutationError.value = null;
   },
   onError: (err: unknown, operation) => {
-    if (currentOperation(operation)) mutationError.value = problemMessage(err, "error.http.fallback");
+    if (currentOperation(operation))
+      mutationError.value = problemMessage(err, "error.http.fallback");
   },
   onSuccess: async (created, operation) => {
     await assign.mutateAsync({ ...operation, tagId: created.id }).catch(() => undefined);
@@ -113,27 +150,46 @@ const create = useMutation({
 });
 
 const remove = useMutation({
-  mutationFn: (operation: TagOperation & { tagId: string }) => removeDocumentTag(operation.workspaceId, operation.documentId, operation.projectId, operation.tagId),
+  mutationFn: (operation: TagOperation & { tagId: string }) =>
+    removeDocumentTag(
+      operation.workspaceId,
+      operation.documentId,
+      operation.projectId,
+      operation.tagId,
+    ),
   onMutate: (operation) => {
     if (currentOperation(operation)) mutationError.value = null;
   },
   onError: (err: unknown, operation) => {
-    if (currentOperation(operation)) mutationError.value = problemMessage(err, "error.http.fallback");
+    if (currentOperation(operation))
+      mutationError.value = problemMessage(err, "error.http.fallback");
   },
   onSuccess: async (_ok, operation) => {
-    queryClient.setQueryData(documentAssignedTagsQuery(operation.workspaceId, operation.documentId, operation.projectId).queryKey, (items: DocumentTag[] = []) =>
-      items.filter((tag) => tag.id !== operation.tagId),
+    queryClient.setQueryData(
+      documentAssignedTagsQuery(operation.workspaceId, operation.documentId, operation.projectId)
+        .queryKey,
+      (items: DocumentTag[] = []) => items.filter((tag) => tag.id !== operation.tagId),
     );
     await invalidate(operation);
   },
 });
 
-function assignTag(tagId: string): void { assign.mutate({ ...captureOperation(), tagId }); }
-function createTag(name: string): void { create.mutate({ ...captureOperation(), name }); }
-function removeTag(tagId: string): void { remove.mutate({ ...captureOperation(), tagId }); }
+function assignTag(tagId: string): void {
+  assign.mutate({ ...captureOperation(), tagId });
+}
+function createTag(name: string): void {
+  create.mutate({ ...captureOperation(), name });
+}
+function removeTag(tagId: string): void {
+  remove.mutate({ ...captureOperation(), tagId });
+}
 
-const pending = computed(() => assign.isPending.value || create.isPending.value || remove.isPending.value);
-const hidden = computed(() => props.readOnly && assignedQuery.isSuccess.value && assigned.value.length === 0);
+const pending = computed(
+  () => assign.isPending.value || create.isPending.value || remove.isPending.value,
+);
+const hidden = computed(
+  () => props.readOnly && assignedQuery.isSuccess.value && assigned.value.length === 0,
+);
 const filterInput = useTemplateRef<HTMLInputElement>("filterInput");
 
 function toggle(): void {
@@ -148,7 +204,8 @@ function toggle(): void {
 function onFilterKeydown(event: KeyboardEvent): void {
   if (event.key !== "Enter" || event.isComposing) return;
   event.preventDefault();
-  const first = exact.value && !assignedIds.value.has(exact.value.id) ? exact.value : candidates.value[0];
+  const first =
+    exact.value && !assignedIds.value.has(exact.value.id) ? exact.value : candidates.value[0];
   if (first) assignTag(first.id);
   else if (canCreate.value) createTag(filter.value.trim());
 }
@@ -161,7 +218,13 @@ function onPanelKeydown(event: KeyboardEvent): void {
 </script>
 
 <template>
-  <div v-if="!hidden" class="tags-bar" role="group" :aria-label="t('doc.tags')" data-testid="document-tags-bar">
+  <div
+    v-if="!hidden"
+    class="tags-bar"
+    role="group"
+    :aria-label="t('doc.tags')"
+    data-testid="document-tags-bar"
+  >
     <QueryLoading v-if="assignedQuery.isPending.value" />
     <QueryError
       v-if="assignedQuery.isError.value"
@@ -211,18 +274,32 @@ function onPanelKeydown(event: KeyboardEvent): void {
       />
       <ul v-if="poolQuery.isSuccess.value" class="tags-bar__options">
         <li v-for="tag in candidates" :key="tag.id">
-          <button type="button" class="tags-bar__option" :disabled="pending" @click="assignTag(tag.id)">
+          <button
+            type="button"
+            class="tags-bar__option"
+            :disabled="pending"
+            @click="assignTag(tag.id)"
+          >
             <span class="tag-chip" :data-color="tag.color">{{ tag.name }}</span>
           </button>
         </li>
         <li v-if="canCreate">
-          <button type="button" class="tags-bar__option" :disabled="pending" @click="createTag(filter.trim())">
+          <button
+            type="button"
+            class="tags-bar__option"
+            :disabled="pending"
+            @click="createTag(filter.trim())"
+          >
             {{ t("doc.tags.create", { name: filter.trim() }) }}
           </button>
         </li>
-        <li v-if="candidates.length === 0 && !canCreate" class="px-2 py-1 text-sm text-muted">{{ t("doc.tags.empty") }}</li>
+        <li v-if="candidates.length === 0 && !canCreate" class="px-2 py-1 text-sm text-muted">{{
+          t("doc.tags.empty")
+        }}</li>
       </ul>
     </div>
-    <p v-if="mutationError" role="alert" class="basis-full text-sm text-error">{{ mutationError }}</p>
+    <p v-if="mutationError" role="alert" class="basis-full text-sm text-error">{{
+      mutationError
+    }}</p>
   </div>
 </template>

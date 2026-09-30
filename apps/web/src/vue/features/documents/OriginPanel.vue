@@ -32,7 +32,11 @@ const projectName = ref("");
 const projectKey = ref("");
 
 const origins = useQuery(() =>
-  taskOriginsQuery(props.workspaceId, { documentId: props.documentId, taskId: props.taskId }, after.value),
+  taskOriginsQuery(
+    props.workspaceId,
+    { documentId: props.documentId, taskId: props.taskId },
+    after.value,
+  ),
 );
 const projects = useQuery(() => documentTaskProjectsQuery(props.workspaceId, props.documentId));
 const hide = computed(
@@ -50,7 +54,8 @@ watch(
   [() => projects.data.value, projectId],
   ([data]) => {
     if (!data) return;
-    if (!data.items.some((item) => item.id === projectId.value)) projectId.value = data.suggestedId ?? "";
+    if (!data.items.some((item) => item.id === projectId.value))
+      projectId.value = data.suggestedId ?? "";
   },
   { immediate: true },
 );
@@ -66,7 +71,9 @@ const createTask = useMutation({
     after.value = null;
     title.value = "";
     requestId.value = crypto.randomUUID();
-    await queryClient.invalidateQueries({ queryKey: ["task-origins", props.workspaceId, props.documentId] });
+    await queryClient.invalidateQueries({
+      queryKey: ["task-origins", props.workspaceId, props.documentId],
+    });
     await queryClient.invalidateQueries({ queryKey: ["tasks", props.workspaceId] });
   },
 });
@@ -78,7 +85,9 @@ const createProject = useMutation({
     requestId.value = crypto.randomUUID();
     projectName.value = "";
     projectKey.value = "";
-    await queryClient.invalidateQueries({ queryKey: ["task-projects", props.workspaceId, props.documentId] });
+    await queryClient.invalidateQueries({
+      queryKey: ["task-projects", props.workspaceId, props.documentId],
+    });
     await queryClient.invalidateQueries({ queryKey: ["projects", props.workspaceId] });
   },
 });
@@ -126,7 +135,9 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
   >
     <h2 class="text-lg">{{ heading }} ({{ origins.data.value?.count ?? 0 }})</h2>
     <p v-if="origins.isLoading.value" role="status">{{ t("collection.origins.loading") }}</p>
-    <p v-if="origins.isError.value" role="alert">{{ originErrorText(origins.error.value, t("collection.origins.error")) }}</p>
+    <p v-if="origins.isError.value" role="alert">{{
+      originErrorText(origins.error.value, t("collection.origins.error"))
+    }}</p>
     <a
       v-for="item in origins.data.value?.items ?? []"
       :key="item.taskId"
@@ -139,7 +150,9 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
           : `${item.documentDisplayId} · ${item.documentTitle}`
       }}
     </a>
-    <p v-if="origins.data.value && origins.data.value.count === 0">{{ t("collection.noOrigins") }}</p>
+    <p v-if="origins.data.value && origins.data.value.count === 0">{{
+      t("collection.noOrigins")
+    }}</p>
     <UButton v-if="after" class="w-fit" variant="outline" color="neutral" @click="after = null">
       {{ t("collection.origins.first") }}
     </UButton>
@@ -153,7 +166,9 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
       {{ t("collection.origins.next") }}
     </UButton>
     <div v-if="documentId" class="flex flex-col gap-3">
-      <p v-if="surface === 'loading'" role="status">{{ t("collection.taskCreation.projectsLoading") }}</p>
+      <p v-if="surface === 'loading'" role="status">{{
+        t("collection.taskCreation.projectsLoading")
+      }}</p>
       <p v-if="surface === 'error'" role="alert">
         {{ originErrorText(projects.error.value, t("collection.taskCreation.projectsError")) }}
       </p>
@@ -164,20 +179,28 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
         @submit.prevent="submitTask"
       >
         <div class="flex flex-col gap-1">
-          <label :for="`origin-project-${documentId}`" class="text-sm font-medium">{{ t("collection.taskProject") }}</label>
+          <label :for="`origin-project-${documentId}`" class="text-sm font-medium">{{
+            t("collection.taskProject")
+          }}</label>
           <select
             :id="`origin-project-${documentId}`"
             :class="fieldClass"
             :value="projectId"
             @change="onProjectChange"
           >
-            <option v-for="project in projects.data.value.items" :key="project.id" :value="project.id">
+            <option
+              v-for="project in projects.data.value.items"
+              :key="project.id"
+              :value="project.id"
+            >
               {{ project.name }} ({{ project.key }})
             </option>
           </select>
         </div>
         <div class="flex flex-col gap-1">
-          <label :for="`origin-title-${documentId}`" class="text-sm font-medium">{{ t("collection.taskTitle") }}</label>
+          <label :for="`origin-title-${documentId}`" class="text-sm font-medium">{{
+            t("collection.taskTitle")
+          }}</label>
           <input
             :id="`origin-title-${documentId}`"
             :class="fieldClass"
@@ -185,7 +208,10 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
             @input="onTitleInput"
           />
         </div>
-        <UButton type="submit" :disabled="!projectId || !title.trim() || createTask.isPending.value">
+        <UButton
+          type="submit"
+          :disabled="!projectId || !title.trim() || createTask.isPending.value"
+        >
           {{ t("collection.createTask") }}
         </UButton>
       </form>
@@ -197,14 +223,29 @@ const fieldClass = "h-10 rounded-md border border-default bg-default px-2";
       >
         <p class="w-full">{{ t("collection.projectRequired") }}</p>
         <div class="flex flex-col gap-1">
-          <label :for="`origin-project-name-${documentId}`" class="text-sm font-medium">{{ t("collection.projectName") }}</label>
-          <input :id="`origin-project-name-${documentId}`" v-model="projectName" :class="fieldClass" />
+          <label :for="`origin-project-name-${documentId}`" class="text-sm font-medium">{{
+            t("collection.projectName")
+          }}</label>
+          <input
+            :id="`origin-project-name-${documentId}`"
+            v-model="projectName"
+            :class="fieldClass"
+          />
         </div>
         <div class="flex flex-col gap-1">
-          <label :for="`origin-project-key-${documentId}`" class="text-sm font-medium">{{ t("project.keyLabel") }}</label>
-          <input :id="`origin-project-key-${documentId}`" v-model="projectKey" :class="fieldClass" />
+          <label :for="`origin-project-key-${documentId}`" class="text-sm font-medium">{{
+            t("project.keyLabel")
+          }}</label>
+          <input
+            :id="`origin-project-key-${documentId}`"
+            v-model="projectKey"
+            :class="fieldClass"
+          />
         </div>
-        <UButton type="submit" :disabled="!projectName.trim() || !projectKey.trim() || createProject.isPending.value">
+        <UButton
+          type="submit"
+          :disabled="!projectName.trim() || !projectKey.trim() || createProject.isPending.value"
+        >
           {{ t("project.new") }}
         </UButton>
       </form>

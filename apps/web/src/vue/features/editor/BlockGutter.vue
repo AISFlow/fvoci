@@ -11,7 +11,10 @@ import BlockMenu from "./BlockMenu.vue";
 // caret's block that shows when focused, and the block menu. On narrow
 // screens the stylesheet hides the gutter unless a touch is held.
 const props = defineProps<{ editor: TiptapEditor; gutter: GutterHandle }>();
-const { keyboardPos, menu, openFromKeyboard, closeMenu, plus, drag } = useBlockGutter(props.editor, props.gutter);
+const { keyboardPos, menu, openFromKeyboard, closeMenu, plus, drag } = useBlockGutter(
+  props.editor,
+  props.gutter,
+);
 const menuId = useId();
 
 function onKeyboardClick(event: MouseEvent): void {

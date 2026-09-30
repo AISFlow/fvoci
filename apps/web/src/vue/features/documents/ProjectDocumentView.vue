@@ -5,7 +5,17 @@ import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import UCollapsible from "@nuxt/ui/components/Collapsible.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, type FunctionalComponent, h, markRaw, nextTick, onScopeDispose, ref, shallowRef, watch } from "vue";
+import {
+  computed,
+  type FunctionalComponent,
+  h,
+  markRaw,
+  nextTick,
+  onScopeDispose,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import { bindBlockPresence, isBlockPresenceAwareness } from "@/features/documents/block-presence";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
 import { collabUserOf, setTitleEditing } from "@/features/documents/collab-model";
@@ -94,7 +104,8 @@ const room = useCollabRoom(
 const session = room.session;
 const { mentionItems, entityResolver } = useEditorEntities(
   () => props.workspaceId,
-  () => `${props.documentId}:${session.value?.generation ?? ""}:${collabUser.value?.id ?? ""}:${session.value?.status === "unauthorized"}`,
+  () =>
+    `${props.documentId}:${session.value?.generation ?? ""}:${collabUser.value?.id ?? ""}:${session.value?.status === "unauthorized"}`,
 );
 
 const optionsOpen = ref(false);
@@ -109,24 +120,28 @@ function onOptionsKeydown(event: KeyboardEvent): void {
 const title = ref("");
 const titleInput = ref<HTMLTextAreaElement | null>(null);
 // Keep long titles readable at the current width, including readonly titles.
-watch([titleInput, title], async ([input], _previous, onCleanup) => {
-  if (!input) return;
-  let width = 0;
-  const resize = () => {
-    input.style.height = "auto";
-    input.style.height = `${input.scrollHeight + 2}px`;
-  };
-  const observer = new ResizeObserver(([entry]) => {
-    if (entry && entry.contentRect.width !== width) {
-      width = entry.contentRect.width;
-      resize();
-    }
-  });
-  observer.observe(input);
-  onCleanup(() => observer.disconnect());
-  await nextTick();
-  if (titleInput.value === input) resize();
-}, { flush: "post" });
+watch(
+  [titleInput, title],
+  async ([input], _previous, onCleanup) => {
+    if (!input) return;
+    let width = 0;
+    const resize = () => {
+      input.style.height = "auto";
+      input.style.height = `${input.scrollHeight + 2}px`;
+    };
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry && entry.contentRect.width !== width) {
+        width = entry.contentRect.width;
+        resize();
+      }
+    });
+    observer.observe(input);
+    onCleanup(() => observer.disconnect());
+    await nextTick();
+    if (titleInput.value === input) resize();
+  },
+  { flush: "post" },
+);
 const icon = ref("");
 const status = ref<string>("draft");
 const saveError = ref<string | null>(null);
@@ -178,10 +193,14 @@ watch(
     () => session.value?.provider,
     () => session.value?.generation,
   ],
-  () => { operationLifecycle += 1; },
+  () => {
+    operationLifecycle += 1;
+  },
   { flush: "sync" },
 );
-onScopeDispose(() => { operationLifecycle += 1; });
+onScopeDispose(() => {
+  operationLifecycle += 1;
+});
 function captureOperation(): DocumentOperation {
   return { scope: { ...scope.value }, slug: props.slug, lifecycle: operationLifecycle };
 }
@@ -207,7 +226,8 @@ const trashDoc = useMutation({
 });
 
 const moveDoc = useMutation({
-  mutationFn: (operation: DocumentOperation & { newParentId: string }) => moveDocument(operation.scope, operation.newParentId),
+  mutationFn: (operation: DocumentOperation & { newParentId: string }) =>
+    moveDocument(operation.scope, operation.newParentId),
   onSuccess: async (_result, operation) => {
     const { workspaceId, documentId, projectId } = operation.scope;
     await Promise.all([
@@ -215,7 +235,9 @@ const moveDoc = useMutation({
       queryClient.invalidateQueries({ queryKey: ["wiki-discovery", workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
       queryClient.invalidateQueries({ queryKey: ["project-documents", workspaceId, projectId] }),
-      queryClient.invalidateQueries({ queryKey: ["project-document", workspaceId, projectId, documentId] }),
+      queryClient.invalidateQueries({
+        queryKey: ["project-document", workspaceId, projectId, documentId],
+      }),
     ]);
     if (!currentOperation(operation)) return;
     lifecycleError.value = null;
@@ -231,11 +253,14 @@ function move(newParentId: string): void {
 }
 
 const patchMeta = useMutation({
-  mutationFn: (operation: DocumentOperation & { body: PatchDocumentBody }) => patchDocument(operation.scope, operation.body),
+  mutationFn: (operation: DocumentOperation & { body: PatchDocumentBody }) =>
+    patchDocument(operation.scope, operation.body),
   onSuccess: async (_result, operation) => {
     const { workspaceId, documentId, projectId } = operation.scope;
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["project-document", workspaceId, projectId, documentId] }),
+      queryClient.invalidateQueries({
+        queryKey: ["project-document", workspaceId, projectId, documentId],
+      }),
       queryClient.invalidateQueries({ queryKey: ["project-documents", workspaceId, projectId] }),
       queryClient.invalidateQueries({ queryKey: ["wiki-discovery", workspaceId] }),
     ]);
@@ -246,21 +271,31 @@ const patchMeta = useMutation({
   },
 });
 
-const notFound = computed(() => metaQuery.error.value instanceof ProblemError && metaQuery.error.value.status === 404);
+const notFound = computed(
+  () => metaQuery.error.value instanceof ProblemError && metaQuery.error.value.status === 404,
+);
 const meta = computed(() => metaQuery.data.value);
-const displayRef = computed(() => (meta.value ? formatDisplayId(props.project.key, meta.value.number) : ""));
+const displayRef = computed(() =>
+  meta.value ? formatDisplayId(props.project.key, meta.value.number) : "",
+);
 const crumbAncestors = computed(() =>
   projectAncestors(tree.data.value?.items ?? [], props.documentId, props.project.rootDocumentId),
 );
 const saving = computed(() => patchMeta.isPending.value);
 const archived = computed(() => meta.value?.status === "archived");
 const projectReadOnly = computed(() => !props.project.canEdit || props.project.archived);
-const readOnly = computed(() => archived.value || projectReadOnly.value || (session.value?.readOnly ?? false));
+const readOnly = computed(
+  () => archived.value || projectReadOnly.value || (session.value?.readOnly ?? false),
+);
 const ready = computed(() => Boolean(session.value?.synced && collabUser.value));
 const refusalNote = computed(() => collabRefusalNote(session.value?.status, ready.value));
 const badge = computed(() =>
   session.value
-    ? collabBadge(session.value.status, session.value.pending || persisting.value, session.value.durableSaved)
+    ? collabBadge(
+        session.value.status,
+        session.value.pending || persisting.value,
+        session.value.durableSaved,
+      )
     : null,
 );
 const canPersist = computed(
@@ -344,7 +379,8 @@ async function persistBody(): Promise<void> {
 }
 
 function onTitleFocus(): void {
-  if (!readOnly.value && isBlockPresenceAwareness(awareness.value)) setTitleEditing(awareness.value, true);
+  if (!readOnly.value && isBlockPresenceAwareness(awareness.value))
+    setTitleEditing(awareness.value, true);
 }
 
 function onTitleBlur(): void {
@@ -372,7 +408,9 @@ function trash(): void {
 }
 
 function flashBlock(id: string): void {
-  const element = document.querySelector<HTMLElement>(`.fvoci-editor [data-id="${CSS.escape(id)}"]`);
+  const element = document.querySelector<HTMLElement>(
+    `.fvoci-editor [data-id="${CSS.escape(id)}"]`,
+  );
   if (!element) return;
   element.setAttribute("data-afn-flash", "");
   window.setTimeout(() => element.removeAttribute("data-afn-flash"), 800);
@@ -388,7 +426,11 @@ function refOf(number: number): string {
     <p>{{ t("doc.error.notFound") }}</p>
     <AppLink :to="projectPath(slug, project.key)">{{ t("nav.projects") }}</AppLink>
   </div>
-  <QueryError v-else-if="metaQuery.isError.value" :message="loadErrorMessage(metaQuery.error.value)" @retry="metaQuery.refetch()" />
+  <QueryError
+    v-else-if="metaQuery.isError.value"
+    :message="loadErrorMessage(metaQuery.error.value)"
+    @retry="metaQuery.refetch()"
+  />
   <QueryLoading v-else-if="!meta" />
   <article v-else class="document-page" :data-testid="`document-${displayRef}`">
     <header class="document-page__head">
@@ -417,12 +459,29 @@ function refOf(number: number): string {
         />
         <div class="document-page__fields">
           <span class="document-page__badge">{{ displayRef }}</span>
-          <span class="document-page__badge">{{ t(status === "published" ? "doc.status.published" : status === "archived" ? "doc.status.archived" : "doc.status.draft") }}</span>
+          <span class="document-page__badge">{{
+            t(
+              status === "published"
+                ? "doc.status.published"
+                : status === "archived"
+                  ? "doc.status.archived"
+                  : "doc.status.draft",
+            )
+          }}</span>
           <span v-if="readOnly" class="document-page__badge">{{ t("doc.readOnly") }}</span>
           <StarToggle :workspace-id="workspaceId" type="document" :target-id="documentId" />
-          <ShareDialog v-if="!readOnly" :workspace-id="workspaceId" :target="{ documentId, projectId: project.id }" />
+          <ShareDialog
+            v-if="!readOnly"
+            :workspace-id="workspaceId"
+            :target="{ documentId, projectId: project.id }"
+          />
         </div>
-        <DocumentTagsBar :workspace-id="workspaceId" :document-id="documentId" :project-id="project.id" :read-only="readOnly" />
+        <DocumentTagsBar
+          :workspace-id="workspaceId"
+          :document-id="documentId"
+          :project-id="project.id"
+          :read-only="readOnly"
+        />
         <div class="document-page__collab">
           <span
             v-if="badge"
@@ -433,7 +492,11 @@ function refOf(number: number): string {
           >
             {{ t(badge.label) }}
           </span>
-          <span v-else class="document-page__collab-status document-page__collab-status--wait" data-collab-persisted="false">
+          <span
+            v-else
+            class="document-page__collab-status document-page__collab-status--wait"
+            data-collab-persisted="false"
+          >
             {{ t("doc.collab.connecting") }}
           </span>
           <UButton size="sm" :disabled="!canPersist" @click="persistBody().catch(() => undefined)">
@@ -461,12 +524,15 @@ function refOf(number: number): string {
             variant="outline"
             color="neutral"
             :trailing-icon="optionsOpen ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'"
-          >{{ t("doc.options") }}</UButton>
+            >{{ t("doc.options") }}</UButton
+          >
           <template #content>
             <div class="document-page__options-content">
               <div class="document-page__fields">
                 <div class="document-page__field">
-                  <label for="project-document-icon" class="text-sm font-medium">{{ t("project.icon") }}</label>
+                  <label for="project-document-icon" class="text-sm font-medium">{{
+                    t("project.icon")
+                  }}</label>
                   <input
                     id="project-document-icon"
                     v-model="icon"
@@ -477,7 +543,9 @@ function refOf(number: number): string {
                   />
                 </div>
                 <div class="document-page__field">
-                  <label for="project-document-status" class="text-sm font-medium">{{ t("doc.status.a11y") }}</label>
+                  <label for="project-document-status" class="text-sm font-medium">{{
+                    t("doc.status.a11y")
+                  }}</label>
                   <select
                     id="project-document-status"
                     class="document-page__field-select"
@@ -486,7 +554,9 @@ function refOf(number: number): string {
                     :disabled="saving || readOnly"
                     @change="onStatusChange"
                   >
-                    <option v-for="value in STATUSES" :key="value" :value="value">{{ t(STATUS_LABEL[value]) }}</option>
+                    <option v-for="value in STATUSES" :key="value" :value="value">{{
+                      t(STATUS_LABEL[value])
+                    }}</option>
                   </select>
                 </div>
               </div>
@@ -497,7 +567,11 @@ function refOf(number: number): string {
                 :project-id="project.id"
                 :persist-now="canPersist ? persistBody : undefined"
               />
-              <div v-if="!readOnly" class="document-page__lifecycle" :aria-label="t('doc.move.title')">
+              <div
+                v-if="!readOnly"
+                class="document-page__lifecycle"
+                :aria-label="t('doc.move.title')"
+              >
                 <label class="document-page__field">
                   <span class="sr-only">{{ t("doc.move.parentLabel") }}</span>
                   <select
@@ -507,7 +581,9 @@ function refOf(number: number): string {
                     :disabled="moveDoc.isPending.value || trashDoc.isPending.value"
                   >
                     <option value="">{{ t("doc.move.parentLabel") }}</option>
-                    <option v-for="node in moveTargets" :key="node.id" :value="node.id">{{ node.title }}</option>
+                    <option v-for="node in moveTargets" :key="node.id" :value="node.id">{{
+                      node.title
+                    }}</option>
                   </select>
                 </label>
                 <UButton
@@ -538,7 +614,10 @@ function refOf(number: number): string {
         <p v-if="persistError" role="alert" class="document-page__error">{{ persistError }}</p>
       </div>
     </header>
-    <section class="document-page__body document-page__body--editor" :aria-label="t('doc.body.a11y')">
+    <section
+      class="document-page__body document-page__body--editor"
+      :aria-label="t('doc.body.a11y')"
+    >
       <p v-if="session?.status === 'unauthorized'" class="document-page__body-note" role="alert">
         {{ t("doc.collab.unauthorized") }}
       </p>
@@ -577,7 +656,11 @@ function refOf(number: number): string {
       :project="{ id: project.id, canCreateTasks: project.canEdit && !project.archived }"
       :editor="ready ? editor : null"
       :insert-blocked-reason="
-        readOnly ? t('doc.readOnly') : session?.status === 'connected' ? null : t('ai.document.loading')
+        readOnly
+          ? t('doc.readOnly')
+          : session?.status === 'connected'
+            ? null
+            : t('ai.document.loading')
       "
     />
     <OriginPanel :workspace-id="workspaceId" :slug="slug" :document-id="documentId" />

@@ -13,7 +13,9 @@ const queryClient = useQueryClient();
 const stars = useQuery(() => starsQuery(props.workspaceId));
 const error = ref<string | null>(null);
 const star = computed(() =>
-  stars.data.value?.items.find((item) => item.type === props.type && item.targetId === props.targetId),
+  stars.data.value?.items.find(
+    (item) => item.type === props.type && item.targetId === props.targetId,
+  ),
 );
 
 const toggle = useMutation({
@@ -36,7 +38,8 @@ const toggle = useMutation({
     :disabled="stars.isLoading.value || toggle.isPending.value"
     @click="toggle.mutate()"
   >
-    <span aria-hidden="true" class="mr-1">{{ star ? "★" : "☆" }}</span>{{ star ? t("cmdk.unstar") : t("cmdk.star") }}
+    <span aria-hidden="true" class="mr-1">{{ star ? "★" : "☆" }}</span
+    >{{ star ? t("cmdk.unstar") : t("cmdk.star") }}
   </UButton>
   <p v-if="error" role="alert" class="document-page__error">{{ error }}</p>
 </template>

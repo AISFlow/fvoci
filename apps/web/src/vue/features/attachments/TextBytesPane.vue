@@ -10,7 +10,8 @@ import ViewerLoadingPane from "./ViewerLoadingPane.vue";
 // A text attachment: its bytes as plain text, never markup.
 const props = defineProps<{ downloadUrl: string; chunk?: number | undefined }>();
 
-type State = { status: "loading" } | { status: "error"; message: string } | { status: "text"; text: string };
+type State =
+  { status: "loading" } | { status: "error"; message: string } | { status: "text"; text: string };
 const state = shallowRef<State>({ status: "loading" });
 
 useEffectAfterRender([() => props.downloadUrl], () => {
@@ -35,7 +36,11 @@ useEffectAfterRender([() => props.downloadUrl], () => {
 
 <template>
   <ViewerLoadingPane v-if="state.status === 'loading'" />
-  <ViewerErrorPane v-else-if="state.status === 'error'" :message="state.message" :download-url="downloadUrl" />
+  <ViewerErrorPane
+    v-else-if="state.status === 'error'"
+    :message="state.message"
+    :download-url="downloadUrl"
+  />
   <div v-else class="attachment-viewer__pane">
     <ChunkText :text="state.text" :chunk="chunk" />
   </div>

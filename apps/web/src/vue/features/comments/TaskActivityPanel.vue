@@ -32,7 +32,9 @@ const props = withDefaults(
 
 const queryClient = useQueryClient();
 const filter = ref<TaskActivityFilter>("all");
-const activity = useInfiniteQuery(() => taskActivityQuery(props.workspaceId, props.taskId, filter.value));
+const activity = useInfiniteQuery(() =>
+  taskActivityQuery(props.workspaceId, props.taskId, filter.value),
+);
 const me = useQuery(meQuery);
 const timeZone = computed(() => me.data.value?.timezone || FALLBACK_TIME_ZONE);
 const actions = useCommentActions({
@@ -42,11 +44,17 @@ const actions = useCommentActions({
   projectId: null,
   invalidate: () =>
     Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["task-activity", props.workspaceId, props.taskId] }),
-      queryClient.invalidateQueries({ queryKey: ["comments", props.workspaceId, "task", props.taskId] }),
+      queryClient.invalidateQueries({
+        queryKey: ["task-activity", props.workspaceId, props.taskId],
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["comments", props.workspaceId, "task", props.taskId],
+      }),
     ]),
 });
-const activityItems = computed(() => activity.data.value?.pages.flatMap((page) => page.items) ?? []);
+const activityItems = computed(
+  () => activity.data.value?.pages.flatMap((page) => page.items) ?? [],
+);
 
 function commentNode(item: ActivityCommentItem) {
   return { comment: item.comment, children: [] };
@@ -83,7 +91,9 @@ function commentNode(item: ActivityCommentItem) {
         </select>
       </label>
     </div>
-    <p v-if="actions.actionError.value" role="alert" class="comment-panel__error">{{ actions.actionError.value }}</p>
+    <p v-if="actions.actionError.value" role="alert" class="comment-panel__error">{{
+      actions.actionError.value
+    }}</p>
     <div
       v-if="activityItems.length === 0"
       class="mx-auto flex w-full max-w-lg flex-1 flex-col items-start justify-center gap-3 px-6 py-12 sm:px-8"
@@ -120,7 +130,9 @@ function commentNode(item: ActivityCommentItem) {
           <template #meta>
             <p class="comment-thread__meta">
               {{ item.actor?.name ?? t("task.activity.actor.unknown") }} ·
-              <time :datetime="item.createdAt">{{ formatActivityTime(item.createdAt, timeZone) }}</time>
+              <time :datetime="item.createdAt">{{
+                formatActivityTime(item.createdAt, timeZone)
+              }}</time>
             </p>
           </template>
         </CommentItem>

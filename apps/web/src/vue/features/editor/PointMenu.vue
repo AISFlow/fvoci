@@ -9,7 +9,13 @@ import { menuContent } from "./menu-content";
 // items, Escape closes it and returns focus to where it was, Tab closes it
 // and moves on from there, and scrolling anything but the menu closes it.
 // After a command the editor keeps the focus the command gave it.
-const props = defineProps<{ x: number; y: number; owner: HTMLElement; label: string; id?: string }>();
+const props = defineProps<{
+  x: number;
+  y: number;
+  owner: HTMLElement;
+  label: string;
+  id?: string;
+}>();
 const emit = defineEmits<{ close: [] }>();
 
 const menu = useTemplateRef<HTMLElement>("menu");

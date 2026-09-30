@@ -86,7 +86,14 @@ function exportPdf(): void {
             </p>
           </div>
           <div class="flex flex-wrap gap-2">
-            <UButton type="button" variant="ghost" color="neutral" size="sm" :loading="refreshing" @click="emit('refresh')">
+            <UButton
+              type="button"
+              variant="ghost"
+              color="neutral"
+              size="sm"
+              :loading="refreshing"
+              @click="emit('refresh')"
+            >
               {{ t("load.retry") }}
             </UButton>
             <UButton
@@ -101,13 +108,23 @@ function exportPdf(): void {
             </UButton>
           </div>
         </div>
-        <PublicShareSearch :token="token" @select-document="emit('selectDocument', $event)" @denied="emit('denied', $event)" />
+        <PublicShareSearch
+          :token="token"
+          @select-document="emit('selectDocument', $event)"
+          @denied="emit('denied', $event)"
+        />
         <p v-if="bodyLoading" role="status" class="share-page__status">
           {{ t("doc.loading") }}
         </p>
         <div v-if="bodyError" class="flex flex-wrap items-center gap-3">
           <p role="alert" class="share-page__alert">{{ bodyError }}</p>
-          <UButton type="button" size="sm" variant="outline" color="neutral" @click="emit('retryBody')">
+          <UButton
+            type="button"
+            size="sm"
+            variant="outline"
+            color="neutral"
+            @click="emit('retryBody')"
+          >
             {{ t("load.retry") }}
           </UButton>
         </div>

@@ -34,14 +34,20 @@ const workspace = session.workspace;
 const workspaceId = computed(() => workspace.value?.id ?? "");
 
 const query = useQuery(() => attachmentQuery(workspaceId.value, id.value));
-const isHwp = computed(() => query.data.value !== undefined && viewerKind(query.data.value) === "hwp");
-const editContext = useQuery(() => attachmentEditContextQuery(workspaceId.value, id.value, isHwp.value));
+const isHwp = computed(
+  () => query.data.value !== undefined && viewerKind(query.data.value) === "hwp",
+);
+const editContext = useQuery(() =>
+  attachmentEditContextQuery(workspaceId.value, id.value, isHwp.value),
+);
 
 const downloadUrl = computed(() =>
   workspace.value ? attachmentDownloadUrl(workspace.value.id, id.value) : "",
 );
 const notFound = computed(
-  () => query.error.value instanceof ProblemError && (query.error.value.status === 404 || query.error.value.status === 403),
+  () =>
+    query.error.value instanceof ProblemError &&
+    (query.error.value.status === 404 || query.error.value.status === 403),
 );
 const retryable = computed(
   () =>
@@ -57,12 +63,20 @@ function onSavedCopy(copyId: string): void {
 </script>
 
 <template>
-  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="session.status.value === 'error'" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="wiki">
+  <WorkspaceShell
+    v-else-if="workspace"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+    active="wiki"
+  >
     <p v-if="query.isLoading.value && !query.data.value" class="attachment-viewer__status">
       {{ t("attachment.preview.loading") }}
     </p>

@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { CODE_LANGUAGES, CODE_LINE_BACKGROUND, codeChromeHostKey, type TiptapEditor, useCodeBlockChrome } from "@fvoci/editor/vue";
+import {
+  CODE_LANGUAGES,
+  CODE_LINE_BACKGROUND,
+  codeChromeHostKey,
+  type TiptapEditor,
+  useCodeBlockChrome,
+} from "@fvoci/editor/vue";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { inject, onBeforeUnmount, watch } from "vue";
@@ -8,7 +14,9 @@ import { inject, onBeforeUnmount, watch } from "vue";
 // language, copy, line numbers, fold (long blocks) and wrap, and the line
 // gutter with highlighted ({3-5}) and diff lines.
 const props = defineProps<{ editor: TiptapEditor }>();
-const { block, chrome, view, copyFailed, patch, setLanguage, copy } = useCodeBlockChrome(props.editor);
+const { block, chrome, view, copyFailed, patch, setLanguage, copy } = useCodeBlockChrome(
+  props.editor,
+);
 const host = inject(codeChromeHostKey, null);
 
 function onLanguageChange(event: Event): void {
@@ -62,9 +70,13 @@ onBeforeUnmount(() => {
         :disabled="!block.editable"
         @change="onLanguageChange"
       >
-        <option v-for="lang in CODE_LANGUAGES" :key="lang || 'plain'" :value="lang">{{ lang || "plain" }}</option>
+        <option v-for="lang in CODE_LANGUAGES" :key="lang || 'plain'" :value="lang">{{
+          lang || "plain"
+        }}</option>
       </select>
-      <UButton type="button" size="xs" variant="outline" color="neutral" @click="copy">{{ t("editor.code.copy") }}</UButton>
+      <UButton type="button" size="xs" variant="outline" color="neutral" @click="copy">{{
+        t("editor.code.copy")
+      }}</UButton>
     </div>
     <p v-if="copyFailed" role="alert">{{ t("editor.copy.failed") }}</p>
     <div class="fvoci-format-cluster">

@@ -42,7 +42,10 @@ test("the Vue public share page is an anonymous reader of /api/v1/share/{token}"
   const page = source("../../pages/PublicSharePage.vue");
   assert.match(page, /sharePublicMetaQuery/);
   assert.match(page, /sharePublicTreeQuery\(token\.value, meta\.isSuccess\.value\)/);
-  assert.match(page, /sharePublicBodyQuery\(token\.value, selectedDocumentId\.value, meta\.isSuccess\.value\)/);
+  assert.match(
+    page,
+    /sharePublicBodyQuery\(token\.value, selectedDocumentId\.value, meta\.isSuccess\.value\)/,
+  );
   assert.match(page, /failMessage/);
   assert.match(page, /from ["']@\/lib\/queries\/share["']/);
   assert.doesNotMatch(page, /from ["']react["']/);

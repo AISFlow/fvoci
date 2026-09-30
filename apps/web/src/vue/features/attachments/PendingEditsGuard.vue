@@ -45,11 +45,15 @@ function warn(event: BeforeUnloadEvent): void {
 function onLink(event: MouseEvent): void {
   const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
   if (!(anchor instanceof HTMLAnchorElement)) return;
-  const path = guardedViewerLink(event, {
-    href: anchor.href,
-    target: anchor.target || document.querySelector("base")?.target || "",
-    download: anchor.hasAttribute("download"),
-  }, window.location.href);
+  const path = guardedViewerLink(
+    event,
+    {
+      href: anchor.href,
+      target: anchor.target || document.querySelector("base")?.target || "",
+      download: anchor.hasAttribute("download"),
+    },
+    window.location.href,
+  );
   if (!path) return;
   event.preventDefault();
   void router.push(path);

@@ -3,7 +3,11 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, ref, shallowRef } from "vue";
 import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, zoomIn, zoomOut } from "@/features/attachments/pdf-limits";
-import { openPptxInWorker, PptxWorkerError, type RemotePptxDeck } from "@/features/attachments/pptx-client";
+import {
+  openPptxInWorker,
+  PptxWorkerError,
+  type RemotePptxDeck,
+} from "@/features/attachments/pptx-client";
 import { PPTX_MAX_BYTES } from "@/features/attachments/pptx-limits";
 import { SLIDE_IMAGE_TYPE } from "@/features/attachments/pptx-svg";
 import { downloadCapped, type ViewerPrefetch } from "@/features/attachments/viewer-download";
@@ -118,7 +122,11 @@ useEffectAfterRender([source, epoch], () => {
       state.value = { status: "error", message: t("load.failed"), retry: true };
     } else {
       // Over a cap, too slow, or not a deck the renderer can read: fetching again will not help.
-      state.value = { status: "error", message: t("attachment.viewer.previewUnavailable"), retry: false };
+      state.value = {
+        status: "error",
+        message: t("attachment.viewer.previewUnavailable"),
+        retry: false,
+      };
     }
   });
   return () => {
@@ -138,7 +146,8 @@ useEffectAfterRender([deck, slide], () => {
     // A retired deck is about to be replaced by the open effect. Any other closed deck lost its
     // worker while idle, with no render to report it: reopening could repeat without end, so
     // this is a load failure whose retry downloads again.
-    if (!retired.has(currentDeck)) state.value = { status: "error", message: t("load.failed"), retry: true };
+    if (!retired.has(currentDeck))
+      state.value = { status: "error", message: t("load.failed"), retry: true };
     return;
   }
   if (failed.slides.has(slide.value)) {
@@ -190,13 +199,17 @@ function retry(): void {
 const current = computed(() => {
   const shown = image.value;
   const currentDeck = deck.value;
-  return shown && currentDeck && shown.deck === currentDeck && shown.index === slide.value ? shown : null;
+  return shown && currentDeck && shown.deck === currentDeck && shown.index === slide.value
+    ? shown
+    : null;
 });
 
 const slideCount = computed(() => (state.value.status === "ready" ? state.value.slideCount : 0));
 const slideWidth = computed(() => (state.value.status === "ready" ? state.value.width : 0));
 const slideHeight = computed(() => (state.value.status === "ready" ? state.value.height : 0));
-const label = computed(() => t("attachment.viewer.slide", { current: slide.value + 1, total: slideCount.value }));
+const label = computed(() =>
+  t("attachment.viewer.slide", { current: slide.value + 1, total: slideCount.value }),
+);
 
 function onSlideError(): void {
   const shown = current.value;
@@ -230,7 +243,13 @@ function onSlideError(): void {
       @zoom-out="zoom = zoomOut(zoom)"
       @reset="zoom = 1"
     >
-      <UButton size="sm" variant="outline" color="neutral" :disabled="slide <= 0" @click="slide = Math.max(0, slide - 1)">
+      <UButton
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="slide <= 0"
+        @click="slide = Math.max(0, slide - 1)"
+      >
         {{ t("attachment.viewer.prevSlide") }}
       </UButton>
       <p class="attachment-viewer__page-label">{{ label }}</p>
@@ -255,7 +274,11 @@ function onSlideError(): void {
         :height="Math.round(slideHeight * zoom)"
         @error="onSlideError"
       />
-      <p v-else-if="current?.status === 'unavailable'" role="alert" class="attachment-viewer__alert">
+      <p
+        v-else-if="current?.status === 'unavailable'"
+        role="alert"
+        class="attachment-viewer__alert"
+      >
         {{ t("attachment.viewer.previewUnavailable") }}
       </p>
     </div>

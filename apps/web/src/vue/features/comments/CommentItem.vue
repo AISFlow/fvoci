@@ -62,22 +62,51 @@ function toggleResolved(): void {
         :aria-pressed="comment.reactions?.[emoji]?.reactedByMe ?? false"
         :aria-label="`${t('comment.reaction')} ${emoji}`"
         @click="
-          actions.react.mutate({ id: comment.id, emoji, on: !(comment.reactions?.[emoji]?.reactedByMe ?? false) })
+          actions.react.mutate({
+            id: comment.id,
+            emoji,
+            on: !(comment.reactions?.[emoji]?.reactedByMe ?? false),
+          })
         "
       >
-        {{ emoji }}{{ (comment.reactions?.[emoji]?.count ?? 0) > 0 ? ` ${comment.reactions?.[emoji]?.count}` : "" }}
+        {{ emoji
+        }}{{
+          (comment.reactions?.[emoji]?.count ?? 0) > 0
+            ? ` ${comment.reactions?.[emoji]?.count}`
+            : ""
+        }}
       </UButton>
-      <UButton v-if="!readOnly && isRoot" size="sm" variant="outline" color="neutral" :disabled="pending" @click="toggleResolved">
+      <UButton
+        v-if="!readOnly && isRoot"
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="pending"
+        @click="toggleResolved"
+      >
         {{ resolved ? t("comment.unresolve") : t("comment.resolve") }}
       </UButton>
-      <UButton v-if="!readOnly" size="sm" variant="outline" color="neutral" :disabled="pending" @click="toggleReply">
+      <UButton
+        v-if="!readOnly"
+        size="sm"
+        variant="outline"
+        color="neutral"
+        :disabled="pending"
+        @click="toggleReply"
+      >
         {{ t("comment.reply") }}
       </UButton>
       <template v-if="!readOnly && isAuthor">
         <UButton size="sm" variant="outline" color="neutral" :disabled="pending" @click="startEdit">
           {{ t("comment.edit") }}
         </UButton>
-        <UButton size="sm" variant="outline" color="neutral" :disabled="pending" @click="actions.remove.mutate(comment.id)">
+        <UButton
+          size="sm"
+          variant="outline"
+          color="neutral"
+          :disabled="pending"
+          @click="actions.remove.mutate(comment.id)"
+        >
           {{ t("comment.delete") }}
         </UButton>
       </template>
@@ -85,7 +114,9 @@ function toggleResolved(): void {
     <form
       v-if="editing"
       class="comment-thread__compose"
-      @submit.prevent="actions.patch.mutate({ id: comment.id, body: actions.editDraft.value.trim() })"
+      @submit.prevent="
+        actions.patch.mutate({ id: comment.id, body: actions.editDraft.value.trim() })
+      "
     >
       <textarea
         v-model="actions.editDraft.value"
@@ -96,7 +127,9 @@ function toggleResolved(): void {
       <UButton type="submit" size="sm" :disabled="pending || actions.editDraft.value.trim() === ''">
         {{ t("comment.save") }}
       </UButton>
-      <UButton size="sm" variant="outline" color="neutral" @click="cancelEdit">{{ t("comment.edit.cancel") }}</UButton>
+      <UButton size="sm" variant="outline" color="neutral" @click="cancelEdit">{{
+        t("comment.edit.cancel")
+      }}</UButton>
     </form>
     <CommentCompose
       v-if="actions.replyToId.value === comment.id && !readOnly"
