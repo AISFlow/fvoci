@@ -936,7 +936,9 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
-#### 추가 사용자 지시와 현재 실행 (2026-09-30 23:16 KST)
+#### 추가 사용자 지시와 현재 실행 (2026-09-30 23:28 KST)
+
+최신 추가 수락: 로컬 제품 HEAD `589a7db184233f5e69f463f14d914811f96da7da`. 공통 Vue 선언7c5e6072는 `ctx_837f4a10aac1` 독립 ACCEPT 후 편집기/i18n896ab338과00635ee3에 통합했고, 합본80파일 lint·웹 타입 통과. 인증의 오래된 redirect P2는3fad750d에서 수정해 `ctx_74098966238e`가 별도 delta ACCEPT; 실제 고정3fad의 브라우저6건과59단위 근거를 읽고589a7db1에 충돌 없이 통합했다. 해당 합본에서도 인증59단위·담당 범위 lint·웹 tsc/vue-tsc 통과. 기존0ced의11브라우저 성공은 이전 SHA 근거로만 유지한다. `takeover-evidence/auth-and-editor-589a7db1`에12파일 해시 보존. 원격 push/CI는 아직 실행하지 않았고 전체 직접 관리 범위 lint/format·최종 누적 E2E·Docker/CI는 남았다. 아래 시점별 기록의 검토 대기는 이 고정 범위에 한해서만 해소됐다.
 
 원격 #272는 `9ec790aa70ebeabc15b20733693bfb38f211ebc3`, 로컬 제품 통합 후보는 `7361178c98488eb1fcf0f940956f22343fc69c80`다. 독립 검토된 웹 lib/build 및 테스트 불변식0d26c389도 충돌 없이 통합했고, 해당 합본의71파일 lint·126단위·웹 tsc/vue-tsc는 통과했다. 디자인 f702 이후 독립 검토된 공통 lint 설정156을 5e55f38a에, 설정 화면1b078e0b을 02014444에 충돌 없이 통합했다. 5e55의 frozen Bun 설치·웹 타입 검사는 통과했고, 020의 설정 화면 실제 브라우저 합본5건도 통과했다. 이전40f에 검토된 디자인 `b99700ab`을 충돌 없이 ordinary merge했다. docs/rewrite.md 외 전체 tree가 검토된 b997과 같음을 확인했고, 통합 경로의 frozen Bun 설치 후 웹 tsc/vue-tsc도 통과했다. 설치 전 tsc 부재 exit127은 준비 실패로 별도 보존한다. Calendar `62e0d504`, caret `421e0f4c`, Rust close 순서 `bc9e05f4`의 기존 검토·실행은 유지한다. 고정 bc9의 새 native bundle/실제 Rust·DB에서 원래 wiki browser 9/9 통과; 최종 default-feature Docker·누적 전체 검사·새 원격 CI 완료를 뜻하지 않는다. 원격9ec Web은 실패, Rust는 cancelled, 다른3게이트는 성공이다. Draft·사용자 별도 승인 전 머지·태그·릴리스·배포 금지.
 
