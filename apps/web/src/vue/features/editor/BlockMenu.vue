@@ -9,6 +9,7 @@ import {
 } from "@fvoci/editor/vue";
 import { type I18nKey, t } from "@fvoci/i18n";
 import { shallowRef } from "vue";
+import { canUseToolbar } from "./useEditorToolbar";
 import MenuItem from "./MenuItem.vue";
 import PointMenu from "./PointMenu.vue";
 
@@ -36,6 +37,7 @@ const CONVERT: ReadonlyArray<{ key: I18nKey; kind: ConvertKind }> = [
 const copyFailed = shallowRef(false);
 
 function run(command: () => void): void {
+  if (!canUseToolbar(props.editor)) return;
   command();
   emit("close");
 }

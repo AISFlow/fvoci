@@ -22,6 +22,7 @@ import type { EntityResolver } from "../entities.js";
 import { overlayOwner } from "../overlay-owner.js";
 import { selectAllEscape, selectAllStep } from "../table-actions.js";
 import AttachmentBlock from "./AttachmentBlock.vue";
+import "./chrome/editor-template.css";
 import type { GutterBlock, GutterHandle } from "./block-gutter.js";
 import {
   attachmentBridgeKey,
@@ -262,6 +263,7 @@ watch(editor, (current, _previous, onCleanup) => {
   const onKeyDown = (event: KeyboardEvent) => {
     const element = host.value;
     if (!element?.isConnected) return;
+    if (event.isComposing || current.view.composing || event.keyCode === 229) return;
     if (isGuardedTextField(event.target, element)) return;
     if (event.key === "Escape") {
       if (document.querySelector(OVERLAY_SELECTOR)) return;

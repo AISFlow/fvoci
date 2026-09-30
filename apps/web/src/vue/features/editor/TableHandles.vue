@@ -16,6 +16,7 @@ import {
 import { type I18nKey, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useId } from "vue";
+import { canUseToolbar } from "./useEditorToolbar";
 import MenuItem from "./MenuItem.vue";
 import PointMenu from "./PointMenu.vue";
 
@@ -35,6 +36,7 @@ const BACKGROUNDS: ReadonlyArray<{ key: I18nKey; value: string | null }> = [
 ];
 
 function run(command: () => void): void {
+  if (!canUseToolbar(props.editor)) return;
   command();
   closeMenu();
 }
