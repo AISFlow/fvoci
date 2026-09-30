@@ -159,7 +159,9 @@ test("workflow settings add, rename and delete statuses", async ({ page }) => {
   const backlog = workflow.statuses[0];
   await createTask(page, wsId, projectId, { title: "사용 중", statusId: backlog.id });
   await section.getByRole("button", { name: "삭제" }).first().click();
-  await expect(section.getByRole("alert")).toHaveText("태스크가 남아 있는 상태는 삭제할 수 없습니다");
+  await expect(section.getByRole("alert")).toHaveText(
+    "태스크가 남아 있는 상태는 삭제할 수 없습니다",
+  );
   await expect(section.getByLabel("상태 이름")).toHaveCount(7);
 
   await section.getByRole("button", { name: "삭제" }).nth(6).click();

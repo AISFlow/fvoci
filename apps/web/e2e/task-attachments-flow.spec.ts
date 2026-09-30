@@ -98,17 +98,18 @@ test("task attachments: pick, preview thumbnail, download, delete", async ({ pag
   await expect
     .poll(
       async () =>
-        (await (await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${attachmentId}`)).json())
-          .preview,
+        (
+          await (
+            await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${attachmentId}`)
+          ).json()
+        ).preview,
       { timeout: 30_000 },
     )
     .toEqual({ width: 1600, height: 400 });
   await page.reload();
   const thumb = panel.locator(`img[src$="/attachments/${attachmentId}/download?variant=preview"]`);
   await expect(thumb).toBeVisible();
-  await expect
-    .poll(() => thumb.evaluate((img: HTMLImageElement) => img.naturalWidth))
-    .toBe(1600);
+  await expect.poll(() => thumb.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1600);
   const preview = await page.request.get(`${href}?variant=preview`);
   expect(preview.status()).toBe(200);
   expect(preview.headers()["content-type"]).toBe("image/webp");

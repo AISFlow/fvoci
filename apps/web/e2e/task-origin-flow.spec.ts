@@ -113,5 +113,7 @@ test("document create form makes a task origin visible on both screens", async (
   await page.reload();
   const afterRestore = page.getByRole("region", { name: "연결 태스크" });
   await expect(afterRestore.getByRole("heading", { name: /연결 태스크 \(1\)/ })).toBeVisible();
-  await expect(afterRestore.getByRole("link", { name: /TORI-\d+ · 문서에서 만든 연결/ })).toBeVisible();
+  await expect(
+    afterRestore.getByRole("link", { name: /TORI-\d+ · 문서에서 만든 연결/ }),
+  ).toBeVisible();
 });

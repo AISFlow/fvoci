@@ -43,8 +43,9 @@ test("owner adds a holiday and copies an ICS feed that lists dated tasks", async
   const wsId = await workspaceId(page, owner.workspaceSlug);
   const projects = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
   expect(projects.ok()).toBe(true);
-  const projectId = (await projects.json()).items.find((item: { key: string }) => item.key === "CAL")
-    ?.id as string;
+  const projectId = (await projects.json()).items.find(
+    (item: { key: string }) => item.key === "CAL",
+  )?.id as string;
   expect(projectId).toBeTruthy();
   const createdTask = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`,
@@ -64,11 +65,16 @@ test("owner adds a holiday and copies an ICS feed that lists dated tasks", async
   expect(other.status()).toBe(201);
 
   await page.goto(`/w/${owner.workspaceSlug}/settings`);
-  await page.locator("summary").filter({ hasText: /달력 구독/ }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /달력 구독/ })
+    .click();
   await expect(page.getByText("등록된 공휴일이 없습니다")).toBeVisible();
   await page.getByLabel("공휴일 날짜").fill("2026-09-01");
   await page.getByRole("button", { name: "공휴일 추가" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "공휴일 변경을 저장했습니다" })).toBeVisible();
+  await expect(
+    page.getByRole("status").filter({ hasText: "공휴일 변경을 저장했습니다" }),
+  ).toBeVisible();
   await expect(page.locator("time").filter({ hasText: "2026-09-01" })).toBeVisible();
 
   const tokenResp = page.waitForResponse(

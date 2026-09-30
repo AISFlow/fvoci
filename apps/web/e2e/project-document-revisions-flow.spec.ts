@@ -116,7 +116,9 @@ test("project document: save a revision, edit, restore through the room", async 
   expect(wiki.status()).toBe(404);
 
   // 7. Archived project: history stays readable, writes are refused and hidden.
-  const archive = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${project.id}/archive`);
+  const archive = await page.request.post(
+    `/api/v1/workspaces/${wsId}/projects/${project.id}/archive`,
+  );
   expect(archive.status()).toBe(200);
   const refused = await page.request.post(revisionsUrl);
   expect(refused.status()).toBe(409);
@@ -128,7 +130,9 @@ test("project document: save a revision, edit, restore through the room", async 
   await expect(page.getByTestId("revision-restore")).toHaveCount(0);
 });
 
-test("project long title wraps and remains readable after archive without hiding the body", async ({ page }) => {
+test("project long title wraps and remains readable after archive without hiding the body", async ({
+  page,
+}) => {
   await ensureSetup(page);
   const wsId = await workspaceId(page);
   const created = await page.request.post(`/api/v1/workspaces/${wsId}/projects`, {
@@ -136,33 +140,88 @@ test("project long title wraps and remains readable after archive without hiding
   });
   expect(created.status()).toBe(201);
   const project = await created.json();
-  const title = "한국어 협업 문서 제목이 길어질 때 탐색과 편집 작업을 안정적으로 유지하는 주간 업무 기록 및 검토 결과";
-  const docRes = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents`, { data: { parentId: project.rootDocumentId, title } });
+  const title =
+    "한국어 협업 문서 제목이 길어질 때 탐색과 편집 작업을 안정적으로 유지하는 주간 업무 기록 및 검토 결과";
+  const docRes = await page.request.post(
+    `/api/v1/workspaces/${wsId}/projects/${project.id}/documents`,
+    { data: { parentId: project.rootDocumentId, title } },
+  );
   expect(docRes.status()).toBe(201);
   const doc = await docRes.json();
-  expect((await page.request.put(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}/body`, { data: { contentMd: "첫 번째 업무 본문입니다.\n\n두 번째 업무 본문입니다.\n\n세 번째 업무 본문입니다." } })).ok()).toBe(true);
+  expect(
+    (
+      await page.request.put(
+        `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}/body`,
+        {
+          data: {
+            contentMd:
+              "첫 번째 업무 본문입니다.\n\n두 번째 업무 본문입니다.\n\n세 번째 업무 본문입니다.",
+          },
+        },
+      )
+    ).ok(),
+  ).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/w/${admin.workspaceSlug}/${doc.displayId}`);
   await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
   const field = page.getByLabel("문서 제목");
   await expect(field).toHaveValue(title);
-  await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
-  expect(await field.evaluate((e) => e.scrollWidth)).toBeLessThanOrEqual(await field.evaluate((e) => e.clientWidth));
-  expect(await page.locator(".ProseMirror > p").nth(2).evaluate((e) => e.getBoundingClientRect().bottom)).toBeLessThan(844);
+  await expect
+    .poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1))
+    .toBe(true);
+  expect(await field.evaluate((e) => e.scrollWidth)).toBeLessThanOrEqual(
+    await field.evaluate((e) => e.clientWidth),
+  );
+  expect(
+    await page
+      .locator(".ProseMirror > p")
+      .nth(2)
+      .evaluate((e) => e.getBoundingClientRect().bottom),
+  ).toBeLessThan(844);
   await field.fill("프로젝트 한국어 제목");
   await field.press("Enter");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}`)).json()).title).toBe("프로젝트 한국어 제목");
-  await field.fill(title); await field.press("Enter");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}`)).json()).title).toBe(title);
-  expect((await page.request.post(`/api/v1/workspaces/${wsId}/projects/${project.id}/archive`)).ok()).toBe(true);
-  await page.reload(); await expect(field).toBeDisabled();
-  await expect.poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1)).toBe(true);
+  await expect
+    .poll(
+      async () =>
+        (
+          await (
+            await page.request.get(
+              `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}`,
+            )
+          ).json()
+        ).title,
+    )
+    .toBe("프로젝트 한국어 제목");
+  await field.fill(title);
+  await field.press("Enter");
+  await expect
+    .poll(
+      async () =>
+        (
+          await (
+            await page.request.get(
+              `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}`,
+            )
+          ).json()
+        ).title,
+    )
+    .toBe(title);
+  expect(
+    (await page.request.post(`/api/v1/workspaces/${wsId}/projects/${project.id}/archive`)).ok(),
+  ).toBe(true);
+  await page.reload();
+  await expect(field).toBeDisabled();
+  await expect
+    .poll(async () => field.evaluate((e) => e.scrollHeight <= e.clientHeight + 1))
+    .toBe(true);
   await expect(field).toHaveValue(title);
   await expect(page.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
   const options = page.getByRole("button", { name: "문서 옵션", exact: true });
-  await options.click(); await expect(page.getByLabel("아이콘")).toBeDisabled();
+  await options.click();
+  await expect(page.getByLabel("아이콘")).toBeDisabled();
   await expect(page.getByLabel("문서 상태")).toBeDisabled();
   await expect(page.getByRole("button", { name: "Markdown", exact: true })).toBeEnabled();
-  await options.press("Escape"); await expect(options).toBeFocused();
+  await options.press("Escape");
+  await expect(options).toBeFocused();
   await expect(options).toHaveAttribute("aria-expanded", "false");
 });

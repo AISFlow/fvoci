@@ -36,7 +36,9 @@ async function workspaceId(page: Page, slug: string): Promise<string> {
 async function taskIdFor(page: Page, wsId: string, displayId: string): Promise<string> {
   const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/${displayId}`);
   expect(lookup.ok()).toBe(true);
-  const taskId = (await lookup.json()).items.find((item: { kind: string }) => item.kind === "task")?.id;
+  const taskId = (await lookup.json()).items.find(
+    (item: { kind: string }) => item.kind === "task",
+  )?.id;
   expect(taskId).toBeTruthy();
   return taskId;
 }
@@ -89,13 +91,19 @@ test("member comments on a task, viewer is read-only, parent picker searches", a
   const wsId = await workspaceId(page, owner.workspaceSlug);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
   expect(projectsRes.ok()).toBe(true);
-  const project = (await projectsRes.json()).items.find((item: { key: string }) => item.key === "TCU");
+  const project = (await projectsRes.json()).items.find(
+    (item: { key: string }) => item.key === "TCU",
+  );
   expect(project).toBeTruthy();
   const membersRes = await page.request.get(`/api/v1/workspaces/${wsId}/members`);
   expect(membersRes.ok()).toBe(true);
   const members = (await membersRes.json()).items as Array<{ email: string; userId: string }>;
-  const memberId = members.find((item) => item.email.toLowerCase() === member.email.toLowerCase())?.userId;
-  const viewerId = members.find((item) => item.email.toLowerCase() === viewer.email.toLowerCase())?.userId;
+  const memberId = members.find(
+    (item) => item.email.toLowerCase() === member.email.toLowerCase(),
+  )?.userId;
+  const viewerId = members.find(
+    (item) => item.email.toLowerCase() === viewer.email.toLowerCase(),
+  )?.userId;
   expect(memberId).toBeTruthy();
   expect(viewerId).toBeTruthy();
   const memberGrant = await page.request.post(
@@ -147,12 +155,14 @@ test("member comments on a task, viewer is read-only, parent picker searches", a
 
   const parentTaskId = await taskIdFor(page, wsId, "TCU-2");
   const childTaskId = await taskIdFor(page, wsId, "TCU-3");
-  await expect.poll(async () => {
-    const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${childTaskId}`);
-    expect(detailRes.ok()).toBe(true);
-    const detail = await detailRes.json();
-    return `${detail.type}:${detail.parentId}`;
-  }).toBe(`subtask:${parentTaskId}`);
+  await expect
+    .poll(async () => {
+      const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${childTaskId}`);
+      expect(detailRes.ok()).toBe(true);
+      const detail = await detailRes.json();
+      return `${detail.type}:${detail.parentId}`;
+    })
+    .toBe(`subtask:${parentTaskId}`);
 
   await logout(page);
   await login(page, viewer.email, viewer.password);

@@ -30,7 +30,13 @@ const day = (d: number) => `${Y}-0${M}-${String(d).padStart(2, "0")}`;
 // Icon sets must be bundled; these are the Iconify API hosts a runtime fetch would hit.
 const ICON_API_HOSTS = ["api.iconify.design", "api.simplesvg.com", "api.unisvg.com"];
 
-type Task = { id: string; number: number; startDate: string | null; dueDate: string | null; dueAt: string | null };
+type Task = {
+  id: string;
+  number: number;
+  startDate: string | null;
+  dueDate: string | null;
+  dueAt: string | null;
+};
 
 function watchIconRequests(page: Page): string[] {
   const hits: string[] = [];
@@ -95,7 +101,9 @@ async function createTask(
   projectId: string,
   data: Record<string, string>,
 ): Promise<Task> {
-  const res = await request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, { data });
+  const res = await request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, {
+    data,
+  });
   expect(res.status()).toBe(201);
   return res.json();
 }
@@ -115,8 +123,15 @@ function bar(page: Page, taskId: string) {
 }
 
 /** Drags a bar (or one of its handles) by whole days, at the chart's own scale. */
-async function dragBy(page: Page, taskId: string, days: number, part: "bar" | "start" | "end" = "bar") {
-  const pxPerDay = Number(await page.locator('[data-slot="gantt"]').getAttribute("data-px-per-day"));
+async function dragBy(
+  page: Page,
+  taskId: string,
+  days: number,
+  part: "bar" | "start" | "end" = "bar",
+) {
+  const pxPerDay = Number(
+    await page.locator('[data-slot="gantt"]').getAttribute("data-px-per-day"),
+  );
   expect(pxPerDay).toBeGreaterThan(0);
   const target =
     part === "bar"
@@ -158,9 +173,12 @@ test("signed out, the Gantt URL goes through login and back; the chart matches t
     startDate: day(20),
     dueDate: day(21),
   });
-  const dep = await page.request.post(`/api/v1/workspaces/${wsId}/tasks/${blocker.id}/dependencies`, {
-    data: { blockedId: blocked.id, type: "FS" },
-  });
+  const dep = await page.request.post(
+    `/api/v1/workspaces/${wsId}/tasks/${blocker.id}/dependencies`,
+    {
+      data: { blockedId: blocked.id, type: "FS" },
+    },
+  );
   expect(dep.status()).toBe(200);
 
   // A fresh browser: direct URL, then the login page (UI), then back.
@@ -174,13 +192,19 @@ test("signed out, the Gantt URL goes through login and back; the chart matches t
   await fresh.getByLabel("이메일").fill(admin.email);
   await fresh.getByLabel("비밀번호").fill(admin.password);
   await fresh.getByRole("button", { name: "로그인", exact: true }).click();
-  await expect(fresh).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${project.key}/gantt\\?y=${Y}&m=${M}$`));
+  await expect(fresh).toHaveURL(
+    new RegExp(`/w/${admin.workspaceSlug}/${project.key}/gantt\\?y=${Y}&m=${M}$`),
+  );
 
   const chart = fresh.locator('[data-slot="gantt"]');
   await expect(chart).toBeVisible();
   await expect(chart).toHaveAttribute("data-bar-edit", "1");
-  await expect(chart.locator(".fvoci-gantt__row-label", { hasText: "Gantt blocker" })).toBeVisible();
-  await expect(chart.locator(".fvoci-gantt__row-label", { hasText: "Gantt blocked" })).toBeVisible();
+  await expect(
+    chart.locator(".fvoci-gantt__row-label", { hasText: "Gantt blocker" }),
+  ).toBeVisible();
+  await expect(
+    chart.locator(".fvoci-gantt__row-label", { hasText: "Gantt blocked" }),
+  ).toBeVisible();
   await expect(chart.locator("polyline.fvoci-gantt__link")).toHaveCount(1);
   await expect(fresh.locator('[data-slot="gantt-period"]')).toHaveText(`${Y}년 ${M}월`);
   await expect(bar(fresh, blocker.id)).toHaveAttribute("data-start", day(10));
@@ -191,7 +215,13 @@ test("signed out, the Gantt URL goes through login and back; the chart matches t
   const me = await (await fresh.request.get("/api/v1/auth/me")).json();
   const server = await (
     await fresh.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/task-layout`, {
-      params: { year: Y, month: M, weekStartsOn: me.weekStartsOn === 1 ? 1 : 0, pxPerDay: 32, laneHeight: 48 },
+      params: {
+        year: Y,
+        month: M,
+        weekStartsOn: me.weekStartsOn === 1 ? 1 : 0,
+        pxPerDay: 32,
+        laneHeight: 48,
+      },
     })
   ).json();
   expect(Number(await chart.getAttribute("data-px-per-day"))).toBe(server.scale.pxPerDay);
@@ -227,7 +257,9 @@ test("signed out, the Gantt URL goes through login and back; the chart matches t
   await context.close();
 });
 
-test("dragging a bar saves it; the dates survive a reload and a dueAt keeps its time of day", async ({ page }) => {
+test("dragging a bar saves it; the dates survive a reload and a dueAt keeps its time of day", async ({
+  page,
+}) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1600, height: 900 });
   const csp = watchCspViolations(page);
@@ -308,7 +340,11 @@ test("dragging a bar saves it; the dates survive a reload and a dueAt keeps its 
   expect(body.dueDate).toBeUndefined();
   expect(localTime(body.dueAt)).toBe(localTime(`${day(6)}T09:30:00.000Z`));
   expect(Date.parse(body.dueAt) - Date.parse(`${day(6)}T09:30:00.000Z`)).toBe(3 * 86_400_000);
-  expect(body.expectedDates).toEqual({ startDate: day(4), dueDate: null, dueAt: `${day(6)}T09:30:00.000Z` });
+  expect(body.expectedDates).toEqual({
+    startDate: day(4),
+    dueDate: null,
+    dueAt: `${day(6)}T09:30:00.000Z`,
+  });
   await expect(bar(page, timed.id)).toHaveAttribute("data-start", day(7));
   await expect(chart).not.toHaveAttribute("aria-busy", "true");
 
@@ -317,7 +353,11 @@ test("dragging a bar saves it; the dates survive a reload and a dueAt keeps its 
   await expect(bar(page, ranged.id)).toHaveAttribute("data-end", day(22));
   await expect(bar(page, timed.id)).toHaveAttribute("data-start", day(7));
   const savedRanged = await getTask(page.request, wsId, ranged.id);
-  expect([savedRanged.startDate, savedRanged.dueDate, savedRanged.dueAt]).toEqual([day(16), day(22), null]);
+  expect([savedRanged.startDate, savedRanged.dueDate, savedRanged.dueAt]).toEqual([
+    day(16),
+    day(22),
+    null,
+  ]);
   const savedTimed = await getTask(page.request, wsId, timed.id);
   expect(savedTimed.startDate).toBe(day(7));
   expect(savedTimed.dueDate).toBeNull();
@@ -327,7 +367,9 @@ test("dragging a bar saves it; the dates survive a reload and a dueAt keeps its 
   expect(iconFetches).toEqual([]);
 });
 
-test("handles write only the date of their own edge; a one-date bar has no handle on its date", async ({ page }) => {
+test("handles write only the date of their own edge; a one-date bar has no handle on its date", async ({
+  page,
+}) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1600, height: 900 });
   const csp = watchCspViolations(page);
@@ -339,8 +381,14 @@ test("handles write only the date of their own edge; a one-date bar has no handl
     startDate: day(10),
     dueDate: day(14),
   });
-  const dueOnly = await createTask(page.request, wsId, project.id, { title: "Gantt due only", dueDate: day(20) });
-  const startOnly = await createTask(page.request, wsId, project.id, { title: "Gantt start only", startDate: day(8) });
+  const dueOnly = await createTask(page.request, wsId, project.id, {
+    title: "Gantt due only",
+    dueDate: day(20),
+  });
+  const startOnly = await createTask(page.request, wsId, project.id, {
+    title: "Gantt start only",
+    startDate: day(8),
+  });
 
   await page.goto(ganttUrl(project.key));
   await expect(page.locator('[data-slot="gantt"]')).toHaveAttribute("data-bar-edit", "1");
@@ -390,7 +438,9 @@ test("handles write only the date of their own edge; a one-date bar has no handl
 
   await page.reload();
   await expect(bar(page, ranged.id)).toHaveAttribute("data-start", day(8));
-  const saved = await Promise.all([ranged, dueOnly, startOnly].map((task) => getTask(page.request, wsId, task.id)));
+  const saved = await Promise.all(
+    [ranged, dueOnly, startOnly].map((task) => getTask(page.request, wsId, task.id)),
+  );
   expect(saved.map((task) => [task.startDate, task.dueDate, task.dueAt])).toEqual([
     [day(8), day(14), null],
     [day(17), day(20), null],
@@ -422,11 +472,10 @@ test("a task spanning the month's edges moves by the day asked", async ({ page }
   const chart = page.locator('[data-slot="gantt"]');
   await expect(chart).toHaveAttribute("data-bar-edit", "1");
   await expect(bar(page, early.id)).toHaveAttribute("data-start", `${Y}-02-10`);
-  expect(Number(await bar(page, early.id).locator(".fvoci-gantt__bar-rect").getAttribute("x"))).toBeLessThan(0);
-  const layoutEnd = await chart
-    .locator(".fvoci-gantt__tick")
-    .last()
-    .getAttribute("data-date");
+  expect(
+    Number(await bar(page, early.id).locator(".fvoci-gantt__bar-rect").getAttribute("x")),
+  ).toBeLessThan(0);
+  const layoutEnd = await chart.locator(".fvoci-gantt__tick").last().getAttribute("data-date");
   expect(layoutEnd! < `${Y}-04-10`).toBe(true);
 
   // ArrowLeft moves it one day earlier, not to the first visible day.
@@ -469,14 +518,18 @@ test("a task spanning the month's edges moves by the day asked", async ({ page }
   });
   await expect(bar(page, late.id)).toHaveAttribute("data-end", `${Y}-04-12`);
 
-  const saved = await Promise.all([early, late].map((task) => getTask(page.request, wsId, task.id)));
+  const saved = await Promise.all(
+    [early, late].map((task) => getTask(page.request, wsId, task.id)),
+  );
   expect(saved.map((task) => [task.startDate, task.dueDate])).toEqual([
     [`${Y}-02-09`, day(4)],
     [day(29), `${Y}-04-12`],
   ]);
 });
 
-test("a task changed elsewhere is not overwritten, and a broken dependency snaps back", async ({ page }) => {
+test("a task changed elsewhere is not overwritten, and a broken dependency snaps back", async ({
+  page,
+}) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1600, height: 900 });
   const csp = watchCspViolations(page);
@@ -499,7 +552,9 @@ test("a task changed elsewhere is not overwritten, and a broken dependency snaps
   expect(dep.status()).toBe(200);
 
   // No stream: the page must not learn of the other edit before the drag.
-  await page.route(/\/api\/v1\/workspaces\/[^/]+\/projects\/[^/]+\/stream$/, (route) => route.abort());
+  await page.route(/\/api\/v1\/workspaces\/[^/]+\/projects\/[^/]+\/stream$/, (route) =>
+    route.abort(),
+  );
   await page.goto(ganttUrl(project.key));
   await expect(bar(page, first.id)).toHaveAttribute("data-end", day(12));
 
@@ -536,7 +591,10 @@ test("a task changed elsewhere is not overwritten, and a broken dependency snaps
   expect(csp).toEqual([]);
 });
 
-test("a view-only member gets no drag handles and the server refuses a forced change", async ({ page, browser }) => {
+test("a view-only member gets no drag handles and the server refuses a forced change", async ({
+  page,
+  browser,
+}) => {
   test.setTimeout(120_000);
   await ensureSetup(page);
   const wsId = await workspaceId(page.request, admin.workspaceSlug);
@@ -558,9 +616,12 @@ test("a view-only member gets no drag handles and the server refuses a forced ch
     }[]
   ).find((m) => m.email === viewer.email);
   expect(viewerUser).toBeTruthy();
-  const added = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${project.id}/members`, {
-    data: { userId: viewerUser!.userId, role: "viewer" },
-  });
+  const added = await page.request.post(
+    `/api/v1/workspaces/${wsId}/projects/${project.id}/members`,
+    {
+      data: { userId: viewerUser!.userId, role: "viewer" },
+    },
+  );
   expect(added.status()).toBe(201);
 
   const context = await browser.newContext();
@@ -596,7 +657,9 @@ test("an archived project's Gantt is read-only", async ({ page }) => {
     startDate: day(10),
     dueDate: day(14),
   });
-  const archive = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${project.id}/archive`);
+  const archive = await page.request.post(
+    `/api/v1/workspaces/${wsId}/projects/${project.id}/archive`,
+  );
   expect(archive.ok()).toBe(true);
   await page.goto(ganttUrl(project.key));
   await expect(bar(page, task.id)).toBeVisible();
@@ -609,7 +672,11 @@ test("the Gantt page loads none of the wiki editor's code or styles", async ({ p
   await ensureSetup(page);
   const wsId = await workspaceId(page.request, admin.workspaceSlug);
   const project = await createProject(page.request, wsId, "GLD");
-  const task = await createTask(page.request, wsId, project.id, { title: "Gantt load", startDate: day(3), dueDate: day(4) });
+  const task = await createTask(page.request, wsId, project.id, {
+    title: "Gantt load",
+    startDate: day(3),
+    dueDate: day(4),
+  });
   await page.goto(ganttUrl(project.key));
   await expect(bar(page, task.id)).toBeVisible();
   // Every script and stylesheet this document loaded (the boot module, the
@@ -638,7 +705,11 @@ test("a project list that fails to load offers a retry", async ({ page }) => {
   await ensureSetup(page);
   const wsId = await workspaceId(page.request, admin.workspaceSlug);
   const project = await createProject(page.request, wsId, "GRT");
-  const task = await createTask(page.request, wsId, project.id, { title: "Gantt retry", startDate: day(3), dueDate: day(4) });
+  const task = await createTask(page.request, wsId, project.id, {
+    title: "Gantt retry",
+    startDate: day(3),
+    dueDate: day(4),
+  });
   let failList = true;
   await page.route(/\/api\/v1\/workspaces\/[^/]+\/projects(\?[^/]*)?$/, (route) => {
     if (!failList || route.request().method() !== "GET") return route.continue();
@@ -661,8 +732,13 @@ test("Vue project tabs and the workspace project list stay in one runtime", asyn
   await ensureSetup(page);
   const wsId = await workspaceId(page.request, admin.workspaceSlug);
   const project = await createProject(page.request, wsId, "GNV");
-  await createTask(page.request, wsId, project.id, { title: "Gantt nav", startDate: day(3), dueDate: day(4) });
-  const marker = () => page.evaluate(() => (window as unknown as { __sameDocument?: boolean }).__sameDocument);
+  await createTask(page.request, wsId, project.id, {
+    title: "Gantt nav",
+    startDate: day(3),
+    dueDate: day(4),
+  });
+  const marker = () =>
+    page.evaluate(() => (window as unknown as { __sameDocument?: boolean }).__sameDocument);
   const markDocument = () =>
     page.evaluate(() => {
       (window as unknown as { __sameDocument?: boolean }).__sameDocument = true;
@@ -682,7 +758,9 @@ test("Vue project tabs and the workspace project list stay in one runtime", asyn
   await markDocument();
   await page.getByRole("link", { name: "간트", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${project.key}/gantt$`));
-  await expect(page.locator('[data-slot="gantt"]').or(page.locator('[data-slot="gantt-empty"]'))).toBeVisible();
+  await expect(
+    page.locator('[data-slot="gantt"]').or(page.locator('[data-slot="gantt-empty"]')),
+  ).toBeVisible();
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   expect(await marker(), "tasks → Gantt stays in the Vue app").toBe(true);
 

@@ -87,7 +87,11 @@ function installProbe(): void {
   } catch {
     /* unsupported */
   }
-  const observe = (type: string, opts: Record<string, unknown>, fn: (e: PerformanceEntry) => void) => {
+  const observe = (
+    type: string,
+    opts: Record<string, unknown>,
+    fn: (e: PerformanceEntry) => void,
+  ) => {
     try {
       new PerformanceObserver((list) => list.getEntries().forEach(fn)).observe({
         type,
@@ -110,7 +114,11 @@ function installProbe(): void {
     });
   });
   observe("element", {}, (raw) => {
-    const e = raw as PerformanceEntry & { identifier: string; renderTime: number; loadTime: number };
+    const e = raw as PerformanceEntry & {
+      identifier: string;
+      renderTime: number;
+      loadTime: number;
+    };
     st.el.push({ id: e.identifier, r: e.renderTime, l: e.loadTime });
   });
   observe("paint", {}, (e) => st.paint.push({ n: e.name, s: e.startTime }));
@@ -189,7 +197,11 @@ function installProbe(): void {
     };
     const hit = (el: Element, pre: boolean) => {
       const now = performance.now();
-      const rec: Hit = { dom: now, abs: performance.timeOrigin + now, tag: el.tagName.toLowerCase() };
+      const rec: Hit = {
+        dom: now,
+        abs: performance.timeOrigin + now,
+        tag: el.tagName.toLowerCase(),
+      };
       if (pre) rec.pre = true;
       st.hits[id] = rec;
       const target = timingTarget(el, spec.text);
@@ -273,7 +285,11 @@ export async function waitHit(page: Page, id: string, timeoutMs: number): Promis
 }
 
 /** Waits (bounded) for the Element Timing entry of a watch; null when none arrives. */
-export async function elementPaint(page: Page, id: string, timeoutMs = 1000): Promise<number | null> {
+export async function elementPaint(
+  page: Page,
+  id: string,
+  timeoutMs = 1000,
+): Promise<number | null> {
   try {
     await page.waitForFunction((i) => window.__fp!.el.some((e) => e.id === i), id, {
       timeout: timeoutMs,
@@ -289,7 +305,11 @@ export async function elementPaint(page: Page, id: string, timeoutMs = 1000): Pr
 }
 
 /** Main-thread long tasks (>50 ms) that started in [from, to). */
-export async function longTasks(page: Page, from: number, to: number): Promise<{ count: number; totalMs: number }> {
+export async function longTasks(
+  page: Page,
+  from: number,
+  to: number,
+): Promise<{ count: number; totalMs: number }> {
   return page.evaluate(
     ([f, t]) => {
       const hits = window.__fp!.lt.filter((x) => x.s >= f && x.s < t);
@@ -299,9 +319,18 @@ export async function longTasks(page: Page, from: number, to: number): Promise<{
   );
 }
 
-export function waterfall(res: ResourceEntry[]): { n: string; t: string; s: number; w: number; e: number; b: number }[] {
+export function waterfall(
+  res: ResourceEntry[],
+): { n: string; t: string; s: number; w: number; e: number; b: number }[] {
   const r1 = (v: number) => Math.round(v * 10) / 10;
-  return res.map((r) => ({ n: r.name, t: r.type, s: r1(r.start), w: r1(r.respStart), e: r1(r.end), b: r.bytes }));
+  return res.map((r) => ({
+    n: r.name,
+    t: r.type,
+    s: r1(r.start),
+    w: r1(r.respStart),
+    e: r1(r.end),
+    b: r.bytes,
+  }));
 }
 
 export async function pageNow(page: Page): Promise<number> {
@@ -318,16 +347,22 @@ export async function eventsSince(page: Page, since: number): Promise<EventEntry
 
 export async function paints(page: Page): Promise<{ n: string; s: number }[]> {
   // Read the timeline buffer directly: observer callbacks may not have run yet.
-  return page.evaluate(() => performance.getEntriesByType("paint").map((e) => ({ n: e.name, s: e.startTime })));
+  return page.evaluate(() =>
+    performance.getEntriesByType("paint").map((e) => ({ n: e.name, s: e.startTime })),
+  );
 }
 
 /** Waits (bounded) for the first-contentful-paint entry; null when none arrives. */
 export async function firstContentfulPaint(page: Page, timeoutMs = 1000): Promise<number | null> {
   try {
-    await page.waitForFunction(() => performance.getEntriesByName("first-contentful-paint", "paint").length > 0, undefined, {
-      timeout: timeoutMs,
-      polling: 16,
-    });
+    await page.waitForFunction(
+      () => performance.getEntriesByName("first-contentful-paint", "paint").length > 0,
+      undefined,
+      {
+        timeout: timeoutMs,
+        polling: 16,
+      },
+    );
   } catch {
     return null;
   }
@@ -366,7 +401,9 @@ export function sanitizeUrl(url: string): string {
 }
 
 /** INP-style duration per interaction: max Event Timing duration per interactionId. */
-export function interactions(entries: EventEntry[]): { id: number; duration: number; inputDelay: number }[] {
+export function interactions(
+  entries: EventEntry[],
+): { id: number; duration: number; inputDelay: number }[] {
   const byId = new Map<number, { duration: number; inputDelay: number }>();
   for (const e of entries) {
     if (!e.i) continue;
@@ -377,12 +414,21 @@ export function interactions(entries: EventEntry[]): { id: number; duration: num
   return [...byId.entries()].map(([id, v]) => ({ id, ...v }));
 }
 
-export type Stats = { n: number; failures: number; median: number | null; p95: number | null; max: number | null };
+export type Stats = {
+  n: number;
+  failures: number;
+  median: number | null;
+  p95: number | null;
+  max: number | null;
+};
 
 export function stats(values: (number | null | undefined)[]): Stats {
-  const ok = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v)).sort((a, b) => a - b);
+  const ok = values
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+    .sort((a, b) => a - b);
   const failures = values.length - ok.length;
-  const q = (p: number) => (ok.length ? ok[Math.min(ok.length - 1, Math.ceil(p * ok.length) - 1)] : null);
+  const q = (p: number) =>
+    ok.length ? ok[Math.min(ok.length - 1, Math.ceil(p * ok.length) - 1)] : null;
   return {
     n: values.length,
     failures,

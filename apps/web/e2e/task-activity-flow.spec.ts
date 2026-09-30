@@ -18,9 +18,7 @@ async function workspaceId(page: Page, slug: string): Promise<string> {
   return workspace.id;
 }
 
-test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시 열어도 보존한다", async ({
-  page,
-}) => {
+test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시 열어도 보존한다", async ({ page }) => {
   test.setTimeout(120_000);
 
   await page.goto("/");
@@ -41,10 +39,9 @@ test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시
   });
   expect(projectResponse.ok()).toBeTruthy();
   const project: { id: string } = await projectResponse.json();
-  const taskResponse = await page.request.post(
-    `${base}/projects/${project.id}/tasks`,
-    { data: { title: "배양 조건 확인", priority: "medium" } },
-  );
+  const taskResponse = await page.request.post(`${base}/projects/${project.id}/tasks`, {
+    data: { title: "배양 조건 확인", priority: "medium" },
+  });
   expect(taskResponse.ok()).toBeTruthy();
   const task: { id: string; number: number } = await taskResponse.json();
   const taskApi = `${base}/tasks/${task.id}`;
@@ -76,9 +73,7 @@ test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시
   const activity = page.locator("#fv-comments");
   await expect(activity.getByRole("heading", { name: "활동" })).toBeVisible();
   await expect(activity.getByText(replyBody, { exact: true })).toBeVisible();
-  await expect(
-    activity.getByText("태스크를 생성했습니다.", { exact: false }),
-  ).toBeVisible();
+  await expect(activity.getByText("태스크를 생성했습니다.", { exact: false })).toBeVisible();
   await expect(activity.getByText("보관 상태", { exact: true })).toHaveCount(2);
   await expect(activity.getByText("보통", { exact: true })).toBeVisible();
   await expect(activity.getByText("높음", { exact: true })).toBeVisible();
@@ -97,12 +92,8 @@ test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시
   await filter.selectOption("comments");
   await expect(activity.getByText(replyBody, { exact: true })).toBeVisible();
   await expect(rootDraft).toHaveValue("작성 중인 최상위 댓글");
-  await expect(activity.getByLabel("댓글을 입력하세요").first()).toHaveValue(
-    "작성 중인 답글",
-  );
-  await expect(
-    activity.getByText("태스크를 생성했습니다.", { exact: false }),
-  ).toHaveCount(0);
+  await expect(activity.getByLabel("댓글을 입력하세요").first()).toHaveValue("작성 중인 답글");
+  await expect(activity.getByText("태스크를 생성했습니다.", { exact: false })).toHaveCount(0);
 
   // In-page edits refresh the feed without a reload.
   await filter.selectOption("all");
@@ -114,14 +105,10 @@ test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시
 
   await page.reload();
   await expect(page.getByLabel("태스크 제목")).toHaveValue(inPageTitle);
-  await expect(
-    page.locator("#fv-comments").getByText(replyBody, { exact: true }),
-  ).toBeVisible();
+  await expect(page.locator("#fv-comments").getByText(replyBody, { exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await activity.scrollIntoViewIfNeeded();
-  expect(
-    await activity.evaluate(
-      (element) => element.scrollWidth <= element.clientWidth,
-    ),
-  ).toBe(true);
+  expect(await activity.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  );
 });

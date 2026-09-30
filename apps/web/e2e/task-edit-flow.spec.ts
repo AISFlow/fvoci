@@ -24,12 +24,18 @@ async function workspaceId(page: Page, slug: string): Promise<string> {
 async function taskIdFor(page: Page, wsId: string, displayId: string): Promise<string> {
   const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/${displayId}`);
   expect(lookup.ok()).toBe(true);
-  const taskId = (await lookup.json()).items.find((item: { kind: string }) => item.kind === "task")?.id;
+  const taskId = (await lookup.json()).items.find(
+    (item: { kind: string }) => item.kind === "task",
+  )?.id;
   expect(taskId).toBeTruthy();
   return taskId;
 }
 
-async function taskDetail(page: Page, wsId: string, taskId: string): Promise<{
+async function taskDetail(
+  page: Page,
+  wsId: string,
+  taskId: string,
+): Promise<{
   title: string;
   type: string;
   parentId: string | null;
@@ -114,7 +120,9 @@ test("task edit flow covers fields, hierarchy, conflicts, trash and restore", as
 
   const wsId = await workspaceId(page, admin.workspaceSlug);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
-  const project = (await projectsRes.json()).items.find((item: { key: string }) => item.key === "EDT");
+  const project = (await projectsRes.json()).items.find(
+    (item: { key: string }) => item.key === "EDT",
+  );
   expect(project).toBeTruthy();
   const doneStatusId = await workflowStatusId(page, wsId, project.id, "done");
   const todoStatusId = await workflowStatusId(page, wsId, project.id, "todo");
@@ -131,30 +139,39 @@ test("task edit flow covers fields, hierarchy, conflicts, trash and restore", as
   await page.getByTestId("task-edit-due-date").fill("2026-01-31");
   await page.getByTestId("task-edit-due-date").blur();
 
-  await expect.poll(async () => {
-    const detail = await taskDetail(page, wsId, taskId);
-    return `${detail.priority}:${detail.dueDate}:${detail.dueAt}`;
-  }).toBe("high:2026-01-31:null");
+  await expect
+    .poll(async () => {
+      const detail = await taskDetail(page, wsId, taskId);
+      return `${detail.priority}:${detail.dueDate}:${detail.dueAt}`;
+    })
+    .toBe("high:2026-01-31:null");
 
   await page.getByTestId("task-edit-type").selectOption("subtask");
   await expect(page.getByTestId("task-edit-parent")).toContainText("상위 태스크 없음");
   await page.getByTestId("task-edit-parent").click();
   await page.getByTestId("task-edit-parent-search").fill("부모 일");
-  await page.locator(".task-parent-select__panel").getByRole("option", { name: /부모 일/ }).click();
+  await page
+    .locator(".task-parent-select__panel")
+    .getByRole("option", { name: /부모 일/ })
+    .click();
   await page.getByTestId("task-edit-hierarchy-save").click();
-  await expect.poll(async () => {
-    const detail = await taskDetail(page, wsId, taskId);
-    return `${detail.type}:${detail.parentId}`;
-  }).toBe(`subtask:${parentTaskId}`);
+  await expect
+    .poll(async () => {
+      const detail = await taskDetail(page, wsId, taskId);
+      return `${detail.type}:${detail.parentId}`;
+    })
+    .toBe(`subtask:${parentTaskId}`);
   await expect(page.getByTestId("task-edit-type")).toHaveValue("subtask");
 
   await page.getByTestId("task-edit-type").selectOption("task");
   await expect(page.getByTestId("task-edit-parent")).toContainText("상위 태스크 없음");
   await page.getByTestId("task-edit-hierarchy-save").click();
-  await expect.poll(async () => {
-    const detail = await taskDetail(page, wsId, taskId);
-    return `${detail.type}:${detail.parentId}`;
-  }).toBe("task:null");
+  await expect
+    .poll(async () => {
+      const detail = await taskDetail(page, wsId, taskId);
+      return `${detail.type}:${detail.parentId}`;
+    })
+    .toBe("task:null");
   await expect(page.getByTestId("task-edit-type")).toHaveValue("task");
 
   const initialStatusId = (await taskDetail(page, wsId, taskId)).statusId;
@@ -182,9 +199,7 @@ test("task edit flow covers fields, hierarchy, conflicts, trash and restore", as
   const trashedGet = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
   expect(trashedGet.status()).toBe(404);
 
-  const restoreRes = await page.request.post(
-    `/api/v1/workspaces/${wsId}/tasks/${taskId}/restore`,
-  );
+  const restoreRes = await page.request.post(`/api/v1/workspaces/${wsId}/tasks/${taskId}/restore`);
   expect(restoreRes.ok()).toBe(true);
 
   await page.goto(`/w/${admin.workspaceSlug}/EDT-3`);

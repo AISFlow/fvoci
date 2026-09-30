@@ -111,16 +111,16 @@ test("project document: edit, trash, restore; project delete and admin restore",
   });
   await page.getByTestId("project-lifecycle").getByRole("button", { name: "보관" }).click();
   await expect(page.getByText("보관됨").first()).toBeVisible();
-  await page
-    .getByTestId("project-lifecycle")
-    .getByRole("button", { name: "보관 해제" })
-    .click();
+  await page.getByTestId("project-lifecycle").getByRole("button", { name: "보관 해제" }).click();
   await expect(
     page.getByTestId("project-lifecycle").getByRole("button", { name: "보관", exact: true }),
   ).toBeVisible();
 
   // Delete the project, then an admin restores it with its documents.
-  await page.getByTestId("project-lifecycle").getByRole("button", { name: "프로젝트 삭제" }).click();
+  await page
+    .getByTestId("project-lifecycle")
+    .getByRole("button", { name: "프로젝트 삭제" })
+    .click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/projects$`));
   await expect(page.getByRole("link", { name: /휴지통 프로젝트/ })).toHaveCount(0);
 

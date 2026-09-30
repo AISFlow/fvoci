@@ -24,7 +24,9 @@ async function workspaceId(page: Page, slug: string): Promise<string> {
 async function taskIdFor(page: Page, wsId: string, displayId: string): Promise<string> {
   const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/${displayId}`);
   expect(lookup.ok()).toBe(true);
-  const taskId = (await lookup.json()).items.find((item: { kind: string }) => item.kind === "task")?.id;
+  const taskId = (await lookup.json()).items.find(
+    (item: { kind: string }) => item.kind === "task",
+  )?.id;
   expect(taskId).toBeTruthy();
   return taskId;
 }
@@ -77,7 +79,9 @@ test("task assignee and label pickers round-trip through the edit UI", async ({ 
   expect(meRes.ok()).toBe(true);
   const userId = (await meRes.json()).userId as string;
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
-  const project = (await projectsRes.json()).items.find((item: { key: string }) => item.key === "TAL");
+  const project = (await projectsRes.json()).items.find(
+    (item: { key: string }) => item.key === "TAL",
+  );
   expect(project).toBeTruthy();
   const taskId = await taskIdFor(page, wsId, "TAL-2");
 
@@ -94,18 +98,22 @@ test("task assignee and label pickers round-trip through the edit UI", async ({ 
   await page.getByTestId(`task-edit-assignee-${userId}`).check();
   await page.getByTestId(`task-edit-label-${labelId}`).check();
 
-  await expect.poll(async () => {
-    const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
-    expect(detailRes.ok()).toBe(true);
-    const detail = await detailRes.json();
-    return `${(detail.assigneeIds ?? []).join(",")}:${(detail.labelIds ?? []).join(",")}`;
-  }).toBe(`${userId}:${labelId}`);
+  await expect
+    .poll(async () => {
+      const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
+      expect(detailRes.ok()).toBe(true);
+      const detail = await detailRes.json();
+      return `${(detail.assigneeIds ?? []).join(",")}:${(detail.labelIds ?? []).join(",")}`;
+    })
+    .toBe(`${userId}:${labelId}`);
 
   await page.getByTestId(`task-edit-assignee-${userId}`).uncheck();
-  await expect.poll(async () => {
-    const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
-    expect(detailRes.ok()).toBe(true);
-    const detail = await detailRes.json();
-    return (detail.assigneeIds ?? []).length;
-  }).toBe(0);
+  await expect
+    .poll(async () => {
+      const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
+      expect(detailRes.ok()).toBe(true);
+      const detail = await detailRes.json();
+      return (detail.assigneeIds ?? []).length;
+    })
+    .toBe(0);
 });

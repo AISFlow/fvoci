@@ -1,9 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import {
-  decodeHocuspocusFrame,
-  frameBytes,
-  persistParts,
-} from "../e2e-pending/collab-wire";
+import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
 import { login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
@@ -139,7 +135,9 @@ async function openEditableTask(
   const task = (await taskRes.json()) as { id: string; number: number };
 
   await page.goto(`/w/${admin.workspaceSlug}/${projectKey}-${task.number}`);
-  await expect(page.getByRole("heading", { name: "보관 전 본문" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("heading", { name: "보관 전 본문" })).toBeVisible({
+    timeout: 15_000,
+  });
   const body = page.getByTestId("task-body");
   await expect(body).toBeVisible({ timeout: 15_000 });
   await expect(body.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 30_000 });
@@ -275,7 +273,9 @@ test("failed archive persist shows error, keeps task active and restores editing
 
   persistHold.release();
   await page.reload();
-  await expect(page.getByTestId("task-body").locator('[data-collab-status="connected"]')).toBeVisible({
+  await expect(
+    page.getByTestId("task-body").locator('[data-collab-status="connected"]'),
+  ).toBeVisible({
     timeout: 30_000,
   });
   await archiveButton.click();

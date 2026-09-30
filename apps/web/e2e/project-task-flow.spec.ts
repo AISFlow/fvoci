@@ -59,15 +59,20 @@ async function ensureSetup(page: Page): Promise<void> {
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
     await expect(page).toHaveURL(/\/$/);
-    await expect.poll(async () => {
-      const res = await page.request.get("/api/v1/me/workspaces");
-      if (!res.ok()) return [];
-      const body = (await res.json()) as { items: { slug: string }[] };
-      return body.items.map((item) => item.slug);
-    }).toContain(admin.workspaceSlug);
+    await expect
+      .poll(async () => {
+        const res = await page.request.get("/api/v1/me/workspaces");
+        if (!res.ok()) return [];
+        const body = (await res.json()) as { items: { slug: string }[] };
+        return body.items.map((item) => item.slug);
+      })
+      .toContain(admin.workspaceSlug);
     return;
   }
-  if (page.url().includes("/login") || (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0) {
+  if (
+    page.url().includes("/login") ||
+    (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
+  ) {
     await login(page, admin.email, admin.password);
   }
 }
@@ -104,9 +109,7 @@ test("member creates a workspace project, task, and sees counts after reload", a
 
   await expect(page).toHaveURL(/\/w\/acme\/LAB-2$/);
   const idAfterCreate = await workspaceId(page, "acme");
-  const labLookup = await page.request.get(
-    `/api/v1/workspaces/${idAfterCreate}/lookup/LAB-2`,
-  );
+  const labLookup = await page.request.get(`/api/v1/workspaces/${idAfterCreate}/lookup/LAB-2`);
   expect(labLookup.status()).toBe(200);
   const labLookupBody = await labLookup.json();
   expect(
@@ -119,9 +122,7 @@ test("member creates a workspace project, task, and sees counts after reload", a
   await expect(page.getByText("LAB-2")).toBeVisible();
 
   await page.goto("/w/acme/LAB-1");
-  const labRootLookup = await page.request.get(
-    `/api/v1/workspaces/${idAfterCreate}/lookup/LAB-1`,
-  );
+  const labRootLookup = await page.request.get(`/api/v1/workspaces/${idAfterCreate}/lookup/LAB-1`);
   expect(labRootLookup.status()).toBe(200);
   const labRootBody = await labRootLookup.json();
   expect(
@@ -186,7 +187,9 @@ test("guest create is rejected with a visible error and wiki still loads", async
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
 });
 
-test("private project is absent for non-members and viewer writes fail visibly", async ({ page }) => {
+test("private project is absent for non-members and viewer writes fail visibly", async ({
+  page,
+}) => {
   createE2eUser(other.email, other.password, other.givenName, {
     familyName: other.familyName,
     workspaceSlug: admin.workspaceSlug,
@@ -361,10 +364,13 @@ test("task list uses server statusCounts and paginates without duplicate rows", 
   const loadMoreInFlight = new Promise<void>((resolve) => {
     loadMoreSent = resolve;
   });
-  await page.route((url) => url.pathname === streamPath, async (route) => {
-    await loadMoreInFlight;
-    await route.continue();
-  });
+  await page.route(
+    (url) => url.pathname === streamPath,
+    async (route) => {
+      await loadMoreInFlight;
+      await route.continue();
+    },
+  );
   let secondPageHeld = false;
   await page.route(
     (url) => url.pathname === listUrl && url.searchParams.has("cursor"),

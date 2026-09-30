@@ -93,7 +93,12 @@ async function projectDocRefs(
   while (grew) {
     grew = false;
     for (const item of items) {
-      if (item.projectId === project.id && item.parentId && below.has(item.parentId) && !below.has(item.id)) {
+      if (
+        item.projectId === project.id &&
+        item.parentId &&
+        below.has(item.parentId) &&
+        !below.has(item.id)
+      ) {
         below.add(item.id);
         grew = true;
       }
@@ -137,7 +142,9 @@ async function openProjectTasks(page: Page, key: string): Promise<void> {
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/${key}/tasks$`));
 }
 
-test("project home shows wiki, documents can be created and moved in the tree", async ({ page }) => {
+test("project home shows wiki, documents can be created and moved in the tree", async ({
+  page,
+}) => {
   await ensureSetup(page);
   createE2eUser(member.email, member.password, member.givenName, {
     familyName: member.familyName,
@@ -219,7 +226,9 @@ test("project home shows wiki, documents can be created and moved in the tree", 
   expect(moveRes.ok()).toBe(true);
 
   await page.reload();
-  const branch = page.locator(".wiki-tree__branch").filter({ has: page.getByTestId("project-doc-HOME-2") });
+  const branch = page
+    .locator(".wiki-tree__branch")
+    .filter({ has: page.getByTestId("project-doc-HOME-2") });
   await expect(branch.getByTestId("project-doc-HOME-3")).toBeVisible();
   await expect(branch.locator(".wiki-tree--nested")).toBeVisible();
 });
@@ -275,7 +284,9 @@ test("clone copies workflow labels and milestones but not tasks", async ({ page 
   );
   expect(sourceWorkflow.ok()).toBe(true);
   expect(cloneWorkflow.ok()).toBe(true);
-  const sourceNames = (await sourceWorkflow.json()).statuses.map((row: { name: string }) => row.name);
+  const sourceNames = (await sourceWorkflow.json()).statuses.map(
+    (row: { name: string }) => row.name,
+  );
   const cloneNames = (await cloneWorkflow.json()).statuses.map((row: { name: string }) => row.name);
   expect(cloneNames).toEqual(sourceNames);
 
@@ -283,9 +294,9 @@ test("clone copies workflow labels and milestones but not tasks", async ({ page 
     `/api/v1/workspaces/${wsId}/projects/${cpyProject.id}/labels`,
   );
   expect(cloneLabels.ok()).toBe(true);
-  expect(
-    (await cloneLabels.json()).items.some((row: { name: string }) => row.name === "bug"),
-  ).toBe(true);
+  expect((await cloneLabels.json()).items.some((row: { name: string }) => row.name === "bug")).toBe(
+    true,
+  );
 
   const sourceTasks = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${homeProject.id}/tasks`,

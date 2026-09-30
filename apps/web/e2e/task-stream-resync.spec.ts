@@ -43,12 +43,14 @@ async function ensureOwnerWorkspace(page: Page): Promise<void> {
     await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
     await expect(page).toHaveURL(/\/$/);
-    await expect.poll(async () => {
-      const res = await page.request.get("/api/v1/me/workspaces");
-      if (!res.ok()) return [];
-      const body = (await res.json()) as { items: { slug: string }[] };
-      return body.items.map((item) => item.slug);
-    }).toContain(owner.workspaceSlug);
+    await expect
+      .poll(async () => {
+        const res = await page.request.get("/api/v1/me/workspaces");
+        if (!res.ok()) return [];
+        const body = (await res.json()) as { items: { slug: string }[] };
+        return body.items.map((item) => item.slug);
+      })
+      .toContain(owner.workspaceSlug);
     return;
   }
   if (
@@ -86,15 +88,16 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   const wsId = await workspaceId(ownerPage, owner.workspaceSlug);
   const projectsRes = await ownerPage.request.get(`/api/v1/workspaces/${wsId}/projects`);
   expect(projectsRes.ok()).toBe(true);
-  const project = (await projectsRes.json()).items.find((item: { key: string }) => item.key === "TSR");
+  const project = (await projectsRes.json()).items.find(
+    (item: { key: string }) => item.key === "TSR",
+  );
   expect(project).toBeTruthy();
   const projectId = project.id as string;
 
   const viewerTab = await ownerContext.newPage();
   const streamWait = viewerTab.waitForResponse(
     (res) =>
-      res.url().includes(`/projects/${projectId}/stream`) &&
-      res.request().method() === "GET",
+      res.url().includes(`/projects/${projectId}/stream`) && res.request().method() === "GET",
     { timeout: 30_000 },
   );
   await viewerTab.goto(`/w/${owner.workspaceSlug}/TSR/tasks`);
@@ -139,13 +142,16 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   ) as { id: string; name: string };
   expect(nextStatus).toBeTruthy();
 
-  const metaRes = await memberPage.request.patch(`/api/v1/workspaces/${wsId}/tasks/${peerTask.id}`, {
-    data: { title: "원격 수정", dueDate: "2027-01-15" },
-  });
+  const metaRes = await memberPage.request.patch(
+    `/api/v1/workspaces/${wsId}/tasks/${peerTask.id}`,
+    {
+      data: { title: "원격 수정", dueDate: "2027-01-15" },
+    },
+  );
   expect(metaRes.ok(), await metaRes.text()).toBe(true);
-  await expect(
-    viewerTaskList.locator(".task-row__title", { hasText: "원격 수정" }),
-  ).toBeVisible({ timeout: 25_000 });
+  await expect(viewerTaskList.locator(".task-row__title", { hasText: "원격 수정" })).toBeVisible({
+    timeout: 25_000,
+  });
 
   const statusRes = await memberPage.request.patch(
     `/api/v1/workspaces/${wsId}/tasks/${peerTask.id}`,

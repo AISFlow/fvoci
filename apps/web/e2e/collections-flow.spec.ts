@@ -97,9 +97,9 @@ test("document tags, project collection fields/views and saved task views round-
   await expect(page).toHaveURL(new RegExp(`/w/${slug}/COL/tasks$`));
 
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
-  const project = ((await projectsRes.json()) as { items: { id: string; key: string }[] }).items.find(
-    (item) => item.key === "COL",
-  )!;
+  const project = (
+    (await projectsRes.json()) as { items: { id: string; key: string }[] }
+  ).items.find((item) => item.key === "COL")!;
   const workflowRes = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/workflow`,
   );
@@ -115,7 +115,10 @@ test("document tags, project collection fields/views and saved task views round-
   const displayId = `COL-${task.number}`;
 
   await page.goto(`/w/${slug}/COL/tasks`);
-  await page.getByRole("navigation", { name: "프로젝트 관리 메뉴" }).getByRole("link", { name: "속성 설정" }).click();
+  await page
+    .getByRole("navigation", { name: "프로젝트 관리 메뉴" })
+    .getByRole("link", { name: "속성 설정" })
+    .click();
   await expect(page).toHaveURL(new RegExp(`/w/${slug}/COL/settings/fields$`));
   const manager = page.getByTestId("collection-field-manager");
   await manager.getByLabel("속성 이름").fill("단계");
@@ -165,12 +168,16 @@ test("document tags, project collection fields/views and saved task views round-
   const buildColumn = page.getByRole("region", { name: "구현" });
   await expect(buildColumn.getByTestId(`collection-card-${displayId}`)).toBeVisible();
   await expect(buildColumn.getByTestId(`collection-card-${displayId}`)).toContainText("단계: 구현");
-  await expect(page.getByRole("region", { name: "설계" }).getByTestId(`collection-card-${displayId}`)).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: "설계" }).getByTestId(`collection-card-${displayId}`),
+  ).toHaveCount(0);
 
   // Calendar by due date: month window, day counts, previews and the day list.
   const dueRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/tasks`,
-    { data: { title: "달력 태스크", type: "task", statusId: openStatus.id, dueDate: "2027-03-15" } },
+    {
+      data: { title: "달력 태스크", type: "task", statusId: openStatus.id, dueDate: "2027-03-15" },
+    },
   );
   expect(dueRes.status()).toBe(201);
   const dueTask = (await dueRes.json()) as { number: number };
@@ -207,7 +214,10 @@ test("document tags, project collection fields/views and saved task views round-
       return ((await res.json()) as { items: { name: string; config: unknown }[] }).items;
     })
     .toEqual([
-      expect.objectContaining({ name: "열린 태스크", config: { filters: { openOnly: true }, sort: [] } }),
+      expect.objectContaining({
+        name: "열린 태스크",
+        config: { filters: { openOnly: true }, sort: [] },
+      }),
     ]);
 
   await page.getByRole("button", { name: "필터 해제" }).click();
@@ -243,13 +253,18 @@ test("grouped board pages each column and moves cards by drag or select through 
   });
   expect(projectRes.status()).toBe(201);
   const project = (await projectRes.json()) as { id: string };
-  const workflow = (await (await page.request.get(`${base}/projects/${project.id}/workflow`)).json()) as {
+  const workflow = (await (
+    await page.request.get(`${base}/projects/${project.id}/workflow`)
+  ).json()) as {
     id: string;
     statuses: { id: string; name: string }[];
   };
   const [statusA, statusB] = workflow.statuses;
   expect(statusA && statusB).toBeTruthy();
-  const titlesA = Array.from({ length: 60 }, (_, index) => `보드 A ${String(index + 1).padStart(3, "0")}`);
+  const titlesA = Array.from(
+    { length: 60 },
+    (_, index) => `보드 A ${String(index + 1).padStart(3, "0")}`,
+  );
   await createTasksViaApi(page, wsId, project.id, titlesA, statusA!.id);
   await createTasksViaApi(page, wsId, project.id, ["보드 B 001", "보드 B 002"], statusB!.id);
 
@@ -268,19 +283,31 @@ test("grouped board pages each column and moves cards by drag or select through 
   const design = field.options.find((option) => option.label === "설계")!;
   const build = field.options.find((option) => option.label === "구현")!;
 
-  type Row = { id: string; displayId: string; statusId: string | null; values: Record<string, unknown>; version: number };
+  type Row = {
+    id: string;
+    displayId: string;
+    statusId: string | null;
+    values: Record<string, unknown>;
+    version: number;
+  };
   async function itemRow(displayId: string): Promise<Row> {
     const res = await page.request.post(`${base}/collections/${collection.id}/query`, {
-      data: { config: { query: { filters: {}, sort: [] }, groupBy: null, dateBy: null }, limit: 100 },
+      data: {
+        config: { query: { filters: {}, sort: [] }, groupBy: null, dateBy: null },
+        limit: 100,
+      },
     });
     expect(res.ok()).toBe(true);
-    const row = ((await res.json()) as { items: Row[] }).items.find((item) => item.displayId === displayId);
+    const row = ((await res.json()) as { items: Row[] }).items.find(
+      (item) => item.displayId === displayId,
+    );
     expect(row).toBeTruthy();
     return row!;
   }
   // Grab the card by its padding (its centre is the keyboard select) and drop on the column head.
   const dragPoints = { sourcePosition: { x: 4, y: 4 }, targetPosition: { x: 20, y: 10 } };
-  const cards = (column: ReturnType<Page["getByRole"]>) => column.locator('[data-testid^="collection-card-"]');
+  const cards = (column: ReturnType<Page["getByRole"]>) =>
+    column.locator('[data-testid^="collection-card-"]');
   async function cardIds(column: ReturnType<Page["getByRole"]>): Promise<string[]> {
     return cards(column).evaluateAll((nodes) =>
       nodes.map((node) => node.getAttribute("data-testid")!.replace("collection-card-", "")),
@@ -288,9 +315,15 @@ test("grouped board pages each column and moves cards by drag or select through 
   }
   const querySpy: { group: unknown; cursor: boolean }[] = [];
   page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().endsWith(`/collections/${collection.id}/query`)) {
+    if (
+      request.method() === "POST" &&
+      request.url().endsWith(`/collections/${collection.id}/query`)
+    ) {
       const body = request.postDataJSON() as { group?: unknown; cursor?: string };
-      querySpy.push({ group: "group" in body ? body.group : "(all)", cursor: Boolean(body.cursor) });
+      querySpy.push({
+        group: "group" in body ? body.group : "(all)",
+        cursor: Boolean(body.cursor),
+      });
     }
   });
 
@@ -302,10 +335,13 @@ test("grouped board pages each column and moves cards by drag or select through 
   const loadMoreInFlight = new Promise<void>((resolve) => {
     loadMoreSent = resolve;
   });
-  await page.route((url) => url.pathname === streamPath, async (route) => {
-    await loadMoreInFlight;
-    await route.continue();
-  });
+  await page.route(
+    (url) => url.pathname === streamPath,
+    async (route) => {
+      await loadMoreInFlight;
+      await route.continue();
+    },
+  );
   let nextPageHeld = false;
   await page.route(
     (url) => url.pathname === `${base}/collections/${collection.id}/query`,
@@ -338,8 +374,12 @@ test("grouped board pages each column and moves cards by drag or select through 
   await expect(columnA.getByRole("button", { name: `${statusA!.name} · 더 보기` })).toHaveCount(0);
   await expect(cards(columnB)).toHaveCount(2);
   // One catalog request without a group; every other request names its column.
-  expect(querySpy.filter((entry) => entry.group === "(all)" && !entry.cursor).length).toBeGreaterThan(0);
-  expect(querySpy.filter((entry) => entry.cursor).every((entry) => entry.group === statusA!.id)).toBe(true);
+  expect(
+    querySpy.filter((entry) => entry.group === "(all)" && !entry.cursor).length,
+  ).toBeGreaterThan(0);
+  expect(
+    querySpy.filter((entry) => entry.cursor).every((entry) => entry.group === statusA!.id),
+  ).toBe(true);
 
   // 2. Drag a second-page card to another status; it persists and survives reload.
   const movedId = (await cardIds(columnA)).at(-1)!;
@@ -398,9 +438,11 @@ test("grouped board pages each column and moves cards by drag or select through 
   await expect(columnB.getByTestId(`collection-card-${blockedId}`)).toHaveCount(0);
   expect((await itemRow(blockedId)).statusId).toBe(statusA!.id);
   expect(
-    (await page.request.patch(`${base}/workflows/${workflow.id}/statuses/${statusB!.id}`, {
-      data: { wipLimit: null },
-    })).ok(),
+    (
+      await page.request.patch(`${base}/workflows/${workflow.id}/statuses/${statusB!.id}`, {
+        data: { wipLimit: null },
+      })
+    ).ok(),
   ).toBe(true);
 
   // 4. Group by the select field: option columns plus the unassigned column, each paged.
@@ -423,14 +465,22 @@ test("grouped board pages each column and moves cards by drag or select through 
   await noneColumn.getByTestId(`collection-card-${dragged}`).dragTo(buildColumn, dragPoints);
   await expect(buildColumn.getByTestId(`collection-card-${dragged}`)).toBeVisible();
   await expect(cards(noneColumn)).toHaveCount(61);
-  await expect.poll(async () => (await itemRow(dragged)).values[field.id]).toEqual({ options: [build.id] });
+  await expect
+    .poll(async () => (await itemRow(dragged)).values[field.id])
+    .toEqual({ options: [build.id] });
 
   // Keyboard alternative: the per-card select moves into an option and back to unassigned.
   const keyed = (await cardIds(noneColumn))[0]!;
-  await noneColumn.getByLabel(`그룹 기준 · ${keyed}`, { exact: true }).selectOption({ label: "설계" });
+  await noneColumn
+    .getByLabel(`그룹 기준 · ${keyed}`, { exact: true })
+    .selectOption({ label: "설계" });
   await expect(designColumn.getByTestId(`collection-card-${keyed}`)).toBeVisible();
-  await expect.poll(async () => (await itemRow(keyed)).values[field.id]).toEqual({ options: [design.id] });
-  await buildColumn.getByLabel(`그룹 기준 · ${dragged}`, { exact: true }).selectOption({ label: "미지정" });
+  await expect
+    .poll(async () => (await itemRow(keyed)).values[field.id])
+    .toEqual({ options: [design.id] });
+  await buildColumn
+    .getByLabel(`그룹 기준 · ${dragged}`, { exact: true })
+    .selectOption({ label: "미지정" });
   await expect(noneColumn.getByTestId(`collection-card-${dragged}`)).toBeVisible();
   await expect(buildColumn.getByText("현재 결과에 표시할 자료가 없습니다")).toBeVisible();
   await expect.poll(async () => (await itemRow(dragged)).values[field.id] ?? null).toBeNull();
@@ -439,17 +489,22 @@ test("grouped board pages each column and moves cards by drag or select through 
   // 5. Stale version (changed elsewhere): the move is rejected, the error stays visible
   //    and the board shows the server value instead of a false success.
   const stale = await itemRow(keyed);
-  const elsewhere = await page.request.put(`${base}/collections/${collection.id}/items/${stale.id}/values`, {
-    data: {
-      fieldId: field.id,
-      expectedVersion: stale.version,
-      expectedFieldVersion: field.version,
-      value: { options: [build.id] },
+  const elsewhere = await page.request.put(
+    `${base}/collections/${collection.id}/items/${stale.id}/values`,
+    {
+      data: {
+        fieldId: field.id,
+        expectedVersion: stale.version,
+        expectedFieldVersion: field.version,
+        value: { options: [build.id] },
+      },
     },
-  });
+  );
   expect(elsewhere.ok()).toBe(true);
   await designColumn.getByTestId(`collection-card-${keyed}`).dragTo(noneColumn, dragPoints);
-  await expect(page.getByRole("alert").filter({ hasText: "다른 곳에서 먼저 수정되었습니다" })).toBeVisible();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "다른 곳에서 먼저 수정되었습니다" }),
+  ).toBeVisible();
   await expect(buildColumn.getByTestId(`collection-card-${keyed}`)).toBeVisible();
   await expect(noneColumn.getByTestId(`collection-card-${keyed}`)).toHaveCount(0);
   expect((await itemRow(keyed)).values[field.id]).toEqual({ options: [build.id] });
@@ -483,20 +538,31 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   const slug = admin.workspaceSlug;
   const base = `/api/v1/workspaces/${wsId}`;
   const me = (await (await page.request.get("/api/v1/auth/me")).json()) as { timezone: string };
-  const dayIn = (iso: string) => new Intl.DateTimeFormat("en-CA", { timeZone: me.timezone }).format(new Date(iso));
+  const dayIn = (iso: string) =>
+    new Intl.DateTimeFormat("en-CA", { timeZone: me.timezone }).format(new Date(iso));
 
   const projectRes = await page.request.post(`${base}/projects`, {
     data: { key: "CAL", name: "달력 프로젝트", visibility: "workspace" },
   });
   expect(projectRes.status()).toBe(201);
   const project = (await projectRes.json()) as { id: string };
-  const workflow = (await (await page.request.get(`${base}/projects/${project.id}/workflow`)).json()) as {
+  const workflow = (await (
+    await page.request.get(`${base}/projects/${project.id}/workflow`)
+  ).json()) as {
     statuses: { id: string }[];
   };
-  async function createTask(title: string, dueDate: string | null): Promise<{ id: string; displayId: string }> {
+  async function createTask(
+    title: string,
+    dueDate: string | null,
+  ): Promise<{ id: string; displayId: string }> {
     const res = await page.request.post(`${base}/projects/${project.id}/tasks`, {
       // Create rejects an explicit null date; omit the field for an undated task.
-      data: { title, type: "task", statusId: workflow.statuses[0]!.id, ...(dueDate ? { dueDate } : {}) },
+      data: {
+        title,
+        type: "task",
+        statusId: workflow.statuses[0]!.id,
+        ...(dueDate ? { dueDate } : {}),
+      },
     });
     expect(res.status()).toBe(201);
     const body = (await res.json()) as { id: string; number: number };
@@ -507,7 +573,11 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   const timed = await createTask("시각 마감", null);
   const stale = await createTask("충돌 이동", "2027-05-12");
   expect(
-    (await page.request.patch(`${base}/tasks/${timed.id}`, { data: { dueAt: "2027-05-05T03:00:00Z" } })).ok(),
+    (
+      await page.request.patch(`${base}/tasks/${timed.id}`, {
+        data: { dueAt: "2027-05-05T03:00:00Z" },
+      })
+    ).ok(),
   ).toBe(true);
 
   const collection = (await (
@@ -533,18 +603,31 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   };
   async function itemRow(displayId: string): Promise<Row> {
     const res = await page.request.post(`${base}/collections/${collection.id}/query`, {
-      data: { config: { query: { filters: {}, sort: [] }, groupBy: null, dateBy: null }, limit: 100 },
+      data: {
+        config: { query: { filters: {}, sort: [] }, groupBy: null, dateBy: null },
+        limit: 100,
+      },
     });
     expect(res.ok()).toBe(true);
-    const row = ((await res.json()) as { items: Row[] }).items.find((item) => item.displayId === displayId);
+    const row = ((await res.json()) as { items: Row[] }).items.find(
+      (item) => item.displayId === displayId,
+    );
     expect(row).toBeTruthy();
     return row!;
   }
-  async function putValue(displayId: string, fieldId: string, fieldVersion: number, value: unknown) {
+  async function putValue(
+    displayId: string,
+    fieldId: string,
+    fieldVersion: number,
+    value: unknown,
+  ) {
     const row = await itemRow(displayId);
-    const res = await page.request.put(`${base}/collections/${collection.id}/items/${row.id}/values`, {
-      data: { fieldId, expectedVersion: row.version, expectedFieldVersion: fieldVersion, value },
-    });
+    const res = await page.request.put(
+      `${base}/collections/${collection.id}/items/${row.id}/values`,
+      {
+        data: { fieldId, expectedVersion: row.version, expectedFieldVersion: fieldVersion, value },
+      },
+    );
     expect(res.ok()).toBe(true);
   }
   const instant = "2027-05-08T14:30:00Z";
@@ -568,23 +651,32 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
 
   // 1. Due basis: drag a preview to another day; dueDate changes and survives reload.
   await openMonth();
-  await expect(cell("2027-05-10").getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
+  await expect(
+    cell("2027-05-10").getByTestId(`collection-preview-${previewed.displayId}`),
+  ).toBeVisible();
   // Hold delivery of a real Rust response so pending geometry is deterministic.
   // Status must not move drop targets, even before the accepted write refetches.
   const monthGrid = page.locator('table[data-testid="collection-calendar"]');
   const calendarStatus = page.locator(".template-calendar header [role=status]");
   await expect(calendarStatus).toHaveCount(0);
-  const idleGeometry = { month: await monthGrid.boundingBox(), unassigned: await unassigned.boundingBox() };
+  const idleGeometry = {
+    month: await monthGrid.boundingBox(),
+    unassigned: await unassigned.boundingBox(),
+  };
   expect(idleGeometry.month).toBeTruthy();
   expect(idleGeometry.unassigned).toBeTruthy();
   let releasePatch!: () => void;
-  const patchGate = new Promise<void>(resolve => { releasePatch = resolve; });
+  const patchGate = new Promise<void>((resolve) => {
+    releasePatch = resolve;
+  });
   let patchStarted = false;
   let patchDelivered!: () => void;
-  const delivered = new Promise<void>(resolve => { patchDelivered = resolve; });
+  const delivered = new Promise<void>((resolve) => {
+    patchDelivered = resolve;
+  });
   const taskPath = `${base}/tasks/${previewed.id}`;
   const taskRoute = `**${taskPath}`;
-  await page.route(taskRoute, async route => {
+  await page.route(taskRoute, async (route) => {
     patchStarted = true;
     try {
       const response = await route.fetch();
@@ -594,7 +686,9 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
       patchDelivered();
     }
   });
-  const acceptedMove = page.waitForResponse(res => res.request().method() === "PATCH" && new URL(res.url()).pathname === taskPath);
+  const acceptedMove = page.waitForResponse(
+    (res) => res.request().method() === "PATCH" && new URL(res.url()).pathname === taskPath,
+  );
   try {
     await preview(previewed.displayId).dragTo(cell("2027-05-14"));
     await expect(calendarStatus).toHaveText("일정을 저장하는 중…");
@@ -607,22 +701,33 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   }
   const accepted = await acceptedMove;
   expect(accepted.status()).toBe(200);
-  expect(accepted.request().postDataJSON()).toMatchObject({ dueDate: "2027-05-14", expectedDates: { dueDate: "2027-05-10" } });
+  expect(accepted.request().postDataJSON()).toMatchObject({
+    dueDate: "2027-05-14",
+    expectedDates: { dueDate: "2027-05-10" },
+  });
   expect(await accepted.json()).toMatchObject({ dueDate: "2027-05-14", dueAt: null });
   await expect(calendarStatus).toHaveCount(0);
   expect(await monthGrid.boundingBox()).toEqual(idleGeometry.month);
   expect(await unassigned.boundingBox()).toEqual(idleGeometry.unassigned);
-  await expect(cell("2027-05-14").getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
-  await expect(cell("2027-05-10").getByTestId(`collection-preview-${previewed.displayId}`)).toHaveCount(0);
+  await expect(
+    cell("2027-05-14").getByTestId(`collection-preview-${previewed.displayId}`),
+  ).toBeVisible();
+  await expect(
+    cell("2027-05-10").getByTestId(`collection-preview-${previewed.displayId}`),
+  ).toHaveCount(0);
   await expect.poll(async () => (await itemRow(previewed.displayId)).dueDate).toBe("2027-05-14");
 
   // A timed due (dueAt) moves to a plain due date, as the source calendar does.
-  await expect(cell(dayIn("2027-05-05T03:00:00Z")).getByTestId(`collection-preview-${timed.displayId}`)).toBeVisible();
+  await expect(
+    cell(dayIn("2027-05-05T03:00:00Z")).getByTestId(`collection-preview-${timed.displayId}`),
+  ).toBeVisible();
   // Optimistic previews become visible before refetch settles. Wait for the
   // actual draggable capability before beginning a second mutation.
   await expect(preview(timed.displayId)).toHaveAttribute("draggable", "true");
   await preview(timed.displayId).dragTo(cell("2027-05-20"));
-  await expect(cell("2027-05-20").getByTestId(`collection-preview-${timed.displayId}`)).toBeVisible();
+  await expect(
+    cell("2027-05-20").getByTestId(`collection-preview-${timed.displayId}`),
+  ).toBeVisible();
   await expect
     .poll(async () => {
       const row = await itemRow(timed.displayId);
@@ -643,7 +748,11 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   await expect(page.getByTestId(`collection-row-${listed.displayId}`)).toBeVisible();
   // Real pointer drag (mouse down, move, up) from the list onto a day cell above it.
   await expect(listedHandle).toHaveAttribute("draggable", "true");
-  const returnMove = page.waitForResponse(res => res.request().method() === "PATCH" && new URL(res.url()).pathname === `${base}/tasks/${listed.id}`);
+  const returnMove = page.waitForResponse(
+    (res) =>
+      res.request().method() === "PATCH" &&
+      new URL(res.url()).pathname === `${base}/tasks/${listed.id}`,
+  );
   const from = (await page.getByTestId(`collection-drag-${listed.displayId}`).boundingBox())!;
   const to = (await cell("2027-05-25").boundingBox())!;
   await page.mouse.move(from.x + 4, from.y + 4);
@@ -653,40 +762,69 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   await page.mouse.up();
   const returned = await returnMove;
   expect(returned.status()).toBe(200);
-  expect(returned.request().postDataJSON()).toMatchObject({ dueDate: "2027-05-25", expectedDates: { dueDate: null, dueAt: null } });
+  expect(returned.request().postDataJSON()).toMatchObject({
+    dueDate: "2027-05-25",
+    expectedDates: { dueDate: null, dueAt: null },
+  });
   expect(await returned.json()).toMatchObject({ dueDate: "2027-05-25", dueAt: null });
-  await expect(cell("2027-05-25").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
+  await expect(
+    cell("2027-05-25").getByTestId(`collection-preview-${listed.displayId}`),
+  ).toBeVisible();
   await expect.poll(async () => (await itemRow(listed.displayId)).dueDate).toBe("2027-05-25");
 
   await page.reload();
   await page.locator('input[type="month"]').fill("2027-05");
-  await expect(cell("2027-05-14").getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
-  await expect(cell("2027-05-20").getByTestId(`collection-preview-${timed.displayId}`)).toBeVisible();
-  await expect(cell("2027-05-25").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
+  await expect(
+    cell("2027-05-14").getByTestId(`collection-preview-${previewed.displayId}`),
+  ).toBeVisible();
+  await expect(
+    cell("2027-05-20").getByTestId(`collection-preview-${timed.displayId}`),
+  ).toBeVisible();
+  await expect(
+    cell("2027-05-25").getByTestId(`collection-preview-${listed.displayId}`),
+  ).toBeVisible();
 
   // 3. Stale dates (changed elsewhere): expectedDates rejects the move and the calendar
   //    shows the server value instead of a false success. The drag starts first so the
   //    dragged row is the pre-edit snapshot whether or not the task stream refreshes the
   //    calendar before the drop; the target's drop-over marker shows dragstart ran.
-  await expect(cell("2027-05-12").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
+  await expect(
+    cell("2027-05-12").getByTestId(`collection-preview-${stale.displayId}`),
+  ).toBeVisible();
   const staleFrom = (await preview(stale.displayId).boundingBox())!;
   const staleTo = (await cell("2027-05-15").boundingBox())!;
   await page.mouse.move(staleFrom.x + staleFrom.width / 2, staleFrom.y + staleFrom.height / 2);
   await page.mouse.down();
-  await page.mouse.move(staleFrom.x + staleFrom.width / 2 + 40, staleFrom.y + staleFrom.height / 2, { steps: 4 });
-  await page.mouse.move(staleTo.x + staleTo.width / 2, staleTo.y + staleTo.height - 8, { steps: 8 });
+  await page.mouse.move(
+    staleFrom.x + staleFrom.width / 2 + 40,
+    staleFrom.y + staleFrom.height / 2,
+    { steps: 4 },
+  );
+  await page.mouse.move(staleTo.x + staleTo.width / 2, staleTo.y + staleTo.height - 8, {
+    steps: 8,
+  });
   await expect(cell("2027-05-15")).toHaveAttribute("data-drop-over", "true");
   expect(
-    (await page.request.patch(`${base}/tasks/${stale.id}`, { data: { dueDate: "2027-05-13" } })).ok(),
+    (
+      await page.request.patch(`${base}/tasks/${stale.id}`, { data: { dueDate: "2027-05-13" } })
+    ).ok(),
   ).toBe(true);
   // The task stream refreshes the calendar mid-drag: the preview moves to 05-13, so the
   // drag-source element in 05-12 is unmounted before the drop.
-  await expect(cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
-  await expect(cell("2027-05-12").getByTestId(`collection-preview-${stale.displayId}`)).toHaveCount(0);
-  const staleMove = page.waitForResponse(
-    (res) => res.request().method() === "PATCH" && new URL(res.url()).pathname === `${base}/tasks/${stale.id}`,
+  await expect(
+    cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`),
+  ).toBeVisible();
+  await expect(cell("2027-05-12").getByTestId(`collection-preview-${stale.displayId}`)).toHaveCount(
+    0,
   );
-  await page.mouse.move(staleTo.x + staleTo.width / 2 + 4, staleTo.y + staleTo.height - 8, { steps: 2 });
+  const staleMove = page.waitForResponse(
+    (res) =>
+      res.request().method() === "PATCH" &&
+      new URL(res.url()).pathname === `${base}/tasks/${stale.id}`,
+  );
+  await page.mouse.move(staleTo.x + staleTo.width / 2 + 4, staleTo.y + staleTo.height - 8, {
+    steps: 2,
+  });
   await page.mouse.up();
   const staleResponse = await staleMove;
   expect(staleResponse.status()).toBe(409);
@@ -694,22 +832,33 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
     dueDate: "2027-05-15",
     expectedDates: { dueDate: "2027-05-12" },
   });
-  await expect(page.getByRole("alert").filter({ hasText: "다른 곳에서 먼저 수정되었습니다" })).toBeVisible();
-  await expect(cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
-  await expect(cell("2027-05-15").getByTestId(`collection-preview-${stale.displayId}`)).toHaveCount(0);
+  await expect(
+    page.getByRole("alert").filter({ hasText: "다른 곳에서 먼저 수정되었습니다" }),
+  ).toBeVisible();
+  await expect(
+    cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`),
+  ).toBeVisible();
+  await expect(cell("2027-05-15").getByTestId(`collection-preview-${stale.displayId}`)).toHaveCount(
+    0,
+  );
   expect((await itemRow(stale.displayId)).dueDate).toBe("2027-05-13");
 
   // 4. Datetime field: the day changes, the wall time in the user's zone stays.
   await dateBy("시각");
   const sourceDay = dayIn(instant);
-  await expect(cell(sourceDay).getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
+  await expect(
+    cell(sourceDay).getByTestId(`collection-preview-${previewed.displayId}`),
+  ).toBeVisible();
   const targetDay = `2027-05-${String(Number(sourceDay.slice(8, 10)) + 2).padStart(2, "0")}`;
   await expect(preview(previewed.displayId)).toHaveAttribute("draggable", "true");
   await preview(previewed.displayId).dragTo(cell(targetDay));
-  await expect(cell(targetDay).getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
+  await expect(
+    cell(targetDay).getByTestId(`collection-preview-${previewed.displayId}`),
+  ).toBeVisible();
   await expect
     .poll(async () => {
-      const value = (await itemRow(previewed.displayId)).values[timeField.id] as { datetime: string } | undefined;
+      const value = (await itemRow(previewed.displayId)).values[timeField.id] as
+        { datetime: string } | undefined;
       return value ? Date.parse(value.datetime) : null;
     })
     .toBe(Date.parse(instant) + 2 * 86_400_000);
@@ -718,8 +867,12 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   await dateBy("기준일");
   await expect(preview(listed.displayId)).toHaveAttribute("draggable", "true");
   await preview(listed.displayId).dragTo(cell("2027-05-04"));
-  await expect(cell("2027-05-04").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
-  await expect.poll(async () => (await itemRow(listed.displayId)).values[dateField.id]).toEqual({ date: "2027-05-04" });
+  await expect(
+    cell("2027-05-04").getByTestId(`collection-preview-${listed.displayId}`),
+  ).toBeVisible();
+  await expect
+    .poll(async () => (await itemRow(listed.displayId)).values[dateField.id])
+    .toEqual({ date: "2027-05-04" });
   await calendar.getByRole("button", { name: "2027-05-04 · 전체 1개" }).click();
   const editor = page.getByLabel(`기준일 · ${listed.displayId}`, { exact: true });
   await editor.fill("2027-05-06");
@@ -728,16 +881,24 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
     .getByTestId("value-editor-base_day")
     .getByRole("button", { name: "저장" })
     .click();
-  await expect.poll(async () => (await itemRow(listed.displayId)).values[dateField.id]).toEqual({ date: "2027-05-06" });
-  await expect(cell("2027-05-06").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
+  await expect
+    .poll(async () => (await itemRow(listed.displayId)).values[dateField.id])
+    .toEqual({ date: "2027-05-06" });
+  await expect(
+    cell("2027-05-06").getByTestId(`collection-preview-${listed.displayId}`),
+  ).toBeVisible();
 
   // 6. Archived project: previews and rows are read-only and a drag writes nothing.
   expect((await page.request.post(`${base}/projects/${project.id}/archive`)).ok()).toBe(true);
   await openMonth();
   await expect(preview(stale.displayId)).toBeVisible();
-  await expect(calendar.locator('[data-testid^="collection-preview-"][draggable="true"]')).toHaveCount(0);
+  await expect(
+    calendar.locator('[data-testid^="collection-preview-"][draggable="true"]'),
+  ).toHaveCount(0);
   await preview(stale.displayId).dragTo(cell("2027-05-16"));
-  await expect(cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
+  await expect(
+    cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`),
+  ).toBeVisible();
   expect((await itemRow(stale.displayId)).dueDate).toBe("2027-05-13");
   await calendar.getByRole("button", { name: "2027-05-13 · 전체 1개" }).click();
   await expect(page.getByTestId(`collection-row-${stale.displayId}`)).toBeVisible();
