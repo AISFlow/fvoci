@@ -22,12 +22,14 @@ import "@/features/share/share.css";
 const route = useRoute();
 const token = computed(() => String(route.params.token ?? ""));
 const selectedDocumentId = ref<string | null>(null);
-watch(token, () => { selectedDocumentId.value = null; }, { flush: "sync" });
-const meta = useQuery(() => sharePublicMetaQuery(token.value));
-const tree = useQuery(() => sharePublicTreeQuery(token.value, meta.isSuccess.value));
-const body = useQuery(() =>
-  sharePublicBodyQuery(token.value, selectedDocumentId.value, meta.isSuccess.value),
-);
+const accessError = ref<string | null>(null);
+watch(token, () => { selectedDocumentId.value = null; accessError.value = null; }, { flush: "sync" });
+const meta = useQuery(() => ({ ...sharePublicMetaQuery(token.value), staleTime: 0 }));
+const tree = useQuery(() => ({ ...sharePublicTreeQuery(token.value, meta.isSuccess.value), staleTime: 0 }));
+const body = useQuery(() => ({
+  ...sharePublicBodyQuery(token.value, selectedDocumentId.value, meta.isSuccess.value),
+  staleTime: 0,
+}));
 
 const share = computed(() => meta.data.value);
 const metaError = computed(() => (meta.error.value ? failMessage(meta.error.value) : null));
@@ -42,15 +44,18 @@ function onSelectDocument(documentId: string): void {
 
 async function refresh(): Promise<void> {
   const result = await meta.refetch();
-  if (result.isSuccess) await Promise.all([tree.refetch(), body.refetch()]);
+  if (result.isSuccess) {
+    accessError.value = null;
+    await Promise.all([tree.refetch(), body.refetch()]);
+  }
 }
 </script>
 
 <template>
-  <div v-if="metaError || treeError" class="share-page" data-public-share="vue">
+  <div v-if="metaError || treeError || accessError" class="share-page" data-public-share="vue">
     <div class="share-page__gate">
       <div class="flex flex-col gap-3">
-        <p role="alert" class="share-page__alert">{{ metaError || treeError }}</p>
+        <p role="alert" class="share-page__alert">{{ metaError || treeError || accessError }}</p>
         <UButton variant="outline" color="neutral" :loading="meta.isFetching.value || tree.isFetching.value" @click="refresh">
           {{ t("load.retry") }}
         </UButton>
@@ -70,11 +75,12 @@ async function refresh(): Promise<void> {
     :tree="tree.data.value?.items ?? []"
     :active-document-id="activeDocumentId"
     :body="body.data.value ?? null"
-    :body-loading="body.isLoading.value"
+    :body-loading="body.isFetching.value"
     :body-error="bodyError"
     :refreshing="meta.isFetching.value || tree.isFetching.value || body.isFetching.value"
     @select-document="onSelectDocument"
     @retry-body="() => void body.refetch()"
     @refresh="refresh"
+    @denied="accessError = failMessage($event)"
   />
 </template>
