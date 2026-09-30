@@ -96,7 +96,7 @@ test("cold home, legal and populated Gantt record their actual production asset 
       await expect(cold.locator("#root[data-v-app]")).toHaveCount(1);
       if (new URL(origin + path).pathname.endsWith("gantt")) {
         await expect(cold.getByRole("searchbox", { name: "태스크 검색" })).toBeVisible();
-        await expect(cold.getByText("Canonical task", { exact: true })).toBeVisible();
+        await expect(cold.getByRole("region", { name: "간트", exact: true }).getByText("Canonical task", { exact: true })).toBeVisible();
       } else await expect(cold.locator("main")).toBeVisible();
       await cold.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
       witnesses.push({ path, requests, responses, resources: await cold.evaluate(() => performance.getEntriesByType("resource").map(entry => ({ name: entry.name, initiatorType: (entry as PerformanceResourceTiming).initiatorType }))) });
