@@ -6,11 +6,13 @@ import { computed, ref } from "vue";
 import { api, ensureOk, loadErrorMessage } from "@/lib/api";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
+import ConfirmDialog from "./ConfirmDialog.vue";
 import "@/features/settings/settings-shell.css";
 
 const props = defineProps<{ workspaceId: string }>();
 const client = useQueryClient();
 const error = ref<string | null>(null);
+const restoreTarget = ref<string | null>(null);
 
 const deleted = useQuery(() => ({
   queryKey: ["projects", props.workspaceId, "deleted"] as const,
@@ -32,6 +34,7 @@ const restore = useMutation({
     ),
   onSuccess: async () => {
     error.value = null;
+    restoreTarget.value = null;
     await Promise.all([
       client.invalidateQueries({ queryKey: ["projects", props.workspaceId] }),
       client.invalidateQueries({ queryKey: ["trash", props.workspaceId] }),
@@ -45,10 +48,8 @@ const restore = useMutation({
 const items = computed(() => deleted.data.value?.items ?? []);
 
 function restoreProject(projectId: string): void {
-  if (!window.confirm(`${t("project.restore.confirm.title")}\n${t("project.restore.confirm.body")}`)) {
-    return;
-  }
-  restore.mutate(projectId);
+  error.value = null;
+  restoreTarget.value = projectId;
 }
 </script>
 
@@ -81,5 +82,15 @@ function restoreProject(projectId: string): void {
       </li>
     </ul>
     <p v-if="error" role="alert" class="text-error">{{ error }}</p>
+    <ConfirmDialog
+      :open="restoreTarget !== null"
+      :title="t('project.restore.confirm.title')"
+      :body="t('project.restore.confirm.body')"
+      :action-label="t('trash.restore')"
+      :pending="restore.isPending.value"
+      :error="error"
+      @close="restoreTarget = null"
+      @confirm="restoreTarget && restore.mutate(restoreTarget)"
+    />
   </section>
 </template>

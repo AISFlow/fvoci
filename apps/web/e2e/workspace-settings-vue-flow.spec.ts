@@ -71,7 +71,7 @@ test("Vue settings commit identity, groups, tokens, holidays, preferences and re
   await tokens.locator("summary").click();
   await expect(secretField).toHaveCount(0);
   await tokens.getByRole("button", { name: "폐기" }).click();
-  await page.getByRole("alertdialog").getByRole("button", { name: "폐기" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "폐기" }).click();
   await expect(tokens.getByText("토큰이 없습니다")).toBeVisible();
   expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/documents`, { headers: auth })).ok()).toBe(false);
 
@@ -153,8 +153,8 @@ test("actual Vue tags and templates URLs persist edits, apply documents, and enf
   const project = await projectResponse.json();
   expect((await page.request.delete(`/api/v1/workspaces/${workspaceId}/projects/${project.id}`)).ok()).toBe(true);
   await openSettings(page);
-  page.once("dialog", (dialog) => dialog.accept());
   await page.getByTestId("deleted-projects").getByRole("button", { name: "복원 Recovered settings project" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "복원", exact: true }).click();
   await expect(page.getByTestId("deleted-projects")).toHaveCount(0);
   const activeProjects = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json();
   expect(activeProjects.items.some((item: { id: string }) => item.id === project.id)).toBe(true);
