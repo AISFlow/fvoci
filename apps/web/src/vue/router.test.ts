@@ -305,3 +305,9 @@ test("workspace settings routes exist but the boundary still sends them to React
   assert.equal(isVueAppPath("/w/acme/settings/document-tags"), false);
   assert.equal(isVueAppPath("/w/acme/settings/templates"), false);
 });
+
+test("project fields and workflow settings resolve to their own lazy pages", () => {
+  const router = createAppRouter(createMemoryHistory());
+  assert.equal(router.resolve("/w/acme/GNT/settings/fields").name, "project-fields");
+  assert.equal(router.resolve("/w/acme/GNT/settings/workflow").name, "project-workflow");
+});

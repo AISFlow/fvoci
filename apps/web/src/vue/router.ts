@@ -7,6 +7,8 @@ import { VUE_SETTINGS_ROUTE_PATHS, VUE_ACCOUNT_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS,
  * editor (Tiptap, Yjs, the collab provider) or its stylesheets
  * (import-graph.test.ts and e2e/project-gantt-flow.spec.ts check this). */
 export const routes: RouteRecordRaw[] = [
+  { path: VUE_ROUTE_PATHS.projectFields, name: "project-fields", component: () => import("./features/projects/settings/ProjectFieldsPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectWorkflow, name: "project-workflow", component: () => import("./features/projects/settings/ProjectWorkflowPage.vue") },
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   // Wiki refs are more specific than project home's `/w/:slug/:ref` and must
   // stay listed first so `/w/acme/wiki-3` is never the project overview.

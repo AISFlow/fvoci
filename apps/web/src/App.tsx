@@ -16,8 +16,6 @@ import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
 import { TemplatesSettingsPage } from "@/pages/TemplatesSettingsPage";
-import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
-import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
 import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
 
@@ -118,8 +116,8 @@ const router = createBrowserRouter(
         <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
         <Route path="settings/templates" element={<TemplatesSettingsPage />} />
         <Route path="notifications" element={<NoRoute />} />
-        <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
-        <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
+        <Route path=":ref/settings/fields" element={<NoRoute />} />
+        <Route path=":ref/settings/workflow" element={<NoRoute />} />
         <Route path=":ref" element={<WorkspaceRefPage />} />
       </Route>
       <Route path="*" element={<NoRoute />} />

@@ -26,6 +26,8 @@ export const VUE_APP_PATHS: readonly RegExp[] = [
   PROJECT_HOME_PATH,
   WORKSPACE_ITEM_PATH,
   /^\/w\/[^/]+\/[^/]+\/(?:tasks|table|board|calendar)\/?$/i,
+  // Existing project workflow and collection-field settings.
+  /^\/w\/[^/]+\/[^/]+\/settings\/(?:fields|workflow)\/?$/i,
   // Project Gantt: /w/:slug/:ref/gantt
   /^\/w\/[^/]+\/[^/]+\/gantt\/?$/i,
   // Wiki document: /w/:slug/WIKI-<n>, the refs parseWikiRef (lib/href.ts)

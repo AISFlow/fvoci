@@ -210,7 +210,7 @@ test("single-segment resource routes agree with the shared ref grammar", () => {
     // React Router matches /w/:slug in any case, as the boundary does.
     const ref = /^\/w\/[^/]+\/([^/]+)\/?$/i.exec(path)?.[1];
     const resource = ref ? parseRef(ref) : null;
-    const projectView = /\/(gantt|tasks|table|board|calendar)\/?$/i.test(path);
+    const projectView = /\/(gantt|tasks|table|board|calendar)\/?$/i.test(path) || /\/settings\/(fields|workflow)\/?$/i.test(path);
     const login = /^\/login\/?$/i.test(path);
     const homeOrPublic = path === "/" || /^\/legal\/[^/]+\/?$/i.test(path) || /^\/service-info\/?$/i.test(path);
     const invite = /^\/invite\/[^/]+\/?$/i.test(path);
@@ -272,5 +272,13 @@ test("the Vue router matches exactly the paths the boundary sends it", () => {
   for (const path of SAMPLES) {
     const matched = router.resolve(path).name !== "react-app";
     assert.equal(matched, isVueAppPath(path), path);
+  }
+});
+
+test("project settings retain exact fields/workflow route ownership", () => {
+  for (const section of ["fields", "workflow"]) {
+    assert.equal(isVueAppPath(`/w/acme/GNT/settings/${section}`), true);
+    assert.equal(isVueAppPath(`/W/acme/gnt/SETTINGS/${section.toUpperCase()}/`), true);
+    assert.equal(isVueAppPath(`/w/acme/GNT/settings/${section}/extra`), false);
   }
 });
