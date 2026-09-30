@@ -16,5 +16,5 @@ exec bwrap --unshare-net \
     if command -v node; then exit 1; fi
     python3 -c '\''from pathlib import Path; assert not list(Path("/bin").glob("node*")); assert not Path("/usr/bin").exists(); assert not Path("/home/kinesis/.nvm").exists(); print("isolated filesystem: Node absent, network isolated")'\''
     bun -e '\''console.log(JSON.stringify({bun:process.versions.bun,execPath:process.execPath}))'\''
-    python3 scripts/test_eslint.py
-  '
+    python3 scripts/test_eslint.py "$@"
+  ' lint-nodefree-proof "$@"

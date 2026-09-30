@@ -142,12 +142,209 @@ const slotName = "default";
         self.assertNotEqual(run([*PRETTIER, "--check", str(self.directory / "missing.ts")]).returncode, 0)
 
     def test_browser_does_not_receive_node_or_bun_globals(self):
-        result = run([*ESLINT, "--print-config", "apps/web/src/vue/features/settings/toggle.ts"])
-        config = json.loads(result.stdout)
-        for name in ["Bun", "process", "Buffer", "require"]:
-            self.assertNotIn(name, config["languageOptions"]["globals"])
-        self.assertIn("window", config["languageOptions"]["globals"])
-        self.assertEqual(config["rules"]["@typescript-eslint/no-floating-promises"][1]["ignoreVoid"], False)
+        forbidden = {"Bun", "process", "Buffer", "require", "__dirname", "__filename",
+                     "module", "exports", "setImmediate", "clearImmediate"}
+        for path, environment in self.runtime_paths():
+            with self.subTest(path=path):
+                result = run([*ESLINT, "--print-config", path])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = json.loads(result.stdout)
+                declared = config["languageOptions"].get("globals", {})
+                self.assertFalse(forbidden.intersection(declared), declared)
+                runtime_rule = config["rules"]["no-restricted-globals"][1]
+                expected = forbidden | {"window"} if environment == "worker" else forbidden
+                self.assertEqual(set(runtime_rule["globals"]), expected)
+                self.assertTrue(runtime_rule["checkGlobalObject"])
+                if environment == "browser":
+                    self.assertIn("window", declared)
+                elif environment == "worker":
+                    self.assertIn("self", declared)
+                    self.assertIn("postMessage", declared)
+                    self.assertNotIn("window", declared)
+                if path.endswith(".ts"):
+                    self.assertEqual(config["rules"]["@typescript-eslint/no-floating-promises"][1]["ignoreVoid"], False)
+
+    @staticmethod
+    def runtime_paths():
+        return [
+            ("apps/web/src/vue/features/settings/toggle.ts", "browser"),
+            ("apps/web/src/features/attachments/hwp-worker.ts", "worker"),
+            ("apps/web/src/features/attachments/pptx-worker.ts", "worker"),
+            ("apps/web/src/features/attachments/xlsx-worker.ts", "worker"),
+            ("apps/web/public/sw.js", "worker"),
+            ("packages/i18n/src/index.ts", "library"),
+        ]
+
+    def test_browser_worker_and_i18n_reject_runtime_node_bun(self):
+        # Stdin with actual file paths exercises the real root config/projects
+        # without writing product files or replacing the parser/rule set.
+        negative = '''export const forbidden = [process.pid, Bun.version,
+Buffer.alloc(0), require("bad"), __dirname, __filename, module, exports,
+setImmediate, clearImmediate];'''
+        names = {"Bun", "process", "Buffer", "require", "__dirname", "__filename",
+                 "module", "exports", "setImmediate", "clearImmediate"}
+        for path, environment in self.runtime_paths():
+            with self.subTest(path=path):
+                positive = {
+                    "browser": "export const href = window.location.href;",
+                    "worker": 'self.postMessage("ready");',
+                    "library": "export const add = (left: number, right: number): number => left + right;",
+                }[environment]
+                args = [*ESLINT, "--stdin", "--stdin-filename", path,
+                        "--max-warnings=0", "--format=json"]
+                valid = run(args, input=positive)
+                self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+                invalid = run(args, input=negative)
+                report = json.loads(invalid.stdout)
+                self.assertNotEqual(invalid.returncode, 0, report)
+                self.assertEqual(sum(f["fatalErrorCount"] for f in report), 0, report)
+                restricted = [m for f in report for m in f["messages"]
+                              if m["ruleId"] == "no-restricted-globals"]
+                self.assertEqual({m["message"].split("'")[1] for m in restricted}, names, report)
+                self.assertTrue(all(m["severity"] == 2 for m in restricted))
+
+    def test_qualified_runtime_globals_and_local_names(self):
+        for path in ["apps/web/src/vue/features/settings/toggle.ts",
+                     "apps/web/src/features/attachments/hwp-worker.ts",
+                     "packages/i18n/src/index.ts"]:
+            with self.subTest(path=path):
+                args = [*ESLINT, "--stdin", "--stdin-filename", path,
+                        "--max-warnings=0", "--format=json"]
+                positive = '''export function local(process: { pid: number }): number { return process.pid; }
+export function localObject(window: { process: { pid: number } }): number { return window.process.pid; }
+export const label = { process: "local", Bun: "local" };'''
+                valid = run(args, input=positive)
+                self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+                negative = '''export const qualified = [globalThis.process.pid,
+window.process.pid, self.process.pid, globalThis.Bun.version,
+window.Bun.version, self.Bun.version];'''
+                invalid = run(args, input=negative)
+                report = json.loads(invalid.stdout)
+                self.assertNotEqual(invalid.returncode, 0, report)
+                self.assertEqual(sum(f["fatalErrorCount"] for f in report), 0, report)
+                restricted = [m for f in report for m in f["messages"]
+                              if m["ruleId"] == "no-restricted-globals"]
+                self.assertEqual(len(restricted), 6, report)
+                self.assertTrue(all(m["severity"] == 2 for m in restricted))
+
+    def test_indexed_access_preserves_missing_route_fallbacks(self):
+        source = '''<script setup lang="ts">
+import { computed } from "vue";
+import { useRoute } from "vue-router";
+const route = useRoute();
+const slug = computed(() => String(route.params.slug ?? ""));
+</script><template><p>{{ slug }}</p></template>'''
+        result, report = self.lint("ProofRoute.vue", source)
+        self.assertEqual(result.returncode, 0, report)
+        dictionary = 'export function read(values: Record<string, string>): string { return values.slug ?? ""; }'
+        result, report = self.lint("ProofDictionary.ts", dictionary)
+        self.assertEqual(result.returncode, 0, report)
+        valid = self.compiler("apps/web/tsconfig.eslint.json", dictionary, "ts", "tsc")
+        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+        invalid = self.compiler("apps/web/tsconfig.eslint.json", dictionary.replace('values.slug ?? ""', 'values.slug'), "ts", "tsc")
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("TS2322", invalid.stdout + invalid.stderr)
+        self.assertIn("undefined", invalid.stdout + invalid.stderr)
+        self.assert_rule("ProofKnownField.ts", 'export function read(value: { slug: string }): string { return value.slug ?? ""; }', "@typescript-eslint/no-unnecessary-condition")
+
+    def test_exact_development_export_buffer_contract(self):
+        for path in ["packages/editor/src/export/docx.ts", "packages/editor/src/export/pptx.ts"]:
+            with self.subTest(path=path):
+                args = [*ESLINT, "--stdin", "--stdin-filename", path,
+                        "--max-warnings=0", "--format=json"]
+                positive = 'export const bytes = Buffer.from("oracle", "utf8");'
+                valid = run(args, input=positive)
+                self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+                config = json.loads(run([*ESLINT, "--print-config", path]).stdout)
+                self.assertEqual(config["languageOptions"]["globals"]["Buffer"], "readonly")
+                names = {"Bun", "process", "require", "__dirname", "__filename",
+                         "module", "exports", "setImmediate", "clearImmediate"}
+                self.assertEqual(set(config["rules"]["no-restricted-globals"][1]["globals"]), names)
+                negative = 'export const forbidden = [process.pid, Bun.version, globalThis.process.pid, globalThis.Bun.version];'
+                invalid = run(args, input=negative)
+                report = json.loads(invalid.stdout)
+                self.assertNotEqual(invalid.returncode, 0, report)
+                self.assertEqual(sum(f["fatalErrorCount"] for f in report), 0, report)
+                restricted = [m for f in report for m in f["messages"]
+                              if m["ruleId"] == "no-restricted-globals"]
+                self.assertEqual(len(restricted), 4, report)
+        for path in ["packages/editor/src/json.ts", "packages/editor/src/export/limits.ts",
+                     "apps/web/src/features/attachments/hwp-worker.ts", "packages/i18n/src/index.ts"]:
+            with self.subTest(browser_path=path):
+                result = run([*ESLINT, "--stdin", "--stdin-filename", path,
+                              "--max-warnings=0", "--format=json"], input='export const bytes = Buffer.alloc(0);')
+                report = json.loads(result.stdout)
+                self.assertNotEqual(result.returncode, 0, report)
+                self.assertIn("no-restricted-globals", {m["ruleId"] for f in report for m in f["messages"]}, report)
+
+    def test_bun_development_types_and_runtime(self):
+        source = '''import assert from "node:assert/strict";
+import { mock, test } from "bun:test";
+await mock.module("fvoci-bun-typing-proof", () => ({ value: 1 }));
+test("typed Bun Transpiler and module mock", () => {
+  const code = new Bun.Transpiler({ loader: "ts" }).transformSync("export const value: number = 1;");
+  assert.equal(typeof code, "string");
+  assert.equal(code.includes("number"), false);
+});'''
+        result, report = self.lint("ProofBun.test.ts", source)
+        self.assertEqual(result.returncode, 0, report)
+        path = self.directory / "ProofBun.test.ts"
+        runtime = run(["bun", "test", "--isolate", str(path)], timeout=30)
+        self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+        self.assertIn("1 pass", runtime.stderr)
+        for config in ["apps/web/tsconfig.eslint.json", "packages/editor/tsconfig.eslint.json"]:
+            valid = self.compiler(config, source, "ts", "tsc")
+            self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+            invalid = self.compiler(config, source.replace('loader: "ts"', 'loader: "invalid-loader"'), "ts", "tsc")
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("TS2322", invalid.stdout + invalid.stderr)
+        self.assert_rule("ProofBunUnsafe.test.ts", 'import { mock } from "bun:test"; mock.module("proof", () => ({ value: 1 }));', "@typescript-eslint/no-floating-promises")
+        self.assert_rule("ProofBunUnrelated.test.ts", 'import { test } from "bun:test"; test("proof", () => { Promise.resolve(1); });', "@typescript-eslint/no-floating-promises")
+
+    def test_node_test_runner_failure_propagation_and_no_waiver(self):
+        for name, body, expected in [
+            ("Pass", '() => { if (Number("1") !== 1) throw new Error("unexpected"); }', 0),
+            ("Throw", '() => { throw new Error("node-test-throw-proof"); }', 1),
+            ("Reject", '() => Promise.reject(new Error("node-test-reject-proof"))', 1),
+        ]:
+            source = f'import test from "node:test"; test("{name}", {body});'
+            path = self.source(f"NodeRunner{name}.test.ts", source)
+            runtime = run(["bun", "test", "--isolate", str(path)], timeout=30)
+            self.assertEqual(runtime.returncode, expected, runtime.stdout + runtime.stderr)
+            self.assertIn("1 pass" if expected == 0 else "1 fail", runtime.stderr)
+        # Installed TestContext.test has the SAME typeof test as registration;
+        # a known-safe-call type allowance would also mask an unsafe subtest.
+        self.assert_rule("NodeUnhandled.test.ts", 'import test from "node:test"; await test("parent", (t) => { t.test("child", () => Promise.resolve()); });', "@typescript-eslint/no-floating-promises")
+        unrelated = 'import test from "node:test"; await test("parent", () => { Promise.reject(new Error("unhandled-promise-proof")); });'
+        self.assert_rule("NodeUnrelated.test.ts", unrelated, "@typescript-eslint/no-floating-promises")
+        path = self.directory / "NodeUnrelated.test.ts"
+        runtime = run(["bun", "test", "--isolate", str(path)], timeout=30)
+        self.assertNotEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+        self.assertIn("unhandled-promise-proof", runtime.stderr)
+
+    def test_sfc_import_gap_remains_with_strict_vue_compiler(self):
+        self.source("ProofNode.vue", '''<script setup lang="ts">
+import type { NodeViewProps } from "@tiptap/vue-3";
+defineProps<NodeViewProps>();
+</script><template><span /></template>''')
+        source = '''import ProofNode from "./ProofNode.vue";
+import { VueNodeViewRenderer } from "@tiptap/vue-3";
+export const renderer = VueNodeViewRenderer(ProofNode);'''
+        # Document the plain-TS program's SFC import gap without a shim/waiver.
+        self.assert_rule("ProofSfcImport.ts", source, "@typescript-eslint/no-unsafe-argument")
+        for config in ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]:
+            typed = self.compiler(config, source, "ts", "vue-tsc")
+            self.assertEqual(typed.returncode, 0, typed.stdout + typed.stderr)
+            broken = self.compiler(config, source + '\nexport const invalid: number = "bad";', "ts", "vue-tsc")
+            self.assertNotEqual(broken.returncode, 0)
+            self.assertIn("TS2322", broken.stdout + broken.stderr)
+
+    def test_y_text_declared_string_contract_without_rule_allowance(self):
+        source = 'import * as Y from "yjs"; export function text(value: Y.Text): string { return value.toJSON(); }'
+        result, report = self.lint("ProofYText.ts", source)
+        self.assertEqual(result.returncode, 0, report)
+        self.assert_rule("ProofYTextInherited.ts", source.replace("value.toJSON()", "value.toString()"), "@typescript-eslint/no-base-to-string")
+        self.assert_rule("ProofObjectString.ts", 'export function text(value: object): string { return value.toString(); }', "@typescript-eslint/no-base-to-string")
 
     def test_formatter_keeps_import_order_text_and_tailwind(self):
         source = 'import "./z.css";\nimport "./a.css";\nexport const value = 1;\n'
