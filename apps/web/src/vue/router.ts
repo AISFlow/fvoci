@@ -28,6 +28,16 @@ export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.serviceInfo, name: "service-info", component: () => import("./pages/ServiceInfoPage.vue") },
   { path: VUE_ROUTE_PATHS.invite, name: "invite", component: () => import("./pages/InvitePage.vue") },
   { path: VUE_ROUTE_PATHS.setup, name: "setup", component: () => import("./pages/SetupPage.vue") },
+  {
+    path: VUE_ROUTE_PATHS.attachmentView,
+    name: "attachment-view",
+    component: () => import("./pages/AttachmentViewPage.vue"),
+  },
+  {
+    path: VUE_ROUTE_PATHS.shareAttachmentView,
+    name: "share-attachment-view",
+    component: () => import("./pages/ShareAttachmentViewPage.vue"),
+  },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

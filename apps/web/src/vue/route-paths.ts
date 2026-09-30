@@ -28,4 +28,8 @@ export const VUE_ROUTE_PATHS = {
   serviceInfo: "/service-info",
   invite: "/invite/:token",
   setup: "/setup",
+  // Session attachment viewer: /w/:slug/a/:attachmentId/view
+  attachmentView: "/w/:slug/a/:attachmentId/view",
+  // Anonymous share attachment viewer: /s/:token/attachments/:attachmentId/view
+  shareAttachmentView: "/s/:token/attachments/:attachmentId/view",
 } as const;

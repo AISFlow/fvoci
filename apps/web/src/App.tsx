@@ -88,10 +88,6 @@ const router = createBrowserRouter(
       {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
       <Route path="/s/:token" element={<PublicSharePage />} />
       <Route
-        path="/s/:token/attachments/:attachmentId/view"
-        {...lazyPage(() => import("@/pages/ShareAttachmentViewPage").then((m) => m.ShareAttachmentViewPage))}
-      />
-      <Route
         path="/settings/admin"
         {...lazyPage(() => import("@/pages/AdminPage").then((m) => m.AdminPage), { setupGuard: true })}
       />
@@ -129,10 +125,6 @@ const router = createBrowserRouter(
         <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
         <Route path="settings/templates" element={<TemplatesSettingsPage />} />
         <Route path="notifications" element={<NotificationsPage />} />
-        <Route
-          path="a/:attachmentId/view"
-          {...lazyPage(() => import("@/pages/AttachmentViewPage").then((m) => m.AttachmentViewPage))}
-        />
         <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
         <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
         <Route path=":ref" element={<WorkspaceRefPage />} />

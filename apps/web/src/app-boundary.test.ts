@@ -86,6 +86,24 @@ const SAMPLES = [
   "/setups",
   "/w/acme",
   "/w/acme/a/123/view",
+  "/w/acme/a/123/view/",
+  "/w/acme/A/123/VIEW",
+  "/w/acme/a/123",
+  "/w/acme/a/123/view/extra",
+  "/s/tok/attachments/123/view",
+  "/s/tok/attachments/123/view/",
+  "/S/tok/attachments/123/View",
+  "/s/tok/attachments/123",
+  "/s/tok/attachments/123/view/extra",
+  "/s/tok",
+  "/settings/admin",
+  "/settings/audit",
+  "/settings/legal",
+  "/legal/privacy",
+  "/w//a/123/view",
+  "/s//attachments/123/view",
+  "/w/acme/a//view",
+  "/s/tok/attachments//view",
   "/w/acme/WIKI-1",
   "/w/acme/WIKI-12/",
   "/w/acme/wiki-7",
@@ -175,7 +193,9 @@ test("single-segment resource routes agree with the shared ref grammar", () => {
     const invite = /^\/invite\/[^/]+\/?$/i.test(path);
     const setup = /^\/setup\/?$/i.test(path);
     const auth = /^\/(reset-password|magic-link|confirm-email|cancel-withdraw|consent)\/?$/i.test(path);
-    if (!projectView && !login && !homeOrPublic && !invite && !setup && !auth) assert.equal(isVueAppPath(path), resource !== null, path);
+    const attachment = /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
+      /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i.test(path);
+    if (!projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
   }
 });
 
@@ -185,6 +205,23 @@ test("home and public pages enter Vue while admin policies remain React", () => 
   }
   for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal"]) {
     assert.equal(isVueAppPath(path), false, path);
+  }
+});
+
+test("attachment viewers boot Vue while public share, public share and admin pages retain React", () => {
+  for (const path of ["/w/acme/a/123/view", "/w/acme/a/123/view/", "/W/acme/A/123/VIEW",
+    "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View"]) {
+    assert.equal(isVueAppPath(path), true, path);
+  }
+  for (const path of ["/s/tok", "/settings/admin", "/settings/audit", "/settings/legal",
+    "/w/acme/a/123", "/w/acme/a/123/view/extra", "/s/tok/attachments/123", "/s/tok/attachments/123/view/extra"]) {
+    assert.equal(isVueAppPath(path), false, path);
+  }
+});
+
+test("public policy pages remain Vue after the viewer merge", () => {
+  for (const path of ["/legal/privacy", "/LEGAL/terms/"]) {
+    assert.equal(isVueAppPath(path), true, path);
   }
 });
 

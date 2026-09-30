@@ -1,3 +1,4 @@
+import { expectVueViewer } from "./viewer-app";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -239,6 +240,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
 
   // HWPX: three laid-out pages with distinct Korean ink, page navigation and zoom.
   await page.goto(`/w/acme/a/${hwpxId}/view`);
+  await expectVueViewer(page);
   const shell = page.locator("[data-attachment-viewer]");
   const viewer = page.locator("[data-hwp-viewer]");
   await expect(viewer).toBeVisible({ timeout: 30_000 });

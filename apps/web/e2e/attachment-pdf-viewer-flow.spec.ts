@@ -6,6 +6,7 @@ import {
   FIXTURE_PAGE_W,
 } from "../src/features/attachments/pdf-test-fixture";
 import { watchCspViolations } from "./helpers";
+import { expectVueViewer } from "./viewer-app";
 
 const owner = {
   email: "pdf-viewer@example.com",
@@ -148,6 +149,7 @@ async function hangulCells(page: Page): Promise<{ dark: number; signature: strin
 
 test("PDF attachment: page navigation, zoom, rendered content, doc switch, not found", async ({
   page,
+  browser,
 }) => {
   test.setTimeout(90_000);
   const csp = watchCspViolations(page);
@@ -202,6 +204,23 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   await page.goto(`/w/acme/a/${pdfId}/view`);
   const viewer = page.locator("[data-pdf-viewer]");
   await expect(viewer).toBeVisible({ timeout: 20_000 });
+  await expectVueViewer(page);
+  // The candidate survives a direct URL refresh with the authenticated cookie.
+  await page.reload();
+  await expect(viewer.getByText("1 / 2")).toBeVisible();
+  await expectVueViewer(page);
+  // A direct session viewer URL in an anonymous context returns to login,
+  // retaining the full viewer target, including search and fragment.
+  const anonymous = await browser.newContext();
+  try {
+    const signedOut = await anonymous.newPage();
+    const target = `/w/acme/a/${pdfId}/view?chunk=0#document`;
+    await signedOut.goto(target);
+    await expect(signedOut).toHaveURL((url) => url.pathname === "/login" && url.searchParams.get("returnTo") === target);
+    expect((await signedOut.request.get(`/api/v1/workspaces/${wsId}/attachments/${pdfId}`)).status()).toBe(401);
+  } finally {
+    await anonymous.close();
+  }
   await expect(viewer.getByText("1 / 2")).toBeVisible();
   await expect(viewer.getByRole("button", { name: "이전 쪽" })).toBeDisabled();
 
