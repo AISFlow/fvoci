@@ -91,7 +91,7 @@ function onLoadMore(): void {
                 :number="item.number"
                 :project-key="projectById.get(projectId)?.key"
                 :status-name="statusById.get(item.statusId)?.name"
-                :due="item.dueDate ?? item.dueAt"
+                :due-date="item.dueDate" :due-at="item.dueAt"
                 :time-zone="timeZone"
                 :type="item.type"
                 :priority="item.priority"

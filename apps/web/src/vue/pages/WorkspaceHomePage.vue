@@ -123,7 +123,7 @@ const recentItems = computed(() =>
             <li v-for="item in assigned.data.value?.items ?? []" :key="item.id">
               <MyTaskRow :slug="slug" :item-id="item.id" :title="item.title" :number="item.number"
                 :project-key="projectById.get(item.projectId)?.key" :status-name="statusById.get(item.statusId)?.name"
-                :due="item.dueDate ?? item.dueAt" :time-zone="timeZone" :type="item.type" :priority="item.priority"
+                :due-date="item.dueDate" :due-at="item.dueAt" :time-zone="timeZone" :type="item.type" :priority="item.priority"
                 :labels="(labels.data.value?.items ?? []).filter(label => item.labelIds.includes(label.id))"
                 :assignee-ids="item.assigneeIds" :members="members.data.value?.items ?? []" />
             </li>

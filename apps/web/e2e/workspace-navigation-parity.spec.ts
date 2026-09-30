@@ -51,6 +51,7 @@ test("workspace landing has authorized projects, counts, and eight due-ordered a
   await expect(rows).toHaveCount(8);
   await expect(rows.first()).toContainText("Due 1");
   await expect(rows.last()).toContainText("Due 8");
+  await expect(rows.first()).toContainText("10. 1.");
   await expect(rows.first()).toContainText("버그");
   await expect(rows.first()).toContainText("높음");
   await expect(rows.first()).toContainText("Label 0");
