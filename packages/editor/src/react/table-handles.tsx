@@ -11,7 +11,7 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { moveNodeTo } from "./gutter-actions.js";
+import { moveNodeTo } from "../gutter-actions.js";
 import { preventSelectionLoss } from "./menu-keyboard.js";
 import { PointMenu } from "./point-menu.js";
 import {

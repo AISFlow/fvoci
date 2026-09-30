@@ -26,6 +26,7 @@ import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
 import CommentPanel from "../comments/CommentPanel.vue";
 import EditorBubble from "../editor/EditorBubble.vue";
+import EditorControls from "../editor/EditorControls.vue";
 import EditorToolbar from "../editor/EditorToolbar.vue";
 import UnfurlCard from "../editor/UnfurlCard.vue";
 import CollabPresence from "./CollabPresence.vue";
@@ -425,6 +426,9 @@ function flashBlock(id: string): void {
         </template>
         <template #bubble="{ editor: live }">
           <EditorBubble :editor="live" />
+        </template>
+        <template #controls="{ editor: live, gutter, editable }">
+          <EditorControls :editor="live" :gutter="gutter" :editable="editable" />
         </template>
       </FvociEditor>
     </section>
