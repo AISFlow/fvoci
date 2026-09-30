@@ -5,11 +5,11 @@ import { useInfiniteQuery, useQuery } from "@tanstack/vue-query";
 import { computed } from "vue";
 import { useRoute } from "vue-router";
 import { projectsQuery } from "@/features/projects/queries";
-import { groupTasksByProject, myTasksQuery, workspaceStatusesQuery } from "@/features/tasks/my-tasks";
+import { groupTasksByProject, myTasksQuery, workspaceStatusesQuery, workspaceLabelsQuery } from "@/features/tasks/my-tasks";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { FALLBACK_TZ } from "@/lib/datetime";
-import { meQuery } from "@/lib/queries";
+import { meQuery, membersQuery } from "@/lib/queries";
 import QueryError from "../components/QueryError.vue";
 import QueryLoading from "../components/QueryLoading.vue";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
@@ -36,6 +36,8 @@ const projects = useQuery(() => ({
   enabled: Boolean(workspaceId.value),
 }));
 const me = useQuery(meQuery);
+const labels = useQuery(() => workspaceLabelsQuery(workspaceId.value));
+const members = useQuery(() => ({ ...membersQuery(workspaceId.value), enabled: Boolean(workspaceId.value) }));
 
 const items = computed(() => mergeTaskListPages(tasks.data.value?.pages ?? [])?.items ?? []);
 const grouped = computed(() => groupTasksByProject(items.value));
@@ -91,6 +93,11 @@ function onLoadMore(): void {
                 :status-name="statusById.get(item.statusId)?.name"
                 :due="item.dueDate ?? item.dueAt"
                 :time-zone="timeZone"
+                :type="item.type"
+                :priority="item.priority"
+                :labels="(labels.data.value?.items ?? []).filter(label => item.labelIds.includes(label.id))"
+                :assignee-ids="item.assigneeIds"
+                :members="members.data.value?.items ?? []"
               />
             </li>
           </ul>
