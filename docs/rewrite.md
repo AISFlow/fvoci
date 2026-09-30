@@ -1338,3 +1338,6 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
 - #267 fa7dac74 후보5게이트 SUCCESS와 독립 ACCEPT 후 expected-head merge. main f18f2b2b; controls 수락 main5d5171a7과 공통 merge-base 이후 변경 경로 겹침0, 예상 merge tree5ba62cfd와 실제 main tree 일치. 통합 후 셸/컨트롤 상호작용 검증은 후속 CI/브라우저로 별도 확인하며 배포 완료로 표시하지 않는다.
 
 - 사용자 요청으로 Orca 정상 재시작 전 정리 완료. 본 파동 워커5개와 생성 실패 워커2개 종료/회수, 생성 시 빈 셸1개도 자식 없음 확인 후 종료. root 코디네이터 터미널·기존 타 세션·앱/DB는 임의 종료하지 않음. 원격 CI는 취소하지 않았으며 계속 실행. 다음 시작: Orca 새 runtime/desktop 상태 확인 → 터미널 실제 표시·Sol6.1 모델/effort 확인 → auth269 setup 완료 경합 수정 워커 → docs 로컬246cc3ff 이후 delta 검토 → CI288 수락 후 frontend 갱신. main f18f2b2b, 홈 로컬21ad5327(독립 ACCEPT/실제21pass), CI288 de913cd8. 전체 종료/React 제거/배포 완료 아님.
+
+- Orca 복구 후 run496803f4d94f에서 visible Sol6.1/high 워커 재개: auth 수정 ctx8ecf949c8a08(무거운 브라우저 단독 소유), frontend 갱신 A ctxa3b86c32d2d6(273/274→279/283,275/277/281), B ctxf15669a41d93(276→282→285→286,284). 모든 이전 파동 워커 종료 확인 뒤 배정. 기존 WIP 유지, 원격 쓰기는 코디네이터만.
+- CI288 de913cd8 독립 ACCEPT와 후보5게이트 SUCCESS 후 main50d95df1a98c2d88d28f09222c2985fbdb585623에 수락. mainf18과 변경 경로 겹침0, 예상/실제 merge tree4cdd0bbe 일치, clean main fast-forward. 이제 대기 frontend PR의 동일 고정 기반 갱신을 진행한다. main 후속 CI/배포 별도. 265/267은 이미 수락되어 갱신 대상에서 완료 처리.

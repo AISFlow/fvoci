@@ -410,3 +410,7 @@ invite_connect high, setup_integrate medium으로 요청했으며 실제 완료 
 CLI connected는 화면 연결을 보장하지 않는다. 2026-09-30 `orca-ide open --json`은
 `desktop_activation_blocked`: persistent terminal provider unavailable로 headless 상태이며 앱 정상 종료/재시작을 안내했다.
 실행 결과를 회수·보존한 뒤 종료하며 활성 검사를 무차별 종료하거나 정상 표시로 주장하지 않는다.
+
+재개 확인 (2026-09-30): 사용자 Orca 재시작 뒤1.4.217 새 runtime73201137-ed1f-4a8a-bcde-302a44c54e4b에서
+desktop available, graph ready, connected 확인. worker-start가 visible terminal, requested/effective gpt-6.1-sol/high,
+input_accepted 및 turn_started observed를 반환했다. 이전 headless/준비 시간 초과와 구분한다. 상세 dispatch와 소유권은 진행 정본에 둔다.
