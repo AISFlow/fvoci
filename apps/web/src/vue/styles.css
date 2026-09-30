@@ -1,8 +1,8 @@
-/* The Vue app's stylesheet: Tailwind and Nuxt UI, scanning only the Vue
-   sources (the React stylesheet, src/styles/app.css, scans the rest). */
+/* App styles: Tailwind and Nuxt UI, scanning Vue sources. */
 @import "tailwindcss" source(none);
 @import "@nuxt/ui";
 @import "../styles/tokens.css";
+@import "../styles/presence.css";
 
 @source "./";
 /* The Vue editor host and node views (@fvoci/editor/vue). */
