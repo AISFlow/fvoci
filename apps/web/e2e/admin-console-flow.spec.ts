@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { authSql, expectVueAuth } from "./auth-link-evidence";
+import { authSql, expectVueAuth, navigateAuthQuery } from "./auth-link-evidence";
 import { createE2eUser, waitForCapturedMail } from "./helpers";
 
 const admin = {
@@ -133,8 +133,13 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(memberPage.getByText("이 약관은")).toBeVisible();
   const submit = memberPage.getByRole("button", { name: "동의하고 계속" });
   await expect(submit).toBeDisabled();
+  // The current query controls the destination even when this page is reused.
+  await navigateAuthQuery(memberPage, "/consent?returnTo=%2Fsettings%2Faccount%3Fconfirmed%3D1%23profile");
   await memberPage.getByRole("checkbox", { name: "동의합니다" }).check();
   await submit.click();
+  await expect(memberPage).toHaveURL(/\/settings\/account\?confirmed=1#profile$/);
+  await expect(memberPage.getByRole("heading", { name: "계정 설정" })).toBeVisible();
+  await memberPage.goto("/");
   await expect(memberPage).toHaveURL(/\/$/);
   await expect(memberPage.getByText("소속 워크스페이스가 없습니다.")).toBeVisible();
   expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(200);

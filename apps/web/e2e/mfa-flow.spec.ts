@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { expectSpentMagic, expectVueAuth } from "./auth-link-evidence";
+import { expectSpentMagic, expectVueAuth, navigateAuthQuery } from "./auth-link-evidence";
 import { logout, waitForCapturedMail } from "./helpers";
 import { currentStep, freshCode, totp } from "./mfa-helpers";
 import { qrModules } from "../src/lib/qr";
@@ -128,8 +128,20 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await expect(page).toHaveURL(/\/magic-link\?token=/);
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
   await expectSpentMagic(page, "/api/v1/auth/magic-link/consume", magicToken!);
-  await submitMfaCode(page, recoveryCodes[0]);
-  await expect(page.getByRole("alert")).toContainText("인증 코드가 맞지 않습니다");
+  // Leaving this token query discards its challenge. A new link is still
+  // consumed explicitly and receives its own MFA challenge.
+  await navigateAuthQuery(page, "/magic-link?token=not-issued");
+  await expect(page.getByRole("heading", { name: "2단계 인증" })).toHaveCount(0);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
+  expect((await page.request.post("/api/v1/auth/magic-link", { data: { email: owner.email } })).status()).toBe(202);
+  const secondMail = await waitForCapturedMail((mail) =>
+    mail.to === owner.email && mail.text.includes("/magic-link?token=") && !mail.text.includes(magicToken!),
+  );
+  const secondToken = secondMail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
+  expect(secondToken).toBeTruthy();
+  await navigateAuthQuery(page, `/magic-link?token=${secondToken}`);
+  await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "2단계 인증" })).toBeVisible();
   expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
   await submitMfaCode(page, recoveryCodes[2]);
   await expect(page).toHaveURL(/\/$/);

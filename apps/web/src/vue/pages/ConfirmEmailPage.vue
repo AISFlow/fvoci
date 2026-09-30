@@ -41,5 +41,5 @@ async function onConfirm(value: string): Promise<void> {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>
   </div>
-  <ConfirmEmailView v-else :token="token" :confirm-email="onConfirm" />
+  <ConfirmEmailView v-else :key="token ?? ''" :token="token" :confirm-email="onConfirm" />
 </template>

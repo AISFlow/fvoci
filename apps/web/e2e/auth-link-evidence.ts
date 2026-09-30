@@ -46,6 +46,11 @@ export async function rejectMagicVariants(
   await page.goto(`${path}?token=${token}`);
   await expectVueAuth(page);
   expect(authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`)).toBe("1");
+  await navigateAuthQuery(page, path);
+  await expect(page.getByRole("alert")).toBeVisible();
+  await navigateAuthQuery(page, `${path}?token=${token}`);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`)).toBe("1");
   const tampered = `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`;
   await navigateAuthQuery(page, `${path}?token=${tampered}`);
   await submit();

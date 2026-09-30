@@ -43,5 +43,5 @@ async function onConfirm(newPassword: string): Promise<void> {
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>
   </div>
-  <ResetPasswordView v-else :token="token" :submit-confirm="onConfirm" />
+  <ResetPasswordView v-else :key="token ?? ''" :token="token" :submit-confirm="onConfirm" />
 </template>

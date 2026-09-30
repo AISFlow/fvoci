@@ -97,7 +97,7 @@ test("the remaining auth pages call the React pages' APIs and do not consume on 
   const consent = source("../../pages/ConsentPage.vue");
   assert.match(consent, /api\.GET\("\/api\/v1\/auth\/consents\/pending"\)/);
   assert.match(consent, /api\.POST\("\/api\/v1\/auth\/consents"/);
-  assert.match(consent, /window\.location\.assign\(returnTo\)/);
+  assert.match(consent, /window\.location\.assign\(returnTo\.value\)/);
   assert.match(consent, /err\.status === 401/);
   assert.doesNotMatch(consent, /from ["']react["']/);
   assert.doesNotMatch(consent, /from ["']@tanstack\/react-query["']/);

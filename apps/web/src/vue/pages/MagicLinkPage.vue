@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery } from "@tanstack/vue-query";
-import { computed, ref, watchEffect } from "vue";
+import { computed, ref, watch, watchEffect } from "vue";
 import { useRoute } from "vue-router";
 import { api, ensureOk } from "@/lib/api";
 import { setupStatusQuery } from "@/lib/queries";
@@ -17,6 +17,7 @@ const token = computed(() => {
   return typeof value === "string" && value.length > 0 ? value : null;
 });
 const mfaToken = ref<string | null>(null);
+watch(token, () => { mfaToken.value = null; });
 const leaving = computed(() => setup.data.value?.needed === true);
 
 watchEffect(() => {
@@ -41,6 +42,8 @@ async function onConsume(value: string): Promise<void> {
       body: { token: value },
     }),
   );
+  // A response for a link we have left must not restore its MFA challenge.
+  if (token.value !== value) return;
   if (result.mfaToken) {
     mfaToken.value = result.mfaToken;
     return;
@@ -61,5 +64,5 @@ async function onConsume(value: string): Promise<void> {
     @back="leaveToLogin"
     @verified="enterApp"
   />
-  <MagicLinkView v-else :token="token" :consume-token="onConsume" />
+  <MagicLinkView v-else :key="token ?? ''" :token="token" :consume-token="onConsume" />
 </template>

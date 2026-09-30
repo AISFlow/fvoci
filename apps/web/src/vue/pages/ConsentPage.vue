@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import { useQuery } from "@tanstack/vue-query";
 import { computed, watchEffect } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import QueryError from "../components/QueryError.vue";
 import QueryLoading from "../components/QueryLoading.vue";
 import ConsentView from "../features/auth/ConsentView.vue";
@@ -11,10 +11,14 @@ import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
 import { safeReturnTo } from "@/lib/consent";
 
 const router = useRouter();
-const returnTo = safeReturnTo(
-  new URLSearchParams(window.location.search).get("returnTo"),
-  window.location.origin,
-);
+const route = useRoute();
+const returnTo = computed(() => {
+  const value = route.query.returnTo;
+  return safeReturnTo(
+    typeof value === "string" ? value : Array.isArray(value) ? value[0] : null,
+    window.location.origin,
+  );
+});
 const pending = useQuery({
   queryKey: ["consents-pending"],
   queryFn: async () => (await ensureOk(await api.GET("/api/v1/auth/consents/pending"))).pending,
@@ -34,14 +38,14 @@ watchEffect(() => {
   }
   // Nothing (left) to accept: continue where the gate interrupted.
   if (pending.data.value !== undefined && pending.data.value.length === 0) {
-    window.location.assign(returnTo);
+    window.location.assign(returnTo.value);
   }
 });
 
 async function onSubmit(items: { kind: string; version: number }[]): Promise<void> {
   await ensureOk(await api.POST("/api/v1/auth/consents", { body: { items } }));
   // A full load drops every query that failed on the gate.
-  window.location.assign(returnTo);
+  window.location.assign(returnTo.value);
 }
 </script>
 
