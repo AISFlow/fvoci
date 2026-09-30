@@ -711,7 +711,7 @@ test("Korean composition with the caret after the marked text leaves no stray ja
   await expect.poll(() => blockTexts(page), { timeout: 5_000 }).toEqual(["첫 문단한글"]);
 });
 
-test("moving between five documents in the app keeps one room socket and every edit", async ({ page }) => {
+test("moving between five documents in the app keeps one room socket and every edit", async ({ page }, testInfo) => {
   await login(page, admin.email, admin.password);
   const csp = watchCspViolations(page);
   const sockets = watchCollabSockets(page);
@@ -740,30 +740,62 @@ test("moving between five documents in the app keeps one room socket and every e
   await expectRoom(docs[0]!);
   // When the last keystroke and the link click reached the page.
   await page.evaluate(() => {
-    const marks = window as unknown as { lastKeyAt: number; lastLinkAt: number };
-    addEventListener("keydown", () => (marks.lastKeyAt = performance.now()), true);
+    const marks = window as unknown as {
+      lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
+      lastLinkTrusted: boolean; lastLinkHref: string;
+    };
+    addEventListener("keydown", (event) => {
+      marks.lastKeyAt = performance.now();
+      marks.lastKeyTrusted = event.isTrusted;
+    }, true);
     addEventListener("click", (event) => {
-      if ((event.target as Element | null)?.closest("a")) marks.lastLinkAt = performance.now();
+      const link = (event.target as Element | null)?.closest("a");
+      if (link) {
+        marks.lastLinkAt = performance.now();
+        marks.lastLinkTrusted = event.isTrusted;
+        marks.lastLinkHref = link.getAttribute("href") ?? "";
+      }
     }, true);
   });
   const gaps: number[] = [];
+  const gestures: unknown[] = [];
   for (let i = 0; i < 4; i += 1) {
     const next = docs[i + 1]!;
-    await editorOf(page).click();
+    const editor = editorOf(page);
+    const link = page.getByRole("navigation", { name: "상위 경로" })
+      .getByRole("link", { name: `이동 ${i + 2}`, exact: true });
+    await editor.click();
+    // Resolve, scroll and check the real link before the rapid gesture. Doing
+    // locator actionability after typing can miss the provider's 200 ms batch.
+    await expect(link).toHaveAttribute("href", next.path);
+    await link.click({ trial: true });
+    const box = await link.boundingBox();
+    expect(box).not.toBeNull();
+    const point = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+    await page.mouse.move(point.x, point.y);
+    await expect(editor).toBeFocused();
     await page.keyboard.type(`떠나기 직전 ${i + 1}`);
     // An in-app move (a router link) inside the editor's 200 ms update batch.
-    await page
-      .getByRole("navigation", { name: "상위 경로" })
-      .getByRole("link", { name: `이동 ${i + 2}`, exact: true })
-      .click();
-    gaps.push(
-      await page.evaluate(() => {
-        const marks = window as unknown as { lastKeyAt: number; lastLinkAt: number };
-        return marks.lastLinkAt - marks.lastKeyAt;
-      }),
-    );
+    // Native browser mouse input at the prepared link, with no intervening
+    // locator resolution, scroll, assertion or DOM-dispatched click.
+    await page.mouse.click(point.x, point.y);
+    const gesture = await page.evaluate(() => {
+      const marks = window as unknown as {
+        lastKeyAt: number; lastLinkAt: number; lastKeyTrusted: boolean;
+        lastLinkTrusted: boolean; lastLinkHref: string;
+      };
+      return { keyAt: marks.lastKeyAt, clickAt: marks.lastLinkAt,
+        gap: marks.lastLinkAt - marks.lastKeyAt, keyTrusted: marks.lastKeyTrusted,
+        clickTrusted: marks.lastLinkTrusted, href: marks.lastLinkHref };
+    });
+    gestures.push({ ...gesture, point });
+    gaps.push(gesture.gap);
+    expect(gesture.keyTrusted).toBe(true);
+    expect(gesture.clickTrusted).toBe(true);
+    expect(gesture.href).toBe(next.path);
     await expectRoom(next);
   }
+  await testInfo.attach("rapid-navigation-input", { body: JSON.stringify(gestures), contentType: "application/json" });
   // The fifth room connected: no socket leaked against the per-session cap.
   expect(sockets.opened()).toBe(5);
   for (const gap of gaps) expect(gap).toBeLessThan(200);
