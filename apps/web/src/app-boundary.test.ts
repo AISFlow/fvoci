@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createMemoryHistory, createRouter } from "vue-router";
-import { isVueAppPath } from "./app-boundary.ts";
+import { isVueAppPath as ownsVuePath, VUE_APP_PATHS } from "./app-boundary.ts";
 import { parseRef } from "./lib/href.ts";
 import { VUE_ROUTE_PATHS } from "./vue/route-paths.ts";
+
+// Feature grammars stay exact; the SPA fallback is owned separately below.
+const matchesFeaturePath = (path: string) => VUE_APP_PATHS.some(pattern => pattern.test(path));
 
 const SAMPLES = [
   "/w/acme/GNT/gantt",
@@ -138,71 +141,71 @@ const SAMPLES = [
   "/w/acme/%47NT", "/w/acme/%47NT-1",
 ];
 
-test("the boot module sends the Gantt path alongside connected project flows, to the Vue app", () => {
-  assert.equal(isVueAppPath("/w/acme/GNT/gantt"), true);
-  assert.equal(isVueAppPath("/w/acme/GNT/gantt/"), true);
+test("the feature grammar matches the Gantt path alongside connected project flows, to the Vue app", () => {
+  assert.equal(matchesFeaturePath("/w/acme/GNT/gantt"), true);
+  assert.equal(matchesFeaturePath("/w/acme/GNT/gantt/"), true);
   // React Router matched the Gantt route in any case; the boundary does too.
-  assert.equal(isVueAppPath("/w/acme/GNT/Gantt"), true);
-  assert.equal(isVueAppPath("/W/acme/GNT/GANTT"), true);
-  assert.equal(isVueAppPath("/w/acme/GNT"), true);
-  assert.equal(isVueAppPath("/w/acme/GNT/gantt/extra"), false);
-  assert.equal(isVueAppPath("/w/acme/GNT/tasks"), true);
-  assert.equal(isVueAppPath("/"), true);
+  assert.equal(matchesFeaturePath("/w/acme/GNT/Gantt"), true);
+  assert.equal(matchesFeaturePath("/W/acme/GNT/GANTT"), true);
+  assert.equal(matchesFeaturePath("/w/acme/GNT"), true);
+  assert.equal(matchesFeaturePath("/w/acme/GNT/gantt/extra"), false);
+  assert.equal(matchesFeaturePath("/w/acme/GNT/tasks"), true);
+  assert.equal(matchesFeaturePath("/"), true);
 });
 
-test("the boot module sends valid wiki and project items, to the Vue app", () => {
-  assert.equal(isVueAppPath("/w/acme/WIKI-1"), true);
-  assert.equal(isVueAppPath("/w/acme/wiki-12/"), true);
-  assert.equal(isVueAppPath("/w/acme/WIKI-123456789"), true);
+test("the feature grammar matches valid wiki and project items, to the Vue app", () => {
+  assert.equal(matchesFeaturePath("/w/acme/WIKI-1"), true);
+  assert.equal(matchesFeaturePath("/w/acme/wiki-12/"), true);
+  assert.equal(matchesFeaturePath("/w/acme/WIKI-123456789"), true);
   // parseRef refuses these; the React app handles them as before.
-  assert.equal(isVueAppPath("/w/acme/WIKI-0"), false);
-  assert.equal(isVueAppPath("/w/acme/WIKI-01"), false);
-  assert.equal(isVueAppPath("/w/acme/WIKI-1234567890"), false);
+  assert.equal(matchesFeaturePath("/w/acme/WIKI-0"), false);
+  assert.equal(matchesFeaturePath("/w/acme/WIKI-01"), false);
+  assert.equal(matchesFeaturePath("/w/acme/WIKI-1234567890"), false);
   // Task and project-document refs now render their Vue replacement.
-  assert.equal(isVueAppPath("/w/acme/PRJ-1"), true);
-  assert.equal(isVueAppPath("/w/acme/GNT-1"), true);
-  assert.equal(isVueAppPath("/w/acme/XWIKI-1"), true);
-  assert.equal(isVueAppPath("/w/acme/wiki"), true);
+  assert.equal(matchesFeaturePath("/w/acme/PRJ-1"), true);
+  assert.equal(matchesFeaturePath("/w/acme/GNT-1"), true);
+  assert.equal(matchesFeaturePath("/w/acme/XWIKI-1"), true);
+  assert.equal(matchesFeaturePath("/w/acme/wiki"), true);
 });
 
-test("the boot module sends /login, and only that path, to the Vue app", () => {
-  assert.equal(isVueAppPath("/login"), true);
-  assert.equal(isVueAppPath("/login/"), true);
-  assert.equal(isVueAppPath("/LOGIN"), true);
-  assert.equal(isVueAppPath("/login/extra"), false);
-  assert.equal(isVueAppPath("/logins"), false);
+test("the feature grammar matches /login, and only that path, to the Vue app", () => {
+  assert.equal(matchesFeaturePath("/login"), true);
+  assert.equal(matchesFeaturePath("/login/"), true);
+  assert.equal(matchesFeaturePath("/LOGIN"), true);
+  assert.equal(matchesFeaturePath("/login/extra"), false);
+  assert.equal(matchesFeaturePath("/logins"), false);
 });
 
-test("the boot module sends exactly single-token invite paths to Vue", () => {
-  assert.equal(isVueAppPath("/invite/tok"), true);
-  assert.equal(isVueAppPath("/invite/tok/"), true);
-  assert.equal(isVueAppPath("/INVITE/tok"), true);
-  assert.equal(isVueAppPath("/invite/a%2Fb"), true);
-  assert.equal(isVueAppPath("/invite"), false);
-  assert.equal(isVueAppPath("/invite/"), false);
-  assert.equal(isVueAppPath("/invite//"), false);
-  assert.equal(isVueAppPath("/invite/tok/extra"), false);
-  assert.equal(isVueAppPath("/invites/tok"), false);
+test("the feature grammar matches exactly single-token invite paths to Vue", () => {
+  assert.equal(matchesFeaturePath("/invite/tok"), true);
+  assert.equal(matchesFeaturePath("/invite/tok/"), true);
+  assert.equal(matchesFeaturePath("/INVITE/tok"), true);
+  assert.equal(matchesFeaturePath("/invite/a%2Fb"), true);
+  assert.equal(matchesFeaturePath("/invite"), false);
+  assert.equal(matchesFeaturePath("/invite/"), false);
+  assert.equal(matchesFeaturePath("/invite//"), false);
+  assert.equal(matchesFeaturePath("/invite/tok/extra"), false);
+  assert.equal(matchesFeaturePath("/invites/tok"), false);
 });
 
-test("the boot module sends /setup, and only that path, to the Vue app", () => {
-  assert.equal(isVueAppPath("/setup"), true);
-  assert.equal(isVueAppPath("/setup/"), true);
-  assert.equal(isVueAppPath("/SETUP"), true);
-  assert.equal(isVueAppPath("/setup/extra"), false);
-  assert.equal(isVueAppPath("/setups"), false);
+test("the feature grammar matches /setup, and only that path, to the Vue app", () => {
+  assert.equal(matchesFeaturePath("/setup"), true);
+  assert.equal(matchesFeaturePath("/setup/"), true);
+  assert.equal(matchesFeaturePath("/SETUP"), true);
+  assert.equal(matchesFeaturePath("/setup/extra"), false);
+  assert.equal(matchesFeaturePath("/setups"), false);
 });
 
-test("wiki list and workspace search boot Vue", () => {
-  assert.equal(isVueAppPath("/w/acme/wiki"), true);
-  assert.equal(isVueAppPath("/w/acme/wiki/"), true);
-  assert.equal(isVueAppPath("/w/acme/WIKI"), true);
-  assert.equal(isVueAppPath("/w/acme/search"), true);
-  assert.equal(isVueAppPath("/w/acme/search/"), true);
-  assert.equal(isVueAppPath("/w/acme/Search"), true);
+test("wiki list and workspace search match Vue feature paths", () => {
+  assert.equal(matchesFeaturePath("/w/acme/wiki"), true);
+  assert.equal(matchesFeaturePath("/w/acme/wiki/"), true);
+  assert.equal(matchesFeaturePath("/w/acme/WIKI"), true);
+  assert.equal(matchesFeaturePath("/w/acme/search"), true);
+  assert.equal(matchesFeaturePath("/w/acme/search/"), true);
+  assert.equal(matchesFeaturePath("/w/acme/Search"), true);
   // Wiki documents stay on the Vue app; the list path must not steal them.
-  assert.equal(isVueAppPath("/w/acme/WIKI-1"), true);
-  assert.equal(isVueAppPath("/w/acme/wiki-12"), true);
+  assert.equal(matchesFeaturePath("/w/acme/WIKI-1"), true);
+  assert.equal(matchesFeaturePath("/w/acme/wiki-12"), true);
 });
 
 test("single-segment resource routes agree with the shared ref grammar", () => {
@@ -219,44 +222,44 @@ test("single-segment resource routes agree with the shared ref grammar", () => {
     const attachment = /^\/w\/[^/]+\/a\/[^/]+\/view\/?$/i.test(path) ||
       /^\/s\/[^/]+\/attachments\/[^/]+\/view\/?$/i.test(path);
     const workspaceSection = /^\/w\/[^/]+(?:\/(?:projects|wiki|search|my-tasks|notifications|trash))?\/?$/i.test(path);
-    if (!/^\/settings\/(account|admin|audit|legal)\/?$/i.test(path) && !/^\/w\/[^/]+\/settings(?:\/(document-tags|templates))?\/?$/i.test(path) && !workspaceSection && !projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(isVueAppPath(path), resource !== null, path);
+    if (!/^\/settings\/(account|admin|audit|legal)\/?$/i.test(path) && !/^\/w\/[^/]+\/settings(?:\/(document-tags|templates))?\/?$/i.test(path) && !workspaceSection && !projectView && !login && !homeOrPublic && !invite && !setup && !auth && !attachment) assert.equal(matchesFeaturePath(path), resource !== null, path);
   }
 });
 
 test("home, public and exact admin pages enter Vue", () => {
   for (const path of ["/", "/legal/terms", "/legal/privacy/", "/LEGAL/unknown", "/service-info", "/SERVICE-INFO/", "/settings/legal", "/settings/admin", "/settings/audit", "/settings/account"]) {
-    assert.equal(isVueAppPath(path), true, path);
+    assert.equal(matchesFeaturePath(path), true, path);
   }
   for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal/extra"]) {
-    assert.equal(isVueAppPath(path), false, path);
+    assert.equal(matchesFeaturePath(path), false, path);
   }
 });
 
 test("workspace navigation owns exact section paths and excludes nested private flows", () => {
   for (const section of ["", "/projects", "/wiki", "/search", "/my-tasks", "/notifications", "/trash"]) {
     const path = `/w/acme${section}`;
-    assert.equal(isVueAppPath(path), true, path);
-    assert.equal(isVueAppPath(`${path}/`.toUpperCase()), true, path);
+    assert.equal(matchesFeaturePath(path), true, path);
+    assert.equal(matchesFeaturePath(`${path}/`.toUpperCase()), true, path);
   }
   for (const path of ["/w", "/w//", "/w/acme/wiki/extra", "/w/acme/search/extra", "/settings/account/extra"]) {
-    assert.equal(isVueAppPath(path), false, path);
+    assert.equal(matchesFeaturePath(path), false, path);
   }
 });
 
-test("attachment viewers and exact public share boot Vue", () => {
+test("attachment viewers and exact public share match Vue feature paths", () => {
   for (const path of ["/w/acme/a/123/view", "/w/acme/a/123/view/", "/W/acme/A/123/VIEW",
     "/s/tok/attachments/123/view", "/s/tok/attachments/123/view/", "/S/tok/attachments/123/View", "/s/tok", "/S/tok/"]) {
-    assert.equal(isVueAppPath(path), true, path);
+    assert.equal(matchesFeaturePath(path), true, path);
   }
   for (const path of ["/s/tok/extra", "/settings/admin/extra", "/settings/audit/extra", "/settings/legal/extra",
     "/w/acme/a/123", "/w/acme/a/123/view/extra", "/s/tok/attachments/123", "/s/tok/attachments/123/view/extra"]) {
-    assert.equal(isVueAppPath(path), false, path);
+    assert.equal(matchesFeaturePath(path), false, path);
   }
 });
 
 test("public policy pages remain Vue after the viewer merge", () => {
   for (const path of ["/legal/privacy", "/LEGAL/terms/"]) {
-    assert.equal(isVueAppPath(path), true, path);
+    assert.equal(matchesFeaturePath(path), true, path);
   }
 });
 
@@ -264,29 +267,34 @@ test("the Vue router matches exactly the paths the boundary sends it", () => {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
-      ...Object.values(VUE_ROUTE_PATHS).map((path) => ({ path, component: {} })),
-      // As in src/vue/router.ts: every other path is the React app's.
-      { path: "/:pathMatch(.*)*", name: "react-app", component: {} },
+      ...Object.values(VUE_ROUTE_PATHS).filter(path => path !== VUE_ROUTE_PATHS.workspaceRef).map((path) => ({ path, component: {} })),
+      // Check the exact feature grammars independently of Vue's fallback.
+      { path: "/:pathMatch(.*)*", name: "feature-fallback", component: {} },
     ],
   });
   for (const path of SAMPLES) {
-    const matched = router.resolve(path).name !== "react-app";
-    assert.equal(matched, isVueAppPath(path), path);
+    const matched = router.resolve(path).name !== "feature-fallback";
+    assert.equal(matched, matchesFeaturePath(path), path);
   }
 });
 
 test("project settings retain exact fields/workflow route ownership", () => {
   for (const section of ["fields", "workflow"]) {
-    assert.equal(isVueAppPath(`/w/acme/GNT/settings/${section}`), true);
-    assert.equal(isVueAppPath(`/W/acme/gnt/SETTINGS/${section.toUpperCase()}/`), true);
-    assert.equal(isVueAppPath(`/w/acme/GNT/settings/${section}/extra`), false);
+    assert.equal(matchesFeaturePath(`/w/acme/GNT/settings/${section}`), true);
+    assert.equal(matchesFeaturePath(`/W/acme/gnt/SETTINGS/${section.toUpperCase()}/`), true);
+    assert.equal(matchesFeaturePath(`/w/acme/GNT/settings/${section}/extra`), false);
   }
 });
 
 test("workspace settings owns only its exact three supported pages", () => {
   for (const part of ["", "/document-tags", "/templates"]) {
-    assert.equal(isVueAppPath(`/w/acme/settings${part}`), true);
-    assert.equal(isVueAppPath(`/W/acme/SETTINGS${part.toUpperCase()}/`), true);
-    assert.equal(isVueAppPath(`/w/acme/settings${part}/extra`), false);
+    assert.equal(matchesFeaturePath(`/w/acme/settings${part}`), true);
+    assert.equal(matchesFeaturePath(`/W/acme/SETTINGS${part.toUpperCase()}/`), true);
+    assert.equal(matchesFeaturePath(`/w/acme/settings${part}/extra`), false);
   }
+});
+
+ test("Vue owns local fallback paths as well as every feature grammar", () => {
+  for (const path of SAMPLES) assert.equal(ownsVuePath(path), true, path);
+  for (const path of ["", "https://example.com/", "//example.com/"]) assert.equal(ownsVuePath(path), false, path);
 });

@@ -4,6 +4,7 @@
 const projectRef = "(?!(?:projects|search|wiki|trash|my-tasks|notifications|settings|a)(?:/|$))(?![^/]*-\\d+(?:/|$))[A-Za-z][A-Za-z0-9-]{1,31}";
 
 const VUE_BASE_ROUTE_PATHS = {
+  workspaceRef: "/w/:slug/:ref",
   projectFields: "/w/:slug/:ref/settings/fields",
   projectWorkflow: "/w/:slug/:ref/settings/workflow",
   projectHome: `/w/:slug/:ref(${projectRef.replaceAll(")", "\\)")})`,

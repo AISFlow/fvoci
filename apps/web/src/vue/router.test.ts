@@ -5,8 +5,8 @@ import { createMemoryHistory } from "vue-router";
 import { createAppRouter, routes } from "./router.ts";
 import { VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS } from "./route-paths.ts";
 
-// A navigation to a React page leaves the Vue app with a full load; one that
-// failed or was superseded never happened and loads nothing.
+// Unknown paths follow Vue redirects; failed or superseded navigation never loads a document.
+const routerName = (path: string) => createAppRouter(createMemoryHistory()).resolve(path).name;
 
 function withLocation(run: (loads: string[]) => Promise<void>): () => Promise<void> {
   return async () => {
@@ -22,11 +22,13 @@ function withLocation(run: (loads: string[]) => Promise<void>): () => Promise<vo
 }
 
 test(
-  "a completed navigation to a React page is a full page load",
+  "unknown nested paths replace with home without a full load",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
+    router.getRoutes().find(record => record.name === "home")!.components = { default: { render: () => null } };
     await router.push("/settings/account/extra");
-    assert.deepEqual(loads, ["/settings/account/extra"]);
+    assert.equal(router.currentRoute.value.path, "/");
+    assert.deepEqual(loads, []);
   }),
 );
 
@@ -94,7 +96,7 @@ test("the setup route is declared and the boundary sends /setup to Vue", () => {
   assert.equal(isVueAppPath("/setup"), true);
   assert.equal(isVueAppPath("/setup/"), true);
   assert.equal(isVueAppPath("/SETUP"), true);
-  assert.equal(isVueAppPath("/setups"), false);
+  assert.equal(routerName("/setups"), "unknown-path");
 });
 
 test(
@@ -117,25 +119,28 @@ test(
 );
 
 test(
-  "a failed or superseded navigation to a React page loads nothing",
+  "fallback navigation still honors aborted and superseded page guards",
   withLocation(async (loads) => {
     const router = createAppRouter(createMemoryHistory());
-    let release: () => void = () => undefined;
-    router.beforeEach((to) => {
-      if (to.path === "/blocked") return false;
-      if (to.path === "/slow") return new Promise<void>((resolve) => (release = resolve));
+    for (const record of router.getRoutes()) if (record.components) record.components = { default: { render: () => null } };
+    await router.push("/w/acme/projects");
+    let release = () => {};
+    let entered = () => {};
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    router.beforeEach(to => {
+      if (to.path === "/") return false;
+      if (to.path === "/w/acme/slow!") { entered(); return new Promise<void>(resolve => { release = resolve; }); }
       return true;
     });
-
-    const blocked = await router.push("/blocked");
-    assert.ok(blocked, "the guard aborted the navigation");
-    assert.deepEqual(loads, []);
-
-    const slow = router.push("/slow");
-    await router.push("/settings/account/extra");
+    assert.ok(await router.push("/unknown/nested"));
+    assert.equal(router.currentRoute.value.path, "/w/acme/projects");
+    const slow = router.push("/w/acme/slow!");
+    await waiting;
+    await router.push("/w/acme/wiki");
     release();
-    assert.ok(await slow, "the later navigation superseded it");
-    assert.deepEqual(loads, ["/settings/account/extra"]);
+    assert.ok(await slow);
+    assert.equal(router.currentRoute.value.path, "/w/acme/wiki");
+    assert.deepEqual(loads, []);
   }),
 );
 
@@ -310,4 +315,11 @@ test("project fields and workflow settings resolve to their own lazy pages", () 
   const router = createAppRouter(createMemoryHistory());
   assert.equal(router.resolve("/w/acme/GNT/settings/fields").name, "project-fields");
   assert.equal(router.resolve("/w/acme/GNT/settings/workflow").name, "project-workflow");
+});
+
+test("decoded and invalid single-segment refs reach the guarded fallback, exact sections retain precedence", () => {
+  const router = createAppRouter(createMemoryHistory());
+  for (const path of ["/w/acme/%47NT", "/w/acme/%20GNT%20", "/w/acme/%EF%BC%A7%EF%BC%AE%EF%BC%B4", "/w/acme/WIKI-01", "/w/acme/a", "/w/acme/bad!"]) assert.equal(router.resolve(path).name, "workspace-ref", path);
+  assert.equal(router.resolve("/w/acme/%47NT").params.ref, "GNT");
+  for (const path of ["/w/acme/wiki/extra", "/settings/account/extra"]) assert.equal(router.resolve(path).name, "unknown-path", path);
 });
