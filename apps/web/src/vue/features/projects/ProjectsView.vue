@@ -93,7 +93,10 @@ function onCloneClick(project: ProjectListItem, event: Event): void {
               t("project.visibility.private")
             }}</span>
           </span>
-          <span class="project-list__count">{{ t("entrance.openTaskCount", { count: project.openTaskCount }) }}</span>
+          <span class="project-list__counts">
+            <span class="project-list__count">{{ t("entrance.documentCount", { count: project.documentCount ?? "—" }) }}</span>
+            <span class="project-list__count">{{ t("entrance.openTaskCount", { count: project.openTaskCount }) }}</span>
+          </span>
           <UButton
             type="button"
             variant="outline"
@@ -117,7 +120,10 @@ function onCloneClick(project: ProjectListItem, event: Event): void {
               t("project.visibility.private")
             }}</span>
           </span>
-          <span class="project-list__count">{{ t("entrance.openTaskCount", { count: project.openTaskCount }) }}</span>
+          <span class="project-list__counts">
+            <span class="project-list__count">{{ t("entrance.documentCount", { count: project.documentCount ?? "—" }) }}</span>
+            <span class="project-list__count">{{ t("entrance.openTaskCount", { count: project.openTaskCount }) }}</span>
+          </span>
           <UButton
             type="button"
             variant="outline"

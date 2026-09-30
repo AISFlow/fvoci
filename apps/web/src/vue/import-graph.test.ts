@@ -117,6 +117,7 @@ test("the Vue entry's static graph leaves the wiki editor to the wiki page's chu
     "TrashPage.vue",
     "ProjectHomePage.vue",
     "WorkspaceItemPage.vue",
+    "WorkspaceRefPage.vue",
     "AttachmentViewPage.vue",
     "ShareAttachmentViewPage.vue",
     "AccountSettingsPage.vue",

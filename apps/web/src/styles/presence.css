@@ -1,0 +1,33 @@
+/* Presence ink matches packages/ui/presence.ts / apps/web/src/lib/presence.ts. */
+.afn-label-red {
+  --afn-label-ink: #b91c1c;
+  color: var(--afn-label-ink);
+}
+.afn-label-orange {
+  --afn-label-ink: #c2410c;
+  color: var(--afn-label-ink);
+}
+.afn-label-amber {
+  --afn-label-ink: #b45309;
+  color: var(--afn-label-ink);
+}
+.afn-label-green {
+  --afn-label-ink: #15803d;
+  color: var(--afn-label-ink);
+}
+.afn-label-teal {
+  --afn-label-ink: #0f766e;
+  color: var(--afn-label-ink);
+}
+.afn-label-blue {
+  --afn-label-ink: #1d4ed8;
+  color: var(--afn-label-ink);
+}
+.afn-label-violet {
+  --afn-label-ink: #6d28d9;
+  color: var(--afn-label-ink);
+}
+.afn-label-pink {
+  --afn-label-ink: #be185d;
+  color: var(--afn-label-ink);
+}

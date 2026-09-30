@@ -14,7 +14,7 @@ test("project and task URLs mount Vue across direct loads, links, reload and enc
   await expect(page).toHaveURL(/\/$/);
 
   await page.goto("/w/routes/projects");
-  await expect(page.locator("#root[data-v-app]")).toHaveCount(0);
+  await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   await page.getByRole("button", { name: "새 프로젝트" }).click();
   await page.getByLabel("키").fill("OPS-DEV");
   await page.getByLabel("이름", { exact: true }).fill("Route project");
@@ -40,7 +40,7 @@ test("project and task URLs mount Vue across direct loads, links, reload and enc
   await expect(page.getByRole("heading", { name: "Route task" })).toBeVisible();
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
 
-  // Raw encoded resources start in React, then canonicalize to Vue once,
+  // Raw encoded resources canonicalize once in Vue,
   // retaining query and fragment; mixed case and trailing slash load directly.
   await page.goto("/w/routes/%4FPS-DEV-2?from=encoded#task-comments");
   await expect(page).toHaveURL(/\/OPS-DEV-2\?from=encoded#task-comments$/);
@@ -70,5 +70,5 @@ test("project and task URLs mount Vue across direct loads, links, reload and enc
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   await page.goto("/w/routes/projects");
   await expect(page.getByRole("heading", { name: "프로젝트", exact: true })).toBeVisible();
-  await expect(page.locator("#root[data-v-app]")).toHaveCount(0);
+  await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
 });

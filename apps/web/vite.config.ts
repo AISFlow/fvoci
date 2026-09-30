@@ -2,7 +2,6 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import ui from "@nuxt/ui/vite";
-import react from "@vitejs/plugin-react";
 import vue from "@vitejs/plugin-vue";
 import { defineConfig, type Plugin } from "vite";
 import { nuxtUiAppConfig, nuxtUiColorsCss } from "./src/build/nuxt-ui-colors.ts";
@@ -180,12 +179,11 @@ const apiProxyTarget =
   process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
 
 // Nuxt UI's plugin set registers @tailwindcss/vite itself; it is the only
-// Tailwind registration and also compiles the React app's stylesheet.
+// Tailwind registration for the Vue app's stylesheets.
 const uiPlugins = ui(nuxtUiUserOptions).flat() as Plugin[];
 
 export default defineConfig({
   plugins: [
-    react(),
     vue(),
     ...uiPlugins,
     nuxtUiColorsStyle(uiPlugins),
@@ -203,15 +201,12 @@ export default defineConfig({
       "@": path.resolve(import.meta.dirname, "./src"),
     },
     dedupe: [
-      "react",
-      "react-dom",
       "vue",
       "yjs",
       "y-protocols",
       "@tiptap/core",
       "@tiptap/pm",
       "@hocuspocus/provider",
-      "@hocuspocus/provider-react",
     ],
   },
   server: {

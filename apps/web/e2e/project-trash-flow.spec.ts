@@ -130,6 +130,7 @@ test("project document: edit, trash, restore; project delete and admin restore",
   const deleted = page.getByTestId("deleted-projects");
   await expect(deleted).toContainText("TRSH");
   await deleted.getByRole("button", { name: "복원 휴지통 프로젝트" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "복원", exact: true }).click();
   await expect(page.getByText("삭제된 프로젝트가 없습니다")).toBeVisible();
 
   await page.goto(`/w/${admin.workspaceSlug}/TRSH`);

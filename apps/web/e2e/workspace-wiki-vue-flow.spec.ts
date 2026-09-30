@@ -210,12 +210,12 @@ test("direct URL and refresh serve the Vue page with the saved body", async ({ p
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   await expectBlocks(page, ["새로 고쳐도 남는 본문"]);
 
-  // The accepted Vue wiki list stays in the same app.
+  // The wiki list stays inside the Vue app.
   await page.getByRole("navigation", { name: "상위 경로" }).getByRole("link", { name: "위키", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/wiki$`));
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
-  // Its real document link returns to the Vue editor.
+  // ...and the wiki list's link comes back to the Vue page.
   await page.getByRole("link", { name: "Vue 직접 주소" }).click();
   await expect(page).toHaveURL(new RegExp(`${doc.path}$`));
   await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });

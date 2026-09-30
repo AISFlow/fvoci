@@ -4,11 +4,11 @@ import path from "node:path";
 import test from "node:test";
 import { QueryClient, useQuery, VueQueryPlugin } from "@tanstack/vue-query";
 import { createApp, effectScope } from "vue";
-import { isVueAppPath } from "@/app-boundary";
+import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
 import { lookupQuery, resolveLookupTarget, type LookupItem } from "@/features/tasks/lookup";
 import { projectLabelsQuery, projectMilestonesQuery, taskQuery } from "@/features/tasks/queries";
 import { workflowQuery } from "@/features/projects/queries";
-import { WORKSPACE_ITEM_PATH } from "@/app-boundary";
+import { WORKSPACE_ITEM_PATH } from "@/vue/route-paths";
 import { VUE_ROUTE_PATHS } from "../../route-paths.ts";
 import { leaveTo } from "../../session/navigation.ts";
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { execFileSync } from "node:child_process";
 import ts from "typescript";
 import { QueryClient } from "@tanstack/vue-query";
 import { computed, effectScope, onScopeDispose, reactive, shallowRef, watch } from "vue";
@@ -27,10 +28,10 @@ function assertCapturedKeys(name: string, keys: unknown[][]) {
     : [["tree", "old-workspace"], ["document", "old-workspace", "old-document"], ["ancestors", "old-workspace", "old-document"]];
   assert.deepEqual(keys.map((key) => JSON.stringify(key)).sort(), [...counts, ...counts, ...documentKeys].map((key) => JSON.stringify(key)).sort());
 }
-function harness(name: string) {
-  const source = readFileSync(new URL(`./${name}.vue`, import.meta.url), "utf8");
+function harness(name: string, includePatch = false) {
+  const source = componentSource(`documents/${name}.vue`);
   const from = source.indexOf("type DocumentOperation =");
-  const to = source.indexOf("const patchMeta =", from);
+  const to = source.indexOf(includePatch ? "const notFound =" : "const patchMeta =", from);
   assert.ok(from > 0 && to > from);
   const script = ts.transpile(source.slice(from, to), { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
   const props = reactive({ workspaceId: "old-workspace", documentId: "old-document", slug: "old" });
@@ -46,6 +47,7 @@ function harness(name: string) {
   }
   const active = shallowRef<{ session: ReturnType<typeof createSession> } | null>({ session: createSession() });
   const session = computed(() => active.value?.session.value ?? null);
+  const saveError = shallowRef<string | null>("previous save error");
   const lifecycleError = shallowRef<string | null>("previous error"); const moveParentId = shallowRef("parent");
   const invalidated: unknown[][] = []; const navigation: string[] = []; const requests: unknown[] = []; const mutations: Mutation[] = [];
   let complete!: () => void;
@@ -55,14 +57,14 @@ function harness(name: string) {
   for (const workspaceId of ["old-workspace", "new-workspace"]) {
     for (const tag of ["", "tag"]) queryClient.setQueryData(["wiki-discovery", workspaceId, tag], { totalCount: 2 });
   }
-  const setup = new Function("props", "scope", "session", "collabUser", "watch", "onScopeDispose", "lifecycleError", "moveParentId", "useMutation", "trashDocument", "moveDocument", "queryClient", "window", "trashPath", "loadErrorMessage", `${script}\nreturn {captureOperation, currentOperation};`);
+  const setup = new Function("props", "scope", "session", "collabUser", "watch", "onScopeDispose", "lifecycleError", "moveParentId", "useMutation", "trashDocument", "moveDocument", "queryClient", "window", "trashPath", "loadErrorMessage", "patchDocument", "saveError", "metaKey", "treeKey", `${script}\nreturn {captureOperation, currentOperation};`);
   const lifetime = effectScope();
   const operations = lifetime.run(() => setup(props, scope, session, collabUser, watch, onScopeDispose, lifecycleError, moveParentId,
     (options: Mutation) => { mutations.push(options); return { mutate: () => undefined }; }, load, load,
     { invalidateQueries: async ({ queryKey }: { queryKey: unknown[] }) => { invalidated.push(queryKey); await queryClient.invalidateQueries({ queryKey }); } },
-    { location: { assign: (path: string) => navigation.push(path) } }, (slug: string) => `/w/${slug}/trash`, () => "failed",
+    { location: { assign: (path: string) => navigation.push(path) } }, (slug: string) => `/w/${slug}/trash`, () => "failed", load, saveError, computed(() => ["document", props.workspaceId, props.documentId]), computed(() => ["tree", props.workspaceId]),
   )) as { captureOperation: () => Operation; currentOperation: (op: Operation) => boolean };
-  return { source, props, projectId, collabUser, queryClient, scope, peers, unsent, bind, active, session, createSession, lifecycleError, moveParentId, invalidated, navigation, requests, mutations, complete, lifetime, ...operations };
+  return { saveError, source, props, projectId, collabUser, queryClient, scope, peers, unsent, bind, active, session, createSession, lifecycleError, moveParentId, invalidated, navigation, requests, mutations, complete, lifetime, ...operations };
 }
 
 for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
@@ -136,8 +138,131 @@ for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
           assert.deepEqual(h.navigation, [`/w/${h.props.slug}/trash`]);
         }
         const meta = h.source.slice(h.source.indexOf("const patchMeta ="), h.source.indexOf("const notFound ="));
-        assert.equal(meta.includes('["projects"'), false); assert.equal(meta.includes('["me", "workspaces"]'), false); assert.equal(meta.includes('["wiki-discovery"'), false);
+        assert.equal(meta.includes('["projects"'), false); assert.equal(meta.includes('["me", "workspaces"]'), false); assert.equal(meta.includes('["wiki-discovery"'), true);
       } finally { h.lifetime.stop(); h.queryClient.clear(); }
+    });
+  }
+}
+
+function componentSource(path: string): string {
+  if (process.env.FVOCI_CACHE_BASELINE) return execFileSync("git", ["show", `${process.env.FVOCI_CACHE_BASELINE}:apps/web/src/vue/features/${path}`], { encoding: "utf8" });
+  return readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+}
+for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
+  for (const retired of [false, true]) test(`${name}: metadata refreshes fresh discovery without counts (retired=${retired})`, async () => {
+    const h = harness(name, true);
+    try {
+      const op = { ...h.captureOperation(), body: { title: "renamed" } };
+      const callback = h.mutations[2]!;
+      const request = callback.mutationFn(op);
+      if (retired) { h.props.workspaceId = "new-workspace"; h.collabUser.value = { id: "other" }; }
+      h.complete(); await request;
+      assert.deepEqual(h.requests[0], op.scope);
+      await callback.onSuccess({}, op);
+      for (const tag of ["", "tag"]) {
+        let requests = 0;
+        const result = await h.queryClient.fetchQuery({ queryKey: ["wiki-discovery", "old-workspace", tag], staleTime: 30_000,
+          queryFn: async () => { requests++; return { title: "renamed", totalCount: 2 }; } });
+        assert.equal(requests, 1, "successful mutation must retire the still-fresh discovery cache");
+        assert.equal(result.title, "renamed");
+        assert.equal(h.queryClient.getQueryState(["wiki-discovery", "new-workspace", tag])?.isInvalidated, false);
+      }
+      assert.equal(h.invalidated.some(key => key[0] === "projects" || key[0] === "me"), false);
+      assert.ok(h.invalidated.every(key => key[1] === "old-workspace"));
+      assert.equal(h.saveError.value, retired ? "previous save error" : null);
+      callback.onError(new Error("late"), op);
+      assert.equal(h.saveError.value, retired ? "previous save error" : "failed");
+    } finally { h.lifetime.stop(); h.queryClient.clear(); }
+  });
+}
+
+type LocalOperation = { workspaceId: string; documentId?: string; projectId: string | null; tagId?: string; name?: string; lifecycle?: number };
+type LocalMutation = { mutationFn: (op: LocalOperation) => Promise<unknown>; onSuccess: (data: any, op: LocalOperation) => Promise<void>; onError: (err: unknown, op: LocalOperation) => void };
+function localHarness(kind: "tags" | "restore") {
+  const source = componentSource(kind === "tags" ? "documents/DocumentTagsBar.vue" : "settings/DeletedProjectsSection.vue");
+  const start = source.indexOf(kind === "tags" ? "type TagOperation" : "type RestoreOperation");
+  // Baseline uses live props; execute its real callback for the negative cache proof.
+  const baselineStart = source.indexOf(kind === "tags" ? "async function invalidate()" : "const restore =");
+  const end = source.indexOf(kind === "tags" ? "const pending =" : "const items =");
+  const script = ts.transpile(source.slice(start >= 0 ? start : baselineStart, end), { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
+  const props = reactive({ workspaceId: "old-workspace", documentId: "old-document", projectId: null as string | null, readOnly: false });
+  const me = { data: shallowRef({ userId: "actor", sessionId: "session" }) };
+  const error = shallowRef<string | null>("previous error"); const restoreTarget = shallowRef("project");
+  const open = shallowRef(true); const filter = shallowRef("tag"); const mutations: LocalMutation[] = []; const requests: unknown[] = [];
+  const client = new QueryClient();
+  for (const ws of ["old-workspace", "new-workspace"]) {
+    for (const tag of ["", "tag"]) client.setQueryData(["wiki-discovery", ws, tag], { items: [] });
+    for (const prefix of ["projects", "trash", "document-tags"]) client.setQueryData([prefix, ws], {});
+    client.setQueryData(["document-tags", ws, "assigned", `${ws === "old-workspace" ? "old" : "new"}-document`], []);
+  }
+  client.setQueryData(["me", "workspaces"], { items: [] });
+  const assignedQuery = (ws: string, doc: string) => ({ queryKey: ["document-tags", ws, "assigned", doc] });
+  const load = async (...args: unknown[]) => { requests.push(args); return {}; };
+  const life = effectScope();
+  const setup = new Function("props", "me", "watch", "onScopeDispose", "queryClient", "client", "error", "mutationError", "restoreTarget", "open", "filter", "trigger", "HTMLElement", "useMutation", "documentAssignedTagsQuery", "assignedOptions", "assignDocumentTag", "createDocumentTag", "removeDocumentTag", "api", "ensureOk", "loadErrorMessage", "problemMessage",
+    `${script}\nreturn typeof captureOperation === 'function' ? captureOperation : (projectId) => ({workspaceId: props.workspaceId, documentId: props.documentId, projectId});`);
+  const capture = life.run(() => setup(props, me, watch, onScopeDispose, client, client, error, error, restoreTarget, open, filter, shallowRef(null), class {},
+    (options: LocalMutation) => { mutations.push(options); return { mutate: () => {}, mutateAsync: async (op: LocalOperation) => { const result = await options.mutationFn(op); await options.onSuccess({ id: "tag", name: "tag" }, op); return result; } }; },
+    assignedQuery, computed(() => assignedQuery(props.workspaceId, props.documentId)), load, load, load, { POST: load }, (value: unknown) => value, () => "failed", () => "failed")) as (projectId?: string) => LocalOperation;
+  return { client, props, me, error, restoreTarget, open, filter, mutations, requests, life, capture };
+}
+for (const kind of ["tags", "restore"] as const) {
+  for (const retired of [false, true]) test(`${kind}: captured success refreshes fresh discovery and suppresses retired UI (${retired})`, async () => {
+    const h = localHarness(kind);
+    try {
+      const op = { ...h.capture("project"), tagId: "tag", name: "new tag" };
+      if (retired) { h.props.workspaceId = "new-workspace"; h.props.documentId = "new-document"; h.me.data.value = { userId: "other", sessionId: "new" }; }
+      await h.mutations[0]!.onSuccess({ id: "tag", name: "tag" }, op);
+      for (const tag of ["", "tag"]) {
+        let requests = 0;
+        await h.client.fetchQuery({ queryKey: ["wiki-discovery", "old-workspace", tag], staleTime: 30_000, queryFn: async () => { requests++; return { items: ["updated"] }; } });
+        assert.equal(requests, 1, "mutation must refresh the cached original list before 30s");
+        assert.equal(h.client.getQueryState(["wiki-discovery", "new-workspace", tag])?.isInvalidated, false);
+      }
+      assert.equal(h.client.getQueryState(["projects", "old-workspace"])?.isInvalidated, kind === "restore");
+      assert.equal(h.client.getQueryState(["me", "workspaces"])?.isInvalidated, kind === "restore");
+      assert.equal(h.client.getQueryState(["projects", "new-workspace"])?.isInvalidated, false);
+      if (kind === "tags") {
+        assert.deepEqual(h.client.getQueryData(["document-tags", "old-workspace", "assigned", "old-document"]), [{ id: "tag", name: "tag" }]);
+        assert.deepEqual(h.client.getQueryData(["document-tags", "new-workspace", "assigned", "new-document"]), []);
+        assert.equal(h.open.value, retired);
+        await h.mutations[1]!.onSuccess({ id: "tag" }, op);
+        assert.deepEqual(h.requests[0], ["old-workspace", "old-document", null, "tag"], "create-to-assign retains the captured document");
+        await h.mutations[2]!.onSuccess({}, op);
+        assert.deepEqual(h.client.getQueryData(["document-tags", "old-workspace", "assigned", "old-document"]), []);
+        assert.equal(h.client.getQueryState(["wiki-discovery", "old-workspace", "tag"])?.isInvalidated, true);
+      } else {
+        assert.equal(h.client.getQueryState(["trash", "old-workspace"])?.isInvalidated, true);
+        assert.equal(h.restoreTarget.value, retired ? "project" : null);
+      }
+      h.mutations[0]!.onError(new Error("late"), op);
+      assert.equal(h.error.value, retired ? "previous error" : "failed");
+    } finally { h.life.stop(); h.client.clear(); }
+  });
+}
+
+for (const kind of ["tags", "restore"] as const) {
+  for (const change of ["document", "project", "actor roundtrip", "session", "readonly", "disposal"] as const) {
+    if (kind === "restore" && ["document", "project", "readonly"].includes(change)) continue;
+    test(`${kind}: retired ${change} retains original cache target and UI`, async () => {
+      const h = localHarness(kind);
+      try {
+        const op = { ...h.capture("project"), tagId: "tag" };
+        if (change === "document") h.props.documentId = "new-document";
+        if (change === "project") h.props.projectId = "new-project";
+        if (change === "actor roundtrip") { h.me.data.value = { userId: "other", sessionId: "session" }; h.me.data.value = { userId: "actor", sessionId: "session" }; }
+        if (change === "session") h.me.data.value = { userId: "actor", sessionId: "new-session" };
+        if (change === "readonly") h.props.readOnly = true;
+        if (change === "disposal") h.life.stop();
+        await h.mutations[0]!.mutationFn(op);
+        await h.mutations[0]!.onSuccess({ id: "tag" }, op);
+        h.mutations[0]!.onError(new Error("late"), op);
+        assert.equal(h.error.value, "previous error");
+        assert.equal(h.client.getQueryState(["wiki-discovery", "old-workspace", "tag"])?.isInvalidated, true);
+        assert.equal(h.open.value, true); assert.equal(h.restoreTarget.value, "project");
+        if (kind === "tags") assert.deepEqual(h.requests[0], ["old-workspace", "old-document", null, "tag"]);
+        else assert.deepEqual(h.requests[0], ["/api/v1/workspaces/{workspace_id}/projects/{project_id}/restore", { params: { path: { workspace_id: "old-workspace", project_id: "project" } } }]);
+      } finally { h.life.stop(); h.client.clear(); }
     });
   }
 }

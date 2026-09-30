@@ -1,11 +1,8 @@
-import { createRouter, createWebHistory, type RouteRecordRaw, type RouterHistory } from "vue-router";
-import { isVueAppPath } from "@/app-boundary";
+import { createRouter, createWebHistory, stringifyQuery, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { VUE_SETTINGS_ROUTE_PATHS, VUE_ACCOUNT_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
 
-/** The Vue app's pages; src/app-boundary.ts sends exactly the live paths
- * (VUE_ROUTE_PATHS) here. Each page is its own chunk, so the Gantt page does not load the wiki
- * editor (Tiptap, Yjs, the collab provider) or its stylesheets
- * (import-graph.test.ts and e2e/project-gantt-flow.spec.ts check this). */
+/** Each page is a lazy chunk, so Gantt and the app entry do not load the
+ * document editor or its styles (import-graph and browser groups verify it). */
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectFields, name: "project-fields", component: () => import("./features/projects/settings/ProjectFieldsPage.vue") },
   { path: VUE_ROUTE_PATHS.projectWorkflow, name: "project-workflow", component: () => import("./features/projects/settings/ProjectWorkflowPage.vue") },
@@ -76,30 +73,29 @@ export const routes: RouteRecordRaw[] = [
     name: "workspace-settings",
     component: () => import("./pages/WorkspaceSettingsPage.vue"),
   },
-  // Public share reader. apps/web/src/app-boundary.ts is owned elsewhere;
-  // boot still needs `/^\/s\/[^/]+\/?$/i` and must NOT match
-  // `/s/:token/attachments/...` (that stays a different route).
+  // Public share is an anonymous reader with its own session-free gate.
   { path: VUE_ROUTE_PATHS.publicShare, name: "public-share", component: () => import("./pages/PublicSharePage.vue") },
+  // Decoded refs outside the raw route grammar canonicalize after the same
+  // workspace/session gates as resource pages. Invalid refs keep the shell.
+  { path: VUE_ROUTE_PATHS.workspaceRef, name: "workspace-ref", component: () => import("./pages/WorkspaceRefPage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {
   const router = createRouter({
     history,
+    // Reusing the current query during a canonical ref replacement preserves
+    // its original spelling (including repeated keys and encoded spaces).
+    // New query objects use Vue Router's standard serialization.
+    stringifyQuery: (query) => {
+      const current = router.currentRoute.value;
+      if (query !== current.query) return stringifyQuery(query);
+      const suffix = current.fullPath.slice(current.path.length);
+      return suffix.startsWith("?") ? suffix.slice(1).split("#", 1)[0]! : "";
+    },
     routes: [
       ...routes,
-      // Never rendered: a path outside the Vue app is left by a full load.
-      { path: "/:pathMatch(.*)*", name: "react-app", component: { render: () => null } },
+      { path: "/:pathMatch(.*)*", name: "unknown-path", redirect: "/" },
     ],
-  });
-  // Any in-app navigation to a React page becomes a full page load, so the
-  // boot module loads the React app for it. The navigation completes first
-  // (the Vue page unmounts, its collab room flushes and closes) and the load
-  // replaces the entry it made. A guard that cancelled it instead would make
-  // vue-router undo a history pop with go(-1), which races the load. A
-  // navigation that failed or was superseded by another one did not happen:
-  // afterEach sees those too, and they load nothing.
-  router.afterEach((to, _from, failure) => {
-    if (!failure && !isVueAppPath(to.path)) window.location.replace(to.fullPath);
   });
   return router;
 }
