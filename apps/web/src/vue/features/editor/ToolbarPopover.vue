@@ -62,6 +62,13 @@ const options = computed(() =>
     onEscapeKeyDown: () => {
       escaped = true;
     },
+    onFocusOutside: (event) => {
+      // Checkbox/radio commands focus the editor to restore its selection.
+      // Keep their menu open; a pointer outside still dismisses it normally.
+      if (props.kind === "menu" && event.target instanceof Node && props.editor.view.dom.contains(event.target)) {
+        event.preventDefault();
+      }
+    },
     onCloseAutoFocus: (event) => {
       event.preventDefault();
       if (tabbed) {
