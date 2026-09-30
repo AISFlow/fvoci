@@ -11,25 +11,37 @@ test.describe.configure({ mode: "serial" });
 test.beforeAll(async ({ browser, baseURL }) => { await setupInstance(browser, baseURL); });
 
 test("non-editor Vue screens do not load the editor host or its collaboration plugins", async ({ page }) => {
-  const scripts = new Set<string>();
-  page.on("request", (request) => {
-    if (request.resourceType() === "script") scripts.add(request.url());
-  });
+  const assets = new Set<string>();
+  const captureAssets = async () => {
+    const paths = await page.evaluate(() => performance.getEntriesByType("resource")
+      .map((entry) => new URL(entry.name).pathname)
+      .filter((path) => /^\/assets\/[^/]+\.(js|css)$/.test(path)));
+    expect(paths.some((path) => path.endsWith(".js"))).toBe(true);
+    for (const path of paths) assets.add(path);
+  };
   await login(page, admin.email, admin.password);
+  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+  await captureAssets();
   await page.goto(`/w/${admin.workspaceSlug}`);
   await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
-  const loaded = await Promise.all([...scripts].map(async (url) => {
-    // The isolated server serves an immutable copied production build for
-    // this group. Read the exact requested assets after navigation so CDP
-    // cannot invalidate the previous document's response-body identifiers.
-    const response = await page.request.get(url);
+  await captureAssets();
+  const wsId = await workspaceId(page.request);
+  const project = await page.request.post(`/api/v1/workspaces/${wsId}/projects`, {
+    data: { key: "TCL", name: "Editor lazy boundary", visibility: "workspace" },
+  });
+  expect(project.status()).toBe(201);
+  await page.goto(`/w/${admin.workspaceSlug}/TCL/gantt`);
+  await expect(page.locator('[data-slot="gantt"]')).toBeVisible();
+  await captureAssets();
+  // The group serves an immutable copied build. Read the actual requested
+  // assets after navigation, as the existing Gantt boundary regression does.
+  const loaded = await Promise.all([...assets].map(async (path) => {
+    const response = await page.request.get(path);
     expect(response.ok()).toBe(true);
-    return { url, text: await response.text() };
+    return { path, text: await response.text() };
   }));
-  // These runtime plugin keys survive minification. Checking actual response
-  // contents covers a shared chunk whose filename no longer says "editor".
-  const editorScripts = loaded.filter(({ text }) => text.includes("fvociSlash") || text.includes("fvociMention"));
-  expect(editorScripts.map(({ url }) => new URL(url).pathname)).toEqual([]);
+  const editorAssets = loaded.filter(({ text }) => /ProseMirror|fvoci-editor|fvociSlash|fvociMention/.test(text));
+  expect(editorAssets.map(({ path }) => path)).toEqual([]);
   await expect(editorOf(page)).toHaveCount(0);
 });
 
