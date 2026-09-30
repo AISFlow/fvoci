@@ -62,24 +62,21 @@ function onSwitch(event: Event): void {
         <AppLink to="/" class="underline underline-offset-2">{{ t("nav.backHome") }}</AppLink>
         <nav class="flex flex-wrap items-center gap-3" :aria-label="t('nav.workspace')">
           <AppLink :to="workspaceHomePath(slug)" :aria-current="active === 'home' ? 'page' : undefined">{{ t("nav.home") }}</AppLink>
-          <a
+          <AppLink
             :to="wikiPath(slug)"
             :class="active === 'wiki' ? 'font-medium text-highlighted' : undefined"
             :aria-current="active === 'wiki' ? 'page' : undefined"
-            >{{ t("nav.wiki") }}</a
-          >
-          <a
+            >{{ t("nav.wiki") }}</AppLink>
+          <AppLink
             :to="projectsPath(slug)"
             :class="active === 'projects' ? 'font-medium text-highlighted' : undefined"
             :aria-current="active === 'projects' ? 'page' : undefined"
-            >{{ t("nav.projects") }}</a
-          >
-          <a
+            >{{ t("nav.projects") }}</AppLink>
+          <AppLink
             :to="myTasksPath(slug)"
             :class="active === 'myTasks' ? 'font-medium text-highlighted' : undefined"
             :aria-current="active === 'myTasks' ? 'page' : undefined"
-            >{{ t("task.mine") }}</a
-          >
+            >{{ t("task.mine") }}</AppLink>
           <AppLink :to="searchPath(slug)" :aria-current="active === 'search' ? 'page' : undefined">{{ t("nav.search") }}</AppLink>
           <AppLink :to="settingsPath(slug)" :aria-current="active === 'settings' ? 'page' : undefined">{{ t("nav.settings") }}</AppLink>
         </nav>
