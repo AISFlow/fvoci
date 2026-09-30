@@ -73,15 +73,16 @@ async function ensureSetup(page: Page): Promise<void> {
     await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
-    await expect(page).toHaveURL(/\/$/);
-    return;
-  }
-  if (
+  } else if (
     page.url().includes("/login") ||
     (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
   ) {
     await login(page, admin.email, admin.password);
   }
+  // Setup starts at '/', then may cross Vue /login before returning home.
+  // The URL alone can match before that redirect and interrupt a direct wiki goto.
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
 }
 
 async function workspaceId(request: APIRequestContext): Promise<string> {
