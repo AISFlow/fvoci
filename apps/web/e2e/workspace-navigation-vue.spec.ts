@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
 import { createE2eUser, login, logout, watchCspViolations } from "./helpers";
 
@@ -120,29 +121,48 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   const members = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()).items;
   const memberId = members.find((item: { email: string }) => item.email === "navigation-inbox@example.com").userId;
   const copy = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items.find((item: { key: string }) => item.key === "COPY");
-  // Confirm outbox delivery for each bounded setup batch before producing more.
-  // This keeps relay backlog out of the paging assertion without longer waits.
-  const recipientContext = await browser.newContext({ baseURL });
-  const recipient = await recipientContext.newPage();
+  createE2eUser("navigation-mentions@example.com", "mentionspass123", "댓글", { workspaceSlug: "navigation", membershipRole: "member" });
+  const authorContext = await browser.newContext({ baseURL });
+  const coauthor = await authorContext.newPage();
+  const commentIds: string[] = [];
   try {
-    await login(recipient, "navigation-inbox@example.com", "inboxpass123");
-    for (let start = 0; start < 105; start += 15) {
-      const count = Math.min(15, 105 - start);
-      await Promise.all(Array.from({ length: count }, async (_, offset) => {
-        const task = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/tasks`, { data: { title: `Paged inbox ${start + offset}` } });
-        expect(task.status()).toBe(201);
-        const id = (await task.json()).id;
-        const assigned = await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${id}`, { data: { assigneeIds: [memberId] } });
-        expect(assigned.status()).toBe(200);
+    await login(coauthor, "navigation-mentions@example.com", "mentionspass123");
+    for (let start = 0; start < 105; start += 5) {
+      await Promise.all(Array.from({ length: Math.min(5, 105 - start) }, async (_, offset) => {
+        // Two real members stay within the unchanged sixty-comments/user limit.
+        const author = start + offset < 53 ? page : coauthor;
+        const comment = await author.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${copy.rootDocumentId}/comments`, {
+          data: { body: `Paged inbox ${start + offset}`, mentionedUserIds: [memberId] },
+        });
+        expect(comment.status()).toBe(201);
+        commentIds.push((await comment.json()).id);
       }));
-      await expect.poll(async () => (await (await recipient.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(start + count);
     }
   } finally {
-    await recipientContext.close();
+    await authorContext.close();
   }
+  // Coordinator-approved DB fixture materializes these genuine API-created
+  // events in the isolated inbox. The unchanged notifications-flow separately
+  // covers event delivery; this flow proves real HTTP cursors/read/archive.
+  for (const id of [workspaceId, memberId, ...commentIds]) expect(id).toMatch(/^[0-9a-f-]{36}$/i);
+  const container = process.env.FVOCI_TEST_PG_CONTAINER;
+  const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
+  if (!container || !adminUrl) throw new Error("isolated PostgreSQL fixture context is required");
+  const sql = `
+    BEGIN;
+    INSERT INTO fvoci.notifications (workspace_id, user_id, event_id, verb, actor_user_id, target_type, target_id, payload, created_at)
+    SELECT e.workspace_id, '${memberId}'::uuid, e.id, e.verb, e.actor_user_id, e.target_type, e.target_id,
+      jsonb_strip_nulls(jsonb_build_object('commentId', c.id, 'documentId', c.document_id, 'taskId', c.task_id)) || jsonb_build_object('parentId', c.parent_id), e.created_at
+    FROM fvoci.events e JOIN fvoci.comments c ON c.id = e.target_id AND c.workspace_id = e.workspace_id
+    WHERE e.workspace_id = '${workspaceId}'::uuid AND e.verb = 'comment.created'
+      AND e.target_id IN (${commentIds.map((id) => `'${id}'::uuid`).join(",")})
+    ON CONFLICT (workspace_id, user_id, event_id) DO NOTHING;
+    COMMIT;
+  `;
+  execFileSync("docker", ["exec", "-i", container, "psql", "-U", "postgres", "-d", new URL(adminUrl).pathname.slice(1), "-v", "ON_ERROR_STOP=1"], { input: sql, stdio: ["pipe", "pipe", "pipe"] });
   await logout(page);
   await login(page, "navigation-inbox@example.com", "inboxpass123");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(105);
+  expect((await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(105);
   await page.goto("/w/navigation/notifications");
   await vue(page);
   const rows = page.locator(".notifications-page__row");
@@ -153,7 +173,7 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   await expect(rows).toHaveCount(105);
   await expect(page.getByRole("button", { name: "더 보기", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: /안 읽은 알림 105건/ }).click();
-  await expect(page.getByRole("region", { name: "알림", exact: true }).getByText(/Paged inbox/).first()).toBeVisible();
+  await expect(page.getByRole("region", { name: "알림", exact: true }).getByText("문서에 새 댓글이 달렸습니다", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: /안 읽은 알림 105건/ }).click();
   await rows.first().getByRole("button", { name: "보관", exact: true }).click();
   await page.getByRole("tab", { name: "보관", exact: true }).click();

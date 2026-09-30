@@ -214,7 +214,7 @@ async fn list_projects_route(
         Some("true") => true,
         Some(_) => return Err(AppError::from_code(ProblemCode::InvalidInput)),
     };
-    let (user, _user_id, session_id) = require_session(
+    let auth = crate::http::authz::require_request_auth(
         &state,
         &headers,
         &jar,
@@ -222,9 +222,17 @@ async fn list_projects_route(
         Some(workspace_id),
     )
     .await?;
-    let actor_user_id = parse_user_id(&user.user_id)?;
+    let actor_user_id = auth.user_id;
+    let session_id = auth.credential_id;
+    let expose_document_count = auth.token_scopes.as_deref().is_none_or(|scopes| {
+        crate::auth::scopes::grants_api_token_scope(
+            scopes,
+            crate::auth::scopes::ApiTokenScope::DocumentsRead,
+        )
+    });
     if deleted {
-        // Source `listDeletedProjects`: counts are zero and the rows are not editable.
+        // Source `listDeletedProjects`: task counts are zero and rows are not editable.
+        // Document counts are unavailable for deleted projects.
         let result =
             list_deleted_projects(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
                 .await
@@ -246,6 +254,7 @@ async fn list_projects_route(
                         created_by: project.created_by.to_string(),
                         created_at: project.created_at,
                         updated_at: project.updated_at,
+                        document_count: None,
                         task_count: 0,
                         open_task_count: 0,
                         can_edit: false,
@@ -276,6 +285,7 @@ async fn list_projects_route(
                     created_by: item.project.created_by.to_string(),
                     created_at: item.project.created_at,
                     updated_at: item.project.updated_at,
+                    document_count: expose_document_count.then_some(item.document_count),
                     task_count: item.task_count,
                     open_task_count: item.open_task_count,
                     can_edit: item.can_edit,
