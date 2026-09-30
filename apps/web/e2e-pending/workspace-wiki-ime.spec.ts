@@ -105,9 +105,11 @@ type LiveEditor = {
   state: {
     doc: {
       forEach(fn: (node: { textContent: string; attrs: Record<string, unknown> }) => void): void;
+      resolve(pos: number): { index(depth: number): number; parentOffset: number };
     };
     selection: { empty: boolean; $from: { index(depth: number): number; parentOffset: number } };
   };
+  view: { posAtDOM(node: Node, offset: number): number; hasFocus(): boolean; focus(): void };
 };
 
 /** The editor model's top-level blocks: text and UniqueID. */
@@ -131,6 +133,34 @@ async function caret(page: Page): Promise<{ block: number; offset: number } | nu
   });
 }
 
+/** Navigation is complete only when PM and the focused browser caret agree.
+ * Home/End move the native Selection before selectionchange reaches PM. A
+ * pending focus repair can restore PM's old paragraph end in that gap, so the
+ * next ArrowRight enters the following empty paragraph instead of the word. */
+async function expectCaret(page: Page, block: number, offset: number): Promise<void> {
+  await expect.poll(() => editorLocator(page).evaluate((root) => {
+    const editor = (root as HTMLElement & { editor?: LiveEditor }).editor;
+    if (!editor) throw new Error("missing live editor");
+    const selection = editor.state.selection;
+    const native = root.ownerDocument.getSelection();
+    let browser = null;
+    if (native?.isCollapsed && native.anchorNode && root.contains(native.anchorNode)) {
+      const pos = editor.state.doc.resolve(editor.view.posAtDOM(native.anchorNode, native.anchorOffset));
+      browser = { block: pos.index(0), offset: pos.parentOffset };
+    }
+    return {
+      focused: editor.view.hasFocus(),
+      model: selection.empty ? { block: selection.$from.index(0), offset: selection.$from.parentOffset } : null,
+      browser,
+    };
+  })).toEqual({ focused: true, model: { block, offset }, browser: { block, offset } });
+}
+
+async function navigateCaret(page: Page, key: string, block: number, offset: number): Promise<void> {
+  await page.keyboard.press(key);
+  await expectCaret(page, block, offset);
+}
+
 /** Model and DOM agree on the block texts, which equal `expected`. */
 async function expectBlocks(page: Page, expected: string[]): Promise<void> {
   await expect.poll(() => blockTexts(page), { timeout: 15_000 }).toEqual(expected);
@@ -142,13 +172,89 @@ async function placeCaret(page: Page, where: Where): Promise<void> {
   const { block, offset } = CARET[where];
   await editorLocator(page).locator(":scope > *").nth(block).click();
   if (where === "mid") {
-    await page.keyboard.press("Home");
-    for (let i = 0; i < offset; i += 1) await page.keyboard.press("ArrowRight");
+    await navigateCaret(page, "Home", block, 0);
+    for (let i = 0; i < offset; i += 1) await navigateCaret(page, "ArrowRight", block, i + 1);
   } else {
-    await page.keyboard.press("End");
+    await navigateCaret(page, "End", block, offset);
   }
   await expect.poll(() => caret(page)).toEqual({ block, offset });
 }
+
+test("native Home survives the pending editor focus repair before ArrowRight", async ({ browser, collabApp }) => {
+  const ctx = await newCollabContext(browser, collabApp.baseUrl);
+  try {
+    const page = await ctx.newPage();
+    await ensureCollabFixture(page);
+    await login(page, member.email, member.password);
+    const doc = await seededDoc(page, "IME native caret focus repair");
+    await page.goto(doc.url);
+    await waitConnected(page);
+    await expectBlocks(page, SEED);
+
+    // Control scheduling of the installed PM focus-repair callback, as in
+    // workspace-wiki-vue-controls. Use real click/keyboard events and no sleeps,
+    // model selection writes, or selectionchange observer replacement.
+    await editorLocator(page).evaluate((element) => {
+      const root = element as HTMLElement & { editor: LiveEditor };
+      const snapshot = () => {
+        const native = document.getSelection()!;
+        const model = root.editor.state.selection.$from;
+        const browser = root.editor.state.doc.resolve(root.editor.view.posAtDOM(native.anchorNode!, native.anchorOffset));
+        return {
+          model: { block: model.index(0), offset: model.parentOffset },
+          browser: { block: browser.index(0), offset: browser.parentOffset },
+        };
+      };
+      const gate = { captured: false, delivered: false, before: null as ReturnType<typeof snapshot> | null,
+        after: null as ReturnType<typeof snapshot> | null };
+      Object.assign(window, { __imeFocusRepair: gate });
+      const nativeTimeout = window.setTimeout.bind(window);
+      let focusing = false;
+      let repair: (() => void) | undefined;
+      let timer: number | undefined;
+      root.addEventListener("focus", () => { focusing = true; }, { capture: true, once: true });
+      root.addEventListener("focusin", () => { focusing = false; }, { once: true });
+      window.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+        // Pinned prosemirror-view schedules this during the root focus event.
+        if (focusing && delay === 20 && typeof callback === "function") {
+          if (repair) throw new Error("multiple editor focus-repair tasks");
+          gate.captured = true;
+          repair = () => callback(...args);
+          timer = nativeTimeout(() => {}, delay);
+          return timer;
+        }
+        return nativeTimeout(callback, delay, ...args);
+      }) as typeof window.setTimeout;
+      const deliver = (event: KeyboardEvent) => {
+        if (event.key !== "Home" || event.shiftKey) return;
+        window.setTimeout = nativeTimeout;
+        document.removeEventListener("keyup", deliver);
+        window.clearTimeout(timer);
+        if (!repair) throw new Error("missing pending editor focus repair");
+        gate.before = snapshot();
+        repair();
+        gate.delivered = true;
+        gate.after = snapshot();
+      };
+      // After the product keyup handler, before async selectionchange.
+      document.addEventListener("keyup", deliver);
+    });
+    await editorLocator(page).locator(":scope > *").nth(1).click();
+    await expectCaret(page, 1, SEED[1].length);
+    await page.keyboard.press("Home");
+    const gate = await page.evaluate(() => (window as unknown as { __imeFocusRepair: unknown }).__imeFocusRepair);
+    await test.info().attach("native-home-focus-repair", { body: JSON.stringify(gate), contentType: "application/json" });
+    const expected = { model: { block: 1, offset: 0 }, browser: { block: 1, offset: 0 } };
+    expect(gate).toEqual({ captured: true, delivered: true, before: expected, after: expected });
+    // Deliberately no fixture navigation barrier between native keys.
+    await page.keyboard.press("ArrowRight");
+    await expectCaret(page, 1, 1);
+    await expectBlocks(page, SEED);
+    expect((await modelBlocks(page)).map((node) => node.id)).toEqual([null, null, null]);
+  } finally {
+    await ctx.close();
+  }
+});
 
 /** A peer appends " 원격" to a block and A receives it. */
 async function peerEdit(a: Page, b: Page, block: number, expected: string[]): Promise<void> {
