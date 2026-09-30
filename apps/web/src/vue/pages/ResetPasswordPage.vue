@@ -9,11 +9,6 @@ import { setupStatusQuery } from "@/lib/queries";
 import { redirectTo } from "../session/navigation";
 import ResetPasswordView from "../features/auth/ResetPasswordView.vue";
 
-// /reset-password?token=: the confirm form. Boot still sends this path to
-// React until apps/web/src/app-boundary.ts includes:
-//   /^\/reset-password\/?$/i
-// Pair that with VUE_ROUTE_PATHS.resetPassword = "/reset-password".
-
 const route = useRoute();
 const router = useRouter();
 const setup = useQuery(setupStatusQuery);

@@ -9,12 +9,6 @@ import { setupStatusQuery } from "@/lib/queries";
 import { redirectTo } from "../session/navigation";
 import CancelWithdrawView from "../features/auth/CancelWithdrawView.vue";
 
-// /cancel-withdraw#token=: the token stays in the fragment. Opening the page
-// never cancels; only the button spends it. Boot still sends this path to
-// React until apps/web/src/app-boundary.ts includes:
-//   /^\/cancel-withdraw\/?$/i
-// Pair that with VUE_ROUTE_PATHS.cancelWithdraw = "/cancel-withdraw".
-
 const setup = useQuery(setupStatusQuery);
 const fragment = parseErasureHash(window.location.hash);
 const recoveryHref =

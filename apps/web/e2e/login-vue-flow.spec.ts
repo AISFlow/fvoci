@@ -1,6 +1,6 @@
 // /login is a page of the Vue app (logout landing, MFA step, OIDC error
 // query). Setup, invite, home and public information are also Vue pages;
-// reset-password stays on the React app.
+// The remaining auth links and consent prompt are Vue pages too.
 // These flows run against the production build served by the Rust server.
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { login, logout, watchCspViolations } from "./helpers";

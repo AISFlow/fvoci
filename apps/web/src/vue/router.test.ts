@@ -146,22 +146,22 @@ const AUTH_REST = [
   { name: "consent", path: "/consent" },
 ] as const;
 
-test("the remaining auth routes are declared (boot still needs the boundary regex)", () => {
+test("the remaining auth routes are declared live Vue paths", () => {
   for (const { name, path } of AUTH_REST) {
     assert.equal(
       routes.some((route) => route.name === name && route.path === path),
       true,
       name,
     );
-    // Boot still loads the React app for these URLs (src/app-boundary.ts).
-    assert.equal(isVueAppPath(path), false, path);
-    assert.equal(isVueAppPath(`${path}/`), false, `${path}/`);
-    assert.equal(isVueAppPath(path.toUpperCase()), false, path.toUpperCase());
+    // The boundary and router agree for case and trailing slash variants.
+    assert.equal(isVueAppPath(path), true, path);
+    assert.equal(isVueAppPath(`${path}/`), true, `${path}/`);
+    assert.equal(isVueAppPath(path.toUpperCase()), true, path.toUpperCase());
   }
 });
 
 test(
-  "a completed navigation to a remaining auth page is a full page load (boot is still React)",
+  "a completed navigation to a remaining auth page stays in Vue",
   withLocation(async (loads) => {
     for (const path of [
       "/reset-password?token=tok",
@@ -171,9 +171,12 @@ test(
       "/consent?returnTo=%2F",
     ]) {
       const router = createAppRouter(createMemoryHistory());
+      for (const route of routes) {
+        router.removeRoute(route.name!);
+        router.addRoute({ path: route.path, name: route.name, component: { render: () => null } });
+      }
       await router.push(path);
-      assert.deepEqual(loads.splice(0), [path], path);
+      assert.deepEqual(loads.splice(0), [], path);
     }
   }),
 );
-

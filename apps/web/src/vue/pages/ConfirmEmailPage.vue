@@ -9,11 +9,6 @@ import { setupStatusQuery } from "@/lib/queries";
 import { redirectTo } from "../session/navigation";
 import ConfirmEmailView from "../features/auth/ConfirmEmailView.vue";
 
-// /confirm-email?token=: confirm a mailed address change. Boot still sends
-// this path to React until apps/web/src/app-boundary.ts includes:
-//   /^\/confirm-email\/?$/i
-// Pair that with VUE_ROUTE_PATHS.confirmEmail = "/confirm-email".
-
 const route = useRoute();
 const setup = useQuery(setupStatusQuery);
 const token = computed(() => {

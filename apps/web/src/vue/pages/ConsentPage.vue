@@ -10,11 +10,6 @@ import AuthLayout from "../features/auth/AuthLayout.vue";
 import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
 import { safeReturnTo } from "@/lib/consent";
 
-// /consent: required legal documents after a 428 gate. Boot still sends this
-// path to React until apps/web/src/app-boundary.ts includes:
-//   /^\/consent\/?$/i
-// Pair that with VUE_ROUTE_PATHS.consent = "/consent".
-
 const router = useRouter();
 const returnTo = safeReturnTo(
   new URLSearchParams(window.location.search).get("returnTo"),

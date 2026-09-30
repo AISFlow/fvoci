@@ -10,12 +10,6 @@ import { redirectTo } from "../session/navigation";
 import MagicLinkView from "../features/auth/MagicLinkView.vue";
 import MfaStep from "../features/auth/MfaStep.vue";
 
-// /magic-link?token=: consume waits for a click (mail scanners prefetch).
-// Boot still sends this path to React until apps/web/src/app-boundary.ts
-// includes:
-//   /^\/magic-link\/?$/i
-// Pair that with VUE_ROUTE_PATHS.magicLink = "/magic-link".
-
 const route = useRoute();
 const setup = useQuery(setupStatusQuery);
 const token = computed(() => {
@@ -33,7 +27,7 @@ watchEffect(() => {
 });
 
 async function enterApp(): Promise<void> {
-  // Home is the React app: a full load.
+  // A full load clears anonymous queries after sign-in.
   window.location.replace("/");
 }
 

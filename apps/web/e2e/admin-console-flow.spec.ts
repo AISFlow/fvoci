@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { authSql, expectVueAuth } from "./auth-link-evidence";
 import { createE2eUser, waitForCapturedMail } from "./helpers";
 
 const admin = {
@@ -101,6 +102,7 @@ test("instance admin edits settings and publishes terms; members consent before 
   await page.reload();
   await expect(page).toHaveURL(/\/consent\?returnTo=%2Fsettings%2Flegal$/);
   await expect(page.getByRole("heading", { name: "법적 문서 동의" })).toBeVisible();
+  await expectVueAuth(page);
   await page.getByRole("checkbox", { name: "동의합니다" }).check();
   await page.getByRole("button", { name: "동의하고 계속" }).click();
   await expect(page).toHaveURL(/\/settings\/legal$/);
@@ -109,7 +111,9 @@ test("instance admin edits settings and publishes terms; members consent before 
   // A member signing in is sent to the prompt on the first gated request.
   const memberContext = await browser.newContext();
   const memberPage = await memberContext.newPage();
-  await memberPage.goto("/login");
+  await memberPage.goto("/consent?returnTo=%2Fsettings%2Faccount");
+  await expect(memberPage).toHaveURL(/\/login$/);
+  expect((await memberPage.request.get("/api/v1/auth/consents/pending")).status()).toBe(401);
   await memberPage.getByLabel("이메일").fill(member.email);
   await memberPage.getByLabel("비밀번호").fill(member.password);
   await memberPage.getByRole("button", { name: "로그인", exact: true }).click();
@@ -117,6 +121,14 @@ test("instance admin edits settings and publishes terms; members consent before 
   const gated = await memberPage.request.get("/api/v1/auth/me");
   expect(gated.status()).toBe(428);
   expect((await gated.json()).code).toBe("consent_required");
+  await expectVueAuth(memberPage);
+  const invalid = await memberPage.request.post("/api/v1/auth/consents", { data: { items: [] } });
+  expect(invalid.status()).toBe(400);
+  const stale = await memberPage.request.post("/api/v1/auth/consents", {
+    data: { items: [{ kind: "terms", version: 99999 }] },
+  });
+  expect(stale.status()).toBe(200);
+  expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(428);
   await expect(memberPage.getByRole("heading", { name: "서비스 이용약관" })).toBeVisible();
   await expect(memberPage.getByText("이 약관은")).toBeVisible();
   const submit = memberPage.getByRole("button", { name: "동의하고 계속" });
@@ -126,6 +138,18 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(memberPage).toHaveURL(/\/$/);
   await expect(memberPage.getByText("소속 워크스페이스가 없습니다.")).toBeVisible();
   expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(200);
+  expect(authSql("SELECT count(*) FROM fvoci.user_consents c JOIN fvoci.users u ON c.user_id = u.id WHERE u.email = 'console-member@example.com' AND c.kind = 'terms' AND c.version = 1")).toBe("1");
+  // Empty pending lists continue safely; foreign and recursive targets go home.
+  for (const target of ["//evil.example/", "/consent", "/settings/account?confirmed=1#profile"]) {
+    await memberPage.goto(`/consent?returnTo=${encodeURIComponent(target)}`);
+    if (target.startsWith("/settings")) {
+      await expect(memberPage).toHaveURL(/\/settings\/account\?confirmed=1#profile$/);
+      await expect(memberPage.getByRole("heading", { name: "계정 설정" })).toBeVisible();
+    } else {
+      await expect(memberPage).toHaveURL(/\/$/);
+      await expect(memberPage.getByText("소속 워크스페이스가 없습니다.")).toBeVisible();
+    }
+  }
 
   // The member has no console: no entry, the route sends them home, the API is 404.
   await expect(memberPage.getByRole("link", { name: "인스턴스 관리" })).toHaveCount(0);
