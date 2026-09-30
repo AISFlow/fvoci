@@ -32,10 +32,15 @@ const onSubmit = form.handleSubmit(async (values) => {
     emit("close");
   } catch (error) {
     if (error instanceof ProblemError && (error.status === 400 || error.status === 409)) {
-      form.setError("slug", issueMessage(error.status === 409 ? "i18n:slug taken" : "i18n:form.invalid"));
+      form.setError(
+        "slug",
+        issueMessage(error.status === 409 ? "i18n:slug taken" : "i18n:form.invalid"),
+      );
     } else {
       rootError.value =
-        error instanceof ProblemError && error.titleKnown ? error.title : t("error.workspace.create");
+        error instanceof ProblemError && error.titleKnown
+          ? error.title
+          : t("error.workspace.create");
     }
   }
 });
@@ -47,7 +52,9 @@ const onSubmit = form.handleSubmit(async (values) => {
     <p class="workspace-create__hint">{{ t("workspace.create.dialog.description") }}</p>
     <form class="workspace-create" novalidate @submit="onSubmit">
       <div class="workspace-create__field">
-        <label class="workspace-create__label" for="create-workspace-name">{{ t("workspace.create.name") }}</label>
+        <label class="workspace-create__label" for="create-workspace-name">{{
+          t("workspace.create.name")
+        }}</label>
         <input
           id="create-workspace-name"
           name="name"
@@ -57,7 +64,9 @@ const onSubmit = form.handleSubmit(async (values) => {
         />
       </div>
       <div class="workspace-create__field">
-        <label class="workspace-create__label" for="create-workspace-slug">{{ t("workspace.create.slug") }}</label>
+        <label class="workspace-create__label" for="create-workspace-slug">{{
+          t("workspace.create.slug")
+        }}</label>
         <input
           id="create-workspace-slug"
           name="slug"
@@ -70,8 +79,12 @@ const onSubmit = form.handleSubmit(async (values) => {
       <p v-if="fieldError" role="alert" class="workspace-create__alert">{{ fieldError }}</p>
       <p v-if="rootError" role="alert" class="workspace-create__alert">{{ rootError }}</p>
       <div class="workspace-empty__actions">
-        <UButton type="submit" :disabled="form.submitting.value">{{ t("workspace.create.action") }}</UButton>
-        <UButton type="button" variant="outline" color="neutral" @click="emit('close')">{{ t("common.cancel") }}</UButton>
+        <UButton type="submit" :disabled="form.submitting.value">{{
+          t("workspace.create.action")
+        }}</UButton>
+        <UButton type="button" variant="outline" color="neutral" @click="emit('close')">{{
+          t("common.cancel")
+        }}</UButton>
       </div>
     </form>
   </NativeModal>

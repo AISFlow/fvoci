@@ -17,9 +17,14 @@ const props = defineProps<{
   projectKeys?: ReadonlyMap<string, string>;
   draggable?: boolean;
 }>();
-const emit = defineEmits<{ dropDocument: [sourceId: string, destId: string, position: "top" | "bottom" | "onto"] }>();
+const emit = defineEmits<{
+  dropDocument: [sourceId: string, destId: string, position: "top" | "bottom" | "onto"];
+}>();
 function onDragStart(event: DragEvent): void {
-  if (!props.draggable || (props.node.projectId && props.node.parentId === null)) { event.preventDefault(); return; }
+  if (!props.draggable || (props.node.projectId && props.node.parentId === null)) {
+    event.preventDefault();
+    return;
+  }
   event.dataTransfer?.setData("application/x-fvoci-document", props.node.id);
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
 }
@@ -29,14 +34,15 @@ function onDrop(event: DragEvent): void {
   event.preventDefault();
   const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
   const ratio = (event.clientY - box.top) / Math.max(box.height, 1);
-  emit("dropDocument", id, props.node.id, ratio < .28 ? "top" : ratio > .72 ? "bottom" : "onto");
+  emit("dropDocument", id, props.node.id, ratio < 0.28 ? "top" : ratio > 0.72 ? "bottom" : "onto");
 }
 
-
 const childNodes = computed(() => childrenOf(props.byParent, props.node.id));
-const wikiRef = computed(() => props.node.projectId
-  ? props.projectKeys?.get(props.node.projectId) ? formatDisplayId(props.projectKeys.get(props.node.projectId)!, props.node.number) : null
-  : wikiDisplayId(props.node.number));
+const wikiRef = computed(() => {
+  if (!props.node.projectId) return wikiDisplayId(props.node.number);
+  const projectKey = props.projectKeys?.get(props.node.projectId);
+  return projectKey ? formatDisplayId(projectKey, props.node.number) : null;
+});
 const status = computed(() => {
   if (props.node.status === "draft") return t("doc.status.draft");
   if (props.node.status === "archived") return t("doc.status.archived");

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { isOidcConfigured, workspaceOidcForm } from "./workspace-oidc.ts";
 
-test("workspaceOidcForm accepts an http issuer and required credentials", () => {
+await test("workspaceOidcForm accepts an http issuer and required credentials", () => {
   const parsed = workspaceOidcForm.safeParse({
     issuer: "https://idp.example/realms/acme",
     clientId: "fvoci",
@@ -12,7 +12,7 @@ test("workspaceOidcForm accepts an http issuer and required credentials", () => 
   assert.equal(parsed.success, true);
 });
 
-test("workspaceOidcForm refuses a non-http issuer", () => {
+await test("workspaceOidcForm refuses a non-http issuer", () => {
   const parsed = workspaceOidcForm.safeParse({
     issuer: "not-a-url",
     clientId: "fvoci",
@@ -22,7 +22,7 @@ test("workspaceOidcForm refuses a non-http issuer", () => {
   assert.equal(parsed.success, false);
 });
 
-test("isOidcConfigured requires issuer, client, and label", () => {
+await test("isOidcConfigured requires issuer, client, and label", () => {
   assert.equal(isOidcConfigured(null), false);
   assert.equal(
     isOidcConfigured({

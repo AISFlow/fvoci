@@ -9,7 +9,7 @@ function source(file: string): string {
   return readFileSync(path.join(dir, file), "utf8");
 }
 
-test("the Vue legal page reads the public legal queries and SafeHtml", () => {
+await test("the Vue legal page reads the public legal queries and SafeHtml", () => {
   const page = source("../../pages/LegalPage.vue");
   assert.match(page, /from "@\/lib\/queries\/legal"/);
   assert.match(page, /legalDocQuery/);
@@ -25,7 +25,7 @@ test("the Vue legal page reads the public legal queries and SafeHtml", () => {
   assert.doesNotMatch(page, /from ["']@fvoci\/editor\/safe-html["']/);
 });
 
-test("the Vue service-info page fails once and retries the public instance", () => {
+await test("the Vue service-info page fails once and retries the public instance", () => {
   const page = source("../../pages/ServiceInfoPage.vue");
   assert.match(page, /from "@\/lib\/queries\/instance"/);
   assert.match(page, /retry: false/);
@@ -34,7 +34,7 @@ test("the Vue service-info page fails once and retries the public instance", () 
   assert.doesNotMatch(page, /RouterLink/);
 });
 
-test("authenticated legal nav and operator view cross with plain anchors", () => {
+await test("authenticated legal nav and operator view cross with plain anchors", () => {
   const nav = source("AuthenticatedLegalNav.vue");
   assert.match(nav, /href="\/service-info"/);
   assert.match(nav, /:href="`\/legal\/\$\{doc\.kind\}`"/);

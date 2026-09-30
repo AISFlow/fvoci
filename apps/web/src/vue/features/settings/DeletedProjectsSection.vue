@@ -29,9 +29,16 @@ const deleted = useQuery(() => ({
 
 type RestoreOperation = { workspaceId: string; projectId: string; lifecycle: number };
 let operationLifecycle = 0;
-watch([() => props.workspaceId, () => me.data.value?.userId, () => me.data.value?.sessionId],
-  () => { operationLifecycle++; }, { flush: "sync" });
-onScopeDispose(() => { operationLifecycle++; });
+watch(
+  [() => props.workspaceId, () => me.data.value?.userId, () => me.data.value?.sessionId],
+  () => {
+    operationLifecycle++;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  operationLifecycle++;
+});
 function captureOperation(projectId: string): RestoreOperation {
   return { workspaceId: props.workspaceId, projectId, lifecycle: operationLifecycle };
 }
@@ -78,9 +85,15 @@ function restoreProject(projectId: string): void {
       :message="loadErrorMessage(deleted.error.value)"
       @retry="deleted.refetch()"
     />
-    <p v-else-if="items.length === 0" class="settings-section__lede">{{ t("project.restore.empty") }}</p>
+    <p v-else-if="items.length === 0" class="settings-section__lede">{{
+      t("project.restore.empty")
+    }}</p>
     <ul v-if="items.length > 0" class="flex flex-col gap-2" data-testid="deleted-projects">
-      <li v-for="project in items" :key="project.id" class="flex items-center justify-between gap-2">
+      <li
+        v-for="project in items"
+        :key="project.id"
+        class="flex items-center justify-between gap-2"
+      >
         <span>
           <span class="font-mono">{{ project.key }}</span> {{ project.name }}
         </span>

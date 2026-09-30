@@ -3,7 +3,12 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, ref } from "vue";
 import { inputText } from "../../composables/useZodForm";
-import type { MfaDisableInput, MfaSetupInput, MfaSetupOutput, MfaStatusOutput } from "@/features/settings/account-requests";
+import type {
+  MfaDisableInput,
+  MfaSetupInput,
+  MfaSetupOutput,
+  MfaStatusOutput,
+} from "@/features/settings/account-requests";
 import { problemMessage } from "@/lib/api";
 import { qrModules } from "@/lib/qr";
 import { fieldClass } from "./field-classes";
@@ -31,8 +36,10 @@ const reauthValue = ref("");
 const qr = computed(() => (setup.value ? qrModules(setup.value.otpauthUri) : null));
 
 async function copyText(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
+  const capabilities: { clipboard?: Clipboard } = navigator;
+  const clipboard = capabilities.clipboard;
+  if (clipboard && typeof clipboard.writeText === "function") {
+    await clipboard.writeText(value);
     return;
   }
   throw new Error("clipboard unavailable");
@@ -87,11 +94,16 @@ async function submitReauth(): Promise<void> {
       reauthValue.value = "";
     } else {
       notice.value = null;
-      setup.value = await props.onSetup({ currentPassword: props.hasPassword ? reauthValue.value : null });
+      setup.value = await props.onSetup({
+        currentPassword: props.hasPassword ? reauthValue.value : null,
+      });
       reauthValue.value = "";
     }
   } catch (err) {
-    reauthError.value = problemMessage(err, props.status.enabled ? "error.mfa.disable" : "error.mfa.setup");
+    reauthError.value = problemMessage(
+      err,
+      props.status.enabled ? "error.mfa.disable" : "error.mfa.setup",
+    );
   } finally {
     reauthValue.value = "";
     reauthPending.value = false;
@@ -100,7 +112,8 @@ async function submitReauth(): Promise<void> {
 
 const reauthLabel = computed(() => {
   if (setup.value) return null;
-  if (props.status.enabled) return props.hasPassword ? t("auth.passwordCurrent") : t("auth.account.mfa.disable.code");
+  if (props.status.enabled)
+    return props.hasPassword ? t("auth.passwordCurrent") : t("auth.account.mfa.disable.code");
   return props.hasPassword ? t("auth.passwordCurrent") : null;
 });
 const reauthSecret = computed(() => (props.status.enabled ? props.hasPassword : true));
@@ -125,14 +138,19 @@ const reauthAction = computed(() =>
       <p role="status" class="text-sm font-medium">{{ t("auth.account.mfa.enabled") }}</p>
       <p class="text-sm font-medium">{{ t("auth.account.mfa.recovery.title") }}</p>
       <p class="break-keep text-sm text-muted">{{ t("auth.account.mfa.recovery.body") }}</p>
-      <ul class="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-sm" data-testid="mfa-recovery-codes">
+      <ul
+        class="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-sm"
+        data-testid="mfa-recovery-codes"
+      >
         <li v-for="code in setup.recoveryCodes" :key="code">{{ code }}</li>
       </ul>
       <div class="flex gap-2">
         <UButton type="button" variant="outline" color="neutral" size="sm" @click="copyRecovery">
           {{ copied ? t("auth.account.mfa.recovery.copied") : t("auth.account.mfa.recovery.copy") }}
         </UButton>
-        <UButton type="button" size="sm" @click="doneSetup">{{ t("auth.account.mfa.recovery.done") }}</UButton>
+        <UButton type="button" size="sm" @click="doneSetup">{{
+          t("auth.account.mfa.recovery.done")
+        }}</UButton>
       </div>
     </div>
 
@@ -159,7 +177,9 @@ const reauthAction = computed(() =>
         </a>
         <div class="flex min-w-0 flex-col gap-1.5">
           <p class="text-sm font-medium">{{ t("auth.account.mfa.manualKey") }}</p>
-          <code class="break-all font-mono text-sm" data-testid="mfa-secret">{{ setup.secret }}</code>
+          <code class="break-all font-mono text-sm" data-testid="mfa-secret">{{
+            setup.secret
+          }}</code>
         </div>
       </div>
       <label class="text-sm font-medium" for="settings-mfa-code">{{ t("auth.mfa.code") }}</label>
@@ -176,14 +196,23 @@ const reauthAction = computed(() =>
         <UButton type="submit" size="sm" :disabled="enablePending">
           {{ enablePending ? t("auth.mfa.setup.confirming") : t("auth.account.mfa.enable") }}
         </UButton>
-        <UButton type="button" variant="outline" color="neutral" size="sm" :disabled="enablePending" @click="doneSetup">
+        <UButton
+          type="button"
+          variant="outline"
+          color="neutral"
+          size="sm"
+          :disabled="enablePending"
+          @click="doneSetup"
+        >
           {{ t("auth.mfa.setup.cancel") }}
         </UButton>
       </div>
     </form>
 
     <form v-else class="flex flex-col gap-1.5" novalidate @submit.prevent="submitReauth">
-      <label v-if="reauthLabel" class="text-sm font-medium" for="settings-mfa-confirm">{{ reauthLabel }}</label>
+      <label v-if="reauthLabel" class="text-sm font-medium" for="settings-mfa-confirm">{{
+        reauthLabel
+      }}</label>
       <div class="flex gap-2">
         <input
           v-if="reauthLabel"
@@ -194,7 +223,13 @@ const reauthAction = computed(() =>
           :value="reauthValue"
           @input="reauthValue = inputText($event)"
         />
-        <UButton type="submit" variant="outline" color="neutral" size="sm" :disabled="reauthPending">
+        <UButton
+          type="submit"
+          variant="outline"
+          color="neutral"
+          size="sm"
+          :disabled="reauthPending"
+        >
           {{ reauthPending ? t("auth.mfa.reauth.pending") : reauthAction }}
         </UButton>
       </div>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { formatPersonName, notificationMessage, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/vue-query";
@@ -27,6 +28,7 @@ const TABS: { value: NotificationFilter; label: string }[] = [
 
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationError(() => route.fullPath);
 const queryClient = useQueryClient();
 const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
@@ -39,13 +41,28 @@ const tab = computed<NotificationFilter>(() => {
 const actionError = ref<string | null>(null);
 const actionPending = ref(false);
 let actionVersion = 0;
-watch([workspaceId, slug, tab, () => session.me.value?.userId, () => session.me.value?.sessionId,
-  () => session.me.value?.isInstanceAdmin, () => workspace.value?.role, () => session.status.value], () => {
+watch(
+  [
+    workspaceId,
+    slug,
+    tab,
+    () => session.me.value?.userId,
+    () => session.me.value?.sessionId,
+    () => session.me.value?.isInstanceAdmin,
+    () => workspace.value?.role,
+    () => session.status.value,
+  ],
+  () => {
+    actionVersion++;
+    actionPending.value = false;
+    actionError.value = null;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
   actionVersion++;
   actionPending.value = false;
-  actionError.value = null;
-}, { flush: "sync" });
-onScopeDispose(() => { actionVersion++; actionPending.value = false; });
+});
 
 const list = useInfiniteQuery(() => {
   const id = workspaceId.value;
@@ -54,22 +71,32 @@ const list = useInfiniteQuery(() => {
     ...notificationListQuery(id, filter),
     queryKey: ["notifications", id, "inbox", filter] as const,
     initialPageParam: undefined as string | undefined,
-    queryFn: async ({ pageParam, signal }: { pageParam: string | undefined; signal: AbortSignal }) =>
-      ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {
-        signal,
-        params: { path: { workspace_id: id }, query: { filter, cursor: pageParam } },
-      })),
+    queryFn: async ({
+      pageParam,
+      signal,
+    }: {
+      pageParam: string | undefined;
+      signal: AbortSignal;
+    }) =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {
+          signal,
+          params: { path: { workspace_id: id }, query: { filter, cursor: pageParam } },
+        }),
+      ),
     getNextPageParam: (page: { nextCursor?: string | null }) => page.nextCursor ?? undefined,
     enabled: Boolean(id),
   };
 });
 const items = computed(() => {
   const seen = new Set<string>();
-  return (list.data.value?.pages ?? []).flatMap((page) => page.items).filter((item) => {
-    if (seen.has(item.id)) return false;
-    seen.add(item.id);
-    return true;
-  });
+  return (list.data.value?.pages ?? [])
+    .flatMap((page) => page.items)
+    .filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
 });
 
 async function perform(action: () => Promise<unknown>): Promise<void> {
@@ -81,7 +108,8 @@ async function perform(action: () => Promise<unknown>): Promise<void> {
   try {
     await action();
   } catch (error) {
-    if (version === actionVersion && id === workspaceId.value) actionError.value = loadErrorMessage(error);
+    if (version === actionVersion && id === workspaceId.value)
+      actionError.value = loadErrorMessage(error);
   } finally {
     if (version === actionVersion && id === workspaceId.value) actionPending.value = false;
   }
@@ -101,7 +129,12 @@ const readAll = useMutation({
 });
 
 function selectTab(value: NotificationFilter): void {
-  void router.replace({ query: { ...route.query, tab: value === "all" ? undefined : value }, hash: route.hash });
+  navigation.run(() =>
+    router.replace({
+      query: { ...route.query, tab: value === "all" ? undefined : value },
+      hash: route.hash,
+    }),
+  );
 }
 
 async function openItem(item: NotificationItem): Promise<void> {
@@ -119,7 +152,12 @@ async function openItem(item: NotificationItem): Promise<void> {
     await queryClient.invalidateQueries({ queryKey: ["notifications", id] });
     await queryClient.invalidateQueries({ queryKey: ["notifications-unread", id] });
   }
-  if (version !== actionVersion || workspaceId.value !== id || router.currentRoute.value.params.slug !== currentSlug) return;
+  if (
+    version !== actionVersion ||
+    workspaceId.value !== id ||
+    router.currentRoute.value.params.slug !== currentSlug
+  )
+    return;
   const href = notificationHref(currentSlug, item);
   if (href) followAppHref(href, router);
 }
@@ -136,21 +174,34 @@ async function toggleArchive(item: NotificationItem): Promise<void> {
   await queryClient.invalidateQueries({ queryKey: ["notifications", id] });
   await queryClient.invalidateQueries({ queryKey: ["notifications-unread", id] });
 }
-
-
 </script>
 
 <template>
-  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="session.status.value === 'error'" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="notifications">
+  <WorkspaceShell
+    v-else-if="workspace"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+    active="notifications"
+  >
     <div class="notifications-page">
       <div class="notifications-page__head">
         <h1 class="notifications-page__title">{{ t("notif.list.title") }}</h1>
-        <UButton type="button" variant="outline" color="neutral" size="sm" :disabled="actionPending" @click="perform(() => readAll.mutateAsync(workspaceId))">
+        <UButton
+          type="button"
+          variant="outline"
+          color="neutral"
+          size="sm"
+          :disabled="actionPending"
+          @click="perform(() => readAll.mutateAsync(workspaceId))"
+        >
           {{ t("notif.readAllFull") }}
         </UButton>
       </div>
@@ -161,13 +212,17 @@ async function toggleArchive(item: NotificationItem): Promise<void> {
           type="button"
           role="tab"
           :aria-selected="tab === entry.value"
-          :class="tab === entry.value ? 'notifications-page__tab is-active' : 'notifications-page__tab'"
+          :class="
+            tab === entry.value ? 'notifications-page__tab is-active' : 'notifications-page__tab'
+          "
           @click="selectTab(entry.value)"
         >
           {{ entry.label }}
         </button>
       </div>
-      <p v-if="actionError" role="alert">{{ actionError }}</p>
+      <p v-if="actionError || navigation.error.value" role="alert">{{
+        actionError ?? navigation.error.value
+      }}</p>
       <QueryLoading v-if="list.isPending.value" />
       <QueryError
         v-else-if="list.isError.value"
@@ -179,12 +234,20 @@ async function toggleArchive(item: NotificationItem): Promise<void> {
       </p>
       <ul v-if="items.length > 0" class="notifications-page__list">
         <li v-for="item in items" :key="item.id" class="notifications-page__row">
-          <button type="button" class="notifications-page__item" :disabled="actionPending" @click="perform(() => openItem(item))">
+          <button
+            type="button"
+            class="notifications-page__item"
+            :disabled="actionPending"
+            @click="perform(() => openItem(item))"
+          >
             <span class="notifications-page__actor">
               <span v-if="!item.readAt" class="sr-only">{{ t("notif.filter.unread") }}</span>
               {{
                 item.actorGivenName
-                  ? formatPersonName({ givenName: item.actorGivenName, familyName: item.actorFamilyName })
+                  ? formatPersonName({
+                      givenName: item.actorGivenName,
+                      familyName: item.actorFamilyName,
+                    })
                   : t("notif.unknownActor")
               }}
             </span>
@@ -192,7 +255,14 @@ async function toggleArchive(item: NotificationItem): Promise<void> {
               {{ notificationMessage({ verb: item.verb, payload: payloadRecord(item.payload) }) }}
             </span>
           </button>
-          <UButton type="button" variant="outline" color="neutral" size="sm" :disabled="actionPending" @click="perform(() => toggleArchive(item))">
+          <UButton
+            type="button"
+            variant="outline"
+            color="neutral"
+            size="sm"
+            :disabled="actionPending"
+            @click="perform(() => toggleArchive(item))"
+          >
             {{ item.archivedAt ? t("notif.unarchive") : t("notif.archive") }}
           </UButton>
         </li>
@@ -203,7 +273,8 @@ async function toggleArchive(item: NotificationItem): Promise<void> {
         variant="outline"
         color="neutral"
         size="sm"
-        :disabled="list.isFetchingNextPage.value" @click="perform(() => list.fetchNextPage())"
+        :disabled="list.isFetchingNextPage.value"
+        @click="perform(() => list.fetchNextPage())"
       >
         {{ t("notif.list.loadMore") }}
       </UButton>

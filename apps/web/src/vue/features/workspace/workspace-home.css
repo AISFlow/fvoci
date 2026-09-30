@@ -2,75 +2,75 @@
    Layout classes for empty/create forms live in features/workspace/workspace-aux.css. */
 
 .app-shell {
-	min-height: 100dvh;
-	display: flex;
-	flex-direction: column;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-shell__header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 1rem;
-	border-bottom: 1px solid var(--border);
-	padding: 0.75rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem 1rem;
 }
 
 .app-shell__main {
-	flex: 1;
-	padding: 1.5rem 1rem 2rem;
+  flex: 1;
+  padding: 1.5rem 1rem 2rem;
 }
 
 .workspace-list {
-	display: flex;
-	flex-direction: column;
-	gap: 0.5rem;
-	max-width: 40rem;
-	margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 40rem;
+  margin: 0 auto;
 }
 
 .workspace-list__item {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 1rem;
-	border: 1px solid var(--border);
-	border-radius: var(--radius);
-	padding: 0.75rem 1rem;
-	text-decoration: none;
-	color: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  text-decoration: none;
+  color: inherit;
 }
 
 .workspace-list__item:hover {
-	background: var(--accent);
+  background: var(--accent);
 }
 
 .workspace-create__input {
-	height: 2.75rem;
-	width: 100%;
-	min-width: 0;
-	border: 1px solid var(--input);
-	border-radius: var(--radius);
-	background: var(--background);
-	padding: 0.5rem 0.75rem;
-	color: var(--foreground);
-	font-size: var(--text-ui-size);
-	line-height: var(--text-ui-leading);
-	outline: none;
+  height: 2.75rem;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--input);
+  border-radius: var(--radius);
+  background: var(--background);
+  padding: 0.5rem 0.75rem;
+  color: var(--foreground);
+  font-size: var(--text-ui-size);
+  line-height: var(--text-ui-leading);
+  outline: none;
 }
 
 .workspace-create__input:focus-visible {
-	border-color: var(--ring);
-	box-shadow: 0 0 0 3px var(--ring);
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px var(--ring);
 }
 
 .workspace-create__input:disabled {
-	opacity: 0.5;
+  opacity: 0.5;
 }
 
 .workspace-create__label {
-	color: var(--foreground);
-	font-size: var(--text-ui-size);
-	line-height: var(--text-ui-leading);
-	font-weight: 500;
+  color: var(--foreground);
+  font-size: var(--text-ui-size);
+  line-height: var(--text-ui-leading);
+  font-weight: 500;
 }

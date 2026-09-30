@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import UInput from "@nuxt/ui/components/Input.vue";
@@ -25,10 +26,18 @@ const TAB_LABEL = {
   task: "search.tab.task",
   attachment: "search.tab.attachment",
   comment: "search.tab.comment",
-} as const satisfies Record<SearchTab, "search.tab.all" | "search.tab.document" | "search.tab.task" | "search.tab.attachment" | "search.tab.comment">;
+} as const satisfies Record<
+  SearchTab,
+  | "search.tab.all"
+  | "search.tab.document"
+  | "search.tab.task"
+  | "search.tab.attachment"
+  | "search.tab.comment"
+>;
 
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationError(() => route.fullPath);
 const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
@@ -44,12 +53,20 @@ const projectId = computed(() => {
 const draft = ref(q.value);
 const projects = useQuery(() => projectsQuery(workspaceId.value));
 const knownProject = ref<{ workspaceId: string; projectId: string } | null>(null);
-const knownProjectId = computed(() => knownProject.value?.workspaceId === workspaceId.value ? knownProject.value.projectId : undefined);
-watch([workspaceId, projectId], ([workspaceId, projectId]) => {
-  if (projectId) knownProject.value = { workspaceId, projectId };
-}, { immediate: true });
+const knownProjectId = computed(() =>
+  knownProject.value?.workspaceId === workspaceId.value ? knownProject.value.projectId : undefined,
+);
+watch(
+  [workspaceId, projectId],
+  ([workspaceId, projectId]) => {
+    if (projectId) knownProject.value = { workspaceId, projectId };
+  },
+  { immediate: true },
+);
 let draftTimer: ReturnType<typeof setTimeout> | undefined;
-function cancelDraft(): void { clearTimeout(draftTimer); }
+function cancelDraft(): void {
+  clearTimeout(draftTimer);
+}
 watch(draft, (value) => {
   cancelDraft();
   if (value === q.value) return;
@@ -58,7 +75,10 @@ watch(draft, (value) => {
     if (scope === workspaceId.value) replaceQuery({ q: value.trim() });
   }, 300);
 });
-watch([workspaceId, q], () => { cancelDraft(); draft.value = q.value; });
+watch([workspaceId, q], () => {
+  cancelDraft();
+  draft.value = q.value;
+});
 onScopeDispose(cancelDraft);
 let pageGeneration = 0;
 const extra = ref<SearchHit[]>([]);
@@ -72,8 +92,19 @@ const parsed = computed(() => parseSearchTagPrefix(q.value, tags.data.value?.ite
 const tagPoolPending = computed(() => tagPrefix.value && tags.isLoading.value);
 const tagPoolError = computed(() => tagPrefix.value && tags.isError.value);
 const page = useQuery(() => ({
-  ...searchQuery(workspaceId.value, parsed.value.q, tab.value, projectId.value, undefined, "lexical", { tag: parsed.value.tag }),
-  enabled: Boolean(workspaceId.value) && parsed.value.q.trim().length > 0 && (!tagPrefix.value || tags.isSuccess.value),
+  ...searchQuery(
+    workspaceId.value,
+    parsed.value.q,
+    tab.value,
+    projectId.value,
+    undefined,
+    "lexical",
+    { tag: parsed.value.tag },
+  ),
+  enabled:
+    Boolean(workspaceId.value) &&
+    parsed.value.q.trim().length > 0 &&
+    (!tagPrefix.value || tags.isSuccess.value),
 }));
 
 watch(
@@ -90,7 +121,7 @@ watch(
 
 const items = computed(() => {
   const seen = new Set<string>();
-  return [...((page.data.value?.items ?? []) as SearchHit[]), ...extra.value].filter(item => {
+  return [...((page.data.value?.items ?? []) as SearchHit[]), ...extra.value].filter((item) => {
     const key = `${item.type}:${item.id}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -100,12 +131,14 @@ const items = computed(() => {
 
 function replaceQuery(next: { q?: string; tab?: SearchTab; projectId?: string }): void {
   cancelDraft();
-  void router.replace(
-    searchPath(slug.value, {
-      q: next.q ?? draft.value.trim(),
-      tab: next.tab ?? tab.value,
-      projectId: "projectId" in next ? next.projectId : projectId.value,
-    }),
+  navigation.run(() =>
+    router.replace(
+      searchPath(slug.value, {
+        q: next.q ?? draft.value.trim(),
+        tab: next.tab ?? tab.value,
+        projectId: "projectId" in next ? next.projectId : projectId.value,
+      }),
+    ),
   );
 }
 
@@ -137,7 +170,7 @@ async function loadMore(): Promise<void> {
       }),
     );
     if (generation !== pageGeneration) return;
-    extra.value = [...extra.value, ...((fetched.items ?? []) as SearchHit[])];
+    extra.value = [...extra.value, ...(fetched.items as SearchHit[])];
     nextCursor.value = fetched.nextCursor ?? undefined;
   } catch {
     if (generation !== pageGeneration) return;
@@ -149,12 +182,20 @@ async function loadMore(): Promise<void> {
 </script>
 
 <template>
-  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="session.status.value === 'error'" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name" active="search">
+  <WorkspaceShell
+    v-else-if="workspace"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+    active="search"
+  >
     <div class="search-page">
       <h1 id="search-page-title" class="search-page__title">{{ t("search.title") }}</h1>
       <p class="search-page__hint">{{ t("search.hint") }}</p>
@@ -172,13 +213,25 @@ async function loadMore(): Promise<void> {
       <fieldset v-if="knownProjectId" class="mb-4 flex flex-wrap items-center gap-3">
         <legend class="sr-only">{{ t("search.scope") }}</legend>
         <label class="flex items-center gap-1 text-sm">
-          <input type="radio" name="search-scope" :checked="!projectId" @change="replaceQuery({ projectId: undefined })" />
+          <input
+            type="radio"
+            name="search-scope"
+            :checked="!projectId"
+            @change="replaceQuery({ projectId: undefined })"
+          />
           {{ t("search.scope.workspace") }}
         </label>
         <label class="flex items-center gap-1 text-sm">
-          <input type="radio" name="search-scope" :checked="Boolean(projectId)" @change="replaceQuery({ projectId: knownProjectId })" />
+          <input
+            type="radio"
+            name="search-scope"
+            :checked="Boolean(projectId)"
+            @change="replaceQuery({ projectId: knownProjectId })"
+          />
           {{ t("search.scope.project") }}
-          <span class="text-muted">{{ projects.data.value?.items.find(project => project.id === knownProjectId)?.name ?? '' }}</span>
+          <span class="text-muted">{{
+            projects.data.value?.items.find((project) => project.id === knownProjectId)?.name ?? ""
+          }}</span>
         </label>
       </fieldset>
       <div class="search-page__tabs" role="tablist" :aria-label="t('search.resultType')">
@@ -196,18 +249,46 @@ async function loadMore(): Promise<void> {
       </div>
       <p v-if="!q" class="search-page__status">{{ t("search.hint") }}</p>
       <QueryLoading v-if="q && (page.isLoading.value || tagPoolPending)" />
-      <QueryError v-if="tagPoolError" :message="loadErrorMessage(tags.error.value)" @retry="() => void tags.refetch()" />
+      <QueryError
+        v-if="tagPoolError"
+        :message="loadErrorMessage(tags.error.value)"
+        @retry="() => void tags.refetch()"
+      />
       <QueryError
         v-if="q && page.isError.value"
         :message="loadErrorMessage(page.error.value)"
         @retry="() => void page.refetch()"
       />
-      <p v-if="q && !tagPoolPending && !tagPoolError && !page.isLoading.value && !page.isError.value && items.length === 0" class="search-page__status">
+      <p
+        v-if="
+          q &&
+          !tagPoolPending &&
+          !tagPoolError &&
+          !page.isLoading.value &&
+          !page.isError.value &&
+          items.length === 0
+        "
+        class="search-page__status"
+      >
         {{ t("search.empty") }}
       </p>
-      <SearchResultList v-if="items.length > 0" :slug="slug" :items="items" labelled-by="search-page-title" />
-      <p v-if="moreError" role="alert" class="search-page__status">{{ moreError }}</p>
-      <UButton v-if="q && nextCursor" type="button" variant="outline" color="neutral" :disabled="loadingMore" @click="loadMore">
+      <SearchResultList
+        v-if="items.length > 0"
+        :slug="slug"
+        :items="items"
+        labelled-by="search-page-title"
+      />
+      <p v-if="moreError || navigation.error.value" role="alert" class="search-page__status">{{
+        moreError ?? navigation.error.value
+      }}</p>
+      <UButton
+        v-if="q && nextCursor"
+        type="button"
+        variant="outline"
+        color="neutral"
+        :disabled="loadingMore"
+        @click="loadMore"
+      >
         {{ t("search.loadMore") }}
       </UButton>
     </div>

@@ -44,7 +44,9 @@ const startInstall = useMutation({
   },
   onError: (err: unknown) => {
     actionError.value =
-      err instanceof ProblemError && err.status === 400 ? t("github.notConfigured") : failMessage(err);
+      err instanceof ProblemError && err.status === 400
+        ? t("github.notConfigured")
+        : failMessage(err);
   },
 });
 
@@ -73,7 +75,9 @@ const link = useMutation({
 const installationId = computed(() => install.data.value?.installationId ?? null);
 const connected = computed(() => installationId.value !== null);
 const loadError = computed(() => (install.error.value ? failMessage(install.error.value) : null));
-const busy = computed(() => install.isPending.value || startInstall.isPending.value || uninstall.isPending.value);
+const busy = computed(
+  () => install.isPending.value || startInstall.isPending.value || uninstall.isPending.value,
+);
 
 function onLink(): void {
   linkError.value = null;
@@ -124,7 +128,9 @@ function confirmUninstall(): void {
     <summary class="settings-disclosure__summary">{{ t("settings.github") }}</summary>
     <div class="settings-disclosure__body">
       <p v-if="install.isPending.value" role="status">{{ t("load.loading") }}</p>
-      <p v-if="loadError" role="alert" class="settings-notice settings-notice--danger">{{ loadError }}</p>
+      <p v-if="loadError" role="alert" class="settings-notice settings-notice--danger">{{
+        loadError
+      }}</p>
       <p v-if="!install.isPending.value && !loadError" class="text-muted">
         {{ connected ? t("github.connected") : t("github.disconnected") }}
         <template v-if="connected"> ({{ installationId }})</template>
@@ -157,16 +163,28 @@ function confirmUninstall(): void {
       >
         {{ t("github.install") }}
       </UButton>
-      <p v-if="actionError" role="alert" class="settings-notice settings-notice--danger">{{ actionError }}</p>
+      <p v-if="actionError" role="alert" class="settings-notice settings-notice--danger">{{
+        actionError
+      }}</p>
       <form class="flex flex-col gap-2" novalidate @submit.prevent="onLink">
         <p class="font-medium">{{ t("github.issue.link") }}</p>
         <div class="flex flex-col gap-1.5">
           <label :for="`${formId}-task`">{{ t("github.issue.task") }}</label>
-          <UInput :id="`${formId}-task`" v-model="taskId" autocomplete="off" :disabled="link.isPending.value" />
+          <UInput
+            :id="`${formId}-task`"
+            v-model="taskId"
+            autocomplete="off"
+            :disabled="link.isPending.value"
+          />
         </div>
         <div class="flex flex-col gap-1.5">
           <label :for="`${formId}-repo`">{{ t("github.issue.repo") }}</label>
-          <UInput :id="`${formId}-repo`" v-model="repo" autocomplete="off" :disabled="link.isPending.value" />
+          <UInput
+            :id="`${formId}-repo`"
+            v-model="repo"
+            autocomplete="off"
+            :disabled="link.isPending.value"
+          />
         </div>
         <div class="flex flex-col gap-1.5">
           <label :for="`${formId}-number`">{{ t("github.issue.number") }}</label>
@@ -178,9 +196,13 @@ function confirmUninstall(): void {
           />
         </div>
         <p v-if="fieldError" class="text-error" role="alert">{{ fieldError }}</p>
-        <UButton type="submit" size="sm" class="w-fit" :disabled="link.isPending.value">{{ t("github.issue.link") }}</UButton>
+        <UButton type="submit" size="sm" class="w-fit" :disabled="link.isPending.value">{{
+          t("github.issue.link")
+        }}</UButton>
         <p v-if="linkStatus" role="status" class="settings-notice">{{ linkStatus }}</p>
-        <p v-if="linkError" role="alert" class="settings-notice settings-notice--danger">{{ linkError }}</p>
+        <p v-if="linkError" role="alert" class="settings-notice settings-notice--danger">{{
+          linkError
+        }}</p>
       </form>
     </div>
     <ConfirmDialog

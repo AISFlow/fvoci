@@ -4,7 +4,11 @@ import UButton from "@nuxt/ui/components/Button.vue";
 import UInput from "@nuxt/ui/components/Input.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, useId } from "vue";
-import { WEBHOOK_EVENTS, webhookCreateProblemKey, webhookEventLabel } from "@/features/settings/webhook-events";
+import {
+  WEBHOOK_EVENTS,
+  webhookCreateProblemKey,
+  webhookEventLabel,
+} from "@/features/settings/webhook-events";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import type { WebhookCreateInput, WebhookCreatedOutput, WebhookOutput } from "@/lib/contracts";
 import { workspaceWebhooksQuery } from "@/lib/queries";
@@ -125,27 +129,39 @@ function confirmDelete(): void {
             :aria-invalid="urlError ? true : undefined"
             :aria-describedby="urlError ? `${formId}-url-error` : undefined"
           />
-          <p v-if="urlError" :id="`${formId}-url-error`" class="text-error" role="alert">{{ urlError }}</p>
+          <p v-if="urlError" :id="`${formId}-url-error`" class="text-error" role="alert">{{
+            urlError
+          }}</p>
         </div>
         <fieldset class="flex flex-col gap-1.5">
           <legend class="font-medium">{{ t("webhook.events") }}</legend>
           <div class="grid gap-x-4 sm:grid-cols-2">
-            <label v-for="verb in WEBHOOK_EVENTS" :key="verb" class="flex min-h-11 items-center gap-2">
+            <label
+              v-for="verb in WEBHOOK_EVENTS"
+              :key="verb"
+              class="flex min-h-11 items-center gap-2"
+            >
               <input
                 :id="`${formId}-${verb.replaceAll('.', '-')}`"
                 type="checkbox"
                 class="size-4"
                 :checked="events.includes(verb)"
                 :disabled="create.isPending.value"
-                @change="events = toggleItem(events, verb, ($event.target as HTMLInputElement).checked)"
+                @change="
+                  events = toggleItem(events, verb, ($event.target as HTMLInputElement).checked)
+                "
               />
               <span>{{ webhookEventLabel(verb) }}</span>
             </label>
           </div>
           <p v-if="eventsError" class="text-error" role="alert">{{ eventsError }}</p>
         </fieldset>
-        <UButton type="submit" size="sm" class="w-fit" :disabled="create.isPending.value">{{ t("webhook.create") }}</UButton>
-        <p v-if="formError" role="alert" class="settings-notice settings-notice--danger">{{ formError }}</p>
+        <UButton type="submit" size="sm" class="w-fit" :disabled="create.isPending.value">{{
+          t("webhook.create")
+        }}</UButton>
+        <p v-if="formError" role="alert" class="settings-notice settings-notice--danger">{{
+          formError
+        }}</p>
       </form>
       <RevealedSecret
         v-if="revealed"
@@ -157,9 +173,17 @@ function confirmDelete(): void {
         :copied-label="t('webhook.copied')"
       />
       <p v-if="webhooks.isPending.value" role="status">{{ t("load.loading") }}</p>
-      <p v-if="listError" role="alert" class="settings-notice settings-notice--danger">{{ listError }}</p>
-      <p v-if="!webhooks.isPending.value && !listError && items.length === 0" class="text-muted">{{ t("webhook.empty") }}</p>
-      <ul v-if="items.length > 0" class="flex flex-col divide-y" :aria-label="t('settings.webhooks')">
+      <p v-if="listError" role="alert" class="settings-notice settings-notice--danger">{{
+        listError
+      }}</p>
+      <p v-if="!webhooks.isPending.value && !listError && items.length === 0" class="text-muted">{{
+        t("webhook.empty")
+      }}</p>
+      <ul
+        v-if="items.length > 0"
+        class="flex flex-col divide-y"
+        :aria-label="t('settings.webhooks')"
+      >
         <li
           v-for="row in items"
           :key="row.id"

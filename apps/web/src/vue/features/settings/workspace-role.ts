@@ -7,7 +7,10 @@ export const WORKSPACE_ROLES: WorkspaceRole[] = ["owner", "admin", "member", "gu
 
 /** Workspace role rank used by the React settings page. */
 export function roleAtLeast(role: string, minimum: string): boolean {
-  return ORDER.indexOf(role as (typeof ORDER)[number]) >= ORDER.indexOf(minimum as (typeof ORDER)[number]);
+  return (
+    ORDER.indexOf(role as (typeof ORDER)[number]) >=
+    ORDER.indexOf(minimum as (typeof ORDER)[number])
+  );
 }
 
 export function roleLabel(role: string): string {

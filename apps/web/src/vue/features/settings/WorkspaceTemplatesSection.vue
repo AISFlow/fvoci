@@ -120,7 +120,12 @@ function kindLabel(value: TemplateOutput["kind"]): string {
         <form class="flex flex-col gap-2" novalidate @submit.prevent="onCreate">
           <div class="flex flex-col gap-1.5">
             <label :for="titleId">{{ t("template.title") }}</label>
-            <UInput :id="titleId" v-model="title" :disabled="pending" :aria-invalid="titleError ? true : undefined" />
+            <UInput
+              :id="titleId"
+              v-model="title"
+              :disabled="pending"
+              :aria-invalid="titleError ? true : undefined"
+            />
             <p v-if="titleError" class="text-error" role="alert">{{ titleError }}</p>
           </div>
           <div class="flex flex-col gap-1.5">
@@ -136,18 +141,37 @@ function kindLabel(value: TemplateOutput["kind"]): string {
               <option value="task">{{ t("template.kind.task") }}</option>
             </select>
           </div>
-          <UButton type="submit" size="sm" class="w-fit" :disabled="pending">{{ t("template.create") }}</UButton>
+          <UButton type="submit" size="sm" class="w-fit" :disabled="pending">{{
+            t("template.create")
+          }}</UButton>
         </form>
         <p v-if="error" class="text-error" role="alert">{{ error }}</p>
-        <UButton v-if="listQuery.isError.value" type="button" size="sm" variant="outline" color="neutral" class="w-fit" @click="listQuery.refetch()">
+        <UButton
+          v-if="listQuery.isError.value"
+          type="button"
+          size="sm"
+          variant="outline"
+          color="neutral"
+          class="w-fit"
+          @click="listQuery.refetch()"
+        >
           {{ t("load.retry") }}
         </UButton>
         <QueryLoading v-if="loading" />
-        <p v-if="!loading && templates.length === 0" class="text-muted">{{ t("template.empty") }}</p>
+        <p v-if="!loading && templates.length === 0" class="text-muted">{{
+          t("template.empty")
+        }}</p>
         <div v-if="hasTaskTemplate" class="flex flex-col gap-1.5">
           <div v-if="projectsQueryResult.isError.value" role="alert">
             <p>{{ failMessage(projectsQueryResult.error.value) }}</p>
-            <UButton type="button" size="sm" variant="outline" color="neutral" @click="projectsQueryResult.refetch()">{{ t("load.retry") }}</UButton>
+            <UButton
+              type="button"
+              size="sm"
+              variant="outline"
+              color="neutral"
+              @click="projectsQueryResult.refetch()"
+              >{{ t("load.retry") }}</UButton
+            >
           </div>
           <label :for="projectFieldId">{{ t("template.project") }}</label>
           <select
@@ -158,15 +182,21 @@ function kindLabel(value: TemplateOutput["kind"]): string {
             :disabled="pending"
           >
             <option value="none">{{ t("template.project.placeholder") }}</option>
-            <option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option>
+            <option v-for="project in projects" :key="project.id" :value="project.id">{{
+              project.name
+            }}</option>
           </select>
         </div>
         <div v-if="templates.length > 0" class="overflow-x-auto">
           <table class="w-full border-collapse">
             <thead>
               <tr>
-                <th scope="col" class="border-b border-default px-2 py-2 text-left">{{ t("template.title") }}</th>
-                <th scope="col" class="border-b border-default px-2 py-2 text-left">{{ t("template.kind") }}</th>
+                <th scope="col" class="border-b border-default px-2 py-2 text-left">{{
+                  t("template.title")
+                }}</th>
+                <th scope="col" class="border-b border-default px-2 py-2 text-left">{{
+                  t("template.kind")
+                }}</th>
                 <th scope="col" class="border-b border-default px-2 py-2">
                   <span class="sr-only">{{ t("template.apply") }}</span>
                 </th>

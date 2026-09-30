@@ -16,7 +16,9 @@ const events = useInfiniteQuery(() => workspaceEventsQuery(props.workspaceId));
 const items = computed(() => flattenEventPages(events.data.value?.pages));
 const timeZone = computed(() => me.data.value?.timezone ?? FALLBACK_TZ);
 const firstPageFailed = computed(() => events.isError.value && !events.isFetchNextPageError.value);
-const loadError = computed(() => (firstPageFailed.value ? loadErrorMessage(events.error.value) : null));
+const loadError = computed(() =>
+  firstPageFailed.value ? loadErrorMessage(events.error.value) : null,
+);
 const loadMoreError = computed(() =>
   events.isFetchNextPageError.value ? t("settings.activity.loadMoreFailed") : null,
 );
@@ -34,20 +36,28 @@ function eventTime(createdAt: string): string {
 
 <template>
   <section class="settings-section" aria-labelledby="workspace-events-title">
-    <h2 id="workspace-events-title" class="settings-section__title">{{ t("settings.activity") }}</h2>
+    <h2 id="workspace-events-title" class="settings-section__title">{{
+      t("settings.activity")
+    }}</h2>
     <div class="flex flex-col gap-2" data-testid="workspace-events">
       <p v-if="events.isLoading.value" role="status" class="text-muted">{{ t("load.loading") }}</p>
       <div v-if="loadError" class="flex flex-col items-start gap-2">
         <p role="alert" class="text-error">{{ loadError }}</p>
-        <UButton type="button" variant="outline" color="neutral" @click="events.refetch()">{{ t("load.retry") }}</UButton>
+        <UButton type="button" variant="outline" color="neutral" @click="events.refetch()">{{
+          t("load.retry")
+        }}</UButton>
       </div>
-      <p v-if="!events.isLoading.value && !loadError && items.length === 0" class="text-muted">{{ t("audit.empty") }}</p>
+      <p v-if="!events.isLoading.value && !loadError && items.length === 0" class="text-muted">{{
+        t("audit.empty")
+      }}</p>
       <div v-if="items.length > 0" class="overflow-x-auto">
         <table class="w-full border-collapse">
           <tbody>
             <tr v-for="row in items" :key="row.id">
               <td class="border-b border-default px-2 py-2 align-top font-mono">{{ row.verb }}</td>
-              <td class="border-b border-default px-2 py-2 align-top settings-tabular">{{ eventTime(row.createdAt) }}</td>
+              <td class="border-b border-default px-2 py-2 align-top settings-tabular">{{
+                eventTime(row.createdAt)
+              }}</td>
             </tr>
           </tbody>
         </table>

@@ -295,11 +295,11 @@ await test("the Vue account provider button calls the link handler and reflects 
   assert.match(page, /<UButton\b[^>]*\btype="button"[^>]*@click="linkProvider\(p\.provider\)"/);
   assert.match(
     page,
-    /function linkProvider\(provider: string\): void\s*\{\s*void clickOidcStart\(provider, \(\) => startOidcLink\(provider\),/,
+    /async function linkProvider\(provider: string\): Promise<void>\s*\{\s*await clickOidcStart\(\s*provider,\s*\(\) => startOidcLink\(provider\),/,
   );
   assert.match(page, /setPending: \(next\) =>\s*\{\s*linkPending\.value = next;/);
   assert.match(page, /setError: \(message\) =>\s*\{\s*methodError\.value = message;/);
-  assert.match(page, /\}, "error\.link"\);/);
+  assert.match(page, /\},\s*"error\.link",?\s*\);/);
   assert.match(page, /:disabled="linkPending !== null"/);
   assert.match(page, /:aria-busy="linkPending === p\.provider \? true : undefined"/);
   assert.match(page, /<p v-if="methodError" role="alert"[^>]*>\{\{ methodError \}\}/);

@@ -23,6 +23,7 @@ export function parseForm<T>(
 export function fieldIssue(schema: z.ZodType, value: unknown, field: string): string | null {
   const result = schema.safeParse(value);
   if (result.success) return null;
-  const issue = result.error.issues.find((item) => item.path[0] === field) ?? result.error.issues[0];
+  const issue =
+    result.error.issues.find((item) => item.path[0] === field) ?? result.error.issues[0];
   return issue ? issueText(issue.message) : null;
 }

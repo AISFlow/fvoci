@@ -31,17 +31,22 @@ const members = useQuery(() => membersQuery(props.workspaceId));
 const groupMembersQuery = useQuery(() => ({
   queryKey: ["workspaces", props.workspaceId, "groups", selectedGroupId.value, "members"] as const,
   enabled: Boolean(selectedGroupId.value),
-  queryFn: async () =>
-    ensureOk(
+  queryFn: async () => {
+    const groupId = selectedGroupId.value;
+    if (groupId === null) throw new Error("Group members query requires a selected group");
+    return ensureOk(
       await api.GET("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members", {
-        params: { path: { workspace_id: props.workspaceId, group_id: selectedGroupId.value! } },
+        params: { path: { workspace_id: props.workspaceId, group_id: groupId } },
       }),
-    ),
+    );
+  },
   retry: false as const,
 }));
 
 const groups = computed(() => groupsQuery.data.value?.items ?? []);
-const selected = computed(() => groups.value.find((group) => group.id === selectedGroupId.value) ?? null);
+const selected = computed(
+  () => groups.value.find((group) => group.id === selectedGroupId.value) ?? null,
+);
 const memberItems = computed(() => members.data.value?.items ?? []);
 const selectedMemberIds = computed(
   () => new Set((groupMembersQuery.data.value?.items ?? []).map((row) => row.userId)),
@@ -198,11 +203,19 @@ function deleteGroup(): void {
       <p v-if="groupsQuery.isPending.value" role="status">{{ t("load.loading") }}</p>
       <p v-if="groupsError" role="alert" class="settings-notice settings-notice--danger">
         {{ groupsError }}
-        <UButton type="button" size="sm" variant="outline" color="neutral" @click="groupsQuery.refetch()">
+        <UButton
+          type="button"
+          size="sm"
+          variant="outline"
+          color="neutral"
+          @click="groupsQuery.refetch()"
+        >
           {{ t("load.retry") }}
         </UButton>
       </p>
-      <p v-else-if="groups.length === 0 && !groupsQuery.isPending.value" class="text-muted">{{ t("group.empty") }}</p>
+      <p v-else-if="groups.length === 0 && !groupsQuery.isPending.value" class="text-muted">{{
+        t("group.empty")
+      }}</p>
       <ul v-else class="flex flex-col gap-1">
         <li v-for="group in groups" :key="group.id">
           <UButton
@@ -225,22 +238,37 @@ function deleteGroup(): void {
             <label for="group-name">{{ t("group.name") }}</label>
             <UInput id="group-name" v-model="name" :disabled="pending || create.isPending.value" />
           </div>
-          <UButton type="submit" size="sm" :disabled="pending || create.isPending.value">{{ t("group.create") }}</UButton>
+          <UButton type="submit" size="sm" :disabled="pending || create.isPending.value">{{
+            t("group.create")
+          }}</UButton>
         </div>
       </form>
       <section v-if="selected" class="mt-4 flex flex-col gap-3">
         <h2 class="font-medium">{{ selected.name }}</h2>
         <p v-if="membersError" role="alert" class="settings-notice settings-notice--danger">
           {{ membersError }}
-          <UButton type="button" size="sm" variant="outline" color="neutral" @click="groupMembersQuery.refetch()">
+          <UButton
+            type="button"
+            size="sm"
+            variant="outline"
+            color="neutral"
+            @click="groupMembersQuery.refetch()"
+          >
             {{ t("load.retry") }}
           </UButton>
         </p>
-        <p v-if="groupMemberRows.length === 0 && !groupMembersQuery.isPending.value" class="text-muted">
+        <p
+          v-if="groupMemberRows.length === 0 && !groupMembersQuery.isPending.value"
+          class="text-muted"
+        >
           {{ t("group.emptyMembers") }}
         </p>
         <ul v-else class="flex flex-col divide-y">
-          <li v-for="row in groupMemberRows" :key="row.userId" class="flex items-center justify-between gap-2 py-2">
+          <li
+            v-for="row in groupMemberRows"
+            :key="row.userId"
+            class="flex items-center justify-between gap-2 py-2"
+          >
             <span>{{ memberLabel(row.userId) }}</span>
             <UButton
               v-if="canManage"
@@ -255,9 +283,19 @@ function deleteGroup(): void {
             </UButton>
           </li>
         </ul>
-        <p v-if="canManage && candidatesError" role="alert" class="settings-notice settings-notice--danger">
+        <p
+          v-if="canManage && candidatesError"
+          role="alert"
+          class="settings-notice settings-notice--danger"
+        >
           {{ candidatesError }}
-          <UButton type="button" size="sm" variant="outline" color="neutral" @click="members.refetch()">
+          <UButton
+            type="button"
+            size="sm"
+            variant="outline"
+            color="neutral"
+            @click="members.refetch()"
+          >
             {{ t("load.retry") }}
           </UButton>
         </p>
@@ -276,22 +314,41 @@ function deleteGroup(): void {
               </option>
             </select>
           </div>
-          <UButton type="submit" size="sm" :disabled="pending || candidates.length === 0">{{ t("group.addMember") }}</UButton>
+          <UButton type="submit" size="sm" :disabled="pending || candidates.length === 0">{{
+            t("group.addMember")
+          }}</UButton>
         </form>
         <div v-if="canManage && confirmDelete" class="flex flex-col gap-2">
           <p>{{ t("group.delete.confirm.body", { name: selected.name }) }}</p>
           <div class="flex gap-2">
-            <UButton type="button" size="sm" variant="outline" color="neutral" @click="confirmDelete = false">
+            <UButton
+              type="button"
+              size="sm"
+              variant="outline"
+              color="neutral"
+              @click="confirmDelete = false"
+            >
               {{ t("common.dismiss") }}
             </UButton>
-            <UButton type="button" size="sm" :disabled="pending" @click="deleteGroup">{{ t("group.delete") }}</UButton>
+            <UButton type="button" size="sm" :disabled="pending" @click="deleteGroup">{{
+              t("group.delete")
+            }}</UButton>
           </div>
         </div>
-        <UButton v-else-if="canManage" type="button" size="sm" variant="outline" color="neutral" @click="confirmDelete = true">
+        <UButton
+          v-else-if="canManage"
+          type="button"
+          size="sm"
+          variant="outline"
+          color="neutral"
+          @click="confirmDelete = true"
+        >
           {{ t("group.delete") }}
         </UButton>
       </section>
-      <p v-if="actionError" role="alert" class="settings-notice settings-notice--danger">{{ actionError }}</p>
+      <p v-if="actionError" role="alert" class="settings-notice settings-notice--danger">{{
+        actionError
+      }}</p>
     </div>
   </details>
 </template>

@@ -43,7 +43,9 @@ async function download(): Promise<void> {
 <template>
   <section v-if="canManage" class="settings-section">
     <h2 class="settings-section__title">{{ t("export.workspace") }}</h2>
-    <UButton type="button" :loading="pending" :disabled="pending" @click="download">{{ t("export.workspace") }}</UButton>
+    <UButton type="button" :loading="pending" :disabled="pending" @click="download">{{
+      t("export.workspace")
+    }}</UButton>
     <p v-if="error" role="alert" class="settings-notice settings-notice--danger">{{ error }}</p>
   </section>
 </template>

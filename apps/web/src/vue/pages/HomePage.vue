@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
@@ -19,6 +20,7 @@ import "../features/workspace/workspace-home.css";
 
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationError(() => route.fullPath);
 const queryClient = useQueryClient();
 const createOpen = ref(false);
 const logoutError = ref<string | null>(null);
@@ -30,7 +32,9 @@ const workspaces = useQuery(() => ({ ...workspacesQuery, enabled: ready.value })
 
 const denied = computed(() => route.query.denied === "workspace");
 const items = computed(() => workspaces.data.value?.items ?? []);
-const leaving = computed(() => setup.data.value?.needed === true || (ready.value && me.isError.value));
+const leaving = computed(
+  () => setup.data.value?.needed === true || (ready.value && me.isError.value),
+);
 
 watchEffect(() => {
   if (!ready.value) {
@@ -43,7 +47,7 @@ watchEffect(() => {
 function dismissDenied(): void {
   const query = { ...route.query };
   delete query.denied;
-  void router.replace({ query });
+  navigation.run(() => router.replace({ query }));
 }
 
 async function logout(): Promise<void> {
@@ -56,7 +60,10 @@ async function logout(): Promise<void> {
     return;
   }
   if (!result.response.ok) {
-    logoutError.value = problemMessage(new ProblemError(result.response.status), "error.auth.logout");
+    logoutError.value = problemMessage(
+      new ProblemError(result.response.status),
+      "error.auth.logout",
+    );
     return;
   }
   // Clear this app's cache without refetching the now-revoked session.
@@ -77,7 +84,11 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>
   </div>
-  <p v-else-if="setup.isLoading.value || workspaces.isLoading.value || me.isLoading.value || leaving" role="status" class="p-8 text-muted">
+  <p
+    v-else-if="setup.isLoading.value || workspaces.isLoading.value || me.isLoading.value || leaving"
+    role="status"
+    class="p-8 text-muted"
+  >
     {{ t("load.loading") }}
   </p>
   <div v-else class="app-shell">
@@ -92,11 +103,11 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
       </button>
     </div>
     <div
-      v-if="items.length > 0 && logoutError"
+      v-if="items.length > 0 && (logoutError || navigation.error.value)"
       role="alert"
       class="border-b border-default bg-elevated px-4 py-2 text-sm text-muted"
     >
-      {{ logoutError }}
+      {{ logoutError ?? navigation.error.value }}
     </div>
     <template v-if="items.length === 0">
       <main class="app-shell__main">
@@ -111,7 +122,11 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
           :is-admin="me.data.value?.isInstanceAdmin === true"
           :on-create="createWorkspace"
           :on-logout="() => void logout()"
-          :error="logoutError ?? (workspaces.isError.value ? t('load.listFailed') : null)"
+          :error="
+            navigation.error.value ??
+            logoutError ??
+            (workspaces.isError.value ? t('load.listFailed') : null)
+          "
           :on-retry="() => void workspaces.refetch()"
         />
       </main>
@@ -138,7 +153,13 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
           <a href="/settings/account" class="self-center text-sm underline underline-offset-2">
             {{ t("settings.account") }}
           </a>
-          <UButton type="button" size="sm" variant="outline" color="neutral" @click="() => void logout()">
+          <UButton
+            type="button"
+            size="sm"
+            variant="outline"
+            color="neutral"
+            @click="() => void logout()"
+          >
             {{ t("nav.logout") }}
           </UButton>
         </div>
@@ -164,7 +185,11 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
           </a>
         </div>
       </main>
-      <WorkspaceCreateDialog :open="createOpen" :on-create="createWorkspace" @close="createOpen = false" />
+      <WorkspaceCreateDialog
+        :open="createOpen"
+        :on-create="createWorkspace"
+        @close="createOpen = false"
+      />
     </template>
     <footer class="border-t border-default px-4 py-3">
       <AuthenticatedLegalNav />

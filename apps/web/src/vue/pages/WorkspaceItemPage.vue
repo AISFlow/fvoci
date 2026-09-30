@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
@@ -15,7 +16,12 @@ import {
 import { taskFieldValidationMessage, taskMutationErrorMessage } from "@/features/tasks/task-errors";
 import { settleTaskPatch } from "@/features/tasks/task-patch-cache";
 import { lookupQuery, resolveLookupTarget } from "@/features/tasks/lookup";
-import { projectLabelsQuery, projectMilestonesQuery, taskListQuery, taskQuery } from "@/features/tasks/queries";
+import {
+  projectLabelsQuery,
+  projectMilestonesQuery,
+  taskListQuery,
+  taskQuery,
+} from "@/features/tasks/queries";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { membersQuery } from "@/lib/queries";
 import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
@@ -37,6 +43,7 @@ import "@/features/projects/projects.css";
 // to the connected task list through leaveTo.
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationError(() => route.fullPath);
 const queryClient = useQueryClient();
 const slug = computed(() => String(route.params.slug ?? ""));
 const refParam = computed(() => String(route.params.ref ?? ""));
@@ -56,27 +63,32 @@ const formEpoch = ref(0);
 
 const workspaceId = computed(() => workspace.value?.id ?? "");
 const projects = useQuery(() => projectsQuery(workspaceId.value));
-const project = computed(() => findProjectByKey(projects.data.value?.items, item.value?.prefix ?? ""));
+const project = computed(() =>
+  findProjectByKey(projects.data.value?.items, item.value?.prefix ?? ""),
+);
 const lookup = useQuery(() => lookupQuery(workspaceId.value, displayId.value));
 const lookupTarget = computed(() =>
-  lookup.isSuccess.value ? resolveLookupTarget(lookup.data.value?.items ?? [], displayId.value) : null,
+  lookup.isSuccess.value
+    ? resolveLookupTarget(lookup.data.value?.items ?? [], displayId.value)
+    : null,
 );
-const lookupTask = computed(() => (lookupTarget.value?.kind === "task" ? lookupTarget.value.item : null));
+const lookupTask = computed(() =>
+  lookupTarget.value?.kind === "task" ? lookupTarget.value.item : null,
+);
 const projectDocument = computed(() =>
   lookupTarget.value?.kind === "project-document" ? lookupTarget.value.item : null,
 );
 const task = useQuery(() => taskQuery(workspaceId.value, lookupTask.value?.id ?? ""));
-useTaskStream(
-  workspaceId,
-  () => project.value?.id ?? lookupTask.value?.projectId ?? undefined,
-);
+useTaskStream(workspaceId, () => project.value?.id ?? lookupTask.value?.projectId ?? undefined);
 const workflow = useQuery(() =>
   workflowQuery(workspaceId.value, project.value?.id ?? lookupTask.value?.projectId ?? ""),
 );
 const taskPages = useInfiniteQuery(() =>
   taskListQuery(workspaceId.value, project.value?.id ?? task.data.value?.projectId ?? ""),
 );
-const parentItems = computed(() => mergeTaskListPages(taskPages.data.value?.pages ?? [])?.items ?? []);
+const parentItems = computed(
+  () => mergeTaskListPages(taskPages.data.value?.pages ?? [])?.items ?? [],
+);
 const members = useQuery(() => ({
   ...membersQuery(workspaceId.value),
   enabled: Boolean(workspaceId.value),
@@ -97,8 +109,12 @@ async function afterMutation(): Promise<void> {
 
 function goTo(path: string): void {
   leaveTo(path, {
-    assign: (url) => window.location.assign(url),
-    push: (pathTo) => void router.push(pathTo),
+    assign: (url) => {
+      window.location.assign(url);
+    },
+    push: (pathTo) => {
+      navigation.run(() => router.push(pathTo));
+    },
   });
 }
 
@@ -222,11 +238,17 @@ async function runPatch(body: PatchTaskBody): Promise<void> {
 }
 
 const projectsDenied = computed(
-  () => projects.isError.value && projects.error.value instanceof ProblemError && projects.error.value.status === 404,
+  () =>
+    projects.isError.value &&
+    projects.error.value instanceof ProblemError &&
+    projects.error.value.status === 404,
 );
 const missingItem = computed(() => item.value == null);
 const lookup404 = computed(
-  () => lookup.isError.value && lookup.error.value instanceof ProblemError && lookup.error.value.status === 404,
+  () =>
+    lookup.isError.value &&
+    lookup.error.value instanceof ProblemError &&
+    lookup.error.value.status === 404,
 );
 const lookupMiss = computed(() => lookup.isSuccess.value && lookupTarget.value?.kind === "miss");
 const task404 = computed(
@@ -237,13 +259,18 @@ const task404 = computed(
     task.error.value.status === 404,
 );
 const realNotFound = computed(
-  () => missingItem.value || projectsDenied.value || lookup404.value || lookupMiss.value || task404.value,
+  () =>
+    missingItem.value ||
+    projectsDenied.value ||
+    lookup404.value ||
+    lookupMiss.value ||
+    task404.value,
 );
 
 const taskReadOnly = computed(
   () =>
     !task.data.value?.canEdit ||
-    task.data.value?.archivedAt !== null ||
+    task.data.value.archivedAt !== null ||
     project.value?.status === "archived",
 );
 
@@ -325,15 +352,18 @@ async function onRemoveDependency(edge: { blockerId: string; blockedId: string }
   actionError.value = null;
   try {
     await ensureOk(
-      await api.DELETE("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies/{blocked_id}", {
-        params: {
-          path: {
-            workspace_id: workspaceId.value,
-            task_id: edge.blockerId,
-            blocked_id: edge.blockedId,
+      await api.DELETE(
+        "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies/{blocked_id}",
+        {
+          params: {
+            path: {
+              workspace_id: workspaceId.value,
+              task_id: edge.blockerId,
+              blocked_id: edge.blockedId,
+            },
           },
         },
-      }),
+      ),
     );
     await afterMutation();
   } catch (err) {
@@ -352,12 +382,19 @@ async function onTrash(): Promise<void> {
 </script>
 
 <template>
-  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="session.status.value === 'loading'" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="session.status.value === 'error'" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="session.retry()">{{ t("load.retry") }}</UButton>
   </div>
-  <WorkspaceShell v-else-if="workspace" :slug="slug" :workspace-id="workspace.id" :workspace-name="workspace.name">
+  <WorkspaceShell
+    v-else-if="workspace"
+    :slug="slug"
+    :workspace-id="workspace.id"
+    :workspace-name="workspace.name"
+  >
     <QueryLoading v-if="projects.isLoading.value" />
     <QueryError
       v-if="projects.isError.value && !projectsDenied"
@@ -410,12 +447,14 @@ async function onTrash(): Promise<void> {
       :members="members.data.value?.items ?? []"
       :labels="labels.data.value?.items ?? []"
       :milestones="milestones.data.value?.items ?? []"
-      :dependency-candidates="parentItems.map((row) => ({ id: row.id, number: row.number, title: row.title }))"
+      :dependency-candidates="
+        parentItems.map((row) => ({ id: row.id, number: row.number, title: row.title }))
+      "
       :read-only="taskReadOnly"
       :can-edit="task.data.value.canEdit"
       :pending="pending"
       :field-error="fieldError"
-      :action-error="actionError"
+      :action-error="actionError ?? navigation.error.value"
       :archive-pending="patchTask.isPending.value"
       :trash-pending="trashTask.isPending.value"
       :form-epoch="formEpoch"
@@ -453,7 +492,9 @@ async function onTrash(): Promise<void> {
       "
     />
     <p v-if="realNotFound || projectDocument" class="task-home__note">
-      <AppLink :to="project ? projectTasksPath(slug, project.key) : projectsPath(slug)">{{ t("nav.projects") }}</AppLink>
+      <AppLink :to="project ? projectTasksPath(slug, project.key) : projectsPath(slug)">{{
+        t("nav.projects")
+      }}</AppLink>
     </p>
   </WorkspaceShell>
 </template>

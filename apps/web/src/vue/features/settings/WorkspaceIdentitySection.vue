@@ -61,14 +61,24 @@ function onDelete(): void {
 <template>
   <section class="settings-section">
     <h1 class="settings-section__title">{{ t("settings.workspace") }}</h1>
-    <p v-if="workspaceName !== '' && !(workspaceKind === 'team' && canManage)" class="text-sm font-medium break-keep">
+    <p
+      v-if="workspaceName !== '' && !(workspaceKind === 'team' && canManage)"
+      class="text-sm font-medium break-keep"
+    >
       {{ workspaceName }}
     </p>
     <p v-if="workspaceSlug !== ''" class="settings-section__lede">
       {{ t("workspace.settings.slug") }} <span class="settings-tabular">{{ workspaceSlug }}</span>
     </p>
-    <p v-if="workspaceKind === 'personal'" class="text-sm text-muted">{{ t("personal workspace is immutable") }}</p>
-    <form v-if="workspaceKind === 'team' && canManage" class="settings-form" novalidate @submit.prevent="onSaveName">
+    <p v-if="workspaceKind === 'personal'" class="text-sm text-muted">{{
+      t("personal workspace is immutable")
+    }}</p>
+    <form
+      v-if="workspaceKind === 'team' && canManage"
+      class="settings-form"
+      novalidate
+      @submit.prevent="onSaveName"
+    >
       <label for="workspace-name">{{ t("workspace.name") }}</label>
       <div class="settings-form__row">
         <UInput
@@ -80,13 +90,19 @@ function onDelete(): void {
         />
         <UButton type="submit" size="sm" :disabled="namePending">{{ t("workspace.save") }}</UButton>
       </div>
-      <p v-if="nameFieldError" role="alert" class="settings-notice settings-notice--danger">{{ nameFieldError }}</p>
-      <p v-if="nameError" role="alert" class="settings-notice settings-notice--danger">{{ nameError }}</p>
+      <p v-if="nameFieldError" role="alert" class="settings-notice settings-notice--danger">{{
+        nameFieldError
+      }}</p>
+      <p v-if="nameError" role="alert" class="settings-notice settings-notice--danger">{{
+        nameError
+      }}</p>
       <p v-if="nameSaved && !nameError" role="status" class="settings-notice settings-notice--ok">
         {{ t("workspace.settings.saved") }}
       </p>
     </form>
-    <p v-if="workspaceKind === 'team' && !canManage" class="text-sm text-muted">{{ t("workspace.settings.readOnly") }}</p>
+    <p v-if="workspaceKind === 'team' && !canManage" class="text-sm text-muted">{{
+      t("workspace.settings.readOnly")
+    }}</p>
     <details v-if="workspaceKind === 'team' && isOwner" class="settings-disclosure">
       <summary class="settings-disclosure__summary">{{ t("workspace.delete") }}</summary>
       <div class="settings-disclosure__body">
@@ -109,8 +125,12 @@ function onDelete(): void {
           >
             {{ confirmSlugError }}
           </p>
-          <p v-if="deleteError" role="alert" class="settings-notice settings-notice--danger">{{ deleteError }}</p>
-          <UButton type="submit" size="sm" color="error" :disabled="deletePending">{{ t("workspace.delete") }}</UButton>
+          <p v-if="deleteError" role="alert" class="settings-notice settings-notice--danger">{{
+            deleteError
+          }}</p>
+          <UButton type="submit" size="sm" color="error" :disabled="deletePending">{{
+            t("workspace.delete")
+          }}</UButton>
         </form>
       </div>
     </details>

@@ -71,7 +71,9 @@ const instanceName = computed(() => {
   const brandingName = leafValue(values.value.branding, "name");
   return typeof brandingName === "string" ? brandingName : "";
 });
-const shown = computed(() => SETTINGS_ENTRIES.filter(([key, entry]) => matches(key, entry, query.value)));
+const shown = computed(() =>
+  SETTINGS_ENTRIES.filter(([key, entry]) => matches(key, entry, query.value)),
+);
 
 function currentValue(key: SettingsKey): unknown {
   return draft.value[key] !== undefined ? draft.value[key] : values.value[key];
@@ -93,7 +95,10 @@ function eeLocked(key: SettingsKey): boolean {
 }
 
 function setLeaf(key: SettingsKey, leaf: string, next: unknown): void {
-  draft.value = { ...draft.value, [key]: withLeaf(draft.value[key] ?? values.value[key], leaf, next) };
+  draft.value = {
+    ...draft.value,
+    [key]: withLeaf(draft.value[key] ?? values.value[key], leaf, next),
+  };
 }
 
 async function submit(key: SettingsKey, next: unknown): Promise<void> {
@@ -110,9 +115,9 @@ async function submit(key: SettingsKey, next: unknown): Promise<void> {
   } finally {
     saving.value = false;
   }
-  const rest = { ...draft.value };
-  delete rest[key];
-  draft.value = rest;
+  draft.value = Object.fromEntries(
+    Object.entries(draft.value).filter(([draftKey]) => draftKey !== key),
+  );
   saved.value = true;
 }
 
@@ -120,9 +125,13 @@ function runAsset(kind: BrandingAssetKind, file: File | null): void {
   if (busy.value) return;
   saving.value = true;
   assetProblems.value = { ...assetProblems.value, [kind]: undefined };
-  void props.onAsset(kind, file)
+  void props
+    .onAsset(kind, file)
     .catch((err: unknown) => {
-      assetProblems.value = { ...assetProblems.value, [kind]: problemMessage(err, "error.network") };
+      assetProblems.value = {
+        ...assetProblems.value,
+        [kind]: problemMessage(err, "error.network"),
+      };
     })
     .finally(() => {
       saving.value = false;
@@ -146,14 +155,19 @@ function overrideText(value: unknown, key: string): string {
 }
 
 function widgetOf(entry: (typeof SETTINGS_ENTRIES)[number][1], leaf: string): SettingsWidget {
-  return entry.widgets[leaf]!;
+  const widget = entry.widgets[leaf];
+  if (widget === undefined) throw new Error(`Missing settings widget: ${leaf}`);
+  return widget;
 }
 
 function assetKindOf(leaf: string): BrandingAssetKind | null {
   return BRANDING_ASSET_KINDS.find((kind) => kind === leaf) ?? null;
 }
 
-function enumOptions(key: SettingsKey, leaf: string): { value: string; label: string; disabled?: boolean }[] {
+function enumOptions(
+  key: SettingsKey,
+  leaf: string,
+): { value: string; label: string; disabled?: boolean }[] {
   return (SETTING_ENUM_OPTIONS[`${key}.${leaf}`] ?? []).map((value) => ({
     value,
     label: label(optionKey(key, leaf, value)),
@@ -179,7 +193,9 @@ const badgeClass =
 
 <template>
   <section class="settings-section" aria-labelledby="instance-settings-title">
-    <h2 class="settings-section__title text-title" id="instance-settings-title">{{ t("settings.ui.title") }}</h2>
+    <h2 id="instance-settings-title" class="settings-section__title text-title">{{
+      t("settings.ui.title")
+    }}</h2>
     <p class="settings-section__lede">{{ t("settings.ui.help") }}</p>
     <p v-if="saveError" role="alert" class="text-sm text-error">{{ saveError }}</p>
     <p v-if="saved" role="status" class="text-sm text-muted">{{ t("workspace.settings.saved") }}</p>
@@ -195,7 +211,9 @@ const badgeClass =
       <QueryLoading v-if="loading" />
       <QueryError v-if="error && onRetry" :message="error" @retry="onRetry" />
       <p v-else-if="error" class="text-sm text-error" role="alert">{{ error }}</p>
-      <p v-if="!loading && shown.length === 0" class="text-sm text-muted">{{ t("settings.ui.noMatch") }}</p>
+      <p v-if="!loading && shown.length === 0" class="text-sm text-muted">{{
+        t("settings.ui.noMatch")
+      }}</p>
       <template v-if="data !== null">
         <section
           v-for="[key, entry] in shown"
@@ -204,20 +222,30 @@ const badgeClass =
           class="flex flex-col gap-3 rounded-md border border-default p-4"
         >
           <div class="flex flex-wrap items-center gap-2">
-            <h3 class="text-sm font-medium" :id="`setting-${key}`">{{ label(entry.labelKey) }}</h3>
+            <h3 :id="`setting-${key}`" class="text-sm font-medium">{{ label(entry.labelKey) }}</h3>
             <span :class="badgeClass">{{ label(entry.group) }}</span>
-            <span v-if="entry.safety === 'restart_required'" :class="badgeClass">{{ t("settings.ui.restart") }}</span>
-            <span v-if="overridden.has(key)" :class="badgeClass">{{ t("settings.ui.overridden") }}</span>
+            <span v-if="entry.safety === 'restart_required'" :class="badgeClass">{{
+              t("settings.ui.restart")
+            }}</span>
+            <span v-if="overridden.has(key)" :class="badgeClass">{{
+              t("settings.ui.overridden")
+            }}</span>
             <span v-if="eeLocked(key)" :class="badgeClass">{{ t("ee.badge") }}</span>
           </div>
           <p class="text-xs text-muted">{{ label(entry.helpKey) }}</p>
           <p v-if="eeLocked(key)" class="text-xs text-muted">{{ t("ee.required") }}</p>
-          <p v-if="restartPending.has(key)" class="text-xs text-error">{{ t("settings.ui.restartPending") }}</p>
+          <p v-if="restartPending.has(key)" class="text-xs text-error">{{
+            t("settings.ui.restartPending")
+          }}</p>
           <p
             v-if="key === 'attachmentTransfer' && transfer.effectiveOptionKey !== null"
             class="text-xs text-muted"
           >
-            {{ t("settings.attachmentTransfer.effective", { mode: label(transfer.effectiveOptionKey) }) }}
+            {{
+              t("settings.attachmentTransfer.effective", {
+                mode: label(transfer.effectiveOptionKey),
+              })
+            }}
           </p>
           <p
             v-if="key === 'attachmentTransfer' && transfer.unavailableKey !== null"
@@ -233,12 +261,15 @@ const badgeClass =
             {{ t("settings.attachmentTransfer.blocked") }}
           </p>
           <div v-for="leaf in Object.keys(entry.widgets)" :key="leaf" class="flex flex-col gap-1">
-            <label class="font-mono text-xs" :for="`${key}.${leaf}`" :id="`${key}.${leaf}-label`">
+            <label :id="`${key}.${leaf}-label`" class="font-mono text-xs" :for="`${key}.${leaf}`">
               {{ `${key}.${leaf}` }}
             </label>
             <template v-if="widgetOf(entry, leaf) === 'asset'">
               <div v-if="assetKindOf(leaf)" class="flex flex-col gap-2">
-                <p v-if="assetDigest(leafValue(values[key], leaf)) === null" class="text-xs text-muted">
+                <p
+                  v-if="assetDigest(leafValue(values[key], leaf)) === null"
+                  class="text-xs text-muted"
+                >
                   {{ t(ASSET_COPY[assetKindOf(leaf)!].none) }}
                 </p>
                 <div
@@ -248,7 +279,12 @@ const badgeClass =
                   <img
                     :alt="t(ASSET_COPY[assetKindOf(leaf)!].alt, { name: instanceName })"
                     class="max-h-full max-w-full object-contain"
-                    :src="assetPreviewSrc(assetKindOf(leaf)!, assetDigest(leafValue(values[key], leaf))!)"
+                    :src="
+                      assetPreviewSrc(
+                        assetKindOf(leaf)!,
+                        assetDigest(leafValue(values[key], leaf))!,
+                      )
+                    "
                   />
                 </div>
                 <input
@@ -256,14 +292,16 @@ const badgeClass =
                   :class="fieldClass"
                   type="file"
                   :accept="BRANDING_ASSET_MIME.join(',')"
-                  :aria-describedby="assetProblems[assetKindOf(leaf)!] ? `${key}.${leaf}-problem` : undefined"
+                  :aria-describedby="
+                    assetProblems[assetKindOf(leaf)!] ? `${key}.${leaf}-problem` : undefined
+                  "
                   :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
                   @change="pickAsset(assetKindOf(leaf)!, $event)"
                 />
                 <p
                   v-if="assetProblems[assetKindOf(leaf)!]"
-                  class="text-xs text-error"
                   :id="`${key}.${leaf}-problem`"
+                  class="text-xs text-error"
                   role="alert"
                 >
                   {{ assetProblems[assetKindOf(leaf)!] }}
@@ -346,16 +384,20 @@ const badgeClass =
                 <label class="font-mono text-xs" :for="`msg-${msgKey}`">{{ msgKey }}</label>
                 <p class="whitespace-pre-line text-xs text-muted">{{ label(msgKey) }}</p>
                 <textarea
+                  :id="`msg-${msgKey}`"
                   :class="textareaClass"
                   :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
-                  :id="`msg-${msgKey}`"
                   rows="2"
                   :value="overrideText(leafValue(currentValue(key), leaf), msgKey)"
                   @input="
                     setLeaf(
                       key,
                       leaf,
-                      withMessageOverride(overrideMap(leafValue(currentValue(key), leaf)), msgKey, inputText($event)),
+                      withMessageOverride(
+                        overrideMap(leafValue(currentValue(key), leaf)),
+                        msgKey,
+                        inputText($event),
+                      ),
                     )
                   "
                 />
@@ -375,7 +417,9 @@ const badgeClass =
                 </p>
               </div>
             </div>
-            <p v-if="envApplied.has(`${key}.${leaf}`)" class="text-xs text-muted">{{ t("settings.ui.envFixed") }}</p>
+            <p v-if="envApplied.has(`${key}.${leaf}`)" class="text-xs text-muted">{{
+              t("settings.ui.envFixed")
+            }}</p>
           </div>
           <div class="flex flex-wrap gap-2">
             <ConfirmAction
