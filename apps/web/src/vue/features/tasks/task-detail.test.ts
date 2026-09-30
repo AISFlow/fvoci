@@ -195,7 +195,7 @@ await test("TaskDetailView wires the React side panels without a second collab r
   assert.match(taskView, /hide-when-empty/);
   assert.match(taskView, /:task-id="task\.id"/);
   assert.match(taskView, /:current-user-id="currentUserId"/);
-  assert.match(taskView, /readOnly \|\| task\.archivedAt != null/);
+  assert.match(taskView, /bodyReadOnly \|\| task\.archivedAt != null/);
   const template = taskView.slice(taskView.indexOf("<template>"));
   const collectionAt = template.indexOf("TaskCollectionProperties");
   const bodyAt = template.indexOf("TaskBodyEditor");
