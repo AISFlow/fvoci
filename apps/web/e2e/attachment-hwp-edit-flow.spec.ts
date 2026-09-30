@@ -176,8 +176,14 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await searchLink.click();
   await expect(page).toHaveURL(/\/w\/acme\/search/);
   await expect(dialog).toHaveCount(0);
-  // Wait until the boundary load has unmounted the viewer before history back.
+  // Keep the no-match link check above, then create distinct viewer/search
+  // documents for native history protection; reloading SPA history is insufficient.
   await expect(viewer).toHaveCount(0);
+  await page.goto(viewPath);
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await page.goto("/w/acme/search");
+  await expect(page).toHaveURL(/\/w\/acme\/search/);
+  await expect(page.locator("[data-v-app]")).toHaveCount(1);
   await page.goBack();
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
@@ -237,7 +243,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await expect(dialog).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(saveButton).toBeEnabled();
-  // Forward to the prior React document crosses a browser document boundary.
+  // Forward to the separately loaded search document crosses a browser document boundary.
   // Its native beforeunload prompt must preserve the exact dirty content when
   // dismissed, and discard only after acceptance. Same-app history uses the
   // custom dialog below, after save-copy.
