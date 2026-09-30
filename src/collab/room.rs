@@ -4120,6 +4120,16 @@ impl RoomActor {
     }
 
     async fn deliver_outbound(&mut self, conn_id: Uuid, bytes: Vec<u8>, kind: OutboundKind) {
+        let Some(events) = self.connections.get(&conn_id).map(|c| c.events.clone()) else {
+            return;
+        };
+        // Transport teardown closes this receiver before the actor drains its
+        // admitted input prefix. It is not a slow peer: Leave/lease retirement
+        // already orders cleanup after that prefix. Evicting here during an
+        // earlier update's broadcast would discard the queued final edit.
+        if events.is_closed() {
+            return;
+        }
         let accounted_bytes = bytes.len().saturating_add(OUTBOUND_FRAME_OVERHEAD);
         let budget = self
             .connections
@@ -4152,16 +4162,16 @@ impl RoomActor {
             accounted_bytes,
             budget,
         };
-        let events = self.connections.get(&conn_id).map(|c| c.events.clone());
-        let Some(events) = events else {
-            return;
-        };
         let frame = OutboundFrame {
             bytes,
             kind,
             permit: Some(delivery_permit),
         };
-        if events.try_send(RoomClientEvent::Outbound(frame)).is_err() {
+        // The receiver can close after the check above. A full live channel
+        // still enforces the outbound budget and preempts the slow peer.
+        if let Err(mpsc::error::TrySendError::Full(_)) =
+            events.try_send(RoomClientEvent::Outbound(frame))
+        {
             self.evict_for_backpressure(conn_id).await;
         }
     }
