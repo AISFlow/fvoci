@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
-import { logout } from "./helpers";
+import { expectSpentMagic, expectVueAuth } from "./auth-link-evidence";
+import { logout, waitForCapturedMail } from "./helpers";
 import { currentStep, freshCode, totp } from "./mfa-helpers";
 import { qrModules } from "../src/lib/qr";
 
@@ -108,4 +109,29 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await passwordStep(page);
   await submitMfaCode(page, recoveryCodes[1]);
   await expect(page).toHaveURL(/\/$/);
+
+  // Magic-link consumption must also stop at MFA without issuing a session.
+  await logout(page);
+  await page.getByRole("button", { name: "이메일로 로그인 링크 받기" }).click();
+  await page.locator("#magic-link-email").fill(owner.email);
+  await page.getByRole("button", { name: "링크 받기", exact: true }).click();
+  const magicMail = await waitForCapturedMail((mail) =>
+    mail.to === owner.email && mail.text.includes("/magic-link?token="),
+  );
+  const magicToken = magicMail.text.match(/magic-link\?token=([A-Za-z0-9_-]+)/)?.[1];
+  expect(magicToken).toBeTruthy();
+  await page.goto(`/magic-link?token=${magicToken}`);
+  await expectVueAuth(page);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
+  await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "2단계 인증" })).toBeVisible();
+  await expect(page).toHaveURL(/\/magic-link\?token=/);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
+  await expectSpentMagic(page, "/api/v1/auth/magic-link/consume", magicToken!);
+  await submitMfaCode(page, recoveryCodes[0]);
+  await expect(page.getByRole("alert")).toContainText("인증 코드가 맞지 않습니다");
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(401);
+  await submitMfaCode(page, recoveryCodes[2]);
+  await expect(page).toHaveURL(/\/$/);
+  expect((await page.request.get("/api/v1/auth/me")).status()).toBe(200);
 });
