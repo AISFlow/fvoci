@@ -24,4 +24,3 @@ export const VUE_ROUTE_PATHS = {
   invite: "/invite/:token",
   setup: "/setup",
 } as const;
-
