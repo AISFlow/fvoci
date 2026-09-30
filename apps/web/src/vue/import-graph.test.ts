@@ -59,6 +59,7 @@ test("the Vue app's module graph imports no React module", () => {
     "AccountSettingsPage.vue",
     "DocumentTagsSettingsPage.vue",
     "TemplatesSettingsPage.vue",
+    "PublicSharePage.vue",
   ]) {
     walk(path.join(web, "src/vue/pages", extra));
   }
@@ -125,6 +126,7 @@ test("the Vue entry's static graph leaves the wiki editor to the wiki page's chu
     "WorkspaceSettingsPage.vue",
     "DocumentTagsSettingsPage.vue",
     "TemplatesSettingsPage.vue",
+    "PublicSharePage.vue",
   ]) {
     assert.equal(seen.has(path.join(web, "src/vue/pages", page)), false, `${page} is a lazy route chunk`);
   }
@@ -164,4 +166,24 @@ test("the workspace-item chunk may load the collab editor (the React page does)"
     found.some((entry) => entry.includes("@fvoci/editor") || entry.includes("editor/")),
     `expected the task/document item page to load the editor, got ${JSON.stringify(found)}`,
   );
+});
+
+test("the public share page does not load the wiki editor stack", () => {
+  const seen = new Set<string>();
+  const found: string[] = [];
+  const walk = (file: string) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = readFileSync(file, "utf8");
+    for (const [, spec] of source.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
+      if (!spec) continue;
+      if (EDITOR_STACK.test(spec)) found.push(`${spec} in ${path.relative(web, file)}`);
+      if (REACT.test(spec)) found.push(`${spec} in ${path.relative(web, file)}`);
+      const next = resolve(spec, file);
+      if (next && !next.endsWith(".css")) walk(next);
+    }
+  };
+  walk(path.join(web, "src/vue/pages/PublicSharePage.vue"));
+  assert.ok(seen.size > 1, `walked ${seen.size} modules`);
+  assert.deepEqual(found, []);
 });
