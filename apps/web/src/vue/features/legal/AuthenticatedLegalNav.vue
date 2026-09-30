@@ -2,8 +2,7 @@
 import { t } from "@fvoci/i18n";
 import { LEGAL_DOCS } from "@/features/legal/operator-fields";
 
-// /service-info and /legal/:kind stay React until the boot boundary moves:
-// plain anchors, a full page load.
+// Public Vue pages use plain anchors for a full page load with fresh queries.
 </script>
 
 <template>
