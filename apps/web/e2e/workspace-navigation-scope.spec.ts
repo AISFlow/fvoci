@@ -385,7 +385,7 @@ test("late notification open and read-all preserve the other workspace's unread 
         { data: { body: "Scoped notification", mentionedUserIds: [userId] } },
       );
       expect(response.status()).toBe(201);
-      commentIds.push((await readJson(response, flowSchemas.document)).id);
+      commentIds.push((await readJson(response, flowSchemas.id)).id);
     } finally {
       await context.close();
     }

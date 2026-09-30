@@ -255,7 +255,7 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
             },
           );
           expect(comment.status()).toBe(201);
-          commentIds.push((await readJson(comment, flowSchemas.document)).id);
+          commentIds.push((await readJson(comment, flowSchemas.id)).id);
         }),
       );
     }
