@@ -14,6 +14,7 @@ import {
   type Page,
   type Request,
   type Response,
+  type Route,
 } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser, login, watchCspViolations } from "./helpers";
 
@@ -548,6 +549,26 @@ test("the bell shows a notification created through the API and opens it from bo
       "href",
       `/w/${admin.workspaceSlug}/notifications`,
     );
+    const firstNotificationPath = `**/api/v1/workspaces/${wsId}/notifications/${firstItem.id}`;
+    const failMarkRead = async (route: Route): Promise<void> => {
+      if (route.request().method() === "PATCH") {
+        await route.abort("failed");
+      } else {
+        await route.continue();
+      }
+    };
+    const ganttUrl = m.page.url();
+    await m.page.route(firstNotificationPath, failMarkRead);
+    try {
+      await panel.getByRole("button", { name: message, exact: true }).click();
+      await expect(panel.getByRole("alert")).toHaveText("연결을 확인하고 다시 시도해 주세요.");
+      await expect(panel).toBeVisible();
+      await expect(m.page).toHaveURL(ganttUrl);
+      expect((await notifications()).find((item) => item.id === firstItem.id)?.readAt).toBeNull();
+      expect(await unreadCount()).toBe(unread);
+    } finally {
+      await m.page.unroute(firstNotificationPath, failMarkRead);
+    }
     await markDocument(m.page);
     const patched = m.page.waitForResponse(
       (response: Response) =>
@@ -555,6 +576,7 @@ test("the bell shows a notification created through the API and opens it from bo
         response.request().method() === "PATCH",
     );
     await panel.getByRole("button", { name: message, exact: true }).click();
+    await expect(panel.getByRole("alert")).toHaveCount(0);
     expect((await patched).status()).toBe(200);
     const fixtureValue1 = firstItem.displayId;
     if (fixtureValue1 === null) throw new Error("Missing fixture value: firstItem.displayId");
@@ -566,19 +588,42 @@ test("the bell shows a notification created through the API and opens it from bo
     expect((await notifications()).find((item) => item.id === firstItem.id)?.readAt).toBeTruthy();
 
     // Wiki: read all clears the count; "see all" opens the inbox (React).
-    const { task: second } = await assign("셸 알림 태스크 둘");
+    const { task: second, item: secondItem } = await assign("셸 알림 태스크 둘");
     await openWiki(m.page, doc);
     await m.page
       .getByRole("button", { name: `안 읽은 알림 ${String(await unreadCount())}건` })
       .click();
     const secondMessage = `태스크 #${String(second.number)} 「${second.title}」의 담당자로 지정되었습니다`;
     await expect(panel.getByRole("button", { name: secondMessage, exact: true })).toBeVisible();
+    await expect(panel.getByRole("alert")).toHaveCount(0);
+    const readAllPath = `**/api/v1/workspaces/${wsId}/notifications/read-all`;
+    const failReadAll = async (route: Route): Promise<void> => {
+      if (route.request().method() === "POST") {
+        await route.abort("failed");
+      } else {
+        await route.continue();
+      }
+    };
+    const wikiUrl = m.page.url();
+    const unreadBeforeReadAll = await unreadCount();
+    await m.page.route(readAllPath, failReadAll);
+    try {
+      await panel.getByRole("button", { name: "모두 읽음" }).click();
+      await expect(panel.getByRole("alert")).toHaveText("연결을 확인하고 다시 시도해 주세요.");
+      await expect(panel).toBeVisible();
+      await expect(m.page).toHaveURL(wikiUrl);
+      expect((await notifications()).find((item) => item.id === secondItem.id)?.readAt).toBeNull();
+      expect(await unreadCount()).toBe(unreadBeforeReadAll);
+    } finally {
+      await m.page.unroute(readAllPath, failReadAll);
+    }
     const readAll = m.page.waitForResponse(
       (response: Response) =>
         response.url().endsWith(`/api/v1/workspaces/${wsId}/notifications/read-all`) &&
         response.request().method() === "POST",
     );
     await panel.getByRole("button", { name: "모두 읽음" }).click();
+    await expect(panel.getByRole("alert")).toHaveCount(0);
     expect((await readAll).status()).toBe(200);
     await expect(m.page.getByRole("button", { name: "알림", exact: true })).toBeVisible();
     await expect(panel.getByRole("button", { name: "모두 읽음" })).toHaveCount(0);
