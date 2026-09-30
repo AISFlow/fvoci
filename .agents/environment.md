@@ -9,16 +9,16 @@
 
 2026-10-01 00:36 KST, 현재 terminal 환경·세션 JSONL·설치 CLI·run-current를 읽기 전용으로 대조했다.
 
-| 항목 | 실제 값 | 근거 |
-| --- | --- | --- |
-| 코디네이터 모델 / effort | `gpt-6.1-sol` / `high` | 최신 `turn_context`; 요청값·TUI 이름만으로 추정하지 않음 |
-| 실행 경로 / CLI | Orca Codex 주 terminal, `codex-cli 0.159.1`, source `cli` | session_meta·현재 `codex --version` |
-| 주 세션 | `01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0` | 실제 `CODEX_THREAD_ID`와 JSONL 일치 |
-| terminal handle | `term_cc010fa2-f24c-4018-820f-16172de0e39f` | 실제 `ORCA_TERMINAL_HANDLE`와 Run coordinator_handle 일치 |
-| 현재 Run / generation | `run_496803f4d94f` / `2` | 본인 terminal의 기존 Run 바인딩 및 최신 run-current |
-| Orca runtime | `73201137-ed1f-4a8a-bcde-302a44c54e4b` | 현재 CLI 응답 `_meta.runtimeId` |
-| 통합 worktree | `/home/kinesis/orca/workspaces/fvoci/f272-batch-integration` | 최신 turn_context.cwd·실제 Git |
-| 현재 sandbox / approval | `danger-full-access` / `never` | 최신 turn_context; filesystem·network 접근 가능, 강한 읽기 전용 sandbox 아님 |
+| 항목                     | 실제 값                                                      | 근거                                                                         |
+| ------------------------ | ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| 코디네이터 모델 / effort | `gpt-6.1-sol` / `high`                                       | 최신 `turn_context`; 요청값·TUI 이름만으로 추정하지 않음                     |
+| 실행 경로 / CLI          | Orca Codex 주 terminal, `codex-cli 0.159.1`, source `cli`    | session_meta·현재 `codex --version`                                          |
+| 주 세션                  | `01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0`                       | 실제 `CODEX_THREAD_ID`와 JSONL 일치                                          |
+| terminal handle          | `term_cc010fa2-f24c-4018-820f-16172de0e39f`                  | 실제 `ORCA_TERMINAL_HANDLE`와 Run coordinator_handle 일치                    |
+| 현재 Run / generation    | `run_496803f4d94f` / `2`                                     | 본인 terminal의 기존 Run 바인딩 및 최신 run-current                          |
+| Orca runtime             | `73201137-ed1f-4a8a-bcde-302a44c54e4b`                       | 현재 CLI 응답 `_meta.runtimeId`                                              |
+| 통합 worktree            | `/home/kinesis/orca/workspaces/fvoci/f272-batch-integration` | 최신 turn_context.cwd·실제 Git                                               |
+| 현재 sandbox / approval  | `danger-full-access` / `never`                               | 최신 turn_context; filesystem·network 접근 가능, 강한 읽기 전용 sandbox 아님 |
 
 실제 transcript:
 `/home/kinesis/.codex/sessions/2026/09/30/rollout-2026-09-30T23-38-52-01a0f2c1-0b9e-7453-80a6-3e490b6ef7f0.jsonl`.
@@ -41,17 +41,17 @@ Run의 오래된 objective 문자열에 남은 “Astra”는 당시 생성 meta
 
 ## 2. 저장소와 설치 도구
 
-| 항목 | 현재 경로·버전 / 확인 범위 |
-| --- | --- |
-| 호스트 | Linux `6.18.33.2-microsoft-standard-WSL2`, x86_64; 62 GiB RAM. 00:36 관측 가용35 GiB·디스크583 GiB는 일시 snapshot |
-| Orca | `/home/kinesis/.local/bin/orca-ide`, **1.4.217**. 선택한 실행 파일을 모든 호출에 재사용 |
-| Codex | `codex-cli 0.159.1`; 실행 모델/effort는 위 transcript로 확인 |
-| Bun | **1.4.2**, root `packageManager=bun@1.4.2`; 고정 lock와 worktree 로컬 dependencies 사용 |
-| 웹 도구 | manifest의 TypeScript5.9.3·ESLint10.11.0·Prettier3.9.9. Vue-tsc/Volar와 기타 pin은 manifest·patch 정본 확인 |
-| Rust | 프로젝트 toolchain의 `rustc 1.98.1 (48a229cea 2026-09-01)`; cargo/rustfmt/clippy 경로는 아래 환경 설정 |
-| Docker / Python / gh | Docker29.8.1, Python3.14.4, gh2.46.0. 버전 조회만 실행, 설치·전역 설정 변경 없음 |
-| CodeGraph | `/home/kinesis/.local/bin/codegraph`, **1.6.0**; 번들 Node를 쓰는 개발 도구 |
-| 원본 참조 clone | `/home/kinesis/orca/references/fvoci-rust-source-20260924`; target와 별도 저장소. 원본 고정 SHA는 rewrite.md §1 |
+| 항목                 | 현재 경로·버전 / 확인 범위                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| 호스트               | Linux `6.18.33.2-microsoft-standard-WSL2`, x86_64; 62 GiB RAM. 00:36 관측 가용35 GiB·디스크583 GiB는 일시 snapshot |
+| Orca                 | `/home/kinesis/.local/bin/orca-ide`, **1.4.217**. 선택한 실행 파일을 모든 호출에 재사용                            |
+| Codex                | `codex-cli 0.159.1`; 실행 모델/effort는 위 transcript로 확인                                                       |
+| Bun                  | **1.4.2**, root `packageManager=bun@1.4.2`; 고정 lock와 worktree 로컬 dependencies 사용                            |
+| 웹 도구              | manifest의 TypeScript5.9.3·ESLint10.11.0·Prettier3.9.9. Vue-tsc/Volar와 기타 pin은 manifest·patch 정본 확인        |
+| Rust                 | 프로젝트 toolchain의 `rustc 1.98.1 (48a229cea 2026-09-01)`; cargo/rustfmt/clippy 경로는 아래 환경 설정             |
+| Docker / Python / gh | Docker29.8.1, Python3.14.4, gh2.46.0. 버전 조회만 실행, 설치·전역 설정 변경 없음                                   |
+| CodeGraph            | `/home/kinesis/.local/bin/codegraph`, **1.6.0**; 번들 Node를 쓰는 개발 도구                                        |
+| 원본 참조 clone      | `/home/kinesis/orca/references/fvoci-rust-source-20260924`; target와 별도 저장소. 원본 고정 SHA는 rewrite.md §1    |
 
 원본은 private 읽기 전용 참조이고 대상은 AISFlow/fvoci다. 참조 clone의 쓰기 비트 제거는
 같은 계정이 되돌릴 수 있는 우발 쓰기 방지이며 보안 sandbox가 아니다. 현재 개발 계정 접근을
@@ -98,7 +98,7 @@ worktree마다 자기 `.codegraph/` 인덱스를 사용한다. `status` → 필�
 로컬 설정을 확인했지만, 이번 문서 정리가 전역 설정을 다시 변경하거나 update-check를 삭제한 것은 아니다.
 수동 실행의 버전 확인 가능성과 최초 `update-check.json` 잔존 관측은 과거 근거에 보존한다.
 
-현재 통합 worktree에서 own init은 1,119files/28,030nodes/122,755edges였다.
+초기 인수 때 통합 worktree의 own init은 1,119files/28,030nodes/122,755edges였다.
 00:36의 own status는 1,120files/같은 nodes·edges, DB118.11MB, up-to-date로 응답했다.
 인덱스는 개발 산출물이고 `.gitignore`/`.dockerignore` 대상이며 제품 image/CI 필수 검사에 넣지 않는다.
 
@@ -113,14 +113,15 @@ worktree target, 실행별 DB·비특권 앱 역할·Redis/search prefix·storag
 실제 wrapper의 동적 port·mode600 임시 credential·container label·cleanup 결과를 기록하고 소유한 자원만 정리한다.
 credential 실값·전체 대화는 문서/evidence에 복제하지 않는다. 소유 불명 PG·runner·다른 세션은 종료하지 않는다.
 
-프론트 전용 검증에서 승인된 현재 native 재사용 bundle:
-`/home/kinesis/orca/workspaces/fvoci/f272-rapid-close/target/rapid-close`,
-source `bc9e05f4faef04862ccc1a6295b815863756ce43`.
-411 source input·5 binary SHA-256/size/mode·root db-tests/engine worker feature provenance를 전후 확인한다.
-정확한 검증 JSON은 rewrite.md §8의 영속 `f272-rapid-close-native-provenance.json`이다.
-이 target는 읽기 전용이며 cargo·generate-api·run-web-e2e 전체 wrapper를 그곳에서 실행하지 않는다.
-새 worktree의 fresh dist와 독립 자원을 써서 허용된 group wrapper에 경로만 전달한다.
-옛 `prebuilt-8adaf1b8` 근거는 과거 범위다. Keycloak SHA-stamped release build·default-feature 최종 제품 image의 증거로 대체하지 않는다.
+프론트 전용 native 재사용은 rewrite.md의 해당 검증 SHA와 영속 provenance가 고정한 bundle만 허용한다.
+현재 후보의 Rust/crates/migration/manifest·lock/toolchain 입력과 실제 native source hash/feature가 일치하는지
+전후 대조한 뒤 읽기 전용으로 쓴다. 제품 Rust가 바뀌면 옛 bundle 성공을 새 후보에 적용하지 않는다.
+새 worktree의 fresh dist와 독립 자원을 쓰며 group wrapper에 경로만 전달한다.
+빌려 쓰는 target/source에서 cargo·generate-api·run-web-e2e 전체 wrapper를 실행하지 않는다.
+
+이전 bc9 source의 rapid-close bundle과 411입력·5 binary/mode/hash·db-tests/worker 근거는
+rewrite.md §8 evidence에 보존한다. Closed outbound 수정 뒤의 own native와 최종 default-feature image는
+별도 고정 입력·feature·metadata로 판단한다. 옛 prebuilt-8ada도 역사적 근거이며 현재 입력 검사를 대신하지 않는다.
 
 현재 pinned wrapper의 local PostgreSQL18.3/Meili1.53.2·read-only native feature 근거와
 원격 PG16/17/18·ARM/기타 CI 범위는 해당 실제 job/report대로 구분한다. 로컬 debug-feature 성공은
