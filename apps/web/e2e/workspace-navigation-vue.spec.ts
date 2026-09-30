@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Browser, type Page } from "@playwright/test";
 import { createE2eUser, login, logout, watchCspViolations } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
@@ -114,9 +114,7 @@ test("direct section URLs preserve query and hash across reload; foreign and sig
   expect((await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).status()).toBe(404);
 });
 
-test("notification pagination reaches a third page, bell cache stays valid, and archive/read persist", async ({ page, browser, baseURL }) => {
-  await login(page, owner.email, owner.password);
-  createE2eUser("navigation-inbox@example.com", "inboxpass123", "수신", { workspaceSlug: "navigation", membershipRole: "member" });
+async function createInboxMentions(page: Page, browser: Browser, baseURL: string | undefined, from: number, to: number): Promise<void> {
   const members = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/members`)).json()).items;
   const memberId = members.find((item: { email: string }) => item.email === "navigation-inbox@example.com").userId;
   const copy = (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/projects`)).json()).items.find((item: { key: string }) => item.key === "COPY");
@@ -126,8 +124,8 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   const recipient = await recipientContext.newPage();
   try {
     await login(recipient, "navigation-inbox@example.com", "inboxpass123");
-    for (let start = 0; start < 105; start += 15) {
-      const count = Math.min(15, 105 - start);
+    for (let start = from; start < to; start += 5) {
+      const count = Math.min(5, to - start);
       await Promise.all(Array.from({ length: count }, async (_, offset) => {
         const comment = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${copy.id}/documents/${copy.rootDocumentId}/comments`, {
           data: { body: `Paged inbox ${start + offset}`, mentionedUserIds: [memberId] },
@@ -139,10 +137,40 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   } finally {
     await recipientContext.close();
   }
+}
+
+async function openRecipientInbox(page: Page): Promise<void> {
   await logout(page);
   await login(page, "navigation-inbox@example.com", "inboxpass123");
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(105);
   await page.goto("/w/navigation/notifications");
+  await vue(page);
+}
+
+test("the first inbox page contains every confirmed notification", async ({ page, browser, baseURL }) => {
+  await login(page, owner.email, owner.password);
+  createE2eUser("navigation-inbox@example.com", "inboxpass123", "수신", { workspaceSlug: "navigation", membershipRole: "member" });
+  await createInboxMentions(page, browser, baseURL, 0, 35);
+  await openRecipientInbox(page);
+  await expect(page.locator(".notifications-page__row")).toHaveCount(35);
+  await expect(page.getByRole("button", { name: "더 보기", exact: true })).toHaveCount(0);
+});
+
+test("the second inbox page appends confirmed notifications and reload resets the page", async ({ page, browser, baseURL }) => {
+  await login(page, owner.email, owner.password);
+  await createInboxMentions(page, browser, baseURL, 35, 70);
+  await openRecipientInbox(page);
+  const rows = page.locator(".notifications-page__row");
+  await expect(rows).toHaveCount(50);
+  await page.getByRole("button", { name: "더 보기", exact: true }).click();
+  await expect(rows).toHaveCount(70);
+  await page.reload();
+  await expect(rows).toHaveCount(50);
+});
+
+test("notification pagination reaches a third page, bell cache stays valid, and archive/read persist", async ({ page, browser, baseURL }) => {
+  await login(page, owner.email, owner.password);
+  await createInboxMentions(page, browser, baseURL, 70, 105);
+  await openRecipientInbox(page);
   await vue(page);
   const rows = page.locator(".notifications-page__row");
   await expect(rows).toHaveCount(50);
