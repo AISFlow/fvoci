@@ -286,9 +286,26 @@ async function workspaceSlugs(page: Page): Promise<string[]> {
   return body.items.filter((w) => w.kind === "team").map((w) => w.slug);
 }
 
+/** Vue's mount marker, observed on actual auth routes without recording tokens. */
+async function expectVueAuthRoute(page: Page, route: string): Promise<void> {
+  await expect(page.locator("#root.isolate[data-v-app]")).toHaveCount(1);
+  const pathname = new URL(page.url()).pathname;
+  expect(
+    route === "/invite/:token" ? pathname.startsWith("/invite/") : pathname === route,
+    `the mounted Vue auth route is ${route}`,
+  ).toBe(true);
+  observe(`vueRoute:${route}`, { mounted: true, root: "#root.isolate[data-v-app]" });
+}
+
+async function openInvitation(page: Page, token: string): Promise<void> {
+  await page.goto(`/invite/${token}`);
+  await expectVueAuthRoute(page, "/invite/:token");
+}
+
 async function setupOwner(page: Page): Promise<void> {
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await expectVueAuthRoute(page, "/setup");
   await page.getByLabel("성").fill(OWNER.familyName);
   await page.getByLabel("이름", { exact: true }).fill(OWNER.givenName);
   await page.getByLabel("이메일").fill(OWNER.email);
@@ -420,11 +437,13 @@ async function clickProvider(page: Page): Promise<void> {
 async function openLogin(page: Page): Promise<void> {
   await page.goto("/login");
   await expect(page.getByRole("link", { name: config().label, exact: true })).toBeVisible();
+  await expectVueAuthRoute(page, "/login");
 }
 
 async function openAccountSettings(page: Page): Promise<void> {
   await page.goto("/settings/account");
   await expect(page.getByText("연결된 소셜 계정")).toBeVisible();
+  await expectVueAuthRoute(page, "/settings/account");
 }
 
 function linkButton(page: Page) {
@@ -574,8 +593,16 @@ async function prepareInstance(browser: Browser): Promise<void> {
   const providersText = await providersResponse.text();
   const secret = process.env.OIDC_GENERIC_CLIENT_SECRET ?? "";
   expect(secret.length > 0 && providersText.includes(secret), "the client secret stays on the server").toBe(false);
-  const providers = JSON.parse(providersText) as { providers: unknown };
+  const providers = JSON.parse(providersText) as { providers: unknown; workspaceSso: boolean };
   expect(providers.providers).toEqual([{ provider: "generic", label: c.label }]);
+  expect(providers.workspaceSso).toBe(false);
+  // A normal build trusts no entitlement issuer: local test-license SSO below
+  // must never be mistaken for enabling workspace SSO in this release server.
+  const sso = await page.request.get(`/api/v1/auth/sso?slug=${WORKSPACE.slug}`, { maxRedirects: 0 });
+  expect(sso.status()).toBe(302);
+  expect(new URL(sso.headers().location, fvociOrigin).pathname).toBe("/login");
+  expect(new URL(sso.headers().location, fvociOrigin).searchParams.get("error")).toBe("provider_not_configured");
+  observe("unentitledWorkspaceSso", { workspaceSso: false, status: sso.status(), error: "provider_not_configured" });
   observe("providers", providers);
   observe("servedWebAssets", await servedAssetsWithout(page, secret));
   await context.close();
@@ -840,7 +867,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     const usersBefore = userCount();
 
     const { context, page, csp } = await newPage(browser);
-    await page.goto(`/invite/${token}`);
+    await openInvitation(page, token);
     await expect(page.getByRole("heading", { name: /초대 수락/ })).toBeVisible();
     const leg = keycloakLeg(page);
     await page.getByRole("button", { name: config().label, exact: true }).click();
@@ -893,7 +920,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       const usersBefore = userCount();
 
       const { context, page } = await newPage(browser);
-      await page.goto(`/invite/${token}`);
+      await openInvitation(page, token);
       const leg = keycloakLeg(page);
       await page.getByRole("button", { name: config().label, exact: true }).click();
       expect(await leg.pass(idpUser)).toBe("form");
@@ -951,7 +978,7 @@ test.describe("failure boundaries", () => {
     await context.close();
 
     const pat = await newPage(browser);
-    await pat.page.goto(`/invite/${token}`);
+    await openInvitation(pat.page, token);
     await pat.page.getByLabel("이메일").fill(PAT.email);
     await pat.page.getByLabel("성").fill(PAT.familyName);
     await pat.page.getByLabel("이름", { exact: true }).fill(PAT.givenName);
