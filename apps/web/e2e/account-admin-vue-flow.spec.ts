@@ -52,6 +52,23 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   expect((await nameSaved).status()).toBe(200);
   await page.reload();
   await expect(page.locator("#settings-given-name")).toHaveValue("재로드 멤버");
+  // Real transport failure leaves the account route recoverable, without
+  // fabricating an API answer or converting an outage into a logout.
+  try {
+    await page.context().setOffline(true);
+    await page.evaluate(async () => {
+      const root = document.getElementById("root") as HTMLElement & {
+        __vue_app__: { _context: { provides: Record<string, { invalidateQueries: (input: { queryKey: string[] }) => Promise<void> }> } };
+      };
+      await root.__vue_app__._context.provides.VUE_QUERY_CLIENT.invalidateQueries({ queryKey: ["auth", "me"] });
+    });
+    await expect(page.getByRole("alert")).toBeVisible();
+    await expect(page).toHaveURL(/\/settings\/account$/);
+  } finally {
+    await page.context().setOffline(false);
+  }
+  await page.getByRole("button", { name: "다시 시도", exact: true }).click();
+  await expect(page.locator("#settings-given-name")).toHaveValue("재로드 멤버");
   const preferences = page.getByRole("region", { name: "설정", exact: true });
   await preferences.getByLabel("시간대", { exact: true }).click();
   await page.getByRole("option", { name: "UTC", exact: true }).click();

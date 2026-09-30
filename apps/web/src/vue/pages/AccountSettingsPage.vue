@@ -17,7 +17,7 @@ import {
   withdrawAccount,
 } from "@/features/settings/account-requests";
 import { oidcErrorMessage } from "@/lib/oidc";
-import { api, ensureOk } from "@/lib/api";
+import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
 import { applyTextScale } from "@/lib/ui-preferences";
 import { identitiesQuery, meQuery, mfaStatusQuery, providersQuery } from "@/lib/queries";
 import QueryLoading from "../components/QueryLoading.vue";
@@ -49,15 +49,17 @@ const successNotice = computed(() => {
 const errorNotice = computed(() => oidcErrorMessage(queryString(route.query.error)));
 
 watchEffect(() => {
-  if (me.isError.value) redirectTo(loginPath(window.location));
+  if (me.error.value instanceof ProblemError && me.error.value.status === 401) redirectTo(loginPath(window.location));
 });
 
-const failed = computed(() => identities.isError.value || providers.isError.value || mfa.isError.value);
+const failed = computed(() => me.isError.value || identities.isError.value || providers.isError.value || mfa.isError.value);
+const failure = computed(() => loadErrorMessage(me.error.value ?? identities.error.value ?? providers.error.value ?? mfa.error.value));
 const ready = computed(
   () => me.data.value && identities.data.value && providers.data.value && mfa.data.value,
 );
 
 function retry(): void {
+  void me.refetch();
   void identities.refetch();
   void providers.refetch();
   void mfa.refetch();
@@ -86,7 +88,7 @@ async function savePreferences(input: { locale: "ko"; timezone: string; weekStar
     <main class="flex-1 p-4">
       <div class="settings-page">
         <div v-if="failed">
-          <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
+          <p role="alert" class="text-muted">{{ failure }}</p>
           <UButton type="button" size="sm" class="mt-2" @click="retry">{{ t("load.retry") }}</UButton>
         </div>
         <QueryLoading v-else-if="!ready" />
