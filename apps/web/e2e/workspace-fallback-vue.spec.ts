@@ -41,7 +41,8 @@ test("encoded, trimmed and NFKC project refs canonicalize once inside Vue with q
     const before = await page.evaluate(() => Number(sessionStorage.getItem("fallbackBoots")));
     await page.goto(`/w/fallback/${ref}?from=item#document-comments`);
     await expect(page).toHaveURL(new RegExp(`/${target}\\?from=item#document-comments$`));
-    await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+    if (target === "WIKI-1") await expect(page.getByRole("textbox", { name: "문서 제목", exact: true })).toHaveValue(title!);
+    else await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
     expect(await page.evaluate(() => Number(sessionStorage.getItem("fallbackBoots")))).toBe(before + 1);
   }
 });
