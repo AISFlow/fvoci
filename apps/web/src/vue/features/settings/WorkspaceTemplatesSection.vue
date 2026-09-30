@@ -56,6 +56,7 @@ const create = useMutation({
     ),
   onSuccess: async () => {
     actionError.value = null;
+    title.value = "";
     await invalidate();
   },
   onError: (err: unknown) => {
@@ -99,15 +100,11 @@ function onCreate(): void {
     titleError.value = parsed.message;
     return;
   }
-  void create
-    .mutateAsync({
-      kind: parsed.data.kind,
-      title: parsed.data.title,
-      payload: { title: parsed.data.title },
-    })
-    .then(() => {
-      title.value = "";
-    });
+  create.mutate({
+    kind: parsed.data.kind,
+    title: parsed.data.title,
+    payload: { title: parsed.data.title },
+  });
 }
 
 function kindLabel(value: TemplateOutput["kind"]): string {
@@ -142,9 +139,16 @@ function kindLabel(value: TemplateOutput["kind"]): string {
           <UButton type="submit" size="sm" class="w-fit" :disabled="pending">{{ t("template.create") }}</UButton>
         </form>
         <p v-if="error" class="text-error" role="alert">{{ error }}</p>
+        <UButton v-if="listQuery.isError.value" type="button" size="sm" variant="outline" color="neutral" class="w-fit" @click="listQuery.refetch()">
+          {{ t("load.retry") }}
+        </UButton>
         <QueryLoading v-if="loading" />
         <p v-if="!loading && templates.length === 0" class="text-muted">{{ t("template.empty") }}</p>
         <div v-if="hasTaskTemplate" class="flex flex-col gap-1.5">
+          <div v-if="projectsQueryResult.isError.value" role="alert">
+            <p>{{ failMessage(projectsQueryResult.error.value) }}</p>
+            <UButton type="button" size="sm" variant="outline" color="neutral" @click="projectsQueryResult.refetch()">{{ t("load.retry") }}</UButton>
+          </div>
           <label :for="projectFieldId">{{ t("template.project") }}</label>
           <select
             :id="projectFieldId"
@@ -180,7 +184,7 @@ function kindLabel(value: TemplateOutput["kind"]): string {
                     color="neutral"
                     :disabled="pending || (row.kind === 'task' && projectId === 'none')"
                     @click="
-                      apply.mutateAsync({
+                      apply.mutate({
                         id: row.id,
                         kind: row.kind,
                         projectId: row.kind === 'task' ? projectId : undefined,

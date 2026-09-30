@@ -10,7 +10,7 @@ import ConfirmAction from "./ConfirmAction.vue";
 import { copyText } from "./clipboard";
 import { fieldIssue, parseForm } from "./form";
 import { displayedRedirectUri } from "./sso-uri";
-import { isOidcConfigured, workspaceOidcForm } from "./workspace-oidc";
+import { workspaceOidcForm } from "./workspace-oidc";
 import "@/features/settings/settings-shell.css";
 
 type WorkspaceOidcInput = components["schemas"]["WorkspaceOidcBody"];
@@ -43,7 +43,7 @@ const redirectUri = computed(() =>
   displayedRedirectUri(oidc.data.value?.redirectUri, window.location.origin, props.workspaceId),
 );
 const current = computed(() => oidc.data.value ?? null);
-const configured = computed(() => isOidcConfigured(current.value));
+const configured = computed(() => Boolean(current.value?.issuer && current.value?.clientId));
 const eeRequired = computed(() => oidc.error.value instanceof ProblemError && oidc.error.value.status === 404);
 
 function failMessage(err: unknown): string {
@@ -59,6 +59,7 @@ const save = useMutation({
       }),
     ),
   onSuccess: async () => {
+    clientSecret.value = "";
     actionError.value = null;
     await queryClient.invalidateQueries({ queryKey });
   },
@@ -132,13 +133,11 @@ function onSave(): void {
     };
     return;
   }
-  void save.mutateAsync({
+  save.mutate({
     issuer: parsed.data.issuer,
     clientId: parsed.data.clientId,
     clientSecret: parsed.data.clientSecret,
     label: parsed.data.label === "" ? null : parsed.data.label,
-  }).then(() => {
-    clientSecret.value = "";
   });
 }
 </script>

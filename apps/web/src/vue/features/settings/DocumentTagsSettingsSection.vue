@@ -8,7 +8,7 @@ import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
 import { documentTagPoolQuery, TAG_COLORS, type TagColor } from "@/lib/queries/collections";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
-import ConfirmAction from "./ConfirmAction.vue";
+import ConfirmDialog from "./ConfirmDialog.vue";
 import "@/features/settings/settings-shell.css";
 import "@/features/collections/collections.css";
 
@@ -19,6 +19,7 @@ const colorId = useId();
 const name = ref("");
 const color = ref<TagColor>("gray");
 const actionError = ref<string | null>(null);
+const removeTarget = ref<{ id: string; assignmentCount: number } | null>(null);
 const tags = useQuery(() => documentTagPoolQuery(props.workspaceId));
 
 function failMessage(err: unknown): string {
@@ -75,6 +76,7 @@ const remove = useMutation({
     ),
   onSuccess: async () => {
     actionError.value = null;
+    removeTarget.value = null;
     await invalidate();
   },
   onError: (err) => {
@@ -89,7 +91,7 @@ const pending = computed(() => create.isPending.value || patch.isPending.value |
 
 function onCreate(): void {
   const trimmed = name.value.trim();
-  if (trimmed === "" || pending.value) return;
+  if (trimmed === "" || pending.value || !canCreate.value) return;
   create.mutate({ name: trimmed, color: color.value });
 }
 
@@ -100,6 +102,9 @@ function onRenameEnter(event: KeyboardEvent): void {
 function onRename(id: string, current: string, event: Event): void {
   const input = event.target as HTMLInputElement;
   const next = input.value.trim();
+  // Display the persisted name until the server acknowledges a new one.
+  input.value = current;
+  if (pending.value || !canManage.value) return;
   if (next === "" || next === current) {
     input.value = current;
     return;
@@ -109,7 +114,7 @@ function onRename(id: string, current: string, event: Event): void {
 
 function onColor(id: string, next: string): void {
   const found = TAG_COLORS.find((item) => item === next);
-  if (found) patch.mutate({ id, body: { color: found } });
+  if (found && !pending.value && canManage.value) patch.mutate({ id, body: { color: found } });
 }
 </script>
 
@@ -167,15 +172,16 @@ function onColor(id: string, next: string): void {
             </td>
             <td class="border-b border-default px-2 py-2 settings-tabular">{{ row.assignmentCount }}</td>
             <td v-if="canManage" class="border-b border-default px-2 py-2">
-              <ConfirmAction
-                :title="t('doc.tags.delete.confirm.title')"
-                :description="t('doc.tags.delete.confirm.body', { count: row.assignmentCount })"
-                :action-label="t('doc.tags.delete')"
+              <UButton
+                type="button"
+                size="sm"
+                variant="outline"
+                color="neutral"
                 :disabled="pending"
-                :run="async () => { try { await remove.mutateAsync(row.id); } catch { /* onError shows the problem title. */ } }"
+                @click="actionError = null; removeTarget = row"
               >
                 {{ t("doc.tags.delete") }}
-              </ConfirmAction>
+              </UButton>
             </td>
           </tr>
         </tbody>
@@ -200,5 +206,15 @@ function onColor(id: string, next: string): void {
       </div>
       <UButton type="submit" size="sm" :disabled="pending || name.trim() === ''">{{ t("doc.tags.create.action") }}</UButton>
     </form>
+    <ConfirmDialog
+      :open="removeTarget !== null"
+      :title="t('doc.tags.delete.confirm.title')"
+      :body="t('doc.tags.delete.confirm.body', { count: removeTarget?.assignmentCount ?? 0 })"
+      :action-label="t('doc.tags.delete')"
+      :pending="remove.isPending.value"
+      :error="actionError"
+      @close="removeTarget = null"
+      @confirm="removeTarget && remove.mutate(removeTarget.id)"
+    />
   </section>
 </template>
