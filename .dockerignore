@@ -14,6 +14,7 @@ crates/document-extract/.vendor-src
 crates/collab-engine/target
 compat/target
 **/*.md
+!apps/web/NOTICE.md
 !crates/document-extract/README.md
 !crates/collab-engine/README.md
 !packages/editor/src/fonts/README.md
