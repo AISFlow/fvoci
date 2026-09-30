@@ -43,3 +43,18 @@ export const VUE_WORKSPACE_ROUTE_PATHS = {
   wikiList: "/w/:slug/wiki",
   search: "/w/:slug/search",
 } as const;
+
+/**
+ * Vue pages for workspace nav (my-tasks, notifications, trash). Declared as
+ * lazy chunks so the Vue app can render them once boot moves; until then
+ * src/app-boundary.ts still sends these paths to React, so afterEach full-loads.
+ * Coordinator regexes to add later (do not put these on VUE_ROUTE_PATHS yet):
+ *   /^\/w\/[^/]+\/my-tasks\/?$/i
+ *   /^\/w\/[^/]+\/notifications\/?$/i
+ *   /^\/w\/[^/]+\/trash\/?$/i
+ */
+export const VUE_NAV_ROUTE_PATHS = {
+  myTasks: "/w/:slug/my-tasks",
+  notifications: "/w/:slug/notifications",
+  trash: "/w/:slug/trash",
+} as const;

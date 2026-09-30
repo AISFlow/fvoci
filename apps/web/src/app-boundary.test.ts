@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { isVueAppPath } from "./app-boundary.ts";
@@ -57,6 +58,12 @@ const SAMPLES = [
   "/setup/extra",
   "/setups",
   "/w/acme",
+  "/w/acme/my-tasks",
+  "/w/acme/my-tasks/",
+  "/w/acme/notifications",
+  "/w/acme/notifications/",
+  "/w/acme/trash",
+  "/w/acme/trash/",
   "/w/acme/a/123/view",
   "/w/acme/WIKI-1",
   "/w/acme/WIKI-12/",
@@ -166,6 +173,17 @@ test("home and public pages enter Vue while admin policies remain React", () => 
   for (const path of ["/legal", "/legal/terms/extra", "/service-infos", "/service-info/extra", "/settings/legal"]) {
     assert.equal(isVueAppPath(path), false, path);
   }
+});
+
+test("workspace nav pages stay on the React boot until the coordinator regexes land", () => {
+  assert.equal(isVueAppPath("/w/acme/my-tasks"), false);
+  assert.equal(isVueAppPath("/w/acme/my-tasks/"), false);
+  assert.equal(isVueAppPath("/w/acme/notifications"), false);
+  assert.equal(isVueAppPath("/w/acme/trash"), false);
+  const boundary = readFileSync(new URL("./app-boundary.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/my-tasks/);
+  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/notifications/);
+  assert.doesNotMatch(boundary, /\[\^\/\]\+\\\/trash/);
 });
 
 test("the Vue router matches exactly the paths the boundary sends it", () => {

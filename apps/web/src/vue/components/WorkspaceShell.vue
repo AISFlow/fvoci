@@ -29,7 +29,7 @@ const props = withDefaults(
     workspaceId: string;
     workspaceName: string;
     /** The section the page belongs to. */
-    active?: "wiki" | "projects" | "search";
+    active?: "wiki" | "projects" | "search" | "myTasks" | "notifications";
   }>(),
   { active: "projects" },
 );
@@ -70,13 +70,13 @@ function onSwitch(event: Event): void {
             :aria-current="active === 'projects' ? 'page' : undefined"
             >{{ t("nav.projects") }}</a
           >
-          <a :href="myTasksPath(slug)">{{ t("task.mine") }}</a>
           <a
-            :href="searchPath(slug)"
-            :class="active === 'search' ? 'font-medium text-highlighted' : undefined"
-            :aria-current="active === 'search' ? 'page' : undefined"
-            >{{ t("nav.search") }}</a
+            :href="myTasksPath(slug)"
+            :class="active === 'myTasks' ? 'font-medium text-highlighted' : undefined"
+            :aria-current="active === 'myTasks' ? 'page' : undefined"
+            >{{ t("task.mine") }}</a
           >
+          <a :href="searchPath(slug)" :aria-current="active === 'search' ? 'page' : undefined">{{ t("nav.search") }}</a>
           <a :href="settingsPath(slug)">{{ t("nav.settings") }}</a>
         </nav>
       </div>
