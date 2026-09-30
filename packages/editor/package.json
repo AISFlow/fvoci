@@ -6,15 +6,8 @@
     "./json": "./src/json.ts",
     "./sanitize": "./src/sanitize.ts",
     "./attachment-model": "./src/attachment-model.ts",
-    "./react": "./src/react/schema.tsx",
-    "./fvoci-editor": "./src/react/fvoci-editor.tsx",
     "./vue": "./src/vue/index.ts",
     "./vue/safe-html": "./src/vue/safe-html.ts",
-    "./block-menu": "./src/react/block-menu.tsx",
-    "./format-toolbar": "./src/react/format-toolbar.tsx",
-    "./link-popover": "./src/react/tiptap-ui/link-popover.tsx",
-    "./list-dropdown-menu": "./src/react/tiptap-ui/list-dropdown-menu.tsx",
-    "./safe-html": "./src/react/safe-html.tsx",
     "./extract": "./src/extract.ts",
     "./markdown/parse": "./src/markdown/parse.ts",
     "./collab": "./src/collab/constants.ts",
@@ -40,8 +33,6 @@
     "@m2d/core": "1.7.1",
     "@m2d/list": "0.0.9",
     "@m2d/table": "0.1.1",
-    "@radix-ui/react-popover": "1.1.23",
-    "@react-pdf/renderer": "^4.9.0",
     "@tiptap/core": "3.31.3",
     "@tiptap/extension-bubble-menu": "3.31.3",
     "@tiptap/extension-code-block-lowlight": "3.31.3",
@@ -49,7 +40,6 @@
     "@tiptap/extension-collaboration-caret": "3.31.3",
     "@tiptap/extension-details": "3.31.3",
     "@tiptap/extension-drag-handle": "3.31.3",
-    "@tiptap/extension-drag-handle-react": "3.31.3",
     "@tiptap/extension-emoji": "3.31.3",
     "@tiptap/extension-file-handler": "3.31.3",
     "@tiptap/extension-highlight": "3.31.3",
@@ -62,7 +52,6 @@
     "@tiptap/extension-unique-id": "3.31.3",
     "@tiptap/extensions": "3.31.3",
     "@tiptap/pm": "3.31.3",
-    "@tiptap/react": "3.31.3",
     "@tiptap/starter-kit": "3.31.3",
     "@tiptap/suggestion": "3.31.3",
     "@tiptap/vue-3": "3.31.3",
@@ -83,19 +72,16 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@react-pdf/renderer": "^4.9.0",
     "@types/node": "26.6.2",
     "@types/react": "19.3.0",
-    "@types/react-dom": "19.3.0",
     "@types/sanitize-html": "^2.16.1",
     "react": "19.3.0",
-    "react-dom": "19.3.0",
     "typescript": "5.9.3",
     "vue": "3.5.43",
     "vue-tsc": "3.3.11"
   },
   "peerDependencies": {
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
     "vue": "^3.5.43"
   }
 }
