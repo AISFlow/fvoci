@@ -7,6 +7,8 @@ import { VUE_SETTINGS_ROUTE_PATHS, VUE_ACCOUNT_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS,
  * editor (Tiptap, Yjs, the collab provider) or its stylesheets
  * (import-graph.test.ts and e2e/project-gantt-flow.spec.ts check this). */
 export const routes: RouteRecordRaw[] = [
+  { path: VUE_ROUTE_PATHS.projectFields, name: "project-fields", component: () => import("./features/projects/settings/ProjectFieldsPage.vue") },
+  { path: VUE_ROUTE_PATHS.projectWorkflow, name: "project-workflow", component: () => import("./features/projects/settings/ProjectWorkflowPage.vue") },
   { path: VUE_ROUTE_PATHS.projectGantt, name: "project-gantt", component: () => import("./pages/ProjectGanttPage.vue") },
   // Wiki refs are more specific than project home's `/w/:slug/:ref` and must
   // stay listed first so `/w/acme/wiki-3` is never the project overview.
@@ -28,13 +30,11 @@ export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.serviceInfo, name: "service-info", component: () => import("./pages/ServiceInfoPage.vue") },
   { path: VUE_ROUTE_PATHS.invite, name: "invite", component: () => import("./pages/InvitePage.vue") },
   { path: VUE_ROUTE_PATHS.setup, name: "setup", component: () => import("./pages/SetupPage.vue") },
-  // More specific than `/w/:slug`. Coordinator-owned app-boundary.ts still
-  // boots the React app for these until its regexes include them.
+  // Exact section routes stay separate from project and item refs.
   { path: VUE_WORKSPACE_ROUTE_PATHS.projects, name: "projects", component: () => import("./pages/ProjectsPage.vue") },
   { path: VUE_WORKSPACE_ROUTE_PATHS.wikiList, name: "wiki-list", component: () => import("./pages/WikiPage.vue") },
   { path: VUE_WORKSPACE_ROUTE_PATHS.search, name: "search", component: () => import("./pages/SearchPage.vue") },
-  // More specific than `/w/:slug`. Boot still loads React until the
-  // coordinator regexes in route-paths.ts (VUE_NAV_ROUTE_PATHS) land.
+
   { path: VUE_NAV_ROUTE_PATHS.myTasks, name: "my-tasks", component: () => import("./pages/MyTasksPage.vue") },
   {
     path: VUE_NAV_ROUTE_PATHS.notifications,
@@ -79,7 +79,7 @@ export const routes: RouteRecordRaw[] = [
   // Public share reader. apps/web/src/app-boundary.ts is owned elsewhere;
   // boot still needs `/^\/s\/[^/]+\/?$/i` and must NOT match
   // `/s/:token/attachments/...` (that stays a different route).
-  { path: "/s/:token", name: "public-share", component: () => import("./pages/PublicSharePage.vue") },
+  { path: VUE_ROUTE_PATHS.publicShare, name: "public-share", component: () => import("./pages/PublicSharePage.vue") },
 ];
 
 export function createAppRouter(history: RouterHistory = createWebHistory()) {

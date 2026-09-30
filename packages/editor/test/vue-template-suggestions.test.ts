@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { embedSlashItems, filterSlashItems } from "../src/react/suggestion-menu.ts";
+import { embedSlashItems, filterSlashItems } from "../src/suggestion-menu.ts";
 
 // The template presentation must leave the authorized async producers and
 // custom FVOCI commands discoverable, including when only an alias matches.

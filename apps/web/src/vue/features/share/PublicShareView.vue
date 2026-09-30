@@ -6,6 +6,8 @@ import { downloadSharePdf, type ShareTreeNode } from "@/lib/queries/share";
 import { shareTreeRoots } from "@/lib/share-links";
 import PublicTreeBranch from "./PublicTreeBranch.vue";
 import ShareBodyView from "./ShareBodyView.vue";
+import PublicShareSearch from "./PublicShareSearch.vue";
+import type { ProblemError } from "@/lib/api";
 
 const props = defineProps<{
   token: string;
@@ -16,11 +18,14 @@ const props = defineProps<{
   body: string | null;
   bodyLoading: boolean;
   bodyError: string | null;
+  refreshing: boolean;
 }>();
 
 const emit = defineEmits<{
   selectDocument: [documentId: string];
   retryBody: [];
+  refresh: [];
+  denied: [error: ProblemError];
 }>();
 
 const dateFormat = new Intl.DateTimeFormat("ko", {
@@ -54,7 +59,7 @@ function exportPdf(): void {
 </script>
 
 <template>
-  <div class="share-page">
+  <div class="share-page" data-public-share="vue">
     <div :class="['share-page__frame', hasTree ? null : 'share-page__frame--solo']">
       <aside v-if="hasTree" class="share-page__rail">
         <nav :aria-label="t('share.document')" class="share-page__tree">
@@ -80,17 +85,23 @@ function exportPdf(): void {
               <span>{{ t("share.expires") }} {{ formatDate(expiresAt) }}</span>
             </p>
           </div>
-          <UButton
-            type="button"
-            variant="outline"
-            color="neutral"
-            size="sm"
-            :disabled="pdfPending"
-            @click="exportPdf"
-          >
-            {{ t("export.pdf") }}
-          </UButton>
+          <div class="flex flex-wrap gap-2">
+            <UButton type="button" variant="ghost" color="neutral" size="sm" :loading="refreshing" @click="emit('refresh')">
+              {{ t("load.retry") }}
+            </UButton>
+            <UButton
+              type="button"
+              variant="outline"
+              color="neutral"
+              size="sm"
+              :disabled="pdfPending || bodyLoading || Boolean(bodyError)"
+              @click="exportPdf"
+            >
+              {{ t("export.pdf") }}
+            </UButton>
+          </div>
         </div>
+        <PublicShareSearch :token="token" @select-document="emit('selectDocument', $event)" @denied="emit('denied', $event)" />
         <p v-if="bodyLoading" role="status" class="share-page__status">
           {{ t("doc.loading") }}
         </p>
@@ -100,7 +111,7 @@ function exportPdf(): void {
             {{ t("load.retry") }}
           </UButton>
         </div>
-        <ShareBodyView v-if="body !== null && !bodyLoading" :html="body" />
+        <ShareBodyView v-if="body !== null && !bodyLoading && !bodyError" :html="body" />
       </main>
     </div>
   </div>

@@ -20,9 +20,9 @@ use crate::attachments::content_disposition_attachment;
 use crate::auth::session::SessionUser;
 use crate::db::documents::{
     create_wiki_document, get_wiki_document, list_trashed_wiki_documents, list_wiki_ancestors,
-    list_wiki_tree, move_wiki_document, reorder_wiki_document, restore_wiki_document,
-    trash_wiki_document, update_wiki_document_meta, CreateDocumentInput, DocumentDbError,
-    DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
+    list_wiki_tree, list_workspace_wiki_discovery, move_wiki_document, reorder_wiki_document,
+    restore_wiki_document, trash_wiki_document, update_wiki_document_meta, CreateDocumentInput,
+    DocumentDbError, DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
 };
 use crate::documents::export::{
     export_filename, render_document_export, ExportFormat, ExportRenderError,
@@ -40,6 +40,10 @@ pub fn router() -> Router<AppState> {
             post(create_document),
         )
         .route("/api/v1/workspaces/{workspace_id}/tree", get(list_tree))
+        .route(
+            "/api/v1/workspaces/{workspace_id}/wiki-discovery",
+            get(list_wiki_discovery),
+        )
         .route(
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}",
             get(get_document)
@@ -338,6 +342,52 @@ async fn list_tree(
         })),
         Err(err) => Err(map_document_error(err)),
     }
+}
+
+async fn list_wiki_discovery(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    query: Result<Query<TreeQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<TreeResponse>, DocumentApiError> {
+    let Query(query) = query.map_err(AppError::from)?;
+    let tag = parse_tree_tag(query.tag.as_deref())?;
+    let (_, user_id, credential_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
+        Some(workspace_id),
+    )
+    .await?;
+    let items = list_workspace_wiki_discovery(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        credential_id,
+        tag,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_document_error)?;
+    Ok(Json(TreeResponse {
+        items: items
+            .into_iter()
+            .map(|node| TreeNodeResponse {
+                id: node.id.to_string(),
+                workspace_id: node.workspace_id.to_string(),
+                parent_id: node.parent_id.map(|id| id.to_string()),
+                project_id: node.project_id.map(|id| id.to_string()),
+                title: node.title,
+                icon: node.icon,
+                path: node.path,
+                sort_key: node.sort_key,
+                number: node.number,
+                status: node.status,
+            })
+            .collect(),
+    }))
 }
 
 async fn get_ancestors(

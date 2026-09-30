@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
 import { notificationPrefsQuery } from "@/lib/queries";
 import QueryError from "../../components/QueryError.vue";
@@ -27,6 +27,30 @@ const save = useMutation({
   },
 });
 const prefs = computed(() => prefsQuery.data.value);
+const saving = ref(false);
+
+async function changePreference(key: "inApp" | "mailImmediate" | "mailDigest", event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const current = prefs.value;
+  if (!current) return;
+  const next = input.checked;
+  input.checked = current[key];
+  if (saving.value) return;
+  saving.value = true;
+  try {
+    await save.mutateAsync({
+      inApp: current.inApp,
+      mailImmediate: current.mailImmediate,
+      mailDigest: current.mailDigest,
+      [key]: next,
+    });
+  } catch {
+    // The mutation renders the problem below and keeps the committed value.
+  } finally {
+    saving.value = false;
+    input.checked = prefs.value?.[key] ?? current[key];
+  }
+}
 </script>
 
 <template>
@@ -38,12 +62,14 @@ const prefs = computed(() => prefsQuery.data.value);
   />
   <section v-else-if="prefs" class="settings-section">
     <h2 class="settings-section__title">{{ t("settings.notifications.title") }}</h2>
+    <fieldset class="flex flex-col gap-3" :disabled="saving" :aria-busy="saving">
+      <legend class="sr-only">{{ t("settings.notifications.title") }}</legend>
     <label class="settings-form__row">
       <input
         id="prefs-in-app"
         type="checkbox"
         :checked="prefs.inApp"
-        @change="save.mutate({ ...prefs, inApp: ($event.target as HTMLInputElement).checked })"
+        @change="changePreference('inApp', $event)"
       />
       <span>{{ t("notif.prefs.inApp") }}</span>
     </label>
@@ -52,7 +78,7 @@ const prefs = computed(() => prefsQuery.data.value);
         id="prefs-mail-immediate"
         type="checkbox"
         :checked="prefs.mailImmediate"
-        @change="save.mutate({ ...prefs, mailImmediate: ($event.target as HTMLInputElement).checked })"
+        @change="changePreference('mailImmediate', $event)"
       />
       <span>{{ t("notif.prefs.mailImmediate") }}</span>
     </label>
@@ -61,10 +87,11 @@ const prefs = computed(() => prefsQuery.data.value);
         id="prefs-mail-digest"
         type="checkbox"
         :checked="prefs.mailDigest"
-        @change="save.mutate({ ...prefs, mailDigest: ($event.target as HTMLInputElement).checked })"
+        @change="changePreference('mailDigest', $event)"
       />
       <span>{{ t("notif.prefs.mailDigest") }}</span>
     </label>
+    </fieldset>
     <PushToggle :workspace-id="workspaceId" />
     <p v-if="save.error.value" role="alert" class="settings-notice">
       {{ save.error.value instanceof ProblemError ? save.error.value.title : t("settings.save.failed") }}

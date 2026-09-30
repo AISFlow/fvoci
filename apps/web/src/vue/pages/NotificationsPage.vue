@@ -38,6 +38,7 @@ const actionPending = ref(false);
 
 const list = useInfiniteQuery(() => ({
   ...notificationListQuery(workspaceId.value, tab.value),
+  queryKey: ["notifications", workspaceId.value, "inbox", tab.value] as const,
   initialPageParam: undefined as string | undefined,
   queryFn: async ({ pageParam }: { pageParam: string | undefined }) =>
     ensureOk(await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {

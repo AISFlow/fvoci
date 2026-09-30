@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { formatPersonName, t } from "@fvoci/i18n";
+import UPageCard from "@nuxt/ui/components/PageCard.vue";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { ref } from "vue";
 import ConfirmAction from "../../components/ConfirmAction.vue";
@@ -65,7 +66,7 @@ function pendingDays(user: AdminUser): number | null {
 
 <template>
   <div class="settings-stack">
-    <section class="settings-section" aria-labelledby="admin-system-title">
+    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="admin-system-title">
       <h2 class="settings-section__title text-title" id="admin-system-title">{{ t("admin.system") }}</h2>
       <div class="text-sm">
         <QueryLoading v-if="loading" />
@@ -77,8 +78,8 @@ function pendingDays(user: AdminUser): number | null {
         </ul>
         <p v-if="error" role="alert" class="text-error">{{ error }}</p>
       </div>
-    </section>
-    <section class="settings-section" aria-labelledby="admin-users-title">
+    </UPageCard>
+    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="admin-users-title">
       <h2 class="settings-section__title text-title" id="admin-users-title">{{ t("admin.users") }}</h2>
       <div class="flex flex-col gap-2 overflow-x-auto">
         <p v-if="actionError" role="alert" class="settings-notice settings-notice--danger">{{ actionError }}</p>
@@ -163,8 +164,8 @@ function pendingDays(user: AdminUser): number | null {
           </tbody>
         </table>
       </div>
-    </section>
-    <section class="settings-section" aria-labelledby="admin-workspaces-title">
+    </UPageCard>
+    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="admin-workspaces-title">
       <h2 class="settings-section__title text-title" id="admin-workspaces-title">{{ t("admin.workspaces") }}</h2>
       <div class="overflow-x-auto">
         <table class="w-full border-collapse">
@@ -182,7 +183,7 @@ function pendingDays(user: AdminUser): number | null {
           </tbody>
         </table>
       </div>
-    </section>
+    </UPageCard>
     <InstanceSettingsView
       :data="settings"
       :error="settingsError ?? null"

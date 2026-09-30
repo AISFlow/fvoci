@@ -26,7 +26,7 @@ test("the Vue notifications page PATCHes read/archive, POSTs read-all, and follo
 
 test("followAppHref stays in Vue only for live app-boundary paths", () => {
   const navigation = source("../../session/navigation.ts");
-  assert.match(navigation, /isVueAppPath\(href\)/);
+  assert.match(navigation, /isVueAppPath\(href\.split/);
   assert.match(navigation, /router\.push\(href\)/);
   assert.match(navigation, /window\.location\.assign\(href\)/);
 });
