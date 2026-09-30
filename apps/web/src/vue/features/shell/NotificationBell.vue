@@ -23,7 +23,7 @@ const bell = useNotificationBell({
     router.push(path).catch(reportError);
   },
 });
-const { open, count, items, label, badge } = bell;
+const { open, count, items, label, badge, actionError } = bell;
 const { isPending: listPending, isError: listFailed, error: listError } = bell.list;
 
 // An in-app navigation (to another wiki document) keeps the shell mounted;
@@ -38,12 +38,12 @@ watch(
 );
 
 // As in the React bell, a failed write leaves the panel as it was.
-function onItem(item: NotificationItem): void {
-  bell.openItem(item).catch(() => undefined);
+function onItem(item: NotificationItem): Promise<void> {
+  return bell.perform(() => bell.openItem(item));
 }
 
-function onReadAll(): void {
-  bell.readAll().catch(() => undefined);
+function onReadAll(): Promise<void> {
+  return bell.perform(() => bell.readAll());
 }
 </script>
 
@@ -81,6 +81,7 @@ function onReadAll(): void {
           t("notif.readAll")
         }}</UButton>
       </div>
+      <p v-if="actionError" role="alert" class="m-0 p-3 text-sm text-error">{{ actionError }}</p>
       <p v-if="listPending" class="m-0 p-3 text-sm text-muted">{{ t("load.loading") }}</p>
       <div v-if="listFailed" class="p-3">
         <QueryError :message="loadErrorMessage(listError)" @retry="bell.list.refetch()" />

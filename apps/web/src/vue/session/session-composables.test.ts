@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
-import { createApp, effectScope, nextTick } from "vue";
+import { createApp, effectScope, nextTick, ref } from "vue";
 import { ProblemError } from "@/lib/api";
 import { useProjectRef } from "./useProjectRef.ts";
 import { useWikiDocumentRef } from "./useWikiDocumentRef.ts";
@@ -16,13 +16,19 @@ function queryClient(): QueryClient {
 }
 
 /** Runs `use` as a component setup would: inside an app (for inject) and an effect scope. */
-function mount<T>(client: QueryClient, use: () => T): { result: T; stop: () => void } {
+function mount<T>(
+  client: QueryClient,
+  use: () => T,
+): { result: T; stop: () => void; dispose: () => void } {
   const app = createApp({ render: () => null });
   app.use(VueQueryPlugin, { queryClient: client });
   const scope = effectScope();
   const result = app.runWithContext(() => scope.run(use)) as T;
   return {
     result,
+    dispose: () => {
+      scope.stop();
+    },
     stop: () => {
       scope.stop();
       client.clear();
@@ -383,3 +389,75 @@ await test("access refresh failure remains on the query cache and keeps the cach
     else Reflect.deleteProperty(globalThis, "reportError");
   }
 });
+
+function deferred<T>() {
+  let complete: ((value: T) => void) | undefined;
+  const promise = new Promise<T>((resolve) => {
+    complete = resolve;
+  });
+  return {
+    promise,
+    resolve(value: T) {
+      assert.ok(complete);
+      complete(value);
+    },
+  };
+}
+
+for (const transition of ["switch", "dispose", "current denial", "setup priority"]) {
+  await test(`access refresh: ${transition} keeps redirect ownership on the current session guard`, async () => {
+    const client = queryClient();
+    const other = { ...WORKSPACE, id: "99999999-9999-7999-8999-999999999999", slug: "other" };
+    seedSession(client, [WORKSPACE, other]);
+    const redirects: string[] = [];
+    const slug = ref(WORKSPACE.slug);
+    const env = testEnvironment(redirects);
+    let onAccessChange: (() => void) | undefined;
+    let closed = 0;
+    env.watchAccess = (_id, handlers) => {
+      onAccessChange = handlers.onAccessChange;
+      return {
+        close: () => {
+          closed += 1;
+        },
+      };
+    };
+    const { stop, dispose } = mount(client, () => useWorkspaceSession(slug, env));
+    try {
+      const list = deferred<{ items: (typeof WORKSPACE)[] }>();
+      // A real QueryClient request owns this deferred list; the access refresh
+      // joins the same in-flight query exactly as it would join a slow HTTP GET.
+      const fetching = client.query({
+        queryKey: ["me", "workspaces"],
+        staleTime: 0,
+        queryFn: () => list.promise,
+      });
+      assert.ok(onAccessChange);
+      const oldCallback = onAccessChange;
+      oldCallback();
+      if (transition === "switch") {
+        slug.value = "other";
+        await nextTick();
+        assert.equal(closed, 1);
+        oldCallback(); // A closed lease cannot start a new refresh.
+      }
+      if (transition === "dispose") dispose();
+      if (transition === "setup priority") {
+        client.setQueryData(["setup", "status"], { needed: true });
+        await nextTick();
+      }
+      list.resolve({ items: [other] });
+      await fetching;
+      await nextTick();
+      const expected =
+        transition === "current denial"
+          ? ["/?denied=workspace"]
+          : transition === "setup priority"
+            ? ["/setup"]
+            : [];
+      assert.deepEqual(redirects, expected);
+    } finally {
+      stop();
+    }
+  });
+}

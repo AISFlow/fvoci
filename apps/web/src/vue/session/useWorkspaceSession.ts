@@ -80,27 +80,27 @@ export function useWorkspaceSession(
     () => workspace.value?.id,
     (workspaceId, _previous, onCleanup) => {
       if (!workspaceId) return;
+      let active = true;
       const subscription = env.watchAccess(workspaceId, {
         onAccessChange: () => {
-          queryClient
-            .query({ ...workspacesQuery, staleTime: 0 })
-            .then((list) => {
-              if (!list.items.some((item) => item.id === workspaceId))
-                env.redirect("/?denied=workspace");
-            })
-            .catch((error: unknown) => {
-              // Query failures remain on the cache and must not evict the page.
-              // Failures from the consumer (such as redirect) have no query owner.
-              if (queryClient.getQueryState(workspacesQuery.queryKey)?.error !== error)
-                reportError(error);
-            });
+          if (!active) return;
+          // The fresh list updates the reactive denied guard above. That guard
+          // belongs to the current slug/scope and preserves setup/401 priority;
+          // a retired subscription never redirects from its captured workspace.
+          queryClient.query({ ...workspacesQuery, staleTime: 0 }).catch((error: unknown) => {
+            // Query failures remain on the cache and must not evict the page.
+            // Unexpected failures with no query owner remain observable.
+            if (queryClient.getQueryState(workspacesQuery.queryKey)?.error !== error)
+              reportError(error);
+          });
         },
       });
       onCleanup(() => {
+        active = false;
         subscription.close();
       });
     },
-    { immediate: true },
+    { immediate: true, flush: "sync" },
   );
 
   const failedWithoutData = (query: { isError: { value: boolean }; data: { value: unknown } }) =>

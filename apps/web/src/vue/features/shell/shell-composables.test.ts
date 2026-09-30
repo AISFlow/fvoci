@@ -3,6 +3,7 @@ import test from "node:test";
 import { t } from "@fvoci/i18n";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import { createApp, effectScope, ref } from "vue";
+import { ProblemError, problemMessage } from "@/lib/api";
 import type { NotificationItem } from "@/features/notifications/notification-target";
 import { useLogout, type LogoutEnvironment } from "./useLogout.ts";
 import { useNotificationBell } from "./useNotificationBell.ts";
@@ -304,3 +305,86 @@ await test("bell: an item reads as its notification message", () => {
     stop();
   }
 });
+
+await test("bell: failed mark/read-all writes own an in-place error and the next attempt clears it", async () => {
+  const client = queryClient();
+  const { result, stop, navigations } = mountBell(client);
+  try {
+    result.open.value = true;
+    await result.perform(() => result.openItem(notification({})));
+    assert.equal(result.actionError.value, t("error.network"));
+    assert.equal(result.open.value, true);
+    assert.deepEqual(navigations, []);
+    await result.perform(() => result.readAll());
+    assert.equal(result.actionError.value, t("error.network"));
+    const success = result.perform(() =>
+      result.openItem(notification({ readAt: "2031-03-02T00:00:00Z", displayId: "WIKI-4" })),
+    );
+    assert.equal(
+      result.actionError.value,
+      null,
+      "the old error clears when the new attempt starts",
+    );
+    await success;
+    assert.equal(result.actionError.value, null);
+    assert.equal(result.open.value, false);
+    assert.deepEqual(navigations, ["/w/acme/WIKI-4"]);
+  } finally {
+    stop();
+  }
+});
+
+await test("bell: an older failed attempt cannot overwrite a newer attempt's error", async () => {
+  const client = queryClient();
+  const { result, stop } = mountBell(client);
+  let fail: ((error: Error) => void) | undefined;
+  const pending = new Promise<void>((_resolve, reject) => {
+    fail = reject;
+  });
+  try {
+    const first = result.perform(() => pending);
+    const secondFailure = new ProblemError(500);
+    await result.perform(() => Promise.reject(secondFailure));
+    assert.equal(result.actionError.value, problemMessage(secondFailure, "error.http.fallback"));
+    assert.ok(fail);
+    fail(new Error("older network failure"));
+    await first;
+    assert.equal(result.actionError.value, problemMessage(secondFailure, "error.http.fallback"));
+  } finally {
+    stop();
+  }
+});
+
+for (const change of ["workspace", "dispose"]) {
+  await test(`bell: late write failure after ${change} retirement does not set the current panel error`, async () => {
+    const client = queryClient();
+    const workspace = ref(WORKSPACE_ID);
+    const slug = ref(SLUG);
+    const { result, stop } = mount(client, () =>
+      useNotificationBell({
+        workspaceId: workspace,
+        slug,
+        navigate: () => {
+          assert.fail("no navigation is expected");
+        },
+      }),
+    );
+    let fail: ((error: Error) => void) | undefined;
+    const pending = new Promise<void>((_resolve, reject) => {
+      fail = reject;
+    });
+    try {
+      const done = result.perform(() => pending);
+      if (change === "workspace") {
+        workspace.value = "other-workspace";
+        slug.value = "other";
+      } else stop();
+      assert.ok(fail);
+      fail(new Error("retired write failure"));
+      await done;
+      assert.equal(result.actionError.value, null);
+    } finally {
+      stop();
+    }
+  });
+}
