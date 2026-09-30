@@ -217,7 +217,7 @@ test("workspace consents show real empty, populated, timezone, retry and role de
   await section.getByRole("button", { name: "다시 시도" }).click();
   await expect(section.getByRole("alert")).toHaveCount(0);
   const row = section.getByRole("row").filter({ has: page.getByRole("cell", { name: "terms", exact: true }) });
-  await expect(row.getByRole("cell").nth(0)).toHaveText("김 설정");
+  await expect(row.getByRole("cell").nth(0)).toHaveText("김설정");
   await expect(row.getByRole("cell").nth(2)).toHaveText(String(version));
   await expect(row.getByRole("cell").nth(3)).toHaveText("2025. 12. 31.");
   const stored = await (await page.request.get(`/api/v1/workspaces/${workspaceId}/consents`)).json();
@@ -254,6 +254,102 @@ test("workspace consents show real empty, populated, timezone, retry and role de
       }
     } finally {
       await rolePage.close();
+    }
+  }
+});
+
+test("late workspace rename and delete success or failure cannot change the switched workspace", async ({ page }) => {
+  await login(page, owner.email, owner.password);
+  const createdB = await page.request.post("/api/v1/workspaces", { data: { name: "Race workspace B", slug: "settings-race-b" } });
+  expect(createdB.status()).toBe(201);
+  const workspaceB = await createdB.json();
+  for (const operation of ["rename", "delete"] as const) {
+    for (const outcome of ["success", "failure"] as const) {
+      const slugA = `settings-race-${operation}-${outcome}`;
+      const nameA = `Race ${operation} ${outcome}`;
+      const createdA = await page.request.post("/api/v1/workspaces", { data: { name: nameA, slug: slugA } });
+      expect(createdA.status()).toBe(201);
+      const workspaceA = await createdA.json();
+      await page.goto(`/w/${slugA}/settings`);
+      await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveValue(nameA);
+
+      let release!: () => void;
+      let received!: () => void;
+      const responseGate = new Promise<void>((resolve) => { release = resolve; });
+      const requestReceived = new Promise<void>((resolve) => { received = resolve; });
+      const urlA = `**/api/v1/workspaces/${workspaceA.id}`;
+      const method = operation === "rename" ? "PATCH" : "DELETE";
+      await page.route(urlA, async (route) => {
+        if (route.request().method() !== method) return route.continue();
+        // Delay a real Rust request until the workspace switch. For rename failure,
+        // send server-invalid input past the already-tested client validator.
+        received();
+        await responseGate;
+        const response = await route.fetch(operation === "rename" && outcome === "failure"
+          ? { postData: { name: "x".repeat(1001) } } : {});
+        expect(response.ok()).toBe(outcome === "success");
+        await route.fulfill({ response });
+      });
+      try {
+        if (operation === "rename") {
+          await page.getByLabel("워크스페이스 이름", { exact: true }).fill(`${nameA} updated`);
+          await page.getByRole("button", { name: "저장", exact: true }).click();
+          await expect(page.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
+        } else {
+          const disclosure = page.locator("details").filter({ has: page.locator("summary", { hasText: /^워크스페이스 삭제$/ }) });
+          await disclosure.locator("summary").click();
+          await disclosure.getByRole("textbox").fill(outcome === "success" ? slugA : "wrong-confirmation");
+          await disclosure.getByRole("button", { name: "워크스페이스 삭제", exact: true }).click();
+        }
+        await requestReceived;
+        // The header uses Vue routing, preserving the mutation-owning page.
+        await page.getByLabel("워크스페이스 전환").selectOption(workspaceB.id);
+        await expect(page).toHaveURL(/\/w\/settings-race-b\/settings$/);
+        await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveValue("Race workspace B");
+        await expect(page.getByRole("button", { name: "저장", exact: true })).toBeEnabled();
+        release();
+        // Read the real query client's state to await callbacks, including
+        // invalidations, without adding a product hook or a timing sleep.
+        await expect.poll(() => page.evaluate((id) => {
+          const root = document.getElementById("root") as HTMLElement & {
+            __vue_app__: { _context: { provides: Record<string, {
+              getMutationCache(): { getAll(): { state: { variables?: { workspaceId?: string }; status: string } }[] };
+            }> } };
+          };
+          const mutation = root.__vue_app__._context.provides.VUE_QUERY_CLIENT.getMutationCache().getAll()
+            .find((item) => item.state.variables?.workspaceId === id);
+          return mutation?.state.status;
+        }, workspaceA.id)).toBe(outcome === "success" ? "success" : "error");
+        await expect(page).toHaveURL(/\/w\/settings-race-b\/settings$/);
+        await expect(page.getByText("저장했습니다", { exact: true })).toHaveCount(0);
+        await expect(page.locator(".settings-page > .settings-section").first().getByRole("alert")).toHaveCount(0);
+        await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveValue("Race workspace B");
+        expect((await (await page.request.get(`/api/v1/workspaces/${workspaceB.id}`)).json()).name).toBe("Race workspace B");
+        if (outcome === "success") {
+          expect(await page.evaluate((id) => {
+            const root = document.getElementById("root") as HTMLElement & {
+              __vue_app__: { _context: { provides: Record<string, {
+                getQueryState(key: string[]): { isInvalidated: boolean } | undefined;
+              }> } };
+            };
+            return root.__vue_app__._context.provides.VUE_QUERY_CLIENT.getQueryState(["workspaces", id])?.isInvalidated;
+          }, workspaceA.id)).toBe(true);
+        }
+        if (operation === "rename") {
+          expect((await (await page.request.get(`/api/v1/workspaces/${workspaceA.id}`)).json()).name)
+            .toBe(outcome === "success" ? `${nameA} updated` : nameA);
+          await page.getByLabel("워크스페이스 전환").selectOption(workspaceA.id);
+          await expect(page.getByLabel("워크스페이스 이름", { exact: true }))
+            .toHaveValue(outcome === "success" ? `${nameA} updated` : nameA);
+          await expect(page.getByText("저장했습니다", { exact: true })).toHaveCount(0);
+        } else {
+          expect((await page.request.get(`/api/v1/workspaces/${workspaceA.id}`)).status())
+            .toBe(outcome === "success" ? 404 : 200);
+        }
+      } finally {
+        release();
+        await page.unroute(urlA);
+      }
     }
   }
 });

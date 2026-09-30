@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref, watch, watchEffect } from "vue";
+import { computed, onScopeDispose, ref, watch, watchEffect } from "vue";
 import { RouterLink, useRoute } from "vue-router";
 import { showsWorkspaceSso } from "@/features/settings/workspace-sso-scope";
 import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
@@ -59,53 +59,79 @@ const nameError = ref<string | null>(null);
 const nameSaved = ref(false);
 const deleteError = ref<string | null>(null);
 
-watch(workspaceId, () => {
+// A new visit (including A -> B -> A), role or session owns fresh UI state.
+const lifecycle = ref(0);
+type WorkspaceMutation = { workspaceId: string; lifecycle: number };
+const isCurrent = (input: WorkspaceMutation) =>
+  input.lifecycle === lifecycle.value && input.workspaceId === workspaceId.value;
+watch([slug, workspaceId, () => workspace.value?.role, () => session.me.value?.userId], () => {
+  lifecycle.value += 1;
   nameError.value = null;
   nameSaved.value = false;
   deleteError.value = null;
-});
+}, { flush: "sync" });
+onScopeDispose(() => { lifecycle.value += 1; });
 
 const rename = useMutation({
-  mutationFn: async (name: string) =>
+  mutationFn: async (input: WorkspaceMutation & { name: string }) =>
     ensureOk(
       await api.PATCH("/api/v1/workspaces/{workspace_id}", {
-        params: { path: { workspace_id: workspaceId.value } },
-        body: { name },
+        params: { path: { workspace_id: input.workspaceId } },
+        body: { name: input.name },
       }),
     ),
-  onSuccess: async () => {
-    nameError.value = null;
-    nameSaved.value = true;
-    await queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] });
-    await queryClient.invalidateQueries({ queryKey: ["workspaces", workspaceId.value] });
+  onSuccess: async (_data, input) => {
+    if (isCurrent(input)) {
+      nameError.value = null;
+      nameSaved.value = true;
+    }
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
+      queryClient.invalidateQueries({ queryKey: ["workspaces", input.workspaceId] }),
+    ]);
   },
-  onError: (err: unknown) => {
+  onError: (err: unknown, input) => {
+    if (!isCurrent(input)) return;
     nameSaved.value = false;
     nameError.value = err instanceof ProblemError ? err.title : t("error.network");
   },
 });
 
 const remove = useMutation({
-  mutationFn: async (confirmSlug: string) =>
+  mutationFn: async (input: WorkspaceMutation & { confirmSlug: string }) =>
     ensureOk(
       await api.DELETE("/api/v1/workspaces/{workspace_id}", {
-        params: { path: { workspace_id: workspaceId.value } },
-        body: { confirmSlug },
+        params: { path: { workspace_id: input.workspaceId } },
+        body: { confirmSlug: input.confirmSlug },
       }),
     ),
-  onSuccess: async () => {
-    deleteError.value = null;
-    await queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] });
-    window.location.replace("/");
+  onSuccess: (_data, input) => {
+    if (isCurrent(input)) {
+      deleteError.value = null;
+      window.location.replace("/");
+    }
+    void queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] });
+    void queryClient.invalidateQueries({ queryKey: ["workspaces", input.workspaceId] });
   },
-  onError: (err: unknown) => {
+  onError: (err: unknown, input) => {
+    if (!isCurrent(input)) return;
     deleteError.value = err instanceof ProblemError ? err.title : t("error.network");
   },
 });
+const namePending = computed(() => rename.isPending.value && !!rename.variables.value && isCurrent(rename.variables.value));
+const deletePending = computed(() => remove.isPending.value && !!remove.variables.value && isCurrent(remove.variables.value));
 
 function onSaveName(name: string): void {
+  if (!canManage.value || workspace.value?.kind !== "team" || namePending.value) return;
+  nameError.value = null;
   nameSaved.value = false;
-  rename.mutate(name);
+  rename.mutate({ name, workspaceId: workspaceId.value, lifecycle: lifecycle.value });
+}
+
+function onDelete(confirmSlug: string): void {
+  if (!isOwner.value || workspace.value?.kind !== "team" || deletePending.value) return;
+  deleteError.value = null;
+  remove.mutate({ confirmSlug, workspaceId: workspaceId.value, lifecycle: lifecycle.value });
 }
 </script>
 
@@ -135,13 +161,13 @@ function onSaveName(name: string): void {
         :workspace-kind="workspace.kind"
         :can-manage="canManage"
         :is-owner="isOwner"
-        :name-pending="rename.isPending.value"
+        :name-pending="namePending"
         :name-error="nameError"
         :name-saved="nameSaved"
-        :delete-pending="remove.isPending.value"
+        :delete-pending="deletePending"
         :delete-error="deleteError"
         @save-name="onSaveName"
-        @delete="remove.mutate($event)"
+        @delete="onDelete"
       />
       <WorkspaceMembersSection
         v-if="memberOrAbove"
