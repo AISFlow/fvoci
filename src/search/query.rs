@@ -20,7 +20,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-use crate::db::context::{session_is_live, set_tenant};
+use crate::db::context::{begin_read, session_is_live, set_tenant};
 use crate::db::documents::document_permission;
 use crate::db::group_grants::guest_wiki_document_ids_select_sql;
 use crate::db::projects::{load_live_project, project_permission, visible_project_sql_for_guest};
@@ -792,6 +792,7 @@ async fn scan_lexical_global(
                 input.actor_user_id,
                 input.session_id,
                 None,
+                input.tag,
                 acl,
                 &hits,
             )
@@ -1237,6 +1238,7 @@ async fn hydrate_hits(
         input.actor_user_id,
         input.session_id,
         input.project_id,
+        input.tag,
         acl,
         hits,
     )
@@ -1249,15 +1251,18 @@ async fn hydrate_hits_for_workspace(
     actor_user_id: Uuid,
     session_id: Uuid,
     project_filter: Option<Uuid>,
+    tag: Option<Uuid>,
     acl: &SearchAcl,
     hits: &[MeiliHit],
 ) -> Result<Vec<HydratedRow>, sqlx::Error> {
     if hits.is_empty() {
         return Ok(Vec::new());
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace_id).await?;
-    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+    if !session_is_live(&mut tx, actor_user_id, session_id).await?
+        || !workspace_is_live(&mut tx, workspace_id).await?
+    {
         tx.rollback().await?;
         return Ok(Vec::new());
     }
@@ -1266,6 +1271,7 @@ async fn hydrate_hits_for_workspace(
         workspace_id,
         actor_user_id,
         project_filter,
+        tag,
         acl,
         hits,
     )
@@ -1279,6 +1285,7 @@ async fn hydrate_in_tx(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     project_filter: Option<Uuid>,
+    tag: Option<Uuid>,
     acl: &SearchAcl,
     hits: &[MeiliHit],
 ) -> Result<Vec<HydratedRow>, sqlx::Error> {
@@ -1311,10 +1318,16 @@ async fn hydrate_in_tx(
               AND d.deleted_at IS NULL
               AND d.status <> 'archived'
               AND d.id = ANY($2)
+              AND ($3::uuid IS NULL OR EXISTS (
+                  SELECT 1 FROM fvoci.document_tag_assignments a
+                  WHERE a.workspace_id = d.workspace_id AND a.document_id = d.id
+                    AND a.tag_id = $3
+              ))
             "#,
         )
         .bind(workspace_id)
         .bind(&doc_ids)
+        .bind(tag)
         .fetch_all(&mut **tx)
         .await?;
         for (id, title, body, project_id, number, updated_at, project_key) in rows {
@@ -1411,7 +1424,9 @@ async fn hydrate_in_tx(
         .filter(|h| h.kind == SearchSourceKind::Attachment)
         .filter_map(|h| Uuid::parse_str(&h.resource_id).ok())
         .collect();
-    if !att_ids.is_empty() {
+    // Source tag semantics: only documents are narrowed by direct assignment;
+    // tasks remain eligible, while comments/attachments are omitted entirely.
+    if tag.is_none() && !att_ids.is_empty() {
         let rows = sqlx::query_as::<
             _,
             (
@@ -1511,7 +1526,7 @@ async fn hydrate_in_tx(
         .filter(|h| h.kind == SearchSourceKind::Comment)
         .filter_map(|h| Uuid::parse_str(&h.resource_id).ok())
         .collect();
-    if !comment_ids.is_empty() {
+    if tag.is_none() && !comment_ids.is_empty() {
         let rows = sqlx::query_as::<
             _,
             (

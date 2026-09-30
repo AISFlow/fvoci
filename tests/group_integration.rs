@@ -35,6 +35,334 @@ async fn bearer(
     (status, json)
 }
 
+/// Discovery is a separate, authorized bulk read. The legacy wiki tree must
+/// not acquire project rows or infer guest access to a granted child's parent.
+#[tokio::test]
+async fn wiki_discovery_bulk_grants_tags_and_default_tree_boundary() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, ws, "member", "discovery-member").await;
+    let guest = add_workspace_user(&admin, ws, "guest", "discovery-guest").await;
+    let public = create_project(app.clone(), &cookie, ws, "PUB", "workspace").await;
+    let private = create_project(app.clone(), &cookie, ws, "GRANT", "private").await;
+    let hidden = create_project(app.clone(), &member.cookie, ws, "HIDDEN", "private").await;
+    let public_id: Uuid = public["id"].as_str().unwrap().parse().unwrap();
+    let private_id: Uuid = private["id"].as_str().unwrap().parse().unwrap();
+    let public_root = public["rootDocumentId"].as_str().unwrap();
+    let private_root = private["rootDocumentId"].as_str().unwrap();
+    let hidden_root = hidden["rootDocumentId"].as_str().unwrap();
+    let project_child = Uuid::now_v7();
+    project_harness::insert_project_document(&admin, ws, public_id, project_child, owner_id, 10)
+        .await;
+    sqlx::query("UPDATE fvoci.documents SET parent_id=$2, status='draft' WHERE id=$1")
+        .bind(project_child)
+        .bind(public_root.parse::<Uuid>().unwrap())
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mut wiki = Vec::new();
+    for parent in [None, None, Some(0)] {
+        let (status, doc) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/documents"),
+            Some(json!({"title": "discovery wiki", "parentId": parent.map(|i| &wiki[i])})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{doc}");
+        wiki.push(doc["id"].as_str().unwrap().to_string());
+    }
+    let child_id: Uuid = wiki[2].parse().unwrap();
+    // Multiple overlapping groups must never duplicate discovery rows.
+    for i in 0..2 {
+        let group = Uuid::now_v7();
+        sqlx::query("INSERT INTO fvoci.groups (id, workspace_id, name) VALUES ($1, $2, $3)")
+            .bind(group)
+            .bind(ws)
+            .bind(format!("discovery-{i}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        for user in [member.user_id, guest.user_id] {
+            sqlx::query("INSERT INTO fvoci.group_members (workspace_id, group_id, user_id) VALUES ($1, $2, $3)")
+                .bind(ws).bind(group).bind(user).execute(&admin).await.unwrap();
+        }
+        sqlx::query("INSERT INTO fvoci.project_members (id, workspace_id, project_id, group_id, role) VALUES ($1, $2, $3, $4, 'viewer')")
+            .bind(Uuid::now_v7()).bind(ws).bind(private_id).bind(group)
+            .execute(&admin).await.unwrap();
+        sqlx::query("INSERT INTO fvoci.document_members (id, workspace_id, document_id, group_id, role) VALUES ($1, $2, $3, $4, 'viewer')")
+            .bind(Uuid::now_v7()).bind(ws).bind(child_id).bind(group)
+            .execute(&admin).await.unwrap();
+    }
+    sqlx::query("INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES ($1, $2, $3, $4, 'viewer')")
+        .bind(Uuid::now_v7()).bind(ws).bind(public_id).bind(guest.user_id)
+        .execute(&admin).await.unwrap();
+    sqlx::query("UPDATE fvoci.projects SET status = 'archived' WHERE id = $1")
+        .bind(private_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.documents SET status = 'archived' WHERE id = $1")
+        .bind(child_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let tag = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.document_tags (id, workspace_id, name, color) VALUES ($1, $2, 'discovery', 'blue')")
+        .bind(tag).bind(ws).execute(&admin).await.unwrap();
+    for doc in [child_id, private_root.parse().unwrap()] {
+        sqlx::query("INSERT INTO fvoci.document_tag_assignments (workspace_id, document_id, tag_id) VALUES ($1, $2, $3)")
+            .bind(ws).bind(doc).bind(tag).execute(&admin).await.unwrap();
+    }
+    let path = format!("/api/v1/workspaces/{ws}/wiki-discovery");
+    let ids = |body: &Value| -> Vec<String> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (status, owner_rows) = json_request(app.clone(), "GET", &path, None, Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{owner_rows}");
+    assert!(ids(&owner_rows).contains(&public_root.to_string()));
+    assert!(ids(&owner_rows).contains(&private_root.to_string()));
+    assert!(
+        !ids(&owner_rows).contains(&hidden_root.to_string()),
+        "owner bypassed private ACL"
+    );
+    let (status, member_rows) =
+        json_request(app.clone(), "GET", &path, None, Some(&member.cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{member_rows}");
+    assert_eq!(
+        ids(&member_rows)
+            .iter()
+            .filter(|id| id.as_str() == private_root)
+            .count(),
+        1
+    );
+    let (status, guest_rows) =
+        json_request(app.clone(), "GET", &path, None, Some(&guest.cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{guest_rows}");
+    let guest_ids = ids(&guest_rows);
+    assert!(guest_ids.contains(&public_root.to_string()));
+    assert!(guest_ids.contains(&project_child.to_string()));
+    assert!(guest_ids.contains(&private_root.to_string()));
+    assert_eq!(guest_ids.iter().filter(|id| *id == &wiki[2]).count(), 1);
+    assert!(!guest_ids.contains(&wiki[0]));
+    assert!(!guest_ids.contains(&wiki[1]));
+    assert!(!guest_ids.contains(&hidden_root.to_string()));
+    let (status, tagged) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}?tag={tag}"),
+        None,
+        Some(&guest.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tagged}");
+    let mut actual = ids(&tagged);
+    actual.sort();
+    let mut expected = vec![wiki[2].clone(), private_root.to_string()];
+    expected.sort();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        tagged["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == wiki[2])
+            .unwrap()["parentId"],
+        wiki[0]
+    );
+    for who in [&cookie, &guest.cookie] {
+        let (status, legacy) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/tree"),
+            None,
+            Some(who),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{legacy}");
+        assert!(legacy["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["projectId"].is_null()));
+        if who == &guest.cookie {
+            assert!(ids(&legacy).is_empty());
+        }
+    }
+    let (status, empty) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}?tag={}", Uuid::now_v7()),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ids(&empty).is_empty());
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}?tag=bad"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    for (scope, expected_status) in [
+        ("documents.read", StatusCode::OK),
+        ("tasks.read", StatusCode::NOT_FOUND),
+    ] {
+        let (status, created) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/api-tokens"),
+            Some(json!({"name": scope, "scopes": [scope]})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let (status, body) = bearer(
+            app.clone(),
+            "GET",
+            &path,
+            None,
+            created["token"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(status, expected_status, "{body}");
+    }
+    // Hold the row-reading statement after its credential/membership snapshot,
+    // then revoke both tags and groups using another committed connection.
+    let mut blocker = admin.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query("LOCK TABLE fvoci.documents IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let pending_app = app.clone();
+    let pending_path = format!("{path}?tag={tag}");
+    let pending_cookie = guest.cookie.clone();
+    let pending = tokio::spawn(async move {
+        json_request(
+            pending_app,
+            "GET",
+            &pending_path,
+            None,
+            Some(&pending_cookie),
+        )
+        .await
+    });
+    project_harness::wait_for_blocked_query_count(&admin, pid, "%FROM fvoci.documents d%", 1).await;
+    sqlx::query("DELETE FROM fvoci.group_members WHERE workspace_id = $1 AND user_id = $2")
+        .bind(ws)
+        .bind(guest.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.document_tag_assignments WHERE workspace_id=$1 AND tag_id=$2")
+        .bind(ws)
+        .bind(tag)
+        .execute(&admin)
+        .await
+        .unwrap();
+    blocker.commit().await.unwrap();
+    let (status, snapshot) = pending.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{snapshot}");
+    let mut snapshot_ids = ids(&snapshot);
+    snapshot_ids.sort();
+    assert_eq!(
+        snapshot_ids, expected,
+        "permission and tag use the same read snapshot"
+    );
+    // A new snapshot sees the already-committed revocations.
+    let (status, revoked) =
+        json_request(app.clone(), "GET", &path, None, Some(&guest.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!ids(&revoked).contains(&private_root.to_string()));
+    assert!(!ids(&revoked).contains(&wiki[2]));
+    sqlx::query("UPDATE fvoci.projects SET deleted_at = now() WHERE id = $1")
+        .bind(public_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.documents SET deleted_at = now() WHERE id = $1")
+        .bind(child_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, deleted) = json_request(app.clone(), "GET", &path, None, Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!ids(&deleted).contains(&public_root.to_string()));
+    assert!(!ids(&deleted).contains(&wiki[2]));
+    let session = session_id_for_user(&admin, guest.user_id).await;
+    sqlx::query("DELETE FROM fvoci.sessions WHERE id = $1")
+        .bind(session)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, _) = json_request(app.clone(), "GET", &path, None, Some(&guest.cookie)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // A live credential outside this workspace still cannot read discovery.
+    let outsider = add_workspace_user(&admin, ws, "member", "discovery-outsider").await;
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id=$1 AND user_id=$2")
+        .bind(ws)
+        .bind(outsider.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, other) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({"slug": "discovery-other", "name": "Other"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+    let other_ws: Uuid = other["id"].as_str().unwrap().parse().unwrap();
+    let foreign_tag = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.document_tags (id,workspace_id,name,color) VALUES ($1,$2,'foreign','blue')")
+        .bind(foreign_tag).bind(other_ws).execute(&admin).await.unwrap();
+    let (status, foreign) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{path}?tag={foreign_tag}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ids(&foreign).is_empty());
+    let (status, _) = json_request(app.clone(), "GET", &path, None, Some(&outsider.cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let restricted = app_pool(&harness).await;
+    let (superuser, bypass): (bool, bool) =
+        sqlx::query_as("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user")
+            .fetch_one(&restricted)
+            .await
+            .unwrap();
+    assert!(!superuser && !bypass);
+    let unscoped: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.documents")
+        .fetch_one(&restricted)
+        .await
+        .unwrap();
+    assert_eq!(unscoped, 0, "tenant context must not survive pooled reads");
+    restricted.close().await;
+    assert_ne!(owner_id, guest.user_id);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn groups_crud_membership_project_grant_and_user_id_members() {
     let harness = TestDb::bootstrap().await;

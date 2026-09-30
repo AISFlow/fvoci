@@ -1112,6 +1112,10 @@ pub struct ProjectListItemOutput {
     pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Live project documents, including the root; unavailable for deleted rows
+    /// or API tokens without document read access.
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub document_count: Option<i64>,
     pub task_count: i64,
     pub open_task_count: i64,
     pub can_edit: bool,
@@ -1723,6 +1727,52 @@ impl From<crate::auth::session::SessionUser> for SessionUserOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_document_count_serializes_number_and_explicit_null() {
+        let mut output = ProjectListItemOutput {
+            id: "project".into(),
+            workspace_id: "workspace".into(),
+            key: "PRJ".into(),
+            name: "Project".into(),
+            description: None,
+            icon: None,
+            visibility: "workspace".into(),
+            root_document_id: None,
+            status: "active".into(),
+            created_by: "owner".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            document_count: Some(4),
+            task_count: 0,
+            open_task_count: 0,
+            can_edit: true,
+            can_manage: true,
+        };
+        assert_eq!(serde_json::to_value(&output).unwrap()["documentCount"], 4);
+        output.document_count = None;
+        let value = serde_json::to_value(output).unwrap();
+        assert!(value.as_object().unwrap().contains_key("documentCount"));
+        assert!(value["documentCount"].is_null());
+    }
+
+    #[cfg(feature = "api-schema")]
+    #[test]
+    fn project_document_count_schema_is_required_nullable_integer() {
+        let spec: serde_json::Value =
+            serde_json::from_str(&crate::api::openapi::spec_json()).unwrap();
+        let schema = &spec["components"]["schemas"]["ProjectListItemOutput"];
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "documentCount"));
+        let count = &schema["properties"]["documentCount"];
+        let types = count["type"].as_array().expect("nullable integer types");
+        assert!(types.iter().any(|kind| kind == "integer"));
+        assert!(types.iter().any(|kind| kind == "null"));
+        assert_eq!(count["format"], "int64");
+    }
 
     #[test]
     fn session_user_output_serializes_null_family_name() {
