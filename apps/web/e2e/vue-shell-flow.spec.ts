@@ -340,8 +340,8 @@ test("the search palette finds seeded documents and tasks and opens them from bo
     await palette.getByLabel("검색어").press("Enter");
     await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/search\\?q=${token}$`));
     await expect(page.getByRole("region", { name: "검색" }).getByText(first.title)).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator("#root[data-v-app]")).toHaveCount(0);
-    expect(await sameDocument(page), "search page crosses into React with a full load").toBe(false);
+    await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
+    expect(await sameDocument(page), "the search palette opens its Vue page with the existing full navigation").toBe(false);
   }
 
   // No match.
@@ -678,8 +678,8 @@ test("the workspace switch lands on the same section of the other workspace from
     await markDocument(page);
     await select.selectOption({ label: "Vue Shell Two" });
     await expect(page).toHaveURL(new RegExp(`/w/vshell2/${section}$`));
-    await expect(page.locator("#root[data-v-app]")).toHaveCount(0);
-    expect(await sameDocument(page)).toBe(false);
+    await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
+    expect(await sameDocument(page), "workspace switch uses the Vue router").toBe(true);
   }
   expect(seen.csp).toEqual([]);
   expect(seen.icons).toEqual([]);

@@ -655,7 +655,7 @@ test("a project list that fails to load offers a retry", async ({ page }) => {
   await expect(bar(page, task.id)).toHaveAttribute("data-start", day(3));
 });
 
-test("Vue project tabs stay in one runtime and links to React pages fully load", async ({ page }) => {
+test("Vue project tabs and the workspace project list stay in one runtime", async ({ page }) => {
   test.setTimeout(120_000);
   const csp = watchCspViolations(page);
   await ensureSetup(page);
@@ -694,13 +694,13 @@ test("Vue project tabs stay in one runtime and links to React pages fully load",
   await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
   expect(await marker(), "Gantt → tasks stays in the Vue app").toBe(true);
 
-  // The workspace project list is still a React page.
+  // The workspace project list is a connected Vue page.
   await markDocument();
   await page.locator(`a[href="/w/${admin.workspaceSlug}/projects"]`).first().click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/projects$`));
   await expect(page.getByRole("button", { name: "새 프로젝트", exact: true })).toBeVisible();
   await expect(page.getByText(project.name, { exact: true })).toBeVisible();
-  await expect(page.locator("#root[data-v-app]")).toHaveCount(0);
-  expect(await marker(), "project list crosses into React with a full load").toBeUndefined();
+  await expect(page.locator("#root[data-v-app]")).toHaveCount(1);
+  expect(await marker(), "project list navigation stays in Vue").toBe(true);
   expect(csp).toEqual([]);
 });
