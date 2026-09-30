@@ -936,7 +936,28 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
-#### 최신 PR272 실행 체크포인트 (2026-09-30 15:53 KST)
+#### 최신 Goal·누적 실행 체크포인트 (2026-09-30 16:21 KST)
+
+최신 사용자 Goal: **합의된 백엔드 Rust 이관 상태를 실제 실행 경로와 기존 수락 근거로 종결 확인하고, #272에서 전체 Vue 3 + Nuxt UI + Tiptap/Bun 사용자 흐름·선택한 Editor/Calendar UI·React 및 임시 전환 계층 제거를 완결한다. 실제 Rust/app-role DB/최종 배포 이미지 검증과 독립 검토 뒤 머지하지 않고 별도 사용자 승인을 기다린다.** 이전 별도 요청·완료 이력·WIP·협업 비교는 취소하지 않는다. 브라우저 TypeScript나 개발 생성기를 Rust로 옮기는 목표가 아니다. 기존 goal 도구의 blocked 이력과 수정 API 부재는 그대로이며 이 절을 정본으로 갱신한다.
+
+- 원격272는 `b0d258586e935977f683fd151b44e6d74785501c`, base/main `50d95df1a98c2d88d28f09222c2985fbdb585623`, Draft/open/auto-merge 없음. Web36680350031·Rust36680350123·Install36680349995·Native documents36680350003·collaboration36680350008 **모두 SUCCESS**. Install amd64/arm64 설치·백업복구4 jobs 성공, upgrade-smoke-arm64는 조건상 SKIPPED이며 통과로 세지 않는다. 이 결과는 이후 로컬 합본의 검증이 아니다.
+- 로컬 미push `c84ba72ef0c3920ab59c5b6cf64a890a0f84fbd5`: 기존4eb 이후 accepted wiki4fca(원본#284 spec 회수+revision panel 층 수정), account React retirement30c, neutral editor movea51을 ordinary merge. 합본4eb의 독립 검증은85unit·실제12browser·Bun build·HTTP343assets+NOTICE 일치, docs8c 별도 ACCEPT. 후속 c84 전체 실행은 아직 수락 전이다.
+- wiki4fca: original5pass/1fail 보존, fixed desktop6/mobile viewport revision1 및 별도 ACCEPT. account30c: React전용10파일 제거,55unit/actual5browser 및 별도 ACCEPT. a51: helper4+CSS를 중립 위치로 이동,58editor+6web units/schema/build/actual4browser 및 별도 ACCEPT. PDF 개발 oracle·일반 Hocuspocus provider·문서 변환은 유지. a51 native inventory는930이름 중928tracked일치+2개 양쪽 부재이며930실파일 검증으로 확대하지 않는다.
+- native rapid navigation9a는 첫 trusted key→click201.4ms로 기존<200 조건 FAILURE; 나머지184.2/84.1/68.3ms, back/persist tail 미실행. trace가 측정 사이 Playwright snapshot 대기를 확인했으나 모든 지연의 원인으로 단정하지 않는다. `ctx_45af01bb6e95`가 별도 CDP native browser-event 후보 준비, 기존 임계값/trace/신뢰 입력/room/history/persist 조건 유지. 실제 OS IBus 성공 근거와 CDP 합성 입력은 구분한다.
+
+| 보존된 실행 항목 | 현재 담당·고정 입력 | 다음 수락 행동 |
+| --- | --- | --- |
+| Workspace 홈/위키/검색/알림/휴지통·최종 fallback | `ctx_4bc48944e4ac`, lifecycle2b8696c4, 새 Rust 연결c6fca53a/18237087 | 새 native quartet과 실제 scope11/parity6/direct4 검증·별도 review. encoded ref/unknown/setup/auth fallback 후 boot 제거; 재작성 아님 |
+| Wiki 이동·discovery·검색·count backend | `ctx_78bc50455736`, generated214da/source3fee→lint49f4 | move/discovery/count/search scoped review 재사용, 실제49 clippy·합본 project/group/search 검사와 새 native pairing. security/typegen 검토는 통과, gate 결과와 구분 |
+| Entity lifecycle/count cache | fixeddf7656e1, 독립 `ctx_795f547d4a6c` | 기존3b BLOCK 수정56unit/6browser + 최종prefix2browser; captured discovery 계약과 실제 합본 연결 후 수락 |
+| Workspace settings React 제거 | fixed8c9379df, 독립 `ctx_03db58092810` | 전용20파일·세 contract 검사 전환,56unit/build/actual4browser 보고 검토·통합 |
+| 첨부 viewer React 제거 | `ctx_9ac253a0ad9f`, baseffe69033 | 수락된 Vue viewer 재사용, React 전용8개 호출자 확인·제거·PDF/share/HWP-edit 회귀. 공통 worker/WASM/Office/PDF 보존 |
+| 백엔드 이관 종결 확인 | readonly `ctx_aeb0bee4a004`, basec84/main50d95·기존 수락 근거 | A 구현/수락 B 실제 공백 C 승인 차이 D 외부 검증한계 E 개발도구로 좁게 정리. 전체 재감사/새 설계 없음 |
+| 최종 누적 수락 | Astra 조정·Sol 별도 검증/검토 | 고정 Bun 설치/도구 실행·API/schema·전체 Vue 실제회귀·기존 Keycloak fixture·S3 A/B·깨끗한 Docker 이미지/NOTICE·지원아키텍처 설치/재시작/복구·모듈/네트워크 React 부재. 최종 SHA가 준비된 뒤 범위 맞춰 재사용/실행 |
+
+**최종 이미지 검사를 host build/prebuilt로 대신하지 않는다.** 외부 제공자·OS·브라우저 미검증은 구체적으로 분리하고 다른 전환 작업을 막지 않는다. desktop/좁은 화면 실제 screenshot·메뉴·스크롤·focus·한글/readonly 증거를 Editor/Calendar 최종 수락에 연결한다. 최종 후보 완료 후에도 main/하위PR merge, tag/release/배포 금지·사용자 승인 대기. 기존 별도 0.x 요청은 이 hold를 우회하지 않는다.
+
+#### 이전 PR272 실행 체크포인트 (2026-09-30 15:53 KST)
 
 **#272 Draft·auto-merge 없음. 별도 사용자 승인 전 main 머지·릴리스 금지.** 이전 snapshot과 실패 근거는 아래 그대로 보존한다.
 
