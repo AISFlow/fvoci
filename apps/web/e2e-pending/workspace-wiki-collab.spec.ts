@@ -963,21 +963,88 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   }
 });
 
-test("@ mention does not call unsupported APIs", async ({ page }) => {
-  const mentionHits: string[] = [];
+test("@ mention uses authorized suggestions and preserves the selected user after reload", async ({ page }) => {
+  await ensureCollabFixture(page);
+  // Other scenarios revoke the shared peer; own this suggestion's membership.
+  const mentionPeer = { ...peer, email: "collab-mention-peer@example.com", givenName: "제안", familyName: "멘션" };
+  const mentionLabel = "멘션제안";
+  installCollabPeer(mentionPeer);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "멤버 멘션");
+  const editor = await openEditor(page, doc.url);
+  const membersPath = `/api/v1/workspaces/${doc.workspaceId}/members`;
+  const groupsPath = `/api/v1/workspaces/${doc.workspaceId}/groups`;
+  // Empty @ queries only load these two contracted metadata collections.
+  // Check exact paths/methods/query strings, including enrichment after reload;
+  // search, lookup and legacy mention/user endpoints must not sneak through.
+  const mentionHits: Array<{ method: string; path: string; query: string }> = [];
+  const failedApiResponses: Array<{ path: string; status: number }> = [];
+  let selectingMention = true;
   page.on("request", (request) => {
-    const url = request.url();
-    if (url.includes("/search") || url.includes("/lookup") || url.includes("/members")) {
-      mentionHits.push(url);
+    const url = new URL(request.url());
+    if (url.pathname.startsWith("/api/") &&
+      (selectingMention || /\/(search|lookup|members|groups|mentions?|users)(\/|$)/.test(url.pathname))) {
+      mentionHits.push({ method: request.method(), path: url.pathname, query: url.search });
     }
   });
-  await ensureCollabFixture(page);
-  await login(page, member.email, member.password);
-  const doc = await createWikiDoc(page, "미지원 멘션");
-  const editor = await openEditor(page, doc.url);
+  page.on("response", (response) => {
+    const path = new URL(response.url()).pathname;
+    if (path.startsWith("/api/") && response.status() >= 400) {
+      failedApiResponses.push({ path, status: response.status() });
+    }
+  });
+  const membersResponse = page.waitForResponse((response) => new URL(response.url()).pathname === membersPath);
+  const groupsResponse = page.waitForResponse((response) => new URL(response.url()).pathname === groupsPath);
   await editor.click();
   await page.keyboard.type("@");
-  expect(mentionHits).toEqual([]);
+  const [members, groups] = await Promise.all([membersResponse, groupsResponse]);
+  expect(members.status()).toBe(200);
+  expect(groups.status()).toBe(200);
+  const body = await members.json();
+  const selected = body.items.find((item: { email: string }) => item.email === mentionPeer.email);
+  expect(selected).toMatchObject({ givenName: mentionPeer.givenName, familyName: mentionPeer.familyName, role: "member" });
+  expect(selected.userId).toMatch(UUID_RE);
+  await expect(page.getByRole("listbox").getByRole("option", { name: mentionLabel, exact: true })).toBeVisible();
+  await page.getByRole("listbox").getByRole("option", { name: mentionLabel, exact: true }).click();
+  await expect(editor.locator("[data-mention]")).toHaveText(`@${mentionLabel}`);
+  const before = await editorShape(page);
+  expect(before.document.content?.flatMap((node) => node.content ?? []).filter((node) => node.type === "mention"))
+    .toEqual([{ type: "mention", attrs: { entity: "user", id: selected.userId, label: mentionLabel } }]);
+  selectingMention = false;
+  await persistBody(page);
+  await page.reload();
+  await waitConnected(page);
+  expect((await editorShape(page)).document).toEqual(before.document);
+  await expect(editorLocator(page).locator("[data-mention]")).toHaveText(`@${mentionLabel}`);
+  expect(mentionHits).toContainEqual({ method: "GET", path: membersPath, query: "" });
+  expect(mentionHits).toContainEqual({ method: "GET", path: groupsPath, query: "" });
+  expect(mentionHits.filter((hit) => hit.method !== "GET" || hit.query !== "" || ![membersPath, groupsPath].includes(hit.path))).toEqual([]);
+  expect(failedApiResponses).toEqual([]);
+});
+
+test("@ mention member metadata denies guests, nonmembers and unauthenticated users", async ({ page }) => {
+  await ensureCollabFixture(page);
+  await login(page, member.email, member.password);
+  const id = await workspaceId(page, admin.workspaceSlug);
+  const path = `/api/v1/workspaces/${id}/members`;
+  createE2eUser("collab-mention-guest@example.com", "guestpass1", "멘션게스트", {
+    workspaceSlug: admin.workspaceSlug,
+    membershipRole: "guest",
+  });
+  createE2eUser("collab-mention-outsider@example.com", "outsiderpass1", "멘션외부인");
+  for (const [email, password] of [
+    ["collab-mention-guest@example.com", "guestpass1"],
+    ["collab-mention-outsider@example.com", "outsiderpass1"],
+  ]) {
+    await login(page, email, password);
+    const response = await page.request.get(path);
+    expect(response.status()).toBe(404);
+    expect(await response.json()).not.toHaveProperty("items");
+  }
+  await page.context().clearCookies();
+  const response = await page.request.get(path);
+  expect(response.status()).toBe(401);
+  expect(await response.json()).not.toHaveProperty("items");
 });
 
 test("slash attachment uploads, shows metadata, downloads bytes, and survives persist reload", async ({
