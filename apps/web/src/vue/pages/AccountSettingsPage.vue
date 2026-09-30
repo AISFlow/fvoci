@@ -2,7 +2,7 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, watchEffect } from "vue";
+import { computed, watch, watchEffect } from "vue";
 import { useRoute } from "vue-router";
 import {
   changePassword,
@@ -17,10 +17,13 @@ import {
   withdrawAccount,
 } from "@/features/settings/account-requests";
 import { oidcErrorMessage } from "@/lib/oidc";
+import { api, ensureOk } from "@/lib/api";
+import { applyTextScale } from "@/lib/ui-preferences";
 import { identitiesQuery, meQuery, mfaStatusQuery, providersQuery } from "@/lib/queries";
 import QueryLoading from "../components/QueryLoading.vue";
 import AccountSettingsView from "../features/settings/AccountSettingsView.vue";
 import MfaSection from "../features/settings/MfaSection.vue";
+import AccountTokensSection from "../features/settings/AccountTokensSection.vue";
 import { loginPath, redirectTo } from "../session/navigation";
 import "@/features/settings/settings-shell.css";
 
@@ -30,6 +33,9 @@ const me = useQuery(meQuery);
 const identities = useQuery(identitiesQuery);
 const providers = useQuery(providersQuery);
 const mfa = useQuery(mfaStatusQuery);
+watch(() => me.data.value?.textScale, (scale) => {
+  if (scale !== undefined) applyTextScale(scale);
+}, { immediate: true });
 
 function queryString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
@@ -60,6 +66,16 @@ function retry(): void {
 async function onWithdraw(input: Parameters<typeof withdrawAccount>[0]): Promise<void> {
   window.location.assign(await withdrawAccount(input));
 }
+
+async function savePreferences(input: { locale: "ko"; timezone: string; weekStartsOn: number; textScale: number }): Promise<void> {
+  const current = me.data.value;
+  if (!current) return;
+  const committed = await ensureOk(await api.PATCH("/api/v1/auth/me", {
+    body: { givenName: current.givenName, ...input },
+  }));
+  queryClient.setQueryData(meQuery.queryKey, committed);
+  await queryClient.invalidateQueries({ queryKey: meQuery.queryKey });
+}
 </script>
 
 <template>
@@ -83,6 +99,7 @@ async function onWithdraw(input: Parameters<typeof withdrawAccount>[0]): Promise
           :success-notice="successNotice"
           :error-notice="errorNotice"
           :on-save-name="(input) => saveProfileName(queryClient, input)"
+          :on-save-preferences="savePreferences"
           :on-send-verification="sendEmailVerification"
           :on-change-email="requestEmailChange"
           :on-change-password="(input) => changePassword(queryClient, input)"
@@ -100,6 +117,7 @@ async function onWithdraw(input: Parameters<typeof withdrawAccount>[0]): Promise
             />
           </template>
         </AccountSettingsView>
+        <AccountTokensSection v-if="ready && !failed" class="mt-6" />
       </div>
     </main>
     <footer class="border-t border-default px-4 py-3">

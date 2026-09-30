@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import UPageCard from "@nuxt/ui/components/PageCard.vue";
+import UFormField from "@nuxt/ui/components/FormField.vue";
+import USelect from "@nuxt/ui/components/Select.vue";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { ref } from "vue";
+import { computed, ref } from "vue";
+import { z } from "zod";
 import ConfirmAction from "../../components/ConfirmAction.vue";
 import { inputText, useZodForm } from "../../composables/useZodForm";
 import { ProblemError, problemMessage } from "@/lib/api";
@@ -23,6 +26,9 @@ import {
   withdrawConfirmForm,
 } from "@/lib/validators";
 import { fieldClass } from "./field-classes";
+import { settingLabel } from "@/features/settings/settings-instance-model";
+import { readThemePreference, setThemePreference, type ThemePreference } from "@/lib/ui-preferences";
+import { optionKey, SETTING_ENUM_OPTIONS } from "@/features/settings/settings-catalog";
 import "@/features/settings/settings-shell.css";
 
 const props = defineProps<{
@@ -33,6 +39,7 @@ const props = defineProps<{
   successNotice?: string | null;
   errorNotice?: string | null;
   onSaveName: (input: ProfileNameInput) => Promise<void>;
+  onSavePreferences: (input: { locale: "ko"; timezone: string; weekStartsOn: number; textScale: number }) => Promise<void>;
   onSendVerification: (email: string) => Promise<void>;
   onChangeEmail: (newEmail: string) => Promise<void>;
   onChangePassword: (input: PasswordChangeInput) => Promise<void>;
@@ -103,6 +110,45 @@ async function submitName(): Promise<void> {
       });
     } catch (err) {
       nameError.value = problemMessage(err, "settings.save.failed");
+    }
+  });
+}
+
+const preferenceForm = useZodForm({
+  schema: () => z.object({
+    locale: z.literal("ko"),
+    timezone: z.string().min(1, "i18n:form.too_small"),
+    weekStartsOn: z.enum(["0", "1"]).transform(Number),
+    textScale: z.enum(["16", "18", "20"]).transform(Number),
+  }),
+  defaults: () => ({
+    locale: "ko" as const,
+    timezone: props.me.timezone,
+    weekStartsOn: String(props.me.weekStartsOn),
+    textScale: String(props.me.textScale),
+  }),
+  fieldIds: { locale: "settings-locale", timezone: "settings-timezone", weekStartsOn: "settings-week-start", textScale: "settings-text-scale" },
+});
+const timezones = computed(() => [...new Set([props.me.timezone, "UTC", ...Intl.supportedValuesOf("timeZone")])]);
+const preferenceError = ref<string | null>(null);
+const preferencesSaved = ref(false);
+const theme = ref<ThemePreference>(readThemePreference());
+
+function changeTheme(value: unknown): void {
+  if (value !== "system" && value !== "light" && value !== "dark") return;
+  theme.value = value;
+  setThemePreference(value);
+}
+
+async function submitPreferences(): Promise<void> {
+  await preferenceForm.submit(async (input) => {
+    preferenceError.value = null;
+    preferencesSaved.value = false;
+    try {
+      await props.onSavePreferences(input);
+      preferencesSaved.value = true;
+    } catch (err) {
+      preferenceError.value = problemMessage(err, "settings.save.failed");
     }
   });
 }
@@ -206,8 +252,8 @@ async function handleExport(): Promise<void> {
 
 <template>
   <div class="settings-stack">
-    <UPageCard as="section" variant="subtle" class="settings-section">
-      <h1 class="settings-section__title text-title">{{ t("auth.account.title") }}</h1>
+    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="account-title">
+      <h1 id="account-title" class="settings-section__title text-title">{{ t("auth.account.title") }}</h1>
       <div class="flex flex-col gap-6">
         <p v-if="successNotice" role="status" class="text-sm text-muted">{{ successNotice }}</p>
         <p v-if="errorNotice" role="alert" class="text-sm text-error">{{ errorNotice }}</p>
@@ -389,6 +435,38 @@ async function handleExport(): Promise<void> {
           <p v-if="methodError" role="alert" class="text-sm text-error">{{ methodError }}</p>
         </div>
       </div>
+    </UPageCard>
+    <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="account-preferences-title">
+      <h2 id="account-preferences-title" class="settings-section__title">{{ t("settings.title") }}</h2>
+      <form class="flex flex-col gap-4" novalidate @submit.prevent="submitPreferences">
+        <fieldset :disabled="preferenceForm.submitting.value" class="grid gap-4 sm:grid-cols-2">
+          <legend class="sr-only">{{ t("settings.title") }}</legend>
+          <UFormField name="locale" :label="t('settings.locale')" :error="preferenceForm.errors.value.locale">
+            <USelect id="settings-locale" class="w-full" :model-value="preferenceForm.values.locale"
+              :items="[{ label: settingLabel(optionKey('defaults.user', 'locale', 'ko')), value: 'ko' }]"
+              @update:model-value="(value) => { if (value === 'ko') preferenceForm.values.locale = value; }" />
+          </UFormField>
+          <UFormField name="timezone" :label="t('settings.timezone')" :error="preferenceForm.errors.value.timezone">
+            <USelect id="settings-timezone" class="w-full" v-model="preferenceForm.values.timezone" :items="timezones" />
+          </UFormField>
+          <UFormField name="weekStartsOn" :label="t('settings.weekStart')" :error="preferenceForm.errors.value.weekStartsOn">
+            <USelect id="settings-week-start" class="w-full" v-model="preferenceForm.values.weekStartsOn"
+              :items="SETTING_ENUM_OPTIONS['defaults.user.weekStartsOn']!.map(value => ({ label: settingLabel(optionKey('defaults.user', 'weekStartsOn', value)), value }))" />
+          </UFormField>
+          <UFormField name="textScale" :label="t('settings.textScale')" :error="preferenceForm.errors.value.textScale">
+            <USelect id="settings-text-scale" class="w-full" v-model="preferenceForm.values.textScale"
+              :items="SETTING_ENUM_OPTIONS['defaults.user.textScale']!.map(value => ({ label: settingLabel(optionKey('defaults.user', 'textScale', value)), value }))" />
+          </UFormField>
+        </fieldset>
+        <UFormField name="theme" :label="t('settings.theme')">
+          <USelect id="settings-theme" class="w-full sm:max-w-xs" :model-value="theme"
+            :items="[{ label: t('settings.theme.system'), value: 'system' }, { label: t('settings.theme.light'), value: 'light' }, { label: t('settings.theme.dark'), value: 'dark' }]"
+            @update:model-value="changeTheme" />
+        </UFormField>
+        <p v-if="preferenceError" role="alert" class="text-sm text-error">{{ preferenceError }}</p>
+        <p v-if="preferencesSaved" role="status" class="text-sm text-muted">{{ t("common.saved") }}</p>
+        <UButton type="submit" class="w-fit" :disabled="preferenceForm.submitting.value">{{ t("settings.ui.save") }}</UButton>
+      </form>
     </UPageCard>
     <UPageCard as="section" variant="subtle" class="settings-section">
       <UButton
