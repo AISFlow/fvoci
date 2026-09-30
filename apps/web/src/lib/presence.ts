@@ -7,19 +7,19 @@
  * apps/web/test/collab-session.test.ts 가 두 벌의 드리프트를 잠근다.
  */
 export const PRESENCE_COLORS = [
-	"#b91c1c",
-	"#c2410c",
-	"#b45309",
-	"#15803d",
-	"#0f766e",
-	"#1d4ed8",
-	"#6d28d9",
-	"#be185d",
+  "#b91c1c",
+  "#c2410c",
+  "#b45309",
+  "#15803d",
+  "#0f766e",
+  "#1d4ed8",
+  "#6d28d9",
+  "#be185d",
 ] as const;
 
 export function presenceColorOf(userId: string): string {
-	const tail = userId.replaceAll("-", "").slice(-6);
-	const parsed = Number.parseInt(tail, 16);
-	const index = Number.isFinite(parsed) ? parsed % PRESENCE_COLORS.length : 0;
-	return PRESENCE_COLORS[index] ?? PRESENCE_COLORS[0];
+  const tail = userId.replaceAll("-", "").slice(-6);
+  const parsed = Number.parseInt(tail, 16);
+  const index = Number.isFinite(parsed) ? parsed % PRESENCE_COLORS.length : 0;
+  return PRESENCE_COLORS[index] ?? PRESENCE_COLORS[0];
 }

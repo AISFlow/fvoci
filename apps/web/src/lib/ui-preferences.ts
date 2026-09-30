@@ -1,11 +1,19 @@
 export type ThemePreference = "system" | "light" | "dark";
 
 function read(key: string): string | null {
-  try { return localStorage.getItem(key); } catch { return null; }
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
 }
 
 function store(key: string, value: string): void {
-  try { localStorage.setItem(key, value); } catch { /* Keep the applied session preference. */ }
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* Keep the applied session preference. */
+  }
 }
 
 export function readThemePreference(): ThemePreference {
@@ -14,7 +22,9 @@ export function readThemePreference(): ThemePreference {
 }
 
 function applyTheme(preference: ThemePreference): void {
-  const dark = preference === "dark" || (preference === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const dark =
+    preference === "dark" ||
+    (preference === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.classList.toggle("dark", dark);
 }
 
@@ -25,7 +35,7 @@ export function setThemePreference(preference: ThemePreference): void {
 
 export function applyTextScale(scale: number): void {
   if (scale !== 16 && scale !== 18 && scale !== 20) return;
-  document.documentElement.style.fontSize = `${scale}px`;
+  document.documentElement.style.fontSize = `${String(scale)}px`;
   store("fvoci-text-scale", String(scale));
 }
 
@@ -44,7 +54,8 @@ export function startUiPreferences(): () => void {
       preference = readThemePreference();
       applyTheme(preference);
     }
-    if (event.key === "fvoci-text-scale" || event.key === null) applyTextScale(Number(read("fvoci-text-scale") ?? 16));
+    if (event.key === "fvoci-text-scale" || event.key === null)
+      applyTextScale(Number(read("fvoci-text-scale") ?? 16));
   };
   media.addEventListener("change", systemChanged);
   window.addEventListener("storage", stored);

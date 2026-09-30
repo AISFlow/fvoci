@@ -4,9 +4,7 @@ const slugPattern = /^[a-z0-9-]{2,32}$/;
 
 const nfkcString = z.string().transform((value) => value.normalize("NFKC"));
 
-const slugSchema = nfkcString.pipe(
-  z.string().regex(slugPattern, "i18n:form.invalid"),
-);
+const slugSchema = nfkcString.pipe(z.string().regex(slugPattern, "i18n:form.invalid"));
 
 export const loginInput = z.object({
   email: z.string().trim().email("i18n:form.email"),

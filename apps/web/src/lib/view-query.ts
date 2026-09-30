@@ -52,7 +52,7 @@ const STRING_FILTER_KEYS = [
 export const EMPTY_VIEW_QUERY: ViewQuery = Object.freeze({
   filters: Object.freeze({}) as ViewFilters,
   sort: Object.freeze([]) as unknown as ViewSort[],
-}) as ViewQuery;
+});
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -167,7 +167,7 @@ export function patchViewFilter<K extends keyof ViewFilters>(
     value === "" ||
     (Array.isArray(value) && value.length === 0)
   ) {
-    delete filters[key];
+    Reflect.deleteProperty(filters, key);
   } else {
     filters[key] = value;
   }

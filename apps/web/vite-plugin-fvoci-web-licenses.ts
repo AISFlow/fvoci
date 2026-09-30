@@ -36,14 +36,16 @@ const LICENSE_FILES = [/^license/i, /^licence/i, /^copying/i];
 function isNodeModulesPackageRoot(dir: string): boolean {
   const parent = path.dirname(dir);
   if (path.basename(parent) === "node_modules") return !path.basename(dir).startsWith("@");
-  return path.basename(parent).startsWith("@") && path.basename(path.dirname(parent)) === "node_modules";
+  return (
+    path.basename(parent).startsWith("@") && path.basename(path.dirname(parent)) === "node_modules"
+  );
 }
 
 type PackageJson = { name?: string; version?: string; license?: string };
 
 /** The package a module belongs to, skipping nested non-root package.json files. */
 function mainPackage(from: string): { dir: string; data: PackageJson } | null {
-  for (let dir = from; ; ) {
+  for (let dir = from; ;) {
     const file = path.join(dir, "package.json");
     if (fs.existsSync(file)) {
       const data = JSON.parse(fs.readFileSync(file, "utf8")) as PackageJson;
@@ -70,7 +72,9 @@ export function packageLicenseEntries(moduleIds: Iterable<string>): LicenseEntry
     const entry: LicenseEntry = { name: pkg.data.name, version: pkg.data.version ?? "0.0.0" };
     if (entries.has(licenseEntryId(entry))) continue;
     if (pkg.data.license) entry.identifier = pkg.data.license.trim();
-    const licenseFile = fs.readdirSync(pkg.dir).find((file) => LICENSE_FILES.some((re) => re.test(file)));
+    const licenseFile = fs
+      .readdirSync(pkg.dir)
+      .find((file) => LICENSE_FILES.some((re) => re.test(file)));
     if (licenseFile) entry.text = fs.readFileSync(path.join(pkg.dir, licenseFile), "utf8").trim();
     entries.set(licenseEntryId(entry), entry);
   }
@@ -82,7 +86,9 @@ export function packageLicenseEntries(moduleIds: Iterable<string>): LicenseEntry
  * bundled icon sets), sorted by `name@version` as Vite sorts.
  */
 export function mergeLicenseEntries(licenseJson: string, extraEntries: LicenseEntry[]): string {
-  const merged = new Map(parseLicenseJson(licenseJson).map((entry) => [licenseEntryId(entry), entry]));
+  const merged = new Map(
+    parseLicenseJson(licenseJson).map((entry) => [licenseEntryId(entry), entry]),
+  );
   for (const entry of extraEntries) {
     if (!merged.has(licenseEntryId(entry))) merged.set(licenseEntryId(entry), entry);
   }
@@ -112,7 +118,7 @@ export function bundledIconPrefixes(code: string): string[] {
   }
   const prefixes = new Set<string>();
   for (const [, literal] of literals) {
-    const collections: unknown = JSON.parse(JSON.parse(literal!) as string);
+    const collections: unknown = JSON.parse(JSON.parse(literal) as string);
     if (!Array.isArray(collections)) {
       throw new Error(`${NUXT_UI_ICONS_MODULE_ID}: icon collections are not an array`);
     }
@@ -134,7 +140,10 @@ export function bundledIconPrefixes(code: string): string[] {
  * LICENSE file, so each one needs a pinned supplement in the browser license
  * manifest, or the notice check fails the build.
  */
-export function iconSetLicenseEntries(prefixes: Iterable<string>, resolveFrom: string): LicenseEntry[] {
+export function iconSetLicenseEntries(
+  prefixes: Iterable<string>,
+  resolveFrom: string,
+): LicenseEntry[] {
   const entries: LicenseEntry[] = [];
   for (const prefix of prefixes) {
     const name = `@iconify-json/${prefix}`;
@@ -148,12 +157,16 @@ export function iconSetLicenseEntries(prefixes: Iterable<string>, resolveFrom: s
       if (path.dirname(at) === at) break;
     }
     if (!dir) {
-      throw new Error(`icon set "${prefix}" is bundled but ${name} is not installed; install it so its license is known`);
+      throw new Error(
+        `icon set "${prefix}" is bundled but ${name} is not installed; install it so its license is known`,
+      );
     }
     const data = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as PackageJson;
     const entry: LicenseEntry = { name, version: data.version ?? "0.0.0" };
     if (data.license) entry.identifier = data.license.trim();
-    const licenseFile = fs.readdirSync(dir).find((file) => LICENSE_FILES.some((re) => re.test(file)));
+    const licenseFile = fs
+      .readdirSync(dir)
+      .find((file) => LICENSE_FILES.some((re) => re.test(file)));
     if (licenseFile) entry.text = fs.readFileSync(path.join(dir, licenseFile), "utf8").trim();
     entries.push(entry);
   }

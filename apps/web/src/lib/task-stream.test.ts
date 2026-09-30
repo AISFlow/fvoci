@@ -17,7 +17,7 @@ test.afterEach(() => {
   mock.restoreAll();
 });
 
-test("a reopened task stream resyncs on its open and keeps delivering hints", () => {
+await test("a reopened task stream resyncs on its open and keeps delivering hints", () => {
   let resyncs = 0;
   const hints: TaskStreamHint[] = [];
   const sub = subscribeTaskStream("ws", "project", {
@@ -45,7 +45,7 @@ test("a reopened task stream resyncs on its open and keeps delivering hints", ()
   assert.equal(reopened.closed, true);
 });
 
-test("closing the subscription while refused stops the reopen", () => {
+await test("closing the subscription while refused stops the reopen", () => {
   const sub = subscribeTaskStream("ws", "project", { onResync: () => {}, onTask: () => {} });
   MockEventSource.latest().fail(MockEventSource.CLOSED);
   sub.close();
@@ -55,7 +55,7 @@ test("closing the subscription while refused stops the reopen", () => {
 
 // SA-12: the browser dispatches both its native `open` (the 200 response) and
 // the server's `event: open` item to the same "open" listeners.
-test("a connect resyncs once, on the server's open", () => {
+await test("a connect resyncs once, on the server's open", () => {
   let resyncs = 0;
   const sub = subscribeTaskStream("ws", "project", {
     onResync: () => {
@@ -76,7 +76,7 @@ test("a connect resyncs once, on the server's open", () => {
   sub.close();
 });
 
-test("the task stream listens only for events the server sends", () => {
+await test("the task stream listens only for events the server sends", () => {
   const sub = subscribeTaskStream("ws", "project", { onResync: () => {}, onTask: () => {} });
   const source = MockEventSource.latest();
   // src/http/routes/streams.rs queue_item_to_event: `open` and `task` only;

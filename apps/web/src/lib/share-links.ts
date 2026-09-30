@@ -51,7 +51,8 @@ export function isSafeShareHref(href: string): boolean {
   if (value === "") return false;
   const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(value);
   // Browsers read `\\host` and `/\host` as protocol-relative `//host`.
-  if (!scheme) return !/^[/\\]{2}/.test(value) && !/[\u0000-\u001f]/.test(value);
+  if (!scheme)
+    return !/^[/\\]{2}/.test(value) && !Array.from(value).some((char) => char.charCodeAt(0) <= 31);
   const name = scheme[1].toLowerCase();
   return name === "http" || name === "https" || name === "mailto";
 }
@@ -73,8 +74,7 @@ export function starItemDisplayId(
   item: { projectId: string | null; number: number },
   projectKeyById: ReadonlyMap<string, string>,
 ): string | null {
-  if (item.projectId === null) return `WIKI-${item.number}`;
+  if (item.projectId === null) return `WIKI-${String(item.number)}`;
   const key = projectKeyById.get(item.projectId);
-  return key ? `${key}-${item.number}` : null;
+  return key ? `${key}-${String(item.number)}` : null;
 }
-

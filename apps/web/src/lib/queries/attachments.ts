@@ -21,14 +21,21 @@ export function attachmentQuery(workspaceId: string, attachmentId: string) {
 }
 
 /** Source `hwpEditable`: whether this session may save an edited HWP/HWPX copy. */
-export function attachmentEditContextQuery(workspaceId: string, attachmentId: string, enabled: boolean) {
+export function attachmentEditContextQuery(
+  workspaceId: string,
+  attachmentId: string,
+  enabled: boolean,
+) {
   return queryOptions({
     queryKey: ["attachment-edit-context", workspaceId, attachmentId] as const,
     queryFn: async () =>
       ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/edit-context", {
-          params: { path: { workspace_id: workspaceId, attachment_id: attachmentId } },
-        }),
+        await api.GET(
+          "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/edit-context",
+          {
+            params: { path: { workspace_id: workspaceId, attachment_id: attachmentId } },
+          },
+        ),
       ),
     enabled,
     retry: false,

@@ -17,7 +17,8 @@ export interface SharedQueryOptions<TQueryFnData, TQueryKey extends QueryKey> {
 }
 
 /** Retry count, switch, or predicate: the same query-core type in both adapters. */
-export type SharedRetry = boolean | number | ((failureCount: number, error: DefaultError) => boolean);
+export type SharedRetry =
+  boolean | number | ((failureCount: number, error: DefaultError) => boolean);
 
 /**
  * Same as @tanstack/react-query's and @tanstack/vue-query's `queryOptions`:
@@ -27,7 +28,9 @@ export type SharedRetry = boolean | number | ((failureCount: number, error: Defa
  */
 export function queryOptions<TQueryFnData, const TQueryKey extends QueryKey>(
   options: SharedQueryOptions<TQueryFnData, TQueryKey>,
-): SharedQueryOptions<TQueryFnData, TQueryKey> & { queryKey: DataTag<TQueryKey, TQueryFnData, DefaultError> } {
+): SharedQueryOptions<TQueryFnData, TQueryKey> & {
+  queryKey: DataTag<TQueryKey, TQueryFnData, DefaultError>;
+} {
   return options as SharedQueryOptions<TQueryFnData, TQueryKey> & {
     queryKey: DataTag<TQueryKey, TQueryFnData, DefaultError>;
   };

@@ -11,27 +11,18 @@ function resolved(req: NodeJS.Require, spec: string): string {
   return realpathSync(req.resolve(spec));
 }
 
-test("web, Vue editor, and provider share Vue, Tiptap, and Yjs identities", async () => {
-  const editorReq = createRequire(
-    webRequire.resolve("@fvoci/editor/vue"),
-  );
-  const collabReq = createRequire(
-    webRequire.resolve("@fvoci/editor/collab-tiptap"),
-  );
+await test("web, Vue editor, and provider share Vue, Tiptap, and Yjs identities", async () => {
+  const editorReq = createRequire(webRequire.resolve("@fvoci/editor/vue"));
+  const collabReq = createRequire(webRequire.resolve("@fvoci/editor/collab-tiptap"));
   const providerReq = createRequire(webRequire.resolve("@hocuspocus/provider"));
-  const tiptapVueReq = createRequire(
-    editorReq.resolve("@tiptap/vue-3"),
-  );
+  const tiptapVueReq = createRequire(editorReq.resolve("@tiptap/vue-3"));
 
   const webVue = resolved(webRequire, "vue");
   const webYjs = resolved(webRequire, "yjs");
 
   assert.equal(resolved(editorReq, "vue"), webVue);
   assert.equal(resolved(tiptapVueReq, "vue"), webVue);
-  assert.equal(
-    resolved(tiptapVueReq, "@tiptap/core"),
-    resolved(editorReq, "@tiptap/core"),
-  );
+  assert.equal(resolved(tiptapVueReq, "@tiptap/core"), resolved(editorReq, "@tiptap/core"));
   assert.equal(resolved(collabReq, "yjs"), webYjs);
   assert.equal(resolved(providerReq, "yjs"), webYjs);
 
@@ -41,11 +32,12 @@ test("web, Vue editor, and provider share Vue, Tiptap, and Yjs identities", asyn
   assert.equal(Vue.createVNode("div").type, "div");
 });
 
-test("the retained PDF converter and renderer share their development React", async () => {
+await test("the retained PDF converter and renderer share their development React", async () => {
   const pdfReq = createRequire(webRequire.resolve("@fvoci/editor/export/pdf"));
   const rendererReq = createRequire(pdfReq.resolve("@react-pdf/renderer"));
   const pdfReact = resolved(pdfReq, "react");
   assert.equal(resolved(rendererReq, "react"), pdfReact);
-  const React = await import(pdfReact);
+  // pdfReact is the installed React export resolved from the PDF converter's package.
+  const React = (await import(pdfReact)) as typeof import("react");
   assert.equal(React.createElement("div").type, "div");
 });

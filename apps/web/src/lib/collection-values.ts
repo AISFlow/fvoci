@@ -18,7 +18,12 @@ export const FIELD_TYPES = [
 ] as const;
 export type FieldType = (typeof FIELD_TYPES)[number];
 
-export const OPTION_FIELD_TYPES: readonly string[] = ["select", "multi_select", "checkboxes", "labels"];
+export const OPTION_FIELD_TYPES: readonly string[] = [
+  "select",
+  "multi_select",
+  "checkboxes",
+  "labels",
+];
 /** Scalar types the server accepts as sort keys. */
 export const SORTABLE_FIELD_TYPES: readonly string[] = [
   "text",
@@ -28,7 +33,13 @@ export const SORTABLE_FIELD_TYPES: readonly string[] = [
   "datetime",
   "checkbox",
 ];
-export const DRAFT_FIELD_TYPES: readonly string[] = ["text", "paragraph", "number", "date", "datetime"];
+export const DRAFT_FIELD_TYPES: readonly string[] = [
+  "text",
+  "paragraph",
+  "number",
+  "date",
+  "datetime",
+];
 
 export function isFieldType(value: string): value is FieldType {
   return (FIELD_TYPES as readonly string[]).includes(value);
@@ -273,7 +284,7 @@ export function monthGrid(month: string, weekStartsOn: number): CalendarCell[][]
     const day = new Date(Date.UTC(year, monthNumber - 1, 1 - lead + index));
     const date = day.toISOString().slice(0, 10);
     if (index % 7 === 0) weeks.push([]);
-    weeks[weeks.length - 1]!.push({ date, inMonth: date.slice(0, 7) === month });
+    weeks[weeks.length - 1].push({ date, inMonth: date.slice(0, 7) === month });
   }
   return weeks;
 }

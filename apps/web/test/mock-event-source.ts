@@ -81,6 +81,6 @@ export class MockEventSource {
 
 export function installMockEventSource(): void {
   MockEventSource.instances = [];
-  // @ts-expect-error test shim
+  // @ts-expect-error The minimal test shim intentionally omits native EventSource static/prototype members.
   globalThis.EventSource = MockEventSource;
 }

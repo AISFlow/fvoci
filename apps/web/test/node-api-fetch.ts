@@ -11,7 +11,7 @@ export function installNodeRelativeRequestShim(): () => void {
       }
       return new NativeRequest(input, init);
     },
-  }) as typeof Request;
+  });
   return () => {
     globalThis.Request = NativeRequest;
   };
