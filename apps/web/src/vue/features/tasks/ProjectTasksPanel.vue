@@ -23,6 +23,8 @@ import { collectionFieldsQuery, projectCollectionQuery, type ProjectView } from 
 import { encodeViewQueryParam, parseViewQueryParam, type ViewQuery } from "@/lib/view-query";
 import QueryError from "../../components/QueryError.vue";
 import QueryLoading from "../../components/QueryLoading.vue";
+import ProjectMilestonesSection from "../projects/ProjectMilestonesSection.vue";
+import ProjectGroupsSection from "../projects/ProjectGroupsSection.vue";
 import TaskCreateDialog from "./TaskCreateDialog.vue";
 import TaskFilters from "./TaskFilters.vue";
 import TaskList from "./TaskList.vue";
@@ -182,4 +184,6 @@ function retryList(): void {
     @close="onCreateClose"
     @submit="onCreateSubmit"
   />
+  <ProjectMilestonesSection :workspace-id="workspace.id" :project-id="project.id" :can-manage="project.status === 'active' && project.canEdit" />
+  <ProjectGroupsSection :workspace-id="workspace.id" :project-id="project.id" :can-manage="workspace.role === 'admin' || workspace.role === 'owner'" />
 </template>
