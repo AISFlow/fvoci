@@ -32,7 +32,10 @@ const slug = computed(() => String(route.params.slug ?? ""));
 const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
 const workspaceId = computed(() => workspace.value?.id ?? "");
-const tab = ref<NotificationFilter>("all");
+const tab = computed<NotificationFilter>(() => {
+  const value = route.query.tab;
+  return value === "unread" || value === "archived" ? value : "all";
+});
 const actionError = ref<string | null>(null);
 const actionPending = ref(false);
 let actionVersion = 0;
@@ -91,7 +94,7 @@ const readAll = useMutation({
 });
 
 function selectTab(value: NotificationFilter): void {
-  tab.value = value;
+  void router.replace({ query: { ...route.query, tab: value === "all" ? undefined : value }, hash: route.hash });
 }
 
 async function openItem(item: NotificationItem): Promise<void> {

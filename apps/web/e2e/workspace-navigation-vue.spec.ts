@@ -178,13 +178,17 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
   await rows.first().getByRole("button", { name: "보관", exact: true }).click();
   await page.getByRole("tab", { name: "보관", exact: true }).click();
   await expect(rows).toHaveCount(1);
+  await expect(page).toHaveURL(/\?tab=archived$/);
   await page.reload();
-  await page.getByRole("tab", { name: "보관", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "보관", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(rows).toHaveCount(1);
   await rows.first().getByRole("button", { name: "보관 해제", exact: true }).click();
   await expect(rows).toHaveCount(0);
   await page.getByRole("button", { name: "전체 읽음", exact: true }).click();
   await page.getByRole("tab", { name: "안 읽음", exact: true }).click();
+  await expect(page).toHaveURL(/\?tab=unread$/);
+  await page.reload();
+  await expect(page.getByRole("tab", { name: "안 읽음", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(rows).toHaveCount(0);
   expect((await (await page.request.get(`/api/v1/workspaces/${workspaceId}/notifications/unread-count`)).json()).count).toBe(0);
 });
