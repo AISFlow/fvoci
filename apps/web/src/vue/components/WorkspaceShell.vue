@@ -5,7 +5,7 @@ import UDashboardGroup from "@nuxt/ui/components/DashboardGroup.vue";
 import UDashboardPanel from "@nuxt/ui/components/DashboardPanel.vue";
 import UDashboardNavbar from "@nuxt/ui/components/DashboardNavbar.vue";
 import UNavigationMenu from "@nuxt/ui/components/NavigationMenu.vue";
-import { isVueAppPath } from "@/app-boundary";
+import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
 import { useQuery } from "@tanstack/vue-query";
 import { computed } from "vue";
 import { useRouter } from "vue-router";

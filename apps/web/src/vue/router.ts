@@ -1,10 +1,8 @@
 import { createRouter, createWebHistory, stringifyQuery, type RouteRecordRaw, type RouterHistory } from "vue-router";
 import { VUE_SETTINGS_ROUTE_PATHS, VUE_ACCOUNT_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS, VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS } from "./route-paths";
 
-/** The Vue app's pages; src/app-boundary.ts sends exactly the live paths
- * (VUE_ROUTE_PATHS) here. Each page is its own chunk, so the Gantt page does not load the wiki
- * editor (Tiptap, Yjs, the collab provider) or its stylesheets
- * (import-graph.test.ts and e2e/project-gantt-flow.spec.ts check this). */
+/** Each page is a lazy chunk, so Gantt and the app entry do not load the
+ * document editor or its styles (import-graph and browser groups verify it). */
 export const routes: RouteRecordRaw[] = [
   { path: VUE_ROUTE_PATHS.projectFields, name: "project-fields", component: () => import("./features/projects/settings/ProjectFieldsPage.vue") },
   { path: VUE_ROUTE_PATHS.projectWorkflow, name: "project-workflow", component: () => import("./features/projects/settings/ProjectWorkflowPage.vue") },
@@ -75,9 +73,7 @@ export const routes: RouteRecordRaw[] = [
     name: "workspace-settings",
     component: () => import("./pages/WorkspaceSettingsPage.vue"),
   },
-  // Public share reader. apps/web/src/app-boundary.ts is owned elsewhere;
-  // boot still needs `/^\/s\/[^/]+\/?$/i` and must NOT match
-  // `/s/:token/attachments/...` (that stays a different route).
+  // Public share is an anonymous reader with its own session-free gate.
   { path: VUE_ROUTE_PATHS.publicShare, name: "public-share", component: () => import("./pages/PublicSharePage.vue") },
   // Decoded refs outside the raw route grammar canonicalize after the same
   // workspace/session gates as resource pages. Invalid refs keep the shell.

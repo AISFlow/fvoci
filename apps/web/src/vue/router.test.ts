@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isVueAppPath } from "@/app-boundary";
+import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
 import { createMemoryHistory } from "vue-router";
 import { createAppRouter, routes } from "./router.ts";
 import { VUE_ROUTE_PATHS, VUE_WORKSPACE_ROUTE_PATHS, VUE_NAV_ROUTE_PATHS } from "./route-paths.ts";

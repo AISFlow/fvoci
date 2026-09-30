@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createMemoryHistory, createRouter } from "vue-router";
-import { isVueAppPath as ownsVuePath, VUE_APP_PATHS } from "./app-boundary.ts";
-import { parseRef } from "./lib/href.ts";
-import { VUE_ROUTE_PATHS } from "./vue/route-paths.ts";
+import { isLocalAppPath as ownsVuePath } from "./route-paths.ts";
+import { createAppRouter } from "./router.ts";
+import { parseRef } from "../lib/href.ts";
+import { VUE_ROUTE_PATHS } from "./route-paths.ts";
 
 // Feature grammars stay exact; the SPA fallback is owned separately below.
-const matchesFeaturePath = (path: string) => VUE_APP_PATHS.some(pattern => pattern.test(path));
+const featureRouter = createAppRouter(createMemoryHistory());
+const matchesFeaturePath = (path: string) => !["workspace-ref", "unknown-path"].includes(String(featureRouter.resolve(path).name));
 
 const SAMPLES = [
   "/w/acme/GNT/gantt",

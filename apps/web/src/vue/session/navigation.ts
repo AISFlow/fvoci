@@ -1,4 +1,4 @@
-import { isVueAppPath } from "@/app-boundary";
+import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
 import type { Router } from "vue-router";
 
 // Local SPA hrefs, including fallback paths, use the Vue router. External

@@ -1,4 +1,15 @@
-/** Live paths agree with app-boundary.ts. */
+export const PROJECT_HOME_PATH =
+  /^\/w\/[^/]+\/(?!(?:projects|search|wiki|trash|my-tasks|notifications|settings|a)\/?$)(?![^/]*-\d+\/?$)[A-Za-z][A-Za-z0-9-]{1,31}\/?$/i;
+export const WORKSPACE_ITEM_PATH =
+  /^\/w\/[^/]+\/(?!wiki-[1-9]\d{0,8}\/?$)[A-Za-z0-9-]{2,32}-[1-9]\d{0,8}\/?$/i;
+
+
+/** Local SPA URLs are routed in Vue, including canonical and unknown paths. */
+export function isLocalAppPath(pathname: string): boolean {
+  return pathname.startsWith("/") && !pathname.startsWith("//");
+}
+
+/** Live feature routes and local SPA navigation. */
 // Escape inner closing parentheses for vue-router's custom-regexp parser.
 // Reserved workspace screens and item refs must never resolve as project home.
 const projectRef = "(?!(?:projects|search|wiki|trash|my-tasks|notifications|settings|a)(?:/|$))(?![^/]*-\\d+(?:/|$))[A-Za-z][A-Za-z0-9-]{1,31}";
