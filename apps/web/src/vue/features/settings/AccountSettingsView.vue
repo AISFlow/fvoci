@@ -547,8 +547,8 @@ async function handleExport(): Promise<void> {
           >
             <USelect
               id="settings-timezone"
-              class="w-full"
               v-model="preferenceForm.values.timezone"
+              class="w-full"
               :items="timezones"
             />
           </UFormField>
@@ -559,8 +559,8 @@ async function handleExport(): Promise<void> {
           >
             <USelect
               id="settings-week-start"
-              class="w-full"
               v-model="preferenceForm.values.weekStartsOn"
+              class="w-full"
               :items="
                 SETTING_ENUM_OPTIONS['defaults.user.weekStartsOn']!.map((value) => ({
                   label: settingLabel(optionKey('defaults.user', 'weekStartsOn', value)),
@@ -576,8 +576,8 @@ async function handleExport(): Promise<void> {
           >
             <USelect
               id="settings-text-scale"
-              class="w-full"
               v-model="preferenceForm.values.textScale"
+              class="w-full"
               :items="
                 SETTING_ENUM_OPTIONS['defaults.user.textScale']!.map((value) => ({
                   label: settingLabel(optionKey('defaults.user', 'textScale', value)),

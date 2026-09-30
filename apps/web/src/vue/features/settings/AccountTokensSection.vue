@@ -130,13 +130,13 @@ async function revoke(token: ApiToken): Promise<void> {
         <UFormField name="tokenWorkspace" :label="t('workspace.name')">
           <USelect
             id="account-token-workspace"
-            class="w-full"
             v-model="workspaceId"
+            class="w-full"
             :items="workspaceOptions"
           />
         </UFormField>
         <UFormField name="tokenName" :label="t('token.name')">
-          <UInput id="account-token-name" class="w-full" v-model="name" autocomplete="off" />
+          <UInput id="account-token-name" v-model="name" class="w-full" autocomplete="off" />
         </UFormField>
         <fieldset class="grid gap-2 sm:grid-cols-2">
           <legend class="mb-2 font-medium">{{ t("token.scopes") }}</legend>

@@ -72,7 +72,7 @@ function pendingDays(user: AdminUser): number | null {
       class="settings-section"
       aria-labelledby="admin-system-title"
     >
-      <h2 class="settings-section__title text-title" id="admin-system-title">{{
+      <h2 id="admin-system-title" class="settings-section__title text-title">{{
         t("admin.system")
       }}</h2>
       <div class="text-sm">
@@ -92,7 +92,7 @@ function pendingDays(user: AdminUser): number | null {
       class="settings-section"
       aria-labelledby="admin-users-title"
     >
-      <h2 class="settings-section__title text-title" id="admin-users-title">{{
+      <h2 id="admin-users-title" class="settings-section__title text-title">{{
         t("admin.users")
       }}</h2>
       <div class="flex flex-col gap-2 overflow-x-auto">
@@ -200,7 +200,7 @@ function pendingDays(user: AdminUser): number | null {
       class="settings-section"
       aria-labelledby="admin-workspaces-title"
     >
-      <h2 class="settings-section__title text-title" id="admin-workspaces-title">{{
+      <h2 id="admin-workspaces-title" class="settings-section__title text-title">{{
         t("admin.workspaces")
       }}</h2>
       <div class="overflow-x-auto">

@@ -191,7 +191,7 @@ const badgeClass =
 
 <template>
   <section class="settings-section" aria-labelledby="instance-settings-title">
-    <h2 class="settings-section__title text-title" id="instance-settings-title">{{
+    <h2 id="instance-settings-title" class="settings-section__title text-title">{{
       t("settings.ui.title")
     }}</h2>
     <p class="settings-section__lede">{{ t("settings.ui.help") }}</p>
@@ -220,7 +220,7 @@ const badgeClass =
           class="flex flex-col gap-3 rounded-md border border-default p-4"
         >
           <div class="flex flex-wrap items-center gap-2">
-            <h3 class="text-sm font-medium" :id="`setting-${key}`">{{ label(entry.labelKey) }}</h3>
+            <h3 :id="`setting-${key}`" class="text-sm font-medium">{{ label(entry.labelKey) }}</h3>
             <span :class="badgeClass">{{ label(entry.group) }}</span>
             <span v-if="entry.safety === 'restart_required'" :class="badgeClass">{{
               t("settings.ui.restart")
@@ -259,7 +259,7 @@ const badgeClass =
             {{ t("settings.attachmentTransfer.blocked") }}
           </p>
           <div v-for="leaf in Object.keys(entry.widgets)" :key="leaf" class="flex flex-col gap-1">
-            <label class="font-mono text-xs" :for="`${key}.${leaf}`" :id="`${key}.${leaf}-label`">
+            <label :id="`${key}.${leaf}-label`" class="font-mono text-xs" :for="`${key}.${leaf}`">
               {{ `${key}.${leaf}` }}
             </label>
             <template v-if="widgetOf(entry, leaf) === 'asset'">
@@ -298,8 +298,8 @@ const badgeClass =
                 />
                 <p
                   v-if="assetProblems[assetKindOf(leaf)!]"
-                  class="text-xs text-error"
                   :id="`${key}.${leaf}-problem`"
+                  class="text-xs text-error"
                   role="alert"
                 >
                   {{ assetProblems[assetKindOf(leaf)!] }}
@@ -382,9 +382,9 @@ const badgeClass =
                 <label class="font-mono text-xs" :for="`msg-${msgKey}`">{{ msgKey }}</label>
                 <p class="whitespace-pre-line text-xs text-muted">{{ label(msgKey) }}</p>
                 <textarea
+                  :id="`msg-${msgKey}`"
                   :class="textareaClass"
                   :disabled="busy || envApplied.has(`${key}.${leaf}`) || eeLocked(key)"
-                  :id="`msg-${msgKey}`"
                   rows="2"
                   :value="overrideText(leafValue(currentValue(key), leaf), msgKey)"
                   @input="

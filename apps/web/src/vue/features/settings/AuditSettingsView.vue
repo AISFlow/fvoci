@@ -21,7 +21,7 @@ defineProps<{
 <template>
   <div class="settings-stack">
     <UPageCard as="section" variant="subtle" class="settings-section" aria-labelledby="audit-title">
-      <h2 class="settings-section__title text-title" id="audit-title">{{ t("audit.title") }}</h2>
+      <h2 id="audit-title" class="settings-section__title text-title">{{ t("audit.title") }}</h2>
       <div class="flex flex-col gap-4">
         <p v-if="eeRequired" class="text-sm text-muted">{{ t("ee.required") }}</p>
         <p v-if="error" class="text-sm text-error" role="alert">{{ error }}</p>

@@ -223,7 +223,6 @@ const createError = computed(() =>
       :on-select-tag="selectTag"
       :moving="moving"
       :move-error="moveError"
-      @drop-document="onDropDocument"
       :loading="tree.isLoading.value || projects.isLoading.value"
       :error="
         tree.isError.value || projects.isError.value
@@ -248,6 +247,7 @@ const createError = computed(() =>
         }
       "
       :on-create="onCreateDocument"
+      @drop-document="onDropDocument"
     />
   </WorkspaceShell>
 </template>

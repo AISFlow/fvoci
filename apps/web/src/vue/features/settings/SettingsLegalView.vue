@@ -80,7 +80,7 @@ async function submit(): Promise<void> {
     class="settings-section"
     aria-labelledby="legal-manage-title"
   >
-    <h2 class="settings-section__title text-title" id="legal-manage-title">{{
+    <h2 id="legal-manage-title" class="settings-section__title text-title">{{
       t("legal.manage")
     }}</h2>
     <div class="flex flex-col gap-6">
@@ -101,8 +101,8 @@ async function submit(): Promise<void> {
           </UButton>
         </div>
         <input
-          :disabled="form.submitting.value"
           id="legal-kind"
+          :disabled="form.submitting.value"
           :class="fieldClass"
           :value="kind"
           @input="onKindChange(inputText($event))"
