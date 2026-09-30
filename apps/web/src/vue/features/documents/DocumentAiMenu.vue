@@ -142,10 +142,10 @@ type Item = { key: string; label: string; href?: string; state?: TaskApplyState 
 const items = computed<Item[]>(() => {
   const current = result.value;
   if (current?.action === "summarize")
-    return current.lines.map((line, index) => ({ key: `${index}`, label: line }));
+    return current.lines.map((line, index) => ({ key: String(index), label: line }));
   if (current?.action === "generateTasks") {
     return current.titles.map((title, index) => ({
-      key: `${index}`,
+      key: String(index),
       label: title,
       state: current.states[index],
     }));
@@ -193,7 +193,7 @@ function apply(): void {
   // WHY: after the last block, not at the caret — it never splits the sentence being edited.
   // A normal editor transaction, so Yjs syncs it like typing.
   applying = true;
-  let inserted = false;
+  let inserted: boolean;
   try {
     inserted = editor
       .chain()

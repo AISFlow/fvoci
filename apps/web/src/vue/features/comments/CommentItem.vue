@@ -3,7 +3,6 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed } from "vue";
 import { REACTIONS } from "@/features/comments/comment-api";
-import { nextReplyTarget } from "@/features/comments/comment-drafts";
 import type { CommentNode } from "@/features/comments/comment-tree";
 import CommentCompose from "./CommentCompose.vue";
 import type { CommentActions } from "./useCommentActions";
@@ -23,23 +22,28 @@ const isRoot = computed(() => comment.value.parentId == null);
 const resolved = computed(() => comment.value.resolvedAt != null);
 const editing = computed(() => props.actions.editingId.value === comment.value.id);
 const pending = computed(() => props.actions.pending.value);
+const editDraft = computed({
+  get: () => props.actions.editDraft.value,
+  set: (value: string) => {
+    props.actions.setEditDraft(value);
+  },
+});
+const replyDraft = computed({
+  get: () => props.actions.replyDraft.value,
+  set: (value: string) => {
+    props.actions.setReplyDraft(value);
+  },
+});
 
 function toggleReply(): void {
-  props.actions.replyToId.value = nextReplyTarget(props.actions.replyToId.value, comment.value.id);
-  props.actions.replyDraft.value = "";
+  props.actions.toggleReply(comment.value.id);
 }
-
 function startEdit(): void {
-  props.actions.replyToId.value = null;
-  props.actions.editingId.value = comment.value.id;
-  props.actions.editDraft.value = comment.value.body;
+  props.actions.startEdit(comment.value.id, comment.value.body);
 }
-
 function cancelEdit(): void {
-  props.actions.editingId.value = null;
-  props.actions.editDraft.value = "";
+  props.actions.cancelEdit();
 }
-
 function toggleResolved(): void {
   if (resolved.value) props.actions.unresolve.mutate(comment.value.id);
   else props.actions.resolve.mutate(comment.value.id);
@@ -119,7 +123,7 @@ function toggleResolved(): void {
       "
     >
       <textarea
-        v-model="actions.editDraft.value"
+        v-model="editDraft"
         class="comment-thread__input"
         :aria-label="t('comment.placeholder')"
         :disabled="pending"
@@ -133,7 +137,7 @@ function toggleResolved(): void {
     </form>
     <CommentCompose
       v-if="actions.replyToId.value === comment.id && !readOnly"
-      v-model:draft="actions.replyDraft.value"
+      v-model:draft="replyDraft"
       :actions="actions"
       reply
       @submit="actions.create.mutate({ text: $event, parentId: comment.id })"

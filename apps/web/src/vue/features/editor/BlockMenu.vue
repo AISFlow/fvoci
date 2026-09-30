@@ -61,11 +61,13 @@ function colour(): void {
 
 /** Copies `#<block id>`; a failure stays visible and the menu stays open for a retry. */
 function copyLink(): void {
-  const id = props.editor.state.doc.nodeAt(props.pos)?.attrs.id;
+  const id: unknown = props.editor.state.doc.nodeAt(props.pos)?.attrs.id;
   if (typeof id !== "string" || id.length === 0) return;
   copyFailed.value = false;
   copyText(`#${id}`).then(
-    () => emit("close"),
+    () => {
+      emit("close");
+    },
     () => {
       copyFailed.value = true;
     },

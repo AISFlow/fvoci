@@ -25,7 +25,9 @@ import PointMenu from "./PointMenu.vue";
 // the column and row handles (the menu), and "+" for a column and a row.
 // Every action is an editor command, so Yjs carries it to peers.
 const props = defineProps<{ editor: TiptapEditor }>();
-const { box, menu, closeMenu, openMenu, drag, moveTable } = useTableHandles(props.editor);
+const controls = useTableHandles(props.editor);
+const { box, menu, drag } = controls;
+
 const menuId = useId();
 
 const BACKGROUNDS: ReadonlyArray<{ key: I18nKey; value: string | null }> = [
@@ -38,7 +40,7 @@ const BACKGROUNDS: ReadonlyArray<{ key: I18nKey; value: string | null }> = [
 function run(command: () => void): void {
   if (!canUseToolbar(props.editor)) return;
   command();
-  closeMenu();
+  controls.closeMenu();
 }
 </script>
 
@@ -67,7 +69,7 @@ function run(command: () => void): void {
       @pointermove="drag.pointermove"
       @pointerup="drag.pointerup"
       @pointercancel="drag.pointercancel"
-      @click="openMenu"
+      @click="controls.openMenu"
     >
       {{ t("editor.block.table") }}
     </UButton>
@@ -80,7 +82,7 @@ function run(command: () => void): void {
       aria-haspopup="menu"
       :aria-expanded="menu !== null"
       :aria-controls="menu ? menuId : undefined"
-      @click="openMenu"
+      @click="controls.openMenu"
     >
       ↕
     </UButton>
@@ -93,7 +95,7 @@ function run(command: () => void): void {
       aria-haspopup="menu"
       :aria-expanded="menu !== null"
       :aria-controls="menu ? menuId : undefined"
-      @click="openMenu"
+      @click="controls.openMenu"
     >
       ↔
     </UButton>
@@ -125,7 +127,7 @@ function run(command: () => void): void {
     :y="menu.y"
     :owner="editor.view.dom"
     :label="t('editor.block.table')"
-    @close="closeMenu"
+    @close="controls.closeMenu"
   >
     <div class="fvoci-vue-menu__group">
       <MenuItem @select="run(() => addColumn(editor))">{{ t("editor.table.insertCol") }}</MenuItem>
@@ -139,8 +141,12 @@ function run(command: () => void): void {
     </div>
     <hr class="fvoci-vue-menu__separator" />
     <div class="fvoci-vue-menu__group">
-      <MenuItem @select="run(() => moveTable(-1))">{{ t("editor.table.moveUp") }}</MenuItem>
-      <MenuItem @select="run(() => moveTable(1))">{{ t("editor.table.moveDown") }}</MenuItem>
+      <MenuItem @select="run(() => controls.moveTable(-1))">{{
+        t("editor.table.moveUp")
+      }}</MenuItem>
+      <MenuItem @select="run(() => controls.moveTable(1))">{{
+        t("editor.table.moveDown")
+      }}</MenuItem>
       <MenuItem @select="run(() => toggleTableHeaderRow(editor))">{{
         t("editor.table.headerRow")
       }}</MenuItem>

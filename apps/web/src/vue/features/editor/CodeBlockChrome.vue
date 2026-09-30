@@ -14,13 +14,13 @@ import { inject, onBeforeUnmount, watch } from "vue";
 // language, copy, line numbers, fold (long blocks) and wrap, and the line
 // gutter with highlighted ({3-5}) and diff lines.
 const props = defineProps<{ editor: TiptapEditor }>();
-const { block, chrome, view, copyFailed, patch, setLanguage, copy } = useCodeBlockChrome(
-  props.editor,
-);
+const controls = useCodeBlockChrome(props.editor);
+const { block, chrome, view, copyFailed } = controls;
+
 const host = inject(codeChromeHostKey, null);
 
 function onLanguageChange(event: Event): void {
-  setLanguage((event.target as HTMLSelectElement).value);
+  controls.setLanguage((event.target as HTMLSelectElement).value);
 }
 
 /** WHY: a chrome button's default mousedown would focus it and drop the
@@ -74,7 +74,7 @@ onBeforeUnmount(() => {
           lang || "plain"
         }}</option>
       </select>
-      <UButton type="button" size="xs" variant="outline" color="neutral" @click="copy">{{
+      <UButton type="button" size="xs" variant="outline" color="neutral" @click="controls.copy">{{
         t("editor.code.copy")
       }}</UButton>
     </div>
@@ -86,7 +86,7 @@ onBeforeUnmount(() => {
         variant="outline"
         color="neutral"
         :aria-pressed="chrome.linenos ? 'true' : 'false'"
-        @click="patch({ linenos: !chrome.linenos })"
+        @click="controls.patch({ linenos: !chrome.linenos })"
       >
         {{ t("editor.code.linenos") }}
       </UButton>
@@ -97,7 +97,7 @@ onBeforeUnmount(() => {
         variant="outline"
         color="neutral"
         :aria-pressed="chrome.folded ? 'true' : 'false'"
-        @click="patch({ folded: !chrome.folded })"
+        @click="controls.patch({ folded: !chrome.folded })"
       >
         {{ t("editor.code.fold") }}
       </UButton>
@@ -107,7 +107,7 @@ onBeforeUnmount(() => {
         variant="outline"
         color="neutral"
         :aria-pressed="chrome.wrap ? 'true' : 'false'"
-        @click="patch({ wrap: !chrome.wrap })"
+        @click="controls.patch({ wrap: !chrome.wrap })"
       >
         {{ t("editor.code.wrap") }}
       </UButton>

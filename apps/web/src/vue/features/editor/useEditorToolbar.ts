@@ -85,7 +85,10 @@ export function useEditorToolbar(editor: TiptapEditor) {
     // Official handlers add the required leading space after existing text,
     // so @/: actually activate the existing suggestion plugins.
     const handlers = createHandlers();
-    handlers[trigger === "@" ? "mention" : "emoji"].execute(editor as VueEditor).run();
+    const chain = handlers[trigger === "@" ? "mention" : "emoji"].execute(
+      editor as VueEditor,
+    ) as ReturnType<TiptapEditor["chain"]>;
+    chain.run();
   }
   return { state, history, insert, format, insertSlash, insertTrigger };
 }

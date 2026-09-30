@@ -33,7 +33,7 @@ const items = computed(() =>
 );
 const side = computed(() => (props.mode === "mobile" ? "top" : "bottom"));
 const headingLabel = computed(() =>
-  state.value.heading ? `H${state.value.heading}` : t("editor.block.paragraph"),
+  state.value.heading ? `H${String(state.value.heading)}` : t("editor.block.paragraph"),
 );
 const lists = [
   { type: "bulletList", key: "editor.block.bullet", icon: "i-lucide-list" },

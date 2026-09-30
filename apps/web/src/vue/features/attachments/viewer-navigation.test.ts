@@ -13,7 +13,7 @@ const click = {
 };
 const link = { href: "/w/acme/search?q=hello#results", target: "", download: false };
 
-test("a local viewer link enters route guards with its complete destination", () => {
+await test("a local viewer link enters route guards with its complete destination", () => {
   assert.equal(guardedViewerLink(click, link, current), link.href);
   assert.equal(
     guardedViewerLink(click, { ...link, href: "/w/acme/a/456/view", target: "_self" }, current),
@@ -21,7 +21,7 @@ test("a local viewer link enters route guards with its complete destination", ()
   );
 });
 
-test("viewer guards preserve modified clicks, new tabs, downloads, external links and document anchors", () => {
+await test("viewer guards preserve modified clicks, new tabs, downloads, external links and document anchors", () => {
   for (const field of ["metaKey", "ctrlKey", "shiftKey", "altKey", "defaultPrevented"]) {
     assert.equal(guardedViewerLink({ ...click, [field]: true }, link, current), null, field);
   }

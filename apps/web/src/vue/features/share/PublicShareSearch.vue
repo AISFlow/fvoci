@@ -16,7 +16,9 @@ watch(input, (value, _previous, cleanup) => {
   const timer = setTimeout(() => {
     q.value = value;
   }, 300);
-  cleanup(() => clearTimeout(timer));
+  cleanup(() => {
+    clearTimeout(timer);
+  });
 });
 watch(
   () => props.token,

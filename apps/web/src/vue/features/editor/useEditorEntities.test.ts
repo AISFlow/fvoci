@@ -36,9 +36,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 function transport(documentUuid: EditorEntityTransport["documentUuid"]): EditorEntityTransport {
-  const unused = async (): Promise<never> => {
-    throw new Error("unexpected endpoint");
-  };
+  const unused = (): Promise<never> => Promise.reject(new Error("unexpected endpoint"));
   return {
     documentUuid,
     members: unused,
@@ -52,20 +50,22 @@ function transport(documentUuid: EditorEntityTransport["documentUuid"]): EditorE
   };
 }
 
-test("scope teardown aborts real requests and stable callbacks cannot enrich after unmount", async () => {
+await test("scope teardown aborts real requests and stable callbacks cannot enrich after unmount", async () => {
   const pending = deferred<Doc>();
   let signal!: AbortSignal;
   const scope = effectScope();
-  const callbacks = scope.run(() =>
-    useEditorEntities(
-      () => "ws",
-      () => "room",
-      transport(async (_id, s) => {
-        signal = s;
-        return pending.promise;
-      }),
+  const callbacks = required(
+    scope.run(() =>
+      useEditorEntities(
+        () => "ws",
+        () => "room",
+        transport(async (_id, s) => {
+          signal = s;
+          return pending.promise;
+        }),
+      ),
     ),
-  )!;
+  );
   const result = callbacks.entityResolver("document", id);
   scope.stop();
   assert.equal(signal.aborted, true);
@@ -75,75 +75,81 @@ test("scope teardown aborts real requests and stable callbacks cannot enrich aft
   assert.deepEqual(await callbacks.mentionItems(""), []);
 });
 
-test("workspace and room/session changes retire old requests synchronously without replacing callback identities", async () => {
+await test("workspace and room/session changes retire old requests synchronously without replacing callback identities", async () => {
   const workspace = ref("old");
   const room = ref("doc:1:user-a");
   const pending: ReturnType<typeof deferred<Doc>>[] = [];
   const signals: AbortSignal[] = [];
   const scope = effectScope();
-  const callbacks = scope.run(() =>
-    useEditorEntities(
-      () => workspace.value,
-      () => room.value,
-      transport(async (_id, signal) => {
-        const result = deferred<Doc>();
-        pending.push(result);
-        signals.push(signal);
-        return result.promise;
-      }),
+  const callbacks = required(
+    scope.run(() =>
+      useEditorEntities(
+        () => workspace.value,
+        () => room.value,
+        transport(async (_id, signal) => {
+          const result = deferred<Doc>();
+          pending.push(result);
+          signals.push(signal);
+          return result.promise;
+        }),
+      ),
     ),
-  )!;
+  );
   const resolver = callbacks.entityResolver;
   const mentions = callbacks.mentionItems;
   const old = resolver("document", id);
   workspace.value = "new";
-  assert.equal(signals[0]!.aborted, true);
-  pending[0]!.resolve(doc("old"));
+  assert.equal(required(signals[0]).aborted, true);
+  required(pending[0]).resolve(doc("old"));
   assert.equal(await old, null);
   const retiredRoom = resolver("document", id);
   room.value = "doc:2:user-b";
-  assert.equal(signals[1]!.aborted, true);
-  pending[1]!.resolve(doc("new"));
+  assert.equal(required(signals[1]).aborted, true);
+  required(pending[1]).resolve(doc("new"));
   assert.equal(await retiredRoom, null);
   const current = resolver("document", id);
-  pending[2]!.resolve(doc("new"));
+  required(pending[2]).resolve(doc("new"));
   assert.equal((await current)?.label, "Authorized");
   assert.equal(callbacks.entityResolver, resolver);
   assert.equal(callbacks.mentionItems, mentions);
   scope.stop();
 });
 
-test("remount gets fresh metadata and cannot revive an old callback", async () => {
+await test("remount gets fresh metadata and cannot revive an old callback", async () => {
   const first = effectScope();
   let calls = 0;
-  const api = transport(async () => {
+  const api = transport(() => {
     calls++;
-    return doc("ws");
+    return Promise.resolve(doc("ws"));
   });
-  const one = first.run(() =>
-    useEditorEntities(
-      () => "ws",
-      () => "room",
-      api,
+  const one = required(
+    first.run(() =>
+      useEditorEntities(
+        () => "ws",
+        () => "room",
+        api,
+      ),
     ),
-  )!;
+  );
   assert.ok(await one.entityResolver("document", id));
   first.stop();
   const second = effectScope();
-  const two = second.run(() =>
-    useEditorEntities(
-      () => "ws",
-      () => "room",
-      api,
+  const two = required(
+    second.run(() =>
+      useEditorEntities(
+        () => "ws",
+        () => "room",
+        api,
+      ),
     ),
-  )!;
+  );
   assert.ok(await two.entityResolver("document", id));
   assert.equal(await one.entityResolver("document", id), null);
   assert.equal(calls, 2);
   second.stop();
 });
 
-test("all three compiled consumers supply callbacks before their one existing editor mount", () => {
+await test("all three compiled consumers supply callbacks before their one existing editor mount", () => {
   for (const rel of [
     "../documents/WikiDocumentView.vue",
     "../documents/ProjectDocumentView.vue",
@@ -164,3 +170,8 @@ test("all three compiled consumers supply callbacks before their one existing ed
     assert.equal(source.includes("new Y.Doc"), false);
   }
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert.ok(value !== null && value !== undefined, "required fixture value");
+  return value;
+}

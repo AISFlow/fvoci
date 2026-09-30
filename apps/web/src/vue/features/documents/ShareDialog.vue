@@ -79,7 +79,7 @@ const error = computed(
 );
 
 function expiresLabel(days: number): string {
-  const key = `share.expires.${days}`;
+  const key = `share.expires.${String(days)}`;
   return isI18nKey(key) ? t(key) : String(days);
 }
 

@@ -1,3 +1,4 @@
+import { evaluateTestFunction } from "./evaluate-test-function.test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -16,7 +17,7 @@ import { failMessage } from "./public-share-fail";
 type Node = {
   type: string;
   text: string;
-  props: Record<string, any>;
+  props: Record<string, unknown>;
   children: Node[];
   parent: Node | null;
 };
@@ -35,7 +36,8 @@ const renderer = Vue.createRenderer<Node, Node>({
     el.children = [];
   },
   patchProp: (el, key, _old, value) => {
-    el.props[key] = value;
+    const property: unknown = value;
+    el.props[key] = property;
   },
   parentNode: (el) => el.parent,
   nextSibling: (el) => el.parent?.children[el.parent.children.indexOf(el) + 1] ?? null,
@@ -51,11 +53,11 @@ const renderer = Vue.createRenderer<Node, Node>({
   },
 });
 
-function evaluate(
+async function evaluate(
   code: string,
   imports: Record<string, Record<string, unknown>>,
   result: string,
-): any {
+): Promise<unknown> {
   const ast = ts.createSourceFile("page.ts", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const bindings: Record<string, unknown> = {};
   for (const statement of [...ast.statements].reverse()) {
@@ -73,7 +75,8 @@ function evaluate(
   const js = new Bun.Transpiler({ loader: "ts" }).transformSync(
     code.replace(/export default/, "return").replace(/export function render/, "function render"),
   );
-  return new Function(...Object.keys(bindings), `${js}\n${result}`)(...Object.values(bindings));
+  const run = await evaluateTestFunction(Object.keys(bindings), `${js}\n${result}`);
+  return run(...Object.values(bindings));
 }
 
 function deferred<T>() {
@@ -99,7 +102,7 @@ function descendants(root: Node): Node[] {
   return [root, ...root.children.flatMap(descendants)];
 }
 
-function mountPage() {
+async function mountPage() {
   const route = Vue.reactive({ params: { token: "share-a" } });
   const client = new VueQuery.QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: Infinity } },
@@ -108,7 +111,7 @@ function mountPage() {
   // explicitly, just as VueQueryPlugin does in the actual browser.
   client.mount();
   const requests: { token: string; kind: string; documentId?: string | null }[] = [];
-  const pending: Record<string, ReturnType<typeof deferred<any>>[]> = {};
+  const pending: Record<string, ReturnType<typeof deferred<unknown>>[]> = {};
   let readerMounts = 0;
   const request = (kind: string, token: string, documentId?: string | null) => {
     requests.push({ kind, token, documentId });
@@ -118,7 +121,9 @@ function mountPage() {
       const release = () => {
         if (pending[key]?.[0] === controlled) pending[key].shift();
       };
-      void controlled.promise.then(release, release);
+      controlled.promise.then(release, release).catch((error: unknown) => {
+        assert.fail(String(error));
+      });
       return controlled.promise;
     }
     if (documentId === "child") return Promise.reject(new ProblemError(404));
@@ -170,15 +175,19 @@ function mountPage() {
     "../features/share/PublicShareView.vue": { default: reader },
     "../features/share/public-share-fail": { failMessage },
   };
-  const component = evaluate(script.content, imports, "");
+  const component = (await evaluate(script.content, imports, "")) as Vue.ComponentOptions;
   const template = compileTemplate({
-    source: descriptor.template!.content,
+    source: required(descriptor.template).content,
     filename,
     id: "recovery-test",
     compilerOptions: { bindingMetadata: script.bindings },
   });
   assert.deepEqual(template.errors, []);
-  component.render = evaluate(template.code, imports, "return render;");
+  component.render = (await evaluate(
+    template.code,
+    imports,
+    "return render;",
+  )) as Vue.ComponentOptions["render"];
   const root = node("root");
   const app = renderer.createApp(component);
   app.use(VueQuery.VueQueryPlugin, { queryClient: client });
@@ -194,14 +203,16 @@ function mountPage() {
     denied: () => descendants(root).some((el) => el.props.role === "alert"),
     refreshing: () => descendants(root).find((el) => el.type === "button")?.props.loading,
     queue(kind: string, token = route.params.token) {
-      const control = deferred<any>();
+      const control = deferred<unknown>();
       (pending[`${token}:${kind}`] ??= []).push(control);
       return control;
     },
-    refresh: () =>
-      descendants(root)
-        .find((el) => el.type === "button")!
-        .props.onClick() as Promise<void>,
+    refresh: () => {
+      const button = required(descendants(root).find((el) => el.type === "button"));
+      const click = button.props.onClick;
+      assert.equal(typeof click, "function");
+      return (click as () => Promise<void>)();
+    },
     stop: () => {
       app.unmount();
       client.unmount();
@@ -210,17 +221,32 @@ function mountPage() {
   };
 }
 
-async function denyChild(page: ReturnType<typeof mountPage>) {
-  await until(() => page.reader()?.props.body?.includes("cached body"), "the authorized reader");
-  page.reader()!.props.onSelectDocument("child");
+function selectDocument(reader: Node | undefined, id: string): void {
+  const handler = required(reader).props.onSelectDocument;
+  assert.equal(typeof handler, "function");
+  (handler as (id: string) => void)(id);
+}
+function awaitRefresh(reader: Node | undefined): Promise<void> {
+  const handler = required(reader).props.onRefresh;
+  assert.equal(typeof handler, "function");
+  return (handler as () => Promise<void>)();
+}
+async function denyChild(page: Awaited<ReturnType<typeof mountPage>>) {
+  await until(
+    () =>
+      typeof page.reader()?.props.body === "string" &&
+      String(page.reader()?.props.body).includes("cached body"),
+    "the authorized reader",
+  );
+  selectDocument(page.reader(), "child");
   await until(page.denied, "the child denial gate");
   assert.equal(page.reader(), undefined);
 }
 
 for (const recoversAgain of [false, true])
-  test(`older recovery stays gated after reconnect denial${recoversAgain ? " even when another reconnect succeeds" : " while its tree is pending"}`, async () => {
+  await test(`older recovery stays gated after reconnect denial${recoversAgain ? " even when another reconnect succeeds" : " while its tree is pending"}`, async () => {
     onlineManager.setOnline(true);
-    const page = mountPage();
+    const page = await mountPage();
     try {
       await denyChild(page);
       const tree = page.queue("tree");
@@ -284,8 +310,8 @@ for (const recoversAgain of [false, true])
     }
   });
 
-test("current metadata still fetching prevents historical recovery results from reopening the reader", async () => {
-  const page = mountPage();
+await test("current metadata still fetching prevents historical recovery results from reopening the reader", async () => {
+  const page = await mountPage();
   try {
     await denyChild(page);
     const tree = page.queue("tree");
@@ -325,8 +351,8 @@ test("current metadata still fetching prevents historical recovery results from 
   }
 });
 
-test("old-token metadata completion cannot reset a new token's denied selection or its recovery spinner", async () => {
-  const page = mountPage();
+await test("old-token metadata completion cannot reset a new token's denied selection or its recovery spinner", async () => {
+  const page = await mountPage();
   try {
     await denyChild(page);
     const oldMeta = page.queue("meta");
@@ -375,17 +401,17 @@ test("old-token metadata completion cannot reset a new token's denied selection 
 });
 
 for (const selection of ["child", "sibling"])
-  test(`selection changing to ${selection} during a normal metadata refresh invalidates its continuation`, async () => {
-    const page = mountPage();
+  await test(`selection changing to ${selection} during a normal metadata refresh invalidates its continuation`, async () => {
+    const page = await mountPage();
     try {
       await until(() => Boolean(page.reader()?.props.body), "the initial reader");
       const meta = page.queue("meta");
-      const refresh = page.reader()!.props.onRefresh() as Promise<void>;
+      const refresh = awaitRefresh(page.reader());
       await until(
         () => page.client.getQueryState(["share-public", "share-a"])?.fetchStatus === "fetching",
         "normal refresh metadata",
       );
-      page.reader()!.props.onSelectDocument(selection);
+      selectDocument(page.reader(), selection);
       await until(
         () =>
           page.client.getQueryState(["share-body", "share-a", selection])?.fetchStatus === "idle",
@@ -408,8 +434,8 @@ for (const selection of ["child", "sibling"])
     }
   });
 
-test("a superseded recovery cannot clear the gate or stop the newer recovery spinner", async () => {
-  const page = mountPage();
+await test("a superseded recovery cannot clear the gate or stop the newer recovery spinner", async () => {
+  const page = await mountPage();
   try {
     await denyChild(page);
     const tree = page.queue("tree");
@@ -435,14 +461,14 @@ test("a superseded recovery cannot clear the gate or stop the newer recovery spi
     meta.resolve({ documentId: "root", title: "current title", expiresAt: null });
     await newRecovery;
     await until(() => Boolean(page.reader()), "new recovery success");
-    assert.equal(page.reader()!.props.refreshing, false);
+    assert.equal(required(page.reader()).props.refreshing, false);
   } finally {
     page.stop();
   }
 });
 
-test("sequential current recovery waits for both fresh tree and root body before mounting content", async () => {
-  const page = mountPage();
+await test("sequential current recovery waits for both fresh tree and root body before mounting content", async () => {
+  const page = await mountPage();
   try {
     await denyChild(page);
     const tree = page.queue("tree");
@@ -463,10 +489,15 @@ test("sequential current recovery waits for both fresh tree and root body before
     body.resolve("<p>current authorized body</p>");
     await recovery;
     await until(() => Boolean(page.reader()), "successful full recovery");
-    assert.equal(page.reader()!.props.body, "<p>current authorized body</p>");
-    assert.deepEqual(page.reader()!.props.tree, [{ id: "root", title: "current tree" }]);
+    assert.equal(required(page.reader()).props.body, "<p>current authorized body</p>");
+    assert.deepEqual(required(page.reader()).props.tree, [{ id: "root", title: "current tree" }]);
     assert.equal(page.denied(), false);
   } finally {
     page.stop();
   }
 });
+
+function required<T>(value: T | null | undefined): T {
+  assert.ok(value !== null && value !== undefined, "required fixture value");
+  return value;
+}

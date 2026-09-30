@@ -1,3 +1,4 @@
+import { evaluateTestFunction } from "../share/evaluate-test-function.test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -16,6 +17,28 @@ const roomScript = ts.transpile(roomSource.slice(from, to), {
   target: ts.ScriptTarget.ES2022,
   module: ts.ModuleKind.None,
 });
+
+const roomFactory = await evaluateTestFunction(
+  [
+    "computed",
+    "generation",
+    "provider",
+    "doc",
+    "fragment",
+    "unauthorized",
+    "room",
+    "connectionStatus",
+    "collabStatusOf",
+    "synced",
+    "unsent",
+    "readOnly",
+    "isDurablySaved",
+    "bind",
+    "peers",
+    "persist",
+  ],
+  roomScript,
+);
 
 type Scope = { workspaceId: string; documentId: string; projectId: string | null };
 type Operation = { scope: Scope; slug: string; newParentId?: string };
@@ -45,7 +68,7 @@ function assertCapturedKeys(name: string, keys: unknown[][]) {
     [...counts, ...counts, ...documentKeys].map((key) => JSON.stringify(key)).sort(),
   );
 }
-function harness(name: string, includePatch = false) {
+async function harness(name: string, includePatch = false) {
   const source = componentSource(`documents/${name}.vue`);
   const from = source.indexOf("type DocumentOperation =");
   const to = source.indexOf(includePatch ? "const notFound =" : "const patchMeta =", from);
@@ -66,25 +89,7 @@ function harness(name: string, includePatch = false) {
   const unsent = shallowRef(false);
   const bind = shallowRef({ ack: { saved: false } });
   function createSession(generation = 1, provider = {}, doc = {}) {
-    return new Function(
-      "computed",
-      "generation",
-      "provider",
-      "doc",
-      "fragment",
-      "unauthorized",
-      "room",
-      "connectionStatus",
-      "collabStatusOf",
-      "synced",
-      "unsent",
-      "readOnly",
-      "isDurablySaved",
-      "bind",
-      "peers",
-      "persist",
-      roomScript,
-    )(
+    return roomFactory(
       computed,
       generation,
       provider,
@@ -128,26 +133,28 @@ function harness(name: string, includePatch = false) {
     for (const tag of ["", "tag"])
       queryClient.setQueryData(["wiki-discovery", workspaceId, tag], { totalCount: 2 });
   }
-  const setup = new Function(
-    "props",
-    "scope",
-    "session",
-    "collabUser",
-    "watch",
-    "onScopeDispose",
-    "lifecycleError",
-    "moveParentId",
-    "useMutation",
-    "trashDocument",
-    "moveDocument",
-    "queryClient",
-    "window",
-    "trashPath",
-    "loadErrorMessage",
-    "patchDocument",
-    "saveError",
-    "metaKey",
-    "treeKey",
+  const setup = await evaluateTestFunction(
+    [
+      "props",
+      "scope",
+      "session",
+      "collabUser",
+      "watch",
+      "onScopeDispose",
+      "lifecycleError",
+      "moveParentId",
+      "useMutation",
+      "trashDocument",
+      "moveDocument",
+      "queryClient",
+      "window",
+      "trashPath",
+      "loadErrorMessage",
+      "patchDocument",
+      "saveError",
+      "metaKey",
+      "treeKey",
+    ],
     `${script}\nreturn {captureOperation, currentOperation};`,
   );
   const lifetime = effectScope();
@@ -210,13 +217,13 @@ function harness(name: string, includePatch = false) {
 
 for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
   for (const update of ["peers", "pending", "ACK"] as const) {
-    test(`${name}: same-room ${update} completes trash/move and displays failures`, async () => {
-      const h = harness(name);
+    await test(`${name}: same-room ${update} completes trash/move and displays failures`, async () => {
+      const h = await harness(name);
       try {
         const operation = h.captureOperation();
         const before = h.session.value;
-        const trash = h.mutations[0]!.mutationFn(operation);
-        const move = h.mutations[1]!.mutationFn({ ...operation, newParentId: "parent" });
+        const trash = required(h.mutations[0]).mutationFn(operation);
+        const move = required(h.mutations[1]).mutationFn({ ...operation, newParentId: "parent" });
         if (update === "peers") h.peers.value = [{ id: "peer" }];
         if (update === "pending") h.unsent.value = true;
         if (update === "ACK") h.bind.value = { ack: { saved: true } };
@@ -227,7 +234,7 @@ for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
         assert.equal(h.currentOperation(operation), true);
         h.complete();
         await Promise.all([trash, move]);
-        await h.mutations[1]!.onSuccess({}, operation);
+        await required(h.mutations[1]).onSuccess({}, operation);
         assert.equal(h.moveParentId.value, "");
         assert.equal(h.lifecycleError.value, null);
         for (const mutation of h.mutations) {
@@ -235,7 +242,7 @@ for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
           assert.equal(h.lifecycleError.value, "failed");
           h.lifecycleError.value = "previous error";
         }
-        await h.mutations[0]!.onSuccess({}, operation);
+        await required(h.mutations[0]).onSuccess({}, operation);
         assert.deepEqual(h.navigation, ["/w/old/trash"]);
         assert.equal(h.lifecycleError.value, null);
         assert.deepEqual(h.requests, [operation.scope, operation.scope]);
@@ -273,13 +280,13 @@ for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
     "actor roundtrip",
     "disposal",
   ]) {
-    test(`${name}: retired ${change} suppresses success/error but invalidates captured counts`, async () => {
-      const h = harness(name);
+    await test(`${name}: retired ${change} suppresses success/error but invalidates captured counts`, async () => {
+      const h = await harness(name);
       try {
         const old = h.captureOperation();
-        const trash = h.mutations[0]!.mutationFn(old);
-        const move = h.mutations[1]!.mutationFn({ ...old, newParentId: "parent" });
-        const before = h.session.value!;
+        const trash = required(h.mutations[0]).mutationFn(old);
+        const move = required(h.mutations[1]).mutationFn({ ...old, newParentId: "parent" });
+        const before = required(h.session.value);
         if (change === "workspace") h.props.workspaceId = "new-workspace";
         if (change === "document") h.props.documentId = "new-document";
         if (change === "project") h.projectId.value = "new-project";
@@ -296,8 +303,8 @@ for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
         h.complete();
         await Promise.all([trash, move]);
         assert.equal(h.currentOperation(old), false);
-        await h.mutations[0]!.onSuccess({}, old);
-        await h.mutations[1]!.onSuccess({}, old);
+        await required(h.mutations[0]).onSuccess({}, old);
+        await required(h.mutations[1]).onSuccess({}, old);
         for (const mutation of h.mutations) mutation.onError(new Error("late"), old);
         assert.deepEqual(h.requests, [old.scope, old.scope]);
         assert.equal(h.invalidated.filter((key) => key[0] === "projects").length, 2);
@@ -320,7 +327,7 @@ for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
         assert.equal(h.lifecycleError.value, "previous error");
         assert.equal(h.moveParentId.value, "parent");
         if (change !== "disposal") {
-          await h.mutations[0]!.onSuccess({}, h.captureOperation());
+          await required(h.mutations[0]).onSuccess({}, h.captureOperation());
           assert.deepEqual(h.navigation, [`/w/${h.props.slug}/trash`]);
         }
         const meta = h.source.slice(
@@ -349,11 +356,11 @@ function componentSource(path: string): string {
 }
 for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
   for (const retired of [false, true])
-    test(`${name}: metadata refreshes fresh discovery without counts (retired=${retired})`, async () => {
-      const h = harness(name, true);
+    await test(`${name}: metadata refreshes fresh discovery without counts (retired=${String(retired)})`, async () => {
+      const h = await harness(name, true);
       try {
         const op = { ...h.captureOperation(), body: { title: "renamed" } };
-        const callback = h.mutations[2]!;
+        const callback = required(h.mutations[2]);
         const request = callback.mutationFn(op);
         if (retired) {
           h.props.workspaceId = "new-workspace";
@@ -365,12 +372,12 @@ for (const name of ["WikiDocumentView", "ProjectDocumentView"]) {
         await callback.onSuccess({}, op);
         for (const tag of ["", "tag"]) {
           let requests = 0;
-          const result = await h.queryClient.fetchQuery({
+          const result = await h.queryClient.query({
             queryKey: ["wiki-discovery", "old-workspace", tag],
             staleTime: 30_000,
-            queryFn: async () => {
+            queryFn: () => {
               requests++;
-              return { title: "renamed", totalCount: 2 };
+              return Promise.resolve({ title: "renamed", totalCount: 2 });
             },
           });
           assert.equal(
@@ -409,10 +416,10 @@ type LocalOperation = {
 };
 type LocalMutation = {
   mutationFn: (op: LocalOperation) => Promise<unknown>;
-  onSuccess: (data: any, op: LocalOperation) => Promise<void>;
+  onSuccess: (data: unknown, op: LocalOperation) => Promise<void>;
   onError: (err: unknown, op: LocalOperation) => void;
 };
-function localHarness(kind: "tags" | "restore") {
+async function localHarness(kind: "tags" | "restore") {
   const source = componentSource(
     kind === "tags" ? "documents/DocumentTagsBar.vue" : "settings/DeletedProjectsSection.vue",
   );
@@ -453,35 +460,37 @@ function localHarness(kind: "tags" | "restore") {
   const assignedQuery = (ws: string, doc: string) => ({
     queryKey: ["document-tags", ws, "assigned", doc],
   });
-  const load = async (...args: unknown[]) => {
+  const load = (...args: unknown[]) => {
     requests.push(args);
-    return {};
+    return Promise.resolve({});
   };
   const life = effectScope();
-  const setup = new Function(
-    "props",
-    "me",
-    "watch",
-    "onScopeDispose",
-    "queryClient",
-    "client",
-    "error",
-    "mutationError",
-    "restoreTarget",
-    "open",
-    "filter",
-    "trigger",
-    "HTMLElement",
-    "useMutation",
-    "documentAssignedTagsQuery",
-    "assignedOptions",
-    "assignDocumentTag",
-    "createDocumentTag",
-    "removeDocumentTag",
-    "api",
-    "ensureOk",
-    "loadErrorMessage",
-    "problemMessage",
+  const setup = await evaluateTestFunction(
+    [
+      "props",
+      "me",
+      "watch",
+      "onScopeDispose",
+      "queryClient",
+      "client",
+      "error",
+      "mutationError",
+      "restoreTarget",
+      "open",
+      "filter",
+      "trigger",
+      "HTMLElement",
+      "useMutation",
+      "documentAssignedTagsQuery",
+      "assignedOptions",
+      "assignDocumentTag",
+      "createDocumentTag",
+      "removeDocumentTag",
+      "api",
+      "ensureOk",
+      "loadErrorMessage",
+      "problemMessage",
+    ],
     `${script}\nreturn typeof captureOperation === 'function' ? captureOperation : (projectId) => ({workspaceId: props.workspaceId, documentId: props.documentId, projectId});`,
   );
   const capture = life.run(() =>
@@ -498,7 +507,9 @@ function localHarness(kind: "tags" | "restore") {
       open,
       filter,
       shallowRef(null),
-      class {},
+      class {
+        marker = "fixture-element";
+      },
       (options: LocalMutation) => {
         mutations.push(options);
         return {
@@ -537,8 +548,8 @@ function localHarness(kind: "tags" | "restore") {
 }
 for (const kind of ["tags", "restore"] as const) {
   for (const retired of [false, true])
-    test(`${kind}: captured success refreshes fresh discovery and suppresses retired UI (${retired})`, async () => {
-      const h = localHarness(kind);
+    await test(`${kind}: captured success refreshes fresh discovery and suppresses retired UI (${String(retired)})`, async () => {
+      const h = await localHarness(kind);
       try {
         const op = { ...h.capture("project"), tagId: "tag", name: "new tag" };
         if (retired) {
@@ -546,13 +557,13 @@ for (const kind of ["tags", "restore"] as const) {
           h.props.documentId = "new-document";
           h.me.data.value = { userId: "other", sessionId: "new" };
         }
-        await h.mutations[0]!.onSuccess({ id: "tag", name: "tag" }, op);
+        await required(h.mutations[0]).onSuccess({ id: "tag", name: "tag" }, op);
         for (const tag of ["", "tag"]) {
           let requests = 0;
-          await h.client.fetchQuery({
+          await h.client.query({
             queryKey: ["wiki-discovery", "old-workspace", tag],
             staleTime: 30_000,
-            queryFn: async () => {
+            queryFn: () => {
               requests++;
               return { items: ["updated"] };
             },
@@ -582,13 +593,13 @@ for (const kind of ["tags", "restore"] as const) {
             [],
           );
           assert.equal(h.open.value, retired);
-          await h.mutations[1]!.onSuccess({ id: "tag" }, op);
+          await required(h.mutations[1]).onSuccess({ id: "tag" }, op);
           assert.deepEqual(
             h.requests[0],
             ["old-workspace", "old-document", null, "tag"],
             "create-to-assign retains the captured document",
           );
-          await h.mutations[2]!.onSuccess({}, op);
+          await required(h.mutations[2]).onSuccess({}, op);
           assert.deepEqual(
             h.client.getQueryData(["document-tags", "old-workspace", "assigned", "old-document"]),
             [],
@@ -601,7 +612,7 @@ for (const kind of ["tags", "restore"] as const) {
           assert.equal(h.client.getQueryState(["trash", "old-workspace"])?.isInvalidated, true);
           assert.equal(h.restoreTarget.value, retired ? "project" : null);
         }
-        h.mutations[0]!.onError(new Error("late"), op);
+        required(h.mutations[0]).onError(new Error("late"), op);
         assert.equal(h.error.value, retired ? "previous error" : "failed");
       } finally {
         h.life.stop();
@@ -620,8 +631,8 @@ for (const kind of ["tags", "restore"] as const) {
     "disposal",
   ] as const) {
     if (kind === "restore" && ["document", "project", "readonly"].includes(change)) continue;
-    test(`${kind}: retired ${change} retains original cache target and UI`, async () => {
-      const h = localHarness(kind);
+    await test(`${kind}: retired ${change} retains original cache target and UI`, async () => {
+      const h = await localHarness(kind);
       try {
         const op = { ...h.capture("project"), tagId: "tag" };
         if (change === "document") h.props.documentId = "new-document";
@@ -633,9 +644,9 @@ for (const kind of ["tags", "restore"] as const) {
         if (change === "session") h.me.data.value = { userId: "actor", sessionId: "new-session" };
         if (change === "readonly") h.props.readOnly = true;
         if (change === "disposal") h.life.stop();
-        await h.mutations[0]!.mutationFn(op);
-        await h.mutations[0]!.onSuccess({ id: "tag" }, op);
-        h.mutations[0]!.onError(new Error("late"), op);
+        await required(h.mutations[0]).mutationFn(op);
+        await required(h.mutations[0]).onSuccess({ id: "tag" }, op);
+        required(h.mutations[0]).onError(new Error("late"), op);
         assert.equal(h.error.value, "previous error");
         assert.equal(
           h.client.getQueryState(["wiki-discovery", "old-workspace", "tag"])?.isInvalidated,
@@ -656,4 +667,9 @@ for (const kind of ["tags", "restore"] as const) {
       }
     });
   }
+}
+
+function required<T>(value: T | null | undefined): T {
+  assert.ok(value !== null && value !== undefined, "required fixture value");
+  return value;
 }

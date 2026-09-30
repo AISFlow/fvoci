@@ -17,7 +17,7 @@ const url = shallowRef("");
 const composing = shallowRef<boolean>(false);
 function readLink(): void {
   composing.value = false;
-  const href = props.editor.getAttributes("link").href;
+  const href: unknown = props.editor.getAttributes("link").href;
   url.value = typeof href === "string" ? href : "";
 }
 function setLink(close: () => void): void {
@@ -44,6 +44,8 @@ function onKeydown(event: KeyboardEvent, close: () => void): void {
   if (event.key !== "Enter") return;
   // Enter confirms Korean IME before it can apply a URL. keyCode 229 also
   // covers browsers that finish composition before reporting the key.
+  // Keep the existing IME fallback when composition ends before keydown.
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
   if (event.isComposing || composing.value || event.keyCode === 229) {
     event.preventDefault();
     return;

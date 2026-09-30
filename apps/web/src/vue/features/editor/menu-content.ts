@@ -1,4 +1,4 @@
-import type { PopoverProps } from "@nuxt/ui/components/Popover.vue";
+import type { PopoverProps } from "@nuxt/ui";
 
 type PopoverContent = NonNullable<PopoverProps["content"]>;
 
