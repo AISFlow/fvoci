@@ -14,8 +14,8 @@ import { redirectTo } from "../session/navigation";
 import LoginForm from "../features/auth/LoginForm.vue";
 import MfaStep from "../features/auth/MfaStep.vue";
 
-// /login: logout landing, MFA step, and OIDC error query. The boot module
-// sends this path to the Vue app (src/app-boundary.ts).
+// /login: logout landing, MFA step, and OIDC error query, loaded by the
+// single Vue entry (src/vue/entry.ts).
 
 const route = useRoute();
 const setup = useQuery(setupStatusQuery);
@@ -46,8 +46,8 @@ watchEffect(() => {
     redirectTo("/setup");
     return;
   }
-  // React SetupGuard mounts LoginPage only after setup succeeds, so #mfa=
-  // survives a setup-error refresh. Take the fragment only on that same screen.
+  // Take #mfa= only after setup succeeds, preserving the fragment through
+  // loading, setup errors, and a setup-error refresh.
   if (mfaToken.value === null) mfaToken.value = takeMfaFragment();
   if (me.data.value) {
     // Start the destination with its own app/query cache after login.

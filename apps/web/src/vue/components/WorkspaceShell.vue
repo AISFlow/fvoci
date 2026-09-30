@@ -5,7 +5,6 @@ import UDashboardGroup from "@nuxt/ui/components/DashboardGroup.vue";
 import UDashboardPanel from "@nuxt/ui/components/DashboardPanel.vue";
 import UDashboardNavbar from "@nuxt/ui/components/DashboardNavbar.vue";
 import UNavigationMenu from "@nuxt/ui/components/NavigationMenu.vue";
-import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
 import { useQuery } from "@tanstack/vue-query";
 import { computed } from "vue";
 import { useRouter } from "vue-router";
@@ -27,10 +26,9 @@ import SearchPalette from "../features/shell/SearchPalette.vue";
 import { useLogout } from "../features/shell/useLogout";
 import { usePushSessionRebind } from "../features/shell/usePushSessionRebind";
 
-// The React app's workspace shell (features/workspace/workspace-shell.tsx):
-// section links, the workspace switch, the search palette, the notification
-// bell, account and logout, and the legal footer. Every link and switch
-// target outside this app is a React page, reached with a full page load.
+// The Vue workspace shell: section links, workspace switch, search palette,
+// notification bell, account, logout, and legal footer. Section links and
+// switches use the router; logout and public legal links retain full loads.
 const props = withDefaults(
   defineProps<{
     slug: string;
@@ -55,7 +53,7 @@ const navigation = computed(() =>
     { label: t("task.mine"), to: myTasksPath(props.slug), active: props.active === "myTasks" },
     { label: t("nav.search"), to: searchPath(props.slug), active: props.active === "search" },
     { label: t("nav.settings"), to: settingsPath(props.slug), active: props.active === "settings" },
-  ].map((item) => ({ ...item, exact: true, external: !isVueAppPath(item.to) })),
+  ].map((item) => ({ ...item, exact: true })),
 );
 const { error: logoutError, logout } = useLogout();
 usePushSessionRebind(() => props.workspaceId);
