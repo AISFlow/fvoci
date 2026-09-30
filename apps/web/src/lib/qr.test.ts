@@ -7,7 +7,11 @@ const URI =
 
 function darkSet(path: string): Set<string> {
   const cells = new Set<string>();
-  for (const match of path.matchAll(/M(\d+) (\d+)h1v1h-1z/g)) cells.add(`${match[1]},${match[2]}`);
+  for (const match of path.matchAll(/M(\d+) (\d+)h1v1h-1z/g)) {
+    const [, x, y] = match;
+    assert.ok(x !== undefined && y !== undefined);
+    cells.add(`${x},${y}`);
+  }
   return cells;
 }
 
@@ -23,7 +27,7 @@ await test("qrModules draws a square module grid with the three finder patterns"
     [0, 0],
     [size - 7, 0],
     [0, size - 7],
-  ]) {
+  ] as const) {
     for (let i = 0; i < 7; i++) {
       assert.ok(
         dark.has(`${String(x0 + i)},${String(y0)}`) &&

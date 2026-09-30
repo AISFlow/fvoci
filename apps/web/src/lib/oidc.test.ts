@@ -114,7 +114,9 @@ await test("startOidcInvite posts the fields by fetch, then navigates to the pro
     fake.deps,
   );
   assert.equal(fake.sent.length, 1);
-  const { input, init } = fake.sent[0];
+  const request = fake.sent[0];
+  assert.ok(request);
+  const { input, init } = request;
   assert.equal(input, "/api/v1/auth/oidc/google/start");
   assert.equal(init.method, "POST");
   // Same-origin only: the state cookie must be stored, nothing is sent elsewhere.

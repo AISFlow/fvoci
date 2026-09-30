@@ -45,11 +45,13 @@ await test("stale close does not affect a new pool entry", () => {
   assert.equal(sharedEventSourceRefCount(url), 1);
   first.close();
   assert.equal(sharedEventSourceRefCount(url), 1);
-  assert.equal(MockEventSource.instances[1]?.closed, false);
+  const secondSource = MockEventSource.instances[1];
+  assert.ok(secondSource);
+  assert.equal(secondSource.closed, false);
 
   second.close();
   assert.equal(sharedEventSourceRefCount(url), 0);
-  assert.equal(MockEventSource.instances[1]?.closed, true);
+  assert.equal(secondSource.closed, true);
 });
 
 await test("a refused connection is reopened after a jittered backoff", () => {
