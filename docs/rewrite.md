@@ -764,18 +764,18 @@ CI 선택 범위 변경 후보(2026-09-30, base `a1d19b6e`, 아직 수락 전): 
 
 ### 6.3 Vue 프론트엔드 전환 체크리스트 (2026-09-30, 정본)
 
-승인 범위는 합의된 사용자 기능 전체(Vue 3 + Nuxt UI + Tiptap)이며 Gantt·위키 예광탄만이 아니다. 필요한 Rust/API/OpenAPI/DB 변경은 막지 않는다. React DOM 복제가 아니라 동등한 제공이 목표다. 이 절이 유일한 전환 TODO다(이슈·PR은 여기 ID에 연결).
+승인 범위는 합의된 사용자 기능 전체(Vue 3 + Nuxt UI + Tiptap)이며 Gantt·위키 예광탄만이 아니다. 필요한 Rust/API/OpenAPI/DB 변경은 막지 않는다. React DOM 복제가 아니라 동등한 제공이 목표다. 이 절은 기능군·라우트 대응표의 정본이며, 같은 이슈·PR의 현재 실행·소유권·수락 조건은 §6.5 기존 항목에서 갱신한다.
 
 **단계**: 미착수 / 구현 중·로컬 WIP / 실제 라우트 연결 완료 / 종단 간 검증 완료 / 독립 검토·CI 중 / main 수락 완료.
 예광탄 수락 ≠ 상위 기능군 완료. stacked PR을 main 수락으로 적지 않는다. 확인하지 못한 항목은 미확인. #263·#266은 제품 기능군 완료 수에 넣지 않는다.
 
-**라우트 대조(실행 경로, 페이지 파일만으로 완료 판정하지 않음)**
+**인수 당시 라우트 대조(기준 main `f3f53c90`; 현재 단계는 §6.5, 페이지 파일만으로 완료 판정하지 않음)**
 
 - main `f3f53c90` `app-boundary.ts` / `boot.ts`: Vue는 Gantt + 위키 문서. `/login`·`/setup`은 아직 React.
 - 후보: #269가 `/login`을 Vue로 보냄. #270 `b601ef64`가 `/setup`을 Vue로 보내고 React `SetupPage`를 제거함. 둘 다 main 아님.
-- 회수 WIP는 Vue `router.ts`에 경로가 있어도 `app-boundary.ts`가 안 보내면 boot는 React다(연결 전). `app-boundary.ts` 단독 소유는 코디네이터. 후보는 필요한 경로를 그 브랜치에서 연결·검사한다.
+- 회수 WIP는 Vue `router.ts`에 경로가 있어도 `app-boundary.ts`가 안 보내면 boot는 React다(연결 전). `app-boundary.ts`의 최종 통합 소유자는 코디네이터이며, 명시적으로 지정한 Sol 워커가 후보의 경로를 연결·검사한다.
 
-React에 있고 Vue 페이지가 아직 없는 URL: `/setup`, `/s/:token`, `/invite/:token`, `/reset-password`, `/consent`, `/service-info`, `/legal/:kind`, `/magic-link`, `/confirm-email`, `/cancel-withdraw`, `/`, `/w/:slug/wiki`, `/w/:slug/search`, `/w/:slug/trash`, `/w/:slug/settings`(+ document-tags·templates), `/w/:slug/notifications`, `/w/:slug/my-tasks`, `/w/:slug/:ref`(프로젝트 홈·태스크·프로젝트 문서), `/w/:slug/:ref/settings/fields|workflow`. MFA·OIDC 버튼은 별도 URL이 아니라 `/login` 하위.
+인수 당시 React 잔여 URL(후속 후보 연결·수락은 §6.5에서 추적): `/setup`, `/s/:token`, `/invite/:token`, `/reset-password`, `/consent`, `/service-info`, `/legal/:kind`, `/magic-link`, `/confirm-email`, `/cancel-withdraw`, `/`, `/w/:slug/wiki`, `/w/:slug/search`, `/w/:slug/trash`, `/w/:slug/settings`(+ document-tags·templates), `/w/:slug/notifications`, `/w/:slug/my-tasks`, `/w/:slug/:ref`(프로젝트 홈·태스크·프로젝트 문서), `/w/:slug/:ref/settings/fields|workflow`. MFA·OIDC 버튼은 별도 URL이 아니라 `/login` 하위.
 
 #### 기능군 완료 체크 (상위는 필수 하위·출시 차단·구 경로 제거가 모두 끝날 때)
 
@@ -922,76 +922,113 @@ Web run 36599369890 shard 5: `test.fail` Hangul composition이 통과해 "Expect
 
 
 ### 6.5 Astra / Sol 6.1 실행 TODO (2026-09-30 인수)
-이 절이 현재 소유권·다음 실행의 정본이다. §6.3 기능표·기존 검증은 그대로 재사용하고 과거 Grok 담당 표기는 당시 기록이다.
-원격 열린 PR·이슈는 REST `--paginate`, `per_page=100`으로 끝까지 확인: PR31·이슈4, auto-merge0.
-main `f3f53c907d27982065984249916e7447dd94ac45`, 게시 pre-release `v0.3.0`(2026-09-29T12:37:09Z).
-main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 main 전환 범위는 구분한다.
-현재 다른 Run·CI·release 자동 체인을 재가동하지 않았다. 기존 live 프로세스·데이터는 유지한다.
+이 절이 현재 소유권·다음 실행의 정본이다. §6.3 기능표·기존 검증을 재사용하며 과거 Grok/Opus 담당·검사·요청은 당시 기록으로 보존한다. 아래 최초 인수 HEAD·check 집계는 과거 snapshot이며 실제 테스트 수나 최신 수락 상태가 아니다.
+
+상위 목표는 **현재 Astra 세션에서 사용자가 요청한 모든 작업과 진행 중 결과를 보존하고 끝까지 완료하는 것**이다. 합의된 전체 Vue 3 + Nuxt UI + Tiptap/Bun 프론트엔드를 실제 Rust/API/DB에 연결하고, WIP/PR을 연결 → production 브라우저·데이터/권한 검증 → 별도 Sol6.1 고정 HEAD 검토·실제 CI → main 수락까지 종결한다. 대체된 React 경로와 임시 포팅 기반을 조건 충족 후 제거하되 사용자 데이터·보안·기능·라이선스·복구 근거를 보존하며, 승인된 비교와 0.x 시험 배포 증거까지 이어간다. 현재 세션에 추가한 지시이며 새 인수/reset이나 새 기능 자동 승인이 아니다.
+
+기존 Codex goal thread `01a0ef48-5c88-77f1-9f45-9008284a2deb`의 범위에는 이미 CI #288과 전체 프론트엔드 갱신이 포함돼 있다. 코디네이터가 실제 `get_goal`로 확인한 상태는 `blocked`이며 그 목표·이력은 보존한다. 현재 도구에는 objective 수정·resume API가 없으므로 active로 표시하거나 새 goal/재개 명령을 만들지 않는다. 이 문서가 확장된 목표·실행 TODO의 정본이고, 기존 Orca `run_496803f4d94f`에서 계속 실행한다.
+
+요청별 추적은 기존 ID에 연결한다: 전체 사용자 작업은 §6.3 기능군과 아래 기존 PR/WIP, 결함은 #149/#259/#260/#261 및 #269, Vue 흐름 수락은 #265/#267/#269–#279/#281–#287, React 제거는 각 흐름의 제거 조건과 아래 공통 제거 항목, 호환·비교는 #266/#280과 §5 잔여, 승인된 0.x 배포는 기존 §6.1 출시 기록과 각 항목의 배포 상태다. 후속 0.x 시험 배포는 독립 검토·필수 검사 수락 및 green main first-parent에서 기존 release workflow로 코디네이터가 수행한다(AGENTS의 승인 범위); 1.0.0+·사용자 운영 환경 자동 배포·불변 산출물 덮어쓰기는 포함하지 않는다. 목록을 따로 복제하지 않으며 개별 PR 완료를 전체 종료로 세지 않는다.
+
+2026-09-30 11:10–11:13 KST 조회: 원격 main `50d95df1a98c2d88d28f09222c2985fbdb585623`, 원격 PR HEAD/base와 로컬 HEAD를 구분했다. main의 install/rust/web/documents/collab-engine 5게이트 모두 SUCCESS 근거는 `/home/kinesis/orca/fvoci-evidence/recovery-20260930/takeover-evidence/main-50d95df1-gates.json`. 게시 pre-release는 여전히 `v0.3.0`(2026-09-29T12:37:09Z)이며 새 배포 없음. 최초 인수의 main `f3f53c907d27982065984249916e7447dd94ac45`와 Web `36599369890` failure/나머지4 workflow success는 과거 근거로 보존한다. 당시 열린 PR31·이슈4(auto-merge0)는 인수 snapshot이며 현재 이슈4의 추적은 유지한다.
+
+갱신 제출 근거는 같은 evidence root의 `wave-a-refresh-push.json`, `wave-b-refresh-push.json`, `docs-compat-refresh-push.json`, `qr156-refresh-push.json`과 `/tmp/fvoci-refresh-wave-a-orca-sol61.txt`, `/tmp/fvoci-refresh-wave-a-review-sol61.txt`, `/tmp/fvoci-refresh-wave-b-orca-sol61.txt`, `/tmp/fvoci-refresh-wave-b-review-sol61.txt`, `/tmp/fvoci-compat-docs-merge-review-sol61.txt`, `/tmp/fvoci-qr156-review-sol61.txt`다. 갱신 검토는 해당 fixed HEAD/delta 범위이며 실제 라우트 수락이나 새 diff 검토로 전용하지 않는다.
+
+현재 실행은 Orca1.4.217 runtime `73201137-ed1f-4a8a-bcde-302a44c54e4b`의 visible terminal 워커이며 native worker 없음. 실제 `gpt-6.1-sol` high/medium은 각 보고서의 transcript 근거를 따른다. 코디네이터 자원 snapshot(load1.77/가용37GiB/디스크671GiB)에서 격리된 브라우저2묶음을 배정한 것은 고정 수량 상한이 아니다. AGENTS의 상한 해제·경로당 한 작성자·독립 검토·자원 기반 병렬도는 모순 없이 유지하며 과거 모델 기록과 설정은 변경하지 않는다. 다른 Run·자동 체인을 재가동하거나 기존 데이터·미커밋 결과를 폐기하지 않는다.
 
 - [x] 위키 한글 회귀·협업 복구 — [#287](https://github.com/AISFlow/fvoci/pull/287)
-  - 현재 단계: main 수락 `a1d19b6e03c13ce94c642129b9cc5bc573be3764`; 배포 v0.3.0에는 미포함. merge SHA CI 별도 진행.
+  - 요청 근거: 기존 위키 한글·협업 결함 복구 요청; 고정 SHA 수락 근거 보존.
+  - 실제 라우트/범위: 위키 한글 회귀·협업 복구.
+  - 현재 단계: main 수락 `a1d19b6e03c13ce94c642129b9cc5bc573be3764`; 배포 v0.3.0에는 미포함. 원래 merge SHA CI와 현재 main50d95df1 5게이트 SUCCESS를 구분한다.
   - 담당 Sol 6.1 워커: ci287 구현, review287_setup/review_ci_auth_delta 독립 검토 완료.
   - 기준 HEAD / PR / 선행 의존성: `15ed8e0b1634cb410367aca4f9dcb211103efd4a` / #287 merged / main.
   - 남은 구체적인 작업: 원래 후보 수락 완료. 후속 native caret settle 검사 경합은 #269 f6fbb8df에서 처리; #287 성공을 후속 수정 성공으로 재표시하지 않는다.
   - 수락 검사: 독립 ACCEPT + 5 workflow gate 성공. takeover-evidence/ci-287/final-checks.json. 실제 pending36통과/기존OSIME12skip.
   - 출시 차단: 출시 검사 차단.
   - 기존 React 제거 조건: 해당 없음.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] 태스크 첨부/활동/시간 패널 — [#286](https://github.com/AISFlow/fvoci/pull/286)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 10, 'FAILURE': 15, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `e133d90e5776c7935196c7faafa90d14a2720ce4` / #286 / #285; 관측 base `d3533356b2547dd14cbc89e4bf3b12e6c1e448c3`.
-  - 남은 구체적인 작업: 상세 flow와 연결, 단일 collab room 유지. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: 태스크 상세 내 첨부·활동·시간 패널; #285 상세 URL/단일 collab room.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 B task_14b99302f53e/ctx_f15669a41d93 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `5b2574bf1daacd4ca313e0b7158d17d866ae4d9d` / #286 / #285; 조회 base `802d00cce04617ab712b81bc560cf17273e99da3`
+  - 남은 구체적인 작업: 상세 flow와 연결, 단일 collab room 유지. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: 첨부·활동·시간 확정 저장/재조회; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 285 선행.
   - 기존 React 제거 조건: 패널 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `e133d90e5776c7935196c7faafa90d14a2720ce4` / #286 / #285; 관측 base `d3533356b2547dd14cbc89e4bf3b12e6c1e448c3`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 10, 'FAILURE': 15, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] 태스크·프로젝트 문서 상세 — [#285](https://github.com/AISFlow/fvoci/pull/285)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 10, 'FAILURE': 15, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `d3533356b2547dd14cbc89e4bf3b12e6c1e448c3` / #285 / #282; 관측 base `8623ab2af9eafbb5420c234f00045983259a7bdb`.
-  - 남은 구체적인 작업: 기존 item lookup·본문 경로 연결. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/:ref 태스크·프로젝트 문서 상세와 본문.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 B task_14b99302f53e/ctx_f15669a41d93 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `802d00cce04617ab712b81bc560cf17273e99da3` / #285 / #282; 조회 base `a21c1454c296a710e617861636aff55e7fabcc7b`
+  - 남은 구체적인 작업: 기존 item lookup·본문 경로 연결. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: 문서/태스크 권한·협업·저장 E2E; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 282 선행.
   - 기존 React 제거 조건: Vue item 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `d3533356b2547dd14cbc89e4bf3b12e6c1e448c3` / #285 / #282; 관측 base `8623ab2af9eafbb5420c234f00045983259a7bdb`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 10, 'FAILURE': 15, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] live 위키 댓글/공유/별/리비전 — [#284](https://github.com/AISFlow/fvoci/pull/284)
-  - 현재 단계: 독립 검토·CI; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `6e90189af32f55812388a1a5b5964aa2901e2850` / #284 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`.
-  - 남은 구체적인 작업: 기존6/6 E2E와 고정 검토를 재사용하고 CI delta 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: 기존 live 위키 문서 URL 내 댓글·공유·별·리비전.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 B task_14b99302f53e/ctx_f15669a41d93 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `8372c610f598761bdac127c558323d80a4145e0c` / #284 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 기존6/6 E2E와 고정 검토를 재사용하고 CI delta 확인. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: live wiki chrome E2E·필수 CI; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 261 전체 완료와 구분.
   - 기존 React 제거 조건: 기존 live 경로 유지.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `6e90189af32f55812388a1a5b5964aa2901e2850` / #284 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 독립 검토·CI; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] my-tasks · notifications · trash — [#283](https://github.com/AISFlow/fvoci/pull/283)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `739290acd6eff824692dc2b9c829910fedd434a0` / #283 / #274; 관측 base `e18fdbbe9ed5fd97d88b041165cb5023bc9b4f6a`.
-  - 남은 구체적인 작업: workspace 기반 세 경로 연결. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/my-tasks · /w/:slug/notifications · /w/:slug/trash.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `c6179f0383676f66b4685257d90dfe4328a41316` / #283 / #274; 조회 base `d26e117ec4fed6d39b060aa5be2748fe20e2a787`
+  - 남은 구체적인 작업: workspace 기반 세 경로 연결. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: 알림·내 일감·휴지통/복원 E2E; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 274 선행.
   - 기존 React 제거 조건: 각 경로 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `739290acd6eff824692dc2b9c829910fedd434a0` / #283 / #274; 관측 base `e18fdbbe9ed5fd97d88b041165cb5023bc9b4f6a`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] 프로젝트 홈 — [#282](https://github.com/AISFlow/fvoci/pull/282)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 10, 'FAILURE': 15, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `8623ab2af9eafbb5420c234f00045983259a7bdb` / #282 / #276; 관측 base `dc2611e605439b9cb38c069a4230ba8c648474c9`.
-  - 남은 구체적인 작업: KEY-n item과 겹치지 않게 기존 home 연결. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/:ref 프로젝트 홈; KEY-n 상세와 구분.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 B task_14b99302f53e/ctx_f15669a41d93 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `a21c1454c296a710e617861636aff55e7fabcc7b` / #282 / #276; 조회 base `f419c402d2fec43d32e8a9dee89676fb7c0d3adf`
+  - 남은 구체적인 작업: KEY-n item과 겹치지 않게 기존 home 연결. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: 프로젝트 홈 실제 권한/재조회; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 276 선행.
   - 기존 React 제거 조건: Vue 홈 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `8623ab2af9eafbb5420c234f00045983259a7bdb` / #282 / #276; 관측 base `dc2611e605439b9cb38c069a4230ba8c648474c9`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 10, 'FAILURE': 15, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] /s/:token — [#281](https://github.com/AISFlow/fvoci/pull/281)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `beaa095cc9c44cccf334cd96d36edb3e52fa24ab` / #281 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`.
-  - 남은 구체적인 작업: attachment 공유와 겹치지 않게 공개 공유 연결. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /s/:token 공개 공유.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `fe536b84f2abaddeed117807b4e416ef098a4005` / #281 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: attachment 공유와 겹치지 않게 공개 공유 연결. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: 익명 공유·삭제/철회·직접진입 E2E; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 공개 공유 전환.
   - 기존 React 제거 조건: Vue 공유 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `beaa095cc9c44cccf334cd96d36edb3e52fa24ab` / #281 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] 협업 비교 계획 — [#280](https://github.com/AISFlow/fvoci/pull/280)
+  - 요청 근거: 승인된 차수 후 비용·복구·스키마 비교 지시; Yrs 유지 결론 선결정 금지.
+  - 실제 라우트/범위: 현재 차수 수락 뒤 CRDT 비용·복구·스키마 비교; 기본 엔진 채택/데이터 이전은 별도 판단.
   - 현재 단계: 최신 사용자 비교 정책과 전체 문서 독립 ACCEPT; 최신 CI 진행.
   - 담당 Sol 6.1 워커: review_ci_auth_delta/review_invite_final 독립 검토; Astra 문서 통합.
   - 기준 HEAD / PR / 선행 의존성: `b4d5bf25` / #280 / main.
@@ -999,152 +1036,213 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 수락 검사: 문서 delta 독립 검토; 실제 비교는 별도 측정; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 현재 차수 비차단.
   - 기존 React 제거 조건: React 제거와 무관.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] /w/:slug/wiki · search — [#279](https://github.com/AISFlow/fvoci/pull/279)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 22, 'SKIPPED': 6, 'FAILURE': 3}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `4fe8480f1f1021c04c39eeada689230b2fac02bc` / #279 / #274; 관측 base `e18fdbbe9ed5fd97d88b041165cb5023bc9b4f6a`.
-  - 남은 구체적인 작업: wiki 문서 URL과 겹치지 않게 목록/검색 연결. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/wiki · /w/:slug/search.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `88ca2ce763b493d1c86980b9af6197a2e1cfcdb8` / #279 / #274; 조회 base `d26e117ec4fed6d39b060aa5be2748fe20e2a787`
+  - 남은 구체적인 작업: wiki 문서 URL과 겹치지 않게 목록/검색 연결. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: wiki 목록·검색·권한 E2E; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: workspace 선행.
   - 기존 React 제거 조건: 목록/검색 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `4fe8480f1f1021c04c39eeada689230b2fac02bc` / #279 / #274; 관측 base `e18fdbbe9ed5fd97d88b041165cb5023bc9b4f6a`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 22, 'SKIPPED': 6, 'FAILURE': 3}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] reset/magic/confirm/cancel/consent — [#278](https://github.com/AISFlow/fvoci/pull/278)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /reset-password · /magic-link · /confirm-email · /cancel-withdraw · /consent.
   - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 21, 'SKIPPED': 6, 'FAILURE': 4}(검사 수가 아닌 check 집계, 외부 check 포함).
   - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
   - 기준 HEAD / PR / 선행 의존성: `20846dd86c1572ae7f2587ee5358b859d089439c` / #278 / #269; 관측 base `ef17b410779f1eeebcf50f47050cb81b1ab9aaca`.
-  - 남은 구체적인 작업: 기존 auth-rest 경로별 boundary 연결. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 남은 구체적인 작업: 최종 #269 auth delta 검증·독립 검토 뒤 의존 순서로 기존 후보 갱신/충돌 delta 검토·push·새 HEAD CI/main 수락; 기존 실제 URL/검사/React 제거 근거 보존, 비교 고정 차수는 유지
   - 수락 검사: mail-reset/account lifecycle E2E; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: login 선행.
   - 기존 React 제거 조건: 경로별 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] /settings/account · admin/audit/legal — [#277](https://github.com/AISFlow/fvoci/pull/277)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `b16c20b044c47a9f9acff82f54104c6863741d58` / #277 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`.
-  - 남은 구체적인 작업: 계정 정본으로 연결; 공개 약관 #272와 분리. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /settings/account 및 관리자 audit/legal; 공개 약관 #272와 구분.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `37789ee38fd9b56c063b11bb09ded0b075a916fe` / #277 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 계정 정본으로 연결; 공개 약관 #272와 분리. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: MFA·account lifecycle·admin/legal E2E; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 계정/관리 전환.
   - 기존 React 제거 조건: 각 기능 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `b16c20b044c47a9f9acff82f54104c6863741d58` / #277 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] 프로젝트 task/collection views — [#276](https://github.com/AISFlow/fvoci/pull/276)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 25, 'FAILURE': 15, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `dc2611e605439b9cb38c069a4230ba8c648474c9` / #276 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`.
-  - 남은 구체적인 작업: 프로젝트 묶음의 첫 실제 경로 연결. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/:ref 프로젝트 목록·보드·간트·캘린더·컬렉션.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 B task_14b99302f53e/ctx_f15669a41d93 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `f419c402d2fec43d32e8a9dee89676fb7c0d3adf` / #276 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 프로젝트 묶음의 첫 실제 경로 연결. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: 목록·보드·캘린더·컬렉션 권한/저장 E2E; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 프로젝트 전환 선행.
   - 기존 React 제거 조건: 뷰별 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `dc2611e605439b9cb38c069a4230ba8c648474c9` / #276 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 25, 'FAILURE': 15, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] 첨부/공유 첨부 viewer — [#275](https://github.com/AISFlow/fvoci/pull/275)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 22, 'FAILURE': 3, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `9ec6c4133630f3b7d9bd9f52827368feac9d3c17` / #275 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`.
-  - 남은 구체적인 작업: 기존 viewer URL 연결·자산 경로 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
-  - 수락 검사: 실제 첨부/공유 viewer·WASM·다운로드 E2E; 중요한 delta는 별도 Sol6.1 검토.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/a/:id/view · /s/:token/attachments/:id/view; 지원 형식·다운로드·WASM·HWP 편집.
+  - 현재 단계: 로컬 a71a6872 actual viewer URL 연결·quick182/build 통과 후 실제 Rust/DB browser7그룹 중6그룹 통과; HWP edit dirty-navigation 실패. 최종검사/수정·독립 검토·CI·main 미수락
+  - 담당 Sol 6.1 워커: task_e06d60a6154c/ctx_73d490e8dabb Sol6.1/high, 같은 r11-vue-viewers tree 단독 소유; 갱신 A 이력 보존
+  - 기준 HEAD / PR / 선행 의존성: 원격 `7818d32f2a1b1d6ec0a4a585a7c1a58696c2d89c` / #275 / main; 로컬 후보 `a71a6872e9b7a7a4e2f04d9d389e6101bd2ef890`, 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: React boundary를 지나는 HWP 편집 이동의 PendingEditsGuard 최소 수정 및 native cross-document beforeunload dismiss-preserve/accept-discard 검사; 실패 근거 보존 후 실제7그룹 완료·고정 HEAD 독립 검토·CI·main 수락
+  - 수락 검사: actual viewer URL·지원 형식/WASM·첨부/공유/다운로드 권한·HWP 수정/저장/이동 보존; quick182/build 및6그룹 성공은 부분 근거, 실패 HWP 그룹을 포함한 최종 Rust/DB/browser와 별도 Sol 검토·새 HEAD CI 필요
   - 출시 차단: 첨부 전환.
   - 기존 React 제거 조건: 모든 지원 형식 대체 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `9ec6c4133630f3b7d9bd9f52827368feac9d3c17` / #275 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 22, 'FAILURE': 3, 'SKIPPED': 6}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] /w/:slug · /w/:slug/projects — [#274](https://github.com/AISFlow/fvoci/pull/274)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `e18fdbbe9ed5fd97d88b041165cb5023bc9b4f6a` / #274 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`.
-  - 남은 구체적인 작업: 기존 workspace 랜딩부터 연결. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug · /w/:slug/projects.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `d26e117ec4fed6d39b060aa5be2748fe20e2a787` / #274 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 기존 workspace 랜딩부터 연결. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: workspace/project 권한·재조회 E2E; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 탐색 선행.
   - 기존 React 제거 조건: Vue workspace 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `e18fdbbe9ed5fd97d88b041165cb5023bc9b4f6a` / #274 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] /w/:slug/settings — [#273](https://github.com/AISFlow/fvoci/pull/273)
-  - 현재 단계: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `c4c7d87812b4570531ec7bfc481278c2c65d8eba` / #273 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`.
-  - 남은 구체적인 작업: 워크스페이스 설정만 연결; account 정본은 #277. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /w/:slug/settings 및 document-tags/templates·멤버·SSO·import/export.
+  - 현재 단계: 최신 main/CI288 반영·독립 갱신 검토 후 일반 push 완료; 실제 흐름 main 미수락·미배포. 새 HEAD CI는 수락 시 확인하며 갱신 push를 라우트 수락으로 세지 않음
+  - 담당 Sol 6.1 워커: 갱신 A task_d58de1bb2f9b/ctx_a3b86c32d2d6 갱신 완료·별도 fixed-delta 검토 완료; 다음 연결 작성자는 미배정, Astra가 소유권 지정
+  - 기준 HEAD / PR / 선행 의존성: 원격 `0480f1dfbc16a1ff3b7cb9e30a5e8f3f62e3c64e` / #273 / main; 조회 base `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 워크스페이스 설정만 연결; account 정본은 #277. 최신 후보 actual boundary/router 연결·production Rust/DB/browser 검증·별도 흐름 검토·현재 CI·main 수락까지 담당 지정 후 진행
   - 수락 검사: 설정 권한·멤버·SSO·import/export E2E; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 설정 기능 누락.
   - 기존 React 제거 조건: 각 설정 흐름 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `c4c7d87812b4570531ec7bfc481278c2c65d8eba` / #273 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 로컬 구현/WIP·라우트 미연결; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 23, 'SKIPPED': 6, 'FAILURE': 2}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] / · /legal/:kind · /service-info — [#272](https://github.com/AISFlow/fvoci/pull/272)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: / · /legal/:kind · /service-info.
   - 현재 단계: 로컬 통합 후보21ad5327 실제 Vue URL·Rust/DB21검사 및 별도 고정 merge 검토 ACCEPT. 원격은 기존 c9b59494이며 미push·main/배포 미수락.
   - 담당 Sol 6.1 워커: home_public_connect 구현·검증, review_invite_final 독립 검토.
   - 기준 HEAD / PR / 선행 의존성: 로컬 `21ad53276510d96928b2b8f497695c8ea1eda495` / #272 / #271 54bcc682 및 #270/#269; 다음 차수 준비.
-  - 남은 구체적인 작업: CI288 수락 후 최신 기반 갱신·원격 제출·CI·main 수락. 현재 협업 비교 고정 차수를 늘리지 않는다.
+  - 남은 구체적인 작업: 최종 #269 auth delta 검증·독립 검토 뒤 의존 순서로 기존 후보 갱신/충돌 delta 검토·push·새 HEAD CI/main 수락; 기존 실제 URL/검사/React 제거 근거 보존, 비교 고정 차수는 유지
   - 수락 검사: 통합 unit110·Bun production build·별도 검토의 경계18검사, 실제 Rust/DB6그룹21pass/0fail/0skip. 서비스3개 controlled 검사는 primary 실제 API 검증과 구분.
   - 출시 차단: login 선행.
   - 기존 React 제거 조건: 대체 HomePage/public LegalPage/ServiceInfoPage·전용 route 제거 후보; 관리자 약관과 공통 코드는 유지.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] /invite/:token — [#271](https://github.com/AISFlow/fvoci/pull/271)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /invite/:token.
   - 현재 단계: 실제 URL 연결·Rust/DB 검증·독립 최종 ACCEPT; 최신 CI 진행, main/배포 미수락.
   - 담당 Sol 6.1 워커: invite_connect 구현·검증; review_invite/review_invite_final 독립 검토.
   - 기준 HEAD / PR / 선행 의존성: `54bcc682f50eb5b4457e479021603669ab781258` / #271 / #270 → #269.
-  - 남은 구체적인 작업: 최신 CI와 #270/#269 통합 후 수락. 이 후보의 외부 IdP callback은 미실행이며 기존 Keycloak 검증과 구분.
+  - 남은 구체적인 작업: 최종 #269 auth delta 검증·독립 검토 뒤 의존 순서로 기존 후보 갱신/충돌 delta 검토·push·새 HEAD CI/main 수락; 기존 실제 URL/검사/React 제거 근거 보존, 비교 고정 차수는 유지
   - 수락 검사: invite3·기존MFA1 실제 Rust/DB 통과, 관련unit40·production build, 최종 독립 ACCEPT.
   - 출시 차단: login 선행.
   - 기존 React 제거 조건: 전용 React invite page/form과 route 제거 완료; 다른 계정·약관 흐름 유지.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] /setup — [#270](https://github.com/AISFlow/fvoci/pull/270)
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /setup.
   - 현재 단계: Vue setup 연결·원래 코드와 auth delta 독립 ACCEPT; 원격 CI 진행, main/배포 미수락.
   - 담당 Sol 6.1 워커: setup_integrate 구현·검증; review287_setup/review_ci_auth_delta 독립 검토.
   - 기준 HEAD / PR / 선행 의존성: `4b7f9578a6e8e665e6ed2b2d6fa31c01604368f8` / #270 / #269.
-  - 남은 구체적인 작업: #269 최신 수락 후 필요한 통합 delta 확인·현재 CI 수락. 다른 브랜치를 기계적으로 갱신하지 않는다.
+  - 남은 구체적인 작업: 최종 #269 auth delta 검증·독립 검토 뒤 의존 순서로 기존 후보 갱신/충돌 delta 검토·push·새 HEAD CI/main 수락; 기존 실제 URL/검사/React 제거 근거 보존, 비교 고정 차수는 유지
   - 수락 검사: setup 단위19 + workspace-flow 실제 Rust/DB; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: login 선행.
   - 기존 React 제거 조건: 후보의 React SetupPage 제거 검증.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] /login — [#269](https://github.com/AISFlow/fvoci/pull/269)
-  - 현재 단계: Vue login 실제 연결·제품 검토 ACCEPT; 후속 caret 검사 최종40통과/기존OSIME12skip·delta 독립 ACCEPT, 최신 CI 진행. main/배포 미수락.
-  - 담당 Sol 6.1 워커: auth_acceptance/auth_guard_fix 제품·검증, caret_settle_recovery 후속; review_ci_auth_delta와 review_controls_final 독립 검토.
-  - 기준 HEAD / PR / 선행 의존성: `f6fbb8df0a2c95e3ac21d11972e27ff8a81fe2fb` / #269 / main 및 #287 포함.
-  - 남은 구체적인 작업: CI Web shard6의 setup→home 준비 경합 수정·독립 검토·관련 브라우저 회귀 후 최신 CI·main 통합. caret delta 및 setup 오류 spinner F1은 별도 검토 수락 완료.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: /login 내 MFA/OIDC와 logout·협업 이동/입력 회귀.
+  - 현재 단계: 로컬 `8a878ad18ed16f23cf33efa9998352a949a90fb3`(parent3da6737e)에서 native caret/remote-sync 제품 race 재현 후 supported handleClick 최소 수정; controlled old-negative/fixed-pass 및 wiki7/editorunit22 통과. controls/input/login 최종 실행·독립 검토 대기, main 미수락
+  - 담당 Sol 6.1 워커: task_9ad3573ebff9/ctx_cadd8faad24b Sol6.1/high, r11-vue-auth 단독 소유; 이전 auth/caret 검토는 당시 고정 범위
+  - 기준 HEAD / PR / 선행 의존성: 원격 `f6fbb8df0a2c95e3ac21d11972e27ff8a81fe2fb` / #269 / main 및 #287; 로컬 `8a878ad18ed16f23cf33efa9998352a949a90fb3`, 수정 base `3da6737e`
+  - 남은 구체적인 작업: 진행 중 controls/native input/login 최종 결과 회수 → 제품 handleClick·검사 delta 별도 Sol 검토 → 일반 push/최신 CI/main; setup→home 준비 경합 실패·과거 caret 검사 성공을 새 제품 수정 수락으로 전용하지 않음
   - 수락 검사: 로그인 제품 최종5실제E2E, 이전19흐름 근거 보존; caret deterministic red/green과 정확한 native selection 단언·최신 CI.
   - 출시 차단: 인증 전환 선행.
   - 기존 React 제거 조건: Vue 인증 수락 후 React LoginPage/전용 연결.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `f6fbb8df0a2c95e3ac21d11972e27ff8a81fe2fb` / #269 / main 및 #287 포함. 당시 단계·check snapshot: Vue login 실제 연결·제품 검토 ACCEPT; 후속 caret 검사 최종40통과/기존OSIME12skip·delta 독립 ACCEPT, 최신 CI 진행. main/배포 미수락.
 
 - [x] Vue 공통 셸 main 수락 — [#267](https://github.com/AISFlow/fvoci/pull/267)
-  - 현재 단계: main `f18f2b2bf40d2fe67b01089b807aecf54e695ec5` 수락; 독립 ACCEPT·후보5게이트 SUCCESS. main 후속 CI·배포 미완료.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: Vue 공통 셸·알림 이동·위키 문서 주변 경로.
+  - 현재 단계: main `f18f2b2bf40d2fe67b01089b807aecf54e695ec5` 수락; 독립 ACCEPT·후보5게이트 SUCCESS. 현재 main50d95df1 5게이트 SUCCESS; 신규 배포 없음.
   - 담당 Sol 6.1 워커: shell_ci_recovery 구현·검증; review_invite_final 별도 컨텍스트 delta 검토.
   - 기준 HEAD / PR / 선행 의존성: `fa7dac746fdf5e6852bdb70fffe467794bfe96e2` / #267 / main 및 #287 포함.
   - 남은 구체적인 작업: main 통합 후 셸/위키 관련 회귀·CI와 배포 확인. 이전 a446a7c3 원격 timeout은 수정 SHA의 성공으로 덮어쓰지 않는다.
   - 수락 검사: 원래 독립 full-shell 검토와 새 3경로 delta ACCEPT, 실패 재현 후 실제 shell6통과·production build.
   - 출시 차단: 261 / 0.4.0 차단.
   - 기존 React 제거 조건: Vue 셸 수락 후.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] compat probe 정리 — [#266](https://github.com/AISFlow/fvoci/pull/266)
-  - 현재 단계: 독립 검토·CI; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `ddce8bf2ba799dc5316d2475c2a90f9fd5ecdc4b` / #266 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`.
-  - 남은 구체적인 작업: 실제 fixture 보존·기존 검토 재사용·CI delta. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 현재 세션의 목표/TODO 정합화·임시 포팅 기반 정리 지시; 기존 결과·fixture 보존.
+  - 실제 라우트/범위: compat probe/도구 정리와 canonical fixture·oracle/소비자 보존.
+  - 현재 단계: 최신 main merge `1c0a5a85` 별도 Sol ACCEPT 후 일반 push; 실제 원격 CI 대기·main 미수락
+  - 담당 Sol 6.1 워커: 갱신 구현 Sol6.1; 독립 task_038be2b42562/ctx_7b4d8c01ce05 high 완료, Astra 통합 소유
+  - 기준 HEAD / PR / 선행 의존성: `1c0a5a85d7858a9a1035a6ced40e85175d457d89` / #266 / main `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: fixture/oracle320보존·실제 소비자·CI selector delta 고정 검토 근거 유지; 실제 원격 full CI와 tested merge/base/head 확인 후 main 수락, 임시 probe 정리를 제품 제거로 확대하지 않음
   - 수락 검사: fixture 경로/관련 Rust·web 검사; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 비기능 정리.
   - 기존 React 제거 조건: 제품 기능 제거 금지.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `ddce8bf2ba799dc5316d2475c2a90f9fd5ecdc4b` / #266 / main; 관측 base `f3f53c907d27982065984249916e7447dd94ac45`. 당시 단계·check snapshot: 독립 검토·CI; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [x] 위키 편집 컨트롤 main 수락 — [#265](https://github.com/AISFlow/fvoci/pull/265)
-  - 현재 단계: main `5d5171a7d07f04fd8ef665617464a6ac8fe194a4` 수락. 후보5게이트 SUCCESS·실제 Rust/DB·독립 ACCEPT_WITH_NITS; 배포 미포함, main 후속 CI 별도 진행.
+  - 요청 근거: 2026-09-30 현재 세션의 전체 합의 Vue 전환·기존 WIP 종결 지시; §6.3 해당 기능군.
+  - 실제 라우트/범위: 위키 문서 실제 URL의 편집 컨트롤·native drop/paste·첨부/협업.
+  - 현재 단계: main `5d5171a7d07f04fd8ef665617464a6ac8fe194a4` 수락. 후보5게이트 SUCCESS·실제 Rust/DB·독립 ACCEPT_WITH_NITS; 배포 미포함; 현재 main50d95df1 5게이트 SUCCESS.
   - 담당 Sol 6.1 워커: wiki_controls_complete 구현·검증; review_controls_final 독립 검토.
   - 기준 HEAD / PR / 선행 의존성: `93425dadb878e5759ac162aadc48d1ba0c36969c` / #265 / main 및 #287 포함.
   - 남은 구체적인 작업: main 후속 CI와 후속 배포 확인. 선택 복구 finally·native drag/drop/paste는 수락; 업로드 gate filename 명시 nit은 비차단.
   - 수락 검사: production build·unit11·controls6·native input3 통과, 실제 peer/저장재조회/download인가 포함. 통합 후 영향 검사.
   - 출시 차단: 261 / 0.4.0 차단.
   - 기존 React 제거 조건: Vue 컨트롤 수락 후 공통 PM 로직 보존.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] 운영·역할·인계 기록 — [#263](https://github.com/AISFlow/fvoci/pull/263)
-  - 현재 단계: 독립 검토·CI; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: Astra; 독립 검토 추후 배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `8777f372e230e27ca89092c65b37548a0a3bd93d` / #263 / main; 관측 base `6f64febc487808246596f02922b1826b4fcc939a`.
-  - 남은 구체적인 작업: 현재 역할·전체 인수 TODO 업데이트 후 delta 검토. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 현재 세션의 목표/TODO 정합화·임시 포팅 기반 정리 지시; 기존 결과·fixture 보존.
+  - 실제 라우트/범위: AGENTS/environment 및 기존 rewrite 목표·수락/실행 기록.
+  - 현재 단계: 원격 d556a7eb fixed merge 독립 ACCEPT 후 push; 11:13 KST documents/install SUCCESS, collab/rust/web gate QUEUED. 현재 goal/TODO 로컬 신규 delta는 새 독립 검토·push/CI/main 미수락
+  - 담당 Sol 6.1 워커: 문서 단독 writer task_581011afa5c2/ctx_0f43e6ec581e; Astra 최종 소유. 이전 d556 검토 task_038be2b42562/ctx_7b4d8c01ce05를 신규 diff 검토로 전용하지 않음
+  - 기준 HEAD / PR / 선행 의존성: 원격/이번 수정 base `d556a7eb30f7876e4c1f0a4b2103ea4b4cdf13c5` / #263 / main `50d95df1a98c2d88d28f09222c2985fbdb585623`; 신규 로컬 commit은 제출 보고서에 고정
+  - 남은 구체적인 작업: 기존 목표·TODO 보강 로컬 commit → 별도 Sol6.1 신규 delta 사실 검토 → 코디네이터 일반 push → 새 tested merge/base/head CI → main 수락; worker 원격 쓰기 없음
   - 수락 검사: 문서 diff/check + 독립 사실 대조; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: 제품 전환 완료로 계산 안 함.
   - 기존 React 제거 조건: 해당 없음.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `8777f372e230e27ca89092c65b37548a0a3bd93d` / #263 / main; 관측 base `6f64febc487808246596f02922b1826b4fcc939a`. 당시 단계·check snapshot: 독립 검토·CI; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] build(deps): bump the web-minor-patch group across 2 directories with 6 updates — [#191](https://github.com/AISFlow/fvoci/pull/191)
-  - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 22, 'FAILURE': 18, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `320514c797a367051d0f8a710c711d6bb21e5e3c` / #191 / main; 관측 base `3919a326f384b2f3168eb495f539a9556b536f73`.
-  - 남은 구체적인 작업: 자동 의존성 갱신 별도 우선순위; 현재 lockfile/런타임 호환부터 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: web/editor manifests·Bun lock·Hocuspocus4.7/Yjs/XLSX/KaTeX/Vite와 라이선스.
+  - 현재 단계: 로컬 a72e1a0e 갱신 독립 REQUEST_CHANGES: browser provider pin4.6과 실제4.7 불일치; 미push·main 미수락
+  - 담당 Sol 6.1 워커: 수정 task_8235301f8f3d/ctx_6293af3a651e 단독 writer; 독립 검토 task_1b090797cb8a/ctx_24c36068f541 high 완료
+  - 기준 HEAD / PR / 선행 의존성: 원격 `320514c797a367051d0f8a710c711d6bb21e5e3c` / #191 / main50d95df1; 로컬검토 `a72e1a0eb2e3373c6faa1f2f89903edf67538dca`
+  - 남은 구체적인 작업: fixed4.6 fixture 이력을 보존하고 live installed-provider 기대값4.7과 분리; 정확한 wire equality 유지·수정 delta 재검토·실제 collaboration/XLSX/라이선스 브라우저·CI 후 제출/수락
   - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: Vue 연결의 필수 선행 아님.
   - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `320514c797a367051d0f8a710c711d6bb21e5e3c` / #191 / main; 관측 base `3919a326f384b2f3168eb495f539a9556b536f73`. 당시 단계·check snapshot: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 22, 'FAILURE': 18, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] build(deps): bump base64 from 0.22.1 to 0.23.1 in /crates/collab-engine — [#160](https://github.com/AISFlow/fvoci/pull/160)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): bump base64 from 0.22.1 to 0.23.1 in /crates/collab-engine; 해당 의존성 manifest/lock·실제 소비자.
   - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 9, 'FAILURE': 27}(검사 수가 아닌 check 집계, 외부 check 포함).
   - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
   - 기준 HEAD / PR / 선행 의존성: `7546b78002e3b917811b403f36ccb62c9c3f96fc` / #160 / main; 관측 base `5f114ea4e90d741bb8bbccaadfa4725d20df88ff`.
@@ -1152,8 +1250,11 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: Vue 연결의 필수 선행 아님.
   - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] build(deps): bump base64 from 0.22.1 to 0.23.1 — [#158](https://github.com/AISFlow/fvoci/pull/158)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): bump base64 from 0.22.1 to 0.23.1; 해당 의존성 manifest/lock·실제 소비자.
   - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 36}(검사 수가 아닌 check 집계, 외부 check 포함).
   - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
   - 기준 HEAD / PR / 선행 의존성: `98886c09a4eb00bbf035f2e4fdb48d00a4c9f2d1` / #158 / main; 관측 base `5f114ea4e90d741bb8bbccaadfa4725d20df88ff`.
@@ -1161,8 +1262,11 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: Vue 연결의 필수 선행 아님.
   - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] build(deps): Bump thiserror from 2.0.20 to 2.0.21 in the rust-minor-patch group across 1 directory — [#157](https://github.com/AISFlow/fvoci/pull/157)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): Bump thiserror from 2.0.20 to 2.0.21 in the rust-minor-patch group across 1 directory; 해당 의존성 manifest/lock·실제 소비자.
   - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 38, 'FAILURE': 2, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
   - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
   - 기준 HEAD / PR / 선행 의존성: `ece789f0ed5cf5d67aba93ad725fb55a173dc94b` / #157 / main; 관측 base `c5e7a9e906f2579a953caf6712fcb3df1008e499`.
@@ -1170,17 +1274,24 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: Vue 연결의 필수 선행 아님.
   - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] build(deps): bump qrcode-generator from 1.4.4 to 2.0.4 in /apps/web — [#156](https://github.com/AISFlow/fvoci/pull/156)
-  - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 21, 'FAILURE': 15}(검사 수가 아닌 check 집계, 외부 check 포함).
-  - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
-  - 기준 HEAD / PR / 선행 의존성: `a193311f3a29c0e61d398f434f3d63f78b618a59` / #156 / main; 관측 base `73cc54bac5c978d48018a4d9847fd5415d860b20`.
-  - 남은 구체적인 작업: 자동 의존성 갱신 별도 우선순위; 현재 lockfile/런타임 호환부터 확인. 기존 담당 Grok 쓰기 클레임 반납, 새 동시 작성자 없음.
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: QR2.0.4 API·MFA 설정 화면·완전한 MIT notice와 browser licenses.
+  - 현재 단계: 763f692e fixed 갱신/QR·notice delta 독립 PASS 후 push; 실제 MFA/license browser·원격 CI/main 수락 대기
+  - 담당 Sol 6.1 워커: 갱신 구현 Sol6.1/high; 독립 task_536dbf95fbb7/ctx_6e5378b01ff1 Sol6.1/medium 완료; 추가 browser 담당 Astra 배정
+  - 기준 HEAD / PR / 선행 의존성: `763f692e67de4a638d7bb2d72afa8febfbb914bf` / #156 / main `50d95df1a98c2d88d28f09222c2985fbdb585623`
+  - 남은 구체적인 작업: 최신 HEAD 실제 MFA 설정/TOTP/recovery 및 public license browser 검사·원격 CI 수락; API/geometry·완전 MIT supplement 고정 검토를 browser 성공으로 표시하지 않음
   - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: Vue 연결의 필수 선행 아님.
   - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
+  - 이전 인수 snapshot: `a193311f3a29c0e61d398f434f3d63f78b618a59` / #156 / main; 관측 base `73cc54bac5c978d48018a4d9847fd5415d860b20`. 당시 단계·check snapshot: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 21, 'FAILURE': 15}(검사 수가 아닌 check 집계, 외부 check 포함).
 
 - [ ] build(deps): Bump the services-minor-patch group across 1 directory with 2 updates — [#155](https://github.com/AISFlow/fvoci/pull/155)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): Bump the services-minor-patch group across 1 directory with 2 updates; 해당 의존성 manifest/lock·실제 소비자.
   - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 40, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
   - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
   - 기준 HEAD / PR / 선행 의존성: `87185d93092ec99edf7ac9d54e0f68b4bf5d83ec` / #155 / main; 관측 base `c5e7a9e906f2579a953caf6712fcb3df1008e499`.
@@ -1188,8 +1299,11 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: Vue 연결의 필수 선행 아님.
   - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] build(deps): Bump debian from `8820086` to `3783cc0` in /infra/rust — [#153](https://github.com/AISFlow/fvoci/pull/153)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): Bump debian from `8820086` to `3783cc0` in /infra/rust; 해당 의존성 manifest/lock·실제 소비자.
   - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 40, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
   - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
   - 기준 HEAD / PR / 선행 의존성: `b00c059f63a818921a2c39252966fd2835d19716` / #153 / main; 관측 base `c5e7a9e906f2579a953caf6712fcb3df1008e499`.
@@ -1197,8 +1311,11 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: Vue 연결의 필수 선행 아님.
   - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 - [ ] build(deps): Bump actions/checkout from 4.4.0 to 7.0.1 — [#152](https://github.com/AISFlow/fvoci/pull/152)
+  - 요청 근거: 기존 열린 의존성 PR 인수와 최신 CI 반영 지시; 새 기능 자동 승인으로 확대하지 않음.
+  - 실제 라우트/범위: build(deps): Bump actions/checkout from 4.4.0 to 7.0.1; 해당 의존성 manifest/lock·실제 소비자.
   - 현재 단계: 자동 업데이트 후보; main 미수락·미배포. 현재 check 상태 {'SUCCESS': 40, 'SKIPPED': 1}(검사 수가 아닌 check 집계, 외부 check 포함).
   - 담당 Sol 6.1 워커: 미배정; 미배정 항목의 책임은 Astra.
   - 기준 HEAD / PR / 선행 의존성: `126b1263053523563e5b7121490fde046c4906b1` / #152 / main; 관측 base `c5e7a9e906f2579a953caf6712fcb3df1008e499`.
@@ -1206,26 +1323,63 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
   - 수락 검사: 의존성 영향 검사·독립 검토·현재 후보 CI; 중요한 delta는 별도 Sol6.1 검토.
   - 출시 차단: Vue 연결의 필수 선행 아님.
   - 기존 React 제거 조건: React 전용 의존성은 최종 제거와 조정.
+  - 배포: 이 후보/delta의 신규 배포 없음; 게시 v0.3.0 및 후속 승인된 0.x 조건과 구분.
 
 #### 열린 이슈 인수
 
-- [ ] #261: Vue 누락 컨트롤·셸·drop/paste. #265/#267 처리 중이며 0.4.0 출시 차단. 실제 입력·첨부 E2E 후 종료한다.
+- [ ] #261: Vue 누락 컨트롤·셸·drop/paste. #265/#267 main 수락 뒤 잔여 검증 중이며 0.4.0 출시 차단. 실제 입력·첨부 E2E 후 종료한다.
+  - 요청 근거 / 실제 라우트·범위: 기존 Vue 컨트롤·셸·drop/paste 누락 및 0.4.0 차단 요청; 위키 편집/공통 셸 actual URL·native 입력/첨부.
+  - 현재 단계 / 담당 Sol 6.1 워커: 부분 해결: #265/#267 main 수락; 이슈 전체 미종결; 후속 담당 미배정, Astra가 소유권 지정.
+  - 기준 HEAD/PR / 남은 구체적인 작업: main50d95df1; #265 93425dad/#267 fa7dac74; 최종 잔여 scope 대조·입력/첨부 실제 E2E와 기능별 제거 확인 후 종료.
+  - 수락 검사 / 차단·선행 의존성: 독립 검토·실제 Rust/DB/peer/저장·브라우저·CI; 전체 기능군 완료와 구분; 기존 흐름 종결 우선; 0.4.0 출시 차단 유지.
+  - 기존 React 제거 조건 / 배포: 이 흐름의 Vue 계약·실제 검증·검토·main 수락 뒤 전용 경로 제거; 새 수정 배포 없음, v0.3.0 기록 보존.
+
 - [ ] #259: 인라인 수식 원격 변경 중 로컬 초안 손실. 제품 결함·출시 차단, #265 기반 수락 후 기존 재현부터 이어간다.
+  - 요청 근거 / 실제 라우트·범위: 원격 변경 중 인라인 수식 로컬 초안 손실 결함 요청; Vue/Tiptap 수식 편집의 remote update와 로컬 초안 보존.
+  - 현재 단계 / 담당 Sol 6.1 워커: 제품 결함·미수락; 후속 담당 미배정, Astra가 소유권 지정.
+  - 기준 HEAD/PR / 남은 구체적인 작업: 수락 #265/main50d95df1; 새 수정 HEAD/PR 미생성; 기존 재현과 negative control부터 이어 최소 수정·별도 회귀/검토/CI/main 수락.
+  - 수락 검사 / 차단·선행 의존성: 실제 peer 원격 변경·초안/저장/재조회·취소·최신 fixed HEAD 독립 검토; 제품 결함·출시 차단; #265 기반 수락 완료.
+  - 기존 React 제거 조건 / 배포: 이 흐름의 Vue 계약·실제 검증·검토·main 수락 뒤 전용 경로 제거; 새 수정 배포 없음, v0.3.0 기록 보존.
+
 - [ ] #260: 한글 조합 중 500ms 초과 정지 시 undo 분리. 저장 손실과 구분되는 제품 입력 결함; 별도 회귀와 수정을 배정한다.
+  - 요청 근거 / 실제 라우트·범위: 한글 조합 중 500ms 초과 정지 때 undo 분리 결함 요청; Vue/Tiptap 실제 한글 조합·undo grouping; 저장 손실과 구분.
+  - 현재 단계 / 담당 Sol 6.1 워커: 제품 입력 결함·미수락; 후속 담당 미배정, Astra가 소유권 지정.
+  - 기준 HEAD/PR / 남은 구체적인 작업: main50d95df1; 새 수정 HEAD/PR 미생성; 기존 재현 보존·독립 회귀/최소 수정 배정·실제 입력 검증 후 수락.
+  - 수락 검사 / 차단·선행 의존성: native IME/정지/undo·협업/저장 구분·negative control·별도 Sol 검토/CI; 현재 차수의 입력 검증과 구분하며 무조건 skip/retry로 해결하지 않음.
+  - 기존 React 제거 조건 / 배포: 이 흐름의 Vue 계약·실제 검증·검토·main 수락 뒤 전용 경로 제거; 새 수정 배포 없음, v0.3.0 기록 보존.
+
 - [ ] #149: A/B 모두 사용자 승인, #254 구현 수락. 추가 정책 승인을 기다리지 않는다. 실제 외부 S3/다른 브라우저 검증 F와 오래된 이슈 기록 정정이 남았다.
+  - 요청 근거 / 실제 라우트·범위: 사용자 A/B 전송 승인 및 #254 후속 외부 검증 요청; 실제 외부 S3·다른 브라우저·프록시의 첨부 A/B 전송.
+  - 현재 단계 / 담당 Sol 6.1 워커: A/B 승인·#254 구현 수락; 외부 검증 F 잔여; 후속 담당 미배정, Astra가 소유권 지정.
+  - 기준 HEAD/PR / 남은 구체적인 작업: 기존 #254 수락 근거·§5; 새 수정 HEAD/PR 미생성; 추가 정책 승인을 기다리지 않고 외부 제공자/브라우저/프록시 실제 검증 F와 오래된 이슈 기록 정정.
+  - 수락 검사 / 차단·선행 의존성: 실제 업로드/재개/다운로드·인가·데이터 보존·A/B 비용/기록; 최종 Sol 검토; 외부 제공자·브라우저 검증 자원 필요; 기본 정책을 새로 승인하지 않음.
+  - 기존 React 제거 조건 / 배포: 이 흐름의 Vue 계약·실제 검증·검토·main 수락 뒤 전용 경로 제거; 새 수정 배포 없음, v0.3.0 기록 보존.
 
 #### 로컬 WIP·기존 후속 인수
 
 - [ ] Gantt contract19경로·identity34경로 tracked WIP: 원본 유지·별도 binary patch 보존. 공통 OpenAPI·인가 경로가 겹치므로 현재 새 작성자 없음.
+  - 요청 근거 / 실제 범위 / 단계: 기존 세션 WIP·데이터 계약 보존 지시; Gantt19/identity34 경로의 계약·인가 수정, 미검증 WIP.
+  - Sol 담당 / fixed HEAD·PR / 다음 작업: Astra 소유·작성자 미배정; recovery patch와 §6.4 원래 SHA를 고정하고 필요 흐름에만 배정. 새 PR/HEAD 미생성, 원본 패치·미커밋 보존.
+  - 수락 검사 / 의존성 / 구 코드 제거 조건 / 배포: 공통 OpenAPI·인가 소유권 조정 후 실제 계약·DB/권한·별도 검토/CI; 회수만으로 수락·삭제하지 않음, 신규 배포 없음.
 - [ ] digest `a83c38a3`, import admission `8f418b2f`, search/streams `aa3cd449`, collab structure `9070bbfd`, Dependabot `11b203b0`: 회수 패치의 main 적용 검사만 통과. 제품 검증/수락 아님. Vue 연결 선행으로 삼지 않는다.
+  - 요청 근거 / 실제 범위 / 단계: 기존 사용자 후속·커밋 보존 지시; 위 고정 SHA의 digest/import/search/collab/의존성 범위, 제품 미수락.
+  - Sol 담당 / HEAD·PR / 다음 작업: Astra 소유·후속 미배정; 위 HEAD와 recovery mapping 보존, 필요한 기능별 실제 diff/의존성부터 확인하고 기존 항목에 배정.
+  - 수락 검사 / 의존성 / 구 코드 제거 조건 / 배포: 실제 Rust/API/DB 및 해당 브라우저·독립 검토/CI; main 적용 가능 여부는 제품 성공이 아님. fixture/원본·구 경로를 수락 전에 폐기하지 않음, 신규 배포 없음.
 - [x] i18n `1172a73a`는 #165 `7f3e2477`로 대체됨을 확인. 제품 코드 동일·테스트 메시지2곳만 차이; 재구현하지 않음.
 - [x] 미사용 worktree9개 정리, 71→62. 브랜치/HEAD·bundle·WIP·유일 로그 보존. 상세 §6.4와 recovery result.json.
 - [ ] 기존 §5/§6.1 후속(메일 전달 영속화, digest 한계, SSE 비용, xmin, 외부 IdP/S3/플랫폼, upgrade 검증 등)은 Astra가 계속 소유하며 기능별 필요 시 배정한다. 새 기능·정책 변경으로 확대하지 않는다.
+  - 요청 근거 / 실제 범위 / 단계: 현재 세션의 모든 기존 요청 종결; §5/§6.1에 기록한 미구현·부분 검증/외부 계약 범위 유지, 전체 미완료.
+  - Sol 담당 / fixed HEAD·PR / 다음 작업: Astra 최종 소유·필요 기능별 Sol 배정; 해당 기존 항목의 fixed SHA/PR/근거 유지, 선행이 준비된 후 실제 잔여 작업을 이어감.
+  - 수락 검사 / 의존성 / 구 코드 제거 조건 / 배포: 기능별 실제 외부 시스템·보안/데이터/복구·플랫폼 및 독립 검토/CI; 새 정책/기능은 자동 승인하지 않음. 대체 경로 수락 뒤 제거, 최신 v0.3.0과 후속0.x 증거 구분.
 - [ ] 전체 합의 흐름 Vue 수락 뒤 React 공통 부팅·router·adapter·의존성·빌드·lockfile 제거. production module graph와 실제 브라우저 직접진입/redirect/WASM까지 검증한다.
+  - 요청 근거 / 실제 범위: 전체 Vue 전환 종결·대체 React/임시 포팅 기반 제거 지시; 공통 boot/router/adapter·package/lock/build와 잔여 runtime 위임. #266 fixture/probe 정리와 구분한다.
+  - 현재 단계 / 담당 Sol 6.1 워커 / 기준 HEAD·PR: 흐름별 대체 중, 공통 제거 미착수; Astra 최종 소유, Sol 단독 작성자 추후 배정; main50d95df1/§6.3 기존 PR 대응표, 새 제거 PR 미생성.
+  - 다음 작업 / 차단·의존성 / 구 코드 제거 조건: 먼저 기존 Vue 후보 actual URL→Rust/DB→production browser→별도 검토/CI→main 수락; 합의 전체 흐름 수락 뒤 공통 제거. 데이터·보안·기능·라이선스와 fixture는 보존한다.
+  - 수락 검사 / 배포: production module graph·직접진입/redirect/WASM·전체 영향 검사·독립 검토/CI; 서버 제품 경로는 Node/Bun/Deno/내장 JS 엔진 없는 실제 최종 환경 검증도 필요. 삭제/배포 완료 아님, 승인된 후속0.x 증거까지 추적.
 
-현재 쓰기 소유권: `fix-wiki-ime-expected-fail`의 caret/helper 회귀는 ci287, `r11-vue-auth`의 인증 이동 경합은 auth_acceptance,
+최초 인수 당시 쓰기 소유권(현재 소유권은 위 항목의 task/dispatch): `fix-wiki-ime-expected-fail`의 caret/helper 회귀는 ci287, `r11-vue-auth`의 인증 이동 경합은 auth_acceptance,
 `docs-0-3-0-record`의 AGENTS/environment/rewrite는 Astra. review287_setup은 별도 읽기 전용 컨텍스트이며 제품 변경 권한이 없다.
-무거운 로컬 E2E는 현재 ci287에 먼저 배정했고 auth는 빠른 검사를 진행한다. 소유권 겹침이나 실행 자원 변경은 먼저 조정한다.
+당시 무거운 로컬 E2E는 ci287에 먼저 배정했고 auth는 빠른 검사를 진행한다. 소유권 겹침이나 실행 자원 변경은 먼저 조정한다.
 
 
 #### 인수 실행 결과 갱신 (2026-09-30, 첫 Sol6.1 검증 차수)
@@ -1349,3 +1503,7 @@ main Web `36599369890` failure; 다른 4 workflow success. 게시된 버전과 m
 
 - Orca 복구 후 run496803f4d94f에서 visible Sol6.1/high 워커 재개: auth 수정 ctx8ecf949c8a08(무거운 브라우저 단독 소유), frontend 갱신 A ctxa3b86c32d2d6(273/274→279/283,275/277/281), B ctxf15669a41d93(276→282→285→286,284). 모든 이전 파동 워커 종료 확인 뒤 배정. 기존 WIP 유지, 원격 쓰기는 코디네이터만.
 - CI288 de913cd8 독립 ACCEPT와 후보5게이트 SUCCESS 후 main50d95df1a98c2d88d28f09222c2985fbdb585623에 수락. mainf18과 변경 경로 겹침0, 예상/실제 merge tree4cdd0bbe 일치, clean main fast-forward. 이제 대기 frontend PR의 동일 고정 기반 갱신을 진행한다. main 후속 CI/배포 별도. 265/267은 이미 수락되어 갱신 대상에서 완료 처리.
+  - 요청 근거 / 실제 범위: 현재 세션의 CI 영향 선택 최적화·수락 후 전체 대기 frontend PR 갱신 지시; CI selector·workflow gate와 실제 event merge provenance.
+  - 현재 단계 / Sol 담당 / fixed HEAD·PR: #288 `de913cd8f7b4960f575f41636bbc1562f6bf3ecb` 독립 ACCEPT·main 수락; ci_impact_implement 구현/별도 검토 이력 보존, Astra 통합 소유. 현재 main50d95df1의 5게이트도 SUCCESS.
+  - 다음 작업 / 수락 검사 / 차단·의존성: 기존 갱신 A/B 제출 완료, #269 최종 수정→#270/#271/#272/#278 갱신은 대기; 각 새 fixed HEAD의 실제 merge/base/head CI·독립 delta 검토·제품 URL/DB/browser 수락 확인. CI288 수락은 Vue 흐름 수락이 아니다.
+  - 구 코드 제거 조건 / 배포: React 제거 선행 조건은 각 기능 수락과 전체 대응표; 신규 배포 없음, v0.3.0 및 승인된 후속0.x 조건 유지.
