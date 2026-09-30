@@ -11,6 +11,7 @@ import {
 } from "@/lib/queries/share";
 import { hardenShareFragmentHtml } from "./harden-share-html.ts";
 import { failMessage } from "./public-share-fail.ts";
+import { publicShareSearchQuery } from "./public-share-search.ts";
 
 const dir = import.meta.dirname;
 
@@ -91,4 +92,19 @@ test("share attachment view is not this page", () => {
   assert.doesNotMatch(page, /shareAttachmentQuery|ShareAttachmentViewPage/);
   const branch = source("PublicTreeBranch.vue");
   assert.doesNotMatch(branch, /shareAttachment/);
+});
+
+test("anonymous search requires a bounded nonempty query and does not retry denial or throttling", () => {
+  assert.equal(publicShareSearchQuery("", "word").enabled, false);
+  assert.equal(publicShareSearchQuery("token", "  ").enabled, false);
+  assert.equal(publicShareSearchQuery("token", "x".repeat(201)).enabled, false);
+  const query = publicShareSearchQuery("token", "한글 ✅");
+  assert.equal(query.enabled, true);
+  assert.deepEqual(query.queryKey, ["share-search", "token", "한글 ✅"]);
+  assert.equal(typeof query.retry, "function");
+  const retry = query.retry as (count: number, error: Error) => boolean;
+  assert.equal(retry(0, new ProblemError(404)), false);
+  assert.equal(retry(0, new ProblemError(429)), false);
+  assert.equal(retry(0, new Error("offline")), true);
+  assert.equal(retry(2, new Error("offline")), false);
 });
