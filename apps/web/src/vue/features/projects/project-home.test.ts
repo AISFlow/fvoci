@@ -108,7 +108,8 @@ test("project fields and workflow settings stay Vue and preserve query/hash navi
 
   const nested = "/w/acme/GNT/settings/fields/extra";
   leaveTo(nested, env);
-  assert.deepEqual(assigns, [nested]);
+  assert.deepEqual(assigns, []);
+  assert.deepEqual(pushes, [fields, workflow, nested]);
   assert.deepEqual(pushes, [fields, workflow]);
 });
 

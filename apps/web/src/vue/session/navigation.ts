@@ -1,15 +1,15 @@
 import { isVueAppPath } from "@/app-boundary";
 import type { Router } from "vue-router";
 
-// Leaving the Vue app is a full page load: every other page is the React
-// app's, and the two apps share no runtime (src/app-boundary.ts).
+// Local SPA hrefs, including fallback paths, use the Vue router. External
+// targets still use a browser navigation.
 
 /** Replaces the current page with `path` (a redirect: no history entry). */
 export function redirectTo(path: string): void {
   window.location.replace(path);
 }
 
-/** A live Vue-app path stays in this app; any other href is a full page load. */
+/** Local app hrefs stay in Vue; external hrefs use a full page load. */
 export function followAppHref(href: string, router: Router): void {
   if (isVueAppPath(href.split(/[?#]/, 1)[0] ?? "")) void router.push(href);
   else window.location.assign(href);
@@ -27,9 +27,8 @@ const BROWSER_LEAVE: LeaveEnvironment = {
 };
 
 /**
- * Goes to `path`. A live Vue page is `push` (in-app); anything else is a
- * full load (`assign`), because the React app owns it. After deleting a
- * project the projects list is still React, so this is `location.assign`.
+ * Goes to `path`: local SPA paths use `push`, including the router fallback;
+ * other targets use a full load (`assign`).
  */
 export function leaveTo(path: string, env: LeaveEnvironment = BROWSER_LEAVE): void {
   const pathname = path.split(/[?#]/, 1)[0] ?? "";
