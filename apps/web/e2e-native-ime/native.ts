@@ -2,8 +2,47 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Page, Locator } from "@playwright/test";
+import { z } from "zod";
 
-export const evidence = process.env.FVOCI_NATIVE_IME_SESSION!;
+const session = process.env.FVOCI_NATIVE_IME_SESSION;
+if (!session) throw new Error("FVOCI_NATIVE_IME_SESSION is required for native evidence");
+export const evidence = session;
+
+export type NativeImeEvent = {
+  type: string;
+  time: number;
+  key?: string;
+  code?: string;
+  keyCode?: number;
+  which?: number;
+  data?: string | null;
+  inputType?: string;
+  isComposing?: boolean;
+  isTrusted: boolean;
+  defaultPrevented: boolean;
+  defaultPreventedAfterDispatch: boolean;
+  value: string | null;
+};
+declare global {
+  interface Window {
+    nativeImeEvents?: NativeImeEvent[];
+  }
+}
+export function nativeImeEvents(page: Page): Promise<NativeImeEvent[]> {
+  return page.evaluate(() => {
+    const events = window.nativeImeEvents;
+    if (!events) throw new Error("native IME observation has not been installed");
+    return events;
+  });
+}
+const browserCandidates = z.array(
+  z.object({
+    pid: z.string(),
+    args: z.array(z.string()),
+    exe: z.string(),
+    display: z.string().nullable(),
+  }),
+);
 export function native(command: string, args: string[]) {
   if (args.includes("--window")) throw new Error("XSendEvent targeting is forbidden");
   const out = execFileSync(command, args, { encoding: "utf8" });
@@ -19,7 +58,7 @@ export function keys(...keys: string[]) {
 }
 export async function observe(page: Page) {
   await page.evaluate(() => {
-    (window as any).nativeImeEvents = [];
+    window.nativeImeEvents = [];
     for (const type of [
       "keydown",
       "keyup",
@@ -31,23 +70,41 @@ export async function observe(page: Page) {
     ]) {
       document.addEventListener(
         type,
-        (e: any) => {
-          const record = {
+        (e: Event) => {
+          if (!(e.target instanceof Node)) throw new Error("native input target is not a DOM node");
+          // These legacy numeric fields are evidence of the actual OS dispatch,
+          // including IME keyCode 229; modern key/code cannot replace that witness.
+          const keyCode: unknown =
+            e instanceof KeyboardEvent ? Reflect.get(e, "keyCode") : undefined;
+          const which: unknown = e instanceof UIEvent ? Reflect.get(e, "which") : undefined;
+          if (
+            (e instanceof KeyboardEvent && typeof keyCode !== "number") ||
+            (e instanceof UIEvent && typeof which !== "number")
+          ) {
+            throw new Error("native keyboard event lacks numeric legacy evidence");
+          }
+          const record: NativeImeEvent = {
             type,
             time: performance.now(),
-            key: e.key,
-            code: e.code,
-            keyCode: e.keyCode,
-            which: e.which,
-            data: e.data,
-            inputType: e.inputType,
-            isComposing: e.isComposing,
+            key: e instanceof KeyboardEvent ? e.key : undefined,
+            code: e instanceof KeyboardEvent ? e.code : undefined,
+            keyCode: typeof keyCode === "number" ? keyCode : undefined,
+            which: typeof which === "number" ? which : undefined,
+            data: e instanceof InputEvent || e instanceof CompositionEvent ? e.data : undefined,
+            inputType: e instanceof InputEvent ? e.inputType : undefined,
+            isComposing:
+              e instanceof InputEvent || e instanceof KeyboardEvent ? e.isComposing : undefined,
             isTrusted: e.isTrusted,
             defaultPrevented: e.defaultPrevented,
             defaultPreventedAfterDispatch: e.defaultPrevented,
-            value: e.target.value ?? e.target.textContent,
+            value:
+              e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement
+                ? e.target.value
+                : e.target.textContent,
           };
-          (window as any).nativeImeEvents.push(record);
+          const events = window.nativeImeEvents;
+          if (!events) throw new Error("native IME event log is missing");
+          events.push(record);
           // Native event dispatch can run microtasks between listeners; observe
           // cancellation in the next task, after all editor listeners ran.
           setTimeout(() => {
@@ -65,7 +122,7 @@ export async function snapshot(page: Page, name: string) {
     JSON.stringify(
       await page.evaluate(() => ({
         url: location.href,
-        events: (window as any).nativeImeEvents,
+        events: window.nativeImeEvents,
         active: document.activeElement?.outerHTML,
         selection: window.getSelection()?.toString(),
       })),
@@ -76,12 +133,13 @@ export async function snapshot(page: Page, name: string) {
   await page.screenshot({ path: join(evidence, name + ".png") });
 }
 export async function focusNative(page: Page, field: Locator, profile: string) {
-  const candidates = JSON.parse(
-    execFileSync(
-      "python3",
-      [
-        "-c",
-        `
+  const candidates = browserCandidates.parse(
+    JSON.parse(
+      execFileSync(
+        "python3",
+        [
+          "-c",
+          `
 import pathlib,json,sys,shlex
 matches=[]
 for p in pathlib.Path('/proc').iterdir():
@@ -95,20 +153,23 @@ for p in pathlib.Path('/proc').iterdir():
  except (OSError,UnicodeError):pass
 print(json.dumps(matches))
 `,
-        profile,
-      ],
-      { encoding: "utf8" },
+          profile,
+        ],
+        { encoding: "utf8" },
+      ),
     ),
   );
   if (candidates.length !== 1)
     throw new Error("Ambiguous owned browser process: " + JSON.stringify(candidates));
-  if (!candidates[0].exe.endsWith("/chrome-linux64/chrome"))
+  const candidate = candidates[0];
+  if (!candidate) throw new Error("owned browser candidate missing");
+  if (!candidate.exe.endsWith("/chrome-linux64/chrome"))
     throw new Error("Owned Chrome executable mismatch");
   // Chromium rewrites its process title and /proc/environ may be empty.
   // Verify the browser on this X connection by its XID and _NET_WM_PID.
-  if (candidates[0].display && candidates[0].display !== process.env.DISPLAY)
+  if (candidate.display && candidate.display !== process.env.DISPLAY)
     throw new Error("Owned Chrome display mismatch");
-  const { pid, args } = candidates[0];
+  const { pid } = candidate;
   const windows = native("xdotool", ["search", "--onlyvisible", "--pid", pid])
     .split("\n")
     .filter(Boolean);
@@ -118,6 +179,7 @@ print(json.dumps(matches))
   );
   if (owned.length !== 1) throw new Error("Ambiguous Chrome XID: " + JSON.stringify(windows));
   const xid = owned[0];
+  if (!xid) throw new Error("owned Chrome XID missing");
   const windowProperties = native("xprop", ["-id", xid, "_NET_WM_PID", "WM_CLASS", "WM_NAME"]);
   if (!windowProperties.includes(`_NET_WM_PID(CARDINAL) = ${pid}`))
     throw new Error("XID PID does not match owned Chrome");
@@ -125,8 +187,8 @@ print(json.dumps(matches))
     join(evidence, "browser-ownership.json"),
     JSON.stringify(
       {
-        ...candidates[0],
-        displayFromProc: candidates[0].display,
+        ...candidate,
+        displayFromProc: candidate.display,
         xid,
         windows,
         profile,

@@ -1,7 +1,7 @@
 import { chromium } from "@playwright/test";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
-import { evidence, focusNative, keys, observe, snapshot } from "./native";
+import { evidence, focusNative, keys, nativeImeEvents, observe, snapshot } from "./native";
 const profile = join(evidence, "chrome-profile");
 const context = await chromium.launchPersistentContext(profile, {
   headless: false,
@@ -11,6 +11,7 @@ const context = await chromium.launchPersistentContext(profile, {
 });
 try {
   const page = context.pages()[0];
+  if (!page) throw new Error("persistent native browser has no initial page");
   await page.goto(
     'data:text/html,<title>FVOCI native Enter baseline</title><style>div{font:32px sans-serif;width:800px;height:200px;margin:40px;border:1px solid black}</style><div contenteditable="true" aria-label="Owned plain contenteditable"></div>',
   );
@@ -36,10 +37,10 @@ try {
   const result = {
     first,
     second,
-    events: await page.evaluate(() => (window as any).nativeImeEvents),
+    events: await nativeImeEvents(page),
   };
   writeFileSync(join(evidence, "baseline-enter-result.json"), JSON.stringify(result, null, 2));
-  if (!result.events.some((e: any) => e.type === "compositionupdate" && e.data === "글"))
+  if (!result.events.some((e) => e.type === "compositionupdate" && e.data === "글"))
     throw new Error("No native Hangul preedit");
   console.log(JSON.stringify(result));
 } finally {

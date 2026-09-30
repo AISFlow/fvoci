@@ -10,12 +10,23 @@ import {
   savedBody,
   workspaceId,
 } from "../e2e/workspace-wiki-vue-editor";
-import { clickNative, evidence, focusNative, keys, observe, snapshot } from "./native";
+import {
+  clickNative,
+  evidence,
+  focusNative,
+  keys,
+  nativeImeEvents,
+  observe,
+  snapshot,
+} from "./native";
 
 const cases =
   process.env.FVOCI_NATIVE_IME_CASES ?? "first-jamo,composition-enter,backspace,plain-commit";
 test(`OS IBus Hangul [${cases}]: save and persisted reload`, async ({ baseURL }) => {
   test.setTimeout(60_000);
+  const appUrl = process.env.DATABASE_APP_URL;
+  if (!appUrl) throw new Error("DATABASE_APP_URL is required for native ownership evidence");
+  const db = new URL(appUrl);
   const profile = join(evidence, "chrome-profile");
   const context = await chromium.launchPersistentContext(profile, {
     baseURL,
@@ -24,7 +35,6 @@ test(`OS IBus Hangul [${cases}]: save and persisted reload`, async ({ baseURL })
     env: { ...process.env, TMPDIR: "." },
     args: ["--ozone-platform=x11", "--no-first-run", "--no-default-browser-check"],
   });
-  const db = new URL(process.env.DATABASE_APP_URL!);
   writeFileSync(
     join(evidence, "group-ownership.json"),
     JSON.stringify(
@@ -53,6 +63,7 @@ test(`OS IBus Hangul [${cases}]: save and persisted reload`, async ({ baseURL })
     const setup = await context.request.post("/api/v1/setup", { data: admin });
     expect(setup.status(), await setup.text()).toBe(201);
     const page = context.pages()[0];
+    if (!page) throw new Error("persistent native browser has no initial page");
     const ws = await workspaceId(context.request);
     let initial = true;
     const scenarios = cases.split(",");
@@ -74,10 +85,8 @@ test(`OS IBus Hangul [${cases}]: save and persisted reload`, async ({ baseURL })
       await page.waitForTimeout(120);
       await snapshot(page, scenario + "-first-jamo");
       expect(
-        await page.evaluate(() =>
-          (window as any).nativeImeEvents.some(
-            (e: any) => e.type === "compositionupdate" && e.data === "ㅎ",
-          ),
+        (await nativeImeEvents(page)).some(
+          (e) => e.type === "compositionupdate" && e.data === "ㅎ",
         ),
       ).toBe(true);
       let expected: string[];
@@ -118,11 +127,7 @@ test(`OS IBus Hangul [${cases}]: save and persisted reload`, async ({ baseURL })
       }
       await expectBlocks(page, expected);
       await snapshot(page, scenario + "-committed");
-      expect(
-        await page.evaluate(() =>
-          (window as any).nativeImeEvents.some((e: any) => e.type === "compositionend"),
-        ),
-      ).toBe(true);
+      expect((await nativeImeEvents(page)).some((e) => e.type === "compositionend")).toBe(true);
       await clickNative(page, page.getByRole("button", { name: "저장", exact: true }));
       await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
       const stored = await savedBody(context.request, ws, doc.id);
@@ -141,7 +146,8 @@ test(`OS IBus Hangul [${cases}]: save and persisted reload`, async ({ baseURL })
     }
   } finally {
     try {
-      if (context.pages()[0]) await snapshot(context.pages()[0], "final-state");
+      const finalPage = context.pages()[0];
+      if (finalPage) await snapshot(finalPage, "final-state");
     } finally {
       await context.close();
     }

@@ -1,6 +1,6 @@
 import { chromium } from "@playwright/test";
 import { join } from "node:path";
-import { evidence, focusNative, keys, observe, snapshot } from "./native";
+import { evidence, focusNative, keys, nativeImeEvents, observe, snapshot } from "./native";
 const profile = join(evidence, "chrome-profile");
 const context = await chromium.launchPersistentContext(profile, {
   headless: false,
@@ -10,6 +10,7 @@ const context = await chromium.launchPersistentContext(profile, {
 });
 try {
   const page = context.pages()[0];
+  if (!page) throw new Error("persistent native browser has no initial page");
   await page.goto(
     'data:text/html,<title>FVOCI native IME smoke</title><style>textarea{font:32px sans-serif;width:800px;height:200px;margin:40px}</style><textarea aria-label="Owned native IME smoke"></textarea>',
   );
@@ -30,18 +31,18 @@ try {
   await page.waitForTimeout(300);
   await snapshot(page, "commit");
   const value = await field.inputValue();
-  const events = await page.evaluate(() => (window as any).nativeImeEvents);
+  const events = await nativeImeEvents(page);
   if (
     value !== "한글 " ||
-    !events.some((e: any) => e.type === "compositionupdate") ||
-    !events.some((e: any) => e.type === "compositionend")
+    !events.some((e) => e.type === "compositionupdate") ||
+    !events.some((e) => e.type === "compositionend")
   )
     throw new Error("Native IME smoke failed: " + JSON.stringify({ value, events }));
   console.log(
     JSON.stringify({
       result: "PASS native IBus Hangul smoke",
       value,
-      compositionEvents: events.filter((e: any) => e.type.startsWith("composition")),
+      compositionEvents: events.filter((e) => e.type.startsWith("composition")),
     }),
   );
 } finally {
