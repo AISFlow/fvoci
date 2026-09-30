@@ -83,7 +83,9 @@ function handleCopy(): void {
         />
         <template v-if="scheduled && recoveryHref">
           <AuthStatus
-            :message="mailSent === false ? t('auth.erasure.mailNotSent') : t('auth.erasure.copyHint')"
+            :message="
+              mailSent === false ? t('auth.erasure.mailNotSent') : t('auth.erasure.copyHint')
+            "
           />
           <p class="break-all font-mono auth-shell__text">{{ recoveryHref }}</p>
           <UButton

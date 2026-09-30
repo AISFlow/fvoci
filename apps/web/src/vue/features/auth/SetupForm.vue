@@ -106,7 +106,12 @@ const submit = form.handleSubmit(async (values) => {
           @input="form.onInput('workspaceSlug', $event)"
         />
         <AuthAlert v-if="serverError" :message="serverError" />
-        <UButton type="submit" size="lg" class="auth-shell__button" :disabled="form.submitting.value">
+        <UButton
+          type="submit"
+          size="lg"
+          class="auth-shell__button"
+          :disabled="form.submitting.value"
+        >
           {{ form.submitting.value ? t("form.creating") : t("auth.setup.start") }}
         </UButton>
       </form>

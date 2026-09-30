@@ -14,7 +14,12 @@ const noticeShipped = import.meta.env.PROD;
     <a v-if="hasOperatorInfo(operator)" class="auth-shell__footer-link" href="/service-info">
       {{ t("operator.title") }}
     </a>
-    <a v-for="doc in LEGAL_DOCS" :key="doc.kind" class="auth-shell__footer-link" :href="`/legal/${doc.kind}`">
+    <a
+      v-for="doc in LEGAL_DOCS"
+      :key="doc.kind"
+      class="auth-shell__footer-link"
+      :href="`/legal/${doc.kind}`"
+    >
       {{ doc.label }}
     </a>
     <a v-if="noticeShipped" class="auth-shell__footer-link" href="/open-source-licenses.txt">

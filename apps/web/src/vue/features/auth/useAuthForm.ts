@@ -7,7 +7,10 @@ export interface FormSchema<O> {
     data: unknown,
   ):
     | { success: true; data: O }
-    | { success: false; error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] } };
+    | {
+        success: false;
+        error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] };
+      };
 }
 
 /** A validator message: `i18n:<key>` names a catalog message (lib/validators.ts). */
@@ -37,7 +40,10 @@ const BROWSER: AuthFormEnvironment = {
   focus: (id) => document.getElementById(id)?.focus(),
 };
 
-function readFormFields<F extends string>(form: HTMLFormElement, fields: readonly F[]): Record<F, string> {
+function readFormFields<F extends string>(
+  form: HTMLFormElement,
+  fields: readonly F[],
+): Record<F, string> {
   const data = new FormData(form);
   const values = {} as Record<F, string>;
   for (const field of fields) {
@@ -101,7 +107,9 @@ export function useAuthForm<F extends string, O = Record<F, string>>(options: {
   }
 
   /** The submit listener: validates, then runs `onValid` with the parsed values. */
-  function handleSubmit(onValid: (data: O) => Promise<void> | void): (event?: Event) => Promise<void> {
+  function handleSubmit(
+    onValid: (data: O) => Promise<void> | void,
+  ): (event?: Event) => Promise<void> {
     return async (event) => {
       event?.preventDefault();
       if (isFormEventTarget(event?.target)) {

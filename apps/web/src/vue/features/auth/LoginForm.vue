@@ -90,13 +90,22 @@ const onSubmit = form.handleSubmit(async (values) => {
           @input="form.onInput('password', $event)"
         />
         <AuthAlert v-if="serverError" :message="serverError" />
-        <UButton type="submit" size="lg" class="auth-shell__button" :disabled="form.submitting.value">
+        <UButton
+          type="submit"
+          size="lg"
+          class="auth-shell__button"
+          :disabled="form.submitting.value"
+        >
           {{ form.submitting.value ? t("auth.login.pending") : t("auth.login") }}
         </UButton>
       </form>
       <template v-if="magicLink === true && sendMagicLink">
         <hr class="auth-shell__rule" />
-        <AuthDisclosure :trigger="t('auth.magic.cta')" :open="magicOpen" @update:open="magicOpen = $event">
+        <AuthDisclosure
+          :trigger="t('auth.magic.cta')"
+          :open="magicOpen"
+          @update:open="magicOpen = $event"
+        >
           <EmailActionForm
             email-id="magic-link-email"
             :schema="magicLinkInput"
@@ -125,7 +134,9 @@ const onSubmit = form.handleSubmit(async (values) => {
       <AuthStatus v-if="magicLink === false" :message="MAGIC_DISABLED_NOTICE" />
       <template v-if="providers && providers.length > 0">
         <hr class="auth-shell__rule" />
-        <p class="auth-shell__text auth-shell__text--strong auth-shell__text--muted">{{ t("auth.login.social") }}</p>
+        <p class="auth-shell__text auth-shell__text--strong auth-shell__text--muted">{{
+          t("auth.login.social")
+        }}</p>
         <div class="auth-shell__stack">
           <a
             v-for="p in providers"

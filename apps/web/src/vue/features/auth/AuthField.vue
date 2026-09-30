@@ -21,7 +21,9 @@ const input = useTemplateRef<HTMLInputElement>("input");
 
 const errorId = computed(() => (props.error ? `${props.id}-error` : undefined));
 const hintId = computed(() => (props.hint ? `${props.id}-hint` : undefined));
-const describedBy = computed(() => [hintId.value, errorId.value].filter(Boolean).join(" ") || undefined);
+const describedBy = computed(
+  () => [hintId.value, errorId.value].filter(Boolean).join(" ") || undefined,
+);
 
 onMounted(() => {
   if (props.autofocus) input.value?.focus();

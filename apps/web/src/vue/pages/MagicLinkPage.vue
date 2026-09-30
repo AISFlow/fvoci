@@ -17,7 +17,9 @@ const token = computed(() => {
   return typeof value === "string" && value.length > 0 ? value : null;
 });
 const mfaToken = ref<string | null>(null);
-watch(token, () => { mfaToken.value = null; });
+watch(token, () => {
+  mfaToken.value = null;
+});
 const leaving = computed(() => setup.data.value?.needed === true);
 
 watchEffect(() => {
@@ -53,7 +55,9 @@ async function onConsume(value: string): Promise<void> {
 </script>
 
 <template>
-  <p v-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="setup.isError.value" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>

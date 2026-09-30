@@ -21,10 +21,7 @@ const token = computed(() => String(route.params.token ?? ""));
 const setup = useQuery(setupStatusQuery);
 // React SetupGuard mounts InvitePage only after setup succeeds.
 const setupReady = computed(
-  () =>
-    !setup.isLoading.value &&
-    !setup.isError.value &&
-    setup.data.value?.needed !== true,
+  () => !setup.isLoading.value && !setup.isError.value && setup.data.value?.needed !== true,
 );
 const invitation = useQuery(() => ({
   ...invitationPublicQuery(token.value),
@@ -76,7 +73,9 @@ const loadError = computed(() => {
 </script>
 
 <template>
-  <p v-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-if="setup.isLoading.value || leaving" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <div v-else-if="setup.isError.value" class="p-8">
     <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
     <UButton size="sm" class="mt-2" @click="setup.refetch()">{{ t("load.retry") }}</UButton>
@@ -93,7 +92,9 @@ const loadError = computed(() => {
       <AuthAlert :message="loadError" />
     </AuthPanel>
   </AuthLayout>
-  <p v-else-if="!invitation.data.value" role="status" class="p-8 text-muted">{{ t("load.loading") }}</p>
+  <p v-else-if="!invitation.data.value" role="status" class="p-8 text-muted">{{
+    t("load.loading")
+  }}</p>
   <InviteAcceptForm
     v-else
     :invitation="invitation.data.value"

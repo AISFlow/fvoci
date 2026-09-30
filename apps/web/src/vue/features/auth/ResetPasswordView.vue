@@ -55,7 +55,12 @@ const onSubmit = form.handleSubmit(async ({ newPassword }) => {
           <AuthAlert :message="serverError" />
           <RouterLink to="/login" class="auth-shell__link">{{ t("auth.reset.retry") }}</RouterLink>
         </div>
-        <UButton type="submit" size="lg" class="auth-shell__button" :disabled="form.submitting.value">
+        <UButton
+          type="submit"
+          size="lg"
+          class="auth-shell__button"
+          :disabled="form.submitting.value"
+        >
           {{ form.submitting.value ? t("form.changing") : t("auth.reset.change") }}
         </UButton>
       </form>
