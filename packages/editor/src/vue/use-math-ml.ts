@@ -11,7 +11,7 @@ export function useMathMl(
   const render = shallowRef<MathRender>({ html: null, failed: false });
   watch(
     latex,
-    (value, _previous, onCleanup) => {
+    async (value, _previous, onCleanup) => {
       const settled = mathMlWithoutKatex(value);
       if (settled) {
         render.value = settled;
@@ -21,9 +21,8 @@ export function useMathMl(
       onCleanup(() => {
         alive = false;
       });
-      void renderMathMl(value, display).then((next) => {
-        if (alive) render.value = next;
-      });
+      const next = await renderMathMl(value, display);
+      if (alive) render.value = next;
     },
     { immediate: true },
   );

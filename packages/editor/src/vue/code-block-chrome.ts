@@ -128,11 +128,11 @@ export function useCodeBlockChrome(editor: Editor) {
   // Grammars load lazily; the highlighter repaints once one arrives.
   watch(
     block,
-    (current) => {
+    async (current) => {
       if (!current) return;
       const language = languageOfFence(current.language) || current.language;
       if (!language) return;
-      void ensureLanguage(language, current.text);
+      await ensureLanguage(language, current.text);
     },
     { immediate: true },
   );

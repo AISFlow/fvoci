@@ -410,9 +410,13 @@ export function createFvociEditorExtensions(opts: FvociEditorExtensionOptions): 
           dom.textContent = `@${stored}`;
           const resolver = opts.entityResolver();
           if (resolver && isMentionEntity(entity)) {
-            void resolver(entity, id).then((snap) => {
-              if (snap) dom.textContent = `@${snap.label}`;
-            });
+            resolver(entity, id)
+              .then((snap) => {
+                if (snap) dom.textContent = `@${snap.label}`;
+              })
+              .catch((error: unknown) => {
+                console.error("Failed to resolve editor mention", error);
+              });
           }
           return { dom };
         };
@@ -478,18 +482,22 @@ export function createFvociEditorExtensions(opts: FvociEditorExtensionOptions): 
                   return true;
                 }
                 const { from, to } = current.state.selection;
-                void resolvePastedEmbed(text, ws, resolve).then((attrs) => {
-                  if (!attrs || current.isDestroyed) return;
-                  current
-                    .chain()
-                    .focus()
-                    .deleteRange({ from, to })
-                    .insertContentAt(from, {
-                      type: "embed",
-                      attrs,
-                    })
-                    .run();
-                });
+                resolvePastedEmbed(text, ws, resolve)
+                  .then((attrs) => {
+                    if (!attrs || current.isDestroyed) return;
+                    current
+                      .chain()
+                      .focus()
+                      .deleteRange({ from, to })
+                      .insertContentAt(from, {
+                        type: "embed",
+                        attrs,
+                      })
+                      .run();
+                  })
+                  .catch((error: unknown) => {
+                    console.error("Failed to resolve pasted editor embed", error);
+                  });
                 return true;
               },
             },

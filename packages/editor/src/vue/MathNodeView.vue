@@ -30,15 +30,14 @@ function commit(next: string): void {
  * defaultValue: its value is written once, here, and never bound, because
  * Vue re-applies a bound value on every re-render of its template, so a
  * peer's change to this node while typing would reset what was typed. */
-function open(): void {
+async function open(): Promise<void> {
   const source = latex.value;
   editing.value = true;
-  void nextTick(() => {
-    const field = input.value;
-    if (!field) return;
-    field.value = source;
-    field.focus();
-  });
+  await nextTick();
+  const field = input.value;
+  if (!field) return;
+  field.value = source;
+  field.focus();
 }
 
 function onInput(event: Event): void {

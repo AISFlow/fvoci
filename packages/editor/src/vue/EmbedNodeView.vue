@@ -74,15 +74,14 @@ function open(): void {
 // this node (data-entity), which would reset what was typed.
 watch(
   showEditor,
-  (shown) => {
+  async (shown) => {
     if (!shown) return;
     const start = { entity: entity.value, ref: refValue.value };
-    void nextTick(() => {
-      if (kindSelect.value) kindSelect.value.value = start.entity;
-      if (!refInput.value) return;
-      refInput.value.value = start.ref;
-      refInput.value.focus();
-    });
+    await nextTick();
+    if (kindSelect.value) kindSelect.value.value = start.entity;
+    if (!refInput.value) return;
+    refInput.value.value = start.ref;
+    refInput.value.focus();
   },
   { immediate: true },
 );

@@ -179,7 +179,9 @@ export function createFvociExtensions(opts?: {
             type: this.type,
             getAttributes: (match) => {
               const parsed = parseFenceLanguage(match[1]);
-              void ensureLanguage(parsed.language);
+              ensureLanguage(parsed.language).catch((error: unknown) => {
+                console.error("Failed to load editor code-block language", parsed.language, error);
+              });
               return parsed;
             },
           }),
@@ -208,23 +210,27 @@ export function createFvociExtensions(opts?: {
           if (lowlight.listLanguages().includes(key)) continue;
           if (attemptedLangs.has(key)) continue;
           attemptedLangs.add(key);
-          void ensureLanguage(key).then((resolved) => {
-            if (editor.isDestroyed) return;
-            if (!lowlight.listLanguages().includes(resolved)) return;
-            const { tr, doc, selection, storedMarks } = editor.state;
-            doc.descendants((node, pos) => {
-              if (node.type.name !== "codeBlock") return;
-              // WHY: Lowlight needs a node-covering step; preserve its content mapping.
-              tr.setNodeMarkup(pos, undefined, node.attrs);
+          ensureLanguage(key)
+            .then((resolved) => {
+              if (editor.isDestroyed) return;
+              if (!lowlight.listLanguages().includes(resolved)) return;
+              const { tr, doc, selection, storedMarks } = editor.state;
+              doc.descendants((node, pos) => {
+                if (node.type.name !== "codeBlock") return;
+                // WHY: Lowlight needs a node-covering step; preserve its content mapping.
+                tr.setNodeMarkup(pos, undefined, node.attrs);
+              });
+              if (tr.steps.length === 0) return;
+              // WHY: Equivalent markup refresh replaces node boundaries in the step map.
+              tr.setSelection(Selection.fromJSON(tr.doc, selection.toJSON()));
+              tr.setStoredMarks(storedMarks);
+              tr.setMeta("addToHistory", false);
+              tr.setMeta("fvociLowlight", resolved);
+              editor.view.dispatch(tr);
+            })
+            .catch((error: unknown) => {
+              console.error("Failed to refresh editor code-block language", key, error);
             });
-            if (tr.steps.length === 0) return;
-            // WHY: Equivalent markup refresh replaces node boundaries in the step map.
-            tr.setSelection(Selection.fromJSON(tr.doc, selection.toJSON()));
-            tr.setStoredMarks(storedMarks);
-            tr.setMeta("addToHistory", false);
-            tr.setMeta("fvociLowlight", resolved);
-            editor.view.dispatch(tr);
-          });
         }
       },
     }),
