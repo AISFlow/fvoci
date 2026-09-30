@@ -50,10 +50,10 @@ export function dayMove(dateBy: string, row: CalendarRow, day: string | null, fi
   return write && write.kind !== "unavailable" ? write : null;
 }
 /** Preview only; accepted responses and refetch replace it before pending settles. */
-export function optimisticRow(row: CollectionQueryPreview, write: CalendarWrite, zone: string): CollectionQueryPreview {
+export function optimisticRow(row: CollectionQueryPreview, write: CalendarWrite, zone: string, dateBy?: string): CollectionQueryPreview {
   if (write.kind === "task") {
     const next = { ...row, ...write.body };
-    const date = "startDate" in write.body ? next.startDate : next.dueAt ? isoToZonedLocal(next.dueAt, zone).slice(0, 10) : next.dueDate;
+    const date = (dateBy ? dateBy === "start" : "startDate" in write.body) ? next.startDate : next.dueAt ? isoToZonedLocal(next.dueAt, zone).slice(0, 10) : next.dueDate;
     return { ...next, date };
   }
   const value = write.value as { date?: string; datetime?: string } | null;

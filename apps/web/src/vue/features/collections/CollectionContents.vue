@@ -236,14 +236,14 @@ async function saveCalendarDate(row: CollectionQueryPreview, request: CalendarWr
   if (moving.value || !navigator.onLine || !dateMovable(config.value.dateBy, row, active.value)) throw new Error("Calendar write unavailable");
   moveError.value = null;
   moving.value = true;
-  pendingPreview.value = optimisticRow(row, request, timeZone.value);
+  pendingPreview.value = optimisticRow(row, request, timeZone.value, config.value.dateBy ?? undefined);
   try {
     if (request.kind === "task") {
       const accepted = await ensureOk(await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
         params: { path: { workspace_id: props.workspaceId, task_id: request.taskId } }, body: request.body,
       }));
       // Use accepted stored dates, never treat the requested values as server truth.
-      pendingPreview.value = optimisticRow(row, { ...request, body: { ...request.body, ...(request.body.startDate !== undefined ? { startDate: accepted.startDate } : {}), ...(request.body.dueDate !== undefined ? { dueDate: accepted.dueDate } : {}), ...(request.body.dueAt !== undefined ? { dueAt: accepted.dueAt } : {}) } }, timeZone.value);
+      pendingPreview.value = optimisticRow(row, { ...request, body: { ...request.body, ...(request.body.startDate !== undefined ? { startDate: accepted.startDate } : {}), ...(request.body.dueDate !== undefined ? { dueDate: accepted.dueDate } : {}), ...(request.body.dueAt !== undefined ? { dueAt: accepted.dueAt } : {}) } }, timeZone.value, config.value.dateBy ?? undefined);
       await queryClient.invalidateQueries({ queryKey: ["tasks", props.workspaceId, props.projectId] });
     } else {
       const accepted = await putCollectionValue(props.workspaceId, props.collectionId, row.id, {

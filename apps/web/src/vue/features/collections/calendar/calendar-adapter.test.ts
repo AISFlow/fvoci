@@ -44,6 +44,7 @@ test("invalid/readonly edits never create a request; null clears explicitly", ()
 test("optimistic preview projects intent without changing concurrency snapshot", () => {
   const write = editorWrite("due", base, "2026-09-12", false, fields, "UTC")!;
   const next = optimisticRow(base, write, "UTC");
+  expect(optimisticRow(base, resizeWrite(base, "due", "start", "2026-09-02")!, "UTC", "due").date).toBe("2026-09-10");
   expect(next.date).toBe("2026-09-12"); expect(next.version).toBe(7); expect(base.date).toBe("2026-09-10");
   expect(weekDays("2026-03-08", 1)).toEqual(["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-07", "2026-03-08"]);
   expect(addDays("2026-03-08", 1)).toBe("2026-03-09");

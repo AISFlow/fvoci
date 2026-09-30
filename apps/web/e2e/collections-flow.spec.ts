@@ -179,7 +179,7 @@ test("document tags, project collection fields/views and saved task views round-
   await page.locator('input[type="month"]').fill("2027-03");
   await expect(page.getByLabel("2027년 3월", { exact: true }).first()).toBeVisible();
   const calendar = page.getByTestId("collection-calendar");
-  await expect(calendar.getByRole("link", { name: "달력 태스크" })).toBeVisible();
+  await expect(calendar.getByRole("button", { name: "달력 태스크", exact: true })).toBeVisible();
   await calendar.getByRole("button", { name: "2027-03-15 · 전체 1개" }).click();
   await expect(page.getByRole("heading", { name: "2027-03-15 항목" })).toBeVisible();
   await expect(page.getByTestId(`collection-row-COL-${dueTask.number}`)).toBeVisible();
