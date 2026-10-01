@@ -156,7 +156,17 @@ await test("WorkspaceItemPage keeps PATCH MOVE trash archive clone delete and 40
     /api\.POST\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}\/clone"/,
   );
   assert.match(page, /api\.DELETE\("\/api\/v1\/workspaces\/\{workspace_id\}\/tasks\/\{task_id\}"/);
-  assert.match(page, /err\.status === 409/);
+  const recovery = page.match(/async function refetchAfterConflict\([\s\S]*?\n\}/)?.[0];
+  assert.ok(recovery);
+  assert.match(recovery, /scope: ReturnType<typeof captureTaskMutationScope>/);
+  assert.match(
+    recovery,
+    /err\.status !== 409[\s\S]*scope\.epoch !== patchEpoch[\s\S]*scope\.actorEpoch !== patchActorEpoch[\s\S]*\)\s*return;/,
+  );
+  assert.match(
+    recovery,
+    /await invalidateCapturedTask\(scope\);\s*if \(scope\.epoch !== patchEpoch\) return;\s*formEpoch\.value \+= 1/,
+  );
   assert.match(page, /formEpoch\.value \+= 1/);
   assert.match(page, /leaveTo\(/);
   assert.match(page, /projectTasksPath/);
