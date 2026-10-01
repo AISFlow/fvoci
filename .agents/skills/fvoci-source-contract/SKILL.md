@@ -1,9 +1,9 @@
 ---
 name: fvoci-source-contract
-description: FVOCI 원본 조사, Rust 기능 이식 시작, API 또는 협업 데이터 호환성을 판단할 때 사용한다. 기능의 고정 SHA 근거와 실패 조건을 찾는다.
+description: 프론트 기능·API·협업 데이터의 원본 동작/호환성 조사 또는 Rust 이식 전 계약 추출에 사용한다. 고정 SHA와 실패 조건을 찾으며 순수 시각 조정에는 사용하지 않는다.
 ---
 
-# 원본 계약 추출
+# 프론트·API·협업의 원본 계약 조사
 
 공통 모델·권한·소유권 규칙은 루트 AGENTS.md를 따른다. 이 스킬은 원본을 읽기 전용 근거로 사용한다.
 
@@ -26,10 +26,10 @@ description: FVOCI 원본 조사, Rust 기능 이식 시작, API 또는 협업 �
 고정 SHA와 파일/함수, 보존할 계약, 기존 결함·미완료, 새 구현의 수락 시나리오, 실행한 재현과 미실행 범위를 반환한다. 기능 대응표 갱신은 코디네이터에게 전달한다. 문서만으로 실제 지원을 확정하지 않는다.
 
 
-## CodeGraph (선택, 대상 저장소 탐색 보조)
+## CodeGraph (대상 저장소 탐색 보조)
 
-호출 관계·영향 후보를 빨리 좁힐 때 `codegraph explore "<symbols>"`, `codegraph callers <symbol>`,
-`codegraph impact <symbol>`(Claude Code에서는 MCP `codegraph_explore`)를 쓸 수 있다. 실행 경로·worktree는
-`.agents/environment.md`의 CodeGraph 절을 따른다. 결과는 조사 후보다: 메서드 호출·SQL·RLS·cfg·IPC·trait
+코드 탐색·영향 확인 시 AGENTS.md의 사용 규칙과
+[환경 기록 §4](../../environment.md#4-codegraph-설정과-정확도-한계)의 설치된 CLI·인덱스·불가 시 보고 절차를 따른다.
+과거 Claude MCP 연결은 현재 세션의 도구 목록을 대신하지 않는다. 결과는 조사 후보다: 메서드 호출·SQL·RLS·cfg·IPC·trait
 dispatch 엣지가 빠질 수 있으므로(2026-09-26 관찰) 보안·삭제·의존성 제거 결론은 실제 코드와 검사로 확인한다.
 원본 참조 clone은 인덱싱하지 않는다. 응답이 크면 심볼을 더 좁혀 다시 묻는다.

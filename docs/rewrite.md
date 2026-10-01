@@ -316,9 +316,11 @@ flushDelay50/100·DocumentView 구독 분리·대규모 room 재설계 등 비�
 ## 7. 재개와 최종 수락
 
 현재 역할·권한은 AGENTS, 실제 모델/Run 연결은 환경 기록을 읽는다. 그 뒤 이 문서의 §1 체크포인트,
-§4 소유권/TODO와 실제 git status/worktree, Run task/worker·미처리 질문·CI를 대조한다.
+§4 소유권/TODO와 실제 git status/worktree, 선택 경로의 Run task/worker 또는 workflow/agent·미처리 질문·CI를 대조한다.
 기존 작업·검토·입력 근거를 재사용하고 재인수·중복 배정·전수 감사·Run reset을 하지 않는다.
-Orca 작업은 설치 버전의 live guide를 따른다. 기존 Run을 사용하고 다른 terminal을 사칭하지 않는다.
+실행 경로는 AGENTS의 사용자 지정 환경·기존 실행 보존·신규 작업 가용 도구/권한 규칙으로 선택한다.
+Orca 작업은 설치 버전의 live guide와 실제 기존 Run을 따르며 다른 terminal을 사칭하지 않는다.
+native subagent/workflow 작업은 해당 런타임의 결과·인계 절차를 따른다. 어느 경로든 불가 시 제한을 보고하고 환경·모델을 조용히 대체하지 않는다.
 
 다음 실행 순서: 수락된 파서 교정·표준 17건과 두 정본 delta 검토 완료 → 검토된 묶음 정상 push →
 수락된 이미지의 생산 입력 정합 근거 유지·실제 최종 CI → 최종 보고와 **사용자 승인 대기**.

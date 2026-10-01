@@ -1,9 +1,9 @@
 ---
 name: fvoci-fast-verify
-description: FVOCI 변경의 검사를 고르거나 CI 실패·느린 테스트를 조사하고, 기존 구현과 Rust 구현의 검증 시간을 비교할 때 사용한다.
+description: 프론트·백엔드·CI·설정·문서 변경의 최소 충분한 검사 선택, 실패/성능 조사, 로컬·원격 결과 수락에 사용한다. 변경 경계에 맞춰 고르며 관련 없는 전체 제품 검사를 요구하지 않는다.
 ---
 
-# 최소 충분한 검증
+# 변경별 검사 선택·실패 조사·CI 수락
 
 현재 task의 자원/소유권은 AGENTS.md와 환경 기록을 따른다. 실행하지 않은 명령과 아직 구현되지 않은 profile을 성공으로 적지 않는다.
 
@@ -38,6 +38,17 @@ SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 
 
 검사명, 정확한 명령/cwd/SHA, 실행 범위/개수, 결과와 exit code, 소요 시간·조건, 생략 이유와 남은 위험을 반환한다. 누락된 DB나 브라우저 환경이 필요한 검사는 미실행/실패로 분명히 표시한다.
 
+## Vue 정적 검사와 CI 정본
+
+현재 Vue/TypeScript·typed ESLint·Prettier 명령과 준비 순서는
+[Web CI의 `web-static` job](../../../.github/workflows/web.yml),
+[루트 scripts](../../../package.json), [웹 scripts](../../../apps/web/package.json),
+[editor scripts](../../../packages/editor/package.json)가 정본이다. 명령 목록을 별도로 복제하지 않는다.
+고정 dependency 준비 후 lint fixture·lint·format과 웹/editor typecheck의 실제 실행 범위를 확인한다.
+정적 검사는 Rust/DB build 없는 별도 job이며 API/unit·브라우저 수락을 대신하지 않는다.
+무거운 로컬 검사는 AGENTS.md의 한 통제 배치에 모으고 자원에 맞춰 실행한다.
+native 재사용은 [환경 기록 §5](../../environment.md#5-검증-자원과-실행-제약)의 provenance·fresh dist 조건을 따른다.
+
 ## Web Playwright CI shard (browser job only)
 
 1. 정책·플래너: `python3 scripts/web-e2e-groups.py verify --shards 8` 와 `python3 -m unittest scripts.test_web_e2e_groups` 는 DB·브라우저 없이 실행한다. `apps/web/e2e/*.spec.ts` 만 정상 범위이며, 중첩·`.test.ts` 등 미지원 패턴은 플래너가 실패로 막는다.
@@ -52,3 +63,12 @@ SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 
 3. 원격 Actions·merge_group·`workflow_dispatch` full 경로는 통합 수락에서 확인한다. 로컬에서는 플래너/게이트 단위 테스트만 최소 충분으로 돌린다.
 4. 새 workflow/job을 추가하면 `WORKFLOW_JOBS`·`WORKFLOW_YAML`, 해당 plan 출력과 gate의 `needs`를 함께 갱신하고 등록 누락 부정 회귀를 유지한다. 새 Web spec은 shard 자동 발견 결과를 확인한다. 새 Rust integration target은 Cargo 등록뿐 아니라 실제 CI의 양쪽 아키텍처 실행 목록에도 포함한다. 실행 목록 통합 시 기존 target을 빠뜨리지 않았는지 비교하고, 변경 선택 규칙 자체는 전체 CI로 검증한다.
 5. `verify-workflows`는 루트 Rust DB integration target의 Cargo·자동 발견 목록과 PostgreSQL/S3/협업 실행 경로도 대조한다. 새 target은 실제 실행 목록에 연결하고 `bash scripts/test-ci-selection.sh`로 등록 누락·실행 조건을 확인한다. fast/native 또는 수동 probe 예외는 해당 실행 근거를 확인해 기존 분류에 명시하며, 이 DB 등록 검사를 전체 Rust 검사 범위의 증거로 쓰지 않는다.
+
+## 로컬과 원격 검증
+
+로컬 자원과 소유권에 따른 동시 실행 배정은 독립 GitHub-hosted job 수 제한이 아니다.
+공개 대상의 표준 ubuntu-24.04 / ubuntu-24.04-arm에서 관련 검사를 병렬 실행한다.
+유료 runner·결제·권한·운영 배포 변경은 승인에 포함하지 않는다. 워커는 관련 빠른
+검사, 코디네이터는 통합 확인 후 원격 수락 결과의 HEAD/base/merge SHA·명령·실제
+테스트 수를 확인한다. 같은 코드·동등 범위의 원격 성공 후 전체 로컬 검사를 중복하지
+않는다. 고정 SHA 독립 검토와 CI는 병렬 가능하나 둘 다 수락해야 머지한다.

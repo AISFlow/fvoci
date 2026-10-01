@@ -1,11 +1,17 @@
 ---
 name: fvoci-handoff
-description: FVOCI 작업을 제출·검토·통합하거나 세션을 재개하고 워커·워크트리·테스트 자원을 정리할 때 사용한다.
+description: 모든 변경의 제출·독립 검토·통합·재개·자원 정리와 전체 포팅 종료 판단에 사용한다. 선택한 실행 경로의 인계를 다루며 제품 구현·시각 설계 절차를 대신하지 않는다.
 ---
 
-# 제출, 통합, 재개
+# 제출·독립 검토·통합·재개·종료 판단
 
-소유권과 승인 규칙은 AGENTS.md를 따른다. 조정 경로(내장 subagent/workflow 또는 Orca)는 AGENTS.md 역할표를 따르고, Orca를 쓸 때는 공식 orchestration live guide와 실제 task/dispatch를 사용한다.
+소유권·승인과 실행 경로 선택은 AGENTS.md를 따른다. 사용자가 지정한 환경을 우선하고 재개 시 실제 활성 실행과 부분 결과를 보존한다.
+신규 작업은 현재 도구·권한으로 지원되는 경로를 선택한다. 제한이 있으면 보고하며 환경·모델을 조용히 대체하지 않는다.
+
+- Orca: 공식 orchestration live guide와 실제 Run·task/dispatch·worker를 사용하고 완료 전송·ACK·release/retain 상태를 확인한다.
+- native subagent/workflow: 해당 런타임의 위임·결과 조회·재개 절차를 사용하고 agent/run ID와 결과·제공되는 journal을 보존한다. Orca 전용 receipt·ACK/release를 가정하지 않는다.
+
+두 경로 모두 같은 단일 작성자·고정 SHA 독립 검토·검증 수락·원격 승인 규칙을 따른다.
 
 ## 작업 제출
 
@@ -26,7 +32,7 @@ description: FVOCI 작업을 제출·검토·통합하거나 세션을 재개하
 
 ## 세션 재개
 
-AGENTS.md, 환경 기록, 진행 중인 workflow·agent(Orca를 쓰면 현재 task/dispatch), docs/rewrite.md의 최신 수락 SHA와 다음 작업을 확인한다. 실제 git status/worktree와 프로세스를 대조한다. 이전 실행이 남아 있으면 상태부터 확인하며 같은 작업을 다시 시작하지 않는다.
+AGENTS.md, 환경 기록과 현재 실제 연결, 선택 경로의 활성 Run·task/dispatch·worker 또는 workflow·agent, docs/rewrite.md의 최신 수락 SHA와 다음 작업을 확인한다. 실제 git status/worktree와 프로세스를 대조한다. 이전 실행이 남아 있으면 상태부터 확인하며 같은 작업을 다시 시작하지 않는다.
 
 ### Pending·한도 종료 후 인수
 
@@ -51,3 +57,19 @@ AGENTS.md, 환경 기록, 진행 중인 workflow·agent(Orca를 쓰면 현재 ta
 ## 완료 조건
 
 제출과 수락 상태가 구분되고, 다음 세션이 재조사 없이 마지막 검증 SHA·남은 diff·다음 명령을 찾을 수 있어야 한다.
+
+## 지속 진행과 전체 포팅 종료
+
+PR 수락·머지는 전체 작업 종료가 아니다.
+기능 대응표에서 의존성이 충족된
+다음 사용자 기능을 선택해 최신 main의 후속 task로 계속한다. 현재 Vue 흐름과 문서 권한·저장·
+Hocuspocus/Yrs 동시편집의 실제 수락 근거를 보존하고 남은 delta부터 진행한다.
+수락 전에는 probe를 제품 협업 지원으로 표시하지 않는다.
+
+고정 원본 기준과 승인된 최종 지원 범위는 docs/rewrite.md의 기능 대응표로 추적한다.
+개별 task·PR 완료로 종료하지 않고 의존성이 준비된 다음 제품 기능을 이어간다.
+전체 완료는 기능/UI 연결, 보안·데이터·복구, 지원 DB·플랫폼, 배포 산출물의
+필수 검증과 현재 역할표의 독립 검토를 마치고 main에 수락됐을 때만 선언한다. 미구현·미연결·
+부분 검증·원본부터 미구현을 구분하며 opt-in이나 후속 분류로 범위를 제외하지 않는다.
+세션 한계에서는 기존 진행 기록에 검증 SHA·미수락 diff·활성 소유권·실패·다음
+명령·CI 상태·잔존 자원을 남긴다. 설정되지 않은 백그라운드 실행을 약속하지 않는다.
