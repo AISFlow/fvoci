@@ -128,10 +128,6 @@ onScopeDispose(() => {
   patchActorEpoch += 1;
 });
 
-async function afterMutation(): Promise<void> {
-  await invalidateTaskCaches(queryClient, workspaceId.value, projectId.value, taskId.value);
-}
-
 function goTo(path: string): void {
   leaveTo(path, {
     assign: (url) => {
@@ -300,24 +296,32 @@ const pending = computed(
     deleteTask.isPending.value,
 );
 
-async function refetchAfterConflict(err: unknown, epoch = patchEpoch): Promise<void> {
-  if (err instanceof ProblemError && err.status === 409) {
-    await afterMutation();
-    if (epoch !== patchEpoch) return;
-    formEpoch.value += 1;
-  }
+async function refetchAfterConflict(
+  err: unknown,
+  scope: ReturnType<typeof captureTaskMutationScope>,
+): Promise<void> {
+  if (
+    !(err instanceof ProblemError) ||
+    err.status !== 409 ||
+    scope.epoch !== patchEpoch ||
+    scope.actorEpoch !== patchActorEpoch
+  )
+    return;
+  await invalidateCapturedTask(scope);
+  if (scope.epoch !== patchEpoch) return;
+  formEpoch.value += 1;
 }
 
 async function runPatch(body: PatchTaskBody): Promise<void> {
   if (!task.data.value?.canEdit) return;
-  const epoch = patchEpoch;
+  const scope = captureTaskMutationScope();
   fieldError.value = null;
   actionError.value = null;
   try {
-    await patchTask.mutateAsync({ body, scope: captureTaskMutationScope() });
+    await patchTask.mutateAsync({ body, scope });
   } catch (err) {
-    if (epoch !== patchEpoch) return;
-    await refetchAfterConflict(err, epoch);
+    if (scope.epoch !== patchEpoch) return;
+    await refetchAfterConflict(err, scope);
   }
 }
 
@@ -370,17 +374,17 @@ async function onTitleBlur(title: string): Promise<void> {
 async function onStatusChange(statusId: string): Promise<void> {
   const current = task.data.value;
   if (!current || statusId === current.statusId) return;
-  const epoch = patchEpoch;
+  const scope = captureTaskMutationScope();
   actionError.value = null;
   try {
     await moveTask.mutateAsync({
       statusId,
       expectedStatusId: current.statusId,
-      scope: captureTaskMutationScope(),
+      scope,
     });
   } catch (err) {
-    if (epoch !== patchEpoch) return;
-    await refetchAfterConflict(err, epoch);
+    if (scope.epoch !== patchEpoch) return;
+    await refetchAfterConflict(err, scope);
   }
 }
 
@@ -420,24 +424,28 @@ async function onAddDependency(input: {
 }): Promise<void> {
   const current = task.data.value;
   if (!current) return;
+  const scope = captureTaskMutationScope();
   fieldError.value = null;
   actionError.value = null;
   try {
     await ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies", {
-        params: { path: { workspace_id: workspaceId.value, task_id: current.id } },
+        params: { path: taskMutationPath(scope) },
         body: input,
       }),
     );
-    await afterMutation();
+    if (scope.actorEpoch === patchActorEpoch) await invalidateCapturedTask(scope);
   } catch (err) {
-    actionError.value = taskMutationErrorMessage(err, "task.dep.add.failed");
-    await refetchAfterConflict(err);
+    if (scope.epoch === patchEpoch) {
+      actionError.value = taskMutationErrorMessage(err, "task.dep.add.failed");
+      await refetchAfterConflict(err, scope);
+    }
     throw err;
   }
 }
 
 async function onRemoveDependency(edge: { blockerId: string; blockedId: string }): Promise<void> {
+  const scope = captureTaskMutationScope();
   fieldError.value = null;
   actionError.value = null;
   try {
@@ -447,17 +455,17 @@ async function onRemoveDependency(edge: { blockerId: string; blockedId: string }
         {
           params: {
             path: {
-              workspace_id: workspaceId.value,
-              task_id: edge.blockerId,
+              ...taskMutationPath({ ...scope, taskId: edge.blockerId }),
               blocked_id: edge.blockedId,
             },
           },
         },
       ),
     );
-    await afterMutation();
+    if (scope.actorEpoch === patchActorEpoch) await invalidateCapturedTask(scope);
   } catch (err) {
-    actionError.value = taskMutationErrorMessage(err, "task.dep.remove.failed");
+    if (scope.epoch === patchEpoch)
+      actionError.value = taskMutationErrorMessage(err, "task.dep.remove.failed");
   }
 }
 

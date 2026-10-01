@@ -382,6 +382,119 @@ test("a late clone completion preserves subsequent task navigation", async ({
   }
 });
 
+for (const archivedTarget of [false, true]) {
+  test(`a late dependency ${archivedTarget ? "409" : "400"} stays with its originating task and ordinary edges still work`, async ({
+    browser,
+    baseURL,
+  }) => {
+    const signed = await newSignedInPage(browser, baseURL, admin);
+    const page = signed.page;
+    let release = () => {};
+    try {
+      const key = archivedTarget ? "TDA" : "TDP";
+      const f = await fixture(page, key, {});
+      const created = await page.request.post(`${f.base}/projects/${f.projectId}/tasks`, {
+        data: { title: "Dependency parent", type: "epic", statusId: f.task.statusId },
+      });
+      expect(created.status()).toBe(201);
+      const parent = taskSchema.parse(await created.json());
+      expect(
+        (await page.request.patch(f.endpoint, { data: { parentId: parent.id } })).status(),
+      ).toBe(200);
+      const parentEndpoint = `${f.base}/tasks/${parent.id}`;
+      expect(
+        (
+          await page.request.post(`${parentEndpoint}/dependencies`, {
+            data: { blockedId: f.task.id, type: "FS", lagDays: 0 },
+          })
+        ).status(),
+      ).toBe(200);
+      await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
+      await page.getByTestId("task-edit-dependency-open").click();
+      await page.getByTestId("task-edit-dependency-target").selectOption(parent.id);
+      if (archivedTarget) {
+        expect(
+          (await page.request.patch(parentEndpoint, { data: { archived: true } })).status(),
+        ).toBe(200);
+      }
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let serverAnswered = () => {};
+      const answered = new Promise<void>((resolve) => {
+        serverAnswered = resolve;
+      });
+      await page.route(`**${f.endpoint}/dependencies`, async (route) => {
+        const response = await route.fetch();
+        expect(response.status()).toBe(archivedTarget ? 409 : 400);
+        expect(problemSchema.parse(await response.json()).code).toBe(
+          archivedTarget ? "task_archived" : "dependency_cycle",
+        );
+        serverAnswered();
+        await gate;
+        await route.fulfill({ response });
+      });
+      const failed = page.waitForResponse((r) => r.url().endsWith(`${f.endpoint}/dependencies`));
+      await page.getByTestId("task-edit-dependency-add").click();
+      await answered;
+      await page
+        .locator(`a[href="/w/${admin.workspaceSlug}/${key}-${String(parent.number)}"]`)
+        .click();
+      await expect(
+        page.getByRole("heading", { name: "Dependency parent", exact: true }),
+      ).toBeVisible();
+      release();
+      expect((await failed).status()).toBe(archivedTarget ? 409 : 400);
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                resolve();
+              }),
+            ),
+          ),
+      );
+      await expect(page.getByRole("alert")).toHaveCount(0);
+      if (archivedTarget) {
+        expect(
+          (await page.request.patch(parentEndpoint, { data: { archived: false } })).status(),
+        ).toBe(200);
+        await expect(page.getByTestId(`task-edit-dependency-remove-${f.task.id}`)).toBeEnabled();
+      }
+      const removed = page.waitForResponse(
+        (r) =>
+          r.url().endsWith(`${parentEndpoint}/dependencies/${f.task.id}`) &&
+          r.request().method() === "DELETE",
+      );
+      await page.getByTestId(`task-edit-dependency-remove-${f.task.id}`).click();
+      expect((await removed).status()).toBe(200);
+      await expect(page.getByTestId(`task-edit-dependency-${f.task.id}`)).toHaveCount(0);
+      await page.getByTestId("task-edit-dependency-open").click();
+      await page.getByTestId("task-edit-dependency-target").selectOption(f.task.id);
+      const added = page.waitForResponse(
+        (r) =>
+          r.url().endsWith(`${parentEndpoint}/dependencies`) && r.request().method() === "POST",
+      );
+      await page.getByTestId("task-edit-dependency-add").click();
+      expect((await added).status()).toBe(200);
+      await expect(page.getByTestId(`task-edit-dependency-${f.task.id}`)).toBeVisible();
+      const detail = await page.request.get(parentEndpoint);
+      const edges = z
+        .object({
+          dependencies: z.array(z.object({ blockerId: z.string(), blockedId: z.string() })),
+        })
+        .parse(await detail.json());
+      expect(edges.dependencies).toEqual([
+        expect.objectContaining({ blockerId: parent.id, blockedId: f.task.id }),
+      ]);
+    } finally {
+      release();
+      await signed.context.close();
+    }
+  });
+}
+
 test("Calendar commit refreshes retained detail and Gantt before 30s even when stream hints are unavailable", async ({
   browser,
   baseURL,
