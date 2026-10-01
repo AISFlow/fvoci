@@ -3,7 +3,7 @@ import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { findProjectByKey, projectsQuery, workflowQuery } from "@/features/projects/queries";
 import { invalidateTaskCaches } from "@/features/tasks/task-cache";
@@ -12,6 +12,7 @@ import {
   patchTitleBody,
   patchTypeBody,
   type PatchTaskBody,
+  type TaskDetail,
 } from "@/features/tasks/task-edit-payload";
 import { taskFieldValidationMessage, taskMutationErrorMessage } from "@/features/tasks/task-errors";
 import { settleTaskPatch } from "@/features/tasks/task-patch-cache";
@@ -103,6 +104,30 @@ const milestones = useQuery(() =>
 const taskId = computed(() => task.data.value?.id ?? "");
 const projectId = computed(() => project.value?.id ?? task.data.value?.projectId ?? "");
 
+// Retire metadata UI callbacks on task/actor changes, including A → B → A.
+// A same-actor late success may still settle its original cache keys.
+let patchEpoch = 0;
+let patchActorEpoch = 0;
+watch(
+  () => [workspaceId.value, taskId.value] as const,
+  () => {
+    patchEpoch += 1;
+  },
+  { flush: "sync" },
+);
+watch(
+  () => session.me.value?.userId,
+  () => {
+    patchEpoch += 1;
+    patchActorEpoch += 1;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  patchEpoch += 1;
+  patchActorEpoch += 1;
+});
+
 async function afterMutation(): Promise<void> {
   await invalidateTaskCaches(queryClient, workspaceId.value, projectId.value, taskId.value);
 }
@@ -119,6 +144,7 @@ function goTo(path: string): void {
 }
 
 const patchTask = useMutation({
+  onMutate: () => ({ epoch: patchEpoch, actorEpoch: patchActorEpoch }),
   mutationFn: async (body: PatchTaskBody) =>
     ensureOk(
       await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
@@ -126,12 +152,16 @@ const patchTask = useMutation({
         body,
       }),
     ),
-  onSuccess: async (meta) => {
-    fieldError.value = null;
-    actionError.value = null;
-    await settleTaskPatch(queryClient, workspaceId.value, projectId.value, meta);
+  onSuccess: async (meta, _body, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) {
+      fieldError.value = null;
+      actionError.value = null;
+    }
+    await settleTaskPatch(queryClient, meta.workspaceId, meta.projectId, meta);
   },
-  onError: (err) => {
+  onError: (err, _body, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err);
   },
 });
@@ -228,11 +258,13 @@ async function refetchAfterConflict(err: unknown): Promise<void> {
 
 async function runPatch(body: PatchTaskBody): Promise<void> {
   if (!task.data.value?.canEdit) return;
+  const epoch = patchEpoch;
   fieldError.value = null;
   actionError.value = null;
   try {
     await patchTask.mutateAsync(body);
   } catch (err) {
+    if (epoch !== patchEpoch) return;
     await refetchAfterConflict(err);
   }
 }
@@ -312,10 +344,13 @@ async function onHierarchySave(type: string, parentId: string | null): Promise<v
   await runPatch(parsedType.body);
 }
 
-async function onDueDateBlur(value: string): Promise<void> {
+async function onDueDateBlur(
+  value: string,
+  expectedDates: Pick<TaskDetail, "startDate" | "dueDate" | "dueAt">,
+): Promise<void> {
   const current = task.data.value;
   if (!current) return;
-  const parsedDate = patchDateBody(current, "dueDate", value);
+  const parsedDate = patchDateBody(expectedDates, "dueDate", value);
   if (!parsedDate.ok) {
     fieldError.value = taskFieldValidationMessage(parsedDate.issue);
     return;

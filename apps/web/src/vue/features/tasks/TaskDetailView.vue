@@ -51,7 +51,10 @@ const props = defineProps<{
   onStatusChange: (statusId: string) => void | Promise<void>;
   onPriorityChange: (priority: string) => void | Promise<void>;
   onHierarchySave: (type: string, parentId: string | null) => void | Promise<void>;
-  onDueDateBlur: (value: string) => void | Promise<void>;
+  onDueDateBlur: (
+    value: string,
+    expectedDates: Pick<TaskDetail, "startDate" | "dueDate" | "dueAt">,
+  ) => void | Promise<void>;
   onAssigneesChange: (assigneeIds: string[]) => void | Promise<void>;
   onLabelsChange: (labelIds: string[]) => void | Promise<void>;
   onMilestoneChange: (milestoneId: string | null) => void | Promise<void>;

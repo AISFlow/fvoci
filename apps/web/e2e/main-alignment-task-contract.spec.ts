@@ -46,6 +46,8 @@ async function fixture(page: Page, key: string, dates: object) {
     return taskSchema.parse(await response.json());
   };
   return {
+    base,
+    projectId: project.id,
     task,
     endpoint,
     stored,
@@ -128,6 +130,88 @@ test("real PATCH omission/null/date/version and 409 preserve the committed row",
     await signed.context.close();
   }
 });
+
+for (const returnToOrigin of [false, true]) {
+  test(`a late metadata conflict retires across ${returnToOrigin ? "A-B-A" : "A-B"} task selection`, async ({
+    browser,
+    baseURL,
+  }) => {
+    const signed = await newSignedInPage(browser, baseURL, admin);
+    const page = signed.page;
+    let release = () => {};
+    try {
+      const key = returnToOrigin ? "TLA" : "TLB";
+      const f = await fixture(page, key, { dueDate: "2027-03-13" });
+      const created = await page.request.post(`${f.base}/projects/${f.projectId}/tasks`, {
+        data: {
+          title: "Selected parent",
+          type: "epic",
+          statusId: f.task.statusId,
+          dueDate: "2027-03-10",
+        },
+      });
+      expect(created.status()).toBe(201);
+      const parent = taskSchema.parse(await created.json());
+      expect(
+        (await page.request.patch(f.endpoint, { data: { parentId: parent.id } })).status(),
+      ).toBe(200);
+      await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
+      const draft = page.getByTestId("task-edit-due-date");
+      await expect(draft).toHaveValue("2027-03-13");
+      await draft.fill("2027-03-20");
+      const refreshed = page.waitForResponse(
+        (r) => r.url().endsWith(f.endpoint) && r.request().method() === "GET",
+      );
+      expect(
+        (await page.request.patch(f.endpoint, { data: { dueDate: "2027-03-17" } })).status(),
+      ).toBe(200);
+      expect(taskSchema.parse(await (await refreshed).json()).dueDate).toBe("2027-03-17");
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let serverAnswered = () => {};
+      const answered = new Promise<void>((resolve) => {
+        serverAnswered = resolve;
+      });
+      await page.route(`**${f.endpoint}`, async (route) => {
+        if (route.request().method() !== "PATCH") return route.continue();
+        const response = await route.fetch();
+        serverAnswered();
+        await gate;
+        await route.fulfill({ response });
+      });
+      const late = page.waitForResponse(
+        (r) => r.url().endsWith(f.endpoint) && r.request().method() === "PATCH",
+      );
+      await draft.blur();
+      await answered;
+      await page
+        .locator(`a[href="/w/${admin.workspaceSlug}/${key}-${String(parent.number)}"]`)
+        .click();
+      await expect(
+        page.getByRole("heading", { name: "Selected parent", exact: true }),
+      ).toBeVisible();
+      await expect(draft).toHaveValue("2027-03-10");
+      if (returnToOrigin) {
+        await page
+          .locator(".task-home__crumb")
+          .getByRole("link", { name: key, exact: true })
+          .click();
+        await page.getByTestId(`task-row-${f.task.id}`).click();
+        await expect(draft).toHaveValue("2027-03-17");
+      }
+      release();
+      expect((await late).status()).toBe(409);
+      await expect(draft).toBeEnabled();
+      await expect(page.getByRole("alert")).toHaveCount(0);
+      await expect(draft).toHaveValue(returnToOrigin ? "2027-03-17" : "2027-03-10");
+      expect((await f.stored()).dueDate).toBe("2027-03-17");
+    } finally {
+      release();
+      await signed.context.close();
+    }
+  });
+}
 
 test("Calendar commit refreshes retained detail and Gantt before 30s even when stream hints are unavailable", async ({
   browser,
@@ -220,14 +304,80 @@ test("authorized stream reopen requeries a mounted detail after missed peer meta
     );
     await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
     await expect(page.getByTestId("task-edit-due-date")).toHaveValue("2027-03-13");
-    const response = await page.request.patch(f.endpoint, { data: { dueDate: "2027-03-15" } });
+    const response = await page.request.patch(f.endpoint, {
+      data: { title: "Peer rename", dueDate: "2027-03-15" },
+    });
     expect(response.status()).toBe(200);
     const committed = taskSchema.parse(await response.json());
     const opened = page.waitForResponse((r) => r.url().endsWith("/stream") && r.status() === 200);
     refused = false;
     await opened;
     await expect(page.getByTestId("task-edit-due-date")).toHaveValue(committed.dueDate ?? "");
+    await expect(page.getByTestId("task-edit-title")).toHaveValue("Peer rename");
     expect(datesOf(await f.stored())).toEqual(datesOf(committed));
+    // Keep a dirty date draft through a later real peer hint/refetch. Escape
+    // then selects the newest committed value without writing the draft.
+    const draft = page.getByTestId("task-edit-due-date");
+    await draft.fill("2027-03-20");
+    const refreshed = page.waitForResponse(
+      (r) => r.url().endsWith(f.endpoint) && r.request().method() === "GET",
+    );
+    expect(
+      (await page.request.patch(f.endpoint, { data: { dueDate: "2027-03-17" } })).status(),
+    ).toBe(200);
+    await refreshed;
+    await expect(draft).toHaveValue("2027-03-20");
+    await draft.press("Escape");
+    await expect(draft).toHaveValue("2027-03-17");
+    expect((await f.stored()).dueDate).toBe("2027-03-17");
+  } finally {
+    await signed.context.close();
+  }
+});
+
+test("a dirty detail date retains its original conflict baseline after a peer stream refresh", async ({
+  browser,
+  baseURL,
+}) => {
+  const signed = await newSignedInPage(browser, baseURL, admin);
+  const page = signed.page;
+  try {
+    const f = await fixture(page, "TDC", { dueDate: "2027-03-13" });
+    await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
+    const draft = page.getByTestId("task-edit-due-date");
+    await expect(draft).toHaveValue("2027-03-13");
+    await draft.fill("2027-03-20");
+    const refreshed = page.waitForResponse(
+      (r) => r.url().endsWith(f.endpoint) && r.request().method() === "GET",
+    );
+    expect(
+      (await page.request.patch(f.endpoint, { data: { dueDate: "2027-03-17" } })).status(),
+    ).toBe(200);
+    const peer = taskSchema.parse(await (await refreshed).json());
+    expect(peer.dueDate).toBe("2027-03-17");
+    await expect(draft).toHaveValue("2027-03-20");
+    const attempted = page.waitForResponse(
+      (r) => r.url().endsWith(f.endpoint) && r.request().method() === "PATCH",
+    );
+    await draft.blur();
+    const conflict = await attempted;
+    expect(conflict.status()).toBe(409);
+    expect(conflict.request().postDataJSON()).toMatchObject({
+      expectedDates: { dueDate: "2027-03-13" },
+    });
+    expect(problemSchema.parse(await conflict.json()).code).toBe("document_version_mismatch");
+    expect((await f.stored()).dueDate).toBe("2027-03-17");
+    await expect(draft).toHaveValue("2027-03-17");
+    for (const day of ["2027-03-18", "2027-03-19"]) {
+      await draft.fill(day);
+      const saved = page.waitForResponse(
+        (r) => r.url().endsWith(f.endpoint) && r.request().method() === "PATCH",
+      );
+      await draft.blur();
+      expect((await saved).status()).toBe(200);
+      await expect(draft).toBeEnabled();
+      expect((await f.stored()).dueDate).toBe(day);
+    }
   } finally {
     await signed.context.close();
   }
