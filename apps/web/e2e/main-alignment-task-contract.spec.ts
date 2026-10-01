@@ -469,7 +469,7 @@ for (const archivedTarget of [false, true]) {
       );
       await page.getByTestId(`task-edit-dependency-remove-${f.task.id}`).click();
       expect((await removed).status()).toBe(200);
-      await expect(page.getByTestId(`task-edit-dependency-${f.task.id}`)).toHaveCount(0);
+      await expect(page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`)).toHaveCount(0);
       await page.getByTestId("task-edit-dependency-open").click();
       await page.getByTestId("task-edit-dependency-target").selectOption(f.task.id);
       const added = page.waitForResponse(
@@ -478,7 +478,7 @@ for (const archivedTarget of [false, true]) {
       );
       await page.getByTestId("task-edit-dependency-add").click();
       expect((await added).status()).toBe(200);
-      await expect(page.getByTestId(`task-edit-dependency-${f.task.id}`)).toBeVisible();
+      await expect(page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`)).toBeVisible();
       const detail = await page.request.get(parentEndpoint);
       const edges = z
         .object({
