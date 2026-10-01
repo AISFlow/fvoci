@@ -3,6 +3,7 @@ import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, useId, watch } from "vue";
+import { DismissableLayerBranch } from "reka-ui";
 import type { BoardGroup } from "@/features/collections/board-model";
 import { moveRequest } from "@/features/collections/board-model";
 import {
@@ -626,11 +627,10 @@ const emptyCount = computed(() =>
     t("collection.loading")
   }}</p>
   <section v-else class="flex min-w-0 flex-col gap-4" :data-testid="`collection-${type}`">
-    <QueryError
-      v-if="fieldsRefreshFailed"
-      :message="loadErrorMessage(fields.error.value)"
-      @retry="fields.refetch()"
-    />
+    <!-- Metadata retry belongs to the open Calendar editor's interaction. -->
+    <DismissableLayerBranch v-if="fieldsRefreshFailed" as-child>
+      <QueryError :message="loadErrorMessage(fields.error.value)" @retry="fields.refetch()" />
+    </DismissableLayerBranch>
     <div class="collection-toolbar">
       <div class="collection-field">
         <label :for="`${baseId}-view`">{{ t("collection.savedViews") }}</label>

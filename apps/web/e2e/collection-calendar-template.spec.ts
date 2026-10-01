@@ -272,6 +272,48 @@ test("cached fields SSE refetch failure preserves the same Calendar draft and vi
   await offlineCalendarScenario(page, context, "REFETCH", true);
 });
 
+test("online fields transport failure keeps the Calendar draft while visible retry initiates a real GET", async ({
+  page,
+}) => {
+  const f = await fixture(page, "RETRY");
+  const point = await f.task("Retry point", { dueDate: "2027-05-08" });
+  await f.open();
+  await page.getByTestId(`collection-preview-${point.displayId}`).click();
+  const editor = page.getByRole("form", { name: "Calendar event editor" });
+  const input = editor.locator('input[type="date"]');
+  await input.fill("2027-05-12");
+  const node = required(await input.elementHandle());
+  const collection = idSchema.parse(
+    await (await page.request.get(`${f.base}/projects/${f.project.id}/collection`)).json(),
+  );
+  const path = `${f.base}/collections/${collection.id}/fields`;
+  const failure = page.waitForEvent("requestfailed", {
+    predicate: (request) => request.url().endsWith(path),
+  });
+  await page.route(`**${path}`, (route) => route.abort("failed"));
+  expect(
+    (
+      await page.request.patch(`${f.base}/tasks/${point.id}`, {
+        data: { title: "Retry point updated by peer" },
+      })
+    ).ok(),
+  ).toBe(true);
+  expect((await failure).failure()?.errorText).toContain("ERR_FAILED");
+  const error = fieldsErrorLocator(page);
+  await expect(error).toBeVisible();
+  await expect(input).toHaveValue("2027-05-12");
+  expect(await page.evaluate(() => navigator.onLine)).toBe(true);
+  await page.unroute(`**${path}`);
+  const recovered = page.waitForResponse((response) => response.url().endsWith(path));
+  await error.getByRole("button", { name: "다시 시도" }).click();
+  expect((await recovered).status()).toBe(200);
+  await expect(error).toHaveCount(0);
+  await expect(input).toHaveValue("2027-05-12");
+  expect(await input.evaluate((current, prior) => current === prior, node)).toBe(true);
+  await expect(editor.getByRole("button", { name: "저장 뷰 저장" })).toBeEnabled();
+  expect((await f.stored(point.id)).dueDate).toBe("2027-05-08");
+});
+
 function fieldsErrorLocator(page: Page) {
   return page.locator('section[data-testid="collection-calendar"] > [role="alert"]');
 }
@@ -361,7 +403,6 @@ async function offlineCalendarScenario(
         await expect(fieldsError).toHaveCount(0);
         expect(await input.evaluate((node, previous) => node === previous, draftNode)).toBe(true);
       };
-      await fieldsError.getByRole("button", { name: "다시 시도" }).click();
     };
   }
   await context.setOffline(true);
