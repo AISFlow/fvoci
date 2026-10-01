@@ -1,9 +1,9 @@
 ---
 name: fvoci-rust-slice
-description: FVOCI Rust 백엔드 기능을 HTTP 입력부터 영속화와 응답까지 구현하거나 기존 프론트엔드에 연결할 때 사용한다.
+description: Rust 백엔드 수직 기능·서버 아키텍처 구현과 실제 UI/API 연결에 사용한다. 고정 스택과 제품 연산 경계를 적용하며 Vue만의 기능·스타일 수정에는 사용하지 않는다.
 ---
 
-# 작은 수직 기능 구현
+# Rust 백엔드 수직 구현과 고정 서버 계약
 
 공통 운영 규칙은 루트 AGENTS.md, 기능 기준은 현재 task와 원본 계약을 따른다.
 
@@ -27,3 +27,21 @@ Node 대체·바이너리·child/build 경계를 바꾸면 [runtime-boundaries](
 ## 완료 조건
 
 실제 호출 가능한 기능, 보존된 외부 계약, 해당 실패 검사와 실제 실행 결과가 있어야 한다. 뼈대·health endpoint·컴파일 성공만으로 기능 완료를 선언하지 않는다.
+
+## 고정 서버 계약
+
+서버 스택은 Rust stable, Tokio, axum0.8, Tower/tower-http, SQLx/PostgreSQL,
+Serde, tracing, Yrs, rhwp로 고정한다. 실제 구현을 차단하는 검증된 문제가
+없으면 웹 프레임워크를 재비교·교체하지 않는다. axum은 transport/routing/
+extractor/state/middleware/응답 변환을 담당하고, 현재 리소스 인가와 트랜잭션
+불변식은 구체적인 제품 연산·DB에서 재검사한다. 범용 실행 프레임워크는 만들지 않는다.
+
+## 기존 Rust 경계 재사용
+
+- 외부 오류 응답은 [AppError·ProblemCode](../../../src/error.rs)의 상태/코드 계약으로 연결한다.
+  내부 원인을 tracing에 남기되 시크릿을 노출하거나 임의 문자열/범용 500으로 계약을 바꾸지 않는다.
+- [Db](../../../src/db/mod.rs)의 SQLx pool은 clone 가능한 공유 handle이다. 추가 `Arc<Mutex<PgPool>>`
+  등으로 모든 요청을 직렬화하지 않는다. guard를 `await` 너머 보유해야 하는지는 잠금 종류·수명·
+  실제 경합으로 판단하며 임의 clone이나 spawned task로 소유권 문제를 숨기지 않는다.
+- async 작업은 취소·timeout 뒤 DB/외부 효과와 자원 해제를 확인한다. CPU/blocking 작업은 기존
+  격리 경계와 bounded 실행을 따르며 `spawn_blocking`만으로 process 격리를 대체하지 않는다.

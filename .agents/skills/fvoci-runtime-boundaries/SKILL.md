@@ -1,11 +1,11 @@
 ---
 name: fvoci-runtime-boundaries
-description: FVOCI의 Node 서버 경로를 Rust로 대체하거나 Cargo crate·제품 바이너리·운영 명령·native child·배포 및 빌드 경계를 추가·통합할 때 사용한다.
+description: Node 서버 경로 대체, 제품 설치 준비, Cargo crate·바이너리·운영 명령·native child·배포/build 경계 변경에 사용한다. 단순 Vue 기능·스타일이나 경계에 영향 없는 문서 수정에는 사용하지 않는다.
 ---
 
-# Rust 제품 실행 경계
+# Rust 런타임·설치·native child·빌드 경계
 
-Rust 런타임 정책과 승인 범위는 루트 AGENTS.md가 정본이다. 전체 재설계나 무조건 단일 바이너리가
+공통 제품·승인 범위는 루트 AGENTS.md, 구체적인 런타임·설치 계약은 이 스킬이 정본이다. 전체 재설계나 무조건 단일 바이너리가
 목표는 아니다. 진행 중 변경을 보존하고 해당 경계의 안전성·개발 비용·배포 비용을 함께 줄인다.
 
 ## 입력
@@ -66,3 +66,18 @@ PDF 헤더·ZIP/XML·문자열 검사는 출력 품질 전체를 증명하지 �
 기존 PR/task에 유지/제거한 실행 경계와 이유, 실제 호출 전환·검증 SHA, 측정 조건, 남은 runtime 의존성과
 복구 범위를 짧게 남긴다. 하나의 명령·한 파일·한 process를 만드는 것 자체가 수락 조건은 아니다.
 운영 배포·서비스 추가·권한 확대는 이 스킬의 승인 범위가 아니다.
+
+## 제품 런타임과 설치의 필수 계약
+
+서버 측 제품 연산은 Rust가 기준이며 남아 있는 Node 변환 경로는 영구 예외가 아니라 잔여 포팅이다.
+새 Node 의존은 늘리지 않는다. 최종 제품에 Node/Bun/Deno 서버 기능·JS worker 위임·내장 JS 엔진·
+JS 런타임 번들·외부 변환 서비스로의 우회를 남기지 않는다. Vue/Tiptap·브라우저 JS·개발용
+Node/CodeGraph·TS 비교 oracle와 합의한 PostgreSQL·Meilisearch·S3·SMTP는 별개다.
+기본 설치 준비(설정 검증, DB·검색 준비 확인, 앱 역할·migration·grant·검색 키)는 메인 앱 컨테이너의
+시작 절차가 자동 수행한다(2026-09-28 사용자 결정). 정상 요청 처리 단계는 제한된 앱 DB 역할과 필요한
+설정만으로 실행하며, 준비 단계의 소유자 credential·Meili master key를 정상 서버 프로세스에 남기지
+않는다. 준비 실패·키 누락·안전하지 않은 업그레이드(다른 쓰기 서버가 살아 있는 상태의 schema 변경,
+미지원 rolling upgrade, DB downgrade)는 거부한다. 필요한 parser·CRDT process 격리를 유지한다.
+같은 실행 파일을 child로 쓰면 내부 모드는 서버 초기화·credential 로딩·listen 전에 분기한다.
+전체 Node 제거 수락은 Node/Bun/Deno·내장 JS 엔진이 없는 최종 제품 환경에서 실제 경로를 실행한
+근거가 필요하다.
