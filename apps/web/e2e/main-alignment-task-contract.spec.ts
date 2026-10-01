@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { z } from "zod";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { createE2eUser } from "./helpers";
-import { admin, member, newSignedInPage, setupInstance, workspaceId } from "./workspace-wiki-vue-editor";
+import { admin, newSignedInPage, setupInstance, workspaceId } from "./workspace-wiki-vue-editor";
 
 const taskSchema = z
   .object({
@@ -19,6 +19,7 @@ const taskSchema = z
 const projectSchema = z.object({ id: z.string().uuid() }).passthrough();
 const workflowSchema = z.object({ statuses: z.array(z.object({ id: z.string().uuid() })) });
 const problemSchema = z.object({ code: z.string() }).passthrough();
+let adminAuth: Awaited<ReturnType<BrowserContext["storageState"]>> | undefined;
 test.describe.configure({ mode: "serial" });
 test.beforeAll(async ({ browser, baseURL }) => setupInstance(browser, baseURL));
 
@@ -66,6 +67,9 @@ test("real PATCH omission/null/date/version and 409 preserve the committed row",
   baseURL,
 }) => {
   const signed = await newSignedInPage(browser, baseURL, admin);
+  // Reuse this real authenticated session for the extra permission fixture;
+  // the ten original cases already exhaust the server's per-email login limit.
+  adminAuth = await signed.context.storageState();
   const page = signed.page;
   try {
     const f = await fixture(page, "TPC", { startDate: "2027-03-12", dueDate: "2027-03-13" });
@@ -522,9 +526,9 @@ test("HTTP viewer rights keep task metadata disabled and reject direct writes", 
   browser,
   baseURL,
 }) => {
-  // The seeded member owns this project; keep the admin's ten original login
-  // cases below the unchanged server's per-email rate limit.
-  const signed = await newSignedInPage(browser, baseURL, member);
+  if (!adminAuth) throw new Error("Permission fixture requires the earlier real admin session");
+  const context = await browser.newContext({ baseURL, storageState: adminAuth });
+  const signed = { context, page: await context.newPage() };
   const viewer = { email: "task-metadata-viewer@example.com", password: "viewerpass1" };
   let viewing: Awaited<ReturnType<typeof newSignedInPage>> | undefined;
   try {
