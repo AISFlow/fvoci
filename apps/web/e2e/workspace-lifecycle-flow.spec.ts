@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { components } from "../src/generated/api";
 import { readJson, flowSchemas, createE2eUser, login, logout } from "./helpers";
 
 const admin = {
@@ -80,6 +81,14 @@ test("home counts and owner deletes a team workspace", async ({ page }) => {
   await expect(page.getByText("설정을 변경하려면 관리자 권한이 필요합니다")).toBeVisible();
   await expect(page.locator("summary").filter({ hasText: /^워크스페이스 삭제$/ })).toHaveCount(0);
 });
+
+// Rust error.rs ProblemBody: status/type envelope plus typed ProblemResponse.
+const DELETE_UNAVAILABLE_PROBLEM = {
+  type: "about:blank",
+  title: "internal error",
+  status: 503,
+  code: "internal_error",
+} satisfies components["schemas"]["ProblemResponse"] & { type: string; status: number };
 
 function barrier() {
   let complete!: () => void;
@@ -191,7 +200,7 @@ for (const outcome of ["success", "failure"] as const) {
         await route.fulfill({
           status: 503,
           contentType: "application/problem+json",
-          body: JSON.stringify({ title: "controlled delete unavailable", status: 503 }),
+          body: JSON.stringify(DELETE_UNAVAILABLE_PROBLEM),
         });
       }
       delivered.release();
@@ -254,11 +263,17 @@ test("failed delete stays in settings and a later external workspace loss still 
     await route.fulfill({
       status: 503,
       contentType: "application/problem+json",
-      body: JSON.stringify({ title: "controlled delete unavailable", status: 503 }),
+      body: JSON.stringify(DELETE_UNAVAILABLE_PROBLEM),
     });
   });
+  const failedResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "DELETE" &&
+      new URL(response.url()).pathname === `/api/v1/workspaces/${workspace.id}`,
+  );
   await confirmDelete(page, slug);
-  // ensureOk maps a503 without a problem code to this localized fallback; raw title is not UI text.
+  expect((await failedResponse).status()).toBe(503);
+  // internal_error maps to the localized fallback; the server raw title is not UI text.
   await expect(
     page.getByRole("alert").filter({ hasText: "요청을 처리하지 못했습니다. 다시 시도해 주세요." }),
   ).toBeVisible();
