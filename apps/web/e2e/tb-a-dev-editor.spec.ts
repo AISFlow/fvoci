@@ -10,7 +10,7 @@ import { expect, test as base, type Browser, type Page } from "@playwright/test"
 import { createServer, type ViteDevServer } from "vite";
 import { z } from "zod";
 import { login, readJson, flowSchemas } from "./helpers";
-import { admin, ensureSetup } from "./workspace-wiki-vue-editor";
+import { admin } from "./workspace-wiki-vue-editor";
 import {
   ownedServerChildEnv,
   processGroupMembers,
@@ -91,8 +91,8 @@ const test = base.extend<object, { devRuntime: DevRuntime }>({
             if (!binary) throw new Error("FVOCI_E2E_SERVER_BIN missing");
             if (!process.env.DATABASE_APP_URL) throw new Error("isolated app DB URL missing");
             const runtimeEnv = ownedServerChildEnv("127.0.0.1:0");
-            const logPath = path.join(workerInfo.project.outputDir, `tb-a-${phase}-server.log`);
-            mkdirSync(workerInfo.project.outputDir, { recursive: true });
+            const logPath = path.join(workerInfo.project.outputDir, `tb-a-${phase}`, "server.log");
+            mkdirSync(path.dirname(logPath), { recursive: true });
             const childEnv = {
               ...runtimeEnv,
               FVOCI_BIND: "127.0.0.1:0",
@@ -141,6 +141,49 @@ const test = base.extend<object, { devRuntime: DevRuntime }>({
                 root: webRoot,
                 configFile: path.join(webRoot, "vite.config.ts"),
                 cacheDir,
+                plugins: [
+                  {
+                    name: "tb-a-proxy-evidence",
+                    configResolved(config) {
+                      for (const [route, option] of Object.entries(config.server.proxy ?? {})) {
+                        const proxy = typeof option === "string" ? { target: option } : option;
+                        const configure = proxy.configure;
+                        proxy.configure = (instance, options) => {
+                          configure?.(instance, options);
+                          const record = (
+                            event: string,
+                            requestPath?: string,
+                            status?: number,
+                            error?: string,
+                          ) => {
+                            appendFileSync(
+                              logPath,
+                              JSON.stringify({
+                                event,
+                                route,
+                                target: proxy.target,
+                                path: requestPath?.split("?")[0],
+                                status,
+                                error,
+                              }) + "\n",
+                            );
+                          };
+                          record("proxy-configured");
+                          instance.on("proxyReq", (_outgoing, request) => {
+                            record("proxy-request", request.url);
+                          });
+                          instance.on("proxyRes", (response, request) => {
+                            record("proxy-response", request.url, response.statusCode);
+                          });
+                          instance.on("error", (error, request) => {
+                            record("proxy-error", request.url, undefined, error.message);
+                          });
+                        };
+                        if (config.server.proxy) config.server.proxy[route] = proxy;
+                      }
+                    },
+                  },
+                ],
                 server: { host: "127.0.0.1", port, strictPort: true },
               });
             } finally {
@@ -169,6 +212,12 @@ const test = base.extend<object, { devRuntime: DevRuntime }>({
                 ].some((key) => key in childEnv),
                 publicOrigin: childEnv.FVOCI_PUBLIC_ORIGIN,
                 proxyEnvRestored: process.env.API_PROXY_TARGET === previousProxy,
+                resolvedProxy: Object.fromEntries(
+                  Object.entries(server.config.server.proxy ?? {}).map(([route, option]) => [
+                    route,
+                    typeof option === "string" ? option : option.target,
+                  ]),
+                ),
                 watchDisabled: server.config.server.watch === null,
                 polling: process.env.CHOKIDAR_USEPOLLING === "1",
               }),
@@ -186,6 +235,89 @@ const test = base.extend<object, { devRuntime: DevRuntime }>({
     { scope: "worker" },
   ],
 });
+
+async function attachJson(name: string, value: unknown) {
+  const file = test.info().outputPath(`${name}.json`);
+  writeFileSync(file, JSON.stringify(value, null, 2));
+  await test.info().attach(name, { path: file, contentType: "application/json" });
+}
+
+async function setupDevelopmentPage(page: Page) {
+  const events: object[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith("/api/v1/"))
+      events.push({ at: Date.now(), event: "request", path: url.pathname });
+  });
+  page.on("response", (response) => {
+    const url = new URL(response.url());
+    if (url.pathname.startsWith("/api/v1/"))
+      events.push({
+        at: Date.now(),
+        event: "response",
+        path: url.pathname,
+        status: response.status(),
+      });
+  });
+  page.on("requestfailed", (request) =>
+    events.push({
+      at: Date.now(),
+      event: "failed",
+      path: new URL(request.url()).pathname,
+      error: request.failure()?.errorText,
+    }),
+  );
+  try {
+    // A cold dev bootstrap can still be fetching when the document loads.
+    // Await actual Rust responses before asserting the setup/login UI.
+    const bootstrap = Promise.all(
+      ["/api/v1/setup", "/api/v1/auth/me"].map((pathname) =>
+        page.waitForResponse(
+          (response) =>
+            new URL(response.url()).pathname === pathname && response.request().method() === "GET",
+        ),
+      ),
+    );
+    const [, [setup, me]] = await Promise.all([
+      page.goto("/").then(async () => {
+        events.push({
+          at: Date.now(),
+          event: "document-loaded",
+          loadingVisible: await page.getByRole("status").isVisible(),
+        });
+      }),
+      bootstrap,
+    ]);
+    events.push({ at: Date.now(), event: "bootstrap-ready" });
+    expect(setup?.status()).toBe(200);
+    expect(me?.status()).toBe(401);
+    await expect(
+      page
+        .getByRole("button", { name: "시작하기" })
+        .or(page.getByRole("button", { name: "로그아웃" }))
+        .or(page.getByRole("button", { name: "로그인", exact: true })),
+    ).toBeVisible();
+    if (await page.getByRole("button", { name: "시작하기" }).count()) {
+      await page.getByLabel("성").fill(admin.familyName);
+      await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
+      await page.getByLabel("이메일").fill(admin.email);
+      await page.getByLabel("비밀번호").fill(admin.password);
+      await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
+      await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
+      await page.getByRole("button", { name: "시작하기" }).click();
+    } else if (
+      page.url().includes("/login") ||
+      (await page.getByRole("button", { name: "로그인", exact: true }).count())
+    ) {
+      await login(page, admin.email, admin.password);
+    }
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+    events.push({ at: Date.now(), event: "authenticated-ui-ready" });
+  } finally {
+    await attachJson("setup-events", events);
+  }
+}
 
 async function signedIn(browser: Browser) {
   const context = await browser.newContext({ baseURL: devURL });
@@ -275,10 +407,7 @@ async function editAndReadBack(
       await anonymous.close();
     }
     expect(errors).toEqual([]);
-    await test.info().attach("persist-and-readback", {
-      body: JSON.stringify({ resource, expected, frames, saved }, null, 2),
-      contentType: "application/json",
-    });
+    await attachJson("persist-and-readback", { resource, expected, frames, saved });
   } finally {
     await fresh.context.close();
   }
@@ -290,7 +419,7 @@ for (const phase of ["cold", "restart"] as const) {
       await devRuntime.start(phase);
       const context = await browser.newContext({ baseURL: devURL });
       try {
-        await ensureSetup(await context.newPage());
+        await setupDevelopmentPage(await context.newPage());
       } finally {
         await context.close();
       }
@@ -341,9 +470,12 @@ for (const phase of ["cold", "restart"] as const) {
           accepted: true,
           rejected: false,
         });
-        await test.info().attach("transformed-zod-imports", {
-          body: JSON.stringify({ editorZodURL, webZodURL, uuidBytes, webBytes, contracts }),
-          contentType: "application/json",
+        await attachJson("transformed-zod-imports", {
+          editorZodURL,
+          webZodURL,
+          uuidBytes,
+          webBytes,
+          contracts,
         });
       } finally {
         await context.close();
