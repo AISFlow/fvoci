@@ -233,6 +233,7 @@ async function detailGrants(options: {
   archived?: boolean;
   canEdit?: boolean;
   restoring?: boolean;
+  archiving?: boolean;
 }) {
   const filename = path.join(import.meta.dirname, "TaskDetailView.vue");
   const { descriptor } = parse(readFileSync(filename, "utf8"), { filename });
@@ -250,9 +251,10 @@ async function detailGrants(options: {
     Vue.defineComponent({
       inheritAttrs: false,
       props: ["readOnly", "archivePending"],
-      setup(props) {
+      setup(props, { attrs }) {
         return () => {
-          grants.set(name, {
+          const key = attrs["data-testid"] === "task-clone" ? "Clone" : name;
+          grants.set(key, {
             readOnly: Boolean(props.readOnly),
             archivePending: Boolean(props.archivePending),
           });
@@ -263,7 +265,13 @@ async function detailGrants(options: {
   const imports: Record<string, unknown> = {
     vue: Vue,
     "@fvoci/i18n": { formatPersonName, t },
-    "@/features/tasks/task-archive-persist": { runArchiveWithBodyPersist },
+    "@/features/tasks/task-archive-persist": {
+      // The actual persist sequencing is covered by the real archive-persist browser group.
+      // Hold the archive boundary here to inspect every compiled child grant mid-flight.
+      runArchiveWithBodyPersist: options.archiving
+        ? ({ archive }: { archive: () => Promise<void> }) => archive()
+        : runArchiveWithBodyPersist,
+    },
     "@/features/documents/collab-model": { collabUserOf },
     "@/lib/href": { projectTasksPath },
     "@/lib/queries": { meQuery: {} },
@@ -299,17 +307,19 @@ async function detailGrants(options: {
   const pending: Promise<unknown>[] = [];
   let restoreCalls = 0;
   const setup = component.setup;
-  if (options.restoring) {
+  if (options.restoring || options.archiving) {
     component.setup = (props, context) => {
       const state = setup(props, context);
       const handler = state.handleArchiveToggle;
       assert.equal(typeof handler, "function");
       Vue.onServerPrefetch(() => {
-        // Both invocations run before the HTTP restore finishes.
+        // Both invocations run before the HTTP archive/restore finishes.
         for (let i = 0; i < 2; i++) {
           pending.push(
             Promise.resolve(
-              Reflect.apply(handler as (...args: unknown[]) => unknown, undefined, [false]),
+              Reflect.apply(handler as (...args: unknown[]) => unknown, undefined, [
+                Boolean(options.archiving),
+              ]),
             ),
           );
         }
@@ -366,7 +376,15 @@ async function detailGrants(options: {
 
 await test("readonly body admission leaves HTTP metadata editable without granting body or attachment writes", async () => {
   const { grants } = await detailGrants({ pageReadOnly: false, sessionReadOnly: true });
-  assert.equal(grants.get("TaskDetailForm")?.readOnly, false);
+  for (const name of [
+    "TaskDetailForm",
+    "TaskCollectionProperties",
+    "TaskTimeEntries",
+    "TaskActivityPanel",
+  ]) {
+    assert.equal(grants.get(name)?.readOnly, false, name);
+  }
+  assert.equal(grants.has("Clone"), true);
   assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
   assert.equal(grants.get("TaskAttachmentsPanel")?.readOnly, true);
 });
@@ -378,19 +396,40 @@ await test("archived and permission-denied page rights keep metadata and body re
       sessionReadOnly: false,
       ...options,
     });
-    assert.equal(grants.get("TaskDetailForm")?.readOnly, true);
+    for (const name of [
+      "TaskDetailForm",
+      "TaskCollectionProperties",
+      "TaskTimeEntries",
+      "TaskActivityPanel",
+    ]) {
+      assert.equal(grants.get(name)?.readOnly, true, name);
+    }
+    assert.equal(grants.has("Clone"), false);
+    assert.equal(grants.get("TaskAttachmentsPanel")?.readOnly, true);
     assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
   }
 });
 
-await test("in-flight restore holds metadata and body readonly and prevents duplicate dispatch", async () => {
-  const { grants, restoreCalls } = await detailGrants({
-    pageReadOnly: false,
-    sessionReadOnly: false,
-    restoring: true,
-  });
-  assert.equal(grants.get("TaskDetailForm")?.readOnly, true);
-  assert.equal(grants.get("TaskDetailForm")?.archivePending, true);
-  assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
-  assert.equal(restoreCalls, 1);
+await test("in-flight archive and restore hold REST panels and body readonly and prevent duplicate dispatch", async () => {
+  for (const archiving of [false, true]) {
+    const { grants, restoreCalls } = await detailGrants({
+      pageReadOnly: false,
+      sessionReadOnly: false,
+      restoring: !archiving,
+      archiving,
+    });
+    for (const name of [
+      "TaskDetailForm",
+      "TaskCollectionProperties",
+      "TaskTimeEntries",
+      "TaskActivityPanel",
+    ]) {
+      assert.equal(grants.get(name)?.readOnly, true, name);
+    }
+    assert.equal(grants.has("Clone"), false);
+    assert.equal(grants.get("TaskAttachmentsPanel")?.readOnly, true);
+    assert.equal(grants.get("TaskDetailForm")?.archivePending, true);
+    assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
+    assert.equal(restoreCalls, 1);
+  }
 });

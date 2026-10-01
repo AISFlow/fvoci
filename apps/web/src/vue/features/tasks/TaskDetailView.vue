@@ -176,7 +176,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
     />
     <div v-if="canEdit" class="flex flex-wrap gap-2" data-testid="task-detail-actions">
       <UButton
-        v-if="!bodyReadOnly"
+        v-if="!metadataReadOnly"
         size="sm"
         variant="outline"
         color="neutral"
@@ -200,7 +200,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
     <TaskCollectionProperties
       :workspace-id="workspaceId"
       :task-id="task.id"
-      :read-only="bodyReadOnly"
+      :read-only="metadataReadOnly"
     />
     <TaskBodyEditor
       :workspace-id="workspaceId"
@@ -219,7 +219,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :members="members"
-      :read-only="bodyReadOnly"
+      :read-only="metadataReadOnly"
     />
     <TaskActivityPanel
       v-if="currentUserId"
@@ -227,7 +227,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :current-user-id="currentUserId"
-      :read-only="bodyReadOnly"
+      :read-only="metadataReadOnly"
     />
     <TaskBacklinks :slug="slug" :workspace-id="workspaceId" :task-id="task.id" />
     <OriginPanel :slug="slug" :workspace-id="workspaceId" :task-id="task.id" hide-when-empty />
