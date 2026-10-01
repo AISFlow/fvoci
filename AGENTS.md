@@ -48,14 +48,15 @@ worktree는 샌드박스가 아니며 Git 분리를 보안 격리로 주장하�
 
 ## 작업에 해당하는 스킬은 시작 전에 반드시 읽는다
 
-수정 종류로 먼저 분기하고 아래 정본 표에서 해당 스킬만 읽는다. 혼합 작업은 바뀌는 경계의 스킬을 조합하며 8개 전체를 일괄 읽지 않는다.
+수정 종류로 먼저 분기하고 아래 정본 표에서 해당 스킬만 읽는다. 혼합 작업은 바뀌는 경계의 스킬을 조합하며 전체 스킬을 일괄 읽지 않는다.
 
 | 수정 종류 | 먼저 읽을 스킬·추가 조건 |
 | --- | --- |
-| 프론트 기능·라우팅·상태·API 연결 | 원본 동작/호환성 조사는 [fvoci-source-contract](.agents/skills/fvoci-source-contract/SKILL.md); 검사는 아래 fast-verify. Rust·인가/DB도 바뀌면 해당 행 추가 |
+| 프론트 기능·라우팅·상태·API 연결 | [fvoci-vue-implementation](.agents/skills/fvoci-vue-implementation/SKILL.md); 원본 동작/호환성 조사는 [fvoci-source-contract](.agents/skills/fvoci-source-contract/SKILL.md); 검사는 아래 fast-verify. Rust·인가/DB도 바뀌면 해당 행 추가 |
 | 프론트 시각·사용성·CJK/rem·접근성 | [frontend-design](.agents/skills/frontend-design/SKILL.md)와 같은 디렉터리의 `FVOCI-BRIEF.md`·`LICENSE.txt`·`PROVENANCE.md`. 기능만 바꾸면 디자인 스킬 불필요 |
 | Rust 백엔드 기능·서버 구조 | [fvoci-rust-slice](.agents/skills/fvoci-rust-slice/SKILL.md)의 고정 서버 계약·구현 절차 |
 | 프론트/백엔드 인증·인가·세션·DB·migration | [fvoci-db-security](.agents/skills/fvoci-db-security/SKILL.md); 공통 API·저장 계약 조사는 source-contract, 구현은 해당 경계 스킬 |
+| PostgreSQL 쿼리·인덱스·페이지네이션·잠금/풀 성능 | [fvoci-postgres-performance](.agents/skills/fvoci-postgres-performance/SKILL.md)와 db-security; 일반 스키마 변경은 위 DB 행 |
 | RFC·프로토콜·파서·직렬화·암호·SDK | [fvoci-standard-implementations](.agents/skills/fvoci-standard-implementations/SKILL.md)로 선택·직접 구현·교체 전 범위/보안/비용 확인 |
 | 설치·native bridge/child·Node 대체·배포/build | [fvoci-runtime-boundaries](.agents/skills/fvoci-runtime-boundaries/SKILL.md)의 제품 런타임·설치 필수 계약 |
 | 모든 변경의 검사·실패·시간·CI 수락 | [fvoci-fast-verify](.agents/skills/fvoci-fast-verify/SKILL.md); 문서·설정·CI도 필요한 검사만 선택, 문서 때문에 무거운 제품 검사 추가 금지 |

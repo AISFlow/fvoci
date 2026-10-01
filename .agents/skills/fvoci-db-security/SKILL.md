@@ -27,3 +27,15 @@ SDK의 토큰 검증은 아래 현재 세션·identity 연결·RLS·replay/원�
 ## 결과
 
 불변식별 성공·실패·미검증과 실제 DB 버전/역할·명령·SHA를 반환한다. 시크릿은 가린다. 심각한 인가·데이터 결함은 해당 기능 수락의 차단 요인으로 표시한다. 상관없는 전체 앱 검증을 했다고 확대하지 않는다.
+
+## 스키마·migration 변경
+
+[기존 migrations](../../../migrations)와 실제 query/caller에서 PK·FK·UNIQUE·CHECK·NULL,
+삭제/cascade·보존 정책, tenant 경계를 먼저 확인한다. 앱 검증만으로 대체하지 않는다.
+변경은 기존 데이터의 충돌·결측·backfill과 실행 중 잠금·시간·실패 재개를 검토한다.
+현재 runner의 transaction/순서와 설치·업그레이드 제약을 따르며 이미 적용된 migration의
+덮어쓰기나 자동 destructive reset으로 통과시키지 않는다. 새 schema와 기존 데이터 upgrade를
+각각 검사하고, 되돌릴 수 없는 변환은 복구 근거 없이 rollback 가능하다고 쓰지 않는다.
+쿼리/인덱스 성능이 목적이면 [postgres-performance](../fvoci-postgres-performance/SKILL.md)를 추가한다.
+현재 지원과 향후 SQLite·원격 libSQL 목표를 구분하며 PostgreSQL RLS·잠금·SQL이 다른 엔진에서도
+동일하다고 가정하지 않는다. 엔진별 구현/수락 계획은 별도 작업이며 이 문서가 지원을 선언하지 않는다.

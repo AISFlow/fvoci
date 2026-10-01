@@ -35,3 +35,13 @@ Serde, tracing, Yrs, rhwp로 고정한다. 실제 구현을 차단하는 검증�
 없으면 웹 프레임워크를 재비교·교체하지 않는다. axum은 transport/routing/
 extractor/state/middleware/응답 변환을 담당하고, 현재 리소스 인가와 트랜잭션
 불변식은 구체적인 제품 연산·DB에서 재검사한다. 범용 실행 프레임워크는 만들지 않는다.
+
+## 기존 Rust 경계 재사용
+
+- 외부 오류 응답은 [AppError·ProblemCode](../../../src/error.rs)의 상태/코드 계약으로 연결한다.
+  내부 원인을 tracing에 남기되 시크릿을 노출하거나 임의 문자열/범용 500으로 계약을 바꾸지 않는다.
+- [Db](../../../src/db/mod.rs)의 SQLx pool은 clone 가능한 공유 handle이다. 추가 `Arc<Mutex<PgPool>>`
+  등으로 모든 요청을 직렬화하지 않는다. guard를 `await` 너머 보유해야 하는지는 잠금 종류·수명·
+  실제 경합으로 판단하며 임의 clone이나 spawned task로 소유권 문제를 숨기지 않는다.
+- async 작업은 취소·timeout 뒤 DB/외부 효과와 자원 해제를 확인한다. CPU/blocking 작업은 기존
+  격리 경계와 bounded 실행을 따르며 `spawn_blocking`만으로 process 격리를 대체하지 않는다.
