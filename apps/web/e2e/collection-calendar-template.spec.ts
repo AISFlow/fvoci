@@ -304,8 +304,25 @@ test("online fields transport failure keeps the Calendar draft while visible ret
   await expect(input).toHaveValue("2027-05-12");
   expect(await page.evaluate(() => navigator.onLine)).toBe(true);
   await page.unroute(`**${path}`);
+  const { promise: retryStarted, resolve: markRetryStarted } = deferred();
+  const { promise: retryGate, resolve: releaseRetry } = deferred();
+  await page.route(`**${path}`, async (route) => {
+    markRetryStarted();
+    await retryGate;
+    await route.continue();
+  });
   const recovered = page.waitForResponse((response) => response.url().endsWith(path));
   await error.getByRole("button", { name: "다시 시도" }).click();
+  await retryStarted;
+  try {
+    // Keep the error region mounted until outside pointer/focus handling has
+    // settled. A fast200 must not conceal an unintended popover dismissal.
+    await expect(error).toBeVisible();
+    await expect(input).toHaveValue("2027-05-12");
+    expect(await input.evaluate((current, prior) => current === prior, node)).toBe(true);
+  } finally {
+    releaseRetry();
+  }
   expect((await recovered).status()).toBe(200);
   await expect(error).toHaveCount(0);
   await expect(input).toHaveValue("2027-05-12");
