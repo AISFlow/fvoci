@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { EventEmitter } from "node:events";
+import { runInNewContext } from "node:vm";
+import * as Vue from "vue";
+import * as Y from "yjs";
+import ts from "typescript";
+import * as model from "../../features/documents/collab-model";
+import * as ack from "../../features/documents/collab-persist-ack";
 
 // The React glue's source assertions (features/documents/collab-session.test.ts),
 // ported to the Vue room composable. Like those, they read the source: the
@@ -109,3 +116,125 @@ await test("useCollabRoom flushes on pagehide and re-asserts presence on pagesho
   assert.match(session, /reassertPresence\(awareness, next, lastBlockId, lastTitleEditing\);/);
   assert.match(session, /if \(!peersEqual\(peers\.value, nextPeers\)\) peers\.value = nextPeers;/);
 });
+
+// Run the actual composable and persist barrier with a controlled provider
+// transport. This witnesses scope disposal BEFORE delayed provider destruction.
+function roomHarness() {
+  const providers: Provider[] = [];
+  class Provider extends EventEmitter {
+    configuration: { name: string; websocketProvider: { status: string } };
+    synced = true;
+    awareness = null;
+    payloads: string[] = [];
+    constructor(config: Provider["configuration"]) {
+      super();
+      this.configuration = config;
+      providers.push(this);
+    }
+    attach() {}
+    flushPendingUpdates() {}
+    sendStateless(payload: string) {
+      this.payloads.push(payload);
+    }
+    setAwarenessField() {}
+    destroy() {
+      this.emit("destroy");
+    }
+  }
+  const scope = Vue.effectScope();
+  const user = Vue.shallowRef<model.CollabUser | null>(model.collabUserOf("actor-A", "A"));
+  let script = readFileSync(roomPath, "utf8");
+  const parsed = ts.createSourceFile(
+    "room.ts",
+    script,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  for (const statement of [...parsed.statements].reverse())
+    if (ts.isImportDeclaration(statement))
+      script = script.slice(0, statement.getFullStart()) + script.slice(statement.end);
+  script = script.replace(/export /g, "");
+  const room = scope.run(() => {
+    const result: unknown = runInNewContext(
+      new Bun.Transpiler({ loader: "ts" }).transformSync(
+        `(() => {${script}\nreturn useCollabRoom('ws:document:A', user);})()`,
+      ),
+      {
+        ...Vue,
+        ...model,
+        ...ack,
+        Y,
+        user,
+        AbortController,
+        FVOCI_YDOC_FRAGMENT: "body",
+        HocuspocusProvider: Provider,
+        createRefusalAwareSocket: () => ({ status: "connected" }),
+        RoomConnection: class {
+          state = { socket: { status: "connected" }, generation: 0, refusal: null };
+          authenticated() {}
+          reclaim() {}
+          dispose() {}
+        },
+        window: {
+          location: { protocol: "http:", host: "localhost" },
+          setTimeout,
+          addEventListener() {},
+          removeEventListener() {},
+        },
+      },
+    );
+    assert.ok(typeof result === "object" && result !== null && "session" in result);
+    return result as { session: Vue.ComputedRef<{ persistNow(): Promise<void> }> };
+  });
+  assert.ok(room);
+  const provider = providers[0];
+  assert.ok(provider);
+  const session = room.session.value;
+  function lateAck() {
+    const payload = provider.payloads[0];
+    assert.ok(payload);
+    provider.emit("stateless", { payload: payload.replace("persist:", "persisted:") });
+  }
+  return { scope, user, provider, session, lateAck };
+}
+
+for (const retirement of [
+  "dispose",
+  "actor",
+  "actor-aba",
+  "signed-out",
+  "readonly",
+  "unauthorized",
+  "disconnect",
+]) {
+  await test(`pending persist rejects immediately on ${retirement}, before a late ACK`, async () => {
+    const h = roomHarness();
+    try {
+      const pending = h.session.persistNow();
+      const rejected = assert.rejects(pending, /collab persist/);
+      if (retirement === "dispose") h.scope.stop();
+      if (retirement === "actor" || retirement === "actor-aba")
+        h.user.value = model.collabUserOf("actor-B", "B");
+      if (retirement === "actor-aba") h.user.value = model.collabUserOf("actor-A", "A");
+      if (retirement === "signed-out") h.user.value = null;
+      if (retirement === "readonly") h.provider.emit("authenticated", { scope: "readonly" });
+      if (retirement === "unauthorized") h.provider.emit("authenticationFailed");
+      if (retirement === "disconnect") {
+        h.provider.configuration.websocketProvider.status = "disconnected";
+        h.provider.emit("status", { status: "disconnected" });
+      }
+      h.lateAck();
+      await rejected;
+      assert.equal(h.provider.listenerCount("stateless"), 0, "persist listener is retired");
+      await assert.rejects(h.session.persistNow(), /collab persist unavailable/);
+      assert.equal(
+        h.provider.payloads.length,
+        1,
+        "retired capability cannot issue another persist",
+      );
+    } finally {
+      h.scope.stop();
+    }
+  });
+}
