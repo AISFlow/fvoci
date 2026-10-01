@@ -216,6 +216,7 @@ const trashDoc = useMutation({
   mutationFn: (operation: DocumentOperation) => trashDocument(operation.scope),
   onSuccess: async (_result, operation) => {
     await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["trash", operation.scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["projects", operation.scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["wiki-discovery", operation.scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),

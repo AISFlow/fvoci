@@ -160,7 +160,8 @@ for (const kind of ["wiki", "project"] as const) {
     );
     await page.goto(`/w/${slug}/trash`);
     await primedTrash;
-    await expect(page.getByText("휴지통이 비었습니다")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "휴지통", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: `복원 ${title}`, exact: true })).toHaveCount(0);
     // The destination's fresh empty cache must be invalidated by trash even
     // when the app survives and that query is still inside its staleTime.
     await push(page, documentPath);
@@ -320,6 +321,21 @@ test("an authenticated actor change closes the old room and hard-reenters withou
   const doc = await createWiki(page.request, workspaceId, "Actor boundary");
   const path = `/w/${slug}/WIKI-${String(doc.number)}`;
   const open = sockets(page);
+  // Network's raw connection IDs remain observable across document changes;
+  // Playwright's per-document WebSocket objects can miss an old close there.
+  const cdp = await page.context().newCDPSession(page);
+  const wire = new Set<string>();
+  const wireErrors: string[] = [];
+  cdp.on("Network.webSocketCreated", (event: { requestId: string; url: string }) => {
+    if (new URL(event.url).pathname === "/collab") wire.add(event.requestId);
+  });
+  cdp.on("Network.webSocketClosed", (event: { requestId: string }) => {
+    wire.delete(event.requestId);
+  });
+  cdp.on("Network.webSocketFrameError", (event: { errorMessage: string }) => {
+    wireErrors.push(event.errorMessage);
+  });
+  await cdp.send("Network.enable");
   await page.goto(path);
   await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
   const token = await markLifetime(page);
@@ -356,13 +372,19 @@ test("an authenticated actor change closes the old room and hard-reenters withou
       ).__vue_app__._context.provides.VUE_QUERY_CLIENT.getQueryData(["task4-lifetime-proof"]),
     ),
   ).toBeUndefined();
-  await expect.poll(() => open.size).toBe(1);
+  console.log("actor-boundary close observation", {
+    playwright: open.size,
+    native: wire.size,
+    wireErrors,
+  });
+  await expect.poll(() => wire.size).toBe(1);
   // Logout remains a hard boundary, with its existing server and push cleanup.
   await page.getByRole("button", { name: "로그아웃", exact: true }).click();
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByLabel("이메일")).toBeVisible();
   await expect(page.locator("html")).not.toHaveAttribute("data-task4-document", token);
-  await expect.poll(() => open.size).toBe(0);
+  await expect.poll(() => wire.size).toBe(0);
+  await cdp.detach();
 });
 
 test("a missing-wiki lazy chunk failure stays visible on its owning page without reloading", async ({
