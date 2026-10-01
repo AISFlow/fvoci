@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createListener } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -133,29 +142,53 @@ const test = base.extend<object, { devRuntime: DevRuntime }>({
               });
             });
             const previousProxy = process.env.API_PROXY_TARGET;
+            const cacheWasPresent = existsSync(path.join(cacheDir, "deps/_metadata.json"));
             try {
               process.env.API_PROXY_TARGET = backend;
               server = await createServer({
                 root: webRoot,
                 configFile: path.join(webRoot, "vite.config.ts"),
                 cacheDir,
-                plugins: [
-                  {
-                    name: "tb-a-immutable-source",
-                    configResolved(config) {
-                      // Vite's config merge drops an inline null override.
-                      config.server.watch = null;
-                    },
-                  },
-                ],
-                // Source is immutable during this run; HMR is outside this regression.
-                server: { host: "127.0.0.1", port, strictPort: true, watch: null },
+                server: { host: "127.0.0.1", port, strictPort: true },
               });
             } finally {
               if (previousProxy === undefined) delete process.env.API_PROXY_TARGET;
               else process.env.API_PROXY_TARGET = previousProxy;
             }
             await server.listen();
+            const actualEnv = Object.fromEntries(
+              readFileSync(`/proc/${String(child.pid)}/environ`, "utf8")
+                .split("\0")
+                .filter(Boolean)
+                .map((entry) => {
+                  const separator = entry.indexOf("=");
+                  return [entry.slice(0, separator), entry.slice(separator + 1)];
+                }),
+            );
+            writeFileSync(
+              path.join(workerInfo.project.outputDir, `tb-a-${phase}-runtime.json`),
+              JSON.stringify({
+                phase,
+                workerIndex: workerInfo.workerIndex,
+                bun: process.versions.bun,
+                devURL,
+                backend,
+                cacheDir,
+                cacheWasPresent,
+                pid: child.pid,
+                executable: readlinkSync(`/proc/${String(child.pid)}/exe`),
+                appRole: new URL(actualEnv.DATABASE_APP_URL as string).username,
+                ownerCredentialsPresent: [
+                  "DATABASE_URL",
+                  "DATABASE_MIGRATION_URL",
+                  "FVOCI_E2E_ADMIN_DATABASE_URL",
+                  "TEST_DATABASE_URL",
+                ].some((key) => key in actualEnv),
+                publicOrigin: actualEnv.FVOCI_PUBLIC_ORIGIN,
+                watchDisabled: server.config.server.watch === null,
+                polling: process.env.CHOKIDAR_USEPOLLING === "1",
+              }),
+            );
           },
         });
       } finally {
@@ -285,7 +318,8 @@ for (const phase of ["cold", "restart"] as const) {
       const context = await browser.newContext({ baseURL: devURL });
       try {
         const page = await context.newPage();
-        await page.goto("/");
+        await page.goto("/login");
+        await expect(page.getByLabel("이메일")).toBeVisible();
         const uuidPath = `/@fs${path.resolve(webRoot, "../../packages/editor/src/uuid.ts")}`;
         const uuidResponse = await page.request.get(uuidPath);
         expect(uuidResponse.ok()).toBe(true);
