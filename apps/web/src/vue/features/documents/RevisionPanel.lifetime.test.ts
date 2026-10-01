@@ -86,13 +86,22 @@ function harness() {
     restoreRevision: (...args: unknown[]) => request("restore", args),
     getRevision: (...args: unknown[]) => request("preview", args),
     crypto,
+    AbortController,
     document: { activeElement: null },
-    HTMLElement: class {},
+    HTMLElement: class {
+      focus() {}
+    },
   };
   const { descriptor } = parse(readFileSync(new URL("RevisionPanel.vue", import.meta.url), "utf8"));
   assert.ok(descriptor.scriptSetup);
   let source = descriptor.scriptSetup.content;
-  const parsed = ts.createSourceFile("panel.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const parsed = ts.createSourceFile(
+    "panel.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
   for (const statement of [...parsed.statements].reverse())
     if (ts.isImportDeclaration(statement))
       source = source.slice(0, statement.getFullStart()) + source.slice(statement.end);
@@ -118,7 +127,7 @@ function harness() {
   function value(name: string) {
     const ref = panel[name];
     assert.ok(Vue.isRef(ref));
-    return ref.value as unknown;
+    return ref.value;
   }
   function set(name: string, value: unknown) {
     const ref = panel[name];
@@ -130,14 +139,26 @@ function harness() {
     mounted = false;
   }
   return {
-    ack, props, actor, meError, calls, client, call, value, set, detach,
+    ack,
+    props,
+    actor,
+    meError,
+    calls,
+    client,
+    call,
+    value,
+    set,
+    detach,
     persists: () => persists,
     queue() {
       const response = deferred();
       responses.push(response);
       return response;
     },
-    stop() { detach(); client.clear(); },
+    stop() {
+      detach();
+      client.clear();
+    },
   };
 }
 async function settle() {
@@ -156,7 +177,9 @@ await test("delayed persist ACK: repeated save starts exactly one persist and re
     await settle();
     assert.equal(h.persists(), 1, "single flight includes the persist wait");
     assert.equal(h.calls.filter((call) => call.method === "create").length, 1);
-  } finally { h.stop(); }
+  } finally {
+    h.stop();
+  }
 });
 
 function transition(h: ReturnType<typeof harness>, change: string) {
@@ -177,7 +200,18 @@ function transition(h: ReturnType<typeof harness>, change: string) {
   if (change === "readonly") h.props.readOnly = true;
   if (change === "dispose") h.detach();
 }
-const retirements = ["aba", "workspace", "project", "kind", "actor", "actor-aba", "session", "signed-out", "readonly", "dispose"];
+const retirements = [
+  "aba",
+  "workspace",
+  "project",
+  "kind",
+  "actor",
+  "actor-aba",
+  "session",
+  "signed-out",
+  "readonly",
+  "dispose",
+];
 
 await test("scope retirement including same-tick ABA prevents a late ACK from creating a revision", async () => {
   for (const change of retirements) {
@@ -189,46 +223,54 @@ await test("scope retirement including same-tick ABA prevents a late ACK from cr
       await settle();
       assert.equal(h.calls.filter((call) => call.method === "create").length, 0, change);
       assert.equal(h.value("notice"), null, change);
-    } finally { h.stop(); }
+    } finally {
+      h.stop();
+    }
   }
 });
 
 await test("old create success/error never updates notice or invalidates a new scope", async () => {
-  for (const failure of [false, true]) for (const change of retirements) {
-    const h = harness();
-    try {
-      const http = h.queue();
-      h.call("save");
-      h.ack.resolve();
-      await settle();
-      assert.equal(h.calls.filter((call) => call.method === "create").length, 1);
-      transition(h, change);
-      if (failure) http.reject(new Error("old create failed"));
-      else http.resolve();
-      await settle();
-      assert.equal(h.calls.filter((call) => call.method === "invalidate").length, 0, change);
-      assert.equal(h.value("notice"), null, change);
-    } finally { h.stop(); }
-  }
+  for (const failure of [false, true])
+    for (const change of retirements) {
+      const h = harness();
+      try {
+        const http = h.queue();
+        h.call("save");
+        h.ack.resolve();
+        await settle();
+        assert.equal(h.calls.filter((call) => call.method === "create").length, 1);
+        transition(h, change);
+        if (failure) http.reject(new Error("old create failed"));
+        else http.resolve();
+        await settle();
+        assert.equal(h.calls.filter((call) => call.method === "invalidate").length, 0, change);
+        assert.equal(h.value("notice"), null, change);
+      } finally {
+        h.stop();
+      }
+    }
 });
 
 await test("old restore success/timeout never updates a new scope or its document cache", async () => {
-  for (const failure of [false, true]) for (const change of retirements) {
-    const h = harness();
-    try {
-      const http = h.queue();
-      h.set("pendingRestoreId", "revision-old");
-      h.call("confirmRestore");
-      await settle();
-      assert.equal(h.calls.filter((call) => call.method === "restore").length, 1);
-      transition(h, change);
-      if (failure) http.reject(new ProblemError(504));
-      else http.resolve();
-      await settle();
-      assert.equal(h.calls.filter((call) => call.method === "invalidate").length, 0, change);
-      assert.equal(h.value("notice"), null, change);
-    } finally { h.stop(); }
-  }
+  for (const failure of [false, true])
+    for (const change of retirements) {
+      const h = harness();
+      try {
+        const http = h.queue();
+        h.set("pendingRestoreId", "revision-old");
+        h.call("confirmRestore");
+        await settle();
+        assert.equal(h.calls.filter((call) => call.method === "restore").length, 1);
+        transition(h, change);
+        if (failure) http.reject(new ProblemError(504));
+        else http.resolve();
+        await settle();
+        assert.equal(h.calls.filter((call) => call.method === "invalidate").length, 0, change);
+        assert.equal(h.value("notice"), null, change);
+      } finally {
+        h.stop();
+      }
+    }
 });
 
 await test("preview latest selection wins and retirement discards old success/error", async () => {
@@ -243,20 +285,25 @@ await test("preview latest selection wins and retirement discards old success/er
     first.resolve({ id: "first", contentJson: {} });
     await old;
     assert.equal(record(h.value("preview")).id, "second");
-  } finally { h.stop(); }
-  for (const failure of [false, true]) for (const change of retirements) {
-    const h = harness();
-    try {
-      const http = h.queue();
-      const done = h.call("showPreview", "old");
-      transition(h, change);
-      if (failure) http.reject(new Error("old preview failed"));
-      else http.resolve({ id: "old", contentJson: {} });
-      await done;
-      assert.equal(h.value("notice"), null, change);
-      assert.equal(h.value("preview"), null, change);
-    } finally { h.stop(); }
+  } finally {
+    h.stop();
   }
+  for (const failure of [false, true])
+    for (const change of retirements) {
+      const h = harness();
+      try {
+        const http = h.queue();
+        const done = h.call("showPreview", "old");
+        transition(h, change);
+        if (failure) http.reject(new Error("old preview failed"));
+        else http.resolve({ id: "old", contentJson: {} });
+        await done;
+        assert.equal(h.value("notice"), null, change);
+        assert.equal(h.value("preview"), null, change);
+      } finally {
+        h.stop();
+      }
+    }
 });
 
 await test("delayed persist ACK: changing the target retires the pending save", async () => {
@@ -268,5 +315,7 @@ await test("delayed persist ACK: changing the target retires the pending save", 
     await settle();
     assert.equal(h.calls.filter((call) => call.method === "create").length, 0);
     assert.equal(h.value("notice"), null);
-  } finally { h.stop(); }
+  } finally {
+    h.stop();
+  }
 });
