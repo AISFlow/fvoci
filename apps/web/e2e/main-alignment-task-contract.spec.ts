@@ -460,25 +460,34 @@ for (const archivedTarget of [false, true]) {
         expect(
           (await page.request.patch(parentEndpoint, { data: { archived: false } })).status(),
         ).toBe(200);
-        await expect(page.getByTestId(`task-edit-dependency-remove-${f.task.id}`)).toBeEnabled();
+        const restored = await page.request.get(parentEndpoint);
+        expect(restored.status()).toBe(200);
+        expect(
+          z.object({ archivedAt: z.null() }).parse(await restored.json()).archivedAt,
+        ).toBeNull();
+      } else {
+        const removed = page.waitForResponse(
+          (r) =>
+            r.url().endsWith(`${parentEndpoint}/dependencies/${f.task.id}`) &&
+            r.request().method() === "DELETE",
+        );
+        await page.getByTestId(`task-edit-dependency-remove-${f.task.id}`).click();
+        expect((await removed).status()).toBe(200);
+        await expect(
+          page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`),
+        ).toHaveCount(0);
+        await page.getByTestId("task-edit-dependency-open").click();
+        await page.getByTestId("task-edit-dependency-target").selectOption(f.task.id);
+        const added = page.waitForResponse(
+          (r) =>
+            r.url().endsWith(`${parentEndpoint}/dependencies`) && r.request().method() === "POST",
+        );
+        await page.getByTestId("task-edit-dependency-add").click();
+        expect((await added).status()).toBe(200);
+        await expect(
+          page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`),
+        ).toBeVisible();
       }
-      const removed = page.waitForResponse(
-        (r) =>
-          r.url().endsWith(`${parentEndpoint}/dependencies/${f.task.id}`) &&
-          r.request().method() === "DELETE",
-      );
-      await page.getByTestId(`task-edit-dependency-remove-${f.task.id}`).click();
-      expect((await removed).status()).toBe(200);
-      await expect(page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`)).toHaveCount(0);
-      await page.getByTestId("task-edit-dependency-open").click();
-      await page.getByTestId("task-edit-dependency-target").selectOption(f.task.id);
-      const added = page.waitForResponse(
-        (r) =>
-          r.url().endsWith(`${parentEndpoint}/dependencies`) && r.request().method() === "POST",
-      );
-      await page.getByTestId("task-edit-dependency-add").click();
-      expect((await added).status()).toBe(200);
-      await expect(page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`)).toBeVisible();
       const detail = await page.request.get(parentEndpoint);
       const edges = z
         .object({
