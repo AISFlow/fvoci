@@ -59,7 +59,7 @@ function form() {
   });
   const events: { name: string; args: unknown[] }[] = [];
   const scope = Vue.effectScope();
-  const state = scope.run(() =>
+  const setupState = scope.run(() =>
     component.setup(props, {
       attrs: {},
       slots: {},
@@ -67,7 +67,8 @@ function form() {
       emit: (name: string, ...args: unknown[]) => events.push({ name, args }),
     }),
   );
-  assert.ok(state);
+  assert.ok(setupState);
+  const state = setupState;
   function value(name: string): unknown {
     const field = state[name];
     assert.ok(Vue.isRef(field));

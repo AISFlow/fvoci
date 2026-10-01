@@ -299,14 +299,16 @@ for (const aba of [false, true]) {
         await expect(page.getByTestId("task-edit-type")).toHaveValue("task");
       }
       await expect(page.getByTestId("task-edit-hierarchy-save")).toBeDisabled();
-      // A fresh draft for the selected target is owned by that target/generation.
+      // A retained page disables metadata while its previous move is pending.
+      // Returning via the list mounts a new page whose draft has its own lifetime.
       if (aba) await page.getByTestId("task-edit-type").selectOption("bug");
-      else await page.getByTestId("task-edit-type").selectOption("story");
+      else await expect(page.getByTestId("task-edit-type")).toBeDisabled();
       release();
       expect((await response).status()).toBe(200);
       await expect(page.getByTestId("task-edit-type")).toBeEnabled();
-      await expect(page.getByTestId("task-edit-type")).toHaveValue(aba ? "bug" : "story");
-      await expect(page.getByTestId("task-edit-hierarchy-save")).toBeEnabled();
+      await expect(page.getByTestId("task-edit-type")).toHaveValue(aba ? "bug" : "epic");
+      if (aba) await expect(page.getByTestId("task-edit-hierarchy-save")).toBeEnabled();
+      else await expect(page.getByTestId("task-edit-hierarchy-save")).toBeDisabled();
       await expect(page.getByRole("alert")).toHaveCount(0);
       expect(hierarchy(await f.stored())).toEqual(hierarchy(f.task));
     } finally {
@@ -381,7 +383,7 @@ test("real permission loss retires hierarchy; regrant never restores the old dra
     expect(
       (
         await signed.page.request.post(memberEndpoint, {
-          data: { userId: actorId, role: "editor" },
+          data: { userId: actorId, role: "member" },
         })
       ).status(),
     ).toBe(201);
@@ -416,7 +418,7 @@ test("real permission loss retires hierarchy; regrant never restores the old dra
     expect(
       (
         await signed.page.request.patch(`${memberEndpoint}/${actorId}`, {
-          data: { role: "editor" },
+          data: { role: "member" },
         })
       ).status(),
     ).toBe(200);
