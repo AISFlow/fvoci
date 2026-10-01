@@ -348,13 +348,20 @@ async function editAndReadBack(
 ) {
   const errors: string[] = [];
   const frames: { direction: string; message: string }[] = [];
+  const rawControlFrames: { direction: string; payloadBase64: string }[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("websocket", (socket) => {
     const record =
       (direction: string) =>
       ({ payload }: { payload: string | Buffer }) => {
         const message = payload.toString().match(/persist(?:ed)?:[\w-]+/)?.[0];
-        if (message) frames.push({ direction, message });
+        if (message) {
+          frames.push({ direction, message });
+          rawControlFrames.push({
+            direction,
+            payloadBase64: Buffer.from(payload).toString("base64"),
+          });
+        }
       };
     socket.on("framesent", record("framesent"));
     socket.on("framereceived", record("framereceived"));
@@ -392,7 +399,8 @@ async function editAndReadBack(
   try {
     const readback = await fresh.page.request.get(resource.readback);
     expect(readback.ok()).toBe(true);
-    const saved = bodySchema.parse(await readback.json());
+    const rawSaved: unknown = await readback.json();
+    const saved = bodySchema.parse(rawSaved);
     expect(JSON.stringify(saved.contentJson)).toContain(expected);
     await fresh.page.goto(resource.path);
     await expect(fresh.page.locator(".fvoci-editor .ProseMirror").first()).toContainText(expected);
@@ -407,7 +415,14 @@ async function editAndReadBack(
       await anonymous.close();
     }
     expect(errors).toEqual([]);
-    await attachJson("persist-and-readback", { resource, expected, frames, saved });
+    await attachJson("persist-and-readback", {
+      resource,
+      expected,
+      frames,
+      rawControlFrames,
+      saved,
+      readback: { status: readback.status(), body: rawSaved },
+    });
   } finally {
     await fresh.context.close();
   }
