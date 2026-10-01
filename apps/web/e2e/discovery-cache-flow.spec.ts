@@ -1,4 +1,5 @@
 import { readJson, flowSchemas, login } from "./helpers";
+import { writeFileSync } from "node:fs";
 import { buildCacheObserverFixture } from "./cache-observer-fixture";
 import type { CacheObservationWindow } from "./cache-observer-adapter";
 import { expect, test, type Page, type Browser } from "@playwright/test";
@@ -14,11 +15,14 @@ test.afterAll(() => {
   fixture?.dispose();
 });
 test.afterEach(async () => {
-  if (fixture)
+  if (fixture) {
+    const reportPath = test.info().outputPath("cache-observer-served-assets.json");
+    writeFileSync(reportPath, JSON.stringify(await fixture.evidence(), null, 2));
     await test.info().attach("cache-observer-served-assets", {
-      body: Buffer.from(JSON.stringify(await fixture.evidence(), null, 2)),
+      path: reportPath,
       contentType: "application/json",
     });
+  }
 });
 async function newSignedInPage(browser: Browser, baseURL: string | undefined, who: typeof admin) {
   const context = await browser.newContext({ baseURL });
