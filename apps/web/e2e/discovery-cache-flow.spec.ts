@@ -1,71 +1,53 @@
-import { readJson, flowSchemas } from "./helpers";
-import { expect, test, type Page } from "@playwright/test";
-import {
-  admin,
-  createDoc,
-  newSignedInPage,
-  setupInstance,
-  workspaceId,
-} from "./workspace-wiki-vue-editor";
+import { readJson, flowSchemas, login } from "./helpers";
+import { buildCacheObserverFixture } from "./cache-observer-fixture";
+import type { CacheObservationWindow } from "./cache-observer-adapter";
+import { expect, test, type Page, type Browser } from "@playwright/test";
+import { admin, createDoc, setupInstance, workspaceId } from "./workspace-wiki-vue-editor";
 
 test.describe.configure({ mode: "serial" });
-test.beforeAll(async ({ browser, baseURL }) => setupInstance(browser, baseURL));
+let fixture: ReturnType<typeof buildCacheObserverFixture> | undefined;
+test.beforeAll(async ({ browser, baseURL }) => {
+  await setupInstance(browser, baseURL);
+  fixture = buildCacheObserverFixture();
+});
+test.afterAll(() => {
+  fixture?.dispose();
+});
+test.afterEach(async () => {
+  if (fixture)
+    await test.info().attach("cache-observer-served-assets", {
+      body: Buffer.from(JSON.stringify(fixture.evidence(), null, 2)),
+      contentType: "application/json",
+    });
+});
+async function newSignedInPage(browser: Browser, baseURL: string | undefined, who: typeof admin) {
+  const context = await browser.newContext({ baseURL });
+  if (!fixture) throw new Error("Cache observation fixture was not built");
+  await fixture.install(context);
+  const page = await context.newPage();
+  await login(page, who.email, who.password);
+  return { context, page };
+}
 
 // Keep the mounted application's actual QueryClient through every navigation.
 // A document reload or forced invalidation would hide this regression.
 async function push(page: Page, path: string) {
+  const mountedAt = await page.evaluate(() => performance.timeOrigin);
+  await expect.poll(() => page.evaluate(() => "fvociCacheObservationFixture" in window)).toBe(true);
   await page.evaluate(async (path) => {
-    const root = document.getElementById("root") as HTMLElement & {
-      __vue_app__: {
-        config: {
-          globalProperties: {
-            $router: {
-              push: (path: string) => Promise<unknown>;
-            };
-          };
-        };
-      };
-    };
-    await root.__vue_app__.config.globalProperties.$router.push(path);
+    await (window as CacheObservationWindow).fvociCacheObservationFixture.push(path);
   }, path);
   await expect(page).toHaveURL(new RegExp(`${path.replace(/[?]/g, "\\?")}$`));
+  expect(await page.evaluate(() => performance.timeOrigin)).toBe(mountedAt);
 }
 async function discoverySnapshot(page: Page, ws: string, tag = "") {
-  return page.evaluate(
-    ({ ws, tag }) => {
-      type Client = import("@tanstack/vue-query").QueryClient;
-      const root = document.getElementById("root") as HTMLElement & {
-        __vue_app__: {
-          _context: {
-            provides: Record<string, Client>;
-          };
-        };
-      };
-      const required1 = root.__vue_app__._context.provides.VUE_QUERY_CLIENT;
-      if (required1 === undefined) {
-        throw new Error(
-          "Missing fixture value: root.__vue_app__._context.provides.VUE_QUERY_CLIENT",
-        );
-      }
-      const client = required1;
-      const state = client.getQueryState(["wiki-discovery", ws, tag]);
-      return {
-        age: Date.now() - (state?.dataUpdatedAt ?? 0),
-        updatedAt: state?.dataUpdatedAt,
-        invalidated: state?.isInvalidated,
-        countsUpdatedAt: client.getQueryState(["me", "workspaces"])?.dataUpdatedAt,
-        workspaceCount: client
-          .getQueryData<{
-            items: {
-              id: string;
-              documentCount: number;
-            }[];
-          }>(["me", "workspaces"])
-          ?.items.find((item) => item.id === ws)?.documentCount,
-      };
-    },
+  const snapshot = await page.evaluate(
+    ({ ws, tag }) =>
+      (window as CacheObservationWindow).fvociCacheObservationFixture.discoverySnapshot(ws, tag),
     { ws, tag },
   );
+  expect(snapshot.staleTime).toBe(30_000);
+  return snapshot;
 }
 
 for (const host of ["wiki", "project"] as const) {
@@ -191,6 +173,8 @@ test("project restore refreshes retained discovery, project lists and workspace 
   // Prepare the fixture before mounting the app: HomePage fetches workspace
   // totals on login, which can otherwise cache the intermediate root-only count.
   const context = await browser.newContext({ baseURL });
+  if (!fixture) throw new Error("Cache observation fixture was not built");
+  await fixture.install(context);
   const page = await context.newPage();
   try {
     expect(

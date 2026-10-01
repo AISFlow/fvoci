@@ -23,5 +23,15 @@ export function start(): void {
   if (!root) throw new Error("FVOCI app root element is missing");
   root.classList.add("isolate");
 
-  createApp(App).use(createAppRouter()).use(ui).use(VueQueryPlugin, { queryClient }).mount(root);
+  const router = createAppRouter();
+  createApp(App).use(router).use(ui).use(VueQueryPlugin, { queryClient }).mount(root);
+  // This branch is eliminated from the standard production bundle. Only the
+  // separately built cache-observation fixture receives these actual instances.
+  if (import.meta.env.MODE === "task-cache-e2e") {
+    void import("../../e2e/cache-observer-adapter")
+      .then(({ installCacheObserver }) => {
+        installCacheObserver(queryClient, router);
+      })
+      .catch(reportError);
+  }
 }
