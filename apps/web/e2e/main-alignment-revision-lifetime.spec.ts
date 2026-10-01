@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
+import { expect, test, type Page, type Response, type WebSocketRoute } from "@playwright/test";
 import { createEncoder, toUint8Array, writeVarString, writeVarUint } from "lib0/encoding";
 import { z } from "zod";
 import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
@@ -13,7 +13,20 @@ const workspaceSchema = z.object({
 const projectSchema = z.object({ id: z.string(), rootDocumentId: z.string().nullable() });
 const documentSchema = z.object({ id: z.string(), displayId: z.string() });
 const revisionsSchema = z.object({
-  items: z.array(z.object({ id: z.string(), reason: z.string() })),
+  items: z.array(
+    z.object({
+      id: z.string().uuid(),
+      reason: z.string(),
+      createdBy: z.string().uuid().nullable(),
+    }),
+  ),
+});
+const systemSessionHistorySchema = z.array(
+  z.object({ id: z.string().uuid(), reason: z.literal("session"), createdBy: z.null() }),
+);
+const revisionDetailSchema = revisionsSchema.shape.items.element.extend({
+  contentJson: z.unknown(),
+  ySnapshot: z.string(),
 });
 const bodySchema = z.object({ contentJson: z.unknown() });
 const meSchema = z.object({ userId: z.string(), sessionId: z.string() });
@@ -154,6 +167,12 @@ test("delayed durable ACK serializes repeated revision saves and fresh clients r
   await expect(page.getByTestId("revision-item")).toHaveCount(1);
   const [revision] = await history(page, target.path(target.a.id));
   assert.ok(revision);
+  // Positive authorization control: this live actor can create a manual row,
+  // and the system-only history oracle must reject that actual server row.
+  expect(revision.reason).toBe("manual");
+  const me = meSchema.parse(await (await page.request.get("/api/v1/auth/me")).json());
+  expect(revision.createdBy).toBe(me.userId);
+  expect(systemSessionHistorySchema.safeParse([revision]).success).toBe(false);
   const detail = await page.request.get(target.path(target.a.id) + "/revisions/" + revision.id);
   expect(detail.ok()).toBe(true);
   expect(bodySchema.parse(await detail.json()).contentJson).toMatchObject({
@@ -183,7 +202,7 @@ test("delayed durable ACK serializes repeated revision saves and fresh clients r
     body: JSON.stringify({
       requests: gate.requests,
       received: gate.received,
-      revision: revision.id,
+      revision,
     }),
     contentType: "application/json",
   });
@@ -259,14 +278,22 @@ test("unmount and document A to B to A discard an old durable ACK without new re
   // Last-client departure may legitimately capture an automatic session revision.
   // A retired manual save must neither create nor promote that history entry.
   expect(revisions.every((revision) => revision.reason === "session")).toBe(true);
+  systemSessionHistorySchema.parse(revisions);
 });
 
 test("actual project write revocation after durable ACK refuses revision creation", async ({
   page,
-}) => {
+}, info) => {
   const target = await createTarget(page, "RAL5");
   const gate = await interceptAck(page);
-  await edit(page, target.href(target.a.displayId), "edit before project archive");
+  const text = "edit before project archive";
+  const base = target.path(target.a.id);
+  const browserCreates: Response[] = [];
+  page.on("response", (response) => {
+    if (response.request().method() === "POST" && response.url().endsWith(base + "/revisions"))
+      browserCreates.push(response);
+  });
+  await edit(page, target.href(target.a.displayId), text);
   await page.getByTestId("revision-save").click();
   await expect.poll(() => gate.held.length).toBe(1);
   const archived = await page.request.post(target.projectPath + "/archive");
@@ -275,9 +302,56 @@ test("actual project write revocation after durable ACK refuses revision creatio
   await expect(
     page.locator(".document-revision-panel__notice").filter({ hasText: "실패" }),
   ).toBeVisible();
-  expect(await history(page, target.path(target.a.id))).toHaveLength(0);
-  const refused = await page.request.post(target.path(target.a.id) + "/revisions");
+  const beforeDeparture = await history(page, base);
+  expect(beforeDeparture.filter((revision) => revision.reason === "manual")).toHaveLength(0);
+  systemSessionHistorySchema.parse(beforeDeparture);
+  const body = await page.request.get(base + "/body");
+  expect(body.ok()).toBe(true);
+  const durableContent = bodySchema.parse(await body.json()).contentJson;
+  expect(JSON.stringify(durableContent)).toContain(text);
+
+  // Last departure is real and deterministic. An archived, still-live project
+  // permits system history of the already committed edit, never a manual save.
+  await page.goto("/");
+  await expect.poll(async () => (await history(page, base)).length).toBe(1);
+  const before = await history(page, base);
+  const [session] = systemSessionHistorySchema.parse(before);
+  assert.ok(session);
+  const detail = await page.request.get(base + "/revisions/" + session.id);
+  expect(detail.ok()).toBe(true);
+  const snapshot = revisionDetailSchema.parse(await detail.json());
+  expect(snapshot).toMatchObject(session);
+  expect(snapshot.contentJson).toEqual(durableContent);
+  expect(snapshot.ySnapshot).not.toBe("");
+
+  const refused = await page.request.post(base + "/revisions");
   expect(refused.status()).toBe(409);
+  expect(z.object({ code: z.string() }).parse(await refused.json()).code).toBe("project_archived");
+  // The refused request must neither insert a manual row nor promote/mutate
+  // the automatic head, even though it contains the same durable content.
+  expect(await history(page, base)).toEqual(before);
+  const unchanged = await page.request.get(base + "/revisions/" + session.id);
+  expect(unchanged.ok()).toBe(true);
+  expect(revisionDetailSchema.parse(await unchanged.json())).toEqual(snapshot);
+  // The native room may retire before a UI POST starts. Every response that
+  // does arrive must be a real denial; the explicit POST above always runs.
+  const browserRefusals = [];
+  for (const response of browserCreates) {
+    expect(response.status()).toBe(409);
+    const code = z.object({ code: z.string() }).parse(await response.json()).code;
+    expect(code).toBe("project_archived");
+    browserRefusals.push({ status: response.status(), code });
+  }
+  await info.attach("archived-system-revision", {
+    body: JSON.stringify({
+      base,
+      snapshot,
+      durableContent,
+      refusedStatus: refused.status(),
+      browserRefusals,
+    }),
+    contentType: "application/json",
+  });
 });
 
 test("actual logout retires the old session and same-user reentry cannot consume its late ACK", async ({
@@ -313,4 +387,5 @@ test("actual logout retires the old session and same-user reentry cannot consume
   const revisions = await history(page, target.path(target.a.id));
   expect(revisions.filter((revision) => revision.reason === "manual")).toHaveLength(0);
   expect(created).toHaveLength(0);
+  systemSessionHistorySchema.parse(revisions);
 });

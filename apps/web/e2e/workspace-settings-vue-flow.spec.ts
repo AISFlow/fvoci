@@ -432,6 +432,11 @@ test("late workspace rename and delete success or failure cannot change the swit
       const workspaceA = await readJson(createdA, flowSchemas.workspace);
       await page.goto(`/w/${slugA}/settings`);
       await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveValue(nameA);
+      const documentToken = `${operation}/${outcome}`;
+      await page.evaluate(
+        (token) => Reflect.set(window, "settingsRaceDocument", token),
+        documentToken,
+      );
 
       let release!: () => void;
       let received!: () => void;
@@ -478,6 +483,9 @@ test("late workspace rename and delete success or failure cannot change the swit
         // The header uses Vue routing, preserving the mutation-owning page.
         await page.getByLabel("워크스페이스 전환").selectOption(workspaceB.id);
         await expect(page).toHaveURL(/\/w\/settings-race-b\/settings$/);
+        expect(
+          await page.evaluate(() => Reflect.get(window, "settingsRaceDocument") as unknown),
+        ).toBe(documentToken);
         await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveValue(
           "Race workspace B",
         );
@@ -523,6 +531,9 @@ test("late workspace rename and delete success or failure cannot change the swit
           )
           .toBe(outcome === "success" ? "success" : "error");
         await expect(page).toHaveURL(/\/w\/settings-race-b\/settings$/);
+        expect(
+          await page.evaluate(() => Reflect.get(window, "settingsRaceDocument") as unknown),
+        ).toBe(documentToken);
         await expect(page.getByText("저장했습니다", { exact: true })).toHaveCount(0);
         await expect(
           page.locator(".settings-page > .settings-section").first().getByRole("alert"),
@@ -538,7 +549,7 @@ test("late workspace rename and delete success or failure cannot change the swit
             )
           ).name,
         ).toBe("Race workspace B");
-        if (outcome === "success") {
+        if (operation === "rename" && outcome === "success") {
           expect(
             await page.evaluate((id) => {
               const root = document.getElementById("root") as HTMLElement & {
@@ -586,9 +597,49 @@ test("late workspace rename and delete success or failure cannot change the swit
           );
           await expect(page.getByText("저장했습니다", { exact: true })).toHaveCount(0);
         } else {
+          // Deletion removes A from the live picker; B keeps its identity and
+          // management permission without refetching the deleted A metadata.
+          const picker = page.getByLabel("워크스페이스 전환");
+          await expect(picker).toHaveValue(workspaceB.id);
+          await expect(picker.locator(`option[value="${workspaceB.id}"]`)).toHaveText(
+            "Race workspace B",
+          );
+          await expect(picker.locator(`option[value="${workspaceA.id}"]`)).toHaveCount(
+            outcome === "success" ? 0 : 1,
+          );
+          await expect(page.getByRole("button", { name: "저장", exact: true })).toBeEnabled();
+          const liveList = await readJson(
+            await page.request.get("/api/v1/me/workspaces"),
+            flowSchemas.workspaces,
+          );
+          expect(liveList.items.find((item) => item.id === workspaceB.id)).toMatchObject({
+            id: workspaceB.id,
+            name: "Race workspace B",
+            role: "owner",
+          });
+          expect(liveList.items.some((item) => item.id === workspaceA.id)).toBe(
+            outcome === "failure",
+          );
           expect((await page.request.get(`/api/v1/workspaces/${workspaceA.id}`)).status()).toBe(
             outcome === "success" ? 404 : 200,
           );
+          if (outcome === "success") {
+            // Reenter through the mounted router with A's old metadata still
+            // cached: the canonical list/guard must prevent stale settings.
+            await page.evaluate(async (target) => {
+              const root = document.getElementById("root") as HTMLElement & {
+                __vue_app__: {
+                  config: { globalProperties: { $router: { push(to: string): Promise<unknown> } } };
+                };
+              };
+              await root.__vue_app__.config.globalProperties.$router.push(target);
+            }, `/w/${slugA}/settings`);
+            await expect(page).toHaveURL(/\/\?denied=workspace$/);
+            await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveCount(0);
+            await page.goto(`/w/${slugA}/settings`);
+            await expect(page).toHaveURL(/\/\?denied=workspace$/);
+            await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveCount(0);
+          }
         }
       } finally {
         release();
