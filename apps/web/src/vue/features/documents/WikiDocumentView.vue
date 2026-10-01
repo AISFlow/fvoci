@@ -48,6 +48,7 @@ import OriginPanel from "./OriginPanel.vue";
 import RevisionPanel from "./RevisionPanel.vue";
 import ShareDialog from "./ShareDialog.vue";
 import StarToggle from "./StarToggle.vue";
+import { useDocumentHeaderDraft } from "./useDocumentHeaderDraft";
 import "@/features/documents/document-shell.css";
 
 // A wiki document (the React document-view.tsx, wiki branch). The parent
@@ -102,7 +103,11 @@ function onOptionsKeydown(event: KeyboardEvent): void {
   optionsButton.value?.$el.focus();
 }
 
-const title = ref("");
+const header = useDocumentHeaderDraft(() => {
+  const data = metaQuery.data.value;
+  return data?.id === props.documentId ? data : undefined;
+});
+const { title, icon, status } = header;
 const titleInput = ref<HTMLTextAreaElement | null>(null);
 // Keep long titles readable at the current width, including readonly titles.
 watch(
@@ -129,25 +134,12 @@ watch(
   },
   { flush: "post" },
 );
-const icon = ref("");
-const status = ref<string>("draft");
 const saveError = ref<string | null>(null);
 const persistError = ref<string | null>(null);
 const persisting = ref(false);
 const moveParentId = ref("");
 const lifecycleError = ref<string | null>(null);
 const editor = shallowRef<TiptapEditor | null>(null);
-
-watch(
-  () => metaQuery.data.value,
-  (data) => {
-    if (!data) return;
-    title.value = data.title;
-    icon.value = data.icon ?? "";
-    status.value = data.status;
-  },
-  { immediate: true },
-);
 
 // Uploads go through the wiki document route; URL embeds show the unfurl card.
 const attachmentBridge = markRaw(createAttachmentBridge(props.workspaceId, props.documentId));
@@ -264,6 +256,39 @@ const saving = computed(() => patchMeta.isPending.value);
 const archived = computed(() => meta.value?.status === "archived");
 const readOnly = computed(() => archived.value || (session.value?.readOnly ?? false));
 const ready = computed(() => Boolean(session.value?.synced && collabUser.value));
+
+const headerReadOnly = computed(
+  () =>
+    readOnly.value ||
+    !ready.value ||
+    (me.error.value instanceof ProblemError && me.error.value.status === 401) ||
+    session.value?.status === "unauthorized" ||
+    (metaQuery.error.value instanceof ProblemError &&
+      [401, 403, 404].includes(metaQuery.error.value.status)),
+);
+// Retire drafts and callbacks on identity/permission changes, including ABA.
+// Ordinary same-room presence/ACK snapshots and metadata refreshes keep drafts.
+watch(
+  [
+    () => scope.value.workspaceId,
+    () => scope.value.documentId,
+    () => scope.value.projectId,
+    () => props.slug,
+    () => me.data.value?.userId,
+    () => me.data.value?.sessionId,
+    () => session.value?.doc,
+    () => session.value?.provider,
+    () => session.value?.generation,
+    headerReadOnly,
+  ],
+  () => {
+    operationLifecycle += 1;
+    header.reset();
+    saveError.value = null;
+  },
+  { flush: "sync" },
+);
+
 const refusalNote = computed(() => collabRefusalNote(session.value?.status, ready.value));
 const badge = computed(() =>
   session.value
@@ -297,42 +322,48 @@ const awareness = computed(() => session.value?.provider.awareness);
 
 async function saveTitle(): Promise<void> {
   const current = meta.value;
-  if (!current) return;
-  const next = title.value.trim();
+  if (!current || saving.value || headerReadOnly.value) return;
+  const draft = title.value;
+  const next = draft.trim();
   if (!next || next === current.title) return;
   const operation = { ...captureOperation(), body: { title: next } };
   try {
-    await patchMeta.mutateAsync(operation);
+    const saved = await patchMeta.mutateAsync(operation);
+    if (currentOperation(operation) && title.value === draft) title.value = saved.title;
   } catch {
-    if (currentOperation(operation)) title.value = current.title;
+    // The mutation displays the error. Keep the draft for a deliberate retry;
+    // identity/permission retirement above discards it when no longer owned.
   }
 }
 
 async function saveIcon(): Promise<void> {
-  const current = meta.value?.icon ?? "";
-  if (icon.value === current) return;
-  const nextIcon = icon.value.trim() === "" ? null : icon.value.trim();
+  if (saving.value || headerReadOnly.value) return;
+  const draft = icon.value;
+  const nextIcon = draft.trim() || null;
+  if (nextIcon === (meta.value?.icon ?? null)) return;
   const operation = { ...captureOperation(), body: { icon: nextIcon } };
   try {
-    await patchMeta.mutateAsync(operation);
+    const saved = await patchMeta.mutateAsync(operation);
+    if (currentOperation(operation) && icon.value === draft) icon.value = saved.icon ?? "";
   } catch {
-    if (currentOperation(operation)) icon.value = current;
+    // Keep this field's failed draft; unrelated fields still follow the server.
   }
 }
 
 async function saveStatus(next: string): Promise<void> {
   const current = meta.value;
-  if (!current || next === current.status) return;
-  const previous = current.status;
+  if (!current || saving.value || headerReadOnly.value || next === current.status) return;
   const operation = { ...captureOperation(), body: { status: next } };
   try {
-    await patchMeta.mutateAsync(operation);
+    const saved = await patchMeta.mutateAsync(operation);
+    if (currentOperation(operation) && status.value === next) status.value = saved.status;
   } catch {
-    if (currentOperation(operation)) status.value = previous;
+    if (currentOperation(operation) && status.value === next) status.value = meta.value.status;
   }
 }
 
 async function onStatusChange(event: Event): Promise<void> {
+  if (saving.value || headerReadOnly.value) return;
   const next = (event.target as HTMLSelectElement).value;
   status.value = next;
   await saveStatus(next);
@@ -458,7 +489,7 @@ function flashBlock(id: string): void {
           class="document-page__title"
           :aria-label="t('doc.title')"
           :maxlength="TITLE_MAX"
-          :disabled="saving || readOnly"
+          :disabled="saving || headerReadOnly"
           @focus="onTitleFocus"
           @blur="onTitleBlur"
           @keydown="onTitleKeydown"
@@ -545,7 +576,7 @@ function flashBlock(id: string): void {
                     v-model="icon"
                     class="document-page__field-input"
                     :maxlength="ICON_MAX"
-                    :disabled="saving || readOnly"
+                    :disabled="saving || headerReadOnly"
                     @blur="saveIcon"
                   />
                 </div>
@@ -558,7 +589,7 @@ function flashBlock(id: string): void {
                     class="document-page__field-select"
                     :value="status"
                     :aria-label="t('doc.status.a11y')"
-                    :disabled="saving || readOnly"
+                    :disabled="saving || headerReadOnly"
                     @change="onStatusChange"
                   >
                     <option v-for="value in STATUSES" :key="value" :value="value">{{
