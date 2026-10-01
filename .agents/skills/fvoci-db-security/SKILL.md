@@ -1,9 +1,9 @@
 ---
 name: fvoci-db-security
-description: FVOCI 인증·인가·세션·DB 쿼리·트랜잭션·migration 또는 검색·공유·첨부 접근 권한을 변경하거나 검토할 때 사용한다.
+description: 프론트/백엔드의 인증·인가·세션·DB 쿼리·트랜잭션·migration 및 검색·공유·첨부 권한 변경/검토에 사용한다. 실제 앱 역할과 DB 불변식을 다루며 순수 시각 조정에는 사용하지 않는다.
 ---
 
-# DB와 보안 불변식 검증
+# 인증·인가·DB·migration 보안 계약
 
 공통 운영·권한은 AGENTS.md를 따른다. 운영 DB가 아니라 소유권이 분리된 실제 테스트 DB를 사용한다.
 

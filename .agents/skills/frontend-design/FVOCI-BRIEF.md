@@ -1,4 +1,6 @@
-# FVOCI application brief
+# FVOCI visual, usability and CJK typography brief
+
+Use this for visual design, usability, CJK typography, scaling and accessibility work in the existing Vue UI. Functional frontend changes alone do not trigger this design skill; use AGENTS.md to select contract, verification and changed-boundary skills instead.
 
 Read this together with the unmodified `SKILL.md` and `LICENSE.txt`. User instructions override upstream stylistic novelty. This is a Korean collaboration work tool with existing production UI, not a new marketing page. Preserve chosen Nuxt UI Dashboard / Editor / Calendar references, current fonts, tokens and components. Do not add a hero, gradients, giant cards, a new design system, model/tool setup, or a wholesale redesign.
 
