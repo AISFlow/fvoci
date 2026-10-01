@@ -213,6 +213,86 @@ for (const returnToOrigin of [false, true]) {
   });
 }
 
+test("conflict recovery finishing after task navigation preserves the selected draft", async ({
+  browser,
+  baseURL,
+}) => {
+  const signed = await newSignedInPage(browser, baseURL, admin);
+  const page = signed.page;
+  let release = () => {};
+  try {
+    const f = await fixture(page, "TCR", { dueDate: "2027-03-13" });
+    const created = await page.request.post(`${f.base}/projects/${f.projectId}/tasks`, {
+      data: { title: "Recovery parent", type: "epic", statusId: f.task.statusId },
+    });
+    expect(created.status()).toBe(201);
+    const parent = taskSchema.parse(await created.json());
+    expect((await page.request.patch(f.endpoint, { data: { parentId: parent.id } })).status()).toBe(
+      200,
+    );
+    await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
+    const draft = page.getByTestId("task-edit-due-date");
+    await expect(draft).toHaveValue("2027-03-13");
+    await draft.fill("2027-03-20");
+    const refreshed = page.waitForResponse(
+      (r) => r.url().endsWith(f.endpoint) && r.request().method() === "GET",
+    );
+    expect(
+      (await page.request.patch(f.endpoint, { data: { dueDate: "2027-03-17" } })).status(),
+    ).toBe(200);
+    expect(taskSchema.parse(await (await refreshed).json()).dueDate).toBe("2027-03-17");
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let serverAnswered = () => {};
+    const answered = new Promise<void>((resolve) => {
+      serverAnswered = resolve;
+    });
+    await page.route(`**${f.endpoint}`, async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      serverAnswered();
+      await gate;
+      await route.fulfill({ response });
+    });
+    const conflict = page.waitForResponse(
+      (r) => r.url().endsWith(f.endpoint) && r.request().method() === "PATCH",
+    );
+    await draft.blur();
+    expect((await conflict).status()).toBe(409);
+    await answered; // Recovery has begun and awaits a real Rust GET response.
+    await page.locator(`a[href="/w/${admin.workspaceSlug}/TCR-${String(parent.number)}"]`).click();
+    await expect(page.getByRole("heading", { name: "Recovery parent", exact: true })).toBeVisible();
+    const title = page.getByTestId("task-edit-title");
+    await title.fill("Unsaved selected draft");
+    await expect(title).toHaveValue("Unsaved selected draft");
+    const recovery = page.waitForResponse(
+      (r) => r.url().endsWith(f.endpoint) && r.request().method() === "GET",
+    );
+    release();
+    expect(taskSchema.parse(await (await recovery).json()).dueDate).toBe("2027-03-17");
+    // Let the response completion and Vue DOM flush run before checking the draft.
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              resolve();
+            }),
+          ),
+        ),
+    );
+    await expect(title).toHaveValue("Unsaved selected draft");
+    const storedParent = await page.request.get(`${f.base}/tasks/${parent.id}`);
+    expect(storedParent.status()).toBe(200);
+    expect(taskSchema.parse(await storedParent.json()).title).toBe("Recovery parent");
+  } finally {
+    release();
+    await signed.context.close();
+  }
+});
+
 test("Calendar commit refreshes retained detail and Gantt before 30s even when stream hints are unavailable", async ({
   browser,
   baseURL,

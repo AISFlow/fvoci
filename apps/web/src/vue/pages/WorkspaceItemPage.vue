@@ -249,9 +249,10 @@ const pending = computed(
     deleteTask.isPending.value,
 );
 
-async function refetchAfterConflict(err: unknown): Promise<void> {
+async function refetchAfterConflict(err: unknown, epoch = patchEpoch): Promise<void> {
   if (err instanceof ProblemError && err.status === 409) {
     await afterMutation();
+    if (epoch !== patchEpoch) return;
     formEpoch.value += 1;
   }
 }
@@ -265,7 +266,7 @@ async function runPatch(body: PatchTaskBody): Promise<void> {
     await patchTask.mutateAsync(body);
   } catch (err) {
     if (epoch !== patchEpoch) return;
-    await refetchAfterConflict(err);
+    await refetchAfterConflict(err, epoch);
   }
 }
 
