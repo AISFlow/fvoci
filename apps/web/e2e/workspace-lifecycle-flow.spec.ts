@@ -222,7 +222,11 @@ for (const outcome of ["success", "failure"] as const) {
       expect(await page.evaluate(() => Reflect.get(window, "deleteVisit") as unknown)).toBe(
         "same document",
       );
-      await expect(page.getByText("controlled delete unavailable")).toHaveCount(0);
+      await expect(
+        page
+          .getByRole("alert")
+          .filter({ hasText: "요청을 처리하지 못했습니다. 다시 시도해 주세요." }),
+      ).toHaveCount(0);
       expect((await page.request.get(`/api/v1/workspaces/${workspace.id}`)).status()).toBe(
         outcome === "success" ? 404 : 200,
       );
@@ -254,7 +258,10 @@ test("failed delete stays in settings and a later external workspace loss still 
     });
   });
   await confirmDelete(page, slug);
-  await expect(page.getByText("controlled delete unavailable")).toBeVisible();
+  // ensureOk maps a503 without a problem code to this localized fallback; raw title is not UI text.
+  await expect(
+    page.getByRole("alert").filter({ hasText: "요청을 처리하지 못했습니다. 다시 시도해 주세요." }),
+  ).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/w/${slug}/settings$`));
   expect((await page.request.get(`/api/v1/workspaces/${workspace.id}`)).status()).toBe(200);
   const removed = await page.request.delete(`/api/v1/workspaces/${workspace.id}`, {
