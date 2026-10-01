@@ -51,7 +51,10 @@ const props = defineProps<{
   onStatusChange: (statusId: string) => void | Promise<void>;
   onPriorityChange: (priority: string) => void | Promise<void>;
   onHierarchySave: (type: string, parentId: string | null) => void | Promise<void>;
-  onDueDateBlur: (value: string) => void | Promise<void>;
+  onDueDateBlur: (
+    value: string,
+    expectedDates: Pick<TaskDetail, "startDate" | "dueDate" | "dueAt">,
+  ) => void | Promise<void>;
   onAssigneesChange: (assigneeIds: string[]) => void | Promise<void>;
   onLabelsChange: (labelIds: string[]) => void | Promise<void>;
   onMilestoneChange: (milestoneId: string | null) => void | Promise<void>;
@@ -82,6 +85,8 @@ const archivePersistError = ref<string | null>(null);
 let archiveInFlight = false;
 
 const pageReadOnly = computed(() => props.readOnly);
+// HTTP metadata rights are independent of the collaboration connection's grant.
+const metadataReadOnly = computed(() => pageReadOnly.value || archivePersisting.value);
 const bodyReadOnly = computed(
   () => pageReadOnly.value || (session.value?.readOnly ?? false) || archivePersisting.value,
 );
@@ -149,7 +154,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :labels="labels"
       :milestones="milestones"
       :dependency-candidates="dependencyCandidates"
-      :read-only="bodyReadOnly"
+      :read-only="metadataReadOnly"
       :can-edit="canEdit"
       :pending="pending"
       :field-error="fieldError"

@@ -85,3 +85,35 @@ await test("the task stream listens only for events the server sends", () => {
   assert.deepEqual(types.sort(), ["error", "open", "task"]);
   sub.close();
 });
+
+await test("untrusted task hints require nonempty string identifiers and verbs", () => {
+  const hints: TaskStreamHint[] = [];
+  const sub = subscribeTaskStream("ws", "project", {
+    onResync: () => {},
+    onTask: (hint) => hints.push(hint),
+  });
+  const source = MockEventSource.latest();
+  for (const body of [
+    null,
+    [],
+    true,
+    { taskId: 1, verb: "task.updated" },
+    { taskId: "t1", verb: {} },
+    { taskId: "", verb: "task.updated" },
+    { taskId: "t1", verb: "" },
+  ]) {
+    source.message("task", JSON.stringify(body));
+  }
+  source.message("task", "{broken");
+  assert.deepEqual(hints, []);
+  // Unknown verbs are still hints: future server operations can request a GET.
+  source.message("task", JSON.stringify({ taskId: "t1", verb: "task.future" }));
+  source.message("task", JSON.stringify({ taskId: "t1", verb: "task.future" }));
+  assert.deepEqual(hints, [
+    { taskId: "t1", verb: "task.future" },
+    { taskId: "t1", verb: "task.future" },
+  ]);
+  sub.close();
+  source.message("task", JSON.stringify({ taskId: "t2", verb: "task.updated" }));
+  assert.equal(hints.length, 2, "a closed scope cannot deliver a late hint");
+});

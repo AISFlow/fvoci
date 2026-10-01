@@ -61,7 +61,7 @@ const emit = defineEmits<{
   statusChange: [statusId: string];
   priorityChange: [priority: string];
   hierarchySave: [type: string, parentId: string | null];
-  dueDateBlur: [value: string];
+  dueDateBlur: [value: string, expectedDates: Pick<TaskDetail, "startDate" | "dueDate" | "dueAt">];
   assigneesChange: [assigneeIds: string[]];
   labelsChange: [labelIds: string[]];
   milestoneChange: [milestoneId: string | null];
@@ -84,6 +84,34 @@ const depLagDays = ref(0);
 const depLocalError = ref<string | null>(null);
 const titleDraft = ref(props.task.title);
 const dueDateDraft = ref(props.task.dueDate ?? "");
+const dateSnapshot = () => ({
+  startDate: props.task.startDate,
+  dueDate: props.task.dueDate,
+  dueAt: props.task.dueAt,
+});
+const dueDateSnapshot = ref(dateSnapshot());
+
+// A stream refetch updates untouched metadata fields. Keep an unsaved draft
+// when its value has diverged from the previous committed row.
+watch(
+  () => [props.task.id, props.task.title] as const,
+  ([id, next], [previousId, previous]) => {
+    if (id !== previousId || titleDraft.value === previous) titleDraft.value = next;
+  },
+);
+watch(
+  () => [props.task.id, props.task.startDate, props.task.dueDate, props.task.dueAt] as const,
+  ([id, , next], [previousId, , previous]) => {
+    if (
+      id !== previousId ||
+      dueDateDraft.value === (previous ?? "") ||
+      dueDateDraft.value === (next ?? "")
+    ) {
+      dueDateDraft.value = next ?? "";
+      dueDateSnapshot.value = dateSnapshot();
+    }
+  },
+);
 
 watch(
   () => [props.task.id, props.task.type, props.task.parentId] as const,
@@ -157,13 +185,15 @@ function onTitleKeydown(event: KeyboardEvent): void {
 }
 
 function onDueDateBlur(): void {
-  if (dueDateDraft.value !== (props.task.dueDate ?? "")) emit("dueDateBlur", dueDateDraft.value);
+  if (dueDateDraft.value !== (props.task.dueDate ?? ""))
+    emit("dueDateBlur", dueDateDraft.value, { ...dueDateSnapshot.value });
 }
 
 function onDueDateKeydown(event: KeyboardEvent): void {
   if (event.key === "Enter") (event.target as HTMLInputElement).blur();
   if (event.key === "Escape") {
     dueDateDraft.value = props.task.dueDate ?? "";
+    dueDateSnapshot.value = dateSnapshot();
     (event.target as HTMLInputElement).blur();
   }
 }

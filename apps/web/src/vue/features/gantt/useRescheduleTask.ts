@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient, type QueryClient } from "@tanstack/vue-query";
 import { computed, ref } from "vue";
 import type { QueryKey } from "@tanstack/query-core";
-import { invalidateTaskCaches } from "@/features/tasks/task-cache";
+import { settleTaskPatch } from "@/features/tasks/task-patch-cache";
 import { taskMutationErrorMessage } from "@/features/tasks/task-errors";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import type { IsoDate } from "@/lib/iso-date";
@@ -68,11 +68,10 @@ export function useRescheduleTask(
       error.value = null;
       failed.value = false;
     },
-    onSuccess: async (saved, request) => {
+    onSuccess: async (saved) => {
       if (saved === null) return;
-      const { workspaceId, projectId } = context();
-      await invalidateTaskCaches(queryClient, workspaceId, projectId, request.id);
-      await whenIdle(queryClient, layoutKey());
+      await settleTaskPatch(queryClient, saved.workspaceId, saved.projectId, saved);
+      await whenIdle(queryClient, ["task-layout", saved.workspaceId, saved.projectId]);
     },
     onError: async (err) => {
       failed.value = true;
