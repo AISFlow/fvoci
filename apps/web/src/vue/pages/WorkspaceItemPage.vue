@@ -144,12 +144,16 @@ function goTo(path: string): void {
 }
 
 const patchTask = useMutation({
-  onMutate: () => ({ epoch: patchEpoch, actorEpoch: patchActorEpoch }),
-  mutationFn: async (body: PatchTaskBody) =>
+  onMutate: (input: { body: PatchTaskBody; scope: ReturnType<typeof captureTaskMutationScope> }) =>
+    input.scope,
+  mutationFn: async (input: {
+    body: PatchTaskBody;
+    scope: ReturnType<typeof captureTaskMutationScope>;
+  }) =>
     ensureOk(
       await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
-        body,
+        params: { path: taskMutationPath(input.scope) },
+        body: input.body,
       }),
     ),
   onSuccess: async (meta, _body, scope) => {
@@ -178,16 +182,32 @@ function captureTaskMutationScope() {
   };
 }
 
+function taskMutationPath(scope: ReturnType<typeof captureTaskMutationScope>) {
+  // Query awaits onMutate. Refuse an observed retired actor before sending;
+  // a request already sent remains an authoritative Rust operation.
+  if (scope.actorEpoch !== patchActorEpoch)
+    throw new Error("Task mutation actor retired before dispatch");
+  return { workspace_id: scope.workspaceId, task_id: scope.taskId };
+}
+
 async function invalidateCapturedTask(scope: ReturnType<typeof captureTaskMutationScope>) {
   await invalidateTaskCaches(queryClient, scope.workspaceId, scope.projectId, scope.taskId);
 }
 
 const moveTask = useMutation({
-  onMutate: captureTaskMutationScope,
-  mutationFn: async (input: { statusId: string; expectedStatusId: string }) =>
+  onMutate: (input: {
+    statusId: string;
+    expectedStatusId: string;
+    scope: ReturnType<typeof captureTaskMutationScope>;
+  }) => input.scope,
+  mutationFn: async (input: {
+    statusId: string;
+    expectedStatusId: string;
+    scope: ReturnType<typeof captureTaskMutationScope>;
+  }) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
+        params: { path: taskMutationPath(input.scope) },
         body: {
           statusId: input.statusId,
           expectedStatusId: input.expectedStatusId,
@@ -209,11 +229,11 @@ const moveTask = useMutation({
 });
 
 const trashTask = useMutation({
-  onMutate: captureTaskMutationScope,
-  mutationFn: async () =>
+  onMutate: (scope: ReturnType<typeof captureTaskMutationScope>) => scope,
+  mutationFn: async (scope: ReturnType<typeof captureTaskMutationScope>) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
+        params: { path: taskMutationPath(scope) },
       }),
     ),
   onSuccess: async (_data, _input, scope) => {
@@ -230,11 +250,11 @@ const trashTask = useMutation({
 });
 
 const cloneTask = useMutation({
-  onMutate: captureTaskMutationScope,
-  mutationFn: async () =>
+  onMutate: (scope: ReturnType<typeof captureTaskMutationScope>) => scope,
+  mutationFn: async (scope: ReturnType<typeof captureTaskMutationScope>) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/clone", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
+        params: { path: taskMutationPath(scope) },
       }),
     ),
   onSuccess: async (created, _input, scope) => {
@@ -251,11 +271,11 @@ const cloneTask = useMutation({
 });
 
 const deleteTask = useMutation({
-  onMutate: captureTaskMutationScope,
-  mutationFn: async () =>
+  onMutate: (scope: ReturnType<typeof captureTaskMutationScope>) => scope,
+  mutationFn: async (scope: ReturnType<typeof captureTaskMutationScope>) =>
     ensureOk(
       await api.DELETE("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
+        params: { path: taskMutationPath(scope) },
       }),
     ),
   onSuccess: async (_data, _input, scope) => {
@@ -294,7 +314,7 @@ async function runPatch(body: PatchTaskBody): Promise<void> {
   fieldError.value = null;
   actionError.value = null;
   try {
-    await patchTask.mutateAsync(body);
+    await patchTask.mutateAsync({ body, scope: captureTaskMutationScope() });
   } catch (err) {
     if (epoch !== patchEpoch) return;
     await refetchAfterConflict(err, epoch);
@@ -356,6 +376,7 @@ async function onStatusChange(statusId: string): Promise<void> {
     await moveTask.mutateAsync({
       statusId,
       expectedStatusId: current.statusId,
+      scope: captureTaskMutationScope(),
     });
   } catch (err) {
     if (epoch !== patchEpoch) return;
@@ -443,7 +464,7 @@ async function onRemoveDependency(edge: { blockerId: string; blockedId: string }
 async function onTrash(): Promise<void> {
   if (!window.confirm(`${t("task.trash.confirm.title")}\n${t("task.trash.confirm.body")}`)) return;
   try {
-    await trashTask.mutateAsync();
+    await trashTask.mutateAsync(captureTaskMutationScope());
   } catch {
     /* trashTask.onError already mapped the failure. */
   }
@@ -544,7 +565,7 @@ async function onTrash(): Promise<void> {
       :on-clone="
         async () => {
           try {
-            await cloneTask.mutateAsync();
+            await cloneTask.mutateAsync(captureTaskMutationScope());
           } catch {
             /* cloneTask.onError already mapped the failure. */
           }
@@ -553,7 +574,7 @@ async function onTrash(): Promise<void> {
       :on-delete="
         async () => {
           try {
-            await deleteTask.mutateAsync();
+            await deleteTask.mutateAsync(captureTaskMutationScope());
           } catch {
             /* deleteTask.onError already mapped the failure. */
           }
