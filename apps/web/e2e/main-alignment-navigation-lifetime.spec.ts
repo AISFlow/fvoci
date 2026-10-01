@@ -3,6 +3,8 @@ import {
   test,
   type APIRequestContext,
   type BrowserContext,
+  type CDPSession,
+  type JSHandle,
   type Page,
   type WebSocket,
 } from "@playwright/test";
@@ -10,6 +12,7 @@ import type { QueryClient } from "@tanstack/vue-query";
 import type { Router } from "vue-router";
 import { z } from "zod";
 import { createE2eUser, flowSchemas, login, readJson } from "./helpers";
+import { decodeHocuspocusFrame, frameBytes } from "../e2e-pending/collab-wire";
 
 // Production Vue/Rust + isolated PostgreSQL group. The private Vue property is
 // read only by this test to prove the mounted QueryClient survives navigation.
@@ -102,6 +105,87 @@ function sockets(page: Page): Set<WebSocket> {
     socket.on("close", () => open.delete(socket));
   });
   return open;
+}
+
+async function nativeSockets(page: Page): Promise<() => Promise<number>> {
+  await page.addInitScript(() => {
+    const Native = window.WebSocket;
+    const handles: InstanceType<typeof Native>[] = [];
+    Object.defineProperty(window, "task4NativeSockets", { value: handles });
+    window.WebSocket = new Proxy(Native, {
+      construct(target, args, newTarget) {
+        const socket = Reflect.construct(target, args, newTarget) as InstanceType<typeof Native>;
+        handles.push(socket);
+        return socket;
+      },
+    });
+  });
+  return () =>
+    page.evaluate(
+      () =>
+        ((window as ProbeWindow).task4NativeSockets ?? []).filter(
+          (socket) =>
+            new URL(socket.url).pathname === "/collab" &&
+            socket.readyState !== window.WebSocket.CLOSED,
+        ).length,
+    );
+}
+
+// Observe the real server's per-session transport permits, independently of
+// Playwright's page socket map and the old document's destroyed JS realm.
+// The production default is four (src/collab/config.rs). A permit lives through
+// handle_socket, including unauthenticated sockets, and releases on its return.
+async function probeUpgrade(page: Page, cdp: CDPSession) {
+  const handshake = new Promise<number>((resolve, reject) => {
+    let requestId: string | undefined;
+    const cleanup = () => {
+      cdp.off("Network.webSocketCreated", created);
+      cdp.off("Network.webSocketHandshakeResponseReceived", response);
+      cdp.off("Network.webSocketFrameError", failed);
+    };
+    const created = (event: { requestId: string }) => {
+      requestId ??= event.requestId;
+    };
+    const response = (event: { requestId: string; response: { status: number } }) => {
+      if (event.requestId !== requestId) return;
+      cleanup();
+      resolve(event.response.status);
+    };
+    const failed = (event: { requestId: string; errorMessage: string }) => {
+      if (event.requestId !== requestId) return;
+      cleanup();
+      // Chromium reports a refused HTTP upgrade via FrameError rather than
+      // HandshakeResponseReceived. Other network errors must fail this probe.
+      const status = /Unexpected response code: (\d+)/.exec(event.errorMessage)?.[1];
+      if (status) resolve(Number(status));
+      else reject(new Error(event.errorMessage));
+    };
+    cdp.on("Network.webSocketCreated", created);
+    cdp.on("Network.webSocketHandshakeResponseReceived", response);
+    cdp.on("Network.webSocketFrameError", failed);
+  });
+  const socket = await page.evaluateHandle(() => {
+    const url = new URL("/collab", location.href);
+    url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    return new window.WebSocket(url);
+  });
+  return { socket, status: await handshake };
+}
+
+async function closeProbe(socket: JSHandle<globalThis.WebSocket>): Promise<void> {
+  await socket.evaluate((native) => {
+    native.close();
+  });
+  await expect.poll(() => socket.evaluate((native) => native.readyState)).toBe(3);
+  await socket.dispose();
+}
+
+function expectReleasedTransport(status: number, holderStates: number[]): void {
+  // Expired/closed holders cannot create a false free slot. With three OPEN
+  // holders, the fourth successful upgrade proves every prior transport of
+  // this session ended, even if it had already detached its room/awareness.
+  expect(holderStates).toEqual([1, 1, 1]);
+  expect(status).toBe(101);
 }
 
 async function createWiki(request: APIRequestContext, workspaceId: string, title: string) {
@@ -341,27 +425,7 @@ test("an authenticated actor change closes the old room and hard-reenters withou
   // Keep both historical event sets as diagnostics. Across a destroyed realm
   // they can miss close events; current native handles and remote presence
   // independently establish current connections and retired actor ownership.
-  await page.addInitScript(() => {
-    const Native = window.WebSocket;
-    const handles: InstanceType<typeof Native>[] = [];
-    Object.defineProperty(window, "task4NativeSockets", { value: handles });
-    window.WebSocket = new Proxy(Native, {
-      construct(target, args, newTarget) {
-        const socket = Reflect.construct(target, args, newTarget) as InstanceType<typeof Native>;
-        handles.push(socket);
-        return socket;
-      },
-    });
-  });
-  const nativeOpen = () =>
-    page.evaluate(
-      () =>
-        ((window as ProbeWindow).task4NativeSockets ?? []).filter(
-          (socket) =>
-            new URL(socket.url).pathname === "/collab" &&
-            socket.readyState !== window.WebSocket.CLOSED,
-        ).length,
-    );
+  const nativeOpen = await nativeSockets(page);
   const cdp = await page.context().newCDPSession(page);
   const wire = new Set<string>();
   const wireErrors: string[] = [];
@@ -524,18 +588,73 @@ test("actual workspace membership revocation closes the room and keeps the permi
   });
   const doc = await createWiki(page.request, workspaceId, "Revoked workspace");
   const context = await browser.newContext({ baseURL });
+  const probePage = await context.newPage();
+  const cdp = await context.newCDPSession(probePage);
+  const probes: JSHandle<globalThis.WebSocket>[] = [];
   try {
+    await cdp.send("Network.enable");
     const reader = await context.newPage();
     await login(reader, member.email, member.password);
     const meResponse = await reader.request.get("/api/v1/auth/me");
     expect(meResponse.ok()).toBe(true);
     const me = await readJson(meResponse, z.object({ userId: z.string() }));
     const open = sockets(reader);
+    let authFrame: number[] | undefined;
+    reader.on("websocket", (socket) => {
+      if (new URL(socket.url()).pathname !== "/collab") return;
+      socket.on("framesent", ({ payload }) => {
+        const bytes = frameBytes(payload);
+        if (decodeHocuspocusFrame(bytes)?.kind === "auth-token") authFrame ??= Array.from(bytes);
+      });
+    });
+    const nativeOpen = await nativeSockets(reader);
     await reader.goto(`/w/${slug}/WIKI-${String(doc.number)}`);
     await expect(reader.locator('[data-collab-status="connected"]')).toBeVisible({
       timeout: 15000,
     });
     const token = await markLifetime(reader);
+    const path = `/w/${slug}/WIKI-${String(doc.number)}`;
+    // This authorized peer independently observes server room ownership, and
+    // stays alive until after the revoked actor's transport assertions.
+    await page.goto(path);
+    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator(".document-page__presence > li")).toHaveCount(1);
+    await expect.poll(nativeOpen).toBe(1);
+    const editor = reader.locator(".fvoci-editor .ProseMirror");
+    await editor.click();
+    await reader.keyboard.type("saved before membership revocation");
+    await reader.getByRole("button", { name: "저장", exact: true }).click();
+    await expect(reader.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator(".fvoci-editor .ProseMirror")).toContainText(
+      "saved before membership revocation",
+    );
+    // Three native probes share the reader's session cookie and survive its
+    // hard navigation. Keep them OPEN through the final fourth-slot assertion.
+    await probePage.goto("/");
+    const holdersStarted = Date.now();
+    const holders: JSHandle<globalThis.WebSocket>[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const holder = await probeUpgrade(probePage, cdp);
+      probes.push(holder.socket);
+      holders.push(holder.socket);
+      expect(holder.status).toBe(101);
+    }
+    const full = await probeUpgrade(probePage, cdp);
+    probes.push(full.socket);
+    expect(full.status).toBe(503);
+    const liveStates = await Promise.all(
+      holders.map((socket) => socket.evaluate((native) => native.readyState)),
+    );
+    // Positive leak control: the exact postcondition must reject while the
+    // editor's real transport still occupies the fourth server permit.
+    expect(() => {
+      expectReleasedTransport(full.status, liveStates);
+    }).toThrow();
+    console.log("live transport control", {
+      at: Date.now(),
+      holderStates: liveStates,
+      fourthUpgrade: full.status,
+    });
     const removed = await page.request.delete(
       `/api/v1/workspaces/${workspaceId}/members/${me.userId}`,
     );
@@ -543,8 +662,71 @@ test("actual workspace membership revocation closes the room and keeps the permi
     await expect(reader).toHaveURL(/\/\?denied=workspace$/, { timeout: 15000 });
     await expect(reader.locator("html")).not.toHaveAttribute("data-task4-document", token);
     await expect(reader.locator(".fvoci-editor .ProseMirror")).toHaveCount(0);
-    await expect.poll(() => open.size).toBe(0);
+    await expect.poll(nativeOpen).toBe(0);
+    await expect(page.locator(".document-page__presence > li")).toHaveCount(0);
+    console.log("membership revocation close observation", {
+      at: Date.now(),
+      historicalPlaywright: open.size,
+      currentNative: await nativeOpen(),
+      peerSessions: await page.locator(".document-page__presence > li").count(),
+    });
+    const released = await probeUpgrade(probePage, cdp);
+    probes.push(released.socket);
+    const holderStates = await Promise.all(
+      holders.map((socket) => socket.evaluate((native) => native.readyState)),
+    );
+    expectReleasedTransport(released.status, holderStates);
+    console.log("revocation transport permits", {
+      at: Date.now(),
+      heldForMs: Date.now() - holdersStarted,
+      holderStates,
+      fourthUpgrade: released.status,
+    });
+    if (!authFrame) throw new Error("Missing real provider authentication frame");
+    const deniedFrame = await released.socket.evaluate(
+      (native, frame) =>
+        new Promise<number[]>((resolve) => {
+          native.binaryType = "arraybuffer";
+          native.addEventListener(
+            "message",
+            (event: MessageEvent<ArrayBuffer>) => {
+              resolve(Array.from(new Uint8Array(event.data)));
+            },
+            { once: true },
+          );
+          native.send(Uint8Array.from(frame));
+        }),
+      authFrame,
+    );
+    expect(decodeHocuspocusFrame(Uint8Array.from(deniedFrame))?.kind).toBe("auth-denied");
+    await expect(page.locator(".document-page__presence > li")).toHaveCount(0);
+    const rejectedWrite = await reader.request.patch(
+      `/api/v1/workspaces/${workspaceId}/documents/${doc.id}`,
+      { data: { title: "rejected after revocation" } },
+    );
+    expect(rejectedWrite.status()).toBe(404);
+    await reader.goto(path);
+    await expect(reader).toHaveURL(/\/\?denied=workspace$/);
+    await expect(reader.locator(".fvoci-editor .ProseMirror")).toHaveCount(0);
+    await expect.poll(nativeOpen).toBe(0);
+    // A different authorized session keeps editing and saving in the same room.
+    const survivor = page.locator(".fvoci-editor .ProseMirror");
+    await survivor.click();
+    await page.keyboard.type(" authorized edit after revocation");
+    await page.getByRole("button", { name: "저장", exact: true }).click();
+    await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15000 });
+    const body = await page.request.get(
+      `/api/v1/workspaces/${workspaceId}/documents/${doc.id}/body`,
+    );
+    expect(body.ok()).toBe(true);
+    expect(JSON.stringify((await readJson(body, flowSchemas.body)).contentJson)).toContain(
+      "authorized edit after revocation",
+    );
+    await expect(page.getByLabel("문서 제목")).toHaveValue(doc.title);
   } finally {
+    console.log("revocation context cleanup", { at: Date.now() });
+    for (const socket of probes) await closeProbe(socket);
+    await cdp.detach();
     await context.close();
   }
 });

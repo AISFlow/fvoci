@@ -149,7 +149,9 @@ jobs:
             shard: b
             tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    # Main PG16 B measured ~818s PostgreSQL + ~48s S3, exceeding 15m with setup.
+    # Keep A at 15m; B gets a finite 20m allowance for this observed cold path.
+    timeout-minutes: ${{ matrix.shard == 'b' && 20 || 15 }}
     services:
       postgres:
         image: ${{ matrix.postgres_image }}
