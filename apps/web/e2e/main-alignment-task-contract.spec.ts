@@ -160,7 +160,11 @@ for (const returnToOrigin of [false, true]) {
       await expect(draft).toHaveValue("2027-03-13");
       await draft.fill("2027-03-20");
       const refreshed = page.waitForResponse(
-        (r) => r.url().endsWith(f.endpoint) && r.request().method() === "GET",
+        async (r) =>
+          r.url().endsWith(f.endpoint) &&
+          r.request().method() === "GET" &&
+          r.status() === 200 &&
+          taskSchema.parse(await r.json()).dueDate === "2027-03-17",
       );
       expect(
         (await page.request.patch(f.endpoint, { data: { dueDate: "2027-03-17" } })).status(),
@@ -235,7 +239,11 @@ test("conflict recovery finishing after task navigation preserves the selected d
     await expect(draft).toHaveValue("2027-03-13");
     await draft.fill("2027-03-20");
     const refreshed = page.waitForResponse(
-      (r) => r.url().endsWith(f.endpoint) && r.request().method() === "GET",
+      async (r) =>
+        r.url().endsWith(f.endpoint) &&
+        r.request().method() === "GET" &&
+        r.status() === 200 &&
+        taskSchema.parse(await r.json()).dueDate === "2027-03-17",
     );
     expect(
       (await page.request.patch(f.endpoint, { data: { dueDate: "2027-03-17" } })).status(),
@@ -287,6 +295,87 @@ test("conflict recovery finishing after task navigation preserves the selected d
     const storedParent = await page.request.get(`${f.base}/tasks/${parent.id}`);
     expect(storedParent.status()).toBe(200);
     expect(taskSchema.parse(await storedParent.json()).title).toBe("Recovery parent");
+  } finally {
+    release();
+    await signed.context.close();
+  }
+});
+
+test("a late clone completion preserves subsequent task navigation", async ({
+  browser,
+  baseURL,
+}) => {
+  const signed = await newSignedInPage(browser, baseURL, admin);
+  const page = signed.page;
+  let release = () => {};
+  try {
+    const f = await fixture(page, "TCL", {});
+    const created = await page.request.post(`${f.base}/projects/${f.projectId}/tasks`, {
+      data: { title: "Clone parent", type: "epic", statusId: f.task.statusId },
+    });
+    expect(created.status()).toBe(201);
+    const parent = taskSchema.parse(await created.json());
+    expect((await page.request.patch(f.endpoint, { data: { parentId: parent.id } })).status()).toBe(
+      200,
+    );
+    await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
+    await expect(page.getByTestId("task-clone")).toBeEnabled();
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let serverAnswered = () => {};
+    const answered = new Promise<void>((resolve) => {
+      serverAnswered = resolve;
+    });
+    await page.route(`**${f.endpoint}/clone`, async (route) => {
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      serverAnswered();
+      await gate;
+      await route.fulfill({ response });
+    });
+    const cloned = page.waitForResponse((r) => r.url().endsWith(`${f.endpoint}/clone`));
+    await page.getByTestId("task-clone").click();
+    await answered;
+    const selectedPath = `/w/${admin.workspaceSlug}/TCL-${String(parent.number)}`;
+    await page.locator(`a[href="${selectedPath}"]`).click();
+    await expect(page.getByRole("heading", { name: "Clone parent", exact: true })).toBeVisible();
+    const title = page.getByTestId("task-edit-title");
+    release();
+    const response = await cloned;
+    expect(response.status()).toBe(200);
+    const clone = taskSchema.parse(await response.json());
+    const cloneRead = await page.request.get(`${f.base}/tasks/${clone.id}`);
+    expect(cloneRead.status()).toBe(200);
+    expect(taskSchema.parse(await cloneRead.json()).id).toBe(clone.id);
+    await expect(page.getByTestId("task-clone")).toBeEnabled();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              resolve();
+            }),
+          ),
+        ),
+    );
+    await expect(page).toHaveURL(new RegExp(`${selectedPath}$`));
+    await expect(title).toHaveValue("Clone parent");
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    const parentRead = await page.request.get(`${f.base}/tasks/${parent.id}`);
+    expect(taskSchema.parse(await parentRead.json()).title).toBe("Clone parent");
+    // A current operation still completes and navigates to its accepted clone.
+    const currentClone = page.waitForResponse((r) =>
+      r.url().endsWith(`${f.base}/tasks/${parent.id}/clone`),
+    );
+    await page.getByTestId("task-clone").click();
+    const currentResponse = await currentClone;
+    expect(currentResponse.status()).toBe(200);
+    const current = taskSchema.parse(await currentResponse.json());
+    await expect(page).toHaveURL(
+      new RegExp(`/w/${admin.workspaceSlug}/TCL-${String(current.number)}$`),
+    );
+    await expect(page.getByRole("heading", { name: current.title, exact: true })).toBeVisible();
   } finally {
     release();
     await signed.context.close();
@@ -400,7 +489,11 @@ test("authorized stream reopen requeries a mounted detail after missed peer meta
     const draft = page.getByTestId("task-edit-due-date");
     await draft.fill("2027-03-20");
     const refreshed = page.waitForResponse(
-      (r) => r.url().endsWith(f.endpoint) && r.request().method() === "GET",
+      async (r) =>
+        r.url().endsWith(f.endpoint) &&
+        r.request().method() === "GET" &&
+        r.status() === 200 &&
+        taskSchema.parse(await r.json()).dueDate === "2027-03-17",
     );
     expect(
       (await page.request.patch(f.endpoint, { data: { dueDate: "2027-03-17" } })).status(),
@@ -428,7 +521,11 @@ test("a dirty detail date retains its original conflict baseline after a peer st
     await expect(draft).toHaveValue("2027-03-13");
     await draft.fill("2027-03-20");
     const refreshed = page.waitForResponse(
-      (r) => r.url().endsWith(f.endpoint) && r.request().method() === "GET",
+      async (r) =>
+        r.url().endsWith(f.endpoint) &&
+        r.request().method() === "GET" &&
+        r.status() === 200 &&
+        taskSchema.parse(await r.json()).dueDate === "2027-03-17",
     );
     expect(
       (await page.request.patch(f.endpoint, { data: { dueDate: "2027-03-17" } })).status(),

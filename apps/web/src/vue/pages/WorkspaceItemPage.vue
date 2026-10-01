@@ -166,7 +166,24 @@ const patchTask = useMutation({
   },
 });
 
+function captureTaskMutationScope() {
+  return {
+    epoch: patchEpoch,
+    actorEpoch: patchActorEpoch,
+    workspaceId: workspaceId.value,
+    projectId: projectId.value,
+    taskId: taskId.value,
+    slug: slug.value,
+    projectKey: project.value?.key ?? item.value?.prefix ?? "",
+  };
+}
+
+async function invalidateCapturedTask(scope: ReturnType<typeof captureTaskMutationScope>) {
+  await invalidateTaskCaches(queryClient, scope.workspaceId, scope.projectId, scope.taskId);
+}
+
 const moveTask = useMutation({
+  onMutate: captureTaskMutationScope,
   mutationFn: async (input: { statusId: string; expectedStatusId: string }) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move", {
@@ -177,65 +194,79 @@ const moveTask = useMutation({
         },
       }),
     ),
-  onSuccess: async () => {
-    fieldError.value = null;
-    actionError.value = null;
-    await afterMutation();
+  onSuccess: async (_data, _input, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) {
+      fieldError.value = null;
+      actionError.value = null;
+    }
+    await invalidateCapturedTask(scope);
   },
-  onError: (err) => {
+  onError: (err, _input, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err, "board.move.failed");
   },
 });
 
 const trashTask = useMutation({
+  onMutate: captureTaskMutationScope,
   mutationFn: async () =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash", {
         params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
       }),
     ),
-  onSuccess: async () => {
-    actionError.value = null;
-    await invalidateTaskCaches(queryClient, workspaceId.value, projectId.value, taskId.value);
-    const projectKey = project.value?.key ?? item.value?.prefix ?? "";
-    if (projectKey) goTo(projectTasksPath(slug.value, projectKey));
+  onSuccess: async (_data, _input, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) actionError.value = null;
+    await invalidateCapturedTask(scope);
+    if (scope.epoch !== patchEpoch) return;
+    if (scope.projectKey) goTo(projectTasksPath(scope.slug, scope.projectKey));
   },
-  onError: (err) => {
+  onError: (err, _input, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err, "task.trash.failed");
   },
 });
 
 const cloneTask = useMutation({
+  onMutate: captureTaskMutationScope,
   mutationFn: async () =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/clone", {
         params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
       }),
     ),
-  onSuccess: async (created) => {
-    actionError.value = null;
-    await invalidateTaskCaches(queryClient, workspaceId.value, projectId.value, taskId.value);
-    goTo(itemPath(slug.value, created.displayId));
+  onSuccess: async (created, _input, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) actionError.value = null;
+    await invalidateCapturedTask(scope);
+    if (scope.epoch !== patchEpoch) return;
+    goTo(itemPath(scope.slug, created.displayId));
   },
-  onError: (err) => {
+  onError: (err, _input, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err, "task.clone.failed");
   },
 });
 
 const deleteTask = useMutation({
+  onMutate: captureTaskMutationScope,
   mutationFn: async () =>
     ensureOk(
       await api.DELETE("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
         params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
       }),
     ),
-  onSuccess: async () => {
-    actionError.value = null;
-    await invalidateTaskCaches(queryClient, workspaceId.value, projectId.value, taskId.value);
-    const projectKey = project.value?.key ?? item.value?.prefix ?? "";
-    if (projectKey) goTo(projectTasksPath(slug.value, projectKey));
+  onSuccess: async (_data, _input, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) actionError.value = null;
+    await invalidateCapturedTask(scope);
+    if (scope.epoch !== patchEpoch) return;
+    if (scope.projectKey) goTo(projectTasksPath(scope.slug, scope.projectKey));
   },
-  onError: (err) => {
+  onError: (err, _input, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err, "task.delete.failed");
   },
 });
@@ -319,6 +350,7 @@ async function onTitleBlur(title: string): Promise<void> {
 async function onStatusChange(statusId: string): Promise<void> {
   const current = task.data.value;
   if (!current || statusId === current.statusId) return;
+  const epoch = patchEpoch;
   actionError.value = null;
   try {
     await moveTask.mutateAsync({
@@ -326,7 +358,8 @@ async function onStatusChange(statusId: string): Promise<void> {
       expectedStatusId: current.statusId,
     });
   } catch (err) {
-    await refetchAfterConflict(err);
+    if (epoch !== patchEpoch) return;
+    await refetchAfterConflict(err, epoch);
   }
 }
 
