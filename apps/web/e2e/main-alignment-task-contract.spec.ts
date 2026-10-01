@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
 import { createE2eUser } from "./helpers";
-import { admin, newSignedInPage, setupInstance, workspaceId } from "./workspace-wiki-vue-editor";
+import { admin, member, newSignedInPage, setupInstance, workspaceId } from "./workspace-wiki-vue-editor";
 
 const taskSchema = z
   .object({
@@ -522,7 +522,9 @@ test("HTTP viewer rights keep task metadata disabled and reject direct writes", 
   browser,
   baseURL,
 }) => {
-  const signed = await newSignedInPage(browser, baseURL, admin);
+  // The seeded member owns this project; keep the admin's ten original login
+  // cases below the unchanged server's per-email rate limit.
+  const signed = await newSignedInPage(browser, baseURL, member);
   const viewer = { email: "task-metadata-viewer@example.com", password: "viewerpass1" };
   let viewing: Awaited<ReturnType<typeof newSignedInPage>> | undefined;
   try {
