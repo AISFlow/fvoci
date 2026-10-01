@@ -265,11 +265,18 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   await offlineCalendarScenario(page, context, "DST");
 });
 
-test("cached fields SSE refetch failure preserves the same Calendar draft and visible retry recovers", async ({
+test("cached fields SSE refetch failure preserves the same Calendar draft through reconnect", async ({
   page,
   context,
 }) => {
   await offlineCalendarScenario(page, context, "REFETCH", true);
+});
+
+test("offline fields retry interaction keeps the Calendar draft through reconnect and explicit save", async ({
+  page,
+  context,
+}) => {
+  await offlineCalendarScenario(page, context, "OFFLINERETRY", true, true);
 });
 
 test("online fields transport failure keeps the Calendar draft while visible retry initiates a real GET", async ({
@@ -281,6 +288,7 @@ test("online fields transport failure keeps the Calendar draft while visible ret
   await page.getByTestId(`collection-preview-${point.displayId}`).click();
   const editor = page.getByRole("form", { name: "Calendar event editor" });
   const input = editor.locator('input[type="date"]');
+  const popover = page.locator('[data-slot="content"]').filter({ has: editor });
   await input.fill("2027-05-12");
   const node = required(await input.elementHandle());
   const collection = idSchema.parse(
@@ -318,6 +326,8 @@ test("online fields transport failure keeps the Calendar draft while visible ret
     // Keep the error region mounted until outside pointer/focus handling has
     // settled. A fast200 must not conceal an unintended popover dismissal.
     await expect(error).toBeVisible();
+    await expect(popover).toHaveAttribute("data-state", "open");
+    await expect(editor).toBeVisible();
     await expect(input).toHaveValue("2027-05-12");
     expect(await input.evaluate((current, prior) => current === prior, node)).toBe(true);
   } finally {
@@ -325,6 +335,8 @@ test("online fields transport failure keeps the Calendar draft while visible ret
   }
   expect((await recovered).status()).toBe(200);
   await expect(error).toHaveCount(0);
+  await expect(popover).toHaveAttribute("data-state", "open");
+  await expect(editor).toBeVisible();
   await expect(input).toHaveValue("2027-05-12");
   expect(await input.evaluate((current, prior) => current === prior, node)).toBe(true);
   await expect(editor.getByRole("button", { name: "저장 뷰 저장" })).toBeEnabled();
@@ -340,6 +352,7 @@ async function offlineCalendarScenario(
   context: BrowserContext,
   key: string,
   fieldsBarrier = false,
+  offlineRetry = false,
 ): Promise<void> {
   const f = await fixture(page, key);
   const point = await f.task("DST point", {});
@@ -354,6 +367,7 @@ async function offlineCalendarScenario(
   await page.getByTestId(`collection-preview-${point.displayId}`).click();
   const editor = page.getByRole("form", { name: "Calendar event editor" });
   const input = editor.locator('input[type="datetime-local"]');
+  const popover = page.locator('[data-slot="content"]').filter({ has: editor });
   await expect(input).toHaveValue("2026-11-01T01:30");
   await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
   await expect(editor).toHaveCount(0);
@@ -406,6 +420,8 @@ async function offlineCalendarScenario(
       releaseFields();
       expect((await fieldsFailed).failure()?.errorText).toContain("ERR_INTERNET_DISCONNECTED");
       await expect(input).toHaveValue("2026-11-02T09:30");
+      await expect(popover).toHaveAttribute("data-state", "open");
+      await expect(editor).toBeVisible();
       expect(await input.evaluate((node, previous) => node === previous, draftNode)).toBe(true);
       const fieldsError = fieldsErrorLocator(page);
       await expect(fieldsError).toBeVisible();
@@ -418,8 +434,15 @@ async function offlineCalendarScenario(
       afterReconnect = async () => {
         expect((await recovered).status()).toBe(200);
         await expect(fieldsError).toHaveCount(0);
+        await expect(popover).toHaveAttribute("data-state", "open");
+        await expect(editor).toBeVisible();
         expect(await input.evaluate((node, previous) => node === previous, draftNode)).toBe(true);
       };
+      // This checks outside-interaction ownership; the separate online case
+      // proves retry GET causality without automatic reconnect fetching.
+      if (offlineRetry) await fieldsError.getByRole("button", { name: "다시 시도" }).click();
+      await expect(popover).toHaveAttribute("data-state", "open");
+      await expect(editor).toBeVisible();
     };
   }
   await context.setOffline(true);
