@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient, type QueryClient } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { QueryKey } from "@tanstack/query-core";
-import { invalidateTaskCaches } from "@/features/tasks/task-cache";
+import { settleTaskPatch } from "@/features/tasks/task-patch-cache";
 import { taskMutationErrorMessage } from "@/features/tasks/task-errors";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import type { IsoDate } from "@/lib/iso-date";
@@ -50,11 +50,28 @@ export function useRescheduleTask(
   const error = ref<string | null>(null);
   const failed = ref(false);
 
-  const layoutKey = () => ["task-layout", context().workspaceId, context().projectId] as const;
+  const generation = ref(0);
+  watch(
+    [() => context().workspaceId, () => context().projectId],
+    () => {
+      generation.value += 1;
+      error.value = null;
+      failed.value = false;
+    },
+    { flush: "sync" },
+  );
+  type CapturedRequest = RescheduleRequest & {
+    workspaceId: string;
+    projectId: string;
+    timeZone: string;
+    generation: number;
+  };
+  const layoutKey = (request: CapturedRequest) =>
+    ["task-layout", request.workspaceId, request.projectId] as const;
 
   const mutation = useMutation({
-    mutationFn: async (request: RescheduleRequest) => {
-      const { workspaceId, timeZone } = context();
+    mutationFn: async (request: CapturedRequest) => {
+      const { workspaceId, timeZone } = request;
       const body = rescheduleBody(request.item, request.change, timeZone);
       if (body === null) return null;
       return ensureOk(
@@ -64,42 +81,53 @@ export function useRescheduleTask(
         }),
       );
     },
-    onMutate: () => {
+    onMutate: (request) => {
+      if (request.generation !== generation.value) return;
       error.value = null;
       failed.value = false;
     },
-    onSuccess: async (saved, request) => {
+    onSuccess: async (saved) => {
       if (saved === null) return;
-      const { workspaceId, projectId } = context();
-      await invalidateTaskCaches(queryClient, workspaceId, projectId, request.id);
-      await whenIdle(queryClient, layoutKey());
+      await settleTaskPatch(queryClient, saved.workspaceId, saved.projectId, saved);
+      await whenIdle(queryClient, ["task-layout", saved.workspaceId, saved.projectId]);
     },
-    onError: async (err) => {
-      failed.value = true;
-      error.value = taskMutationErrorMessage(err, "gantt.bar.failed");
+    onError: async (err, request) => {
+      if (request.generation === generation.value) {
+        failed.value = true;
+        error.value = taskMutationErrorMessage(err, "gantt.bar.failed");
+      }
       if (err instanceof ProblemError && err.status === 401) {
         await queryClient.invalidateQueries({ queryKey: meQuery.queryKey });
         return;
       }
       if (err instanceof ProblemError && err.code === "dependency_contradiction") return;
-      await queryClient.invalidateQueries({ queryKey: layoutKey() });
-      await whenIdle(queryClient, layoutKey());
+      await queryClient.invalidateQueries({ queryKey: layoutKey(request) });
+      await whenIdle(queryClient, layoutKey(request));
     },
   });
 
   const savingId = computed(() =>
-    mutation.isPending.value ? (mutation.variables.value?.id ?? null) : null,
+    mutation.isPending.value && mutation.variables.value?.generation === generation.value
+      ? mutation.variables.value.id
+      : null,
   );
   /** The saved range to draw until the refetched layout has it. */
   const pending = computed<{ id: string; start: IsoDate; end: IsoDate } | null>(() => {
     const request = mutation.variables.value;
-    if (!mutation.isPending.value || failed.value || !request) return null;
+    if (
+      !mutation.isPending.value ||
+      failed.value ||
+      !request ||
+      request.generation !== generation.value
+    )
+      return null;
     return { id: request.id, start: request.change.start, end: request.change.end };
   });
 
   return {
     reschedule: (request: RescheduleRequest) => {
-      mutation.mutate(request);
+      // Snapshot at the gesture, before Vue Query's asynchronous onMutate step.
+      mutation.mutate({ ...request, ...context(), generation: generation.value });
     },
     savingId,
     pending,

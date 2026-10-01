@@ -42,9 +42,11 @@ export function subscribeTaskStream(
   };
   const onTask = (event: MessageEvent<string>) => {
     try {
-      const body = JSON.parse(event.data) as TaskStreamHint | null;
-      if (body?.taskId && body.verb) {
-        handlers.onTask(body);
+      const body: unknown = JSON.parse(event.data);
+      if (typeof body !== "object" || body === null) return;
+      const { taskId, verb } = body as Record<string, unknown>;
+      if (typeof taskId === "string" && taskId !== "" && typeof verb === "string" && verb !== "") {
+        handlers.onTask({ taskId, verb });
       }
     } catch {
       // Ignore malformed hints; next resync or GET restores state.

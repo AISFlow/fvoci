@@ -3,7 +3,7 @@ import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { findProjectByKey, projectsQuery, workflowQuery } from "@/features/projects/queries";
 import { invalidateTaskCaches } from "@/features/tasks/task-cache";
@@ -12,6 +12,7 @@ import {
   patchTitleBody,
   patchTypeBody,
   type PatchTaskBody,
+  type TaskDetail,
 } from "@/features/tasks/task-edit-payload";
 import { taskFieldValidationMessage, taskMutationErrorMessage } from "@/features/tasks/task-errors";
 import { settleTaskPatch } from "@/features/tasks/task-patch-cache";
@@ -103,9 +104,29 @@ const milestones = useQuery(() =>
 const taskId = computed(() => task.data.value?.id ?? "");
 const projectId = computed(() => project.value?.id ?? task.data.value?.projectId ?? "");
 
-async function afterMutation(): Promise<void> {
-  await invalidateTaskCaches(queryClient, workspaceId.value, projectId.value, taskId.value);
-}
+// Retire metadata UI callbacks on task/actor changes, including A → B → A.
+// A same-actor late success may still settle its original cache keys.
+let patchEpoch = 0;
+let patchActorEpoch = 0;
+watch(
+  () => [workspaceId.value, taskId.value] as const,
+  () => {
+    patchEpoch += 1;
+  },
+  { flush: "sync" },
+);
+watch(
+  () => session.me.value?.userId,
+  () => {
+    patchEpoch += 1;
+    patchActorEpoch += 1;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  patchEpoch += 1;
+  patchActorEpoch += 1;
+});
 
 function goTo(path: string): void {
   leaveTo(path, {
@@ -119,93 +140,149 @@ function goTo(path: string): void {
 }
 
 const patchTask = useMutation({
-  mutationFn: async (body: PatchTaskBody) =>
+  onMutate: (input: { body: PatchTaskBody; scope: ReturnType<typeof captureTaskMutationScope> }) =>
+    input.scope,
+  mutationFn: async (input: {
+    body: PatchTaskBody;
+    scope: ReturnType<typeof captureTaskMutationScope>;
+  }) =>
     ensureOk(
       await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
-        body,
+        params: { path: taskMutationPath(input.scope) },
+        body: input.body,
       }),
     ),
-  onSuccess: async (meta) => {
-    fieldError.value = null;
-    actionError.value = null;
-    await settleTaskPatch(queryClient, workspaceId.value, projectId.value, meta);
+  onSuccess: async (meta, _body, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) {
+      fieldError.value = null;
+      actionError.value = null;
+    }
+    await settleTaskPatch(queryClient, meta.workspaceId, meta.projectId, meta);
   },
-  onError: (err) => {
+  onError: (err, _body, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err);
   },
 });
 
+function captureTaskMutationScope() {
+  return {
+    epoch: patchEpoch,
+    actorEpoch: patchActorEpoch,
+    workspaceId: workspaceId.value,
+    projectId: projectId.value,
+    taskId: taskId.value,
+    slug: slug.value,
+    projectKey: project.value?.key ?? item.value?.prefix ?? "",
+  };
+}
+
+function taskMutationPath(scope: ReturnType<typeof captureTaskMutationScope>) {
+  // Query awaits onMutate. Refuse an observed retired actor before sending;
+  // a request already sent remains an authoritative Rust operation.
+  if (scope.actorEpoch !== patchActorEpoch)
+    throw new Error("Task mutation actor retired before dispatch");
+  return { workspace_id: scope.workspaceId, task_id: scope.taskId };
+}
+
+async function invalidateCapturedTask(scope: ReturnType<typeof captureTaskMutationScope>) {
+  await invalidateTaskCaches(queryClient, scope.workspaceId, scope.projectId, scope.taskId);
+}
+
 const moveTask = useMutation({
-  mutationFn: async (input: { statusId: string; expectedStatusId: string }) =>
+  onMutate: (input: {
+    statusId: string;
+    expectedStatusId: string;
+    scope: ReturnType<typeof captureTaskMutationScope>;
+  }) => input.scope,
+  mutationFn: async (input: {
+    statusId: string;
+    expectedStatusId: string;
+    scope: ReturnType<typeof captureTaskMutationScope>;
+  }) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
+        params: { path: taskMutationPath(input.scope) },
         body: {
           statusId: input.statusId,
           expectedStatusId: input.expectedStatusId,
         },
       }),
     ),
-  onSuccess: async () => {
-    fieldError.value = null;
-    actionError.value = null;
-    await afterMutation();
+  onSuccess: async (_data, _input, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) {
+      fieldError.value = null;
+      actionError.value = null;
+    }
+    await invalidateCapturedTask(scope);
   },
-  onError: (err) => {
+  onError: (err, _input, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err, "board.move.failed");
   },
 });
 
 const trashTask = useMutation({
-  mutationFn: async () =>
+  onMutate: (scope: ReturnType<typeof captureTaskMutationScope>) => scope,
+  mutationFn: async (scope: ReturnType<typeof captureTaskMutationScope>) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
+        params: { path: taskMutationPath(scope) },
       }),
     ),
-  onSuccess: async () => {
-    actionError.value = null;
-    await invalidateTaskCaches(queryClient, workspaceId.value, projectId.value, taskId.value);
-    const projectKey = project.value?.key ?? item.value?.prefix ?? "";
-    if (projectKey) goTo(projectTasksPath(slug.value, projectKey));
+  onSuccess: async (_data, _input, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) actionError.value = null;
+    await invalidateCapturedTask(scope);
+    if (scope.epoch !== patchEpoch) return;
+    if (scope.projectKey) goTo(projectTasksPath(scope.slug, scope.projectKey));
   },
-  onError: (err) => {
+  onError: (err, _input, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err, "task.trash.failed");
   },
 });
 
 const cloneTask = useMutation({
-  mutationFn: async () =>
+  onMutate: (scope: ReturnType<typeof captureTaskMutationScope>) => scope,
+  mutationFn: async (scope: ReturnType<typeof captureTaskMutationScope>) =>
     ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/clone", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
+        params: { path: taskMutationPath(scope) },
       }),
     ),
-  onSuccess: async (created) => {
-    actionError.value = null;
-    await invalidateTaskCaches(queryClient, workspaceId.value, projectId.value, taskId.value);
-    goTo(itemPath(slug.value, created.displayId));
+  onSuccess: async (created, _input, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) actionError.value = null;
+    await invalidateCapturedTask(scope);
+    if (scope.epoch !== patchEpoch) return;
+    goTo(itemPath(scope.slug, created.displayId));
   },
-  onError: (err) => {
+  onError: (err, _input, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err, "task.clone.failed");
   },
 });
 
 const deleteTask = useMutation({
-  mutationFn: async () =>
+  onMutate: (scope: ReturnType<typeof captureTaskMutationScope>) => scope,
+  mutationFn: async (scope: ReturnType<typeof captureTaskMutationScope>) =>
     ensureOk(
       await api.DELETE("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
-        params: { path: { workspace_id: workspaceId.value, task_id: taskId.value } },
+        params: { path: taskMutationPath(scope) },
       }),
     ),
-  onSuccess: async () => {
-    actionError.value = null;
-    await invalidateTaskCaches(queryClient, workspaceId.value, projectId.value, taskId.value);
-    const projectKey = project.value?.key ?? item.value?.prefix ?? "";
-    if (projectKey) goTo(projectTasksPath(slug.value, projectKey));
+  onSuccess: async (_data, _input, scope) => {
+    if (scope.actorEpoch !== patchActorEpoch) return;
+    if (scope.epoch === patchEpoch) actionError.value = null;
+    await invalidateCapturedTask(scope);
+    if (scope.epoch !== patchEpoch) return;
+    if (scope.projectKey) goTo(projectTasksPath(scope.slug, scope.projectKey));
   },
-  onError: (err) => {
+  onError: (err, _input, scope) => {
+    if (scope?.epoch !== patchEpoch) return;
     actionError.value = taskMutationErrorMessage(err, "task.delete.failed");
   },
 });
@@ -219,21 +296,32 @@ const pending = computed(
     deleteTask.isPending.value,
 );
 
-async function refetchAfterConflict(err: unknown): Promise<void> {
-  if (err instanceof ProblemError && err.status === 409) {
-    await afterMutation();
-    formEpoch.value += 1;
-  }
+async function refetchAfterConflict(
+  err: unknown,
+  scope: ReturnType<typeof captureTaskMutationScope>,
+): Promise<void> {
+  if (
+    !(err instanceof ProblemError) ||
+    err.status !== 409 ||
+    scope.epoch !== patchEpoch ||
+    scope.actorEpoch !== patchActorEpoch
+  )
+    return;
+  await invalidateCapturedTask(scope);
+  if (scope.epoch !== patchEpoch) return;
+  formEpoch.value += 1;
 }
 
 async function runPatch(body: PatchTaskBody): Promise<void> {
   if (!task.data.value?.canEdit) return;
+  const scope = captureTaskMutationScope();
   fieldError.value = null;
   actionError.value = null;
   try {
-    await patchTask.mutateAsync(body);
+    await patchTask.mutateAsync({ body, scope });
   } catch (err) {
-    await refetchAfterConflict(err);
+    if (scope.epoch !== patchEpoch) return;
+    await refetchAfterConflict(err, scope);
   }
 }
 
@@ -286,14 +374,17 @@ async function onTitleBlur(title: string): Promise<void> {
 async function onStatusChange(statusId: string): Promise<void> {
   const current = task.data.value;
   if (!current || statusId === current.statusId) return;
+  const scope = captureTaskMutationScope();
   actionError.value = null;
   try {
     await moveTask.mutateAsync({
       statusId,
       expectedStatusId: current.statusId,
+      scope,
     });
   } catch (err) {
-    await refetchAfterConflict(err);
+    if (scope.epoch !== patchEpoch) return;
+    await refetchAfterConflict(err, scope);
   }
 }
 
@@ -312,10 +403,13 @@ async function onHierarchySave(type: string, parentId: string | null): Promise<v
   await runPatch(parsedType.body);
 }
 
-async function onDueDateBlur(value: string): Promise<void> {
+async function onDueDateBlur(
+  value: string,
+  expectedDates: Pick<TaskDetail, "startDate" | "dueDate" | "dueAt">,
+): Promise<void> {
   const current = task.data.value;
   if (!current) return;
-  const parsedDate = patchDateBody(current, "dueDate", value);
+  const parsedDate = patchDateBody(expectedDates, "dueDate", value);
   if (!parsedDate.ok) {
     fieldError.value = taskFieldValidationMessage(parsedDate.issue);
     return;
@@ -330,24 +424,28 @@ async function onAddDependency(input: {
 }): Promise<void> {
   const current = task.data.value;
   if (!current) return;
+  const scope = captureTaskMutationScope();
   fieldError.value = null;
   actionError.value = null;
   try {
     await ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies", {
-        params: { path: { workspace_id: workspaceId.value, task_id: current.id } },
+        params: { path: taskMutationPath(scope) },
         body: input,
       }),
     );
-    await afterMutation();
+    if (scope.actorEpoch === patchActorEpoch) await invalidateCapturedTask(scope);
   } catch (err) {
-    actionError.value = taskMutationErrorMessage(err, "task.dep.add.failed");
-    await refetchAfterConflict(err);
+    if (scope.epoch === patchEpoch) {
+      actionError.value = taskMutationErrorMessage(err, "task.dep.add.failed");
+      await refetchAfterConflict(err, scope);
+    }
     throw err;
   }
 }
 
 async function onRemoveDependency(edge: { blockerId: string; blockedId: string }): Promise<void> {
+  const scope = captureTaskMutationScope();
   fieldError.value = null;
   actionError.value = null;
   try {
@@ -357,24 +455,24 @@ async function onRemoveDependency(edge: { blockerId: string; blockedId: string }
         {
           params: {
             path: {
-              workspace_id: workspaceId.value,
-              task_id: edge.blockerId,
+              ...taskMutationPath({ ...scope, taskId: edge.blockerId }),
               blocked_id: edge.blockedId,
             },
           },
         },
       ),
     );
-    await afterMutation();
+    if (scope.actorEpoch === patchActorEpoch) await invalidateCapturedTask(scope);
   } catch (err) {
-    actionError.value = taskMutationErrorMessage(err, "task.dep.remove.failed");
+    if (scope.epoch === patchEpoch)
+      actionError.value = taskMutationErrorMessage(err, "task.dep.remove.failed");
   }
 }
 
 async function onTrash(): Promise<void> {
   if (!window.confirm(`${t("task.trash.confirm.title")}\n${t("task.trash.confirm.body")}`)) return;
   try {
-    await trashTask.mutateAsync();
+    await trashTask.mutateAsync(captureTaskMutationScope());
   } catch {
     /* trashTask.onError already mapped the failure. */
   }
@@ -475,7 +573,7 @@ async function onTrash(): Promise<void> {
       :on-clone="
         async () => {
           try {
-            await cloneTask.mutateAsync();
+            await cloneTask.mutateAsync(captureTaskMutationScope());
           } catch {
             /* cloneTask.onError already mapped the failure. */
           }
@@ -484,7 +582,7 @@ async function onTrash(): Promise<void> {
       :on-delete="
         async () => {
           try {
-            await deleteTask.mutateAsync();
+            await deleteTask.mutateAsync(captureTaskMutationScope());
           } catch {
             /* deleteTask.onError already mapped the failure. */
           }

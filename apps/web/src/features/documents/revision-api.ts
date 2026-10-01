@@ -55,10 +55,12 @@ export async function listRevisions(
   workspaceId: string,
   id: string,
   projectId: string | null,
+  signal?: AbortSignal,
 ) {
   if (kind === "task") {
     return ensureOk(
       await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions", {
+        signal,
         params: { path: { workspace_id: workspaceId, task_id: id }, query: { limit: 20 } },
       }),
     );
@@ -68,6 +70,7 @@ export async function listRevisions(
       await api.GET(
         "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions",
         {
+          signal,
           params: {
             path: { workspace_id: workspaceId, project_id: projectId, document_id: id },
             query: { limit: 20 },
@@ -78,6 +81,7 @@ export async function listRevisions(
   }
   return ensureOk(
     await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions", {
+      signal,
       params: { path: { workspace_id: workspaceId, document_id: id }, query: { limit: 20 } },
     }),
   );
@@ -88,10 +92,12 @@ export async function createRevision(
   workspaceId: string,
   id: string,
   projectId: string | null,
+  signal?: AbortSignal,
 ) {
   if (kind === "task") {
     return ensureOk(
       await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions", {
+        signal,
         params: { path: { workspace_id: workspaceId, task_id: id } },
       }),
     );
@@ -101,6 +107,7 @@ export async function createRevision(
       await api.POST(
         "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions",
         {
+          signal,
           params: { path: { workspace_id: workspaceId, project_id: projectId, document_id: id } },
         },
       ),
@@ -108,6 +115,7 @@ export async function createRevision(
   }
   return ensureOk(
     await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions", {
+      signal,
       params: { path: { workspace_id: workspaceId, document_id: id } },
     }),
   );
@@ -120,12 +128,14 @@ export async function restoreRevision(
   projectId: string | null,
   revisionId: string,
   correlationId: string,
+  signal?: AbortSignal,
 ) {
   if (kind === "task") {
     return ensureOk(
       await api.POST(
         "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}/restore",
         {
+          signal,
           params: { path: { workspace_id: workspaceId, task_id: id, revision_id: revisionId } },
           body: { correlationId },
         },
@@ -137,6 +147,7 @@ export async function restoreRevision(
       await api.POST(
         "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}/restore",
         {
+          signal,
           params: {
             path: {
               workspace_id: workspaceId,
@@ -154,6 +165,7 @@ export async function restoreRevision(
     await api.POST(
       "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore",
       {
+        signal,
         params: {
           path: { workspace_id: workspaceId, document_id: id, revision_id: revisionId },
         },
@@ -169,10 +181,12 @@ export async function getRevision(
   id: string,
   projectId: string | null,
   revisionId: string,
+  signal?: AbortSignal,
 ) {
   if (kind === "task") {
     return ensureOk(
       await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}", {
+        signal,
         params: { path: { workspace_id: workspaceId, task_id: id, revision_id: revisionId } },
       }),
     );
@@ -182,6 +196,7 @@ export async function getRevision(
       await api.GET(
         "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}",
         {
+          signal,
           params: {
             path: {
               workspace_id: workspaceId,
@@ -198,6 +213,7 @@ export async function getRevision(
     await api.GET(
       "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}",
       {
+        signal,
         params: {
           path: { workspace_id: workspaceId, document_id: id, revision_id: revisionId },
         },

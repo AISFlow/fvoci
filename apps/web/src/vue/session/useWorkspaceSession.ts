@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, toValue, watch, watchEffect, type MaybeRefOrGetter } from "vue";
+import { computed, ref, toValue, watch, watchEffect, type MaybeRefOrGetter } from "vue";
 import { ProblemError } from "@/lib/api";
 import { meQuery, setupStatusQuery, workspacesQuery } from "@/lib/queries";
 import { watchWorkspaceAccess } from "@/lib/workspace-access-stream";
@@ -39,6 +39,20 @@ export function useWorkspaceSession(
   const setup = useQuery(setupStatusQuery);
   const me = useQuery(meQuery);
   const workspaces = useQuery(workspacesQuery);
+  // Another tab can replace the cookie while this document is still mounted.
+  // Private query keys do not include the actor: reenter through the existing
+  // hard boundary before a new actor can consume the previous actor's cache.
+  const actorChanged = ref(false);
+  let actor: string | undefined;
+  watch(
+    () => me.data.value?.userId,
+    (next) => {
+      if (next === undefined) return;
+      if (actor !== undefined && next !== actor) actorChanged.value = true;
+      actor = next;
+    },
+    { immediate: true, flush: "sync" },
+  );
   const workspace = computed(() =>
     workspaces.data.value?.items.find((item) => item.slug === toValue(slug)),
   );
@@ -59,9 +73,11 @@ export function useWorkspaceSession(
       ? "/setup"
       : signedOut.value
         ? loginPath(env.location())
-        : denied.value
-          ? "/?denied=workspace"
-          : undefined;
+        : actorChanged.value
+          ? `${env.location().pathname}${env.location().search}${env.location().hash}`
+          : denied.value
+            ? "/?denied=workspace"
+            : undefined;
     // Queries settle independently. Restarting the same pending navigation
     // (e.g. me 401, then setup completion) cancels its first document request.
     // A different destination still applies the guard priority above.
@@ -77,9 +93,9 @@ export function useWorkspaceSession(
   // The server closes the access stream when membership or the session may
   // have changed; only a fresh workspace list without this workspace evicts.
   watch(
-    () => workspace.value?.id,
-    (workspaceId, _previous, onCleanup) => {
-      if (!workspaceId) return;
+    [() => workspace.value?.id, actorChanged],
+    ([workspaceId, changedActor], _previous, onCleanup) => {
+      if (!workspaceId || changedActor) return;
       let active = true;
       const subscription = env.watchAccess(workspaceId, {
         onAccessChange: () => {
@@ -108,7 +124,8 @@ export function useWorkspaceSession(
 
   const status = computed<SessionStatus>(() => {
     // Leaving for /setup, /login or home: keep showing "loading" until the page goes.
-    if (setup.data.value?.needed || signedOut.value || denied.value) return "loading";
+    if (setup.data.value?.needed || signedOut.value || actorChanged.value || denied.value)
+      return "loading";
     // A failed background refetch keeps the cached data (TanStack keeps `data`
     // with status "error"): only a query with nothing to show makes the page an
     // error, so one network blip during a stream reconnect does not unmount it.

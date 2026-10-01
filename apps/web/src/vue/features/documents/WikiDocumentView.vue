@@ -16,7 +16,7 @@ import {
   shallowRef,
   watch,
 } from "vue";
-import { RouterLink } from "vue-router";
+import { RouterLink, useRouter } from "vue-router";
 import { bindBlockPresence, isBlockPresenceAwareness } from "@/features/documents/block-presence";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
 import { collabUserOf, setTitleEditing } from "@/features/documents/collab-model";
@@ -67,6 +67,7 @@ const TITLE_MAX = 300;
 const ICON_MAX = 50;
 
 const queryClient = useQueryClient();
+const router = useRouter();
 const me = useQuery(meQuery);
 const metaQuery = useQuery(() => documentMetaQuery(props.workspaceId, props.documentId));
 const ancestors = useQuery(() => ancestorsQuery(props.workspaceId, props.documentId));
@@ -197,13 +198,14 @@ const trashDoc = useMutation({
   mutationFn: (operation: DocumentOperation) => trashDocument(operation.scope),
   onSuccess: async (_result, operation) => {
     await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["trash", operation.scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["projects", operation.scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["wiki-discovery", operation.scope.workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
     ]);
     if (!currentOperation(operation)) return;
     lifecycleError.value = null;
-    window.location.assign(trashPath(operation.slug));
+    await router.push(trashPath(operation.slug));
   },
   onError: (error: unknown, operation) => {
     if (currentOperation(operation)) lifecycleError.value = loadErrorMessage(error);
@@ -280,6 +282,7 @@ const canPersist = computed(
     session.value.status === "connected" &&
     !persisting.value,
 );
+
 const moveTargets = computed(() => {
   const docPath = meta.value?.path ?? "";
   return (tree.data.value?.items ?? []).filter(
@@ -336,19 +339,49 @@ async function onStatusChange(event: Event): Promise<void> {
 }
 
 /** The Save button: flush, then wait for the persist ACK that matches this edit prefix. */
+let persistLifecycle = 0;
+watch(
+  [
+    () => scope.value.workspaceId,
+    () => scope.value.documentId,
+    () => scope.value.projectId,
+    () => me.data.value?.userId,
+    () => me.data.value?.sessionId,
+    () => me.error.value instanceof ProblemError && me.error.value.status === 401,
+    () => session.value?.doc,
+    () => session.value?.provider,
+    () => session.value?.generation,
+    () => session.value?.status,
+    readOnly,
+  ],
+  () => {
+    persistLifecycle++;
+    persisting.value = false;
+    persistError.value = null;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  persistLifecycle++;
+});
+
 async function persistBody(): Promise<void> {
   const current = session.value;
-  if (!current || !canPersist.value) return;
+  if (!current || !canPersist.value) throw new Error("collab persist unavailable");
+  const lifetime = persistLifecycle;
   persistError.value = null;
   persisting.value = true;
   try {
     await current.persistNow();
+    if (lifetime !== persistLifecycle) throw new Error("collab persist scope retired");
   } catch (error) {
-    const timedOut = error instanceof Error && error.message.includes("timed out");
-    persistError.value = timedOut ? t("collab timeout — retry") : t("collab unavailable");
+    if (lifetime === persistLifecycle) {
+      const timedOut = error instanceof Error && error.message.includes("timed out");
+      persistError.value = timedOut ? t("collab timeout — retry") : t("collab unavailable");
+    }
     throw error;
   } finally {
-    persisting.value = false;
+    if (lifetime === persistLifecycle) persisting.value = false;
   }
 }
 

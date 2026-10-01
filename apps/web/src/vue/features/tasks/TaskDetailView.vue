@@ -51,7 +51,10 @@ const props = defineProps<{
   onStatusChange: (statusId: string) => void | Promise<void>;
   onPriorityChange: (priority: string) => void | Promise<void>;
   onHierarchySave: (type: string, parentId: string | null) => void | Promise<void>;
-  onDueDateBlur: (value: string) => void | Promise<void>;
+  onDueDateBlur: (
+    value: string,
+    expectedDates: Pick<TaskDetail, "startDate" | "dueDate" | "dueAt">,
+  ) => void | Promise<void>;
   onAssigneesChange: (assigneeIds: string[]) => void | Promise<void>;
   onLabelsChange: (labelIds: string[]) => void | Promise<void>;
   onMilestoneChange: (milestoneId: string | null) => void | Promise<void>;
@@ -82,6 +85,8 @@ const archivePersistError = ref<string | null>(null);
 let archiveInFlight = false;
 
 const pageReadOnly = computed(() => props.readOnly);
+// HTTP metadata rights are independent of the collaboration connection's grant.
+const metadataReadOnly = computed(() => pageReadOnly.value || archivePersisting.value);
 const bodyReadOnly = computed(
   () => pageReadOnly.value || (session.value?.readOnly ?? false) || archivePersisting.value,
 );
@@ -149,7 +154,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :labels="labels"
       :milestones="milestones"
       :dependency-candidates="dependencyCandidates"
-      :read-only="bodyReadOnly"
+      :read-only="metadataReadOnly"
       :can-edit="canEdit"
       :pending="pending"
       :field-error="fieldError"
@@ -171,7 +176,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
     />
     <div v-if="canEdit" class="flex flex-wrap gap-2" data-testid="task-detail-actions">
       <UButton
-        v-if="!bodyReadOnly"
+        v-if="!metadataReadOnly"
         size="sm"
         variant="outline"
         color="neutral"
@@ -195,7 +200,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
     <TaskCollectionProperties
       :workspace-id="workspaceId"
       :task-id="task.id"
-      :read-only="bodyReadOnly"
+      :read-only="metadataReadOnly"
     />
     <TaskBodyEditor
       :workspace-id="workspaceId"
@@ -214,7 +219,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :members="members"
-      :read-only="bodyReadOnly"
+      :read-only="metadataReadOnly"
     />
     <TaskActivityPanel
       v-if="currentUserId"
@@ -222,7 +227,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :current-user-id="currentUserId"
-      :read-only="bodyReadOnly"
+      :read-only="metadataReadOnly"
     />
     <TaskBacklinks :slug="slug" :workspace-id="workspaceId" :task-id="task.id" />
     <OriginPanel :slug="slug" :workspace-id="workspaceId" :task-id="task.id" hide-when-empty />

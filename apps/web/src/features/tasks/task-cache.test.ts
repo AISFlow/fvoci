@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { InfiniteQueryObserver, QueryClient, type InfiniteData } from "@tanstack/query-core";
+import {
+  InfiniteQueryObserver,
+  QueryClient,
+  QueryObserver,
+  type InfiniteData,
+} from "@tanstack/query-core";
 import { invalidateTaskCaches, invalidateTaskStreamResyncCaches } from "./task-cache.ts";
 
 const WS = "ws-1";
@@ -46,6 +51,84 @@ function mountList(key: readonly unknown[]) {
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+await test("resync recovers mounted empty failed detail without evicting inactive or sibling queries", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const cases = [
+    { id: "active", workspace: WS, active: true, enabled: true },
+    { id: "inactive", workspace: WS, active: false, enabled: true },
+    { id: "disabled", workspace: WS, active: true, enabled: false },
+    { id: "foreign", workspace: "other-ws", active: true, enabled: true },
+  ];
+  const gets = new Map<string, number>();
+  const unsubscribes: (() => void)[] = [];
+  try {
+    for (const item of cases) {
+      const key = ["task", item.workspace, item.id];
+      const options = {
+        queryKey: key,
+        queryFn: () => {
+          const count = (gets.get(item.id) ?? 0) + 1;
+          gets.set(item.id, count);
+          return count === 1
+            ? Promise.reject(new Error("first GET offline"))
+            : Promise.resolve({ id: item.id, projectId: PROJECT });
+        },
+      };
+      const observer = new QueryObserver(client, options);
+      const unsubscribe = observer.subscribe(() => {});
+      await flush();
+      if (!item.enabled) observer.setOptions({ ...options, enabled: false });
+      if (item.active) unsubscribes.push(unsubscribe);
+      else unsubscribe();
+    }
+    const inactiveKey = ["task", WS, "inactive"];
+    const inactiveQuery = client.getQueryCache().find({ queryKey: inactiveKey });
+    const inactiveError = client.getQueryState(inactiveKey)?.error;
+    const sibling = ["task", WS, "known-sibling"];
+    client.setQueryData(sibling, { id: "known-sibling", projectId: "other-project" });
+    const idleKey = ["task", WS, "still-loading"];
+    const idleObserver = new QueryObserver(client, {
+      queryKey: idleKey,
+      queryFn: () => new Promise<never>(() => {}),
+    });
+    unsubscribes.push(idleObserver.subscribe(() => {}));
+    const idleQuery = client.getQueryCache().find({ queryKey: idleKey });
+    assert.equal(client.getQueryState(idleKey)?.status, "pending");
+    const failedStates = new Map(
+      cases.map((item) => [item.id, client.getQueryState(["task", item.workspace, item.id])]),
+    );
+    for (const item of cases) {
+      assert.equal(client.getQueryState(["task", item.workspace, item.id])?.status, "error");
+      assert.equal(gets.get(item.id), 1);
+    }
+
+    invalidateTaskStreamResyncCaches(client, WS, PROJECT);
+    await flush();
+
+    assert.equal(gets.get("active"), 2, "reconnect retries the mounted failed detail");
+    assert.deepEqual(client.getQueryData(["task", WS, "active"]), {
+      id: "active",
+      projectId: PROJECT,
+    });
+    for (const item of cases.filter((item) => item.id !== "active")) {
+      const key = ["task", item.workspace, item.id];
+      assert.equal(gets.get(item.id), 1);
+      assert.equal(client.getQueryState(key)?.status, "error");
+      assert.equal(client.getQueryState(key), failedStates.get(item.id), item.id);
+    }
+    assert.equal(client.getQueryCache().find({ queryKey: inactiveKey }), inactiveQuery);
+    assert.equal(client.getQueryState(inactiveKey)?.error, inactiveError);
+    assert.equal(client.getQueryState(sibling)?.isInvalidated, false);
+    assert.equal(client.getQueryCache().find({ queryKey: idleKey }), idleQuery);
+    assert.equal(client.getQueryState(idleKey)?.isInvalidated, false);
+  } finally {
+    unsubscribes.forEach((unsubscribe) => {
+      unsubscribe();
+    });
+    client.clear();
+  }
+});
 
 const invalidations = [
   [
@@ -106,4 +189,116 @@ for (const [list, key] of LISTS) {
       client.clear();
     });
   }
+}
+
+await test("task hints invalidate captured workspace/project caches without touching another workspace", async () => {
+  const client = new QueryClient();
+  const affected = [
+    ["task", WS, "task-1"],
+    ["task-activity", WS, "task-1"],
+    ["task-time-entries", WS, "task-1"],
+    ["collection-item", WS, "task", "task-1"],
+    ["task-layout", WS, PROJECT, "month"],
+    ["tasks", WS, PROJECT, "filter"],
+    ["project-collection", WS, PROJECT],
+    ["collection", WS, "c1"],
+    ["projects", WS],
+  ];
+  const unaffected = [
+    ["task", "other-ws", "task-1"],
+    ["tasks", WS, "other-project"],
+    ["task-layout", WS, "other-project"],
+    ["collection", "other-ws", "c1"],
+    ["task", WS, "other-task"],
+    ["task-time-entries", WS, "other-task"],
+    ["task-time-entries", "other-ws", "task-1"],
+    ["collection-item", WS, "task", "other-task"],
+    ["collection-item", "other-ws", "task", "task-1"],
+    ["collection-item", WS, "document", "task-1"],
+    ["auth", "me"],
+  ];
+  for (const key of [...affected, ...unaffected]) client.setQueryData(key, {});
+  await invalidateTaskCaches(client, WS, PROJECT, "task-1");
+  for (const key of affected) assert.equal(client.getQueryState(key)?.isInvalidated, true);
+  for (const key of unaffected) assert.equal(client.getQueryState(key)?.isInvalidated, false);
+  client.clear();
+});
+
+await test("authorized resync invalidates retained project detail/activity but preserves sibling scope", async () => {
+  const client = new QueryClient();
+  const detail = ["task", WS, "task-1"];
+  const activity = ["task-activity", WS, "task-1"];
+  const sibling = ["task", WS, "task-2"];
+  const siblingActivity = ["task-activity", WS, "task-2"];
+  const foreign = ["task", "other-ws", "task-1"];
+  client.setQueryData(detail, { id: "task-1", projectId: PROJECT });
+  client.setQueryData(sibling, { id: "task-2", projectId: "other-project" });
+  client.setQueryData(foreign, { id: "task-1", projectId: PROJECT });
+  client.setQueryData(activity, {});
+  client.setQueryData(siblingActivity, {});
+  const grants = [
+    ["task-time-entries", WS, "task-1"],
+    ["collection-item", WS, "task", "task-1"],
+  ];
+  const siblingGrants = [
+    ["task-time-entries", WS, "task-2"],
+    ["task-time-entries", "other-ws", "task-1"],
+    ["collection-item", WS, "task", "task-2"],
+    ["collection-item", "other-ws", "task", "task-1"],
+    ["collection-item", WS, "document", "task-1"],
+  ];
+  for (const key of [...grants, ...siblingGrants]) client.setQueryData(key, {});
+  invalidateTaskStreamResyncCaches(client, WS, PROJECT);
+  await flush();
+  for (const key of [detail, activity, ...grants])
+    assert.equal(client.getQueryState(key)?.isInvalidated, true);
+  for (const key of [sibling, siblingActivity, foreign, ...siblingGrants])
+    assert.equal(client.getQueryState(key)?.isInvalidated, false);
+  client.clear();
+});
+
+for (const [name, invalidate] of invalidations) {
+  await test(`${name} refetches mounted REST grants from the server without promoting sibling grants`, async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { staleTime: Infinity, retry: false } },
+    });
+    client.setQueryData(["task", WS, "task-1"], { id: "task-1", projectId: PROJECT });
+    client.setQueryData(["task", WS, "task-2"], { id: "task-2", projectId: "other-project" });
+    const queries = [
+      { key: ["task-time-entries", WS, "task-1"], grant: "canCreate", refetch: true },
+      { key: ["collection-item", WS, "task", "task-1"], grant: "canEdit", refetch: true },
+      { key: ["task-time-entries", WS, "task-2"], grant: "canCreate", refetch: false },
+      { key: ["collection-item", WS, "task", "task-2"], grant: "canEdit", refetch: false },
+      { key: ["task-time-entries", "other-ws", "task-1"], grant: "canCreate", refetch: false },
+      { key: ["collection-item", "other-ws", "task", "task-1"], grant: "canEdit", refetch: false },
+    ];
+    const gets: string[][] = [];
+    const unsubscribes = queries.map(({ key, grant }) =>
+      new QueryObserver(client, {
+        queryKey: key,
+        initialData: { [grant]: false },
+        queryFn: () => {
+          gets.push(key);
+          return Promise.resolve({ [grant]: true });
+        },
+      }).subscribe(() => {}),
+    );
+    try {
+      assert.equal(gets.length, 0);
+      await invalidate(client);
+      await flush();
+      for (const { key, grant, refetch } of queries) {
+        assert.equal(client.getQueryData<Record<string, boolean>>(key)?.[grant], refetch);
+      }
+      assert.deepEqual(
+        gets,
+        queries.filter((query) => query.refetch).map((query) => query.key),
+      );
+    } finally {
+      unsubscribes.forEach((unsubscribe) => {
+        unsubscribe();
+      });
+      client.clear();
+    }
+  });
 }

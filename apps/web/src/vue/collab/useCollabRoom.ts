@@ -209,6 +209,27 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
       ack: createPersistAck(documentId, first.connectionId),
     });
     const persistAborts = new Set<AbortController>();
+    let persistActive = true;
+    function abortPersists(): void {
+      for (const abort of persistAborts) abort.abort();
+      persistAborts.clear();
+    }
+    onScopeDispose(() => {
+      persistActive = false;
+      abortPersists();
+    });
+    // A provider was authenticated for one actor. Changing awareness does not
+    // authenticate that socket for another user, including A → B → A.
+    watch(
+      () => toValue(user)?.id,
+      (_next, previous) => {
+        if (previous !== undefined) {
+          persistActive = false;
+          abortPersists();
+        }
+      },
+      { flush: "sync" },
+    );
 
     // Removed with the generation's scope (React: useHocuspocusEvent cleanups).
     interface SessionEvents {
@@ -232,9 +253,12 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
     listen("authenticated", ({ scope }) => {
       readOnly.value = scope === "readonly";
       unauthorized.value = false;
+      if (readOnly.value) abortPersists();
     });
     listen("authenticationFailed", () => {
       unauthorized.value = true;
+      persistActive = false;
+      abortPersists();
     });
     listen("unsyncedChanges", ({ number }) => {
       unsent.value = number > 0;
@@ -246,18 +270,18 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
       bind.value = syncPersistBind(bind.value, { provider, status: "disconnected", documentId });
     });
 
-    watch(connectionStatus, (status) => {
-      bind.value = syncPersistBind(bind.value, { provider, status, documentId });
-    });
+    watch(
+      connectionStatus,
+      (status) => {
+        bind.value = syncPersistBind(bind.value, { provider, status, documentId });
+      },
+      { flush: "sync" },
+    );
 
     // A new connection generation invalidates the persists still in flight.
-    watch(
-      () => `${bind.value.ack.documentId}\0${bind.value.ack.connectionId}`,
-      () => {
-        for (const abort of persistAborts) abort.abort();
-        persistAborts.clear();
-      },
-    );
+    watch(() => `${bind.value.ack.documentId}\0${bind.value.ack.connectionId}`, abortPersists, {
+      flush: "sync",
+    });
 
     const onUpdate = () => {
       bind.value = reducePersistBind(bind.value, { type: "edit" });
@@ -314,6 +338,13 @@ export function useCollabRoom(name: string, user: MaybeRefOrGetter<CollabUser | 
     const fragment = markRaw(doc.getXmlFragment(FVOCI_YDOC_FRAGMENT));
 
     function persist(): Promise<void> {
+      if (
+        !persistActive ||
+        readOnly.value ||
+        unauthorized.value ||
+        connectionStatus.value !== "connected"
+      )
+        return Promise.reject(new Error("collab persist unavailable"));
       const scope = bind.value.ack;
       const abort = new AbortController();
       persistAborts.add(abort);

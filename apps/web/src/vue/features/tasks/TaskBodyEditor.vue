@@ -3,7 +3,10 @@ import { FvociEditor } from "@fvoci/editor/vue";
 import "@fvoci/editor/styles.css";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { computed, type FunctionalComponent, h, markRaw, ref } from "vue";
+import { computed, type FunctionalComponent, h, markRaw, onScopeDispose, ref, watch } from "vue";
+import { useQuery } from "@tanstack/vue-query";
+import { meQuery } from "@/lib/queries";
+import { ProblemError } from "@/lib/api";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
 import type { CollabUser } from "@/features/documents/collab-model";
 import type { CollabRoomSession } from "../../collab/useCollabRoom";
@@ -62,19 +65,49 @@ const UrlEmbed: FunctionalComponent<{ url: string }> = markRaw((embed: { url: st
 );
 UrlEmbed.props = ["url"];
 
+const me = useQuery(meQuery);
+let persistLifecycle = 0;
+watch(
+  [
+    () => props.workspaceId,
+    () => props.taskId,
+    () => props.collabUser?.id,
+    () => me.data.value?.sessionId,
+    () => me.error.value instanceof ProblemError && me.error.value.status === 401,
+    () => props.session?.doc,
+    () => props.session?.provider,
+    () => props.session?.generation,
+    () => props.session?.status,
+    readOnly,
+  ],
+  () => {
+    persistLifecycle++;
+    persisting.value = false;
+    persistError.value = null;
+  },
+  { flush: "sync" },
+);
+onScopeDispose(() => {
+  persistLifecycle++;
+});
+
 async function persistBody(): Promise<void> {
   const current = props.session;
-  if (!current || !canPersist.value) return;
+  if (!current || !canPersist.value) throw new Error("collab persist unavailable");
+  const lifetime = persistLifecycle;
   persistError.value = null;
   persisting.value = true;
   try {
     await current.persistNow();
+    if (lifetime !== persistLifecycle) throw new Error("collab persist scope retired");
   } catch (error) {
-    const timedOut = error instanceof Error && error.message.includes("timed out");
-    persistError.value = timedOut ? t("collab timeout — retry") : t("collab unavailable");
+    if (lifetime === persistLifecycle) {
+      const timedOut = error instanceof Error && error.message.includes("timed out");
+      persistError.value = timedOut ? t("collab timeout — retry") : t("collab unavailable");
+    }
     throw error;
   } finally {
-    persisting.value = false;
+    if (lifetime === persistLifecycle) persisting.value = false;
   }
 }
 </script>

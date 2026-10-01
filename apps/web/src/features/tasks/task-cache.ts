@@ -1,4 +1,5 @@
 import type { QueryClient, QueryKey } from "@tanstack/query-core";
+import type { TaskDetail } from "./queries";
 
 /**
  * Refetch a paged list (the project task list, the collection board columns)
@@ -27,6 +28,8 @@ export async function invalidateTaskCaches(
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ["task", workspaceId, taskId] }),
     queryClient.invalidateQueries({ queryKey: ["task-activity", workspaceId, taskId] }),
+    queryClient.invalidateQueries({ queryKey: ["task-time-entries", workspaceId, taskId] }),
+    queryClient.invalidateQueries({ queryKey: ["collection-item", workspaceId, "task", taskId] }),
     queryClient.invalidateQueries({ queryKey: ["task-layout", workspaceId, projectId] }),
     invalidateKeepingLoadMore(queryClient, ["tasks", workspaceId, projectId]),
     queryClient.invalidateQueries({ queryKey: ["project-collection", workspaceId, projectId] }),
@@ -40,7 +43,32 @@ export function invalidateTaskStreamResyncCaches(
   workspaceId: string,
   projectId: string,
 ): void {
+  // The server's authorized open recovers missed hints, including a mounted
+  // detail. Its key has no project ID, so select retained details by their
+  // committed row and keep known sibling projects/workspaces untouched. A
+  // mounted detail whose first GET failed has no row to identify its project;
+  // retry it within this workspace without evicting inactive empty queries.
+  const details = queryClient
+    .getQueryCache()
+    .findAll({ queryKey: ["task", workspaceId] })
+    .filter(
+      (query) =>
+        queryClient.getQueryData<TaskDetail>(query.queryKey)?.projectId === projectId ||
+        (query.state.data === undefined && query.state.status === "error" && query.isActive()),
+    );
   Promise.all([
+    ...details.flatMap((query) => [
+      queryClient.invalidateQueries({ queryKey: query.queryKey, exact: true }),
+      queryClient.invalidateQueries({
+        queryKey: ["task-activity", workspaceId, query.queryKey[2]],
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["task-time-entries", workspaceId, query.queryKey[2]],
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["collection-item", workspaceId, "task", query.queryKey[2]],
+      }),
+    ]),
     queryClient.invalidateQueries({ queryKey: ["task-layout", workspaceId, projectId] }),
     invalidateKeepingLoadMore(queryClient, ["tasks", workspaceId, projectId]),
     queryClient.invalidateQueries({ queryKey: ["project-collection", workspaceId, projectId] }),

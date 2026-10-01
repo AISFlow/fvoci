@@ -1,4 +1,12 @@
-import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Locator,
+  type Page,
+  type Request,
+  type Response,
+} from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser } from "./helpers";
 import {
   admin,
@@ -408,6 +416,139 @@ async function retainedCounts(page: Page, ws: string, refresh = false) {
     { workspaceId: ws, refresh },
   );
 }
+
+type CountObservation = {
+  ms: number;
+  target: "workspaces" | "projects";
+  event: string;
+  status?: number | string;
+  fetchStatus?: string;
+  isInvalidated?: boolean;
+  count?: number | null;
+  failure?: string;
+};
+type CountObservationWindow = Window & {
+  __entitiesCountObservation?: { events: CountObservation[]; stop: () => void };
+};
+
+// Passive evidence for the unresolved CI timeout; never refetch or change query options.
+async function observeCounts(page: Page, workspaceId: string) {
+  await page.evaluate((ws) => {
+    type Client = import("@tanstack/vue-query").QueryClient;
+    const root = document.getElementById("root") as HTMLElement & {
+      __vue_app__: { _context: { provides: Record<string, Client> } };
+    };
+    const client = root.__vue_app__._context.provides.VUE_QUERY_CLIENT;
+    if (!client) throw new Error("Missing app QueryClient for count observation");
+    const events: CountObservation[] = [];
+    const start = performance.now();
+    const stop = client.getQueryCache().subscribe((event) => {
+      if (event.type !== "updated") return;
+      const rawKey: unknown = event.query.queryKey;
+      if (!Array.isArray(rawKey)) return;
+      const key: unknown[] = rawKey;
+      const target =
+        key.length === 2 && key[0] === "me" && key[1] === "workspaces"
+          ? "workspaces"
+          : key.length === 2 && key[0] === "projects" && key[1] === ws
+            ? "projects"
+            : null;
+      if (!target) return;
+      const state = event.query.state;
+      const data: unknown = state.data;
+      let count: number | null = null;
+      if (data && typeof data === "object" && "items" in data && Array.isArray(data.items)) {
+        const items: unknown[] = data.items;
+        const item = items.find(
+          (item) => item && typeof item === "object" && "id" in item && item.id === ws,
+        );
+        if (item && typeof item === "object" && "documentCount" in item) {
+          if (typeof item.documentCount === "number") count = item.documentCount;
+        }
+      }
+      events.push({
+        ms: Math.round(performance.now() - start),
+        target,
+        event: event.action.type,
+        status: state.status,
+        fetchStatus: state.fetchStatus,
+        isInvalidated: state.isInvalidated,
+        ...(target === "workspaces" ? { count } : {}),
+      });
+      if (events.length > 80) events.shift();
+    });
+    (window as CountObservationWindow).__entitiesCountObservation = { events, stop };
+  }, workspaceId);
+  const network: CountObservation[] = [];
+  const start = Date.now();
+  const failureCodes = new Set([
+    "net::ERR_ABORTED",
+    "net::ERR_NETWORK_CHANGED",
+    "net::ERR_CONNECTION_CLOSED",
+    "net::ERR_CONNECTION_RESET",
+    "net::ERR_CONNECTION_REFUSED",
+    "net::ERR_CONNECTION_TIMED_OUT",
+    "net::ERR_TIMED_OUT",
+    "net::ERR_INTERNET_DISCONNECTED",
+    "net::ERR_FAILED",
+  ]);
+  function record(request: Request, event: string, status?: number) {
+    if (request.method() !== "GET") return;
+    const path = new URL(request.url()).pathname;
+    const target =
+      path === "/api/v1/me/workspaces"
+        ? "workspaces"
+        : path === `/api/v1/workspaces/${workspaceId}/projects`
+          ? "projects"
+          : null;
+    if (!target) return;
+    const failure = event === "failed" ? request.failure()?.errorText : undefined;
+    network.push({
+      ms: Date.now() - start,
+      target,
+      event,
+      ...(status === undefined ? {} : { status }),
+      ...(failure === undefined ? {} : { failure: failureCodes.has(failure) ? failure : "other" }),
+    });
+    if (network.length > 80) network.shift();
+  }
+  const requested = (request: Request) => {
+    record(request, "request");
+  };
+  const responded = (response: Response) => {
+    record(response.request(), "response", response.status());
+  };
+  const finished = (request: Request) => {
+    record(request, "finished");
+  };
+  const failed = (request: Request) => {
+    record(request, "failed");
+  };
+  page.on("request", requested);
+  page.on("response", responded);
+  page.on("requestfinished", finished);
+  page.on("requestfailed", failed);
+  return {
+    async report(host: "wiki" | "project") {
+      const cache = await page.evaluate(
+        () => (window as CountObservationWindow).__entitiesCountObservation?.events ?? [],
+      );
+      console.log("entities count observation", JSON.stringify({ host, cache, network }));
+    },
+    async stop() {
+      page.off("request", requested);
+      page.off("response", responded);
+      page.off("requestfinished", finished);
+      page.off("requestfailed", failed);
+      await page.evaluate(() => {
+        const fixture = window as CountObservationWindow;
+        fixture.__entitiesCountObservation?.stop();
+        delete fixture.__entitiesCountObservation;
+      });
+    },
+  };
+}
+
 async function pushDocument(page: Page, path: string) {
   await page.evaluate(async (next) => {
     const root = document.getElementById("root") as HTMLElement & {
@@ -439,6 +580,7 @@ for (const host of ["wiki", "project"] as const) {
     const held: {
       release: () => void;
     }[] = [];
+    let countObservation: Awaited<ReturnType<typeof observeCounts>> | undefined;
     try {
       const key = host === "wiki" ? "LCW" : "LCP";
       const f = await fixtures(page.request, key);
@@ -472,6 +614,7 @@ for (const host of ["wiki", "project"] as const) {
           : `/api/v1/workspaces/${f.ws}/projects/${f.project.id}/documents`;
       await openDoc(page, original.path);
       const countBefore = await retainedCounts(page, f.ws);
+      countObservation = await observeCounts(page, f.ws);
       let workspaceRefreshes = 0;
       let projectRefreshes = 0;
       page.on("request", (request) => {
@@ -600,7 +743,21 @@ for (const host of ["wiki", "project"] as const) {
           "Missing fixture value: (await readJson(counts, flowSchemas.workspaces)).items.find(\n          (item: { id: string }) => item.id === f.ws,\n        )",
         );
       expect(fixtureValue2.documentCount).toBe(beforeTrash - 2);
+    } catch (error) {
+      if (countObservation) {
+        try {
+          await countObservation.report(host);
+        } catch {
+          console.log("entities count observation unavailable", host);
+        }
+      }
+      throw error;
     } finally {
+      try {
+        await countObservation?.stop();
+      } catch {
+        console.log("entities count observation cleanup unavailable", host);
+      }
       for (const response of held) response.release();
       await peer.context.close();
       await signed.context.close();
