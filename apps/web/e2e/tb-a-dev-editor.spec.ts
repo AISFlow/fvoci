@@ -1,16 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readlinkSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createListener } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -102,16 +93,17 @@ const test = base.extend<object, { devRuntime: DevRuntime }>({
             const runtimeEnv = ownedServerChildEnv("127.0.0.1:0");
             const logPath = path.join(workerInfo.project.outputDir, `tb-a-${phase}-server.log`);
             mkdirSync(workerInfo.project.outputDir, { recursive: true });
+            const childEnv = {
+              ...runtimeEnv,
+              FVOCI_BIND: "127.0.0.1:0",
+              FVOCI_PUBLIC_ORIGIN: devURL,
+              FVOCI_STATIC_DIR: path.join(webRoot, "dist"),
+              FVOCI_STORAGE_DIR: ownedDir,
+              RUST_LOG: "warn,tower_http=debug",
+            };
             child = spawn(binary, [], {
               detached: true,
-              env: {
-                ...runtimeEnv,
-                FVOCI_BIND: "127.0.0.1:0",
-                FVOCI_PUBLIC_ORIGIN: devURL,
-                FVOCI_STATIC_DIR: path.join(webRoot, "dist"),
-                FVOCI_STORAGE_DIR: ownedDir,
-                RUST_LOG: "warn,tower_http=debug",
-              },
+              env: childEnv,
               stdio: ["ignore", "pipe", "pipe"],
             });
             if (!child.pid) throw new Error("Rust spawn returned no PID");
@@ -156,15 +148,6 @@ const test = base.extend<object, { devRuntime: DevRuntime }>({
               else process.env.API_PROXY_TARGET = previousProxy;
             }
             await server.listen();
-            const actualEnv = Object.fromEntries(
-              readFileSync(`/proc/${String(child.pid)}/environ`, "utf8")
-                .split("\0")
-                .filter(Boolean)
-                .map((entry) => {
-                  const separator = entry.indexOf("=");
-                  return [entry.slice(0, separator), entry.slice(separator + 1)];
-                }),
-            );
             writeFileSync(
               path.join(workerInfo.project.outputDir, `tb-a-${phase}-runtime.json`),
               JSON.stringify({
@@ -176,15 +159,16 @@ const test = base.extend<object, { devRuntime: DevRuntime }>({
                 cacheDir,
                 cacheWasPresent,
                 pid: child.pid,
-                executable: readlinkSync(`/proc/${String(child.pid)}/exe`),
-                appRole: new URL(actualEnv.DATABASE_APP_URL as string).username,
-                ownerCredentialsPresent: [
+                executableCommand: binary,
+                spawnAppRole: new URL(process.env.DATABASE_APP_URL).username,
+                spawnEnvOwnerCredentialsPresent: [
                   "DATABASE_URL",
-                  "DATABASE_MIGRATION_URL",
+                  "FVOCI_MIGRATION_URL",
                   "FVOCI_E2E_ADMIN_DATABASE_URL",
                   "TEST_DATABASE_URL",
-                ].some((key) => key in actualEnv),
-                publicOrigin: actualEnv.FVOCI_PUBLIC_ORIGIN,
+                ].some((key) => key in childEnv),
+                publicOrigin: childEnv.FVOCI_PUBLIC_ORIGIN,
+                proxyEnvRestored: process.env.API_PROXY_TARGET === previousProxy,
                 watchDisabled: server.config.server.watch === null,
                 polling: process.env.CHOKIDAR_USEPOLLING === "1",
               }),
@@ -234,12 +218,14 @@ async function editAndReadBack(
   const frames: { direction: string; message: string }[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("websocket", (socket) => {
-    for (const direction of ["framesent", "framereceived"] as const) {
-      socket.on(direction, ({ payload }: { payload: string | Buffer }) => {
+    const record =
+      (direction: string) =>
+      ({ payload }: { payload: string | Buffer }) => {
         const message = payload.toString().match(/persist(?:ed)?:[\w-]+/)?.[0];
         if (message) frames.push({ direction, message });
-      });
-    }
+      };
+    socket.on("framesent", record("framesent"));
+    socket.on("framereceived", record("framereceived"));
   });
   await page.goto(resource.path);
   const scope = resource.task ? page.getByTestId("task-body") : page.locator(".document-page");
