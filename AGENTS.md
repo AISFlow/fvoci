@@ -5,11 +5,11 @@
 | 역할 | 실행 경로와 모델 | 책임 |
 | --- | --- | --- |
 | 단일 코디네이터 | Orca Codex 주 터미널, `gpt-6.1-sol`, high | 전체 인수·우선순위·소유권·공통 계약·검증 수락·PR 통합·승인된 범위의 원격 반영·정본 TODO |
-| 구현·조사·재현·검증 | Orca 터미널의 Codex worker, `gpt-6.1-sol` | 기존 Vue 후보 연결, Rust/DB/브라우저 검증, 결함 수정과 흐름별 React 제거 |
+| 구현·조사·재현·검증 | Orca 터미널의 Codex worker, `gpt-6.1-sol` | 현재 Vue 흐름 유지, Rust/DB/브라우저 검증과 결함 수정 |
 | 독립 코드 검토 | 구현자와 별도 컨텍스트의 `gpt-6.1-sol` | 고정 base/head의 실제 diff·호출자·계약·회귀 검토, 제품 코드 수정 금지 |
 
 사용자의 최신 직접 지시로 코디네이터를 Sol 6.1 high에 전면 인계했다. 이전 Astra는 배정·통합·원격 쓰기를 중단한다.
-기존 Run·활성 워커·작업·근거를 보존하며, **#272는 별도 사용자 승인 전 머지·릴리스 금지**다.
+기존 Run·활성 워커·작업·근거를 보존한다. #272의 전환·승인 경과는 아래 현재 기준과 환경 기록의 과거 맥락으로 구분한다.
 이 배정은 이전 Astra/Grok 임시 코디네이터 및 Opus/Ultracode 전용 배정을 대체한다. 과거 모델·검토·검증 이력은
 `.agents/environment.md`와 Git 이력에 그대로 보존한다. 모델 변경만으로 기존 구현을 재작성하거나 전수 감사를 반복하지 않는다.
 실제 모델 ID·effort는 transcript/런타임 근거로 기록하며 추측·조용한 대체·가상 Ultracode 옵션을 금지한다.
@@ -23,9 +23,14 @@ Sol 6.1 불가 시 제한을 보고하고 다른 Sol·Grok·Opus로 대체하지
 병렬도를 조정한다. 아래 과거 숫자·Opus/Ultracode 전용 조건보다 이 최신 지시가 우선한다. 같은 경로에는 한 작성자만 둔다.
 검증 워커도 자기 흐름의 수락까지 후속 수정 책임을 갖는다. 기존 코디네이터·자동 체인을 재가동하지 않는다.
 
-우선순위는 이미 작성된 Vue 후보의 실제 URL 연결 → Rust/API/DB·production 브라우저 검증 → 독립 검토·CI → main 수락이다.
-흐름별 수락 후 React 전용 경로를 제거하고 전체 합의 흐름 수락 후 공통 React 부팅·의존성·빌드 구성을 제거한다.
-공통 app-boundary/router/i18n 변경은 소유자를 지정해 워커에게 위임할 수 있으며 연결을 막는 규칙으로 쓰지 않는다.
+### 현재 코드 기준과 전환 이력
+
+#272는 main의 `67c3e19ab953169131013bcc2753dfb7ac39229c`에 머지됐다. 현재 웹 진입점은
+`apps/web/src/vue/main.ts`·`App.vue`·`router.ts`이며, React 후보 연결·공통 React 부팅 제거는
+이미 반영된 전환 이력이다. 이를 새 작업으로 반복하지 않는다. PR 머지는 릴리스·배포 완료를 뜻하지 않는다.
+과거 #272의 별도 승인 전 머지·릴리스 금지와 수락 순서는 [환경 기록](.agents/environment.md)의 과거 맥락에 보존한다.
+현재 작업은 실제 Git/원격 상태와 `docs/rewrite.md`의 관측 시각·미완료 근거를 대조해 정한다.
+공통 Vue 진입점·router·`packages/i18n/src/locales/` 변경은 명시적 소유자를 지정해 위임한다.
 
 현재 차수에는 Yjs/Yrs 교체를 끼워 넣지 않으며 차수 수락 뒤 승인된 비용·복구·스키마 비교를 진행한다.
 Yrs 유지로 결론을 미리 정하거나 해결 불가능한 결함을 비교의 새 선행 조건으로 만들지 않는다.
@@ -41,13 +46,13 @@ Yrs 유지로 결론을 미리 정하거나 해결 불가능한 결함을 비교
 
 원본은 읽기 전용 참조용 별도 저장소다. 대상에는 코디네이터의 통합 worktree와 task별 쓰기 worktree를 둔다. 한 task/허용 경로에 한 작성자만 둔다.
 워커·동시 작성자·독립 검토의 고정 수량 상한은 두지 않는다. CPU·메모리·디스크·inode·DB·브라우저 부하와
-검토·통합 처리량을 보고 병렬도를 배정한다. 무거운 검사의 동시 실행도 실제 자원과 격리 상태로 판단하며
-빠른 검사를 전역 잠금으로 막지 않는다. 독립된 작업이 준비됐을 때만 추가하고 슬롯을 채우려고 작업을 만들지 않는다.
+검토·통합 처리량을 보고 병렬도를 배정한다. 무거운 로컬 검사는 코디네이터가 통제하는 한 배치로 묶고,
+배치 내부 병렬도는 실제 자원과 격리 상태에 맞춘다. 빠른 검사를 전역 잠금으로 막지 않는다. 독립된 작업이 준비됐을 때만 추가하고 슬롯을 채우려고 작업을 만들지 않는다.
 과거 8개 작성자·2/3개 검토자 제한과 모델별 수량 면제 이력은 `.agents/environment.md` 및 Git 이력에 보존한다.
 
 그 밖의 규칙은 그대로다. 특히:
 - 한 task/허용 경로에 한 작성자
-- 아래 문단의 코디네이터 최종 소유 파일과 `apps/web/src/app-boundary.ts`·i18n locales의 명시적 소유자
+- 아래 문단의 코디네이터 최종 소유 파일과 `apps/web/src/vue/main.ts`·`apps/web/src/vue/App.vue`·`apps/web/src/vue/router.ts`·`packages/i18n/src/locales/`의 명시적 소유자
 - 수정 파일·공통 계약·선행 작업이 분리된 작업만 병렬
 - 슬롯을 채우려고 작업을 만들지 않음
 - worktree별 자원 격리
@@ -56,11 +61,9 @@ Yrs 유지로 결론을 미리 정하거나 해결 불가능한 결함을 비교
 - 사용자가 정한 작업 순서(현재 착수 tracer에 Yjs 교체를 끼워 넣지 않음)
 - 호스트 자원 감시
 
-프론트엔드 전용 작업(`git diff --quiet <prebuilt SHA> HEAD -- src crates migrations Cargo.toml Cargo.lock`가
-성공하는 작업)의 e2e는 고정 SHA에서 한 번 빌드한 백엔드 바이너리
-(`/home/kinesis/orca/workspaces/fvoci/prebuilt-8adaf1b8`, `READY`의 sha256)를 읽기 전용으로 쓸 수 있다.
-그 target 디렉터리로 cargo·`run-web-e2e.sh`·`generate-api.sh`를 실행하지 않고,
-`web-e2e-run-group.sh`에 `CARGO_TARGET_DIR`·`FVOCI_COLLAB_ENGINE`만 그 경로로 준다. 수락 근거는 원격 CI다.
+프론트 전용 native bundle 재사용의 입력·hash·feature·toolchain 대조와 fresh dist/실행 조건은
+[환경 기록 §5](.agents/environment.md#5-검증-자원과-실행-제약)만을 정본으로 따른다.
+옛 prebuilt 경로나 일부 디렉터리의 diff만으로 재사용 가능 여부를 판단하지 않는다.
 
 공통 manifest·lockfile·toolchain·CI·migration 순서·공유 API 계약·에이전트 설정의 최종 소유자는 코디네이터다. 변경이 필요하면 먼저 소유권을 조정한다. 워커는 소유하지 않은 경로까지 전체 formatter나 generator를 실행하지 않는다.
 
@@ -98,11 +101,15 @@ worktree의 인덱스를 복사·링크하거나 현재 변경의 근거로 쓰�
 | Node 대체·바이너리·child·배포/build 경계 | `.agents/skills/fvoci-runtime-boundaries/SKILL.md` |
 | 인증·인가·DB·migration | `.agents/skills/fvoci-db-security/SKILL.md` |
 | 검사 선택·실패·시간 측정 | `.agents/skills/fvoci-fast-verify/SKILL.md` |
+| 기존 Vue UI의 시각 설계·사용성 검토 | `.agents/skills/frontend-design/SKILL.md`와 같은 디렉터리의 `FVOCI-BRIEF.md`·`LICENSE.txt`·`PROVENANCE.md` |
 | 제출·검토·통합·재개·정리 | `.agents/skills/fvoci-handoff/SKILL.md` |
 
 스킬은 이 정본에서 읽는다. 클라이언트 자동 탐색은 실제 세션에서 확인한다. 지원하지 않으면 필요한 파일만 명시적으로 읽힌다. 모델마다 전문을 복제하지 않는다.
-스킬은 재사용 절차만 보관하고 참조 자료는 관련 작업에서만 읽는다. 현재 PR/SHA·Pending 상태·로그는
-`docs/rewrite.md`와 거기서 연결한 인계 기록에, 모델/권한은 이 파일에, 도구 설정은 환경 기록에 둔다.
+공통 안전·소유권·검증 수락 계약은 이 파일에 두며 모든 모델과 역할에 동일하게 적용한다.
+8개 스킬은 해당 역할/작업의 재사용 절차이며 참조 자료는 관련 작업에서만 읽는다.
+환경 기록은 도구·실행 제약·관측한 연결과 provenance, `docs/rewrite.md`와 인계 기록은 현재 PR/SHA·Pending·로그의 정본이다.
+개별 task prompt에는 목표·허용 경로·고정 base/head·검증·수락·중단 조건·인계 위치와 필요한 세부 지시를 둔다.
+ACK·인가 등 작업에 중요한 공통 조건은 다시 명시할 수 있으나 정본과 다른 정책으로 분기하거나 완화하지 않는다.
 
 ## 작업 제출
 
@@ -128,16 +135,16 @@ extractor/state/middleware/응답 변환을 담당하고, 현재 리소스 인�
 불변식은 구체적인 제품 연산·DB에서 재검사한다. 범용 실행 프레임워크는 만들지 않는다.
 
 PR 수락·머지는 전체 작업 종료가 아니다. 기능 대응표에서 의존성이 충족된
-다음 사용자 기능을 선택해 최신 main의 후속 task로 계속한다. workspace 기반
-직후 기존 React 흐름과 문서 권한·저장 기반을 연결하고 Hocuspocus/Yrs 동시편집을
-초기 핵심 기능으로 구현한다. 수락 전에는 probe를 제품 협업 지원으로 표시하지 않는다.
+다음 사용자 기능을 선택해 최신 main의 후속 task로 계속한다. 현재 Vue 흐름과 문서 권한·저장·
+Hocuspocus/Yrs 동시편집의 실제 수락 근거를 보존하고 남은 delta부터 진행한다.
+수락 전에는 probe를 제품 협업 지원으로 표시하지 않는다.
 
 
 ## 제품 런타임은 Rust다
 
 서버 측 제품 연산은 Rust가 기준이며 남아 있는 Node 변환 경로는 영구 예외가 아니라 잔여 포팅이다.
 새 Node 의존은 늘리지 않는다. 최종 제품에 Node/Bun/Deno 서버 기능·JS worker 위임·내장 JS 엔진·
-JS 런타임 번들·외부 변환 서비스로의 우회를 남기지 않는다. 기존 React/Tiptap·브라우저 JS·개발용
+JS 런타임 번들·외부 변환 서비스로의 우회를 남기지 않는다. Vue/Tiptap·브라우저 JS·개발용
 Node/CodeGraph·TS 비교 oracle와 합의한 PostgreSQL·Meilisearch·S3·SMTP는 별개다.
 기본 설치 준비(설정 검증, DB·검색 준비 확인, 앱 역할·migration·grant·검색 키)는 메인 앱 컨테이너의
 시작 절차가 자동 수행한다(2026-09-28 사용자 결정). 정상 요청 처리 단계는 제한된 앱 DB 역할과 필요한

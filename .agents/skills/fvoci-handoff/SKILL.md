@@ -5,7 +5,8 @@ description: FVOCI 작업을 제출·검토·통합하거나 세션을 재개하
 
 # 제출, 통합, 재개
 
-소유권과 승인 규칙은 AGENTS.md를 따른다. 조정 경로(내장 subagent/workflow 또는 Orca)는 AGENTS.md 역할표를 따르고, Orca를 쓸 때는 공식 orchestration live guide와 실제 task/dispatch를 사용한다.
+소유권과 승인 규칙은 AGENTS.md를 따른다. 현재 실행 경로는 AGENTS.md 역할표의 Orca terminal이며 공식 orchestration live guide와 실제 task/dispatch를 사용한다.
+내장 subagent/workflow 결과·journal은 과거 실행의 인계 근거로만 구분하며 현재 경로를 조용히 대체하지 않는다.
 
 ## 작업 제출
 
@@ -26,7 +27,7 @@ description: FVOCI 작업을 제출·검토·통합하거나 세션을 재개하
 
 ## 세션 재개
 
-AGENTS.md, 환경 기록, 진행 중인 workflow·agent(Orca를 쓰면 현재 task/dispatch), docs/rewrite.md의 최신 수락 SHA와 다음 작업을 확인한다. 실제 git status/worktree와 프로세스를 대조한다. 이전 실행이 남아 있으면 상태부터 확인하며 같은 작업을 다시 시작하지 않는다.
+AGENTS.md, 환경 기록, 현재 Orca task/dispatch·worker와 남아 있는 과거 workflow·agent, docs/rewrite.md의 최신 수락 SHA와 다음 작업을 확인한다. 실제 git status/worktree와 프로세스를 대조한다. 이전 실행이 남아 있으면 상태부터 확인하며 같은 작업을 다시 시작하지 않는다.
 
 ### Pending·한도 종료 후 인수
 

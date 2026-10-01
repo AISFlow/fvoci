@@ -38,6 +38,17 @@ SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 
 
 검사명, 정확한 명령/cwd/SHA, 실행 범위/개수, 결과와 exit code, 소요 시간·조건, 생략 이유와 남은 위험을 반환한다. 누락된 DB나 브라우저 환경이 필요한 검사는 미실행/실패로 분명히 표시한다.
 
+## Vue 정적 검사와 CI 정본
+
+현재 Vue/TypeScript·typed ESLint·Prettier 명령과 준비 순서는
+[Web CI의 `web-static` job](../../../.github/workflows/web.yml),
+[루트 scripts](../../../package.json), [웹 scripts](../../../apps/web/package.json),
+[editor scripts](../../../packages/editor/package.json)가 정본이다. 명령 목록을 별도로 복제하지 않는다.
+고정 dependency 준비 후 lint fixture·lint·format과 웹/editor typecheck의 실제 실행 범위를 확인한다.
+정적 검사는 Rust/DB build 없는 별도 job이며 API/unit·브라우저 수락을 대신하지 않는다.
+무거운 로컬 검사는 AGENTS.md의 한 통제 배치에 모으고 자원에 맞춰 실행한다.
+native 재사용은 [환경 기록 §5](../../environment.md#5-검증-자원과-실행-제약)의 provenance·fresh dist 조건을 따른다.
+
 ## Web Playwright CI shard (browser job only)
 
 1. 정책·플래너: `python3 scripts/web-e2e-groups.py verify --shards 8` 와 `python3 -m unittest scripts.test_web_e2e_groups` 는 DB·브라우저 없이 실행한다. `apps/web/e2e/*.spec.ts` 만 정상 범위이며, 중첩·`.test.ts` 등 미지원 패턴은 플래너가 실패로 막는다.

@@ -5,9 +5,10 @@
 다음 행동은 [rewrite.md](../docs/rewrite.md), 설치·복구는 [RUNNING.md](../RUNNING.md)를 따른다.
 과거 모델 교체·PR별 일지를 현재 실행 절차에 섞지 않는다.
 
-## 1. 현재 코디네이터와 Run 연결
+## 1. 관측한 코디네이터와 Run 연결
 
-2026-10-01 03:43 KST, 현재 terminal 환경·세션 JSONL·설치 CLI·run-current를 읽기 전용으로 대조했다.
+아래는 2026-10-01 03:43 KST의 terminal 환경·세션 JSONL·설치 CLI·run-current를 읽기 전용으로 대조한 snapshot이다.
+다른 세션이나 재개 시점의 현재 연결·권한·도구 가용성을 보장하지 않는다. 실제 환경을 다시 확인하고 기존 Run을 보존한다.
 
 | 항목                     | 실제 값                                                                       | 근거                                                                         |
 | ------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
@@ -40,8 +41,8 @@ Run의 오래된 objective 문자열에 남은 “Astra”는 당시 생성 meta
 CLI `0.159.2`가 실제 설치됐다. 의도하지 않은 변경과 첫 Task 미주입·공식 release/retry 근거는
 기존 evidence의 `f272-codex-readiness-update-incident.json`에 보존한다. 모델 교체·계정/결제 변경은 없었고 추가 설치 변경은 하지 않는다.
 
-**#272는 별도 사용자 승인 전 main 머지·태그·릴리스·제품 배포 금지**다.
-현재 Task/Dispatch·결과·다음 실행은 rewrite.md §1·§4·§7에서 확인한다.
+#272 후보 당시의 별도 승인 경계는 §6에 보존한다. 현재 Task/Dispatch·결과·다음 실행은
+rewrite.md §1·§4·§7의 관측 시각과 실제 Git/Orca/원격 상태를 대조한다.
 
 ## 2. 저장소와 설치 도구
 
@@ -82,7 +83,8 @@ crate 다운로드 cache의 잠금 대기는 worktree target compile/test 시간
 - worker-start receipt가 ready/turn observed인지 확인하고 uncertain/readiness timeout은 supported recovery로 조사한다.
   FIFO delivery의 모든 메시지를 처리하고 settled worker의 결과·잔존 자원·공식 release/retain 결정을 회수한 후 ACK한다.
   user_takeover retained를 released로 허위 기록하거나 다른 terminal·Run 자원을 강제 종료하지 않는다.
-- 신규 워커는 Orca terminal에서 실행한다. native subagent 서비스 슬롯을 Orca 병렬 상한으로 해석하지 않는다.
+- 신규 워커는 Orca terminal에서 실행한다. Codex 내장 subagent의 실제 서비스 슬롯 제한과 Orca의 그 시점 capacity/readiness 상태를 구분한다.
+  내장 슬롯 수를 Orca의 영구 워커 상한으로 해석하거나 한 시점의 Orca 실패를 영구 제한으로 일반화하지 않는다.
   배정 규칙은 AGENTS.md가 정본이며, 실제 platform/CPU/RAM/disk/DB/browser·통합 처리량을 관측한다.
 - 프로젝트 스킬 정본은 `.agents/skills/`다. 현재 catalog 발견과 필요한 SKILL.md의 명시 읽기를 구분한다.
   클라이언트의 자동 탐색 성공을 다른 클라이언트에 전용하지 않고 모델별 adapter/전문 복제본을 만들지 않는다.
@@ -94,7 +96,9 @@ crate 다운로드 cache의 잠금 대기는 worktree target compile/test 시간
 
 ## 4. CodeGraph 설정과 정확도 한계
 
-worktree마다 자기 `.codegraph/` 인덱스를 사용한다. `status` → 필요시 `init -y`/`sync` →
+코드 탐색·영향 확인에는 AGENTS.md에 따라 설치된 CodeGraph를 활용한다. 아래는 확인된 CLI 경로이며,
+미설치·호출 불가 시 제한을 보고하고 실제 source·검색·검사로 확인한 범위를 명시한다.
+과거 MCP 호출명을 현재 도구 가용성으로 가정하지 않는다. worktree마다 자기 `.codegraph/` 인덱스를 사용한다. `status` → 필요시 `init -y`/`sync` →
 `explore`/`callers`/`impact`로 조회하고 실제 source·SQL·RLS·cfg·IPC·trait dispatch·검사와 대조한다.
 다른 worktree의 index를 복사·링크하지 않는다. status가 최신이어도 개별 탐색의 stale 경고를 확인한다.
 
@@ -118,9 +122,15 @@ worktree target, 실행별 DB·비특권 앱 역할·Redis/search prefix·storag
 credential 실값·전체 대화는 문서/evidence에 복제하지 않는다. 소유 불명 PG·runner·다른 세션은 종료하지 않는다.
 
 프론트 전용 native 재사용은 rewrite.md의 해당 검증 SHA와 영속 provenance가 고정한 bundle만 허용한다.
-현재 후보의 Rust/crates/migration/manifest·lock/toolchain 입력과 실제 native source hash/feature가 일치하는지
-전후 대조한 뒤 읽기 전용으로 쓴다. 제품 Rust가 바뀌면 옛 bundle 성공을 새 후보에 적용하지 않는다.
-새 worktree의 fresh dist와 독립 자원을 쓰며 group wrapper에 경로만 전달한다.
+현재 후보의 전체 native build 입력(Rust/crates/migration, manifest·lock·toolchain, build script·vendor·생성 입력과
+빌드에 영향을 주는 설정)을 provenance의 source SHA/hash·feature·target/profile·toolchain 및 실행 파일 hash와
+전후 대조한 뒤 읽기 전용으로 쓴다. 일부 경로의 `git diff --quiet`만으로 입력 동등성을 증명하지 않는다. 제품 Rust가 바뀌면 옛 bundle 성공을 새 후보에 적용하지 않는다.
+[group wrapper](../scripts/web-e2e-run-group.sh)는 build 없이 `$ROOT/apps/web/dist`를 복사하므로,
+`ROOT`는 검사할 새 worktree의 절대 경로로 지정하고 그 후보에서 생성한 fresh dist·served asset hash를 확인한다.
+`CARGO_TARGET_DIR`·`FVOCI_COLLAB_ENGINE`은 검증된 bundle 경로로, `FVOCI_E2E_PROFILE`은 실제 debug/release
+provenance에 맞춰 전달한다. [inner wrapper](../scripts/web-e2e-inner.sh)가 고르는 server/migrate와 필요한 helper,
+고정 dependencies·브라우저·Docker/DB/검색 준비 및 독립 실행 자원을 먼저 확인한다.
+wrapper의 dist 존재 확인은 최신성이나 입력 동등성 검증이 아니며, 준비와 검사 결과를 따로 기록한다.
 빌려 쓰는 target/source에서 cargo·generate-api·run-web-e2e 전체 wrapper를 실행하지 않는다.
 
 이전 bc9 source의 rapid-close bundle과 411입력·5 binary/mode/hash·db-tests/worker 근거는
@@ -142,6 +152,11 @@ full-web emit TS2742·잘못 설치된 TS 버전 등을 any shim·rule 완화로
 실패와 support recovery·실제 runtime 모델 증거는 보고서에 남긴다.
 
 ## 6. 과거 기록과 재개 포인터
+
+#272 전환 당시에는 Vue 후보 URL 연결 → Rust/API/DB·production 브라우저 검증 → 독립 검토·CI → main 수락
+순서와 별도 사용자 승인 전 머지·태그·릴리스·제품 배포 금지를 적용했다. 흐름별 React 제거 후 공통 React 부팅·
+의존성·빌드 구성을 제거했다. #272는 main `67c3e19ab953169131013bcc2753dfb7ac39229c`에 머지됐으며,
+이전 후보 상태·명령은 역사적 근거다. 이 사실은 새 릴리스·배포 승인이나 미완료 검사 수락을 부여하지 않는다.
 
 정리 전 전체 환경 기록은
 [고정 f442의 environment.md](https://github.com/AISFlow/fvoci/blob/f442a9f06c438b51524e13cb7a2043ff5d95566a/.agents/environment.md)와
