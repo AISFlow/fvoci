@@ -65,7 +65,9 @@ function assertCapturedKeys(name: string, keys: unknown[][]) {
       ];
   assert.deepEqual(
     keys.map((key) => JSON.stringify(key)).sort(),
-    [...counts, ...counts, ...documentKeys].map((key) => JSON.stringify(key)).sort(),
+    [...counts, ...counts, ...documentKeys, ["trash", "old-workspace"]]
+      .map((key) => JSON.stringify(key))
+      .sort(),
   );
 }
 async function harness(name: string, includePatch = false) {
@@ -147,7 +149,7 @@ async function harness(name: string, includePatch = false) {
       "trashDocument",
       "moveDocument",
       "queryClient",
-      "window",
+      "router",
       "trashPath",
       "loadErrorMessage",
       "patchDocument",
@@ -180,7 +182,12 @@ async function harness(name: string, includePatch = false) {
           await queryClient.invalidateQueries({ queryKey });
         },
       },
-      { location: { assign: (path: string) => navigation.push(path) } },
+      {
+        push: (path: string) => {
+          navigation.push(path);
+          return Promise.resolve();
+        },
+      },
       (slug: string) => `/w/${slug}/trash`,
       () => "failed",
       load,

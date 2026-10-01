@@ -2,12 +2,12 @@
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, watchEffect } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { wikiPath } from "@/lib/href";
 import { collabRoomName } from "../collab/useCollabRoom";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
 import WikiDocumentView from "../features/documents/WikiDocumentView.vue";
-import { redirectTo } from "../session/navigation";
+import { useNavigationError } from "../features/workspace/useNavigationError";
 import { useWikiDocumentRef } from "../session/useWikiDocumentRef";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
 
@@ -15,6 +15,7 @@ import { useWorkspaceSession } from "../session/useWorkspaceSession";
 // in-app move to another document tears the room down (flush, then socket
 // and provider) and builds the next one; there is never a second provider.
 const route = useRoute();
+const router = useRouter();
 const slug = computed(() => String(route.params.slug ?? ""));
 const refParam = computed(() => String(route.params.ref ?? ""));
 
@@ -22,11 +23,29 @@ const session = useWorkspaceSession(slug);
 const workspace = session.workspace;
 const documentRef = useWikiDocumentRef(() => workspace.value?.id, refParam);
 const node = documentRef.node;
+const navigation = useNavigationError(
+  () => `${route.fullPath}:${session.me.value?.userId ?? ""}:${session.status.value}`,
+);
 
 // A ref that names no readable wiki document goes to the wiki list, as in the React app.
-watchEffect(() => {
-  if (workspace.value && documentRef.notFound.value) redirectTo(wikiPath(slug.value));
-});
+// The session owns auth/setup/eviction hard boundaries; a missing ref is an
+// ordinary replacement in the current app. Its lazy-route failure stays here.
+let attemptedPage: string | undefined;
+function replaceMissingWiki(): void {
+  if (session.status.value !== "ready" || !workspace.value || !documentRef.notFound.value) {
+    attemptedPage = undefined;
+    return;
+  }
+  const page = `${route.fullPath}:${workspace.value.id}:${session.me.value?.userId ?? ""}`;
+  if (attemptedPage === page) return;
+  attemptedPage = page;
+  navigation.run(() => router.replace(wikiPath(slug.value)));
+}
+watchEffect(replaceMissingWiki);
+function retryNavigation(): void {
+  attemptedPage = undefined;
+  replaceMissingWiki();
+}
 </script>
 
 <template>
@@ -44,7 +63,11 @@ watchEffect(() => {
     :workspace-name="workspace.name"
     active="wiki"
   >
-    <div v-if="documentRef.failed.value">
+    <div v-if="navigation.error.value">
+      <p role="alert" class="text-muted">{{ navigation.error.value }}</p>
+      <UButton size="sm" class="mt-2" @click="retryNavigation">{{ t("load.retry") }}</UButton>
+    </div>
+    <div v-else-if="documentRef.failed.value">
       <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
       <UButton size="sm" class="mt-2" @click="documentRef.retry()">{{ t("load.retry") }}</UButton>
     </div>

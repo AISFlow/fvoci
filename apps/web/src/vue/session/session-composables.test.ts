@@ -404,6 +404,128 @@ function deferred<T>() {
   };
 }
 
+await test("session: an actor change retires the access lease and hard-reenters before an old list settles", async () => {
+  const client = queryClient();
+  seedSession(client);
+  const redirects: string[] = [];
+  let oldCallback: (() => void) | undefined;
+  let closed = 0;
+  const env = testEnvironment(redirects);
+  env.location = () => ({ pathname: "/w/acme/WIKI-1", search: "?from=search", hash: "#block" });
+  env.watchAccess = (_id, handlers) => {
+    oldCallback = handlers.onAccessChange;
+    return {
+      close: () => {
+        closed += 1;
+      },
+    };
+  };
+  const { result, stop } = mount(client, () => useWorkspaceSession("acme", env));
+  const list = deferred<{ items: (typeof WORKSPACE)[] }>();
+  const fetching = client.query({
+    queryKey: ["me", "workspaces"],
+    staleTime: 0,
+    queryFn: () => list.promise,
+  });
+  try {
+    assert.ok(oldCallback);
+    oldCallback();
+    client.setQueryData(["auth", "me"], { ...ME, userId: "77777777-7777-7777-8777-777777777777" });
+    assert.equal(closed, 1, "the lease retires synchronously with the actor");
+    await nextTick();
+    assert.equal(closed, 1, "the previous actor's access subscription closes immediately");
+    assert.equal(
+      result.status.value,
+      "loading",
+      "private children leave before cached data is reused",
+    );
+    assert.deepEqual(redirects, ["/w/acme/WIKI-1?from=search#block"]);
+    oldCallback();
+    list.resolve({ items: [] });
+    await fetching;
+    await nextTick();
+    assert.deepEqual(
+      redirects,
+      ["/w/acme/WIKI-1?from=search#block"],
+      "the old actor's list cannot evict the new actor",
+    );
+  } finally {
+    list.resolve({ items: [] });
+    await fetching;
+    stop();
+  }
+});
+
+for (const status of [403, 500]) {
+  await test(`session: cached me ${String(status)} keeps the actor and does not hard-reenter`, async () => {
+    const client = queryClient();
+    seedSession(client);
+    const redirects: string[] = [];
+    let closed = 0;
+    const env = testEnvironment(redirects);
+    env.watchAccess = () => ({
+      close: () => {
+        closed += 1;
+      },
+    });
+    const { result, stop } = mount(client, () => useWorkspaceSession("acme", env));
+    try {
+      await client
+        .query({
+          queryKey: ["auth", "me"],
+          staleTime: 0,
+          queryFn: () => Promise.reject(new ProblemError(status)),
+        })
+        .catch(() => undefined);
+      await nextTick();
+      assert.equal(result.status.value, "ready");
+      assert.equal(closed, 0);
+      assert.deepEqual(redirects, []);
+    } finally {
+      stop();
+    }
+  });
+}
+
+await test("session: a transient absent me and same-user profile refresh do not change the actor", async () => {
+  const client = queryClient();
+  seedSession(client);
+  const redirects: string[] = [];
+  const { result, stop } = mount(client, () =>
+    useWorkspaceSession("acme", testEnvironment(redirects)),
+  );
+  try {
+    await client.resetQueries({ queryKey: ["auth", "me"] });
+    await nextTick();
+    assert.equal(result.status.value, "error");
+    assert.deepEqual(redirects, []);
+    client.setQueryData(["auth", "me"], { ...ME, locale: "en" });
+    await nextTick();
+    assert.equal(result.status.value, "ready");
+    assert.deepEqual(redirects, []);
+  } finally {
+    stop();
+  }
+});
+
+await test("session: setup keeps priority when the authenticated actor changes", async () => {
+  const client = queryClient();
+  seedSession(client);
+  const redirects: string[] = [];
+  const { result, stop } = mount(client, () =>
+    useWorkspaceSession("acme", testEnvironment(redirects)),
+  );
+  try {
+    client.setQueryData(["setup", "status"], { needed: true });
+    client.setQueryData(["auth", "me"], { ...ME, userId: "77777777-7777-7777-8777-777777777777" });
+    await nextTick();
+    assert.equal(result.status.value, "loading");
+    assert.deepEqual(redirects, ["/setup"]);
+  } finally {
+    stop();
+  }
+});
+
 for (const transition of ["switch", "dispose", "current denial", "setup priority"]) {
   await test(`access refresh: ${transition} keeps redirect ownership on the current session guard`, async () => {
     const client = queryClient();
