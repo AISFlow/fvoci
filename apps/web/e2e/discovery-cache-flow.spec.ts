@@ -16,14 +16,14 @@ test.afterAll(() => {
 test.afterEach(async () => {
   if (fixture)
     await test.info().attach("cache-observer-served-assets", {
-      body: Buffer.from(JSON.stringify(fixture.evidence(), null, 2)),
+      body: Buffer.from(JSON.stringify(await fixture.evidence(), null, 2)),
       contentType: "application/json",
     });
 });
 async function newSignedInPage(browser: Browser, baseURL: string | undefined, who: typeof admin) {
   const context = await browser.newContext({ baseURL });
   if (!fixture) throw new Error("Cache observation fixture was not built");
-  await fixture.install(context);
+  fixture.install(context);
   const page = await context.newPage();
   await login(page, who.email, who.password);
   return { context, page };
@@ -174,7 +174,7 @@ test("project restore refreshes retained discovery, project lists and workspace 
   // totals on login, which can otherwise cache the intermediate root-only count.
   const context = await browser.newContext({ baseURL });
   if (!fixture) throw new Error("Cache observation fixture was not built");
-  await fixture.install(context);
+  fixture.install(context);
   const page = await context.newPage();
   try {
     expect(

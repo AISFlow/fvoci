@@ -1,15 +1,24 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { BrowserContext } from "@playwright/test";
 
-/** API, SSE and collaboration always use the real server. Only this fixture's
- * built assets are intercepted, in this test's browser context. The real
- * document retains server CSP and the browser's network address space. */
+/** Overlay only this wrapper run's private static copy. Rust serves every
+ * document, asset, API, SSE and collaboration response normally. */
 export function buildCacheObserverFixture() {
+  const staticDir = process.env.FVOCI_STATIC_DIR;
+  const resultDir = process.env.FVOCI_E2E_RESULT_DIR;
+  if (
+    !staticDir ||
+    !resultDir ||
+    realpathSync(staticDir) !== path.join(realpathSync(resultDir), "static")
+  ) {
+    throw new Error("Cache fixture requires the wrapper-owned result/static directory");
+  }
   const dist = mkdtempSync(path.join(tmpdir(), "fvoci-cache-observer-"));
+  const sha256 = (body: string | Buffer) => createHash("sha256").update(body).digest("hex");
   try {
     execFileSync(
       "bun",
@@ -20,109 +29,75 @@ export function buildCacheObserverFixture() {
         stdio: "pipe",
       },
     );
-  } catch (error) {
-    rmSync(dist, { recursive: true, force: true });
-    throw error;
-  }
-  function entryScript(directory: string): string {
-    const html = readFileSync(path.join(directory, "index.html"), "utf8");
-    const script = /<script[^>]+src="([^"]+\.js)"/.exec(html)?.[1];
-    if (!script) throw new Error("Cache fixture requires a single built entry script");
-    return script;
-  }
-  let productionEntry: string;
-  let fixtureEntry: string;
-  try {
-    const staticDirectory = process.env.FVOCI_STATIC_DIR;
-    if (!staticDirectory) throw new Error("Cache fixture requires actual server static directory");
-    productionEntry = entryScript(staticDirectory);
-    fixtureEntry = entryScript(dist);
-    const styles = (directory: string) =>
-      [
-        ...readFileSync(path.join(directory, "index.html"), "utf8").matchAll(
-          /<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"/g,
-        ),
-      ].map((match) => match[1]);
-    if (JSON.stringify(styles(staticDirectory)) !== JSON.stringify(styles(dist))) {
-      throw new Error("Cache fixture must preserve the production document's stylesheets");
+    // Server CSP is computed at startup from inline shell content. The fixture
+    // may change external chunk URLs; everything else must remain identical.
+    const original = readFileSync(path.join(staticDir, "index.html"), "utf8");
+    const fixture = readFileSync(path.join(dist, "index.html"), "utf8");
+    const withoutExternalJs = (html: string) =>
+      html.replace(/((?:src|href)=")\/assets\/[^"/]+\.js"/g, '$1/EXTERNAL-JS"');
+    if (withoutExternalJs(original) !== withoutExternalJs(fixture)) {
+      throw new Error("Fixture shell changed inline CSP content or production styles");
     }
-  } catch (error) {
-    rmSync(dist, { recursive: true, force: true });
-    throw error;
-  }
-  const served = new Map<
-    string,
-    {
-      url: string;
-      source: string;
-      sourceSha256: string;
-      servedSha256: string;
+    const files = readdirSync(dist, { recursive: true, withFileTypes: true }).filter((entry) =>
+      entry.isFile(),
+    );
+    const manifest = files.map((entry) => {
+      const relative = path.relative(dist, path.join(entry.parentPath, entry.name));
+      return { path: relative, sha256: sha256(readFileSync(path.join(dist, relative))) };
+    });
+    cpSync(dist, staticDir, { recursive: true });
+    for (const entry of manifest) {
+      if (sha256(readFileSync(path.join(staticDir, entry.path))) !== entry.sha256) {
+        throw new Error(`Fixture overlay mismatch: ${entry.path}`);
+      }
+    }
+    const byPath = new Map(manifest.map((entry) => [`/${entry.path}`, entry.sha256]));
+    const observed: Promise<{
+      path: string;
+      sha256: string;
       securityHeaders: Record<string, string>;
-    }
-  >();
-  return {
-    evidence() {
-      return {
-        mode: "task-cache-e2e",
-        productionEntry,
-        fixtureEntry,
-        assets: [...served.values()],
-      };
-    },
-    async install(context: BrowserContext) {
-      await context.route(
-        (url) => url.pathname.startsWith("/assets/"),
-        async (route) => {
-          const pathname = new URL(route.request().url()).pathname;
-          const file = path.join(dist, pathname === productionEntry ? fixtureEntry : pathname);
-          if (!file.startsWith(`${dist}/`) || !existsSync(file)) {
-            await route.continue();
-            return;
-          }
-          // Preserve the real server's CSP and other response headers.
-          const response = await route.fetch();
-          const source = readFileSync(file);
-          const body = file.endsWith(".js")
-            ? source
-                .toString("utf8")
-                .replaceAll(path.basename(fixtureEntry), path.basename(productionEntry))
-            : source;
-          const securityHeaders = Object.fromEntries(
-            Object.entries(response.headers()).filter(([key]) =>
-              [
-                "content-security-policy",
-                "x-content-type-options",
-                "referrer-policy",
-                "permissions-policy",
-                "cross-origin-resource-policy",
-                "cross-origin-opener-policy",
-              ].includes(key),
-            ),
+    }>[] = [];
+    return {
+      install(context: BrowserContext) {
+        context.on("response", (response) => {
+          const pathname = new URL(response.url()).pathname;
+          if (!pathname.startsWith("/assets/") || response.status() !== 200) return;
+          observed.push(
+            response.body().then((body) => {
+              const hash = sha256(body);
+              if (byPath.get(pathname) !== hash)
+                throw new Error(`Served fixture asset mismatch: ${pathname}`);
+              const securityHeaders = Object.fromEntries(
+                Object.entries(response.headers()).filter(([key]) =>
+                  [
+                    "content-security-policy",
+                    "x-content-type-options",
+                    "referrer-policy",
+                    "permissions-policy",
+                    "cross-origin-resource-policy",
+                    "cross-origin-opener-policy",
+                  ].includes(key),
+                ),
+              );
+              return { path: pathname, sha256: hash, securityHeaders };
+            }),
           );
-          served.set(pathname, {
-            url: pathname,
-            source: path.relative(dist, file),
-            sourceSha256: createHash("sha256").update(source).digest("hex"),
-            servedSha256: createHash("sha256").update(body).digest("hex"),
-            securityHeaders,
-          });
-          const contentType = file.endsWith(".js")
-            ? "application/javascript"
-            : file.endsWith(".css")
-              ? "text/css"
-              : file.endsWith(".html")
-                ? "text/html"
-                : undefined;
-          // Fixture chunk hashes differ from the ordinary build, so the real
-          // static server can return 404 for a fixture-only asset. Keep its
-          // security headers, while supplying the existing fixture file/type.
-          // Lazy chunks import entry exports. Use one URL/module identity.
-          await route.fulfill({ response, body, status: 200, contentType });
-        },
-      );
-    },
-    dispose() {
-      rmSync(dist, { recursive: true, force: true });
-    },
-  };
+        });
+      },
+      async evidence() {
+        return {
+          mode: "task-cache-e2e",
+          shellUnchangedExceptExternalJs: true,
+          manifest,
+          served: await Promise.all(observed),
+        };
+      },
+      dispose() {
+        rmSync(dist, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    rmSync(dist, { recursive: true, force: true });
+    throw error;
+  }
 }
