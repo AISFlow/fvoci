@@ -56,6 +56,10 @@ test("queued attachments survive complete loss/retry and cannot insert after can
   expect(moved.ok()).toBe(true);
   const sourcePath = `/w/${owner.slug}/WIKI-${String(source.number)}`;
   const destinationPath = `/w/${owner.slug}/WIKI-${String(destination.number)}`;
+  const originalBody = await readJson(
+    await page.request.get(`${ws}/documents/${source.id}/body`),
+    flowSchemas.body,
+  );
   await page.goto(sourcePath);
   await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
   const queue = page.locator("[data-fvoci-uploads]");
@@ -149,8 +153,12 @@ test("queued attachments survive complete loss/retry and cannot insert after can
     await route.abort();
     partFinished.resolve(undefined);
   });
+  const canceledSession = page.waitForResponse((response) =>
+    response.url().endsWith(`/documents/${source.id}/uploads`),
+  );
   await pasteFile(page, "canceled.txt");
   await partEntered.promise;
+  const canceledUpload = await readJson(await canceledSession, flowSchemas.upload);
   await queue.getByRole("button", { name: "취소" }).click();
   await expect(queue).toHaveCount(0);
   releasePart.resolve(undefined);
@@ -159,6 +167,26 @@ test("queued attachments survive complete loss/retry and cannot insert after can
   await page.unroute(completePattern);
   expect(canceledCompletes).toBe(0);
   await expect(editor.getByRole("link", { name: "canceled.txt" })).toHaveCount(0);
+
+  // Provider sends/rejoins are not DB ACKs. Save must turn the current edit
+  // prefix's badge from unsaved to persisted before the authorized body read.
+  const storedIds = [lostId, retryId, retriedUpload.attachmentId];
+  const assertStoredBody = (contentJson: unknown) => {
+    const json = JSON.stringify(contentJson);
+    for (const id of storedIds) expect(json).toContain(`"${id}"`);
+    expect(json).not.toContain(canceledUpload.attachmentId);
+    expect(json).not.toContain(failedUpload.attachmentId);
+  };
+  // Negative control: the real original body cannot satisfy the positive IDs.
+  for (const id of storedIds) expect(JSON.stringify(originalBody.contentJson)).not.toContain(id);
+  await expect(page.locator('[data-collab-persisted="false"]')).toBeVisible();
+  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible();
+  const savedBody = await readJson(
+    await page.request.get(`${ws}/documents/${source.id}/body`),
+    flowSchemas.body,
+  );
+  assertStoredBody(savedBody.contentJson);
 
   // Complete is durable before navigation but its response remains queued.
   // Navigate through the app, then release it in the same JS realm: an old
@@ -176,6 +204,11 @@ test("queued attachments survive complete loss/retry and cannot insert after can
     await route.fulfill({ response });
     completeFinished.resolve(undefined);
   });
+  // Register before navigation: the browser abort, rather than route handler
+  // completion alone, fences the real upload transport's retirement.
+  const lateAborted = page.waitForEvent("requestfailed", (request) =>
+    request.url().endsWith(`/attachments/${lateId}/complete`),
+  );
   await pasteFile(page, "late-complete.txt");
   await completeEntered.promise;
   await page.getByRole("link", { name: "Upload destination", exact: true }).click();
@@ -183,6 +216,7 @@ test("queued attachments survive complete loss/retry and cannot insert after can
   await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
   releaseComplete.resolve(undefined);
   await completeFinished.promise;
+  expect((await lateAborted).failure()?.errorText).toBe("net::ERR_ABORTED");
   await page.unroute(completePattern);
   await expect(queue).toHaveCount(0);
   await expect(editor.locator(".afn-attachment")).toHaveCount(0);
@@ -191,6 +225,13 @@ test("queued attachments survive complete loss/retry and cannot insert after can
     flowSchemas.body,
   );
   expect(JSON.stringify(destinationBody.contentJson)).not.toContain(lateId);
+  const sourceBody = await readJson(
+    await page.request.get(`${ws}/documents/${source.id}/body`),
+    flowSchemas.body,
+  );
+  assertStoredBody(sourceBody.contentJson);
+  expect(sourceBody.contentJson).toEqual(savedBody.contentJson);
+  expect(JSON.stringify(sourceBody.contentJson)).not.toContain(lateId);
   const lateDownload = await page.request.get(`${ws}/attachments/${lateId}/download`);
   expect(lateDownload.ok()).toBe(true);
   expect(await lateDownload.text()).toBe("original bytes: late-complete.txt");
@@ -200,6 +241,13 @@ test("queued attachments survive complete loss/retry and cannot insert after can
   try {
     const reopened = await fresh.newPage();
     await login(reopened, owner.email, owner.password);
+    const freshBody = await readJson(
+      await reopened.request.get(`${ws}/documents/${source.id}/body`),
+      flowSchemas.body,
+    );
+    assertStoredBody(freshBody.contentJson);
+    expect(freshBody.contentJson).toEqual(sourceBody.contentJson);
+    expect(JSON.stringify(freshBody.contentJson)).not.toContain(lateId);
     await reopened.goto(sourcePath);
     await expect(reopened.locator('[data-collab-status="connected"]')).toBeVisible();
     const stored = reopened.locator(".fvoci-editor .ProseMirror");
@@ -215,6 +263,17 @@ test("queued attachments survive complete loss/retry and cannot insert after can
     await expect(stored.getByRole("link", { name: "late-complete.txt" })).toHaveCount(0);
     await expect(stored.getByRole("link", { name: "canceled.txt" })).toHaveCount(0);
     await expect(reopened.locator("[data-fvoci-uploads]")).toHaveCount(0);
+    await reopened.goto(destinationPath);
+    await expect(reopened.locator('[data-collab-status="connected"]')).toBeVisible();
+    await expect(reopened.locator(".fvoci-editor .ProseMirror .afn-attachment")).toHaveCount(0);
+    await expect(reopened.getByRole("link", { name: "late-complete.txt" })).toHaveCount(0);
+    await expect(reopened.locator("[data-fvoci-uploads]")).toHaveCount(0);
+    const freshDestinationBody = await readJson(
+      await reopened.request.get(`${ws}/documents/${destination.id}/body`),
+      flowSchemas.body,
+    );
+    expect(freshDestinationBody.contentJson).toEqual(destinationBody.contentJson);
+    expect(JSON.stringify(freshDestinationBody.contentJson)).not.toContain(lateId);
   } finally {
     await fresh.close();
   }
@@ -228,6 +287,8 @@ test("queued attachments survive complete loss/retry and cannot insert after can
       completeCalls,
       retryCalls,
       canceledCompletes,
+      storedIds,
+      canceledId: canceledUpload.attachmentId,
     }),
     contentType: "application/json",
   });
