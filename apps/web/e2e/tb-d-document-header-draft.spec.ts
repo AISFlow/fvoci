@@ -316,9 +316,9 @@ async function actorReentry(page: Page) {
         };
       };
     };
-    void root.__vue_app__._context.provides.VUE_QUERY_CLIENT.refetchQueries({
+    root.__vue_app__._context.provides.VUE_QUERY_CLIENT.refetchQueries({
       queryKey: ["auth", "me"],
-    });
+    }).catch(reportError);
   });
   await navigation;
   await page.waitForLoadState("domcontentloaded");
