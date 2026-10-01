@@ -668,6 +668,7 @@ fn wrap_md_marks(run: &MdRun) -> String {
         LazyLock::new(|| Regex::new(r"[\p{Zs}\t\n\x0c\r]*$").expect("constant regex"));
     let mut leading = "";
     let mut trailing = "";
+    let mut wrap_emphasis = true;
     if !has("code")
         && ["bold", "italic", "strike", "highlight"]
             .iter()
@@ -675,14 +676,16 @@ fn wrap_md_marks(run: &MdRun) -> String {
     {
         let start = LEADING_SPACE.find(&run.md).map_or(0, |m| m.end());
         if start == run.md.len() {
-            return run.md.clone();
+            // Blank emphasis is unrepresentable, but its link must still be wrapped.
+            wrap_emphasis = false;
+        } else {
+            let end = TRAILING_SPACE
+                .find(&run.md)
+                .map_or(run.md.len(), |m| m.start());
+            leading = &run.md[..start];
+            trailing = &run.md[end..];
+            text = run.md[start..end].to_string();
         }
-        let end = TRAILING_SPACE
-            .find(&run.md)
-            .map_or(run.md.len(), |m| m.start());
-        leading = &run.md[..start];
-        trailing = &run.md[end..];
-        text = run.md[start..end].to_string();
     }
     if has("code") {
         let fence = fence_for(&text, '`', 1);
@@ -693,26 +696,25 @@ fn wrap_md_marks(run: &MdRun) -> String {
         };
         text = format!("{fence}{pad}{text}{pad}{fence}");
     }
-    if has("bold") {
+    if wrap_emphasis && has("bold") {
         text = format!("**{text}**");
     }
-    if has("italic") {
+    if wrap_emphasis && has("italic") {
         text = format!("*{text}*");
     }
-    if has("strike") {
+    if wrap_emphasis && has("strike") {
         text = format!("~~{text}~~");
     }
-    if has("highlight") {
+    if wrap_emphasis && has("highlight") {
         text = format!("=={text}==");
     }
     let link = marks
         .iter()
         .find(|m| m.ty == "link" && m.href.as_deref().is_some_and(|h| !h.is_empty()));
-    let wrapped = match link.and_then(|m| m.href.as_deref()) {
-        Some(href) => format!("[{text}]({href})"),
-        None => text,
-    };
-    format!("{leading}{wrapped}{trailing}")
+    match link.and_then(|m| m.href.as_deref()) {
+        Some(href) => format!("[{leading}{text}{trailing}]({href})"),
+        None => format!("{leading}{text}{trailing}"),
+    }
 }
 
 fn inline_md(nodes: Option<&Vec<Value>>, opts: MdOpts) -> String {
@@ -1066,6 +1068,149 @@ mod tests {
                 }],
             };
             assert_eq!(wrap_md_marks(&run), text);
+        }
+    }
+
+    fn linked_markdown_run(text: &str, emphasis: Option<&str>) -> Value {
+        let mut marks =
+            vec![json!({"type":"link","attrs":{"href":"https://example.com/target?q=1"}})];
+        if let Some(ty) = emphasis {
+            marks.push(json!({"type":ty}));
+        }
+        para(json!([
+            {"type":"text","text":"before "},
+            {"type":"text","text":text,"marks":marks},
+            {"type":"text","text":" after"}
+        ]))
+    }
+
+    fn parsed_markdown_text_and_link(doc: &Value) -> (String, String) {
+        let mut text = String::new();
+        let mut linked = String::new();
+        for node in doc["content"][0]["content"]
+            .as_array()
+            .expect("parsed content")
+        {
+            let value = node["text"].as_str().expect("parsed text");
+            text.push_str(value);
+            for mark in node["marks"].as_array().into_iter().flatten() {
+                if mark["type"] == "link" {
+                    assert_eq!(mark["attrs"]["href"], "https://example.com/target?q=1");
+                    linked.push_str(value);
+                }
+            }
+        }
+        (text, linked)
+    }
+
+    #[test]
+    fn markdown_whitespace_links_keep_href_with_each_emphasis() {
+        for emphasis in ["bold", "italic", "strike", "highlight"] {
+            for text in [" ", "  ", "\t", "\u{a0}", "\u{2003}"] {
+                let md = tiptap_doc_to_md(&linked_markdown_run(text, Some(emphasis)));
+                let parsed = crate::documents::markdown::md_to_tiptap(&md).expect("parse");
+                let (got, linked) = parsed_markdown_text_and_link(&parsed);
+                assert_eq!(got, format!("before {text} after"), "{md}");
+                assert_eq!(linked, text, "{emphasis}: {md}");
+                for node in parsed["content"][0]["content"].as_array().unwrap() {
+                    for mark in node["marks"].as_array().into_iter().flatten() {
+                        assert_eq!(mark["type"], "link", "no blank emphasis: {md}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn markdown_link_only_and_emphasis_only_whitespace_keep_semantics() {
+        for text in [" ", "  ", "\t", "\u{a0}", "\u{2003}"] {
+            let md = tiptap_doc_to_md(&linked_markdown_run(text, None));
+            let parsed = crate::documents::markdown::md_to_tiptap(&md).expect("parse");
+            assert_eq!(
+                parsed_markdown_text_and_link(&parsed),
+                (format!("before {text} after"), text.to_string())
+            );
+            for emphasis in ["bold", "italic", "strike", "highlight"] {
+                let mut input = linked_markdown_run(text, Some(emphasis));
+                input["content"][0]["content"][1]["marks"] = json!([{"type":emphasis}]);
+                let md = tiptap_doc_to_md(&input);
+                let parsed = crate::documents::markdown::md_to_tiptap(&md).expect("parse");
+                assert_eq!(
+                    parsed_markdown_text_and_link(&parsed),
+                    (format!("before {text} after"), String::new())
+                );
+                for node in parsed["content"][0]["content"].as_array().unwrap() {
+                    assert!(
+                        node["marks"]
+                            .as_array()
+                            .is_none_or(|marks| marks.is_empty()),
+                        "{md}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn markdown_linked_visible_emphasis_keeps_boundaries_text_and_target() {
+        for emphasis in ["bold", "italic", "strike", "highlight"] {
+            for text in [
+                "한글 😀",
+                " 한글 😀",
+                "한글 😀 ",
+                " 한글 😀 ",
+                "\u{a0}한글 😀\u{a0}",
+                "\t한글 😀\t",
+            ] {
+                let md = tiptap_doc_to_md(&linked_markdown_run(text, Some(emphasis)));
+                let parsed = crate::documents::markdown::md_to_tiptap(&md).expect("parse");
+                assert_eq!(
+                    parsed_markdown_text_and_link(&parsed),
+                    (format!("before {text} after"), text.to_string()),
+                    "{md}"
+                );
+                let marked = parsed["content"][0]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|node| node["text"].as_str().is_some_and(|s| s.contains("한글")))
+                    .expect("visible text");
+                let mut types: Vec<_> = marked["marks"]
+                    .as_array()
+                    .expect("marks")
+                    .iter()
+                    .map(|mark| mark["type"].as_str().unwrap())
+                    .collect();
+                types.sort();
+                let mut expected = vec!["link", emphasis];
+                expected.sort();
+                assert_eq!(types, expected, "{md}");
+            }
+        }
+    }
+
+    #[test]
+    fn markdown_code_whitespace_links_preserve_target_text_and_code() {
+        for text in [" ", "  ", "\t", "\u{a0}", "\u{2003}"] {
+            let md = tiptap_doc_to_md(&linked_markdown_run(text, Some("code")));
+            let parsed = crate::documents::markdown::md_to_tiptap(&md).expect("parse");
+            assert_eq!(
+                parsed_markdown_text_and_link(&parsed),
+                (format!("before {text} after"), text.to_string()),
+                "{md}"
+            );
+            for node in parsed["content"][0]["content"].as_array().unwrap() {
+                let mut types: Vec<_> = node["marks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|mark| mark["type"].as_str().unwrap())
+                    .collect();
+                if !types.is_empty() {
+                    types.sort();
+                    assert_eq!(types, vec!["code", "link"], "{md}");
+                }
+            }
         }
     }
 
