@@ -180,6 +180,20 @@ function fencedCode(text: string, language: string): string {
 
 function wrapMdMarks({ md, marks }: MdRun): string {
   let text = md;
+  let leading = "";
+  let trailing = "";
+  // CommonMark emphasis delimiters cannot open/close next to whitespace.
+  // Keep those characters outside the delimiters instead of losing the entire
+  // visible mark on reimport. Code spans have their own whitespace/pad rules.
+  if (
+    !marks.some((m) => m.type === "code") &&
+    marks.some((m) => ["bold", "italic", "strike", "highlight"].includes(m.type))
+  ) {
+    leading = /^[\p{Zs}\t\n\f\r]*/u.exec(text)?.[0] ?? "";
+    trailing = /[\p{Zs}\t\n\f\r]*$/u.exec(text)?.[0] ?? "";
+    if (leading.length === text.length) return text;
+    text = text.slice(leading.length, text.length - trailing.length);
+  }
   if (marks.some((m) => m.type === "code")) {
     const fence = fenceFor(text, "`", 1);
     const pad =
@@ -193,7 +207,7 @@ function wrapMdMarks({ md, marks }: MdRun): string {
   if (marks.some((m) => m.type === "strike")) text = `~~${text}~~`;
   if (marks.some((m) => m.type === "highlight")) text = `==${text}==`;
   const link = marks.find((m) => m.type === "link" && m.href);
-  return link?.href ? `[${text}](${link.href})` : text;
+  return leading + (link?.href ? `[${text}](${link.href})` : text) + trailing;
 }
 
 /** WHY: rev-691·#727 — 수식 자기 검증 재시도와 raw HTML summary 의 이스케이프 문맥. */

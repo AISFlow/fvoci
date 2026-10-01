@@ -330,6 +330,12 @@ fn node_from_json(json: &Value, depth: u32) -> Result<Parsed, EngineStatus> {
     let Some((tag, spec)) = node_spec(type_name) else {
         return Err(malformed(format!("unknown node type {type_name:?}")));
     };
+    // y-tiptap encodes marks on XmlText, not on an emoji XmlElement. Refuse
+    // an unrepresentable imported atom before producing a seed; marked
+    // Unicode text remains supported and comparison-only ychange is ignored.
+    if tag == "emoji" && marks.iter().any(|(name, _)| *name != "ychange") {
+        return Err(malformed("marked emoji must be Unicode text"));
+    }
     let children = match obj.get("content") {
         None => Vec::new(),
         Some(content) => fragment_from_json(content, depth + 1)?,
@@ -561,5 +567,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn marked_emoji_atoms_are_refused_but_marked_unicode_and_diff_metadata_are_supported() {
+        let input = json!({"type":"doc","content":[{"type":"paragraph","content":[
+            {"type":"emoji","attrs":{"name":"grinning"},"marks":[{"type":"bold"}]}
+        ]}]});
+        assert!(matches!(
+            tiptap_to_yjs_update(&input, &Limits::for_tests()),
+            Err(EngineStatus::Malformed { .. })
+        ));
+        let unicode = json!({"type":"doc","content":[{"type":"paragraph","content":[
+            {"type":"text","text":"😀한글","marks":[{"type":"bold"}]},
+            {"type":"emoji","attrs":{"name":"grinning"},"marks":[{"type":"ychange"}]}
+        ]}]});
+        let observed = project(&seed(&unicode));
+        assert_eq!(observed["content"][0]["content"][0]["text"], "😀한글");
+        assert_eq!(
+            observed["content"][0]["content"][0]["marks"][0]["type"],
+            "bold"
+        );
+        assert_eq!(observed["content"][0]["content"][1]["type"], "emoji");
     }
 }

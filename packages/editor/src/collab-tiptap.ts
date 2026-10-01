@@ -1,9 +1,6 @@
 import { getSchema } from "@tiptap/core";
-import {
-  prosemirrorJSONToYXmlFragment,
-  yDocToProsemirrorJSON,
-  ySyncPluginKey,
-} from "@tiptap/y-tiptap";
+import { Node } from "@tiptap/pm/model";
+import { prosemirrorToYXmlFragment, yDocToProsemirrorJSON, ySyncPluginKey } from "@tiptap/y-tiptap";
 import * as Y from "yjs";
 import { FVOCI_YDOC_FRAGMENT } from "./collab/constants.js";
 import { isTiptapDoc, type TiptapDoc } from "./json.js";
@@ -33,10 +30,20 @@ function withoutYChange(value: unknown): unknown {
 
 const schema = getSchema(createFvociExtensions());
 
+function seedNode(json: TiptapDoc): Node {
+  const node = Node.fromJSON(schema, { type: "doc", content: json.content ?? [] });
+  node.descendants((child) => {
+    if (child.type.name === "emoji" && child.marks.some((mark) => mark.type.name !== "ychange")) {
+      throw new RangeError("Marked emoji must be Unicode text");
+    }
+  });
+  return node;
+}
+
 export function tiptapJsonToYDoc(json: TiptapDoc, fragment = FVOCI_YDOC_FRAGMENT): Y.Doc {
+  const node = seedNode(json);
   const doc = new Y.Doc({ gc: false });
-  const payload = { type: "doc" as const, content: json.content ?? [] };
-  prosemirrorJSONToYXmlFragment(schema, payload, doc.getXmlFragment(fragment));
+  prosemirrorToYXmlFragment(node, doc.getXmlFragment(fragment));
   return doc;
 }
 
@@ -60,10 +67,13 @@ export function replaceYDocContent(
   json: TiptapDoc,
   fragment = FVOCI_YDOC_FRAGMENT,
 ): void {
+  // Yjs transactions commit even if the callback throws. Validate with the
+  // same SDK schema before deleting the live fragment, so rejected imports
+  // cannot broadcast an empty replacement or destroy the previous document.
+  const replacement = seedNode(json);
   const frag = doc.getXmlFragment(fragment);
-  const payload = { type: "doc" as const, content: json.content ?? [] };
   doc.transact(() => {
     if (frag.length > 0) frag.delete(0, frag.length);
-    prosemirrorJSONToYXmlFragment(schema, payload, frag);
+    prosemirrorToYXmlFragment(replacement, frag);
   });
 }

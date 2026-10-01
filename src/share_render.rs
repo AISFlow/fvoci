@@ -42,7 +42,9 @@
 //! - Recursion has no explicit depth limit (neither does the source); callers
 //!   pass `serde_json` values, whose parser caps nesting at 128.
 
+use regex::Regex;
 use serde_json::Value;
+use std::sync::LazyLock;
 
 use crate::collab::derived_body::emoji_glyph;
 
@@ -658,6 +660,30 @@ fn wrap_md_marks(run: &MdRun) -> String {
     let marks = &run.marks;
     let has = |ty: &str| marks.iter().any(|m| m.ty == ty);
     let mut text = run.md.clone();
+    // CommonMark emphasis cannot open/close against whitespace. Reuse the
+    // Unicode-aware regex dependency; preserve boundary bytes outside marks.
+    static LEADING_SPACE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^[\p{Zs}\t\n\x0c\r]*").expect("constant regex"));
+    static TRAILING_SPACE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[\p{Zs}\t\n\x0c\r]*$").expect("constant regex"));
+    let mut leading = "";
+    let mut trailing = "";
+    if !has("code")
+        && ["bold", "italic", "strike", "highlight"]
+            .iter()
+            .any(|ty| has(ty))
+    {
+        let start = LEADING_SPACE.find(&run.md).map_or(0, |m| m.end());
+        if start == run.md.len() {
+            return run.md.clone();
+        }
+        let end = TRAILING_SPACE
+            .find(&run.md)
+            .map_or(run.md.len(), |m| m.start());
+        leading = &run.md[..start];
+        trailing = &run.md[end..];
+        text = run.md[start..end].to_string();
+    }
     if has("code") {
         let fence = fence_for(&text, '`', 1);
         let pad = if text.starts_with('`') || text.ends_with('`') || space_padded_non_blank(&text) {
@@ -682,10 +708,11 @@ fn wrap_md_marks(run: &MdRun) -> String {
     let link = marks
         .iter()
         .find(|m| m.ty == "link" && m.href.as_deref().is_some_and(|h| !h.is_empty()));
-    match link.and_then(|m| m.href.as_deref()) {
+    let wrapped = match link.and_then(|m| m.href.as_deref()) {
         Some(href) => format!("[{text}]({href})"),
         None => text,
-    }
+    };
+    format!("{leading}{wrapped}{trailing}")
 }
 
 fn inline_md(nodes: Option<&Vec<Value>>, opts: MdOpts) -> String {
@@ -987,6 +1014,61 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn markdown_emphasis_preserves_unicode_and_boundary_whitespace() {
+        for text in [
+            "한글 😀",
+            "한글 😀 ",
+            " 한글 😀",
+            " 한글 😀 ",
+            "\u{a0}한글 😀\u{a0}",
+            "\t한글 😀\t",
+        ] {
+            for types in [
+                vec!["bold"],
+                vec!["italic"],
+                vec!["bold", "italic"],
+                vec!["strike"],
+            ] {
+                let marks: Vec<Value> = types.iter().map(|ty| json!({"type": ty})).collect();
+                let input = json!({"type":"doc","content":[{"type":"paragraph","content":[
+                    {"type":"text","text":"앞 "}, {"type":"text","text":text,"marks":marks}, {"type":"text","text":" 뒤"}
+                ]}]});
+                let md = tiptap_doc_to_md_first_pass(&input);
+                let imported = crate::documents::markdown::md_to_tiptap(&md).expect("parse");
+                let nodes = imported["content"][0]["content"]
+                    .as_array()
+                    .expect("content");
+                let got: String = nodes.iter().filter_map(|n| n["text"].as_str()).collect();
+                assert_eq!(got, format!("앞 {text} 뒤"), "{md}");
+                let marked = nodes
+                    .iter()
+                    .find(|n| n["text"].as_str().is_some_and(|s| s.contains("한글")))
+                    .expect("marked text");
+                let mut actual: Vec<&str> = marked["marks"]
+                    .as_array()
+                    .expect("marks")
+                    .iter()
+                    .filter_map(|m| m["type"].as_str())
+                    .collect();
+                let mut expected = types.clone();
+                actual.sort();
+                expected.sort();
+                assert_eq!(actual, expected, "{md}");
+            }
+        }
+        for text in [" ", "  ", "\t", "\u{a0}"] {
+            let run = MdRun {
+                md: text.to_string(),
+                marks: vec![Mark {
+                    ty: "bold".to_string(),
+                    href: None,
+                }],
+            };
+            assert_eq!(wrap_md_marks(&run), text);
+        }
+    }
+
     fn para(content: Value) -> Value {
         json!({"type": "doc", "content": [{"type": "paragraph", "content": content}]})
     }
@@ -1196,7 +1278,7 @@ mod tests {
 {"doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"a","marks":[{"type":"link","attrs":{"href":"https://e.com/?a=1&b=\"2\"<>"}}]},{"type":"text","text":"b","marks":[{"type":"link","attrs":{"href":"javascript:alert(1)"}}]},{"type":"text","text":"c","marks":[{"type":"link","attrs":{"href":"JAVASCRIPT:alert(1)"}}]},{"type":"text","text":"d","marks":[{"type":"link","attrs":{"href":" java\tscript:alert(1)"}}]},{"type":"text","text":"e","marks":[{"type":"link","attrs":{"href":"//evil.com/x"}}]},{"type":"text","text":"f","marks":[{"type":"link","attrs":{"href":"mailto:a@b.c"}}]},{"type":"text","text":"g","marks":[{"type":"link","attrs":{"href":"/docs/1#x"}}]},{"type":"text","text":"h","marks":[{"type":"link","attrs":{"href":"\\\\evil.com"}}]},{"type":"text","text":"i","marks":[{"type":"link","attrs":{"href":"jav<!-- x -->ascript:alert(1)"}}]},{"type":"text","text":"j","marks":[{"type":"link","attrs":{"href":"HTTPS://X.COM"}}]},{"type":"text","text":"k","marks":[{"type":"link","attrs":{"href":"data:text/html,x"}}]},{"type":"text","text":"l","marks":[{"type":"link","attrs":{"href":""}}]},{"type":"text","text":"m","marks":[{"type":"link","attrs":{"href":"1http:x"}}]},{"type":"text","text":"n","marks":[{"type":"link","attrs":{"href":" / /x"}}]}]}]},"html":"<p><a href=\"https://e.com/?a=1&amp;b=&quot;2&quot;&lt;&gt;\">a</a><a>b</a><a>c</a><a>d</a><a>e</a><a href=\"mailto:a@b.c\">f</a><a href=\"/docs/1#x\">g</a><a>h</a><a>i</a><a href=\"HTTPS://X.COM\">j</a><a>k</a>l<a href=\"1http:x\">m</a><a>n</a></p>","md":"[a](https://e.com/?a=1&b=\"2\"<>)[b](javascript:alert(1))[c](JAVASCRIPT:alert(1))[d]( java\tscript:alert(1))[e](//evil.com/x)[f](mailto:a@b.c)[g](/docs/1#x)[h](\\\\evil.com)[i](jav<!-- x -->ascript:alert(1))[j](HTTPS://X.COM)[k](data:text/html,x)l[m](1http:x)[n]( / /x)\n"},
 {"doc":{"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"H1"}]},{"type":"heading","attrs":{"level":3},"content":[{"type":"text","text":"H3","marks":[{"type":"bold"}]}]},{"type":"heading","attrs":{"level":5},"content":[{"type":"text","text":"H5 <x>","marks":[{"type":"italic"}]}]},{"type":"heading","attrs":{"level":9},"content":[{"type":"text","text":"H9"}]},{"type":"heading","attrs":{"level":0},"content":[{"type":"text","text":"H0"}]},{"type":"heading","attrs":{"level":2.5},"content":[{"type":"text","text":"H2.5"}]},{"type":"heading","attrs":{"level":"2"},"content":[{"type":"text","text":"Hs"}]},{"type":"heading","content":[{"type":"text","text":"# not"}]}]},"html":"<h1>H1</h1><h3><strong>H3</strong></h3><em>H5 &lt;x&gt;</em>H9<h1>H0</h1>H2.5<h1>Hs</h1><h1># not</h1>","md":"# H1\n\n### **H3**\n\n##### *H5 \\<x>*\n\n###### H9\n\n# H0\n\n## H2.5\n\n# Hs\n\n# # not\n"},
 {"doc":{"type":"doc","content":[{"type":"embed","attrs":{"ref":"abc<\"&>","entity":"document"}},{"type":"embed","attrs":{"ref":"https://x.y","entity":"url"}},{"type":"embed","attrs":{"ref":"T-1","entity":"task"}},{"type":"embed","attrs":{}}]},"html":"<div>abc&lt;\"&amp;&gt;</div><div>https://x.y</div><div>T-1</div><div></div>","md":"[[doc:abc<\"&>]]\n\nhttps://x.y\n\n[[task:T-1]]\n\n[[doc:]]\n"},
-{"doc":{"type":"doc","content":[{"type":"math","attrs":{"latex":"a<b & $$x$$"}},{"type":"mermaid","attrs":{"source":"graph TD; A-->B\n```"}},{"type":"mermaid","content":[{"type":"text","text":"flow"}]},{"type":"paragraph","content":[{"type":"text","text":"x "},{"type":"mathInline","attrs":{"latex":"a\n  b"}},{"type":"mathInline","attrs":{"latex":"$c"}},{"type":"text","text":" y","marks":[{"type":"bold"}]}]},{"type":"paragraph","content":[{"type":"mathInline","attrs":{"latex":"q"},"marks":[{"type":"bold"},{"type":"link","attrs":{"href":"http://z"}}]}]},{"type":"paragraph","content":[{"type":"mathInline","attrs":{"latex":"   "}}]}]},"html":"<pre data-math>a&lt;b &amp; $$x$$</pre><pre data-mermaid>graph TD; A--&gt;B\n```</pre><pre data-mermaid></pre><p>x <span data-math-inline>a\n  b</span><span data-math-inline>$c</span><strong> y</strong></p><p><a href=\"http://z\"><strong><span data-math-inline>q</span></strong></a></p><p><span data-math-inline>   </span></p>","md":"$$$\na<b & $$x$$\n$$$\n\n````mermaid\ngraph TD; A-->B\n```\n````\n\n```mermaid\nflow\n```\n\nx $a b$<!---->$$ $c $$** y**\n\n[**$q$**](http://z)\n"},
+{"doc":{"type":"doc","content":[{"type":"math","attrs":{"latex":"a<b & $$x$$"}},{"type":"mermaid","attrs":{"source":"graph TD; A-->B\n```"}},{"type":"mermaid","content":[{"type":"text","text":"flow"}]},{"type":"paragraph","content":[{"type":"text","text":"x "},{"type":"mathInline","attrs":{"latex":"a\n  b"}},{"type":"mathInline","attrs":{"latex":"$c"}},{"type":"text","text":" y","marks":[{"type":"bold"}]}]},{"type":"paragraph","content":[{"type":"mathInline","attrs":{"latex":"q"},"marks":[{"type":"bold"},{"type":"link","attrs":{"href":"http://z"}}]}]},{"type":"paragraph","content":[{"type":"mathInline","attrs":{"latex":"   "}}]}]},"html":"<pre data-math>a&lt;b &amp; $$x$$</pre><pre data-mermaid>graph TD; A--&gt;B\n```</pre><pre data-mermaid></pre><p>x <span data-math-inline>a\n  b</span><span data-math-inline>$c</span><strong> y</strong></p><p><a href=\"http://z\"><strong><span data-math-inline>q</span></strong></a></p><p><span data-math-inline>   </span></p>","md":"$$$\na<b & $$x$$\n$$$\n\n````mermaid\ngraph TD; A-->B\n```\n````\n\n```mermaid\nflow\n```\n\nx $a b$<!---->$$ $c $$ **y**\n\n[**$q$**](http://z)\n"},
 {"doc":{"type":"doc","content":[{"type":"table","content":[{"type":"tableRow","content":[{"type":"tableHeader","content":[{"type":"paragraph","content":[{"type":"text","text":"A|B"}]}]},{"type":"tableHeader","content":[{"type":"paragraph","content":[{"type":"text","text":"C"}]},{"type":"paragraph","content":[{"type":"text","text":"D","marks":[{"type":"code"}]}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","content":[{"type":"paragraph","content":[{"type":"text","text":"1"},{"type":"hardBreak"},{"type":"text","text":"2"}]}]},{"type":"tableCell","content":[]}]},{"type":"other"}]},{"type":"table","content":[]}]},"html":"<table><tr><th><p>A|B</p></th><th><p>C</p><p><code>D</code></p></th></tr><tr><td><p>1<br />2</p></td><td></td></tr></table><table></table>","md":"| A\\|B | C `D` |\n| --- | --- |\n| 1<br>2 |  |\n"},
 {"doc":{"type":"doc","content":[{"type":"orderedList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"one"}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"sub"}]},{"type":"paragraph","content":[{"type":"text","text":"sub2"}]}]}]}]},{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"two"}]}]},{"type":"listItem","content":[]}]},{"type":"taskList","content":[{"type":"taskItem","attrs":{"checked":true},"content":[{"type":"paragraph","content":[{"type":"text","text":"done"}]},{"type":"paragraph","content":[{"type":"text","text":"more"}]}]},{"type":"taskItem","attrs":{"checked":"true"},"content":[{"type":"paragraph","content":[{"type":"text","text":"todo"}]}]}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"- dash"}]}]}]}]},"html":"<ol><li><p>one</p><ul><li><p>sub</p><p>sub2</p></li></ul></li><li><p>two</p></li><li></li></ol><p>done</p><p>more</p><p>todo</p><ul><li><p>- dash</p></li></ul>","md":"1. one\n\n   - sub\n\n     sub2\n2. two\n3. \n\n- [x] done\n\n  more\n- [ ] todo\n\n- \\- dash\n"},
 {"doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"a`b","marks":[{"type":"code"}]}]},{"type":"paragraph","content":[{"type":"text","text":"`x``","marks":[{"type":"code"}]}]},{"type":"paragraph","content":[{"type":"text","text":" pad ","marks":[{"type":"code"}]}]},{"type":"paragraph","content":[{"type":"text","text":"  ","marks":[{"type":"code"}]}]},{"type":"paragraph","content":[{"type":"text","text":" a\nb ","marks":[{"type":"code"}]}]},{"type":"paragraph","content":[{"type":"text","text":"x","marks":[{"type":"code"},{"type":"bold"},{"type":"italic"},{"type":"strike"},{"type":"highlight"},{"type":"link","attrs":{"href":"https://l"}},{"type":"underline"}]}]}]},"html":"<p><code>a`b</code></p><p><code>`x``</code></p><p><code> pad </code></p><p><code>  </code></p><p><code> a\nb </code></p><p><a href=\"https://l\"><s><em><strong><code>x</code></strong></em></s></a></p>","md":"``a`b``\n\n``` `x`` ```\n\n`  pad  `\n\n`  `\n\n` a\nb `\n\n[==~~***`x`***~~==](https://l)\n"},
