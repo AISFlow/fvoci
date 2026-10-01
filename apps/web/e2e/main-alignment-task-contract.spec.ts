@@ -476,9 +476,26 @@ for (const archivedTarget of [false, true]) {
         const body = page.getByTestId("task-body");
         await expect(body.locator('[data-collab-status="connected"]')).toBeVisible();
         await expect(body.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
+        const collectionEndpoint = `${parentEndpoint}/collection-item`;
+        const archivedCollection = await page.request.get(collectionEndpoint);
+        expect(archivedCollection.status()).toBe(200);
+        expect(
+          z.object({ canEdit: z.literal(false) }).parse(await archivedCollection.json()).canEdit,
+        ).toBe(false);
+        const collectionRefetched = page.waitForResponse(
+          async (r) =>
+            r.url().endsWith(collectionEndpoint) &&
+            r.request().method() === "GET" &&
+            r.status() === 200 &&
+            z.object({ canEdit: z.boolean() }).parse(await r.json()).canEdit,
+        );
         expect(
           (await page.request.patch(parentEndpoint, { data: { archived: false } })).status(),
         ).toBe(200);
+        expect(
+          z.object({ canEdit: z.literal(true) }).parse(await (await collectionRefetched).json())
+            .canEdit,
+        ).toBe(true);
         const restored = await page.request.get(parentEndpoint);
         expect(restored.status()).toBe(200);
         expect(

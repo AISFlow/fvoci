@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { InfiniteQueryObserver, QueryClient, type InfiniteData } from "@tanstack/query-core";
+import {
+  InfiniteQueryObserver,
+  QueryClient,
+  QueryObserver,
+  type InfiniteData,
+} from "@tanstack/query-core";
 import { invalidateTaskCaches, invalidateTaskStreamResyncCaches } from "./task-cache.ts";
 
 const WS = "ws-1";
@@ -113,6 +118,8 @@ await test("task hints invalidate captured workspace/project caches without touc
   const affected = [
     ["task", WS, "task-1"],
     ["task-activity", WS, "task-1"],
+    ["task-time-entries", WS, "task-1"],
+    ["collection-item", WS, "task", "task-1"],
     ["task-layout", WS, PROJECT, "month"],
     ["tasks", WS, PROJECT, "filter"],
     ["project-collection", WS, PROJECT],
@@ -125,6 +132,11 @@ await test("task hints invalidate captured workspace/project caches without touc
     ["task-layout", WS, "other-project"],
     ["collection", "other-ws", "c1"],
     ["task", WS, "other-task"],
+    ["task-time-entries", WS, "other-task"],
+    ["task-time-entries", "other-ws", "task-1"],
+    ["collection-item", WS, "task", "other-task"],
+    ["collection-item", "other-ws", "task", "task-1"],
+    ["collection-item", WS, "document", "task-1"],
     ["auth", "me"],
   ];
   for (const key of [...affected, ...unaffected]) client.setQueryData(key, {});
@@ -146,11 +158,69 @@ await test("authorized resync invalidates retained project detail/activity but p
   client.setQueryData(foreign, { id: "task-1", projectId: PROJECT });
   client.setQueryData(activity, {});
   client.setQueryData(siblingActivity, {});
+  const grants = [
+    ["task-time-entries", WS, "task-1"],
+    ["collection-item", WS, "task", "task-1"],
+  ];
+  const siblingGrants = [
+    ["task-time-entries", WS, "task-2"],
+    ["task-time-entries", "other-ws", "task-1"],
+    ["collection-item", WS, "task", "task-2"],
+    ["collection-item", "other-ws", "task", "task-1"],
+    ["collection-item", WS, "document", "task-1"],
+  ];
+  for (const key of [...grants, ...siblingGrants]) client.setQueryData(key, {});
   invalidateTaskStreamResyncCaches(client, WS, PROJECT);
   await flush();
-  for (const key of [detail, activity])
+  for (const key of [detail, activity, ...grants])
     assert.equal(client.getQueryState(key)?.isInvalidated, true);
-  for (const key of [sibling, siblingActivity, foreign])
+  for (const key of [sibling, siblingActivity, foreign, ...siblingGrants])
     assert.equal(client.getQueryState(key)?.isInvalidated, false);
   client.clear();
 });
+
+for (const [name, invalidate] of invalidations) {
+  await test(`${name} refetches mounted REST grants from the server without promoting sibling grants`, async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { staleTime: Infinity, retry: false } },
+    });
+    client.setQueryData(["task", WS, "task-1"], { id: "task-1", projectId: PROJECT });
+    client.setQueryData(["task", WS, "task-2"], { id: "task-2", projectId: "other-project" });
+    const queries = [
+      { key: ["task-time-entries", WS, "task-1"], grant: "canCreate", refetch: true },
+      { key: ["collection-item", WS, "task", "task-1"], grant: "canEdit", refetch: true },
+      { key: ["task-time-entries", WS, "task-2"], grant: "canCreate", refetch: false },
+      { key: ["collection-item", WS, "task", "task-2"], grant: "canEdit", refetch: false },
+      { key: ["task-time-entries", "other-ws", "task-1"], grant: "canCreate", refetch: false },
+      { key: ["collection-item", "other-ws", "task", "task-1"], grant: "canEdit", refetch: false },
+    ];
+    const gets: string[][] = [];
+    const unsubscribes = queries.map(({ key, grant }) =>
+      new QueryObserver(client, {
+        queryKey: key,
+        initialData: { [grant]: false },
+        queryFn: () => {
+          gets.push(key);
+          return Promise.resolve({ [grant]: true });
+        },
+      }).subscribe(() => {}),
+    );
+    try {
+      assert.equal(gets.length, 0);
+      await invalidate(client);
+      await flush();
+      for (const { key, grant, refetch } of queries) {
+        assert.equal(client.getQueryData<Record<string, boolean>>(key)?.[grant], refetch);
+      }
+      assert.deepEqual(
+        gets,
+        queries.filter((query) => query.refetch).map((query) => query.key),
+      );
+    } finally {
+      unsubscribes.forEach((unsubscribe) => {
+        unsubscribe();
+      });
+      client.clear();
+    }
+  });
+}

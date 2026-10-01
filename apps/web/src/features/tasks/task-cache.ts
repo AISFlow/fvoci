@@ -28,6 +28,8 @@ export async function invalidateTaskCaches(
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ["task", workspaceId, taskId] }),
     queryClient.invalidateQueries({ queryKey: ["task-activity", workspaceId, taskId] }),
+    queryClient.invalidateQueries({ queryKey: ["task-time-entries", workspaceId, taskId] }),
+    queryClient.invalidateQueries({ queryKey: ["collection-item", workspaceId, "task", taskId] }),
     queryClient.invalidateQueries({ queryKey: ["task-layout", workspaceId, projectId] }),
     invalidateKeepingLoadMore(queryClient, ["tasks", workspaceId, projectId]),
     queryClient.invalidateQueries({ queryKey: ["project-collection", workspaceId, projectId] }),
@@ -55,6 +57,12 @@ export function invalidateTaskStreamResyncCaches(
       queryClient.invalidateQueries({ queryKey: query.queryKey, exact: true }),
       queryClient.invalidateQueries({
         queryKey: ["task-activity", workspaceId, query.queryKey[2]],
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["task-time-entries", workspaceId, query.queryKey[2]],
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["collection-item", workspaceId, "task", query.queryKey[2]],
       }),
     ]),
     queryClient.invalidateQueries({ queryKey: ["task-layout", workspaceId, projectId] }),
