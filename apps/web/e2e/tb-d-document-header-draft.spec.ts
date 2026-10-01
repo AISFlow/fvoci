@@ -38,6 +38,22 @@ async function setup(page: Page): Promise<string> {
   return ws.id;
 }
 
+let adminCookies: Awaited<ReturnType<import("@playwright/test").BrowserContext["cookies"]>>;
+test.beforeAll(async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL });
+  try {
+    const page = await context.newPage();
+    await setup(page);
+    adminCookies = await context.cookies();
+    console.log(`TB-D runner: Bun ${process.versions.bun ?? "absent"}; ${process.version}`);
+  } finally {
+    await context.close();
+  }
+});
+test.beforeEach(async ({ page }) => {
+  await page.context().addCookies(adminCookies);
+});
+
 async function fixtures(page: Page, kind: Kind) {
   const ws = await setup(page);
   let projectId: string | null = null;
@@ -126,10 +142,12 @@ async function freshClient(
     status: string;
   },
 ) {
-  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const context = await browser.newContext({
+    baseURL: new URL(page.url()).origin,
+    storageState: await page.context().storageState(),
+  });
   try {
     const fresh = await context.newPage();
-    await login(fresh, admin.email, admin.password);
     expect(await get(fresh, doc)).toMatchObject({
       title: expected.title,
       icon: expected.icon || null,
@@ -328,6 +346,10 @@ for (const kind of ["wiki", "project"] as const) {
     page,
   }) => {
     const { ws, projectId, doc, parent } = await fixtures(page, kind);
+    const originalActor = await readJson(
+      await page.request.get("/api/v1/auth/me"),
+      flowSchemas.user.extend({ sessionId: z.string() }),
+    );
     const member = {
       email: `header-${randomBytes(5).toString("hex")}@example.com`,
       password: "headersecret1",
@@ -356,14 +378,21 @@ for (const kind of ["wiki", "project"] as const) {
       try {
         const title = page.getByLabel("문서 제목", { exact: true });
         await title.fill("old actor draft");
-        expect((await page.request.post("/api/v1/auth/login", { data: member })).status()).toBe(
-          200,
-        );
+        await page.context().addCookies(await context.cookies());
+        expect(
+          (await readJson(await page.request.get("/api/v1/auth/me"), flowSchemas.user)).userId,
+        ).toBe(user.userId);
         await refresh(page, ["auth", "me"]);
         await expect(title).toHaveValue(doc.title);
         await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
         await title.fill("member actor draft");
         expect((await page.request.post("/api/v1/auth/login", { data: admin })).status()).toBe(200);
+        const returnedActor = await readJson(
+          await page.request.get("/api/v1/auth/me"),
+          flowSchemas.user.extend({ sessionId: z.string() }),
+        );
+        expect(returnedActor.userId).toBe(originalActor.userId);
+        expect(returnedActor.sessionId).not.toBe(originalActor.sessionId);
         await refresh(page, ["auth", "me"]);
         await expect(title).toHaveValue(doc.title);
         await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
@@ -512,10 +541,12 @@ for (const kind of ["wiki", "project"] as const) {
         barrier.release();
         expect((await get(page, doc)).title).toBe(doc.title);
         expect((await editing.request.get(doc.url)).status()).toBe(404);
-        const fresh = await browser.newContext({ baseURL: new URL(page.url()).origin });
+        const fresh = await browser.newContext({
+          baseURL: new URL(page.url()).origin,
+          storageState: await context.storageState(),
+        });
         try {
           const denied = await fresh.newPage();
-          await login(denied, member.email, member.password);
           expect((await denied.request.get(doc.url)).status()).toBe(404);
         } finally {
           await fresh.close();
