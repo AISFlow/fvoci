@@ -45,12 +45,16 @@ export function invalidateTaskStreamResyncCaches(
 ): void {
   // The server's authorized open recovers missed hints, including a mounted
   // detail. Its key has no project ID, so select retained details by their
-  // committed row and keep sibling projects/workspaces untouched.
+  // committed row and keep known sibling projects/workspaces untouched. A
+  // mounted detail whose first GET failed has no row to identify its project;
+  // retry it within this workspace without evicting inactive empty queries.
   const details = queryClient
     .getQueryCache()
     .findAll({ queryKey: ["task", workspaceId] })
     .filter(
-      (query) => queryClient.getQueryData<TaskDetail>(query.queryKey)?.projectId === projectId,
+      (query) =>
+        queryClient.getQueryData<TaskDetail>(query.queryKey)?.projectId === projectId ||
+        (query.state.data === undefined && query.state.status === "error" && query.isActive()),
     );
   Promise.all([
     ...details.flatMap((query) => [

@@ -52,6 +52,84 @@ function mountList(key: readonly unknown[]) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+await test("resync recovers mounted empty failed detail without evicting inactive or sibling queries", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const cases = [
+    { id: "active", workspace: WS, active: true, enabled: true },
+    { id: "inactive", workspace: WS, active: false, enabled: true },
+    { id: "disabled", workspace: WS, active: true, enabled: false },
+    { id: "foreign", workspace: "other-ws", active: true, enabled: true },
+  ];
+  const gets = new Map<string, number>();
+  const unsubscribes: (() => void)[] = [];
+  try {
+    for (const item of cases) {
+      const key = ["task", item.workspace, item.id];
+      const options = {
+        queryKey: key,
+        queryFn: () => {
+          const count = (gets.get(item.id) ?? 0) + 1;
+          gets.set(item.id, count);
+          return count === 1
+            ? Promise.reject(new Error("first GET offline"))
+            : Promise.resolve({ id: item.id, projectId: PROJECT });
+        },
+      };
+      const observer = new QueryObserver(client, options);
+      const unsubscribe = observer.subscribe(() => {});
+      await flush();
+      if (!item.enabled) observer.setOptions({ ...options, enabled: false });
+      if (item.active) unsubscribes.push(unsubscribe);
+      else unsubscribe();
+    }
+    const inactiveKey = ["task", WS, "inactive"];
+    const inactiveQuery = client.getQueryCache().find({ queryKey: inactiveKey });
+    const inactiveError = client.getQueryState(inactiveKey)?.error;
+    const sibling = ["task", WS, "known-sibling"];
+    client.setQueryData(sibling, { id: "known-sibling", projectId: "other-project" });
+    const idleKey = ["task", WS, "still-loading"];
+    const idleObserver = new QueryObserver(client, {
+      queryKey: idleKey,
+      queryFn: () => new Promise<never>(() => {}),
+    });
+    unsubscribes.push(idleObserver.subscribe(() => {}));
+    const idleQuery = client.getQueryCache().find({ queryKey: idleKey });
+    assert.equal(client.getQueryState(idleKey)?.status, "pending");
+    const failedStates = new Map(
+      cases.map((item) => [item.id, client.getQueryState(["task", item.workspace, item.id])]),
+    );
+    for (const item of cases) {
+      assert.equal(client.getQueryState(["task", item.workspace, item.id])?.status, "error");
+      assert.equal(gets.get(item.id), 1);
+    }
+
+    invalidateTaskStreamResyncCaches(client, WS, PROJECT);
+    await flush();
+
+    assert.equal(gets.get("active"), 2, "reconnect retries the mounted failed detail");
+    assert.deepEqual(client.getQueryData(["task", WS, "active"]), {
+      id: "active",
+      projectId: PROJECT,
+    });
+    for (const item of cases.filter((item) => item.id !== "active")) {
+      const key = ["task", item.workspace, item.id];
+      assert.equal(gets.get(item.id), 1);
+      assert.equal(client.getQueryState(key)?.status, "error");
+      assert.equal(client.getQueryState(key), failedStates.get(item.id), item.id);
+    }
+    assert.equal(client.getQueryCache().find({ queryKey: inactiveKey }), inactiveQuery);
+    assert.equal(client.getQueryState(inactiveKey)?.error, inactiveError);
+    assert.equal(client.getQueryState(sibling)?.isInvalidated, false);
+    assert.equal(client.getQueryCache().find({ queryKey: idleKey }), idleQuery);
+    assert.equal(client.getQueryState(idleKey)?.isInvalidated, false);
+  } finally {
+    unsubscribes.forEach((unsubscribe) => {
+      unsubscribe();
+    });
+    client.clear();
+  }
+});
+
 const invalidations = [
   [
     "stream open resync",
