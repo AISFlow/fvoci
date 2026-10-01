@@ -156,6 +156,10 @@ const MarkedEmoji = Emoji.extend({
           let representable = true;
           tr.doc.descendants((node) => {
             if (node.type.name !== "emoji" || !node.marks.length) return;
+            // Normalization waits for composition to finish. Refuse the atom
+            // mark now so ySync cannot publish its unencodable intermediate
+            // state; the same command can run normally after composition.
+            if (this.editor.view.composing) representable = false;
             const name: unknown = node.attrs.name;
             if (typeof name !== "string" || !shortcodeToEmoji(name, this.options.emojis)?.emoji)
               representable = false;
