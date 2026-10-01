@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page, type Request } from "@playwright/test";
 import { login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
@@ -236,16 +236,70 @@ test("task edit flow covers fields, hierarchy, conflicts, trash and restore", as
   await expect(page.getByTestId("task-edit-type")).toHaveValue("task");
 
   const initialStatusId = (await taskDetail(page, wsId, taskId)).statusId;
+  expect(initialStatusId).not.toBe(todoStatusId);
+  expect(initialStatusId).not.toBe(doneStatusId);
   const secondTab = await openSecondTab(context, page.url());
-  const staleMove = await page.request.post(`/api/v1/workspaces/${wsId}/tasks/${taskId}/move`, {
-    data: { statusId: todoStatusId, expectedStatusId: initialStatusId },
+  let releaseMove!: () => void;
+  const heldMove = new Promise<void>((resolve) => {
+    releaseMove = resolve;
   });
-  expect(staleMove.ok()).toBe(true);
-  await secondTab.getByTestId("task-edit-status").selectOption(doneStatusId);
-  await expect(secondTab.getByTestId("task-edit-action-error")).toContainText(
-    "다른 곳에서 먼저 수정되었습니다",
+  let captureMove!: (request: Request) => void;
+  const moveStarted = new Promise<Request>((resolve) => {
+    captureMove = resolve;
+  });
+  const movePath = `/api/v1/workspaces/${wsId}/tasks/${taskId}/move`;
+  await secondTab.route(
+    (url) => url.pathname === movePath,
+    async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      captureMove(route.request());
+      await heldMove;
+      await route.continue();
+    },
   );
-  await secondTab.close();
+  try {
+    await expect(secondTab.getByTestId("task-edit-status")).toHaveValue(initialStatusId);
+    const browserResponse = secondTab.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" && new URL(response.url()).pathname === movePath,
+    );
+    // Capture the real UI precondition before the competing commit. Live SSE
+    // may refresh the tab while held, but cannot change this request's body.
+    await secondTab.getByTestId("task-edit-status").selectOption(doneStatusId);
+    const request = await moveStarted;
+    const requestBody = z
+      .object({ statusId: z.string(), expectedStatusId: z.string() })
+      .strict()
+      .parse(request.postDataJSON());
+    expect(requestBody).toEqual({
+      statusId: doneStatusId,
+      expectedStatusId: initialStatusId,
+    });
+    const externalMove = await page.request.post(movePath, {
+      data: { statusId: todoStatusId, expectedStatusId: initialStatusId },
+    });
+    expect(externalMove.status()).toBe(200);
+    expect((await taskDetail(page, wsId, taskId)).statusId).toBe(todoStatusId);
+    releaseMove();
+    const conflict = await browserResponse;
+    expect(conflict.status()).toBe(409);
+    const problem = z.object({ code: z.string() }).parse(await conflict.json());
+    expect(problem.code).toBe("document_version_mismatch");
+    await expect(secondTab.getByTestId("task-edit-action-error")).toContainText(
+      "다른 곳에서 먼저 수정되었습니다",
+    );
+    expect((await taskDetail(page, wsId, taskId)).statusId).toBe(todoStatusId);
+    console.log("deterministic conflict precondition witness", {
+      initialStatusId,
+      externalStatusId: todoStatusId,
+      browserMove: requestBody,
+      browserStatus: conflict.status(),
+      problemCode: problem.code,
+    });
+  } finally {
+    releaseMove();
+    await secondTab.close();
+  }
   await page.reload();
   await expect(page.getByTestId("task-edit-title")).toHaveValue("반복 일감");
   await expect(page.getByRole("heading", { name: "반복 일감" })).toBeVisible();

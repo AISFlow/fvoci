@@ -583,3 +583,102 @@ for (const transition of ["switch", "dispose", "current denial", "setup priority
     }
   });
 }
+
+await test("session: acknowledged current workspace deletion retires access and owns home through late list denial", async () => {
+  const client = queryClient();
+  seedSession(client);
+  const redirects: string[] = [];
+  let changed: (() => void) | undefined;
+  let closed = 0;
+  const env = testEnvironment(redirects);
+  env.watchAccess = (_id, handlers) => {
+    changed = handlers.onAccessChange;
+    return {
+      close: () => {
+        closed += 1;
+      },
+    };
+  };
+  const { result, stop } = mount(client, () => useWorkspaceSession("acme", env));
+  try {
+    assert.equal(result.leaveDeletedWorkspace("other"), false);
+    assert.equal(closed, 0);
+    assert.equal(result.leaveDeletedWorkspace(WORKSPACE.id), true);
+    assert.equal(closed, 1, "ACK retires the old access listener synchronously");
+    assert.equal(result.status.value, "loading");
+    await nextTick();
+    assert.deepEqual(redirects, ["/"]);
+    changed?.();
+    client.setQueryData(["me", "workspaces"], { items: [] });
+    await nextTick();
+    assert.deepEqual(redirects, ["/"], "late list denial cannot restart the pending home request");
+  } finally {
+    stop();
+  }
+});
+
+await test("session: acknowledged deletion keeps setup,401 and actor hard boundaries above home", async () => {
+  for (const boundary of ["setup", "401", "actor"]) {
+    const client = queryClient();
+    seedSession(client);
+    const redirects: string[] = [];
+    const { result, stop } = mount(client, () =>
+      useWorkspaceSession("acme", testEnvironment(redirects)),
+    );
+    try {
+      assert.equal(result.leaveDeletedWorkspace(WORKSPACE.id), true);
+      await nextTick();
+      if (boundary === "setup") client.setQueryData(["setup", "status"], { needed: true });
+      if (boundary === "actor") client.setQueryData(["auth", "me"], { ...ME, userId: "new-actor" });
+      if (boundary === "401")
+        await client
+          .query({
+            queryKey: ["auth", "me"],
+            staleTime: 0,
+            queryFn: () => Promise.reject(new ProblemError(401)),
+          })
+          .catch(() => undefined);
+      await nextTick();
+      assert.deepEqual(redirects, [
+        "/",
+        boundary === "setup"
+          ? "/setup"
+          : boundary === "401"
+            ? "/login?returnTo=%2Fw%2Facme%2FWIKI-1"
+            : "/w/acme/WIKI-1",
+      ]);
+    } finally {
+      stop();
+    }
+  }
+});
+
+await test("session: deletion ownership does not survive route ABA, missing membership before ACK or disposal", async () => {
+  const client = queryClient();
+  seedSession(client);
+  const slug = ref("acme");
+  const redirects: string[] = [];
+  const { result, dispose, stop } = mount(client, () =>
+    useWorkspaceSession(slug, testEnvironment(redirects)),
+  );
+  try {
+    assert.equal(result.leaveDeletedWorkspace(WORKSPACE.id), true);
+    await nextTick();
+    slug.value = "other";
+    slug.value = "acme";
+    await nextTick();
+    client.setQueryData(["me", "workspaces"], { items: [] });
+    await nextTick();
+    assert.deepEqual(redirects, ["/", "/?denied=workspace"]);
+    assert.equal(
+      result.leaveDeletedWorkspace(WORKSPACE.id),
+      false,
+      "pre-ACK denial remains a guard, not deletion authorization",
+    );
+    dispose();
+    client.setQueryData(["me", "workspaces"], { items: [WORKSPACE] });
+    assert.equal(result.leaveDeletedWorkspace(WORKSPACE.id), false);
+  } finally {
+    stop();
+  }
+});
