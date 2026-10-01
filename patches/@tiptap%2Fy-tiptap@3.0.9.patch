@@ -1,0 +1,88 @@
+diff --git a/dist/y-tiptap.cjs b/dist/y-tiptap.cjs
+index 8b341de0dc9875e8840099b1309fff1ebb0c5db2..f7c0e9a302d143f5ecce57d190241bf65c65def8 100644
+--- a/dist/y-tiptap.cjs
++++ b/dist/y-tiptap.cjs
+@@ -326,12 +326,27 @@ const ySyncPlugin = (yXmlFragment, {
+  * @param {import('prosemirror-model').Node} oldDoc
+  * @param {number|null|undefined} oldAbs
+  * @param {number|null} resolved
++ * @param {ProsemirrorBinding} binding
++ * @param {Y.RelativePosition} relativePosition
+  * @return {number|null}
+  */
+-const recoverSelectionEndpoint = (newDoc, oldDoc, oldAbs, resolved) => {
++const recoverSelectionEndpoint = (newDoc, oldDoc, oldAbs, resolved, binding, relativePosition) => {
+   if (oldAbs == null) {
+     return resolved
+   }
++  // The rebuilt mapping contains only XML containers present in this editor.
++  // A valid endpoint in a surviving type must follow its content, even when
++  // the same update also moves or inserts an unrelated block. Deleted types
++  // and unresolved endpoints still use the existing structural recovery.
++  if (resolved !== null) {
++    const decoded = Y__namespace.createAbsolutePositionFromRelativePosition(relativePosition, binding.doc);
++    const mappedType = decoded !== null && decoded.type instanceof Y__namespace.XmlText
++      ? decoded.type.parent : decoded?.type;
++    if (decoded !== null && decoded.type._item !== null && !decoded.type._item.deleted &&
++      mappedType != null && binding.mapping.has(mappedType)) {
++      return resolved
++    }
++  }
+   const misresolved = resolved === null ||
+     (oldAbs > 1 && resolved <= 1) ||
+     isMisresolvedAfterStructuralChange(oldDoc, newDoc, oldAbs, resolved);
+@@ -395,8 +410,8 @@ const restoreRelativeSelection = (tr, relSel, binding, oldDoc) => {
+         binding.mapping
+       );
+       if (oldDoc != null) {
+-        anchor = recoverSelectionEndpoint(tr.doc, oldDoc, relSel.absAnchor, anchor);
+-        head = recoverSelectionEndpoint(tr.doc, oldDoc, relSel.absHead, head);
++        anchor = recoverSelectionEndpoint(tr.doc, oldDoc, relSel.absAnchor, anchor, binding, relSel.anchor);
++        head = recoverSelectionEndpoint(tr.doc, oldDoc, relSel.absHead, head, binding, relSel.head);
+       }
+       // Collapse to the surviving endpoint instead of dropping the selection;
+       // an unset selection maps through the full-doc replace to the doc start.
+diff --git a/dist/y-tiptap.js b/dist/y-tiptap.js
+index c6fdfa42dc346d31a3b4af91e0b3993ac3735a09..17db9843df789c586e3875b6c60b5f77bde9109e 100644
+--- a/dist/y-tiptap.js
++++ b/dist/y-tiptap.js
+@@ -292,12 +292,27 @@ const ySyncPlugin = (yXmlFragment, {
+  * @param {import('prosemirror-model').Node} oldDoc
+  * @param {number|null|undefined} oldAbs
+  * @param {number|null} resolved
++ * @param {ProsemirrorBinding} binding
++ * @param {Y.RelativePosition} relativePosition
+  * @return {number|null}
+  */
+-const recoverSelectionEndpoint = (newDoc, oldDoc, oldAbs, resolved) => {
++const recoverSelectionEndpoint = (newDoc, oldDoc, oldAbs, resolved, binding, relativePosition) => {
+   if (oldAbs == null) {
+     return resolved
+   }
++  // The rebuilt mapping contains only XML containers present in this editor.
++  // A valid endpoint in a surviving type must follow its content, even when
++  // the same update also moves or inserts an unrelated block. Deleted types
++  // and unresolved endpoints still use the existing structural recovery.
++  if (resolved !== null) {
++    const decoded = Y.createAbsolutePositionFromRelativePosition(relativePosition, binding.doc);
++    const mappedType = decoded !== null && decoded.type instanceof Y.XmlText
++      ? decoded.type.parent : decoded?.type;
++    if (decoded !== null && decoded.type._item !== null && !decoded.type._item.deleted &&
++      mappedType != null && binding.mapping.has(mappedType)) {
++      return resolved
++    }
++  }
+   const misresolved = resolved === null ||
+     (oldAbs > 1 && resolved <= 1) ||
+     isMisresolvedAfterStructuralChange(oldDoc, newDoc, oldAbs, resolved);
+@@ -361,8 +376,8 @@ const restoreRelativeSelection = (tr, relSel, binding, oldDoc) => {
+         binding.mapping
+       );
+       if (oldDoc != null) {
+-        anchor = recoverSelectionEndpoint(tr.doc, oldDoc, relSel.absAnchor, anchor);
+-        head = recoverSelectionEndpoint(tr.doc, oldDoc, relSel.absHead, head);
++        anchor = recoverSelectionEndpoint(tr.doc, oldDoc, relSel.absAnchor, anchor, binding, relSel.anchor);
++        head = recoverSelectionEndpoint(tr.doc, oldDoc, relSel.absHead, head, binding, relSel.head);
+       }
+       // Collapse to the surviving endpoint instead of dropping the selection;
+       // an unset selection maps through the full-doc replace to the doc start.

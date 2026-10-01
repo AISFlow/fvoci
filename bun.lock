@@ -130,6 +130,7 @@
     },
   },
   "patchedDependencies": {
+    "@tiptap/y-tiptap@3.0.9": "patches/@tiptap%2Fy-tiptap@3.0.9.patch",
     "@volar/typescript@2.4.28": "patches/@volar%2Ftypescript@2.4.28.patch",
   },
   "overrides": {
