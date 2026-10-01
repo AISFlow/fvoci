@@ -42,7 +42,9 @@
 //! - Recursion has no explicit depth limit (neither does the source); callers
 //!   pass `serde_json` values, whose parser caps nesting at 128.
 
+use regex::Regex;
 use serde_json::Value;
+use std::sync::LazyLock;
 
 use crate::collab::derived_body::emoji_glyph;
 
@@ -658,6 +660,30 @@ fn wrap_md_marks(run: &MdRun) -> String {
     let marks = &run.marks;
     let has = |ty: &str| marks.iter().any(|m| m.ty == ty);
     let mut text = run.md.clone();
+    // CommonMark emphasis cannot open/close against whitespace. Reuse the
+    // Unicode-aware regex dependency; preserve boundary bytes outside marks.
+    static LEADING_SPACE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^[\p{Zs}\t\n\x0c\r]*").expect("constant regex"));
+    static TRAILING_SPACE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[\p{Zs}\t\n\x0c\r]*$").expect("constant regex"));
+    let mut leading = "";
+    let mut trailing = "";
+    if !has("code")
+        && ["bold", "italic", "strike", "highlight"]
+            .iter()
+            .any(|ty| has(ty))
+    {
+        let start = LEADING_SPACE.find(&run.md).map_or(0, |m| m.end());
+        if start == run.md.len() {
+            return run.md.clone();
+        }
+        let end = TRAILING_SPACE
+            .find(&run.md)
+            .map_or(run.md.len(), |m| m.start());
+        leading = &run.md[..start];
+        trailing = &run.md[end..];
+        text = run.md[start..end].to_string();
+    }
     if has("code") {
         let fence = fence_for(&text, '`', 1);
         let pad = if text.starts_with('`') || text.ends_with('`') || space_padded_non_blank(&text) {
@@ -682,10 +708,11 @@ fn wrap_md_marks(run: &MdRun) -> String {
     let link = marks
         .iter()
         .find(|m| m.ty == "link" && m.href.as_deref().is_some_and(|h| !h.is_empty()));
-    match link.and_then(|m| m.href.as_deref()) {
+    let wrapped = match link.and_then(|m| m.href.as_deref()) {
         Some(href) => format!("[{text}]({href})"),
         None => text,
-    }
+    };
+    format!("{leading}{wrapped}{trailing}")
 }
 
 fn inline_md(nodes: Option<&Vec<Value>>, opts: MdOpts) -> String {
@@ -986,6 +1013,61 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+
+    #[test]
+    fn markdown_emphasis_preserves_unicode_and_boundary_whitespace() {
+        for text in [
+            "한글 😀",
+            "한글 😀 ",
+            " 한글 😀",
+            " 한글 😀 ",
+            "\u{a0}한글 😀\u{a0}",
+            "\t한글 😀\t",
+        ] {
+            for types in [
+                vec!["bold"],
+                vec!["italic"],
+                vec!["bold", "italic"],
+                vec!["strike"],
+            ] {
+                let marks: Vec<Value> = types.iter().map(|ty| json!({"type": ty})).collect();
+                let input = json!({"type":"doc","content":[{"type":"paragraph","content":[
+                    {"type":"text","text":"앞 "}, {"type":"text","text":text,"marks":marks}, {"type":"text","text":" 뒤"}
+                ]}]});
+                let md = tiptap_doc_to_md_first_pass(&input);
+                let imported = crate::documents::markdown::md_to_tiptap(&md).expect("parse");
+                let nodes = imported["content"][0]["content"]
+                    .as_array()
+                    .expect("content");
+                let got: String = nodes.iter().filter_map(|n| n["text"].as_str()).collect();
+                assert_eq!(got, format!("앞 {text} 뒤"), "{md}");
+                let marked = nodes
+                    .iter()
+                    .find(|n| n["text"].as_str().is_some_and(|s| s.contains("한글")))
+                    .expect("marked text");
+                let mut actual: Vec<&str> = marked["marks"]
+                    .as_array()
+                    .expect("marks")
+                    .iter()
+                    .filter_map(|m| m["type"].as_str())
+                    .collect();
+                let mut expected = types.clone();
+                actual.sort();
+                expected.sort();
+                assert_eq!(actual, expected, "{md}");
+            }
+        }
+        for text in [" ", "  ", "\t", "\u{a0}"] {
+            let run = MdRun {
+                md: text.to_string(),
+                marks: vec![Mark {
+                    ty: "bold".to_string(),
+                    href: None,
+                }],
+            };
+            assert_eq!(wrap_md_marks(&run), text);
+        }
+    }
 
     fn para(content: Value) -> Value {
         json!({"type": "doc", "content": [{"type": "paragraph", "content": content}]})
