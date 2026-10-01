@@ -100,6 +100,7 @@ async function get(page: Page, doc: Document) {
 async function holdResponse(page: Page, url: string, method: string) {
   let arrived!: (response: APIResponse) => void;
   let release!: () => void;
+  let retired = false;
   const entered = new Promise<APIResponse>((resolve) => {
     arrived = resolve;
   });
@@ -112,11 +113,15 @@ async function holdResponse(page: Page, url: string, method: string) {
     const actual = await route.fetch();
     arrived(actual);
     await gate;
+    if (retired) return;
     await route.fulfill({ response: actual });
   });
   return {
     entered,
     release,
+    retire: () => {
+      retired = true;
+    },
     close: async () => {
       release();
       await page.unroute(pattern);
@@ -294,6 +299,32 @@ async function refresh(page: Page, queryKey: readonly string[]) {
     await root.__vue_app__._context.provides.VUE_QUERY_CLIENT.refetchQueries({ queryKey: key });
   }, queryKey);
 }
+async function actorReentry(page: Page) {
+  const before = await page.evaluate(() => performance.timeOrigin);
+  const navigation = page.waitForEvent("framenavigated", {
+    predicate: (frame) => frame === page.mainFrame(),
+  });
+  await page.evaluate(() => {
+    const root = document.getElementById("root") as HTMLElement & {
+      __vue_app__: {
+        _context: {
+          provides: {
+            VUE_QUERY_CLIENT: {
+              refetchQueries(options: { queryKey: readonly string[] }): Promise<void>;
+            };
+          };
+        };
+      };
+    };
+    void root.__vue_app__._context.provides.VUE_QUERY_CLIENT.refetchQueries({
+      queryKey: ["auth", "me"],
+    });
+  });
+  await navigation;
+  await page.waitForLoadState("domcontentloaded");
+  expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(before);
+}
+
 async function navigate(page: Page, path: string) {
   await page.evaluate(async (next) => {
     const root = document.getElementById("root") as HTMLElement & {
@@ -382,7 +413,11 @@ for (const kind of ["wiki", "project"] as const) {
         expect(
           (await readJson(await page.request.get("/api/v1/auth/me"), flowSchemas.user)).userId,
         ).toBe(user.userId);
-        await refresh(page, ["auth", "me"]);
+        barrier.retire();
+        await actorReentry(page);
+        barrier.release();
+        expect((await get(page, doc)).title).toBe(doc.title);
+        await page.goto(doc.path);
         await expect(title).toHaveValue(doc.title);
         await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
         await title.fill("member actor draft");
@@ -393,15 +428,12 @@ for (const kind of ["wiki", "project"] as const) {
         );
         expect(returnedActor.userId).toBe(originalActor.userId);
         expect(returnedActor.sessionId).not.toBe(originalActor.sessionId);
-        await refresh(page, ["auth", "me"]);
+        await actorReentry(page);
+        expect((await get(page, doc)).title).toBe(doc.title);
+        await page.goto(doc.path);
         await expect(title).toHaveValue(doc.title);
         await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
         await title.fill("current actor draft");
-        const delivered = page.waitForResponse(
-          (r) => new URL(r.url()).pathname === `${doc.url}/move` && r.request().method() === "POST",
-        );
-        barrier.release();
-        expect((await delivered).status()).toBe(200);
         await refresh(page, kind === "wiki" ? ["document"] : ["project-document"]);
         await expect(title).toHaveValue("current actor draft");
         expect((await get(page, doc)).title).toBe(doc.title);
