@@ -311,6 +311,8 @@ for (const outcome of ["success", "503"] as const) {
 
 test("an authenticated actor change closes the old room and hard-reenters without exposing its mounted cache", async ({
   page,
+  browser,
+  baseURL,
 }) => {
   const workspaceId = await setup(page);
   const other = { email: "navigation-actor@example.com", password: "memberpass1" };
@@ -336,55 +338,70 @@ test("an authenticated actor change closes the old room and hard-reenters withou
     wireErrors.push(event.errorMessage);
   });
   await cdp.send("Network.enable");
-  await page.goto(path);
-  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
-  const token = await markLifetime(page);
-  const loginResponse = await page.request.post("/api/v1/auth/login", {
-    data: { email: admin.email, password: admin.password },
-  });
-  expect(loginResponse.ok()).toBe(true);
-  // Same actor / changed session cookie is an ordinary successful refetch.
-  await page.evaluate(async () => {
-    const client = (document.getElementById("root") as AppRoot).__vue_app__._context.provides
-      .VUE_QUERY_CLIENT;
-    await client.refetchQueries({ queryKey: ["auth", "me"] });
-  });
-  await expectLifetime(page, token);
-  expect(open.size).toBe(1);
-  const changed = await page.request.post("/api/v1/auth/login", { data: other });
-  expect(changed.ok()).toBe(true);
-  const reentry = page.waitForEvent("request", {
-    predicate: (request) => request.isNavigationRequest() && request.frame() === page.mainFrame(),
-  });
-  await page.evaluate(() => {
-    const client = (document.getElementById("root") as AppRoot).__vue_app__._context.provides
-      .VUE_QUERY_CLIENT;
-    client.refetchQueries({ queryKey: ["auth", "me"] }).catch(reportError);
-  });
-  expect((await (await reentry).response())?.status()).toBe(200);
-  await expect(page).toHaveURL(path);
-  await expect(page.getByLabel("문서 제목")).toHaveValue("Actor boundary");
-  await expect(page.locator("html")).not.toHaveAttribute("data-task4-document", token);
-  expect(
-    await page.evaluate(() =>
-      (
-        document.getElementById("root") as AppRoot
-      ).__vue_app__._context.provides.VUE_QUERY_CLIENT.getQueryData(["task4-lifetime-proof"]),
-    ),
-  ).toBeUndefined();
-  console.log("actor-boundary close observation", {
-    playwright: open.size,
-    native: wire.size,
-    wireErrors,
-  });
-  await expect.poll(() => wire.size).toBe(1);
-  // Logout remains a hard boundary, with its existing server and push cleanup.
-  await page.getByRole("button", { name: "로그아웃", exact: true }).click();
-  await expect(page).toHaveURL(/\/login$/);
-  await expect(page.getByLabel("이메일")).toBeVisible();
-  await expect(page.locator("html")).not.toHaveAttribute("data-task4-document", token);
-  await expect.poll(() => wire.size).toBe(0);
-  await cdp.detach();
+  const peerContext = await browser.newContext({ baseURL });
+  try {
+    await page.goto(path);
+    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
+    const token = await markLifetime(page);
+    const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+    const peer = await peerContext.newPage();
+    await login(peer, admin.email, admin.password);
+    await peer.goto(path);
+    await expect(peer.getByText("나 (다른 탭)", { exact: true })).toBeVisible();
+    const loginResponse = await page.request.post("/api/v1/auth/login", {
+      data: { email: admin.email, password: admin.password },
+    });
+    expect(loginResponse.ok()).toBe(true);
+    // Same actor / changed session cookie is an ordinary successful refetch.
+    await page.evaluate(async () => {
+      const client = (document.getElementById("root") as AppRoot).__vue_app__._context.provides
+        .VUE_QUERY_CLIENT;
+      await client.refetchQueries({ queryKey: ["auth", "me"] });
+    });
+    await expectLifetime(page, token);
+    expect(open.size).toBe(1);
+    const changed = await page.request.post("/api/v1/auth/login", { data: other });
+    expect(changed.ok()).toBe(true);
+    const reentry = page.waitForEvent("request", {
+      predicate: (request) => request.isNavigationRequest() && request.frame() === page.mainFrame(),
+    });
+    await page.evaluate(() => {
+      const client = (document.getElementById("root") as AppRoot).__vue_app__._context.provides
+        .VUE_QUERY_CLIENT;
+      client.refetchQueries({ queryKey: ["auth", "me"] }).catch(reportError);
+    });
+    expect((await (await reentry).response())?.status()).toBe(200);
+    await expect(page).toHaveURL(path);
+    await expect(page.getByLabel("문서 제목")).toHaveValue("Actor boundary");
+    await expect(page.locator("html")).not.toHaveAttribute("data-task4-document", token);
+    expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(timeOrigin);
+    expect(
+      await page.evaluate(() =>
+        (
+          document.getElementById("root") as AppRoot
+        ).__vue_app__._context.provides.VUE_QUERY_CLIENT.getQueryData(["task4-lifetime-proof"]),
+      ),
+    ).toBeUndefined();
+    console.log("actor-boundary close observation", {
+      playwright: open.size,
+      native: wire.size,
+      wireErrors,
+    });
+    await expect(peer.locator(".document-page__presence")).toContainText("다른 사용자");
+    await expect(peer.getByText("나 (다른 탭)", { exact: true })).toHaveCount(0);
+    await expect(peer.locator(".document-page__presence > li")).toHaveCount(1);
+    await expect.poll(() => wire.size).toBe(1);
+    // Logout remains a hard boundary, with its existing server and push cleanup.
+    await page.getByRole("button", { name: "로그아웃", exact: true }).click();
+    await expect(page).toHaveURL(/\/login$/);
+    await expect(page.getByLabel("이메일")).toBeVisible();
+    await expect(page.locator("html")).not.toHaveAttribute("data-task4-document", token);
+    await expect.poll(() => wire.size).toBe(0);
+    await expect(peer.locator(".document-page__presence > li")).toHaveCount(0);
+  } finally {
+    await peerContext.close();
+    await cdp.detach();
+  }
 });
 
 test("a missing-wiki lazy chunk failure stays visible on its owning page without reloading", async ({
