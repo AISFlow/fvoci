@@ -514,18 +514,6 @@ for (const archivedTarget of [false, true]) {
         expect(z.object({ canCreate: z.literal(true) }).parse(await allowed.json()).canCreate).toBe(
           true,
         );
-        // Actual REST authorization succeeds while the retained body lease stays readonly.
-        expect(
-          (
-            await page.request.post(timeEndpoint, {
-              data: {
-                startedAt: "2027-03-14T09:00:00Z",
-                endedAt: "2027-03-14T09:30:00Z",
-                note: "REST grant probe",
-              },
-            })
-          ).status(),
-        ).toBe(201);
         await expect(
           page
             .getByTestId("task-time-entries")
@@ -597,6 +585,18 @@ for (const archivedTarget of [false, true]) {
         } finally {
           await fresh.close();
         }
+        // Actual REST authorization succeeds while the retained body lease stays readonly.
+        expect(
+          (
+            await page.request.post(timeEndpoint, {
+              data: {
+                startedAt: "2027-03-14T09:00:00Z",
+                endedAt: "2027-03-14T09:30:00Z",
+                note: "REST grant probe",
+              },
+            })
+          ).status(),
+        ).toBe(201);
         await expect(page).toHaveURL(retainedUrl);
         expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
         await expect(body.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
