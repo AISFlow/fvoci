@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { z } from "zod";
 import { expect, test, type Page } from "@playwright/test";
+import { createE2eUser } from "./helpers";
 import { admin, newSignedInPage, setupInstance, workspaceId } from "./workspace-wiki-vue-editor";
 
 const taskSchema = z
@@ -457,37 +458,50 @@ for (const archivedTarget of [false, true]) {
       );
       await expect(page.getByRole("alert")).toHaveCount(0);
       if (archivedTarget) {
+        await expect(page.getByTestId("task-edit-title")).toBeDisabled();
+        await expect(page.getByTestId("task-edit-dependency-open")).toHaveCount(0);
+        const retainedUrl = page.url();
+        const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+        const body = page.getByTestId("task-body");
+        await expect(body.locator('[data-collab-status="connected"]')).toBeVisible();
+        await expect(body.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
         expect(
           (await page.request.patch(parentEndpoint, { data: { archived: false } })).status(),
         ).toBe(200);
         const restored = await page.request.get(parentEndpoint);
         expect(restored.status()).toBe(200);
         expect(
-          z.object({ archivedAt: z.null() }).parse(await restored.json()).archivedAt,
+          z.object({ archivedAt: z.null(), canEdit: z.literal(true) }).parse(await restored.json())
+            .archivedAt,
         ).toBeNull();
-      } else {
-        const removed = page.waitForResponse(
-          (r) =>
-            r.url().endsWith(`${parentEndpoint}/dependencies/${f.task.id}`) &&
-            r.request().method() === "DELETE",
-        );
-        await page.getByTestId(`task-edit-dependency-remove-${f.task.id}`).click();
-        expect((await removed).status()).toBe(200);
-        await expect(
-          page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`),
-        ).toHaveCount(0);
-        await page.getByTestId("task-edit-dependency-open").click();
-        await page.getByTestId("task-edit-dependency-target").selectOption(f.task.id);
-        const added = page.waitForResponse(
-          (r) =>
-            r.url().endsWith(`${parentEndpoint}/dependencies`) && r.request().method() === "POST",
-        );
-        await page.getByTestId("task-edit-dependency-add").click();
-        expect((await added).status()).toBe(200);
-        await expect(
-          page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`),
-        ).toBeVisible();
+        await expect(page.getByTestId("task-edit-title")).toBeEnabled();
+        await expect(page).toHaveURL(retainedUrl);
+        expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
+        // HTTP restore does not promote the already admitted readonly body lease.
+        await expect(body.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
+        await expect(body.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
       }
+      const removed = page.waitForResponse(
+        (r) =>
+          r.url().endsWith(`${parentEndpoint}/dependencies/${f.task.id}`) &&
+          r.request().method() === "DELETE",
+      );
+      await page.getByTestId(`task-edit-dependency-remove-${f.task.id}`).click();
+      expect((await removed).status()).toBe(200);
+      await expect(page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`)).toHaveCount(
+        0,
+      );
+      await page.getByTestId("task-edit-dependency-open").click();
+      await page.getByTestId("task-edit-dependency-target").selectOption(f.task.id);
+      const added = page.waitForResponse(
+        (r) =>
+          r.url().endsWith(`${parentEndpoint}/dependencies`) && r.request().method() === "POST",
+      );
+      await page.getByTestId("task-edit-dependency-add").click();
+      expect((await added).status()).toBe(200);
+      await expect(
+        page.getByTestId(`task-edit-dependency-${parent.id}-${f.task.id}`),
+      ).toBeVisible();
       const detail = await page.request.get(parentEndpoint);
       const edges = z
         .object({
@@ -503,6 +517,69 @@ for (const archivedTarget of [false, true]) {
     }
   });
 }
+
+test("HTTP viewer rights keep task metadata disabled and reject direct writes", async ({
+  browser,
+  baseURL,
+}) => {
+  const signed = await newSignedInPage(browser, baseURL, admin);
+  const viewer = { email: "task-metadata-viewer@example.com", password: "viewerpass1" };
+  let viewing: Awaited<ReturnType<typeof newSignedInPage>> | undefined;
+  try {
+    const f = await fixture(signed.page, "TMV", {});
+    const created = await signed.page.request.post(`${f.base}/projects/${f.projectId}/tasks`, {
+      data: { title: "Viewer dependency target", statusId: f.task.statusId, type: "task" },
+    });
+    expect(created.status()).toBe(201);
+    const target = taskSchema.parse(await created.json());
+    createE2eUser(viewer.email, viewer.password, "Viewer", {
+      workspaceSlug: admin.workspaceSlug,
+      membershipRole: "guest",
+    });
+    const members = await signed.page.request.get(`${f.base}/members`);
+    expect(members.status()).toBe(200);
+    const viewerId = z
+      .object({ items: z.array(z.object({ email: z.string(), userId: z.string() })) })
+      .parse(await members.json())
+      .items.find((item) => item.email === viewer.email)?.userId;
+    if (!viewerId) throw new Error("Fixture requires viewer membership");
+    expect(
+      (
+        await signed.page.request.post(`${f.base}/projects/${f.projectId}/members`, {
+          data: { userId: viewerId, role: "viewer" },
+        })
+      ).status(),
+    ).toBe(201);
+    viewing = await newSignedInPage(browser, baseURL, viewer);
+    const page = viewing.page;
+    const detail = await page.request.get(f.endpoint);
+    expect(detail.status()).toBe(200);
+    expect(z.object({ canEdit: z.literal(false) }).parse(await detail.json()).canEdit).toBe(false);
+    await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
+    await expect(page.getByTestId("task-edit-title")).toBeDisabled();
+    await expect(page.getByTestId("task-edit-due-date")).toBeDisabled();
+    await expect(page.getByTestId("task-edit-dependency-open")).toHaveCount(0);
+    expect(
+      (await page.request.patch(f.endpoint, { data: { title: "Denied title" } })).status(),
+    ).toBe(404);
+    expect(
+      (
+        await page.request.post(`${f.endpoint}/dependencies`, {
+          data: { blockedId: target.id, type: "FS", lagDays: 0 },
+        })
+      ).status(),
+    ).toBe(404);
+    expect((await f.stored()).title).toBe(f.task.title);
+    const committed = await signed.page.request.get(f.endpoint);
+    expect(committed.status()).toBe(200);
+    expect(
+      z.object({ dependencies: z.array(z.unknown()) }).parse(await committed.json()).dependencies,
+    ).toEqual([]);
+  } finally {
+    await viewing?.context.close();
+    await signed.context.close();
+  }
+});
 
 test("Calendar commit refreshes retained detail and Gantt before 30s even when stream hints are unavailable", async ({
   browser,

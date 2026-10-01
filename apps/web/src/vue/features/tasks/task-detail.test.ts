@@ -2,6 +2,18 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
+import * as Vue from "vue";
+import { renderToString } from "vue/server-renderer";
+import { formatPersonName, t } from "@fvoci/i18n";
+import { collabUserOf } from "@/features/documents/collab-model";
+import { runArchiveWithBodyPersist } from "@/features/tasks/task-archive-persist";
+import { projectTasksPath } from "@/lib/href";
+import {
+  compiledComponent,
+  evaluate,
+  renderFunction,
+} from "../../../features/settings/compiled-component-test";
 import { QueryClient, useQuery, VueQueryPlugin } from "@tanstack/vue-query";
 import { createApp, effectScope } from "vue";
 import { isLocalAppPath as isVueAppPath } from "@/vue/route-paths";
@@ -211,4 +223,174 @@ await test("TaskDetailView wires the React side panels without a second collab r
   const bodyAt = template.indexOf("TaskBodyEditor");
   const attachAt = template.indexOf("TaskAttachmentsPanel");
   assert.ok(collectionAt > 0 && collectionAt < bodyAt && bodyAt < attachAt);
+});
+
+// Compile the actual parent; mock room/query snapshots and leaf components only.
+// These assertions verify the grants passed to each child, not server authorization.
+async function detailGrants(options: {
+  pageReadOnly: boolean;
+  sessionReadOnly: boolean;
+  archived?: boolean;
+  canEdit?: boolean;
+  restoring?: boolean;
+}) {
+  const filename = path.join(import.meta.dirname, "TaskDetailView.vue");
+  const { descriptor } = parse(readFileSync(filename, "utf8"), { filename });
+  const script = compileScript(descriptor, { id: "task-grants" });
+  assert.ok(descriptor.template);
+  const template = compileTemplate({
+    source: descriptor.template.content,
+    filename,
+    id: "task-grants",
+    compilerOptions: { bindingMetadata: script.bindings },
+  });
+  assert.deepEqual(template.errors, []);
+  const grants = new Map<string, { readOnly: boolean; archivePending: boolean }>();
+  const leaf = (name: string) =>
+    Vue.defineComponent({
+      inheritAttrs: false,
+      props: ["readOnly", "archivePending"],
+      setup(props) {
+        return () => {
+          grants.set(name, {
+            readOnly: Boolean(props.readOnly),
+            archivePending: Boolean(props.archivePending),
+          });
+          return null;
+        };
+      },
+    });
+  const imports: Record<string, unknown> = {
+    vue: Vue,
+    "@fvoci/i18n": { formatPersonName, t },
+    "@/features/tasks/task-archive-persist": { runArchiveWithBodyPersist },
+    "@/features/documents/collab-model": { collabUserOf },
+    "@/lib/href": { projectTasksPath },
+    "@/lib/queries": { meQuery: {} },
+    "@tanstack/vue-query": { useQuery: () => ({ data: Vue.ref(null) }) },
+    "../../collab/useCollabRoom": {
+      collabRoomName: () => "w:task:t",
+      useCollabRoom: () => ({ session: Vue.ref({ readOnly: options.sessionReadOnly }) }),
+    },
+    "@/features/projects/projects.css": {},
+  };
+  for (const name of [
+    "@nuxt/ui/components/Button.vue",
+    "../../components/AppLink.vue",
+    "../../components/ConfirmActionButton.vue",
+    "../collections/TaskCollectionProperties.vue",
+    "../comments/TaskActivityPanel.vue",
+    "../documents/OriginPanel.vue",
+    "../documents/StarToggle.vue",
+    "./TaskAttachmentsPanel.vue",
+    "./TaskBacklinks.vue",
+    "./TaskBodyEditor.vue",
+    "./TaskDetailForm.vue",
+    "./TaskTimeEntries.vue",
+  ]) {
+    imports[name] = { default: leaf(path.basename(name, ".vue")) };
+  }
+  const component = compiledComponent(evaluate(script.content, imports).default);
+  component.render = renderFunction(evaluate(template.code, imports).render);
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const pending: Promise<unknown>[] = [];
+  let restoreCalls = 0;
+  const setup = component.setup;
+  if (options.restoring) {
+    component.setup = (props, context) => {
+      const state = setup(props, context);
+      const handler = state.handleArchiveToggle;
+      assert.equal(typeof handler, "function");
+      Vue.onServerPrefetch(() => {
+        // Both invocations run before the HTTP restore finishes.
+        for (let i = 0; i < 2; i++) {
+          pending.push(
+            Promise.resolve(
+              Reflect.apply(handler as (...args: unknown[]) => unknown, undefined, [false]),
+            ),
+          );
+        }
+      });
+      return state;
+    };
+  }
+  const callbacks = Object.fromEntries(
+    [
+      "TitleBlur",
+      "StatusChange",
+      "PriorityChange",
+      "HierarchySave",
+      "DueDateBlur",
+      "AssigneesChange",
+      "LabelsChange",
+      "MilestoneChange",
+      "AddDependency",
+      "RemoveDependency",
+      "Trash",
+      "Clone",
+      "Delete",
+    ].map((name) => [`on${name}`, () => Promise.resolve()]),
+  );
+  try {
+    await renderToString(
+      Vue.createSSRApp(component, {
+        slug: "ws",
+        workspaceId: "w",
+        projectId: "p",
+        projectKey: "TASK",
+        currentUserId: "u",
+        task: { id: "t", title: "Task", archivedAt: options.archived ? "2026-10-01" : null },
+        statuses: [],
+        members: [],
+        labels: [],
+        milestones: [],
+        dependencyCandidates: [],
+        readOnly: options.pageReadOnly,
+        canEdit: options.canEdit ?? true,
+        ...callbacks,
+        onArchiveToggle: () => {
+          restoreCalls++;
+          return held;
+        },
+      }),
+    );
+  } finally {
+    release();
+    await Promise.all(pending);
+  }
+  return { grants, restoreCalls };
+}
+
+await test("readonly body admission leaves HTTP metadata editable without granting body or attachment writes", async () => {
+  const { grants } = await detailGrants({ pageReadOnly: false, sessionReadOnly: true });
+  assert.equal(grants.get("TaskDetailForm")?.readOnly, false);
+  assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
+  assert.equal(grants.get("TaskAttachmentsPanel")?.readOnly, true);
+});
+
+await test("archived and permission-denied page rights keep metadata and body readonly", async () => {
+  for (const options of [{ archived: true }, { canEdit: false }]) {
+    const { grants } = await detailGrants({
+      pageReadOnly: true,
+      sessionReadOnly: false,
+      ...options,
+    });
+    assert.equal(grants.get("TaskDetailForm")?.readOnly, true);
+    assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
+  }
+});
+
+await test("in-flight restore holds metadata and body readonly and prevents duplicate dispatch", async () => {
+  const { grants, restoreCalls } = await detailGrants({
+    pageReadOnly: false,
+    sessionReadOnly: false,
+    restoring: true,
+  });
+  assert.equal(grants.get("TaskDetailForm")?.readOnly, true);
+  assert.equal(grants.get("TaskDetailForm")?.archivePending, true);
+  assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
+  assert.equal(restoreCalls, 1);
 });

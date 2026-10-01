@@ -85,6 +85,8 @@ const archivePersistError = ref<string | null>(null);
 let archiveInFlight = false;
 
 const pageReadOnly = computed(() => props.readOnly);
+// HTTP metadata rights are independent of the collaboration connection's grant.
+const metadataReadOnly = computed(() => pageReadOnly.value || archivePersisting.value);
 const bodyReadOnly = computed(
   () => pageReadOnly.value || (session.value?.readOnly ?? false) || archivePersisting.value,
 );
@@ -152,7 +154,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :labels="labels"
       :milestones="milestones"
       :dependency-candidates="dependencyCandidates"
-      :read-only="bodyReadOnly"
+      :read-only="metadataReadOnly"
       :can-edit="canEdit"
       :pending="pending"
       :field-error="fieldError"
