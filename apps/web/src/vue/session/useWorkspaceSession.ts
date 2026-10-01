@@ -1,5 +1,13 @@
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref, toValue, watch, watchEffect, type MaybeRefOrGetter } from "vue";
+import {
+  computed,
+  onScopeDispose,
+  ref,
+  toValue,
+  watch,
+  watchEffect,
+  type MaybeRefOrGetter,
+} from "vue";
 import { ProblemError } from "@/lib/api";
 import { meQuery, setupStatusQuery, workspacesQuery } from "@/lib/queries";
 import { watchWorkspaceAccess } from "@/lib/workspace-access-stream";
@@ -67,6 +75,33 @@ export function useWorkspaceSession(
       me.data.value !== undefined && workspaces.isSuccess.value && workspace.value === undefined,
   );
 
+  // Only a confirmed DELETE from the current page can own clean home. Keep
+  // the captured identity after its workspace disappears from a fresh list;
+  // metadata/access completions in the departing document are then expected.
+  const deletedWorkspace = ref<{ id: string; slug: string; actor: string }>();
+  let active = true;
+  const leavingDeletedWorkspace = computed(() => {
+    const deleted = deletedWorkspace.value;
+    return (
+      !!deleted &&
+      active &&
+      !actorChanged.value &&
+      deleted.slug === toValue(slug) &&
+      deleted.actor === me.data.value?.userId &&
+      (workspace.value === undefined || workspace.value.id === deleted.id)
+    );
+  });
+  watch(
+    () => toValue(slug),
+    () => {
+      deletedWorkspace.value = undefined;
+    },
+    { flush: "sync" },
+  );
+  onScopeDispose(() => {
+    active = false;
+  });
+
   let requestedRedirect: string | undefined;
   watchEffect(() => {
     const path = setup.data.value?.needed
@@ -75,9 +110,11 @@ export function useWorkspaceSession(
         ? loginPath(env.location())
         : actorChanged.value
           ? `${env.location().pathname}${env.location().search}${env.location().hash}`
-          : denied.value
-            ? "/?denied=workspace"
-            : undefined;
+          : leavingDeletedWorkspace.value
+            ? "/"
+            : denied.value
+              ? "/?denied=workspace"
+              : undefined;
     // Queries settle independently. Restarting the same pending navigation
     // (e.g. me 401, then setup completion) cancels its first document request.
     // A different destination still applies the guard priority above.
@@ -93,9 +130,9 @@ export function useWorkspaceSession(
   // The server closes the access stream when membership or the session may
   // have changed; only a fresh workspace list without this workspace evicts.
   watch(
-    [() => workspace.value?.id, actorChanged],
-    ([workspaceId, changedActor], _previous, onCleanup) => {
-      if (!workspaceId || changedActor) return;
+    [() => workspace.value?.id, actorChanged, leavingDeletedWorkspace],
+    ([workspaceId, changedActor, deleted], _previous, onCleanup) => {
+      if (!workspaceId || changedActor || deleted) return;
       let active = true;
       const subscription = env.watchAccess(workspaceId, {
         onAccessChange: () => {
@@ -124,7 +161,13 @@ export function useWorkspaceSession(
 
   const status = computed<SessionStatus>(() => {
     // Leaving for /setup, /login or home: keep showing "loading" until the page goes.
-    if (setup.data.value?.needed || signedOut.value || actorChanged.value || denied.value)
+    if (
+      setup.data.value?.needed ||
+      signedOut.value ||
+      actorChanged.value ||
+      leavingDeletedWorkspace.value ||
+      denied.value
+    )
       return "loading";
     // A failed background refetch keeps the cached data (TanStack keeps `data`
     // with status "error"): only a query with nothing to show makes the page an
@@ -142,5 +185,13 @@ export function useWorkspaceSession(
     if (workspaces.isError.value) workspaces.refetch().catch(reportError);
   }
 
-  return { me: computed(() => me.data.value), workspace, status, retry };
+  function leaveDeletedWorkspace(workspaceId: string): boolean {
+    const userId = me.data.value?.userId;
+    if (!active || status.value !== "ready" || !userId || workspace.value?.id !== workspaceId)
+      return false;
+    deletedWorkspace.value = { id: workspaceId, slug: toValue(slug), actor: userId };
+    return true;
+  }
+
+  return { me: computed(() => me.data.value), workspace, status, retry, leaveDeletedWorkspace };
 }

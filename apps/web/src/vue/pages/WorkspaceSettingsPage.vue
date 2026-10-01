@@ -7,7 +7,7 @@ import { RouterLink, useRoute } from "vue-router";
 import { showsWorkspaceSso } from "@/features/settings/workspace-sso-scope";
 import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
 import { documentTagsSettingsPath, templatesSettingsPath } from "@/lib/href";
-import { workspaceMetaQuery } from "@/lib/queries";
+import { meQuery, workspaceMetaQuery, workspacesQuery } from "@/lib/queries";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
 import DeletedProjectsSection from "../features/settings/DeletedProjectsSection.vue";
 import NotificationPrefsSection from "../features/settings/NotificationPrefsSection.vue";
@@ -39,12 +39,13 @@ const meta = useQuery(() => ({
   retry: false as const,
 }));
 
-watchEffect(() => {
-  if (
+const metadataDenied = computed(
+  () =>
     meta.error.value instanceof ProblemError &&
-    (meta.error.value.status === 403 || meta.error.value.status === 404) &&
-    workspace.value
-  ) {
+    (meta.error.value.status === 403 || meta.error.value.status === 404),
+);
+watchEffect(() => {
+  if (metadataDenied.value && workspace.value && session.status.value === "ready") {
     window.location.replace("/?denied=workspace");
   }
 });
@@ -67,9 +68,19 @@ const deleteError = ref<string | null>(null);
 const lifecycle = ref(0);
 type WorkspaceMutation = { workspaceId: string; lifecycle: number };
 const isCurrent = (input: WorkspaceMutation) =>
-  input.lifecycle === lifecycle.value && input.workspaceId === workspaceId.value;
+  input.lifecycle === lifecycle.value &&
+  input.workspaceId === workspaceId.value &&
+  session.status.value === "ready";
 watch(
-  [slug, workspaceId, () => workspace.value?.role, () => session.me.value?.userId],
+  [
+    slug,
+    workspaceId,
+    () => workspace.value?.role,
+    () => session.me.value?.userId,
+    () => session.me.value?.sessionId,
+    session.status,
+    metadataDenied,
+  ],
   () => {
     lifecycle.value += 1;
     nameError.value = null;
@@ -108,7 +119,9 @@ const rename = useMutation({
 });
 
 const remove = useMutation({
-  mutationFn: async (input: WorkspaceMutation & { confirmSlug: string }) =>
+  mutationFn: async (
+    input: WorkspaceMutation & { confirmSlug: string; actorId: string; sessionId: string },
+  ) =>
     ensureOk(
       await api.DELETE("/api/v1/workspaces/{workspace_id}", {
         params: { path: { workspace_id: input.workspaceId } },
@@ -118,12 +131,23 @@ const remove = useMutation({
   onSuccess: async (_data, input) => {
     if (isCurrent(input)) {
       deleteError.value = null;
-      window.location.replace("/");
+      // The fresh home document owns its list/cache. Refetching the deleted
+      // metadata here would race both denial guards against the pending home.
+      session.leaveDeletedWorkspace(input.workspaceId);
+      return;
     }
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] }),
-      queryClient.invalidateQueries({ queryKey: ["workspaces", input.workspaceId] }),
-    ]);
+    // A late committed deletion must still disappear from this actor's list
+    // without refetching or navigating the workspace they have since entered.
+    const sameActor = () => {
+      const actor = queryClient.getQueryData(meQuery.queryKey);
+      return actor?.userId === input.actorId && actor.sessionId === input.sessionId;
+    };
+    if (!sameActor()) return;
+    await queryClient.cancelQueries({ queryKey: workspacesQuery.queryKey, exact: true });
+    if (!sameActor()) return;
+    queryClient.setQueryData(workspacesQuery.queryKey, (data) =>
+      data ? { ...data, items: data.items.filter((item) => item.id !== input.workspaceId) } : data,
+    );
   },
   onError: (err: unknown, input) => {
     if (!isCurrent(input)) return;
@@ -147,7 +171,15 @@ function onSaveName(name: string): void {
 function onDelete(confirmSlug: string): void {
   if (!isOwner.value || workspace.value?.kind !== "team" || deletePending.value) return;
   deleteError.value = null;
-  remove.mutate({ confirmSlug, workspaceId: workspaceId.value, lifecycle: lifecycle.value });
+  const actor = session.me.value;
+  if (!actor) return;
+  remove.mutate({
+    confirmSlug,
+    workspaceId: workspaceId.value,
+    lifecycle: lifecycle.value,
+    actorId: actor.userId,
+    sessionId: actor.sessionId,
+  });
 }
 </script>
 
