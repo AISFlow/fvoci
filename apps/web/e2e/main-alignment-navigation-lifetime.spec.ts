@@ -152,7 +152,18 @@ for (const kind of ["wiki", "project"] as const) {
       trashEndpoint = `/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents/${documentId}/trash`;
     }
     const open = sockets(page);
-    await page.goto(documentPath);
+    const primedTrash = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        new URL(response.url()).pathname === `/api/v1/workspaces/${workspaceId}/trash` &&
+        response.ok(),
+    );
+    await page.goto(`/w/${slug}/trash`);
+    await primedTrash;
+    await expect(page.getByText("휴지통이 비었습니다")).toBeVisible();
+    // The destination's fresh empty cache must be invalidated by trash even
+    // when the app survives and that query is still inside its staleTime.
+    await push(page, documentPath);
     await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
     const editor = page.locator(".fvoci-editor .ProseMirror");
     await expect(editor).toBeVisible();

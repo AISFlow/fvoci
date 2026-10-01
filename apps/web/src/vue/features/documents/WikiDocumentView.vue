@@ -16,7 +16,7 @@ import {
   shallowRef,
   watch,
 } from "vue";
-import { RouterLink } from "vue-router";
+import { RouterLink, useRouter } from "vue-router";
 import { bindBlockPresence, isBlockPresenceAwareness } from "@/features/documents/block-presence";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
 import { collabUserOf, setTitleEditing } from "@/features/documents/collab-model";
@@ -67,6 +67,7 @@ const TITLE_MAX = 300;
 const ICON_MAX = 50;
 
 const queryClient = useQueryClient();
+const router = useRouter();
 const me = useQuery(meQuery);
 const metaQuery = useQuery(() => documentMetaQuery(props.workspaceId, props.documentId));
 const ancestors = useQuery(() => ancestorsQuery(props.workspaceId, props.documentId));
@@ -203,7 +204,7 @@ const trashDoc = useMutation({
     ]);
     if (!currentOperation(operation)) return;
     lifecycleError.value = null;
-    window.location.assign(trashPath(operation.slug));
+    await router.push(trashPath(operation.slug));
   },
   onError: (error: unknown, operation) => {
     if (currentOperation(operation)) lifecycleError.value = loadErrorMessage(error);
