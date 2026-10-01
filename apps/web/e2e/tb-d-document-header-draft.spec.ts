@@ -45,7 +45,7 @@ test.beforeAll(async ({ browser, baseURL }) => {
     const page = await context.newPage();
     await setup(page);
     adminCookies = await context.cookies();
-    console.log(`TB-D runner: Bun ${process.versions.bun ?? "absent"}; ${process.version}`);
+    console.log(`TB-D runner: Bun ${process.versions.bun}; ${process.version}`);
   } finally {
     await context.close();
   }
