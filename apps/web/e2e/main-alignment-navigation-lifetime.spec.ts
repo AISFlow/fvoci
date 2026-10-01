@@ -1,4 +1,11 @@
-import { expect, test, type APIRequestContext, type Page, type WebSocket } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type BrowserContext,
+  type Page,
+  type WebSocket,
+} from "@playwright/test";
 import type { QueryClient } from "@tanstack/vue-query";
 import type { Router } from "vue-router";
 import { z } from "zod";
@@ -13,10 +20,17 @@ type AppRoot = HTMLElement & {
   };
 };
 type ProbeDocument = Document & { task4Client?: QueryClient };
+type ProbeWindow = Window & {
+  task4NativeSockets?: { url: string; readyState: number }[];
+};
 const slug = "navlife";
 const admin = { email: "Admin@Example.COM", password: "supersecret1" };
+let adminState: Awaited<ReturnType<BrowserContext["storageState"]>> | undefined;
 
 async function setup(page: Page): Promise<string> {
+  // Reuse this isolated fixture's session instead of making every scenario a
+  // password-login load test. Each scenario still gets a fresh app and cache.
+  if (adminState) await page.context().addCookies(adminState.cookies);
   await page.goto("/");
   await expect(
     page
@@ -37,6 +51,7 @@ async function setup(page: Page): Promise<string> {
   }
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+  adminState = await page.context().storageState();
   const response = await page.request.get("/api/v1/me/workspaces");
   expect(response.ok()).toBe(true);
   const workspace = (await readJson(response, flowSchemas.workspaces)).items.find(
@@ -323,8 +338,30 @@ test("an authenticated actor change closes the old room and hard-reenters withou
   const doc = await createWiki(page.request, workspaceId, "Actor boundary");
   const path = `/w/${slug}/WIKI-${String(doc.number)}`;
   const open = sockets(page);
-  // Network's raw connection IDs remain observable across document changes;
-  // Playwright's per-document WebSocket objects can miss an old close there.
+  // Keep both historical event sets as diagnostics. Across a destroyed realm
+  // they can miss close events; current native handles and remote presence
+  // independently establish current connections and retired actor ownership.
+  await page.addInitScript(() => {
+    const Native = window.WebSocket;
+    const handles: InstanceType<typeof Native>[] = [];
+    Object.defineProperty(window, "task4NativeSockets", { value: handles });
+    window.WebSocket = new Proxy(Native, {
+      construct(target, args, newTarget) {
+        const socket = Reflect.construct(target, args, newTarget) as InstanceType<typeof Native>;
+        handles.push(socket);
+        return socket;
+      },
+    });
+  });
+  const nativeOpen = () =>
+    page.evaluate(
+      () =>
+        ((window as ProbeWindow).task4NativeSockets ?? []).filter(
+          (socket) =>
+            new URL(socket.url).pathname === "/collab" &&
+            socket.readyState !== window.WebSocket.CLOSED,
+        ).length,
+    );
   const cdp = await page.context().newCDPSession(page);
   const wire = new Set<string>();
   const wireErrors: string[] = [];
@@ -360,6 +397,7 @@ test("an authenticated actor change closes the old room and hard-reenters withou
     });
     await expectLifetime(page, token);
     expect(open.size).toBe(1);
+    await expect.poll(nativeOpen).toBe(1);
     const changed = await page.request.post("/api/v1/auth/login", { data: other });
     expect(changed.ok()).toBe(true);
     const reentry = page.waitForEvent("request", {
@@ -390,14 +428,19 @@ test("an authenticated actor change closes the old room and hard-reenters withou
     await expect(peer.locator(".document-page__presence")).toContainText("다른 사용자");
     await expect(peer.getByText("나 (다른 탭)", { exact: true })).toHaveCount(0);
     await expect(peer.locator(".document-page__presence > li")).toHaveCount(1);
-    await expect.poll(() => wire.size).toBe(1);
+    await expect.poll(nativeOpen).toBe(1);
     // Logout remains a hard boundary, with its existing server and push cleanup.
     await page.getByRole("button", { name: "로그아웃", exact: true }).click();
     await expect(page).toHaveURL(/\/login$/);
     await expect(page.getByLabel("이메일")).toBeVisible();
     await expect(page.locator("html")).not.toHaveAttribute("data-task4-document", token);
-    await expect.poll(() => wire.size).toBe(0);
+    await expect.poll(nativeOpen).toBe(0);
     await expect(peer.locator(".document-page__presence > li")).toHaveCount(0);
+    console.log("logout close observation", {
+      playwright: open.size,
+      historicalNetwork: wire.size,
+      currentNative: await nativeOpen(),
+    });
   } finally {
     await peerContext.close();
     await cdp.detach();
