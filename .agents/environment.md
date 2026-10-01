@@ -1,6 +1,7 @@
 # FVOCI 실행 환경과 도구
 
-이 문서는 현재 모델·Run 연결·설치 도구·탐색 설정·실행 제약의 정본이다.
+이 문서는 관측한 모델·Run 연결·설치 도구와 탐색 설정·실행 제약의 정본이다.
+실행 경로 선택은 AGENTS.md를 따르며 아래 호스트·Run snapshot을 모든 환경의 필수 조건으로 적용하지 않는다.
 역할·권한·소유권·병렬 배정 규칙은 [AGENTS.md](../AGENTS.md), 기능·후보 SHA·검사 결과·활성 Task와
 다음 행동은 [rewrite.md](../docs/rewrite.md), 설치·복구는 [RUNNING.md](../RUNNING.md)를 따른다.
 과거 모델 교체·PR별 일지를 현재 실행 절차에 섞지 않는다.
@@ -31,8 +32,11 @@
 보존하고 공식 @all로 소유권 변경을 전달했다. 다른 Run 생성/reset·terminal 사칭·자동 체인 재가동은 없었다.
 Run의 오래된 objective 문자열에 남은 “Astra”는 당시 생성 metadata이며 현재 역할 배정이 아니다.
 
-현재 구현·검증과 독립 검토는 Orca Codex terminal의 Sol 6.1이다. 신규 launch는 requested/effective
+이 snapshot 당시 구현·검증과 독립 검토는 Orca Codex terminal의 Sol 6.1이었다.
+신규 실행에서는 선택한 런타임이 제공하는 시작·모델 근거를 확인한다. Orca launch는 requested/effective
 `gpt-6.1-sol`과 effort, input_accepted/turn_started를 확인하고 보고서의 실제 session_meta/turn_context와 대조한다.
+native subagent/workflow는 해당 런타임의 agent/run ID·시작 상태·실제 모델/effort 근거를 기록한다.
+노출되지 않는 값은 미확인으로 남기며 Orca 전용 receipt나 transcript 경로를 다른 환경에 요구하지 않는다.
 별도 컨텍스트·고정 SHA·검토 도구의 제한은 각 보고서에 기록한다. 지원하지 않는 hard read-only 제한을
 적용했다고 주장하지 않으며 읽기 전용 prompt와 Git 변경 감시의 한계를 명시한다.
 실행 불가·capacity·readiness 실패는 작업 시작·검토 완료로 세지 않는다. 모델 fallback·계정/결제 변경은 하지 않는다.
@@ -42,9 +46,11 @@ CLI `0.159.2`가 실제 설치됐다. 의도하지 않은 변경과 첫 Task 미
 기존 evidence의 `f272-codex-readiness-update-incident.json`에 보존한다. 모델 교체·계정/결제 변경은 없었고 추가 설치 변경은 하지 않는다.
 
 #272 후보 당시의 별도 승인 경계는 §6에 보존한다. 현재 Task/Dispatch·결과·다음 실행은
-rewrite.md §1·§4·§7의 관측 시각과 실제 Git/Orca/원격 상태를 대조한다.
+rewrite.md §1·§4·§7의 관측 시각과 실제 Git·선택한 실행 경로·원격 상태를 대조한다.
 
 ## 2. 저장소와 설치 도구
+
+다음 경로·설치 값은 §1과 같은 호스트 관측 기록이다. 다른 환경에서는 실제 가용 도구와 권한을 확인한다.
 
 | 항목                 | 현재 경로·버전 / 확인 범위                                                                                         |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -74,25 +80,38 @@ export PATH="$CARGO_HOME/bin:$PATH"
 프로젝트 설치의 최초 rustup-init1.28.2 공식 SHA-256 대조와 CodeGraph provenance는 §6의 과거 근거에 있다.
 crate 다운로드 cache의 잠금 대기는 worktree target compile/test 시간과 구분한다.
 
-## 3. Orca·스킬·개발 연결
+## 3. 실행 경로별 절차·스킬·개발 연결
+
+AGENTS.md에 따라 환경을 선택하고 실제 활성 작업을 이어간다. 다음 경로별 절차를 혼용하지 않는다.
+
+### Orca를 사용하는 경우
 
 - installed orca-cli/orchestration 스킬의 stub에서 선택한 binary의 live guide를 읽는다.
   필요할 때만 messaging/gates·coordinator-loop·placement/recovery reference를 추가로 읽는다.
   unsupported 명령을 추정하거나 bare `orca`로 조용히 전환하지 않는다. 과거 PATH의 bare orca 빈 파일 문제가 있었고
-  이번 세션은 위 절대 경로로 통일했다.
+  §1 snapshot의 세션은 위 절대 경로로 통일했다. 현재 환경의 선택한 실행 파일은 다시 확인한다.
 - worker-start receipt가 ready/turn observed인지 확인하고 uncertain/readiness timeout은 supported recovery로 조사한다.
   FIFO delivery의 모든 메시지를 처리하고 settled worker의 결과·잔존 자원·공식 release/retain 결정을 회수한 후 ACK한다.
   user_takeover retained를 released로 허위 기록하거나 다른 terminal·Run 자원을 강제 종료하지 않는다.
-- 신규 워커는 Orca terminal에서 실행한다. Codex 내장 subagent의 실제 서비스 슬롯 제한과 Orca의 그 시점 capacity/readiness 상태를 구분한다.
-  내장 슬롯 수를 Orca의 영구 워커 상한으로 해석하거나 한 시점의 Orca 실패를 영구 제한으로 일반화하지 않는다.
-  배정 규칙은 AGENTS.md가 정본이며, 실제 platform/CPU/RAM/disk/DB/browser·통합 처리량을 관측한다.
+- Orca 작업은 해당 Run의 task/dispatch·worker 상태와 capacity/readiness를 확인한다. 한 시점의 실패를 영구 제한으로 일반화하지 않는다.
+
+### native subagent/workflow를 사용하는 경우
+
+- 현재 런타임의 지원되는 위임·메시지·결과 조회·재개 도구를 사용하고 agent/workflow ID와 소유 경로를 기록한다.
+- 결과와 journal 등 실제 제공되는 인계 근거를 회수한다. Orca의 terminal handle·task receipt·ACK/release를 요구하거나 있다고 주장하지 않는다.
+- 실제 서비스 슬롯 제한을 확인하고, 이를 Orca나 다른 환경의 영구 워커 상한으로 전용하지 않는다.
+
+### 공통 확인
+
+- 배정 규칙은 AGENTS.md가 정본이며 실제 platform/CPU/RAM/disk/DB/browser·통합 처리량을 관측한다.
+  선택 경로가 불가하면 제한을 보고하며 환경·모델을 조용히 대체하지 않는다.
 - 프로젝트 스킬 정본은 `.agents/skills/`다. 현재 catalog 발견과 필요한 SKILL.md의 명시 읽기를 구분한다.
   클라이언트의 자동 탐색 성공을 다른 클라이언트에 전용하지 않고 모델별 adapter/전문 복제본을 만들지 않는다.
 - 개발 MCP·상주 scheduler·daemon·중복 agent MCP를 이번 인계/정리에서 추가하지 않았다.
   GitHub는 gh, 파일/Git/Rust는 로컬 도구, 공개 library 문서는 해당 공식 출처를 쓴다.
   기존 연결·전역 MCP 설정을 덮어쓰지 않으며 private 원본을 공개 문서 서비스에 전송하지 않는다.
 - 과거 Claude 프로젝트 CodeGraph MCP 등록·Cursor CLI 실행은 당시 검증 이력이다.
-  현재 Codex 코디네이터는 검증된 CodeGraph CLI를 직접 사용하며, 과거 MCP 연결을 현재 세션 연결로 주장하지 않는다.
+  §1 snapshot의 Codex 코디네이터는 검증된 CodeGraph CLI를 직접 사용했다. 현재 환경의 연결은 다시 확인하며 과거 MCP 연결을 현재 세션 연결로 주장하지 않는다.
 
 ## 4. CodeGraph 설정과 정확도 한계
 
@@ -169,8 +188,8 @@ Ultracode 요청/실제 effort·capacity/readiness 실패·old Run·dispatch/실
 - 과거 cleanup/cache·614GiB 회수 근거: `/home/kinesis/orca/fvoci-evidence/space-reclaim-2026-09-29/` 및 recovery result/receipts.
 - 최초 CodeGraph1.6.0 release/provenance: f442의2026-09-26 설치 기록, release tag `dfccdf62`, build `b59023f0`,
   tar SHA256SUMS 일치·attestation API 조회. gh2.46의 attestation verify 미지원은 API 조회와 구분한다.
-- 과거 Run `run_b01d432a9dee`와 native/workflow 세션은 추적 자료이며 현재 기본 실행 대상이 아니다.
+- 과거 Run `run_b01d432a9dee`와 당시 native/workflow 세션은 추적 자료다. 이 이력은 신규 작업의 native/workflow 사용을 금지하지 않으며 재개 대상은 실제 활성 상태로 판단한다.
 
-재개는 AGENTS → 이 파일의 실제 연결/도구 → rewrite.md §1·§4·§7 → 실제 Git/Orca task/worker/CI 순서다.
+재개는 AGENTS → 이 파일의 관측 기록과 현재 실제 연결/도구 → rewrite.md §1·§4·§7 → 실제 Git·선택 경로의 task/worker 또는 workflow/agent·CI 순서다.
 이미 회수한 코드·검토·실패 근거를 재사용하고 현재 질문·남은 delta부터 이어간다.
 이번 정리는 재인수·재구현·전수 감사가 아니다. 모델·계정·권한 배정은 유지하며, 실제 CLI 설치 변경은 §1의 근거와 구분해 기록한다.
