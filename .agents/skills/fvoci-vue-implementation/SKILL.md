@@ -13,7 +13,8 @@ Nuxt UI Vue plugin + TanStack Vue Query 흐름을 유지한다. Nuxt SSR 앱이�
 
 - [Vue 진입점](../../../apps/web/src/vue/main.ts), [라우터](../../../apps/web/src/vue/router.ts),
   해당 `features`/`composables`와 실제 URL의 호출 경로부터 확인한다. 기존 framework-free 정책·API
-  adapter를 재사용하고 새 전역 store나 병렬 API client를 만들기 전에 실제 필요를 확인한다.
+  adapter를 재사용하고 새 전역 store나 병렬 API client를 만들기 전에
+  [추가·통합 전 선택 기준](../fvoci-standard-implementations/SKILL.md#추가통합-전-선택-기준)을 적용한다.
 - 서버 상태는 기존 [query options](../../../apps/web/src/lib/query-options.ts)·Vue Query의 key와
   mutation/invalidation 경계를 따른다. workspace·resource·세션 변경 시 이전 응답이 새 화면에
   적용되지 않게 하며, 캐시 무효화·권한 거부·오류 표시를 성공 경로와 함께 연결한다.

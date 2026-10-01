@@ -11,6 +11,7 @@ description: Rust 백엔드 수직 기능·서버 아키텍처 구현과 실제 
 
 기준 SHA, 허용 파일, source-contract 결과, 실제 호출 경로, 필요한 검증 명령과 수락 조건.
 
+구현 추가·통합은 [선택 기준](../fvoci-standard-implementations/SKILL.md#추가통합-전-선택-기준)으로 먼저 판단한다.
 표준 프로토콜·파서·SDK를 만들거나 바꾸면 [standard-implementations](../fvoci-standard-implementations/SKILL.md),
 Node 대체·바이너리·child/build 경계를 바꾸면 [runtime-boundaries](../fvoci-runtime-boundaries/SKILL.md)를 먼저 적용한다.
 해당하지 않는 작업에서 후보 라이브러리 전체를 조사하지 않는다.
