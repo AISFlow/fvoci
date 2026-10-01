@@ -130,7 +130,7 @@ function hostPersist(file: string, available: boolean, delayed = false) {
   const lifetimeStart = script.indexOf("let persistLifecycle =");
   assert.ok(lifetimeStart > 0);
   const owner = Vue.effectScope();
-  const callable: unknown = owner.run(() =>
+  const callable: unknown = owner.run((): unknown =>
     runInNewContext(
       new Bun.Transpiler({ loader: "ts" }).transformSync(
         `(() => {${script.slice(lifetimeStart, fn.end)}; return persistBody;})()`,
@@ -146,7 +146,9 @@ function hostPersist(file: string, available: boolean, delayed = false) {
     reject,
     persisting,
     persistError,
-    stop: () => owner.stop(),
+    stop: () => {
+      owner.stop();
+    },
     retire(change: string) {
       if (change === "aba") {
         resource.value = { ...resource.value, documentId: "other" };
