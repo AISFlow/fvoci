@@ -250,9 +250,10 @@ async function detailGrants(options: {
     Vue.defineComponent({
       inheritAttrs: false,
       props: ["readOnly", "archivePending"],
-      setup(props) {
+      setup(props, { attrs }) {
         return () => {
-          grants.set(name, {
+          const key = attrs["data-testid"] === "task-clone" ? "Clone" : name;
+          grants.set(key, {
             readOnly: Boolean(props.readOnly),
             archivePending: Boolean(props.archivePending),
           });
@@ -366,7 +367,15 @@ async function detailGrants(options: {
 
 await test("readonly body admission leaves HTTP metadata editable without granting body or attachment writes", async () => {
   const { grants } = await detailGrants({ pageReadOnly: false, sessionReadOnly: true });
-  assert.equal(grants.get("TaskDetailForm")?.readOnly, false);
+  for (const name of [
+    "TaskDetailForm",
+    "TaskCollectionProperties",
+    "TaskTimeEntries",
+    "TaskActivityPanel",
+  ]) {
+    assert.equal(grants.get(name)?.readOnly, false, name);
+  }
+  assert.equal(grants.has("Clone"), true);
   assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
   assert.equal(grants.get("TaskAttachmentsPanel")?.readOnly, true);
 });
@@ -378,7 +387,16 @@ await test("archived and permission-denied page rights keep metadata and body re
       sessionReadOnly: false,
       ...options,
     });
-    assert.equal(grants.get("TaskDetailForm")?.readOnly, true);
+    for (const name of [
+      "TaskDetailForm",
+      "TaskCollectionProperties",
+      "TaskTimeEntries",
+      "TaskActivityPanel",
+    ]) {
+      assert.equal(grants.get(name)?.readOnly, true, name);
+    }
+    assert.equal(grants.has("Clone"), false);
+    assert.equal(grants.get("TaskAttachmentsPanel")?.readOnly, true);
     assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
   }
 });
@@ -389,7 +407,16 @@ await test("in-flight restore holds metadata and body readonly and prevents dupl
     sessionReadOnly: false,
     restoring: true,
   });
-  assert.equal(grants.get("TaskDetailForm")?.readOnly, true);
+  for (const name of [
+    "TaskDetailForm",
+    "TaskCollectionProperties",
+    "TaskTimeEntries",
+    "TaskActivityPanel",
+  ]) {
+    assert.equal(grants.get(name)?.readOnly, true, name);
+  }
+  assert.equal(grants.has("Clone"), false);
+  assert.equal(grants.get("TaskAttachmentsPanel")?.readOnly, true);
   assert.equal(grants.get("TaskDetailForm")?.archivePending, true);
   assert.equal(grants.get("TaskBodyEditor")?.readOnly, true);
   assert.equal(restoreCalls, 1);

@@ -464,6 +464,13 @@ for (const archivedTarget of [false, true]) {
       if (archivedTarget) {
         await expect(page.getByTestId("task-edit-title")).toBeDisabled();
         await expect(page.getByTestId("task-edit-dependency-open")).toHaveCount(0);
+        await expect(page.getByTestId("task-clone")).toHaveCount(0);
+        await expect(page.locator("[data-comment-compose]")).toHaveCount(0);
+        await expect(
+          page
+            .getByTestId("task-time-entries")
+            .getByRole("button", { name: "기록 추가", exact: true }),
+        ).toHaveCount(0);
         const retainedUrl = page.url();
         const timeOrigin = await page.evaluate(() => performance.timeOrigin);
         const body = page.getByTestId("task-body");
@@ -482,6 +489,99 @@ for (const archivedTarget of [false, true]) {
         await expect(page).toHaveURL(retainedUrl);
         expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
         // HTTP restore does not promote the already admitted readonly body lease.
+        await expect(body.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
+        await expect(body.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
+        const timeEndpoint = `${parentEndpoint}/time-entries`;
+        const allowed = await page.request.get(timeEndpoint);
+        expect(allowed.status()).toBe(200);
+        expect(z.object({ canCreate: z.literal(true) }).parse(await allowed.json()).canCreate).toBe(
+          true,
+        );
+        // Actual REST authorization succeeds while the retained body lease stays readonly.
+        expect(
+          (
+            await page.request.post(timeEndpoint, {
+              data: {
+                startedAt: "2027-03-14T09:00:00Z",
+                endedAt: "2027-03-14T09:30:00Z",
+                note: "REST grant probe",
+              },
+            })
+          ).status(),
+        ).toBe(201);
+        await expect(
+          page
+            .getByTestId("task-time-entries")
+            .getByRole("button", { name: "기록 추가", exact: true }),
+        ).toBeVisible();
+        await expect(page.getByTestId("task-clone")).toBeEnabled();
+        await expect(page.locator("[data-comment-compose] textarea")).toBeEnabled();
+        const timePanel = page.getByTestId("task-time-entries");
+        await timePanel.getByRole("button", { name: "기록 추가", exact: true }).click();
+        await page.locator("#task-time-started").fill("2027-03-14T10:00");
+        await page.locator("#task-time-ended").fill("2027-03-14T10:30");
+        await page.locator("#task-time-note").fill("UI restored REST entry");
+        const saved = page.waitForResponse(
+          (r) => r.url().endsWith(timeEndpoint) && r.request().method() === "POST",
+        );
+        await timePanel.getByRole("button", { name: "기록 추가", exact: true }).click();
+        const savedResponse = await saved;
+        expect(savedResponse.status()).toBe(201);
+        const entry = z
+          .object({
+            id: z.string().uuid(),
+            durationSeconds: z.literal(1800),
+            note: z.literal("UI restored REST entry"),
+          })
+          .parse(await savedResponse.json());
+        await expect(timePanel).toContainText(entry.note);
+        const database = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
+        if (!database) throw new Error("Actual DB tracer requires wrapper-owned database");
+        const row = JSON.parse(
+          execFileSync(
+            "docker",
+            [
+              "exec",
+              process.env.FVOCI_TEST_PG_CONTAINER ?? "",
+              "psql",
+              "-U",
+              "postgres",
+              "-d",
+              new URL(database).pathname.slice(1),
+              "-X",
+              "-At",
+              "-v",
+              "ON_ERROR_STOP=1",
+              "-c",
+              `SELECT json_build_object('id',id,'taskId',task_id,'durationSeconds',duration_seconds,'note',note) FROM fvoci.time_entries WHERE id='${entry.id}'::uuid`,
+            ],
+            { encoding: "utf8" },
+          ),
+        ) as { id: string; taskId: string; durationSeconds: number; note: string };
+        expect(row).toEqual({ ...entry, taskId: parent.id });
+        if (!adminAuth) throw new Error("Fresh client requires the earlier real admin session");
+        const fresh = await browser.newContext({ baseURL, storageState: adminAuth });
+        try {
+          const reloaded = await fresh.request.get(timeEndpoint);
+          expect(reloaded.status()).toBe(200);
+          expect(
+            z
+              .object({
+                items: z.array(
+                  z.object({
+                    id: z.string(),
+                    note: z.string().nullable(),
+                    durationSeconds: z.number().nullable(),
+                  }),
+                ),
+              })
+              .parse(await reloaded.json()).items,
+          ).toContainEqual(entry);
+        } finally {
+          await fresh.close();
+        }
+        await expect(page).toHaveURL(retainedUrl);
+        expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
         await expect(body.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
         await expect(body.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
       }
@@ -565,6 +665,28 @@ test("HTTP viewer rights keep task metadata disabled and reject direct writes", 
     await expect(page.getByTestId("task-edit-title")).toBeDisabled();
     await expect(page.getByTestId("task-edit-due-date")).toBeDisabled();
     await expect(page.getByTestId("task-edit-dependency-open")).toHaveCount(0);
+    await expect(page.getByTestId("task-clone")).toHaveCount(0);
+    await expect(page.locator("[data-comment-compose]")).toHaveCount(0);
+    await expect(
+      page.getByTestId("task-time-entries").getByRole("button", { name: "기록 추가", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("task-body").locator(".ProseMirror")).toHaveAttribute(
+      "contenteditable",
+      "false",
+    );
+    const times = await page.request.get(`${f.endpoint}/time-entries`);
+    expect(times.status()).toBe(200);
+    expect(z.object({ canCreate: z.literal(false) }).parse(await times.json()).canCreate).toBe(
+      false,
+    );
+    expect(
+      (
+        await page.request.post(`${f.endpoint}/time-entries`, {
+          data: { startedAt: "2027-03-14T10:00:00Z", endedAt: "2027-03-14T10:30:00Z" },
+        })
+      ).status(),
+    ).toBe(404);
+    expect((await page.request.post(`${f.endpoint}/clone`)).status()).toBe(404);
     expect(
       (await page.request.patch(f.endpoint, { data: { title: "Denied title" } })).status(),
     ).toBe(404);
