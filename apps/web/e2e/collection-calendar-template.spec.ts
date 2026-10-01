@@ -289,11 +289,51 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   await expect(editor.getByRole("alert")).toBeVisible();
   expect(patches).toBe(0);
   await input.fill("2026-11-02T09:30");
+  const draftNode = required(await input.elementHandle());
+  const collection = idSchema.parse(
+    await (await page.request.get(`${f.base}/projects/${f.project.id}/collection`)).json(),
+  );
+  const fieldsPath = `${f.base}/collections/${collection.id}/fields`;
+  const { promise: fieldsStarted, resolve: markFieldsStarted } = deferred();
+  const { promise: fieldsGate, resolve: releaseFields } = deferred();
+  await page.route(`**${fieldsPath}`, async (route) => {
+    markFieldsStarted();
+    await fieldsGate;
+    await route.continue();
+  });
+  // A real peer write reaches the mounted project's SSE subscription. Its
+  // metadata refetch begins online; only fields crosses the offline boundary.
+  const siblings = [
+    `${f.base}/projects/${f.project.id}/collection`,
+    `${f.base}/collections/${collection.id}/views`,
+    `${f.base}/collections/${collection.id}/query`,
+  ].map((path) => page.waitForResponse((r) => r.url().endsWith(path) && r.ok()));
+  expect(
+    (
+      await page.request.patch(`${f.base}/tasks/${point.id}`, {
+        data: { title: "DST point updated by peer" },
+      })
+    ).ok(),
+  ).toBe(true);
+  await fieldsStarted;
+  await Promise.all(siblings);
+  const fieldsFailed = page.waitForEvent("requestfailed", {
+    predicate: (request) => request.url().endsWith(fieldsPath),
+  });
   await context.setOffline(true);
+  releaseFields();
+  expect((await fieldsFailed).failure()?.errorText).toContain("ERR_INTERNET_DISCONNECTED");
   await expect(
     page.getByRole("status").filter({ hasText: "Offline · unsaved drafts" }),
   ).toBeVisible();
+  await expect(input).toHaveValue("2026-11-02T09:30");
+  expect(await input.evaluate((node, previous) => node === previous, draftNode)).toBe(true);
+  const fieldsError = page.locator('section[data-testid="collection-calendar"] > [role="alert"]');
+  await expect(fieldsError).toBeVisible();
+  await expect(fieldsError.getByRole("button", { name: "다시 시도" })).toBeVisible();
   await expect(editor.getByRole("button", { name: "저장 뷰 저장" })).toBeDisabled();
+  expect(patches).toBe(0);
+  await page.unroute(`**${fieldsPath}`);
   // Independent HTTP client commits while the browser is offline. Reconnect may
   // refresh the grid but must retain both draft intent and the old conflict guard.
   expect(
@@ -305,11 +345,15 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   ).toBe(true);
   await context.setOffline(false);
   await expect(input).toHaveValue("2026-11-02T09:30");
+  // Reconnect is an explicit product refresh; fields must recover normally.
+  await expect(fieldsError).toHaveCount(0);
+  expect(await input.evaluate((node, previous) => node === previous, draftNode)).toBe(true);
   const saved = page.waitForResponse(
     (r) => r.request().method() === "PATCH" && r.url().endsWith(`/tasks/${point.id}`),
   );
   await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
   expect((await saved).status()).toBe(409);
+  await expect(editor.getByRole("alert")).toBeVisible();
   await expect(input).toHaveValue("2026-11-02T09:30");
   await expect(
     page.locator('td[data-date="2026-11-03"]').getByTestId(`collection-preview-${point.displayId}`),
