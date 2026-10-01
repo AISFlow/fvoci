@@ -107,3 +107,50 @@ for (const [list, key] of LISTS) {
     });
   }
 }
+
+await test("task hints invalidate captured workspace/project caches without touching another workspace", async () => {
+  const client = new QueryClient();
+  const affected = [
+    ["task", WS, "task-1"],
+    ["task-activity", WS, "task-1"],
+    ["task-layout", WS, PROJECT, "month"],
+    ["tasks", WS, PROJECT, "filter"],
+    ["project-collection", WS, PROJECT],
+    ["collection", WS, "c1"],
+    ["projects", WS],
+  ];
+  const unaffected = [
+    ["task", "other-ws", "task-1"],
+    ["tasks", WS, "other-project"],
+    ["task-layout", WS, "other-project"],
+    ["collection", "other-ws", "c1"],
+    ["task", WS, "other-task"],
+    ["auth", "me"],
+  ];
+  for (const key of [...affected, ...unaffected]) client.setQueryData(key, {});
+  await invalidateTaskCaches(client, WS, PROJECT, "task-1");
+  for (const key of affected) assert.equal(client.getQueryState(key)?.isInvalidated, true);
+  for (const key of unaffected) assert.equal(client.getQueryState(key)?.isInvalidated, false);
+  client.clear();
+});
+
+await test("authorized resync invalidates retained project detail/activity but preserves sibling scope", async () => {
+  const client = new QueryClient();
+  const detail = ["task", WS, "task-1"];
+  const activity = ["task-activity", WS, "task-1"];
+  const sibling = ["task", WS, "task-2"];
+  const siblingActivity = ["task-activity", WS, "task-2"];
+  const foreign = ["task", "other-ws", "task-1"];
+  client.setQueryData(detail, { id: "task-1", projectId: PROJECT });
+  client.setQueryData(sibling, { id: "task-2", projectId: "other-project" });
+  client.setQueryData(foreign, { id: "task-1", projectId: PROJECT });
+  client.setQueryData(activity, {});
+  client.setQueryData(siblingActivity, {});
+  invalidateTaskStreamResyncCaches(client, WS, PROJECT);
+  await flush();
+  for (const key of [detail, activity])
+    assert.equal(client.getQueryState(key)?.isInvalidated, true);
+  for (const key of [sibling, siblingActivity, foreign])
+    assert.equal(client.getQueryState(key)?.isInvalidated, false);
+  client.clear();
+});

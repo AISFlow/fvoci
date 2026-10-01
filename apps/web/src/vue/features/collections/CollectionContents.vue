@@ -11,6 +11,7 @@ import {
   dateMoveRequest,
   type CalendarRow,
 } from "@/features/collections/calendar-model";
+import { settleTaskPatch } from "@/features/tasks/task-patch-cache";
 import {
   collectionConfigOf,
   defaultConfig,
@@ -293,9 +294,7 @@ async function saveCalendarDate(
         timeZone.value,
         config.value.dateBy ?? undefined,
       );
-      await queryClient.invalidateQueries({
-        queryKey: ["tasks", props.workspaceId, props.projectId],
-      });
+      await settleTaskPatch(queryClient, accepted.workspaceId, accepted.projectId, accepted);
     } else {
       const accepted = await putCollectionValue(props.workspaceId, props.collectionId, row.id, {
         fieldId: request.fieldId,

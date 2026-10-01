@@ -1,4 +1,5 @@
 import type { QueryClient, QueryKey } from "@tanstack/query-core";
+import type { TaskDetail } from "./queries";
 
 /**
  * Refetch a paged list (the project task list, the collection board columns)
@@ -40,7 +41,22 @@ export function invalidateTaskStreamResyncCaches(
   workspaceId: string,
   projectId: string,
 ): void {
+  // The server's authorized open recovers missed hints, including a mounted
+  // detail. Its key has no project ID, so select retained details by their
+  // committed row and keep sibling projects/workspaces untouched.
+  const details = queryClient
+    .getQueryCache()
+    .findAll({ queryKey: ["task", workspaceId] })
+    .filter(
+      (query) => queryClient.getQueryData<TaskDetail>(query.queryKey)?.projectId === projectId,
+    );
   Promise.all([
+    ...details.flatMap((query) => [
+      queryClient.invalidateQueries({ queryKey: query.queryKey, exact: true }),
+      queryClient.invalidateQueries({
+        queryKey: ["task-activity", workspaceId, query.queryKey[2]],
+      }),
+    ]),
     queryClient.invalidateQueries({ queryKey: ["task-layout", workspaceId, projectId] }),
     invalidateKeepingLoadMore(queryClient, ["tasks", workspaceId, projectId]),
     queryClient.invalidateQueries({ queryKey: ["project-collection", workspaceId, projectId] }),
