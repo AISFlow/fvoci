@@ -740,6 +740,30 @@ struct HistoryCursor {
     kind: TimeRecordKind,
 }
 
+fn history_sql() -> String {
+    format!("WITH records AS ({RECORDS_SQL}) SELECT * FROM records WHERE started_at < (($5::date+1)::timestamp AT TIME ZONE $6) AND (ended_at > ($4::date::timestamp AT TIME ZONE $6) OR ended_at IS NULL OR (kind='segment' AND ended_at=started_at AND started_at >= ($4::date::timestamp AT TIME ZONE $6))) AND ($7::timestamptz IS NULL OR (started_at,id,kind)<($7,$8::uuid,$9::text)) ORDER BY started_at DESC,id DESC,kind DESC LIMIT 101")
+}
+
+/// Exact current query and an unadopted existing-state witness candidate for
+/// restricted-role EXPLAIN fixtures. No production cursor or route uses it.
+#[cfg(feature = "db-tests")]
+pub fn history_measurement_sql(with_witness: bool) -> String {
+    let current = history_sql();
+    if !with_witness {
+        return current;
+    }
+    format!(
+        r#"WITH page AS MATERIALIZED ({current}), witness AS (
+ SELECT ARRAY[
+  (SELECT count(*) FROM fvoci.task_timer_audit WHERE user_id=$3 AND workspace_id=$1 AND task_id=$2),
+  (SELECT count(*) FROM fvoci.time_entries WHERE user_id=$3 AND workspace_id=$1 AND task_id=$2),
+  (SELECT count(*) FROM fvoci.task_timer_segments WHERE user_id=$3 AND workspace_id=$1 AND task_id=$2 AND ended_at IS NOT NULL),
+  (SELECT count(*) FROM fvoci.task_timer_legacy_open WHERE user_id=$3 AND workspace_id=$1 AND task_id=$2)
+ ]::bigint[] AS version)
+ SELECT witness.version,COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.started_at DESC,p.id DESC,p.kind DESC) FROM page p),'[]'::jsonb) AS records FROM witness"#
+    )
+}
+
 pub async fn history(
     pool: &PgPool,
     workspace: Uuid,
@@ -776,7 +800,7 @@ pub async fn history(
             _ => return Ok(Err(TimerDbError::InvalidInput)),
         },
     };
-    let sql=format!("WITH records AS ({RECORDS_SQL}) SELECT * FROM records WHERE started_at < (($5::date+1)::timestamp AT TIME ZONE $6) AND (ended_at >= ($4::date::timestamp AT TIME ZONE $6) OR ended_at IS NULL) AND ($7::timestamptz IS NULL OR (started_at,id,kind)<($7,$8::uuid,$9::text)) ORDER BY started_at DESC,id DESC,kind DESC LIMIT 101");
+    let sql = history_sql();
     let rows: Vec<RecordTuple> = sqlx::query_as(&sql)
         .bind(workspace)
         .bind(task)
@@ -850,7 +874,7 @@ pub async fn summary(
  SELECT date_trunc('milliseconds',started_at) AS started_at,date_trunc('milliseconds',COALESCE(ended_at,GREATEST(started_at,$7::timestamptz))) AS ended_at
  FROM records WHERE ended_at IS NOT NULL OR kind='segment'
  ), days AS (SELECT d::date AS day,d::timestamp AT TIME ZONE $6 AS a,(d::date+1)::timestamp AT TIME ZONE $6 AS b FROM generate_series($4::date::timestamp,$5::date::timestamp,interval '1 day') d)
- SELECT day,COALESCE(sum(GREATEST(0,EXTRACT(EPOCH FROM(LEAST(i.ended_at,b)-GREATEST(i.started_at,a)))*1000)),0)::bigint
+ SELECT day,COALESCE(sum(GREATEST(0,EXTRACT(EPOCH FROM(LEAST(i.ended_at,b)-GREATEST(i.started_at,a)))*1000)) FILTER (WHERE i.started_at IS NOT NULL),0)::bigint
  FROM days LEFT JOIN intervals i ON i.started_at<b AND i.ended_at>a GROUP BY day ORDER BY day"#
     );
     let rows: Vec<(NaiveDate, i64)> = sqlx::query_as(&sql)
@@ -863,7 +887,7 @@ pub async fn summary(
         .bind(at)
         .fetch_all(&mut *tx)
         .await?;
-    let flags:(bool,bool)=sqlx::query_as(&format!("WITH records AS ({RECORDS_SQL}) SELECT EXISTS(SELECT 1 FROM records WHERE kind='segment' AND ended_at IS NULL),EXISTS(SELECT 1 FROM records WHERE kind='manual' AND ended_at IS NULL)")).bind(workspace).bind(task).bind(actor).fetch_one(&mut *tx).await?;
+    let flags:(bool,bool)=sqlx::query_as(&format!("WITH records AS ({RECORDS_SQL}) SELECT EXISTS(SELECT 1 FROM fvoci.task_timer_runs WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3 AND status<>'stopped'),EXISTS(SELECT 1 FROM records WHERE kind='manual' AND ended_at IS NULL)")).bind(workspace).bind(task).bind(actor).fetch_one(&mut *tx).await?;
     let days = rows
         .into_iter()
         .map(|(date, milliseconds)| TimerDayTotal { date, milliseconds })
@@ -895,6 +919,25 @@ fn kind_text(kind: TimeRecordKind) -> &'static str {
 fn record_audit(value: &TimeRecord) -> Value {
     json!({"recordId":value.id,"kind":value.kind,"startedAt":value.started_at,"endedAt":value.ended_at,"note":value.note,"revision":value.revision})
 }
+// Only new submitted ranges adopt millisecond precision. Expected CAS ranges
+// and existing034 anchors are never normalized. Hash/replay uses the original
+// typed request, so even aliases of one effective range remain different intents.
+fn effective_range(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let start = DateTime::from_timestamp_millis(start.timestamp_millis())?;
+    let end = DateTime::from_timestamp_millis(end.timestamp_millis())?;
+    (end > start).then_some((start, end))
+}
+
+fn submitted_range_audit(record: &TimeRecord, start: DateTime<Utc>, end: DateTime<Utc>) -> Value {
+    let mut value = record_audit(record);
+    value["submittedStartedAt"] = json!(start);
+    value["submittedEndedAt"] = json!(end);
+    value
+}
+
 async fn hint(
     tx: &mut Transaction<'_, Postgres>,
     workspace: Uuid,
@@ -946,11 +989,6 @@ pub async fn create_manual(
     if !note_reason_valid(&body.note, &body.reason) {
         return Ok(Err(TimerDbError::InvalidInput));
     }
-    let Some(seconds) =
-        crate::db::task_ops::time_entry_duration_seconds(body.started_at, body.ended_at)
-    else {
-        return Ok(Err(TimerDbError::InvalidInput));
-    };
     let mut tx = pool.begin().await?;
     if let Err(e) = write_allowed(&mut tx, workspace, task, actor, session).await? {
         return Ok(Err(e));
@@ -968,6 +1006,19 @@ pub async fn create_manual(
     if body.expected_session_id != session {
         return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
     }
+    let submitted = body;
+    let Some((start, end)) = effective_range(submitted.started_at, submitted.ended_at) else {
+        return Ok(Err(TimerDbError::InvalidInput));
+    };
+    let mut effective = submitted.clone();
+    effective.started_at = start;
+    effective.ended_at = end;
+    let body = &effective;
+    let Some(seconds) =
+        crate::db::task_ops::time_entry_duration_seconds(body.started_at, body.ended_at)
+    else {
+        return Ok(Err(TimerDbError::InvalidInput));
+    };
     let at = clock(&mut tx).await?;
     if body.ended_at > at {
         return Ok(Err(TimerDbError::InvalidInput));
@@ -993,7 +1044,7 @@ pub async fn create_manual(
         Some(id),
         "time.manual",
         Value::Null,
-        record_audit(&record),
+        submitted_range_audit(&record, submitted.started_at, submitted.ended_at),
         body.reason.trim(),
     )
     .await?;
@@ -1021,13 +1072,6 @@ pub async fn correct(
         return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
     }
     if !note_reason_valid(&body.note, &body.reason)
-        || body.ended_at <= body.started_at
-        || i32::try_from(
-            (body.ended_at - body.started_at)
-                .num_milliseconds()
-                .div_euclid(1000),
-        )
-        .is_err()
         || body.expected_revision < 0
         || body.expected_revision == i64::MAX
     {
@@ -1052,6 +1096,17 @@ pub async fn correct(
     }
     if body.expected_session_id != session {
         return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    let submitted = body;
+    let Some((start, end)) = effective_range(submitted.started_at, submitted.ended_at) else {
+        return Ok(Err(TimerDbError::InvalidInput));
+    };
+    let mut effective = submitted.clone();
+    effective.started_at = start;
+    effective.ended_at = end;
+    let body = &effective;
+    if i32::try_from((end - start).num_milliseconds().div_euclid(1000)).is_err() {
+        return Ok(Err(TimerDbError::InvalidInput));
     }
     // Same writer prefix serializes own commands, then a concrete record row is
     // locked. No update to another actor's rows or hidden task is possible.
@@ -1118,7 +1173,7 @@ pub async fn correct(
         (before.kind == TimeRecordKind::Manual).then_some(id),
         "time.correct",
         record_audit(&before),
-        record_audit(&corrected),
+        submitted_range_audit(&corrected, submitted.started_at, submitted.ended_at),
         body.reason.trim(),
     )
     .await?;
