@@ -523,21 +523,10 @@ for (const archivedTarget of [false, true]) {
         await expect(page.locator("[data-comment-compose] textarea")).toBeEnabled();
         const timePanel = page.getByTestId("task-time-entries");
         await timePanel.getByRole("button", { name: "기록 추가", exact: true }).click();
-        const { isoToDatetimeLocalInTimeZone } = await import("../src/lib/datetime");
-        const me = z
-          .object({ timezone: z.string() })
-          .parse(await (await page.request.get("/api/v1/auth/me")).json());
-        const timerResponse = await page.request.get(`${parentEndpoint}/timer`);
-        expect(timerResponse.status()).toBe(200);
-        const anchor = z.object({ serverNow: z.string() }).parse(await timerResponse.json());
-        const endedAt = new Date(Date.parse(anchor.serverNow) - 60_000).toISOString();
-        const startedAt = new Date(Date.parse(endedAt) - 1_800_000).toISOString();
-        await timePanel
-          .getByLabel("시작", { exact: true })
-          .fill(isoToDatetimeLocalInTimeZone(startedAt, me.timezone));
-        await timePanel
-          .getByLabel("종료", { exact: true })
-          .fill(isoToDatetimeLocalInTimeZone(endedAt, me.timezone));
+        // Fixed unambiguous past local time; planned future time is not an
+        // elapsed record. Keep the exact independent 1800-second DB oracle.
+        await timePanel.getByLabel("시작", { exact: true }).fill("2020-03-14T10:00");
+        await timePanel.getByLabel("종료", { exact: true }).fill("2020-03-14T10:30");
         await timePanel.getByLabel("메모", { exact: true }).fill("UI restored REST entry");
         await timePanel
           .getByLabel("기록·수정 사유", { exact: true })

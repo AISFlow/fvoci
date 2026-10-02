@@ -3708,6 +3708,86 @@ mod task_timer {
                 own = Some(result);
             }
         }
+        // A PAT's captured credential is its actual token UUID, not a
+        // cookie session. Keep the authenticated author's same private view.
+        let read_token = api_token(&admin, actor, workspace, &["tasks.read"]).await;
+        let pat_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM fvoci.api_tokens WHERE token_hash=$1")
+                .bind(fvoci_server::auth::token::hash_token(&read_token))
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        let pat_path = format!("{url}?expectedActorId={actor}&expectedSessionId={pat_id}");
+        for path in [&url, &pat_path] {
+            fixture.probe("before captured PAT").await;
+            let (status, rows) = bearer_request(app.clone(), "GET", path, None, &read_token).await;
+            fixture.probe("after captured PAT").await;
+            assert_eq!(status, StatusCode::OK, "{rows}");
+            assert_eq!(Some(&rows), own.as_ref());
+            assert_eq!(timer_effects(&admin, &actors, &tasks).await, before);
+        }
+        for path in [
+            format!(
+                "{url}?expectedActorId={}&expectedSessionId={pat_id}",
+                other.user_id
+            ),
+            format!(
+                "{url}?expectedActorId={actor}&expectedSessionId={}",
+                Uuid::now_v7()
+            ),
+            format!("{url}?expectedActorId={actor}&expectedSessionId={expected_session}"),
+        ] {
+            let (status, denied) =
+                bearer_request(app.clone(), "GET", &path, None, &read_token).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+            assert_eq!(denied["params"]["code"], "timer_context_changed");
+            assert!(denied.get("items").is_none());
+            assert_eq!(timer_effects(&admin, &actors, &tasks).await, before);
+        }
+        let unrelated_scope = api_token(&admin, actor, workspace, &["projects.read"]).await;
+        let unrelated_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM fvoci.api_tokens WHERE token_hash=$1")
+                .bind(fvoci_server::auth::token::hash_token(&unrelated_scope))
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        let unrelated_path =
+            format!("{url}?expectedActorId={actor}&expectedSessionId={unrelated_id}");
+        let (status, denied) =
+            bearer_request(app.clone(), "GET", &unrelated_path, None, &unrelated_scope).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        assert!(denied.get("items").is_none());
+        assert_eq!(timer_effects(&admin, &actors, &tasks).await, before);
+        // Existing cookie-first precedence is unchanged, even with a Bearer
+        // that cannot read tasks. Capturing the PAT cannot override the cookie.
+        let authorization = format!("Bearer {unrelated_scope}");
+        let (status, rows, _) = http_request(
+            app.clone(),
+            "GET",
+            &matched,
+            None,
+            Some("application/json"),
+            Some(&cookie),
+            &[("authorization", authorization.as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        assert_eq!(Some(&rows), own.as_ref());
+        let authorization = format!("Bearer {read_token}");
+        let (status, denied, _) = http_request(
+            app.clone(),
+            "GET",
+            &pat_path,
+            None,
+            Some("application/json"),
+            Some(&cookie),
+            &[("authorization", authorization.as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+        assert_eq!(denied["params"]["code"], "timer_context_changed");
+        assert!(denied.get("items").is_none());
+        assert_eq!(timer_effects(&admin, &actors, &tasks).await, before);
         let (status, shared) = timer_checked_request(
             &fixture,
             app.clone(),
@@ -3807,6 +3887,12 @@ mod task_timer {
         )
         .await;
         let foreign_path = format!("/api/v1/workspaces/{foreign_id}/tasks/{}/time-entries?expectedActorId={expected_actor}&expectedSessionId={}",foreign_task["id"].as_str().unwrap(),fresh_context["expectedSessionId"].as_str().unwrap());
+        let foreign_pat_path = format!("/api/v1/workspaces/{foreign_id}/tasks/{}/time-entries?expectedActorId={actor}&expectedSessionId={pat_id}",foreign_task["id"].as_str().unwrap());
+        let (status, hidden_pat) =
+            bearer_request(app.clone(), "GET", &foreign_pat_path, None, &read_token).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden_pat}");
+        assert!(hidden_pat.get("items").is_none());
+        assert_eq!(timer_effects(&admin, &actors, &tasks).await, before);
         let (status, hidden) = timer_checked_request(
             &fixture,
             app.clone(),

@@ -1126,6 +1126,79 @@ function timerDatabaseEffects(actor: string, task: string): string {
   )`);
 }
 
+// Observe the real API client's JSON consumption without changing requests,
+// status, body or Vue state. A MessageChannel task runs after the response's
+// promise continuations and Vue's microtask flush, including stale-run return.
+async function observeOwnerCompletion(page: import("@playwright/test").Page): Promise<void> {
+  await page.evaluate(() => {
+    const witness = document.createElement("script");
+    witness.type = "application/json";
+    witness.dataset.testid = "owner-delivery-witness";
+    document.body.append(witness);
+    const requested: string[] = [];
+    const completed: string[] = [];
+    const publish = () => {
+      witness.textContent = JSON.stringify({ requested, completed });
+    };
+    publish();
+    const nativeFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = async (input, init) => {
+      const method = input instanceof Request ? input.method : (init?.method ?? "GET");
+      const url = input instanceof Request ? input.url : String(input);
+      if (
+        method !== "POST" ||
+        new URL(url, location.href).pathname !== "/api/v1/me/task-timer/stop"
+      )
+        return nativeFetch(input, init);
+      let body: unknown;
+      if (input instanceof Request) body = await input.clone().json();
+      else {
+        const requestBody = init?.body;
+        if (typeof requestBody !== "string")
+          throw new Error("owner request witness requires the actual JSON request");
+        body = JSON.parse(requestBody);
+      }
+      if (
+        typeof body !== "object" ||
+        body === null ||
+        !("runId" in body) ||
+        typeof body.runId !== "string"
+      )
+        throw new Error("owner request witness requires the actual run identity");
+      const runId = body.runId;
+      requested.push(runId);
+      publish();
+      const response = await nativeFetch(input, init);
+      const nativeJson = response.json.bind(response);
+      response.json = async () => {
+        const result: unknown = await nativeJson();
+        const delivery = new MessageChannel();
+        delivery.port1.onmessage = () => {
+          completed.push(runId);
+          publish();
+          delivery.port1.close();
+          delivery.port2.close();
+        };
+        delivery.port2.postMessage(runId);
+        return result;
+      };
+      return response;
+    };
+  });
+}
+async function ownerCompletion(
+  page: import("@playwright/test").Page,
+  runId: string,
+): Promise<void> {
+  await expect
+    .poll(async () => {
+      const value = await page.getByTestId("owner-delivery-witness").textContent();
+      return z.object({ completed: z.array(z.string()) }).parse(JSON.parse(value ?? "null"))
+        .completed;
+    })
+    .toContain(runId);
+}
+
 async function ordinaryTimerTask(page: import("@playwright/test").Page, key: string) {
   await timerWorkspace(page);
   const slug = `w5-${key.toLowerCase()}-timer`;
@@ -1346,6 +1419,7 @@ test("a committed withheld owner stop cannot keep a successor run's current cont
   await page.goto(`/w/${fixture.slug}/my-tasks`);
   const owner = page.getByTestId("timer-owner");
   await expect(owner.getByRole("button", { name: "현재 측정 종료", exact: true })).toBeEnabled();
+  await observeOwnerCompletion(page);
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
   let release = () => {};
   const delivery = new Promise<void>((resolve) => {
@@ -1425,6 +1499,7 @@ test("a committed withheld owner stop cannot keep a successor run's current cont
     // actual canonical R2 control. Keep this literal oracle through the fix.
     await expect(owner.getByRole("button", { name: "현재 측정 종료", exact: true })).toBeEnabled();
     release();
+    await ownerCompletion(page, run1.runId);
     await expect(owner.getByRole("button", { name: "현재 측정 종료", exact: true })).toBeEnabled();
     expect(timerDatabaseEffects(identity.userId, fixture.task.id)).toBe(beforeDelivery);
     expect(timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run?.id).toBe(
@@ -1567,6 +1642,7 @@ test("a late R1 response cannot clear the genuine pending stop of canonical R2",
   const owner = page.getByTestId("timer-owner");
   const button = owner.getByRole("button", { name: "현재 측정 종료", exact: true });
   await expect(button).toBeEnabled();
+  await observeOwnerCompletion(page);
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
   const held = [run1.runId, ""].map(() => {
     let release = () => {};
@@ -1648,6 +1724,20 @@ test("a late R1 response cannot clear the genuine pending stop of canonical R2",
     );
     first.release();
     await firstResponse;
+    await ownerCompletion(page, run1.runId);
+    await expect(button).toBeDisabled();
+    await button.evaluate((element) => {
+      if (!(element instanceof HTMLButtonElement))
+        throw new Error("owner control is not a native button");
+      element.click();
+    });
+    const attempts = z
+      .object({ requested: z.array(z.string()) })
+      .parse(
+        JSON.parse((await page.getByTestId("owner-delivery-witness").textContent()) ?? "null"),
+      );
+    expect(attempts.requested).toEqual([run1.runId, run2.runId]);
+    expect(index).toBe(2);
     await expect(button).toBeDisabled();
     expect(timerDatabaseEffects(identity.userId, fixture.task.id)).toBe(beforeDelivery);
     second.release();
