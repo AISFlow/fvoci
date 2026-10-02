@@ -374,7 +374,7 @@ async function permissionFixture(
 test("authoritative revoked timer GET retires mounted private state while 503 preserves the server anchor", async ({
   page,
   browser,
-}) => {
+}, testInfo) => {
   const fixture = await permissionFixture(page, "TACL", "member");
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
   try {
@@ -415,6 +415,7 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
         body: JSON.stringify({ type: "about:blank", title: "일시적인 연결 실패", status: 503 }),
       });
     });
+    const unavailableWaitStarted = Date.now();
     const unavailable = editor.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === timerUrl &&
@@ -425,8 +426,15 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
     // polling response before the unchanged UI assertions. The app disables
     // refetchOnWindowFocus, so this does not pretend focus itself refetches.
     await editor.bringToFront();
-    await editor.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
     await unavailable;
+    await testInfo.attach("timer-real-503-precondition", {
+      body: JSON.stringify({
+        status: 503,
+        method: "GET",
+        observedWaitMilliseconds: Date.now() - unavailableWaitStarted,
+      }),
+      contentType: "application/json",
+    });
     await expect(mounted.getByRole("alert")).toBeVisible();
     await expect(mounted.getByTestId("timer-state")).toHaveText("측정 중");
     await expect(mounted.getByTestId("timer-actual")).toBeVisible();
@@ -443,6 +451,7 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
       },
     );
     await editor.unroute(`**${timerUrl}`);
+    const denialWaitStarted = Date.now();
     const realDenial = editor.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === timerUrl &&
@@ -451,8 +460,15 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
     );
     const revoke = await page.request.delete(`${memberUrl}/${me.userId}`);
     expect(revoke.ok(), await revoke.text()).toBe(true);
-    await editor.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
     const denial = await realDenial;
+    await testInfo.attach("timer-real-404-precondition", {
+      body: JSON.stringify({
+        status: denial.status(),
+        method: "GET",
+        observedWaitMilliseconds: Date.now() - denialWaitStarted,
+      }),
+      contentType: "application/json",
+    });
     expect((await denial.text()).includes("권한 회수 뒤 사적인 측정")).toBe(false);
     await expect(mounted).toBeVisible();
     await expect(mounted.getByTestId("timer-state")).toHaveCount(0);
