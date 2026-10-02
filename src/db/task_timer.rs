@@ -857,6 +857,7 @@ async fn write_allowed(
     Ok(
         require_task_write_access(tx, workspace, actor, session, task, false)
             .await?
+            .map(|_| ())
             .map_err(TimerDbError::Project),
     )
 }
