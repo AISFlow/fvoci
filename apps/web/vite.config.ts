@@ -208,6 +208,12 @@ export default defineConfig({
     },
     dedupe: ["vue", "yjs", "y-protocols", "@tiptap/core", "@tiptap/pm", "@hocuspocus/provider"],
   },
+  optimizeDeps: {
+    // Web forms use Zod 3 while the linked editor uses Zod 4. Prebundling
+    // bare "zod" resolves it from the app and gives both importers Zod 3.
+    // Both versions ship ESM; keep their importer-specific resolution.
+    exclude: ["zod"],
+  },
   server: {
     port: 5173,
     strictPort: true,
