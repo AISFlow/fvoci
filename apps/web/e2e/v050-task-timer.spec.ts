@@ -654,6 +654,7 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     project: z.object({ id: z.string() }).parse(await projectResponse.json()),
   };
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  let releaseOwner = () => {};
   try {
     const other = await context.newPage();
     await login(other, fixture.email, credentials.password);
@@ -714,6 +715,49 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     await expect(mounted.getByTestId("timer-state")).toHaveCount(0);
     const actorRead = timerShape.parse(await (await page.request.get(timerUrl)).json());
     expect(actorRead.run).toBeNull();
+    const ownerDelivery = new Promise<void>((resolve) => {
+      releaseOwner = resolve;
+    });
+    type OwnerObservation = {
+      status: number;
+      capturedActorParameter: string | null;
+      capturedSessionParameter: string | null;
+      returnedOtherRun: boolean;
+    };
+    let observeOwner: (value: OwnerObservation) => void = () => {};
+    const ownerRead = new Promise<OwnerObservation>((resolve) => {
+      observeOwner = resolve;
+    });
+    await page.route(
+      (url) => url.pathname === "/api/v1/me/task-timer",
+      async (route) => {
+        // Fetch the actual Rust response with the browser's original headers.
+        // Hold only its delivery so me refresh cannot cancel the task oracle.
+        const native = await route.fetch();
+        const value = z
+          .object({ runId: z.string().nullable().optional() })
+          .parse(await native.json());
+        const url = new URL(route.request().url());
+        observeOwner({
+          status: native.status(),
+          capturedActorParameter: url.searchParams.get("expectedActorId"),
+          capturedSessionParameter: url.searchParams.get("expectedSessionId"),
+          returnedOtherRun: value.runId === run.runId,
+        });
+        await ownerDelivery;
+        if (!page.isClosed()) await route.fulfill({ response: native });
+      },
+    );
+    await page.route(
+      (url) => url.pathname === timerUrl,
+      async (route) => {
+        const native = await route.fetch();
+        // Both ordinary polls must reach Rust before either denial can refresh
+        // me and cancel the other captured scope. No query is forced or forged.
+        await ownerRead;
+        if (!page.isClosed()) await route.fulfill({ response: native });
+      },
+    );
     const switchedResponse = page.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === timerUrl && response.request().method() === "GET",
@@ -723,6 +767,7 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     await page.context().addCookies(await context.cookies());
     await page.bringToFront();
     const response = await switchedResponse;
+    const ownerObservation = await ownerRead;
     const body: unknown = await response.json();
     const observed = z
       .object({ run: z.object({ id: z.string() }).nullable().optional() })
@@ -744,6 +789,7 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
         authenticatedActor: authenticated.userId,
         returnedOtherRun: observed.run?.id === run.runId,
         mountedState: await mounted.getByTestId("timer-state").allTextContents(),
+        ownerObservation,
       }),
       contentType: "application/json",
     });
@@ -754,7 +800,12 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     expect(new URL(response.url()).searchParams.get("expectedActorId")).toBe(actorA.userId);
     expect(new URL(response.url()).searchParams.get("expectedSessionId")).toBe(actorA.sessionId);
     expect(observed.run).toBeUndefined();
+    expect(ownerObservation.status).toBe(409);
+    expect(ownerObservation.capturedActorParameter).toBe(actorA.userId);
+    expect(ownerObservation.capturedSessionParameter).toBe(actorA.sessionId);
+    expect(ownerObservation.returnedOtherRun).toBe(false);
   } finally {
+    releaseOwner();
     await context.close();
   }
 });

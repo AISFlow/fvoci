@@ -263,15 +263,17 @@ mod schema {
     pub struct TaskTimerApiDoc;
 
     #[utoipa::path(get, path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer", tag="tasks", security(("fvoci_session"=[])),
-        params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path)),
-        responses((status=200,body=TaskTimerState),(status=401,body=ProblemResponse),(status=404,body=ProblemResponse)))]
+        params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path),
+            ("expectedActorId"=Option<Uuid>,Query),("expectedSessionId"=Option<Uuid>,Query)),
+        responses((status=200,body=TaskTimerState),(status=401,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
     fn task_state() {}
     #[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer", tag="tasks", security(("fvoci_session"=[])),
         params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path)), request_body=TimerCommandBody,
         responses((status=200,body=TimerCommandOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
     fn task_command() {}
     #[utoipa::path(get, path="/api/v1/me/task-timer", tag="tasks", security(("fvoci_session"=[])),
-        responses((status=200,body=OwnerTimerState),(status=401,body=ProblemResponse)))]
+        params(("expectedActorId"=Option<Uuid>,Query),("expectedSessionId"=Option<Uuid>,Query)),
+        responses((status=200,body=OwnerTimerState),(status=401,body=ProblemResponse),(status=409,body=ProblemResponse)))]
     fn owner_state() {}
     #[utoipa::path(post, path="/api/v1/me/task-timer/stop", tag="tasks", security(("fvoci_session"=[])), request_body=TimerCleanupBody,
         responses((status=200,body=TimerCommandOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=409,body=ProblemResponse)))]

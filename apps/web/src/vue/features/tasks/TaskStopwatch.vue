@@ -10,6 +10,7 @@ import {
   taskStopwatchQuery,
   ownerStopwatchQuery,
   sendTimerCommand,
+  timerContextChanged,
   type TimerCommand,
 } from "./task-stopwatch-queries";
 
@@ -35,7 +36,10 @@ const editable = computed(
   () => !props.readOnly && !revoked.value && visibleState.value?.canControl === true,
 );
 function denied(err: unknown): err is ProblemError {
-  return err instanceof ProblemError && [401, 403, 404].includes(err.status);
+  return (
+    (err instanceof ProblemError && [401, 403, 404].includes(err.status)) ||
+    timerContextChanged(err)
+  );
 }
 async function retirePrivateState(err: ProblemError): Promise<void> {
   if (revoked.value) return;
@@ -51,6 +55,16 @@ async function retirePrivateState(err: ProblemError): Promise<void> {
   note.value = "";
   await client.cancelQueries({ queryKey: key, exact: true });
   client.removeQueries({ queryKey: key, exact: true });
+  if (
+    timerContextChanged(err) &&
+    live &&
+    key[1] === actor.value &&
+    key[2] === credential.value &&
+    key[3] === props.workspaceId &&
+    key[4] === props.taskId
+  ) {
+    await client.invalidateQueries({ queryKey: meQuery.queryKey, exact: true });
+  }
 }
 watch(
   [() => state.error.value, () => state.dataUpdatedAt.value],
@@ -205,13 +219,10 @@ async function submit(capture: Capture): Promise<void> {
     error.value = loadErrorMessage(err);
     retryable.value = !(err instanceof ProblemError) || err.status === 429 || err.status >= 500;
     if (!retryable.value) command = undefined;
-    if (err instanceof ProblemError && err.status === 409) {
-      await client.invalidateQueries({ queryKey: meQuery.queryKey, exact: true });
-      if (current(capture)) await state.refetch();
-    }
-    // 401/403/404 clear private timer display; network/503 keep the draft and
+    // Authority/context failures clear private display; network/503 keep the draft and
     // original request id for explicit replay. Session guard owns navigation.
     if (denied(err)) await retirePrivateState(err);
+    else if (err instanceof ProblemError && err.status === 409) await state.refetch();
   } finally {
     if (current(capture)) pending.value = false;
   }

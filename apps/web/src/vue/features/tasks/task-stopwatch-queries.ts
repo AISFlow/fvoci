@@ -1,8 +1,16 @@
 import type { components } from "@/generated/api";
-import { api, ensureOk } from "@/lib/api";
+import { api, ensureOk, ProblemError } from "@/lib/api";
 import { queryOptions } from "@/lib/query-options";
 
 export type TimerCommand = components["schemas"]["TimerCommandBody"];
+
+export function timerContextChanged(error: unknown): error is ProblemError {
+  return (
+    error instanceof ProblemError &&
+    error.status === 409 &&
+    error.reason === "timer_context_changed"
+  );
+}
 
 export function taskStopwatchQuery(
   actor: string,
@@ -15,7 +23,10 @@ export function taskStopwatchQuery(
     queryFn: async ({ signal }) =>
       ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer", {
-          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+          params: {
+            path: { workspace_id: workspaceId, task_id: taskId },
+            query: { expectedActorId: actor, expectedSessionId: sessionId },
+          },
           signal,
         }),
       ),
@@ -39,7 +50,13 @@ export async function sendTimerCommand(workspaceId: string, taskId: string, body
 export function ownerStopwatchQuery(actor: string, sessionId: string) {
   return queryOptions({
     queryKey: ["task-timer-owner", actor, sessionId] as const,
-    queryFn: async ({ signal }) => ensureOk(await api.GET("/api/v1/me/task-timer", { signal })),
+    queryFn: async ({ signal }) =>
+      ensureOk(
+        await api.GET("/api/v1/me/task-timer", {
+          params: { query: { expectedActorId: actor, expectedSessionId: sessionId } },
+          signal,
+        }),
+      ),
     enabled: Boolean(actor && sessionId),
     retry: false,
     refetchInterval: 5000,
