@@ -1,5 +1,7 @@
 import { expect, type Page, test, type WebSocketRoute } from "@playwright/test";
 import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createEncoder, toUint8Array, writeVarString, writeVarUint } from "lib0/encoding";
 import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
@@ -1995,6 +1997,12 @@ test("fresh real server readonly-authenticated join recovers write authority aft
     expect(after.content?.[0]?.content).toEqual([
       { type: "text", text: "실제 쓰기 권한으로 한글 수정" },
     ]);
+    const sql = restrictedDbBody(ws, doc.id);
+    expect(sql).toHaveProperty("content", after);
+    await testInfo.attach("w3-real-readonly-grant-app-role-DB.json", {
+      body: JSON.stringify(sql),
+      contentType: "application/json",
+    });
     const newest = await newSignedInPage(browser, baseURL, admin);
     try {
       await openDoc(newest.page, doc.path);
@@ -2126,3 +2134,369 @@ for (const kind of ["project", "task"] as const) {
     }
   });
 }
+
+test("real router navigation protects a private Markdown draft and actual logout retires it without saving", async ({
+  page,
+  browser,
+  baseURL,
+}, testInfo) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "초안 이동과 로그아웃", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "leave-source-body" },
+          content: [{ type: "text", text: "보존할 본문" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await save(page);
+  const before = await savedBody(page.request, ws, doc.id);
+  await recordIdentity(page);
+  await page.evaluate(() => {
+    const root = document.querySelector(".tiptap") as EditorElement;
+    (window as Window & { w3Leaving?: Witness }).w3Leaving = root.w3Witness;
+  });
+  await selectMode(page, "markdown");
+  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+  await field.fill("저장되지 않은 한글 비공개 🧑‍💻");
+  await page.getByRole("link", { name: "홈", exact: true }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Markdown 초안을 두고 이동할까요?" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "계속 편집", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`${doc.path}$`));
+  await expect(field).toHaveValue("저장되지 않은 한글 비공개 🧑‍💻");
+  await expectIdentity(page, 0);
+  await page.screenshot({
+    path: testInfo.outputPath("w3-private-draft-navigation.png"),
+    fullPage: true,
+  });
+  await page.getByRole("link", { name: "홈", exact: true }).first().click();
+  await dialog.getByRole("button", { name: "초안 버리고 이동", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}$`));
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const old = (window as Window & { w3Leaving?: Witness }).w3Leaving;
+        if (!old) throw new Error("Missing retired room witness");
+        const provider = old.provider as HocuspocusProvider;
+        return {
+          destroyed: old.editor.isDestroyed,
+          attached: provider.isAttached,
+          reconnecting: provider.configuration.websocketProvider.shouldConnect,
+          updates: old.updates,
+        };
+      }),
+    )
+    .toEqual({ destroyed: true, attached: false, reconnecting: false, updates: 0 });
+  expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
+  await page.goBack();
+  await expect(editorOf(page)).toBeVisible();
+  await expectBlocks(page, ["보존할 본문"]);
+  expect(
+    await editorOf(page).evaluate((root) => {
+      const old = (window as Window & { w3Leaving?: Witness }).w3Leaving;
+      const options = (root as EditorElement).editor.extensionManager.extensions.find(
+        (item) => item.name === "collaboration",
+      )?.options as Record<string, unknown> | undefined;
+      return old?.doc !== options?.document;
+    }),
+  ).toBe(true);
+  await selectMode(page, "markdown");
+  await expect(field).toHaveValue("보존할 본문");
+  await field.fill("로그아웃으로 폐기할 비공개 초안");
+  const observer = await newSignedInPage(browser, baseURL, admin);
+  try {
+    await page.getByRole("button", { name: "로그아웃", exact: true }).click();
+    await expect(page).toHaveURL(/\/login$/);
+    await expect(page.getByLabel("이메일")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Markdown 직접 편집" })).toHaveCount(0);
+    expect(await savedBody(observer.page.request, ws, doc.id)).toEqual(before);
+    await openDoc(observer.page, doc.path);
+    await expectBlocks(observer.page, ["보존할 본문"]);
+    await selectMode(observer.page, "markdown");
+    await expect(observer.page.getByRole("textbox", { name: "Markdown 직접 편집" })).toHaveValue(
+      "보존할 본문",
+    );
+  } finally {
+    await observer.context.close();
+  }
+});
+
+test("pending rich save across mode entry cannot mark a newer Markdown prefix saved before its own matched ACK", async ({
+  page,
+  browser,
+  baseURL,
+}, testInfo) => {
+  const gate = await sourceAckGate(page);
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "모드 진입 중 저장", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "pending-mode-body" },
+          content: [{ type: "text", text: "기준" }],
+        },
+      ],
+    },
+  });
+  try {
+    await openDoc(page, doc.path);
+    await observeActualAckDelivery(page);
+    await recordIdentity(page);
+    await caretAtEndOf(page, 0);
+    await page.keyboard.type(" 첫 수정");
+    await page.getByRole("button", { name: "저장", exact: true }).click();
+    await expect.poll(() => gate.held.length).toBe(1);
+    await selectMode(page, "markdown");
+    const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+    await expect(field).toHaveValue("기준 첫 수정");
+    await expect(page.locator('[data-collab-persisted="false"]')).toBeVisible();
+    await field.fill("기준 가장 최신 한글");
+    await page.getByRole("button", { name: "적용", exact: true }).click();
+    const old = gate.held[0];
+    if (!old) throw new Error("Missing original rich-save ACK");
+    gate.release(0);
+    await expectAckDelivered(page, `persisted:${old.id}`);
+    await expect(page.locator('[data-collab-persisted="false"]')).toBeVisible();
+    await expectBlocks(page, ["기준 가장 최신 한글"]);
+    await expectIdentity(page);
+    await selectMode(page, "rich");
+    await page.getByRole("button", { name: "저장", exact: true }).click();
+    await expect.poll(() => gate.held.length).toBe(2);
+    gate.release(1);
+    await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible();
+    const after = await savedBody(page.request, ws, doc.id);
+    expect(after.content?.[0]?.attrs?.id).toBe("pending-mode-body");
+    expect(after.content?.[0]?.content).toEqual([{ type: "text", text: "기준 가장 최신 한글" }]);
+    const sql = restrictedDbBody(ws, doc.id);
+    expect(sql).toHaveProperty("content", after);
+    await testInfo.attach("w3-pending-mode-new-prefix-app-role-DB.json", {
+      body: JSON.stringify(sql),
+      contentType: "application/json",
+    });
+    const fresh = await newSignedInPage(browser, baseURL, admin);
+    try {
+      await openDoc(fresh.page, doc.path);
+      await expectBlocks(fresh.page, ["기준 가장 최신 한글"]);
+      expect(await savedBody(fresh.page.request, ws, doc.id)).toEqual(after);
+    } finally {
+      await fresh.context.close();
+    }
+  } finally {
+    gate.releaseAll();
+  }
+});
+
+async function nativeFileDrop(page: Page, path: string): Promise<void> {
+  const block = blockAt(page, 0);
+  await block.scrollIntoViewIfNeeded();
+  const point = await block.evaluate((element) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let text = walker.nextNode();
+    if (!text) throw new Error("Missing native upload text target");
+    while (walker.nextNode()) text = walker.currentNode;
+    const range = document.createRange();
+    range.setStart(text, text.textContent?.length ?? 0);
+    range.collapse(true);
+    const rect = range.getBoundingClientRect();
+    return { x: rect.x + 1, y: rect.y + rect.height / 2 };
+  });
+  const session = await page.context().newCDPSession(page);
+  try {
+    const data = { items: [], files: [path], dragOperationsMask: 1 };
+    for (const type of ["dragEnter", "dragOver", "drop"] as const)
+      await session.send("Input.dispatchDragEvent", { type, ...point, data });
+  } finally {
+    await session.detach();
+  }
+}
+
+test("real deferred native upload invalidates a private Markdown proposal and its next pending upload aborts on actual unmount", async ({
+  page,
+}, testInfo) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "첨부 완료와 초안 수명", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "upload-source-p" },
+          content: [{ type: "text", text: "첨부 기준" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await save(page);
+  await recordIdentity(page);
+  const path = testInfo.outputPath("첨부 한글.txt");
+  writeFileSync(path, "실제 첨부 내용 🧑‍💻\n");
+  let release: () => void = () => {};
+  let received = 0;
+  let routeFinished = 0;
+  let held = new Promise<void>((done) => {
+    release = done;
+  });
+  const uploadUrl = `**/documents/${doc.id}/uploads`;
+  const routeErrors: string[] = [];
+  await page.route(uploadUrl, async (route) => {
+    received++;
+    await held;
+    await route.continue().catch((error: unknown) => {
+      routeErrors.push(error instanceof Error ? error.message : String(error));
+    });
+    routeFinished++;
+  });
+  try {
+    await nativeFileDrop(page, path);
+    await expect.poll(() => received).toBe(1);
+    await expect(page.getByRole("progressbar")).toHaveCount(1);
+    await selectMode(page, "markdown");
+    const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+    await field.fill("업로드 전에 만든 비공개 한글 초안");
+    await expectIdentity(page, 0);
+    release();
+    await expect(editorOf(page).locator('[data-state="stored"]')).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "적용", exact: true })).toBeDisabled();
+    await expect(field).toHaveValue("업로드 전에 만든 비공개 한글 초안");
+    await expect(page.locator(".fvoci-source-panel [role=status]")).toHaveText(
+      "문서가 변경되었습니다. 초안을 취소하고 최신 내용을 다시 열어 주세요.",
+    );
+    await page.getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
+    await selectMode(page, "rich");
+    await expect(editorOf(page).locator(".afn-attachment-name")).toHaveText("첨부 한글.txt");
+    await expectIdentity(page);
+    await save(page);
+    const after = await savedBody(page.request, ws, doc.id);
+    expect(after.content?.[0]?.attrs?.id).toBe("upload-source-p");
+    expect(after.content?.[0]?.content).toEqual([{ type: "text", text: "첨부 기준" }]);
+    const attachments = after.content?.filter((node) => node.type === "attachment");
+    expect(attachments).toHaveLength(1);
+    const attachment = attachments?.[0];
+    if (typeof attachment?.attrs?.id !== "string") throw new Error("Missing actual attachment ID");
+    await expect(editorOf(page).locator('a[data-state="stored"]')).toHaveAttribute(
+      "href",
+      `/api/v1/workspaces/${ws}/attachments/${attachment.attrs.id}/download`,
+    );
+    await selectMode(page, "markdown");
+    await expect(field).toHaveValue(new RegExp(attachment.attrs.id));
+    await selectMode(page, "rich");
+    held = new Promise<void>((done) => {
+      release = done;
+    });
+    const failures: string[] = [];
+    page.on("requestfailed", (request) => {
+      if (request.url().endsWith(`/documents/${doc.id}/uploads`))
+        failures.push(request.failure()?.errorText ?? "missing reason");
+    });
+    await nativeFileDrop(page, path);
+    await expect.poll(() => received).toBe(2);
+    await expect(page.getByRole("progressbar")).toHaveCount(1);
+    await page.getByRole("link", { name: "홈", exact: true }).first().click();
+    await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}$`));
+    await expect.poll(() => failures.length).toBe(1);
+    expect(failures[0]).toContain("ERR_ABORTED");
+    release();
+    await expect.poll(() => routeFinished).toBe(2);
+    expect(await savedBody(page.request, ws, doc.id)).toEqual(after);
+    await page.goBack();
+    await expect(editorOf(page)).toBeVisible();
+    await expect(editorOf(page).locator('[data-state="stored"]')).toHaveCount(1);
+    expect(await savedBody(page.request, ws, doc.id)).toEqual(after);
+    await testInfo.attach("w3-deferred-upload-epoch-unmount.json", {
+      body: JSON.stringify({ beforeUnmount: after, failures, routeErrors }),
+      contentType: "application/json",
+    });
+  } finally {
+    release();
+    await page.unroute(uploadUrl);
+  }
+});
+
+test("actual served editor JavaScript CSS and complete notices match this frozen production dist", async ({
+  page,
+}, testInfo) => {
+  const witnesses: {
+    path: string;
+    status: number;
+    bytes: number;
+    sha256: string;
+    expectedSha256: string;
+  }[] = [];
+  const pending: Promise<void>[] = [];
+  const sha = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
+  page.on("response", (response) => {
+    const path = new URL(response.url()).pathname;
+    if (!/^\/assets\/[^/]+\.(?:js|css)$/.test(path)) return;
+    pending.push(
+      response.body().then((body) => {
+        const expected = readFileSync(new URL(`../dist${path}`, import.meta.url));
+        witnesses.push({
+          path,
+          status: response.status(),
+          bytes: body.length,
+          sha256: sha(body),
+          expectedSha256: sha(expected),
+        });
+      }),
+    );
+  });
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "실제 제공된 편집기 자산", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "asset-witness-body" },
+          content: [{ type: "text", text: "한글 자산 🧑‍💻" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  for (const mode of ["markdown", "preview", "block", "rich"] as const)
+    await selectMode(page, mode);
+  await Promise.all(pending);
+  expect(witnesses.some((item) => item.path.endsWith(".js"))).toBe(true);
+  expect(witnesses.some((item) => item.path.endsWith(".css"))).toBe(true);
+  for (const item of witnesses) {
+    expect(item.status).toBe(200);
+    expect(item.sha256).toBe(item.expectedSha256);
+  }
+  const notices = await page.request.get("/open-source-licenses.txt");
+  expect(notices.status()).toBe(200);
+  const servedNotices = await notices.body();
+  const expectedNotices = readFileSync(
+    new URL("../dist/open-source-licenses.txt", import.meta.url),
+  );
+  expect(servedNotices).toEqual(expectedNotices);
+  expect(servedNotices.toString()).toContain("## launder - 1.7.1 (MIT)");
+  expect(servedNotices.toString()).toContain("## remark-math - 6.0.0 (MIT)");
+  const source = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" });
+  expect(source.status).toBe(0);
+  await testInfo.attach("w3-actual-served-assets-and-notices.json", {
+    body: JSON.stringify({
+      sourceSHA: source.stdout.trim(),
+      witnesses,
+      notices: {
+        bytes: servedNotices.length,
+        sha256: sha(servedNotices),
+        expectedSha256: sha(expectedNotices),
+      },
+    }),
+    contentType: "application/json",
+  });
+});
