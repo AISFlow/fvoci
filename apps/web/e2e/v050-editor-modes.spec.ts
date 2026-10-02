@@ -1,4 +1,5 @@
 import { expect, type Page, test, type WebSocketRoute } from "@playwright/test";
+import { spawnSync } from "node:child_process";
 import { createEncoder, toUint8Array, writeVarString, writeVarUint } from "lib0/encoding";
 import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
@@ -41,6 +42,70 @@ type Witness = {
   updates: number;
 };
 type EditorElement = HTMLElement & { editor: Editor; w3Witness?: Witness };
+
+/** Read only through this invocation's actual restricted app role. */
+function restrictedDbBody(workspace: string, document: string): unknown {
+  const container = process.env.FVOCI_TEST_PG_CONTAINER;
+  const connection = process.env.DATABASE_APP_URL;
+  if (!container?.startsWith("fvoci-rust-test-pg-") || !connection)
+    throw new Error("Missing owned isolated PostgreSQL app-role fixture");
+  const app = new URL(connection);
+  if (
+    app.hostname !== "127.0.0.1" ||
+    !/^fvoci_app_fvoci_e2e_[a-f0-9]{16}$/.test(app.username) ||
+    !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(app.pathname)
+  )
+    throw new Error("Refusing a non-fixture DB connection");
+  for (const id of [workspace, document])
+    if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
+      throw new Error("Invalid fixture identity");
+  const result = spawnSync(
+    "docker",
+    [
+      "exec",
+      "-i",
+      container,
+      "psql",
+      "-X",
+      "-qAt",
+      "-U",
+      app.username,
+      "-d",
+      app.pathname.slice(1),
+      "-v",
+      "ON_ERROR_STOP=1",
+    ],
+    {
+      input: `BEGIN READ ONLY;
+SET LOCAL app.tenant_id = '${workspace}';
+SELECT jsonb_build_object('role', current_user, 'superuser', r.rolsuper,
+ 'bypassRls', r.rolbypassrls, 'tenant', public.app_tenant_id(),
+ 'rls', c.relrowsecurity, 'forced', c.relforcerowsecurity,
+ 'notOwner', pg_get_userbyid(c.relowner) <> current_user,
+ 'rlsActive', row_security_active(c.oid),
+ 'content', d.content_json, 'version', d.version)
+FROM pg_roles r JOIN pg_class c ON c.oid = 'fvoci.documents'::regclass
+JOIN fvoci.documents d ON d.id = '${document}' AND d.workspace_id = '${workspace}'
+WHERE r.rolname = current_user;
+ROLLBACK;`,
+      encoding: "utf8",
+      timeout: 10000,
+    },
+  );
+  expect(result.status, "restricted read-only DB witness exit").toBe(0);
+  const witness: unknown = JSON.parse(result.stdout);
+  expect(witness).toMatchObject({
+    role: app.username,
+    superuser: false,
+    bypassRls: false,
+    tenant: workspace,
+    rls: true,
+    rlsActive: true,
+    notOwner: true,
+    forced: expect.any(Boolean),
+  });
+  return witness;
+}
 
 async function recordIdentity(page: Page): Promise<void> {
   await editorOf(page).evaluate((root) => {
@@ -372,11 +437,16 @@ test("late older-schema peer data retires only the editor, preserving the same l
         return {
           repairs: witness.repairs,
           raw: witness.doc.getXmlFragment("prosemirror").toJSON(),
+          nodeNames: witness.doc
+            .getXmlFragment("prosemirror")
+            .toArray()
+            .map((node) => (node as Y.XmlElement).nodeName),
           destroyed: witness.doc.isDestroyed,
         };
       });
       expect(current.repairs).toBe(0);
-      expect(current.raw).toContain("futureNode");
+      expect(current.nodeNames).toEqual(["paragraph", "futureNode", "paragraph"]);
+      expect(current.raw).toContain("futurenode");
       expect(current.raw).toContain('id="future-preserved"');
       expect(current.raw).toContain("동료 동시 변경");
       expect(current.destroyed).toBe(false);
@@ -485,7 +555,7 @@ test("wrong/old-prefix ACK never copies or marks newest source edit saved, match
   page,
   browser,
   baseURL,
-}) => {
+}, testInfo) => {
   const gate = await sourceAckGate(page);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await login(page, admin.email, admin.password);
@@ -530,7 +600,16 @@ test("wrong/old-prefix ACK never copies or marks newest source edit saved, match
   await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible();
   const body = await savedBody(page.request, ws, doc.id);
   expect(body.content?.[0]?.attrs?.id).toBe("ack-body");
-  expect(body.content?.[0]?.content?.[0]?.text).toBe("가장 최신 수정 🧑‍💻");
+  expect(body.content?.[0]?.content).toEqual([
+    { type: "text", text: "가장 최신 수정 " },
+    { type: "emoji", attrs: { name: "technologist" } },
+  ]);
+  const sql = restrictedDbBody(ws, doc.id);
+  expect(sql).toHaveProperty("content", body);
+  await testInfo.attach("w3-matched-ACK-app-role-DB.json", {
+    body: JSON.stringify(sql),
+    contentType: "application/json",
+  });
   const fresh = await newSignedInPage(browser, baseURL, admin);
   try {
     await openDoc(fresh.page, doc.path);
@@ -1056,4 +1135,83 @@ test("pending block-math permission notification makes zero local readonly write
   const body = await savedBody(page.request, ws, doc.id);
   expect(body.content?.[0]?.attrs?.latex).toBe("z + 1");
   expect(body.content?.[0]?.attrs?.id).toBe("math-owned");
+});
+
+test("focused visible Math Cancel never publishes its draft, and detached old field events cannot consume a newly opened draft", async ({
+  page,
+}, testInfo) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "수식 취소 소유권", {
+    json: {
+      type: "doc",
+      content: [
+        { type: "math", attrs: { id: "cancel-math", latex: "x + y" } },
+        {
+          type: "paragraph",
+          attrs: { id: "cancel-tail" },
+          content: [{ type: "text", text: "문단" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await save(page);
+  const before = await savedBody(page.request, ws, doc.id);
+  await recordIdentity(page);
+  const field = page.getByRole("textbox", { name: "수식 LaTeX" });
+  const cancel = editorOf(page).getByRole("button", { name: "취소 · 최신 내용 열기" });
+  await page.getByTitle("수식 편집", { exact: true }).click();
+  await field.fill("must discard 🧑‍💻");
+  await field.evaluate((element) => {
+    (window as Window & { w3OldMathField?: HTMLTextAreaElement }).w3OldMathField =
+      element as HTMLTextAreaElement;
+  });
+  await expect(field).toBeFocused();
+  await cancel.click();
+  expect(
+    await editorOf(page).evaluate(
+      (root) => (root as EditorElement).editor.state.doc.child(0).attrs.latex as unknown,
+    ),
+  ).toBe("x + y");
+  await expectIdentity(page, 0);
+  expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
+  await page.getByTitle("수식 편집", { exact: true }).click();
+  await field.fill("current new private");
+  await page.evaluate(() => {
+    const old = (window as Window & { w3OldMathField?: HTMLTextAreaElement }).w3OldMathField;
+    if (!old || old.isConnected) throw new Error("Expected removed old Math textarea");
+    old.value = "retired target must not publish";
+    old.dispatchEvent(new Event("input", { bubbles: true }));
+    old.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+  });
+  await expect(field).toHaveValue("current new private");
+  await expectIdentity(page, 0);
+  await cancel.click();
+  await expectIdentity(page, 0);
+  for (const activate of ["Space", "Enter"] as const) {
+    await page.getByTitle("수식 편집", { exact: true }).click();
+    await field.fill(`keyboard ${activate} must discard`);
+    await page.keyboard.press("Tab");
+    await expect(cancel).toBeFocused();
+    await expectIdentity(page, 0);
+    await page.keyboard.press("Shift+Tab");
+    await expect(field).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(cancel).toBeFocused();
+    await page.screenshot({
+      path: testInfo.outputPath(`w3-math-keyboard-${activate}.png`),
+      fullPage: true,
+    });
+    await page.keyboard.press(activate);
+    await expect(field).toHaveCount(0);
+    await expectIdentity(page, 0);
+  }
+  await page.getByTitle("수식 편집", { exact: true }).click();
+  await field.fill("authorized final");
+  await caretAtEndOf(page, 1);
+  await save(page);
+  const after = await savedBody(page.request, ws, doc.id);
+  expect(after.content?.[0]?.attrs).toMatchObject({ id: "cancel-math", latex: "authorized final" });
+  expect(after.content?.[1]).toEqual(before.content?.[1]);
 });

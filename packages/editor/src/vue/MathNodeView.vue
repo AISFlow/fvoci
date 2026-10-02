@@ -21,8 +21,11 @@ const editing = ref(false);
 /** The typed source not committed yet; null when it equals the node's. */
 const draft = ref<string | null>(null);
 const input = useTemplateRef<HTMLTextAreaElement>("input");
+const cancelButton = useTemplateRef<HTMLButtonElement>("cancelButton");
 const composing = ref(false);
 let retired = false;
+let fieldLifetime = 0;
+let activeField: HTMLTextAreaElement | null = null;
 const owner = shallowRef<{
   editor: typeof props.editor;
   node: typeof props.node;
@@ -33,6 +36,27 @@ const stale = computed(() => !!owner.value && latex.value !== owner.value.latex)
 
 function writable(): boolean {
   return !retired && !props.editor.isDestroyed && props.editor.isEditable;
+}
+
+function ownsField(event: Event): boolean {
+  return (
+    editing.value &&
+    writable() &&
+    editable.value &&
+    activeField !== null &&
+    event.target === activeField &&
+    input.value === activeField
+  );
+}
+
+function closeField(): void {
+  fieldLifetime++;
+  activeField = null;
+  editing.value = false;
+  composing.value = false;
+}
+function currentOpen(lifetime: number): boolean {
+  return editing.value && lifetime === fieldLifetime;
 }
 
 function commit(next: string): boolean {
@@ -77,35 +101,49 @@ async function open(): Promise<void> {
       latex: latex.value,
     };
   const source = draft.value ?? latex.value;
+  const lifetime = ++fieldLifetime;
+  activeField = null;
   editing.value = true;
   await nextTick();
   const field = input.value;
-  if (!field || !writable()) return;
+  if (!field || !writable() || !currentOpen(lifetime)) return;
+  activeField = field;
   field.value = source;
   field.focus();
 }
 
 function onInput(event: Event): void {
+  if (!ownsField(event)) return;
   const value = (event.target as HTMLTextAreaElement).value;
   draft.value = value === latex.value ? null : value;
 }
 
 function onBlur(event: FocusEvent): void {
+  if (!ownsField(event)) return;
   const value = (event.target as HTMLTextAreaElement).value;
   draft.value = value === latex.value ? null : value;
+  // Keyboard focus may move to Cancel before activation. Keep its draft
+  // private until that explicit action, just as pointer focus is prevented.
+  if (cancelButton.value && event.relatedTarget === cancelButton.value) return;
   if (commit(value)) {
     draft.value = null;
     owner.value = null;
   }
-  editing.value = false;
-  composing.value = false;
+  closeField();
+}
+
+function onCompositionStart(event: CompositionEvent): void {
+  if (ownsField(event)) composing.value = true;
+}
+function onCompositionEnd(event: CompositionEvent): void {
+  if (ownsField(event)) composing.value = false;
 }
 
 function cancel(): void {
   if (composing.value) return;
   draft.value = null;
   owner.value = null;
-  editing.value = false;
+  closeField();
 }
 
 // Authorization notifications close the field without publishing a private
@@ -113,14 +151,13 @@ function cancel(): void {
 // a peer's new latex invalidates its original owner before any later commit.
 watch(editable, (value) => {
   if (value) return;
-  editing.value = false;
-  composing.value = false;
+  closeField();
 });
 onBeforeUnmount(() => {
   retired = true;
   draft.value = null;
   owner.value = null;
-  composing.value = false;
+  closeField();
 });
 </script>
 
@@ -133,8 +170,8 @@ onBeforeUnmount(() => {
       :aria-label="t('editor.math.latex')"
       @input="onInput"
       @blur="onBlur"
-      @compositionstart="composing = true"
-      @compositionend="composing = false"
+      @compositionstart="onCompositionStart"
+      @compositionend="onCompositionEnd"
     />
     <div
       v-else-if="!editable"
@@ -159,8 +196,15 @@ onBeforeUnmount(() => {
       <pre v-else>{{ empty ? t("editor.math.empty") : latex }}</pre>
     </button>
     <p v-if="draft !== null && stale" role="status">{{ t("editor.mode.stale") }}</p>
-    <button v-if="draft !== null" type="button" :disabled="composing" @click="cancel">{{
-      t("editor.mode.cancel")
-    }}</button>
+    <button
+      v-if="draft !== null"
+      ref="cancelButton"
+      type="button"
+      :disabled="composing"
+      @pointerdown.prevent
+      @mousedown.prevent
+      @click="cancel"
+      >{{ t("editor.mode.cancel") }}</button
+    >
   </NodeViewWrapper>
 </template>

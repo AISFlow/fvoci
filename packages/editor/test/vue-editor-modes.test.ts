@@ -20,12 +20,111 @@ import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "../src/collab-tiptap.ts";
 import { rawEditorPreflight, SourceModeSession } from "../src/source-mode.ts";
 import { createFvociExtensions } from "../src/tiptap-schema.ts";
+import { mdToTiptapJson } from "../src/markdown/parse.ts";
 import {
   applyEditorModePreviewStyles,
   attachmentPreviewSpec,
   embedPreviewSpec,
   sanitizeEditorModePreview,
 } from "../src/vue/editor-mode-preview.ts";
+
+await test("installed SDK XML serialization does not normalize raw future node identity, and parser emoji semantics have independent mutant controls", () => {
+  const doc = new Y.Doc({ gc: false });
+  try {
+    const future = new Y.XmlElement("futureNode");
+    future.setAttribute("id", "future-preserved");
+    const text = new Y.XmlText();
+    text.insert(0, "한글 🧑‍💻");
+    future.insert(0, [text]);
+    doc.getXmlFragment("prosemirror").insert(0, [future]);
+    assert.equal(future.nodeName, "futureNode");
+    assert.equal(
+      doc.getXmlFragment("prosemirror").toJSON(),
+      '<futurenode id="future-preserved">한글 🧑‍💻</futurenode>',
+    );
+    const expected = {
+      type: "doc",
+      content: [
+        {
+          type: "futureNode",
+          attrs: { id: "future-preserved" },
+          content: [{ type: "text", text: "한글 🧑‍💻" }],
+        },
+      ],
+    };
+    assert.deepEqual(yDocToTiptapJson(doc), expected);
+    for (const field of ["type", "id"]) {
+      const mutant = structuredClone(expected);
+      const node = mutant.content[0];
+      assert.ok(node);
+      if (field === "type") node.type = "futurenode";
+      else node.attrs.id = "different-ref";
+      assert.throws(() => {
+        assert.deepEqual(mutant, expected);
+      });
+    }
+    assert.deepEqual(mdToTiptapJson("가장 최신 수정 🧑‍💻"), {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "가장 최신 수정 🧑‍💻" }] }],
+    });
+    const semantic = [
+      { type: "text", text: "가장 최신 수정 " },
+      { type: "emoji", attrs: { name: "technologist" } },
+    ];
+    const liveDoc = tiptapJsonToYDoc({
+      type: "doc",
+      content: [
+        { type: "paragraph", attrs: { id: "oracle-p" }, content: [{ type: "text", text: "원본" }] },
+      ],
+    });
+    const live = liveEditor(liveDoc);
+    const source = new SourceModeSession(
+      liveDoc,
+      () => 1,
+      () => true,
+    );
+    try {
+      const capture = source.capture(live.editor.state.doc);
+      assert.equal(
+        source.apply(source.prepare(capture, "가장 최신 수정 🧑‍💻", live.editor.state), live.editor),
+        true,
+      );
+      // The parser preserves Unicode text; the installed ordinary Emoji
+      // appendTransaction represents unmarked Unicode as its existing atom.
+      assert.deepEqual(yDocToTiptapJson(liveDoc), {
+        type: "doc",
+        content: [{ type: "paragraph", attrs: { id: "oracle-p" }, content: semantic }],
+      });
+    } finally {
+      source.destroy();
+      live.close();
+      liveDoc.destroy();
+    }
+    assert.throws(() => {
+      assert.deepEqual([{ type: "text", text: "가장 최신 수정 " }], semantic);
+    });
+    assert.throws(() => {
+      assert.deepEqual(
+        [
+          { type: "text", text: "가장 최신 수정 " },
+          { type: "emoji", attrs: { name: "different-emoji" } },
+        ],
+        semantic,
+      );
+    });
+    assert.throws(() => {
+      assert.deepEqual(
+        [
+          { type: "text", text: "different text " },
+          { type: "emoji", attrs: { name: "technologist" } },
+        ],
+        semantic,
+      );
+    });
+  } finally {
+    doc.destroy();
+  }
+});
 
 function liveEditor(ydoc: Y.Doc) {
   const editor = new Editor({
@@ -141,14 +240,19 @@ await test("actual block-math watcher and commands make zero readonly or retired
     open(): Promise<void>;
     onInput(event: Event): void;
     onBlur(event: FocusEvent): void;
+    cancel(): void;
+    privateDraft(): string | null;
   };
   const effects = Vue.effectScope();
   const controls = effects.run(
     () =>
       runInNewContext(
-        ts.transpileModule(`(()=>{${code};return {open,onInput,onBlur};})()`, {
-          compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext },
-        }).outputText,
+        ts.transpileModule(
+          `(()=>{${code};return {open,onInput,onBlur,cancel,privateDraft:()=>draft.value};})()`,
+          {
+            compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext },
+          },
+        ).outputText,
         {
           ...Vue,
           props,
@@ -160,9 +264,9 @@ await test("actual block-math watcher and commands make zero readonly or retired
       ) as unknown as Controls,
   );
   assert.ok(controls);
-  const event = (type: string) => {
+  const event = (type: string, target = field) => {
     const value = new Event(type);
-    Object.defineProperty(value, "target", { value: field });
+    Object.defineProperty(value, "target", { value: target });
     return value;
   };
   let updates = 0;
@@ -183,6 +287,48 @@ await test("actual block-math watcher and commands make zero readonly or retired
     controls.onBlur(event("blur") as FocusEvent);
     assert.equal(updates, 0);
     assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+    local.editor.setEditable(true);
+    await Vue.nextTick();
+    // Reauthorization alone cannot restore the old removed field's authority.
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(updates, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+    assert.equal(controls.privateDraft(), "private pending");
+    controls.cancel();
+    const newField = { value: "", focus() {} };
+    input.value = newField;
+    await controls.open();
+    newField.value = "current private";
+    controls.onInput(event("input", newField));
+    field.value = "cancelled old field value";
+    controls.onInput(event("input"));
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(controls.privateDraft(), "current private");
+    assert.equal(updates, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+    controls.cancel();
+    let focused = 0;
+    const raceField = {
+      value: "",
+      focus() {
+        focused++;
+      },
+    };
+    input.value = raceField;
+    const retiredOpen = controls.open();
+    controls.cancel();
+    const currentOpen = controls.open();
+    await Promise.all([retiredOpen, currentOpen]);
+    assert.equal(focused, 1);
+    assert.equal(raceField.value, "x + y");
+    assert.equal(updates, 0);
+    controls.cancel();
+    input.value = field;
+    await controls.open();
+    field.value = "private pending";
+    controls.onInput(event("input"));
+    local.editor.setEditable(false);
+    await Vue.nextTick();
     local.editor.setEditable(true);
     await Vue.nextTick();
     await controls.open();
