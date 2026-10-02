@@ -2,7 +2,9 @@
 use crate::api::personal_input_dto::{PersonalInputBody, PersonalInputIntent, PersonalInputOutput};
 use crate::db::context::{lock_membership_users, lock_tree, recheck_session, set_tenant};
 use crate::db::documents::{create_wiki_document_tx, CreateDocumentInput};
-use crate::db::projects::{create_project_tx, CreateProjectInput, ProjectDbError};
+use crate::db::projects::{
+    create_project_tx, project_permission_by_id, CreateProjectInput, ProjectDbError,
+};
 use crate::db::task_origins::{
     create_document_task_tx, document_view_permission, origin_request_hash, task_view_permission,
     DocumentTaskRequest, TaskOriginDbError,
@@ -167,30 +169,59 @@ async fn create_in_tx(
         match input.project_id {
             Some(id) => Some(id),
             None => {
-                let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM fvoci.projects WHERE workspace_id = $1 AND key = 'INBOX' AND deleted_at IS NULL AND status <> 'archived'")
-                    .bind(workspace_id).fetch_optional(&mut **tx).await?;
+                let candidates: Vec<Uuid> = sqlx::query_scalar(
+                    r#"SELECT id FROM fvoci.projects WHERE workspace_id=$1 AND (key='INBOX' OR key LIKE 'INBOX-%') AND visibility='private' AND deleted_at IS NULL AND status='active' ORDER BY (key='INBOX') DESC, key COLLATE "C", id"#
+                ).bind(workspace_id).fetch_all(&mut **tx).await?;
+                let mut existing = None;
+                for id in candidates {
+                    if project_permission_by_id(tx, workspace_id, actor, id)
+                        .await?
+                        .is_some_and(|permission| permission.at_least(ProjectPermission::Edit))
+                    {
+                        existing = Some(id);
+                        break;
+                    }
+                }
                 Some(match existing {
                     Some(id) => id,
-                    None => match create_project_tx(
-                        tx,
-                        workspace_id,
-                        actor,
-                        session_id,
-                        CreateProjectInput {
-                            key: "INBOX",
-                            name: "Personal",
-                            visibility: "private",
-                            description: None,
-                            icon: None,
-                            lead_user_id: None,
-                        },
-                        client_ip,
-                    )
-                    .await?
-                    {
-                        Ok(project) => project.id,
-                        Err(err) => return Ok(Err(PersonalInputDbError::Project(err))),
-                    },
+                    None => {
+                        // Archive/trash keep their unique keys. Inspect all occupied
+                        // candidate keys under the existing tenant tree lock; never
+                        // restore/purge a row or retry a failed SQL transaction.
+                        let keys = default_project_keys(input.request_id);
+                        let occupied: Vec<String> = sqlx::query_scalar(
+                            "SELECT key FROM fvoci.projects WHERE workspace_id=$1 AND key=ANY($2)",
+                        )
+                        .bind(workspace_id)
+                        .bind(&keys[..])
+                        .fetch_all(&mut **tx)
+                        .await?;
+                        let Some(key) = keys.iter().find(|key| !occupied.contains(key)) else {
+                            return Ok(Err(PersonalInputDbError::Project(
+                                ProjectDbError::Conflict,
+                            )));
+                        };
+                        match create_project_tx(
+                            tx,
+                            workspace_id,
+                            actor,
+                            session_id,
+                            CreateProjectInput {
+                                key,
+                                name: "Personal",
+                                visibility: "private",
+                                description: None,
+                                icon: None,
+                                lead_user_id: None,
+                            },
+                            client_ip,
+                        )
+                        .await?
+                        {
+                            Ok(project) => project.id,
+                            Err(err) => return Ok(Err(PersonalInputDbError::Project(err))),
+                        }
+                    }
                 })
             }
         }
@@ -298,9 +329,40 @@ async fn output(
     })
 }
 
+fn default_project_keys(request_id: Uuid) -> [String; 8] {
+    // Letter before the 24-byte UUID suffix keeps every key within the existing
+    // <=32-character project grammar, including the forbidden -digits suffix.
+    let suffix = request_id.simple().to_string()[8..].to_uppercase();
+    [
+        "INBOX".into(),
+        "INBOX-A".into(),
+        "INBOX-B".into(),
+        "INBOX-C".into(),
+        format!("INBOX-D{suffix}"),
+        format!("INBOX-E{suffix}"),
+        format!("INBOX-F{suffix}"),
+        format!("INBOX-G{suffix}"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_default_keys_obey_existing_project_grammar() {
+        for request in [Uuid::nil(), Uuid::now_v7(), Uuid::from_bytes([255; 16])] {
+            let keys = default_project_keys(request);
+            let mut unique = std::collections::HashSet::new();
+            for key in keys {
+                assert_eq!(
+                    crate::projects::normalize_project_key(&key),
+                    Ok(key.clone())
+                );
+                assert!(unique.insert(key));
+            }
+            assert_eq!(unique.len(), 8);
+        }
+    }
     #[test]
     fn hash_binds_actor_intent_source_and_original_typed_title() {
         let ws = Uuid::nil();

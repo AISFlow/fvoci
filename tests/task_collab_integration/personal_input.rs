@@ -184,6 +184,7 @@ async fn personal_input_origin_failure_rolls_back_task_events_activity_and_recei
     let body=json!({"requestId":request,"intent":"task","title":"rollback fixture"});let(status,_)=session_call(addr,Method::POST,&path,&owner.session_token,Some(body.clone())).await;
     sqlx::raw_sql("DROP TRIGGER fixture_origin_fail ON fvoci.task_origins; DROP FUNCTION fvoci.fixture_origin_fail();").execute(&admin).await.unwrap();admin.close().await;
     assert_eq!(status,StatusCode::INTERNAL_SERVER_ERROR);assert_eq!(committed_counts(&run,ws,"rollback fixture").await,(0,0,0,0,0,0,0));
+    assert_eq!(default_project_counts(&run, ws).await, (0,0,0,0,0), "default project, workflow, statuses, documents and receipt all roll back");
     let mut conn=observer(&run,ws).await;let receipts:i64=sqlx::query_scalar("SELECT count(*) FROM fvoci.personal_input_commands WHERE request_id=$1").bind(request).fetch_one(&mut conn).await.unwrap();assert_eq!(receipts,0);drop(conn);
     let(status,created)=session_call(addr,Method::POST,&path,&owner.session_token,Some(body)).await;assert_eq!(status,StatusCode::CREATED,"{created}");assert_eq!(committed_counts(&run,ws,"rollback fixture").await,(1,1,1,1,1,1,1));run.finish().await.unwrap();
  }).await;
@@ -366,4 +367,108 @@ async fn personal_input_start_survives_supported_team_slug_collision() {
         assert_eq!(unchanged,("team".into(),slug,"Supported ordinary team".into()));drop(conn);
         run.finish().await.unwrap();
     }).await;
+}
+
+#[tokio::test]
+async fn personal_input_default_project_survives_archive_trash_and_key_collisions() {
+    run_test("personal_input_default_project_survives_archive_trash_and_key_collisions", async {
+        let mut run = TestRun::new(TestDb::bootstrap().await);
+        let (addr, f) = setup_task(&mut run, 5000).await;
+        let owner = personal(addr, &f.owner).await;
+        let ws = owner.workspace_id;
+        let path = input_path(&owner);
+        let project_path = |id: Uuid, suffix: &str| format!("/api/v1/workspaces/{ws}/projects/{id}{suffix}");
+        let capture = |request: Uuid, title: &str| json!({"requestId":request,"intent":"task","title":title});
+        let initial = capture(Uuid::now_v7(), "initial inbox");
+        let (status, first) = session_call(addr, Method::POST, &path, &owner.session_token, Some(initial)).await;
+        assert_eq!(status, StatusCode::CREATED, "{first}");
+        let inbox = Uuid::parse_str(first["projectId"].as_str().unwrap()).unwrap();
+        let (status, archived) = session_call(addr, Method::POST, &project_path(inbox, "/archive"), &owner.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{archived}");
+        let after_archive = capture(Uuid::now_v7(), "after archived inbox");
+        let (status, alternative) = session_call(addr, Method::POST, &path, &owner.session_token, Some(after_archive.clone())).await;
+        // This genuine request fails at the reviewed pre-fix product SHA:
+        // migration008 retains the archived INBOX unique key.
+        assert_eq!(status, StatusCode::CREATED, "fresh capture after user archive must succeed: {alternative}");
+        let alternate = Uuid::parse_str(alternative["projectId"].as_str().unwrap()).unwrap();
+        assert_ne!(alternate, inbox);
+        let (a, b) = tokio::join!(
+            session_call(addr, Method::POST, &path, &owner.session_token, Some(after_archive.clone())),
+            session_call(addr, Method::POST, &path, &owner.session_token, Some(after_archive))
+        );
+        assert_eq!(a.0, StatusCode::CREATED, "{}", a.1);
+        assert_eq!(b.0, StatusCode::CREATED, "{}", b.1);
+        assert_eq!(a.1["taskId"], alternative["taskId"]);
+        assert_eq!(b.1["documentId"], alternative["documentId"]);
+        assert_eq!(committed_counts(&run, ws, "after archived inbox").await, (1,1,1,1,1,1,1));
+        let (status, trashed) = session_call(addr, Method::DELETE, &project_path(alternate, ""), &owner.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{trashed}");
+        let (status, third) = session_call(addr, Method::POST, &path, &owner.session_token, Some(capture(Uuid::now_v7(), "after trashed alternative"))).await;
+        assert_eq!(status, StatusCode::CREATED, "{third}");
+        let active = Uuid::parse_str(third["projectId"].as_str().unwrap()).unwrap();
+        assert_ne!(active, alternate);
+        let (status, reuse) = session_call(addr, Method::POST, &path, &owner.session_token, Some(capture(Uuid::now_v7(), "reuse active private alternative"))).await;
+        assert_eq!(status, StatusCode::CREATED, "{reuse}");
+        assert_eq!(reuse["projectId"], third["projectId"]);
+        let mut conn = observer(&run, ws).await;
+        let rows: Vec<(Uuid, String, String, String, bool)> = sqlx::query_as("SELECT id,key,status,visibility,deleted_at IS NOT NULL FROM fvoci.projects WHERE workspace_id=$1 ORDER BY key")
+            .bind(ws).fetch_all(&mut conn).await.unwrap();
+        assert!(rows.iter().any(|row| row == &(inbox, "INBOX".into(), "archived".into(), "private".into(), false)));
+        assert!(rows.iter().any(|row| row.0 == alternate && row.1 == "INBOX-A" && row.4));
+        assert!(rows.iter().any(|row| row == &(active, "INBOX-B".into(), "active".into(), "private".into(), false)));
+        drop(conn);
+        let (status, value) = session_call(addr, Method::POST, &project_path(active, "/archive"), &owner.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        let collision_request = Uuid::now_v7();
+        // Ordinary project commands can occupy every human key and a predicted
+        // request-derived key; the allocator must inspect, not restore/purge.
+        let suffix = collision_request.simple().to_string()[8..].to_uppercase();
+        for key in ["INBOX-C".to_string(), format!("INBOX-D{suffix}")] {
+            let occupied = create_project(addr, &owner, &key).await;
+            let (status, value) = session_call(addr, Method::POST, &project_path(occupied, "/archive"), &owner.session_token, None).await;
+            assert_eq!(status, StatusCode::OK, "{value}");
+        }
+        let collision = capture(collision_request, "skip occupied fallback key");
+        let (status, skipped) = session_call(addr, Method::POST, &path, &owner.session_token, Some(collision.clone())).await;
+        assert_eq!(status, StatusCode::CREATED, "{skipped}");
+        let selected = Uuid::parse_str(skipped["projectId"].as_str().unwrap()).unwrap();
+        let mut conn = observer(&run, ws).await;
+        let key: String = sqlx::query_scalar("SELECT key FROM fvoci.projects WHERE workspace_id=$1 AND id=$2").bind(ws).bind(selected).fetch_one(&mut conn).await.unwrap();
+        assert_eq!(key, format!("INBOX-E{suffix}"));
+        drop(conn);
+        let (status, replay) = session_call(addr, Method::POST, &path, &owner.session_token, Some(collision)).await;
+        assert_eq!(status, StatusCode::CREATED, "{replay}");
+        assert_eq!(replay["taskId"], skipped["taskId"]);
+        assert_eq!(committed_counts(&run, ws, "skip occupied fallback key").await, (1,1,1,1,1,1,1));
+        let (status, value) = session_call(addr, Method::POST, &project_path(selected, "/archive"), &owner.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        let exhausted_request = Uuid::now_v7();
+        let suffix = exhausted_request.simple().to_string()[8..].to_uppercase();
+        for prefix in ['D', 'E', 'F', 'G'] {
+            let occupied = create_project(addr, &owner, &format!("INBOX-{prefix}{suffix}")).await;
+            let (status, value) = session_call(addr, Method::POST, &project_path(occupied, "/archive"), &owner.session_token, None).await;
+            assert_eq!(status, StatusCode::OK, "{value}");
+        }
+        let before = default_project_counts(&run, ws).await;
+        let command = capture(exhausted_request, "bounded allocation failure");
+        let (status, value) = session_call(addr, Method::POST, &path, &owner.session_token, Some(command.clone())).await;
+        assert_eq!(status, StatusCode::CONFLICT, "all occupied keys must fail without any partial write: {value}");
+        assert_eq!(default_project_counts(&run, ws).await, before);
+        assert_eq!(committed_counts(&run, ws, "bounded allocation failure").await, (0,0,0,0,0,0,0));
+        // A later explicit user unarchive supplies an eligible ordinary target;
+        // retrying the failed command is permitted because no receipt committed.
+        let (status, value) = session_call(addr, Method::POST, &project_path(active, "/unarchive"), &owner.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        let (status, recovered) = session_call(addr, Method::POST, &path, &owner.session_token, Some(command)).await;
+        assert_eq!(status, StatusCode::CREATED, "{recovered}");
+        assert_eq!(recovered["projectId"], active.to_string());
+        assert_eq!(committed_counts(&run, ws, "bounded allocation failure").await, (1,1,1,1,1,1,1));
+        run.finish().await.unwrap();
+    }).await;
+}
+
+async fn default_project_counts(run: &TestRun, ws: Uuid) -> (i64, i64, i64, i64, i64) {
+    let mut conn = observer(run, ws).await;
+    sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.projects WHERE workspace_id=$1), (SELECT count(*) FROM fvoci.workflows WHERE workspace_id=$1), (SELECT count(*) FROM fvoci.statuses WHERE workspace_id=$1), (SELECT count(*) FROM fvoci.documents WHERE workspace_id=$1), (SELECT count(*) FROM fvoci.personal_input_commands WHERE workspace_id=$1)")
+        .bind(ws).fetch_one(&mut conn).await.unwrap()
 }
