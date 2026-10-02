@@ -146,6 +146,7 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :key="`${task.id}:${formEpoch ?? 0}`"
       :slug="slug"
       :workspace-id="workspaceId"
+      :current-user-id="currentUserId"
       :project-id="projectId"
       :project-key="projectKey"
       :task="task"
