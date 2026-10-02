@@ -1,3 +1,14 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
+import path from "node:path";
 import { expect, test } from "@playwright/test";
 import { z } from "zod";
 import { createE2eUser, login } from "./helpers";
@@ -16,6 +27,174 @@ const timerShape = z.object({
     })
     .nullable(),
   actualMilliseconds: z.number(),
+});
+
+// Test-only invoker witness inside this group's isolated database. No product
+// policy is modified and no credential or task content enters diagnostics.
+function diagnosticDatabase() {
+  const container = process.env.FVOCI_TEST_PG_CONTAINER;
+  const admin = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
+  const app = process.env.DATABASE_APP_URL;
+  if (!container || !admin || !app) throw new Error("isolated timer diagnostic database missing");
+  return { container, database: new URL(admin).pathname.slice(1), role: new URL(app).username };
+}
+function diagnosticSql(sql: string): string {
+  const { container, database } = diagnosticDatabase();
+  return execFileSync(
+    "docker",
+    [
+      "exec",
+      "-i",
+      container,
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      database,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-qAt",
+    ],
+    { input: sql, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+  ).trim();
+}
+const witnessRows = z.array(
+  z.object({
+    pid: z.number(),
+    role: z.string(),
+    actor: z.string(),
+    tenant: z.string().nullable(),
+    system: z.string().nullable(),
+    tables: z.array(
+      z.object({
+        name: z.string(),
+        superuser: z.boolean(),
+        bypass: z.boolean(),
+        nonowner: z.boolean(),
+        force: z.boolean(),
+        active: z.boolean(),
+      }),
+    ),
+  }),
+);
+test.beforeAll(() => {
+  const { role } = diagnosticDatabase();
+  if (!/^[a-zA-Z0-9_]+$/.test(role)) throw new Error("unexpected isolated role identifier");
+  diagnosticSql(`
+    CREATE TABLE IF NOT EXISTS public.w5_timer_runtime_proof (id uuid PRIMARY KEY, value jsonb NOT NULL);
+    GRANT INSERT ON public.w5_timer_runtime_proof TO "${role}";
+    CREATE OR REPLACE FUNCTION public.w5_timer_runtime_witness() RETURNS trigger
+      LANGUAGE plpgsql SECURITY INVOKER SET search_path='' AS $$
+    BEGIN
+      INSERT INTO public.w5_timer_runtime_proof(id,value)
+      SELECT NEW.id,jsonb_build_object('pid',pg_backend_pid(),'role',current_user,'actor',public.app_self_user_id(),
+        'tenant',nullif(current_setting('app.tenant_id',true),''),'system',nullif(current_setting('app.system_ctx',true),''),
+        'tables',(SELECT jsonb_agg(jsonb_build_object('name',c.relname,'superuser',r.rolsuper,'bypass',r.rolbypassrls,
+          'nonowner',c.relowner<>r.oid,'force',c.relforcerowsecurity,'active',row_security_active(c.oid)) ORDER BY c.relname)
+          FROM pg_roles r CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE r.rolname=current_user AND n.nspname='fvoci' AND c.relname IN
+          ('time_entries','task_timer_runs','task_timer_segments','task_timer_legacy_open','task_timer_commands','task_timer_audit')));
+      RETURN NEW;
+    END; $$;
+    DROP TRIGGER IF EXISTS w5_timer_runtime_witness ON fvoci.task_timer_audit;
+    CREATE TRIGGER w5_timer_runtime_witness AFTER INSERT ON fvoci.task_timer_audit
+      FOR EACH ROW EXECUTE FUNCTION public.w5_timer_runtime_witness();
+  `);
+});
+test.afterEach(async ({ page }, testInfo) => {
+  const rows = witnessRows.parse(
+    JSON.parse(
+      diagnosticSql(
+        "SELECT COALESCE(jsonb_agg(value ORDER BY id),'[]'::jsonb) FROM public.w5_timer_runtime_proof",
+      ),
+    ),
+  );
+  const serverBin = process.env.FVOCI_E2E_SERVER_BIN;
+  if (!serverBin) throw new Error("own server binary missing");
+  const native = [];
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const exe = readlinkSync(`/proc/${entry}/exe`);
+      if (exe !== realpathSync(serverBin)) continue;
+      native.push({
+        pid: Number(entry),
+        exe,
+        sha256: createHash("sha256")
+          .update(readFileSync(`/proc/${entry}/exe`))
+          .digest("hex"),
+      });
+    } catch {
+      /* Processes can disappear between directory read and inspection. */
+    }
+  }
+  const scripts = await page
+    .locator('script[src*="/assets/"]')
+    .evaluateAll((elements) =>
+      elements
+        .map((element) => element.getAttribute("src"))
+        .filter((value): value is string => Boolean(value)),
+    );
+  const assets = [];
+  for (const src of scripts) {
+    const pathname = new URL(src, page.url()).pathname;
+    const response = await page.request.get(pathname);
+    expect(response.ok(), pathname).toBe(true);
+    const served = createHash("sha256")
+      .update(await response.body())
+      .digest("hex");
+    const staticDir = process.env.FVOCI_STATIC_DIR;
+    if (!staticDir) throw new Error("own static namespace missing");
+    const copied = createHash("sha256")
+      .update(readFileSync(path.join(staticDir, pathname)))
+      .digest("hex");
+    expect(served, pathname).toBe(copied);
+    assets.push({ path: pathname, servedSha256: served, ownStaticSha256: copied });
+  }
+  const { container, database, role } = diagnosticDatabase();
+  const proof = {
+    test: testInfo.title,
+    rows,
+    native,
+    assets,
+    serverOrigin: new URL(page.url()).origin,
+    container,
+    database,
+    role,
+  };
+  const target = testInfo.outputPath("timer-runtime-proof.json");
+  writeFileSync(target, JSON.stringify(proof, null, 2));
+  await testInfo.attach("timer-runtime-proof", { path: target, contentType: "application/json" });
+  const evidenceDir = process.env.FVOCI_W5_EVIDENCE_DIR;
+  if (evidenceDir) {
+    mkdirSync(evidenceDir, { recursive: true });
+    writeFileSync(
+      path.join(evidenceDir, `runtime-${testInfo.testId}.json`),
+      JSON.stringify(proof, null, 2),
+    );
+  }
+  expect(native).toHaveLength(1);
+  expect(assets.length).toBeGreaterThan(0);
+  // View-only case may have no write in its fresh worker. The first flow and
+  // revocation case must prove the real server invoker's context before denial.
+  if (!testInfo.title.startsWith("MyTasks timer controls")) expect(rows.length).toBeGreaterThan(0);
+  for (const row of rows) {
+    expect(row.role).toBe(role);
+    expect(row.system).toBeNull();
+    expect(row.tables).toHaveLength(6);
+    for (const table of row.tables) {
+      expect(table.superuser).toBe(false);
+      expect(table.bypass).toBe(false);
+      expect(table.nonowner).toBe(true);
+      expect(table.force).toBe(true);
+      expect(table.active).toBe(true);
+    }
+  }
+});
+test.afterAll(() => {
+  diagnosticSql(
+    "DROP TRIGGER IF EXISTS w5_timer_runtime_witness ON fvoci.task_timer_audit; DROP FUNCTION IF EXISTS public.w5_timer_runtime_witness(); DROP TABLE IF EXISTS public.w5_timer_runtime_proof;",
+  );
 });
 
 test("detail start commits server intervals; a new MyTasks client pauses, resumes and stops the same task", async ({
