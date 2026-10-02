@@ -154,6 +154,55 @@ async function expectIdentity(page: Page, updates?: number): Promise<void> {
   if (updates !== undefined) expect(result.updates).toBe(updates);
 }
 
+/** Fixture-only runtime diagnostics; no auth headers, tokens or credential IDs. */
+async function readLiveRuntime(page: Page): Promise<unknown> {
+  return editorOf(page).evaluate((root) => {
+    const element = root as EditorElement;
+    const editor = element.editor;
+    const options = (name: string) =>
+      editor.extensionManager.extensions.find((item) => item.name === name)?.options as
+        Record<string, unknown> | undefined;
+    const doc = options("collaboration")?.document as Y.Doc;
+    const provider = options("collaborationCaret")?.provider as HocuspocusProvider;
+    const shell = element.closest(".fvoci-editor") as HTMLElement & {
+      __vueParentComponent?: { props?: { modeScope?: unknown; editable?: unknown } };
+    };
+    const app = document.querySelector("#root") as HTMLElement & {
+      __vue_app__: {
+        _context: {
+          provides: {
+            VUE_QUERY_CLIENT: {
+              getQueriesData(options: { queryKey: readonly string[] }): [unknown, unknown][];
+            };
+          };
+        };
+      };
+    };
+    const metadata = app.__vue_app__._context.provides.VUE_QUERY_CLIENT.getQueriesData({
+      queryKey: ["document"],
+    }).map(([key, data]) => ({
+      key,
+      status:
+        typeof data === "object" && data !== null && "status" in data ? data.status : undefined,
+    }));
+    const scope = shell.__vueParentComponent?.props?.modeScope;
+    return {
+      editable: editor.isEditable,
+      pm: editor.getJSON() as unknown,
+      rawXML: doc.getXmlFragment("prosemirror").toJSON(),
+      sameDoc: doc === element.w3Witness?.doc,
+      sameProvider: provider === element.w3Witness?.provider,
+      localUpdates: element.w3Witness?.updates,
+      authenticated: provider.isAuthenticated,
+      authorizedScope: provider.authorizedScope,
+      socketStatus: provider.configuration.websocketProvider.status,
+      modeScope: typeof scope === "number" ? scope : undefined,
+      editableProp: shell.__vueParentComponent?.props?.editable,
+      metadata,
+    };
+  });
+}
+
 test("four modes keep the same actual editor/doc/provider/fragment and no-op/Cancel publish zero content updates", async ({
   page,
 }) => {
@@ -757,7 +806,7 @@ test("fresh authenticated readonly client copies only after a genuine current co
   page,
   browser,
   baseURL,
-}) => {
+}, testInfo) => {
   await login(page, admin.email, admin.password);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "읽기 전용 현재 본문", {
@@ -805,6 +854,10 @@ test("fresh authenticated readonly client copies only after a genuine current co
     await selectMode(readonly.page, "markdown");
     const field = readonly.page.getByRole("textbox", { name: "Markdown 직접 편집" });
     await expect(field).not.toBeEditable();
+    await testInfo.attach("w3-H1-live-before-copy.json", {
+      body: JSON.stringify({ live: await readLiveRuntime(readonly.page), committed: before }),
+      contentType: "application/json",
+    });
     await readonly.page.evaluate(() => navigator.clipboard.writeText("readonly sentinel"));
     await readonly.page.getByRole("button", { name: "저장된 현재 문서 복사" }).click();
     await expect.poll(() => requested).toBe(true);
@@ -813,9 +866,21 @@ test("fresh authenticated readonly client copies only after a genuine current co
       "readonly sentinel",
     );
     release();
-    await expect
-      .poll(() => readonly.page.evaluate(() => navigator.clipboard.readText()))
-      .toContain("보관된 한글 🧑‍💻");
+    try {
+      await expect
+        .poll(() => readonly.page.evaluate(() => navigator.clipboard.readText()))
+        .toContain("보관된 한글 🧑‍💻");
+    } finally {
+      await testInfo.attach("w3-H1-live-after-response.json", {
+        body: JSON.stringify({
+          live: await readLiveRuntime(readonly.page),
+          actualBody,
+          panel: await readonly.page.locator(".fvoci-source-panel").textContent(),
+          alerts: await readonly.page.locator(".fvoci-editor [role=alert]").allTextContents(),
+        }),
+        contentType: "application/json",
+      });
+    }
     await selectMode(readonly.page, "preview");
     await expect(readonly.page.locator(".fvoci-mode-preview")).toContainText("보관된 한글 🧑‍💻");
     await selectMode(readonly.page, "rich");
@@ -1079,6 +1144,10 @@ test("pending block-math permission notification makes zero local readonly write
   await save(page);
   const before = await savedBody(page.request, ws, doc.id);
   await recordIdentity(page);
+  await testInfo.attach("w3-D3-initial-runtime.json", {
+    body: JSON.stringify(await readLiveRuntime(page)),
+    contentType: "application/json",
+  });
   await page.getByTitle("수식 편집", { exact: true }).click();
   const field = page.getByRole("textbox", { name: "수식 LaTeX" });
   await field.fill("private pending latex 🧑‍💻");
@@ -1105,6 +1174,10 @@ test("pending block-math permission notification makes zero local readonly write
     contentType: "application/json",
   });
   expect(observed).toEqual({ editable: false, latex: "x + y", updates: 0 });
+  await testInfo.attach("w3-D3-archived-runtime.json", {
+    body: JSON.stringify(await readLiveRuntime(page)),
+    contentType: "application/json",
+  });
   await expectIdentity(page, 0);
   expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
   const fresh = await newSignedInPage(browser, baseURL, admin);
@@ -1127,7 +1200,19 @@ test("pending block-math permission notification makes zero local readonly write
     ).status(),
   ).toBe(200);
   await refetchActualQuery(page, ["document"]);
-  await expect(editorOf(page)).toHaveAttribute("contenteditable", "true");
+  try {
+    await expect(editorOf(page)).toHaveAttribute("contenteditable", "true");
+  } finally {
+    await testInfo.attach("w3-D3-regrant-runtime.json", {
+      body: JSON.stringify({
+        live: await readLiveRuntime(page),
+        actualMeta: (await (
+          await page.request.get(`/api/v1/workspaces/${ws}/documents/${doc.id}`)
+        ).json()) as unknown,
+      }),
+      contentType: "application/json",
+    });
+  }
   await page.getByTitle("수식 편집", { exact: true }).click();
   await expect(field).toHaveValue("private pending latex 🧑‍💻");
   await field.fill("z + 1");
