@@ -580,6 +580,24 @@ pub async fn cleanup(
 // anchors, projections and closed manual rows stay durable and unmodified.
 // Each correction is actor-owned and requires current target Edit permission.
 const RECORDS_SQL: &str = r#"
+WITH scoped_segments AS MATERIALIZED (
+ SELECT s.* FROM fvoci.task_timer_segments s
+ WHERE s.workspace_id=$1 AND s.task_id=$2 AND s.user_id=$3
+), segment_notes AS MATERIALIZED (
+ SELECT DISTINCT ON (a.after_value->>'recordId')
+        a.after_value->>'recordId' AS record_id,a.after_value
+ FROM fvoci.task_timer_audit a
+ JOIN scoped_segments s ON a.after_value->>'recordId'=s.id::text
+ WHERE a.user_id=$3 AND a.verb<>'time.correct'
+ ORDER BY a.after_value->>'recordId',a.id DESC
+), corrections AS MATERIALIZED (
+ SELECT DISTINCT ON (a.after_value->>'kind',a.after_value->>'recordId')
+        a.after_value->>'kind' AS kind,a.after_value->>'recordId' AS record_id,a.after_value
+ FROM fvoci.task_timer_audit a
+ WHERE a.user_id=$3 AND a.workspace_id=$1 AND a.task_id=$2 AND a.verb='time.correct'
+ ORDER BY a.after_value->>'kind',a.after_value->>'recordId',
+          (a.after_value->>'revision')::bigint DESC,a.id DESC
+)
 SELECT b.id,b.kind,
  COALESCE((c.after_value->>'startedAt')::timestamptz,b.started_at) AS started_at,
  COALESCE((c.after_value->>'endedAt')::timestamptz,b.ended_at) AS ended_at,
@@ -589,13 +607,10 @@ FROM (
  SELECT s.id,'segment'::text AS kind,s.started_at,s.ended_at,s.run_id,
  CASE WHEN a.after_value IS NOT NULL THEN a.after_value->>'note' ELSE COALESCE(e.note,r.note) END AS note,
  false AS reserved_legacy
- FROM fvoci.task_timer_segments s
+ FROM scoped_segments s
  JOIN fvoci.task_timer_runs r ON r.id=s.run_id
  LEFT JOIN fvoci.time_entries e ON e.workspace_id=s.workspace_id AND e.id=s.time_entry_id
- LEFT JOIN LATERAL (SELECT after_value FROM fvoci.task_timer_audit
-   WHERE user_id=$3 AND after_value->>'recordId'=s.id::text AND verb<>'time.correct'
-   ORDER BY id DESC LIMIT 1) a ON true
- WHERE s.workspace_id=$1 AND s.task_id=$2 AND s.user_id=$3
+ LEFT JOIN segment_notes a ON a.record_id=s.id::text
  UNION ALL
  SELECT e.id,'manual'::text,e.started_at,e.ended_at,NULL::uuid,e.note,
  EXISTS(SELECT 1 FROM fvoci.task_timer_legacy_open l WHERE l.time_entry_id=e.id AND l.user_id=$3)
@@ -603,10 +618,7 @@ FROM (
  WHERE e.workspace_id=$1 AND e.task_id=$2 AND e.user_id=$3
  AND NOT EXISTS(SELECT 1 FROM fvoci.task_timer_segments s WHERE s.time_entry_id=e.id)
 ) b
-LEFT JOIN LATERAL (SELECT after_value FROM fvoci.task_timer_audit
- WHERE user_id=$3 AND workspace_id=$1 AND task_id=$2 AND verb='time.correct'
- AND after_value->>'recordId'=b.id::text AND after_value->>'kind'=b.kind
- ORDER BY (after_value->>'revision')::bigint DESC,id DESC LIMIT 1) c ON true
+LEFT JOIN corrections c ON c.record_id=b.id::text AND c.kind=b.kind
 "#;
 
 /// Called only after the existing task-read fence, on that same read snapshot.
@@ -728,7 +740,11 @@ fn range_valid(from: NaiveDate, to: NaiveDate) -> bool {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HistoryCursor {
+    version: u8,
+    session: Uuid,
+    fingerprint: String,
     actor: Uuid,
     workspace: Uuid,
     task: Uuid,
@@ -740,15 +756,54 @@ struct HistoryCursor {
     kind: TimeRecordKind,
 }
 
-fn history_sql() -> String {
+#[cfg(feature = "db-tests")]
+fn history_record_page_sql() -> String {
     format!("WITH records AS ({RECORDS_SQL}) SELECT * FROM records WHERE started_at < (($5::date+1)::timestamp AT TIME ZONE $6) AND (ended_at > ($4::date::timestamp AT TIME ZONE $6) OR ended_at IS NULL OR (kind='segment' AND ended_at=started_at AND started_at >= ($4::date::timestamp AT TIME ZONE $6))) AND ($7::timestamptz IS NULL OR (started_at,id,kind)<($7,$8::uuid,$9::text)) ORDER BY started_at DESC,id DESC,kind DESC LIMIT 101")
 }
 
-/// Exact current query and an unadopted existing-state witness candidate for
-/// restricted-role EXPLAIN fixtures. No production cursor or route uses it.
+// Fingerprint and page share the complete effective local-date snapshot.
+// This costs O(n) for the eligible records; it is not a writer revision counter.
+fn history_sql() -> String {
+    format!(
+        r#"WITH records AS MATERIALIZED (
+{RECORDS_SQL}
+), eligible AS MATERIALIZED (
+ SELECT * FROM records
+ WHERE started_at < (($5::date+1)::timestamp AT TIME ZONE $6)
+   AND (ended_at > ($4::date::timestamp AT TIME ZONE $6)
+        OR ended_at IS NULL
+        OR (kind='segment' AND ended_at=started_at
+            AND started_at >= ($4::date::timestamp AT TIME ZONE $6)))
+), witness AS (
+ SELECT encode(sha256(convert_to('task-history-v1:' || COALESCE(
+   string_agg(encode(sha256(convert_to(jsonb_build_array(
+       kind,id,EXTRACT(EPOCH FROM started_at),EXTRACT(EPOCH FROM ended_at),
+       run_id,note,revision,reserved_legacy
+   )::text,'UTF8')),'hex'),'' ORDER BY id,kind),''),'UTF8')),'hex') AS fingerprint
+ FROM eligible
+), page AS (
+ SELECT * FROM eligible
+ WHERE $7::timestamptz IS NULL OR (started_at,id,kind)<($7,$8::uuid,$9::text)
+ ORDER BY started_at DESC,id DESC,kind DESC LIMIT 101
+)
+SELECT witness.fingerprint,page.id,page.kind,page.started_at,page.ended_at,
+       page.run_id,page.note,page.revision,page.reserved_legacy
+FROM witness LEFT JOIN page ON true
+ORDER BY page.started_at DESC NULLS LAST,page.id DESC NULLS LAST,page.kind DESC NULLS LAST"#
+    )
+}
+
+/// Exact adopted history statement for restricted-role plan measurements.
+#[cfg(feature = "db-tests")]
+pub fn history_snapshot_measurement_sql() -> String {
+    history_sql()
+}
+
+/// Preserve the earlier page/four-count experiment for its existing fixtures.
+/// Production uses the effective-record fingerprint, not these counts.
 #[cfg(feature = "db-tests")]
 pub fn history_measurement_sql(with_witness: bool) -> String {
-    let current = history_sql();
+    let current = history_record_page_sql();
     if !with_witness {
         return current;
     }
@@ -782,26 +837,46 @@ pub async fn history(
     let zone = time_zone(&mut tx, actor).await?;
     let cursor: Option<HistoryCursor> = match &query.cursor {
         None => None,
+        Some(value) if value.len() > 4096 => return Ok(Err(TimerDbError::InvalidInput)),
         Some(value) => match URL_SAFE_NO_PAD
             .decode(value)
             .ok()
             .and_then(|b| serde_json::from_slice::<HistoryCursor>(&b).ok())
         {
             Some(c)
-                if c.actor == actor
+                if c.version == 1
+                    && c.fingerprint.len() == 64
+                    && c.fingerprint
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                    && c.actor == actor
                     && c.workspace == workspace
                     && c.task == task
                     && c.from == query.from
                     && c.to == query.to
                     && c.zone == zone =>
             {
+                if c.session != session {
+                    return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+                }
                 Some(c)
             }
             _ => return Ok(Err(TimerDbError::InvalidInput)),
         },
     };
     let sql = history_sql();
-    let rows: Vec<RecordTuple> = sqlx::query_as(&sql)
+    type HistoryRow = (
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+        Option<Uuid>,
+        Option<String>,
+        Option<i64>,
+        Option<bool>,
+    );
+    let rows: Vec<HistoryRow> = sqlx::query_as(&sql)
         .bind(workspace)
         .bind(task)
         .bind(actor)
@@ -816,8 +891,36 @@ pub async fn history(
         }))
         .fetch_all(&mut *tx)
         .await?;
-    let more = rows.len() > 100;
-    let items = rows
+    let fingerprint = rows
+        .first()
+        .map(|r| r.0.clone())
+        .ok_or_else(|| sqlx::Error::Protocol("missing history snapshot header".into()))?;
+    if cursor
+        .as_ref()
+        .is_some_and(|c| c.fingerprint != fingerprint)
+    {
+        return Ok(Err(TimerDbError::Conflict("timer_history_changed")));
+    }
+    let mut records = Vec::with_capacity(rows.len());
+    for (_, id, kind, start, end, run, note, revision, reserved) in rows {
+        // LEFT JOIN retains the witness even when the page has become empty.
+        let Some(id) = id else {
+            continue;
+        };
+        let missing = || sqlx::Error::Protocol("incomplete history page record".into());
+        records.push((
+            id,
+            kind.ok_or_else(missing)?,
+            start.ok_or_else(missing)?,
+            end,
+            run,
+            note,
+            revision.ok_or_else(missing)?,
+            reserved.ok_or_else(missing)?,
+        ));
+    }
+    let more = records.len() > 100;
+    let items = records
         .into_iter()
         .take(100)
         .map(record)
@@ -827,6 +930,9 @@ pub async fn history(
         Some(
             URL_SAFE_NO_PAD.encode(
                 serde_json::to_vec(&HistoryCursor {
+                    version: 1,
+                    session,
+                    fingerprint,
                     actor,
                     workspace,
                     task,
