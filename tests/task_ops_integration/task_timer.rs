@@ -2387,6 +2387,33 @@ mod task_timer {
         harness.cleanup().await;
     }
 
+    // Store each completed phase before a later fixture prerequisite can fail.
+    // Evidence is optional outside the coordinator's explicit runtime batch.
+    fn timer_measurement_receipt(name: &str, value: &Value) {
+        if let Ok(directory) = std::env::var("FVOCI_W5_EVIDENCE_DIR") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.join(name))
+                .unwrap();
+            use std::io::Write;
+            let release_complete = name == "history-null-locator-release.json"
+                || name == "history-explain-101-2048.json";
+            let checkpoint = json!({"checkpoint":name,"observationsCaptured":true,
+                "legacyRelease":if release_complete {"ASSERTIONS_PASSED"} else {"NOTREACHED"},
+                "finalResourceCleanup":"NOTREACHED; see actual runner result", "observations":value});
+            file.write_all(
+                serde_json::to_string_pretty(&checkpoint)
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+            file.sync_all().unwrap();
+        }
+    }
+
     async fn timer_measure_history_sql(
         fixture: &TimerFixture,
         workspace: Uuid,
@@ -2541,6 +2568,10 @@ mod task_timer {
                     Some(false),
                 )
                 .await;
+                timer_measurement_receipt(
+                    &format!("history-plan-{count}-{candidate}-explain.json"),
+                    &json!({"personalRows":count,"candidate":candidate,"backend":fixture.pid,"plan":plan}),
+                );
                 // First/warm describe observed order, not OS cache eviction.
                 let first = timer_measure_history_sql(
                     &fixture,
@@ -2551,6 +2582,10 @@ mod task_timer {
                     Some(true),
                 )
                 .await;
+                timer_measurement_receipt(
+                    &format!("history-plan-{count}-{candidate}-first.json"),
+                    &json!({"personalRows":count,"candidate":candidate,"backend":fixture.pid,"plan":first}),
+                );
                 let warm = timer_measure_history_sql(
                     &fixture,
                     workspace,
@@ -2560,9 +2595,27 @@ mod task_timer {
                     Some(true),
                 )
                 .await;
+                timer_measurement_receipt(
+                    &format!("history-plan-{count}-{candidate}-warm.json"),
+                    &json!({"personalRows":count,"candidate":candidate,"backend":fixture.pid,"plan":warm}),
+                );
                 let result =
                     timer_measure_history_sql(&fixture, workspace, task_id, actor, candidate, None)
                         .await;
+                let receipt = json!({"personalRows":count,"unrelatedActorRows":if count==2048 {2048}else{0},"unrelatedTaskRows":if count==2048 {2048}else{0},"postgres":pg_version,"candidateNotAdopted":candidate,"actualRouterBackend":fixture.pid,"plan":plan,"firstObserved":first,"warmObserved":warm,"queryResult":result,"limits":"Warm/first execution order only; no cold cache claim; internal Router/app-role queries, no production latency promise"});
+                timer_measurement_receipt(
+                    &format!(
+                        "history-explain-{count}-{}.json",
+                        if candidate { "candidate" } else { "current" }
+                    ),
+                    &receipt,
+                );
+                println!(
+                    "W5 EXPLAIN rows={count} candidate={candidate} firstMs={} warmMs={}",
+                    receipt["firstObserved"][0]["Execution Time"],
+                    receipt["warmObserved"][0]["Execution Time"]
+                );
+                evidence.push(receipt);
                 if candidate {
                     assert_eq!(result["version"], json!([count, count, 0, 0]));
                     assert_eq!(result["records"].as_array().unwrap().len(), 101);
@@ -2578,7 +2631,6 @@ mod task_timer {
                 } else {
                     assert_eq!(result["count"], 101);
                 }
-                evidence.push(json!({"personalRows":count,"unrelatedActorRows":if count==2048 {2048}else{0},"unrelatedTaskRows":if count==2048 {2048}else{0},"postgres":pg_version,"candidateNotAdopted":candidate,"actualRouterBackend":fixture.pid,"plan":plan,"firstObserved":first,"warmObserved":warm,"queryResult":result,"limits":"Warm/first execution order only; no cold cache claim; internal Router/app-role queries, no production latency promise"}));
             }
             fixture.probe("before endpoint timing").await;
             let clock = std::time::Instant::now();
@@ -2592,13 +2644,15 @@ mod task_timer {
             .await;
             let elapsed = clock.elapsed().as_secs_f64() * 1000.0;
             fixture.probe("after endpoint timing").await;
+            let receipt = json!({"personalRows":count,"actualCurrentEndpointMilliseconds":elapsed,"includes":"HTTP auth +pool acquires +permission +SQL +serialization; excludes fixture probes; no mocked transport/nativeTCP"});
+            timer_measurement_receipt(&format!("history-endpoint-{count}.json"), &receipt);
+            evidence.push(receipt);
             assert_eq!(status, StatusCode::OK, "{history}");
             assert_eq!(history["items"].as_array().unwrap().len(), 100);
-            evidence.push(json!({"personalRows":count,"actualCurrentEndpointMilliseconds":elapsed,"includes":"HTTP auth +pool acquires +permission +SQL +serialization; excludes fixture probes; no mocked transport/nativeTCP"}));
         }
         // Actual oldAPI open +explicit NULLlocator release verifies the fourth
         // component catches reservedLegacy changes the first three miss.
-        let (status, open) = timer_checked_request(&fixture, app.clone(),"POST",&format!("{base}/time-entries"),Some(json!({"startedAt":"2026-09-30T09:00:00Z","endedAt":null,"note":"Explicit unresolved legacy release"})),Some(&cookie)).await;
+        let (status, open) = timer_checked_request(&fixture, app.clone(),"POST",&format!("{base}/time-entries"),Some(json!({"startedAt":"2026-09-30T09:00:00Z","note":"Explicit unresolved legacy release"})),Some(&cookie)).await;
         assert_eq!(status, StatusCode::CREATED, "{open}");
         let before =
             timer_measure_history_sql(&fixture, workspace, task_id, actor, true, None).await;
@@ -2649,19 +2703,11 @@ mod task_timer {
         .await;
         assert_eq!(replay, released);
         evidence.push(json!({"nullLocatorRelease":{"beforeVersion":before["version"],"afterVersion":after["version"],"raw034Unchanged":true},"productionCursor":"UNCHANGED/NOTADOPTED"}));
-        if let Ok(directory) = std::env::var("FVOCI_W5_EVIDENCE_DIR") {
-            let directory = std::path::PathBuf::from(directory);
-            std::fs::create_dir_all(&directory).unwrap();
-            let path = directory.join("history-explain-101-2048.json");
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-                .unwrap();
-            use std::io::Write;
-            file.write_all(serde_json::to_string_pretty(&evidence).unwrap().as_bytes())
-                .unwrap();
-        }
+        timer_measurement_receipt(
+            "history-null-locator-release.json",
+            evidence.last().unwrap(),
+        );
+        timer_measurement_receipt("history-explain-101-2048.json", &json!(evidence));
         for result in &evidence {
             if result.get("firstObserved").is_some() {
                 println!(
