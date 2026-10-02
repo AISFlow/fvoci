@@ -101,4 +101,236 @@ mod task_timer {
         drop(app);
         harness.cleanup().await;
     }
+    #[tokio::test]
+    async fn timer_receipt_replay_and_actual_app_connection_rls_isolation() {
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, actor, workspace) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let other = add_workspace_user(&admin, workspace, "member", "timer-other").await;
+        let project = create_project(app.clone(), &cookie, workspace, "REPLAY", "workspace").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Replay once"}),
+        )
+        .await;
+        let url = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}/timer",
+            task["id"].as_str().unwrap()
+        );
+        let body = json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null,"note":"original"});
+        let (status, original) =
+            json_request(app.clone(), "POST", &url, Some(body.clone()), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{original}");
+        let (status, replayed) =
+            json_request(app.clone(), "POST", &url, Some(body.clone()), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(
+            original, replayed,
+            "lost-success duplicate must return the committed receipt"
+        );
+        let mut changed = body.clone();
+        changed["note"] = json!("changed");
+        let (status, mismatch) =
+            json_request(app.clone(), "POST", &url, Some(changed), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{mismatch}");
+        let pool = project_harness::app_pool(&harness).await;
+        let mut tx = pool.begin().await.unwrap();
+        let (superuser,bypass,nonowner,active): (bool,bool,bool,bool) = sqlx::query_as("SELECT r.rolsuper,r.rolbypassrls,c.relowner <> r.oid,row_security_active(c.oid) FROM pg_roles r CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE r.rolname=current_user AND n.nspname='fvoci' AND c.relname='task_timer_runs'").fetch_one(&mut *tx).await.unwrap();
+        assert_eq!(
+            (superuser, bypass, nonowner, active),
+            (false, false, true, true)
+        );
+        fvoci_server::db::context::set_self_user(&mut tx, actor)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.task_timer_runs")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap(),
+            1
+        );
+        fvoci_server::db::context::set_self_user(&mut tx, other.user_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.task_timer_runs")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.task_timer_commands")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap(),
+            0
+        );
+        tx.commit().await.unwrap();
+        let mut reused = pool.begin().await.unwrap();
+        let self_id: Option<String> =
+            sqlx::query_scalar("SELECT nullif(current_setting('app.self_user_id',true),'')")
+                .fetch_one(&mut *reused)
+                .await
+                .unwrap();
+        assert_eq!(
+            self_id, None,
+            "transaction-local actor must not leak on pool reuse"
+        );
+        reused.commit().await.unwrap();
+        println!("W5 same app connection NSNB=false/false nonowner=true row_security_active=true actor-switch isolated");
+        project_harness::close_pool(pool).await;
+        admin.close().await;
+        drop(app);
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn timer_two_independent_db_waiters_cross_workspace_start_one_person_run() {
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, actor, workspace_a) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let workspace_b = insert_workspace(&admin).await;
+        sqlx::query(
+            "INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,'owner')",
+        )
+        .bind(workspace_b)
+        .bind(actor)
+        .execute(&admin)
+        .await
+        .unwrap();
+        let pa = create_project(app.clone(), &cookie, workspace_a, "RUNONE", "workspace").await;
+        let pb = create_project(app.clone(), &cookie, workspace_b, "RUNTWO", "workspace").await;
+        let ta = create_task(
+            app.clone(),
+            &cookie,
+            workspace_a,
+            pa["id"].as_str().unwrap(),
+            json!({"title":"A"}),
+        )
+        .await;
+        let tb = create_task(
+            app.clone(),
+            &cookie,
+            workspace_b,
+            pb["id"].as_str().unwrap(),
+            json!({"title":"B"}),
+        )
+        .await;
+        let mut holder = admin.begin().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        hold_membership_user_lock(&mut holder, actor).await;
+        let a = app.clone();
+        let ca = cookie.clone();
+        let b = app.clone();
+        let cb = cookie.clone();
+        let ua = format!(
+            "/api/v1/workspaces/{workspace_a}/tasks/{}/timer",
+            ta["id"].as_str().unwrap()
+        );
+        let ub = format!(
+            "/api/v1/workspaces/{workspace_b}/tasks/{}/timer",
+            tb["id"].as_str().unwrap()
+        );
+        let first = tokio::spawn(async move {
+            json_request(a,"POST",&ua,Some(json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null})),Some(&ca)).await
+        });
+        let second = tokio::spawn(async move {
+            json_request(b,"POST",&ub,Some(json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null})),Some(&cb)).await
+        });
+        let waiters = project_harness::wait_for_blocked_query_count(
+            &admin,
+            pid,
+            "%pg_advisory_xact_lock%",
+            2,
+        )
+        .await;
+        assert_ne!(
+            waiters[0], waiters[1],
+            "independent database connections must reach the actual writer barrier"
+        );
+        holder.commit().await.unwrap();
+        let x = first.await.unwrap();
+        let y = second.await.unwrap();
+        assert!(
+            (x.0 == StatusCode::OK && y.0 == StatusCode::CONFLICT)
+                || (y.0 == StatusCode::OK && x.0 == StatusCode::CONFLICT),
+            "{x:?} {y:?}"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM fvoci.task_timer_runs WHERE user_id=$1 AND status<>'stopped'"
+            )
+            .bind(actor)
+            .fetch_one(&admin)
+            .await
+            .unwrap(),
+            1
+        );
+        println!(
+            "W5 actual barrier: two independent app DB waiters; cross-workspace one winner, one409"
+        );
+        admin.close().await;
+        drop(app);
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn timer_command_without_captured_actor_session_cannot_execute_under_replaced_cookie() {
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, _actor, workspace) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let replacement = add_workspace_user(&admin, workspace, "member", "replacement").await;
+        let project = create_project(app.clone(), &cookie, workspace, "SWAP", "workspace").await;
+        add_project_member(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            replacement.user_id,
+            "editor",
+        )
+        .await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Old screen target"}),
+        )
+        .await;
+        let url = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}/timer",
+            task["id"].as_str().unwrap()
+        );
+        // Exact original UI wire body captured before a cookie/actor switch.
+        // Omitting context must be rejected, even if replacement has Edit.
+        let (status,response)=json_request(app.clone(),"POST",&url,Some(json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null,"note":"old actor draft"})),Some(&replacement.cookie)).await;
+        let effects: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM fvoci.task_timer_runs WHERE user_id=$1")
+                .bind(replacement.user_id)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        println!("W5 original stale actor command status={status} replacement effects={effects} response={response}");
+        admin.close().await;
+        drop(app);
+        harness.cleanup().await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "uncaptured old command must not execute under a replacement cookie"
+        );
+        assert_eq!(
+            effects, 0,
+            "no timer or old draft effect for replacement actor"
+        );
+    }
 }
