@@ -686,6 +686,89 @@ mod task_timer {
             effects_after, effects_before,
             "other-owner correction and denied reads have no history/audit/receipt effects"
         );
+        // The actual production pool factory restricted to one connection
+        // proves reuse rather than assuming two checkouts chose the same PID.
+        let witness = fvoci_server::db::pool::connect_app_with_max(&harness.app_url, 1)
+            .await
+            .unwrap();
+        let pid_before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&witness)
+            .await
+            .unwrap();
+        let flags: Vec<(String, bool, bool, bool, bool, bool)> = sqlx::query_as(
+            "SELECT c.relname,r.rolsuper,r.rolbypassrls,c.relowner<>r.oid,c.relforcerowsecurity,row_security_active(c.oid) FROM pg_roles r CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE r.rolname=current_user AND n.nspname='fvoci' AND c.relname=ANY($1) ORDER BY c.relname",
+        )
+        .bind(vec!["time_entries", "task_timer_runs", "task_timer_segments", "task_timer_legacy_open", "task_timer_commands", "task_timer_audit"])
+        .fetch_all(&witness)
+        .await
+        .unwrap();
+        assert_eq!(flags.len(), 6);
+        for (name, superuser, bypass, nonowner, force, active) in &flags {
+            assert_eq!(
+                (*superuser, *bypass, *nonowner, *force, *active),
+                (false, false, true, true, true),
+                "{name}"
+            );
+        }
+        let session = project_harness::session_id_for_user(&admin, actor).await;
+        let own_read = fvoci_server::db::task_ops::list_time_entries(
+            &witness,
+            workspace,
+            Uuid::parse_str(task["id"].as_str().unwrap()).unwrap(),
+            actor,
+            session,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(own_read.items[0].note.as_deref(), Some("휴식 제외"));
+        let context_sql = "SELECT pg_backend_pid(),NULLIF(current_setting('app.self_user_id',true),''),NULLIF(current_setting('app.tenant_id',true),''),NULLIF(current_setting('app.system_ctx',true),'')";
+        let after_read: (i32, Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as(context_sql)
+                .fetch_one(&witness)
+                .await
+                .unwrap();
+        assert_eq!(after_read, (pid_before, None, None, None));
+        let mut reused = fvoci_server::db::context::begin_read(&witness)
+            .await
+            .unwrap();
+        fvoci_server::db::context::set_tenant(&mut reused, workspace)
+            .await
+            .unwrap();
+        fvoci_server::db::context::set_self_user(&mut reused, other.user_id)
+            .await
+            .unwrap();
+        let during: (i32, Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as(context_sql)
+                .fetch_one(&mut *reused)
+                .await
+                .unwrap();
+        assert_eq!(
+            during,
+            (
+                pid_before,
+                Some(other.user_id.to_string()),
+                Some(workspace.to_string()),
+                None
+            )
+        );
+        let own_audits: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.task_timer_audit")
+            .fetch_one(&mut *reused)
+            .await
+            .unwrap();
+        assert_eq!(
+            own_audits, 1,
+            "same backend switched actor sees only their manual audit"
+        );
+        reused.commit().await.unwrap();
+        let after_reuse: (i32, Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as(context_sql)
+                .fetch_one(&witness)
+                .await
+                .unwrap();
+        assert_eq!(after_reuse, (pid_before, None, None, None));
+        println!("W5 current read witness six NSNB=false/false nonowner/FORCE/RLSactive=true; same backend PID={pid_before}; local self/tenant/system after read/reuse empty");
+        project_harness::close_pool(witness).await;
         println!("W5 manual/correction canonical/day/history audit phases passed; original range preserved; existing consumer endedAt={effective_end} note={effective_note}");
         admin.close().await;
         drop(app);
