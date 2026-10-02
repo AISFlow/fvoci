@@ -22247,6 +22247,24 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "expectedActorId",
+            "in": "query",
+            "description": "Captured actor UUID; when present must match the authenticated actor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expectedSessionId",
+            "in": "query",
+            "description": "Captured credential UUID; when present must match the authenticated session or API token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -22256,6 +22274,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TimeEntryListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed captured context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
                 }
               }
             }
@@ -22272,6 +22300,16 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Captured actor or credential changed (timer_context_changed)",
             "content": {
               "application/json": {
                 "schema": {

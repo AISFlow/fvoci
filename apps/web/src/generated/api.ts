@@ -21566,7 +21566,12 @@ export interface operations {
     };
     list_time_entries: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Captured actor UUID; when present must match the authenticated actor */
+                expectedActorId?: string;
+                /** @description Captured credential UUID; when present must match the authenticated session or API token */
+                expectedSessionId?: string;
+            };
             header?: never;
             path: {
                 /** @description Workspace id */
@@ -21587,6 +21592,15 @@ export interface operations {
                     "application/json": components["schemas"]["TimeEntryListResponse"];
                 };
             };
+            /** @description Malformed captured context */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
             /** @description Authentication required */
             401: {
                 headers: {
@@ -21598,6 +21612,15 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Captured actor or credential changed (timer_context_changed) */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
