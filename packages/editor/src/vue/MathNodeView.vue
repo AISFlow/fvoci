@@ -2,6 +2,12 @@
 import { t } from "@fvoci/i18n";
 import { NodeViewWrapper, nodeViewProps } from "@tiptap/vue-3";
 import {
+  absolutePositionToRelativePosition,
+  ySyncPluginKey,
+  type ProsemirrorBinding,
+} from "@tiptap/y-tiptap";
+import * as Y from "yjs";
+import {
   computed,
   nextTick,
   onBeforeUnmount,
@@ -35,13 +41,35 @@ const composing = ref(false);
 let retired = false;
 let fieldLifetime = 0;
 let activeField: HTMLTextAreaElement | null = null;
+// Only an uninterrupted authorized field may explicitly supersede a peer's
+// latex. Retained drafts reopened after retirement keep their captured epoch.
+let uninterruptedField = false;
 const owner = shallowRef<{
   editor: typeof props.editor;
   node: typeof props.node;
   id: unknown;
   latex: string;
+  native: ReturnType<typeof mathAtomAt>;
 } | null>(null);
 const stale = computed(() => !!owner.value && latex.value !== owner.value.latex);
+
+/** The installed binding may rebuild an unchanged PM atom on a peer edit.
+ * Observe its current native owner, using the same public position boundary
+ * as inline Math; never infer ownership from its shifting position or label. */
+function mathAtomAt(position: number): { doc: Y.Doc; atom: Y.XmlElement } | null {
+  const sync = ySyncPluginKey.getState(props.editor.state) as
+    { doc: Y.Doc; type: Y.XmlFragment; binding: ProsemirrorBinding | null } | undefined;
+  if (!sync?.binding) return null;
+  const boundary = absolutePositionToRelativePosition(
+    position,
+    sync.type,
+    sync.binding.mapping,
+  ) as Y.RelativePosition;
+  const absolute = Y.createAbsolutePositionFromRelativePosition(boundary, sync.doc);
+  if (!(absolute?.type instanceof Y.XmlFragment)) return null;
+  const atom = absolute.type.get(absolute.index);
+  return atom instanceof Y.XmlElement && atom.nodeName === "math" ? { doc: sync.doc, atom } : null;
+}
 
 function writable(): boolean {
   return !retired && !props.editor.isDestroyed && props.editor.isEditable;
@@ -59,6 +87,7 @@ function ownsField(event: Event): boolean {
 }
 
 function closeField(): void {
+  uninterruptedField = false;
   fieldLifetime++;
   activeField = null;
   editing.value = false;
@@ -83,16 +112,18 @@ function commit(next: string): boolean {
   const position = props.getPos();
   if (typeof position !== "number") return false;
   const current = props.editor.state.doc.nodeAt(position);
+  const native = captured.native ? mathAtomAt(position) : null;
   if (
     !current ||
     current.type !== captured.node.type ||
-    (typeof captured.id === "string" && captured.id
-      ? current.attrs.id !== captured.id
+    current.attrs.id !== captured.id ||
+    (captured.native
+      ? native?.doc !== captured.native.doc || native.atom !== captured.native.atom
       : current !== captured.node) ||
-    current.attrs.latex !== captured.latex
+    (current.attrs.latex !== captured.latex && !uninterruptedField)
   )
     return false;
-  if (next !== captured.latex) props.updateAttributes({ latex: next });
+  if (next !== current.attrs.latex) props.updateAttributes({ latex: next });
   return true;
 }
 
@@ -102,6 +133,7 @@ function commit(next: string): boolean {
  * peer's change to this node while typing would reset what was typed. */
 async function open(): Promise<void> {
   if (!writable()) return;
+  uninterruptedField = draft.value === null;
   if (draft.value === null)
     owner.value = {
       editor: toRaw(props.editor),
@@ -110,6 +142,10 @@ async function open(): Promise<void> {
       node: toRaw(props.node),
       id: props.node.attrs.id as unknown,
       latex: latex.value,
+      native: (() => {
+        const position = props.getPos();
+        return typeof position === "number" ? mathAtomAt(position) : null;
+      })(),
     };
   const source = draft.value ?? latex.value;
   const lifetime = ++fieldLifetime;
@@ -135,7 +171,10 @@ function onBlur(event: FocusEvent): void {
   draft.value = value === latex.value ? null : value;
   // Keyboard focus may move to Cancel before activation. Keep its draft
   // private until that explicit action, just as pointer focus is prevented.
-  if (cancelButton.value && event.relatedTarget === cancelButton.value) return;
+  if (cancelButton.value && event.relatedTarget === cancelButton.value) {
+    uninterruptedField = false;
+    return;
+  }
   if (commit(value)) {
     draft.value = null;
     owner.value = null;

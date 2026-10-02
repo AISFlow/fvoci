@@ -503,6 +503,111 @@ function splitTextBlock(
   });
 }
 
+/** Joining consumes later block identities, not their presentation or runs.
+ * Match unchanged paragraph text in order before merging inline Markdown.
+ * New inter-paragraph whitespace has no inherited hidden formatting. */
+function joinTextBlocks(
+  raw: SourceNode[],
+  base: SourceNode[],
+  next: SourceNode,
+  path: string,
+  offset: number,
+): SourceNode | null {
+  const first = raw[0];
+  const projected = base[0];
+  if (
+    !first ||
+    !projected ||
+    !["paragraph", "heading"].includes(next.type) ||
+    [...raw, ...base].some((node) => node.type !== "paragraph") ||
+    [...raw, ...base, next].some((node) => (node.content ?? []).some((run) => run.type !== "text"))
+  )
+    return null;
+  for (const [index, node] of raw.entries()) {
+    for (const field of new Set([
+      ...Object.keys(first.attrs ?? {}),
+      ...Object.keys(node.attrs ?? {}),
+    ])) {
+      if (
+        field !== "id" &&
+        (Object.hasOwn(first.attrs ?? {}, field) !== Object.hasOwn(node.attrs ?? {}, field) ||
+          !sameValue(first.attrs?.[field], node.attrs?.[field]))
+      )
+        loss(
+          node,
+          `${path}.content.${String(offset + index)}`,
+          `attrs.${field}`,
+          "Joined blocks have distinct stored presentation or extension attributes; Cancel or join in rich mode.",
+        );
+    }
+  }
+  const text = (node: SourceNode) => (node.content ?? []).map((run) => run.text ?? "").join("");
+  const after = text(next);
+  const content: SourceNode[] = [];
+  const projection: SourceNode[] = [];
+  let cursor = 0;
+  let mapped = true;
+  for (const [index, node] of raw.entries()) {
+    const before = base[index];
+    const value = before ? text(before) : "";
+    if (before && text(node) !== value)
+      loss(
+        node,
+        `${path}.content.${String(offset + index)}`,
+        "content/text",
+        "Markdown changed literal text or Unicode in a joined block; Cancel or join in rich mode.",
+      );
+    const start = after.indexOf(value, cursor);
+    if (
+      !before ||
+      !value ||
+      start < 0 ||
+      after.indexOf(value, start + 1) >= 0 ||
+      !/^\s*$/.test(after.slice(cursor, start))
+    ) {
+      mapped = false;
+      break;
+    }
+    if (start > cursor) {
+      const separator = { type: "text", text: after.slice(cursor, start) };
+      content.push(separator);
+      projection.push(separator);
+    }
+    content.push(...(node.content ?? []));
+    projection.push(...(before.content ?? []));
+    cursor = start + value.length;
+  }
+  if (mapped && cursor === after.length)
+    return mergeNode(
+      { ...first, content },
+      { ...projected, content: projection },
+      next,
+      `${path}.content.${String(offset)}`,
+    );
+  // A simultaneous replacement is editable only when every run has the same
+  // full metadata. Checking just first runs hides later colors/links/attrs.
+  const metadata = (node: SourceNode) => {
+    const rest = { ...node };
+    Reflect.deleteProperty(rest, "text");
+    return rest;
+  };
+  const uniform = first.content?.[0];
+  for (const [index, node] of raw.entries()) {
+    if (
+      (node.content ?? []).some(
+        (run) => !sameValue(metadata(run), metadata(uniform ?? { type: "text" })),
+      )
+    )
+      loss(
+        node,
+        `${path}.content.${String(offset + index)}`,
+        "content/marks/attrs",
+        "Joined text replacement has ambiguous run formatting or extension metadata; Cancel or edit in rich mode.",
+      );
+  }
+  return mergeNode(first, projected, next, `${path}.content.${String(offset)}`);
+}
+
 function mergeChildren(
   raw: SourceNode[],
   base: SourceNode[],
@@ -562,20 +667,16 @@ function mergeChildren(
         return mergeNode(firstRaw, firstBase, node, `${path}.content.${String(offset + prefix)}`);
       return node;
     }
-    if (
-      newMiddle.length === 1 &&
-      oldMiddle.length > 1 &&
-      original &&
-      projected &&
-      oldMiddle.every(
-        (item) =>
-          item.type === "paragraph" && (item.content ?? []).every((child) => child.type === "text"),
-      ) &&
-      raw
-        .slice(prefix, base.length - suffix)
-        .every((item) => sameValue(item.content?.[0]?.marks, original.content?.[0]?.marks))
-    )
-      return mergeNode(original, projected, node, `${path}.content.${String(offset + prefix)}`);
+    if (newMiddle.length === 1 && oldMiddle.length > 1) {
+      const joined = joinTextBlocks(
+        raw.slice(prefix, base.length - suffix),
+        oldMiddle,
+        node,
+        path,
+        offset + prefix,
+      );
+      if (joined) return joined;
+    }
     // A pure insertion has no existing identity to guess; UniqueID allocates
     // only when its actual localized apply transaction reaches the editor.
     if (oldMiddle.length === 0) return node;

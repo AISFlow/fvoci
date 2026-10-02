@@ -370,6 +370,118 @@ test("source edit, actual peer edit and same-actor undo retain IDs and newest du
   }
 });
 
+test("Markdown join warns for later block attributes with zero-write Cancel and a safe join preserves later color after matched save/new client", async ({
+  page,
+  browser,
+  baseURL,
+}, testInfo) => {
+  await authenticatedHome(page);
+  const ws = await workspaceId(page.request);
+  const content = (right: boolean) => ({
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "join-first" },
+        content: [{ type: "text", text: "alpha" }],
+      },
+      {
+        type: "paragraph",
+        attrs: { id: "join-later", ...(right ? { textAlign: "right" } : {}) },
+        content: [
+          { type: "text", text: "beta " },
+          {
+            type: "text",
+            text: "감마 🧑‍💻",
+            marks: [{ type: "textStyle", attrs: { color: "#112233" } }],
+          },
+        ],
+      },
+      {
+        type: "paragraph",
+        attrs: { id: "join-neighbor" },
+        content: [{ type: "text", text: "그대로 둔 이웃" }],
+      },
+    ],
+  });
+  const lossDoc = await createDoc(page.request, ws, "문단 합치기 손실 경고", {
+    json: content(true),
+  });
+  await openDoc(page, lossDoc.path);
+  await recordIdentity(page);
+  const before = await savedBody(page.request, ws, lossDoc.id);
+  const dbBefore = restrictedDbBody(ws, lossDoc.id);
+  let contentRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() !== "GET" && request.url().includes(`/documents/${lossDoc.id}`))
+      contentRequests++;
+  });
+  await selectMode(page, "markdown");
+  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+  await field.fill((await field.inputValue()).replace("alpha\n\nbeta", "alpha beta"));
+  await page.getByRole("button", { name: "적용", exact: true }).click();
+  const warning = page.getByRole("alert").filter({ hasText: "join-later" });
+  await expect(warning).toContainText("document.content.1");
+  await expect(warning).toContainText("attrs.textAlign");
+  await expectIdentity(page, 0);
+  await page.screenshot({ path: testInfo.outputPath("w3-join-loss-warning.png"), fullPage: true });
+  await page.getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
+  await expect(field).toHaveValue(/alpha\n\nbeta/);
+  await selectMode(page, "rich");
+  await expectBlocks(page, ["alpha", "beta 감마 🧑‍💻", "그대로 둔 이웃"]);
+  await expectIdentity(page, 0);
+  expect(contentRequests).toBe(0);
+  expect(await savedBody(page.request, ws, lossDoc.id)).toEqual(before);
+  expect(restrictedDbBody(ws, lossDoc.id)).toEqual(dbBefore);
+
+  const safeDoc = await createDoc(page.request, ws, "문단 합치기 실제 저장", {
+    json: content(false),
+  });
+  await openDoc(page, safeDoc.path);
+  await recordIdentity(page);
+  await selectMode(page, "markdown");
+  await field.fill((await field.inputValue()).replace("alpha\n\nbeta", "alpha beta"));
+  await page.getByRole("button", { name: "적용", exact: true }).click();
+  await selectMode(page, "rich");
+  await expectBlocks(page, ["alpha beta 감마 🧑‍💻", "그대로 둔 이웃"]);
+  await expectIdentity(page);
+  await save(page);
+  const saved = await savedBody(page.request, ws, safeDoc.id);
+  expect(saved.content).toHaveLength(2);
+  expect(saved.content?.[0]?.attrs?.id).toBe("join-first");
+  expect(saved.content?.[0]?.content).toEqual([
+    { type: "text", text: "alpha beta " },
+    {
+      type: "text",
+      text: "감마 🧑‍💻",
+      marks: [
+        expect.objectContaining({
+          type: "textStyle",
+          attrs: expect.objectContaining({ color: "#112233" }),
+        }),
+      ],
+    },
+  ]);
+  expect(saved.content?.[1]?.attrs?.id).toBe("join-neighbor");
+  expect(restrictedDbBody(ws, safeDoc.id)).toMatchObject({ content: saved });
+  await page.screenshot({ path: testInfo.outputPath("w3-safe-join-saved.png"), fullPage: true });
+  const fresh = await newSignedInPage(browser, baseURL, admin);
+  try {
+    await openDoc(fresh.page, safeDoc.path);
+    await expectBlocks(fresh.page, ["alpha beta 감마 🧑‍💻", "그대로 둔 이웃"]);
+    expect(await savedBody(fresh.page.request, ws, safeDoc.id)).toEqual(saved);
+    expect(
+      await editorOf(fresh.page).evaluate((root) => {
+        const color: unknown = (root as EditorElement).editor.state.doc.child(0).lastChild?.marks[0]
+          ?.attrs.color;
+        return color;
+      }),
+    ).toBe("#112233");
+  } finally {
+    await fresh.context.close();
+  }
+});
+
 test("dirty source refuses delete-only peer changes and Cancel keeps current peer state", async ({
   browser,
   baseURL,
@@ -742,6 +854,133 @@ test("wrong/old-prefix ACK never copies or marks newest source edit saved, match
     expect(await savedBody(fresh.page.request, ws, doc.id)).toEqual(body);
   } finally {
     await fresh.context.close();
+    gate.releaseAll();
+  }
+});
+
+test("actual Markdown file export waits for the current ACK and downloads latest canonical text/reference/file while leaving an unapplied draft private", async ({
+  page,
+  browser,
+  baseURL,
+}, testInfo) => {
+  const gate = await sourceAckGate(page);
+  await authenticatedHome(page);
+  const ws = await workspaceId(page.request);
+  const target = await createDoc(page.request, ws, "다운로드 참조 대상");
+  const doc = await createDoc(page.request, ws, "최신 문서 다운로드", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "export-current" },
+          content: [{ type: "text", text: "원본" }],
+        },
+        { type: "embed", attrs: { id: "export-ref", entity: "document", ref: target.id } },
+      ],
+    },
+  });
+  const path = testInfo.outputPath("최신 첨부.txt");
+  const fileBytes = Buffer.from("실제 다운로드 첨부 내용\n", "utf8");
+  writeFileSync(path, fileBytes);
+  try {
+    await openDoc(page, doc.path);
+    await nativeFileDrop(page, path);
+    await expect(editorOf(page).locator('[data-state="stored"]')).toHaveCount(1);
+    await caretAtEndOf(page, 0);
+    await page.keyboard.type(" 가장 최신 한글");
+    await expect(blockAt(page, 0)).toHaveText("원본 가장 최신 한글");
+    await recordIdentity(page);
+    await observeActualAckDelivery(page);
+    await selectMode(page, "markdown");
+    const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+    await field.fill("공개하면 안 되는 비공개 Markdown 초안");
+    await expectIdentity(page, 0);
+    const exportUrl = `/api/v1/workspaces/${ws}/documents/${doc.id}/md`;
+    let exportRequests = 0;
+    let downloaded = false;
+    page.on("request", (request) => {
+      if (request.url().endsWith(exportUrl)) exportRequests++;
+    });
+    page.once("download", () => {
+      downloaded = true;
+    });
+    const response = page.waitForResponse((value) => value.url().endsWith(exportUrl));
+    const download = page.waitForEvent("download");
+    const before = gate.held.length;
+    await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
+    await page
+      .locator(".document-export-menu")
+      .getByRole("button", { name: "Markdown", exact: true })
+      .click();
+    await expect.poll(() => gate.held.length).toBeGreaterThan(before);
+    expect(exportRequests, "no export HTTP request before the genuine current ACK").toBe(0);
+    expect(downloaded).toBe(false);
+    await expect(page.locator('[data-collab-persisted="false"]')).toBeVisible();
+    const newest = gate.held.length - 1;
+    const ack = gate.held[newest];
+    if (!ack) throw new Error("Missing current export persist ACK");
+    gate.release(newest);
+    await expectAckDelivered(page, `persisted:${ack.id}`);
+    await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible();
+    const actualResponse = await response;
+    expect(actualResponse.status()).toBe(200);
+    const actualDownload = await download;
+    expect(actualDownload.suggestedFilename()).toBe("최신 문서 다운로드.md");
+    expect(await actualDownload.failure()).toBeNull();
+    const exportedPath = testInfo.outputPath("actual-latest-document.md");
+    await actualDownload.saveAs(exportedPath);
+    const bytes = readFileSync(exportedPath);
+    expect(bytes).toEqual(await actualResponse.body()); // Transport bytes, not a converter oracle.
+    const text = bytes.toString("utf8");
+    expect(text).toContain("# 최신 문서 다운로드\n\n");
+    expect(text).toContain("원본 가장 최신 한글");
+    expect(text).toContain(`[[doc:${target.id}]]`);
+    expect(text).not.toContain("비공개 Markdown 초안");
+    const body = await savedBody(page.request, ws, doc.id);
+    expect(body.content?.[0]).toMatchObject({
+      attrs: { id: "export-current" },
+      content: [{ type: "text", text: "원본 가장 최신 한글" }],
+    });
+    expect(body.content?.find((node) => node.type === "embed")).toMatchObject({
+      attrs: { id: "export-ref", entity: "document", ref: target.id },
+    });
+    const file = body.content?.find((node) => node.type === "attachment");
+    expect(file?.attrs).toMatchObject({
+      id: expect.any(String),
+      name: "최신 첨부.txt",
+      mime: "text/plain",
+      size: fileBytes.length,
+    });
+    const id = file?.attrs?.id;
+    if (typeof id !== "string") throw new Error("Missing actual uploaded file identity");
+    expect(text).toContain(`[최신 첨부.txt](attachment:${id})`);
+    expect(restrictedDbBody(ws, doc.id)).toMatchObject({ content: body });
+    await expect(field).toHaveValue("공개하면 안 되는 비공개 Markdown 초안");
+    await expectIdentity(page, 0);
+    expect(exportRequests).toBe(1);
+    const fresh = await newSignedInPage(browser, baseURL, admin);
+    try {
+      await openDoc(fresh.page, doc.path);
+      await expect(blockAt(fresh.page, 0)).toHaveText("원본 가장 최신 한글");
+      expect(await savedBody(fresh.page.request, ws, doc.id)).toEqual(body);
+      await expect(editorOf(fresh.page).locator('a[data-state="stored"]')).toHaveAttribute(
+        "href",
+        `/api/v1/workspaces/${ws}/attachments/${id}/download`,
+      );
+    } finally {
+      await fresh.context.close();
+    }
+    await testInfo.attach("w3-actual-file-export-current-ACK-DB.json", {
+      body: JSON.stringify({
+        ack: ack.id,
+        db: restrictedDbBody(ws, doc.id),
+        exportedBytes: bytes.length,
+        exportRequests,
+      }),
+      contentType: "application/json",
+    });
+  } finally {
     gate.releaseAll();
   }
 });
@@ -1296,6 +1535,117 @@ test("pending block-math permission notification makes zero local readonly write
   const body = await savedBody(page.request, ws, doc.id);
   expect(body.content?.[0]?.attrs?.latex).toBe("z + 1");
   expect(body.content?.[0]?.attrs?.id).toBe("math-owned");
+});
+
+test("an idless live Math atom survives an unrelated peer tail edit, then explicit blur saves its source to the same native owner", async ({
+  page,
+  browser,
+  baseURL,
+}, testInfo) => {
+  await authenticatedHome(page);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "수식 원격 꼬리와 명시적 blur", {
+    json: {
+      type: "doc",
+      content: [
+        { type: "math", attrs: { latex: "x" } },
+        {
+          type: "paragraph",
+          attrs: { id: "math-peer-tail" },
+          content: [{ type: "text", text: "꼬리" }],
+        },
+      ],
+    },
+  });
+  const gate = await sourceAckGate(page);
+  const peer = await newSignedInPage(browser, baseURL, admin);
+  try {
+    await openDoc(page, doc.path);
+    await openDoc(peer.page, doc.path);
+    await recordIdentity(page);
+    await observeActualAckDelivery(page);
+    await editorOf(page).evaluate((root) => {
+      const element = root as EditorElement & {
+        mathOwner?: { atom: Y.XmlElement; node: unknown; client: number; clock: number };
+      };
+      const atom = element.w3Witness?.fragment.get(0) as Y.XmlElement;
+      const node = element.editor.state.doc.child(0);
+      if (atom.nodeName !== "math" || !atom._item || node.attrs.id !== null)
+        throw new Error("Requires the actual legacy idless Math fixture");
+      element.mathOwner = { atom, node, client: atom._item.id.client, clock: atom._item.id.clock };
+    });
+    await page.locator(".fvoci-editor button.afn-math").click();
+    const field = page.getByLabel("수식 LaTeX");
+    await field.fill("y");
+    await caretAtEndOf(peer.page, 1);
+    await peer.page.keyboard.type(" 동료");
+    await expect(blockAt(page, 1)).toContainText("꼬리 동료");
+    await expect(field).toBeFocused();
+    await expect(field).toHaveValue("y");
+    const witness = await editorOf(page).evaluate((root) => {
+      const element = root as EditorElement & {
+        mathOwner?: { atom: Y.XmlElement; node: unknown; client: number; clock: number };
+      };
+      const owner = element.mathOwner;
+      const atom = element.w3Witness?.fragment.get(0) as Y.XmlElement;
+      if (!owner || !atom._item) throw new Error("Missing actual Math owner");
+      return {
+        sameAtom: atom === owner.atom,
+        nativeId: { client: atom._item.id.client, clock: atom._item.id.clock },
+        capturedId: { client: owner.client, clock: owner.clock },
+        deleted: atom._item.deleted,
+        rebuiltPm: element.editor.state.doc.child(0) !== owner.node,
+        logicalId: element.editor.state.doc.child(0).attrs.id as unknown,
+        latex: element.editor.state.doc.child(0).attrs.latex as unknown,
+      };
+    });
+    expect(witness).toMatchObject({
+      sameAtom: true,
+      deleted: false,
+      rebuiltPm: true,
+      logicalId: null,
+      latex: "x",
+    });
+    expect(witness.nativeId).toEqual(witness.capturedId);
+    await testInfo.attach("w3-math-unrelated-tail-native-owner.json", {
+      body: JSON.stringify(witness),
+      contentType: "application/json",
+    });
+    await field.blur();
+    for (const target of [page, peer.page])
+      await expect(target.locator(".fvoci-editor .afn-math annotation")).toHaveText("y");
+    const saved = save(page);
+    await expect.poll(() => gate.held.length).toBeGreaterThan(0);
+    const held = gate.held.at(-1);
+    if (!held) throw new Error("Missing genuine current Math persist ACK");
+    await expect(page.locator('[data-collab-persisted="true"]')).toHaveCount(0);
+    gate.release(gate.held.length - 1);
+    await expectAckDelivered(page, `persisted:${held.id}`);
+    await saved;
+    const body = await savedBody(page.request, ws, doc.id);
+    expect(body.content?.[0]).toMatchObject({ type: "math", attrs: { latex: "y" } });
+    expect(body.content?.[1]).toMatchObject({
+      attrs: { id: "math-peer-tail" },
+      content: [{ type: "text", text: "꼬리 동료" }],
+    });
+    expect(restrictedDbBody(ws, doc.id)).toMatchObject({ content: body });
+    await page.screenshot({
+      path: testInfo.outputPath("w3-math-unrelated-tail-saved.png"),
+      fullPage: true,
+    });
+    const fresh = await newSignedInPage(browser, baseURL, admin);
+    try {
+      await openDoc(fresh.page, doc.path);
+      await expect(fresh.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("y");
+      await expect(blockAt(fresh.page, 1)).toContainText("꼬리 동료");
+      expect(await savedBody(fresh.page.request, ws, doc.id)).toEqual(body);
+    } finally {
+      await fresh.context.close();
+    }
+  } finally {
+    gate.releaseAll();
+    await peer.context.close();
+  }
 });
 
 test("focused visible Math Cancel never publishes its draft, and detached old field events cannot consume a newly opened draft", async ({

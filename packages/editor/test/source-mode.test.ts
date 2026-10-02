@@ -17,6 +17,218 @@ const paragraph = (id: string, text: string) => ({
 });
 const document = (...content: unknown[]): TiptapDoc => ({ type: "doc", content });
 
+for (const kind of ["plain", "uniform", "later-color", "different-runs", "link"] as const) {
+  await test(`paragraph join ${kind} preserves independently declared full inline semantics and neighbors`, () => {
+    const color = { type: "textStyle", attrs: { color: "#112233" } };
+    const underline = { type: "underline" };
+    const link = {
+      type: "link",
+      attrs: {
+        href: "https://example.com/a%20b?q=한글#target",
+        title: "exact title",
+        target: "_self",
+      },
+    };
+    const firstMarks = kind === "uniform" ? [color] : kind === "different-runs" ? [underline] : [];
+    const laterMarks = kind === "plain" ? [] : kind === "link" ? [color, link] : [color];
+    const fixture = setup(
+      document(
+        paragraph("outside-before", "untouched"),
+        {
+          type: "paragraph",
+          attrs: { id: "join-first" },
+          content: [{ type: "text", text: "alpha", marks: firstMarks }],
+        },
+        {
+          type: "paragraph",
+          attrs: { id: "join-later" },
+          content: [
+            { type: "text", text: "beta ", marks: kind === "uniform" ? [color] : [] },
+            { type: "text", text: "감마 🧑‍💻", marks: laterMarks },
+          ],
+        },
+        {
+          type: "embed",
+          attrs: {
+            id: "outside-ref",
+            entity: "document",
+            ref: "10000000-0000-4000-8000-000000000003",
+          },
+        },
+        {
+          type: "attachment",
+          attrs: {
+            id: "10000000-0000-4000-8000-000000000006",
+            name: "exact 한글.pdf",
+            mime: "application/pdf",
+            size: 17,
+          },
+        },
+      ),
+    );
+    try {
+      const capture = fixture.session.capture(fixture.state.doc);
+      const before = Y.encodeStateAsUpdate(fixture.ydoc);
+      const source = capture.source.replace("alpha\n\nbeta", "alpha beta");
+      assert.notEqual(source, capture.source);
+      const proposal = fixture.session.prepare(capture, source, fixture.state);
+      assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+      assert.ok(proposal.transaction);
+      const after = fixture.state.apply(proposal.transaction).doc;
+      assert.equal(after.childCount, 4);
+      const joined = after.child(1);
+      assert.equal(joined.attrs.id, "join-first");
+      assert.equal(joined.textContent, "alpha beta 감마 🧑‍💻");
+      const marked = joined.content.content.find((run) => run.text?.includes("감마"));
+      assert.ok(marked);
+      assert.equal(
+        marked.marks.find((mark) => mark.type.name === "textStyle")?.attrs.color,
+        kind === "plain" ? undefined : "#112233",
+      );
+      const alpha = joined.child(0);
+      assert.equal(
+        alpha.marks.some((mark) => mark.type.name === "underline"),
+        kind === "different-runs",
+      );
+      assert.equal(
+        alpha.marks.find((mark) => mark.type.name === "textStyle")?.attrs.color,
+        kind === "uniform" ? "#112233" : undefined,
+      );
+      if (kind === "link") {
+        const actual = marked.marks.find((mark) => mark.type.name === "link");
+        assert.ok(actual);
+        for (const [field, expected] of Object.entries(link.attrs))
+          assert.equal(actual.attrs[field], expected);
+      }
+      assert.ok(after.child(0).eq(fixture.state.doc.child(0)));
+      assert.ok(after.child(2).eq(fixture.state.doc.child(3)));
+      assert.ok(after.child(3).eq(fixture.state.doc.child(4)));
+      assert.deepEqual(
+        Y.encodeStateAsUpdate(fixture.ydoc),
+        before,
+        "preparation is observation only",
+      );
+    } finally {
+      fixture.close();
+    }
+  });
+}
+
+for (const field of ["textAlign", "futureFlag"] as const) {
+  await test(`paragraph join refuses a later distinct ${field} with precise loss and zero-write Cancel`, () => {
+    const fixture = setup(
+      document(
+        paragraph("outside", "neighbor"),
+        paragraph("join-first", "alpha"),
+        paragraph("join-later", "beta gamma"),
+      ),
+    );
+    const later = fixture.ydoc.getXmlFragment("prosemirror").get(2);
+    assert.ok(later instanceof Y.XmlElement);
+    later.setAttribute(field, field === "textAlign" ? "right" : "preserve");
+    const state = EditorState.create({
+      schema,
+      doc: schema.nodeFromJSON(yDocToTiptapJson(fixture.ydoc)),
+    });
+    const manager = new Y.UndoManager(fixture.ydoc.getXmlFragment("prosemirror"));
+    let updates = 0;
+    fixture.ydoc.on("update", () => updates++);
+    try {
+      const capture = fixture.session.capture(state.doc);
+      const before = Y.encodeStateAsUpdate(fixture.ydoc);
+      const proposal = fixture.session.prepare(
+        capture,
+        capture.source.replace("alpha\n\nbeta", "alpha beta"),
+        state,
+      );
+      assert.equal(proposal.status, "loss");
+      assert.equal(proposal.transaction, undefined);
+      assert.equal(proposal.diagnostics[0]?.id, "join-later");
+      assert.equal(proposal.diagnostics[0].path, "document.content.2");
+      assert.equal(proposal.diagnostics[0].field, `attrs.${field}`);
+      fixture.session.destroy(); // Cancel retires the private proposal, never compensates with a write.
+      assert.equal(updates, 0);
+      assert.equal(manager.undoStack.length, 0);
+      assert.deepEqual(Y.encodeStateAsUpdate(fixture.ydoc), before);
+      assert.equal(later.getAttribute(field), field === "textAlign" ? "right" : "preserve");
+    } finally {
+      manager.destroy();
+      fixture.close();
+    }
+  });
+}
+
+await test("paragraph join permits identical presentation attrs on every consumed block", () => {
+  const fixture = setup(
+    document(
+      ...["alpha", "beta", "gamma"].map((text, index) => ({
+        ...paragraph(`uniform-${String(index)}`, text),
+        attrs: { id: `uniform-${String(index)}`, textAlign: "right" },
+      })),
+    ),
+  );
+  try {
+    const capture = fixture.session.capture(fixture.state.doc);
+    const proposal = fixture.session.prepare(capture, "alpha beta gamma", fixture.state);
+    assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+    assert.ok(proposal.transaction);
+    assert.equal(proposal.transaction.doc.childCount, 1);
+    assert.equal(proposal.transaction.doc.child(0).attrs.textAlign, "right");
+    assert.equal(proposal.transaction.doc.child(0).attrs.id, "uniform-0");
+    assert.equal(proposal.transaction.doc.textContent, "alpha beta gamma");
+  } finally {
+    fixture.close();
+  }
+});
+
+await test("joined replacement refuses hidden metadata on a later run rather than inheriting the first run", () => {
+  const fixture = setup(
+    document(paragraph("outside", "neighbor"), paragraph("join-first", "alpha"), {
+      type: "paragraph",
+      attrs: { id: "join-later" },
+      content: [
+        { type: "text", text: "beta " },
+        {
+          type: "text",
+          text: "gamma",
+          marks: [{ type: "textStyle", attrs: { color: "#112233" } }],
+        },
+      ],
+    }),
+  );
+  try {
+    const capture = fixture.session.capture(fixture.state.doc);
+    const before = Y.encodeStateAsUpdate(fixture.ydoc);
+    const proposal = fixture.session.prepare(
+      capture,
+      "neighbor\n\nALPHA BETA GAMMA",
+      fixture.state,
+    );
+    assert.equal(proposal.status, "loss");
+    assert.equal(proposal.transaction, undefined);
+    assert.equal(proposal.diagnostics[0]?.id, "join-later");
+    assert.equal(proposal.diagnostics[0].path, "document.content.2");
+    assert.equal(proposal.diagnostics[0].field, "content/marks/attrs");
+    assert.deepEqual(Y.encodeStateAsUpdate(fixture.ydoc), before);
+  } finally {
+    fixture.close();
+  }
+});
+
+await test("joined replacement of plain uniform runs stays directly editable", () => {
+  const fixture = setup(document(paragraph("first", "alpha"), paragraph("later", "beta gamma")));
+  try {
+    const capture = fixture.session.capture(fixture.state.doc);
+    const proposal = fixture.session.prepare(capture, "ALPHA BETA GAMMA", fixture.state);
+    assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+    assert.ok(proposal.transaction);
+    assert.equal(proposal.transaction.doc.textContent, "ALPHA BETA GAMMA");
+    assert.equal(proposal.transaction.doc.child(0).attrs.id, "first");
+  } finally {
+    fixture.close();
+  }
+});
+
 function setup(input: TiptapDoc) {
   const ydoc = tiptapJsonToYDoc(input);
   const state = EditorState.create({ schema, doc: schema.nodeFromJSON(yDocToTiptapJson(ydoc)) });

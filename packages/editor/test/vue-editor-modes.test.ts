@@ -15,7 +15,13 @@ import {
   type Transaction,
 } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
-import { initProseMirrorDoc, ySyncPlugin, ySyncPluginKey, yUndoPlugin } from "@tiptap/y-tiptap";
+import {
+  absolutePositionToRelativePosition,
+  initProseMirrorDoc,
+  ySyncPlugin,
+  ySyncPluginKey,
+  yUndoPlugin,
+} from "@tiptap/y-tiptap";
 import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "../src/collab-tiptap.ts";
 import { rawEditorPreflight, SourceModeSession } from "../src/source-mode.ts";
@@ -683,6 +689,602 @@ function liveEditor(ydoc: Y.Doc) {
   };
 }
 
+await test("actual source join loss/Cancel dispatches zero writes and a delete-only peer invalidates a safe join", () => {
+  const doc = tiptapJsonToYDoc({
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "join-first" },
+        content: [{ type: "text", text: "alpha" }],
+      },
+      {
+        type: "paragraph",
+        attrs: { id: "join-later", textAlign: "right" },
+        content: [{ type: "text", text: "beta gamma" }],
+      },
+    ],
+  });
+  const live = liveEditor(doc);
+  const source = new SourceModeSession(
+    doc,
+    () => 1,
+    () => true,
+  );
+  const before = Y.encodeStateAsUpdate(doc);
+  let updates = 0;
+  let persistCallbacks = 0;
+  doc.on("update", () => {
+    updates++;
+    persistCallbacks++;
+  });
+  try {
+    const capture = source.capture(live.editor.state.doc);
+    const proposal = source.prepare(capture, "alpha beta gamma", live.editor.state);
+    assert.equal(proposal.status, "loss");
+    assert.equal(proposal.diagnostics[0]?.id, "join-later");
+    assert.equal(proposal.diagnostics[0].field, "attrs.textAlign");
+    assert.equal(source.apply(proposal, live.editor), false);
+    source.destroy(); // Actual publication guard refuses even a retained proposal after Cancel.
+    assert.equal(source.apply(proposal, live.editor), false);
+    assert.equal(updates, 0);
+    assert.equal(persistCallbacks, 0);
+    assert.equal(live.manager.undoStack.length, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+  } finally {
+    source.destroy();
+    live.close();
+    doc.destroy();
+  }
+
+  const safeDoc = tiptapJsonToYDoc({
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "safe-first" },
+        content: [{ type: "text", text: "alpha" }],
+      },
+      {
+        type: "paragraph",
+        attrs: { id: "safe-later" },
+        content: [{ type: "text", text: "beta gamma" }],
+      },
+    ],
+  });
+  const safe = liveEditor(safeDoc);
+  const session = new SourceModeSession(
+    safeDoc,
+    () => 1,
+    () => true,
+  );
+  const peer = new Y.Doc({ gc: false });
+  Y.applyUpdate(peer, Y.encodeStateAsUpdate(safeDoc));
+  try {
+    const capture = session.capture(safe.editor.state.doc);
+    const proposal = session.prepare(capture, "alpha beta gamma", safe.editor.state);
+    assert.equal(proposal.status, "ready");
+    const vector = Y.encodeStateVector(safeDoc);
+    peer.getXmlFragment("prosemirror").delete(1, 1);
+    Y.applyUpdate(safeDoc, Y.encodeStateAsUpdate(peer, vector), "peer-delete");
+    assert.deepEqual(
+      Y.encodeStateVector(safeDoc),
+      vector,
+      "deletion-only change keeps the state vector",
+    );
+    const current = Y.encodeStateAsUpdate(safeDoc);
+    let publication = 0;
+    safeDoc.on("update", () => publication++);
+    assert.equal(session.isCurrent(capture), false);
+    assert.equal(session.prepare(capture, "alpha beta gamma", safe.editor.state).status, "stale");
+    assert.equal(session.apply(proposal, safe.editor), false);
+    assert.equal(publication, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(safeDoc), current);
+    assert.equal(safe.editor.state.doc.textContent, "alpha");
+  } finally {
+    session.destroy();
+    safe.close();
+    peer.destroy();
+    safeDoc.destroy();
+  }
+});
+
+await test("actual ySync join preserves exact native peer ownership/full state through two undo-redo cycles and rejects a whitespace-only peer deletion", () => {
+  const doc = tiptapJsonToYDoc({
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "join-first" },
+        content: [{ type: "text", text: "alpha" }],
+      },
+      {
+        type: "paragraph",
+        attrs: { id: "join-later" },
+        content: [
+          { type: "text", text: "beta " },
+          {
+            type: "text",
+            text: "gamma",
+            marks: [{ type: "textStyle", attrs: { color: "#112233" } }],
+          },
+        ],
+      },
+      {
+        type: "heading",
+        attrs: { id: "join-neighbor-link", level: 2 },
+        content: [
+          {
+            type: "text",
+            text: "jump",
+            marks: [
+              {
+                type: "link",
+                attrs: { href: "#join-first", title: "exact neighbor", target: "_self" },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        type: "codeBlock",
+        attrs: { id: "join-neighbor-code", language: "text" },
+        content: [{ type: "text", text: "line1\nline2" }],
+      },
+      {
+        type: "paragraph",
+        attrs: { id: "join-neighbor-break" },
+        content: [
+          { type: "text", text: "left" },
+          { type: "hardBreak" },
+          { type: "text", text: "right" },
+        ],
+      },
+    ],
+  });
+  const peerDoc = new Y.Doc({ gc: false });
+  Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(doc));
+  const local = liveEditor(doc);
+  const peer = liveEditor(peerDoc);
+  const wire = Symbol("join-wire");
+  let peerUpdate: Uint8Array | undefined;
+  const history: Uint8Array[] = [];
+  doc.on("update", (value, origin) => {
+    if (origin === local.manager) history.push(value);
+    if (origin !== wire) Y.applyUpdate(peerDoc, value, wire);
+  });
+  peerDoc.on("update", (value, origin) => {
+    if (origin === ySyncPluginKey) peerUpdate = value;
+    if (origin !== wire) Y.applyUpdate(doc, value, wire);
+  });
+  const source = new SourceModeSession(
+    doc,
+    () => 1,
+    () => true,
+  );
+  const first = doc.getXmlFragment("prosemirror").get(0);
+  assert.ok(first instanceof Y.XmlElement && first._item);
+  const firstId = first._item.id;
+  const firstText = first.get(0);
+  assert.ok(firstText instanceof Y.XmlText && firstText._item);
+  const firstTextId = firstText._item.id;
+  const rawNeighbors = yDocToTiptapJson(doc).content?.slice(2);
+  assert.ok(rawNeighbors);
+  const neighbors = rawNeighbors;
+  const peers = [local, peer];
+  const nativeNeighbors = peers.map((live) =>
+    [2, 3, 4].map((index) => {
+      const node = (live === local ? doc : peerDoc).getXmlFragment("prosemirror").get(index);
+      assert.ok(node instanceof Y.XmlElement && node._item);
+      return { node, id: node._item.id, pm: live.editor.state.doc.child(index) };
+    }),
+  );
+  const gamma = {
+    type: "text",
+    text: "gamma",
+    marks: [{ type: "textStyle", attrs: { color: "#112233" } }],
+  };
+  const second = {
+    type: "paragraph",
+    attrs: { id: "join-later" },
+    content: [{ type: "text", text: "beta " }, gamma],
+  };
+  function stage(joined: boolean, text: string) {
+    const expected = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "join-first" },
+          content: joined ? [{ type: "text", text }, gamma] : [{ type: "text", text }],
+        },
+        ...(joined ? [] : [second]),
+        ...neighbors,
+      ],
+    };
+    for (const [index, live] of peers.entries()) {
+      const currentDoc = index === 0 ? doc : peerDoc;
+      assert.deepEqual(
+        live.editor.state.doc.toJSON(),
+        live.editor.schema.nodeFromJSON(expected).toJSON(),
+      );
+      // Full wire data: clone preserves own fields/undefined/Unicode/marks while
+      // removing only JS prototype identity from schema-created attr maps.
+      assert.deepEqual(structuredClone(yDocToTiptapJson(currentDoc)), structuredClone(expected));
+      for (const [position, original] of (nativeNeighbors[index] ?? []).entries()) {
+        const offset = (joined ? 1 : 2) + position;
+        const current = currentDoc.getXmlFragment("prosemirror").get(offset);
+        assert.equal(current, original.node);
+        assert.deepEqual(current._item?.id, original.id);
+        assert.ok(live.editor.state.doc.child(offset).eq(original.pm));
+      }
+    }
+    assert.ok(Y.equalSnapshots(Y.snapshot(doc), Y.snapshot(peerDoc)));
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), Y.encodeStateAsUpdate(peerDoc));
+  }
+  try {
+    const capture = source.capture(local.editor.state.doc);
+    const proposal = source.prepare(
+      capture,
+      capture.source.replace("alpha\n\nbeta", "alpha beta"),
+      local.editor.state,
+    );
+    assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+    assert.equal(source.apply(proposal, local.editor), true);
+    assert.equal(local.manager.undoStack.length, 1);
+    stage(true, "alpha beta ");
+    peer.host.dispatch(peer.editor.state.tr.insertText(" 동료", 6));
+    assert.ok(peerUpdate);
+    const decoded = Y.decodeUpdate(peerUpdate);
+    const inserted = decoded.structs.filter(
+      (item): item is Y.Item =>
+        item instanceof Y.Item &&
+        item.id.client === peerDoc.clientID &&
+        item.content instanceof Y.ContentString,
+    );
+    assert.equal(inserted.length, 1);
+    const insertion = inserted[0];
+    assert.ok(insertion);
+    const peerClock = insertion.id.clock;
+    // The PM operand and native insertion differ here: common-prefix binding
+    // reuses the local leading space. Keep the original guessed failure in P.
+    assert.equal(insertion.content.getContent().join(""), "동료 ");
+    assert.equal(insertion.length, 3);
+    assert.equal(decoded.ds.clients.size, 0);
+    const from = Y.createRelativePositionFromTypeIndex(firstText, 6, 0);
+    const to = Y.createRelativePositionFromTypeIndex(firstText, 9, -1);
+    assert.ok(from.item && to.item);
+    assert.equal(from.item.client, peerDoc.clientID);
+    assert.equal(from.item.clock, insertion.id.clock);
+    assert.equal(to.item.client, peerDoc.clientID);
+    assert.equal(to.item.clock, insertion.id.clock + 2);
+    function peerInvariant(currentDoc: Y.Doc, offset: number) {
+      const left = Y.createAbsolutePositionFromRelativePosition(from, currentDoc);
+      const right = Y.createAbsolutePositionFromRelativePosition(to, currentDoc);
+      assert.ok(left && right);
+      assert.equal(left.index, offset);
+      assert.equal(right.index, offset + 3);
+      assert.equal(left.type, right.type);
+      assert.ok(left.type instanceof Y.XmlText && left.type.parent instanceof Y.XmlElement);
+      assert.equal(left.type.parent.getAttribute("id"), "join-first");
+      assert.deepEqual(left.type.parent._item?.id, firstId);
+      assert.deepEqual(left.type._item?.id, firstTextId);
+      const delta: unknown = left.type.toDelta();
+      assert.ok(Array.isArray(delta));
+      let position = 0;
+      let plain = "";
+      for (const value of delta as unknown[]) {
+        assert.ok(
+          typeof value === "object" &&
+            value !== null &&
+            "insert" in value &&
+            typeof value.insert === "string",
+        );
+        if (position < right.index && position + value.insert.length > left.index)
+          assert.deepEqual(
+            "attributes" in value ? value.attributes : {},
+            {},
+            "peer marks remain exactly plain",
+          );
+        position += value.insert.length;
+        plain += value.insert;
+      }
+      const text = plain.slice(left.index, right.index);
+      assert.equal(text, "동료 ");
+      assert.equal(Buffer.from(text).toString("hex"), "eb8f99eba38c20");
+      for (let clock = peerClock; clock < peerClock + 3; clock++) {
+        const item = Y.getItem(currentDoc.store, Y.createID(peerDoc.clientID, clock));
+        assert.ok(item instanceof Y.Item);
+        assert.equal(item.id.client, peerDoc.clientID);
+        assert.equal(
+          item.deleted,
+          false,
+          "every peer-owned character including space remains live",
+        );
+        assert.equal(item.redone, null, "local history never clones peer ownership");
+      }
+    }
+    stage(true, "alpha 동료 beta ");
+    for (const current of [doc, peerDoc]) peerInvariant(current, 6);
+    assert.equal(peer.manager.undoStack.length, 1);
+    for (let cycle = 0; cycle < 2; cycle++) {
+      local.manager.undo();
+      stage(false, "alpha동료 ");
+      for (const current of [doc, peerDoc]) peerInvariant(current, 5);
+      assert.equal(local.manager.undoStack.length, 0);
+      assert.equal(local.manager.redoStack.length, 1);
+      assert.equal(peer.manager.undoStack.length, 1);
+      local.manager.redo();
+      stage(true, "alpha 동료 beta ");
+      for (const current of [doc, peerDoc]) peerInvariant(current, 6);
+      assert.equal(local.manager.undoStack.length, 1);
+      assert.equal(local.manager.redoStack.length, 0);
+      assert.equal(peer.manager.undoStack.length, 1);
+    }
+    assert.equal(history.length, 4);
+    for (const update of history) {
+      const deletes = Y.decodeUpdate(update).ds.clients.get(peerDoc.clientID) ?? [];
+      assert.ok(
+        deletes.every(
+          (range) =>
+            range.clock + range.len <= insertion.id.clock || range.clock >= insertion.id.clock + 3,
+        ),
+        "local undo/redo deletes zero clocks in the complete peer range",
+      );
+    }
+    const negative = new Y.Doc({ gc: false });
+    try {
+      Y.applyUpdate(negative, Y.encodeStateAsUpdate(doc));
+      const end = Y.createAbsolutePositionFromRelativePosition(to, negative);
+      assert.ok(end && end.type instanceof Y.XmlText);
+      const delta: unknown = end.type.toDelta();
+      assert.ok(Array.isArray(delta));
+      const inserts: string[] = [];
+      for (const part of delta as unknown[]) {
+        assert.ok(
+          typeof part === "object" &&
+            part !== null &&
+            "insert" in part &&
+            typeof part.insert === "string",
+        );
+        inserts.push(part.insert);
+      }
+      assert.equal(inserts.join("").at(end.index - 1), " ");
+      end.type.delete(end.index - 1, 1); // Genuine deletion of only the peer-owned space.
+      assert.throws(() => {
+        peerInvariant(negative, 6);
+      }, assert.AssertionError);
+      assert.notDeepEqual(yDocToTiptapJson(negative), yDocToTiptapJson(doc));
+    } finally {
+      negative.destroy();
+    }
+  } finally {
+    source.destroy();
+    local.close();
+    peer.close();
+    doc.destroy();
+    peerDoc.destroy();
+  }
+});
+
+for (const schedule of [
+  "idless-normal",
+  "idless-peer-tail",
+  "identified-replaced-same-id",
+  "idless-replaced",
+  "idless-idallocated",
+  "peer-newest",
+  "retired-peer-newest",
+  "readonly",
+  "dispose",
+  "composition",
+  "cancel",
+] as const) {
+  await test(`actual Math atom ownership ${schedule} preserves ordinary blur and rejects a different or retired native owner`, async () => {
+    const identified =
+      schedule === "identified-replaced-same-id" ||
+      schedule === "peer-newest" ||
+      schedule === "retired-peer-newest";
+    const seed = tiptapJsonToYDoc({
+      type: "doc",
+      content: [
+        { type: "math", attrs: { latex: "x", ...(identified ? { id: "math-same-id" } : {}) } },
+        { type: "paragraph", attrs: { id: "tail" }, content: [{ type: "text", text: "tail" }] },
+      ],
+    });
+    const doc = new Y.Doc({ gc: false });
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(seed));
+    seed.destroy();
+    const peerDoc = new Y.Doc({ gc: false });
+    Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(doc));
+    const local = liveEditor(doc);
+    const peer = liveEditor(peerDoc);
+    const original = doc.getXmlFragment("prosemirror").get(0);
+    assert.ok(original instanceof Y.XmlElement && original._item);
+    const nativeId = original._item.id;
+    const wire = Symbol("math-wire");
+    doc.on("update", (value, origin) => {
+      if (origin !== wire) Y.applyUpdate(peerDoc, value, wire);
+    });
+    peerDoc.on("update", (value, origin) => {
+      if (origin !== wire) Y.applyUpdate(doc, value, wire);
+    });
+    const props = Vue.reactive({
+      editor: Vue.markRaw(local.editor),
+      node: local.editor.state.doc.child(0),
+      getPos: () => 0,
+      updateAttributes(attrs: Record<string, unknown>) {
+        local.host.dispatch(
+          local.editor.state.tr.setNodeMarkup(0, undefined, {
+            ...local.editor.state.doc.child(0).attrs,
+            ...attrs,
+          }),
+        );
+        props.node = local.editor.state.doc.child(0);
+      },
+    });
+    const field = { value: "", focus() {} };
+    const input = Vue.shallowRef(field);
+    const cancelButton = Vue.shallowRef(null);
+    const unmount: (() => void)[] = [];
+    const source = readFileSync(new URL("../src/vue/MathNodeView.vue", import.meta.url), "utf8")
+      .split('<script setup lang="ts">')[1]
+      ?.split("</script>")[0];
+    assert.ok(source);
+    const editable = readFileSync(new URL("../src/vue/use-editable.ts", import.meta.url), "utf8");
+    const code =
+      editable
+        .slice(editable.indexOf("export function useEditable"))
+        .replace("export function", "function") +
+      "\n" +
+      source.slice(source.indexOf("const editable ="));
+    const effects = Vue.effectScope();
+    const controls = effects.run(
+      () =>
+        runInNewContext(
+          ts.transpileModule(
+            `(()=>{${code};return {open,onInput,onBlur,cancel,onCompositionStart,onCompositionEnd,draft:()=>draft.value};})()`,
+            { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext } },
+          ).outputText,
+          {
+            ...Vue,
+            props,
+            Y,
+            ySyncPluginKey,
+            absolutePositionToRelativePosition,
+            useTemplateRef: (name: string) => (name === "input" ? input : cancelButton),
+            useMathMl: () => ({ html: null, failed: false }),
+            onBeforeUnmount: (fn: () => void) => unmount.push(fn),
+            t: (key: string) => key,
+          },
+        ) as unknown,
+    ) as {
+      open(): Promise<void>;
+      onInput(event: Event): void;
+      onBlur(event: FocusEvent): void;
+      cancel(): void;
+      onCompositionStart(event: Event): void;
+      onCompositionEnd(event: Event): void;
+      draft(): string | null;
+    };
+    const event = (type: string) => {
+      const value = new Event(type);
+      Object.defineProperty(value, "target", { value: field });
+      return value;
+    };
+    try {
+      const nodeBefore = Vue.toRaw(props.node);
+      await controls.open();
+      assert.equal(field.value, "x");
+      const ownDraft =
+        schedule === "peer-newest" || schedule === "retired-peer-newest" ? "a+b" : "y";
+      field.value = ownDraft;
+      controls.onInput(event("input"));
+      if (schedule === "idless-peer-tail") {
+        peer.host.dispatch(peer.editor.state.tr.insertText(" peer", 6));
+        props.node = local.editor.state.doc.child(0);
+        assert.notEqual(
+          Vue.toRaw(props.node),
+          nodeBefore,
+          "actual peer ySync rebuilds the PM atom object",
+        );
+        assert.equal(doc.getXmlFragment("prosemirror").get(0), original);
+        assert.deepEqual(original._item.id, nativeId);
+        assert.equal(original._item.deleted, false);
+        assert.equal(local.editor.state.doc.child(0).attrs.latex, "x");
+      }
+      if (schedule === "identified-replaced-same-id" || schedule === "idless-replaced") {
+        const replacement = new Y.XmlElement("math");
+        replacement.setAttribute("latex", "x");
+        if (identified) replacement.setAttribute("id", "math-same-id");
+        peerDoc.transact(() => {
+          const fragment = peerDoc.getXmlFragment("prosemirror");
+          fragment.delete(0, 1);
+          fragment.insert(0, [replacement]);
+        });
+        props.node = local.editor.state.doc.child(0);
+        assert.notEqual(doc.getXmlFragment("prosemirror").get(0), original);
+        assert.equal(original._item.deleted, true);
+        assert.equal(props.node.attrs.latex, "x");
+        if (identified) assert.equal(props.node.attrs.id, "math-same-id");
+      }
+      if (schedule === "idless-idallocated") {
+        const atom = peerDoc.getXmlFragment("prosemirror").get(0);
+        assert.ok(atom instanceof Y.XmlElement);
+        atom.setAttribute("id", "new-logical-owner");
+        props.node = local.editor.state.doc.child(0);
+        assert.equal(doc.getXmlFragment("prosemirror").get(0), original);
+        assert.equal(props.node.attrs.id, "new-logical-owner");
+      }
+      if (schedule === "retired-peer-newest") {
+        local.editor.setEditable(false);
+        await Vue.nextTick();
+      }
+      if (schedule === "peer-newest" || schedule === "retired-peer-newest") {
+        peer.host.dispatch(
+          peer.editor.state.tr.setNodeMarkup(0, undefined, {
+            ...peer.editor.state.doc.child(0).attrs,
+            latex: "peer-newest",
+          }),
+        );
+        props.node = local.editor.state.doc.child(0);
+        for (const live of [local, peer])
+          assert.equal(live.editor.state.doc.child(0).attrs.latex, "peer-newest");
+        assert.equal(doc.getXmlFragment("prosemirror").get(0), original);
+        assert.equal(field.value, ownDraft);
+      }
+      if (schedule === "retired-peer-newest") {
+        const retiredState = Y.encodeStateAsUpdate(doc);
+        local.editor.setEditable(true);
+        await Vue.nextTick();
+        controls.onBlur(event("blur") as FocusEvent);
+        assert.deepEqual(Y.encodeStateAsUpdate(doc), retiredState);
+        await controls.open();
+        assert.equal(field.value, ownDraft);
+      }
+      if (schedule === "readonly") {
+        local.editor.setEditable(false);
+        await Vue.nextTick();
+      }
+      if (schedule === "dispose") for (const callback of unmount) callback();
+      if (schedule === "composition") controls.onCompositionStart(event("compositionstart"));
+      if (schedule === "cancel") controls.cancel();
+      const before = Y.encodeStateAsUpdate(doc);
+      let updates = 0;
+      doc.on("update", () => updates++);
+      controls.onBlur(event("blur") as FocusEvent);
+      const allowed =
+        schedule === "idless-normal" ||
+        schedule === "idless-peer-tail" ||
+        schedule === "peer-newest";
+      const expected = allowed
+        ? ownDraft
+        : schedule === "retired-peer-newest"
+          ? "peer-newest"
+          : "x";
+      for (const live of [local, peer])
+        assert.equal(live.editor.state.doc.child(0).attrs.latex, expected);
+      assert.equal(updates, allowed ? 1 : 0);
+      if (!allowed) assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+      if (schedule === "idless-peer-tail")
+        assert.equal(local.editor.state.doc.child(1).textContent, "tail peer");
+      if (
+        schedule === "identified-replaced-same-id" ||
+        schedule === "idless-replaced" ||
+        schedule === "retired-peer-newest"
+      )
+        assert.equal(controls.draft(), ownDraft);
+    } finally {
+      effects.stop();
+      for (const callback of unmount) callback();
+      local.close();
+      peer.close();
+      doc.destroy();
+      peerDoc.destroy();
+    }
+  });
+}
+
 await test("actual block-math watcher and commands make zero readonly or retired writes, retain a readable draft and refuse to overwrite a peer's newer latex", async () => {
   const doc = tiptapJsonToYDoc({
     type: "doc",
@@ -762,6 +1364,9 @@ await test("actual block-math watcher and commands make zero readonly or retired
         {
           ...Vue,
           props,
+          Y,
+          ySyncPluginKey,
+          absolutePositionToRelativePosition,
           t: (key: string) => key,
           useTemplateRef: () => input,
           useMathMl: () => ({ html: null, failed: false }),
@@ -849,6 +1454,8 @@ await test("actual block-math watcher and commands make zero readonly or retired
     await controls.open();
     field.value = "stale private";
     controls.onInput(event("input"));
+    local.editor.setEditable(false);
+    await Vue.nextTick();
     peer.host.dispatch(
       peer.editor.state.tr.setNodeMarkup(0, undefined, {
         ...peer.editor.state.doc.child(0).attrs,
@@ -858,6 +1465,12 @@ await test("actual block-math watcher and commands make zero readonly or retired
     props.node = local.editor.state.doc.child(0);
     const afterPeer = Y.encodeStateAsUpdate(doc);
     const count = updates;
+    local.editor.setEditable(true);
+    await Vue.nextTick();
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(updates, count, "retired field cannot publish after reauthorization");
+    await controls.open();
+    assert.equal(field.value, "stale private");
     controls.onBlur(event("blur") as FocusEvent);
     assert.equal(local.editor.state.doc.child(0).attrs.latex, "peer newest");
     assert.equal(peer.editor.state.doc.child(0).attrs.latex, "peer newest");

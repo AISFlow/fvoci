@@ -144,7 +144,10 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
 
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "문서 옵션", exact: true }).click();
-  await page.getByRole("button", { name: "Markdown" }).click();
+  await page
+    .locator(".document-export-menu")
+    .getByRole("button", { name: "Markdown", exact: true })
+    .click();
   const download = await downloadPromise;
   const suggested = download.suggestedFilename();
   expect(suggested.endsWith(".md")).toBe(true);

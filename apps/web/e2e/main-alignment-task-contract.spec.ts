@@ -1,3 +1,7 @@
+import type { Editor } from "@tiptap/core";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
+import type * as Y from "yjs";
+import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
 import { execFileSync } from "node:child_process";
 import { z } from "zod";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
@@ -391,10 +395,11 @@ for (const archivedTarget of [false, true]) {
   test(`a late dependency ${archivedTarget ? "409" : "400"} stays with its originating task and ordinary edges still work`, async ({
     browser,
     baseURL,
-  }) => {
+  }, testInfo) => {
     const signed = await newSignedInPage(browser, baseURL, admin);
     const page = signed.page;
     let release = () => {};
+    let releaseAdmission = () => {};
     try {
       const key = archivedTarget ? "TDA" : "TDP";
       const f = await fixture(page, key, {});
@@ -414,6 +419,66 @@ for (const archivedTarget of [false, true]) {
           })
         ).status(),
       ).toBe(200);
+      const admissions: { generation: number; scope: string; delivered: boolean }[] = [];
+      const requests: { generation: number; id: string }[] = [];
+      const acks: { generation: number; id: string }[] = [];
+      let socketGeneration = 0;
+      let deliverGrant = () => {};
+      let grantHeld = false;
+      const workspace = f.base.split("/").at(-1);
+      if (!workspace) throw new Error("Missing workspace fixture");
+      const routingKey = `${workspace}:task:${parent.id}`;
+      if (archivedTarget)
+        await page.routeWebSocket(/\/collab(?:\?|$)/, (socket) => {
+          const generation = ++socketGeneration;
+          const server = socket.connectToServer();
+          socket.onMessage((message) => {
+            const frame = decodeHocuspocusFrame(frameBytes(message));
+            const parts = frame?.kind === "stateless" ? persistParts(frame.payload) : null;
+            if (
+              frame &&
+              "routingKey" in frame &&
+              frame.routingKey === routingKey &&
+              parts?.kind === "request"
+            )
+              requests.push({ generation, id: parts.id });
+            server.send(message);
+          });
+          server.onMessage((message) => {
+            const frame = decodeHocuspocusFrame(frameBytes(message));
+            if (frame?.kind === "auth-scope" && frame.routingKey === routingKey) {
+              const admission = { generation, scope: frame.scope, delivered: false };
+              admissions.push(admission);
+              if (
+                frame.scope === "read-write" &&
+                admissions.some((item) => item.scope === "readonly")
+              ) {
+                grantHeld = true;
+                deliverGrant = () => {
+                  admission.delivered = true;
+                  socket.send(message);
+                };
+                return;
+              }
+              admission.delivered = true;
+            }
+            const parts = frame?.kind === "stateless" ? persistParts(frame.payload) : null;
+            if (
+              frame &&
+              "routingKey" in frame &&
+              frame.routingKey === routingKey &&
+              parts?.kind === "done"
+            )
+              acks.push({ generation, id: parts.id });
+            socket.send(message);
+          });
+        });
+      releaseAdmission = () => {
+        if (grantHeld) {
+          grantHeld = false;
+          deliverGrant();
+        }
+      };
       await page.goto(`/w/${admin.workspaceSlug}/${f.displayId}`);
       await page.getByTestId("task-edit-dependency-open").click();
       await page.getByTestId("task-edit-dependency-target").selectOption(parent.id);
@@ -476,6 +541,76 @@ for (const archivedTarget of [false, true]) {
         const body = page.getByTestId("task-body");
         await expect(body.locator('[data-collab-status="connected"]')).toBeVisible();
         await expect(body.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
+        await expect(body.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
+        await body.locator(".ProseMirror").evaluate((root) => {
+          const element = root as HTMLElement & {
+            editor: Editor;
+            retainedAdmission?: {
+              doc: Y.Doc;
+              provider: HocuspocusProvider;
+              clientId: number;
+              updates: number;
+            };
+          };
+          const options = (name: string) =>
+            element.editor.extensionManager.extensions.find((extension) => extension.name === name)
+              ?.options as Record<string, unknown>;
+          const doc = options("collaboration").document as Y.Doc;
+          const provider = options("collaborationCaret").provider as HocuspocusProvider;
+          element.retainedAdmission = { doc, provider, clientId: doc.clientID, updates: 0 };
+          doc.on("update", () => {
+            if (element.retainedAdmission) element.retainedAdmission.updates++;
+          });
+        });
+        const observeAdmission = () =>
+          body.evaluate((root) => {
+            const element = root.querySelector(".ProseMirror") as HTMLElement & {
+              editor: Editor;
+              retainedAdmission?: {
+                doc: Y.Doc;
+                provider: HocuspocusProvider;
+                clientId: number;
+                updates: number;
+              };
+            };
+            const witness = element.retainedAdmission;
+            if (!witness) throw new Error("Task body or its actual editor was remounted");
+            const options = (name: string) =>
+              element.editor.extensionManager.extensions.find(
+                (extension) => extension.name === name,
+              )?.options as Record<string, unknown>;
+            const save = Array.from(root.querySelectorAll("button")).find(
+              (button) => button.textContent.trim() === "저장",
+            );
+            if (!save) throw new Error("Missing actual Save affordance");
+            return {
+              sameDoc: options("collaboration").document === witness.doc,
+              sameProvider: options("collaborationCaret").provider === witness.provider,
+              sameClientId: witness.doc.clientID === witness.clientId,
+              authenticated: witness.provider.isAuthenticated,
+              scope: witness.provider.authorizedScope,
+              status: root
+                .querySelector("[data-collab-status]")
+                ?.getAttribute("data-collab-status"),
+              editorEditable: element.editor.isEditable,
+              domEditable: element.getAttribute("contenteditable"),
+              canPersistAffordance: !save.disabled,
+              updates: witness.updates,
+            };
+          });
+        expect(await observeAdmission()).toMatchObject({
+          sameDoc: true,
+          sameProvider: true,
+          sameClientId: true,
+          authenticated: true,
+          scope: "readonly",
+          editorEditable: false,
+          domEditable: "false",
+          canPersistAffordance: false,
+          updates: 0,
+        });
+        const oldAdmission = admissions.find((item) => item.scope === "readonly" && item.delivered);
+        if (!oldAdmission) throw new Error("Requires actual server readonly authentication");
         const collectionEndpoint = `${parentEndpoint}/collection-item`;
         const archivedCollection = await page.request.get(collectionEndpoint);
         expect(archivedCollection.status()).toBe(200);
@@ -505,7 +640,7 @@ for (const archivedTarget of [false, true]) {
         await expect(page.getByTestId("task-edit-title")).toBeEnabled();
         await expect(page).toHaveURL(retainedUrl);
         expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
-        // HTTP restore does not promote the already admitted readonly body lease.
+        // HTTP alone cannot promote the old readonly admission; the real new server grant is deliberately held.
         await expect(body.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
         await expect(body.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
         const timeEndpoint = `${parentEndpoint}/time-entries`;
@@ -585,7 +720,7 @@ for (const archivedTarget of [false, true]) {
         } finally {
           await fresh.close();
         }
-        // Actual REST authorization succeeds while the retained body lease stays readonly.
+        // Actual REST authorization succeeds while the new socket's genuine writable auth frame remains held.
         expect(
           (
             await page.request.post(timeEndpoint, {
@@ -601,6 +736,194 @@ for (const archivedTarget of [false, true]) {
         expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
         await expect(body.locator(".ProseMirror")).toHaveAttribute("contenteditable", "false");
         await expect(body.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
+        await expect.poll(() => grantHeld).toBe(true);
+        const newAdmission = admissions.at(-1);
+        expect(newAdmission).toMatchObject({ scope: "read-write", delivered: false });
+        if (!newAdmission) throw new Error("Missing actual fresh server writable admission");
+        expect(newAdmission.generation).toBeGreaterThan(oldAdmission.generation);
+        expect(await observeAdmission()).toMatchObject({
+          sameDoc: true,
+          sameProvider: true,
+          sameClientId: true,
+          editorEditable: false,
+          domEditable: "false",
+          canPersistAffordance: false,
+          updates: 0,
+        });
+        expect(requests).toEqual([]);
+        await testInfo.attach("w3-task-before-fresh-auth-delivery.json", {
+          body: JSON.stringify({ admissions, state: await observeAdmission() }),
+          contentType: "application/json",
+        });
+        await body.evaluate((root) => {
+          const owner = window as Window & {
+            taskAdmissionFrames?: {
+              running: boolean;
+              states: {
+                scope: string | undefined;
+                status: string | null;
+                editable: boolean;
+                dom: string | null;
+                saveEnabled: boolean;
+              }[];
+            };
+          };
+          const frames = {
+            running: true,
+            states: [] as {
+              scope: string | undefined;
+              status: string | null;
+              editable: boolean;
+              dom: string | null;
+              saveEnabled: boolean;
+            }[],
+          };
+          owner.taskAdmissionFrames = frames;
+          const sample = () => {
+            if (!frames.running || frames.states.length >= 128) return;
+            const element = root.querySelector(".ProseMirror") as HTMLElement & {
+              editor: Editor;
+              retainedAdmission: { provider: HocuspocusProvider };
+            };
+            const save = Array.from(root.querySelectorAll("button")).find(
+              (button) => button.textContent.trim() === "저장",
+            );
+            frames.states.push({
+              scope: element.retainedAdmission.provider.authorizedScope,
+              status:
+                root.querySelector("[data-collab-status]")?.getAttribute("data-collab-status") ??
+                null,
+              editable: element.editor.isEditable,
+              dom: element.getAttribute("contenteditable"),
+              saveEnabled: save !== undefined && !save.disabled,
+            });
+            requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+        });
+        releaseAdmission();
+        // One joint public observation checks Save, editor and genuine provider
+        // admission; neither HTTP canEdit nor a later Save-only sample is proof.
+        await expect.poll(observeAdmission).toMatchObject({
+          sameDoc: true,
+          sameProvider: true,
+          sameClientId: true,
+          authenticated: true,
+          scope: "read-write",
+          status: "connected",
+          editorEditable: true,
+          domEditable: "true",
+          canPersistAffordance: true,
+          updates: 0,
+        });
+        await testInfo.attach("w3-task-fresh-auth-coherent.json", {
+          body: JSON.stringify({ admissions, state: await observeAdmission() }),
+          contentType: "application/json",
+        });
+        const frames = await page.evaluate(async () => {
+          await new Promise<void>((resolve) =>
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                resolve();
+              }),
+            ),
+          );
+          const owner = window as Window & {
+            taskAdmissionFrames?: {
+              running: boolean;
+              states: {
+                scope: string | undefined;
+                status: string | null;
+                editable: boolean;
+                dom: string | null;
+                saveEnabled: boolean;
+              }[];
+            };
+          };
+          if (!owner.taskAdmissionFrames) throw new Error("Missing bounded frame observation");
+          owner.taskAdmissionFrames.running = false;
+          return owner.taskAdmissionFrames.states;
+        });
+        expect(
+          frames.some((state) => state.scope === "read-write" && state.status === "connected"),
+        ).toBe(true);
+        for (const state of frames.filter(
+          (state) => state.scope === "read-write" && state.status === "connected",
+        )) {
+          expect(state.dom).toBe(String(state.editable));
+          expect(state.saveEnabled).toBe(state.editable);
+        }
+        await testInfo.attach("w3-task-admission-frame-coherence.json", {
+          body: JSON.stringify(frames),
+          contentType: "application/json",
+        });
+        const restoredBody = body.locator(".ProseMirror");
+        await restoredBody.click();
+        await page.keyboard.type("실제 재인증 태스크 본문");
+        await body.getByRole("button", { name: "저장", exact: true }).click();
+        await expect(body.locator('[data-collab-persisted="true"]')).toBeVisible();
+        const matched = requests.filter(
+          (request) =>
+            request.generation === newAdmission.generation &&
+            acks.some((ack) => ack.generation === request.generation && ack.id === request.id),
+        );
+        expect(matched.length).toBeGreaterThan(0);
+        const savedTask = await page.request.get(parentEndpoint);
+        expect(savedTask.status()).toBe(200);
+        const committed = z
+          .object({ contentJson: z.unknown() })
+          .parse(await savedTask.json()).contentJson;
+        expect(JSON.stringify(committed)).toContain("실제 재인증 태스크 본문");
+        const appConnection = process.env.DATABASE_APP_URL;
+        const container = process.env.FVOCI_TEST_PG_CONTAINER;
+        if (!appConnection || !container?.startsWith("fvoci-rust-test-pg-"))
+          throw new Error("Requires owned app-role task DB");
+        const app = new URL(appConnection);
+        if (
+          !/^fvoci_app_fvoci_e2e_[a-f0-9]{16}$/.test(app.username) ||
+          !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(app.pathname)
+        )
+          throw new Error("Requires restricted fixture role");
+        const storedBody = JSON.parse(
+          execFileSync(
+            "docker",
+            [
+              "exec",
+              "-i",
+              container,
+              "psql",
+              "-X",
+              "-qAt",
+              "-U",
+              app.username,
+              "-d",
+              app.pathname.slice(1),
+              "-v",
+              "ON_ERROR_STOP=1",
+            ],
+            {
+              input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${workspace}'; SELECT content_json FROM fvoci.tasks WHERE id='${parent.id}'; ROLLBACK;`,
+              encoding: "utf8",
+            },
+          ),
+        ) as unknown;
+        expect(storedBody).toEqual(committed);
+        const newest = await browser.newContext({ baseURL, storageState: adminAuth });
+        try {
+          const client = await newest.newPage();
+          await client.goto(retainedUrl);
+          await expect(client.getByTestId("task-body").locator(".ProseMirror")).toContainText(
+            "실제 재인증 태스크 본문",
+          );
+          const response = await client.request.get(parentEndpoint);
+          expect(response.status()).toBe(200);
+          expect(
+            z.object({ contentJson: z.unknown() }).parse(await response.json()).contentJson,
+          ).toEqual(committed);
+        } finally {
+          await newest.close();
+        }
+        expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
       }
       const removed = page.waitForResponse(
         (r) =>
@@ -634,6 +957,13 @@ for (const archivedTarget of [false, true]) {
       ]);
     } finally {
       release();
+      releaseAdmission();
+      await page
+        .evaluate(() => {
+          const owner = window as Window & { taskAdmissionFrames?: { running: boolean } };
+          if (owner.taskAdmissionFrames) owner.taskAdmissionFrames.running = false;
+        })
+        .catch(() => undefined);
       await signed.context.close();
     }
   });
@@ -903,3 +1233,368 @@ test("a dirty detail date retains its original conflict baseline after a peer st
     await signed.context.close();
   }
 });
+
+for (const schedule of ["natural", "server-readonly", "retired-grant"] as const) {
+  test(`actual task fresh admission ${schedule} preserves coherent editor and Save authority on the same Y.Doc`, async ({
+    browser,
+    baseURL,
+  }, testInfo) => {
+    if (!adminAuth) throw new Error("Requires earlier actual admin login");
+    const context = await browser.newContext({ baseURL, storageState: adminAuth });
+    const page = await context.newPage();
+    let releaseFrame = () => {};
+    try {
+      const f = await fixture(
+        page,
+        schedule === "natural" ? "TGN" : schedule === "server-readonly" ? "TGR" : "TGL",
+        {},
+      );
+      const initial = await page.request.patch(f.endpoint, { data: { archived: true } });
+      expect(initial.status()).toBe(200);
+      const originalBody = z
+        .object({ contentJson: z.unknown(), version: z.number() })
+        .parse(await (await page.request.get(f.endpoint)).json());
+      const workspace = f.base.split("/").at(-1);
+      if (!workspace) throw new Error("Missing workspace");
+      const routingKey = `${workspace}:task:${f.task.id}`;
+      let generation = 0;
+      let held = false;
+      const admissions: { generation: number; scope: string; delivered: boolean }[] = [];
+      const requests: { generation: number; id: string }[] = [];
+      const acks: { generation: number; id: string }[] = [];
+      await page.routeWebSocket(/\/collab(?:\?|$)/, (socket) => {
+        const current = ++generation;
+        const server = socket.connectToServer();
+        socket.onMessage((message) => {
+          const frame = decodeHocuspocusFrame(frameBytes(message));
+          if (
+            schedule === "server-readonly" &&
+            current > 1 &&
+            frame?.kind === "auth-token" &&
+            frame.routingKey === routingKey
+          ) {
+            held = true;
+            releaseFrame = () => {
+              held = false;
+              server.send(message);
+            };
+            return;
+          }
+          const parts = frame?.kind === "stateless" ? persistParts(frame.payload) : null;
+          if (
+            frame &&
+            "routingKey" in frame &&
+            frame.routingKey === routingKey &&
+            parts?.kind === "request"
+          )
+            requests.push({ generation: current, id: parts.id });
+          server.send(message);
+        });
+        server.onMessage((message) => {
+          const frame = decodeHocuspocusFrame(frameBytes(message));
+          if (frame?.kind === "auth-scope" && frame.routingKey === routingKey) {
+            const admission = { generation: current, scope: frame.scope, delivered: false };
+            admissions.push(admission);
+            if (schedule === "retired-grant" && frame.scope === "read-write") {
+              held = true;
+              releaseFrame = () => {
+                if (!held) return;
+                held = false;
+                admission.delivered = true;
+                socket.send(message);
+              };
+              return;
+            }
+            admission.delivered = true;
+          }
+          const parts = frame?.kind === "stateless" ? persistParts(frame.payload) : null;
+          if (
+            frame &&
+            "routingKey" in frame &&
+            frame.routingKey === routingKey &&
+            parts?.kind === "done"
+          )
+            acks.push({ generation: current, id: parts.id });
+          socket.send(message);
+        });
+      });
+      const path = `/w/${admin.workspaceSlug}/${f.displayId}`;
+      await page.goto(path);
+      const body = page.getByTestId("task-body");
+      await expect(body.locator('[data-collab-status="connected"]')).toBeVisible();
+      const editor = body.locator(".ProseMirror");
+      await expect(editor).toHaveAttribute("contenteditable", "false");
+      await expect(body.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
+      await body.evaluate((root) => {
+        const element = root.querySelector(".ProseMirror") as HTMLElement & { editor: Editor };
+        const options = (name: string) =>
+          element.editor.extensionManager.extensions.find((extension) => extension.name === name)
+            ?.options as Record<string, unknown>;
+        const doc = options("collaboration").document as Y.Doc;
+        const provider = options("collaborationCaret").provider as HocuspocusProvider;
+        const owner = window as Window & {
+          taskFreshAdmission?: {
+            doc: Y.Doc;
+            provider: HocuspocusProvider;
+            clientId: number;
+            root: Element;
+            updates: number;
+            running: boolean;
+            states: {
+              scope: string | undefined;
+              status: string | null;
+              editable: boolean;
+              dom: string | null;
+              saveEnabled: boolean;
+            }[];
+          };
+        };
+        const witness = {
+          doc,
+          provider,
+          clientId: doc.clientID,
+          root,
+          updates: 0,
+          running: true,
+          states: [] as {
+            scope: string | undefined;
+            status: string | null;
+            editable: boolean;
+            dom: string | null;
+            saveEnabled: boolean;
+          }[],
+        };
+        owner.taskFreshAdmission = witness;
+        doc.on("update", () => {
+          witness.updates++;
+        });
+        const sample = () => {
+          if (!witness.running || witness.states.length >= 256) return;
+          const save = Array.from(root.querySelectorAll("button")).find(
+            (button) => button.textContent.trim() === "저장",
+          );
+          witness.states.push({
+            scope: provider.authorizedScope,
+            status:
+              root.querySelector("[data-collab-status]")?.getAttribute("data-collab-status") ??
+              null,
+            editable: element.editor.isEditable,
+            dom: element.getAttribute("contenteditable"),
+            saveEnabled: save !== undefined && !save.disabled,
+          });
+          requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      });
+      const observe = () =>
+        body.evaluate((root) => {
+          const owner = window as Window & {
+            taskFreshAdmission?: {
+              doc: Y.Doc;
+              provider: HocuspocusProvider;
+              clientId: number;
+              root: Element;
+              updates: number;
+            };
+          };
+          const witness = owner.taskFreshAdmission;
+          if (!witness) throw new Error("Missing actual task admission");
+          const element = root.querySelector(".ProseMirror") as HTMLElement & { editor: Editor };
+          const options = (name: string) =>
+            element.editor.extensionManager.extensions.find((extension) => extension.name === name)
+              ?.options as Record<string, unknown>;
+          const save = Array.from(root.querySelectorAll("button")).find(
+            (button) => button.textContent.trim() === "저장",
+          );
+          return {
+            sameRoot: root === witness.root,
+            sameDoc: options("collaboration").document === witness.doc,
+            sameProvider: options("collaborationCaret").provider === witness.provider,
+            sameClientId: witness.doc.clientID === witness.clientId,
+            authenticated: witness.provider.isAuthenticated,
+            scope: witness.provider.authorizedScope,
+            status: root.querySelector("[data-collab-status]")?.getAttribute("data-collab-status"),
+            editable: element.editor.isEditable,
+            dom: element.getAttribute("contenteditable"),
+            canPersistAffordance: save !== undefined && !save.disabled,
+            updates: witness.updates,
+          };
+        });
+      expect(await observe()).toMatchObject({
+        authenticated: true,
+        scope: "readonly",
+        editable: false,
+        dom: "false",
+        canPersistAffordance: false,
+        updates: 0,
+      });
+      const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+      expect((await page.request.patch(f.endpoint, { data: { archived: false } })).status()).toBe(
+        200,
+      );
+      if (schedule !== "natural") {
+        await expect.poll(() => held).toBe(true);
+        expect(await observe()).toMatchObject({
+          editable: false,
+          dom: "false",
+          canPersistAffordance: false,
+          updates: 0,
+        });
+        const collection = `${f.endpoint}/collection-item`;
+        const retired = page.waitForResponse(
+          async (response) =>
+            response.url().endsWith(collection) &&
+            response.status() === 200 &&
+            response.request().method() === "GET" &&
+            !z.object({ canEdit: z.boolean() }).parse(await response.json()).canEdit,
+        );
+        expect((await page.request.patch(f.endpoint, { data: { archived: true } })).status()).toBe(
+          200,
+        );
+        await retired;
+        releaseFrame();
+      }
+      await expect
+        .poll(observe)
+        .toMatchObject({
+          sameRoot: true,
+          sameDoc: true,
+          sameProvider: true,
+          sameClientId: true,
+          authenticated: true,
+          scope: schedule === "server-readonly" ? "readonly" : "read-write",
+          status: "connected",
+          editable: schedule === "natural",
+          dom: String(schedule === "natural"),
+          canPersistAffordance: schedule === "natural",
+          updates: 0,
+        });
+      const frames = await page.evaluate(async () => {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              resolve();
+            }),
+          ),
+        );
+        const owner = window as Window & {
+          taskFreshAdmission?: {
+            running: boolean;
+            states: {
+              scope: string | undefined;
+              status: string | null;
+              editable: boolean;
+              dom: string | null;
+              saveEnabled: boolean;
+            }[];
+          };
+        };
+        if (!owner.taskFreshAdmission) throw new Error("Missing bounded observation");
+        owner.taskFreshAdmission.running = false;
+        return owner.taskFreshAdmission.states;
+      });
+      for (const frame of frames.filter((frame) => frame.status === "connected")) {
+        expect(frame.dom).toBe(String(frame.editable));
+        expect(frame.saveEnabled).toBe(frame.editable);
+        if (frame.scope === "readonly") expect(frame.editable).toBe(false);
+      }
+      expect(
+        admissions.some(
+          (admission) =>
+            admission.generation > 1 &&
+            admission.delivered &&
+            admission.scope === (schedule === "server-readonly" ? "readonly" : "read-write"),
+        ),
+      ).toBe(true);
+      expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
+      if (schedule === "natural") {
+        await editor.click();
+        await page.keyboard.type("자연스러운 태스크 재인증 한글");
+        await body.getByRole("button", { name: "저장", exact: true }).click();
+        await expect(body.locator('[data-collab-persisted="true"]')).toBeVisible();
+        expect(
+          requests.some(
+            (request) =>
+              request.generation > 1 &&
+              acks.some((ack) => ack.generation === request.generation && ack.id === request.id),
+          ),
+        ).toBe(true);
+        const response = await page.request.get(f.endpoint);
+        expect(response.status()).toBe(200);
+        const committed = z
+          .object({ contentJson: z.unknown() })
+          .parse(await response.json()).contentJson;
+        expect(JSON.stringify(committed)).toContain("자연스러운 태스크 재인증 한글");
+        const connection = process.env.DATABASE_APP_URL;
+        const container = process.env.FVOCI_TEST_PG_CONTAINER;
+        if (!connection || !container?.startsWith("fvoci-rust-test-pg-"))
+          throw new Error("Requires own restricted app DB");
+        const app = new URL(connection);
+        if (
+          !/^fvoci_app_fvoci_e2e_[a-f0-9]{16}$/.test(app.username) ||
+          !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(app.pathname)
+        )
+          throw new Error("Invalid app-role fixture");
+        const stored = JSON.parse(
+          execFileSync(
+            "docker",
+            [
+              "exec",
+              "-i",
+              container,
+              "psql",
+              "-X",
+              "-qAt",
+              "-U",
+              app.username,
+              "-d",
+              app.pathname.slice(1),
+              "-v",
+              "ON_ERROR_STOP=1",
+            ],
+            {
+              input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${workspace}'; SELECT content_json FROM fvoci.tasks WHERE id='${f.task.id}'; ROLLBACK;`,
+              encoding: "utf8",
+            },
+          ),
+        ) as unknown;
+        expect(stored).toEqual(committed);
+        const fresh = await browser.newContext({ baseURL, storageState: adminAuth });
+        try {
+          const newest = await fresh.newPage();
+          await newest.goto(path);
+          await expect(newest.getByTestId("task-body").locator(".ProseMirror")).toContainText(
+            "자연스러운 태스크 재인증 한글",
+          );
+          const saved = await newest.request.get(f.endpoint);
+          expect(saved.status()).toBe(200);
+          expect(
+            z.object({ contentJson: z.unknown() }).parse(await saved.json()).contentJson,
+          ).toEqual(committed);
+        } finally {
+          await fresh.close();
+        }
+      } else {
+        expect(requests).toEqual([]);
+        const response = await page.request.get(f.endpoint);
+        expect(response.status()).toBe(200);
+        expect(
+          z.object({ contentJson: z.unknown(), version: z.number() }).parse(await response.json()),
+        ).toEqual(originalBody);
+      }
+      await testInfo.attach(`w3-task-${schedule}-wire-coherence.json`, {
+        body: JSON.stringify({ admissions, frames, state: await observe(), requests, acks }),
+        contentType: "application/json",
+      });
+    } finally {
+      releaseFrame();
+      await page
+        .evaluate(() => {
+          const owner = window as Window & { taskFreshAdmission?: { running: boolean } };
+          if (owner.taskFreshAdmission) owner.taskFreshAdmission.running = false;
+        })
+        .catch(() => undefined);
+      await context.close();
+    }
+  });
+}
