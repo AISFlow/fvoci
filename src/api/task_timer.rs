@@ -81,6 +81,7 @@ pub struct OwnerTimerState {
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub visible_run: Option<TimerRunOutput>,
     pub legacy_open: bool,
+    pub legacy_open_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,7 +99,12 @@ pub struct TimerCleanupBody {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct TimeCorrectionBody {
+    pub expected_actor_id: Uuid,
+    pub expected_session_id: Uuid,
     pub request_id: Uuid,
+    pub kind: TimeRecordKind,
+    pub expected_revision: i64,
+    pub expected_note: Option<String>,
     /// Original range as seen by this form; null end means a legacy open row.
     pub expected_started_at: DateTime<Utc>,
     pub expected_ended_at: Option<DateTime<Utc>>,
@@ -124,13 +130,111 @@ pub struct TimerSummary {
     pub time_zone: String,
     pub days: Vec<TimerDayTotal>,
     pub total_milliseconds: i64,
+    pub unfinished: bool,
+    pub unresolved_manual: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TimerSummaryQuery {
+    pub expected_actor_id: Option<Uuid>,
+    pub expected_session_id: Option<Uuid>,
     pub from: NaiveDate,
     pub to: NaiveDate,
+}
+
+/// Own task history includes unresolved manual rows explicitly, never guesses
+/// their end. Projected timer rows occur once as canonical segments.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub enum TimeRecordKind {
+    Manual,
+    Segment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimeRecord {
+    pub id: Uuid,
+    pub kind: TimeRecordKind,
+    pub started_at: DateTime<Utc>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub run_id: Option<Uuid>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub note: Option<String>,
+    pub revision: i64,
+    pub reserved_legacy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimerHistory {
+    pub server_now: DateTime<Utc>,
+    pub items: Vec<TimeRecord>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TimerHistoryQuery {
+    pub expected_actor_id: Option<Uuid>,
+    pub expected_session_id: Option<Uuid>,
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimerManualBody {
+    pub expected_actor_id: Uuid,
+    pub expected_session_id: Uuid,
+    pub request_id: Uuid,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
+    pub note: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimerRecordOutput {
+    pub server_now: DateTime<Utc>,
+    pub record: TimeRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LegacyReleaseBody {
+    pub expected_actor_id: Uuid,
+    pub expected_session_id: Uuid,
+    pub request_id: Uuid,
+    pub time_entry_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LegacyReleaseOutput {
+    pub server_now: DateTime<Utc>,
+    pub time_entry_id: Uuid,
+    pub released: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TimerContextQuery {
+    pub expected_actor_id: Option<Uuid>,
+    pub expected_session_id: Option<Uuid>,
 }
 
 #[cfg(feature = "api-schema")]

@@ -474,4 +474,147 @@ mod task_timer {
         drop(app);
         harness.cleanup().await;
     }
+    #[tokio::test]
+    async fn timer_manual_midnight_correction_audit_history_and_existing_consumer_agree() {
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, actor, workspace) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "RECORD", "workspace").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"기록과 보정"}),
+        )
+        .await;
+        let base = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}/timer",
+            task["id"].as_str().unwrap()
+        );
+        let original_start = "2026-09-30T14:59:30.100Z";
+        let original_end = "2026-09-30T15:00:30.100Z";
+        let body=captured(app.clone(),&cookie,json!({"requestId":Uuid::now_v7(),"startedAt":original_start,"endedAt":original_end,"note":"원본 메모","reason":"수동 기록"})).await;
+        let (status, created) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/history"),
+            Some(body.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let id = created["record"]["id"].as_str().unwrap();
+        let (status, replayed) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/history"),
+            Some(body),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed, created);
+        let summary_url = format!("{base}/summary?from=2026-09-30&to=2026-10-01");
+        let (status, total) =
+            json_request(app.clone(), "GET", &summary_url, None, Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{total}");
+        assert_eq!(total["totalMilliseconds"], 60_000);
+        assert_eq!(total["days"][0]["milliseconds"], 29_900);
+        assert_eq!(total["days"][1]["milliseconds"], 30_100);
+        let correction=captured(app.clone(),&cookie,json!({"requestId":Uuid::now_v7(),"kind":"manual","expectedRevision":0,"expectedStartedAt":original_start,"expectedEndedAt":original_end,"expectedNote":"원본 메모","startedAt":original_start,"endedAt":"2026-09-30T15:00:00.600Z","note":"휴식 제외","reason":"잘못 더한 휴식 29.5초 제외"})).await;
+        let (status, corrected) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/records/{id}/correct"),
+            Some(correction.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{corrected}");
+        assert_eq!(corrected["record"]["revision"], 1);
+        let (status, replayed) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/records/{id}/correct"),
+            Some(correction.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed, corrected);
+        let mut stale = correction;
+        stale["requestId"] = json!(Uuid::now_v7());
+        let (status, conflict) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/records/{id}/correct"),
+            Some(stale),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+        let (status, total) =
+            json_request(app.clone(), "GET", &summary_url, None, Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{total}");
+        assert_eq!(total["totalMilliseconds"], 30_500);
+        assert_eq!(total["days"][0]["milliseconds"], 29_900);
+        assert_eq!(total["days"][1]["milliseconds"], 600);
+        let (status, history) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{base}/history?from=2026-09-30&to=2026-10-01"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{history}");
+        assert_eq!(history["items"][0], corrected["record"]);
+        let (raw_end, raw_note): (chrono::DateTime<chrono::Utc>, Option<String>) = sqlx::query_as(
+            "SELECT ended_at,note FROM fvoci.time_entries WHERE id=$1 AND user_id=$2",
+        )
+        .bind(Uuid::parse_str(id).unwrap())
+        .bind(actor)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(
+            raw_end,
+            chrono::DateTime::parse_from_rfc3339(original_end)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        );
+        assert_eq!(
+            raw_note.as_deref(),
+            Some("원본 메모"),
+            "original closed range/note stay preserved"
+        );
+        let (before,after,reason):(Value,Value,String)=sqlx::query_as("SELECT before_value,after_value,reason FROM fvoci.task_timer_audit WHERE user_id=$1 AND time_entry_id=$2 AND verb='time.correct'").bind(actor).bind(Uuid::parse_str(id).unwrap()).fetch_one(&admin).await.unwrap();
+        assert_eq!(before["endedAt"], original_end);
+        assert_eq!(after["revision"], 1);
+        assert_eq!(reason, "잘못 더한 휴식 29.5초 제외");
+        let (status, existing) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{workspace}/tasks/{}/time-entries",
+                task["id"].as_str().unwrap()
+            ),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{existing}");
+        let effective_end = existing["items"][0]["endedAt"].clone();
+        let effective_note = existing["items"][0]["note"].clone();
+        println!("W5 manual/correction canonical/day/history audit phases passed; original range preserved; existing consumer endedAt={effective_end} note={effective_note}");
+        admin.close().await;
+        drop(app);
+        harness.cleanup().await;
+        assert_eq!(
+            effective_end, corrected["record"]["endedAt"],
+            "existing TaskTimeEntries consumer must show this actor's same effective correction"
+        );
+        assert_eq!(effective_note, corrected["record"]["note"]);
+    }
 }

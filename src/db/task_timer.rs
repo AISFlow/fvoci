@@ -1,14 +1,17 @@
 //! Durable person-wide stopwatch. Reuses the existing membership/credential
 //! writer fence and task/project lock order. No process-local run state.
-use chrono::{DateTime, Utc};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::api::task_timer::{
-    OwnerTimerState, TaskTimerState, TimerCleanupBody, TimerCommandBody, TimerCommandOutput,
-    TimerRunOutput,
+    LegacyReleaseBody, LegacyReleaseOutput, OwnerTimerState, TaskTimerState, TimeCorrectionBody,
+    TimeRecord, TimeRecordKind, TimerCleanupBody, TimerCommandBody, TimerCommandOutput,
+    TimerDayTotal, TimerHistory, TimerHistoryQuery, TimerManualBody, TimerRecordOutput,
+    TimerRunOutput, TimerSummary, TimerSummaryQuery,
 };
 use crate::db::context::{
     begin_read, lock_membership_users, recheck_session, session_is_live, set_self_user, set_tenant,
@@ -156,13 +159,8 @@ async fn state_in(
     let run = active.filter(|r| r.workspace_id == workspace && r.task_id == task);
     // Existing time-entry history remains the shared task total. Own timer
     // fractions/cleanup intervals are added once, never double-count projections.
-    let actual: i64 = sqlx::query_scalar(r#"
-        SELECT COALESCE((SELECT sum(duration_seconds::bigint * 1000) FROM fvoci.time_entries
-            WHERE workspace_id = $1 AND task_id = $2),0)::bigint
-        + COALESCE((SELECT sum(EXTRACT(EPOCH FROM (s.ended_at - s.started_at))*1000
-            - CASE WHEN s.time_entry_id IS NOT NULL THEN FLOOR(EXTRACT(EPOCH FROM (s.ended_at - s.started_at))) * 1000 ELSE 0 END)
-            FROM fvoci.task_timer_segments s WHERE s.workspace_id = $1 AND s.task_id = $2 AND s.user_id = $3 AND s.ended_at IS NOT NULL),0)::bigint
-    "#).bind(workspace).bind(task).bind(actor).fetch_one(&mut **tx).await?;
+    let actual: i64 = sqlx::query_scalar(&format!("WITH records AS ({RECORDS_SQL}) SELECT COALESCE(sum(EXTRACT(EPOCH FROM(date_trunc('milliseconds',ended_at)-date_trunc('milliseconds',started_at)))*1000),0)::bigint FROM records WHERE ended_at IS NOT NULL"))
+        .bind(workspace).bind(task).bind(actor).fetch_one(&mut **tx).await?;
     Ok(TaskTimerState {
         server_now: clock(tx).await?,
         run,
@@ -215,6 +213,8 @@ pub async fn owner_state(pool: &PgPool, actor: Uuid, session: Uuid) -> DbResult<
         status,
         visible_run,
         legacy_open: legacy_open(&mut tx, actor).await?,
+        legacy_open_ids: sqlx::query_scalar("SELECT time_entry_id FROM fvoci.task_timer_legacy_open WHERE user_id=$1 ORDER BY time_entry_id")
+            .bind(actor).fetch_all(&mut *tx).await?,
     };
     tx.commit().await?;
     Ok(Ok(result))
@@ -310,11 +310,11 @@ async fn close_segment(
     actor: Uuid,
     at: DateTime<Utc>,
     project: bool,
-) -> Result<bool, sqlx::Error> {
+) -> Result<(bool, Option<Uuid>), sqlx::Error> {
     let row: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as("SELECT id, started_at FROM fvoci.task_timer_segments WHERE run_id = $1 AND ended_at IS NULL FOR UPDATE")
         .bind(run.id).fetch_optional(&mut **tx).await?;
     let Some((id, start)) = row else {
-        return Ok(false);
+        return Ok((false, None));
     };
     let end = at.max(start);
     let seconds = (end - start).num_seconds();
@@ -334,7 +334,7 @@ async fn close_segment(
     .bind(entry_id)
     .execute(&mut **tx)
     .await?;
-    Ok(at < start)
+    Ok((at < start, Some(id)))
 }
 
 pub fn command_valid(body: &TimerCommandBody) -> bool {
@@ -389,6 +389,8 @@ pub async fn command(
     let active = unfinished(&mut tx, actor).await?;
     let at = clock(&mut tx).await?;
     let mut regression = false;
+    let mut closed_segment = None;
+    let mut closed_note = body.note.clone();
     let (id, status, version) = if body.operation == TimerOperation::Start {
         if active.is_some() || legacy_open(&mut tx, actor).await? {
             return Ok(Err(TimerDbError::Conflict("timer_busy")));
@@ -425,8 +427,9 @@ pub async fn command(
         if body.note.is_some() {
             run.note = body.note.clone();
         }
+        closed_note = run.note.clone();
         if run.status == TimerStatus::Running {
-            regression = close_segment(&mut tx, &run, actor, at, true).await?;
+            (regression, closed_segment) = close_segment(&mut tx, &run, actor, at, true).await?;
         }
         if body.operation == TimerOperation::Resume {
             open_segment(&mut tx, &run, actor, at).await?;
@@ -444,6 +447,10 @@ pub async fn command(
     };
     let value = serde_json::to_value(&output).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let before = json!({"runId":body.run_id,"expectedVersion":body.expected_version});
+    let mut audit_value = value.clone();
+    audit_value["recordId"] = json!(closed_segment);
+    audit_value["kind"] = json!("segment");
+    audit_value["note"] = json!(closed_note);
     let reason = if regression {
         "server_clock_regression_clamped"
     } else {
@@ -458,7 +465,7 @@ pub async fn command(
         None,
         status.as_str(),
         before,
-        value.clone(),
+        audit_value,
         reason,
     )
     .await?;
@@ -518,7 +525,7 @@ pub async fn cleanup(
         return Ok(Err(TimerDbError::Conflict("timer_version")));
     }
     let at = clock(&mut tx).await?;
-    let regression = close_segment(&mut tx, &run, actor, at, false).await?;
+    let (regression, closed_segment) = close_segment(&mut tx, &run, actor, at, false).await?;
     let version = run.version + 1;
     sqlx::query(
         "UPDATE fvoci.task_timer_runs SET status='stopped',version=$2,stopped_at=$3 WHERE id=$1",
@@ -544,7 +551,7 @@ pub async fn cleanup(
         None,
         "cleanup",
         json!({"version":run.version}),
-        value.clone(),
+        json!({"runId":run.id,"version":version,"status":"stopped","recordId":closed_segment,"kind":"segment","note":run.note}),
         if regression {
             "self_cleanup_clock_regression_clamped"
         } else {
@@ -563,4 +570,559 @@ pub async fn cleanup(
     .await?;
     tx.commit().await?;
     Ok(Ok(output))
+}
+
+// Effective personal ranges overlay append-only corrections. Original server
+// anchors, projections and closed manual rows stay durable and unmodified.
+// Each correction is actor-owned and requires current target Edit permission.
+const RECORDS_SQL: &str = r#"
+SELECT b.id,b.kind,
+ COALESCE((c.after_value->>'startedAt')::timestamptz,b.started_at) AS started_at,
+ COALESCE((c.after_value->>'endedAt')::timestamptz,b.ended_at) AS ended_at,
+ b.run_id,CASE WHEN c.after_value IS NOT NULL THEN c.after_value->>'note' ELSE b.note END AS note,
+ COALESCE((c.after_value->>'revision')::bigint,0) AS revision,b.reserved_legacy
+FROM (
+ SELECT s.id,'segment'::text AS kind,s.started_at,s.ended_at,s.run_id,
+ CASE WHEN a.after_value IS NOT NULL THEN a.after_value->>'note' ELSE COALESCE(e.note,r.note) END AS note,
+ false AS reserved_legacy
+ FROM fvoci.task_timer_segments s
+ JOIN fvoci.task_timer_runs r ON r.id=s.run_id
+ LEFT JOIN fvoci.time_entries e ON e.workspace_id=s.workspace_id AND e.id=s.time_entry_id
+ LEFT JOIN LATERAL (SELECT after_value FROM fvoci.task_timer_audit
+   WHERE user_id=$3 AND after_value->>'recordId'=s.id::text AND verb<>'time.correct'
+   ORDER BY id DESC LIMIT 1) a ON true
+ WHERE s.workspace_id=$1 AND s.task_id=$2 AND s.user_id=$3
+ UNION ALL
+ SELECT e.id,'manual'::text,e.started_at,e.ended_at,NULL::uuid,e.note,
+ EXISTS(SELECT 1 FROM fvoci.task_timer_legacy_open l WHERE l.time_entry_id=e.id AND l.user_id=$3)
+ FROM fvoci.time_entries e
+ WHERE e.workspace_id=$1 AND e.task_id=$2 AND e.user_id=$3
+ AND NOT EXISTS(SELECT 1 FROM fvoci.task_timer_segments s WHERE s.time_entry_id=e.id)
+) b
+LEFT JOIN LATERAL (SELECT after_value FROM fvoci.task_timer_audit
+ WHERE user_id=$3 AND workspace_id=$1 AND task_id=$2 AND verb='time.correct'
+ AND after_value->>'recordId'=b.id::text AND after_value->>'kind'=b.kind
+ ORDER BY (after_value->>'revision')::bigint DESC,id DESC LIMIT 1) c ON true
+"#;
+
+type RecordTuple = (
+    Uuid,
+    String,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    Option<Uuid>,
+    Option<String>,
+    i64,
+    bool,
+);
+fn record(row: RecordTuple) -> Result<TimeRecord, sqlx::Error> {
+    let kind = match row.1.as_str() {
+        "manual" => TimeRecordKind::Manual,
+        "segment" => TimeRecordKind::Segment,
+        _ => return Err(sqlx::Error::Protocol("invalid time record kind".into())),
+    };
+    Ok(TimeRecord {
+        id: row.0,
+        kind,
+        started_at: row.2,
+        ended_at: row.3,
+        run_id: row.4,
+        note: row.5,
+        revision: row.6,
+        reserved_legacy: row.7,
+    })
+}
+async fn time_zone(tx: &mut Transaction<'_, Postgres>, actor: Uuid) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("SELECT CASE WHEN EXISTS(SELECT 1 FROM pg_timezone_names p WHERE p.name=u.timezone) THEN u.timezone ELSE 'Asia/Seoul' END FROM fvoci.users u WHERE u.id=$1")
+  .bind(actor).fetch_one(&mut **tx).await
+}
+async fn read_allowed(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    session: Uuid,
+) -> DbResult<()> {
+    set_tenant(tx, workspace).await?;
+    set_self_user(tx, actor).await?;
+    if !session_is_live(tx, actor, session).await? {
+        return Ok(Err(TimerDbError::Project(ProjectDbError::Forbidden)));
+    }
+    if !can_view(tx, workspace, task, actor).await? {
+        return Ok(Err(TimerDbError::Project(ProjectDbError::NotFound)));
+    }
+    Ok(Ok(()))
+}
+fn range_valid(from: NaiveDate, to: NaiveDate) -> bool {
+    to >= from && (to - from).num_days() < 32
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HistoryCursor {
+    actor: Uuid,
+    workspace: Uuid,
+    task: Uuid,
+    from: NaiveDate,
+    to: NaiveDate,
+    zone: String,
+    started_at: DateTime<Utc>,
+    id: Uuid,
+    kind: TimeRecordKind,
+}
+
+pub async fn history(
+    pool: &PgPool,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    query: &TimerHistoryQuery,
+) -> DbResult<TimerHistory> {
+    if !range_valid(query.from, query.to) {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = begin_read(pool).await?;
+    if let Err(e) = read_allowed(&mut tx, workspace, task, actor, session).await? {
+        return Ok(Err(e));
+    }
+    let zone = time_zone(&mut tx, actor).await?;
+    let cursor: Option<HistoryCursor> = match &query.cursor {
+        None => None,
+        Some(value) => match URL_SAFE_NO_PAD
+            .decode(value)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<HistoryCursor>(&b).ok())
+        {
+            Some(c)
+                if c.actor == actor
+                    && c.workspace == workspace
+                    && c.task == task
+                    && c.from == query.from
+                    && c.to == query.to
+                    && c.zone == zone =>
+            {
+                Some(c)
+            }
+            _ => return Ok(Err(TimerDbError::InvalidInput)),
+        },
+    };
+    let sql=format!("WITH records AS ({RECORDS_SQL}) SELECT * FROM records WHERE started_at < (($5::date+1)::timestamp AT TIME ZONE $6) AND (ended_at >= ($4::date::timestamp AT TIME ZONE $6) OR ended_at IS NULL) AND ($7::timestamptz IS NULL OR (started_at,id,kind)<($7,$8::uuid,$9::text)) ORDER BY started_at DESC,id DESC,kind DESC LIMIT 101");
+    let rows: Vec<RecordTuple> = sqlx::query_as(&sql)
+        .bind(workspace)
+        .bind(task)
+        .bind(actor)
+        .bind(query.from)
+        .bind(query.to)
+        .bind(&zone)
+        .bind(cursor.as_ref().map(|c| c.started_at))
+        .bind(cursor.as_ref().map(|c| c.id))
+        .bind(cursor.as_ref().map(|c| match c.kind {
+            TimeRecordKind::Manual => "manual",
+            TimeRecordKind::Segment => "segment",
+        }))
+        .fetch_all(&mut *tx)
+        .await?;
+    let more = rows.len() > 100;
+    let items = rows
+        .into_iter()
+        .take(100)
+        .map(record)
+        .collect::<Result<Vec<_>, _>>()?;
+    let next_cursor = if more {
+        let last = items.last().expect("101 rows have a last item");
+        Some(
+            URL_SAFE_NO_PAD.encode(
+                serde_json::to_vec(&HistoryCursor {
+                    actor,
+                    workspace,
+                    task,
+                    from: query.from,
+                    to: query.to,
+                    zone,
+                    started_at: last.started_at,
+                    id: last.id,
+                    kind: last.kind,
+                })
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
+            ),
+        )
+    } else {
+        None
+    };
+    let result = TimerHistory {
+        server_now: clock(&mut tx).await?,
+        items,
+        next_cursor,
+    };
+    tx.commit().await?;
+    Ok(Ok(result))
+}
+
+pub async fn summary(
+    pool: &PgPool,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    query: &TimerSummaryQuery,
+) -> DbResult<TimerSummary> {
+    if !range_valid(query.from, query.to) {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = begin_read(pool).await?;
+    if let Err(e) = read_allowed(&mut tx, workspace, task, actor, session).await? {
+        return Ok(Err(e));
+    }
+    let zone = time_zone(&mut tx, actor).await?;
+    let at = clock(&mut tx).await?;
+    let sql = format!(
+        r#"WITH records AS ({RECORDS_SQL}), intervals AS (
+ SELECT date_trunc('milliseconds',started_at) AS started_at,date_trunc('milliseconds',COALESCE(ended_at,GREATEST(started_at,$7::timestamptz))) AS ended_at
+ FROM records WHERE ended_at IS NOT NULL OR kind='segment'
+ ), days AS (SELECT d::date AS day,d::timestamp AT TIME ZONE $6 AS a,(d::date+1)::timestamp AT TIME ZONE $6 AS b FROM generate_series($4::date::timestamp,$5::date::timestamp,interval '1 day') d)
+ SELECT day,COALESCE(sum(GREATEST(0,EXTRACT(EPOCH FROM(LEAST(i.ended_at,b)-GREATEST(i.started_at,a)))*1000)),0)::bigint
+ FROM days LEFT JOIN intervals i ON i.started_at<b AND i.ended_at>a GROUP BY day ORDER BY day"#
+    );
+    let rows: Vec<(NaiveDate, i64)> = sqlx::query_as(&sql)
+        .bind(workspace)
+        .bind(task)
+        .bind(actor)
+        .bind(query.from)
+        .bind(query.to)
+        .bind(&zone)
+        .bind(at)
+        .fetch_all(&mut *tx)
+        .await?;
+    let flags:(bool,bool)=sqlx::query_as(&format!("WITH records AS ({RECORDS_SQL}) SELECT EXISTS(SELECT 1 FROM records WHERE kind='segment' AND ended_at IS NULL),EXISTS(SELECT 1 FROM records WHERE kind='manual' AND ended_at IS NULL)")).bind(workspace).bind(task).bind(actor).fetch_one(&mut *tx).await?;
+    let days = rows
+        .into_iter()
+        .map(|(date, milliseconds)| TimerDayTotal { date, milliseconds })
+        .collect::<Vec<_>>();
+    let result = TimerSummary {
+        server_now: at,
+        time_zone: zone,
+        total_milliseconds: days.iter().map(|d| d.milliseconds).sum(),
+        days,
+        unfinished: flags.0,
+        unresolved_manual: flags.1,
+    };
+    tx.commit().await?;
+    Ok(Ok(result))
+}
+
+fn note_reason_valid(note: &Option<String>, reason: &str) -> bool {
+    note.as_ref()
+        .is_none_or(|n| n.encode_utf16().count() <= 2000)
+        && !reason.trim().is_empty()
+        && reason.encode_utf16().count() <= 2000
+}
+fn kind_text(kind: TimeRecordKind) -> &'static str {
+    match kind {
+        TimeRecordKind::Manual => "manual",
+        TimeRecordKind::Segment => "segment",
+    }
+}
+fn record_audit(value: &TimeRecord) -> Value {
+    json!({"recordId":value.id,"kind":value.kind,"startedAt":value.started_at,"endedAt":value.ended_at,"note":value.note,"revision":value.revision})
+}
+async fn hint(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+) -> Result<(), sqlx::Error> {
+    record_task_event_and_audit(
+        tx,
+        TaskChangeRecord {
+            workspace_id: workspace,
+            actor_user_id: actor,
+            verb: "task.timer.changed",
+            target_type: "task",
+            target_id: task,
+            payload: json!({"taskId":task,"hint":"time"}),
+            client_ip: None,
+        },
+    )
+    .await
+}
+async fn write_allowed(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    session: Uuid,
+) -> DbResult<()> {
+    set_tenant(tx, workspace).await?;
+    set_self_user(tx, actor).await?;
+    Ok(
+        require_task_write_access(tx, workspace, actor, session, task, false)
+            .await?
+            .map_err(TimerDbError::Project),
+    )
+}
+
+pub async fn create_manual(
+    pool: &PgPool,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    body: &TimerManualBody,
+) -> DbResult<TimerRecordOutput> {
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if !note_reason_valid(&body.note, &body.reason) {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let Some(seconds) =
+        crate::db::task_ops::time_entry_duration_seconds(body.started_at, body.ended_at)
+    else {
+        return Ok(Err(TimerDbError::InvalidInput));
+    };
+    let mut tx = pool.begin().await?;
+    if let Err(e) = write_allowed(&mut tx, workspace, task, actor, session).await? {
+        return Ok(Err(e));
+    }
+    let digest = hash("manual", Some(workspace), Some(task), body)?;
+    match replay(&mut tx, actor, body.request_id, &digest).await? {
+        Err(e) => return Ok(Err(e)),
+        Ok(Some(value)) => {
+            return Ok(Ok(
+                serde_json::from_value(value).map_err(|e| sqlx::Error::Protocol(e.to_string()))?
+            ))
+        }
+        Ok(None) => {}
+    }
+    if body.expected_session_id != session {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    let at = clock(&mut tx).await?;
+    if body.ended_at > at {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.time_entries(id,workspace_id,task_id,user_id,started_at,ended_at,duration_seconds,note) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(id).bind(workspace).bind(task).bind(actor).bind(body.started_at).bind(body.ended_at).bind(seconds).bind(&body.note).execute(&mut *tx).await?;
+    let record = TimeRecord {
+        id,
+        kind: TimeRecordKind::Manual,
+        started_at: body.started_at,
+        ended_at: Some(body.ended_at),
+        run_id: None,
+        note: body.note.clone(),
+        revision: 0,
+        reserved_legacy: false,
+    };
+    audit(
+        &mut tx,
+        actor,
+        body.request_id,
+        Some(workspace),
+        Some(task),
+        Some(id),
+        "time.manual",
+        Value::Null,
+        record_audit(&record),
+        body.reason.trim(),
+    )
+    .await?;
+    let output = TimerRecordOutput {
+        server_now: at,
+        record,
+    };
+    let value = serde_json::to_value(&output).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    hint(&mut tx, workspace, task, actor).await?;
+    receipt(&mut tx, actor, body.request_id, &digest, None, &value).await?;
+    tx.commit().await?;
+    Ok(Ok(output))
+}
+
+pub async fn correct(
+    pool: &PgPool,
+    workspace: Uuid,
+    task: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    body: &TimeCorrectionBody,
+) -> DbResult<TimerRecordOutput> {
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if !note_reason_valid(&body.note, &body.reason)
+        || body.ended_at <= body.started_at
+        || body.expected_revision < 0
+        || body.expected_revision == i64::MAX
+    {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = pool.begin().await?;
+    if let Err(e) = write_allowed(&mut tx, workspace, task, actor, session).await? {
+        return Ok(Err(e));
+    }
+    let mut semantic =
+        serde_json::to_value(body).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    semantic["recordId"] = json!(id);
+    let digest = hash("correct", Some(workspace), Some(task), &semantic)?;
+    match replay(&mut tx, actor, body.request_id, &digest).await? {
+        Err(e) => return Ok(Err(e)),
+        Ok(Some(value)) => {
+            return Ok(Ok(
+                serde_json::from_value(value).map_err(|e| sqlx::Error::Protocol(e.to_string()))?
+            ))
+        }
+        Ok(None) => {}
+    }
+    if body.expected_session_id != session {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    // Same writer prefix serializes own commands, then a concrete record row is
+    // locked. No update to another actor's rows or hidden task is possible.
+    let exists:Option<Uuid>=match body.kind {
+  TimeRecordKind::Manual=>sqlx::query_scalar("SELECT id FROM fvoci.time_entries WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3 AND id=$4 AND NOT EXISTS(SELECT 1 FROM fvoci.task_timer_segments s WHERE s.time_entry_id=$4) FOR UPDATE").bind(workspace).bind(task).bind(actor).bind(id).fetch_optional(&mut *tx).await?,
+  TimeRecordKind::Segment=>sqlx::query_scalar("SELECT id FROM fvoci.task_timer_segments WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3 AND id=$4 FOR UPDATE").bind(workspace).bind(task).bind(actor).bind(id).fetch_optional(&mut *tx).await?,
+ };
+    if exists.is_none() {
+        return Ok(Err(TimerDbError::Project(ProjectDbError::NotFound)));
+    }
+    let sql =
+        format!("WITH records AS ({RECORDS_SQL}) SELECT * FROM records WHERE id=$4 AND kind=$5");
+    let row: RecordTuple = sqlx::query_as(&sql)
+        .bind(workspace)
+        .bind(task)
+        .bind(actor)
+        .bind(id)
+        .bind(kind_text(body.kind))
+        .fetch_one(&mut *tx)
+        .await?;
+    let before = record(row)?;
+    if before.started_at != body.expected_started_at
+        || before.ended_at != body.expected_ended_at
+        || before.note != body.expected_note
+        || before.revision != body.expected_revision
+    {
+        return Ok(Err(TimerDbError::Conflict("time_record_version")));
+    }
+    // An active server interval must be paused/stopped before editing its range.
+    if before.kind == TimeRecordKind::Segment && before.ended_at.is_none() {
+        return Ok(Err(TimerDbError::Conflict("timer_interval_running")));
+    }
+    let at = clock(&mut tx).await?;
+    if body.ended_at > at {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    if before.kind == TimeRecordKind::Manual && before.ended_at.is_none() {
+        // Closing a legacy row is an explicit user-supplied end, never clock-now or
+        // an inferred duration. Keep its original anchor; a correction overlays
+        // the requested effective range and stores the old open range in audit.
+        let Some(seconds) =
+            crate::db::task_ops::time_entry_duration_seconds(before.started_at, body.ended_at)
+        else {
+            return Ok(Err(TimerDbError::InvalidInput));
+        };
+        sqlx::query("UPDATE fvoci.time_entries SET ended_at=$5,duration_seconds=$6 WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3 AND id=$4").bind(workspace).bind(task).bind(actor).bind(id).bind(body.ended_at).bind(seconds).execute(&mut *tx).await?;
+    }
+    let corrected = TimeRecord {
+        id,
+        kind: before.kind,
+        started_at: body.started_at,
+        ended_at: Some(body.ended_at),
+        run_id: before.run_id,
+        note: body.note.clone(),
+        revision: before.revision + 1,
+        reserved_legacy: false,
+    };
+    audit(
+        &mut tx,
+        actor,
+        body.request_id,
+        Some(workspace),
+        Some(task),
+        (before.kind == TimeRecordKind::Manual).then_some(id),
+        "time.correct",
+        record_audit(&before),
+        record_audit(&corrected),
+        body.reason.trim(),
+    )
+    .await?;
+    let output = TimerRecordOutput {
+        server_now: at,
+        record: corrected,
+    };
+    let value = serde_json::to_value(&output).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    hint(&mut tx, workspace, task, actor).await?;
+    receipt(
+        &mut tx,
+        actor,
+        body.request_id,
+        &digest,
+        before.run_id,
+        &value,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(output))
+}
+
+pub async fn release_legacy(
+    pool: &PgPool,
+    actor: Uuid,
+    session: Uuid,
+    body: &LegacyReleaseBody,
+) -> DbResult<LegacyReleaseOutput> {
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    let mut tx = pool.begin().await?;
+    set_self_user(&mut tx, actor).await?;
+    lock_membership_users(&mut tx, &[actor]).await?;
+    if !recheck_session(&mut tx, actor, session).await? {
+        return Ok(Err(TimerDbError::Project(ProjectDbError::Forbidden)));
+    }
+    let digest = hash("legacy-release", None, None, body)?;
+    match replay(&mut tx, actor, body.request_id, &digest).await? {
+        Err(e) => return Ok(Err(e)),
+        Ok(Some(value)) => {
+            return Ok(Ok(
+                serde_json::from_value(value).map_err(|e| sqlx::Error::Protocol(e.to_string()))?
+            ))
+        }
+        Ok(None) => {}
+    }
+    if body.expected_session_id != session {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    let removed = sqlx::query(
+        "DELETE FROM fvoci.task_timer_legacy_open WHERE user_id=$1 AND time_entry_id=$2",
+    )
+    .bind(actor)
+    .bind(body.time_entry_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if removed != 1 {
+        return Ok(Err(TimerDbError::Conflict("timer_legacy_changed")));
+    }
+    let result = LegacyReleaseOutput {
+        server_now: clock(&mut tx).await?,
+        time_entry_id: body.time_entry_id,
+        released: true,
+    };
+    let value = serde_json::to_value(&result).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    audit(
+        &mut tx,
+        actor,
+        body.request_id,
+        None,
+        None,
+        Some(body.time_entry_id),
+        "legacy.release",
+        json!({"reserved":true}),
+        value.clone(),
+        "explicit_release_original_range_unresolved",
+    )
+    .await?;
+    receipt(&mut tx, actor, body.request_id, &digest, None, &value).await?;
+    tx.commit().await?;
+    Ok(Ok(result))
 }
