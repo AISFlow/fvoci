@@ -1,12 +1,32 @@
 import type { Editor } from "@tiptap/core";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
 import { execFileSync } from "node:child_process";
 import { z } from "zod";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { createE2eUser } from "./helpers";
 import { admin, newSignedInPage, setupInstance, workspaceId } from "./workspace-wiki-vue-editor";
+
+type NativeAdmissionUpdate = {
+  local: boolean;
+  providerOrigin: boolean;
+  clientId: number;
+  bytes: number[];
+  before: string;
+  after: string;
+};
+type AdmissionOwner = {
+  doc: Y.Doc;
+  provider: HocuspocusProvider;
+  editor: Editor;
+  element: HTMLElement;
+  clientId: number;
+  updates: number;
+  localUpdates: number;
+  unauthorizedLocalWrites: number;
+  records: NativeAdmissionUpdate[];
+};
 
 const taskSchema = z
   .object({
@@ -60,6 +80,64 @@ async function fixture(page: Page, key: string, dates: object) {
     path: `/w/${admin.workspaceSlug}/${key}`,
     displayId: `${key}-${String(task.number)}`,
   };
+}
+
+function readTaskBodyDb(workspace: string, task: string) {
+  const connection = process.env.DATABASE_APP_URL;
+  const container = process.env.FVOCI_TEST_PG_CONTAINER;
+  if (!connection || !container?.startsWith("fvoci-rust-test-pg-"))
+    throw new Error("Requires owned restricted app-role DB");
+  const app = new URL(connection);
+  if (
+    !/^fvoci_app_fvoci_e2e_[a-f0-9]{16}$/.test(app.username) ||
+    !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(app.pathname)
+  )
+    throw new Error("Invalid fixture app role");
+  for (const id of [workspace, task])
+    if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
+      throw new Error("Invalid fixture resource");
+  const result = JSON.parse(
+    execFileSync(
+      "docker",
+      [
+        "exec",
+        "-i",
+        container,
+        "psql",
+        "-X",
+        "-qAt",
+        "-U",
+        app.username,
+        "-d",
+        app.pathname.slice(1),
+        "-v",
+        "ON_ERROR_STOP=1",
+      ],
+      {
+        input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${workspace}'; SELECT jsonb_build_object('contentJson',t.content_json,'version',t.version,'role',current_user,'superuser',r.rolsuper,'bypassRls',r.rolbypassrls,'rlsActive',row_security_active(c.oid),'notOwner',pg_get_userbyid(c.relowner) <> current_user) FROM fvoci.tasks t JOIN pg_roles r ON r.rolname=current_user JOIN pg_class c ON c.oid='fvoci.tasks'::regclass WHERE t.id='${task}' AND t.workspace_id='${workspace}'; ROLLBACK;`,
+        encoding: "utf8",
+      },
+    ),
+  ) as unknown;
+  const witness = z
+    .object({
+      contentJson: z.unknown(),
+      version: z.number(),
+      role: z.string(),
+      superuser: z.boolean(),
+      bypassRls: z.boolean(),
+      rlsActive: z.boolean(),
+      notOwner: z.boolean(),
+    })
+    .parse(result);
+  expect(witness).toMatchObject({
+    role: app.username,
+    superuser: false,
+    bypassRls: false,
+    rlsActive: true,
+    notOwner: true,
+  });
+  return witness;
 }
 
 function datesOf(task: z.infer<typeof taskSchema>) {
@@ -545,33 +623,51 @@ for (const archivedTarget of [false, true]) {
         await body.locator(".ProseMirror").evaluate((root) => {
           const element = root as HTMLElement & {
             editor: Editor;
-            retainedAdmission?: {
-              doc: Y.Doc;
-              provider: HocuspocusProvider;
-              clientId: number;
-              updates: number;
-            };
+            retainedAdmission?: AdmissionOwner;
           };
           const options = (name: string) =>
             element.editor.extensionManager.extensions.find((extension) => extension.name === name)
               ?.options as Record<string, unknown>;
           const doc = options("collaboration").document as Y.Doc;
           const provider = options("collaborationCaret").provider as HocuspocusProvider;
-          element.retainedAdmission = { doc, provider, clientId: doc.clientID, updates: 0 };
-          doc.on("update", () => {
-            if (element.retainedAdmission) element.retainedAdmission.updates++;
-          });
+          const witness: AdmissionOwner = {
+            doc,
+            provider,
+            editor: element.editor,
+            element,
+            clientId: doc.clientID,
+            updates: 0,
+            localUpdates: 0,
+            unauthorizedLocalWrites: 0,
+            records: [],
+          };
+          element.retainedAdmission = witness;
+          let previous = doc.getXmlFragment("prosemirror").toJSON();
+          doc.on(
+            "update",
+            (bytes: Uint8Array, origin: unknown, _doc: Y.Doc, transaction: Y.Transaction) => {
+              witness.updates++;
+              if (transaction.local) witness.localUpdates++;
+              if (transaction.local && !element.editor.isEditable)
+                witness.unauthorizedLocalWrites++;
+              const after = doc.getXmlFragment("prosemirror").toJSON();
+              witness.records.push({
+                local: transaction.local,
+                providerOrigin: origin === provider,
+                clientId: doc.clientID,
+                bytes: Array.from(bytes),
+                before: previous,
+                after,
+              });
+              previous = after;
+            },
+          );
         });
         const observeAdmission = () =>
           body.evaluate((root) => {
             const element = root.querySelector(".ProseMirror") as HTMLElement & {
               editor: Editor;
-              retainedAdmission?: {
-                doc: Y.Doc;
-                provider: HocuspocusProvider;
-                clientId: number;
-                updates: number;
-              };
+              retainedAdmission?: AdmissionOwner;
             };
             const witness = element.retainedAdmission;
             if (!witness) throw new Error("Task body or its actual editor was remounted");
@@ -584,6 +680,8 @@ for (const archivedTarget of [false, true]) {
             );
             if (!save) throw new Error("Missing actual Save affordance");
             return {
+              sameEditor: element.editor === witness.editor,
+              sameElement: element === witness.element,
               sameDoc: options("collaboration").document === witness.doc,
               sameProvider: options("collaborationCaret").provider === witness.provider,
               sameClientId: witness.doc.clientID === witness.clientId,
@@ -596,6 +694,9 @@ for (const archivedTarget of [false, true]) {
               domEditable: element.getAttribute("contenteditable"),
               canPersistAffordance: !save.disabled,
               updates: witness.updates,
+              localUpdates: witness.localUpdates,
+              unauthorizedLocalWrites: witness.unauthorizedLocalWrites,
+              records: witness.records,
             };
           });
         expect(await observeAdmission()).toMatchObject({
@@ -609,6 +710,13 @@ for (const archivedTarget of [false, true]) {
           canPersistAffordance: false,
           updates: 0,
         });
+        const originalCanonicalResponse = await page.request.get(parentEndpoint);
+        expect(originalCanonicalResponse.status()).toBe(200);
+        const originalCanonical = z
+          .object({ contentJson: z.unknown(), version: z.number() })
+          .parse(await originalCanonicalResponse.json());
+        const originalDb = readTaskBodyDb(workspace, parent.id);
+        expect(originalDb).toMatchObject(originalCanonical);
         const oldAdmission = admissions.find((item) => item.scope === "readonly" && item.delivered);
         if (!oldAdmission) throw new Error("Requires actual server readonly authentication");
         const collectionEndpoint = `${parentEndpoint}/collection-item`;
@@ -741,6 +849,53 @@ for (const archivedTarget of [false, true]) {
         expect(newAdmission).toMatchObject({ scope: "read-write", delivered: false });
         if (!newAdmission) throw new Error("Missing actual fresh server writable admission");
         expect(newAdmission.generation).toBeGreaterThan(oldAdmission.generation);
+        const causal = await observeAdmission();
+        const canonicalResponse = await page.request.get(parentEndpoint);
+        expect(canonicalResponse.status()).toBe(200);
+        const canonical = z
+          .object({ contentJson: z.unknown(), version: z.number() })
+          .parse(await canonicalResponse.json());
+        await testInfo.attach("w3-task-held-auth-causal-native-updates.json", {
+          body: JSON.stringify({
+            state: causal,
+            canonical,
+            originalCanonical,
+            originalDb,
+            currentDb: readTaskBodyDb(workspace, parent.id),
+            decoded: causal.records.map((record) => {
+              const update = Y.decodeUpdate(new Uint8Array(record.bytes));
+              return {
+                local: record.local,
+                providerOrigin: record.providerOrigin,
+                currentClientId: record.clientId,
+                structs: update.structs.map((item) => ({
+                  client: item.id.client,
+                  clock: item.id.clock,
+                  length: item.length,
+                  kind: item.constructor.name,
+                  contentKind: item instanceof Y.Item ? item.content.constructor.name : null,
+                  text:
+                    item instanceof Y.Item && item.content instanceof Y.ContentString
+                      ? item.content.str
+                      : null,
+                })),
+                deletes: Array.from(update.ds.clients, ([client, ranges]) => ({
+                  client,
+                  ranges: ranges.map((range) => ({ clock: range.clock, length: range.len })),
+                })),
+              };
+            }),
+          }),
+          contentType: "application/json",
+        });
+        expect(canonical).toEqual(originalCanonical);
+        expect(readTaskBodyDb(workspace, parent.id)).toEqual(originalDb);
+        expect(causal).toMatchObject({
+          sameEditor: true,
+          sameElement: true,
+          localUpdates: 0,
+          unauthorizedLocalWrites: 0,
+        });
         expect(await observeAdmission()).toMatchObject({
           sameDoc: true,
           sameProvider: true,
@@ -761,6 +916,7 @@ for (const archivedTarget of [false, true]) {
               running: boolean;
               states: {
                 scope: string | undefined;
+                authenticated: boolean;
                 status: string | null;
                 editable: boolean;
                 dom: string | null;
@@ -772,6 +928,7 @@ for (const archivedTarget of [false, true]) {
             running: true,
             states: [] as {
               scope: string | undefined;
+              authenticated: boolean;
               status: string | null;
               editable: boolean;
               dom: string | null;
@@ -790,6 +947,7 @@ for (const archivedTarget of [false, true]) {
             );
             frames.states.push({
               scope: element.retainedAdmission.provider.authorizedScope,
+              authenticated: element.retainedAdmission.provider.isAuthenticated,
               status:
                 root.querySelector("[data-collab-status]")?.getAttribute("data-collab-status") ??
                 null,
@@ -833,6 +991,7 @@ for (const archivedTarget of [false, true]) {
               running: boolean;
               states: {
                 scope: string | undefined;
+                authenticated: boolean;
                 status: string | null;
                 editable: boolean;
                 dom: string | null;
@@ -1336,12 +1495,20 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           taskFreshAdmission?: {
             doc: Y.Doc;
             provider: HocuspocusProvider;
+            editor: Editor;
+            element: HTMLElement;
             clientId: number;
             root: Element;
             updates: number;
+            localUpdates: number;
+            unauthorizedLocalWrites: number;
+            records: NativeAdmissionUpdate[];
             running: boolean;
+            ownerBroken: boolean;
+            violations: number;
             states: {
               scope: string | undefined;
+              authenticated: boolean;
               status: string | null;
               editable: boolean;
               dom: string | null;
@@ -1352,12 +1519,20 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         const witness = {
           doc,
           provider,
+          editor: element.editor,
+          element,
           clientId: doc.clientID,
           root,
           updates: 0,
+          localUpdates: 0,
+          unauthorizedLocalWrites: 0,
+          records: [] as NativeAdmissionUpdate[],
           running: true,
+          ownerBroken: false,
+          violations: 0,
           states: [] as {
             scope: string | undefined;
+            authenticated: boolean;
             status: string | null;
             editable: boolean;
             dom: string | null;
@@ -1365,26 +1540,57 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           }[],
         };
         owner.taskFreshAdmission = witness;
-        doc.on("update", () => {
-          witness.updates++;
-        });
+        let previous = doc.getXmlFragment("prosemirror").toJSON();
+        doc.on(
+          "update",
+          (bytes: Uint8Array, origin: unknown, _doc: Y.Doc, transaction: Y.Transaction) => {
+            witness.updates++;
+            if (transaction.local) witness.localUpdates++;
+            if (transaction.local && !element.editor.isEditable) witness.unauthorizedLocalWrites++;
+            const after = doc.getXmlFragment("prosemirror").toJSON();
+            witness.records.push({
+              local: transaction.local,
+              providerOrigin: origin === provider,
+              clientId: doc.clientID,
+              bytes: Array.from(bytes),
+              before: previous,
+              after,
+            });
+            previous = after;
+          },
+        );
         const sample = () => {
-          if (!witness.running || witness.states.length >= 256) return;
+          if (!witness.running) return;
+          const current = root.querySelector(".ProseMirror") as HTMLElement & { editor: Editor };
+          if (current !== witness.element || current.editor !== witness.editor) {
+            witness.ownerBroken = true;
+            return;
+          }
+          if (witness.states.length >= 256) witness.states.splice(1, 1);
           const save = Array.from(root.querySelectorAll("button")).find(
             (button) => button.textContent.trim() === "저장",
           );
-          witness.states.push({
+          const state = {
             scope: provider.authorizedScope,
+            authenticated: provider.isAuthenticated,
             status:
               root.querySelector("[data-collab-status]")?.getAttribute("data-collab-status") ??
               null,
-            editable: element.editor.isEditable,
-            dom: element.getAttribute("contenteditable"),
+            editable: current.editor.isEditable,
+            dom: current.getAttribute("contenteditable"),
             saveEnabled: save !== undefined && !save.disabled,
-          });
+          };
+          if (
+            state.status === "connected" &&
+            (state.dom !== String(state.editable) ||
+              state.saveEnabled !== state.editable ||
+              (state.authenticated && state.scope === "readonly" && state.editable))
+          )
+            witness.violations++;
+          witness.states.push(state);
           requestAnimationFrame(sample);
         };
-        requestAnimationFrame(sample);
+        sample();
       });
       const observe = () =>
         body.evaluate((root) => {
@@ -1394,7 +1600,14 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
               provider: HocuspocusProvider;
               clientId: number;
               root: Element;
+              editor: Editor;
+              element: HTMLElement;
               updates: number;
+              localUpdates: number;
+              unauthorizedLocalWrites: number;
+              records: NativeAdmissionUpdate[];
+              ownerBroken: boolean;
+              violations: number;
             };
           };
           const witness = owner.taskFreshAdmission;
@@ -1407,7 +1620,11 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             (button) => button.textContent.trim() === "저장",
           );
           return {
+            ownerBroken: witness.ownerBroken,
+            violations: witness.violations,
             sameRoot: root === witness.root,
+            sameEditor: element.editor === witness.editor,
+            sameElement: element === witness.element,
             sameDoc: options("collaboration").document === witness.doc,
             sameProvider: options("collaborationCaret").provider === witness.provider,
             sameClientId: witness.doc.clientID === witness.clientId,
@@ -1418,6 +1635,9 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             dom: element.getAttribute("contenteditable"),
             canPersistAffordance: save !== undefined && !save.disabled,
             updates: witness.updates,
+            localUpdates: witness.localUpdates,
+            unauthorizedLocalWrites: witness.unauthorizedLocalWrites,
+            records: witness.records,
           };
         });
       expect(await observe()).toMatchObject({
@@ -1455,7 +1675,11 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         releaseFrame();
       }
       await expect.poll(observe).toMatchObject({
+        ownerBroken: false,
+        violations: 0,
         sameRoot: true,
+        sameEditor: true,
+        sameElement: true,
         sameDoc: true,
         sameProvider: true,
         sameClientId: true,
@@ -1480,6 +1704,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             running: boolean;
             states: {
               scope: string | undefined;
+              authenticated: boolean;
               status: string | null;
               editable: boolean;
               dom: string | null;
@@ -1491,6 +1716,27 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         owner.taskFreshAdmission.running = false;
         return owner.taskFreshAdmission.states;
       });
+      expect(
+        frames.some(
+          (frame) =>
+            frame.authenticated &&
+            frame.scope === "readonly" &&
+            frame.status === "connected" &&
+            !frame.editable &&
+            !frame.saveEnabled,
+        ),
+      ).toBe(true);
+      if (schedule === "natural")
+        expect(
+          frames.some(
+            (frame) =>
+              frame.authenticated &&
+              frame.scope === "read-write" &&
+              frame.status === "connected" &&
+              frame.editable &&
+              frame.saveEnabled,
+          ),
+        ).toBe(true);
       for (const frame of frames.filter((frame) => frame.status === "connected")) {
         expect(frame.dom).toBe(String(frame.editable));
         expect(frame.saveEnabled).toBe(frame.editable);

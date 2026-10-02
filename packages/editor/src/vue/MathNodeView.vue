@@ -44,6 +44,8 @@ let activeField: HTMLTextAreaElement | null = null;
 // Only an uninterrupted authorized field may explicitly supersede a peer's
 // latex. Retained drafts reopened after retirement keep their captured epoch.
 let uninterruptedField = false;
+let observedId: unknown = null;
+let ownerDrift = false;
 const owner = shallowRef<{
   editor: typeof props.editor;
   node: typeof props.node;
@@ -101,6 +103,7 @@ function commit(next: string): boolean {
   const captured = owner.value;
   if (
     retired ||
+    ownerDrift ||
     composing.value ||
     !captured ||
     captured.editor !== toRaw(props.editor) ||
@@ -116,7 +119,15 @@ function commit(next: string): boolean {
   if (
     !current ||
     current.type !== captured.node.type ||
-    current.attrs.id !== captured.id ||
+    (current.attrs.id !== captured.id &&
+      !(
+        uninterruptedField &&
+        captured.native &&
+        (captured.id === null || captured.id === undefined) &&
+        typeof current.attrs.id === "string" &&
+        current.attrs.id.length > 0 &&
+        (observedId === null || observedId === undefined || current.attrs.id === observedId)
+      )) ||
     (captured.native
       ? native?.doc !== captured.native.doc || native.atom !== captured.native.atom
       : current !== captured.node) ||
@@ -134,7 +145,9 @@ function commit(next: string): boolean {
 async function open(): Promise<void> {
   if (!writable()) return;
   uninterruptedField = draft.value === null;
-  if (draft.value === null)
+  if (draft.value === null) {
+    observedId = props.node.attrs.id as unknown;
+    ownerDrift = false;
     owner.value = {
       editor: toRaw(props.editor),
       // VueRenderer wraps the PM node deeply; compare its original immutable
@@ -147,6 +160,7 @@ async function open(): Promise<void> {
         return typeof position === "number" ? mathAtomAt(position) : null;
       })(),
     };
+  }
   const source = draft.value ?? latex.value;
   const lifetime = ++fieldLifetime;
   activeField = null;
@@ -195,6 +209,32 @@ function cancel(): void {
   owner.value = null;
   closeField();
 }
+
+// An idless native atom may gain its first label while this field is active.
+// Latch each observed label: a later observed rename/removal cannot authorize
+// this old field. Unobserved intermediate history is not inferred from origin.
+watch(
+  () => props.node.attrs.id as unknown,
+  () => {
+    const captured = owner.value;
+    if (
+      !captured ||
+      !uninterruptedField ||
+      !captured.native ||
+      (captured.id !== null && captured.id !== undefined)
+    )
+      return;
+    const position = props.getPos();
+    if (typeof position !== "number") return;
+    const native = mathAtomAt(position);
+    if (native?.doc !== captured.native.doc || native.atom !== captured.native.atom) return;
+    const id: unknown = props.editor.state.doc.nodeAt(position)?.attrs.id;
+    if (observedId !== null && observedId !== undefined) {
+      if (id !== observedId) ownerDrift = true;
+    } else if (typeof id === "string" && id.length > 0) observedId = id;
+  },
+  { flush: "sync" },
+);
 
 // Authorization notifications close the field without publishing a private
 // draft after permission is false. The same readable view may reopen its draft;

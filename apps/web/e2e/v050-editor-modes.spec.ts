@@ -897,6 +897,17 @@ test("actual Markdown file export waits for the current ACK and downloads latest
     await field.fill("공개하면 안 되는 비공개 Markdown 초안");
     await expectIdentity(page, 0);
     const exportUrl = `/api/v1/workspaces/${ws}/documents/${doc.id}/md`;
+    let realResponse:
+      { bytes: Buffer; status: number; headers: Record<string, string> } | undefined;
+    await page.route(`**${exportUrl}`, async (route) => {
+      const original = await route.fetch();
+      realResponse = {
+        bytes: await original.body(),
+        status: original.status(),
+        headers: original.headers(),
+      };
+      await route.fulfill({ response: original });
+    });
     let exportRequests = 0;
     let downloaded = false;
     page.on("request", (request) => {
@@ -931,7 +942,12 @@ test("actual Markdown file export waits for the current ACK and downloads latest
     const exportedPath = testInfo.outputPath("actual-latest-document.md");
     await actualDownload.saveAs(exportedPath);
     const bytes = readFileSync(exportedPath);
-    expect(bytes).toEqual(await actualResponse.body()); // Transport bytes, not a converter oracle.
+    if (!realResponse) throw new Error("Missing original authenticated Rust export response");
+    expect(realResponse.status).toBe(200);
+    expect(realResponse.headers["content-type"]).toBe("text/markdown; charset=utf-8");
+    expect(realResponse.headers["content-disposition"]).toContain("attachment;");
+    expect(realResponse.headers["content-length"]).toBe(String(realResponse.bytes.length));
+    expect(bytes).toEqual(realResponse.bytes); // Exact original Rust response, not a converter oracle.
     const text = bytes.toString("utf8");
     expect(text).toContain("# 최신 문서 다운로드\n\n");
     expect(text).toContain("원본 가장 최신 한글");
@@ -976,6 +992,15 @@ test("actual Markdown file export waits for the current ACK and downloads latest
         ack: ack.id,
         db: restrictedDbBody(ws, doc.id),
         exportedBytes: bytes.length,
+        originalResponse: {
+          status: realResponse.status,
+          headers: {
+            contentType: realResponse.headers["content-type"],
+            contentDisposition: realResponse.headers["content-disposition"],
+            contentLength: realResponse.headers["content-length"],
+          },
+          sha256: createHash("sha256").update(realResponse.bytes).digest("hex"),
+        },
         exportRequests,
       }),
       contentType: "application/json",

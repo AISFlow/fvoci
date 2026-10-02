@@ -1073,7 +1073,12 @@ for (const schedule of [
   "identified-replaced-same-id",
   "idless-replaced",
   "idless-idallocated",
+  "retired-idless-idallocated",
+  "identified-retarget",
+  "observed-firstlabel-retarget",
+  "observed-firstlabel-ABA",
   "peer-newest",
+  "idless-peer-newest-firstlabel",
   "retired-peer-newest",
   "readonly-ABA-peer-newest",
   "readonly",
@@ -1084,6 +1089,7 @@ for (const schedule of [
   await test(`actual Math atom ownership ${schedule} preserves ordinary blur and rejects a different or retired native owner`, async () => {
     const identified =
       schedule === "identified-replaced-same-id" ||
+      schedule === "identified-retarget" ||
       schedule === "peer-newest" ||
       schedule === "retired-peer-newest" ||
       schedule === "readonly-ABA-peer-newest";
@@ -1179,7 +1185,11 @@ for (const schedule of [
       await controls.open();
       assert.equal(field.value, "x");
       const ownDraft =
-        schedule === "peer-newest" || schedule === "retired-peer-newest" ? "a+b" : "y";
+        schedule === "peer-newest" ||
+        schedule === "retired-peer-newest" ||
+        schedule === "idless-peer-newest-firstlabel"
+          ? "a+b"
+          : "y";
       field.value = ownDraft;
       controls.onInput(event("input"));
       if (schedule === "idless-peer-tail") {
@@ -1210,13 +1220,34 @@ for (const schedule of [
         assert.equal(props.node.attrs.latex, "x");
         if (identified) assert.equal(props.node.attrs.id, "math-same-id");
       }
-      if (schedule === "idless-idallocated") {
+      if (schedule === "retired-idless-idallocated") {
+        local.editor.setEditable(false);
+        local.editor.setEditable(true);
+      }
+      if (
+        schedule === "idless-idallocated" ||
+        schedule === "retired-idless-idallocated" ||
+        schedule === "identified-retarget" ||
+        schedule === "observed-firstlabel-retarget" ||
+        schedule === "observed-firstlabel-ABA"
+      ) {
         const atom = peerDoc.getXmlFragment("prosemirror").get(0);
         assert.ok(atom instanceof Y.XmlElement);
         atom.setAttribute("id", "new-logical-owner");
         props.node = local.editor.state.doc.child(0);
         assert.equal(doc.getXmlFragment("prosemirror").get(0), original);
         assert.equal(props.node.attrs.id, "new-logical-owner");
+        if (schedule === "observed-firstlabel-retarget" || schedule === "observed-firstlabel-ABA") {
+          atom.setAttribute("id", "different-logical-owner");
+          props.node = local.editor.state.doc.child(0);
+          assert.equal(props.node.attrs.id, "different-logical-owner");
+          assert.equal(doc.getXmlFragment("prosemirror").get(0), original);
+          if (schedule === "observed-firstlabel-ABA") {
+            atom.setAttribute("id", "new-logical-owner");
+            props.node = local.editor.state.doc.child(0);
+            assert.equal(props.node.attrs.id, "new-logical-owner");
+          }
+        }
       }
       if (schedule === "readonly-ABA-peer-newest") {
         local.editor.setEditable(false);
@@ -1228,6 +1259,7 @@ for (const schedule of [
       }
       if (
         schedule === "peer-newest" ||
+        schedule === "idless-peer-newest-firstlabel" ||
         schedule === "retired-peer-newest" ||
         schedule === "readonly-ABA-peer-newest"
       ) {
@@ -1243,7 +1275,11 @@ for (const schedule of [
         assert.equal(doc.getXmlFragment("prosemirror").get(0), original);
         assert.equal(field.value, ownDraft);
       }
-      if (schedule === "retired-peer-newest" || schedule === "readonly-ABA-peer-newest") {
+      if (
+        schedule === "retired-peer-newest" ||
+        schedule === "readonly-ABA-peer-newest" ||
+        schedule === "retired-idless-idallocated"
+      ) {
         const retiredState = Y.encodeStateAsUpdate(doc);
         local.editor.setEditable(true);
         await Vue.nextTick();
@@ -1266,7 +1302,9 @@ for (const schedule of [
       const allowed =
         schedule === "idless-normal" ||
         schedule === "idless-peer-tail" ||
-        schedule === "peer-newest";
+        schedule === "idless-idallocated" ||
+        schedule === "peer-newest" ||
+        schedule === "idless-peer-newest-firstlabel";
       const expected = allowed
         ? ownDraft
         : schedule === "retired-peer-newest" || schedule === "readonly-ABA-peer-newest"
