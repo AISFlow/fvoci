@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
+import * as Vue from "vue";
 import { Editor } from "@tiptap/core";
+import type { Node as PmNode } from "@tiptap/pm/model";
 import { splitBlock } from "@tiptap/pm/commands";
 import {
   EditorState,
@@ -44,6 +49,9 @@ function liveEditor(ydoc: Y.Doc) {
   const host = {
     state,
     composing: false,
+    get editable() {
+      return editor.options.editable;
+    },
     hasFocus: () => false,
     dispatch(tr: Transaction) {
       const before = state;
@@ -73,6 +81,148 @@ function liveEditor(ydoc: Y.Doc) {
     },
   };
 }
+
+await test("actual block-math watcher and commands make zero readonly or retired writes, retain a readable draft and refuse to overwrite a peer's newer latex", async () => {
+  const doc = tiptapJsonToYDoc({
+    type: "doc",
+    content: [
+      { type: "math", attrs: { id: "math-owner", latex: "x + y" } },
+      { type: "paragraph", attrs: { id: "math-tail" } },
+    ],
+  });
+  const peerDoc = new Y.Doc({ gc: false });
+  Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(doc));
+  const local = liveEditor(doc);
+  const peer = liveEditor(peerDoc);
+  const wire = Symbol("wire");
+  doc.on("update", (value, origin) => {
+    if (origin !== wire) Y.applyUpdate(peerDoc, value, wire);
+  });
+  peerDoc.on("update", (value, origin) => {
+    if (origin !== wire) Y.applyUpdate(doc, value, wire);
+  });
+  local.host.dispatch(
+    local.editor.state.tr.setSelection(NodeSelection.create(local.editor.state.doc, 0)),
+  );
+  const props: {
+    editor: Editor;
+    node: PmNode;
+    getPos: () => number | undefined;
+    updateAttributes: (attrs: Record<string, unknown>) => void;
+  } = Vue.shallowReactive({
+    editor: local.editor,
+    node: local.editor.state.doc.child(0),
+    getPos: () => 0,
+    updateAttributes: (attrs: Record<string, unknown>) => {
+      assert.equal(local.editor.commands.updateAttributes("math", attrs), true);
+      props.node = local.editor.state.doc.child(0);
+    },
+  });
+  const unmount: (() => void)[] = [];
+  const field = { value: "", focus() {} };
+  const input = Vue.shallowRef(field);
+  const editableSource = readFileSync(
+    new URL("../src/vue/use-editable.ts", import.meta.url),
+    "utf8",
+  );
+  const mathSource = readFileSync(new URL("../src/vue/MathNodeView.vue", import.meta.url), "utf8");
+  const mathScript = mathSource.split('<script setup lang="ts">')[1]?.split("</script>")[0];
+  assert.ok(mathScript);
+  // Execute the actual consumer and editable owner, without a copied watcher.
+  // Only DOM refs/render/lifecycle are controlled; PM commands and Yjs are real.
+  const code =
+    editableSource
+      .slice(editableSource.indexOf("export function useEditable"))
+      .replace("export function", "function") +
+    "\n" +
+    mathScript.slice(mathScript.indexOf("const editable ="));
+  type Controls = {
+    open(): Promise<void>;
+    onInput(event: Event): void;
+    onBlur(event: FocusEvent): void;
+  };
+  const effects = Vue.effectScope();
+  const controls = effects.run(
+    () =>
+      runInNewContext(
+        ts.transpileModule(`(()=>{${code};return {open,onInput,onBlur};})()`, {
+          compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext },
+        }).outputText,
+        {
+          ...Vue,
+          props,
+          t: (key: string) => key,
+          useTemplateRef: () => input,
+          useMathMl: () => ({ html: null, failed: false }),
+          onBeforeUnmount: (callback: () => void) => unmount.push(callback),
+        },
+      ) as unknown as Controls,
+  );
+  assert.ok(controls);
+  const event = (type: string) => {
+    const value = new Event(type);
+    Object.defineProperty(value, "target", { value: field });
+    return value;
+  };
+  let updates = 0;
+  doc.on("update", () => {
+    updates++;
+  });
+  try {
+    await controls.open();
+    assert.equal(field.value, "x + y");
+    field.value = "private pending";
+    controls.onInput(event("input"));
+    const before = Y.encodeStateAsUpdate(doc);
+    local.editor.setEditable(false);
+    await Vue.nextTick();
+    assert.equal(local.editor.isEditable, false);
+    assert.equal(local.editor.state.doc.child(0).attrs.latex, "x + y");
+    assert.equal(updates, 0);
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(updates, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+    local.editor.setEditable(true);
+    await Vue.nextTick();
+    await controls.open();
+    assert.equal(field.value, "private pending");
+    field.value = "authorized z";
+    controls.onInput(event("input"));
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(local.editor.state.doc.child(0).attrs.latex, "authorized z");
+    assert.equal(local.editor.state.doc.child(0).attrs.id, "math-owner");
+    assert.equal(peer.editor.state.doc.child(0).attrs.latex, "authorized z");
+    assert.equal(updates, 1);
+    await controls.open();
+    field.value = "stale private";
+    controls.onInput(event("input"));
+    peer.host.dispatch(
+      peer.editor.state.tr.setNodeMarkup(0, undefined, {
+        ...peer.editor.state.doc.child(0).attrs,
+        latex: "peer newest",
+      }),
+    );
+    props.node = local.editor.state.doc.child(0);
+    const afterPeer = Y.encodeStateAsUpdate(doc);
+    const count = updates;
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(local.editor.state.doc.child(0).attrs.latex, "peer newest");
+    assert.equal(peer.editor.state.doc.child(0).attrs.latex, "peer newest");
+    assert.equal(updates, count);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), afterPeer);
+    for (const callback of unmount) callback();
+    field.value = "late retired callback";
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(updates, count);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), afterPeer);
+  } finally {
+    effects.stop();
+    local.close();
+    peer.close();
+    doc.destroy();
+    peerDoc.destroy();
+  }
+});
 
 const input = {
   type: "doc" as const,
