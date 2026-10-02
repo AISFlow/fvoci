@@ -21,6 +21,7 @@ import { tiptapJsonToYDoc, yDocToTiptapJson } from "../src/collab-tiptap.ts";
 import { rawEditorPreflight, SourceModeSession } from "../src/source-mode.ts";
 import { createFvociExtensions } from "../src/tiptap-schema.ts";
 import {
+  applyEditorModePreviewStyles,
   attachmentPreviewSpec,
   embedPreviewSpec,
   sanitizeEditorModePreview,
@@ -359,7 +360,7 @@ await test("backward and node bookmarks map through localized edits without chan
 await test("preview SafeHtml producer retains supported presentation while removing active hostile HTML", () => {
   const preview = sanitizeEditorModePreview(
     '<p><u>&lt;script&gt;evil()&lt;/script&gt; 한글</u><a href="javascript:evil()" onclick="evil()">링크</a></p><details><summary>요약</summary><p>내용</p></details><script>active()</script>',
-  );
+  ).html;
   assert.ok(preview.includes("&lt;script&gt;evil()&lt;/script&gt; 한글"));
   assert.ok(preview.includes("<u>"));
   assert.ok(preview.includes("<details"));
@@ -760,24 +761,106 @@ await test("preview atom producer preserves actual file/name/caption and resolve
   }
 });
 
-await test("preview sanitizer keeps supported heading levels, callout kind, table widths and rich colors/alignment while rejecting active CSS", () => {
-  const html = sanitizeEditorModePreview(
+function previewCssWrites(preview: ReturnType<typeof sanitizeEditorModePreview>) {
+  const writes: { tag: string; property: string; value: string }[] = [];
+  const targets = new Map<
+    string,
+    {
+      tagName: string;
+      style: { setProperty(property: string, value: string): void };
+      removeAttribute(name: string): void;
+    }
+  >();
+  for (const match of preview.html.matchAll(
+    /<([a-z][a-z0-9]*)\b[^>]*data-fvoci-preview-css="(\d+)"[^>]*>/g,
+  )) {
+    const tag = match[1],
+      marker = match[2];
+    assert.ok(tag && marker);
+    targets.set(marker, {
+      tagName: tag.toUpperCase(),
+      style: {
+        setProperty(property, value) {
+          writes.push({ tag, property, value });
+        },
+      },
+      removeAttribute() {},
+    });
+  }
+  // Controlled native DOM boundary, not a DOM parser/CSP or browser substitute.
+  const root = {
+    querySelector(selector: string) {
+      const marker = /="(\d+)"/.exec(selector)?.[1];
+      return marker === undefined ? null : (targets.get(marker) ?? null);
+    },
+  } as unknown as HTMLElement;
+  applyEditorModePreviewStyles(root, preview);
+  return writes;
+}
+
+await test("preview keeps supported heading/callout/table geometry and moves validated presentation to CSSOM before the HTML sink", () => {
+  const preview = sanitizeEditorModePreview(
     '<h4>Level four</h4><h5>Level five</h5><h6>Level six</h6><aside class="afn-callout" data-callout="" data-kind="warning"><p>주의</p></aside><p style="text-align:right"><span style="color:#112233;background-color:#abcdef">색상</span></p><table style="width:300px"><colgroup><col style="width:120px"><col style="width:180px"></colgroup><tbody><tr><td colspan="2" rowspan="2" style="background:#abcdef"><p>셀</p></td></tr></tbody></table><span style="color:expression(evil());background:url(javascript:evil());text-align:evil()" onclick="evil()">bad</span>',
   );
+  const html = preview.html;
   assert.ok(html.includes("<h4>Level four</h4>"));
   assert.ok(html.includes("<h5>Level five</h5>"));
   assert.ok(html.includes("<h6>Level six</h6>"));
   assert.ok(html.includes("<aside") && html.includes('data-kind="warning"'));
-  assert.ok(html.includes("text-align:right"));
-  assert.ok(html.includes("color:#112233") && html.includes("background-color:#abcdef"));
-  assert.ok(
-    html.includes("<colgroup>") && html.includes("width:120px") && html.includes("width:180px"),
-  );
+  assert.ok(html.includes("<colgroup>"));
   assert.ok(html.includes('colspan="2"') && html.includes('rowspan="2"'));
-  assert.ok(html.includes("background:#abcdef"));
+  assert.equal(/\sstyle=/.test(html), false);
   assert.equal(html.includes("expression"), false);
   assert.equal(html.includes("javascript:"), false);
   assert.equal(html.includes("onclick"), false);
+  assert.deepEqual(previewCssWrites(preview), [
+    { tag: "p", property: "text-align", value: "right" },
+    { tag: "span", property: "color", value: "#112233" },
+    { tag: "span", property: "background-color", value: "#abcdef" },
+    { tag: "table", property: "width", value: "300px" },
+    { tag: "col", property: "width", value: "120px" },
+    { tag: "col", property: "width", value: "180px" },
+    { tag: "td", property: "background", value: "#abcdef" },
+  ]);
+});
+
+await test("preview canonical style sidecar cannot consume quoted text, entity attribute injection or stored private markers", () => {
+  const preview = sanitizeEditorModePreview(
+    '<p title="&quot; > style=&quot;color:red&quot;">한글 literal style="color:url(javascript:literal)" &lt;span style="color:red"&gt;</p><span data-fvoci-preview-css="0" style="color:&#35;112233;background-color:rgba(0, 1, 2, 0.5)" title="x&quot; style=&quot;position:absolute">색상</span><h4 data-fvoci-preview-css="0" style="text-align:right;position:absolute;left:-999px">제목</h4><span style="color:var(--attacker);background-color:url(https://attacker.invalid/a);position:fixed" onerror="bad()">거부</span>',
+  );
+  assert.ok(preview.html.includes('literal style="color:url(javascript:literal)"'));
+  assert.ok(preview.html.includes('&lt;span style="color:red"&gt;'));
+  assert.equal(preview.html.includes("title="), false);
+  assert.equal(preview.html.includes("onerror="), false);
+  assert.equal(preview.html.includes("attacker.invalid"), false);
+  assert.deepEqual(previewCssWrites(preview), [
+    { tag: "span", property: "color", value: "#112233" },
+    { tag: "span", property: "background-color", value: "rgba(0, 1, 2, 0.5)" },
+    { tag: "h4", property: "text-align", value: "right" },
+  ]);
+});
+
+await test("preview CSSOM requires the producer's exact sidecar owner and a matching target tag", () => {
+  const preview = sanitizeEditorModePreview('<p style="text-align:right">한글</p>');
+  let writes = 0;
+  const root = {
+    querySelector() {
+      return {
+        tagName: "DIV",
+        style: {
+          setProperty() {
+            writes++;
+          },
+        },
+      };
+    },
+  } as unknown as HTMLElement;
+  applyEditorModePreviewStyles(root, preview);
+  assert.equal(writes, 0);
+  assert.throws(() => {
+    applyEditorModePreviewStyles(root, { html: preview.html });
+  }, /Unowned preview presentation/);
+  assert.equal(writes, 0);
 });
 
 await test("source versus ordinary rich splitBlock peer-boundary undo control records exact CRDT ordering and anchors", () => {

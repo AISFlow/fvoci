@@ -15,6 +15,16 @@ type PreviewOptions = {
   attachmentBridge?: AttachmentBlockBridge | null;
   entityResolver?: EntityResolver | null;
 };
+export type EditorModePreview = Readonly<{ html: SafeHtml }>;
+type PreviewStyle = Readonly<{
+  marker: string;
+  tag: string;
+  declarations: readonly (readonly [string, string])[];
+}>;
+// This attribute is absent from the sanitizer allowlist, so stored/user markup
+// cannot supply a marker. Generated markers belong only to this render object.
+const STYLE_MARKER = "data-fvoci-preview-css";
+const previewStyles = new WeakMap<EditorModePreview, readonly PreviewStyle[]>();
 const attr = (node: PmNode, key: string): string =>
   typeof node.attrs[key] === "string" ? node.attrs[key] : "";
 
@@ -86,7 +96,7 @@ export async function editorModePreview(
   editor: Editor,
   options: PreviewOptions = {},
   signal?: AbortSignal,
-): Promise<SafeHtml> {
+): Promise<EditorModePreview> {
   signal?.throwIfAborted();
   const doc = editor.state.doc;
   const schema = editor.schema;
@@ -126,6 +136,43 @@ export async function editorModePreview(
   return sanitizeEditorModePreview(host.innerHTML);
 }
 
-export function sanitizeEditorModePreview(html: string): SafeHtml {
-  return asSafeHtml(sanitizeRenderedHtml(html));
+export function sanitizeEditorModePreview(html: string): EditorModePreview {
+  const styles: PreviewStyle[] = [];
+  // sanitize-html emits lowercase tags and double-quoted, escaped attributes;
+  // its escapeHtml escapes <, > and attribute quotes. Work only on that canonical
+  // output, never raw markup or a DOM parsed with CSP-blocked style attributes.
+  const sanitized = sanitizeRenderedHtml(html);
+  const withoutStyles = sanitized.replace(/<[a-z][a-z0-9]*\b[^>]*>/g, (opening) => {
+    const style = /\sstyle="([^"]*)"/.exec(opening);
+    if (!style?.[1]) return opening;
+    const tag = /^<([a-z][a-z0-9]*)\b/.exec(opening)?.[1];
+    if (!tag) throw new Error("Invalid sanitized preview tag");
+    const marker = String(styles.length);
+    // The existing sanitizer has already parsed and bounded these declarations.
+    // Its allowed values contain neither semicolons nor embedded colons/entities.
+    const declarations: [string, string][] = style[1].split(";").map((declaration) => {
+      const colon = declaration.indexOf(":");
+      if (colon < 1) throw new Error("Invalid sanitized preview style");
+      return [declaration.slice(0, colon).trim(), declaration.slice(colon + 1).trim()];
+    });
+    styles.push({ marker, tag, declarations });
+    return opening.replace(style[0], ` ${STYLE_MARKER}="${marker}"`);
+  });
+  const result = { html: asSafeHtml(withoutStyles) };
+  previewStyles.set(result, styles);
+  return result;
+}
+
+/** CSSOM is the existing permitted rendering boundary (as for editor carets).
+ * Only this producer's already-sanitized sidecar reaches it; the native SafeHtml
+ * sink receives no style attribute. No CSS or URI is recovered from the DOM. */
+export function applyEditorModePreviewStyles(root: HTMLElement, preview: EditorModePreview): void {
+  const styles = previewStyles.get(preview);
+  if (!styles) throw new Error("Unowned preview presentation");
+  for (const entry of styles) {
+    const element = root.querySelector<HTMLElement>(`[${STYLE_MARKER}="${entry.marker}"]`);
+    if (!element || element.tagName.toLowerCase() !== entry.tag) continue;
+    for (const [property, value] of entry.declarations) element.style.setProperty(property, value);
+    element.removeAttribute(STYLE_MARKER);
+  }
 }
