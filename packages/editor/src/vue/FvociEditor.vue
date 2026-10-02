@@ -391,7 +391,7 @@ async function changeMode(next: EditorMode): Promise<void> {
   // permission listeners: those can finalize their own transient rich drafts.
   // Native source keys are kept outside rich controls by the existing guards.
   if (next === "preview") refreshPreview(current);
-  if (next === "markdown" && !capture.value) refreshSource();
+  if (next === "markdown" && (!capture.value || !draftDirty.value)) refreshSource();
   emit("mode-change", next);
   await nextTick();
   if (lifetime !== modeLifetime || current.isDestroyed) return;

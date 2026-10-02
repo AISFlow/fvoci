@@ -131,6 +131,97 @@ await test("actual shell composition capture guards native NodeView targets, pro
   }
 });
 
+await test("actual mode entry refreshes a clean generated projection after rich edits but preserves an older private draft without writes", async () => {
+  const text = readFileSync(new URL("../src/vue/FvociEditor.vue", import.meta.url), "utf8");
+  const script = text.split('<script setup lang="ts">')[1]?.split("</script>")[0];
+  assert.ok(script);
+  const parsed = ts.createSourceFile("FvociEditor.ts", script, ts.ScriptTarget.Latest, true);
+  const statements = parsed.statements.filter(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) &&
+      ["changeMode", "refreshSource"].includes(statement.name?.text ?? ""),
+  );
+  assert.equal(statements.length, 2);
+  const ydoc = tiptapJsonToYDoc(input);
+  const live = liveEditor(ydoc);
+  const source = new SourceModeSession(
+    ydoc,
+    () => 1,
+    () => true,
+  );
+  const mode = Vue.ref("rich");
+  const capture = Vue.shallowRef(source.capture(live.editor.state.doc));
+  const field = { value: capture.value.source, focus() {} };
+  const dirty = Vue.ref(false);
+  const stale = Vue.ref(false);
+  const controls = runInNewContext(
+    ts.transpileModule(
+      `(()=>{let previewAbort=null,modeLifetime=0,bookmark=null,storedMarks=null,restoreEditorFocus=false;${statements.map((statement) => statement.getText(parsed)).join("\n")};return {changeMode};})()`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext } },
+    ).outputText,
+    {
+      editor: Vue.shallowRef(live.editor),
+      sourceSession: source,
+      sourceBlocked: () => false,
+      mode,
+      richVisible: Vue.computed(() => mode.value === "rich" || mode.value === "block"),
+      capture,
+      sourceField: Vue.shallowRef(field),
+      draftDirty: dirty,
+      sourceStale: stale,
+      proposal: Vue.shallowRef(null),
+      modeError: Vue.ref(null),
+      emit() {},
+      nextTick: Vue.nextTick,
+    },
+  ) as { changeMode(next: string): Promise<void> };
+  try {
+    live.editor.view.dispatch(live.editor.state.tr.insertText(" rich", 1));
+    const afterRich = Y.encodeStateAsUpdate(ydoc);
+    await controls.changeMode("markdown");
+    assert.equal(field.value, " rich한글 연구\n\n자료");
+    assert.equal(source.isCurrent(capture.value), true);
+    assert.deepEqual(Y.encodeStateAsUpdate(ydoc), afterRich);
+    mode.value = "rich";
+    const peerDoc = new Y.Doc({ gc: false });
+    Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(ydoc));
+    const peer = liveEditor(peerDoc);
+    const receive = (update: Uint8Array) => {
+      Y.applyUpdate(ydoc, update);
+    };
+    peerDoc.on("update", receive);
+    try {
+      peer.editor.view.dispatch(peer.editor.state.tr.insertText(" peer", 1));
+      const afterPeer = Y.encodeStateAsUpdate(ydoc);
+      await controls.changeMode("markdown");
+      assert.equal(field.value, " peer rich한글 연구\n\n자료");
+      assert.equal(source.isCurrent(capture.value), true);
+      assert.deepEqual(Y.encodeStateAsUpdate(ydoc), afterPeer);
+    } finally {
+      peerDoc.off("update", receive);
+      peer.close();
+      peerDoc.destroy();
+    }
+    mode.value = "rich";
+    const privateCapture = capture.value;
+    field.value = "직접 작성한 비공개 초안 🧑‍💻";
+    dirty.value = true;
+    live.editor.view.dispatch(live.editor.state.tr.insertText(" newer", 1));
+    const afterNewer = Y.encodeStateAsUpdate(ydoc);
+    stale.value = true;
+    await controls.changeMode("markdown");
+    assert.equal(field.value, "직접 작성한 비공개 초안 🧑‍💻");
+    assert.equal(capture.value, privateCapture);
+    assert.equal(source.isCurrent(capture.value), false);
+    assert.equal(stale.value, true);
+    assert.deepEqual(Y.encodeStateAsUpdate(ydoc), afterNewer);
+  } finally {
+    source.destroy();
+    live.close();
+    ydoc.destroy();
+  }
+});
+
 await test("installed SDK XML serialization does not normalize raw future node identity, and parser emoji semantics have independent mutant controls", () => {
   const doc = new Y.Doc({ gc: false });
   try {

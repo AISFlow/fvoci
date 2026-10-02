@@ -1496,6 +1496,77 @@ test("actual identityless source range refuses Apply with precise warning and Ca
   expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
 });
 
+test("ordinary rich and peer edits refresh clean Markdown entry while a dirty private draft remains stale until explicit Cancel", async ({
+  page,
+  browser,
+  baseURL,
+}) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "최신 생성 Markdown과 비공개 초안", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "fresh-generated-body" },
+          content: [{ type: "text", text: "원본" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await save(page);
+  await recordIdentity(page);
+  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+  await selectMode(page, "markdown");
+  await expect(field).toHaveValue("원본");
+  await selectMode(page, "rich");
+  await caretAtEndOf(page, 0);
+  await page.keyboard.type(" 로컬");
+  await selectMode(page, "markdown");
+  await expect(field).toHaveValue("원본 로컬");
+  const peer = await newSignedInPage(browser, baseURL, admin);
+  try {
+    await openDoc(peer.page, doc.path);
+    await caretAtEndOf(peer.page, 0);
+    await peer.page.keyboard.type(" 동료");
+    await expectBlocks(page, ["원본 로컬 동료"]);
+    const observed = await editorOf(page).evaluate(
+      (root) => (root as EditorElement).w3Witness?.updates,
+    );
+    if (observed === undefined) throw new Error("Missing live update witness");
+    await selectMode(page, "rich");
+    await selectMode(page, "markdown");
+    await expect(field).toHaveValue("원본 로컬 동료");
+    await expectIdentity(page, observed);
+    await field.fill("작성 중인 비공개 초안 🧑‍💻");
+    await selectMode(page, "rich");
+    await caretAtEndOf(page, 0);
+    await page.keyboard.type(" 추가");
+    await expectBlocks(peer.page, ["원본 로컬 동료 추가"]);
+    const dirtyObserved = await editorOf(page).evaluate(
+      (root) => (root as EditorElement).w3Witness?.updates,
+    );
+    if (dirtyObserved === undefined) throw new Error("Missing dirty live update witness");
+    await selectMode(page, "markdown");
+    await expect(field).toHaveValue("작성 중인 비공개 초안 🧑‍💻");
+    await expect(page.getByRole("button", { name: "적용", exact: true })).toBeDisabled();
+    await expect(page.locator(".fvoci-source-panel [role=status]")).toBeVisible();
+    await expectIdentity(page, dirtyObserved);
+    await page.getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
+    await expect(field).toHaveValue("원본 로컬 동료 추가");
+    await expectIdentity(page, dirtyObserved);
+    await selectMode(page, "rich");
+    await save(page);
+    const after = await savedBody(page.request, ws, doc.id);
+    expect(after.content?.[0]?.attrs?.id).toBe("fresh-generated-body");
+    expect(after.content?.[0]?.content).toEqual([{ type: "text", text: "원본 로컬 동료 추가" }]);
+  } finally {
+    await peer.context.close();
+  }
+});
+
 test("actual node and table cell bookmarks survive no-op modes, localized table source edit and later peer-cell undo without replacing cells", async ({
   page,
   browser,
