@@ -4,9 +4,14 @@ import { queryOptions } from "@/lib/query-options";
 
 export type TimerCommand = components["schemas"]["TimerCommandBody"];
 
-export function taskStopwatchQuery(actor: string, workspaceId: string, taskId: string) {
+export function taskStopwatchQuery(
+  actor: string,
+  workspaceId: string,
+  taskId: string,
+  sessionId: string,
+) {
   return queryOptions({
-    queryKey: ["task-timer", actor, workspaceId, taskId] as const,
+    queryKey: ["task-timer", actor, sessionId, workspaceId, taskId] as const,
     queryFn: async ({ signal }) =>
       ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer", {
@@ -14,7 +19,7 @@ export function taskStopwatchQuery(actor: string, workspaceId: string, taskId: s
           signal,
         }),
       ),
-    enabled: Boolean(actor && workspaceId && taskId),
+    enabled: Boolean(actor && sessionId && workspaceId && taskId),
     retry: false,
     // Covers other tabs/new sessions; DB remains the only run owner. A server
     // hint can also refetch this exact query, never a generic entity cache.
@@ -31,11 +36,11 @@ export async function sendTimerCommand(workspaceId: string, taskId: string, body
   );
 }
 
-export function ownerStopwatchQuery(actor: string) {
+export function ownerStopwatchQuery(actor: string, sessionId: string) {
   return queryOptions({
-    queryKey: ["task-timer-owner", actor] as const,
+    queryKey: ["task-timer-owner", actor, sessionId] as const,
     queryFn: async ({ signal }) => ensureOk(await api.GET("/api/v1/me/task-timer", { signal })),
-    enabled: Boolean(actor),
+    enabled: Boolean(actor && sessionId),
     retry: false,
     refetchInterval: 5000,
   });

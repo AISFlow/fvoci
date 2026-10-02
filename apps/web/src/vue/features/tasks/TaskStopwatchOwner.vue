@@ -10,16 +10,22 @@ import { ownerStopwatchQuery } from "./task-stopwatch-queries";
 const client = useQueryClient();
 const me = useQuery(meQuery);
 const actor = computed(() => me.data.value?.userId ?? "");
-const owner = useQuery(() => ownerStopwatchQuery(actor.value));
+const credential = computed(() => me.data.value?.sessionId ?? "");
+const owner = useQuery(() => ownerStopwatchQuery(actor.value, credential.value));
 const pending = ref(false);
 const error = ref<string | null>(null);
 let generation = 0;
 let live = true;
 let retry:
-  | { actor: string; generation: number; body: components["schemas"]["TimerCleanupBody"] }
+  | {
+      actor: string;
+      credential: string;
+      generation: number;
+      body: components["schemas"]["TimerCleanupBody"];
+    }
   | undefined;
 watch(
-  [actor, () => me.dataUpdatedAt.value],
+  [actor, credential],
   () => {
     generation++;
     retry = undefined;
@@ -40,10 +46,15 @@ async function stop(): Promise<void> {
   if (!state?.runId || !state.version) return;
   const capture = retry ?? {
     actor: actor.value,
+    credential: credential.value,
     generation,
     body: { requestId: crypto.randomUUID(), runId: state.runId, expectedVersion: state.version },
   };
-  const current = () => live && capture.actor === actor.value && capture.generation === generation;
+  const current = () =>
+    live &&
+    capture.actor === actor.value &&
+    capture.credential === credential.value &&
+    capture.generation === generation;
   pending.value = true;
   error.value = null;
   replayAllowed.value = false;
@@ -53,7 +64,7 @@ async function stop(): Promise<void> {
     retry = undefined;
     await Promise.all([
       client.invalidateQueries({
-        queryKey: ownerStopwatchQuery(capture.actor).queryKey,
+        queryKey: ownerStopwatchQuery(capture.actor, capture.credential).queryKey,
         exact: true,
       }),
       client.invalidateQueries({

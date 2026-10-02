@@ -17,8 +17,11 @@ const props = defineProps<{
 }>();
 const me = useQuery(meQuery);
 const actor = computed(() => me.data.value?.userId ?? "");
+const credential = computed(() => me.data.value?.sessionId ?? "");
 const client = useQueryClient();
-const state = useQuery(() => taskStopwatchQuery(actor.value, props.workspaceId, props.taskId));
+const state = useQuery(() =>
+  taskStopwatchQuery(actor.value, props.workspaceId, props.taskId, credential.value),
+);
 const note = ref("");
 const error = ref<string | null>(null);
 const pending = ref(false);
@@ -27,6 +30,7 @@ let live = true;
 let generation = 0;
 type Capture = {
   actor: string;
+  credential: string;
   workspace: string;
   task: string;
   generation: number;
@@ -35,7 +39,7 @@ type Capture = {
 };
 let command: Capture | undefined;
 watch(
-  [actor, () => props.workspaceId, () => props.taskId, () => me.dataUpdatedAt.value],
+  [actor, () => props.workspaceId, () => props.taskId, credential, () => props.readOnly],
   () => {
     generation++;
     command = undefined;
@@ -94,6 +98,7 @@ function current(capture: Capture): boolean {
     live &&
     capture.generation === generation &&
     capture.actor === actor.value &&
+    capture.credential === credential.value &&
     capture.workspace === props.workspaceId &&
     capture.task === props.taskId
   );
@@ -129,11 +134,21 @@ async function submit(capture: Capture): Promise<void> {
     // original request id for explicit replay. Session guard owns navigation.
     if (err instanceof ProblemError && [401, 403, 404].includes(err.status)) {
       await client.cancelQueries({
-        queryKey: taskStopwatchQuery(capture.actor, capture.workspace, capture.task).queryKey,
+        queryKey: taskStopwatchQuery(
+          capture.actor,
+          capture.workspace,
+          capture.task,
+          capture.credential,
+        ).queryKey,
         exact: true,
       });
       client.removeQueries({
-        queryKey: taskStopwatchQuery(capture.actor, capture.workspace, capture.task).queryKey,
+        queryKey: taskStopwatchQuery(
+          capture.actor,
+          capture.workspace,
+          capture.task,
+          capture.credential,
+        ).queryKey,
         exact: true,
       });
     }
@@ -153,6 +168,7 @@ function start(operation: TimerCommand["operation"]): void {
   };
   command = {
     actor: actor.value,
+    credential: credential.value,
     workspace: props.workspaceId,
     task: props.taskId,
     generation,
