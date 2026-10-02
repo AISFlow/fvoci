@@ -479,7 +479,17 @@ mod task_timer {
         let harness = TestDb::bootstrap().await;
         let (app, cookie, actor, workspace) = setup_session(&harness).await;
         let admin = admin_pool(&harness).await;
-        let project = create_project(app.clone(), &cookie, workspace, "RECORD", "workspace").await;
+        let project = create_project(app.clone(), &cookie, workspace, "RECORD", "private").await;
+        let other = add_workspace_user(&admin, workspace, "member", "record-other").await;
+        add_project_member(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            other.user_id,
+            "member",
+        )
+        .await;
         let task = create_task(
             app.clone(),
             &cookie,
@@ -494,6 +504,20 @@ mod task_timer {
         );
         let original_start = "2026-09-30T14:59:30.100Z";
         let original_end = "2026-09-30T15:00:30.100Z";
+        let other_body = captured(
+            app.clone(),
+            &other.cookie,
+            json!({"requestId":Uuid::now_v7(),"startedAt":"2026-09-30T14:58:00Z","endedAt":"2026-09-30T14:59:00Z","note":"다른 작성자의 원본","reason":"다른 작성자의 사유"}),
+        ).await;
+        let (status, other_created) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/history"),
+            Some(other_body),
+            Some(&other.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{other_created}");
         let body=captured(app.clone(),&cookie,json!({"requestId":Uuid::now_v7(),"startedAt":original_start,"endedAt":original_end,"note":"원본 메모","reason":"수동 기록"})).await;
         let (status, created) = json_request(
             app.clone(),
@@ -543,7 +567,7 @@ mod task_timer {
         .await;
         assert_eq!(status, StatusCode::OK, "{replayed}");
         assert_eq!(replayed, corrected);
-        let mut stale = correction;
+        let mut stale = correction.clone();
         stale["requestId"] = json!(Uuid::now_v7());
         let (status, conflict) = json_request(
             app.clone(),
@@ -605,8 +629,63 @@ mod task_timer {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{existing}");
+        assert_eq!(existing["items"][0]["durationSeconds"], 30);
+        assert_eq!(existing["items"][1]["id"], other_created["record"]["id"]);
+        assert_eq!(existing["items"][1]["note"], "다른 작성자의 원본");
+        assert_eq!(existing["items"][1]["durationSeconds"], 60);
         let effective_end = existing["items"][0]["endedAt"].clone();
         let effective_note = existing["items"][0]["note"].clone();
+        let existing_url = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}/time-entries",
+            task["id"].as_str().unwrap()
+        );
+        let (status, shared) =
+            json_request(app.clone(), "GET", &existing_url, None, Some(&other.cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{shared}");
+        assert_eq!(shared["items"][0]["endedAt"], original_end);
+        assert_eq!(shared["items"][0]["note"], "원본 메모");
+        assert_eq!(shared["items"][0]["durationSeconds"], 60);
+        assert!(!shared.to_string().contains("휴식 제외"));
+        assert!(!shared.to_string().contains("29.5초"));
+        let (status, other_history) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{base}/history?from=2026-09-30&to=2026-10-01"),
+            None,
+            Some(&other.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{other_history}");
+        assert_eq!(other_history["items"].as_array().unwrap().len(), 1);
+        assert_eq!(other_history["items"][0], other_created["record"]);
+        let effects_before: (i64,i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.task_timer_commands),(SELECT count(*) FROM fvoci.task_timer_audit),(SELECT count(*) FROM fvoci.time_entries)").fetch_one(&admin).await.unwrap();
+        let wrong_owner = captured(app.clone(), &other.cookie, correction).await;
+        let (status, denied) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/records/{id}/correct"),
+            Some(wrong_owner),
+            Some(&other.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        let (status, _) = json_request(app.clone(), "GET", &existing_url, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        sqlx::query("DELETE FROM fvoci.project_members WHERE project_id=$1 AND user_id=$2")
+            .bind(Uuid::parse_str(project["id"].as_str().unwrap()).unwrap())
+            .bind(other.user_id)
+            .execute(&admin)
+            .await
+            .unwrap();
+        let (status, denied) =
+            json_request(app.clone(), "GET", &existing_url, None, Some(&other.cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        assert!(!denied.to_string().contains("원본 메모"));
+        let effects_after: (i64,i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.task_timer_commands),(SELECT count(*) FROM fvoci.task_timer_audit),(SELECT count(*) FROM fvoci.time_entries)").fetch_one(&admin).await.unwrap();
+        assert_eq!(
+            effects_after, effects_before,
+            "other-owner correction and denied reads have no history/audit/receipt effects"
+        );
         println!("W5 manual/correction canonical/day/history audit phases passed; original range preserved; existing consumer endedAt={effective_end} note={effective_note}");
         admin.close().await;
         drop(app);

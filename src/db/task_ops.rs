@@ -183,15 +183,24 @@ pub async fn list_time_entries(
     .bind(task_id)
     .fetch_all(&mut *tx)
     .await?;
+    let mut items: Vec<_> = rows
+        .into_iter()
+        .map(|row| time_entry_row(workspace_id, row))
+        .collect();
+    crate::db::task_timer::apply_self_corrections(
+        &mut tx,
+        workspace_id,
+        task_id,
+        actor_user_id,
+        &mut items,
+    )
+    .await?;
     tx.commit().await?;
     let can_create = task.permission.at_least(ProjectPermission::Edit)
         && task.project.status != "archived"
         && task.archived_at.is_none();
     Ok(Ok(TimeEntryList {
-        items: rows
-            .into_iter()
-            .map(|row| time_entry_row(workspace_id, row))
-            .collect(),
+        items,
         can_create,
     }))
 }

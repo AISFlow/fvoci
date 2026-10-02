@@ -605,6 +605,72 @@ LEFT JOIN LATERAL (SELECT after_value FROM fvoci.task_timer_audit
  ORDER BY (after_value->>'revision')::bigint DESC,id DESC LIMIT 1) c ON true
 "#;
 
+/// Called only after the existing task-read fence, on that same read snapshot.
+/// Decorates the actor's already-loaded rows; other authors retain raw history.
+/// One bounded batch covers manual rows and canonical segment projections.
+pub async fn apply_self_corrections(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    rows: &mut [crate::db::task_ops::TimeEntryRow],
+) -> Result<(), sqlx::Error> {
+    let ids: Vec<Uuid> = rows
+        .iter()
+        .filter(|row| row.workspace_id == workspace && row.task_id == task && row.user_id == actor)
+        .map(|row| row.id)
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    set_self_user(tx, actor).await?;
+    type Correction = (Uuid, DateTime<Utc>, DateTime<Utc>, Option<String>);
+    let corrections: Vec<Correction> = sqlx::query_as(
+        r#"
+        SELECT e.id,(c.after_value->>'startedAt')::timestamptz,
+               (c.after_value->>'endedAt')::timestamptz,c.after_value->>'note'
+        FROM fvoci.time_entries e
+        LEFT JOIN fvoci.task_timer_segments s
+          ON s.time_entry_id=e.id AND s.workspace_id=$1 AND s.task_id=$2 AND s.user_id=$3
+        JOIN LATERAL (
+          SELECT after_value FROM fvoci.task_timer_audit
+          WHERE user_id=$3 AND workspace_id=$1 AND task_id=$2 AND verb='time.correct'
+            AND after_value->>'recordId'=COALESCE(s.id,e.id)::text
+            AND after_value->>'kind'=CASE WHEN s.id IS NULL THEN 'manual' ELSE 'segment' END
+          ORDER BY (after_value->>'revision')::bigint DESC,id DESC LIMIT 1
+        ) c ON true
+        WHERE e.workspace_id=$1 AND e.task_id=$2 AND e.user_id=$3 AND e.id=ANY($4)
+        "#,
+    )
+    .bind(workspace)
+    .bind(task)
+    .bind(actor)
+    .bind(&ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let corrections: std::collections::HashMap<_, _> = corrections
+        .into_iter()
+        .map(|(id, start, end, note)| (id, (start, end, note)))
+        .collect();
+    for row in rows {
+        if row.workspace_id != workspace || row.task_id != task || row.user_id != actor {
+            continue;
+        }
+        if let Some((start, end, note)) = corrections.get(&row.id) {
+            // Existing DTO uses whole seconds. Canonical/history totals retain
+            // exact milliseconds, including corrections shorter than a second.
+            let seconds = (end.signed_duration_since(*start).num_milliseconds()).div_euclid(1000);
+            let seconds = i32::try_from(seconds)
+                .map_err(|_| sqlx::Error::Protocol("corrected duration out of range".into()))?;
+            row.started_at = *start;
+            row.ended_at = Some(*end);
+            row.duration_seconds = Some(seconds);
+            row.note = note.clone();
+        }
+    }
+    Ok(())
+}
+
 type RecordTuple = (
     Uuid,
     String,
@@ -952,6 +1018,12 @@ pub async fn correct(
     }
     if !note_reason_valid(&body.note, &body.reason)
         || body.ended_at <= body.started_at
+        || i32::try_from(
+            (body.ended_at - body.started_at)
+                .num_milliseconds()
+                .div_euclid(1000),
+        )
+        .is_err()
         || body.expected_revision < 0
         || body.expected_revision == i64::MAX
     {
