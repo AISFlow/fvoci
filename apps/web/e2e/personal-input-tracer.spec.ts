@@ -120,6 +120,38 @@ test("private input survives lost response, keeps one source block/task UUID and
   const token = `w2${String(Date.now())}`;
   await dialog.getByLabel("제목 또는 짧은 기록").fill(`${token} private note`);
   await dialog.screenshot({ path: testInfo.outputPath("private-default-dialog.png") });
+  const originalViewport = page.viewportSize();
+  await page.setViewportSize({ width: 320, height: 720 });
+  for (const textScale of ["100%", "200%"]) {
+    await page.evaluate((scale) => {
+      document.documentElement.style.fontSize = scale;
+    }, textScale);
+    const bounds = await dialog.boundingBox();
+    if (!bounds) throw new Error("personal input dialog missing at narrow viewport");
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(320);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(
+      true,
+    );
+    await expect(dialog.getByLabel("제목 또는 짧은 기록")).toHaveValue(`${token} private note`);
+    await dialog.screenshot({
+      path: testInfo.outputPath(`private-dialog-320-text-${textScale.slice(0, -1)}.png`),
+    });
+  }
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "";
+  });
+  if (originalViewport) await page.setViewportSize(originalViewport);
+  await dialog.getByLabel("제목 또는 짧은 기록").focus();
+  await page.keyboard.press("Tab");
+  expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+  const opener = page.getByRole("button", { name: "개인 입력", exact: true });
+  await expect(opener).toBeFocused();
+  await opener.click();
+  await expect(dialog.getByLabel("제목 또는 짧은 기록")).toHaveValue(`${token} private note`);
+
   let lost: z.infer<typeof resultSchema> | undefined;
   let originalCommand: unknown;
   await page.route("**/personal-input", async (route) => {
