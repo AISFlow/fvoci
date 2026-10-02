@@ -905,4 +905,1067 @@ mod task_timer {
         );
         assert_eq!(effective_note, corrected["record"]["note"]);
     }
+
+    // Keep the actual production Router's sole app connection, not a separate
+    // witness pool. Isolated TMPDIR is supplied by the coordinator's batch.
+    struct TimerFixture {
+        pool: sqlx::PgPool,
+        pid: i32,
+        storage_root: std::path::PathBuf,
+    }
+
+    impl Drop for TimerFixture {
+        fn drop(&mut self) {
+            // This exact root was created and captured by this fixture.
+            if self.storage_root.exists() {
+                std::fs::remove_dir_all(&self.storage_root).expect("remove owned timer storage");
+            }
+        }
+    }
+
+    impl TimerFixture {
+        async fn setup(harness: &TestDb) -> (Self, axum::Router, String, Uuid, Uuid) {
+            let mut state = project_harness::app_state(&harness.app_url).await;
+            let storage_root = match &state.storage {
+                fvoci_server::attachments::ObjectStorage::Local(storage) => {
+                    storage.root().to_path_buf()
+                }
+                _ => panic!("timer fixture requires its own local storage"),
+            };
+            assert!(storage_root.starts_with(std::env::temp_dir()));
+            println!("W5 owned storage before body: {}", storage_root.display());
+            let pool = fvoci_server::db::pool::connect_app_with_max(&harness.app_url, 1)
+                .await
+                .unwrap();
+            let old_pool = state.auth.db.pool.clone();
+            state.auth = std::sync::Arc::new(fvoci_server::auth::AuthService {
+                db: fvoci_server::db::Db::new(pool.clone()),
+                password_keys: state.auth.password_keys.clone(),
+            });
+            project_harness::close_pool(old_pool).await;
+            let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let fixture = Self {
+                pool,
+                pid,
+                storage_root,
+            };
+            fixture.probe("before setup").await;
+            let app = fvoci_server::http::router(state, None);
+            let (status, response, headers) = project_harness::json_request_with_headers(
+                app.clone(),
+                "POST",
+                "/api/v1/setup",
+                Some(json!({
+                    "email":"owner@example.com", "password":"supersecret1", "givenName":"Owner",
+                    "workspaceSlug":"acme", "workspaceName":"Acme"
+                })),
+                None,
+            )
+            .await;
+            fixture.probe("after setup").await;
+            assert!(status.is_success(), "{response}");
+            let cookie = headers
+                .get_all("set-cookie")
+                .iter()
+                .filter_map(|value| {
+                    axum_extra::extract::cookie::Cookie::parse(value.to_str().ok()?.to_owned()).ok()
+                })
+                .find(|cookie| cookie.name() == "fvoci_session")
+                .unwrap()
+                .value()
+                .to_owned();
+            let (status, me) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "GET",
+                "/api/v1/auth/me",
+                None,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{me}");
+            let actor = Uuid::parse_str(me["userId"].as_str().unwrap()).unwrap();
+            let (status, workspaces) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "GET",
+                "/api/v1/me/workspaces",
+                None,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{workspaces}");
+            let workspace = workspaces["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| w["slug"] == "acme")
+                .unwrap();
+            let workspace = Uuid::parse_str(workspace["id"].as_str().unwrap()).unwrap();
+            (fixture, app, cookie, actor, workspace)
+        }
+
+        async fn probe(&self, phase: &str) {
+            use sqlx::Row;
+            let rows = sqlx::query(
+                r#"SELECT pg_backend_pid() AS pid, current_user::text AS role,
+                r.rolsuper AS superuser, r.rolbypassrls AS bypass,
+                c.relname::text AS table_name, c.relowner <> r.oid AS nonowner,
+                c.relrowsecurity AS enabled, c.relforcerowsecurity AS forced,
+                row_security_active(c.oid) AS active,
+                nullif(current_setting('app.self_user_id',true),'') AS self_id,
+                nullif(current_setting('app.tenant_id',true),'') AS tenant_id,
+                nullif(current_setting('app.system_ctx',true),'') AS system_ctx
+                FROM pg_roles r CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE r.rolname=current_user AND n.nspname='fvoci'
+                AND c.relname IN ('task_timer_runs','task_timer_segments','task_timer_commands',
+                  'task_timer_audit','task_timer_legacy_open','time_entries') ORDER BY c.relname"#,
+            )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 6, "{phase}");
+            for row in rows {
+                assert_eq!(
+                    row.get::<i32, _>("pid"),
+                    self.pid,
+                    "same actual Router backend: {phase}"
+                );
+                assert!(
+                    !row.get::<bool, _>("superuser") && !row.get::<bool, _>("bypass"),
+                    "{phase}"
+                );
+                for flag in ["nonowner", "enabled", "forced", "active"] {
+                    assert!(
+                        row.get::<bool, _>(flag),
+                        "{} {flag}: {phase}",
+                        row.get::<String, _>("table_name")
+                    );
+                }
+                for setting in ["self_id", "tenant_id", "system_ctx"] {
+                    assert_eq!(
+                        row.get::<Option<String>, _>(setting),
+                        None,
+                        "{setting}: {phase}"
+                    );
+                }
+            }
+        }
+
+        async fn close(self) {
+            self.probe("final reuse").await;
+            project_harness::close_pool(self.pool.clone()).await;
+            println!("W5 actual Router pool: pid={} six NSNB/nonowner/FORCE/RLS-active tables; locals empty", self.pid);
+            std::fs::remove_dir_all(&self.storage_root).unwrap();
+            assert!(!self.storage_root.exists());
+        }
+    }
+
+    async fn timer_checked_request(
+        fixture: &TimerFixture,
+        app: axum::Router,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        cookie: Option<&str>,
+    ) -> (StatusCode, Value) {
+        fixture.probe("before HTTP").await;
+        let response = json_request(app, method, path, body, cookie).await;
+        fixture.probe("after HTTP").await;
+        response
+    }
+
+    async fn timer_effects(admin: &sqlx::PgPool, actors: &[Uuid], tasks: &[Uuid]) -> Value {
+        sqlx::query_scalar(r#"SELECT jsonb_build_object(
+      'runs',(SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.id),'[]'::jsonb) FROM fvoci.task_timer_runs r WHERE r.user_id=ANY($1)),
+      'segments',(SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY s.id),'[]'::jsonb) FROM fvoci.task_timer_segments s WHERE s.user_id=ANY($1)),
+      'receipts',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.user_id,c.request_id),'[]'::jsonb) FROM fvoci.task_timer_commands c WHERE c.user_id=ANY($1)),
+      'audit',(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.id),'[]'::jsonb) FROM fvoci.task_timer_audit a WHERE a.user_id=ANY($1)),
+      'legacy',(SELECT COALESCE(jsonb_agg(to_jsonb(l) ORDER BY l.time_entry_id),'[]'::jsonb) FROM fvoci.task_timer_legacy_open l WHERE l.user_id=ANY($1)),
+      'history',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM fvoci.time_entries e WHERE e.user_id=ANY($1)),
+      'events',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM fvoci.events e WHERE e.target_id=ANY($2)),
+      'taskAudit',(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.id),'[]'::jsonb) FROM fvoci.audit_log a WHERE a.target_id=ANY($2)),
+      'tasks',(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',t.id,'statusId',t.status_id,'startDate',t.start_date,'dueDate',t.due_date,'dueAt',t.due_at,'recurrence',t.recurrence,'estimate',t.estimate,'updatedAt',t.updated_at) ORDER BY t.id),'[]'::jsonb) FROM fvoci.tasks t WHERE t.id=ANY($2))
+    )"#).bind(actors).bind(tasks).fetch_one(admin).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn timer_manual_nanosecond_echo_history_and_correction_roundtrip() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, _actor, workspace) = TimerFixture::setup(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "PRECISION", "private").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Precision roundtrip"}),
+        )
+        .await;
+        let base = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}/timer",
+            task["id"].as_str().unwrap()
+        );
+        let body = captured(app.clone(), &cookie, json!({"requestId":Uuid::now_v7(),"startedAt":"2026-09-30T14:59:30.100000123Z","endedAt":"2026-09-30T14:59:31.100000456Z","note":"Original precision","reason":"Explicit manual range"})).await;
+        let (create_status, created) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("{base}/history"),
+            Some(body),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(create_status, StatusCode::OK, "{created}");
+        let id = created["record"]["id"].as_str().unwrap();
+        let (history_status, history) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{base}/history?from=2026-09-30&to=2026-09-30"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(history_status, StatusCode::OK, "{history}");
+        let correction = captured(app.clone(), &cookie, json!({"requestId":Uuid::now_v7(),"kind":"manual","expectedRevision":0,"expectedStartedAt":created["record"]["startedAt"],"expectedEndedAt":created["record"]["endedAt"],"expectedNote":created["record"]["note"],"startedAt":created["record"]["startedAt"],"endedAt":created["record"]["endedAt"],"note":"Corrected note","reason":"Echoed committed baseline"})).await;
+        let (correction_status, corrected) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("{base}/records/{id}/correct"),
+            Some(correction),
+            Some(&cookie),
+        )
+        .await;
+        println!(
+        "W5 precision original: create={create_status}, history={history_status}, correction={correction_status}, roundtripEqual={}",
+        history["items"][0] == created["record"]
+    );
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+        assert_eq!(
+            history["items"][0], created["record"],
+            "committed response must equal fresh history"
+        );
+        assert_eq!(
+            correction_status,
+            StatusCode::OK,
+            "echoed committed baseline cannot be immediately stale: {corrected}"
+        );
+        assert_eq!(
+            created["record"]["startedAt"], "2026-09-30T14:59:30.100Z",
+            "new ranges explicitly normalize to milliseconds"
+        );
+        assert_eq!(created["record"]["endedAt"], "2026-09-30T14:59:31.100Z");
+    }
+
+    #[tokio::test]
+    async fn timer_manual_submillisecond_second_boundary_agrees_with_existing_consumer() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, _actor, workspace) = TimerFixture::setup(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "SECONDS", "private").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Endpoint millisecond boundary"}),
+        )
+        .await;
+        let task_url = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}",
+            task["id"].as_str().unwrap()
+        );
+        let body = captured(app.clone(), &cookie, json!({"requestId":Uuid::now_v7(),"startedAt":"2026-09-30T14:00:00.100999Z","endedAt":"2026-09-30T14:00:02.100000Z","note":null,"reason":"Whole-second boundary"})).await;
+        let (status, created) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("{task_url}/timer/history"),
+            Some(body),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let (status, state) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{task_url}/timer"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{state}");
+        let (status, entries) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{task_url}/time-entries"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{entries}");
+        let actual = state["actualMilliseconds"].as_i64().unwrap();
+        let seconds = entries["items"][0]["durationSeconds"].as_i64().unwrap();
+        println!(
+            "W5 endpoint rounding original: actualMilliseconds={actual}, existingSeconds={seconds}"
+        );
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+        assert_eq!(actual, 2000);
+        assert_eq!(
+            seconds,
+            actual / 1000,
+            "same effective milliseconds must determine existing whole-second projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn timer_history_exact_local_midnight_is_half_open_in_seoul_and_dst_days() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, actor, workspace) = TimerFixture::setup(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "DAYEDGE", "private").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Local calendar boundaries"}),
+        )
+        .await;
+        let base = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}/timer",
+            task["id"].as_str().unwrap()
+        );
+        let mut results = Vec::new();
+        for (zone, from, next, start, end, elapsed) in [
+            (
+                "Asia/Seoul",
+                "2026-09-30",
+                "2026-10-01",
+                "2026-09-30T14:59:30Z",
+                "2026-09-30T15:00:00Z",
+                30000_i64,
+            ),
+            (
+                "America/New_York",
+                "2026-03-08",
+                "2026-03-09",
+                "2026-03-08T05:00:00Z",
+                "2026-03-09T04:00:00Z",
+                82800000,
+            ),
+            (
+                "America/New_York",
+                "2025-11-02",
+                "2025-11-03",
+                "2025-11-02T04:00:00Z",
+                "2025-11-03T05:00:00Z",
+                90000000,
+            ),
+        ] {
+            // Controlled fixture preference only; actual read converts through PG timezone.
+            sqlx::query("UPDATE fvoci.users SET timezone=$2 WHERE id=$1")
+                .bind(actor)
+                .bind(zone)
+                .execute(&admin)
+                .await
+                .unwrap();
+            let body = captured(app.clone(), &cookie, json!({"requestId":Uuid::now_v7(),"startedAt":start,"endedAt":end,"note":null,"reason":"Exact local day end"})).await;
+            let (status, value) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "POST",
+                &format!("{base}/history"),
+                Some(body),
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{value}");
+            let (status, summary) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "GET",
+                &format!("{base}/summary?from={from}&to={next}"),
+                None,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{summary}");
+            let (status, current_history) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "GET",
+                &format!("{base}/history?from={from}&to={from}"),
+                None,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{current_history}");
+            let (status, next_history) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "GET",
+                &format!("{base}/history?from={next}&to={next}"),
+                None,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{next_history}");
+            results.push((zone, elapsed, summary, current_history, next_history));
+        }
+        admin.close().await;
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+        for (zone, elapsed, summary, current, next) in results {
+            assert_eq!(summary["timeZone"], zone);
+            assert_eq!(summary["totalMilliseconds"], elapsed);
+            assert_eq!(summary["days"][0]["milliseconds"], elapsed);
+            assert_eq!(summary["days"][1]["milliseconds"], 0);
+            assert_eq!(current["items"].as_array().unwrap().len(), 1);
+            assert!(
+                next["items"].as_array().unwrap().is_empty(),
+                "half-open end belongs solely to the previous local day: {zone}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn timer_history_equal_anchor_over_one_page_rejects_correction_between_pages() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, _actor, workspace) = TimerFixture::setup(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "CURSOR", "private").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Correction during pagination"}),
+        )
+        .await;
+        let base = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}/timer",
+            task["id"].as_str().unwrap()
+        );
+        for _ in 0..101 {
+            let body = captured(app.clone(), &cookie, json!({"requestId":Uuid::now_v7(),"startedAt":"2026-09-30T10:00:00Z","endedAt":"2026-09-30T10:00:30Z","note":null,"reason":"Independent equal-anchor history fixture"})).await;
+            let (status, value) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "POST",
+                &format!("{base}/history"),
+                Some(body),
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{value}");
+        }
+        let path = format!("{base}/history?from=2026-09-30&to=2026-09-30");
+        let (status, first) =
+            timer_checked_request(&fixture, app.clone(), "GET", &path, None, Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["items"].as_array().unwrap().len(), 100);
+        let selected = first["items"][0].clone();
+        let id = selected["id"].as_str().unwrap();
+        let correction = captured(app.clone(), &cookie, json!({"requestId":Uuid::now_v7(),"kind":"manual","expectedRevision":0,"expectedStartedAt":selected["startedAt"],"expectedEndedAt":selected["endedAt"],"expectedNote":selected["note"],"startedAt":"2026-09-30T09:00:00Z","endedAt":"2026-09-30T09:00:30Z","note":null,"reason":"Move already-shown record across saved cursor"})).await;
+        let (status, value) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("{base}/records/{id}/correct"),
+            Some(correction),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        let cursor = first["nextCursor"].as_str().unwrap();
+        let query: String = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("cursor", cursor)
+            .finish();
+        let (continuation_status, continuation) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{path}&{query}"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        let duplicate = continuation["items"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == selected["id"]));
+        println!(
+        "W5 cursor original: firstCount=100, continuationStatus={continuation_status}, duplicateShownRecord={duplicate}"
+    );
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+        assert_eq!(
+            continuation_status,
+            StatusCode::CONFLICT,
+            "changed personal history requires explicit stale continuation/refetch"
+        );
+        assert_eq!(continuation["params"]["code"], "timer_history_changed");
+    }
+
+    async fn timer_no_effect_request(
+        fixture: &TimerFixture,
+        admin: &sqlx::PgPool,
+        actors: &[Uuid],
+        tasks: &[Uuid],
+        app: axum::Router,
+        path: &str,
+        body: Value,
+        cookie: &str,
+        expected_status: StatusCode,
+    ) -> Value {
+        let before = timer_effects(admin, actors, tasks).await;
+        let (status, response) =
+            timer_checked_request(fixture, app, "POST", path, Some(body), Some(cookie)).await;
+        let after = timer_effects(admin, actors, tasks).await;
+        assert_eq!(status, expected_status, "{response}");
+        assert_eq!(
+            after, before,
+            "all ordered timer/history/task effects must remain unchanged"
+        );
+        response
+    }
+
+    fn assert_self_cleanup_effects(
+        before: &Value,
+        after: &Value,
+        run: &Value,
+        request: &Value,
+        output: &Value,
+    ) {
+        for field in ["legacy", "history", "events", "taskAudit", "tasks"] {
+            assert_eq!(
+                after[field], before[field],
+                "self cleanup cannot mutate {field}"
+            );
+        }
+        for field in ["receipts", "audit"] {
+            let old = before[field].as_array().unwrap();
+            let current = after[field].as_array().unwrap();
+            assert_eq!(current.len(), old.len() + 1, "one committed {field}");
+            for row in old {
+                assert!(
+                    current.contains(row),
+                    "old full {field} row must remain immutable"
+                );
+            }
+            let added = current.iter().find(|row| !old.contains(row)).unwrap();
+            assert_eq!(added["request_id"], *request);
+            if field == "receipts" {
+                assert_eq!(added["result"], *output);
+                assert_eq!(added["run_id"], *run);
+            } else {
+                assert_eq!(added["verb"], "cleanup");
+                assert!(
+                    added["workspace_id"].is_null()
+                        && added["task_id"].is_null()
+                        && added["time_entry_id"].is_null()
+                );
+                assert_eq!(added["after_value"]["runId"], *run);
+            }
+        }
+        let mut changed_run = 0;
+        assert_eq!(
+            after["runs"].as_array().unwrap().len(),
+            before["runs"].as_array().unwrap().len()
+        );
+        for old in before["runs"].as_array().unwrap() {
+            let current = after["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == old["id"])
+                .unwrap();
+            if old["id"] != *run {
+                assert_eq!(old, current);
+                continue;
+            }
+            changed_run += 1;
+            let mut expected = old.clone();
+            expected["status"] = json!("stopped");
+            expected["version"] = output["version"].clone();
+            assert!(current["stopped_at"].is_string());
+            expected["stopped_at"] = current["stopped_at"].clone();
+            assert_eq!(
+                &expected, current,
+                "only own run status/version/stop anchor change"
+            );
+        }
+        assert_eq!(changed_run, 1);
+        assert_eq!(
+            after["segments"].as_array().unwrap().len(),
+            before["segments"].as_array().unwrap().len()
+        );
+        let mut closed = 0;
+        for old in before["segments"].as_array().unwrap() {
+            let current = after["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == old["id"])
+                .unwrap();
+            if old["run_id"] == *run && old["ended_at"].is_null() {
+                assert!(current["ended_at"].is_string());
+                assert!(current["time_entry_id"].is_null());
+                let mut expected = old.clone();
+                expected["ended_at"] = current["ended_at"].clone();
+                assert_eq!(&expected, current);
+                closed += 1;
+            } else {
+                assert_eq!(old, current, "other/closed full segment remains immutable");
+            }
+        }
+        assert_eq!(closed, 1);
+    }
+
+    #[tokio::test]
+    async fn timer_cleanup_revoked_receipt_replay_full_effects_and_actual_router_pool() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, owner_cookie, owner, workspace) = TimerFixture::setup(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let actor = add_workspace_user(&admin, workspace, "member", "cleanup-owner").await;
+        let other = add_workspace_user(&admin, workspace, "member", "cleanup-other").await;
+        let private =
+            create_project(app.clone(), &owner_cookie, workspace, "HIDDEN", "private").await;
+        add_project_member(
+            app.clone(),
+            &owner_cookie,
+            workspace,
+            private["id"].as_str().unwrap(),
+            actor.user_id,
+            "member",
+        )
+        .await;
+        add_project_member(
+            app.clone(),
+            &owner_cookie,
+            workspace,
+            private["id"].as_str().unwrap(),
+            other.user_id,
+            "member",
+        )
+        .await;
+        let task = create_task(app.clone(), &owner_cookie, workspace, private["id"].as_str().unwrap(),
+            json!({"title":"Revoked private timer target","startDate":"2026-10-01","dueDate":"2026-10-30"})).await;
+        // A second ordinary workspace is a real global-owner consumer.
+        let next_workspace = insert_workspace(&admin).await;
+        for user in [owner, actor.user_id, other.user_id] {
+            sqlx::query(
+                "INSERT INTO fvoci.memberships(workspace_id,user_id,role) VALUES($1,$2,$3)",
+            )
+            .bind(next_workspace)
+            .bind(user)
+            .bind(if user == owner { "owner" } else { "member" })
+            .execute(&admin)
+            .await
+            .unwrap();
+        }
+        let project2 = create_project(
+            app.clone(),
+            &owner_cookie,
+            next_workspace,
+            "NEXT",
+            "workspace",
+        )
+        .await;
+        let task2 = create_task(
+            app.clone(),
+            &owner_cookie,
+            next_workspace,
+            project2["id"].as_str().unwrap(),
+            json!({"title":"New visible target"}),
+        )
+        .await;
+        let tasks = [
+            Uuid::parse_str(task["id"].as_str().unwrap()).unwrap(),
+            Uuid::parse_str(task2["id"].as_str().unwrap()).unwrap(),
+        ];
+        let actors = [owner, actor.user_id, other.user_id];
+        let url = format!("/api/v1/workspaces/{workspace}/tasks/{}/timer", tasks[0]);
+        let url2 = format!(
+            "/api/v1/workspaces/{next_workspace}/tasks/{}/timer",
+            tasks[1]
+        );
+        let cleanup_url = "/api/v1/me/task-timer/stop";
+        let start = captured(app.clone(), &actor.cookie, json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null,"note":"Private run note"})).await;
+        let mut missing = start.clone();
+        missing.as_object_mut().unwrap().remove("expectedActorId");
+        missing.as_object_mut().unwrap().remove("expectedSessionId");
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            missing,
+            &actor.cookie,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            start.clone(),
+            &other.cookie,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        let (status, started) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &url,
+            Some(start.clone()),
+            Some(&actor.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let run = started["runId"].clone();
+        let pause = captured(
+            app.clone(),
+            &actor.cookie,
+            json!({"requestId":Uuid::now_v7(),"operation":"pause","runId":run,"expectedVersion":1}),
+        )
+        .await;
+        let (status, paused) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &url,
+            Some(pause),
+            Some(&actor.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{paused}");
+        assert_eq!(paused["status"], "paused");
+        let next_start = captured(app.clone(), &actor.cookie, json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null})).await;
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url2,
+            next_start,
+            &actor.cookie,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        let resume = captured(app.clone(), &actor.cookie, json!({"requestId":Uuid::now_v7(),"operation":"resume","runId":run,"expectedVersion":2})).await;
+        let (status, resumed) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &url,
+            Some(resume),
+            Some(&actor.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resumed}");
+        assert_eq!(resumed["version"], 3);
+        let cleanup = captured(
+            app.clone(),
+            &actor.cookie,
+            json!({"requestId":Uuid::now_v7(),"runId":run,"expectedVersion":3}),
+        )
+        .await;
+        let mut missing = cleanup.clone();
+        missing.as_object_mut().unwrap().remove("expectedSessionId");
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            cleanup_url,
+            missing,
+            &actor.cookie,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            cleanup_url,
+            cleanup.clone(),
+            &other.cookie,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        // Independent genuine credential, hashed with the production token helper.
+        let token = fvoci_server::auth::token::new_token();
+        let session = Uuid::now_v7();
+        sqlx::query("INSERT INTO fvoci.sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,clock_timestamp()+interval '1 hour')")
+            .bind(session).bind(actor.user_id).bind(&token.hash).execute(&admin).await.unwrap();
+        let mut stale_start = start.clone();
+        stale_start["requestId"] = json!(Uuid::now_v7());
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            stale_start,
+            &token.token,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            cleanup_url,
+            cleanup.clone(),
+            &token.token,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        let mut changed = start.clone();
+        changed["note"] = json!("Changed original payload");
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            &url,
+            changed,
+            &actor.cookie,
+            StatusCode::CONFLICT,
+        )
+        .await;
+
+        // Current permission must precede successful receipt disclosure. Observe
+        // the actual app backend waiting on an independent membership lock.
+        let before_revoke = timer_effects(&admin, &actors, &tasks).await;
+        let mut holder = admin.begin().await.unwrap();
+        let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        hold_membership_user_lock(&mut holder, actor.user_id).await;
+        let replay_app = app.clone();
+        let replay_cookie = actor.cookie.clone();
+        let replay_url = url.clone();
+        let replay_body = start.clone();
+        let pending = tokio::spawn(async move {
+            json_request(
+                replay_app,
+                "POST",
+                &replay_url,
+                Some(replay_body),
+                Some(&replay_cookie),
+            )
+            .await
+        });
+        let waiter = wait_for_advisory_blocked_by(&admin, blocker).await;
+        assert_ne!(waiter, blocker);
+        assert_eq!(
+            waiter, fixture.pid,
+            "actual production Router backend at writer barrier"
+        );
+        sqlx::query("DELETE FROM fvoci.project_members WHERE project_id=$1 AND user_id=$2")
+            .bind(Uuid::parse_str(private["id"].as_str().unwrap()).unwrap())
+            .bind(actor.user_id)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        holder.commit().await.unwrap();
+        let (status, revoked) = pending.await.unwrap();
+        fixture.probe("after ACL barrier").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{revoked}");
+        assert!(
+            revoked.get("runId").is_none(),
+            "no committed private receipt disclosure"
+        );
+        assert_eq!(timer_effects(&admin, &actors, &tasks).await, before_revoke);
+        let before_reads = timer_effects(&admin, &actors, &tasks).await;
+        let (status, hidden) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &url,
+            None,
+            Some(&actor.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+        let (status, owner_state) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            "/api/v1/me/task-timer",
+            None,
+            Some(&actor.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{owner_state}");
+        assert_eq!(owner_state["runId"], run);
+        assert_eq!(owner_state["version"], 3);
+        assert!(owner_state["visibleRun"].is_null());
+        for private_field in ["workspaceId", "taskId", "title", "note"] {
+            assert!(owner_state.get(private_field).is_none());
+        }
+        assert_eq!(timer_effects(&admin, &actors, &tasks).await, before_reads);
+
+        let before_cleanup = timer_effects(&admin, &actors, &tasks).await;
+        let (status, cleaned) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            cleanup_url,
+            Some(cleanup.clone()),
+            Some(&actor.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleaned}");
+        assert_eq!(cleaned["runId"], run);
+        assert_eq!(cleaned["status"], "stopped");
+        assert_eq!(cleaned["version"], 4);
+        let after_cleanup = timer_effects(&admin, &actors, &tasks).await;
+        assert_self_cleanup_effects(
+            &before_cleanup,
+            &after_cleanup,
+            &run,
+            &cleanup["requestId"],
+            &cleaned,
+        );
+        // Exact successful cleanup receipt survives fresh session, with no new
+        // audit, history, task event, or run/segment mutation.
+        let replayed = timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            cleanup_url,
+            cleanup.clone(),
+            &token.token,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(replayed, cleaned);
+        let mut changed = cleanup.clone();
+        changed["expectedVersion"] = json!(2);
+        timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            cleanup_url,
+            changed,
+            &token.token,
+            StatusCode::CONFLICT,
+        )
+        .await;
+        let start2 = captured(app.clone(), &token.token, json!({"requestId":Uuid::now_v7(),"operation":"start","runId":null,"expectedVersion":0,"note":"New target draft"})).await;
+        let (status, run2) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &url2,
+            Some(start2),
+            Some(&token.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{run2}");
+        assert_ne!(run2["runId"], run);
+        let replayed = timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            cleanup_url,
+            cleanup,
+            &token.token,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(replayed, cleaned);
+        let (status, current) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            "/api/v1/me/task-timer",
+            None,
+            Some(&token.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{current}");
+        assert_eq!(current["runId"], run2["runId"]);
+        assert_eq!(current["status"], "running");
+        let cleanup2 = captured(
+            app.clone(),
+            &token.token,
+            json!({"requestId":Uuid::now_v7(),"runId":run2["runId"],"expectedVersion":1}),
+        )
+        .await;
+        let before_final = timer_effects(&admin, &actors, &tasks).await;
+        let (status, stopped2) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            cleanup_url,
+            Some(cleanup2.clone()),
+            Some(&token.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{stopped2}");
+        assert_eq!(stopped2["runId"], run2["runId"]);
+        assert_eq!(stopped2["status"], "stopped");
+        let final_effects = timer_effects(&admin, &actors, &tasks).await;
+        assert_self_cleanup_effects(
+            &before_final,
+            &final_effects,
+            &run2["runId"],
+            &cleanup2["requestId"],
+            &stopped2,
+        );
+        let replayed = timer_no_effect_request(
+            &fixture,
+            &admin,
+            &actors,
+            &tasks,
+            app.clone(),
+            cleanup_url,
+            cleanup2,
+            &token.token,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(replayed, stopped2);
+        println!("W5 F3: full ordered-effect guards/revoked-before-receipt/opaque cleanup/fresh-session replay/R1 replay retains cross-workspace R2");
+        admin.close().await;
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+    }
 }
