@@ -1,5 +1,6 @@
 // Official Nuxt UI editor chrome on FVOCI's existing Tiptap/Yjs host.
 // Real browser, Rust server, DB, peer and persisted ACK; no demo document/store.
+import { spawnSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
 import type { Editor } from "@tiptap/core";
 import type { Transaction } from "@tiptap/pm/state";
@@ -18,6 +19,7 @@ import {
   openDoc,
   save,
   savedBody,
+  type TiptapNode,
   setupInstance,
   watchIconRequests,
   workspaceId,
@@ -506,6 +508,8 @@ test("fixed insert and history use the existing room, selection and persisted do
 
 test("link popup keeps native selection and composing Enter cannot apply the URL", async ({
   page,
+  browser,
+  baseURL,
 }, testInfo) => {
   await observeTemplateSelection(page);
   const checkpoint = async (stage: string) =>
@@ -513,6 +517,74 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
       (window as ObservedWindow).__w3TemplateObserver?.checkpoint(value);
     }, stage);
   const caretBoundaries: unknown[] = [];
+  const liveBody = async (client: Page): Promise<TiptapNode> =>
+    editorOf(client).evaluate(
+      (root) =>
+        (root as HTMLElement & { editor: Editor }).editor.view.state.doc.toJSON() as TiptapNode,
+    );
+  const restrictedDbBody = (workspace: string, document: string): unknown => {
+    const container = process.env.FVOCI_TEST_PG_CONTAINER;
+    const connection = process.env.DATABASE_APP_URL;
+    if (!container?.startsWith("fvoci-rust-test-pg-") || !connection)
+      throw new Error("Missing owned isolated PostgreSQL app-role fixture");
+    const app = new URL(connection);
+    if (
+      app.hostname !== "127.0.0.1" ||
+      !/^fvoci_app_fvoci_e2e_[a-f0-9]{16}$/.test(app.username) ||
+      !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(app.pathname)
+    )
+      throw new Error("Refusing a non-fixture DB connection");
+    for (const id of [workspace, document])
+      if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
+        throw new Error("Invalid fixture identity");
+    const result = spawnSync(
+      "docker",
+      [
+        "exec",
+        "-i",
+        container,
+        "psql",
+        "-X",
+        "-qAt",
+        "-U",
+        app.username,
+        "-d",
+        app.pathname.slice(1),
+        "-v",
+        "ON_ERROR_STOP=1",
+      ],
+      {
+        input: `BEGIN READ ONLY;
+SET LOCAL app.tenant_id = '${workspace}';
+SELECT jsonb_build_object('role', current_user, 'superuser', r.rolsuper,
+ 'bypassRls', r.rolbypassrls, 'tenant', public.app_tenant_id(),
+ 'rls', c.relrowsecurity, 'forced', c.relforcerowsecurity,
+ 'notOwner', pg_get_userbyid(c.relowner) <> current_user,
+ 'rlsActive', row_security_active(c.oid),
+ 'content', d.content_json, 'version', d.version)
+FROM pg_roles r JOIN pg_class c ON c.oid = 'fvoci.documents'::regclass
+JOIN fvoci.documents d ON d.id = '${document}' AND d.workspace_id = '${workspace}'
+WHERE r.rolname = current_user;
+ROLLBACK;`,
+        encoding: "utf8",
+        timeout: 10000,
+      },
+    );
+    expect(result.status, "restricted read-only DB witness exit").toBe(0);
+    const witness: unknown = JSON.parse(result.stdout);
+    expect(witness).toMatchObject({
+      role: app.username,
+      superuser: false,
+      bypassRls: false,
+      tenant: workspace,
+      rls: true,
+      rlsActive: true,
+      notOwner: true,
+      forced: expect.any(Boolean),
+      version: expect.any(Number),
+    });
+    return witness;
+  };
   const observeCaretBoundary = async (stage: "after-click" | "after-End") => {
     caretBoundaries.push(
       await page.evaluate((value) => {
@@ -584,8 +656,12 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
     const doc = await createDoc(page.request, wsId, "템플릿 링크", {
       markdown: "한글과 😀 링크\n",
     });
+    const originalStored = await savedBody(page.request, wsId, doc.id);
+    const storedAttributes = originalStored.content?.[0]?.attrs;
     await openDoc(page, doc.path);
     await checkpoint("openDoc:original");
+    const originalLive = await liveBody(page);
+    const liveAttributes = originalLive.content?.[0]?.attrs;
     await blockAt(page, 0).click();
     await observeCaretBoundary("after-click");
     await page.keyboard.press("End");
@@ -607,6 +683,7 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
     await expect(dialog).toBeVisible();
     await expect(blockAt(page, 0).locator("a")).toHaveCount(0);
     await checkpoint("compositionEnter:original-no-link");
+    const composingBody = await liveBody(page);
     await url.dispatchEvent("compositionend", { data: "한글" });
     await page.keyboard.press("Escape");
     await expect(trigger).toBeFocused();
@@ -614,6 +691,7 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
       "한글과 😀 링크",
     );
     await checkpoint("Cancel:original-native-text");
+    const cancelledBody = await liveBody(page);
     await trigger.click();
     await url.fill("https://example.com/한글");
     await url.press("Enter");
@@ -624,6 +702,78 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
     expect(JSON.stringify(await savedBody(page.request, wsId, doc.id))).toContain('"type":"link"');
     expect(csp).toEqual([]);
     await checkpoint("save:original");
+    if (!storedAttributes || typeof storedAttributes.id !== "string" || !storedAttributes.id)
+      throw new Error("Missing original stored paragraph identity");
+    if (!liveAttributes || liveAttributes.id !== storedAttributes.id)
+      throw new Error("Mounted paragraph identity differs from stored document");
+    // The unchanged MarkedEmoji foundation policy encodes a marked known
+    // emoji as its exact Unicode glyph plus marks; bare atoms keep their name.
+    const bareContent = [
+      { type: "text", text: "한글과 " },
+      { type: "emoji", attrs: { name: "grinning" } },
+      { type: "text", text: " 링크" },
+    ];
+    const linkedContent = [
+      {
+        type: "text",
+        text: "한글과 😀 링크",
+        marks: [
+          {
+            type: "link",
+            attrs: {
+              href: "https://example.com/한글",
+              target: "_blank",
+              rel: "noopener noreferrer nofollow",
+              class: null,
+              title: null,
+            },
+          },
+        ],
+      },
+    ];
+    const expectedStored: TiptapNode = {
+      type: "doc",
+      content: [{ type: "paragraph", attrs: { ...storedAttributes }, content: linkedContent }],
+    };
+    const expectedLive: TiptapNode = {
+      type: "doc",
+      content: [{ type: "paragraph", attrs: { ...liveAttributes }, content: linkedContent }],
+    };
+    expect(originalLive).toEqual({
+      type: "doc",
+      content: [{ type: "paragraph", attrs: { ...liveAttributes }, content: bareContent }],
+    });
+    expect(composingBody).toEqual(originalLive);
+    expect(cancelledBody).toEqual(originalLive);
+    expect(await savedBody(page.request, wsId, doc.id)).toEqual(expectedStored);
+    expect(await liveBody(page)).toEqual(expectedLive);
+    expect(
+      await editorOf(page).evaluate((root) => {
+        const selection = (root as HTMLElement & { editor: Editor }).editor.view.state.selection;
+        return { anchor: selection.anchor, head: selection.head, empty: selection.empty };
+      }),
+    ).toEqual({ anchor: 10, head: 1, empty: false });
+    await expect(blockAt(page, 0).locator("a")).toHaveAttribute("href", "https://example.com/한글");
+    const dbWitness = restrictedDbBody(wsId, doc.id);
+    expect(dbWitness).toMatchObject({ content: expectedStored });
+    await testInfo.attach("w3-template-link-db-witness.json", {
+      body: JSON.stringify(dbWitness),
+      contentType: "application/json",
+    });
+    const fresh = await newSignedInPage(browser, baseURL, admin);
+    try {
+      await openDoc(fresh.page, doc.path);
+      expect(await liveBody(fresh.page)).toEqual(expectedLive);
+      expect(await savedBody(fresh.page.request, wsId, doc.id)).toEqual(expectedStored);
+      await expect(blockAt(fresh.page, 0).locator("a")).toHaveCount(1);
+      await expect(blockAt(fresh.page, 0).locator("a")).toHaveText("한글과 😀 링크");
+      await expect(blockAt(fresh.page, 0).locator("a")).toHaveAttribute(
+        "href",
+        "https://example.com/한글",
+      );
+    } finally {
+      await fresh.context.close();
+    }
   } finally {
     const observation = await page
       .evaluate(() => {
