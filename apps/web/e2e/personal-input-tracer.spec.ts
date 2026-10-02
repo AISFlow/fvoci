@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { expect, test, type Page } from "@playwright/test";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { z } from "zod";
 import { createE2eUser, login } from "./helpers";
 
@@ -101,6 +103,31 @@ async function setup(page: Page): Promise<void> {
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
 }
+async function servedAssets(page: Page, testInfo: TestInfo): Promise<void> {
+  const selectors = ['script[type="module"][src]', 'link[rel="stylesheet"][href]'];
+  const assets: { path: string; sha256: string }[] = [];
+  for (const selector of selectors) {
+    const attribute = selector.startsWith("script") ? "src" : "href";
+    const value = await page.locator(selector).first().getAttribute(attribute);
+    if (!value) throw new Error("missing production asset reference");
+    const path = new URL(value, page.url()).pathname;
+    expect(path.startsWith("/assets/")).toBe(true);
+    const response = await page.request.get(path);
+    expect(response.status()).toBe(200);
+    const actual = createHash("sha256")
+      .update(await response.body())
+      .digest("hex");
+    const expected = createHash("sha256")
+      .update(readFileSync(new URL(`../dist${path}`, import.meta.url)))
+      .digest("hex");
+    expect(actual).toBe(expected);
+    assets.push({ path, sha256: actual });
+  }
+  await testInfo.attach("actual-served-assets", {
+    body: JSON.stringify({ url: page.url(), assets }),
+    contentType: "application/json",
+  });
+}
 async function saveBody(page: Page): Promise<void> {
   await page.getByRole("button", { name: "저장", exact: true }).first().click();
   await expect(page.locator('[data-collab-persisted="true"]').first()).toBeVisible();
@@ -113,6 +140,7 @@ test("private input survives lost response, keeps one source block/task UUID and
   test.setTimeout(90000);
   await setup(page);
   await page.goto("/w/tracer/wiki");
+  await servedAssets(page, testInfo);
   await page.getByRole("button", { name: "개인 입력", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "개인 입력", exact: true });
   await expect(dialog.getByRole("radio", { name: "빠른 기록", exact: true })).toBeChecked();
@@ -499,15 +527,11 @@ test("three actual editor hosts retain draft on Cancel, discard only on explicit
         await page.request.get(`/api/v1/workspaces/${personal.id}/projects/${captured.projectId}`)
       ).json(),
     );
-  const root = z
-    .object({ number: z.number().int() })
-    .parse(
-      await (
-        await page.request.get(
-          `/api/v1/workspaces/${personal.id}/documents/${project.rootDocumentId}`,
-        )
-      ).json(),
-    );
+  const rootResponse = await page.request.get(
+    `/api/v1/workspaces/${personal.id}/projects/${captured.projectId}/documents/${project.rootDocumentId}`,
+  );
+  expect(rootResponse.status()).toBe(200);
+  const root = z.object({ number: z.number().int() }).parse(await rootResponse.json());
   const listPath = `/w/${personal.slug}/wiki`;
   const taskPath = `/w/${personal.slug}/${captured.taskDisplayId}`;
   const parentPath = `/w/${personal.slug}/${parent.taskDisplayId}`;
@@ -707,7 +731,10 @@ test("51 real origins recover a missed hint without detail and preserve an in-fl
   const renamed = "Peer rename while stream refused";
   const rename = await page.request.patch(taskPath(nextTask.taskId), { data: { title: renamed } });
   expect(rename.status()).toBe(200);
-  expect(taskSchema.parse(await rename.json()).title).toBe(renamed);
+  const renamedRow = z
+    .object({ id: z.string().uuid(), title: z.string() })
+    .parse(await rename.json());
+  expect(renamedRow).toEqual({ id: nextTask.taskId, title: renamed });
   expect(
     committed(
       personal.id,
