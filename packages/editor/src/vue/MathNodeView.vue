@@ -199,10 +199,14 @@ function cancel(): void {
 // Authorization notifications close the field without publishing a private
 // draft after permission is false. The same readable view may reopen its draft;
 // a peer's new latex invalidates its original owner before any later commit.
-watch(editable, (value) => {
-  if (value) return;
-  closeField();
-});
+watch(
+  editable,
+  (value) => {
+    if (value) return;
+    closeField();
+  },
+  { flush: "sync" },
+);
 onBeforeUnmount(() => {
   retired = true;
   draft.value = null;

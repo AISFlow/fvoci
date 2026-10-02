@@ -1075,6 +1075,7 @@ for (const schedule of [
   "idless-idallocated",
   "peer-newest",
   "retired-peer-newest",
+  "readonly-ABA-peer-newest",
   "readonly",
   "dispose",
   "composition",
@@ -1084,7 +1085,8 @@ for (const schedule of [
     const identified =
       schedule === "identified-replaced-same-id" ||
       schedule === "peer-newest" ||
-      schedule === "retired-peer-newest";
+      schedule === "retired-peer-newest" ||
+      schedule === "readonly-ABA-peer-newest";
     const seed = tiptapJsonToYDoc({
       type: "doc",
       content: [
@@ -1216,11 +1218,19 @@ for (const schedule of [
         assert.equal(doc.getXmlFragment("prosemirror").get(0), original);
         assert.equal(props.node.attrs.id, "new-logical-owner");
       }
+      if (schedule === "readonly-ABA-peer-newest") {
+        local.editor.setEditable(false);
+        local.editor.setEditable(true);
+      }
       if (schedule === "retired-peer-newest") {
         local.editor.setEditable(false);
         await Vue.nextTick();
       }
-      if (schedule === "peer-newest" || schedule === "retired-peer-newest") {
+      if (
+        schedule === "peer-newest" ||
+        schedule === "retired-peer-newest" ||
+        schedule === "readonly-ABA-peer-newest"
+      ) {
         peer.host.dispatch(
           peer.editor.state.tr.setNodeMarkup(0, undefined, {
             ...peer.editor.state.doc.child(0).attrs,
@@ -1233,7 +1243,7 @@ for (const schedule of [
         assert.equal(doc.getXmlFragment("prosemirror").get(0), original);
         assert.equal(field.value, ownDraft);
       }
-      if (schedule === "retired-peer-newest") {
+      if (schedule === "retired-peer-newest" || schedule === "readonly-ABA-peer-newest") {
         const retiredState = Y.encodeStateAsUpdate(doc);
         local.editor.setEditable(true);
         await Vue.nextTick();
@@ -1259,7 +1269,7 @@ for (const schedule of [
         schedule === "peer-newest";
       const expected = allowed
         ? ownDraft
-        : schedule === "retired-peer-newest"
+        : schedule === "retired-peer-newest" || schedule === "readonly-ABA-peer-newest"
           ? "peer-newest"
           : "x";
       for (const live of [local, peer])
@@ -1271,7 +1281,8 @@ for (const schedule of [
       if (
         schedule === "identified-replaced-same-id" ||
         schedule === "idless-replaced" ||
-        schedule === "retired-peer-newest"
+        schedule === "retired-peer-newest" ||
+        schedule === "readonly-ABA-peer-newest"
       )
         assert.equal(controls.draft(), ownDraft);
     } finally {

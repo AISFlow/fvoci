@@ -1454,21 +1454,19 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         await retired;
         releaseFrame();
       }
-      await expect
-        .poll(observe)
-        .toMatchObject({
-          sameRoot: true,
-          sameDoc: true,
-          sameProvider: true,
-          sameClientId: true,
-          authenticated: true,
-          scope: schedule === "server-readonly" ? "readonly" : "read-write",
-          status: "connected",
-          editable: schedule === "natural",
-          dom: String(schedule === "natural"),
-          canPersistAffordance: schedule === "natural",
-          updates: 0,
-        });
+      await expect.poll(observe).toMatchObject({
+        sameRoot: true,
+        sameDoc: true,
+        sameProvider: true,
+        sameClientId: true,
+        authenticated: true,
+        scope: schedule === "server-readonly" ? "readonly" : "read-write",
+        status: "connected",
+        editable: schedule === "natural",
+        dom: String(schedule === "natural"),
+        canPersistAffordance: schedule === "natural",
+        updates: 0,
+      });
       const frames = await page.evaluate(async () => {
         await new Promise<void>((resolve) =>
           requestAnimationFrame(() =>
