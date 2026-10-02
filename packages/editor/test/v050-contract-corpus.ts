@@ -85,6 +85,34 @@ export const v050ContractCorpus: ContractCase[] = [
       paragraph("f01-empty"),
     ),
     expected: [
+      { path: "content.0.content", value: [text("한글 🧑‍💻 ❤️")] },
+      {
+        path: "content.1.content",
+        value: [
+          text("연구", [
+            { type: "bold", attrs: {} },
+            { type: "italic", attrs: {} },
+          ]),
+          { type: "hardBreak" },
+          text(" ` x ` ", [{ type: "code", attrs: {} }]),
+          text("취소", [{ type: "strike", attrs: {} }]),
+          text("강조", [{ type: "highlight", attrs: { color: "#ffe066" } }]),
+          // Shared schema uses the pinned Link addOptions/addAttributes
+          // defaults; spell them out rather than normalizing them away.
+          text("링크", [
+            {
+              type: "link",
+              attrs: {
+                href: "https://example.com/한글",
+                target: "_blank",
+                rel: "noopener noreferrer nofollow",
+                class: null,
+                title: null,
+              },
+            },
+          ]),
+        ],
+      },
       { path: "content.1.attrs.id", value: "f01-body" },
       { path: "content.0.attrs.id", value: "f01-heading" },
       { path: "content.0.attrs.data-toc-id", value: "distinct-anchor" },
@@ -145,6 +173,32 @@ export const v050ContractCorpus: ContractCase[] = [
       ],
     }),
     expected: [
+      {
+        path: "content.0.content",
+        value: [
+          text("색상", [
+            { type: "textStyle", attrs: { color: "#112233" } },
+            { type: "underline", attrs: {} },
+          ]),
+          text("강조", [{ type: "highlight", attrs: { color: "#abcdef" } }]),
+          text("링크", [
+            {
+              type: "link",
+              attrs: {
+                href: "https://example.com",
+                target: "_self",
+                rel: "author",
+                class: "research",
+                title: "자료",
+              },
+            },
+          ]),
+          text("   ", [
+            { type: "bold", attrs: {} },
+            { type: "italic", attrs: {} },
+          ]),
+        ],
+      },
       { path: "content.0.attrs.id", value: "f02" },
       { path: "content.0.attrs.textAlign", value: "right" },
       {
@@ -260,6 +314,14 @@ export const v050ContractCorpus: ContractCase[] = [
       },
     ),
     expected: [
+      { path: "content.0.content.0.content.0.content", value: [text("항목")] },
+      {
+        path: "content.0.content.0.content.1.content.0.content.0.content",
+        value: [text("세 번째")],
+      },
+      { path: "content.1.content.0.content.0.content", value: [text("완료")] },
+      { path: "content.1.content.1.content.0.content", value: [text("대기")] },
+      { path: "content.2.content.0.content.0.content", value: [text("인용 코드")] },
       { path: "content.0.type", value: "bulletList" },
       { path: "content.0.content.0.type", value: "listItem" },
       { path: "content.0.content.0.content.0.type", value: "paragraph" },
@@ -438,6 +500,12 @@ export const v050ContractCorpus: ContractCase[] = [
       { type: "horizontalRule", attrs: { id: "f05-rule" } },
     ),
     expected: [
+      { path: "content.0.content", value: [text("const x = `한글`;\n```\n끝")] },
+      {
+        path: "content.3.content",
+        value: [{ type: "mathInline", attrs: { latex: "x  + \\text{$5}" } }],
+      },
+      { path: "content.4.content.0.content", value: [text("힌트")] },
       { path: "content.0.attrs.id", value: "f05-code" },
       { path: "content.1.attrs.id", value: "f05-mermaid" },
       { path: "content.2.attrs.id", value: "f05-math" },
@@ -542,6 +610,23 @@ export const v050ContractCorpus: ContractCase[] = [
       { type: "embed", attrs: { id: "f07-url", entity: "url", ref: "https://example.com/source" } },
     ),
     expected: [
+      {
+        path: "content.0.content",
+        value: [
+          { type: "mention", attrs: { entity: "user", id: corpusRefs.user, label: "같은 이름" } },
+          { type: "mention", attrs: { entity: "group", id: corpusRefs.group, label: "같은 이름" } },
+          {
+            type: "mention",
+            attrs: { entity: "document", id: corpusRefs.document, label: "같은 이름" },
+          },
+          { type: "mention", attrs: { entity: "task", id: corpusRefs.task, label: "같은 이름" } },
+          {
+            type: "mention",
+            attrs: { entity: "project", id: corpusRefs.project, label: "같은 이름" },
+          },
+          { type: "mention", attrs: { entity: "task", id: corpusRefs.task, label: "같은 이름" } },
+        ],
+      },
       { path: "content.0.attrs.id", value: "f07-p" },
       { path: "content.0.content.0.attrs.id", value: "10000000-0000-4000-8000-000000000001" },
       { path: "content.0.content.1.attrs.id", value: "10000000-0000-4000-8000-000000000002" },
@@ -666,6 +751,14 @@ export const v050ContractCorpus: ContractCase[] = [
       ),
     ),
     expected: [
+      {
+        path: "content.0.content",
+        value: [
+          { type: "emoji", attrs: { name: "grinning" } },
+          text("🧑‍💻", [{ type: "bold", attrs: {} }]),
+          { type: "emoji", attrs: { name: "custom-no-glyph" } },
+        ],
+      },
       { path: "content.0.attrs.id", value: "f09" },
       { path: "content.0.content.0.attrs.name", value: "grinning" },
       { path: "content.0.content.1.text", value: "🧑‍💻" },
@@ -742,6 +835,14 @@ export const v050ContractCorpus: ContractCase[] = [
       ),
     ),
     expected: [
+      {
+        path: "content.0.content",
+        value: [
+          text("[[task:literal]] @[user/not-an-id] | < $5-$10 \\"),
+          text("!", [{ type: "bold", attrs: {} }]),
+          text("[image](attachment:not-a-file)"),
+        ],
+      },
       { path: "content.0.attrs.id", value: "f11" },
       {
         path: "content.0.content.0.text",
@@ -780,6 +881,10 @@ export const v050ContractCorpus: ContractCase[] = [
       { type: "attachment", attrs: { id: corpusRefs.attachment, name: "file.txt", image: false } },
     ),
     expected: [
+      { path: "content.0.content", value: [text("동일 문단")] },
+      { path: "content.1.content", value: [text("동일 문단")] },
+      { path: "content.2.content", value: [text("동일 문단")] },
+      { path: "content.3.content", value: [text("별도 블록")] },
       { path: "content.0.attrs", value: absent },
       { path: "content.0.attrs.id", value: absent },
       { path: "content.0.content.0.text", value: "동일 문단" },

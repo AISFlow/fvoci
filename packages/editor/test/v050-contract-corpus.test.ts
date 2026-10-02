@@ -384,6 +384,39 @@ await test("semantic facts reject identity, reference, Unicode and layout corrup
   }
 });
 
+await test("same-ID text loss and added marks cannot pass the named inline semantics", () => {
+  for (const [id, path, changed] of [
+    ["F01", "content.1.content.0.text", "lost research"],
+    [
+      "F01",
+      "content.1.content.2.marks",
+      [
+        { type: "code", attrs: {} },
+        { type: "bold", attrs: {} },
+      ],
+    ],
+    ["F02", "content.0.content.0.text", "lost color text"],
+    ["F03", "content.0.content.0.content.0.content.0.marks", [{ type: "bold", attrs: {} }]],
+    ["F05", "content.0.content.0.marks", [{ type: "bold", attrs: {} }]],
+    ["F09", "content.0.content.0.marks", [{ type: "bold", attrs: {} }]],
+    ["F11", "content.0.content.0.marks", [{ type: "bold", attrs: {} }]],
+    ["F12", "content.0.content.0.marks", [{ type: "bold", attrs: {} }]],
+  ] as const) {
+    const fixture = v050ContractCorpus.find((item) => item.id === id);
+    assert.ok(fixture);
+    const stored = tiptapJsonToYDoc(fixture.input);
+    try {
+      const corrupted = structuredClone(observeWithoutWrites(stored));
+      changePath(corrupted, path, changed);
+      assert.throws(() => {
+        assertFacts(corrupted, fixture.expected);
+      }, `${id}: ${path}`);
+    } finally {
+      stored.destroy();
+    }
+  }
+});
+
 await test("all twelve bounded cases carry explicit loss and required-behavior expectations", () => {
   assert.deepEqual(
     v050ContractCorpus.map((item) => item.id),
