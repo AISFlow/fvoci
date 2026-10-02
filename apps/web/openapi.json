@@ -28849,11 +28849,19 @@
           "version",
           "status",
           "visibleRun",
-          "legacyOpen"
+          "legacyOpen",
+          "legacyOpenIds"
         ],
         "properties": {
           "legacyOpen": {
             "type": "boolean"
+          },
+          "legacyOpenIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
           },
           "runId": {
             "type": [

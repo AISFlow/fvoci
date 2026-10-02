@@ -5175,6 +5175,7 @@ export interface components {
         };
         OwnerTimerState: {
             legacyOpen: boolean;
+            legacyOpenIds: string[];
             /**
              * Format: uuid
              * @description Own opaque run identity/version allow explicit cleanup after revocation.
