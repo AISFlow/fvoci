@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { expect, test, type Page, type Response } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page, type Response } from "@playwright/test";
 import { login } from "./helpers";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
@@ -262,7 +262,99 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   page,
   context,
 }) => {
-  const f = await fixture(page, "DST");
+  await offlineCalendarScenario(page, context, "DST");
+});
+
+test("cached fields SSE refetch failure preserves the same Calendar draft through reconnect", async ({
+  page,
+  context,
+}) => {
+  await offlineCalendarScenario(page, context, "REFETCH", true);
+});
+
+test("offline fields retry interaction keeps the Calendar draft through reconnect and explicit save", async ({
+  page,
+  context,
+}) => {
+  await offlineCalendarScenario(page, context, "OFFLINERETRY", true, true);
+});
+
+test("online fields transport failure keeps the Calendar draft while visible retry initiates a real GET", async ({
+  page,
+}) => {
+  const f = await fixture(page, "RETRY");
+  const point = await f.task("Retry point", { dueDate: "2027-05-08" });
+  await f.open();
+  await page.getByTestId(`collection-preview-${point.displayId}`).click();
+  const editor = page.getByRole("form", { name: "Calendar event editor" });
+  const input = editor.locator('input[type="date"]');
+  const popover = page.locator('[data-slot="content"]').filter({ has: editor });
+  await input.fill("2027-05-12");
+  const node = required(await input.elementHandle());
+  const collection = idSchema.parse(
+    await (await page.request.get(`${f.base}/projects/${f.project.id}/collection`)).json(),
+  );
+  const path = `${f.base}/collections/${collection.id}/fields`;
+  const failure = page.waitForEvent("requestfailed", {
+    predicate: (request) => request.url().endsWith(path),
+  });
+  await page.route(`**${path}`, (route) => route.abort("failed"));
+  expect(
+    (
+      await page.request.patch(`${f.base}/tasks/${point.id}`, {
+        data: { title: "Retry point updated by peer" },
+      })
+    ).ok(),
+  ).toBe(true);
+  expect((await failure).failure()?.errorText).toContain("ERR_FAILED");
+  const error = fieldsErrorLocator(page);
+  await expect(error).toBeVisible();
+  await expect(input).toHaveValue("2027-05-12");
+  expect(await page.evaluate(() => navigator.onLine)).toBe(true);
+  await page.unroute(`**${path}`);
+  const { promise: retryStarted, resolve: markRetryStarted } = deferred();
+  const { promise: retryGate, resolve: releaseRetry } = deferred();
+  await page.route(`**${path}`, async (route) => {
+    markRetryStarted();
+    await retryGate;
+    await route.continue();
+  });
+  const recovered = page.waitForResponse((response) => response.url().endsWith(path));
+  await error.getByRole("button", { name: "다시 시도" }).click();
+  await retryStarted;
+  try {
+    // Keep the error region mounted until outside pointer/focus handling has
+    // settled. A fast200 must not conceal an unintended popover dismissal.
+    await expect(error).toBeVisible();
+    await expect(popover).toHaveAttribute("data-state", "open");
+    await expect(editor).toBeVisible();
+    await expect(input).toHaveValue("2027-05-12");
+    expect(await input.evaluate((current, prior) => current === prior, node)).toBe(true);
+  } finally {
+    releaseRetry();
+  }
+  expect((await recovered).status()).toBe(200);
+  await expect(error).toHaveCount(0);
+  await expect(popover).toHaveAttribute("data-state", "open");
+  await expect(editor).toBeVisible();
+  await expect(input).toHaveValue("2027-05-12");
+  expect(await input.evaluate((current, prior) => current === prior, node)).toBe(true);
+  await expect(editor.getByRole("button", { name: "저장 뷰 저장" })).toBeEnabled();
+  expect((await f.stored(point.id)).dueDate).toBe("2027-05-08");
+});
+
+function fieldsErrorLocator(page: Page) {
+  return page.locator('section[data-testid="collection-calendar"] > [role="alert"]');
+}
+
+async function offlineCalendarScenario(
+  page: Page,
+  context: BrowserContext,
+  key: string,
+  fieldsBarrier = false,
+  offlineRetry = false,
+): Promise<void> {
+  const f = await fixture(page, key);
   const point = await f.task("DST point", {});
   expect(
     (
@@ -275,6 +367,7 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   await page.getByTestId(`collection-preview-${point.displayId}`).click();
   const editor = page.getByRole("form", { name: "Calendar event editor" });
   const input = editor.locator('input[type="datetime-local"]');
+  const popover = page.locator('[data-slot="content"]').filter({ has: editor });
   await expect(input).toHaveValue("2026-11-01T01:30");
   await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
   await expect(editor).toHaveCount(0);
@@ -289,7 +382,71 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   await expect(editor.getByRole("alert")).toBeVisible();
   expect(patches).toBe(0);
   await input.fill("2026-11-02T09:30");
+  let afterOffline: (() => Promise<void>) | undefined;
+  let afterReconnect: (() => Promise<void>) | undefined;
+  if (fieldsBarrier) {
+    const draftNode = required(await input.elementHandle());
+    const collection = idSchema.parse(
+      await (await page.request.get(`${f.base}/projects/${f.project.id}/collection`)).json(),
+    );
+    const fieldsPath = `${f.base}/collections/${collection.id}/fields`;
+    const { promise: fieldsStarted, resolve: markFieldsStarted } = deferred();
+    const { promise: fieldsGate, resolve: releaseFields } = deferred();
+    await page.route(`**${fieldsPath}`, async (route) => {
+      markFieldsStarted();
+      await fieldsGate;
+      await route.continue();
+    });
+    // A real peer write reaches the mounted project's SSE subscription. Its
+    // metadata refetch begins online; only fields crosses the offline boundary.
+    const siblings = [
+      `${f.base}/projects/${f.project.id}/collection`,
+      `${f.base}/collections/${collection.id}/views`,
+      `${f.base}/collections/${collection.id}/query`,
+    ].map((path) => page.waitForResponse((r) => r.url().endsWith(path) && r.ok()));
+    expect(
+      (
+        await page.request.patch(`${f.base}/tasks/${point.id}`, {
+          data: { title: "DST point updated by peer" },
+        })
+      ).ok(),
+    ).toBe(true);
+    await fieldsStarted;
+    await Promise.all(siblings);
+    const fieldsFailed = page.waitForEvent("requestfailed", {
+      predicate: (request) => request.url().endsWith(fieldsPath),
+    });
+    afterOffline = async () => {
+      releaseFields();
+      expect((await fieldsFailed).failure()?.errorText).toContain("ERR_INTERNET_DISCONNECTED");
+      await expect(input).toHaveValue("2026-11-02T09:30");
+      await expect(popover).toHaveAttribute("data-state", "open");
+      await expect(editor).toBeVisible();
+      expect(await input.evaluate((node, previous) => node === previous, draftNode)).toBe(true);
+      const fieldsError = fieldsErrorLocator(page);
+      await expect(fieldsError).toBeVisible();
+      await expect(fieldsError.getByRole("button", { name: "다시 시도" })).toBeVisible();
+      expect(patches).toBe(0);
+      await page.unroute(`**${fieldsPath}`);
+      const recovered = page.waitForResponse(
+        (response) => response.url().endsWith(fieldsPath) && response.ok(),
+      );
+      afterReconnect = async () => {
+        expect((await recovered).status()).toBe(200);
+        await expect(fieldsError).toHaveCount(0);
+        await expect(popover).toHaveAttribute("data-state", "open");
+        await expect(editor).toBeVisible();
+        expect(await input.evaluate((node, previous) => node === previous, draftNode)).toBe(true);
+      };
+      // This checks outside-interaction ownership; the separate online case
+      // proves retry GET causality without automatic reconnect fetching.
+      if (offlineRetry) await fieldsError.getByRole("button", { name: "다시 시도" }).click();
+      await expect(popover).toHaveAttribute("data-state", "open");
+      await expect(editor).toBeVisible();
+    };
+  }
   await context.setOffline(true);
+  await afterOffline?.();
   await expect(
     page.getByRole("status").filter({ hasText: "Offline · unsaved drafts" }),
   ).toBeVisible();
@@ -305,11 +462,13 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   ).toBe(true);
   await context.setOffline(false);
   await expect(input).toHaveValue("2026-11-02T09:30");
+  await afterReconnect?.();
   const saved = page.waitForResponse(
     (r) => r.request().method() === "PATCH" && r.url().endsWith(`/tasks/${point.id}`),
   );
   await editor.getByRole("button", { name: "저장 뷰 저장" }).click();
   expect((await saved).status()).toBe(409);
+  await expect(editor.getByRole("alert")).toBeVisible();
   await expect(input).toHaveValue("2026-11-02T09:30");
   await expect(
     page.locator('td[data-date="2026-11-03"]').getByTestId(`collection-preview-${point.displayId}`),
@@ -322,7 +481,7 @@ test("offline reconnect preserves editor intent, refuses unsaved writes, and DST
   await expect(
     page.locator('td[data-date="2026-11-02"]').getByTestId(`collection-preview-${point.displayId}`),
   ).toBeVisible();
-});
+}
 
 test("custom date editor retains stale item guard, rolls back conflict and preserves draft for explicit retry", async ({
   page,
