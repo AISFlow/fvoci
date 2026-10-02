@@ -31,28 +31,62 @@ async function invalidateConnectedTaskCaches(
   queryClient: QueryClient,
   workspaceId: string,
   projectId: string,
-  taskId?: string,
+  taskIds: readonly string[] = [],
   documentId?: string,
+  recoverMissed = false,
 ): Promise<void> {
-  const related = queryClient
-    .getQueryCache()
-    .findAll()
-    .filter((query) => {
+  const queries = queryClient.getQueryCache().findAll();
+  const tasks = new Set(taskIds);
+  const originTargets = new Set(taskIds);
+  if (documentId) originTargets.add(documentId);
+  let sourceKnown = !!documentId;
+  for (const query of queries) {
+    const key = query.queryKey;
+    if (key[0] !== "task-origins" || key[1] !== workspaceId || typeof key[2] !== "string") continue;
+    const data = query.state.data as
+      { items?: Array<{ taskId?: string; documentId?: string }> } | undefined;
+    for (const item of data?.items ?? []) {
+      if (!item.taskId || !tasks.has(item.taskId)) continue;
+      originTargets.add(key[2]);
+      if (item.documentId) {
+        sourceKnown = true;
+        originTargets.add(item.documentId);
+      }
+    }
+  }
+  // Actual task SSE carries only verb/taskId. A new or unseen relation cannot
+  // be ruled out by a page's absence. Recover this authorized origin family
+  // when no permitted source association is cached, as on missed-hint resync.
+  const recoverOrigins = recoverMissed || (tasks.size > 0 && !sourceKnown);
+  if (recoverOrigins)
+    for (const query of queries) {
       const key = query.queryKey;
-      if (key[0] === "search" && key[1] === workspaceId)
-        return (key[3] === "all" || key[3] === "task") && (!key[4] || key[4] === projectId);
-      if (key[0] === "task-origins" && key[1] === workspaceId) {
-        if (key[2] === taskId || (documentId && key[2] === documentId)) return true;
-        const data = query.state.data as { items?: Array<{ taskId?: string }> } | undefined;
-        return !!taskId && (data?.items?.some((item) => item.taskId === taskId) ?? false);
-      }
-      if (key[0] === "backlinks" && key[2] === workspaceId) {
-        if (key[1] === "task" && key[3] === taskId) return true;
-        const data = query.state.data as { items?: Array<{ id?: string }> } | undefined;
-        return !!taskId && (data?.items?.some((item) => item.id === taskId) ?? false);
-      }
-      return false;
-    });
+      if (key[0] !== "task-origins" || key[1] !== workspaceId || typeof key[2] !== "string")
+        continue;
+      const knownTask =
+        query.meta?.originTargetKind === "task"
+          ? queryClient.getQueryData<TaskDetail>(["task", workspaceId, key[2]])
+          : undefined;
+      // Origin DTOs carry no project relation. Only a positively known task
+      // target in a sibling project can be excluded, never an unseen source.
+      // Its actual REST read remains the authority and can deny/return empty.
+      if (!(knownTask?.id === key[2] && knownTask.projectId !== projectId))
+        originTargets.add(key[2]);
+    }
+  const related = queries.filter((query) => {
+    const key = query.queryKey;
+    if (key[0] === "search" && key[1] === workspaceId)
+      return (key[3] === "all" || key[3] === "task") && (!key[4] || key[4] === projectId);
+    if (key[0] === "task-origins" && key[1] === workspaceId) {
+      return typeof key[2] === "string" && originTargets.has(key[2]);
+    }
+    if (key[0] === "backlinks" && key[2] === workspaceId) {
+      if (key[1] === "task" && typeof key[3] === "string" && tasks.has(key[3])) return true;
+      const data = query.state.data as { items?: Array<{ id?: string }> } | undefined;
+      return data?.items?.some((item) => !!item.id && tasks.has(item.id)) ?? false;
+    }
+    return false;
+  });
   await Promise.all([
     invalidateKeepingLoadMore(queryClient, ["workspace-tasks", workspaceId]),
     ...related.map((query) => invalidateKeepingLoadMore(queryClient, query.queryKey)),
@@ -67,7 +101,7 @@ export async function invalidateTaskCaches(
   documentId?: string,
 ): Promise<void> {
   await Promise.all([
-    invalidateConnectedTaskCaches(queryClient, workspaceId, projectId, taskId, documentId),
+    invalidateConnectedTaskCaches(queryClient, workspaceId, projectId, [taskId], documentId),
     queryClient.invalidateQueries({ queryKey: ["task", workspaceId, taskId] }),
     queryClient.invalidateQueries({ queryKey: ["task-activity", workspaceId, taskId] }),
     queryClient.invalidateQueries({ queryKey: ["task-time-entries", workspaceId, taskId] }),
@@ -99,9 +133,15 @@ export function invalidateTaskStreamResyncCaches(
         (query.state.data === undefined && query.state.status === "error" && query.isActive()),
     );
   Promise.all([
-    invalidateConnectedTaskCaches(queryClient, workspaceId, projectId),
+    invalidateConnectedTaskCaches(
+      queryClient,
+      workspaceId,
+      projectId,
+      details.map((query) => String(query.queryKey[2])),
+      undefined,
+      true,
+    ),
     ...details.flatMap((query) => [
-      invalidateConnectedTaskCaches(queryClient, workspaceId, projectId, String(query.queryKey[2])),
       queryClient.invalidateQueries({ queryKey: query.queryKey, exact: true }),
       queryClient.invalidateQueries({
         queryKey: ["task-activity", workspaceId, query.queryKey[2]],
