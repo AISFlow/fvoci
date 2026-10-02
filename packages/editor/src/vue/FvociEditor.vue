@@ -227,12 +227,17 @@ watch(
       draftDirty.value = false;
       sourceStale.value = false;
       preview.value = null;
+      sourceComposing.value = false;
       const current = editor.value;
       current?.destroy();
       editor.value = undefined;
       uploads.value = [];
       anchors.clear();
       emit("ready", null);
+    } else if (mode.value === "preview" && editor.value) {
+      // A same-actor readable permission/scope change retires old resolver
+      // work, then renders the same authorized live document anew.
+      refreshPreview(editor.value);
     }
   },
   { flush: "sync" },
@@ -768,7 +773,7 @@ function bubbleOwner(): HTMLElement {
           @click="applySource"
           >적용</button
         >
-        <button type="button" :disabled="sourceComposing" @click="refreshSource">{{
+        <button type="button" :disabled="sourceComposing" @click="discardSourceDraft">{{
           t("editor.mode.cancel")
         }}</button>
         <button
@@ -780,7 +785,9 @@ function bubbleOwner(): HTMLElement {
         >
       </div>
     </div>
-    <p v-if="mode === 'preview' && !preview" role="status">{{ t("editor.embed.loading") }}</p>
+    <p v-if="editor && mode === 'preview' && !preview" role="status">{{
+      t("editor.embed.loading")
+    }}</p>
     <SafeHtml
       v-if="preview"
       v-show="mode === 'preview'"

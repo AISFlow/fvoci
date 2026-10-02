@@ -276,7 +276,7 @@ test("late older-schema peer data retires only the editor, preserving the same l
     },
   });
   const peer = await newSignedInPage(browser, baseURL, admin);
-  type RawWitness = { doc: Y.Doc; provider: unknown; repairs: number };
+  type RawWitness = { doc: Y.Doc; provider: unknown; repairs: number; updates: number };
   type RawWindow = Window & { w3RawWitness?: RawWitness };
   try {
     await openDoc(page, doc.path);
@@ -292,6 +292,7 @@ test("late older-schema peer data retires only the editor, preserving the same l
           doc,
           provider: options("collaborationCaret")?.provider,
           repairs: 0,
+          updates: 0,
         };
         const syncKey = editor.state.plugins
           .map((plugin) => plugin.spec.key)
@@ -303,12 +304,15 @@ test("late older-schema peer data retires only the editor, preserving the same l
           });
         if (!syncKey) throw new Error("Missing actual ySync key");
         doc.on("update", (_update: Uint8Array, origin: unknown) => {
+          witness.updates++;
           if (origin === syncKey) witness.repairs++;
         });
         (window as RawWindow).w3RawWitness = witness;
       });
     }
     await selectMode(page, "markdown");
+    const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+    await field.fill("원본과 별개의 취소할 초안 🧑‍💻");
     await peer.page.evaluate(() => {
       const witness = (window as RawWindow).w3RawWitness;
       if (!witness) throw new Error("Missing raw document witness");
@@ -331,6 +335,33 @@ test("late older-schema peer data retires only the editor, preserving the same l
     ).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Markdown 직접 편집" })).not.toBeEditable();
     await expect(page.getByRole("button", { name: "적용", exact: true })).toBeDisabled();
+    await expect(field).toHaveValue("원본과 별개의 취소할 초안 🧑‍💻");
+    const beforeCancel = await page.evaluate(() => {
+      const witness = (window as RawWindow).w3RawWitness;
+      if (!witness) throw new Error("Missing raw document witness");
+      return { raw: witness.doc.getXmlFragment("prosemirror").toJSON(), updates: witness.updates };
+    });
+    // The actual visible button must remain useful after Editor.destroy().
+    // Composition blocks deliberate discard even in the raw-readonly panel.
+    await field.dispatchEvent("compositionstart");
+    await expect(page.getByRole("button", { name: "취소 · 최신 내용 열기" })).toBeDisabled();
+    await expect(field).toHaveValue("원본과 별개의 취소할 초안 🧑‍💻");
+    await field.dispatchEvent("compositionend");
+    await page.getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
+    await expect(field).toHaveValue("");
+    await expect(page.getByRole("status").filter({ hasText: "문서가 변경되었습니다" })).toHaveCount(
+      0,
+    );
+    expect(
+      await page.evaluate(() => {
+        const witness = (window as RawWindow).w3RawWitness;
+        if (!witness) throw new Error("Missing raw document witness");
+        return {
+          raw: witness.doc.getXmlFragment("prosemirror").toJSON(),
+          updates: witness.updates,
+        };
+      }),
+    ).toEqual(beforeCancel);
     for (const target of [page, peer.page]) {
       const current = await target.evaluate(() => {
         const witness = (window as RawWindow).w3RawWitness;
