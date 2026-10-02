@@ -1,3 +1,4 @@
+import { extractText } from "@fvoci/editor/extract";
 import { yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
 import { sameValue } from "@fvoci/editor/vue";
 import type * as Y from "yjs";
@@ -98,9 +99,98 @@ function uniqueSupportedMarks(value: unknown, schema: BodySchema): Map<string, u
   }
   return byType;
 }
+function pureUnmarkedText(node: unknown): string | null {
+  return plainRecord(node) &&
+    Object.keys(node).length === 2 &&
+    Object.hasOwn(node, "type") &&
+    node.type === "text" &&
+    Object.hasOwn(node, "text") &&
+    typeof node.text === "string" &&
+    node.text.length > 0
+    ? node.text
+    : null;
+}
+function knownUnmarkedEmoji(node: unknown, schema: BodySchema): string | null {
+  if (
+    !Object.hasOwn(schema.nodes, "text") ||
+    !Object.hasOwn(schema.nodes, "emoji") ||
+    !plainRecord(node) ||
+    Object.keys(node).length !== 2 ||
+    !Object.hasOwn(node, "type") ||
+    node.type !== "emoji" ||
+    !Object.hasOwn(node, "attrs") ||
+    !plainRecord(node.attrs) ||
+    Object.keys(node.attrs).length !== 1 ||
+    !Object.hasOwn(node.attrs, "name") ||
+    typeof node.attrs.name !== "string" ||
+    !node.attrs.name
+  )
+    return null;
+  // Existing public extractor delegates this ONE strict atom to the pinned
+  // Emoji registry. Its unknown-name textual fallback proves no equivalence.
+  const glyph = extractText(node);
+  return glyph && glyph !== `:${node.attrs.name}:` ? glyph : null;
+}
+function textExpansionEnd(
+  text: string,
+  nodes: unknown[],
+  start: number,
+  schema: BodySchema,
+): number | null {
+  let offset = 0,
+    sawEmoji = false,
+    previousText = false;
+  for (let i = start; i < nodes.length; i++) {
+    const plain = pureUnmarkedText(nodes[i]);
+    const glyph = plain === null ? knownUnmarkedEmoji(nodes[i], schema) : null;
+    // The installed producer splits text only around unmarked Emoji atoms.
+    // Do not coalesce arbitrary adjacent text nodes or other node types.
+    if ((plain !== null && previousText) || (plain === null && glyph === null)) return null;
+    const segment = plain ?? glyph;
+    if (!segment || !text.startsWith(segment, offset)) return null;
+    offset += segment.length;
+    sawEmoji ||= glyph !== null;
+    previousText = plain !== null;
+    if (offset === text.length) return sawEmoji ? i + 1 : null;
+  }
+  return null;
+}
+function sameContent(left: unknown[], right: unknown[], schema: BodySchema): boolean {
+  if (
+    ![left, right].every(
+      (nodes) =>
+        Object.keys(nodes).length === nodes.length &&
+        Object.keys(nodes).every((key, index) => key === String(index)),
+    )
+  )
+    return false;
+  let l = 0,
+    r = 0;
+  while (l < left.length && r < right.length) {
+    if (sameCommittedProjection(left[l], right[r], schema)) {
+      l++;
+      r++;
+      continue;
+    }
+    const leftText = pureUnmarkedText(left[l]),
+      rightText = pureUnmarkedText(right[r]);
+    const rightEnd = leftText === null ? null : textExpansionEnd(leftText, right, r, schema);
+    if (rightEnd !== null) {
+      l++;
+      r = rightEnd;
+      continue;
+    }
+    const leftEnd = rightText === null ? null : textExpansionEnd(rightText, left, l, schema);
+    if (leftEnd === null) return false;
+    l = leftEnd;
+    r++;
+  }
+  return l === left.length && r === right.length;
+}
 /** The pinned Rust projector sorts unique raw mark names, while JS preserves
  * Y.Text format-item order. Only this documented supported-node/unique-mark
- * order equivalence is permitted; opaque values and other arrays stay exact. */
+ * order equivalence, plus the pinned unmarked Emoji/text segmentation above,
+ * is permitted; opaque values and other arrays stay exact. */
 function sameCommittedProjection(
   a: unknown,
   b: unknown,
@@ -134,19 +224,7 @@ function sameCommittedProjection(
       );
     }
     if (key === "content" && Array.isArray(a[key]) && Array.isArray(b[key])) {
-      const left = a[key],
-        right = b[key];
-      return (
-        left.length === right.length &&
-        Object.keys(left).length === left.length &&
-        Object.keys(right).length === right.length &&
-        Object.keys(left).every((key, index) => key === String(index)) &&
-        Object.keys(left).every(
-          (index) =>
-            Object.hasOwn(right, index) &&
-            sameCommittedProjection(left[Number(index)], right[Number(index)], schema),
-        )
-      );
+      return sameContent(a[key], b[key], schema);
     }
     return sameValue(a[key], b[key]);
   });
