@@ -182,15 +182,18 @@ function identityDiagnostics(nodes: readonly SourceNode[]): SourceDiagnostic[] {
   function visit(node: SourceNode, path: string): void {
     if (blockTypes.has(node.type)) {
       const id = node.attrs?.id;
-      if (typeof id !== "string" || id.length === 0)
+      // Imported/empty blocks legally have no ID. Their localized mapping is
+      // proved below; the existing SDK allocates on the explicit Apply only.
+      // A non-null malformed or duplicated ID is still ambiguous stored data.
+      if (id != null && (typeof id !== "string" || id.length === 0))
         result.push(
-          diagnostic(node, path, "id", "Missing block identity; return to rich editing."),
+          diagnostic(node, path, "id", "Invalid block identity; return to rich editing."),
         );
-      else if (ids.has(id))
+      else if (typeof id === "string" && ids.has(id))
         result.push(
           diagnostic(node, path, "id", `Duplicate block identity at ${ids.get(id) ?? ""}.`),
         );
-      else ids.set(id, path);
+      else if (typeof id === "string") ids.set(id, path);
     }
     node.content?.forEach((child, i) => {
       visit(child, `${path}.content.${String(i)}`);
@@ -783,7 +786,14 @@ export class SourceModeSession {
   capture(doc: PmNode): SourceCapture {
     const spans: Span[] = [];
     let source = "";
-    for (const node of children(yDocToTiptapJson(this.ydoc))) {
+    const raw = children(yDocToTiptapJson(this.ydoc));
+    const emptyParagraph = doc.type.schema.nodes.paragraph?.create();
+    // ySync intentionally keeps its default empty paragraph out of an empty
+    // fragment until a real edit. Describe only that exact placeholder; viewing
+    // must not seed a node, allocate an ID or coerce any stored content.
+    if (raw.length === 0 && doc.childCount === 1 && emptyParagraph?.eq(doc.child(0)))
+      raw.push({ type: "paragraph" });
+    for (const node of raw) {
       if (spans.length) source += "\n\n";
       const start = source.length;
       source += markdown(node);

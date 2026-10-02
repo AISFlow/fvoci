@@ -2019,42 +2019,183 @@ test("Chromium rich IME engine blocks mode switching without focus loss and pres
   }
 });
 
-test("actual identityless source range refuses Apply with precise warning and Cancel/viewing allocate no ID or content update", async ({
-  page,
-}) => {
-  await authenticatedHome(page);
-  const ws = await workspaceId(page.request);
-  const doc = await createDoc(page.request, ws, "ID 없는 범위 보존", { markdown: "원본 문단" });
-  await openDoc(page, doc.path);
-  await save(page);
-  const before = await savedBody(page.request, ws, doc.id);
-  expect(before.content?.[0]?.attrs?.id).toBeUndefined();
-  await recordIdentity(page);
-  for (const mode of ["markdown", "preview", "block", "rich"] as const)
-    await selectMode(page, mode);
-  await expectIdentity(page, 0);
-  await selectMode(page, "markdown");
-  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
-  await field.fill("한글 조사");
-  await page.getByRole("button", { name: "적용", exact: true }).click();
-  await expect(page.locator(".fvoci-mode-warning")).toContainText(
-    "content.0 · ID 없음 · id: Missing block identity",
-  );
-  await expectIdentity(page, 0);
-  expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
-  await page.getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
-  await expect(field).toHaveValue("원본 문단");
-  await expectIdentity(page, 0);
-  await selectMode(page, "rich");
-  await expectBlocks(page, ["원본 문단"]);
-  expect(
-    await editorOf(page).evaluate(
+for (const example of [
+  {
+    name: "ordinary Markdown import",
+    input: { markdown: "원본 문단" },
+    initial: {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "원본 문단" }] }],
+    },
+    originalSource: "원본 문단",
+    draft: "한글 변경",
+    texts: ["한글 변경"],
+    ids: [null],
+  },
+  {
+    name: "empty Markdown import",
+    input: { markdown: "" },
+    initial: { type: "doc", content: [{ type: "paragraph" }] },
+    originalSource: "",
+    draft: "첫 기록",
+    texts: ["첫 기록"],
+    ids: [null],
+  },
+  {
+    name: "new blank document without imported body",
+    input: undefined,
+    initial: { type: "doc", content: [{ type: "paragraph" }] },
+    originalSource: "",
+    draft: "첫 기록",
+    texts: ["첫 기록"],
+    ids: [null],
+  },
+  {
+    name: "ID-less edit beside existing ID and untouched ID-less sibling",
+    input: {
+      json: {
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "원본 문단" }] },
+          {
+            type: "paragraph",
+            attrs: { id: "ordinary-existing" },
+            content: [{ type: "text", text: "기존 자료" }],
+          },
+          { type: "paragraph", content: [{ type: "text", text: "이웃 문단" }] },
+        ],
+      },
+    },
+    initial: {
+      type: "doc",
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: "원본 문단" }] },
+        {
+          type: "paragraph",
+          attrs: { id: "ordinary-existing" },
+          content: [{ type: "text", text: "기존 자료" }],
+        },
+        { type: "paragraph", content: [{ type: "text", text: "이웃 문단" }] },
+      ],
+    },
+    originalSource: "원본 문단\n\n기존 자료\n\n이웃 문단",
+    draft: "한글 변경\n\n기존 자료\n\n이웃 문단",
+    texts: ["한글 변경", "기존 자료", "이웃 문단"],
+    ids: [null, "ordinary-existing", null],
+  },
+  {
+    name: "existing ID edit beside untouched ID-less sibling",
+    input: {
+      json: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            attrs: { id: "ordinary-existing" },
+            content: [{ type: "text", text: "원본 문단" }],
+          },
+          { type: "paragraph", content: [{ type: "text", text: "이웃 문단" }] },
+        ],
+      },
+    },
+    initial: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "ordinary-existing" },
+          content: [{ type: "text", text: "원본 문단" }],
+        },
+        { type: "paragraph", content: [{ type: "text", text: "이웃 문단" }] },
+      ],
+    },
+    originalSource: "원본 문단\n\n이웃 문단",
+    draft: "한글 변경\n\n이웃 문단",
+    texts: ["한글 변경", "이웃 문단"],
+    ids: ["ordinary-existing", null],
+  },
+]) {
+  test(`${example.name}: viewing/Cancel write zero and localized Markdown Apply persists exact body/IDs to DB and a fresh client`, async ({
+    page,
+    browser,
+    baseURL,
+  }, testInfo) => {
+    await authenticatedHome(page);
+    const ws = await workspaceId(page.request);
+    const doc = await createDoc(page.request, ws, `직접 편집 ${example.name}`, example.input);
+    await openDoc(page, doc.path);
+    await save(page);
+    expect(await savedBody(page.request, ws, doc.id)).toEqual(example.initial);
+    await recordIdentity(page);
+    const liveBody = (client: Page) =>
+      editorOf(client).evaluate(
+        (root) => (root as EditorElement).editor.state.doc.toJSON() as unknown,
+      );
+    const originalLive = await liveBody(page);
+    for (const mode of ["markdown", "preview", "block", "rich"] as const)
+      await selectMode(page, mode);
+    await expectIdentity(page, 0);
+    await selectMode(page, "markdown");
+    const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+    await expect(field).toBeEditable();
+    await expect(field).toHaveValue(example.originalSource);
+    await field.fill("취소할 비공개 초안");
+    await page.getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
+    await expect(field).toHaveValue(example.originalSource);
+    await expectIdentity(page, 0);
+    expect(await liveBody(page)).toEqual(originalLive);
+    expect(await savedBody(page.request, ws, doc.id)).toEqual(example.initial);
+    await field.fill(example.draft);
+    await page.getByRole("button", { name: "적용", exact: true }).click();
+    await expect(page.locator(".fvoci-mode-warning")).toHaveCount(0);
+    const firstID: unknown = await editorOf(page).evaluate(
       (root) => (root as EditorElement).editor.state.doc.child(0).attrs.id as unknown,
-    ),
-  ).toBe(null);
-  await save(page);
-  expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
-});
+    );
+    if (typeof firstID !== "string" || !firstID)
+      throw new Error("Explicit localized Apply did not allocate a block ID");
+    if (example.ids[0]) expect(firstID).toBe(example.ids[0]);
+    const expectedIDs = [firstID, ...example.ids.slice(1)];
+    const expectedStored = {
+      type: "doc",
+      content: example.texts.map((text, index) => ({
+        type: "paragraph",
+        ...(expectedIDs[index] ? { attrs: { id: expectedIDs[index] } } : {}),
+        content: [{ type: "text", text }],
+      })),
+    };
+    const expectedLive = {
+      type: "doc",
+      content: example.texts.map((text, index) => ({
+        type: "paragraph",
+        attrs: { id: expectedIDs[index] ?? null, ychange: null, textAlign: null },
+        content: [{ type: "text", text }],
+      })),
+    };
+    expect(await liveBody(page)).toEqual(expectedLive);
+    await selectMode(page, "rich");
+    await expectBlocks(page, example.texts);
+    await expectIdentity(page);
+    await save(page); // Existing current scoped persist ACK is the durable barrier.
+    expect(await savedBody(page.request, ws, doc.id)).toEqual(expectedStored);
+    const dbWitness = restrictedDbBody(ws, doc.id);
+    await testInfo.attach("w3-idless-apply-app-role-DB.json", {
+      body: JSON.stringify(dbWitness),
+      contentType: "application/json",
+    });
+    if (typeof dbWitness !== "object" || dbWitness === null || !("content" in dbWitness))
+      throw new Error("Missing restricted DB body");
+    expect(dbWitness.content).toEqual(expectedStored);
+    const fresh = await newSignedInPage(browser, baseURL, admin);
+    try {
+      await openDoc(fresh.page, doc.path);
+      await expectBlocks(fresh.page, example.texts);
+      expect(await liveBody(fresh.page)).toEqual(expectedLive);
+      expect(await savedBody(fresh.page.request, ws, doc.id)).toEqual(expectedStored);
+    } finally {
+      await fresh.context.close();
+    }
+  });
+}
 
 test("ordinary rich and peer edits refresh clean Markdown entry while a dirty private draft remains stale until explicit Cancel", async ({
   page,

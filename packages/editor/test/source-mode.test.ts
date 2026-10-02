@@ -297,7 +297,10 @@ for (const example of ordinaryIdentitylessCases) {
       assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
       assert.ok(proposal.transaction);
       const result = proposal.transaction.doc;
-      assert.deepEqual(result.content.content.map((node) => node.textContent), example.texts);
+      assert.deepEqual(
+        result.content.content.map((node) => node.textContent),
+        example.texts,
+      );
       for (let i = 0; i < result.childCount; i++) {
         assert.equal(result.child(i).attrs.id, fixture.state.doc.child(i).attrs.id);
         if (i > 0) assert.ok(result.child(i).eq(fixture.state.doc.child(i)));
@@ -310,6 +313,95 @@ for (const example of ordinaryIdentitylessCases) {
     }
   });
 }
+
+await test("empty native fragment with the SDK default paragraph accepts first Markdown without viewing writes", () => {
+  const ydoc = new Y.Doc();
+  const state = EditorState.create({ schema });
+  const source = new SourceModeSession(
+    ydoc,
+    () => 1,
+    () => true,
+  );
+  let updates = 0;
+  ydoc.on("update", () => updates++);
+  try {
+    const before = Y.encodeStateAsUpdate(ydoc);
+    const capture = source.capture(state.doc);
+    assert.equal(capture.source, "");
+    const proposal = source.prepare(capture, "첫 기록", state);
+    assert.equal(updates, 0);
+    assert.equal(ydoc.getXmlFragment("prosemirror").length, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(ydoc), before);
+    assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+    assert.ok(proposal.transaction);
+    assert.equal(proposal.transaction.doc.child(0).textContent, "첫 기록");
+    assert.equal(proposal.transaction.doc.child(0).attrs.id, null);
+    source.destroy();
+    assert.equal(updates, 0);
+  } finally {
+    source.destroy();
+    ydoc.destroy();
+  }
+});
+
+for (const attrs of [{ id: "existing" }, { textAlign: "right" }]) {
+  await test(`empty native fragment refuses a non-default paragraph ${JSON.stringify(attrs)} without repairing it`, () => {
+    const ydoc = new Y.Doc();
+    const paragraphType = schema.nodes.paragraph;
+    assert.ok(paragraphType);
+    const state = EditorState.create({
+      schema,
+      doc: schema.topNodeType.create(null, paragraphType.create(attrs)),
+    });
+    const source = new SourceModeSession(
+      ydoc,
+      () => 1,
+      () => true,
+    );
+    let updates = 0;
+    ydoc.on("update", () => updates++);
+    try {
+      const before = Y.encodeStateAsUpdate(ydoc);
+      const proposal = source.prepare(source.capture(state.doc), "첫 기록", state);
+      assert.equal(proposal.status, "loss");
+      assert.ok(proposal.diagnostics.some((item) => item.field === "raw/schema"));
+      assert.equal(proposal.transaction, undefined);
+      assert.equal(updates, 0);
+      assert.deepEqual(Y.encodeStateAsUpdate(ydoc), before);
+      source.destroy();
+      assert.equal(updates, 0);
+    } finally {
+      source.destroy();
+      ydoc.destroy();
+    }
+  });
+}
+
+await test("empty native fragment refuses nonempty PM content instead of treating it as a default placeholder", () => {
+  const ydoc = new Y.Doc();
+  const paragraphType = schema.nodes.paragraph;
+  assert.ok(paragraphType);
+  const state = EditorState.create({
+    schema,
+    doc: schema.topNodeType.create(null, paragraphType.create(null, schema.text("unrepresented"))),
+  });
+  const source = new SourceModeSession(
+    ydoc,
+    () => 1,
+    () => true,
+  );
+  try {
+    const before = Y.encodeStateAsUpdate(ydoc);
+    const proposal = source.prepare(source.capture(state.doc), "첫 기록", state);
+    assert.equal(proposal.status, "loss");
+    assert.ok(proposal.diagnostics.some((item) => item.field === "raw/schema"));
+    assert.equal(proposal.transaction, undefined);
+    assert.deepEqual(Y.encodeStateAsUpdate(ydoc), before);
+  } finally {
+    source.destroy();
+    ydoc.destroy();
+  }
+});
 
 function rawNode(node: CorpusNode): Y.XmlElement | Y.XmlText {
   if (node.type === "text") {
@@ -572,7 +664,7 @@ await test("scope ABA needs a monotonically advanced host scope and retirement r
   }
 });
 
-await test("missing/duplicate IDs reject changes without viewing-time repair or file-domain collision", () => {
+await test("duplicate IDs reject changes without viewing-time repair or file-domain collision", () => {
   const fixture = v050ContractCorpus.find((item) => item.id === "F12");
   assert.ok(fixture);
   const current = setup(fixture.input);
@@ -581,10 +673,56 @@ await test("missing/duplicate IDs reject changes without viewing-time repair or 
     const before = Y.encodeStateAsUpdate(current.ydoc);
     const proposal = current.session.prepare(capture, `${capture.source}\nchanged`, current.state);
     assert.equal(proposal.status, "loss");
-    assert.ok(proposal.diagnostics.some((item) => item.field === "id"));
+    assert.ok(
+      proposal.diagnostics.some(
+        (item) => item.field === "id" && item.reason.startsWith("Duplicate block identity"),
+      ),
+    );
     assert.deepEqual(Y.encodeStateAsUpdate(current.ydoc), before);
   } finally {
     current.close();
+  }
+});
+
+for (const id of ["", 17, false] as const) {
+  await test(`malformed non-null block ID ${String(id)} remains a loss refusal without repair`, () => {
+    const fixture = setup(
+      document({ type: "paragraph", attrs: { id }, content: [{ type: "text", text: "원본" }] }),
+    );
+    try {
+      const capture = fixture.session.capture(fixture.state.doc);
+      const before = Y.encodeStateAsUpdate(fixture.ydoc);
+      const proposal = fixture.session.prepare(capture, "변경", fixture.state);
+      assert.equal(proposal.status, "loss");
+      assert.equal(proposal.diagnostics[0]?.path, "content.0");
+      assert.equal(proposal.diagnostics[0].field, "id");
+      assert.equal(proposal.transaction, undefined);
+      assert.deepEqual(Y.encodeStateAsUpdate(fixture.ydoc), before);
+    } finally {
+      fixture.close();
+    }
+  });
+}
+
+await test("ID-less changed opaque range warns about the exact unknown field and Cancel preserves it", () => {
+  const fixture = setup(document({ type: "paragraph", content: [{ type: "text", text: "원본" }] }));
+  const element = fixture.ydoc.getXmlFragment("prosemirror").get(0);
+  assert.ok(element instanceof Y.XmlElement);
+  element.setAttribute("futureFlag", "preserve");
+  try {
+    const capture = fixture.session.capture(fixture.state.doc);
+    const before = Y.encodeStateAsUpdate(fixture.ydoc);
+    const proposal = fixture.session.prepare(capture, "변경", fixture.state);
+    assert.equal(proposal.status, "loss");
+    assert.equal(proposal.diagnostics[0]?.path, "content.0");
+    assert.equal(proposal.diagnostics[0].field, "attrs.futureFlag");
+    assert.equal(proposal.transaction, undefined);
+    fixture.session.destroy();
+    assert.equal(element.getAttribute("futureFlag"), "preserve");
+    assert.equal(element.getAttribute("id"), undefined);
+    assert.deepEqual(Y.encodeStateAsUpdate(fixture.ydoc), before);
+  } finally {
+    fixture.close();
   }
 });
 
