@@ -1,9 +1,141 @@
 import type { components } from "@/generated/api";
 import { api, ensureOk, ProblemError } from "@/lib/api";
-import { queryOptions } from "@/lib/query-options";
+import { infiniteQueryOptions, queryOptions } from "@/lib/query-options";
 import type { Query, QueryClient } from "@tanstack/query-core";
 
 export type TimerCommand = components["schemas"]["TimerCommandBody"];
+export type TimerRecord = components["schemas"]["TimeRecord"];
+export type TimerManual = components["schemas"]["TimerManualBody"];
+export type TimerCorrection = components["schemas"]["TimeCorrectionBody"];
+export type TimerLegacyRelease = components["schemas"]["LegacyReleaseBody"];
+
+export type TimerHistoryScope = {
+  actor: string;
+  session: string;
+  workspace: string;
+  task: string;
+  from: string;
+  to: string;
+  timeZone: string;
+};
+
+export function timerHistoryChanged(error: unknown): error is ProblemError {
+  return (
+    error instanceof ProblemError &&
+    error.status === 409 &&
+    error.reason === "timer_history_changed"
+  );
+}
+
+export function personalTimerHistoryQuery(scope: TimerHistoryScope) {
+  const queryKey = [
+    "task-timer-history",
+    scope.actor,
+    scope.session,
+    scope.workspace,
+    scope.task,
+    scope.from,
+    scope.to,
+    scope.timeZone,
+  ] as const;
+  return infiniteQueryOptions({
+    queryKey,
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ signal, pageParam }) =>
+      captureTimerRead(queryKey, async () =>
+        ensureOk(
+          await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/history", {
+            params: {
+              path: { workspace_id: scope.workspace, task_id: scope.task },
+              query: {
+                expectedActorId: scope.actor,
+                expectedSessionId: scope.session,
+                from: scope.from,
+                to: scope.to,
+                ...(pageParam ? { cursor: pageParam } : {}),
+              },
+            },
+            signal,
+          }),
+        ),
+      ),
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    enabled: Boolean(
+      scope.actor && scope.session && scope.workspace && scope.task && scope.from && scope.to,
+    ),
+    retry: false,
+    staleTime: 0,
+  });
+}
+
+export function personalTimerSummaryQuery(scope: TimerHistoryScope) {
+  const queryKey = [
+    "task-timer-summary",
+    scope.actor,
+    scope.session,
+    scope.workspace,
+    scope.task,
+    scope.from,
+    scope.to,
+    scope.timeZone,
+  ] as const;
+  return queryOptions({
+    queryKey,
+    queryFn: async ({ signal }) =>
+      captureTimerRead(queryKey, async () =>
+        ensureOk(
+          await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/summary", {
+            params: {
+              path: { workspace_id: scope.workspace, task_id: scope.task },
+              query: {
+                expectedActorId: scope.actor,
+                expectedSessionId: scope.session,
+                from: scope.from,
+                to: scope.to,
+              },
+            },
+            signal,
+          }),
+        ),
+      ),
+    enabled: Boolean(
+      scope.actor && scope.session && scope.workspace && scope.task && scope.from && scope.to,
+    ),
+    retry: false,
+    staleTime: 0,
+    refetchInterval: 5000,
+  });
+}
+
+export async function sendPersonalManual(workspace: string, task: string, body: TimerManual) {
+  return ensureOk(
+    await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/history", {
+      params: { path: { workspace_id: workspace, task_id: task } },
+      body,
+    }),
+  );
+}
+
+export async function sendPersonalCorrection(
+  workspace: string,
+  task: string,
+  record: string,
+  body: TimerCorrection,
+) {
+  return ensureOk(
+    await api.POST(
+      "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/records/{record_id}/correct",
+      {
+        params: { path: { workspace_id: workspace, task_id: task, record_id: record } },
+        body,
+      },
+    ),
+  );
+}
+
+export async function sendLegacyRelease(body: TimerLegacyRelease) {
+  return ensureOk(await api.POST("/api/v1/me/task-timer/legacy-release", { body }));
+}
 
 export function timerContextChanged(error: unknown): error is ProblemError {
   return (

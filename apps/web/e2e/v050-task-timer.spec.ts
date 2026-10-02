@@ -5,6 +5,7 @@ import path from "node:path";
 import { expect, test, type Route } from "@playwright/test";
 import { z } from "zod";
 import { createE2eUser, login } from "./helpers";
+import { isoToDatetimeLocalInTimeZone } from "../src/lib/datetime";
 
 const credentials = { email: "timer@example.com", password: "supersecret1" };
 const identityShape = z.object({ userId: z.string(), sessionId: z.string() });
@@ -1096,5 +1097,446 @@ test("a same-actor new-session denial cannot retire a populated successor or ret
     });
     await firstContext.close();
     await secondContext.close();
+  }
+});
+
+const personalRecordShape = z.object({
+  id: z.string(),
+  kind: z.enum(["manual", "segment"]),
+  startedAt: z.string(),
+  endedAt: z.string().nullable(),
+  note: z.string().nullable(),
+  revision: z.number(),
+});
+const recordResultShape = z.object({ record: personalRecordShape });
+
+function timerDatabaseEffects(actor: string, task: string): string {
+  if (![actor, task].every((id) => /^[0-9a-f-]{36}$/.test(id)))
+    throw new Error("invalid fixture UUID");
+  return diagnosticSql(`SELECT jsonb_build_object(
+    'runs',(SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.id),'[]'::jsonb) FROM fvoci.task_timer_runs r WHERE r.user_id='${actor}'),
+    'segments',(SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY s.id),'[]'::jsonb) FROM fvoci.task_timer_segments s WHERE s.user_id='${actor}'),
+    'receipts',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.request_id),'[]'::jsonb) FROM fvoci.task_timer_commands c WHERE c.user_id='${actor}'),
+    'audit',(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.id),'[]'::jsonb) FROM fvoci.task_timer_audit a WHERE a.user_id='${actor}'),
+    'legacy',(SELECT COALESCE(jsonb_agg(to_jsonb(l) ORDER BY l.time_entry_id),'[]'::jsonb) FROM fvoci.task_timer_legacy_open l WHERE l.user_id='${actor}'),
+    'history',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM fvoci.time_entries e WHERE e.user_id='${actor}'),
+    'events',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM fvoci.events e WHERE e.target_id='${task}'),
+    'taskAudit',(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.id),'[]'::jsonb) FROM fvoci.audit_log a WHERE a.target_id='${task}'),
+    'task',(SELECT jsonb_build_object('id',t.id,'statusId',t.status_id,'startDate',t.start_date,'dueDate',t.due_date,'dueAt',t.due_at,'recurrence',t.recurrence,'estimate',t.estimate,'updatedAt',t.updated_at) FROM fvoci.tasks t WHERE t.id='${task}')
+  )`);
+}
+
+async function ordinaryTimerTask(page: import("@playwright/test").Page, key: string) {
+  const workspaceId = await timerWorkspace(page);
+  const actor = identityShape.parse(await (await page.request.get("/api/v1/auth/me")).json());
+  const createdProject = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, {
+    data: { key, name: "기록 검증", visibility: "workspace" },
+  });
+  expect(createdProject.status(), await createdProject.text()).toBe(201);
+  const project = z.object({ id: z.string() }).parse(await createdProject.json());
+  const created = await page.request.post(
+    `/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`,
+    {
+      data: { title: `${key} 기록 검증` },
+    },
+  );
+  expect(created.status(), await created.text()).toBe(201);
+  const task = taskShape.parse(await created.json());
+  const assigned = await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${task.id}`, {
+    data: { assigneeIds: [actor.userId] },
+  });
+  expect(assigned.ok(), await assigned.text()).toBe(true);
+  return {
+    workspaceId,
+    actor,
+    task,
+    detail: `/w/w5timer/${key}-${String(task.number)}`,
+    timerUrl: `/api/v1/workspaces/${workspaceId}/tasks/${task.id}/timer`,
+  };
+}
+
+test("mounted personal manual correction keeps a conflicting draft and fresh-client day week history", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await ordinaryTimerTask(page, "TMAN");
+  const me = z
+    .object({ timezone: z.string() })
+    .parse(await (await page.request.get("/api/v1/auth/me")).json());
+  await page.goto(fixture.detail);
+  const panel = page.getByTestId("task-personal-time-records");
+  await expect(panel.getByRole("button", { name: "시간 기록 추가", exact: true })).toBeEnabled();
+  const sampled = z
+    .object({ serverNow: z.string() })
+    .parse(await (await page.request.get(fixture.timerUrl)).json());
+  const end = new Date(Date.parse(sampled.serverNow) - 60_000).toISOString();
+  const start = new Date(Date.parse(end) - 900_000).toISOString();
+  await panel.getByRole("button", { name: "시간 기록 추가", exact: true }).click();
+  await panel
+    .getByLabel("시작", { exact: true })
+    .fill(isoToDatetimeLocalInTimeZone(start, me.timezone));
+  await panel
+    .getByLabel("종료", { exact: true })
+    .fill(isoToDatetimeLocalInTimeZone(end, me.timezone));
+  await panel.getByLabel("메모", { exact: true }).fill("최초 읽기 기록");
+  await panel.getByLabel("기록·수정 사유", { exact: true }).fill("읽은 시간을 직접 입력");
+  const createdResponse = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === `${fixture.timerUrl}/history` &&
+      response.request().method() === "POST",
+  );
+  await panel.getByRole("button", { name: "시간 기록 추가", exact: true }).click();
+  const created = await createdResponse;
+  expect(created.status(), await created.text()).toBe(200);
+  const first = recordResultShape.parse(await created.json()).record;
+  const row = panel.locator(`[data-record-id="${first.id}"]`);
+  await expect(row).toContainText("최초 읽기 기록");
+  await expect(panel.getByTestId("task-personal-time-summary")).toContainText("00:15:00.000");
+  await row.getByRole("button", { name: "기록 수정", exact: true }).click();
+  await panel.getByLabel("메모", { exact: true }).fill("충돌 뒤 보존할 내 초안");
+  await panel.getByLabel("기록·수정 사유", { exact: true }).fill("독서 메모 수정");
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  try {
+    const fresh = await context.newPage();
+    await login(fresh, credentials.email, credentials.password);
+    const identity = identityShape.parse(await (await fresh.request.get("/api/v1/auth/me")).json());
+    const correctionUrl = `${fixture.timerUrl}/records/${first.id}/correct`;
+    const other = await fresh.request.post(correctionUrl, {
+      data: {
+        expectedActorId: identity.userId,
+        expectedSessionId: identity.sessionId,
+        requestId: crypto.randomUUID(),
+        kind: first.kind,
+        expectedRevision: first.revision,
+        expectedStartedAt: first.startedAt,
+        expectedEndedAt: first.endedAt,
+        expectedNote: first.note,
+        startedAt: first.startedAt,
+        endedAt: first.endedAt,
+        note: "다른 창의 현재 기록",
+        reason: "다른 창 수정",
+      },
+    });
+    expect(other.status(), await other.text()).toBe(200);
+    const beforeConflict = timerDatabaseEffects(identity.userId, fixture.task.id);
+    const conflictResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === correctionUrl &&
+        response.request().method() === "POST",
+    );
+    await panel.getByRole("button", { name: "기록 수정", exact: true }).last().click();
+    const conflict = await conflictResponse;
+    expect(conflict.status(), await conflict.text()).toBe(409);
+    expect(
+      z.object({ params: z.object({ code: z.string() }) }).parse(await conflict.json()).params.code,
+    ).toBe("time_record_version");
+    expect(timerDatabaseEffects(identity.userId, fixture.task.id)).toBe(beforeConflict);
+    await expect(panel.getByLabel("메모", { exact: true })).toHaveValue("충돌 뒤 보존할 내 초안");
+    await expect(row).toContainText("다른 창의 현재 기록");
+    await panel
+      .getByRole("button", { name: "현재 기록을 확인하고 다시 적용", exact: true })
+      .click();
+    const correctedResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === correctionUrl &&
+        response.request().method() === "POST",
+    );
+    await panel.getByRole("button", { name: "기록 수정", exact: true }).last().click();
+    const corrected = await correctedResponse;
+    expect(corrected.status(), await corrected.text()).toBe(200);
+    const final = recordResultShape.parse(await corrected.json()).record;
+    expect(final.revision).toBe(2);
+    expect(final.startedAt).toBe(first.startedAt);
+    expect(final.endedAt).toBe(first.endedAt);
+    await expect(row).toContainText("충돌 뒤 보존할 내 초안");
+    await expect(panel.getByTestId("task-personal-time-summary")).toContainText("00:15:00.000");
+    expect(diagnosticSql(`SELECT note FROM fvoci.time_entries WHERE id='${first.id}'`)).toBe(
+      "최초 읽기 기록",
+    );
+    expect(
+      diagnosticSql(
+        `SELECT count(*) FROM fvoci.task_timer_audit WHERE time_entry_id='${first.id}' AND reason='독서 메모 수정'`,
+      ),
+    ).toBe("1");
+    await fresh.goto(fixture.detail);
+    await expect(
+      fresh.getByTestId("task-personal-time-records").locator(`[data-record-id="${first.id}"]`),
+    ).toContainText("충돌 뒤 보존할 내 초안");
+    await expect(fresh.getByTestId("task-personal-time-summary")).toContainText("00:15:00.000");
+    expect(
+      taskShape.parse(
+        await (
+          await fresh.request.get(
+            `/api/v1/workspaces/${fixture.workspaceId}/tasks/${fixture.task.id}`,
+          )
+        ).json(),
+      ).statusId,
+    ).toBe(fixture.task.statusId);
+    const evidence = process.env.FVOCI_W5_EVIDENCE_DIR;
+    if (!evidence) throw new Error("missing owned evidence namespace");
+    for (const zoom of [100, 200]) {
+      await page.setViewportSize({ width: 320, height: 900 });
+      await page.evaluate((percent) => {
+        document.documentElement.style.fontSize = `${String(percent)}%`;
+      }, zoom);
+      await panel.scrollIntoViewIfNeeded();
+      await expect
+        .poll(() => panel.evaluate((element) => element.scrollWidth <= element.clientWidth))
+        .toBe(true);
+      await page.screenshot({
+          path: path.join(evidence, `manual-personal-320-text-${String(zoom)}.png`),
+        fullPage: true,
+      });
+    }
+    await page.evaluate(() => {
+      document.documentElement.style.fontSize = "";
+    });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await row.getByRole("button", { name: "기록 수정", exact: true }).click();
+    await panel.getByLabel("시작", { exact: true }).focus();
+    await page.keyboard.press("Tab");
+    await expect(panel.getByLabel("종료", { exact: true })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(panel.getByLabel("메모", { exact: true })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(panel.getByLabel("기록·수정 사유", { exact: true })).toBeFocused();
+    await page.screenshot({
+      path: path.join(evidence, "manual-personal-keyboard-focus.png"),
+      fullPage: true,
+    });
+    await testInfo.attach("personal-manual-correction-contract", {
+      body: JSON.stringify({
+        record: first.id,
+        revision: final.revision,
+        rawRangePreserved: true,
+        conflictFullSnapshotUnchanged: true,
+        raw034NoteUnchanged: true,
+        correctionReasonPersisted: true,
+        freshSessionRead: identity.sessionId !== fixture.actor.sessionId,
+      }),
+      contentType: "application/json",
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+test("a committed withheld owner stop cannot keep a successor run's current control pending", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await ordinaryTimerTask(page, "TABA");
+  const run1 = await startPausedTimer(page, fixture.timerUrl, fixture.actor, "첫 번째 측정");
+  await page.goto("/w/w5timer/my-tasks");
+  const owner = page.getByTestId("timer-owner");
+  await expect(owner.getByRole("button", { name: "현재 측정 종료", exact: true })).toBeEnabled();
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  let release = () => {};
+  const delivery = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let committed = () => {};
+  const committedSignal = new Promise<void>((resolve) => {
+    committed = resolve;
+  });
+  let body: unknown;
+  let outcome: unknown;
+  await page.route(
+    (url) => url.pathname === "/api/v1/me/task-timer/stop",
+    async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      body = route.request().postDataJSON();
+      const response = await route.fetch();
+      expect(response.status(), await response.text()).toBe(200);
+      outcome = await response.json();
+      committed();
+      await delivery;
+      if (!page.isClosed()) await route.fulfill({ response });
+    },
+  );
+  try {
+    await owner.getByRole("button", { name: "현재 측정 종료", exact: true }).click();
+    await committedSignal;
+    const fresh = await context.newPage();
+    await login(fresh, credentials.email, credentials.password);
+    const identity = identityShape.parse(await (await fresh.request.get("/api/v1/auth/me")).json());
+    expect(
+      timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run,
+    ).toBeNull();
+    const beforeReplay = timerDatabaseEffects(identity.userId, fixture.task.id);
+    const requestBody = z
+      .object({
+        expectedActorId: z.string(),
+        expectedSessionId: z.string(),
+        requestId: z.string(),
+        runId: z.string(),
+        expectedVersion: z.number(),
+      })
+      .parse(body);
+    expect(requestBody.runId).toBe(run1.runId);
+    const replayed = await fresh.request.post("/api/v1/me/task-timer/stop", { data: requestBody });
+    expect(replayed.status(), await replayed.text()).toBe(200);
+    expect(await replayed.json()).toEqual(outcome);
+    const changed = await fresh.request.post("/api/v1/me/task-timer/stop", {
+      data: { ...requestBody, expectedVersion: requestBody.expectedVersion + 1 },
+    });
+    expect(changed.status(), await changed.text()).toBe(409);
+    expect(timerDatabaseEffects(identity.userId, fixture.task.id)).toBe(beforeReplay);
+    const run2 = await startPausedTimer(fresh, fixture.timerUrl, identity, "後続 측정");
+    const successor = page.waitForResponse(
+      async (response) =>
+        new URL(response.url()).pathname === "/api/v1/me/task-timer" &&
+        response.status() === 200 &&
+        z.object({ runId: z.string().nullable() }).parse(await response.json()).runId ===
+          run2.runId,
+    );
+    await page.bringToFront();
+    await successor;
+    const beforeDelivery = timerDatabaseEffects(identity.userId, fixture.task.id);
+    await testInfo.attach("committed-response-withheld-run-ABA", {
+      body: JSON.stringify({
+        run1: run1.runId,
+        run2: run2.runId,
+        actualNativeCommit200: true,
+        browserResponseStillWithheld: true,
+        genuineFreshSessionReplaySameOutcome: true,
+        changedPayload409: true,
+        replayFullSnapshotUnchanged: true,
+      }),
+      contentType: "application/json",
+    });
+    // Original product negative: an R1 pending completion cannot disable the
+    // actual canonical R2 control. Keep this literal oracle through the fix.
+    await expect(owner.getByRole("button", { name: "현재 측정 종료", exact: true })).toBeEnabled();
+    release();
+    await expect(owner.getByRole("button", { name: "현재 측정 종료", exact: true })).toBeEnabled();
+    expect(timerDatabaseEffects(identity.userId, fixture.task.id)).toBe(beforeDelivery);
+    expect(timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run?.id).toBe(
+      run2.runId,
+    );
+  } finally {
+    release();
+    await context.close();
+  }
+});
+
+test("an ordinary mounted time-entry GET cannot render another actor's private correction under stale identity", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await ordinaryTimerTask(page, "TPRIV");
+  const email = "timer-private-overlay@example.com";
+  createE2eUser(email, credentials.password, "다른 작성자", {
+    workspaceSlug: "w5timer",
+    membershipRole: "member",
+  });
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  let releaseMe = () => {};
+  const meDelivery = new Promise<void>((resolve) => {
+    releaseMe = resolve;
+  });
+  try {
+    const other = await context.newPage();
+    await login(other, email, credentials.password);
+    const identity = identityShape.parse(await (await other.request.get("/api/v1/auth/me")).json());
+    const created = await other.request.post(`${fixture.timerUrl}/history`, {
+      data: {
+        expectedActorId: identity.userId,
+        expectedSessionId: identity.sessionId,
+        requestId: crypto.randomUUID(),
+        startedAt: "2026-09-30T00:00:00Z",
+        endedAt: "2026-09-30T00:15:00Z",
+        note: "공유된 원래 기록",
+        reason: "수동 기록",
+      },
+    });
+    expect(created.status(), await created.text()).toBe(200);
+    const row = recordResultShape.parse(await created.json()).record;
+    const corrected = await other.request.post(`${fixture.timerUrl}/records/${row.id}/correct`, {
+      data: {
+        expectedActorId: identity.userId,
+        expectedSessionId: identity.sessionId,
+        requestId: crypto.randomUUID(),
+        kind: row.kind,
+        expectedRevision: row.revision,
+        expectedStartedAt: row.startedAt,
+        expectedEndedAt: row.endedAt,
+        expectedNote: row.note,
+        startedAt: row.startedAt,
+        endedAt: row.endedAt,
+        note: "다른 작성자만 볼 사적인 수정",
+        reason: "개인 수정",
+      },
+    });
+    expect(corrected.status(), await corrected.text()).toBe(200);
+    await page.goto("/w/w5timer/my-tasks");
+    await expect(page.getByTestId(`my-task-${fixture.task.id}`)).toBeVisible();
+    const before = timerDatabaseEffects(identity.userId, fixture.task.id);
+    await page.route(
+      (url) => url.pathname === "/api/v1/auth/me",
+      async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const response = await route.fetch();
+        await meDelivery;
+        if (!page.isClosed()) await route.fulfill({ response });
+      },
+    );
+    // Hold only captured timer transports with a genuine network-unavailable
+    // status. The ordinary GET below is actual Rust/DB, never a fake private DTO.
+    await page.route(
+      (url) =>
+        url.pathname === "/api/v1/me/task-timer" || url.pathname.startsWith(fixture.timerUrl),
+      async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const capture = new URL(route.request().url()).searchParams;
+        expect(capture.get("expectedActorId")).toBe(fixture.actor.userId);
+        expect(capture.get("expectedSessionId")).toBe(fixture.actor.sessionId);
+        await route.fulfill({
+          status: 503,
+          contentType: "application/problem+json",
+          body: JSON.stringify({ type: "about:blank", status: 503, title: "측정 연결 실패" }),
+        });
+      },
+    );
+    await page.context().addCookies(await context.cookies());
+    const entriesPath = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${fixture.task.id}/time-entries`;
+    const ordinary = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === entriesPath && response.request().method() === "GET",
+    );
+    await page.getByTestId(`my-task-${fixture.task.id}`).click();
+    const response = await ordinary;
+    const parsed = z
+      .object({ items: z.array(z.object({ id: z.string(), note: z.string().nullable() })) })
+      .safeParse(await response.json());
+    if (
+      response.status() === 200 &&
+      parsed.success &&
+      parsed.data.items.some((item) => item.id === row.id)
+    )
+      await expect(page.locator(`[data-time-entry-id="${row.id}"]`)).toBeVisible();
+    await testInfo.attach("ordinary-real-private-overlay-stale-capture", {
+      body: JSON.stringify({
+        status: response.status(),
+        staleActor: fixture.actor.userId,
+        authenticatedActor: identity.userId,
+        expectedActorParameter: new URL(response.url()).searchParams.get("expectedActorId"),
+        expectedSessionParameter: new URL(response.url()).searchParams.get("expectedSessionId"),
+        returnedOtherPrivateCorrection:
+          parsed.success &&
+          parsed.data.items.some((item) => item.note === "다른 작성자만 볼 사적인 수정"),
+        privateResponseMocked: false,
+        identityDeliveryWithheld: true,
+      }),
+      contentType: "application/json",
+    });
+    expect(timerDatabaseEffects(identity.userId, fixture.task.id)).toBe(before);
+    // Original privacy oracle, unchanged after any granted captured GET fix.
+    await expect(page.getByTestId("task-time-entries")).not.toContainText(
+      "다른 작성자만 볼 사적인 수정",
+    );
+  } finally {
+    releaseMe();
+    await context.close();
   }
 });
