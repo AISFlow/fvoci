@@ -965,12 +965,34 @@ test("actual Markdown file export waits for the current ACK and downloads latest
     expect(file?.attrs).toMatchObject({
       id: expect.any(String),
       name: "최신 첨부.txt",
-      mime: "text/plain",
-      size: fileBytes.length,
+      image: false,
     });
     const id = file?.attrs?.id;
     if (typeof id !== "string") throw new Error("Missing actual uploaded file identity");
     expect(text).toContain(`[최신 첨부.txt](attachment:${id})`);
+    // Metadata belongs to the authorized attachment API, not document node attrs.
+    // The stored sniff policy falls back to octet-stream for these plain UTF8 bytes.
+    const expectActualAttachment = async (request: Page["request"]) => {
+      const metadata = await request.get(`/api/v1/workspaces/${ws}/attachments/${id}`);
+      expect(metadata.status()).toBe(200);
+      expect(await metadata.json()).toMatchObject({
+        id,
+        name: "최신 첨부.txt",
+        image: false,
+        mime: "application/octet-stream",
+        sizeBytes: fileBytes.length,
+      });
+      const download = await request.get(`/api/v1/workspaces/${ws}/attachments/${id}/download`);
+      expect(download.status()).toBe(200);
+      const downloadedFile = await download.body();
+      expect(downloadedFile).toEqual(fileBytes);
+      return {
+        id,
+        bytes: downloadedFile.length,
+        sha256: createHash("sha256").update(downloadedFile).digest("hex"),
+      };
+    };
+    const actualAttachment = await expectActualAttachment(page.request);
     expect(restrictedDbBody(ws, doc.id)).toMatchObject({ content: body });
     await expect(field).toHaveValue("공개하면 안 되는 비공개 Markdown 초안");
     await expectIdentity(page, 0);
@@ -984,6 +1006,8 @@ test("actual Markdown file export waits for the current ACK and downloads latest
         "href",
         `/api/v1/workspaces/${ws}/attachments/${id}/download`,
       );
+      const freshAttachment = await expectActualAttachment(fresh.page.request);
+      expect(freshAttachment).toEqual(actualAttachment);
     } finally {
       await fresh.context.close();
     }
@@ -1002,6 +1026,7 @@ test("actual Markdown file export waits for the current ACK and downloads latest
           sha256: createHash("sha256").update(realResponse.bytes).digest("hex"),
         },
         exportRequests,
+        actualAttachment,
       }),
       contentType: "application/json",
     });
