@@ -5845,6 +5845,8 @@ export interface components {
             actualMilliseconds: number;
             /** @description A different unfinished run, without its tenant, task id or title. */
             busyElsewhere: boolean;
+            /** @description Current existing time-entry Edit/archive capability, in this snapshot. */
+            canControl: boolean;
             legacyOpen: boolean;
             run: components["schemas"]["TimerRunOutput"] | null;
             /** Format: date-time */

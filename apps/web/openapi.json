@@ -31430,6 +31430,7 @@
           "run",
           "busyElsewhere",
           "legacyOpen",
+          "canControl",
           "actualMilliseconds"
         ],
         "properties": {
@@ -31440,6 +31441,10 @@
           "busyElsewhere": {
             "type": "boolean",
             "description": "A different unfinished run, without its tenant, task id or title."
+          },
+          "canControl": {
+            "type": "boolean",
+            "description": "Current existing time-entry Edit/archive capability, in this snapshot."
           },
           "legacyOpen": {
             "type": "boolean"
