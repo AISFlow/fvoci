@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
+import * as Vue from "vue";
 import { Editor } from "@tiptap/core";
+import type { Node as PmNode } from "@tiptap/pm/model";
 import { splitBlock } from "@tiptap/pm/commands";
 import {
   EditorState,
@@ -15,11 +20,111 @@ import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "../src/collab-tiptap.ts";
 import { rawEditorPreflight, SourceModeSession } from "../src/source-mode.ts";
 import { createFvociExtensions } from "../src/tiptap-schema.ts";
+import { mdToTiptapJson } from "../src/markdown/parse.ts";
 import {
+  applyEditorModePreviewStyles,
   attachmentPreviewSpec,
   embedPreviewSpec,
   sanitizeEditorModePreview,
 } from "../src/vue/editor-mode-preview.ts";
+
+await test("installed SDK XML serialization does not normalize raw future node identity, and parser emoji semantics have independent mutant controls", () => {
+  const doc = new Y.Doc({ gc: false });
+  try {
+    const future = new Y.XmlElement("futureNode");
+    future.setAttribute("id", "future-preserved");
+    const text = new Y.XmlText();
+    text.insert(0, "한글 🧑‍💻");
+    future.insert(0, [text]);
+    doc.getXmlFragment("prosemirror").insert(0, [future]);
+    assert.equal(future.nodeName, "futureNode");
+    assert.equal(
+      doc.getXmlFragment("prosemirror").toJSON(),
+      '<futurenode id="future-preserved">한글 🧑‍💻</futurenode>',
+    );
+    const expected = {
+      type: "doc",
+      content: [
+        {
+          type: "futureNode",
+          attrs: { id: "future-preserved" },
+          content: [{ type: "text", text: "한글 🧑‍💻" }],
+        },
+      ],
+    };
+    assert.deepEqual(yDocToTiptapJson(doc), expected);
+    for (const field of ["type", "id"]) {
+      const mutant = structuredClone(expected);
+      const node = mutant.content[0];
+      assert.ok(node);
+      if (field === "type") node.type = "futurenode";
+      else node.attrs.id = "different-ref";
+      assert.throws(() => {
+        assert.deepEqual(mutant, expected);
+      });
+    }
+    assert.deepEqual(mdToTiptapJson("가장 최신 수정 🧑‍💻"), {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "가장 최신 수정 🧑‍💻" }] }],
+    });
+    const semantic = [
+      { type: "text", text: "가장 최신 수정 " },
+      { type: "emoji", attrs: { name: "technologist" } },
+    ];
+    const liveDoc = tiptapJsonToYDoc({
+      type: "doc",
+      content: [
+        { type: "paragraph", attrs: { id: "oracle-p" }, content: [{ type: "text", text: "원본" }] },
+      ],
+    });
+    const live = liveEditor(liveDoc);
+    const source = new SourceModeSession(
+      liveDoc,
+      () => 1,
+      () => true,
+    );
+    try {
+      const capture = source.capture(live.editor.state.doc);
+      assert.equal(
+        source.apply(source.prepare(capture, "가장 최신 수정 🧑‍💻", live.editor.state), live.editor),
+        true,
+      );
+      // The parser preserves Unicode text; the installed ordinary Emoji
+      // appendTransaction represents unmarked Unicode as its existing atom.
+      assert.deepEqual(yDocToTiptapJson(liveDoc), {
+        type: "doc",
+        content: [{ type: "paragraph", attrs: { id: "oracle-p" }, content: semantic }],
+      });
+    } finally {
+      source.destroy();
+      live.close();
+      liveDoc.destroy();
+    }
+    assert.throws(() => {
+      assert.deepEqual([{ type: "text", text: "가장 최신 수정 " }], semantic);
+    });
+    assert.throws(() => {
+      assert.deepEqual(
+        [
+          { type: "text", text: "가장 최신 수정 " },
+          { type: "emoji", attrs: { name: "different-emoji" } },
+        ],
+        semantic,
+      );
+    });
+    assert.throws(() => {
+      assert.deepEqual(
+        [
+          { type: "text", text: "different text " },
+          { type: "emoji", attrs: { name: "technologist" } },
+        ],
+        semantic,
+      );
+    });
+  } finally {
+    doc.destroy();
+  }
+});
 
 function liveEditor(ydoc: Y.Doc) {
   const editor = new Editor({
@@ -44,6 +149,9 @@ function liveEditor(ydoc: Y.Doc) {
   const host = {
     state,
     composing: false,
+    get editable() {
+      return editor.options.editable;
+    },
     hasFocus: () => false,
     dispatch(tr: Transaction) {
       const before = state;
@@ -73,6 +181,200 @@ function liveEditor(ydoc: Y.Doc) {
     },
   };
 }
+
+await test("actual block-math watcher and commands make zero readonly or retired writes, retain a readable draft and refuse to overwrite a peer's newer latex", async () => {
+  const doc = tiptapJsonToYDoc({
+    type: "doc",
+    content: [
+      { type: "math", attrs: { id: "math-owner", latex: "x + y" } },
+      { type: "paragraph", attrs: { id: "math-tail" } },
+    ],
+  });
+  const peerDoc = new Y.Doc({ gc: false });
+  Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(doc));
+  const local = liveEditor(doc);
+  const peer = liveEditor(peerDoc);
+  const wire = Symbol("wire");
+  doc.on("update", (value, origin) => {
+    if (origin !== wire) Y.applyUpdate(peerDoc, value, wire);
+  });
+  peerDoc.on("update", (value, origin) => {
+    if (origin !== wire) Y.applyUpdate(doc, value, wire);
+  });
+  local.host.dispatch(
+    local.editor.state.tr.setSelection(NodeSelection.create(local.editor.state.doc, 0)),
+  );
+  const props: {
+    editor: Editor;
+    node: PmNode;
+    getPos: () => number | undefined;
+    updateAttributes: (attrs: Record<string, unknown>) => void;
+  } = Vue.reactive({
+    // Installed VueRenderer deep-reactivates NodeView props; its Vue Editor
+    // is markRaw. Exercise that actual proxy boundary, not shallow props.
+    editor: Vue.markRaw(local.editor),
+    node: local.editor.state.doc.child(0),
+    getPos: () => 0,
+    updateAttributes: (attrs: Record<string, unknown>) => {
+      assert.equal(local.editor.commands.updateAttributes("math", attrs), true);
+      props.node = local.editor.state.doc.child(0);
+    },
+  });
+  assert.equal(Vue.isProxy(props.node), true);
+  assert.notEqual(props.node.type, local.editor.state.doc.child(0).type);
+  assert.equal(Vue.toRaw(props.node.type), local.editor.state.doc.child(0).type);
+  const unmount: (() => void)[] = [];
+  const field = { value: "", focus() {} };
+  const input = Vue.shallowRef(field);
+  const editableSource = readFileSync(
+    new URL("../src/vue/use-editable.ts", import.meta.url),
+    "utf8",
+  );
+  const mathSource = readFileSync(new URL("../src/vue/MathNodeView.vue", import.meta.url), "utf8");
+  const mathScript = mathSource.split('<script setup lang="ts">')[1]?.split("</script>")[0];
+  assert.ok(mathScript);
+  // Execute the actual consumer and editable owner, without a copied watcher.
+  // Only DOM refs/render/lifecycle are controlled; PM commands and Yjs are real.
+  const code =
+    editableSource
+      .slice(editableSource.indexOf("export function useEditable"))
+      .replace("export function", "function") +
+    "\n" +
+    mathScript.slice(mathScript.indexOf("const editable ="));
+  type Controls = {
+    open(): Promise<void>;
+    onInput(event: Event): void;
+    onBlur(event: FocusEvent): void;
+    cancel(): void;
+    privateDraft(): string | null;
+  };
+  const effects = Vue.effectScope();
+  const controls = effects.run(
+    () =>
+      runInNewContext(
+        ts.transpileModule(
+          `(()=>{${code};return {open,onInput,onBlur,cancel,privateDraft:()=>draft.value};})()`,
+          {
+            compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext },
+          },
+        ).outputText,
+        {
+          ...Vue,
+          props,
+          t: (key: string) => key,
+          useTemplateRef: () => input,
+          useMathMl: () => ({ html: null, failed: false }),
+          onBeforeUnmount: (callback: () => void) => unmount.push(callback),
+        },
+      ) as unknown as Controls,
+  );
+  assert.ok(controls);
+  const event = (type: string, target = field) => {
+    const value = new Event(type);
+    Object.defineProperty(value, "target", { value: target });
+    return value;
+  };
+  let updates = 0;
+  doc.on("update", () => {
+    updates++;
+  });
+  try {
+    await controls.open();
+    assert.equal(field.value, "x + y");
+    field.value = "private pending";
+    controls.onInput(event("input"));
+    const before = Y.encodeStateAsUpdate(doc);
+    local.editor.setEditable(false);
+    await Vue.nextTick();
+    assert.equal(local.editor.isEditable, false);
+    assert.equal(local.editor.state.doc.child(0).attrs.latex, "x + y");
+    assert.equal(updates, 0);
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(updates, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+    local.editor.setEditable(true);
+    await Vue.nextTick();
+    // Reauthorization alone cannot restore the old removed field's authority.
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(updates, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+    assert.equal(controls.privateDraft(), "private pending");
+    controls.cancel();
+    const newField = { value: "", focus() {} };
+    input.value = newField;
+    await controls.open();
+    newField.value = "current private";
+    controls.onInput(event("input", newField));
+    field.value = "cancelled old field value";
+    controls.onInput(event("input"));
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(controls.privateDraft(), "current private");
+    assert.equal(updates, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+    controls.cancel();
+    let focused = 0;
+    const raceField = {
+      value: "",
+      focus() {
+        focused++;
+      },
+    };
+    input.value = raceField;
+    const retiredOpen = controls.open();
+    controls.cancel();
+    const currentOpen = controls.open();
+    await Promise.all([retiredOpen, currentOpen]);
+    assert.equal(focused, 1);
+    assert.equal(raceField.value, "x + y");
+    assert.equal(updates, 0);
+    controls.cancel();
+    input.value = field;
+    await controls.open();
+    field.value = "private pending";
+    controls.onInput(event("input"));
+    local.editor.setEditable(false);
+    await Vue.nextTick();
+    local.editor.setEditable(true);
+    await Vue.nextTick();
+    await controls.open();
+    assert.equal(field.value, "private pending");
+    field.value = "authorized z";
+    controls.onInput(event("input"));
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(local.editor.state.doc.child(0).attrs.latex, "authorized z");
+    assert.equal(local.editor.state.doc.child(0).attrs.id, "math-owner");
+    assert.equal(peer.editor.state.doc.child(0).attrs.latex, "authorized z");
+    assert.equal(updates, 1);
+    await controls.open();
+    field.value = "stale private";
+    controls.onInput(event("input"));
+    peer.host.dispatch(
+      peer.editor.state.tr.setNodeMarkup(0, undefined, {
+        ...peer.editor.state.doc.child(0).attrs,
+        latex: "peer newest",
+      }),
+    );
+    props.node = local.editor.state.doc.child(0);
+    const afterPeer = Y.encodeStateAsUpdate(doc);
+    const count = updates;
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(local.editor.state.doc.child(0).attrs.latex, "peer newest");
+    assert.equal(peer.editor.state.doc.child(0).attrs.latex, "peer newest");
+    assert.equal(updates, count);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), afterPeer);
+    for (const callback of unmount) callback();
+    field.value = "late retired callback";
+    controls.onBlur(event("blur") as FocusEvent);
+    assert.equal(updates, count);
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), afterPeer);
+  } finally {
+    effects.stop();
+    local.close();
+    peer.close();
+    doc.destroy();
+    peerDoc.destroy();
+  }
+});
 
 const input = {
   type: "doc" as const,
@@ -209,7 +511,7 @@ await test("backward and node bookmarks map through localized edits without chan
 await test("preview SafeHtml producer retains supported presentation while removing active hostile HTML", () => {
   const preview = sanitizeEditorModePreview(
     '<p><u>&lt;script&gt;evil()&lt;/script&gt; 한글</u><a href="javascript:evil()" onclick="evil()">링크</a></p><details><summary>요약</summary><p>내용</p></details><script>active()</script>',
-  );
+  ).html;
   assert.ok(preview.includes("&lt;script&gt;evil()&lt;/script&gt; 한글"));
   assert.ok(preview.includes("<u>"));
   assert.ok(preview.includes("<details"));
@@ -379,8 +681,8 @@ for (const kind of ["node", "mark"] as const) {
 }
 
 await test("actual ySync paragraph split retains hidden presentation and undo keeps a later peer edit of the surviving first block", () => {
-  const localDoc = tiptapJsonToYDoc({
-    type: "doc",
+  const fixture = {
+    type: "doc" as const,
     content: [
       {
         type: "paragraph",
@@ -393,8 +695,38 @@ await test("actual ySync paragraph split retains hidden presentation and undo ke
           },
         ],
       },
+      {
+        type: "paragraph",
+        attrs: { id: "link-neighbor", textAlign: "center" },
+        content: [
+          {
+            type: "text",
+            text: "원본 블록 참조",
+            marks: [{ type: "link", attrs: { href: "#split", title: "대상", target: "_self" } }],
+          },
+        ],
+      },
+      {
+        type: "attachment",
+        attrs: {
+          id: "10000000-0000-4000-8000-000000000009",
+          name: "자료.pdf",
+          caption: "설명",
+          image: false,
+          width: 70,
+          align: "left",
+          previewWidth: 640,
+          previewHeight: 480,
+        },
+      },
+      {
+        type: "embed",
+        attrs: { id: "embed-neighbor", entity: "document", ref: "document-target" },
+      },
+      { type: "paragraph", attrs: { id: "closing" }, content: [{ type: "text", text: "끝" }] },
     ],
-  });
+  };
+  const localDoc = tiptapJsonToYDoc(fixture);
   const peerDoc = new Y.Doc({ gc: false });
   Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(localDoc));
   const local = liveEditor(localDoc);
@@ -411,22 +743,117 @@ await test("actual ySync paragraph split retains hidden presentation and undo ke
     () => 1,
     () => true,
   );
+  const tails = [local, peer].map((client) =>
+    client.editor.state.doc.content.cut(client.editor.state.doc.child(0).nodeSize),
+  );
+  let splitId: unknown;
+  const stage = (texts: string[]) => {
+    for (const [index, client] of [local, peer].entries()) {
+      const doc = client.editor.state.doc;
+      assert.equal(doc.childCount, texts.length + 4);
+      assert.equal(doc.child(0).attrs.id, "split");
+      if (texts.length === 2) assert.equal(doc.child(1).attrs.id, splitId);
+      let tailStart = 0;
+      for (const [i, text] of texts.entries()) {
+        const block = doc.child(i);
+        assert.equal(block.textContent, text);
+        assert.equal(block.attrs.textAlign, "right");
+        block.descendants((node) => {
+          if (!node.isText) return;
+          assert.equal(node.marks.length, 2);
+          assert.ok(node.marks.some((mark) => mark.type.name === "underline"));
+          assert.equal(
+            node.marks.find((mark) => mark.type.name === "textStyle")?.attrs.color,
+            "#112233",
+          );
+        });
+        tailStart += block.nodeSize;
+      }
+      const tail = tails[index];
+      assert.ok(tail);
+      assert.ok(doc.content.cut(tailStart).eq(tail));
+      assert.equal(doc.child(texts.length).child(0).marks[0]?.attrs.href, "#split");
+      assert.equal(doc.child(texts.length + 1).attrs.id, "10000000-0000-4000-8000-000000000009");
+      assert.equal(doc.child(texts.length + 2).attrs.ref, "document-target");
+    }
+    assert.ok(Y.equalSnapshots(Y.snapshot(localDoc), Y.snapshot(peerDoc)));
+    assert.deepEqual(Y.encodeStateAsUpdate(localDoc), Y.encodeStateAsUpdate(peerDoc));
+  };
   try {
     const capture = source.capture(local.editor.state.doc);
-    const proposal = source.prepare(capture, "alpha\n\nbeta", local.editor.state);
+    const proposal = source.prepare(
+      capture,
+      capture.source.replace("alpha beta", "alpha\n\nbeta"),
+      local.editor.state,
+    );
     assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
     assert.equal(source.apply(proposal, local.editor), true);
+    splitId = local.editor.state.doc.child(1).attrs.id;
+    assert.equal(typeof splitId, "string");
+    assert.ok(splitId && splitId !== "split");
     assert.equal(local.manager.undoStack.length, 1);
-    for (let i = 0; i < 2; i++) {
-      assert.equal(peer.editor.state.doc.child(i).attrs.textAlign, "right");
-      assert.equal(peer.editor.state.doc.child(i).child(0).marks.length, 2);
-    }
+    assert.equal(peer.manager.undoStack.length, 0);
+    stage(["alpha", "beta"]);
     peer.host.dispatch(peer.editor.state.tr.insertText(" peer", 6));
-    assert.equal(local.editor.state.doc.child(0).textContent, "alpha peer");
+    stage(["alpha peer", "beta"]);
+    const paragraph = peerDoc.getXmlFragment("prosemirror").get(0);
+    assert.ok(paragraph instanceof Y.XmlElement);
+    const text = paragraph.get(0);
+    assert.ok(text instanceof Y.XmlText);
+    const start = Y.createRelativePositionFromTypeIndex(text, 5, 0);
+    const end = Y.createRelativePositionFromTypeIndex(text, 10, -1);
+    assert.ok(start.item);
+    assert.equal(start.item.client, peerDoc.clientID);
+    const anchored = (from: number, to: number) => {
+      for (const doc of [localDoc, peerDoc]) {
+        const left = Y.createAbsolutePositionFromRelativePosition(start, doc);
+        const right = Y.createAbsolutePositionFromRelativePosition(end, doc);
+        assert.ok(left && right);
+        assert.equal(left.index, from);
+        assert.equal(right.index, to);
+        assert.equal(left.type, right.type);
+        assert.ok(left.type instanceof Y.XmlText);
+        assert.ok(left.type.parent instanceof Y.XmlElement);
+        assert.equal(left.type.parent.getAttribute("id"), "split");
+        const delta: unknown = left.type.toDelta();
+        assert.ok(Array.isArray(delta));
+        const plain = delta
+          .map((part: unknown) => {
+            assert.ok(typeof part === "object" && part !== null && "insert" in part);
+            assert.ok(typeof part.insert === "string");
+            return part.insert;
+          })
+          .join("");
+        const value = plain.slice(left.index, right.index);
+        assert.equal(value, " peer");
+        assert.equal(Buffer.from(value).toString("hex"), "2070656572");
+        assert.ok(start.item);
+        const item = Y.getItem(doc.store, start.item);
+        assert.ok(item instanceof Y.Item);
+        assert.equal(item.deleted, false);
+        assert.equal(item.id.client, peerDoc.clientID);
+      }
+    };
+    anchored(5, 10);
+    assert.equal(peer.manager.undoStack.length, 1);
     local.manager.undo();
-    assert.equal(local.editor.state.doc.textContent, "alpha peer beta");
-    assert.equal(peer.editor.state.doc.textContent, "alpha peer beta");
-    assert.equal(local.editor.state.doc.child(0).attrs.id, "split");
+    // Independently assessed selective-history order: the old local suffix
+    // resurrects before the same live peer item, whose relative identity stays.
+    stage(["alpha beta peer"]);
+    anchored(10, 15);
+    assert.equal(local.manager.undoStack.length, 0);
+    assert.equal(local.manager.redoStack.length, 1);
+    assert.equal(peer.manager.undoStack.length, 1);
+    local.manager.redo();
+    stage(["alpha peer", "beta"]);
+    anchored(5, 10);
+    assert.equal(local.manager.undoStack.length, 1);
+    assert.equal(local.manager.redoStack.length, 0);
+    assert.equal(peer.manager.undoStack.length, 1);
+    local.manager.undo();
+    stage(["alpha beta peer"]);
+    anchored(10, 15);
+    assert.equal(peer.manager.undoStack.length, 1);
   } finally {
     source.destroy();
     local.close();
@@ -485,24 +912,106 @@ await test("preview atom producer preserves actual file/name/caption and resolve
   }
 });
 
-await test("preview sanitizer keeps supported heading levels, callout kind, table widths and rich colors/alignment while rejecting active CSS", () => {
-  const html = sanitizeEditorModePreview(
+function previewCssWrites(preview: ReturnType<typeof sanitizeEditorModePreview>) {
+  const writes: { tag: string; property: string; value: string }[] = [];
+  const targets = new Map<
+    string,
+    {
+      tagName: string;
+      style: { setProperty(property: string, value: string): void };
+      removeAttribute(name: string): void;
+    }
+  >();
+  for (const match of preview.html.matchAll(
+    /<([a-z][a-z0-9]*)\b[^>]*data-fvoci-preview-css="(\d+)"[^>]*>/g,
+  )) {
+    const tag = match[1],
+      marker = match[2];
+    assert.ok(tag && marker);
+    targets.set(marker, {
+      tagName: tag.toUpperCase(),
+      style: {
+        setProperty(property, value) {
+          writes.push({ tag, property, value });
+        },
+      },
+      removeAttribute() {},
+    });
+  }
+  // Controlled native DOM boundary, not a DOM parser/CSP or browser substitute.
+  const root = {
+    querySelector(selector: string) {
+      const marker = /="(\d+)"/.exec(selector)?.[1];
+      return marker === undefined ? null : (targets.get(marker) ?? null);
+    },
+  } as unknown as HTMLElement;
+  applyEditorModePreviewStyles(root, preview);
+  return writes;
+}
+
+await test("preview keeps supported heading/callout/table geometry and moves validated presentation to CSSOM before the HTML sink", () => {
+  const preview = sanitizeEditorModePreview(
     '<h4>Level four</h4><h5>Level five</h5><h6>Level six</h6><aside class="afn-callout" data-callout="" data-kind="warning"><p>주의</p></aside><p style="text-align:right"><span style="color:#112233;background-color:#abcdef">색상</span></p><table style="width:300px"><colgroup><col style="width:120px"><col style="width:180px"></colgroup><tbody><tr><td colspan="2" rowspan="2" style="background:#abcdef"><p>셀</p></td></tr></tbody></table><span style="color:expression(evil());background:url(javascript:evil());text-align:evil()" onclick="evil()">bad</span>',
   );
+  const html = preview.html;
   assert.ok(html.includes("<h4>Level four</h4>"));
   assert.ok(html.includes("<h5>Level five</h5>"));
   assert.ok(html.includes("<h6>Level six</h6>"));
   assert.ok(html.includes("<aside") && html.includes('data-kind="warning"'));
-  assert.ok(html.includes("text-align:right"));
-  assert.ok(html.includes("color:#112233") && html.includes("background-color:#abcdef"));
-  assert.ok(
-    html.includes("<colgroup>") && html.includes("width:120px") && html.includes("width:180px"),
-  );
+  assert.ok(html.includes("<colgroup>"));
   assert.ok(html.includes('colspan="2"') && html.includes('rowspan="2"'));
-  assert.ok(html.includes("background:#abcdef"));
+  assert.equal(/\sstyle=/.test(html), false);
   assert.equal(html.includes("expression"), false);
   assert.equal(html.includes("javascript:"), false);
   assert.equal(html.includes("onclick"), false);
+  assert.deepEqual(previewCssWrites(preview), [
+    { tag: "p", property: "text-align", value: "right" },
+    { tag: "span", property: "color", value: "#112233" },
+    { tag: "span", property: "background-color", value: "#abcdef" },
+    { tag: "table", property: "width", value: "300px" },
+    { tag: "col", property: "width", value: "120px" },
+    { tag: "col", property: "width", value: "180px" },
+    { tag: "td", property: "background", value: "#abcdef" },
+  ]);
+});
+
+await test("preview canonical style sidecar cannot consume quoted text, entity attribute injection or stored private markers", () => {
+  const preview = sanitizeEditorModePreview(
+    '<p title="&quot; > style=&quot;color:red&quot;">한글 literal style="color:url(javascript:literal)" &lt;span style="color:red"&gt;</p><span data-fvoci-preview-css="0" style="color:&#35;112233;background-color:rgba(0, 1, 2, 0.5)" title="x&quot; style=&quot;position:absolute">색상</span><h4 data-fvoci-preview-css="0" style="text-align:right;position:absolute;left:-999px">제목</h4><span style="color:var(--attacker);background-color:url(https://attacker.invalid/a);position:fixed" onerror="bad()">거부</span>',
+  );
+  assert.ok(preview.html.includes('literal style="color:url(javascript:literal)"'));
+  assert.ok(preview.html.includes('&lt;span style="color:red"&gt;'));
+  assert.equal(preview.html.includes("title="), false);
+  assert.equal(preview.html.includes("onerror="), false);
+  assert.equal(preview.html.includes("attacker.invalid"), false);
+  assert.deepEqual(previewCssWrites(preview), [
+    { tag: "span", property: "color", value: "#112233" },
+    { tag: "span", property: "background-color", value: "rgba(0, 1, 2, 0.5)" },
+    { tag: "h4", property: "text-align", value: "right" },
+  ]);
+});
+
+await test("preview CSSOM requires the producer's exact sidecar owner and a matching target tag", () => {
+  const preview = sanitizeEditorModePreview('<p style="text-align:right">한글</p>');
+  let writes = 0;
+  const root = {
+    querySelector() {
+      return {
+        tagName: "DIV",
+        style: {
+          setProperty() {
+            writes++;
+          },
+        },
+      };
+    },
+  } as unknown as HTMLElement;
+  applyEditorModePreviewStyles(root, preview);
+  assert.equal(writes, 0);
+  assert.throws(() => {
+    applyEditorModePreviewStyles(root, { html: preview.html });
+  }, /Unowned preview presentation/);
+  assert.equal(writes, 0);
 });
 
 await test("source versus ordinary rich splitBlock peer-boundary undo control records exact CRDT ordering and anchors", () => {

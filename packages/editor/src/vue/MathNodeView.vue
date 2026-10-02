@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import { NodeViewWrapper, nodeViewProps } from "@tiptap/vue-3";
-import { computed, nextTick, ref, useTemplateRef, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  ref,
+  shallowRef,
+  toRaw,
+  useTemplateRef,
+  watch,
+} from "vue";
 import SafeHtml from "./SafeHtml.vue";
 import { useEditable } from "./use-editable.js";
 import { useMathMl } from "./use-math-ml.js";
@@ -19,11 +28,72 @@ const empty = computed(() => latex.value.trim() === "");
 
 const editing = ref(false);
 /** The typed source not committed yet; null when it equals the node's. */
-let draft: string | null = null;
+const draft = ref<string | null>(null);
 const input = useTemplateRef<HTMLTextAreaElement>("input");
+const cancelButton = useTemplateRef<HTMLButtonElement>("cancelButton");
+const composing = ref(false);
+let retired = false;
+let fieldLifetime = 0;
+let activeField: HTMLTextAreaElement | null = null;
+const owner = shallowRef<{
+  editor: typeof props.editor;
+  node: typeof props.node;
+  id: unknown;
+  latex: string;
+} | null>(null);
+const stale = computed(() => !!owner.value && latex.value !== owner.value.latex);
 
-function commit(next: string): void {
-  props.updateAttributes({ latex: next });
+function writable(): boolean {
+  return !retired && !props.editor.isDestroyed && props.editor.isEditable;
+}
+
+function ownsField(event: Event): boolean {
+  return (
+    editing.value &&
+    writable() &&
+    editable.value &&
+    activeField !== null &&
+    event.target === activeField &&
+    input.value === activeField
+  );
+}
+
+function closeField(): void {
+  fieldLifetime++;
+  activeField = null;
+  editing.value = false;
+  composing.value = false;
+}
+function currentOpen(lifetime: number): boolean {
+  return editing.value && lifetime === fieldLifetime;
+}
+
+function commit(next: string): boolean {
+  const captured = owner.value;
+  if (
+    retired ||
+    composing.value ||
+    !captured ||
+    captured.editor !== toRaw(props.editor) ||
+    props.editor.isDestroyed ||
+    !props.editor.isEditable ||
+    !editable.value
+  )
+    return false;
+  const position = props.getPos();
+  if (typeof position !== "number") return false;
+  const current = props.editor.state.doc.nodeAt(position);
+  if (
+    !current ||
+    current.type !== captured.node.type ||
+    (typeof captured.id === "string" && captured.id
+      ? current.attrs.id !== captured.id
+      : current !== captured.node) ||
+    current.attrs.latex !== captured.latex
+  )
+    return false;
+  if (next !== captured.latex) props.updateAttributes({ latex: next });
+  return true;
 }
 
 /** Opens the source field. The field is uncontrolled, like the React view's
@@ -31,34 +101,74 @@ function commit(next: string): void {
  * Vue re-applies a bound value on every re-render of its template, so a
  * peer's change to this node while typing would reset what was typed. */
 async function open(): Promise<void> {
-  const source = latex.value;
+  if (!writable()) return;
+  if (draft.value === null)
+    owner.value = {
+      editor: toRaw(props.editor),
+      // VueRenderer wraps the PM node deeply; compare its original immutable
+      // identity with the raw current PM state, including idless legacy nodes.
+      node: toRaw(props.node),
+      id: props.node.attrs.id as unknown,
+      latex: latex.value,
+    };
+  const source = draft.value ?? latex.value;
+  const lifetime = ++fieldLifetime;
+  activeField = null;
   editing.value = true;
   await nextTick();
   const field = input.value;
-  if (!field) return;
+  if (!field || !writable() || !currentOpen(lifetime)) return;
+  activeField = field;
   field.value = source;
   field.focus();
 }
 
 function onInput(event: Event): void {
+  if (!ownsField(event)) return;
   const value = (event.target as HTMLTextAreaElement).value;
-  draft = value === latex.value ? null : value;
+  draft.value = value === latex.value ? null : value;
 }
 
 function onBlur(event: FocusEvent): void {
-  draft = null;
-  commit((event.target as HTMLTextAreaElement).value);
-  editing.value = false;
+  if (!ownsField(event)) return;
+  const value = (event.target as HTMLTextAreaElement).value;
+  draft.value = value === latex.value ? null : value;
+  // Keyboard focus may move to Cancel before activation. Keep its draft
+  // private until that explicit action, just as pointer focus is prevented.
+  if (cancelButton.value && event.relatedTarget === cancelButton.value) return;
+  if (commit(value)) {
+    draft.value = null;
+    owner.value = null;
+  }
+  closeField();
 }
 
-// WHY: #644 리뷰 #2 — 권한이 사라지면 편집 상태도 닫는다. 닫기 전에 마지막 초안을 커밋한다
-// (#658: 언마운트되는 textarea 는 blur 를 보내지 않는다).
+function onCompositionStart(event: CompositionEvent): void {
+  if (ownsField(event)) composing.value = true;
+}
+function onCompositionEnd(event: CompositionEvent): void {
+  if (ownsField(event)) composing.value = false;
+}
+
+function cancel(): void {
+  if (composing.value) return;
+  draft.value = null;
+  owner.value = null;
+  closeField();
+}
+
+// Authorization notifications close the field without publishing a private
+// draft after permission is false. The same readable view may reopen its draft;
+// a peer's new latex invalidates its original owner before any later commit.
 watch(editable, (value) => {
   if (value) return;
-  editing.value = false;
-  const pending = draft;
-  draft = null;
-  if (pending !== null) commit(pending);
+  closeField();
+});
+onBeforeUnmount(() => {
+  retired = true;
+  draft.value = null;
+  owner.value = null;
+  closeField();
 });
 </script>
 
@@ -71,6 +181,8 @@ watch(editable, (value) => {
       :aria-label="t('editor.math.latex')"
       @input="onInput"
       @blur="onBlur"
+      @compositionstart="onCompositionStart"
+      @compositionend="onCompositionEnd"
     />
     <div
       v-else-if="!editable"
@@ -94,5 +206,16 @@ watch(editable, (value) => {
       <SafeHtml v-if="render.html" :html="render.html" />
       <pre v-else>{{ empty ? t("editor.math.empty") : latex }}</pre>
     </button>
+    <p v-if="draft !== null && stale" role="status">{{ t("editor.mode.stale") }}</p>
+    <button
+      v-if="draft !== null"
+      ref="cancelButton"
+      type="button"
+      :disabled="composing"
+      @pointerdown.prevent
+      @mousedown.prevent
+      @click="cancel"
+      >{{ t("editor.mode.cancel") }}</button
+    >
   </NodeViewWrapper>
 </template>

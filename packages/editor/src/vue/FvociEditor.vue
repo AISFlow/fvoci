@@ -51,7 +51,7 @@ import {
 import { copyText } from "../clipboard.js";
 import { tiptapDocToMd } from "../md.js";
 import { yDocToTiptapJson } from "../collab-tiptap.js";
-import { editorModePreview } from "./editor-mode-preview.js";
+import { applyEditorModePreviewStyles, editorModePreview } from "./editor-mode-preview.js";
 import SafeHtml from "./SafeHtml.vue";
 import AttachmentBlock from "./AttachmentBlock.vue";
 import { keyboardBlockPos, type GutterBlock, type GutterHandle } from "./block-gutter.js";
@@ -194,6 +194,7 @@ function inspectRawBeforeBinding(): void {
   const issues = rawEditorPreflight(props.ydoc, current.schema);
   if (!issues.length) return;
   previewAbort?.abort();
+  preview.value = null;
   rawIssues.value = issues;
   scopeEpoch++;
   modeLifetime++;
@@ -227,12 +228,17 @@ watch(
       draftDirty.value = false;
       sourceStale.value = false;
       preview.value = null;
+      sourceComposing.value = false;
       const current = editor.value;
       current?.destroy();
       editor.value = undefined;
       uploads.value = [];
       anchors.clear();
       emit("ready", null);
+    } else if (mode.value === "preview" && editor.value) {
+      // A same-actor readable permission/scope change retires old resolver
+      // work, then renders the same authorized live document anew.
+      refreshPreview(editor.value);
     }
   },
   { flush: "sync" },
@@ -293,6 +299,19 @@ function refreshPreview(current: Editor): void {
     },
   );
 }
+
+const previewHost = useTemplateRef<HTMLDivElement>("previewHost");
+watch(
+  preview,
+  async (rendered) => {
+    if (!rendered) return;
+    await nextTick();
+    const element = previewHost.value;
+    if (!element || preview.value !== rendered || mode.value !== "preview" || !editor.value) return;
+    applyEditorModePreviewStyles(element, rendered);
+  },
+  { flush: "post" },
+);
 
 async function changeMode(next: EditorMode): Promise<void> {
   const current = editor.value;
@@ -768,7 +787,7 @@ function bubbleOwner(): HTMLElement {
           @click="applySource"
           >적용</button
         >
-        <button type="button" :disabled="sourceComposing" @click="refreshSource">{{
+        <button type="button" :disabled="sourceComposing" @click="discardSourceDraft">{{
           t("editor.mode.cancel")
         }}</button>
         <button
@@ -780,13 +799,12 @@ function bubbleOwner(): HTMLElement {
         >
       </div>
     </div>
-    <p v-if="mode === 'preview' && !preview" role="status">{{ t("editor.embed.loading") }}</p>
-    <SafeHtml
-      v-if="preview"
-      v-show="mode === 'preview'"
-      :html="preview"
-      class="fvoci-mode-preview"
-    />
+    <p v-if="editor && mode === 'preview' && !preview" role="status">{{
+      t("editor.embed.loading")
+    }}</p>
+    <div v-if="preview" v-show="mode === 'preview'" ref="previewHost" class="fvoci-mode-preview"
+      ><SafeHtml :html="preview.html"
+    /></div>
     <p v-if="modeError" role="alert">{{ modeError }}</p>
     <div
       v-if="uploads.length > 0"
