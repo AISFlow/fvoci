@@ -25,8 +25,179 @@ import {
   applyEditorModePreviewStyles,
   attachmentPreviewSpec,
   embedPreviewSpec,
+  editorModePreview,
   sanitizeEditorModePreview,
 } from "../src/vue/editor-mode-preview.ts";
+import type { EntitySnapshot } from "../src/entities.ts";
+
+function previewAbortListenerWitness() {
+  const controller = new AbortController();
+  const listeners = new Set<EventListenerOrEventListenerObject>();
+  const add = controller.signal.addEventListener.bind(controller.signal);
+  const remove = controller.signal.removeEventListener.bind(controller.signal);
+  Object.defineProperty(controller.signal, "addEventListener", {
+    value: (
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: AddEventListenerOptions | boolean,
+    ) => {
+      if (!listener) return;
+      if (type === "abort") listeners.add(listener);
+      add(type, listener, options);
+    },
+  });
+  Object.defineProperty(controller.signal, "removeEventListener", {
+    value: (
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: EventListenerOptions | boolean,
+    ) => {
+      if (!listener) return;
+      if (type === "abort") listeners.delete(listener);
+      remove(type, listener, options);
+    },
+  });
+  return { controller, listeners };
+}
+
+await test("owned preview wait aborts before a pending host resolver settles, with no late serialization or Yjs change", async () => {
+  const ydoc = tiptapJsonToYDoc({
+    type: "doc",
+    content: [
+      { type: "embed", attrs: { id: "abort-preview-ref", entity: "document", ref: "target" } },
+      {
+        type: "paragraph",
+        attrs: { id: "abort-preview-tail" },
+        content: [{ type: "text", text: "한글 🧑‍💻" }],
+      },
+    ],
+  });
+  const live = liveEditor(ydoc);
+  const before = Y.encodeStateAsUpdate(ydoc);
+  let serializations = 0;
+  Object.defineProperty(live.editor.view, "dom", {
+    value: {
+      ownerDocument: {
+        createElement() {
+          serializations++;
+          throw new Error("An aborted producer must not serialize");
+        },
+      },
+    },
+  });
+  let resolve: (value: EntitySnapshot | null) => void = () => {};
+  const hostPending = new Promise<EntitySnapshot | null>((done) => {
+    resolve = done;
+  });
+  const { controller, listeners } = previewAbortListenerWitness();
+  const reason = new Error("owned preview retired");
+  const rendering = editorModePreview(
+    live.editor,
+    { entityResolver: () => hostPending },
+    controller.signal,
+  );
+  let rejected = false;
+  const rejection = rendering.catch((error: unknown) => {
+    assert.equal(error, reason);
+    rejected = true;
+  });
+  try {
+    controller.abort(reason);
+    assert.equal(listeners.size, 0, "owned abort subscription is removed immediately");
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    assert.equal(rejected, true, "owned wait retires before host-owned IO completes");
+    assert.equal(serializations, 0);
+    resolve({ label: "late target", icon: "", status: "late" });
+    await rejection;
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    assert.equal(serializations, 0);
+    assert.deepEqual(Y.encodeStateAsUpdate(ydoc), before);
+    assert.equal(live.manager.undoStack.length, 0);
+  } finally {
+    resolve(null);
+    await rejection;
+    live.close();
+    ydoc.destroy();
+  }
+});
+
+for (const schedule of [
+  "already-aborted",
+  "empty",
+  "resolve",
+  "reject",
+  "race",
+  "abort-late-reject",
+] as const) {
+  await test(`owned preview ${schedule} settles and removes its abort listener without publishing a retired snapshot`, async () => {
+    const ydoc = tiptapJsonToYDoc({
+      type: "doc",
+      content:
+        schedule === "empty"
+          ? [{ type: "paragraph", attrs: { id: "preview-empty" } }]
+          : [{ type: "embed", attrs: { id: "preview-ref", entity: "document", ref: "target" } }],
+    });
+    const live = liveEditor(ydoc);
+    const before = Y.encodeStateAsUpdate(ydoc);
+    const { controller, listeners } = previewAbortListenerWitness();
+    const reason = new Error("preview scope retired");
+    const serializeReached = new Error("normal producer reached actual DOM boundary");
+    let serializations = 0;
+    let resolverCalls = 0;
+    Object.defineProperty(live.editor.view, "dom", {
+      value: {
+        ownerDocument: {
+          createElement() {
+            serializations++;
+            throw serializeReached;
+          },
+        },
+      },
+    });
+    let resolve: (value: EntitySnapshot | null) => void = () => {};
+    let reject: (error: Error) => void = () => {};
+    const hostPending = new Promise<EntitySnapshot | null>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    if (schedule === "already-aborted") controller.abort(reason);
+    const rendering = editorModePreview(
+      live.editor,
+      {
+        entityResolver: () => {
+          resolverCalls++;
+          if (schedule === "race") controller.abort(reason);
+          return hostPending;
+        },
+      },
+      controller.signal,
+    );
+    const aborted =
+      schedule === "already-aborted" || schedule === "race" || schedule === "abort-late-reject";
+    const rejection = assert.rejects(
+      rendering,
+      (error: unknown) => error === (aborted ? reason : serializeReached),
+    );
+    try {
+      if (schedule === "abort-late-reject") controller.abort(reason);
+      if (schedule === "reject" || schedule === "abort-late-reject")
+        reject(new Error("late host metadata failure"));
+      else resolve({ label: "current target", icon: "" });
+      await rejection;
+      for (let index = 0; index < 5; index++) await Promise.resolve();
+      assert.equal(listeners.size, 0);
+      assert.equal(serializations, aborted ? 0 : 1);
+      assert.equal(resolverCalls, schedule === "already-aborted" || schedule === "empty" ? 0 : 1);
+      assert.deepEqual(Y.encodeStateAsUpdate(ydoc), before);
+      assert.equal(live.manager.undoStack.length, 0);
+    } finally {
+      resolve(null);
+      await rejection;
+      live.close();
+      ydoc.destroy();
+    }
+  });
+}
 
 await test("actual shell composition capture guards native NodeView targets, provisional 229 and retired owners without PM/Yjs writes", () => {
   const source = readFileSync(new URL("../src/vue/FvociEditor.vue", import.meta.url), "utf8");

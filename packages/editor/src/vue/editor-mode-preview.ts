@@ -116,11 +116,40 @@ export async function editorModePreview(
       ),
     );
   });
-  const resolved = new Map(
-    await Promise.all(
-      [...references].map(async ([node, pending]) => [node, await pending] as const),
-    ),
+  const pending = Promise.all(
+    [...references].map(async ([node, pending]) => [node, await pending] as const),
   );
+  // Host metadata requests may be shared with rich node views. Retire only this
+  // producer's wait immediately, leaving that IO under its existing host owner.
+  const pairs = signal
+    ? await new Promise<Awaited<typeof pending>>((resolve, reject) => {
+        const onAbort = () => {
+          signal.removeEventListener("abort", onAbort);
+          reject(
+            signal.reason instanceof Error
+              ? signal.reason
+              : new DOMException("Preview retired", "AbortError"),
+          );
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        void pending.then(
+          (value) => {
+            signal.removeEventListener("abort", onAbort);
+            resolve(value);
+          },
+          (error: unknown) => {
+            signal.removeEventListener("abort", onAbort);
+            reject(
+              error instanceof Error
+                ? error
+                : new Error("Preview metadata resolution failed", { cause: error }),
+            );
+          },
+        );
+        if (signal.aborted) onAbort();
+      })
+    : await pending;
+  const resolved = new Map(pairs);
   signal?.throwIfAborted();
   const shared = DOMSerializer.fromSchema(schema);
   const serializer = new DOMSerializer(
