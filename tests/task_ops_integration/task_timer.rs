@@ -3785,20 +3785,14 @@ mod task_timer {
         .await;
         assert_eq!(status, StatusCode::OK, "{fresh_rows}");
         assert_eq!(Some(fresh_rows), own);
-        let (status, foreign) = timer_checked_request(
-            &fixture,
-            app.clone(),
-            "POST",
-            "/api/v1/workspaces",
-            Some(json!({"name":"Other actor workspace","slug":"ordinary-capture-foreign"})),
-            Some(&other.cookie),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "{foreign}");
-        let foreign_id = Uuid::parse_str(foreign["id"].as_str().unwrap()).unwrap();
+        // Cross-tenant fixture preparation uses existing harness helpers.
+        // Ordinary workspace members cannot create instance workspaces.
+        let foreign_id = insert_workspace(&admin).await;
+        let foreign_owner =
+            add_workspace_user(&admin, foreign_id, "owner", "ordinary-foreign").await;
         let foreign_project = create_project(
             app.clone(),
-            &other.cookie,
+            &foreign_owner.cookie,
             foreign_id,
             "FOREIGN",
             "workspace",
@@ -3806,7 +3800,7 @@ mod task_timer {
         .await;
         let foreign_task = create_task(
             app.clone(),
-            &other.cookie,
+            &foreign_owner.cookie,
             foreign_id,
             foreign_project["id"].as_str().unwrap(),
             json!({"title":"Other tenant target"}),
