@@ -248,6 +248,69 @@ function setup(input: TiptapDoc) {
   };
 }
 
+const ordinaryIdentitylessCases = [
+  {
+    name: "ordinary import",
+    content: [{ type: "paragraph", content: [{ type: "text", text: "원본 문단" }] }],
+    source: "한글 변경",
+    texts: ["한글 변경"],
+  },
+  {
+    name: "empty imported paragraph",
+    content: [{ type: "paragraph" }],
+    source: "첫 기록",
+    texts: ["첫 기록"],
+  },
+  {
+    name: "ID-less edit with existing ID and untouched ID-less sibling",
+    content: [
+      { type: "paragraph", content: [{ type: "text", text: "원본 문단" }] },
+      paragraph("existing-stable", "기존 자료"),
+      { type: "paragraph", content: [{ type: "text", text: "이웃 문단" }] },
+    ],
+    source: "한글 변경\n\n기존 자료\n\n이웃 문단",
+    texts: ["한글 변경", "기존 자료", "이웃 문단"],
+  },
+  {
+    name: "existing ID edit with untouched ID-less sibling",
+    content: [
+      paragraph("existing-stable", "원본 문단"),
+      { type: "paragraph", content: [{ type: "text", text: "이웃 문단" }] },
+    ],
+    source: "한글 변경\n\n이웃 문단",
+    texts: ["한글 변경", "이웃 문단"],
+  },
+];
+
+for (const example of ordinaryIdentitylessCases) {
+  await test(`${example.name}: directly editable proposal preserves IDs and observes without allocating`, () => {
+    const fixture = setup(document(...example.content));
+    let updates = 0;
+    fixture.ydoc.on("update", () => updates++);
+    try {
+      const before = Y.encodeStateAsUpdate(fixture.ydoc);
+      const capture = fixture.session.capture(fixture.state.doc);
+      assert.equal(fixture.session.prepare(capture, capture.source, fixture.state).status, "noop");
+      const proposal = fixture.session.prepare(capture, example.source, fixture.state);
+      assert.deepEqual(Y.encodeStateAsUpdate(fixture.ydoc), before);
+      assert.equal(updates, 0);
+      assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+      assert.ok(proposal.transaction);
+      const result = proposal.transaction.doc;
+      assert.deepEqual(result.content.content.map((node) => node.textContent), example.texts);
+      for (let i = 0; i < result.childCount; i++) {
+        assert.equal(result.child(i).attrs.id, fixture.state.doc.child(i).attrs.id);
+        if (i > 0) assert.ok(result.child(i).eq(fixture.state.doc.child(i)));
+      }
+      fixture.session.destroy(); // Cancel never dispatches or allocates a replacement ID.
+      assert.equal(updates, 0);
+      assert.deepEqual(Y.encodeStateAsUpdate(fixture.ydoc), before);
+    } finally {
+      fixture.close();
+    }
+  });
+}
+
 function rawNode(node: CorpusNode): Y.XmlElement | Y.XmlText {
   if (node.type === "text") {
     const text = new Y.XmlText();

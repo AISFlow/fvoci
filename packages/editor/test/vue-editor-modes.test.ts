@@ -689,6 +689,90 @@ function liveEditor(ydoc: Y.Doc) {
   };
 }
 
+for (const example of [
+  {
+    name: "ordinary imported paragraph",
+    content: [{ type: "paragraph", content: [{ type: "text", text: "원본 문단" }] }],
+    source: "한글 변경",
+    texts: ["한글 변경"],
+    firstExistingID: null,
+  },
+  {
+    name: "empty imported paragraph",
+    content: [{ type: "paragraph" }],
+    source: "첫 기록",
+    texts: ["첫 기록"],
+    firstExistingID: null,
+  },
+  {
+    name: "ID-less edit beside existing ID and untouched ID-less sibling",
+    content: [
+      { type: "paragraph", content: [{ type: "text", text: "원본 문단" }] },
+      { type: "paragraph", attrs: { id: "existing-stable" }, content: [{ type: "text", text: "기존 자료" }] },
+      { type: "paragraph", content: [{ type: "text", text: "이웃 문단" }] },
+    ],
+    source: "한글 변경\n\n기존 자료\n\n이웃 문단",
+    texts: ["한글 변경", "기존 자료", "이웃 문단"],
+    firstExistingID: null,
+  },
+  {
+    name: "existing ID edit beside untouched ID-less sibling",
+    content: [
+      { type: "paragraph", attrs: { id: "existing-stable" }, content: [{ type: "text", text: "원본 문단" }] },
+      { type: "paragraph", content: [{ type: "text", text: "이웃 문단" }] },
+    ],
+    source: "한글 변경\n\n이웃 문단",
+    texts: ["한글 변경", "이웃 문단"],
+    firstExistingID: "existing-stable",
+  },
+]) {
+  await test(`${example.name}: actual localized Apply uses SDK IDs only on the changed block`, () => {
+    const doc = tiptapJsonToYDoc({ type: "doc", content: example.content });
+    const local = liveEditor(doc);
+    const source = new SourceModeSession(doc, () => 1, () => true);
+    const fragment = doc.getXmlFragment("prosemirror");
+    const originalElements = fragment.toArray();
+    let updates = 0;
+    doc.on("update", () => updates++);
+    try {
+      const before = Y.encodeStateAsUpdate(doc);
+      const capture = source.capture(local.editor.state.doc);
+      const proposal = source.prepare(capture, example.source, local.editor.state);
+      assert.equal(updates, 0);
+      assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+      assert.equal(local.manager.undoStack.length, 0);
+      assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+      assert.equal(source.apply(proposal, local.editor), true);
+      assert.deepEqual(local.editor.state.doc.content.content.map((node) => node.textContent), example.texts);
+      const id: unknown = local.editor.state.doc.child(0).attrs.id;
+      assert.equal(typeof id, "string");
+      assert.ok(id);
+      if (example.firstExistingID) assert.equal(id, example.firstExistingID);
+      assert.equal(local.manager.undoStack.length, 1);
+      assert.ok(updates > 0);
+      assert.equal(fragment.get(0), originalElements[0]);
+      for (let i = 1; i < fragment.length; i++) {
+        assert.equal(fragment.get(i), originalElements[i]);
+        const raw = fragment.get(i);
+        assert.ok(raw instanceof Y.XmlElement);
+        assert.equal(raw.getAttribute("id"), i === 1 && example.content.length === 3 ? "existing-stable" : undefined);
+      }
+      const fresh = new Y.Doc({ gc: false });
+      try {
+        Y.applyUpdate(fresh, Y.encodeStateAsUpdate(doc));
+        assert.deepEqual(yDocToTiptapJson(fresh), yDocToTiptapJson(doc));
+        assert.equal((fresh.getXmlFragment("prosemirror").get(0) as Y.XmlElement).getAttribute("id"), id);
+      } finally {
+        fresh.destroy();
+      }
+    } finally {
+      source.destroy();
+      local.close();
+      doc.destroy();
+    }
+  });
+}
+
 await test("actual source join loss/Cancel dispatches zero writes and a delete-only peer invalidates a safe join", () => {
   const doc = tiptapJsonToYDoc({
     type: "doc",
