@@ -64,7 +64,10 @@ await test("useCollabRoom has no hex literals", () => {
 await test("useCollabRoom hands the room's auth results to the connection state machine", () => {
   const bind = between(source(), "function bindGeneration(", "function retire(");
   assert.match(bind, /const onAuthenticated = \(\) => \{\s*connection\.authenticated\(\);\s*\};/);
-  assert.match(bind, /const onAuthenticationFailed = \(\) => \{\s*connection\.reclaim\(\);\s*\};/);
+  assert.match(
+    bind,
+    /if \(!retiredAuthorization\.has\(provider\) && !reauthorizing\.delete\(provider\)\)\s*connection\.reclaim\(\);/,
+  );
   assert.match(bind, /provider\.off\("authenticated", onAuthenticated\);/);
 });
 
@@ -119,11 +122,41 @@ await test("useCollabRoom flushes on pagehide and re-asserts presence on pagesho
 
 // Run the actual composable and persist barrier with a controlled provider
 // transport. This witnesses scope disposal BEFORE delayed provider destruction.
-function roomHarness() {
+function roomHarness(withAuthorization = false, initialWritable: boolean | null = false) {
   const providers: Provider[] = [];
+  let reclaims = 0;
+  class Socket extends EventEmitter {
+    status = "connected";
+    webSocket: object | null = {};
+    disconnects = 0;
+    connects = 0;
+    disconnect() {
+      this.disconnects++;
+    }
+    connect() {
+      this.connects++;
+      this.webSocket = {};
+      this.status = "connecting";
+      for (const provider of providers) provider.emit("status");
+      return Promise.resolve();
+    }
+    close() {
+      this.webSocket = null;
+      this.status = "disconnected";
+      for (const provider of providers) {
+        provider.isAuthenticated = false;
+        provider.emit("status");
+        provider.emit("disconnect");
+      }
+      this.emit("disconnect");
+    }
+  }
+  const socket = new Socket();
   class Provider extends EventEmitter {
-    configuration: { name: string; websocketProvider: { status: string } };
+    configuration: { name: string; websocketProvider: Socket };
     synced = true;
+    isAuthenticated = false;
+    authorizedScope = "";
     awareness = null;
     payloads: string[] = [];
     constructor(config: Provider["configuration"]) {
@@ -140,9 +173,27 @@ function roomHarness() {
     destroy() {
       this.emit("destroy");
     }
+    authenticate(scope: string) {
+      socket.status = "connected";
+      this.emit("status");
+      this.isAuthenticated = true;
+      this.authorizedScope = scope;
+      this.emit("authenticated", { scope });
+    }
   }
   const scope = Vue.effectScope();
   const user = Vue.shallowRef<model.CollabUser | null>(model.collabUserOf("actor-A", "A"));
+  const authorization = Vue.shallowRef<{
+    roomName: string;
+    actorId: string;
+    sessionId: string;
+    writable: boolean | null;
+  } | null>({
+    roomName: "ws:document:A",
+    actorId: "actor-A",
+    sessionId: "credential-A",
+    writable: initialWritable,
+  });
   let script = readFileSync(roomPath, "utf8");
   const parsed = ts.createSourceFile(
     "room.ts",
@@ -158,7 +209,7 @@ function roomHarness() {
   const room = scope.run(() => {
     const result: unknown = runInNewContext(
       new Bun.Transpiler({ loader: "ts" }).transformSync(
-        `(() => {${script}\nreturn useCollabRoom('ws:document:A', user);})()`,
+        `(() => {${script}\nreturn useCollabRoom('ws:document:A', user, authorization);})()`,
       ),
       {
         ...Vue,
@@ -166,14 +217,17 @@ function roomHarness() {
         ...ack,
         Y,
         user,
+        authorization: withAuthorization ? authorization : undefined,
         AbortController,
         FVOCI_YDOC_FRAGMENT: "body",
         HocuspocusProvider: Provider,
         createRefusalAwareSocket: () => ({ status: "connected" }),
         RoomConnection: class {
-          state = { socket: { status: "connected" }, generation: 0, refusal: null };
+          state = { socket, generation: 0, refusal: null };
           authenticated() {}
-          reclaim() {}
+          reclaim() {
+            reclaims++;
+          }
           dispose() {}
         },
         window: {
@@ -185,18 +239,45 @@ function roomHarness() {
       },
     );
     assert.ok(typeof result === "object" && result !== null && "session" in result);
-    return result as { session: Vue.ComputedRef<{ persistNow(): Promise<void> }> };
+    return result as {
+      doc: Y.Doc;
+      session: Vue.ComputedRef<{
+        provider: Provider;
+        doc: Y.Doc;
+        generation: number;
+        readOnly: boolean;
+        status: string;
+        durableSaved: boolean;
+        persistNow(): Promise<void>;
+      } | null>;
+    };
   });
   assert.ok(room);
   const provider = providers[0];
   assert.ok(provider);
   const session = room.session.value;
+  assert.ok(session);
   function lateAck() {
     const payload = provider.payloads[0];
     assert.ok(payload);
     provider.emit("stateless", { payload: payload.replace("persist:", "persisted:") });
   }
-  return { scope, user, provider, session, lateAck };
+  return {
+    scope,
+    user,
+    provider,
+    session,
+    lateAck,
+    room,
+    socket,
+    authorization,
+    reclaims: () => reclaims,
+    live: () => {
+      const next = room.session.value;
+      assert.ok(next);
+      return next;
+    },
+  };
 }
 
 for (const retirement of [
@@ -238,3 +319,292 @@ for (const retirement of [
     }
   });
 }
+
+await test("readonly admission requires a real permission edge and a new socket auth, preserving identity", async () => {
+  const h = roomHarness(true);
+  try {
+    const doc = h.room.doc;
+    const clientId = doc.clientID;
+    let updates = 0;
+    doc.on("update", () => updates++);
+    h.provider.authenticate("readonly");
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: true,
+    };
+    assert.equal(h.socket.disconnects, 1);
+    assert.equal(h.socket.connects, 0, "wait for actual socket close");
+    assert.equal(h.live().readOnly, true, "metadata is not a server grant");
+    h.provider.authenticate("read-write");
+    assert.equal(h.live().readOnly, true, "late auth on old socket is ignored");
+    h.socket.close();
+    assert.equal(h.socket.connects, 1);
+    assert.equal(h.socket.listenerCount("disconnect"), 0);
+    h.provider.authenticate("read-write");
+    assert.equal(h.live().readOnly, false);
+    assert.equal(h.live().provider, h.provider);
+    assert.equal(h.live().doc, doc);
+    assert.equal(doc.clientID, clientId);
+    assert.equal(h.live().generation, 0);
+    assert.equal(updates, 0);
+    assert.equal(h.reclaims(), 0);
+    const pending = h.live().persistNow();
+    const payload = h.provider.payloads.at(-1);
+    assert.ok(payload);
+    h.provider.emit("stateless", { payload: payload.replace("persist:", "persisted:") });
+    await pending;
+    assert.equal(h.live().durableSaved, true);
+  } finally {
+    h.scope.stop();
+  }
+});
+
+await test("grant before readonly authentication waits for genuine auth; readonly denial cannot loop", () => {
+  const h = roomHarness(true);
+  try {
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: true,
+    };
+    assert.equal(h.socket.disconnects, 0);
+    h.provider.authenticate("readonly");
+    assert.equal(h.socket.disconnects, 1);
+    h.socket.close();
+    h.provider.authenticate("readonly");
+    for (let i = 0; i < 3; i++) h.provider.authenticate("readonly");
+    assert.equal(h.socket.disconnects, 1);
+    assert.equal(h.socket.connects, 1);
+    assert.equal(h.live().readOnly, true);
+  } finally {
+    h.scope.stop();
+  }
+});
+
+await test("unknown metadata and initial writable metadata do not invent a permission edge", () => {
+  const h = roomHarness(true);
+  const initial = roomHarness(true, true);
+  try {
+    h.provider.authenticate("readonly");
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: null,
+    };
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: true,
+    };
+    assert.equal(h.socket.disconnects, 0);
+    assert.equal(h.live().readOnly, true);
+    initial.provider.authenticate("readonly");
+    assert.equal(initial.socket.disconnects, 0);
+    assert.equal(initial.live().readOnly, true);
+  } finally {
+    h.scope.stop();
+    initial.scope.stop();
+  }
+});
+
+for (const retirement of ["actor-aba", "credential-aba", "doc-aba", "dispose"] as const) {
+  await test(`reauthorization callback and late grant retire on ${retirement}`, () => {
+    const h = roomHarness(true);
+    try {
+      h.provider.authenticate("readonly");
+      h.authorization.value = {
+        roomName: "ws:document:A",
+        actorId: "actor-A",
+        sessionId: "credential-A",
+        writable: true,
+      };
+      assert.equal(h.socket.listenerCount("disconnect"), 1);
+      if (retirement === "actor-aba") {
+        h.user.value = model.collabUserOf("actor-B", "B");
+        h.user.value = model.collabUserOf("actor-A", "A");
+      } else if (retirement === "credential-aba") {
+        h.authorization.value = {
+          roomName: "ws:document:A",
+          actorId: "actor-A",
+          sessionId: "credential-B",
+          writable: true,
+        };
+        h.authorization.value = {
+          roomName: "ws:document:A",
+          actorId: "actor-A",
+          sessionId: "credential-A",
+          writable: true,
+        };
+      } else if (retirement === "doc-aba") {
+        h.authorization.value = {
+          roomName: "ws:document:B",
+          actorId: "actor-A",
+          sessionId: "credential-A",
+          writable: true,
+        };
+        h.authorization.value = {
+          roomName: "ws:document:A",
+          actorId: "actor-A",
+          sessionId: "credential-A",
+          writable: true,
+        };
+      } else h.scope.stop();
+      assert.equal(h.socket.listenerCount("disconnect"), 0);
+      h.socket.close();
+      h.provider.authenticate("read-write");
+      h.provider.emit("authenticationFailed");
+      assert.equal(h.socket.connects, 0);
+      assert.equal(h.reclaims(), 0);
+      if (retirement === "dispose") assert.equal(h.room.session.value, null);
+      else assert.equal(h.live().readOnly, true);
+    } finally {
+      h.scope.stop();
+    }
+  });
+}
+
+await test("same-actor revocation during close cancels grant but restores transport once as readonly", () => {
+  const h = roomHarness(true);
+  try {
+    h.provider.authenticate("readonly");
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: true,
+    };
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: false,
+    };
+    h.socket.close();
+    h.provider.authenticate("readonly");
+    assert.equal(h.socket.connects, 1);
+    assert.equal(h.socket.disconnects, 1);
+    assert.equal(h.live().readOnly, true);
+    assert.equal(h.reclaims(), 0);
+  } finally {
+    h.scope.stop();
+  }
+});
+
+await test("reauthentication failure stays unauthorized without reclaim; unrelated collision still reclaims", () => {
+  const h = roomHarness(true);
+  const normal = roomHarness();
+  try {
+    h.provider.authenticate("readonly");
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: true,
+    };
+    h.socket.close();
+    h.provider.emit("authenticationFailed");
+    h.provider.emit("authenticationFailed");
+    assert.equal(h.reclaims(), 0);
+    assert.equal(h.live().status, "unauthorized");
+    assert.equal(h.live().readOnly, true);
+    h.provider.authenticate("read-write");
+    assert.equal(h.live().readOnly, true, "failure retires grant authority");
+    normal.provider.emit("authenticationFailed");
+    assert.equal(normal.reclaims(), 1);
+  } finally {
+    h.scope.stop();
+    normal.scope.stop();
+  }
+});
+
+await test("credential change rejects in-flight persist and late old ACK even for same actor", async () => {
+  const h = roomHarness(true, true);
+  try {
+    h.provider.authenticate("read-write");
+    const pending = h.session.persistNow();
+    const rejected = assert.rejects(pending, /collab persist/);
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-B",
+      writable: true,
+    };
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: true,
+    };
+    h.lateAck();
+    await rejected;
+    assert.equal(h.live().durableSaved, false);
+    assert.equal(h.live().readOnly, true);
+    await assert.rejects(h.session.persistNow(), /collab persist unavailable/);
+    assert.equal(h.provider.payloads.length, 1);
+    assert.equal(h.socket.disconnects, 0);
+  } finally {
+    h.scope.stop();
+  }
+});
+
+await test("definitive metadata denial aborts old persist and rejects late ACK without claiming transport", async () => {
+  const h = roomHarness(true, true);
+  try {
+    h.provider.authenticate("read-write");
+    const pending = h.session.persistNow();
+    const rejected = assert.rejects(pending, /collab persist/);
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: false,
+    };
+    h.lateAck();
+    await rejected;
+    assert.equal(h.live().durableSaved, false);
+    await assert.rejects(h.session.persistNow(), /collab persist unavailable/);
+    assert.equal(h.provider.payloads.length, 1);
+    assert.equal(h.socket.disconnects, 0);
+    assert.equal(h.socket.connects, 0);
+    assert.equal(h.reclaims(), 0);
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: true,
+    };
+    const fresh = h.live().persistNow();
+    const freshPayload = h.provider.payloads.at(-1);
+    assert.ok(freshPayload);
+    assert.notEqual(freshPayload, h.provider.payloads[0]);
+    h.lateAck();
+    assert.equal(h.live().durableSaved, false, "old ACK cannot satisfy the new request");
+    h.provider.emit("stateless", {
+      payload: freshPayload.replace("persist:", "persisted:"),
+    });
+    await fresh;
+    assert.equal(h.live().durableSaved, true);
+  } finally {
+    h.scope.stop();
+  }
+});
+
+await test("ordinary network disconnect does not trigger extra reauthentication or reclaim", () => {
+  const h = roomHarness(true);
+  try {
+    h.provider.authenticate("read-write");
+    h.socket.close();
+    h.provider.authenticate("read-write");
+    assert.equal(h.socket.disconnects, 0);
+    assert.equal(h.socket.connects, 0, "ordinary SDK reconnect is not owned by permission watcher");
+    assert.equal(h.reclaims(), 0);
+    assert.equal(h.live().readOnly, false);
+  } finally {
+    h.scope.stop();
+  }
+});

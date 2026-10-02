@@ -77,7 +77,20 @@ const collabUser = computed(() => {
   const data = me.data.value;
   return data ? collabUserOf(data.userId, formatPersonName(data, data.locale)) : null;
 });
-const room = useCollabRoom(collabRoomName(props.workspaceId, "task", props.task.id), collabUser);
+const room = useCollabRoom(
+  collabRoomName(props.workspaceId, "task", props.task.id),
+  collabUser,
+  () => {
+    const actor = me.data.value;
+    if (!actor || me.isError.value) return null;
+    return {
+      roomName: collabRoomName(props.workspaceId, "task", props.task.id),
+      actorId: actor.userId,
+      sessionId: actor.sessionId,
+      writable: props.canEdit && !props.readOnly && props.task.archivedAt == null,
+    };
+  },
+);
 const session = room.session;
 
 const archivePersisting = ref(false);

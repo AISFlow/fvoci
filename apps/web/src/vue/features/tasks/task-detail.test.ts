@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
+import ts from "typescript";
 import * as Vue from "vue";
 import { renderToString } from "vue/server-renderer";
 import { formatPersonName, t } from "@fvoci/i18n";
@@ -188,17 +189,52 @@ await test("task body uses collab kind task; project document uses kind document
   const taskView = source("./TaskDetailView.vue");
   const page = source("../../pages/WorkspaceItemPage.vue");
   const docView = source("../documents/ProjectDocumentView.vue");
-  assert.match(
-    taskView,
-    /useCollabRoom\(collabRoomName\(props\.workspaceId, "task", props\.task\.id\)/,
-  );
+  function assertRoom(input: string, kind: string, target: string): void {
+    const script = parse(input).descriptor.scriptSetup?.content;
+    assert.ok(script);
+    const tree = ts.createSourceFile("host.ts", script, ts.ScriptTarget.Latest, true);
+    const calls: ts.CallExpression[] = [];
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "useCollabRoom"
+      )
+        calls.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
+    assert.equal(calls.length, 1, "one owned collaboration room");
+    const name = calls[0]?.arguments[0];
+    assert.ok(name && ts.isCallExpression(name));
+    assert.equal(name.expression.getText(tree), "collabRoomName");
+    assert.equal(name.arguments.length, 3);
+    assert.equal(name.arguments[0]?.getText(tree), "props.workspaceId");
+    const actualKind = name.arguments[1];
+    assert.ok(actualKind && ts.isStringLiteral(actualKind));
+    assert.equal(actualKind.text, kind);
+    assert.equal(name.arguments[2]?.getText(tree), target);
+  }
+  assertRoom(taskView, "task", "props.task.id");
   assert.equal((taskView.match(/useCollabRoom\(/g) ?? []).length, 1);
   assert.match(page, /collabRoomName\(workspace\.id, ['"]task['"]/);
   assert.match(page, /collabRoomName\(workspace\.id, ['"]document['"]/);
-  assert.match(
-    docView,
-    /useCollabRoom\(\s*collabRoomName\(props\.workspaceId, "document", props\.documentId\)/,
-  );
+  assertRoom(docView, "document", "props.documentId");
+  const taskRoom = 'collabRoomName(props.workspaceId, "task", props.task.id)';
+  assert.throws(() => {
+    assertRoom(
+      taskView.replace(taskRoom, taskRoom.replace('"task"', '"document"')),
+      "task",
+      "props.task.id",
+    );
+  });
+  assert.throws(() => {
+    assertRoom(
+      taskView.replace(taskRoom, taskRoom.replace("props.task.id", "props.documentId")),
+      "task",
+      "props.task.id",
+    );
+  });
   const room = readFileSync(
     path.join(import.meta.dirname, "../../collab/useCollabRoom.ts"),
     "utf8",

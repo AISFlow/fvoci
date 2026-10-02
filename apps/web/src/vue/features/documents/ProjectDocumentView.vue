@@ -106,6 +106,20 @@ const collabUser = computed(() => {
 const room = useCollabRoom(
   collabRoomName(props.workspaceId, "document", props.documentId),
   collabUser,
+  () => {
+    const actor = me.data.value;
+    if (!actor || me.isError.value) return null;
+    const resource = metaQuery.data.value;
+    return {
+      roomName: collabRoomName(props.workspaceId, "document", props.documentId),
+      actorId: actor.userId,
+      sessionId: actor.sessionId,
+      writable:
+        resource?.id === props.documentId && !metaQuery.isError.value
+          ? resource.status !== "archived" && props.project.canEdit && !props.project.archived
+          : null,
+    };
+  },
 );
 const session = room.session;
 const { mentionItems, entityResolver } = useEditorEntities(
