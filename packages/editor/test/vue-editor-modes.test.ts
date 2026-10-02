@@ -54,6 +54,14 @@ await test("actual shell composition capture guards native NodeView targets, pro
     return false;
   });
   assert.equal(statements.length, names.size);
+  const scopeWatch = parsed.statements.find(
+    (statement) =>
+      ts.isExpressionStatement(statement) &&
+      ts.isCallExpression(statement.expression) &&
+      statement.expression.expression.getText(parsed) === "watch" &&
+      statement.expression.arguments[0]?.getText(parsed).includes("props.modeScope"),
+  );
+  assert.ok(scopeWatch);
   const ydoc = tiptapJsonToYDoc(input);
   const live = liveEditor(ydoc);
   const before = Y.encodeStateAsUpdate(ydoc);
@@ -66,19 +74,36 @@ await test("actual shell composition capture guards native NodeView targets, pro
   retired.isConnected = false;
   const host = { contains: (node: ControlledNode) => node === target || node === other };
   const visible = Vue.ref(true);
-  const controls = runInNewContext(
-    ts.transpileModule(
-      `(()=>{${statements.map((statement) => statement.getText(parsed)).join("\n")};return {onRichCompositionStart,onRichCompositionEnd,onRichKeyDown,onRichKeyUp,retireRichComposition,sourceBlocked,composing:()=>richComposing.value};})()`,
-      { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext } },
-    ).outputText,
-    {
-      ref: Vue.ref,
-      richVisible: visible,
-      editor: Vue.shallowRef(live.editor),
-      host: Vue.shallowRef(host),
-      sourceComposing: Vue.ref(false),
-      Node: ControlledNode,
-    },
+  const stale = Vue.ref(false);
+  const props = Vue.reactive({
+    modeScope: 1,
+    user: { id: "same-actor" },
+    ydoc: Vue.markRaw(ydoc),
+    provider: Vue.markRaw({}),
+    editable: true,
+  });
+  const effects = Vue.effectScope();
+  const controls = effects.run(
+    () =>
+      runInNewContext(
+        ts.transpileModule(
+          `(()=>{let previewAbort=null,scopeEpoch=0,modeLifetime=0;${statements.map((statement) => statement.getText(parsed)).join("\n")};${scopeWatch.getText(parsed)};return {onRichCompositionStart,onRichCompositionEnd,onRichKeyDown,onRichKeyUp,retireRichComposition,sourceBlocked,composing:()=>richComposing.value};})()`,
+          { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext } },
+        ).outputText,
+        {
+          ref: Vue.ref,
+          watch: Vue.watch,
+          props,
+          mode: Vue.ref("rich"),
+          sourceStale: stale,
+          capture: Vue.shallowRef({}),
+          richVisible: visible,
+          editor: Vue.shallowRef(live.editor),
+          host: Vue.shallowRef(host),
+          sourceComposing: Vue.ref(false),
+          Node: ControlledNode,
+        },
+      ) as unknown,
   ) as {
     onRichCompositionStart(event: unknown): void;
     onRichCompositionEnd(event: unknown): void;
@@ -108,6 +133,10 @@ await test("actual shell composition capture guards native NodeView targets, pro
     controls.onRichKeyUp(event());
     controls.onRichCompositionEnd(event(other));
     assert.equal(controls.sourceBlocked(), true);
+    props.modeScope++;
+    assert.equal(stale.value, true);
+    assert.equal(controls.sourceBlocked(), true);
+    assert.equal(controls.composing(), true);
     controls.onRichCompositionEnd(event());
     assert.equal(controls.sourceBlocked(), false);
     live.host.composing = true;
@@ -120,12 +149,22 @@ await test("actual shell composition capture guards native NodeView targets, pro
     controls.onRichCompositionStart(event(retired));
     assert.equal(controls.sourceBlocked(), false);
     controls.onRichCompositionStart(event());
+    props.editable = false;
+    assert.equal(controls.sourceBlocked(), false);
+    props.editable = true;
+    controls.onRichCompositionStart(event(other));
+    controls.onRichCompositionEnd(event());
+    assert.equal(controls.sourceBlocked(), true);
+    controls.onRichCompositionEnd(event(other));
+    assert.equal(controls.sourceBlocked(), false);
+    controls.onRichCompositionStart(event());
     controls.retireRichComposition();
     controls.onRichCompositionEnd(event());
     assert.equal(controls.sourceBlocked(), false);
     assert.deepEqual(Y.encodeStateAsUpdate(ydoc), before);
     assert.equal(live.manager.undoStack.length, 0);
   } finally {
+    effects.stop();
     live.close();
     ydoc.destroy();
   }

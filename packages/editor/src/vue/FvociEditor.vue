@@ -219,7 +219,21 @@ watch(
   ],
   (next, previous) => {
     previewAbort?.abort();
-    retireRichComposition();
+    // The host also advances modeScope for ordinary connection status changes.
+    // That retires a source proposal, but does not end a still-owned native
+    // NodeView composition (those events never set PM view.composing).
+    if (
+      next[1] !== previous[1] ||
+      next[2] !== previous[2] ||
+      next[3] !== previous[3] ||
+      next[4] !== previous[4] ||
+      !(
+        richCompositionTarget instanceof Node &&
+        richCompositionTarget.isConnected &&
+        host.value?.contains(richCompositionTarget)
+      )
+    )
+      retireRichComposition();
     scopeEpoch++;
     modeLifetime++;
     sourceStale.value = Boolean(capture.value);

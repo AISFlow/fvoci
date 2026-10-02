@@ -1805,3 +1805,84 @@ test("actual node and table cell bookmarks survive no-op modes, localized table 
     await peer.context.close();
   }
 });
+
+test("actual socket disconnect during native Math IME keeps the same connected field and blocks modes until composition ends", async ({
+  page,
+}, testInfo) => {
+  let offline = false;
+  let socket: WebSocketRoute | undefined;
+  await page.routeWebSocket(/\/collab(?:\?|$)/, async (route) => {
+    if (offline) {
+      await route.close({ code: 1013, reason: "owned network pause" });
+      return;
+    }
+    route.connectToServer();
+    socket = route;
+  });
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "接続中断と native 조합", {
+    json: {
+      type: "doc",
+      content: [
+        { type: "math", attrs: { id: "network-ime-math", latex: "x + y" } },
+        {
+          type: "paragraph",
+          attrs: { id: "network-ime-tail" },
+          content: [{ type: "text", text: "그대로" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await save(page);
+  const before = await savedBody(page.request, ws, doc.id);
+  await recordIdentity(page);
+  await page.getByTitle("수식 편집", { exact: true }).click();
+  const field = page.getByRole("textbox", { name: "수식 LaTeX" });
+  await field.evaluate((element) => {
+    (window as Window & { w3NetworkIMEField?: Element }).w3NetworkIMEField = element;
+  });
+  await field.focus();
+  await page.keyboard.press("Control+a");
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
+    await expect(field).toHaveValue("ㅎ");
+    await expect(page.locator('[data-editor-mode="markdown"]')).toBeDisabled();
+    if (!socket) throw new Error("Missing actual routed socket");
+    offline = true;
+    await socket.close({ code: 1012, reason: "owned temporary disconnect" });
+    await expect(page.locator('[data-collab-status="disconnected"]')).toBeVisible();
+    await expect(field).toBeFocused();
+    expect(
+      await field.evaluate(
+        (element) =>
+          (window as Window & { w3NetworkIMEField?: Element }).w3NetworkIMEField === element &&
+          element.isConnected,
+      ),
+    ).toBe(true);
+    await expectIdentity(page, 0);
+    expect(
+      await editorOf(page).evaluate((root) => (root as EditorElement).editor.view.composing),
+    ).toBe(false);
+    await expect(page.locator('[data-editor-mode="markdown"]')).toBeDisabled();
+    await expect(page.locator(".fvoci-editor")).toHaveAttribute("data-editor-mode-active", "rich");
+    await page.screenshot({
+      path: testInfo.outputPath("w3-network-native-composition.png"),
+      fullPage: true,
+    });
+    await cdp.send("Input.insertText", { text: "한글 비공개 조합" });
+    await expect(field).toHaveValue("한글 비공개 조합");
+    await expect(page.locator('[data-editor-mode="markdown"]')).toBeEnabled();
+    await editorOf(page).getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
+    await expectIdentity(page, 0);
+    offline = false;
+    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15000 });
+    expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
+    await expectIdentity(page, 0);
+  } finally {
+    offline = false;
+    await cdp.detach();
+  }
+});
