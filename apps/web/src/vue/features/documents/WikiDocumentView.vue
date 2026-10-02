@@ -403,6 +403,7 @@ const sourceEditor = shallowRef<InstanceType<typeof FvociEditor> | null>(null);
 const sourceDraftDialogId = computed(() => `source-draft-leave-${props.documentId}`);
 const {
   open: sourceLeaveOpen,
+  authRetired: sourceAuthRetired,
   draft: sourceDraft,
   receive: onSourceDraft,
   requestLeave,
@@ -411,12 +412,11 @@ const {
 } = useSourceDraftGuard({
   scope: () => persistLifecycle.value,
   identity: () =>
-    `${props.workspaceId}:${props.documentId}:${me.data.value?.userId ?? ""}:${me.data.value?.sessionId ?? ""}:${String(session.value?.generation ?? "")}`,
+    `${props.workspaceId}:${props.documentId}:${me.data.value?.userId ?? ""}:${me.data.value?.sessionId ?? ""}`,
   authorized: () =>
     !!me.data.value?.userId &&
     !!me.data.value.sessionId &&
-    !!session.value &&
-    session.value.status !== "unauthorized" &&
+    session.value?.status !== "unauthorized" &&
     !(me.error.value instanceof ProblemError && me.error.value.status === 401) &&
     !(
       metaQuery.error.value instanceof ProblemError &&
@@ -432,6 +432,9 @@ onBeforeRouteUpdate((to, from) => (to.path === from.path ? true : requestLeave()
 function readSaveSession() {
   return session.value;
 }
+function readAuthRetired() {
+  return sourceAuthRetired.value;
+}
 function readSaveActor() {
   return me.data.value;
 }
@@ -442,7 +445,9 @@ const readonlyCommittedBody = useReadonlyCommittedBody(() => {
   return {
     workspaceId: scope.value.workspaceId,
     targetId: scope.value.documentId,
-    kind: "document",
+    kind: "wiki",
+    schema: editor.value?.schema ?? null,
+    projectId: null,
     actorId: actor.userId,
     credentialId: actor.sessionId,
     lifetime: persistLifecycle.value,
@@ -454,6 +459,7 @@ const readonlyCommittedBody = useReadonlyCommittedBody(() => {
     pending: current.pending,
     allowed:
       readOnly.value &&
+      !sourceAuthRetired.value &&
       !(me.error.value instanceof ProblemError && me.error.value.status === 401) &&
       !(
         metaQuery.error.value instanceof ProblemError &&
@@ -467,7 +473,14 @@ async function waitForEditorSave(): Promise<boolean> {
   const target = `${scope.value.workspaceId}:${scope.value.documentId}:${scope.value.projectId ?? ""}`;
   const actor = me.data.value?.userId;
   const credential = me.data.value?.sessionId;
-  if (!before || before.status !== "connected" || !before.synced || !actor) return false;
+  if (
+    !before ||
+    before.status !== "connected" ||
+    !before.synced ||
+    !actor ||
+    sourceAuthRetired.value
+  )
+    return false;
   try {
     const readonly = readOnly.value;
     const committedRead = readonly ? await readonlyCommittedBody() : false;
@@ -489,6 +502,7 @@ async function waitForEditorSave(): Promise<boolean> {
       current.generation === before.generation &&
       (readonly ? committedRead : current.durableSaved) &&
       !current.pending &&
+      !readAuthRetired() &&
       !(me.error.value instanceof ProblemError && me.error.value.status === 401)
     );
   } catch {
