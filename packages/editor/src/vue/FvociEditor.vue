@@ -128,6 +128,9 @@ const modes = [
 const richVisible = computed(() => mode.value === "rich" || mode.value === "block");
 const sourceField = useTemplateRef<HTMLTextAreaElement>("sourceField");
 const sourceComposing = ref(false);
+const richComposing = ref(false);
+let richCompositionTarget: EventTarget | null = null;
+let richCompositionStarted = false;
 const capture = shallowRef<SourceCapture | null>(null);
 const proposal = shallowRef<SourceProposal | null>(null);
 const draftDirty = ref(false);
@@ -195,6 +198,7 @@ function inspectRawBeforeBinding(): void {
   if (!issues.length) return;
   previewAbort?.abort();
   preview.value = null;
+  retireRichComposition();
   rawIssues.value = issues;
   scopeEpoch++;
   modeLifetime++;
@@ -215,6 +219,7 @@ watch(
   ],
   (next, previous) => {
     previewAbort?.abort();
+    retireRichComposition();
     scopeEpoch++;
     modeLifetime++;
     sourceStale.value = Boolean(capture.value);
@@ -252,7 +257,63 @@ function onSourceInput(event: Event): void {
 }
 
 function sourceBlocked(): boolean {
-  return sourceComposing.value || Boolean(editor.value?.view.composing);
+  return sourceComposing.value || richComposing.value || Boolean(editor.value?.view.composing);
+}
+
+function retireRichComposition(): void {
+  richComposing.value = false;
+  richCompositionTarget = null;
+  richCompositionStarted = false;
+}
+
+function ownsRichInput(event: Event): boolean {
+  return Boolean(
+    richVisible.value &&
+    editor.value &&
+    !editor.value.isDestroyed &&
+    host.value &&
+    event.currentTarget === host.value &&
+    event.target instanceof Node &&
+    event.target.isConnected &&
+    host.value.contains(event.target),
+  );
+}
+
+// NodeView textarea events are excluded by the SDK's stopEvent before PM's
+// editorProps handlers. Observe the existing shell's capture phase so both
+// rich text and native NodeView fields retain their native composition owner.
+// These handlers neither consume events nor dispatch editor transactions.
+function onRichCompositionStart(event: CompositionEvent): void {
+  if (!ownsRichInput(event)) return;
+  richCompositionTarget = event.target;
+  richCompositionStarted = true;
+  richComposing.value = true;
+}
+
+function onRichCompositionEnd(event: CompositionEvent): void {
+  if (ownsRichInput(event) && event.target === richCompositionTarget) retireRichComposition();
+}
+
+function onRichKeyDown(event: KeyboardEvent): void {
+  if (!ownsRichInput(event)) return;
+  // Some IMEs deliver 229 before compositionstart. A later ordinary keyup
+  // can retire only that provisional latch, never an active composition.
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
+  if ((event.isComposing || event.keyCode === 229) && !richCompositionStarted) {
+    richCompositionTarget = event.target;
+    richComposing.value = true;
+  }
+}
+
+function onRichKeyUp(event: KeyboardEvent): void {
+  if (
+    ownsRichInput(event) &&
+    event.target === richCompositionTarget &&
+    !richCompositionStarted &&
+    !event.isComposing &&
+    !editor.value?.view.composing
+  )
+    retireRichComposition();
 }
 
 function moveSelectedBlock(direction: -1 | 1): void {
@@ -677,6 +738,7 @@ onBeforeUnmount(() => {
   draftMounted = false;
   emit("source-dirty", { ...sourceDraftState.value, phase: "retire" });
   modeLifetime++;
+  retireRichComposition();
   previewAbort?.abort();
   sourceSession.destroy();
   emit("ready", null);
@@ -704,7 +766,7 @@ function bubbleOwner(): HTMLElement {
       type="button"
       :data-editor-mode="item.value"
       :aria-pressed="mode === item.value"
-      :disabled="sourceComposing"
+      :disabled="sourceComposing || richComposing"
       @mousedown.prevent
       @click="changeMode(item.value)"
       >{{ item.label }}</button
@@ -738,6 +800,10 @@ function bubbleOwner(): HTMLElement {
       codeChromeHost.folded === null ? undefined : codeChromeHost.folded ? 'true' : 'false'
     "
     @mousedown="onHostMouseDown"
+    @compositionstart.capture="onRichCompositionStart"
+    @compositionend.capture="onRichCompositionEnd"
+    @keydown.capture="onRichKeyDown"
+    @keyup.capture="onRichKeyUp"
   >
     <div v-if="rawIssues.length" role="alert" class="fvoci-mode-warning">
       <p>{{ t("editor.mode.rawReadOnly") }}</p>

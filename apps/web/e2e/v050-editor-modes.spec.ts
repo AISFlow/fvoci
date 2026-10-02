@@ -4,6 +4,7 @@ import { createEncoder, toUint8Array, writeVarString, writeVarUint } from "lib0/
 import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { Editor } from "@tiptap/core";
+import "@tiptap/extension-table";
 import type * as Y from "yjs";
 import { login } from "./helpers";
 import {
@@ -1245,4 +1246,406 @@ test("focused visible Math Cancel never publishes its draft, and detached old fi
   const after = await savedBody(page.request, ws, doc.id);
   expect(after.content?.[0]?.attrs).toMatchObject({ id: "cancel-math", latex: "authorized final" });
   expect(after.content?.[1]).toEqual(before.content?.[1]);
+});
+
+test("Chromium IME engine keeps Korean source composition private until deliberate Apply on the same live document", async ({
+  page,
+}, testInfo) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "실제 Chromium 한글 조합", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "source-ime-body" },
+          content: [{ type: "text", text: "원본 문단" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await save(page);
+  const before = await savedBody(page.request, ws, doc.id);
+  await recordIdentity(page);
+  await selectMode(page, "markdown");
+  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+  await field.focus();
+  await page.keyboard.press("Control+a");
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
+    await expect(field).toHaveValue("ㅎ");
+    await expect(page.locator('[data-editor-mode="rich"]')).toBeDisabled();
+    await expect(page.getByRole("button", { name: "적용", exact: true })).toBeDisabled();
+    await expectIdentity(page, 0);
+    expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
+    await cdp.send("Input.insertText", { text: "한글 연구 🧑‍💻" });
+    await expect(field).toHaveValue("한글 연구 🧑‍💻");
+    await expect(page.locator('[data-editor-mode="rich"]')).toBeEnabled();
+    await expectIdentity(page, 0);
+    await page.getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
+    await expectIdentity(page, 0);
+    await expect(field).toHaveValue("원본 문단");
+    await field.focus();
+    await page.keyboard.press("Control+a");
+    await field.evaluate((element) => {
+      const events: unknown[] = [];
+      (window as Window & { w3SourceIMEEvents?: unknown[] }).w3SourceIMEEvents = events;
+      for (const name of [
+        "compositionstart",
+        "compositionupdate",
+        "compositionend",
+        "input",
+        "blur",
+      ])
+        element.addEventListener(name, (event) =>
+          events.push({
+            type: event.type,
+            value: (element as HTMLTextAreaElement).value,
+            composing: event instanceof InputEvent ? event.isComposing : undefined,
+          }),
+        );
+    });
+    await cdp.send("Input.imeSetComposition", { text: "한", selectionStart: 1, selectionEnd: 1 });
+    await cdp.send("Input.insertText", { text: "한글 조사" });
+    await expect(field).toHaveValue("한글 조사");
+    await expect(page.getByRole("button", { name: "적용", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "적용", exact: true }).click();
+    await testInfo.attach("w3-source-native-IME-after-apply.json", {
+      body: JSON.stringify(
+        await page.evaluate(() => ({
+          events: (window as Window & { w3SourceIMEEvents?: unknown[] }).w3SourceIMEEvents,
+          panel: document.querySelector(".fvoci-source-panel")?.textContent,
+          field: (
+            document.querySelector(
+              'textarea[aria-label="Markdown 직접 편집"]',
+            ) as HTMLTextAreaElement
+          ).value,
+          viewComposing: (document.querySelector(".fvoci-editor .ProseMirror") as EditorElement)
+            .editor.view.composing,
+          document: (
+            document.querySelector(".fvoci-editor .ProseMirror") as EditorElement
+          ).editor.getJSON() as unknown,
+        })),
+      ),
+      contentType: "application/json",
+    });
+    await selectMode(page, "rich");
+    await expectBlocks(page, ["한글 조사"]);
+    await expectIdentity(page);
+    await save(page);
+    const after = await savedBody(page.request, ws, doc.id);
+    expect(after.content?.[0]?.attrs?.id).toBe(before.content?.[0]?.attrs?.id);
+    expect(after.content?.[0]?.content).toEqual([{ type: "text", text: "한글 조사" }]);
+    await caretAtEndOf(page, 0);
+    await cdp.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
+    await expect(editorOf(page)).toBeFocused();
+    await expect(page.locator('[data-editor-mode="markdown"]')).toBeDisabled();
+    await page.locator('[data-editor-mode="markdown"]').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect(page.locator(".fvoci-editor")).toHaveAttribute("data-editor-mode-active", "rich");
+    await expect(editorOf(page)).toBeFocused();
+    await cdp.send("Input.insertText", { text: " 한글 동료" });
+    await expect(page.locator('[data-editor-mode="markdown"]')).toBeEnabled();
+    await expectBlocks(page, ["한글 조사 한글 동료"]);
+    await selectMode(page, "markdown");
+    await expect(field).toHaveValue("한글 조사 한글 동료");
+    await selectMode(page, "rich");
+    await save(page);
+    expect((await savedBody(page.request, ws, doc.id)).content?.[0]?.attrs?.id).toBe(
+      before.content?.[0]?.attrs?.id,
+    );
+  } finally {
+    await cdp.detach();
+  }
+});
+
+test("Chromium rich IME engine blocks mode switching without focus loss and preserves Korean commit identity", async ({
+  page,
+}) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "실제 글쓰기 한글 조합", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "rich-ime-body" },
+          content: [{ type: "text", text: "원본 문단" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await save(page);
+  const before = await savedBody(page.request, ws, doc.id);
+  await recordIdentity(page);
+  await caretAtEndOf(page, 0);
+  await editorOf(page).evaluate((root) => {
+    root.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Process", keyCode: 229, bubbles: true }),
+    );
+  });
+  await expect(page.locator('[data-editor-mode="markdown"]')).toBeDisabled();
+  await expectIdentity(page, 0);
+  await editorOf(page).evaluate((root) => {
+    root.dispatchEvent(new KeyboardEvent("keyup", { key: "Process", keyCode: 229, bubbles: true }));
+  });
+  await expect(page.locator('[data-editor-mode="markdown"]')).toBeEnabled();
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
+    await expect(editorOf(page)).toBeFocused();
+    expect(
+      await editorOf(page).evaluate((root) => (root as EditorElement).editor.view.composing),
+    ).toBe(true);
+    await expect(page.locator('[data-editor-mode="markdown"]')).toBeDisabled();
+    await page.locator('[data-editor-mode="markdown"]').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect(page.locator(".fvoci-editor")).toHaveAttribute("data-editor-mode-active", "rich");
+    await expect(editorOf(page)).toBeFocused();
+    await cdp.send("Input.insertText", { text: " 한글 동료" });
+    await expect(page.locator('[data-editor-mode="markdown"]')).toBeEnabled();
+    await expectBlocks(page, ["원본 문단 한글 동료"]);
+    await expectIdentity(page);
+    await save(page);
+    const after = await savedBody(page.request, ws, doc.id);
+    expect(after.content?.[0]?.attrs?.id).toBe(before.content?.[0]?.attrs?.id);
+    expect(after.content?.[0]?.content).toEqual([{ type: "text", text: "원본 문단 한글 동료" }]);
+    const math = await createDoc(page.request, ws, "NodeView 네이티브 한글 조합", {
+      json: {
+        type: "doc",
+        content: [
+          { type: "math", attrs: { id: "ime-native-math", latex: "x + y" } },
+          {
+            type: "paragraph",
+            attrs: { id: "ime-native-tail" },
+            content: [{ type: "text", text: "그대로" }],
+          },
+        ],
+      },
+    });
+    await openDoc(page, math.path);
+    await save(page);
+    const mathBefore = await savedBody(page.request, ws, math.id);
+    await recordIdentity(page);
+    await page.getByTitle("수식 편집", { exact: true }).click();
+    const field = page.getByRole("textbox", { name: "수식 LaTeX" });
+    await field.focus();
+    await page.keyboard.press("Control+a");
+    await cdp.send("Input.imeSetComposition", { text: "ㅎ", selectionStart: 1, selectionEnd: 1 });
+    await expect(field).toHaveValue("ㅎ");
+    await expect(field).toBeFocused();
+    // Installed NodeView.stopEvent excludes the textarea from PM, so the
+    // shell must guard this field even though PM itself is not composing.
+    expect(
+      await editorOf(page).evaluate((root) => (root as EditorElement).editor.view.composing),
+    ).toBe(false);
+    await expect(page.locator('[data-editor-mode="markdown"]')).toBeDisabled();
+    await expectIdentity(page, 0);
+    await cdp.send("Input.insertText", { text: "한글 비공개 수식" });
+    await expect(page.locator('[data-editor-mode="markdown"]')).toBeEnabled();
+    await expectIdentity(page, 0);
+    await editorOf(page).getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
+    await expectIdentity(page, 0);
+    expect(await savedBody(page.request, ws, math.id)).toEqual(mathBefore);
+  } finally {
+    await cdp.detach();
+  }
+});
+
+test("actual identityless source range refuses Apply with precise warning and Cancel/viewing allocate no ID or content update", async ({
+  page,
+}) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "ID 없는 범위 보존", { markdown: "원본 문단" });
+  await openDoc(page, doc.path);
+  await save(page);
+  const before = await savedBody(page.request, ws, doc.id);
+  expect(before.content?.[0]?.attrs?.id).toBeUndefined();
+  await recordIdentity(page);
+  for (const mode of ["markdown", "preview", "block", "rich"] as const)
+    await selectMode(page, mode);
+  await expectIdentity(page, 0);
+  await selectMode(page, "markdown");
+  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+  await field.fill("한글 조사");
+  await page.getByRole("button", { name: "적용", exact: true }).click();
+  await expect(page.locator(".fvoci-mode-warning")).toContainText(
+    "content.0 · ID 없음 · id: Missing block identity",
+  );
+  await expectIdentity(page, 0);
+  expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
+  await page.getByRole("button", { name: "취소 · 최신 내용 열기" }).click();
+  await expect(field).toHaveValue("원본 문단");
+  await expectIdentity(page, 0);
+  await selectMode(page, "rich");
+  await expectBlocks(page, ["원본 문단"]);
+  expect(
+    await editorOf(page).evaluate(
+      (root) => (root as EditorElement).editor.state.doc.child(0).attrs.id as unknown,
+    ),
+  ).toBe(null);
+  await save(page);
+  expect(await savedBody(page.request, ws, doc.id)).toEqual(before);
+});
+
+test("actual node and table cell bookmarks survive no-op modes, localized table source edit and later peer-cell undo without replacing cells", async ({
+  page,
+  browser,
+  baseURL,
+}, testInfo) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "표 선택 동료 실행 취소", {
+    json: {
+      type: "doc",
+      content: [
+        { type: "math", attrs: { id: "selection-math", latex: "x + y" } },
+        {
+          type: "table",
+          attrs: { id: "selection-table" },
+          content: [
+            {
+              type: "tableRow",
+              content: [
+                {
+                  type: "tableHeader",
+                  attrs: { colspan: 1, rowspan: 1, colwidth: [160], background: "#abcdef" },
+                  content: [
+                    {
+                      type: "paragraph",
+                      attrs: { id: "cell-p-a" },
+                      content: [{ type: "text", text: "셀 하나" }],
+                    },
+                  ],
+                },
+                {
+                  type: "tableCell",
+                  attrs: { colspan: 1, rowspan: 1, colwidth: [200] },
+                  content: [
+                    {
+                      type: "paragraph",
+                      attrs: { id: "cell-p-b" },
+                      content: [{ type: "text", text: "셀 둘째" }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          type: "paragraph",
+          attrs: { id: "selection-tail" },
+          content: [{ type: "text", text: "그대로 문단" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await save(page);
+  const before = await savedBody(page.request, ws, doc.id);
+  await recordIdentity(page);
+  for (const kind of ["node", "cell"] as const) {
+    const selection = await editorOf(page).evaluate((root, kind) => {
+      const editor = (root as EditorElement).editor;
+      if (kind === "node") {
+        if (!editor.commands.setNodeSelection(0)) throw new Error("Node selection failed");
+      } else {
+        const cells: number[] = [];
+        editor.state.doc.descendants((node, pos) => {
+          if (node.type.name === "tableHeader" || node.type.name === "tableCell") cells.push(pos);
+        });
+        const [anchorCell, headCell] = cells;
+        if (
+          cells.length !== 2 ||
+          anchorCell === undefined ||
+          headCell === undefined ||
+          !editor.commands.setCellSelection({ anchorCell, headCell })
+        )
+          throw new Error("Cell selection failed");
+      }
+      return editor.state.selection.toJSON() as unknown;
+    }, kind);
+    expect(selection).toHaveProperty("type", kind);
+    for (const mode of ["markdown", "preview", "block", "rich"] as const)
+      await selectMode(page, mode);
+    expect(
+      await editorOf(page).evaluate(
+        (root) => (root as EditorElement).editor.state.selection.toJSON() as unknown,
+      ),
+    ).toEqual(selection);
+    await expectIdentity(page, 0);
+  }
+  type CellElement = EditorElement & { w3Cells?: Y.XmlElement[] };
+  await editorOf(page).evaluate((root) => {
+    const element = root as CellElement;
+    const table = element.w3Witness?.fragment.get(1) as Y.XmlElement;
+    const row = table.get(0) as Y.XmlElement;
+    element.w3Cells = [row.get(0) as Y.XmlElement, row.get(1) as Y.XmlElement];
+  });
+  const peer = await newSignedInPage(browser, baseURL, admin);
+  try {
+    await openDoc(peer.page, doc.path);
+    await selectMode(page, "markdown");
+    const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+    await field.fill((await field.inputValue()).replace("셀 하나", "셀 수정"));
+    await page.getByRole("button", { name: "적용", exact: true }).click();
+    await selectMode(page, "rich");
+    await expect(editorOf(page).locator("th")).toContainText("셀 수정");
+    expect(
+      await editorOf(page).evaluate(
+        (root) => (root as EditorElement).editor.state.selection.toJSON() as unknown,
+      ),
+    ).toHaveProperty("type", "cell");
+    await expect(editorOf(peer.page).locator("th")).toContainText("셀 수정");
+    await editorOf(peer.page).locator("td").click();
+    await peer.page.keyboard.press("End");
+    await peer.page.keyboard.type(" 동료");
+    await expect(editorOf(page).locator("td")).toContainText("셀 둘째 동료");
+    await editorOf(page).locator("th").click();
+    await page.keyboard.press("Control+z");
+    await expect(editorOf(page).locator("th")).toContainText("셀 하나");
+    await expect(editorOf(page).locator("td")).toContainText("셀 둘째 동료");
+    await expect(editorOf(peer.page).locator("th")).toContainText("셀 하나");
+    await expect(editorOf(peer.page).locator("td")).toContainText("셀 둘째 동료");
+    expect(
+      await editorOf(page).evaluate((root) => {
+        const element = root as CellElement;
+        const table = element.w3Witness?.fragment.get(1) as Y.XmlElement;
+        const row = table.get(0) as Y.XmlElement;
+        return element.w3Cells?.[0] === row.get(0) && element.w3Cells[1] === row.get(1);
+      }),
+    ).toBe(true);
+    await expectIdentity(page);
+    await page.screenshot({ path: testInfo.outputPath("w3-table-peer-undo.png"), fullPage: true });
+    await save(page);
+    const after = await savedBody(page.request, ws, doc.id);
+    expect(after.content?.[0]).toEqual(before.content?.[0]);
+    expect(after.content?.[2]).toEqual(before.content?.[2]);
+    expect(after.content?.[1]?.attrs?.id).toBe("selection-table");
+    const row = after.content?.[1]?.content?.[0];
+    expect(row?.content?.[0]?.attrs).toEqual(
+      before.content?.[1]?.content?.[0]?.content?.[0]?.attrs,
+    );
+    expect(row?.content?.[1]?.attrs).toEqual(
+      before.content?.[1]?.content?.[0]?.content?.[1]?.attrs,
+    );
+    expect(row?.content?.[0]?.content?.[0]).toEqual(
+      before.content?.[1]?.content?.[0]?.content?.[0]?.content?.[0],
+    );
+    expect(row?.content?.[1]?.content?.[0]?.attrs?.id).toBe("cell-p-b");
+    expect(row?.content?.[1]?.content?.[0]?.content).toEqual([
+      { type: "text", text: "셀 둘째 동료" },
+    ]);
+  } finally {
+    await peer.context.close();
+  }
 });

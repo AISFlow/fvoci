@@ -28,6 +28,109 @@ import {
   sanitizeEditorModePreview,
 } from "../src/vue/editor-mode-preview.ts";
 
+await test("actual shell composition capture guards native NodeView targets, provisional 229 and retired owners without PM/Yjs writes", () => {
+  const source = readFileSync(new URL("../src/vue/FvociEditor.vue", import.meta.url), "utf8");
+  const script = source.split('<script setup lang="ts">')[1]?.split("</script>")[0];
+  assert.ok(script);
+  const parsed = ts.createSourceFile("FvociEditor.ts", script, ts.ScriptTarget.Latest, true);
+  const names = new Set([
+    "richComposing",
+    "richCompositionTarget",
+    "richCompositionStarted",
+    "sourceBlocked",
+    "retireRichComposition",
+    "ownsRichInput",
+    "onRichCompositionStart",
+    "onRichCompositionEnd",
+    "onRichKeyDown",
+    "onRichKeyUp",
+  ]);
+  const statements = parsed.statements.filter((statement) => {
+    if (ts.isFunctionDeclaration(statement)) return names.has(statement.name?.text ?? "");
+    if (ts.isVariableStatement(statement))
+      return statement.declarationList.declarations.some(
+        (declaration) => ts.isIdentifier(declaration.name) && names.has(declaration.name.text),
+      );
+    return false;
+  });
+  assert.equal(statements.length, names.size);
+  const ydoc = tiptapJsonToYDoc(input);
+  const live = liveEditor(ydoc);
+  const before = Y.encodeStateAsUpdate(ydoc);
+  class ControlledNode {
+    isConnected = true;
+  }
+  const target = new ControlledNode();
+  const other = new ControlledNode();
+  const retired = new ControlledNode();
+  retired.isConnected = false;
+  const host = { contains: (node: ControlledNode) => node === target || node === other };
+  const visible = Vue.ref(true);
+  const controls = runInNewContext(
+    ts.transpileModule(
+      `(()=>{${statements.map((statement) => statement.getText(parsed)).join("\n")};return {onRichCompositionStart,onRichCompositionEnd,onRichKeyDown,onRichKeyUp,retireRichComposition,sourceBlocked,composing:()=>richComposing.value};})()`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext } },
+    ).outputText,
+    {
+      ref: Vue.ref,
+      richVisible: visible,
+      editor: Vue.shallowRef(live.editor),
+      host: Vue.shallowRef(host),
+      sourceComposing: Vue.ref(false),
+      Node: ControlledNode,
+    },
+  ) as {
+    onRichCompositionStart(event: unknown): void;
+    onRichCompositionEnd(event: unknown): void;
+    onRichKeyDown(event: unknown): void;
+    onRichKeyUp(event: unknown): void;
+    retireRichComposition(): void;
+    sourceBlocked(): boolean;
+    composing(): boolean;
+  };
+  const event = (node = target) => ({
+    target: node,
+    currentTarget: host,
+    isComposing: false,
+    keyCode: 0,
+  });
+  try {
+    controls.onRichKeyDown({ ...event(), keyCode: 229 });
+    assert.equal(controls.sourceBlocked(), true);
+    controls.onRichKeyUp(event(other));
+    assert.equal(controls.composing(), true);
+    controls.onRichKeyUp(event());
+    assert.equal(controls.sourceBlocked(), false);
+    controls.onRichCompositionStart(event());
+    // Native NodeView fields do not set PM view.composing, yet retain their
+    // own composition through ordinary keyup and another field's late end.
+    assert.equal(live.editor.view.composing, false);
+    controls.onRichKeyUp(event());
+    controls.onRichCompositionEnd(event(other));
+    assert.equal(controls.sourceBlocked(), true);
+    controls.onRichCompositionEnd(event());
+    assert.equal(controls.sourceBlocked(), false);
+    live.host.composing = true;
+    assert.equal(controls.sourceBlocked(), true);
+    live.host.composing = false;
+    visible.value = false;
+    controls.onRichCompositionStart(event());
+    assert.equal(controls.sourceBlocked(), false);
+    visible.value = true;
+    controls.onRichCompositionStart(event(retired));
+    assert.equal(controls.sourceBlocked(), false);
+    controls.onRichCompositionStart(event());
+    controls.retireRichComposition();
+    controls.onRichCompositionEnd(event());
+    assert.equal(controls.sourceBlocked(), false);
+    assert.deepEqual(Y.encodeStateAsUpdate(ydoc), before);
+    assert.equal(live.manager.undoStack.length, 0);
+  } finally {
+    live.close();
+    ydoc.destroy();
+  }
+});
+
 await test("installed SDK XML serialization does not normalize raw future node identity, and parser emoji semantics have independent mutant controls", () => {
   const doc = new Y.Doc({ gc: false });
   try {
