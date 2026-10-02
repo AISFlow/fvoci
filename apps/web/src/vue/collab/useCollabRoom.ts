@@ -366,7 +366,7 @@ export function useCollabRoom(
           return;
         }
         credential = nextCredential;
-        if (previousWritable === true && writable === false) {
+        if (writable === false) {
           abortPersists();
         }
         if (writable === true && previousWritable === false) grantPending = true;

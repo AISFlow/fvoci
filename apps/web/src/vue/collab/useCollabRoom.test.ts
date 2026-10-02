@@ -9,6 +9,8 @@ import * as Y from "yjs";
 import ts from "typescript";
 import * as model from "../../features/documents/collab-model";
 import * as ack from "../../features/documents/collab-persist-ack";
+import { ProblemError } from "../../lib/api";
+import { useSourceDraftGuard } from "../composables/useSourceDraftGuard";
 
 // The React glue's source assertions (features/documents/collab-session.test.ts),
 // ported to the Vue room composable. Like those, they read the source: the
@@ -122,7 +124,12 @@ await test("useCollabRoom flushes on pagehide and re-asserts presence on pagesho
 
 // Run the actual composable and persist barrier with a controlled provider
 // transport. This witnesses scope disposal BEFORE delayed provider destruction.
-function roomHarness(withAuthorization = false, initialWritable: boolean | null = false) {
+function roomHarness(
+  withAuthorization = false,
+  initialWritable: boolean | null = false,
+  requestedName = "ws:document:A",
+  authorizationGetter?: () => unknown,
+) {
   const providers: Provider[] = [];
   let reclaims = 0;
   class Socket extends EventEmitter {
@@ -209,7 +216,7 @@ function roomHarness(withAuthorization = false, initialWritable: boolean | null 
   const room = scope.run(() => {
     const result: unknown = runInNewContext(
       new Bun.Transpiler({ loader: "ts" }).transformSync(
-        `(() => {${script}\nreturn useCollabRoom('ws:document:A', user, authorization);})()`,
+        `(() => {${script}\nreturn useCollabRoom(requestedName, user, authorization);})()`,
       ),
       {
         ...Vue,
@@ -217,7 +224,8 @@ function roomHarness(withAuthorization = false, initialWritable: boolean | null 
         ...ack,
         Y,
         user,
-        authorization: withAuthorization ? authorization : undefined,
+        requestedName,
+        authorization: withAuthorization ? (authorizationGetter ?? authorization) : undefined,
         AbortController,
         FVOCI_YDOC_FRAGMENT: "body",
         HocuspocusProvider: Provider,
@@ -608,3 +616,238 @@ await test("ordinary network disconnect does not trigger extra reauthentication 
     h.scope.stop();
   }
 });
+
+await test("definitive denial after unknown metadata aborts the old persist before its late ACK", async () => {
+  const h = roomHarness(true, true);
+  try {
+    h.provider.authenticate("read-write");
+    const pending = h.session.persistNow();
+    const rejected = assert.rejects(pending, /collab persist/);
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: null,
+    };
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: false,
+    };
+    h.lateAck();
+    await rejected;
+    assert.equal(h.live().durableSaved, false);
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: true,
+    };
+    const fresh = h.session.persistNow();
+    const payload = h.provider.payloads.at(-1);
+    assert.ok(payload);
+    assert.notEqual(payload, h.provider.payloads[0]);
+    h.lateAck();
+    assert.equal(h.live().durableSaved, false);
+    h.provider.emit("stateless", { payload: payload.replace("persist:", "persisted:") });
+    await fresh;
+    assert.equal(h.live().durableSaved, true);
+  } finally {
+    h.scope.stop();
+  }
+});
+
+await test("unknown metadata alone preserves an existing persist without allowing a new request", async () => {
+  const h = roomHarness(true, true);
+  try {
+    h.provider.authenticate("read-write");
+    const pending = h.session.persistNow();
+    h.authorization.value = {
+      roomName: "ws:document:A",
+      actorId: "actor-A",
+      sessionId: "credential-A",
+      writable: null,
+    };
+    await assert.rejects(h.session.persistNow(), /collab persist unavailable/);
+    assert.equal(h.live().status, "connected");
+    h.lateAck();
+    await pending;
+    assert.equal(h.live().durableSaved, true);
+    assert.equal(h.provider.payloads.length, 1);
+  } finally {
+    h.scope.stop();
+  }
+});
+
+function actualHostAuthorization(file: string, me: unknown) {
+  const text = readFileSync(path.join(import.meta.dirname, "../features", file), "utf8");
+  const script = text.split('<script setup lang="ts">')[1]?.split("</script>")[0];
+  assert.ok(script);
+  const parsed = ts.createSourceFile("host.ts", script, ts.ScriptTarget.Latest, true);
+  let getter: ts.Expression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "useCollabRoom"
+    )
+      getter = node.arguments[2];
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert.ok(getter && ts.isArrowFunction(getter));
+  const result: unknown = runInNewContext(
+    ts.transpileModule(`(${getter.getText(parsed)})`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None },
+    }).outputText,
+    {
+      me,
+      ProblemError,
+      collabRoomName: (workspace: string, kind: string, id: string) => `${workspace}:${kind}:${id}`,
+      metaQuery: {
+        data: Vue.shallowRef({ id: "A", status: "draft" }),
+        isError: Vue.shallowRef(false),
+      },
+      props: {
+        workspaceId: "ws",
+        documentId: "A",
+        task: { id: "A", archivedAt: null },
+        project: { canEdit: true, archived: false },
+        canEdit: true,
+        readOnly: false,
+      },
+    },
+  );
+  assert.equal(typeof result, "function");
+  return result as () => unknown;
+}
+
+for (const host of [
+  "documents/WikiDocumentView.vue",
+  "documents/ProjectDocumentView.vue",
+  "tasks/TaskDetailView.vue",
+]) {
+  for (const status of [401, 403]) {
+    await test(`actual ${host} definite ${String(status)} retires cached credential and rejects its pending ACK`, async () => {
+      const me = {
+        data: Vue.shallowRef({ userId: "actor-A", sessionId: "credential-A" }),
+        isError: Vue.shallowRef(false),
+        error: Vue.shallowRef<unknown>(null),
+      };
+      const getter = actualHostAuthorization(host, me);
+      const h = roomHarness(
+        true,
+        true,
+        host.startsWith("tasks/") ? "ws:task:A" : "ws:document:A",
+        getter,
+      );
+      try {
+        h.provider.authenticate("read-write");
+        const pending = h.session.persistNow();
+        const rejected = assert.rejects(pending, /collab persist/);
+        me.error.value = new ProblemError(status);
+        me.isError.value = true;
+        await Vue.nextTick();
+        assert.equal(h.live().status, "unauthorized");
+        assert.equal(h.live().readOnly, true);
+        h.lateAck();
+        await rejected;
+        assert.equal(h.live().durableSaved, false);
+        me.error.value = null;
+        me.isError.value = false;
+        h.provider.authenticate("read-write");
+        await Vue.nextTick();
+        assert.equal(h.live().status, "unauthorized", "same retired credential cannot be revived");
+        assert.equal(h.live().readOnly, true);
+        await assert.rejects(h.session.persistNow(), /collab persist unavailable/);
+        assert.equal(h.socket.connects, 0);
+        assert.equal(h.reclaims(), 0);
+      } finally {
+        h.scope.stop();
+      }
+    });
+  }
+  for (const temporary of ["network", "server"] as const) {
+    await test(`actual ${host} ${temporary} me failure preserves current room and pending private-draft navigation`, async () => {
+      const me = {
+        data: Vue.shallowRef({ userId: "actor-A", sessionId: "credential-A" }),
+        isError: Vue.shallowRef(false),
+        error: Vue.shallowRef<unknown>(null),
+      };
+      const getter = actualHostAuthorization(host, me);
+      const h = roomHarness(
+        true,
+        true,
+        host.startsWith("tasks/") ? "ws:task:A" : "ws:document:A",
+        getter,
+      );
+      const guardScope = Vue.effectScope();
+      const owner = {};
+      const state = {
+        owner,
+        phase: "change" as const,
+        scope: 1,
+        dirty: true,
+        stale: false,
+        composing: false,
+      };
+      const guard = guardScope.run(() =>
+        useSourceDraftGuard({
+          scope: () => 1,
+          identity: () => "actor-A:credential-A:A",
+          authorized: () => h.room.session.value?.status !== "unauthorized",
+          editor: () => ({ sourceDraftState: state, discardSourceDraft() {} }),
+        }),
+      );
+      assert.ok(guard);
+      let left: boolean | undefined;
+      try {
+        h.provider.authenticate("read-write");
+        guard.receive({ ...state, phase: "activate" });
+        const pending = guard.requestLeave().then((value) => {
+          left = value;
+        });
+        me.error.value =
+          temporary === "network"
+            ? new TypeError("fixture network failure")
+            : new ProblemError(500);
+        me.isError.value = true;
+        await Vue.nextTick();
+        assert.equal(h.live().status, "connected");
+        assert.equal(h.live().readOnly, false);
+        assert.equal(guard.open.value, true);
+        const unloading = new Event("beforeunload", { cancelable: true });
+        guard.beforeUnload(unloading);
+        assert.equal(
+          unloading.defaultPrevented,
+          true,
+          "temporary IO retains dirty unload protection",
+        );
+        assert.equal(left, undefined, "temporary IO must not approve draft navigation");
+        await assert.rejects(h.session.persistNow(), /collab persist unavailable/);
+        assert.equal(h.provider.payloads.length, 0);
+        me.error.value = null;
+        me.isError.value = false;
+        await Vue.nextTick();
+        assert.equal(h.live().status, "connected");
+        assert.equal(guard.open.value, true);
+        const recovered = new Event("beforeunload", { cancelable: true });
+        guard.beforeUnload(recovered);
+        assert.equal(recovered.defaultPrevented, true);
+        const saving = h.session.persistNow();
+        h.lateAck();
+        await saving;
+        assert.equal(h.live().durableSaved, true);
+        assert.equal(h.socket.disconnects, 0);
+        assert.equal(h.socket.connects, 0);
+        guard.keepEditing();
+        await pending;
+        assert.equal(left, false);
+      } finally {
+        guardScope.stop();
+        h.scope.stop();
+      }
+    });
+  }
+}

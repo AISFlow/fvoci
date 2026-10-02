@@ -8,6 +8,7 @@ import { runArchiveWithBodyPersist } from "@/features/tasks/task-archive-persist
 import type { LabelItem, MilestoneItem, TaskDetail, TaskListItem } from "@/features/tasks/queries";
 import { collabUserOf } from "@/features/documents/collab-model";
 import type { MemberOutput } from "@/lib/contracts";
+import { ProblemError } from "@/lib/api";
 import { projectTasksPath } from "@/lib/href";
 import { meQuery } from "@/lib/queries";
 import { useCollabRoom, collabRoomName } from "../../collab/useCollabRoom";
@@ -82,12 +83,18 @@ const room = useCollabRoom(
   collabUser,
   () => {
     const actor = me.data.value;
-    if (!actor || me.isError.value) return null;
+    if (
+      !actor ||
+      (me.error.value instanceof ProblemError && [401, 403].includes(me.error.value.status))
+    )
+      return null;
     return {
       roomName: collabRoomName(props.workspaceId, "task", props.task.id),
       actorId: actor.userId,
       sessionId: actor.sessionId,
-      writable: props.canEdit && !props.readOnly && props.task.archivedAt == null,
+      writable: me.isError.value
+        ? null
+        : props.canEdit && !props.readOnly && props.task.archivedAt == null,
     };
   },
 );

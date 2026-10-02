@@ -108,14 +108,18 @@ const room = useCollabRoom(
   collabUser,
   () => {
     const actor = me.data.value;
-    if (!actor || me.isError.value) return null;
+    if (
+      !actor ||
+      (me.error.value instanceof ProblemError && [401, 403].includes(me.error.value.status))
+    )
+      return null;
     const resource = metaQuery.data.value;
     return {
       roomName: collabRoomName(props.workspaceId, "document", props.documentId),
       actorId: actor.userId,
       sessionId: actor.sessionId,
       writable:
-        resource?.id === props.documentId && !metaQuery.isError.value
+        resource?.id === props.documentId && !metaQuery.isError.value && !me.isError.value
           ? resource.status !== "archived" && props.project.canEdit && !props.project.archived
           : null,
     };

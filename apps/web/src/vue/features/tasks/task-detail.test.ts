@@ -10,6 +10,7 @@ import { formatPersonName, t } from "@fvoci/i18n";
 import { collabUserOf } from "@/features/documents/collab-model";
 import { runArchiveWithBodyPersist } from "@/features/tasks/task-archive-persist";
 import { projectTasksPath } from "@/lib/href";
+import { ProblemError } from "@/lib/api";
 import {
   compiledComponent,
   evaluate,
@@ -310,6 +311,7 @@ async function detailGrants(options: {
     },
     "@/features/documents/collab-model": { collabUserOf },
     "@/lib/href": { projectTasksPath },
+    "@/lib/api": { ProblemError },
     "@/lib/queries": { meQuery: {} },
     "@tanstack/vue-query": { useQuery: () => ({ data: Vue.ref(null) }) },
     "../../collab/useCollabRoom": {
