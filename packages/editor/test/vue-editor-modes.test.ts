@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Editor } from "@tiptap/core";
+import { splitBlock } from "@tiptap/pm/commands";
 import {
   EditorState,
   NodeSelection,
@@ -14,7 +15,11 @@ import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "../src/collab-tiptap.ts";
 import { rawEditorPreflight, SourceModeSession } from "../src/source-mode.ts";
 import { createFvociExtensions } from "../src/tiptap-schema.ts";
-import { sanitizeEditorModePreview } from "../src/vue/editor-mode-preview.ts";
+import {
+  attachmentPreviewSpec,
+  embedPreviewSpec,
+  sanitizeEditorModePreview,
+} from "../src/vue/editor-mode-preview.ts";
 
 function liveEditor(ydoc: Y.Doc) {
   const editor = new Editor({
@@ -372,3 +377,227 @@ for (const kind of ["node", "mark"] as const) {
     }
   });
 }
+
+await test("actual ySync paragraph split retains hidden presentation and undo keeps a later peer edit of the surviving first block", () => {
+  const localDoc = tiptapJsonToYDoc({
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "split", textAlign: "right" },
+        content: [
+          {
+            type: "text",
+            text: "alpha beta",
+            marks: [{ type: "underline" }, { type: "textStyle", attrs: { color: "#112233" } }],
+          },
+        ],
+      },
+    ],
+  });
+  const peerDoc = new Y.Doc({ gc: false });
+  Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(localDoc));
+  const local = liveEditor(localDoc);
+  const peer = liveEditor(peerDoc);
+  const wire = Symbol("wire");
+  localDoc.on("update", (update, origin) => {
+    if (origin !== wire) Y.applyUpdate(peerDoc, update, wire);
+  });
+  peerDoc.on("update", (update, origin) => {
+    if (origin !== wire) Y.applyUpdate(localDoc, update, wire);
+  });
+  const source = new SourceModeSession(
+    localDoc,
+    () => 1,
+    () => true,
+  );
+  try {
+    const capture = source.capture(local.editor.state.doc);
+    const proposal = source.prepare(capture, "alpha\n\nbeta", local.editor.state);
+    assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+    assert.equal(source.apply(proposal, local.editor), true);
+    assert.equal(local.manager.undoStack.length, 1);
+    for (let i = 0; i < 2; i++) {
+      assert.equal(peer.editor.state.doc.child(i).attrs.textAlign, "right");
+      assert.equal(peer.editor.state.doc.child(i).child(0).marks.length, 2);
+    }
+    peer.host.dispatch(peer.editor.state.tr.insertText(" peer", 6));
+    assert.equal(local.editor.state.doc.child(0).textContent, "alpha peer");
+    local.manager.undo();
+    assert.equal(local.editor.state.doc.textContent, "alpha peer beta");
+    assert.equal(peer.editor.state.doc.textContent, "alpha peer beta");
+    assert.equal(local.editor.state.doc.child(0).attrs.id, "split");
+  } finally {
+    source.destroy();
+    local.close();
+    peer.close();
+    localDoc.destroy();
+    peerDoc.destroy();
+  }
+});
+
+await test("preview atom producer preserves actual file/name/caption and resolved entity/ref semantics instead of empty schema elements", () => {
+  const ydoc = tiptapJsonToYDoc(input);
+  const local = liveEditor(ydoc);
+  try {
+    const file = local.editor.schema.nodeFromJSON({
+      type: "attachment",
+      attrs: {
+        id: "10000000-0000-4000-8000-000000000009",
+        name: "%EC%9E%90%EB%A3%8C.pdf",
+        caption: "<script>literal caption</script>",
+        align: "right",
+      },
+    });
+    const card = JSON.stringify(
+      attachmentPreviewSpec(file, {
+        upload: () => Promise.reject(new Error("Preview must not upload")),
+        downloadUrl: (id) => `/api/v1/workspaces/ws/attachments/${id}/download`,
+      }),
+    );
+    assert.ok(card.includes("자료.pdf"));
+    assert.ok(card.includes("10000000-0000-4000-8000-000000000009/download"));
+    assert.ok(card.includes("<script>literal caption</script>"));
+    assert.ok(card.includes("right"));
+    const withoutBridge = JSON.stringify(attachmentPreviewSpec(file));
+    assert.equal(withoutBridge.includes('"href"'), false);
+    assert.ok(withoutBridge.includes("자료.pdf"));
+    const embedded = local.editor.schema.nodeFromJSON({
+      type: "embed",
+      attrs: { id: "reference-block", entity: "task", ref: "task-target" },
+    });
+    const resolved = JSON.stringify(
+      embedPreviewSpec(embedded, {
+        state: "resolved",
+        snapshot: { label: "한글 동료 업무", icon: "", status: "진행 중" },
+      }),
+    );
+    assert.ok(resolved.includes("한글 동료 업무"));
+    assert.ok(resolved.includes("task-target"));
+    assert.ok(resolved.includes("reference-block"));
+    assert.ok(resolved.includes("진행 중"));
+    assert.ok(
+      JSON.stringify(embedPreviewSpec(embedded, { state: "inaccessible" })).includes("task-target"),
+    );
+  } finally {
+    local.close();
+    ydoc.destroy();
+  }
+});
+
+await test("preview sanitizer keeps supported heading levels, callout kind, table widths and rich colors/alignment while rejecting active CSS", () => {
+  const html = sanitizeEditorModePreview(
+    '<h4>Level four</h4><h5>Level five</h5><h6>Level six</h6><aside class="afn-callout" data-callout="" data-kind="warning"><p>주의</p></aside><p style="text-align:right"><span style="color:#112233;background-color:#abcdef">색상</span></p><table style="width:300px"><colgroup><col style="width:120px"><col style="width:180px"></colgroup><tbody><tr><td colspan="2" rowspan="2" style="background:#abcdef"><p>셀</p></td></tr></tbody></table><span style="color:expression(evil());background:url(javascript:evil());text-align:evil()" onclick="evil()">bad</span>',
+  );
+  assert.ok(html.includes("<h4>Level four</h4>"));
+  assert.ok(html.includes("<h5>Level five</h5>"));
+  assert.ok(html.includes("<h6>Level six</h6>"));
+  assert.ok(html.includes("<aside") && html.includes('data-kind="warning"'));
+  assert.ok(html.includes("text-align:right"));
+  assert.ok(html.includes("color:#112233") && html.includes("background-color:#abcdef"));
+  assert.ok(
+    html.includes("<colgroup>") && html.includes("width:120px") && html.includes("width:180px"),
+  );
+  assert.ok(html.includes('colspan="2"') && html.includes('rowspan="2"'));
+  assert.ok(html.includes("background:#abcdef"));
+  assert.equal(html.includes("expression"), false);
+  assert.equal(html.includes("javascript:"), false);
+  assert.equal(html.includes("onclick"), false);
+});
+
+await test("source versus ordinary rich splitBlock peer-boundary undo control records exact CRDT ordering and anchors", () => {
+  for (const mode of ["source", "rich"]) {
+    const initial = {
+      type: "doc" as const,
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "split", textAlign: "right" },
+          content: [
+            {
+              type: "text",
+              text: "alpha beta",
+              marks: [{ type: "underline" }, { type: "textStyle", attrs: { color: "#112233" } }],
+            },
+          ],
+        },
+      ],
+    };
+    const localDoc = tiptapJsonToYDoc(initial),
+      peerDoc = new Y.Doc({ gc: false });
+    Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(localDoc));
+    const local = liveEditor(localDoc),
+      peer = liveEditor(peerDoc),
+      wire = Symbol("wire");
+    localDoc.on("update", (u, o) => {
+      if (o !== wire) Y.applyUpdate(peerDoc, u, wire);
+    });
+    peerDoc.on("update", (u, o) => {
+      if (o !== wire) Y.applyUpdate(localDoc, u, wire);
+    });
+    const source = new SourceModeSession(
+      localDoc,
+      () => 1,
+      () => true,
+    );
+    let steps: unknown[] = [];
+    if (mode === "source") {
+      const cap = source.capture(local.editor.state.doc);
+      const p = source.prepare(cap, "alpha\n\nbeta", local.editor.state);
+      assert.equal(p.status, "ready");
+      assert.ok(p.transaction);
+      steps = p.transaction.steps.map((s): unknown => s.toJSON());
+      source.apply(p, local.editor);
+    } else {
+      local.host.dispatch(
+        local.editor.state.tr.setSelection(TextSelection.create(local.editor.state.doc, 6, 7)),
+      );
+      local.manager.stopCapturing();
+      assert.equal(
+        splitBlock(local.editor.state, (tr) => {
+          steps = tr.steps.map((s): unknown => s.toJSON());
+          local.host.dispatch(tr);
+        }),
+        true,
+      );
+      local.manager.stopCapturing();
+    }
+    const afterSplit: unknown = local.editor.state.doc.toJSON();
+    peer.host.dispatch(peer.editor.state.tr.insertText(" peer", 6));
+    const text = localDoc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+    const child = text.get(0) as Y.XmlText;
+    const anchor = Y.createRelativePositionFromTypeIndex(child, 5, 0);
+    const afterPeer: unknown = local.editor.state.doc.toJSON();
+    local.manager.undo();
+    const afterUndo: unknown = local.editor.state.doc.toJSON();
+    const absolute = Y.createAbsolutePositionFromRelativePosition(anchor, localDoc);
+    console.log(
+      JSON.stringify({
+        mode,
+        steps,
+        afterSplit,
+        afterPeer,
+        afterUndo,
+        anchor,
+        absolute: absolute && {
+          index: absolute.index,
+          type: (absolute.type as Y.XmlText).toString() as unknown,
+        },
+        peerAfterUndo: peer.editor.state.doc.toJSON() as unknown,
+        rawLocal: yDocToTiptapJson(localDoc),
+        rawPeer: yDocToTiptapJson(peerDoc),
+        converged: Y.equalSnapshots(Y.snapshot(localDoc), Y.snapshot(peerDoc)),
+        undoItems: local.manager.undoStack.length,
+      }),
+    );
+    assert.equal(local.editor.state.doc.textContent.includes(" peer"), true);
+    assert.equal(local.editor.state.doc.textContent, peer.editor.state.doc.textContent);
+    assert.deepEqual(Y.encodeStateAsUpdate(localDoc), Y.encodeStateAsUpdate(peerDoc));
+    assert.equal(local.editor.state.doc.child(0).attrs.id, "split");
+    source.destroy();
+    local.close();
+    peer.close();
+    localDoc.destroy();
+    peerDoc.destroy();
+  }
+});

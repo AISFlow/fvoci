@@ -284,7 +284,7 @@ function mergeNode(raw: SourceNode, base: SourceNode, next: SourceNode, path: st
     const original = raw.content ?? [];
     const projected = base.content ?? [];
     if (raw.type === "paragraph" || raw.type === "heading" || raw.type === "detailsSummary") {
-      content = mergeInline(original, projected, next.content ?? [], path);
+      content = mergeInline(original, projected, next.content ?? [], path, raw);
     } else if (original.length !== projected.length)
       loss(
         raw,
@@ -330,6 +330,7 @@ function mergeInline(
   base: SourceNode[],
   next: SourceNode[],
   path: string,
+  owner: SourceNode,
 ): SourceNode[] {
   // Atom order and identity are never inferred from equal labels. For the
   // ordinary text case, use UTF-16 semantic offsets to retain hidden marks on
@@ -376,6 +377,37 @@ function mergeInline(
   };
   const rawSpans = spans(raw);
   const baseSpans = spans(base);
+  // A replacement across differing metadata omitted by Markdown has no
+  // uniquely recoverable formatting boundary. Never spread the first run's
+  // hidden marks over the replacement or silently erase another run's marks.
+  if (before !== after && prefix < before.length - suffix) {
+    const signatures: Record<string, unknown>[] = [];
+    for (const run of rawSpans) {
+      if (run.end <= prefix || run.start >= before.length - suffix) continue;
+      const projected = baseSpans.find((span) => span.start <= run.start && span.end > run.start);
+      const hidden: Record<string, unknown> = {};
+      for (const mark of run.node.marks ?? []) {
+        const represented = projected?.node.marks?.find((item) => item.type === mark.type);
+        if (!represented) hidden[mark.type] = mark.attrs ?? {};
+        else {
+          const fields = Object.fromEntries(
+            Object.entries(mark.attrs ?? {}).filter(
+              ([key, value]) => !sameValue(value, represented.attrs?.[key]),
+            ),
+          );
+          if (Object.keys(fields).length) hidden[mark.type] = fields;
+        }
+      }
+      signatures.push(hidden);
+    }
+    if (signatures.some((signature) => !sameValue(signature, signatures[0])))
+      loss(
+        owner,
+        path,
+        "marks",
+        `Changed text crosses distinct hidden formatting (${[...new Set(signatures.flatMap(Object.keys))].join(", ")}); its boundary cannot be inferred. Cancel or edit this range in rich mode.`,
+      );
+  }
   const output: SourceNode[] = [];
   for (const run of spans(next)) {
     let offset = run.start;
@@ -411,11 +443,72 @@ function mergeInline(
   return output;
 }
 
+/** Preserve full raw inline runs and presentation attrs on an unambiguous
+ * text split. Only the first surviving block owns the old block identity. */
+function splitTextBlock(
+  raw: SourceNode,
+  base: SourceNode,
+  next: SourceNode[],
+  path: string,
+): SourceNode[] | null {
+  if (
+    !["paragraph", "heading"].includes(raw.type) ||
+    next.some((node) => !["paragraph", "heading"].includes(node.type)) ||
+    [
+      ...(raw.content ?? []),
+      ...(base.content ?? []),
+      ...next.flatMap((node) => node.content ?? []),
+    ].some((node) => node.type !== "text")
+  )
+    return null;
+  const text = (nodes: SourceNode[] | undefined) =>
+    (nodes ?? []).map((node) => node.text ?? "").join("");
+  const before = text(raw.content);
+  if (before !== text(base.content)) return null;
+  let cursor = 0;
+  const ranges: { start: number; end: number }[] = [];
+  for (const node of next) {
+    const value = text(node.content);
+    const start = before.indexOf(value, cursor);
+    if (
+      !value ||
+      start < 0 ||
+      before.indexOf(value, start + 1) >= 0 ||
+      !/^\s*$/.test(before.slice(cursor, start))
+    )
+      return null;
+    cursor = start + value.length;
+    ranges.push({ start, end: cursor });
+  }
+  if (!/^\s*$/.test(before.slice(cursor))) return null;
+  return next.map((node, index) => {
+    const range = ranges[index];
+    if (!range) throw new Error("Missing split range");
+    let offset = 0;
+    const content: SourceNode[] = [];
+    for (const run of raw.content ?? []) {
+      const end = offset + (run.text?.length ?? 0);
+      const from = Math.max(offset, range.start);
+      const to = Math.min(end, range.end);
+      if (from < to) content.push({ ...run, text: run.text?.slice(from - offset, to - offset) });
+      offset = end;
+    }
+    const attrs = { ...raw.attrs };
+    if (index > 0) Reflect.deleteProperty(attrs, "id");
+    const clipped = { ...raw, attrs, content };
+    const projected = children(mdToTiptapJson(markdown(clipped)))[0];
+    if (!projected)
+      loss(raw, path, "content", "Split text is not preserved by the existing Markdown parser.");
+    return mergeNode(clipped, projected, node, path);
+  });
+}
+
 function mergeChildren(
   raw: SourceNode[],
   base: SourceNode[],
   next: SourceNode[],
   path: string,
+  offset = 0,
 ): SourceNode[] {
   let prefix = 0;
   while (prefix < base.length && prefix < next.length && sameValue(base[prefix], next[prefix]))
@@ -429,6 +522,28 @@ function mergeChildren(
     suffix++;
   const oldMiddle = base.slice(prefix, base.length - suffix);
   const newMiddle = next.slice(prefix, next.length - suffix);
+  if (oldMiddle.length === 1 && newMiddle.length > 1) {
+    const original = raw[prefix];
+    const projected = oldMiddle[0];
+    if (original && projected) {
+      const location = `${path}.content.${String(offset + prefix)}`;
+      const split = splitTextBlock(original, projected, newMiddle, location);
+      if (split) return [...raw.slice(0, prefix), ...split, ...raw.slice(raw.length - suffix)];
+      if (
+        !sameValue(original.content, projected.content) ||
+        Object.entries(original.attrs ?? {}).some(
+          ([key, value]) =>
+            key !== "id" && value != null && !sameValue(value, projected.attrs?.[key]),
+        )
+      )
+        loss(
+          original,
+          location,
+          "content/marks/attrs",
+          "Split text has ambiguous hidden formatting or presentation; Cancel or split in rich mode.",
+        );
+    }
+  }
   const middle = newMiddle.map((node, i) => {
     const exact = base
       .map((candidate, index) => (sameValue(candidate, node) ? index : -1))
@@ -439,12 +554,12 @@ function mergeChildren(
     const original = raw[prefix + i];
     const projected = oldMiddle[i];
     if (oldMiddle.length === newMiddle.length && original && projected)
-      return mergeNode(original, projected, node, `${path}.content.${String(prefix + i)}`);
+      return mergeNode(original, projected, node, `${path}.content.${String(offset + prefix + i)}`);
     if (oldMiddle.length === 1 && newMiddle.length > 1) {
       const firstRaw = raw[prefix];
       const firstBase = oldMiddle[0];
       if (i === 0 && firstRaw && firstBase)
-        return mergeNode(firstRaw, firstBase, node, `${path}.content.${String(prefix)}`);
+        return mergeNode(firstRaw, firstBase, node, `${path}.content.${String(offset + prefix)}`);
       return node;
     }
     if (
@@ -460,7 +575,7 @@ function mergeChildren(
         .slice(prefix, base.length - suffix)
         .every((item) => sameValue(item.content?.[0]?.marks, original.content?.[0]?.marks))
     )
-      return mergeNode(original, projected, node, `${path}.content.${String(prefix)}`);
+      return mergeNode(original, projected, node, `${path}.content.${String(offset + prefix)}`);
     // A pure insertion has no existing identity to guess; UniqueID allocates
     // only when its actual localized apply transaction reaches the editor.
     if (oldMiddle.length === 0) return node;
@@ -648,7 +763,7 @@ export class SourceModeSession {
           "content",
           "Markdown omitted or combined blocks in this range.",
         );
-      const merged = mergeChildren(raw, base, parsed, "doc");
+      const merged = mergeChildren(raw, base, parsed, "document", first);
       const identities = identityDiagnostics([
         ...capture.spans.slice(0, first).map((span) => span.node),
         // New nodes have no ID until the editor's existing UniqueID extension

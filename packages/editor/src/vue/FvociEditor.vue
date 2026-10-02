@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "@fvoci/i18n";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import { getSchema, type Editor, type MappablePosition } from "@tiptap/core";
 import {
@@ -18,6 +19,7 @@ import {
   computed,
   nextTick,
   onBeforeUnmount,
+  onMounted,
   provide,
   reactive,
   ref,
@@ -91,7 +93,19 @@ const props = defineProps<{
   waitForSave?: () => Promise<boolean>;
 }>();
 /** The live editor once it exists, and null when it is torn down. */
-const emit = defineEmits<{ ready: [editor: Editor | null]; "mode-change": [mode: EditorMode] }>();
+type SourceDraftState = Readonly<{
+  owner: object;
+  phase: "activate" | "change" | "retire";
+  scope: string | number | undefined;
+  dirty: boolean;
+  stale: boolean;
+  composing: boolean;
+}>;
+const emit = defineEmits<{
+  ready: [editor: Editor | null];
+  "mode-change": [mode: EditorMode];
+  "source-dirty": [state: SourceDraftState];
+}>();
 defineSlots<{
   toolbar?(props: { editor: Editor }): unknown;
   bubble?(props: { editor: Editor }): unknown;
@@ -106,10 +120,10 @@ const slots = useSlots();
 type EditorMode = "rich" | "block" | "markdown" | "preview";
 const mode = ref<EditorMode>("rich");
 const modes = [
-  { value: "rich", label: "글쓰기" },
-  { value: "block", label: "블록 배치" },
-  { value: "markdown", label: "Markdown" },
-  { value: "preview", label: "미리보기" },
+  { value: "rich", label: t("editor.mode.rich") },
+  { value: "block", label: t("editor.mode.block") },
+  { value: "markdown", label: t("editor.mode.markdown") },
+  { value: "preview", label: t("editor.mode.preview") },
 ] as const;
 const richVisible = computed(() => mode.value === "rich" || mode.value === "block");
 const sourceField = useTemplateRef<HTMLTextAreaElement>("sourceField");
@@ -118,8 +132,44 @@ const capture = shallowRef<SourceCapture | null>(null);
 const proposal = shallowRef<SourceProposal | null>(null);
 const draftDirty = ref(false);
 const sourceStale = ref(false);
+const draftOwner = markRaw({});
+let draftMounted = false;
+const sourceDraftState = computed<SourceDraftState>(() => ({
+  owner: draftOwner,
+  phase: "change",
+  scope: props.modeScope,
+  dirty: draftDirty.value,
+  stale: sourceStale.value,
+  composing: sourceComposing.value,
+}));
+onMounted(() => {
+  draftMounted = true;
+  emit("source-dirty", { ...sourceDraftState.value, phase: "activate" });
+});
+watch(
+  sourceDraftState,
+  (state) => {
+    if (draftMounted) emit("source-dirty", state);
+  },
+  { flush: "sync" },
+);
+function discardSourceDraft(): void {
+  if (sourceComposing.value) return;
+  if (editor.value) refreshSource();
+  else {
+    // Raw-unsupported retirement still permits discarding this transient text.
+    // It does not bind, coerce or replace the host's live fragment.
+    if (sourceField.value) sourceField.value.value = "";
+    capture.value = null;
+    proposal.value = null;
+    draftDirty.value = false;
+    sourceStale.value = false;
+    modeError.value = null;
+  }
+}
+defineExpose({ discardSourceDraft, sourceDraftState });
 const modeError = ref<string | null>(null);
-const preview = shallowRef<ReturnType<typeof editorModePreview> | null>(null);
+const preview = shallowRef<Awaited<ReturnType<typeof editorModePreview>> | null>(null);
 const activeBlockPos = ref(-1);
 let modeLifetime = 0;
 let scopeEpoch = 0;
@@ -143,6 +193,7 @@ function inspectRawBeforeBinding(): void {
   if (!current || current.isDestroyed) return;
   const issues = rawEditorPreflight(props.ydoc, current.schema);
   if (!issues.length) return;
+  previewAbort?.abort();
   rawIssues.value = issues;
   scopeEpoch++;
   modeLifetime++;
@@ -161,10 +212,28 @@ watch(
     () => props.provider,
     () => props.editable,
   ],
-  () => {
+  (next, previous) => {
+    previewAbort?.abort();
     scopeEpoch++;
     modeLifetime++;
     sourceStale.value = Boolean(capture.value);
+    if (next[1] !== previous[1] || next[2] !== previous[2] || next[3] !== previous[3]) {
+      // The host owns forced actor/room cleanup. If fixed-lifetime props change
+      // before unmount, retire this old binding and private transient content
+      // synchronously; a different actor must never inherit the prior draft.
+      if (sourceField.value) sourceField.value.value = "";
+      capture.value = null;
+      proposal.value = null;
+      draftDirty.value = false;
+      sourceStale.value = false;
+      preview.value = null;
+      const current = editor.value;
+      current?.destroy();
+      editor.value = undefined;
+      uploads.value = [];
+      anchors.clear();
+      emit("ready", null);
+    }
   },
   { flush: "sync" },
 );
@@ -194,6 +263,37 @@ function onSourceKeyDown(event: KeyboardEvent): void {
   if (event.isComposing || event.keyCode === 229) sourceComposing.value = true;
 }
 
+let previewAbort: AbortController | null = null;
+function refreshPreview(current: Editor): void {
+  previewAbort?.abort();
+  const controller = new AbortController();
+  previewAbort = controller;
+  preview.value = null;
+  const entry = sourceSession.capture(current.state.doc);
+  const lifetime = modeLifetime;
+  void editorModePreview(
+    current,
+    { attachmentBridge: props.attachmentBridge, entityResolver: props.entityResolver },
+    controller.signal,
+  ).then(
+    (html) => {
+      if (
+        controller.signal.aborted ||
+        current.isDestroyed ||
+        lifetime !== modeLifetime ||
+        mode.value !== "preview" ||
+        !sourceSession.isCurrent(entry)
+      )
+        return;
+      preview.value = html;
+    },
+    (error: unknown) => {
+      if (!controller.signal.aborted && lifetime === modeLifetime)
+        modeError.value = error instanceof Error ? error.message : t("editor.mode.copyFailed");
+    },
+  );
+}
+
 async function changeMode(next: EditorMode): Promise<void> {
   const current = editor.value;
   if (!current || sourceBlocked() || mode.value === next) return;
@@ -203,12 +303,16 @@ async function changeMode(next: EditorMode): Promise<void> {
     restoreEditorFocus = current.view.hasFocus();
   }
   const restore = !richVisible.value && (next === "rich" || next === "block");
+  previewAbort?.abort();
+  const lifetime = ++modeLifetime;
+  modeError.value = null;
   mode.value = next;
-  current.setEditable(props.editable && richVisible.value, false);
-  if (next === "preview") preview.value = editorModePreview(current);
+  // Visibility changes do not revoke editor authorization or notify node-view
+  // permission listeners: those can finalize their own transient rich drafts.
+  // Native source keys are kept outside rich controls by the existing guards.
+  if (next === "preview") refreshPreview(current);
   if (next === "markdown" && !capture.value) refreshSource();
   emit("mode-change", next);
-  const lifetime = ++modeLifetime;
   await nextTick();
   if (lifetime !== modeLifetime || current.isDestroyed) return;
   if (next === "markdown") sourceField.value?.focus();
@@ -263,11 +367,11 @@ async function copyLiveSource(): Promise<void> {
       !sourceSession.isCurrent(entry) ||
       current.isDestroyed
     )
-      throw new Error("저장 확인 중 문서가 변경되었습니다. 다시 복사해 주세요.");
+      throw new Error(t("editor.mode.copyStale"));
     await copyText(tiptapDocToMd(yDocToTiptapJson(props.ydoc)));
   } catch (error) {
     if (lifetime === modeLifetime)
-      modeError.value = error instanceof Error ? error.message : "복사하지 못했습니다.";
+      modeError.value = error instanceof Error ? error.message : t("editor.mode.copyFailed");
   }
 }
 
@@ -474,7 +578,7 @@ function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): 
 
 watch(
   () => props.editable,
-  (editable) => editor.value?.setEditable(editable && richVisible.value, false),
+  (editable) => editor.value?.setEditable(editable),
 );
 
 /* WHY: #571 — 열린 오버레이가 Escape 를 먹는다. 에디터까지 올라가면 selectAllEscape 가 함께 돈다. */
@@ -521,8 +625,7 @@ watch(editor, (current, _previous, onCleanup) => {
     activeBlockPos.value = keyboardBlockPos(current);
     if (bookmark && transaction.docChanged) bookmark = bookmark.map(transaction.mapping);
     if (capture.value && transaction.docChanged) sourceStale.value = true;
-    if (mode.value === "preview" && transaction.docChanged)
-      preview.value = editorModePreview(current);
+    if (mode.value === "preview" && transaction.docChanged) refreshPreview(current);
   };
   current.on("transaction", onTransaction);
   const onKeyDown = (event: KeyboardEvent) => {
@@ -552,7 +655,10 @@ watch(editor, (current, _previous, onCleanup) => {
 });
 
 onBeforeUnmount(() => {
+  draftMounted = false;
+  emit("source-dirty", { ...sourceDraftState.value, phase: "retire" });
   modeLifetime++;
+  previewAbort?.abort();
   sourceSession.destroy();
   emit("ready", null);
 });
@@ -572,7 +678,7 @@ function bubbleOwner(): HTMLElement {
 </script>
 
 <template>
-  <div v-if="editor" class="fvoci-mode-controls" role="group" aria-label="문서 편집 모드">
+  <div v-if="editor" class="fvoci-mode-controls" role="group" :aria-label="t('editor.mode.group')">
     <button
       v-for="item in modes"
       :key="item.value"
@@ -586,20 +692,20 @@ function bubbleOwner(): HTMLElement {
     >
   </div>
   <div v-show="richVisible"><slot v-if="editor" name="toolbar" :editor="editor" /></div>
-  <div v-if="mode === 'block'" class="fvoci-mode-controls" aria-label="블록 배치">
+  <div v-if="mode === 'block'" class="fvoci-mode-controls" :aria-label="t('editor.mode.block')">
     <button
       type="button"
       :disabled="!editable || activeBlockPos < 0"
       @mousedown.prevent
       @click="moveSelectedBlock(-1)"
-      >선택 블록 위로</button
+      >{{ t("editor.mode.moveUp") }}</button
     >
     <button
       type="button"
       :disabled="!editable || activeBlockPos < 0"
       @mousedown.prevent
       @click="moveSelectedBlock(1)"
-      >선택 블록 아래로</button
+      >{{ t("editor.mode.moveDown") }}</button
     >
   </div>
   <div
@@ -615,10 +721,7 @@ function bubbleOwner(): HTMLElement {
     @mousedown="onHostMouseDown"
   >
     <div v-if="rawIssues.length" role="alert" class="fvoci-mode-warning">
-      <p
-        >현재 편집기에서 표현할 수 없는 저장 데이터가 있습니다. 원본을 보존하기 위해 읽기 전용으로
-        열었습니다.</p
-      >
+      <p>{{ t("editor.mode.rawReadOnly") }}</p>
       <ul
         ><li v-for="(item, index) in rawIssues.slice(0, 20)" :key="index"
           >{{ item.path }} · {{ item.id ?? "ID 없음" }} · {{ item.field }}: {{ item.reason }}</li
@@ -631,10 +734,10 @@ function bubbleOwner(): HTMLElement {
     </Teleport>
     <div v-show="richVisible"><EditorContent :editor="editor" /></div>
     <div v-show="mode === 'markdown'" class="fvoci-source-panel">
-      <p>현재 문서에서 생성한 Markdown입니다. 편집 후 적용하면 같은 문서가 변경됩니다.</p>
+      <p>{{ t("editor.mode.generated") }}</p>
       <textarea
         ref="sourceField"
-        aria-label="Markdown 직접 편집"
+        :aria-label="t('editor.mode.sourceLabel')"
         :readonly="!editable || rawIssues.length > 0"
         spellcheck="false"
         @input="onSourceInput"
@@ -642,20 +745,15 @@ function bubbleOwner(): HTMLElement {
         @compositionstart="sourceComposing = true"
         @compositionend="sourceComposing = false"
       />
-      <p v-if="sourceStale" role="status"
-        >문서가 변경되었습니다. 초안을 취소하고 최신 내용을 다시 열어 주세요.</p
-      >
-      <p v-else-if="draftDirty" role="status">아직 적용하지 않은 초안입니다.</p>
+      <p v-if="sourceStale" role="status">{{ t("editor.mode.stale") }}</p>
+      <p v-else-if="draftDirty" role="status">{{ t("editor.mode.draft") }}</p>
       <div
         v-if="proposal && (proposal.status === 'loss' || proposal.status === 'invalid')"
         role="alert"
         tabindex="0"
         class="fvoci-mode-warning"
       >
-        <p
-          >이 범위는 Markdown으로 안전하게 적용할 수 없습니다. 글쓰기 또는 블록 모드에서 편집하거나
-          취소해 주세요.</p
-        >
+        <p>{{ t("editor.mode.loss") }}</p>
         <ul
           ><li v-for="(item, index) in proposal.diagnostics" :key="index"
             >{{ item.path }} · {{ item.id ?? "ID 없음" }} · {{ item.field }}: {{ item.reason }}</li
@@ -670,14 +768,19 @@ function bubbleOwner(): HTMLElement {
           @click="applySource"
           >적용</button
         >
-        <button type="button" :disabled="sourceComposing" @click="refreshSource"
-          >취소 · 최신 내용 열기</button
-        >
-        <button v-if="waitForSave" type="button" :disabled="sourceComposing" @click="copyLiveSource"
-          >저장된 현재 문서 복사</button
+        <button type="button" :disabled="sourceComposing" @click="refreshSource">{{
+          t("editor.mode.cancel")
+        }}</button>
+        <button
+          v-if="waitForSave"
+          type="button"
+          :disabled="sourceComposing"
+          @click="copyLiveSource"
+          >{{ t("editor.mode.copy") }}</button
         >
       </div>
     </div>
+    <p v-if="mode === 'preview' && !preview" role="status">{{ t("editor.embed.loading") }}</p>
     <SafeHtml
       v-if="preview"
       v-show="mode === 'preview'"
