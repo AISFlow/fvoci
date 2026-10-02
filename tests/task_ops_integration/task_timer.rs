@@ -27,6 +27,132 @@ mod task_timer {
     }
 
     #[tokio::test]
+    async fn timer_capability_reuses_time_entry_policy_and_preserves_legacy_reads() {
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, _actor, workspace) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let project = create_project(app.clone(), &cookie, workspace, "CAP", "private").await;
+        let viewer = add_workspace_user(&admin, workspace, "member", "timer-viewer").await;
+        add_project_member(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            viewer.user_id,
+            "viewer",
+        )
+        .await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Capability from existing policy"}),
+        )
+        .await;
+        let base = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}",
+            task["id"].as_str().unwrap()
+        );
+        let (status, entry) = json_request(app.clone(), "POST", &format!("{base}/time-entries"), Some(json!({"startedAt":"2026-09-30T10:00:00Z","endedAt":"2026-09-30T10:01:00Z","note":"Unmodified shared legacy history"})), Some(&cookie)).await;
+        assert!(status.is_success(), "{entry}");
+        let member_url = format!(
+            "/api/v1/workspaces/{workspace}/projects/{}/members/{}",
+            project["id"].as_str().unwrap(),
+            viewer.user_id
+        );
+        for (role, can_control) in [
+            ("viewer", false),
+            ("member", true),
+            ("viewer", false),
+            ("member", true),
+        ] {
+            let (status, changed) = json_request(
+                app.clone(),
+                "PATCH",
+                &member_url,
+                Some(json!({"role":role})),
+                Some(&cookie),
+            )
+            .await;
+            assert!(status.is_success(), "{changed}");
+            let (status, state) = json_request(
+                app.clone(),
+                "GET",
+                &format!("{base}/timer"),
+                None,
+                Some(&viewer.cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{state}");
+            assert_eq!(state["canControl"], can_control);
+            let (status, entries) = json_request(
+                app.clone(),
+                "GET",
+                &format!("{base}/time-entries"),
+                None,
+                Some(&viewer.cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{entries}");
+            assert_eq!(entries["canCreate"], can_control);
+            assert_eq!(entries["items"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                entries["items"][0]["note"],
+                "Unmodified shared legacy history"
+            );
+            assert_eq!(entries["items"][0]["durationSeconds"], 60);
+        }
+        let archive_url = format!(
+            "/api/v1/workspaces/{workspace}/projects/{}/archive",
+            project["id"].as_str().unwrap()
+        );
+        let (status, archived) =
+            json_request(app.clone(), "POST", &archive_url, None, Some(&cookie)).await;
+        assert!(status.is_success(), "{archived}");
+        let (status, state) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{base}/timer"),
+            None,
+            Some(&viewer.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{state}");
+        assert_eq!(state["canControl"], false);
+        let (status, entries) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{base}/time-entries"),
+            None,
+            Some(&viewer.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{entries}");
+        assert_eq!(entries["canCreate"], false);
+        assert_eq!(entries["items"][0]["durationSeconds"], 60);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.task_timer_commands")
+                .fetch_one(&admin)
+                .await
+                .unwrap(),
+            0,
+            "capability reads never create commands"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.task_timer_runs")
+                .fetch_one(&admin)
+                .await
+                .unwrap(),
+            0,
+            "capability reads never create runs"
+        );
+        admin.close().await;
+        drop(app);
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
     async fn timer_start_pause_fresh_client_resume_stop_commits_without_completing_task() {
         let harness = TestDb::bootstrap().await;
         let app_role = sqlx::postgres::PgPoolOptions::new()

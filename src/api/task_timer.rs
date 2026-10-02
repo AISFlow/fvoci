@@ -52,6 +52,8 @@ pub struct TaskTimerState {
     /// A different unfinished run, without its tenant, task id or title.
     pub busy_elsewhere: bool,
     pub legacy_open: bool,
+    /// Current existing time-entry Edit/archive capability, in this snapshot.
+    pub can_control: bool,
     pub actual_milliseconds: i64,
 }
 

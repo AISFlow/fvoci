@@ -27,6 +27,48 @@ const client = useQueryClient();
 const state = useQuery(() =>
   taskStopwatchQuery(actor.value, props.workspaceId, props.taskId, credential.value),
 );
+const revoked = ref(false);
+const denial = ref<ProblemError>();
+let revokedUpdate = 0;
+const visibleState = computed(() => (revoked.value ? undefined : state.data.value));
+const editable = computed(
+  () => !props.readOnly && !revoked.value && visibleState.value?.canControl === true,
+);
+function denied(err: unknown): err is ProblemError {
+  return err instanceof ProblemError && [401, 403, 404].includes(err.status);
+}
+async function retirePrivateState(err: ProblemError): Promise<void> {
+  if (revoked.value) return;
+  const key = taskStopwatchQuery(
+    actor.value,
+    props.workspaceId,
+    props.taskId,
+    credential.value,
+  ).queryKey;
+  revokedUpdate = state.dataUpdatedAt.value;
+  denial.value = err;
+  revoked.value = true;
+  note.value = "";
+  await client.cancelQueries({ queryKey: key, exact: true });
+  client.removeQueries({ queryKey: key, exact: true });
+}
+watch(
+  [() => state.error.value, () => state.dataUpdatedAt.value],
+  async () => {
+    const err = state.error.value;
+    if (denied(err)) {
+      await retirePrivateState(err);
+    } else if (
+      revoked.value &&
+      state.isSuccess.value &&
+      state.dataUpdatedAt.value > revokedUpdate
+    ) {
+      revoked.value = false;
+      denial.value = undefined;
+    }
+  },
+  { flush: "sync" },
+);
 const note = ref("");
 const error = ref<string | null>(null);
 const pending = ref(false);
@@ -44,13 +86,32 @@ type Capture = {
 };
 let command: Capture | undefined;
 watch(
-  [actor, () => props.workspaceId, () => props.taskId, credential, () => props.readOnly],
-  () => {
+  [actor, () => props.workspaceId, () => props.taskId, credential],
+  ([nextActor, nextWorkspace, nextTask], [previousActor, previousWorkspace, previousTask]) => {
+    if (
+      nextActor !== previousActor ||
+      nextWorkspace !== previousWorkspace ||
+      nextTask !== previousTask
+    )
+      note.value = "";
+    revoked.value = false;
+    denial.value = undefined;
     generation++;
     command = undefined;
     error.value = null;
     retryable.value = false;
     pending.value = false;
+  },
+  { flush: "sync" },
+);
+watch(
+  editable,
+  (canEdit) => {
+    generation++;
+    command = undefined;
+    retryable.value = false;
+    pending.value = false;
+    if (!canEdit) note.value = "";
   },
   { flush: "sync" },
 );
@@ -66,7 +127,7 @@ watch(
 );
 let ticker: ReturnType<typeof setInterval> | undefined;
 watch(
-  () => state.data.value?.run?.runningSince,
+  () => visibleState.value?.run?.runningSince,
   (anchor) => {
     if (ticker) clearInterval(ticker);
     ticker = undefined;
@@ -83,13 +144,13 @@ onScopeDispose(() => {
   generation++;
   if (ticker) clearInterval(ticker);
 });
-const run = computed(() => state.data.value?.run);
+const run = computed(() => visibleState.value?.run);
 const elapsed = computed(() =>
-  state.data.value
+  visibleState.value
     ? anchoredElapsed(
         run.value?.elapsedMilliseconds ?? 0,
         run.value?.runningSince,
-        state.data.value.serverNow,
+        visibleState.value.serverNow,
         receivedAt.value,
         tick.value,
       )
@@ -97,11 +158,11 @@ const elapsed = computed(() =>
 );
 const actual = computed(
   () =>
-    (state.data.value?.actualMilliseconds ?? 0) +
+    (visibleState.value?.actualMilliseconds ?? 0) +
     (run.value?.runningSince ? Math.max(0, elapsed.value - run.value.elapsedMilliseconds) : 0),
 );
 const disabled = computed(
-  () => props.readOnly || pending.value || !state.isSuccess.value || !actor.value,
+  () => !editable.value || pending.value || !state.isSuccess.value || !actor.value,
 );
 
 function current(capture: Capture): boolean {
@@ -116,7 +177,7 @@ function current(capture: Capture): boolean {
 }
 
 async function submit(capture: Capture): Promise<void> {
-  if (!current(capture) || props.readOnly || pending.value) return;
+  if (!current(capture) || !editable.value || pending.value) return;
   pending.value = true;
   retryable.value = false;
   error.value = null;
@@ -150,26 +211,7 @@ async function submit(capture: Capture): Promise<void> {
     }
     // 401/403/404 clear private timer display; network/503 keep the draft and
     // original request id for explicit replay. Session guard owns navigation.
-    if (err instanceof ProblemError && [401, 403, 404].includes(err.status)) {
-      await client.cancelQueries({
-        queryKey: taskStopwatchQuery(
-          capture.actor,
-          capture.workspace,
-          capture.task,
-          capture.credential,
-        ).queryKey,
-        exact: true,
-      });
-      client.removeQueries({
-        queryKey: taskStopwatchQuery(
-          capture.actor,
-          capture.workspace,
-          capture.task,
-          capture.credential,
-        ).queryKey,
-        exact: true,
-      });
-    }
+    if (denied(err)) await retirePrivateState(err);
   } finally {
     if (current(capture)) pending.value = false;
   }
@@ -206,29 +248,36 @@ async function retry(): Promise<void> {
   <section class="flex flex-col gap-2 py-2 text-sm" :data-testid="`task-stopwatch-${taskId}`">
     <div class="flex flex-wrap items-center gap-2">
       <h2 v-if="!compact" class="text-base font-medium">스톱워치</h2>
-      <output class="text-base tabular-nums" data-testid="timer-elapsed" aria-label="측정 시간">{{
-        stopwatchText(elapsed)
-      }}</output>
+      <output
+        v-if="visibleState"
+        class="text-base tabular-nums"
+        data-testid="timer-elapsed"
+        aria-label="측정 시간"
+        >{{ stopwatchText(elapsed) }}</output
+      >
       <span v-if="run" class="text-sm text-muted" data-testid="timer-state">{{
         run.status === "running" ? "측정 중" : "일시정지"
       }}</span>
-      <span class="text-sm text-muted" data-testid="timer-actual"
+      <span v-if="visibleState" class="text-sm text-muted" data-testid="timer-actual"
         >실제 {{ stopwatchText(actual) }}</span
       >
-      <span v-if="estimate != null" class="text-sm text-muted" data-testid="timer-estimate"
+      <span
+        v-if="visibleState && estimate != null"
+        class="text-sm text-muted"
+        data-testid="timer-estimate"
         >예상 {{ estimate }}</span
       >
     </div>
-    <p v-if="state.isError.value" role="alert" class="break-keep text-error">{{
-      loadErrorMessage(state.error.value)
+    <p v-if="revoked || state.isError.value" role="alert" class="break-keep text-error">{{
+      loadErrorMessage(denial ?? state.error.value)
     }}</p>
-    <p v-if="state.data.value?.legacyOpen" role="status" class="break-keep"
+    <p v-if="visibleState?.legacyOpen" role="status" class="break-keep"
       >기존 미종료 기록을 확인하고 종료 시각을 보정한 뒤 시작할 수 있습니다.</p
     >
-    <p v-else-if="state.data.value?.busyElsewhere" role="status" class="break-keep"
+    <p v-else-if="visibleState?.busyElsewhere" role="status" class="break-keep"
       >다른 작업을 측정하거나 일시정지하고 있습니다. 먼저 그 측정을 종료하세요.</p
     >
-    <label v-if="!compact && !readOnly" class="flex flex-col gap-1 text-sm"
+    <label v-if="!compact && editable" class="flex flex-col gap-1 text-sm"
       >측정 메모
       <textarea
         v-model="note"
@@ -244,7 +293,7 @@ async function retry(): Promise<void> {
         type="button"
         size="sm"
         data-testid="timer-start"
-        :disabled="disabled || state.data.value?.busyElsewhere || state.data.value?.legacyOpen"
+        :disabled="disabled || visibleState?.busyElsewhere || visibleState?.legacyOpen"
         @click="start('start')"
         >시작</UButton
       >

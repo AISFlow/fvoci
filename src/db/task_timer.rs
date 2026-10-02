@@ -151,14 +151,15 @@ async fn state_in(
     workspace: Uuid,
     task: Uuid,
     actor: Uuid,
+    can_control: bool,
 ) -> Result<TaskTimerState, sqlx::Error> {
     let active = unfinished(tx, actor).await?;
     let busy_elsewhere = active
         .as_ref()
         .is_some_and(|r| r.workspace_id != workspace || r.task_id != task);
     let run = active.filter(|r| r.workspace_id == workspace && r.task_id == task);
-    // Existing time-entry history remains the shared task total. Own timer
-    // fractions/cleanup intervals are added once, never double-count projections.
+    // Personal effective closed intervals include canonical fractions/cleanup
+    // once and exclude duplicate projections and other actors' history.
     let actual: i64 = sqlx::query_scalar(&format!("WITH records AS ({RECORDS_SQL}) SELECT COALESCE(sum(EXTRACT(EPOCH FROM(date_trunc('milliseconds',ended_at)-date_trunc('milliseconds',started_at)))*1000),0)::bigint FROM records WHERE ended_at IS NOT NULL"))
         .bind(workspace).bind(task).bind(actor).fetch_one(&mut **tx).await?;
     Ok(TaskTimerState {
@@ -166,6 +167,7 @@ async fn state_in(
         run,
         busy_elsewhere,
         legacy_open: legacy_open(tx, actor).await?,
+        can_control,
         actual_milliseconds: actual,
     })
 }
@@ -180,13 +182,15 @@ pub async fn task_state(
     let mut tx = begin_read(pool).await?;
     set_tenant(&mut tx, workspace).await?;
     set_self_user(&mut tx, actor).await?;
-    if !session_is_live(&mut tx, actor, session).await? {
-        return Ok(Err(TimerDbError::Project(ProjectDbError::Forbidden)));
-    }
-    if !can_view(&mut tx, workspace, task, actor).await? {
-        return Ok(Err(TimerDbError::Project(ProjectDbError::NotFound)));
-    }
-    let state = state_in(&mut tx, workspace, task, actor).await?;
+    let can_control = match crate::db::task_ops::time_entry_capability_in(
+        &mut tx, workspace, task, actor, session,
+    )
+    .await?
+    {
+        Ok(value) => value,
+        Err(err) => return Ok(Err(TimerDbError::Project(err))),
+    };
+    let state = state_in(&mut tx, workspace, task, actor, can_control).await?;
     tx.commit().await?;
     Ok(Ok(state))
 }

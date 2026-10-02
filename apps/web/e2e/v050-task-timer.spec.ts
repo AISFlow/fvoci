@@ -20,6 +20,7 @@ const timerShape = z.object({
     })
     .nullable(),
   actualMilliseconds: z.number(),
+  canControl: z.boolean(),
 });
 
 // Test-only invoker witness inside this group's isolated database. No product
@@ -400,8 +401,30 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
     );
     expect(assign.ok(), await assign.text()).toBe(true);
     const timerUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${task.id}/timer`;
+    const sentinelProjectResponse = await page.request.post(
+      `/api/v1/workspaces/${fixture.workspaceId}/projects`,
+      { data: { key: "SAFE", name: "계속 볼 수 있는 작업", visibility: "workspace" } },
+    );
+    expect(sentinelProjectResponse.status(), await sentinelProjectResponse.text()).toBe(201);
+    const sentinelProject = z
+      .object({ id: z.string() })
+      .parse(await sentinelProjectResponse.json());
+    const sentinelResponse = await page.request.post(
+      `/api/v1/workspaces/${fixture.workspaceId}/projects/${sentinelProject.id}/tasks`,
+      { data: { title: "권한 회수와 무관한 내 작업" } },
+    );
+    expect(sentinelResponse.status(), await sentinelResponse.text()).toBe(201);
+    const sentinelTask = taskShape.parse(await sentinelResponse.json());
+    const sentinelAssign = await page.request.patch(
+      `/api/v1/workspaces/${fixture.workspaceId}/tasks/${sentinelTask.id}`,
+      { data: { assigneeIds: [me.userId] } },
+    );
+    expect(sentinelAssign.ok(), await sentinelAssign.text()).toBe(true);
     await editor.goto("/w/w5timer/my-tasks");
     const mounted = editor.getByTestId(`task-stopwatch-${task.id}`);
+    const sentinel = editor.getByTestId(`task-stopwatch-${sentinelTask.id}`);
+    await expect(sentinel.getByTestId("timer-actual")).toBeVisible();
+    const sentinelActual = await sentinel.getByTestId("timer-actual").innerText();
     await expect(mounted.getByTestId("timer-start")).toBeEnabled();
     await mounted.getByTestId("timer-start").click();
     await expect(mounted.getByTestId("timer-state")).toHaveText("측정 중");
@@ -438,6 +461,23 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
     await expect(mounted.getByRole("alert")).toBeVisible();
     await expect(mounted.getByTestId("timer-state")).toHaveText("측정 중");
     await expect(mounted.getByTestId("timer-actual")).toBeVisible();
+    const sentinelTimerUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${sentinelTask.id}/timer`;
+    const sentinelUnavailable = editor.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === sentinelTimerUrl &&
+        response.request().method() === "GET" &&
+        response.status() === 503,
+    );
+    await editor.route(`**${sentinelTimerUrl}`, async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      await route.fulfill({
+        status: 503,
+        contentType: "application/problem+json",
+        body: JSON.stringify({ type: "about:blank", title: "다른 작업 연결 실패", status: 503 }),
+      });
+    });
+    await sentinelUnavailable;
+    await expect(sentinel.getByTestId("timer-actual")).toHaveText(sentinelActual);
     // Only the unrelated list transport is held to keep the original consumer
     // mounted. The timer denial below comes from real Rust/current project ACL.
     await editor.route(
@@ -475,6 +515,9 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
     await expect(mounted.getByTestId("timer-actual")).toHaveCount(0);
     await expect(mounted.getByTestId("timer-elapsed")).toHaveCount(0);
     await expect(mounted.getByTestId("timer-start")).toBeDisabled();
+    await expect(sentinel.getByTestId("timer-actual")).toHaveText(sentinelActual);
+    await expect(sentinel.getByTestId("timer-elapsed")).toBeVisible();
+    expect((await editor.request.get(sentinelTimerUrl)).status()).toBe(200);
     const actualDenied = await editor.request.get(timerUrl);
     expect(actualDenied.status()).toBe(404);
     const membership = await editor.request.get("/api/v1/me/workspaces");
@@ -524,28 +567,49 @@ test("MyTasks timer controls follow actual View Edit archive and demotion capabi
     const timer = viewer.getByTestId(`task-stopwatch-${task.id}`);
     await expect(timer).toBeVisible();
     await expect(timer.getByTestId("timer-start")).toBeDisabled();
+    const timerUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${task.id}/timer`;
+    const nextControl = (expected: boolean) =>
+      viewer.waitForResponse(async (response) => {
+        if (
+          new URL(response.url()).pathname !== timerUrl ||
+          response.request().method() !== "GET" ||
+          response.status() !== 200
+        )
+          return false;
+        return (
+          z.object({ canControl: z.boolean() }).parse(await response.json()).canControl === expected
+        );
+      });
+    const promotedControl = nextControl(true);
     const promote = await page.request.patch(`${membersUrl}/${me.userId}`, {
       data: { role: "member" },
     });
     expect(promote.ok(), await promote.text()).toBe(true);
     expect(await capability()).toBe(true);
+    await promotedControl;
     await expect(timer.getByTestId("timer-start")).toBeEnabled();
+    const demotedControl = nextControl(false);
     const demote = await page.request.patch(`${membersUrl}/${me.userId}`, {
       data: { role: "viewer" },
     });
     expect(demote.ok(), await demote.text()).toBe(true);
     expect(await capability()).toBe(false);
+    await demotedControl;
     await expect(timer.getByTestId("timer-start")).toBeDisabled();
+    const restoredControl = nextControl(true);
     const again = await page.request.patch(`${membersUrl}/${me.userId}`, {
       data: { role: "member" },
     });
     expect(again.ok(), await again.text()).toBe(true);
+    await restoredControl;
     await expect(timer.getByTestId("timer-start")).toBeEnabled();
+    const archivedControl = nextControl(false);
     const archive = await page.request.post(
       `/api/v1/workspaces/${fixture.workspaceId}/projects/${fixture.project.id}/archive`,
     );
     expect(archive.ok(), await archive.text()).toBe(true);
     expect(await capability()).toBe(false);
+    await archivedControl;
     await expect(timer.getByTestId("timer-start")).toBeDisabled();
   } finally {
     await context.close();

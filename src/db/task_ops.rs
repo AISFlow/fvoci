@@ -196,13 +196,30 @@ pub async fn list_time_entries(
     )
     .await?;
     tx.commit().await?;
-    let can_create = task.permission.at_least(ProjectPermission::Edit)
+    let can_create = time_entry_can_create(&task);
+    Ok(Ok(TimeEntryList { items, can_create }))
+}
+
+fn time_entry_can_create(task: &ViewableTask) -> bool {
+    task.permission.at_least(ProjectPermission::Edit)
         && task.project.status != "archived"
-        && task.archived_at.is_none();
-    Ok(Ok(TimeEntryList {
-        items,
-        can_create,
-    }))
+        && task.archived_at.is_none()
+}
+
+/// Presentation capability from the existing time-entry read gate, in the
+/// caller's current tenant/actor/session read snapshot. Writers still recheck.
+pub(crate) async fn time_entry_capability_in(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<bool, ProjectDbError>, sqlx::Error> {
+    Ok(
+        viewable_task(tx, workspace_id, actor_user_id, session_id, task_id)
+            .await?
+            .map(|task| time_entry_can_create(&task)),
+    )
 }
 
 pub async fn create_time_entry(
