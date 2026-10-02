@@ -6,7 +6,7 @@ import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { Editor } from "@tiptap/core";
 import "@tiptap/extension-table";
 import type * as Y from "yjs";
-import { login } from "./helpers";
+import { flowSchemas, login, readJson } from "./helpers";
 import {
   admin,
   blockAt,
@@ -1886,3 +1886,243 @@ test("actual socket disconnect during native Math IME keeps the same connected f
     await cdp.detach();
   }
 });
+
+test("fresh real server readonly-authenticated join recovers write authority after actual metadata grant and matched save on the same Y.Doc", async ({
+  page,
+  browser,
+  baseURL,
+}, testInfo) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "실제 readonly 인증에서 쓰기 복구", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "real-readonly-grant-body" },
+          content: [{ type: "text", text: "권한 복구 전" }],
+        },
+      ],
+    },
+  });
+  expect(
+    (
+      await page.request.patch(`/api/v1/workspaces/${ws}/documents/${doc.id}`, {
+        data: { status: "archived" },
+      })
+    ).status(),
+  ).toBe(200);
+  const before = await savedBody(page.request, ws, doc.id);
+  const reader = await newSignedInPage(browser, baseURL, admin);
+  try {
+    await openDoc(reader.page, doc.path);
+    await recordIdentity(reader.page);
+    await expect(editorOf(reader.page)).toHaveAttribute("contenteditable", "false");
+    expect(
+      await editorOf(reader.page).evaluate((root) => {
+        const editor = (root as EditorElement).editor;
+        const options = editor.extensionManager.extensions.find(
+          (item) => item.name === "collaborationCaret",
+        )?.options as Record<string, unknown> | undefined;
+        const provider = options?.provider as HocuspocusProvider;
+        return { authenticated: provider.isAuthenticated, scope: provider.authorizedScope };
+      }),
+    ).toEqual({ authenticated: true, scope: "readonly" });
+    await editorOf(reader.page).evaluate((root) => {
+      (window as Window & { w3RealGrant?: Witness }).w3RealGrant = (
+        root as EditorElement
+      ).w3Witness;
+    });
+    const originalClientId = await editorOf(reader.page).evaluate(
+      (root) => (root as EditorElement).w3Witness?.doc.clientID,
+    );
+    await testInfo.attach("w3-real-readonly-join.json", {
+      body: JSON.stringify(await readLiveRuntime(reader.page)),
+      contentType: "application/json",
+    });
+    for (const mode of ["markdown", "preview", "block", "rich"] as const)
+      await selectMode(reader.page, mode);
+    await expectIdentity(reader.page, 0);
+    expect(
+      (
+        await page.request.patch(`/api/v1/workspaces/${ws}/documents/${doc.id}`, {
+          data: { status: "draft" },
+        })
+      ).status(),
+    ).toBe(200);
+    await refetchActualQuery(reader.page, ["document"]);
+    try {
+      await expect(editorOf(reader.page)).toHaveAttribute("contenteditable", "true");
+    } finally {
+      await testInfo.attach("w3-real-readonly-grant.json", {
+        body: JSON.stringify(await readLiveRuntime(reader.page)),
+        contentType: "application/json",
+      });
+    }
+    expect(
+      await editorOf(reader.page).evaluate((root) => {
+        const editor = (root as EditorElement).editor;
+        const options = editor.extensionManager.extensions.find(
+          (item) => item.name === "collaboration",
+        )?.options as Record<string, unknown> | undefined;
+        const ydoc = options?.document as Y.Doc;
+        return ydoc === (window as Window & { w3RealGrant?: Witness }).w3RealGrant?.doc;
+      }),
+    ).toBe(true);
+    await expectIdentity(reader.page, 0);
+    expect(
+      await editorOf(reader.page).evaluate((root) => {
+        const witness = (root as EditorElement).w3Witness;
+        const provider = witness?.provider as HocuspocusProvider;
+        return {
+          clientId: witness?.doc.clientID,
+          authenticated: provider.isAuthenticated,
+          scope: provider.authorizedScope,
+        };
+      }),
+    ).toEqual({ clientId: originalClientId, authenticated: true, scope: "read-write" });
+    await selectMode(reader.page, "markdown");
+    await reader.page
+      .getByRole("textbox", { name: "Markdown 직접 편집" })
+      .fill("실제 쓰기 권한으로 한글 수정");
+    await reader.page.getByRole("button", { name: "적용", exact: true }).click();
+    await selectMode(reader.page, "rich");
+    await expectBlocks(reader.page, ["실제 쓰기 권한으로 한글 수정"]);
+    await save(reader.page);
+    const after = await savedBody(reader.page.request, ws, doc.id);
+    expect(after.content?.[0]?.attrs?.id).toBe(before.content?.[0]?.attrs?.id);
+    expect(after.content?.[0]?.content).toEqual([
+      { type: "text", text: "실제 쓰기 권한으로 한글 수정" },
+    ]);
+    const newest = await newSignedInPage(browser, baseURL, admin);
+    try {
+      await openDoc(newest.page, doc.path);
+      expect(await savedBody(newest.page.request, ws, doc.id)).toEqual(after);
+      await expectBlocks(newest.page, ["실제 쓰기 권한으로 한글 수정"]);
+    } finally {
+      await newest.context.close();
+    }
+  } finally {
+    await reader.context.close();
+  }
+});
+
+for (const kind of ["project", "task"] as const) {
+  test(`${kind} host copies actual newest marked body only after its own genuine readonly HTTP response and preserves live authority`, async ({
+    page,
+    browser,
+    baseURL,
+  }, testInfo) => {
+    await login(page, admin.email, admin.password);
+    const ws = await workspaceId(page.request);
+    const key = kind === "project" ? "WC3" : "TC3";
+    const projectResponse = await page.request.post(`/api/v1/workspaces/${ws}/projects`, {
+      data: { key, name: `${kind} 최신 본문 검토`, visibility: "private" },
+    });
+    expect(projectResponse.status()).toBe(201);
+    const project = await readJson(projectResponse, flowSchemas.project);
+    const created = await page.request.post(
+      `/api/v1/workspaces/${ws}/projects/${project.id}/${kind === "project" ? "documents" : "tasks"}`,
+      {
+        data:
+          kind === "project"
+            ? { parentId: project.rootDocumentId, title: "프로젝트 본문" }
+            : { title: "태스크 본문" },
+      },
+    );
+    expect(created.status()).toBe(201);
+    const resource = await readJson(
+      created,
+      kind === "project" ? flowSchemas.createdDocument : flowSchemas.numbered,
+    );
+    const path =
+      kind === "project"
+        ? (resource as { displayId?: unknown }).displayId
+        : `${key}-${String(resource.number)}`;
+    if (typeof path !== "string") throw new Error("Missing actual resource display path");
+    const metadataUrl =
+      kind === "project"
+        ? `/api/v1/workspaces/${ws}/projects/${project.id}/documents/${resource.id}`
+        : `/api/v1/workspaces/${ws}/tasks/${resource.id}`;
+    const bodyUrl = kind === "project" ? `${metadataUrl}/body` : metadataUrl;
+    await openDoc(page, `/w/${admin.workspaceSlug}/${path}`);
+    await editorOf(page).click();
+    await page.keyboard.press("Control+b");
+    await page.keyboard.type(`${kind} 최신 한글 🧑‍💻`);
+    const host = kind === "task" ? page.getByTestId("task-body") : page.locator("article").first();
+    await host.getByRole("button", { name: "저장", exact: true }).click();
+    await expect(host.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15000 });
+    const beforeResponse = await page.request.get(bodyUrl);
+    expect(beforeResponse.status()).toBe(200);
+    const before = await readJson(beforeResponse, flowSchemas.body);
+    expect(
+      (
+        await page.request.patch(metadataUrl, {
+          data: kind === "project" ? { status: "archived" } : { archived: true },
+        })
+      ).status(),
+    ).toBe(200);
+    const reader = await newSignedInPage(browser, baseURL, admin, {
+      permissions: ["clipboard-read", "clipboard-write"],
+    });
+    let received = false;
+    let release: () => void = () => {};
+    const held = new Promise<void>((done) => {
+      release = done;
+    });
+    let actualBody: unknown;
+    try {
+      await openDoc(reader.page, `/w/${admin.workspaceSlug}/${path}`);
+      await recordIdentity(reader.page);
+      await expect(editorOf(reader.page)).toHaveAttribute("contenteditable", "false");
+      await reader.page.route(`**${bodyUrl}`, async (route) => {
+        const response = await route.fetch();
+        expect(response.status()).toBe(200);
+        actualBody = (await response.json()) as unknown;
+        received = true;
+        await held;
+        await route.fulfill({ response });
+      });
+      await selectMode(reader.page, "markdown");
+      await reader.page.evaluate(() => navigator.clipboard.writeText("host readonly sentinel"));
+      await reader.page.getByRole("button", { name: "저장된 현재 문서 복사" }).click();
+      await expect.poll(() => received).toBe(true);
+      expect(actualBody).toMatchObject({ contentJson: before.contentJson });
+      expect(await reader.page.evaluate(() => navigator.clipboard.readText())).toBe(
+        "host readonly sentinel",
+      );
+      release();
+      try {
+        // Full-document export contract: md.ts appends exactly one terminal LF.
+        await expect
+          .poll(() => reader.page.evaluate(() => navigator.clipboard.readText()))
+          .toBe(`**${kind} 최신 한글 🧑‍💻**\n`);
+      } finally {
+        await testInfo.attach(`w3-${kind}-readonly-live.json`, {
+          body: JSON.stringify({
+            before: before.contentJson,
+            actualBody,
+            live: await readLiveRuntime(reader.page),
+          }),
+          contentType: "application/json",
+        });
+      }
+      await selectMode(reader.page, "preview");
+      await expect(reader.page.locator(".fvoci-mode-preview")).toContainText(
+        `${kind} 최신 한글 🧑‍💻`,
+      );
+      await selectMode(reader.page, "rich");
+      await expectIdentity(reader.page, 0);
+      const afterResponse = await reader.page.request.get(bodyUrl);
+      expect(afterResponse.status()).toBe(200);
+      expect((await readJson(afterResponse, flowSchemas.body)).contentJson).toEqual(
+        before.contentJson,
+      );
+    } finally {
+      release();
+      await reader.page.unroute(`**${bodyUrl}`);
+      await reader.context.close();
+    }
+  });
+}
