@@ -203,18 +203,17 @@ async function observeTemplateSelection(page: Page): Promise<void> {
         const retiredEvent =
           eventBindingGeneration !== undefined && eventBindingGeneration !== bindingGeneration;
         if (!current || !root) {
-          record(
-            {
-              at,
-              stage,
-              owner,
-              bindingGeneration,
-              eventBindingGeneration,
-              retiredEvent,
-              unavailable: mounted?.isDestroyed ? "destroyed-editor" : "missing-editor",
-            },
-            retain || ownerChanged,
-          );
+          const frame = {
+            at,
+            stage,
+            owner,
+            bindingGeneration,
+            eventBindingGeneration,
+            retiredEvent,
+            unavailable: mounted?.isDestroyed ? "destroyed-editor" : "missing-editor",
+          };
+          if (retiredEvent && firstRetiredEvent === undefined) firstRetiredEvent = frame;
+          record(frame, retain || ownerChanged);
           return;
         }
         if (observedUpdate && observedUpdate.doc === ydoc && !retiredEvent) {

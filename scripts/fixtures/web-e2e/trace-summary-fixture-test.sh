@@ -174,6 +174,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const root = process.argv[2];
+const work = process.argv[3];
 const ts = require(root + "/node_modules/typescript");
 const Y = require(root + "/node_modules/yjs");
 const text = fs.readFileSync(root + "/apps/web/e2e/editor-template-chrome-flow.spec.ts", "utf8");
@@ -231,11 +232,11 @@ const retiredAuthenticated = [...providerA.listeners.get("authenticated")][0];
 mounted = rootB;
 observer.checkpoint("ShiftHome:original-return");
 assert.equal(rootA.editor.count(), 0); assert.equal(providerA.count(), 0);
-retiredAuthenticated();
 docA.getMap("fixture").set("retired", 2);
 docB.getMap("fixture").set("one", 1);
 mounted = undefined;
 observer.checkpoint("bubble:original-visible");
+retiredAuthenticated();
 assert.equal(rootB.editor.count(), 0); assert.equal(providerB.count(), 0);
 docB.getMap("fixture").set("during-gap", 2);
 mounted = rootB;
@@ -246,6 +247,7 @@ for (let i = 0; i < 600; i++) {
 }
 rootB.editor.isDestroyed = true;
 observer.checkpoint("Cancel:original-native-text");
+retiredAuthenticated();
 const result = observer.stop();
 const checkpoint = stage => result.actionBoundaries.find(frame => frame.stage === stage);
 const first = checkpoint("openDoc:original"), second = checkpoint("ShiftHome:original-return");
@@ -255,8 +257,13 @@ assert.equal(second.auth.authenticated, false); assert.equal(second.auth.scope, 
 assert.equal(second.auth.status, "connecting"); assert.equal(second.generationUpdates, 0);
 assert.equal(second.bindingGeneration, 2);
 const retired = result.firstRetiredEvent;
-assert.equal(retired.eventBindingGeneration, 1); assert.equal(retired.bindingGeneration, 2);
-assert.equal(retired.clientID, docB.clientID); assert.equal(retired.auth.authenticated, false);
+assert.ok(retired, "First retired callback during missing-editor gap must survive overflow");
+assert.equal(retired.eventBindingGeneration, 1); assert.equal(retired.bindingGeneration, 3);
+assert.equal(retired.unavailable, "missing-editor"); assert.equal(retired.retiredEvent, true);
+assert.equal(retired.clientID, undefined); assert.equal(retired.auth, undefined); assert.equal(retired.pm, undefined);
+const destroyedRetired = result.critical.find(frame => frame.retiredEvent && frame.unavailable === "destroyed-editor");
+assert.ok(destroyedRetired); assert.equal(destroyedRetired.eventBindingGeneration, 1);
+assert.equal(destroyedRetired.bindingGeneration, 5); assert.equal(destroyedRetired.auth, undefined);
 assert.equal(checkpoint("bubble:original-visible").unavailable, "missing-editor");
 assert.equal(checkpoint("popup:original-open-focus").bindingGeneration, 4);
 assert.equal(checkpoint("popup:original-open-focus").generationUpdates, 0);
@@ -281,8 +288,31 @@ retiredAuthenticated();
 assert.equal(JSON.stringify(result), stoppedSnapshot);
 assert.equal(rootA.editor.count(), 0); assert.equal(providerA.count(), 0);
 assert.equal(rootB.editor.count(), 0); assert.equal(providerB.count(), 0);
+const child = require("node:child_process");
+const jsonPath = work + "/observer-gap.json", zipPath = work + "/observer-gap.zip";
+fs.writeFileSync(jsonPath, JSON.stringify(result));
+child.execFileSync("python3", ["-c", `
+import json,sys,zipfile
+member="attachments/"+"c"*40
+with zipfile.ZipFile(sys.argv[2],"w") as archive:
+ archive.writestr("test.trace",json.dumps({"type":"after","attachments":[{"name":"w3-template-native-selection-observation.json","contentType":"application/json","file":member}]}))
+ archive.writestr(member,open(sys.argv[1],"rb").read())
+`, jsonPath, zipPath]);
+const summary = child.execFileSync("python3", [root + "/scripts/web-e2e-trace-summary.py", zipPath], { encoding: "utf8" });
+const prefix = "w3-template-diagnostic ";
+const digest = JSON.parse(summary.split("\n").find(line => line.startsWith(prefix)).slice(prefix.length));
+assert.equal(digest.available, true);
+assert.equal(digest.firstRetiredEvent.unavailable, "missing-editor");
+assert.equal(digest.firstRetiredEvent.eventBindingGeneration, 1);
+assert.equal(digest.firstRetiredEvent.bindingGeneration, 3);
+assert.equal(digest.firstRetiredEvent.retiredEvent, true);
+assert.deepEqual(digest.firstRetiredEvent.auth, { authenticated: null, synced: null, scope: "unknown", status: "unknown" });
+assert.deepEqual(digest.firstRetiredEvent.owner, [null,null,null,null,null,null,null]);
+assert.equal(digest.counts.critical.unknown, false);
+assert.ok(digest.counts.critical.dropped > 256);
+assert.ok(!summary.includes("한글과") && !summary.includes("😀") && !summary.includes("pmDocument"));
 docA.destroy(); docB.destroy();
 console.log("template observer pure fixture: remount/current-owner, gap/destroyed, scoped counters and cleanup PASS");
 JS
 
-bun "$WORK/observer-fixture.cjs" "$ROOT"
+bun "$WORK/observer-fixture.cjs" "$ROOT" "$WORK"
