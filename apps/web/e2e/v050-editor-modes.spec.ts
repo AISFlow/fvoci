@@ -932,7 +932,9 @@ test("actual preview producer and SafeHtml sink keep rich heading, colors, table
   await expect(preview.locator("figcaption")).toHaveText("첨부 설명");
   await expect(preview.locator(".afn-attachment")).toHaveAttribute(
     "href",
-    new RegExp(`/api/v1/workspaces/${ws}/attachments/10000000-0000-4000-8000-000000000009/download`),
+    new RegExp(
+      `/api/v1/workspaces/${ws}/attachments/10000000-0000-4000-8000-000000000009/download`,
+    ),
   );
   await expect(preview.locator(".afn-embed-ref")).toHaveText("참조 대상 🧑‍💻");
   await expect(preview.locator(".afn-embed-target")).toHaveText(target.id);
