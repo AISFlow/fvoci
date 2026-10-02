@@ -258,3 +258,111 @@ test("composition/keyCode229, narrow reflow and enlarged CJK source retain input
   }
   await expectIdentity(page, 0);
 });
+
+test("late older-schema peer data retires only the editor, preserving the same live raw document and supported edit through save/re-entry", async ({
+  browser,
+  baseURL,
+  page,
+}) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "미래 데이터 보존", {
+    json: {
+      type: "doc",
+      content: [
+        { type: "paragraph", attrs: { id: "p" }, content: [{ type: "text", text: "원본" }] },
+        { type: "paragraph", attrs: { id: "other" }, content: [{ type: "text", text: "동료" }] },
+      ],
+    },
+  });
+  const peer = await newSignedInPage(browser, baseURL, admin);
+  type RawWitness = { doc: Y.Doc; provider: unknown; repairs: number };
+  type RawWindow = Window & { w3RawWitness?: RawWitness };
+  try {
+    await openDoc(page, doc.path);
+    await openDoc(peer.page, doc.path);
+    for (const target of [page, peer.page]) {
+      await editorOf(target).evaluate((root) => {
+        const editor = (root as EditorElement).editor;
+        const options = (name: string) =>
+          editor.extensionManager.extensions.find((item) => item.name === name)?.options as
+            Record<string, unknown> | undefined;
+        const doc = options("collaboration")?.document as Y.Doc;
+        const witness: RawWitness = {
+          doc,
+          provider: options("collaborationCaret")?.provider,
+          repairs: 0,
+        };
+        const syncKey = editor.state.plugins
+          .map((plugin) => plugin.spec.key)
+          .find((key) => {
+            const value: unknown = key?.getState(editor.state);
+            return (
+              typeof value === "object" && value !== null && "doc" in value && value.doc === doc
+            );
+          });
+        if (!syncKey) throw new Error("Missing actual ySync key");
+        doc.on("update", (_update: Uint8Array, origin: unknown) => {
+          if (origin === syncKey) witness.repairs++;
+        });
+        (window as RawWindow).w3RawWitness = witness;
+      });
+    }
+    await selectMode(page, "markdown");
+    await peer.page.evaluate(() => {
+      const witness = (window as RawWindow).w3RawWitness;
+      if (!witness) throw new Error("Missing raw document witness");
+      const { doc } = witness;
+      doc.transact(() => {
+        const fragment = doc.getXmlFragment("prosemirror");
+        const existing = fragment.get(0) as Y.XmlElement;
+        const future = existing.clone();
+        future.nodeName = "futureNode";
+        future.setAttribute("id", "future-preserved");
+        fragment.insert(1, [future]);
+        const supported = fragment.get(2) as Y.XmlElement;
+        const text = supported.get(0) as Y.XmlText;
+        text.insert(text.length, " 동시 변경");
+      }, "older-schema-fixture");
+    });
+    await expect(page.getByRole("alert").filter({ hasText: "future-preserved" })).toBeVisible();
+    await expect(
+      peer.page.getByRole("alert").filter({ hasText: "future-preserved" }),
+    ).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Markdown 직접 편집" })).not.toBeEditable();
+    await expect(page.getByRole("button", { name: "적용", exact: true })).toBeDisabled();
+    for (const target of [page, peer.page]) {
+      const current = await target.evaluate(() => {
+        const witness = (window as RawWindow).w3RawWitness;
+        if (!witness) throw new Error("Missing raw document witness");
+        return {
+          repairs: witness.repairs,
+          raw: witness.doc.getXmlFragment("prosemirror").toJSON(),
+          destroyed: witness.doc.isDestroyed,
+        };
+      });
+      expect(current.repairs).toBe(0);
+      expect(current.raw).toContain("futureNode");
+      expect(current.raw).toContain('id="future-preserved"');
+      expect(current.raw).toContain("동료 동시 변경");
+      expect(current.destroyed).toBe(false);
+    }
+    await save(page);
+    const body = await savedBody(page.request, ws, doc.id);
+    expect(body.content?.[1]?.type).toBe("futureNode");
+    expect(body.content?.[1]?.attrs?.id).toBe("future-preserved");
+    expect(body.content?.[2]?.content?.[0]?.text).toBe("동료 동시 변경");
+    const fresh = await newSignedInPage(browser, baseURL, admin);
+    try {
+      await fresh.page.goto(doc.path);
+      await expect(
+        fresh.page.getByRole("alert").filter({ hasText: "future-preserved" }),
+      ).toBeVisible();
+      expect(await savedBody(fresh.page.request, ws, doc.id)).toEqual(body);
+    } finally {
+      await fresh.context.close();
+    }
+  } finally {
+    await peer.context.close();
+  }
+});
