@@ -2,6 +2,30 @@ mod task_timer {
     // First timer consumer: real HTTP boundary, committed intervals, fresh read.
     use super::*;
 
+    async fn captured(app: axum::Router, cookie: &str, mut body: Value) -> Value {
+        let (status, me) = json_request(app, "GET", "/api/v1/auth/me", None, Some(cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{me}");
+        body["expectedActorId"] = me["userId"].clone();
+        body["expectedSessionId"] = me["sessionId"].clone();
+        body
+    }
+
+    async fn timer_request(
+        app: axum::Router,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        cookie: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let body = match (body, cookie) {
+            (Some(body), Some(cookie)) if method == "POST" && path.ends_with("/timer") => {
+                Some(captured(app.clone(), cookie, body).await)
+            }
+            (body, _) => body,
+        };
+        json_request(app, method, path, body, cookie).await
+    }
+
     #[tokio::test]
     async fn timer_start_pause_fresh_client_resume_stop_commits_without_completing_task() {
         let harness = TestDb::bootstrap().await;
@@ -41,10 +65,10 @@ mod task_timer {
         ] {
             assert_rls_forced(&admin, table).await;
         }
-        let (status, started) = json_request(app.clone(), "POST", &url, Some(json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null,"note":"자료 읽기"})), Some(&cookie)).await;
+        let (status, started) = timer_request(app.clone(), "POST", &url, Some(json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null,"note":"자료 읽기"})), Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "{started}");
         let run = started["runId"].as_str().unwrap();
-        let (status, paused) = json_request(
+        let (status, paused) = timer_request(
         app.clone(),
         "POST",
         &url,
@@ -56,7 +80,7 @@ mod task_timer {
     .await;
         assert_eq!(status, StatusCode::OK, "{paused}");
         assert_eq!(paused["status"], "paused");
-        let (status, fresh) = json_request(app.clone(), "GET", &url, None, Some(&cookie)).await;
+        let (status, fresh) = timer_request(app.clone(), "GET", &url, None, Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "{fresh}");
         assert_eq!(fresh["run"]["id"], run);
         assert_eq!(fresh["run"]["version"], 2);
@@ -64,9 +88,9 @@ mod task_timer {
         let elapsed: i64 = sqlx::query_scalar("SELECT sum(EXTRACT(EPOCH FROM (ended_at-started_at))*1000)::bigint FROM fvoci.task_timer_segments WHERE run_id=$1")
         .bind(Uuid::parse_str(run).unwrap()).fetch_one(&admin).await.unwrap();
         assert_eq!(fresh["run"]["elapsedMilliseconds"], elapsed);
-        let (status, resumed) = json_request(app.clone(), "POST", &url, Some(json!({"requestId":Uuid::now_v7(),"operation":"resume","expectedVersion":2,"runId":run})), Some(&cookie)).await;
+        let (status, resumed) = timer_request(app.clone(), "POST", &url, Some(json!({"requestId":Uuid::now_v7(),"operation":"resume","expectedVersion":2,"runId":run})), Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "{resumed}");
-        let (status, stopped) = json_request(
+        let (status, stopped) = timer_request(
         app.clone(),
         "POST",
         &url,
@@ -78,13 +102,13 @@ mod task_timer {
     .await;
         assert_eq!(status, StatusCode::OK, "{stopped}");
         assert_eq!(stopped["status"], "stopped");
-        let (status, fresh) = json_request(app.clone(), "GET", &url, None, Some(&cookie)).await;
+        let (status, fresh) = timer_request(app.clone(), "GET", &url, None, Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "{fresh}");
         assert_eq!(fresh["run"], Value::Null);
         let (segments, closed, owner): (i64, i64, Uuid) = sqlx::query_as("SELECT count(*),count(ended_at),min(user_id::text)::uuid FROM fvoci.task_timer_segments WHERE run_id=$1")
         .bind(Uuid::parse_str(run).unwrap()).fetch_one(&admin).await.unwrap();
         assert_eq!((segments, closed, owner), (2, 2, actor));
-        let (status, after) = json_request(
+        let (status, after) = timer_request(
             app.clone(),
             "GET",
             &format!("/api/v1/workspaces/{workspace}/tasks/{task_id}"),
@@ -122,10 +146,10 @@ mod task_timer {
         );
         let body = json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null,"note":"original"});
         let (status, original) =
-            json_request(app.clone(), "POST", &url, Some(body.clone()), Some(&cookie)).await;
+            timer_request(app.clone(), "POST", &url, Some(body.clone()), Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "{original}");
         let (status, replayed) =
-            json_request(app.clone(), "POST", &url, Some(body.clone()), Some(&cookie)).await;
+            timer_request(app.clone(), "POST", &url, Some(body.clone()), Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "{replayed}");
         assert_eq!(
             original, replayed,
@@ -134,7 +158,7 @@ mod task_timer {
         let mut changed = body.clone();
         changed["note"] = json!("changed");
         let (status, mismatch) =
-            json_request(app.clone(), "POST", &url, Some(changed), Some(&cookie)).await;
+            timer_request(app.clone(), "POST", &url, Some(changed), Some(&cookie)).await;
         assert_eq!(status, StatusCode::CONFLICT, "{mismatch}");
         let pool = project_harness::app_pool(&harness).await;
         let mut tx = pool.begin().await.unwrap();
@@ -240,10 +264,10 @@ mod task_timer {
             tb["id"].as_str().unwrap()
         );
         let first = tokio::spawn(async move {
-            json_request(a,"POST",&ua,Some(json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null})),Some(&ca)).await
+            timer_request(a,"POST",&ua,Some(json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null})),Some(&ca)).await
         });
         let second = tokio::spawn(async move {
-            json_request(b,"POST",&ub,Some(json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null})),Some(&cb)).await
+            timer_request(b,"POST",&ub,Some(json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null})),Some(&cb)).await
         });
         let waiters = project_harness::wait_for_blocked_query_count(
             &admin,
@@ -332,5 +356,122 @@ mod task_timer {
             effects, 0,
             "no timer or old draft effect for replacement actor"
         );
+    }
+    #[tokio::test]
+    async fn timer_captured_context_rejects_new_effects_but_fresh_session_replays_success() {
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, actor, workspace) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let replacement = add_workspace_user(&admin, workspace, "member", "captured-other").await;
+        let project = create_project(app.clone(), &cookie, workspace, "CONTEXT", "workspace").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Captured target"}),
+        )
+        .await;
+        let url = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}/timer",
+            task["id"].as_str().unwrap()
+        );
+        let original=captured(app.clone(),&cookie,json!({"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null,"note":"actor-owned"})).await;
+        let (status, wrong_actor) = json_request(
+            app.clone(),
+            "POST",
+            &url,
+            Some(original.clone()),
+            Some(&replacement.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{wrong_actor}");
+        assert_eq!(wrong_actor["params"]["code"], "timer_context_changed");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.task_timer_runs")
+                .fetch_one(&admin)
+                .await
+                .unwrap(),
+            0
+        );
+        let (status, success) = json_request(
+            app.clone(),
+            "POST",
+            &url,
+            Some(original.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{success}");
+        let token = fvoci_server::auth::token::new_token();
+        let fresh_session = Uuid::now_v7();
+        sqlx::query("INSERT INTO fvoci.sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,clock_timestamp()+interval '1 hour')").bind(fresh_session).bind(actor).bind(&token.hash).execute(&admin).await.unwrap();
+        let (status, replayed) = json_request(
+            app.clone(),
+            "POST",
+            &url,
+            Some(original.clone()),
+            Some(&token.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(
+            replayed, success,
+            "original committed receipt survives same-actor new session"
+        );
+        let mut refreshed_transport = original.clone();
+        refreshed_transport["expectedSessionId"] = json!(fresh_session);
+        let (status, replayed) = json_request(
+            app.clone(),
+            "POST",
+            &url,
+            Some(refreshed_transport),
+            Some(&token.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed, success);
+        let mut stale_new = original.clone();
+        stale_new["requestId"] = json!(Uuid::now_v7());
+        let (status, stale) = json_request(
+            app.clone(),
+            "POST",
+            &url,
+            Some(stale_new),
+            Some(&token.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+        assert_eq!(stale["params"]["code"], "timer_context_changed");
+        let pause=captured(app.clone(),&token.token,json!({"requestId":Uuid::now_v7(),"operation":"pause","expectedVersion":1,"runId":success["runId"]})).await;
+        let (status, paused) =
+            json_request(app.clone(), "POST", &url, Some(pause), Some(&token.token)).await;
+        assert_eq!(status, StatusCode::OK, "{paused}");
+        assert_eq!(paused["version"], 2);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM fvoci.task_timer_commands WHERE user_id=$1"
+            )
+            .bind(actor)
+            .fetch_one(&admin)
+            .await
+            .unwrap(),
+            2,
+            "one receipt per actual command; duplicate/guard failure creates none"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM fvoci.task_timer_runs WHERE user_id=$1"
+            )
+            .bind(replacement.user_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap(),
+            0
+        );
+        println!("W5 captured actor/session new effects rejected; same-actor fresh-session receipt preserved");
+        admin.close().await;
+        drop(app);
+        harness.cleanup().await;
     }
 }

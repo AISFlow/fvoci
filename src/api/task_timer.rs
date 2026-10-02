@@ -14,6 +14,9 @@ use utoipa::ToSchema;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct TimerCommandBody {
+    /// Intent guards, never authorization: authoritative authentication wins.
+    pub expected_actor_id: Uuid,
+    pub expected_session_id: Uuid,
     pub request_id: Uuid,
     pub operation: TimerOperation,
     pub expected_version: i32,
@@ -84,6 +87,8 @@ pub struct OwnerTimerState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct TimerCleanupBody {
+    pub expected_actor_id: Uuid,
+    pub expected_session_id: Uuid,
     pub request_id: Uuid,
     pub run_id: Uuid,
     pub expected_version: i32,

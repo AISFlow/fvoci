@@ -48,7 +48,13 @@ async function stop(): Promise<void> {
     actor: actor.value,
     credential: credential.value,
     generation,
-    body: { requestId: crypto.randomUUID(), runId: state.runId, expectedVersion: state.version },
+    body: {
+      expectedActorId: actor.value,
+      expectedSessionId: credential.value,
+      requestId: crypto.randomUUID(),
+      runId: state.runId,
+      expectedVersion: state.version,
+    },
   };
   const current = () =>
     live &&
@@ -77,7 +83,10 @@ async function stop(): Promise<void> {
     error.value = loadErrorMessage(err);
     replayAllowed.value = !(err instanceof ProblemError) || err.status === 429 || err.status >= 500;
     retry = replayAllowed.value ? capture : undefined;
-    if (err instanceof ProblemError && err.status === 409) await owner.refetch();
+    if (err instanceof ProblemError && err.status === 409) {
+      await client.invalidateQueries({ queryKey: meQuery.queryKey, exact: true });
+      if (current()) await owner.refetch();
+    }
   } finally {
     if (current()) pending.value = false;
   }

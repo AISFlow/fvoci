@@ -226,7 +226,14 @@ fn hash<T: serde::Serialize>(
     task: Option<Uuid>,
     body: &T,
 ) -> Result<String, sqlx::Error> {
-    let value = serde_json::to_vec(&(kind, workspace, task, body))
+    let mut semantic =
+        serde_json::to_value(body).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    // A receipt belongs to the actor, not the transport credential. A fresh
+    // live session may replay a success, but cannot apply an old new command.
+    if let Some(object) = semantic.as_object_mut() {
+        object.remove("expectedSessionId");
+    }
+    let value = serde_json::to_vec(&(kind, workspace, task, semantic))
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     Ok(format!("{:x}", Sha256::digest(value)))
 }
@@ -352,6 +359,9 @@ pub async fn command(
     session: Uuid,
     body: &TimerCommandBody,
 ) -> DbResult<TimerCommandOutput> {
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
     if !command_valid(body) {
         return Ok(Err(TimerDbError::InvalidInput));
     }
@@ -372,6 +382,9 @@ pub async fn command(
             ))
         }
         Ok(None) => {}
+    }
+    if body.expected_session_id != session {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
     }
     let active = unfinished(&mut tx, actor).await?;
     let at = clock(&mut tx).await?;
@@ -473,6 +486,9 @@ pub async fn cleanup(
     session: Uuid,
     body: &TimerCleanupBody,
 ) -> DbResult<TimerCommandOutput> {
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
     if body.expected_version <= 0 || body.expected_version == i32::MAX {
         return Ok(Err(TimerDbError::InvalidInput));
     }
@@ -491,6 +507,9 @@ pub async fn cleanup(
             ))
         }
         Ok(None) => {}
+    }
+    if body.expected_session_id != session {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
     }
     let Some(run) = unfinished(&mut tx, actor).await? else {
         return Ok(Err(TimerDbError::Conflict("timer_version")));

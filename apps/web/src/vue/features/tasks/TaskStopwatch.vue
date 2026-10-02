@@ -144,7 +144,10 @@ async function submit(capture: Capture): Promise<void> {
     error.value = loadErrorMessage(err);
     retryable.value = !(err instanceof ProblemError) || err.status === 429 || err.status >= 500;
     if (!retryable.value) command = undefined;
-    if (err instanceof ProblemError && err.status === 409) await state.refetch();
+    if (err instanceof ProblemError && err.status === 409) {
+      await client.invalidateQueries({ queryKey: meQuery.queryKey, exact: true });
+      if (current(capture)) await state.refetch();
+    }
     // 401/403/404 clear private timer display; network/503 keep the draft and
     // original request id for explicit replay. Session guard owns navigation.
     if (err instanceof ProblemError && [401, 403, 404].includes(err.status)) {
@@ -175,6 +178,8 @@ async function submit(capture: Capture): Promise<void> {
 async function start(operation: TimerCommand["operation"]): Promise<void> {
   if (disabled.value) return;
   const body: TimerCommand = {
+    expectedActorId: actor.value,
+    expectedSessionId: credential.value,
     requestId: crypto.randomUUID(),
     operation,
     expectedVersion: run.value?.version ?? 0,
