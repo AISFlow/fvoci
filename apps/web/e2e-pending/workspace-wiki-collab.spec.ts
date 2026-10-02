@@ -344,6 +344,90 @@ test("insert and delete conflict keeps the insertion and applies the deletion", 
   }
 });
 
+test("remote prefix between Backspaces keeps the native caret on the original text", async ({
+  browser,
+  collabApp,
+}) => {
+  const ctxA = await newCollabContext(browser, collabApp.baseUrl);
+  const ctxB = await newCollabContext(browser, collabApp.baseUrl);
+  const pageA = await ctxA.newPage();
+  const pageB = await ctxB.newPage();
+  let hold = false;
+  const queued: Array<string | Buffer> = [];
+  let release: ((message: string | Buffer) => void) | undefined;
+  // Hold A's inbound server messages only after B has received the prefix.
+  // This preserves a legal overlapping insertion/deletion without changing frames.
+  await pageA.routeWebSocket("**/collab", (socket) => {
+    const server = socket.connectToServer();
+    release = (message) => {
+      socket.send(message);
+    };
+    socket.onMessage((message) => {
+      server.send(message);
+    });
+    server.onMessage((message) => {
+      if (hold) queued.push(message);
+      else socket.send(message);
+    });
+  });
+  const caret = () =>
+    pageB.locator(".fvoci-editor .ProseMirror").evaluate((root) => {
+      const editor = (root as HTMLElement & { editor: import("@tiptap/core").Editor }).editor;
+      const native = window.getSelection();
+      return {
+        pm: editor.state.selection.from,
+        native:
+          native?.isCollapsed && native.anchorNode && root.contains(native.anchorNode)
+            ? editor.view.posAtDOM(native.anchorNode, native.anchorOffset)
+            : null,
+        focused: document.activeElement === root,
+      };
+    });
+  try {
+    await ensureCollabFixture(pageA);
+    await login(pageA, member.email, member.password);
+    await login(pageB, member.email, member.password);
+    const doc = await createWikiDoc(pageA, "원격 삽입 뒤 원래 본문 삭제");
+    const editorA = await openEditor(pageA, doc.url);
+    await editorA.click();
+    await pageA.keyboard.type("한글본문");
+    await openEditor(pageB, doc.url);
+    await expectTokens(pageB, ["한글본문"]);
+    await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
+    await expect.poll(caret).toEqual({ pm: 5, native: 5, focused: true });
+    await pageB.keyboard.press("Backspace");
+    await expect
+      .poll(async () => (await editorShape(pageA)).text, { timeout: 15_000 })
+      .toBe("한글본");
+    await expect.poll(caret).toEqual({ pm: 4, native: 4, focused: true });
+    await pageA.keyboard.type("앞쪽삽");
+    await expect
+      .poll(async () => (await editorShape(pageB)).text, { timeout: 15_000 })
+      .toBe("앞쪽삽한글본");
+    // Equality/convergence alone also passes when both clients delete 삽.
+    await expect.poll(caret).toEqual({ pm: 7, native: 7, focused: true });
+    hold = true;
+    await pageB.keyboard.press("Backspace");
+    await expect.poll(async () => (await editorShape(pageB)).text).toBe("앞쪽삽한글");
+    await expect.poll(caret).toEqual({ pm: 6, native: 6, focused: true });
+    await pageA.keyboard.type("입");
+    await expect.poll(async () => (await editorShape(pageA)).text).toBe("앞쪽삽입한글본");
+    // Wait for a real inbound frame rather than elapsed time.
+    await expect.poll(() => queued.length, { timeout: 15_000 }).toBeGreaterThan(0);
+    expect(release).toBeDefined();
+    hold = false;
+    if (!release) throw new Error("The collaboration message barrier was not connected");
+    for (const message of queued.splice(0)) release(message);
+    await expectConverged(pageA, pageB);
+    for (const page of [pageA, pageB]) {
+      await expect.poll(async () => (await editorShape(page)).text).toBe("앞쪽삽입한글");
+    }
+  } finally {
+    await ctxA.close();
+    await ctxB.close();
+  }
+});
+
 test("Korean plus emoji middle insert and delete converge without dropping IDs", async ({
   browser,
   collabApp,

@@ -34,6 +34,7 @@ const DEP_TYPES = ["FS", "SS", "FF"] as const;
 const props = defineProps<{
   slug: string;
   workspaceId: string;
+  currentUserId: string;
   projectId: string;
   projectKey: string;
   task: TaskDetail;
@@ -114,12 +115,47 @@ watch(
 );
 
 watch(
-  () => [props.task.id, props.task.type, props.task.parentId] as const,
-  () => {
-    draftType.value = isTaskType(props.task.type) ? props.task.type : "task";
-    draftParentId.value = props.task.parentId;
-    hierarchyError.value = null;
+  () =>
+    [
+      props.workspaceId,
+      props.task.id,
+      props.currentUserId,
+      props.readOnly,
+      props.canEdit,
+      props.task.type,
+      props.task.parentId,
+    ] as const,
+  ([workspace, id, actor, readOnly, canEdit, type, parent], previous) => {
+    const [
+      previousWorkspace,
+      previousId,
+      previousActor,
+      previousReadOnly,
+      previousCanEdit,
+      previousType,
+      previousParent,
+    ] = previous;
+    if (
+      workspace !== previousWorkspace ||
+      id !== previousId ||
+      actor !== previousActor ||
+      readOnly !== previousReadOnly ||
+      canEdit !== previousCanEdit
+    ) {
+      cancelHierarchy();
+      return;
+    }
+    const typeUntouched = draftType.value === previousType;
+    // Epic and subtask boundary edits also own the parent they cleared, even
+    // when the old parent was already null. Other type edits own only type.
+    const parentUntouched =
+      draftParentId.value === previousParent &&
+      (typeUntouched || !clearsHierarchyParent(previousType, draftType.value));
+    if (typeUntouched) draftType.value = isTaskType(type) ? type : "task";
+    if (parentUntouched) draftParentId.value = parent;
   },
+  // Observe scope/permission ABA before Vue batches it back to its old value.
+  { flush: "sync" },
 );
 
 watch(

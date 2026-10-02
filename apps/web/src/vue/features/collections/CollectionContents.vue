@@ -157,8 +157,23 @@ const queryBody = computed<CollectionQueryBody>(() => ({
     : {}),
   ...(calendarWindow.value ? { window: calendarWindow.value } : {}),
 }));
+// Keep the same Calendar draft through a failed background fields load. HTTP
+// denials and unexpected errors still retire it; cached fields are not an ACL.
+const fieldsRefreshFailed = computed(() => {
+  const error = fields.error.value;
+  return (
+    props.type === "calendar" &&
+    fields.data.value !== undefined &&
+    fields.isError.value &&
+    (error instanceof TypeError ||
+      (error instanceof ProblemError && [408, 429, 500, 502, 503, 504].includes(error.status)))
+  );
+});
 const rowsEnabled = computed(
-  () => fields.isSuccess.value && views.isSuccess.value && me.isSuccess.value,
+  () =>
+    (fields.isSuccess.value || fieldsRefreshFailed.value) &&
+    views.isSuccess.value &&
+    me.isSuccess.value,
 );
 const rows = useQuery(() =>
   collectionRowsQuery(props.workspaceId, props.collectionId, queryBody.value, rowsEnabled.value),
@@ -398,7 +413,10 @@ const removeView = useMutation({
   },
 });
 
-const failed = computed(() => fields.isError.value || views.isError.value || me.isError.value);
+const failed = computed(
+  () =>
+    (fields.isError.value && !fieldsRefreshFailed.value) || views.isError.value || me.isError.value,
+);
 const memberItems = computed<MemberOutput[]>(() => members.data.value?.items ?? []);
 const userNames = computed(() =>
   memberItems.value.map((member) => ({ userId: member.userId, name: formatPersonName(member) })),
@@ -608,6 +626,14 @@ const emptyCount = computed(() =>
     t("collection.loading")
   }}</p>
   <section v-else class="flex min-w-0 flex-col gap-4" :data-testid="`collection-${type}`">
+    <!-- Metadata retry belongs to the open Calendar editor's interaction. -->
+    <QueryError
+      v-if="fieldsRefreshFailed"
+      :message="loadErrorMessage(fields.error.value)"
+      @pointerdown.stop
+      @focusin.stop
+      @retry="fields.refetch()"
+    />
     <div class="collection-toolbar">
       <div class="collection-field">
         <label :for="`${baseId}-view`">{{ t("collection.savedViews") }}</label>
@@ -789,6 +815,7 @@ const emptyCount = computed(() =>
       @dragleave="onDateDragLeave"
     >
       <CollectionCalendar
+        :key="`${workspaceId}:${projectId}:${collectionId}:${me.data.value.userId}`"
         ref="calendarUI"
         :month="effectiveMonth"
         :date-by="config.dateBy"
