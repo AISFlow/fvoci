@@ -5,7 +5,14 @@ import { computed, onScopeDispose, ref, watch } from "vue";
 import { api, ensureOk, loadErrorMessage, ProblemError } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
 import type { components } from "@/generated/api";
-import { ownerStopwatchQuery, timerContextChanged } from "./task-stopwatch-queries";
+import {
+  ownerStopwatchQuery,
+  timerContextChanged,
+  captureTimerDenial,
+  captureTimerQuery,
+  removeCapturedTimerQuery,
+  type TimerQueryCapture,
+} from "./task-stopwatch-queries";
 
 const client = useQueryClient();
 const me = useQuery(meQuery);
@@ -20,12 +27,14 @@ const denial = ref<ProblemError>();
 let revokedUpdate = 0;
 const visibleOwner = computed(() => (revoked.value ? undefined : owner.data.value));
 let generation = 0;
+let scopeLifetime = 0;
 let live = true;
 let retry:
   | {
       actor: string;
       credential: string;
       generation: number;
+      scopeLifetime: number;
       body: components["schemas"]["TimerCleanupBody"];
     }
   | undefined;
@@ -35,9 +44,15 @@ function denied(err: unknown): err is ProblemError {
     timerContextChanged(err)
   );
 }
-async function retireOwnerState(err: ProblemError): Promise<void> {
+async function retireOwnerState(
+  err: ProblemError,
+  capture: TimerQueryCapture,
+  lifetime: number,
+): Promise<void> {
   if (revoked.value) return;
-  const key = ownerStopwatchQuery(actor.value, credential.value).queryKey;
+  const key = capture.queryKey;
+  const currentScope = () =>
+    live && scopeLifetime === lifetime && key[1] === actor.value && key[2] === credential.value;
   revokedUpdate = owner.dataUpdatedAt.value;
   denial.value = err;
   revoked.value = true;
@@ -46,27 +61,44 @@ async function retireOwnerState(err: ProblemError): Promise<void> {
   pending.value = false;
   replayAllowed.value = false;
   error.value = null;
-  await client.cancelQueries({ queryKey: key, exact: true });
-  client.removeQueries({ queryKey: key, exact: true });
-  if (timerContextChanged(err) && live && key[1] === actor.value && key[2] === credential.value) {
+  const retired = await removeCapturedTimerQuery(client, capture, currentScope);
+  if (retired && timerContextChanged(err) && currentScope()) {
     await client.invalidateQueries({ queryKey: meQuery.queryKey, exact: true });
   }
 }
 watch(
-  [() => owner.error.value, () => owner.dataUpdatedAt.value],
+  [
+    () => owner.error.value,
+    () => owner.dataUpdatedAt.value,
+    () => owner.status.value,
+    () => owner.fetchStatus.value,
+  ],
   async () => {
     const err = owner.error.value;
-    if (denied(err)) await retireOwnerState(err);
-    else if (revoked.value && owner.isSuccess.value && owner.dataUpdatedAt.value > revokedUpdate) {
+    if (denied(err)) {
+      const capture = captureTimerDenial(
+        client,
+        err,
+        ownerStopwatchQuery(actor.value, credential.value).queryKey,
+        owner.status.value,
+        owner.fetchStatus.value,
+      );
+      if (capture) await retireOwnerState(err, capture, scopeLifetime);
+    } else if (
+      revoked.value &&
+      owner.isSuccess.value &&
+      owner.dataUpdatedAt.value > revokedUpdate
+    ) {
       revoked.value = false;
       denial.value = undefined;
     }
   },
-  { flush: "sync" },
+  { flush: "pre" },
 );
 watch(
   [actor, credential],
   () => {
+    scopeLifetime++;
     generation++;
     retry = undefined;
     pending.value = false;
@@ -78,6 +110,7 @@ watch(
   { flush: "sync" },
 );
 onScopeDispose(() => {
+  scopeLifetime++;
   live = false;
   generation++;
 });
@@ -90,6 +123,7 @@ async function stop(): Promise<void> {
     actor: actor.value,
     credential: credential.value,
     generation,
+    scopeLifetime,
     body: {
       expectedActorId: actor.value,
       expectedSessionId: credential.value,
@@ -102,7 +136,8 @@ async function stop(): Promise<void> {
     live &&
     capture.actor === actor.value &&
     capture.credential === credential.value &&
-    capture.generation === generation;
+    capture.generation === generation &&
+    capture.scopeLifetime === scopeLifetime;
   pending.value = true;
   error.value = null;
   replayAllowed.value = false;
@@ -125,7 +160,12 @@ async function stop(): Promise<void> {
     error.value = loadErrorMessage(err);
     replayAllowed.value = !(err instanceof ProblemError) || err.status === 429 || err.status >= 500;
     retry = replayAllowed.value ? capture : undefined;
-    if (denied(err)) await retireOwnerState(err);
+    if (denied(err))
+      await retireOwnerState(
+        err,
+        captureTimerQuery(client, ownerStopwatchQuery(capture.actor, capture.credential).queryKey),
+        capture.scopeLifetime,
+      );
     else if (err instanceof ProblemError && err.status === 409) await owner.refetch();
   } finally {
     if (current()) pending.value = false;

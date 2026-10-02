@@ -12,6 +12,10 @@ import {
   sendTimerCommand,
   timerContextChanged,
   type TimerCommand,
+  captureTimerDenial,
+  captureTimerQuery,
+  removeCapturedTimerQuery,
+  type TimerQueryCapture,
 } from "./task-stopwatch-queries";
 
 const props = defineProps<{
@@ -41,37 +45,47 @@ function denied(err: unknown): err is ProblemError {
     timerContextChanged(err)
   );
 }
-async function retirePrivateState(err: ProblemError): Promise<void> {
+async function retirePrivateState(
+  err: ProblemError,
+  capture: TimerQueryCapture,
+  lifetime: number,
+): Promise<void> {
   if (revoked.value) return;
-  const key = taskStopwatchQuery(
-    actor.value,
-    props.workspaceId,
-    props.taskId,
-    credential.value,
-  ).queryKey;
+  const key = capture.queryKey;
+  const currentScope = () =>
+    live &&
+    scopeLifetime === lifetime &&
+    key[1] === actor.value &&
+    key[2] === credential.value &&
+    key[3] === props.workspaceId &&
+    key[4] === props.taskId;
   revokedUpdate = state.dataUpdatedAt.value;
   denial.value = err;
   revoked.value = true;
   note.value = "";
-  await client.cancelQueries({ queryKey: key, exact: true });
-  client.removeQueries({ queryKey: key, exact: true });
-  if (
-    timerContextChanged(err) &&
-    live &&
-    key[1] === actor.value &&
-    key[2] === credential.value &&
-    key[3] === props.workspaceId &&
-    key[4] === props.taskId
-  ) {
+  const retired = await removeCapturedTimerQuery(client, capture, currentScope);
+  if (retired && timerContextChanged(err) && currentScope()) {
     await client.invalidateQueries({ queryKey: meQuery.queryKey, exact: true });
   }
 }
 watch(
-  [() => state.error.value, () => state.dataUpdatedAt.value],
+  [
+    () => state.error.value,
+    () => state.dataUpdatedAt.value,
+    () => state.status.value,
+    () => state.fetchStatus.value,
+  ],
   async () => {
     const err = state.error.value;
     if (denied(err)) {
-      await retirePrivateState(err);
+      const capture = captureTimerDenial(
+        client,
+        err,
+        taskStopwatchQuery(actor.value, props.workspaceId, props.taskId, credential.value).queryKey,
+        state.status.value,
+        state.fetchStatus.value,
+      );
+      if (capture) await retirePrivateState(err, capture, scopeLifetime);
     } else if (
       revoked.value &&
       state.isSuccess.value &&
@@ -81,7 +95,7 @@ watch(
       denial.value = undefined;
     }
   },
-  { flush: "sync" },
+  { flush: "pre" },
 );
 const note = ref("");
 const error = ref<string | null>(null);
@@ -89,12 +103,14 @@ const pending = ref(false);
 const retryable = ref(false);
 let live = true;
 let generation = 0;
+let scopeLifetime = 0;
 type Capture = {
   actor: string;
   credential: string;
   workspace: string;
   task: string;
   generation: number;
+  scopeLifetime: number;
   body: TimerCommand;
   note: string;
 };
@@ -102,6 +118,7 @@ let command: Capture | undefined;
 watch(
   [actor, () => props.workspaceId, () => props.taskId, credential],
   ([nextActor, nextWorkspace, nextTask], [previousActor, previousWorkspace, previousTask]) => {
+    scopeLifetime++;
     if (
       nextActor !== previousActor ||
       nextWorkspace !== previousWorkspace ||
@@ -154,6 +171,7 @@ watch(
   { immediate: true },
 );
 onScopeDispose(() => {
+  scopeLifetime++;
   live = false;
   generation++;
   if (ticker) clearInterval(ticker);
@@ -183,6 +201,7 @@ function current(capture: Capture): boolean {
   return (
     live &&
     capture.generation === generation &&
+    capture.scopeLifetime === scopeLifetime &&
     capture.actor === actor.value &&
     capture.credential === credential.value &&
     capture.workspace === props.workspaceId &&
@@ -221,7 +240,16 @@ async function submit(capture: Capture): Promise<void> {
     if (!retryable.value) command = undefined;
     // Authority/context failures clear private display; network/503 keep the draft and
     // original request id for explicit replay. Session guard owns navigation.
-    if (denied(err)) await retirePrivateState(err);
+    if (denied(err))
+      await retirePrivateState(
+        err,
+        captureTimerQuery(
+          client,
+          taskStopwatchQuery(capture.actor, capture.workspace, capture.task, capture.credential)
+            .queryKey,
+        ),
+        capture.scopeLifetime,
+      );
     else if (err instanceof ProblemError && err.status === 409) await state.refetch();
   } finally {
     if (current(capture)) pending.value = false;
@@ -245,6 +273,7 @@ async function start(operation: TimerCommand["operation"]): Promise<void> {
     workspace: props.workspaceId,
     task: props.taskId,
     generation,
+    scopeLifetime,
     body,
     note: note.value,
   };
