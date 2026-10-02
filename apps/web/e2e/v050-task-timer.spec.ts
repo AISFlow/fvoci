@@ -563,11 +563,21 @@ test("MyTasks timer controls follow actual View Edit archive and demotion capabi
         .object({ canCreate: z.boolean() })
         .parse(await (await viewer.request.get(entriesUrl)).json()).canCreate;
     expect(await capability()).toBe(false);
+    const timerUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${task.id}/timer`;
+    const initialControl = viewer.waitForResponse(
+      async (response) =>
+        new URL(response.url()).pathname === timerUrl &&
+        response.request().method() === "GET" &&
+        response.status() === 200 &&
+        !z.object({ canControl: z.boolean() }).parse(await response.json()).canControl,
+    );
     await viewer.goto("/w/w5timer/my-tasks");
+    await initialControl;
     const timer = viewer.getByTestId(`task-stopwatch-${task.id}`);
     await expect(timer).toBeVisible();
+    await expect(timer.getByTestId("timer-actual")).toBeVisible();
+    await expect(timer.getByTestId("timer-elapsed")).toBeVisible();
     await expect(timer.getByTestId("timer-start")).toBeDisabled();
-    const timerUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${task.id}/timer`;
     const nextControl = (expected: boolean) =>
       viewer.waitForResponse(async (response) => {
         if (
@@ -612,6 +622,111 @@ test("MyTasks timer controls follow actual View Edit archive and demotion capabi
     await archivedControl;
     await expect(timer.getByTestId("timer-start")).toBeDisabled();
   } finally {
+    await context.close();
+  }
+});
+
+test("captured timer GET cannot cache another actor run under a stale mounted identity", async ({
+  page,
+  browser,
+}, testInfo) => {
+  const fixture = await permissionFixture(page, "COOKIE", "member");
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const originalCookies = await page.context().cookies();
+  try {
+    const other = await context.newPage();
+    await login(other, fixture.email, credentials.password);
+    const identity = z.object({ userId: z.string(), sessionId: z.string() });
+    const actorA = identity.parse(await (await page.request.get("/api/v1/auth/me")).json());
+    const actorB = identity.parse(await (await other.request.get("/api/v1/auth/me")).json());
+    expect(actorB.userId).not.toBe(actorA.userId);
+    const grant = await page.request.post(
+      `/api/v1/workspaces/${fixture.workspaceId}/projects/${fixture.project.id}/members`,
+      {
+        data: { userId: actorB.userId, role: "member" },
+      },
+    );
+    expect(grant.ok(), await grant.text()).toBe(true);
+    const created = await page.request.post(
+      `/api/v1/workspaces/${fixture.workspaceId}/projects/${fixture.project.id}/tasks`,
+      {
+        data: { title: "같은 작업에서 분리된 개인 측정" },
+      },
+    );
+    expect(created.status(), await created.text()).toBe(201);
+    const task = taskShape.parse(await created.json());
+    const assign = await page.request.patch(
+      `/api/v1/workspaces/${fixture.workspaceId}/tasks/${task.id}`,
+      {
+        data: { assigneeIds: [actorA.userId] },
+      },
+    );
+    expect(assign.ok(), await assign.text()).toBe(true);
+    const timerUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${task.id}/timer`;
+    const start = await other.request.post(timerUrl, {
+      data: {
+        expectedActorId: actorB.userId,
+        expectedSessionId: actorB.sessionId,
+        requestId: crypto.randomUUID(),
+        operation: "start",
+        expectedVersion: 0,
+        runId: null,
+        note: "다른 작성자의 사적인 구간",
+      },
+    });
+    expect(start.ok(), await start.text()).toBe(true);
+    const run = z.object({ runId: z.string(), version: z.number() }).parse(await start.json());
+    const pause = await other.request.post(timerUrl, {
+      data: {
+        expectedActorId: actorB.userId,
+        expectedSessionId: actorB.sessionId,
+        requestId: crypto.randomUUID(),
+        operation: "pause",
+        expectedVersion: run.version,
+        runId: run.runId,
+      },
+    });
+    expect(pause.ok(), await pause.text()).toBe(true);
+    await page.goto("/w/w5timer/my-tasks");
+    const mounted = page.getByTestId(`task-stopwatch-${task.id}`);
+    await expect(mounted.getByTestId("timer-actual")).toBeVisible();
+    await expect(mounted.getByTestId("timer-state")).toHaveCount(0);
+    const actorRead = timerShape.parse(await (await page.request.get(timerUrl)).json());
+    expect(actorRead.run).toBeNull();
+    const switchedResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === timerUrl && response.request().method() === "GET",
+    );
+    // A real, independently logged-in credential replaces the cookie while
+    // the actual mounted me/query capture still belongs to actor A.
+    await page.context().addCookies(await context.cookies());
+    await page.bringToFront();
+    const response = await switchedResponse;
+    const body: unknown = await response.json();
+    const observed = z
+      .object({ run: z.object({ id: z.string() }).nullable().optional() })
+      .passthrough()
+      .parse(body);
+    await testInfo.attach("timer-cookie-read-guard", {
+      body: JSON.stringify({
+        status: response.status(),
+        capturedActorParameter: new URL(response.url()).searchParams.get("expectedActorId"),
+        capturedSessionParameter: new URL(response.url()).searchParams.get("expectedSessionId"),
+        expectedActor: actorA.userId,
+        expectedSession: actorA.sessionId,
+        returnedOtherRun: observed.run?.id === run.runId,
+      }),
+      contentType: "application/json",
+    });
+    expect(
+      response.status(),
+      "stale scoped query must be rejected before any other actor state",
+    ).toBe(409);
+    expect(new URL(response.url()).searchParams.get("expectedActorId")).toBe(actorA.userId);
+    expect(new URL(response.url()).searchParams.get("expectedSessionId")).toBe(actorA.sessionId);
+    expect(observed.run).toBeUndefined();
+  } finally {
+    await page.context().addCookies(originalCookies);
     await context.close();
   }
 });
