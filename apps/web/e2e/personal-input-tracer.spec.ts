@@ -603,9 +603,17 @@ test("three actual editor hosts retain draft on Cancel, discard only on explicit
   // Actual Rust Origin rejection leaves the session live, rather than a mocked
   // successful logout. A refused logout must retain both draft and protection.
   await page.route("**/api/v1/auth/logout", async (route) => {
-    await route.continue({
+    // Chromium retains its browser-managed Origin on route.continue. Forward
+    // the real request through APIRequestContext so Rust sees the foreign
+    // Origin, then deliver that genuine denial to the mounted product flow.
+    const response = await route.fetch({
       headers: { ...route.request().headers(), origin: "https://not-this-instance.invalid" },
     });
+    expect(response.status()).toBe(403);
+    expect(z.object({ code: z.string() }).parse(await response.json()).code).toBe(
+      "origin_mismatch",
+    );
+    await route.fulfill({ response });
   });
   const refused = page.waitForResponse((response) =>
     response.url().endsWith("/api/v1/auth/logout"),
