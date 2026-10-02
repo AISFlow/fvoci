@@ -600,6 +600,10 @@ test("three actual editor hosts retain draft on Cancel, discard only on explicit
   const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
   const draft = `${await field.inputValue()}\n\n로그아웃 실패에서 유지할 초안`;
   await field.fill(draft);
+  const liveSessionResponse = await page.request.get("/api/v1/auth/me");
+  expect(liveSessionResponse.status()).toBe(200);
+  const authSession = z.object({ userId: z.string(), sessionId: z.string() });
+  const liveSession = authSession.parse(await liveSessionResponse.json());
   // Actual Rust Origin rejection leaves the session live, rather than a mocked
   // successful logout. A refused logout must retain both draft and protection.
   await page.route("**/api/v1/auth/logout", async (route) => {
@@ -622,7 +626,9 @@ test("three actual editor hosts retain draft on Cancel, discard only on explicit
   expect((await refused).status()).toBe(403);
   await expect(field).toHaveValue(draft);
   await expect(page).toHaveURL(wikiPath);
-  expect((await page.request.get("/api/v1/me")).status()).toBe(200);
+  const retainedSessionResponse = await page.request.get("/api/v1/auth/me");
+  expect(retainedSessionResponse.status()).toBe(200);
+  expect(authSession.parse(await retainedSessionResponse.json())).toEqual(liveSession);
   await page.unroute("**/api/v1/auth/logout");
   const nativeDialogs: string[] = [];
   page.on("dialog", async (dialog) => {
