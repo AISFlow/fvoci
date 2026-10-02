@@ -1,6 +1,10 @@
 // Official Nuxt UI editor chrome on FVOCI's existing Tiptap/Yjs host.
 // Real browser, Rust server, DB, peer and persisted ACK; no demo document/store.
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+import type { Editor } from "@tiptap/core";
+import type { Transaction } from "@tiptap/pm/state";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
+import type * as Y from "yjs";
 import { readJson, flowSchemas, login, watchCspViolations } from "./helpers";
 import {
   admin,
@@ -23,6 +27,216 @@ test.describe.configure({ mode: "serial" });
 test.beforeAll(async ({ browser, baseURL }) => {
   await setupInstance(browser, baseURL);
 });
+
+type TemplateObserver = { checkpoint(stage: string): void; stop(): unknown };
+type ObservedWindow = Window & { __w3TemplateObserver?: TemplateObserver };
+
+async function observeTemplateSelection(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const frames: unknown[] = [];
+    const critical: unknown[] = [];
+    const ownerChanges: unknown[] = [];
+    const observedMismatches: unknown[] = [];
+    const ids = new WeakMap<object, number>();
+    let nextId = 0;
+    const token = (value?: object | null) => {
+      if (!value) return null;
+      if (!ids.has(value)) ids.set(value, ++nextId);
+      return ids.get(value);
+    };
+    let bound: Editor | undefined;
+    let ydoc: Y.Doc | undefined;
+    let provider: HocuspocusProvider | undefined;
+    let firstOwner: string | undefined;
+    let previousNativeId: unknown;
+    let previousBubble = false;
+    let updates = 0;
+    let localUpdates = 0;
+    let stopped = false;
+    let animation = 0;
+    const capture = (stage: string, retain = false) => {
+      try {
+        const root = document.querySelector<HTMLElement & { editor?: Editor }>(
+          ".fvoci-editor .ProseMirror",
+        );
+        const current = root?.editor;
+        if (!current || current.isDestroyed) return;
+        if (!bound) {
+          bound = current;
+          const options = current.extensionManager.extensions.find(
+            (extension) => extension.name === "collaboration",
+          )?.options as { document?: Y.Doc } | undefined;
+          ydoc = options?.document;
+          provider = (
+            current.extensionManager.extensions.find(
+              (extension) => extension.name === "collaborationCaret",
+            )?.options as { provider?: HocuspocusProvider } | undefined
+          )?.provider;
+          bound.on("transaction", transaction);
+          ydoc?.on("update", update);
+          provider?.on("authenticated", authenticated);
+          provider?.on("status", status);
+          provider?.on("synced", synced);
+        }
+        const state = current.view.state;
+        const native = window.getSelection();
+        const inside = Boolean(
+          native?.anchorNode &&
+          native.focusNode &&
+          root.contains(native.anchorNode) &&
+          root.contains(native.focusNode),
+        );
+        let nativePositions: { anchor: number; head: number } | { unknown: string } | null = null;
+        if (inside && native?.anchorNode && native.focusNode) {
+          try {
+            nativePositions = {
+              anchor: current.view.posAtDOM(native.anchorNode, native.anchorOffset),
+              head: current.view.posAtDOM(native.focusNode, native.focusOffset),
+            };
+          } catch (error) {
+            nativePositions = { unknown: String(error) };
+          }
+        }
+        // Read an existing shared type; do not create or seed one for observation.
+        const fragment = ydoc?.share.get("prosemirror") as Y.XmlFragment | undefined;
+        const node = fragment?.toArray()[0];
+        const nativeId: unknown = node && "getAttribute" in node ? node.getAttribute("id") : null;
+        const owner = JSON.stringify([
+          token(root),
+          token(current),
+          token(current.view.dom),
+          token(ydoc),
+          token(provider),
+          token(fragment),
+          token(node),
+        ]);
+        if (!firstOwner) firstOwner = owner;
+        if (owner !== firstOwner) ownerChanges.push({ stage, at: performance.now(), owner });
+        const bubble = document.querySelector<HTMLElement>("[data-fvoci-bubble]");
+        const bubbleChanged = Boolean(bubble) !== previousBubble;
+        const idChanged = nativeId !== previousNativeId;
+        previousBubble = Boolean(bubble);
+        previousNativeId = nativeId;
+        const frame = {
+          at: performance.now(),
+          stage,
+          owner,
+          clientID: ydoc?.clientID ?? null,
+          native: {
+            inside,
+            text: native?.toString() ?? null,
+            positions: nativePositions,
+            anchorNode: token(native?.anchorNode),
+            anchorOffset: native?.anchorOffset,
+            focusNode: token(native?.focusNode),
+            focusOffset: native?.focusOffset,
+          },
+          pm: {
+            anchor: state.selection.anchor,
+            head: state.selection.head,
+            empty: state.selection.empty,
+            type: state.selection.constructor.name,
+            editorAnchor: current.state.selection.anchor,
+            editorHead: current.state.selection.head,
+            marks: state.storedMarks?.map((mark) => mark.toJSON() as unknown) ?? null,
+          },
+          focus: {
+            activeTag: document.activeElement?.tagName,
+            activeLabel: document.activeElement?.getAttribute("aria-label"),
+            editor: current.view.hasFocus(),
+            domEditable: root.contentEditable,
+            editorEditable: current.isEditable,
+            composing: current.view.composing,
+          },
+          auth: {
+            authenticated: provider?.isAuthenticated ?? null,
+            scope: provider?.authorizedScope ?? null,
+            synced: provider?.synced ?? null,
+            status: provider?.configuration.websocketProvider.status ?? null,
+          },
+          nativeId,
+          updates,
+          localUpdates,
+          bubble: bubble
+            ? { visibility: bubble.style.visibility, opacity: bubble.style.opacity }
+            : null,
+          dialog: Boolean(document.querySelector('[role="dialog"]')),
+          ...(retain || bubbleChanged || idChanged
+            ? { pmDocument: state.doc.toJSON() as unknown }
+            : {}),
+        };
+        frames.push(frame);
+        if (frames.length > 512) frames.shift();
+        if (retain || bubbleChanged || idChanged) critical.push(frame);
+        if (
+          nativePositions &&
+          "anchor" in nativePositions &&
+          (nativePositions.anchor !== state.selection.anchor ||
+            nativePositions.head !== state.selection.head)
+        ) {
+          // Native-to-PM settling is observed, not classified as a defect here.
+          observedMismatches.push({ at: frame.at, stage, nativePositions, pm: frame.pm });
+        }
+      } catch (error) {
+        critical.push({ at: performance.now(), stage, unknown: String(error) });
+      }
+    };
+    const transaction = ({ transaction: tr }: { transaction: Transaction }) => {
+      capture(
+        `transaction:doc=${String(tr.docChanged)}:selection=${String(tr.selectionSet)}`,
+        tr.docChanged,
+      );
+    };
+    const update = (_bytes: Uint8Array, _origin: unknown, _doc: Y.Doc, tr: Y.Transaction) => {
+      updates++;
+      if (tr.local) localUpdates++;
+      capture(`Yupdate:local=${String(tr.local)}`, true);
+    };
+    const authenticated = () => {
+      capture("provider:authenticated", true);
+    };
+    const status = () => {
+      capture("provider:status", true);
+    };
+    const synced = () => {
+      capture("provider:synced", true);
+    };
+    const events = ["keydown", "keyup", "selectionchange", "focusin", "focusout", "pointerdown"];
+    const event = (value: Event) => {
+      const legacyKeyCode: unknown =
+        value instanceof KeyboardEvent ? Reflect.get(value, "keyCode") : null;
+      const stage = `${value.type}:${value instanceof KeyboardEvent ? `${value.key}:shift=${String(value.shiftKey)}:composing=${String(value.isComposing)}:keyCode=${String(legacyKeyCode)}` : ""}`;
+      capture(stage, true);
+      queueMicrotask(() => {
+        if (!stopped) capture(`${stage}:microtask`, true);
+      });
+    };
+    for (const name of events) document.addEventListener(name, event, true);
+    const tick = () => {
+      if (stopped) return;
+      capture("frame");
+      animation = requestAnimationFrame(tick);
+    };
+    animation = requestAnimationFrame(tick);
+    (window as ObservedWindow).__w3TemplateObserver = {
+      checkpoint: (stage) => {
+        capture(stage, true);
+      },
+      stop() {
+        capture("finally", true);
+        stopped = true;
+        cancelAnimationFrame(animation);
+        for (const name of events) document.removeEventListener(name, event, true);
+        bound?.off("transaction", transaction);
+        ydoc?.off("update", update);
+        provider?.off("authenticated", authenticated);
+        provider?.off("status", status);
+        provider?.off("synced", synced);
+        return { frames, critical, ownerChanges, observedMismatches, updates, localUpdates };
+      },
+    };
+  });
+}
 
 test("non-editor Vue screens do not load the editor host or its collaboration plugins", async ({
   page,
@@ -147,40 +361,71 @@ test("fixed insert and history use the existing room, selection and persisted do
 
 test("link popup keeps native selection and composing Enter cannot apply the URL", async ({
   page,
-}) => {
-  const csp = watchCspViolations(page);
-  await login(page, admin.email, admin.password);
-  const wsId = await workspaceId(page.request);
-  const doc = await createDoc(page.request, wsId, "템플릿 링크", { markdown: "한글과 😀 링크\n" });
-  await openDoc(page, doc.path);
-  await caretAtEndOf(page, 0);
-  await page.keyboard.press("Shift+Home");
-  const bubble = page.locator("[data-fvoci-bubble]");
-  const trigger = bubble.getByRole("button", { name: "링크", exact: true });
-  await expect(bubble).toBeVisible();
-  await trigger.click();
-  const dialog = page.getByRole("dialog", { name: "링크", exact: true });
-  const url = dialog.getByLabel("URL");
-  await expect(url).toBeFocused();
-  await url.fill("https://example.com/한글");
-  await url.dispatchEvent("compositionstart", { data: "한" });
-  await url.dispatchEvent("keydown", { key: "Enter", isComposing: true, keyCode: 229 });
-  await expect(dialog).toBeVisible();
-  await expect(blockAt(page, 0).locator("a")).toHaveCount(0);
-  await url.dispatchEvent("compositionend", { data: "한글" });
-  await page.keyboard.press("Escape");
-  await expect(trigger).toBeFocused();
-  expect(await editorOf(page).evaluate(() => window.getSelection()?.toString())).toBe(
-    "한글과 😀 링크",
-  );
-  await trigger.click();
-  await url.fill("https://example.com/한글");
-  await url.press("Enter");
-  await expect(dialog).toHaveCount(0);
-  await expect(blockAt(page, 0).locator("a")).toHaveText("한글과 😀 링크");
-  await save(page);
-  expect(JSON.stringify(await savedBody(page.request, wsId, doc.id))).toContain('"type":"link"');
-  expect(csp).toEqual([]);
+}, testInfo) => {
+  await observeTemplateSelection(page);
+  const checkpoint = async (stage: string) =>
+    page.evaluate((value) => {
+      (window as ObservedWindow).__w3TemplateObserver?.checkpoint(value);
+    }, stage);
+  try {
+    const csp = watchCspViolations(page);
+    await login(page, admin.email, admin.password);
+    const wsId = await workspaceId(page.request);
+    const doc = await createDoc(page.request, wsId, "템플릿 링크", {
+      markdown: "한글과 😀 링크\n",
+    });
+    await openDoc(page, doc.path);
+    await checkpoint("openDoc:original");
+    await caretAtEndOf(page, 0);
+    await page.keyboard.press("Shift+Home");
+    await checkpoint("ShiftHome:original-return");
+    const bubble = page.locator("[data-fvoci-bubble]");
+    const trigger = bubble.getByRole("button", { name: "링크", exact: true });
+    await expect(bubble).toBeVisible();
+    await checkpoint("bubble:original-visible");
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "링크", exact: true });
+    const url = dialog.getByLabel("URL");
+    await expect(url).toBeFocused();
+    await checkpoint("popup:original-open-focus");
+    await url.fill("https://example.com/한글");
+    await url.dispatchEvent("compositionstart", { data: "한" });
+    await url.dispatchEvent("keydown", { key: "Enter", isComposing: true, keyCode: 229 });
+    await expect(dialog).toBeVisible();
+    await expect(blockAt(page, 0).locator("a")).toHaveCount(0);
+    await checkpoint("compositionEnter:original-no-link");
+    await url.dispatchEvent("compositionend", { data: "한글" });
+    await page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+    expect(await editorOf(page).evaluate(() => window.getSelection()?.toString())).toBe(
+      "한글과 😀 링크",
+    );
+    await checkpoint("Cancel:original-native-text");
+    await trigger.click();
+    await url.fill("https://example.com/한글");
+    await url.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect(blockAt(page, 0).locator("a")).toHaveText("한글과 😀 링크");
+    await checkpoint("Apply:original-selected-text");
+    await save(page);
+    expect(JSON.stringify(await savedBody(page.request, wsId, doc.id))).toContain('"type":"link"');
+    expect(csp).toEqual([]);
+    await checkpoint("save:original");
+  } finally {
+    const observation = await page
+      .evaluate(() => {
+        const current = (window as ObservedWindow).__w3TemplateObserver;
+        if (!current) return { unavailable: "No installed observer in current page" };
+        const result = current.stop();
+        delete (window as ObservedWindow).__w3TemplateObserver;
+        return result;
+      })
+      .catch((error: unknown) => ({ unavailable: String(error) }));
+    await testInfo.attach("w3-template-native-selection-observation.json", {
+      body: JSON.stringify(observation),
+      contentType: "application/json",
+    });
+  }
 });
 
 test("emoji insertion and mobile groups remain keyboard usable without viewport overflow", async ({
