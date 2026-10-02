@@ -937,6 +937,8 @@ test("a same-actor new-session denial cannot retire a populated successor or ret
   const project = z.object({ id: z.string() }).parse(await projectResponse.json());
   const firstContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
   const secondContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  let releaseTransitionMe = () => {};
+  let transitionMeDelivery = Promise.resolve();
   const events: {
     kind: string;
     endpoint: string;
@@ -988,6 +990,16 @@ test("a same-actor new-session denial cannot retire a populated successor or ret
     await expect(mounted.getByTestId("timer-state")).toHaveText("일시정지");
     await expect(mounted.getByTestId("timer-resume")).toBeEnabled();
     await expect(first.getByTestId("timer-owner")).toBeVisible();
+    await first.route(
+      (url) => url.pathname === "/api/v1/auth/me",
+      async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const native = await route.fetch();
+        const delivery = transitionMeDelivery;
+        await delivery;
+        if (!first.isClosed()) await route.fulfill({ response: native });
+      },
+    );
     const cookies1 = await firstContext.cookies();
     const cookies2 = await secondContext.cookies();
     const endpoint = (url: string) => {
@@ -1022,6 +1034,9 @@ test("a same-actor new-session denial cannot retire a populated successor or ret
       [s1, s2, cookies2],
     ] as const) {
       const transitionStart = events.length;
+      transitionMeDelivery = new Promise<void>((resolve) => {
+        releaseTransitionMe = resolve;
+      });
       const denied = first.waitForResponse(
         (response) =>
           new URL(response.url()).pathname === timerUrl &&
@@ -1053,6 +1068,7 @@ test("a same-actor new-session denial cannot retire a populated successor or ret
         z.object({ params: z.object({ code: z.string() }) }).parse(await oldResult.json()).params
           .code,
       ).toBe("timer_context_changed");
+      releaseTransitionMe();
       await refreshed;
       const result = await successorRead;
       expect(timerShape.parse(await result.json()).run?.id).toBe(run.runId);
@@ -1073,6 +1089,7 @@ test("a same-actor new-session denial cannot retire a populated successor or ret
       ).toEqual([]);
     }
   } finally {
+    releaseTransitionMe();
     await testInfo.attach("timer-real-session-boundaries", {
       body: JSON.stringify({ events, productQueryOrAuthInjection: false }),
       contentType: "application/json",
