@@ -5179,13 +5179,13 @@ export interface components {
              * Format: uuid
              * @description Own opaque run identity/version allow explicit cleanup after revocation.
              */
-            runId?: string | null;
+            runId: string | null;
             /** Format: date-time */
             serverNow: string;
-            status?: components["schemas"]["TimerStatus"] | null;
+            status: components["schemas"]["TimerStatus"] | null;
             /** Format: int32 */
-            version?: number | null;
-            visibleRun?: components["schemas"]["TimerRunOutput"] | null;
+            version: number | null;
+            visibleRun: components["schemas"]["TimerRunOutput"] | null;
         };
         PasswordChangeBody: {
             /** @description `null` only for password-less accounts. */
@@ -5845,7 +5845,7 @@ export interface components {
             /** @description A different unfinished run, without its tenant, task id or title. */
             busyElsewhere: boolean;
             legacyOpen: boolean;
-            run?: components["schemas"]["TimerRunOutput"] | null;
+            run: components["schemas"]["TimerRunOutput"] | null;
             /** Format: date-time */
             serverNow: string;
         };
@@ -5945,9 +5945,9 @@ export interface components {
             elapsedMilliseconds: number;
             /** Format: uuid */
             id: string;
-            note?: string | null;
+            note: string | null;
             /** Format: date-time */
-            runningSince?: string | null;
+            runningSince: string | null;
             /** Format: date-time */
             startedAt: string;
             status: components["schemas"]["TimerStatus"];
