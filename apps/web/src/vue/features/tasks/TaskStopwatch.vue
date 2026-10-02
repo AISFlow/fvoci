@@ -59,6 +59,7 @@ async function retirePrivateState(
     key[2] === credential.value &&
     key[3] === props.workspaceId &&
     key[4] === props.taskId;
+  if (!currentScope()) return;
   revokedUpdate = state.dataUpdatedAt.value;
   denial.value = err;
   revoked.value = true;

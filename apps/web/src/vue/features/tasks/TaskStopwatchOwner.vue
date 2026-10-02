@@ -53,6 +53,7 @@ async function retireOwnerState(
   const key = capture.queryKey;
   const currentScope = () =>
     live && scopeLifetime === lifetime && key[1] === actor.value && key[2] === credential.value;
+  if (!currentScope()) return;
   revokedUpdate = owner.dataUpdatedAt.value;
   denial.value = err;
   revoked.value = true;
