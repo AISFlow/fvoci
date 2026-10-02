@@ -5,6 +5,20 @@ mod task_timer {
     #[tokio::test]
     async fn timer_start_pause_fresh_client_resume_stop_commits_without_completing_task() {
         let harness = TestDb::bootstrap().await;
+        let app_role = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&harness.app_url)
+            .await
+            .unwrap();
+        let flags: (bool, bool) = sqlx::query_as(
+            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+        )
+        .fetch_one(&app_role)
+        .await
+        .unwrap();
+        assert_eq!(flags, (false, false));
+        println!("W5 actual app role: superuser=false bypassrls=false");
+        app_role.close().await;
         let (app, cookie, actor, workspace) = setup_session(&harness).await;
         let admin = admin_pool(&harness).await;
         let project = create_project(app.clone(), &cookie, workspace, "WATCH", "private").await;
