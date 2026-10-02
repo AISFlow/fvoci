@@ -1,4 +1,7 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, type WebSocketRoute } from "@playwright/test";
+import { createEncoder, toUint8Array, writeVarString, writeVarUint } from "lib0/encoding";
+import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { Editor } from "@tiptap/core";
 import type * as Y from "yjs";
 import { login } from "./helpers";
@@ -396,4 +399,275 @@ test("late older-schema peer data retires only the editor, preserving the same l
   } finally {
     await peer.context.close();
   }
+});
+
+type AckWindow = Window & { w3AckSeen?: string[] };
+async function observeActualAckDelivery(page: Page): Promise<void> {
+  await editorOf(page).evaluate((root) => {
+    const editor = (root as EditorElement).editor;
+    const extension = editor.extensionManager.extensions.find(
+      (item) => item.name === "collaborationCaret",
+    );
+    if (!extension) throw new Error("Missing actual collaboration provider");
+    const options = extension.options as Record<string, unknown>;
+    const provider = options.provider as HocuspocusProvider;
+    const seen: string[] = [];
+    (window as AckWindow).w3AckSeen = seen;
+    provider.on("stateless", ({ payload }: { payload: string }) => {
+      seen.push(payload);
+    });
+  });
+}
+async function expectAckDelivered(page: Page, payload: string): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate((value) => (window as AckWindow).w3AckSeen?.includes(value) ?? false, payload),
+    )
+    .toBe(true);
+}
+
+// Real Rust traffic is forwarded unchanged; only the browser-facing ACK is
+// gated to verify exact prefix/lifetime barriers using the installed codec.
+async function sourceAckGate(page: Page) {
+  const held: {
+    id: string;
+    routingKey: string;
+    message: string | Buffer;
+    socket: WebSocketRoute;
+  }[] = [];
+  let hold = true;
+  await page.routeWebSocket(/\/collab(?:\?|$)/, (socket) => {
+    const server = socket.connectToServer();
+    socket.onMessage((message) => {
+      server.send(message);
+    });
+    server.onMessage((message) => {
+      const frame = decodeHocuspocusFrame(frameBytes(message));
+      const parts = frame?.kind === "stateless" ? persistParts(frame.payload) : null;
+      if (hold && parts?.kind === "done" && frame?.kind === "stateless")
+        held.push({ id: parts.id, routingKey: frame.routingKey, message, socket });
+      else socket.send(message);
+    });
+  });
+  const stateless = (index: number, payload: string) => {
+    const item = held[index];
+    if (!item) throw new Error("Missing real held ACK");
+    const encoder = createEncoder();
+    writeVarString(encoder, item.routingKey);
+    writeVarUint(encoder, 5);
+    writeVarString(encoder, payload);
+    item.socket.send(Buffer.from(toUint8Array(encoder)));
+  };
+  return {
+    held,
+    wrong: (index: number) => {
+      stateless(index, "persisted:00000000-0000-4000-8000-000000000001");
+    },
+    fail: (index: number) => {
+      const item = held[index];
+      if (!item) throw new Error("Missing ACK");
+      stateless(index, `persist-failed:${item.id}`);
+    },
+    release: (index: number) => {
+      const item = held[index];
+      if (!item) throw new Error("Missing ACK");
+      item.socket.send(item.message);
+    },
+    releaseAll: () => {
+      hold = false;
+      for (const item of held.splice(0)) item.socket.send(item.message);
+    },
+  };
+}
+
+test("wrong/old-prefix ACK never copies or marks newest source edit saved, matched ACK copies actual live body and a new client sees it", async ({
+  page,
+  browser,
+  baseURL,
+}) => {
+  const gate = await sourceAckGate(page);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "Markdown ACK 최신 본문", {
+    json: {
+      type: "doc",
+      content: [
+        { type: "paragraph", attrs: { id: "ack-body" }, content: [{ type: "text", text: "원본" }] },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await observeActualAckDelivery(page);
+  await selectMode(page, "markdown");
+  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+  await field.fill("첫 수정");
+  await page.getByRole("button", { name: "적용", exact: true }).click();
+  await page.evaluate(() => navigator.clipboard.writeText("sentinel"));
+  await page.getByRole("button", { name: "저장된 현재 문서 복사" }).click();
+  await expect.poll(() => gate.held.length).toBeGreaterThan(0);
+  const old = gate.held.length - 1;
+  gate.wrong(old);
+  await expectAckDelivered(page, "persisted:00000000-0000-4000-8000-000000000001");
+  await expect(page.locator('[data-collab-persisted="false"]')).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("sentinel");
+  await field.fill("가장 최신 수정 🧑‍💻");
+  await page.getByRole("button", { name: "적용", exact: true }).click();
+  gate.release(old);
+  await expect(
+    page.getByRole("alert").filter({ hasText: "저장 확인 중 문서가 변경되었습니다" }),
+  ).toBeVisible();
+  await expect(page.locator('[data-collab-persisted="false"]')).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("sentinel");
+  const before = gate.held.length;
+  await page.getByRole("button", { name: "저장된 현재 문서 복사" }).click();
+  await expect.poll(() => gate.held.length).toBeGreaterThan(before);
+  gate.release(gate.held.length - 1);
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toContain("가장 최신 수정 🧑‍💻");
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible();
+  const body = await savedBody(page.request, ws, doc.id);
+  expect(body.content?.[0]?.attrs?.id).toBe("ack-body");
+  expect(body.content?.[0]?.content?.[0]?.text).toBe("가장 최신 수정 🧑‍💻");
+  const fresh = await newSignedInPage(browser, baseURL, admin);
+  try {
+    await openDoc(fresh.page, doc.path);
+    await expectBlocks(fresh.page, ["가장 최신 수정 🧑‍💻"]);
+    expect(await savedBody(fresh.page.request, ws, doc.id)).toEqual(body);
+  } finally {
+    await fresh.context.close();
+    gate.releaseAll();
+  }
+});
+
+test("failed ACK cannot copy source or claim saved even after the server wrote the requested body", async ({
+  page,
+}) => {
+  const gate = await sourceAckGate(page);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "Markdown 저장 실패", { markdown: "원본" });
+  await openDoc(page, doc.path);
+  await observeActualAckDelivery(page);
+  await selectMode(page, "markdown");
+  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+  await field.fill("실패 확인");
+  await page.getByRole("button", { name: "적용", exact: true }).click();
+  await page.evaluate(() => navigator.clipboard.writeText("failure sentinel"));
+  await page.getByRole("button", { name: "저장된 현재 문서 복사" }).click();
+  await expect.poll(() => gate.held.length).toBeGreaterThan(0);
+  const failed = gate.held.at(-1);
+  if (!failed) throw new Error("Missing failed ACK witness");
+  gate.fail(gate.held.length - 1);
+  await expectAckDelivered(page, `persist-failed:${failed.id}`);
+  await expect(
+    page.getByRole("alert").filter({ hasText: "저장 확인 중 문서가 변경되었습니다" }),
+  ).toBeVisible();
+  await expect(page.locator('[data-collab-persisted="false"]')).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("failure sentinel");
+  gate.releaseAll();
+});
+
+test("block arrangement uses live selection and keeps the actual document/provider plus durable IDs", async ({
+  page,
+}) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "블록 순서", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "first" },
+          content: [{ type: "text", text: "한글 첫 블록" }],
+        },
+        {
+          type: "paragraph",
+          attrs: { id: "second" },
+          content: [{ type: "text", text: "둘째 블록" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await recordIdentity(page);
+  await caretAtEndOf(page, 0);
+  await selectMode(page, "block");
+  await page.getByRole("button", { name: "선택 블록 아래로" }).click();
+  await expectBlocks(page, ["둘째 블록", "한글 첫 블록"]);
+  await expectIdentity(page);
+  await save(page);
+  const body = await savedBody(page.request, ws, doc.id);
+  expect(body.content?.[0]?.attrs?.id).toBe("second");
+  expect(body.content?.[1]?.attrs?.id).toBe("first");
+});
+
+test("native backward selection and stored marks survive no-op modes without Y writes or rich keyboard interception", async ({
+  page,
+}) => {
+  await login(page, admin.email, admin.password);
+  const ws = await workspaceId(page.request);
+  const doc = await createDoc(page.request, ws, "뒤로 선택", {
+    json: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: "selection" },
+          content: [{ type: "text", text: "한글 연구 자료" }],
+        },
+      ],
+    },
+  });
+  await openDoc(page, doc.path);
+  await recordIdentity(page);
+  await caretAtEndOf(page, 0);
+  await page.keyboard.press("Control+Shift+ArrowLeft");
+  const before = await editorOf(page).evaluate((root) => {
+    const state = (root as EditorElement).editor.state;
+    return { anchor: state.selection.anchor, head: state.selection.head };
+  });
+  expect(before.anchor).toBeGreaterThan(before.head);
+  await selectMode(page, "markdown");
+  const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
+  await field.focus();
+  await page.keyboard.press("Control+a");
+  expect(
+    await field.evaluate(
+      (element) =>
+        (element as HTMLTextAreaElement).selectionEnd -
+        (element as HTMLTextAreaElement).selectionStart,
+    ),
+  ).toBe((await field.inputValue()).length);
+  await selectMode(page, "preview");
+  await selectMode(page, "rich");
+  const after = await editorOf(page).evaluate((root) => {
+    const state = (root as EditorElement).editor.state;
+    return {
+      anchor: state.selection.anchor,
+      head: state.selection.head,
+      focused: state.selection.empty
+        ? false
+        : Boolean(document.activeElement?.closest(".ProseMirror")),
+    };
+  });
+  expect({ anchor: after.anchor, head: after.head }).toEqual(before);
+  expect(after.focused).toBe(true);
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("Control+b");
+  const marks = await editorOf(page).evaluate((root) =>
+    (root as EditorElement).editor.state.storedMarks?.map((mark) => mark.type.name),
+  );
+  expect(marks).toContain("bold");
+  await selectMode(page, "markdown");
+  await selectMode(page, "rich");
+  expect(
+    await editorOf(page).evaluate((root) =>
+      (root as EditorElement).editor.state.storedMarks?.map((mark) => mark.type.name),
+    ),
+  ).toEqual(marks);
+  await expectIdentity(page, 0);
 });
