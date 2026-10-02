@@ -552,12 +552,14 @@ export class SourceModeSession {
   private retired = false;
   private readonly onContent = () => {
     this.epoch++;
+    this.beforeBinding?.();
   };
   private readonly fragment: Y.XmlFragment;
   constructor(
     readonly ydoc: Y.Doc,
     private readonly scope: () => ModeScope,
     private readonly authorized: () => boolean,
+    private readonly beforeBinding?: () => void,
   ) {
     this.fragment = ydoc.getXmlFragment(FVOCI_YDOC_FRAGMENT);
     this.fragment.observeDeep(this.onContent);

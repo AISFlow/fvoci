@@ -131,8 +131,28 @@ const sourceSession = markRaw(
     props.ydoc,
     () => scopeEpoch,
     () => props.editable,
+    inspectRawBeforeBinding,
   ),
 );
+
+/** Registered before ySync's observer. Unsupported schema data retires this
+ * binding through its public lifecycle before the SDK can repair it. The
+ * host's same Y.Doc/provider remain authoritative. */
+function inspectRawBeforeBinding(): void {
+  const current = editor.value;
+  if (!current || current.isDestroyed) return;
+  const issues = rawEditorPreflight(props.ydoc, current.schema);
+  if (!issues.length) return;
+  rawIssues.value = issues;
+  scopeEpoch++;
+  modeLifetime++;
+  sourceStale.value = Boolean(capture.value);
+  current.destroy();
+  editor.value = undefined;
+  anchors.clear();
+  uploads.value = [];
+  emit("ready", null);
+}
 watch(
   [
     () => props.modeScope,
@@ -262,7 +282,7 @@ const uploads = shallowRef<Array<{ key: string; file: File }>>([]);
 const anchors = new Map<string, MappablePosition>();
 
 function queueUploads(current: Editor, files: File[], pos: number): void {
-  if (!props.attachmentBridge) return;
+  if (!props.attachmentBridge || !props.editable || rawIssues.value.length) return;
   const queued = files.map((file) => {
     const key = crypto.randomUUID();
     anchors.set(key, uploadAnchor(current, pos));
@@ -279,7 +299,7 @@ function dropUpload(key: string): void {
 function insertUploaded(key: string, result: AttachmentUploadResult): void {
   const current = editor.value;
   const anchor = anchors.get(key);
-  if (!current || current.isDestroyed || !anchor) return;
+  if (!current || current.isDestroyed || !anchor || !props.editable) return;
   current
     .chain()
     .setMeta(FILE_UPLOAD_META, key)
@@ -357,8 +377,8 @@ const editorExtensions = [
       ]
     : []),
 ];
-const rawIssues = rawEditorPreflight(props.ydoc, getSchema(editorExtensions));
-const editor = rawIssues.length
+const rawIssues = shallowRef(rawEditorPreflight(props.ydoc, getSchema(editorExtensions)));
+const editor = rawIssues.value.length
   ? shallowRef<import("@tiptap/vue-3").Editor>()
   : useEditor({
       injectCSS: false,
@@ -615,7 +635,7 @@ function bubbleOwner(): HTMLElement {
       <textarea
         ref="sourceField"
         aria-label="Markdown 직접 편집"
-        :readonly="!editable"
+        :readonly="!editable || rawIssues.length > 0"
         spellcheck="false"
         @input="onSourceInput"
         @keydown="onSourceKeyDown"
@@ -646,7 +666,7 @@ function bubbleOwner(): HTMLElement {
       <div class="fvoci-mode-controls">
         <button
           type="button"
-          :disabled="!editable || !draftDirty || sourceStale || sourceComposing"
+          :disabled="!editor || !editable || !draftDirty || sourceStale || sourceComposing"
           @click="applySource"
           >적용</button
         >
@@ -684,7 +704,7 @@ function bubbleOwner(): HTMLElement {
           previewWidth: 0,
           previewHeight: 0,
         }"
-        :read-only="!editable"
+        :read-only="!editable || rawIssues.length > 0"
         @remove="dropUpload(item.key)"
         @uploaded="insertUploaded(item.key, $event)"
       />

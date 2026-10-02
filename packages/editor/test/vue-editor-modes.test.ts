@@ -12,7 +12,7 @@ import type { EditorView } from "@tiptap/pm/view";
 import { initProseMirrorDoc, ySyncPlugin, ySyncPluginKey, yUndoPlugin } from "@tiptap/y-tiptap";
 import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "../src/collab-tiptap.ts";
-import { SourceModeSession } from "../src/source-mode.ts";
+import { rawEditorPreflight, SourceModeSession } from "../src/source-mode.ts";
 import { createFvociExtensions } from "../src/tiptap-schema.ts";
 import { sanitizeEditorModePreview } from "../src/vue/editor-mode-preview.ts";
 
@@ -253,3 +253,122 @@ await test("untouched raw extension attributes survive a real localized ySync so
     ydoc.destroy();
   }
 });
+
+function addFuture(peer: Y.Doc, kind: "node" | "mark"): void {
+  if (kind === "node") {
+    const node = new Y.XmlElement("futureNode");
+    node.setAttribute("id", "future-id");
+    const text = new Y.XmlText();
+    text.insert(0, "미래 원본 🧑‍💻");
+    node.insert(0, [text]);
+    peer.getXmlFragment("prosemirror").insert(1, [node]);
+  } else {
+    const paragraph = peer.getXmlFragment("prosemirror").get(0);
+    assert.ok(paragraph instanceof Y.XmlElement);
+    const text = paragraph.get(0);
+    assert.ok(text instanceof Y.XmlText);
+    text.format(0, 2, { futureMark: { ref: "future-ref" } });
+  }
+}
+
+await test("negative control: observer-only 096 foundation binding deletes a late schema-unknown node", () => {
+  const ydoc = tiptapJsonToYDoc(input);
+  const peer = new Y.Doc({ gc: false });
+  Y.applyUpdate(peer, Y.encodeStateAsUpdate(ydoc));
+  const source = new SourceModeSession(
+    ydoc,
+    () => 1,
+    () => true,
+  );
+  const local = liveEditor(ydoc);
+  try {
+    const capture = source.capture(local.editor.state.doc);
+    addFuture(peer, "node");
+    const expected = yDocToTiptapJson(peer);
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peer), "remote");
+    assert.notDeepEqual(yDocToTiptapJson(ydoc), expected);
+    assert.equal(yDocToTiptapJson(ydoc).content?.length, 2);
+    assert.equal(source.isCurrent(capture), false);
+  } finally {
+    source.destroy();
+    local.close();
+    ydoc.destroy();
+    peer.destroy();
+  }
+});
+
+for (const kind of ["node", "mark"] as const) {
+  await test(`earlier raw observer retires binding before late unsupported ${kind} can cause an SDK repair write`, () => {
+    const ydoc = tiptapJsonToYDoc(input);
+    const peer = new Y.Doc({ gc: false });
+    Y.applyUpdate(peer, Y.encodeStateAsUpdate(ydoc));
+    const holder: { local: ReturnType<typeof liveEditor> | null } = { local: null };
+    let retired = 0;
+    let repairs = 0;
+    const source = new SourceModeSession(
+      ydoc,
+      () => 1,
+      () => true,
+      () => {
+        if (!holder.local) return;
+        const diagnostics = rawEditorPreflight(ydoc, holder.local.editor.schema);
+        if (!diagnostics.length) return;
+        retired++;
+        // Real SDK view.destroy and owned manager lifecycle, corresponding to
+        // the mounted editor.destroy path. Physical DOM teardown is E2E scope.
+        holder.local.close();
+        holder.local = null;
+      },
+    );
+    holder.local = liveEditor(ydoc);
+    ydoc.on("update", (_update, origin) => {
+      if (origin === ySyncPluginKey) repairs++;
+    });
+    try {
+      const capture = source.capture(holder.local.editor.state.doc);
+      const schema = holder.local.editor.schema;
+      peer.transact(() => {
+        addFuture(peer, kind);
+        const fragment = peer.getXmlFragment("prosemirror");
+        const supported = fragment.get(fragment.length - 1);
+        assert.ok(supported instanceof Y.XmlElement);
+        const text = supported.get(0);
+        assert.ok(text instanceof Y.XmlText);
+        text.insert(text.length, " 동시 편집");
+      }, "older-schema-peer");
+      const expected = yDocToTiptapJson(peer);
+      const peerSnapshot = Y.snapshot(peer);
+      Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peer), "remote");
+      assert.equal(retired, 1);
+      assert.equal(repairs, 0);
+      assert.deepEqual(yDocToTiptapJson(ydoc), expected);
+      assert.ok(Y.equalSnapshots(Y.snapshot(ydoc), peerSnapshot));
+      assert.equal(source.isCurrent(capture), false);
+      const supported = peer
+        .getXmlFragment("prosemirror")
+        .get(peer.getXmlFragment("prosemirror").length - 1);
+      assert.ok(supported instanceof Y.XmlElement);
+      const text = supported.get(0);
+      assert.ok(text instanceof Y.XmlText);
+      text.insert(text.length, " 이후 편집");
+      Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(peer), "remote");
+      assert.equal(retired, 1);
+      assert.equal(repairs, 0);
+      assert.deepEqual(yDocToTiptapJson(ydoc), yDocToTiptapJson(peer));
+      assert.equal(
+        source.prepare(
+          capture,
+          "stale overwrite",
+          EditorState.create({ schema, doc: schema.nodeFromJSON(input) }),
+        ).status,
+        "stale",
+      );
+    } finally {
+      source.destroy();
+      const close = (local: ReturnType<typeof liveEditor> | null) => local?.close();
+      close(holder.local);
+      ydoc.destroy();
+      peer.destroy();
+    }
+  });
+}
