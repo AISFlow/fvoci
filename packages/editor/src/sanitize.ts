@@ -12,6 +12,10 @@ const BLOCKNOTE_TAGS = [
   "h1",
   "h2",
   "h3",
+  "h4",
+  "h5",
+  "h6",
+  "aside",
   "ul",
   "ol",
   "li",
@@ -19,6 +23,8 @@ const BLOCKNOTE_TAGS = [
   "pre",
   "code",
   "table",
+  "colgroup",
+  "col",
   "thead",
   "tbody",
   "tr",
@@ -74,21 +80,46 @@ const KATEX_TAGS = [
 ] as const;
 
 const NUMERIC_UNIT = [/^-?[\d.]+(?:em|ex|px|rem|pt|%)$/];
-const ALLOWED_STYLES: NonNullable<sanitizeHtml.IOptions["allowedStyles"]> = {
-  "*": {
-    height: NUMERIC_UNIT,
-    width: NUMERIC_UNIT,
-    "min-width": NUMERIC_UNIT,
-    top: NUMERIC_UNIT,
-    left: NUMERIC_UNIT,
-    "margin-left": NUMERIC_UNIT,
-    "margin-right": NUMERIC_UNIT,
-    "padding-left": NUMERIC_UNIT,
-    "vertical-align": NUMERIC_UNIT,
-    "border-bottom-width": NUMERIC_UNIT,
-    position: [/^(?:relative|absolute)$/],
-  },
+const EXISTING_NUMERIC_STYLES = {
+  height: NUMERIC_UNIT,
+  width: NUMERIC_UNIT,
+  "min-width": NUMERIC_UNIT,
+  top: NUMERIC_UNIT,
+  left: NUMERIC_UNIT,
+  "margin-left": NUMERIC_UNIT,
+  "margin-right": NUMERIC_UNIT,
+  "padding-left": NUMERIC_UNIT,
+  "vertical-align": NUMERIC_UNIT,
+  "border-bottom-width": NUMERIC_UNIT,
+  position: [/^(?:relative|absolute)$/],
 };
+
+// Current editor color/highlight/table controls emit these three fixed
+// design tokens; corpus/import colors use literal hex or RGB(A). No arbitrary
+// custom property, fallback, CSS URL or expression is admitted by this policy.
+const COLOR = [
+  /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i,
+  /^var\(--(?:accent|destructive|muted)\)$/,
+  /^rgb\(\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*\)$/i,
+  /^rgba\(\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*(?:0(?:\.\d+)?|1(?:\.0+)?)\s*\)$/i,
+];
+const ALIGN = [/^(?:left|center|right|justify)$/];
+// Preserve the old numeric/math profile on the two tags that already
+// admitted style. sanitize-html deep-merges '*' rules with specific rules,
+// so a global rule cannot be narrowed using an empty per-tag property array.
+// Materialize that existing profile here instead of letting newly styled
+// paragraph/heading/table elements inherit math positioning properties.
+const ALLOWED_STYLES: NonNullable<sanitizeHtml.IOptions["allowedStyles"]> = {
+  span: { ...EXISTING_NUMERIC_STYLES, color: COLOR, "background-color": COLOR },
+  figure: EXISTING_NUMERIC_STYLES,
+  mark: { color: [/^inherit$/], "background-color": COLOR },
+};
+for (const tag of ["p", "h1", "h2", "h3", "h4", "h5", "h6"])
+  ALLOWED_STYLES[tag] = { "text-align": ALIGN };
+for (const tag of ["td", "th"])
+  ALLOWED_STYLES[tag] = { "text-align": ALIGN, background: COLOR, "background-color": COLOR };
+for (const tag of ["table", "col"])
+  ALLOWED_STYLES[tag] = { width: NUMERIC_UNIT, "min-width": NUMERIC_UNIT };
 
 /* WHY: preview img src 경로 문자셋 — API id 판정이 아니라 URL 문법이라 소문자 hex 를 박는다. */
 export const ATTACHMENT_PREVIEW_SRC = new RegExp(
@@ -125,8 +156,19 @@ export const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
     figure: ["style", "data-align"],
     img: ["src", "alt", "width", "height"],
     input: ["type", "checked", "disabled"],
-    td: ["colspan", "rowspan"],
-    th: ["colspan", "rowspan"],
+    aside: ["data-callout"],
+    p: ["style"],
+    h1: ["style"],
+    h2: ["style"],
+    h3: ["style"],
+    h4: ["style"],
+    h5: ["style"],
+    h6: ["style"],
+    mark: ["style", "data-color"],
+    table: ["style"],
+    col: ["style"],
+    td: ["colspan", "rowspan", "colwidth", "data-colwidth", "data-background", "style"],
+    th: ["colspan", "rowspan", "colwidth", "data-colwidth", "data-background", "style"],
     ol: ["start"],
     span: ["style"],
     math: ["xmlns", "display"],

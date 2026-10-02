@@ -12,6 +12,9 @@ import {
   type Page,
   type WebSocket as PlaywrightWebSocket,
 } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import type { Editor } from "@tiptap/core";
+import type * as Y from "yjs";
 import type { EditorView } from "@tiptap/pm/view";
 import { decodeHocuspocusFrame } from "../e2e-pending/collab-wire";
 import { readJson, flowSchemas, createE2eUser, login, watchCspViolations } from "./helpers";
@@ -492,7 +495,7 @@ test("a math block inserted with /math reaches the peer, the saved body and a re
 test("a peer's change to an embed or math block being edited keeps the typed draft, and leaving the field commits it", async ({
   browser,
   baseURL,
-}) => {
+}, testInfo) => {
   // Not inline math: a peer's change to an inline node rebuilds its
   // paragraph and the node view with it, in the React editor as well, so
   // the open field closes there (a separate, pre-existing issue: #259).
@@ -555,6 +558,40 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     }
 
     // Block math: A types a new source while B commits another one.
+    const observeMath = async (page: Page, capture = false) =>
+      page.locator(".fvoci-editor .ProseMirror").evaluate((root, capture) => {
+        const element = root as HTMLElement & {
+          editor: Editor;
+          mathOwner?: { atom: Y.XmlElement; pm: unknown; doc: Y.Doc };
+        };
+        const editor = element.editor;
+        const options = editor.extensionManager.extensions.find(
+          (extension) => extension.name === "collaboration",
+        )?.options as { document: Y.Doc };
+        const doc = options.document;
+        const atom = doc
+          .getXmlFragment("prosemirror")
+          .toArray()
+          .find((node) => "nodeName" in node && node.nodeName === "math") as
+          Y.XmlElement | undefined;
+        let pm: unknown;
+        editor.state.doc.forEach((node) => {
+          if (node.type.name === "math") pm = node;
+        });
+        if (!atom?._item) throw new Error("Missing actual native Math atom");
+        if (capture) element.mathOwner = { atom, pm, doc };
+        return {
+          latex: atom.getAttribute("latex"),
+          logicalId: atom.getAttribute("id") ?? null,
+          nativeId: { client: atom._item.id.client, clock: atom._item.id.clock },
+          deleted: atom._item.deleted,
+          sameAtom: element.mathOwner?.atom === atom,
+          sameDoc: element.mathOwner?.doc === doc,
+          rebuiltPm: element.mathOwner?.pm !== pm,
+        };
+      }, capture);
+    await observeMath(a.page, true);
+    await observeMath(b.page, true);
     await a.page.locator(".fvoci-editor button.afn-math").click();
     const sourceA = a.page.getByLabel("수식 LaTeX");
     await expect(sourceA).toBeFocused();
@@ -562,6 +599,10 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     await b.page.locator(".fvoci-editor button.afn-math").click();
     await b.page.getByLabel("수식 LaTeX").fill("y");
     await b.page.getByLabel("수식 LaTeX").blur();
+    await testInfo.attach("w3-original-math-after-B-blur.json", {
+      body: JSON.stringify({ a: await observeMath(a.page), b: await observeMath(b.page) }),
+      contentType: "application/json",
+    });
     await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("y");
     // B's later text edit reaches A after B's latex (one socket, in order).
     await caretAtEndOf(b.page, 3);
@@ -571,6 +612,17 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
       .toBe("뒤 끝");
     await expect(sourceA).toBeFocused();
     await expect(sourceA).toHaveValue("a+b");
+    const beforeExplicitBlur = await observeMath(a.page);
+    expect(beforeExplicitBlur).toMatchObject({
+      sameAtom: true,
+      sameDoc: true,
+      deleted: false,
+      latex: "y",
+    });
+    await testInfo.attach("w3-original-math-peer-y-before-own-blur.json", {
+      body: JSON.stringify(beforeExplicitBlur),
+      contentType: "application/json",
+    });
     await sourceA.blur();
     await expect(a.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b");
     await expect(b.page.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b", {
@@ -591,6 +643,56 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     expect(saved.content.find((node) => node.type === "math")?.attrs).toMatchObject({
       latex: "a+b",
     });
+    const connection = process.env.DATABASE_APP_URL;
+    const container = process.env.FVOCI_TEST_PG_CONTAINER;
+    if (!connection || !container?.startsWith("fvoci-rust-test-pg-"))
+      throw new Error("Requires own app-role fixture");
+    const app = new URL(connection);
+    if (
+      !/^fvoci_app_fvoci_e2e_[a-f0-9]{16}$/.test(app.username) ||
+      !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(app.pathname)
+    )
+      throw new Error("Invalid app role fixture");
+    const stored = JSON.parse(
+      execFileSync(
+        "docker",
+        [
+          "exec",
+          "-i",
+          container,
+          "psql",
+          "-X",
+          "-qAt",
+          "-U",
+          app.username,
+          "-d",
+          app.pathname.slice(1),
+          "-v",
+          "ON_ERROR_STOP=1",
+        ],
+        {
+          input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${wsId}'; SELECT content_json FROM fvoci.documents WHERE workspace_id='${wsId}' AND id='${doc.id}'; ROLLBACK;`,
+          encoding: "utf8",
+        },
+      ),
+    ) as unknown;
+    expect(stored).toEqual(saved);
+    await testInfo.attach("w3-original-math-app-role-body.json", {
+      body: JSON.stringify(stored),
+      contentType: "application/json",
+    });
+    const fresh = await browser.newContext({
+      baseURL,
+      storageState: await a.context.storageState(),
+    });
+    try {
+      const newest = await fresh.newPage();
+      await openDoc(newest, doc.path);
+      await expect(newest.locator(".fvoci-editor .afn-math annotation")).toHaveText("a+b");
+      expect(JSON.parse(await bodyJson(newest.request, wsId, doc.id)) as unknown).toEqual(saved);
+    } finally {
+      await fresh.close();
+    }
   } finally {
     await a.context.close();
     await b.context.close();

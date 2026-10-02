@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -54,6 +55,39 @@ await test("assertBundledLicenseTexts fails when a bundled id lacks text and sup
   assert.throws(() => {
     assertBundledLicenseTexts(entries, supplements);
   }, /no license text and no supplement/);
+});
+
+await test("locked Markdown browser dependencies retain full pinned upstream notices", () => {
+  const supplements = loadBrowserLicenseManifest(manifestPath);
+  const filled = applyBrowserLicenseSupplements(
+    [
+      { name: "launder", version: "1.7.1", identifier: "MIT" },
+      { name: "remark-math", version: "6.0.0", identifier: "MIT" },
+    ],
+    supplements,
+    path.dirname(manifestPath),
+  );
+  assertBundledLicenseTexts(filled, supplements);
+  // Exact relocated upstream PROJECT notice, including its conditional section.
+  // This is not a package-specific notice or a claim that vue-color is bundled.
+  assert.equal(
+    createHash("sha256")
+      .update(filled[0]?.text ?? "")
+      .digest("hex"),
+    "fd8fe2fc75626c3b35be2b78129503cf09df127449b07c5fbf4c1713e3418390",
+  );
+  assert.equal(
+    filled[0]?.supplementSource,
+    "https://raw.githubusercontent.com/apostrophecms/apostrophe/e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3/packages/apostrophe/LICENSE.md",
+  );
+  assert.equal(
+    filled[1]?.supplementSource,
+    "https://raw.githubusercontent.com/remarkjs/remark-math/d5d0660b150810a535bbb07eac6cc96a4510aa24/license",
+  );
+  assert.match(filled[1].text ?? "", /Copyright/);
+  assert.match(filled[1].text ?? "", /Permission is hereby granted/);
+  const notice = finalizeBrowserOpenSourceNotice(JSON.stringify(filled), repoRoot, manifestPath);
+  for (const entry of filled) assert.ok(notice.includes(entry.text ?? "missing"));
 });
 
 await test("finalizeBrowserOpenSourceNotice appends FVOCI LICENSE and editor font OFL files", () => {
