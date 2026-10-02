@@ -248,7 +248,17 @@ mod schema {
 
     #[derive(OpenApi)]
     #[openapi(
-        paths(task_state, task_command, owner_state, owner_cleanup),
+        paths(
+            task_state,
+            task_command,
+            owner_state,
+            owner_cleanup,
+            personal_history,
+            personal_manual,
+            personal_correction,
+            personal_summary,
+            legacy_release
+        ),
         components(schemas(
             TimerOperation,
             TimerStatus,
@@ -257,7 +267,17 @@ mod schema {
             TimerRunOutput,
             TaskTimerState,
             OwnerTimerState,
-            TimerCleanupBody
+            TimerCleanupBody,
+            TimeRecordKind,
+            TimeRecord,
+            TimerHistory,
+            TimerSummary,
+            TimerDayTotal,
+            TimerManualBody,
+            TimeCorrectionBody,
+            TimerRecordOutput,
+            LegacyReleaseBody,
+            LegacyReleaseOutput
         ))
     )]
     pub struct TaskTimerApiDoc;
@@ -278,6 +298,30 @@ mod schema {
     #[utoipa::path(post, path="/api/v1/me/task-timer/stop", tag="tasks", security(("fvoci_session"=[])), request_body=TimerCleanupBody,
         responses((status=200,body=TimerCommandOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=409,body=ProblemResponse)))]
     fn owner_cleanup() {}
+
+    #[utoipa::path(get, path="/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/history", tag="tasks", security(("fvoci_session"=[])),
+        params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path),
+            ("expectedActorId"=Option<Uuid>,Query),("expectedSessionId"=Option<Uuid>,Query),
+            ("from"=NaiveDate,Query),("to"=NaiveDate,Query),("cursor"=Option<String>,Query)),
+        responses((status=200,body=TimerHistory),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=403,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn personal_history() {}
+    #[utoipa::path(post, path="/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/history", tag="tasks", security(("fvoci_session"=[])),
+        params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path)),request_body=TimerManualBody,
+        responses((status=200,body=TimerRecordOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=403,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn personal_manual() {}
+    #[utoipa::path(post, path="/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/records/{record_id}/correct", tag="tasks", security(("fvoci_session"=[])),
+        params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path),("record_id"=Uuid,Path)),request_body=TimeCorrectionBody,
+        responses((status=200,body=TimerRecordOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=403,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn personal_correction() {}
+    #[utoipa::path(get, path="/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer/summary", tag="tasks", security(("fvoci_session"=[])),
+        params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path),
+            ("expectedActorId"=Option<Uuid>,Query),("expectedSessionId"=Option<Uuid>,Query),
+            ("from"=NaiveDate,Query),("to"=NaiveDate,Query)),
+        responses((status=200,body=TimerSummary),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=403,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn personal_summary() {}
+    #[utoipa::path(post, path="/api/v1/me/task-timer/legacy-release", tag="tasks", security(("fvoci_session"=[])),request_body=LegacyReleaseBody,
+        responses((status=200,body=LegacyReleaseOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn legacy_release() {}
 }
 #[cfg(feature = "api-schema")]
 pub use schema::TaskTimerApiDoc;
