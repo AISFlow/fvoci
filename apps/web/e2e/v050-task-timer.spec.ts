@@ -1,13 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  readlinkSync,
-  realpathSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import { z } from "zod";
@@ -111,23 +104,63 @@ test.afterEach(async ({ page }, testInfo) => {
   );
   const serverBin = process.env.FVOCI_E2E_SERVER_BIN;
   if (!serverBin) throw new Error("own server binary missing");
+  const configuredBin = realpathSync(serverBin);
+  const binaryHash = createHash("sha256").update(readFileSync(configuredBin)).digest("hex");
   const native = [];
   for (const entry of readdirSync("/proc")) {
     if (!/^\d+$/.test(entry)) continue;
     try {
-      const exe = readlinkSync(`/proc/${entry}/exe`);
-      if (exe !== realpathSync(serverBin)) continue;
+      // main.rs deliberately makes the server nondumpable. Bind the readable
+      // launch identity to its supervised parent and actual listening origin;
+      // /proc/exe identity remains unavailable, rather than disabling hardening.
+      const argv = readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
+      if (argv[0] !== configuredBin) continue;
+      const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+      const parentPid = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1];
+      if (!parentPid || !/^\d+$/.test(parentPid)) continue;
+      const parentArgv = readFileSync(`/proc/${parentPid}/cmdline`, "utf8").split("\0");
+      const launcher = path.resolve("../../scripts/web-e2e-inner.sh");
+      if (!parentArgv.includes(launcher)) continue;
+      const allowed = new Set([
+        "RUN_DIR",
+        "SERVER_LOG",
+        "FVOCI_STATIC_DIR",
+        "FVOCI_W5_EVIDENCE_DIR",
+      ]);
+      const namespace = new Map<string, string>();
+      for (const value of readFileSync(`/proc/${parentPid}/environ`, "utf8").split("\0")) {
+        const separator = value.indexOf("=");
+        const key = value.slice(0, separator);
+        if (separator > 0 && allowed.has(key)) namespace.set(key, value.slice(separator + 1));
+      }
+      if (
+        namespace.get("RUN_DIR") !== process.env.FVOCI_E2E_RESULT_DIR ||
+        namespace.get("FVOCI_STATIC_DIR") !== process.env.FVOCI_STATIC_DIR ||
+        namespace.get("FVOCI_W5_EVIDENCE_DIR") !== process.env.FVOCI_W5_EVIDENCE_DIR
+      )
+        continue;
+      const serverLog = namespace.get("SERVER_LOG");
+      if (!serverLog) continue;
+      const origin = readFileSync(serverLog, "utf8")
+        .split("\n")
+        .find((line) => line.includes("fvoci-server listening on "))
+        ?.split("fvoci-server listening on ")[1]
+        ?.trim();
+      if (origin !== new URL(page.url()).origin) continue;
       native.push({
         pid: Number(entry),
-        exe,
-        sha256: createHash("sha256")
-          .update(readFileSync(`/proc/${entry}/exe`))
-          .digest("hex"),
+        parentPid: Number(parentPid),
+        launcher,
+        configuredBin,
+        knownFileSha256: binaryHash,
+        listeningOrigin: origin,
+        procExeIdentity: "NOTCAPTURED: intentional nondumpability",
       });
     } catch {
       /* Processes can disappear between directory read and inspection. */
     }
   }
+  expect(createHash("sha256").update(readFileSync(configuredBin)).digest("hex")).toBe(binaryHash);
   const scripts = await page
     .locator('script[src*="/assets/"]')
     .evaluateAll((elements) =>
@@ -382,6 +415,18 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
         body: JSON.stringify({ type: "about:blank", title: "일시적인 연결 실패", status: 503 }),
       });
     });
+    const unavailable = editor.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === timerUrl &&
+        response.request().method() === "GET" &&
+        response.status() === 503,
+    );
+    // Keep the actual consumer foregrounded, then observe its existing 5s
+    // polling response before the unchanged UI assertions. The app disables
+    // refetchOnWindowFocus, so this does not pretend focus itself refetches.
+    await editor.bringToFront();
+    await editor.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+    await unavailable;
     await expect(mounted.getByRole("alert")).toBeVisible();
     await expect(mounted.getByTestId("timer-state")).toHaveText("측정 중");
     await expect(mounted.getByTestId("timer-actual")).toBeVisible();
@@ -406,6 +451,7 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
     );
     const revoke = await page.request.delete(`${memberUrl}/${me.userId}`);
     expect(revoke.ok(), await revoke.text()).toBe(true);
+    await editor.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
     const denial = await realDenial;
     expect((await denial.text()).includes("권한 회수 뒤 사적인 측정")).toBe(false);
     await expect(mounted).toBeVisible();
