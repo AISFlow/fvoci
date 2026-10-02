@@ -379,8 +379,8 @@ for (const kind of ["node", "mark"] as const) {
 }
 
 await test("actual ySync paragraph split retains hidden presentation and undo keeps a later peer edit of the surviving first block", () => {
-  const localDoc = tiptapJsonToYDoc({
-    type: "doc",
+  const fixture = {
+    type: "doc" as const,
     content: [
       {
         type: "paragraph",
@@ -393,8 +393,38 @@ await test("actual ySync paragraph split retains hidden presentation and undo ke
           },
         ],
       },
+      {
+        type: "paragraph",
+        attrs: { id: "link-neighbor", textAlign: "center" },
+        content: [
+          {
+            type: "text",
+            text: "원본 블록 참조",
+            marks: [{ type: "link", attrs: { href: "#split", title: "대상", target: "_self" } }],
+          },
+        ],
+      },
+      {
+        type: "attachment",
+        attrs: {
+          id: "10000000-0000-4000-8000-000000000009",
+          name: "자료.pdf",
+          caption: "설명",
+          image: false,
+          width: 70,
+          align: "left",
+          previewWidth: 640,
+          previewHeight: 480,
+        },
+      },
+      {
+        type: "embed",
+        attrs: { id: "embed-neighbor", entity: "document", ref: "document-target" },
+      },
+      { type: "paragraph", attrs: { id: "closing" }, content: [{ type: "text", text: "끝" }] },
     ],
-  });
+  };
+  const localDoc = tiptapJsonToYDoc(fixture);
   const peerDoc = new Y.Doc({ gc: false });
   Y.applyUpdate(peerDoc, Y.encodeStateAsUpdate(localDoc));
   const local = liveEditor(localDoc);
@@ -411,22 +441,117 @@ await test("actual ySync paragraph split retains hidden presentation and undo ke
     () => 1,
     () => true,
   );
+  const tails = [local, peer].map((client) =>
+    client.editor.state.doc.content.cut(client.editor.state.doc.child(0).nodeSize),
+  );
+  let splitId: unknown;
+  const stage = (texts: string[]) => {
+    for (const [index, client] of [local, peer].entries()) {
+      const doc = client.editor.state.doc;
+      assert.equal(doc.childCount, texts.length + 4);
+      assert.equal(doc.child(0).attrs.id, "split");
+      if (texts.length === 2) assert.equal(doc.child(1).attrs.id, splitId);
+      let tailStart = 0;
+      for (const [i, text] of texts.entries()) {
+        const block = doc.child(i);
+        assert.equal(block.textContent, text);
+        assert.equal(block.attrs.textAlign, "right");
+        block.descendants((node) => {
+          if (!node.isText) return;
+          assert.equal(node.marks.length, 2);
+          assert.ok(node.marks.some((mark) => mark.type.name === "underline"));
+          assert.equal(
+            node.marks.find((mark) => mark.type.name === "textStyle")?.attrs.color,
+            "#112233",
+          );
+        });
+        tailStart += block.nodeSize;
+      }
+      const tail = tails[index];
+      assert.ok(tail);
+      assert.ok(doc.content.cut(tailStart).eq(tail));
+      assert.equal(doc.child(texts.length).child(0).marks[0]?.attrs.href, "#split");
+      assert.equal(doc.child(texts.length + 1).attrs.id, "10000000-0000-4000-8000-000000000009");
+      assert.equal(doc.child(texts.length + 2).attrs.ref, "document-target");
+    }
+    assert.ok(Y.equalSnapshots(Y.snapshot(localDoc), Y.snapshot(peerDoc)));
+    assert.deepEqual(Y.encodeStateAsUpdate(localDoc), Y.encodeStateAsUpdate(peerDoc));
+  };
   try {
     const capture = source.capture(local.editor.state.doc);
-    const proposal = source.prepare(capture, "alpha\n\nbeta", local.editor.state);
+    const proposal = source.prepare(
+      capture,
+      capture.source.replace("alpha beta", "alpha\n\nbeta"),
+      local.editor.state,
+    );
     assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
     assert.equal(source.apply(proposal, local.editor), true);
+    splitId = local.editor.state.doc.child(1).attrs.id;
+    assert.equal(typeof splitId, "string");
+    assert.ok(splitId && splitId !== "split");
     assert.equal(local.manager.undoStack.length, 1);
-    for (let i = 0; i < 2; i++) {
-      assert.equal(peer.editor.state.doc.child(i).attrs.textAlign, "right");
-      assert.equal(peer.editor.state.doc.child(i).child(0).marks.length, 2);
-    }
+    assert.equal(peer.manager.undoStack.length, 0);
+    stage(["alpha", "beta"]);
     peer.host.dispatch(peer.editor.state.tr.insertText(" peer", 6));
-    assert.equal(local.editor.state.doc.child(0).textContent, "alpha peer");
+    stage(["alpha peer", "beta"]);
+    const paragraph = peerDoc.getXmlFragment("prosemirror").get(0);
+    assert.ok(paragraph instanceof Y.XmlElement);
+    const text = paragraph.get(0);
+    assert.ok(text instanceof Y.XmlText);
+    const start = Y.createRelativePositionFromTypeIndex(text, 5, 0);
+    const end = Y.createRelativePositionFromTypeIndex(text, 10, -1);
+    assert.ok(start.item);
+    assert.equal(start.item.client, peerDoc.clientID);
+    const anchored = (from: number, to: number) => {
+      for (const doc of [localDoc, peerDoc]) {
+        const left = Y.createAbsolutePositionFromRelativePosition(start, doc);
+        const right = Y.createAbsolutePositionFromRelativePosition(end, doc);
+        assert.ok(left && right);
+        assert.equal(left.index, from);
+        assert.equal(right.index, to);
+        assert.equal(left.type, right.type);
+        assert.ok(left.type instanceof Y.XmlText);
+        assert.ok(left.type.parent instanceof Y.XmlElement);
+        assert.equal(left.type.parent.getAttribute("id"), "split");
+        const delta: unknown = left.type.toDelta();
+        assert.ok(Array.isArray(delta));
+        const plain = delta
+          .map((part: unknown) => {
+            assert.ok(typeof part === "object" && part !== null && "insert" in part);
+            assert.ok(typeof part.insert === "string");
+            return part.insert;
+          })
+          .join("");
+        const value = plain.slice(left.index, right.index);
+        assert.equal(value, " peer");
+        assert.equal(Buffer.from(value).toString("hex"), "2070656572");
+        assert.ok(start.item);
+        const item = Y.getItem(doc.store, start.item);
+        assert.ok(item instanceof Y.Item);
+        assert.equal(item.deleted, false);
+        assert.equal(item.id.client, peerDoc.clientID);
+      }
+    };
+    anchored(5, 10);
+    assert.equal(peer.manager.undoStack.length, 1);
     local.manager.undo();
-    assert.equal(local.editor.state.doc.textContent, "alpha peer beta");
-    assert.equal(peer.editor.state.doc.textContent, "alpha peer beta");
-    assert.equal(local.editor.state.doc.child(0).attrs.id, "split");
+    // Independently assessed selective-history order: the old local suffix
+    // resurrects before the same live peer item, whose relative identity stays.
+    stage(["alpha beta peer"]);
+    anchored(10, 15);
+    assert.equal(local.manager.undoStack.length, 0);
+    assert.equal(local.manager.redoStack.length, 1);
+    assert.equal(peer.manager.undoStack.length, 1);
+    local.manager.redo();
+    stage(["alpha peer", "beta"]);
+    anchored(5, 10);
+    assert.equal(local.manager.undoStack.length, 1);
+    assert.equal(local.manager.redoStack.length, 0);
+    assert.equal(peer.manager.undoStack.length, 1);
+    local.manager.undo();
+    stage(["alpha beta peer"]);
+    anchored(10, 15);
+    assert.equal(peer.manager.undoStack.length, 1);
   } finally {
     source.destroy();
     local.close();
