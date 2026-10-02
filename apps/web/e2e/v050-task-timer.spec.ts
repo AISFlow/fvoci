@@ -630,9 +630,30 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
   page,
   browser,
 }, testInfo) => {
-  const fixture = await permissionFixture(page, "COOKIE", "member");
+  await timerWorkspace(page);
+  // Keep this identity boundary independent of earlier tests' project streams.
+  // The real MyTasks consumer still installs its normal workspace/project SSEs.
+  const slug = "w5timer-cookie";
+  const workspaceResponse = await page.request.post("/api/v1/workspaces", {
+    data: { name: "측정 작성자 경계", slug },
+  });
+  expect(workspaceResponse.status(), await workspaceResponse.text()).toBe(201);
+  const workspaceId = z.object({ id: z.string() }).parse(await workspaceResponse.json()).id;
+  const email = "cookie@example.com";
+  createE2eUser(email, credentials.password, "작성자 경계", {
+    workspaceSlug: slug,
+    membershipRole: "member",
+  });
+  const projectResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, {
+    data: { key: "COOKIE", name: "작성자 경계", visibility: "private" },
+  });
+  expect(projectResponse.status(), await projectResponse.text()).toBe(201);
+  const fixture = {
+    workspaceId,
+    email,
+    project: z.object({ id: z.string() }).parse(await projectResponse.json()),
+  };
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
-  const originalCookies = await page.context().cookies();
   try {
     const other = await context.newPage();
     await login(other, fixture.email, credentials.password);
@@ -687,7 +708,7 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
       },
     });
     expect(pause.ok(), await pause.text()).toBe(true);
-    await page.goto("/w/w5timer/my-tasks");
+    await page.goto(`/w/${slug}/my-tasks`);
     const mounted = page.getByTestId(`task-stopwatch-${task.id}`);
     await expect(mounted.getByTestId("timer-actual")).toBeVisible();
     await expect(mounted.getByTestId("timer-state")).toHaveCount(0);
@@ -707,6 +728,12 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
       .object({ run: z.object({ id: z.string() }).nullable().optional() })
       .passthrough()
       .parse(body);
+    const authenticated = identity.parse(await (await page.request.get("/api/v1/auth/me")).json());
+    expect(authenticated.userId).toBe(actorB.userId);
+    if (response.ok() && observed.run?.id === run.runId) {
+      // Record the actual mounted consumer's effect before the guard oracle.
+      await expect(mounted.getByTestId("timer-state")).toHaveText("일시정지");
+    }
     await testInfo.attach("timer-cookie-read-guard", {
       body: JSON.stringify({
         status: response.status(),
@@ -714,7 +741,9 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
         capturedSessionParameter: new URL(response.url()).searchParams.get("expectedSessionId"),
         expectedActor: actorA.userId,
         expectedSession: actorA.sessionId,
+        authenticatedActor: authenticated.userId,
         returnedOtherRun: observed.run?.id === run.runId,
+        mountedState: await mounted.getByTestId("timer-state").allTextContents(),
       }),
       contentType: "application/json",
     });
@@ -726,7 +755,6 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     expect(new URL(response.url()).searchParams.get("expectedSessionId")).toBe(actorA.sessionId);
     expect(observed.run).toBeUndefined();
   } finally {
-    await page.context().addCookies(originalCookies);
     await context.close();
   }
 });
