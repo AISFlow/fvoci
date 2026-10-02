@@ -486,3 +486,106 @@ await test("unknown HTML and footnotes cannot silently disappear through the act
     fixture.close();
   }
 });
+
+await test("unambiguous paragraph split keeps hidden underline/color and alignment on both resulting blocks", () => {
+  const fixture = setup(
+    document({
+      type: "paragraph",
+      attrs: { id: "split", textAlign: "right" },
+      content: [
+        {
+          type: "text",
+          text: "alpha beta",
+          marks: [{ type: "underline" }, { type: "textStyle", attrs: { color: "#112233" } }],
+        },
+      ],
+    }),
+  );
+  try {
+    const capture = fixture.session.capture(fixture.state.doc);
+    const proposal = fixture.session.prepare(capture, "alpha\n\nbeta", fixture.state);
+    assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+    assert.ok(proposal.transaction);
+    const after = fixture.state.apply(proposal.transaction).doc;
+    assert.equal(after.childCount, 2);
+    assert.equal(after.child(0).attrs.id, "split");
+    assert.equal(after.child(1).attrs.id, null);
+    for (let i = 0; i < 2; i++) {
+      assert.equal(after.child(i).attrs.textAlign, "right");
+      assert.deepEqual(after.child(i).child(0).marks, fixture.state.doc.child(0).child(0).marks);
+    }
+    assert.equal(after.child(0).textContent, "alpha");
+    assert.equal(after.child(1).textContent, "beta");
+  } finally {
+    fixture.close();
+  }
+});
+
+await test("replacement crossing distinct hidden mark runs warns with stable ID and Cancel leaves original raw bytes", () => {
+  const fixture = setup(
+    document(paragraph("untouched", "other"), {
+      type: "paragraph",
+      attrs: { id: "mixed" },
+      content: [
+        { type: "text", text: "alpha", marks: [{ type: "underline" }] },
+        {
+          type: "text",
+          text: " beta",
+          marks: [{ type: "textStyle", attrs: { color: "#112233" } }],
+        },
+      ],
+    }),
+  );
+  try {
+    const capture = fixture.session.capture(fixture.state.doc);
+    const before = Y.encodeStateAsUpdate(fixture.ydoc);
+    const proposal = fixture.session.prepare(
+      capture,
+      capture.source.replace("alpha beta", "ALPHA BETA"),
+      fixture.state,
+    );
+    assert.equal(proposal.status, "loss");
+    assert.equal(proposal.transaction, undefined);
+    const diagnostic = proposal.diagnostics[0];
+    assert.ok(diagnostic);
+    assert.equal(diagnostic.id, "mixed");
+    assert.equal(diagnostic.path, "document.content.1");
+    assert.equal(diagnostic.field, "marks");
+    assert.ok(diagnostic.reason.includes("underline"));
+    assert.ok(diagnostic.reason.includes("textStyle"));
+    assert.deepEqual(Y.encodeStateAsUpdate(fixture.ydoc), before);
+  } finally {
+    fixture.close();
+  }
+});
+
+await test("a uniquely located split carries each different hidden mark only on its own surviving text", () => {
+  const fixture = setup(
+    document({
+      type: "paragraph",
+      attrs: { id: "split-runs", textAlign: "center" },
+      content: [
+        { type: "text", text: "alpha", marks: [{ type: "underline" }] },
+        {
+          type: "text",
+          text: " beta",
+          marks: [{ type: "textStyle", attrs: { color: "#112233" } }],
+        },
+      ],
+    }),
+  );
+  try {
+    const capture = fixture.session.capture(fixture.state.doc);
+    const proposal = fixture.session.prepare(capture, "alpha\n\n# beta", fixture.state);
+    assert.equal(proposal.status, "ready", JSON.stringify(proposal.diagnostics));
+    assert.ok(proposal.transaction);
+    const after = fixture.state.apply(proposal.transaction).doc;
+    assert.equal(after.child(0).child(0).marks[0]?.type.name, "underline");
+    assert.equal(after.child(1).child(0).marks[0]?.type.name, "textStyle");
+    assert.equal(after.child(1).child(0).marks[0]?.attrs.color, "#112233");
+    assert.equal(after.child(1).attrs.textAlign, "center");
+    assert.equal(after.child(1).type.name, "heading");
+  } finally {
+    fixture.close();
+  }
+});
