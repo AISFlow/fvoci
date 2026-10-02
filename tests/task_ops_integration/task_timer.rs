@@ -3649,6 +3649,42 @@ mod task_timer {
         let before = timer_effects(&admin, &actors, &tasks).await;
         let expected_actor = intent["expectedActorId"].as_str().unwrap();
         let expected_session = intent["expectedSessionId"].as_str().unwrap();
+        // Planned future time is not elapsed history. Use the actual server
+        // anchor and prove refusal preserves every product row and receipt.
+        let (status, anchor) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &format!("{base}/timer"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{anchor}");
+        let future_end =
+            chrono::DateTime::parse_from_rfc3339(anchor["serverNow"].as_str().unwrap()).unwrap()
+                + chrono::Duration::minutes(10);
+        let mut future = intent.clone();
+        future["requestId"] = json!(Uuid::now_v7());
+        future["startedAt"] = json!((future_end - chrono::Duration::minutes(1)).to_rfc3339());
+        future["endedAt"] = json!(future_end.to_rfc3339());
+        let mut reasonless = intent.clone();
+        reasonless["requestId"] = json!(Uuid::now_v7());
+        reasonless["reason"] = json!("  ");
+        for rejected in [future, reasonless] {
+            let (status, invalid) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "POST",
+                &format!("{base}/timer/history"),
+                Some(rejected),
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+            assert!(invalid.get("record").is_none());
+            assert_eq!(timer_effects(&admin, &actors, &tasks).await, before);
+        }
         let matched =
             format!("{url}?expectedActorId={expected_actor}&expectedSessionId={expected_session}");
         let mut own = None;
