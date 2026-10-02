@@ -2,11 +2,12 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Route } from "@playwright/test";
 import { z } from "zod";
 import { createE2eUser, login } from "./helpers";
 
 const credentials = { email: "timer@example.com", password: "supersecret1" };
+const identityShape = z.object({ userId: z.string(), sessionId: z.string() });
 const workspaces = z.object({ items: z.array(z.object({ id: z.string(), slug: z.string() })) });
 const taskShape = z.object({ id: z.string(), number: z.number(), statusId: z.string() });
 const timerShape = z.object({
@@ -381,9 +382,7 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
   try {
     const editor = await context.newPage();
     await login(editor, fixture.email, credentials.password);
-    const me = z
-      .object({ userId: z.string() })
-      .parse(await (await editor.request.get("/api/v1/auth/me")).json());
+    const me = identityShape.parse(await (await editor.request.get("/api/v1/auth/me")).json());
     const memberUrl = `/api/v1/workspaces/${fixture.workspaceId}/projects/${fixture.project.id}/members`;
     const grant = await page.request.post(memberUrl, {
       data: { userId: me.userId, role: fixture.role },
@@ -430,14 +429,19 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
     await expect(mounted.getByTestId("timer-state")).toHaveText("측정 중");
     const committed = timerShape.parse(await (await editor.request.get(timerUrl)).json());
     expect(committed.run?.id).toBeTruthy();
-    await editor.route(`**${timerUrl}`, async (route) => {
+    const timerMatch = (url: URL) => url.pathname === timerUrl;
+    const unavailableHandler = async (route: Route) => {
       if (route.request().method() !== "GET") return route.continue();
+      const capture = new URL(route.request().url()).searchParams;
+      expect(capture.get("expectedActorId")).toBe(me.userId);
+      expect(capture.get("expectedSessionId")).toBe(me.sessionId);
       await route.fulfill({
         status: 503,
         contentType: "application/problem+json",
         body: JSON.stringify({ type: "about:blank", title: "일시적인 연결 실패", status: 503 }),
       });
-    });
+    };
+    await editor.route(timerMatch, unavailableHandler);
     const unavailableWaitStarted = Date.now();
     const unavailable = editor.waitForResponse(
       (response) =>
@@ -468,14 +472,20 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
         response.request().method() === "GET" &&
         response.status() === 503,
     );
-    await editor.route(`**${sentinelTimerUrl}`, async (route) => {
-      if (route.request().method() !== "GET") return route.continue();
-      await route.fulfill({
-        status: 503,
-        contentType: "application/problem+json",
-        body: JSON.stringify({ type: "about:blank", title: "다른 작업 연결 실패", status: 503 }),
-      });
-    });
+    await editor.route(
+      (url) => url.pathname === sentinelTimerUrl,
+      async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const capture = new URL(route.request().url()).searchParams;
+        expect(capture.get("expectedActorId")).toBe(me.userId);
+        expect(capture.get("expectedSessionId")).toBe(me.sessionId);
+        await route.fulfill({
+          status: 503,
+          contentType: "application/problem+json",
+          body: JSON.stringify({ type: "about:blank", title: "다른 작업 연결 실패", status: 503 }),
+        });
+      },
+    );
     await sentinelUnavailable;
     await expect(sentinel.getByTestId("timer-actual")).toHaveText(sentinelActual);
     // Only the unrelated list transport is held to keep the original consumer
@@ -490,7 +500,7 @@ test("authoritative revoked timer GET retires mounted private state while 503 pr
         });
       },
     );
-    await editor.unroute(`**${timerUrl}`);
+    await editor.unroute(timerMatch, unavailableHandler);
     const denialWaitStarted = Date.now();
     const realDenial = editor.waitForResponse(
       (response) =>
@@ -655,10 +665,11 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
   };
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
   let releaseOwner = () => {};
+  let releaseMe = () => {};
   try {
     const other = await context.newPage();
     await login(other, fixture.email, credentials.password);
-    const identity = z.object({ userId: z.string(), sessionId: z.string() });
+    const identity = identityShape;
     const actorA = identity.parse(await (await page.request.get("/api/v1/auth/me")).json());
     const actorB = identity.parse(await (await other.request.get("/api/v1/auth/me")).json());
     expect(actorB.userId).not.toBe(actorA.userId);
@@ -685,6 +696,7 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     );
     expect(assign.ok(), await assign.text()).toBe(true);
     const timerUrl = `/api/v1/workspaces/${fixture.workspaceId}/tasks/${task.id}/timer`;
+    const actorARun = await startPausedTimer(page, timerUrl, actorA, "이전 작성자의 실제 구간");
     const start = await other.request.post(timerUrl, {
       data: {
         expectedActorId: actorB.userId,
@@ -712,9 +724,26 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     await page.goto(`/w/${slug}/my-tasks`);
     const mounted = page.getByTestId(`task-stopwatch-${task.id}`);
     await expect(mounted.getByTestId("timer-actual")).toBeVisible();
-    await expect(mounted.getByTestId("timer-state")).toHaveCount(0);
+    await expect(mounted.getByTestId("timer-state")).toHaveText("일시정지");
+    await expect(mounted.getByTestId("timer-elapsed")).toBeVisible();
+    await expect(mounted.getByTestId("timer-resume")).toBeEnabled();
+    await expect(page.getByTestId("timer-owner")).toBeVisible();
     const actorRead = timerShape.parse(await (await page.request.get(timerUrl)).json());
-    expect(actorRead.run).toBeNull();
+    expect(actorRead.run?.id).toBe(actorARun.runId);
+    const meDelivery = new Promise<void>((resolve) => {
+      releaseMe = resolve;
+    });
+    await page.route(
+      (url) => url.pathname === "/api/v1/auth/me",
+      async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const native = await route.fetch();
+        // Deliver the unchanged real identity only after both old consumers have
+        // consumed their denials. Product identity/navigation guards remain live.
+        await meDelivery;
+        if (!page.isClosed()) await route.fulfill({ response: native });
+      },
+    );
     const ownerDelivery = new Promise<void>((resolve) => {
       releaseOwner = resolve;
     });
@@ -733,11 +762,13 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
       async (route) => {
         // Fetch the actual Rust response with the browser's original headers.
         // Hold only its delivery so me refresh cannot cancel the task oracle.
+        if (route.request().method() !== "GET") return route.continue();
+        const url = new URL(route.request().url());
+        if (url.searchParams.get("expectedSessionId") !== actorA.sessionId) return route.continue();
         const native = await route.fetch();
         const value = z
           .object({ runId: z.string().nullable().optional() })
           .parse(await native.json());
-        const url = new URL(route.request().url());
         observeOwner({
           status: native.status(),
           capturedActorParameter: url.searchParams.get("expectedActorId"),
@@ -751,6 +782,11 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     await page.route(
       (url) => url.pathname === timerUrl,
       async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        if (
+          new URL(route.request().url()).searchParams.get("expectedSessionId") !== actorA.sessionId
+        )
+          return route.continue();
         const native = await route.fetch();
         // Both ordinary polls must reach Rust before either denial can refresh
         // me and cancel the other captured scope. No query is forced or forged.
@@ -779,6 +815,38 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
       // Record the actual mounted consumer's effect before the guard oracle.
       await expect(mounted.getByTestId("timer-state")).toHaveText("일시정지");
     }
+    // The native denial must arrive while the nonempty old consumer remains
+    // mounted. Detachment/navigation cannot stand in for privacy retirement.
+    expect(response.status()).toBe(409);
+    await expect(mounted).toBeVisible();
+    await expect(mounted.getByTestId("timer-state")).toHaveCount(0);
+    await expect(mounted.getByTestId("timer-actual")).toHaveCount(0);
+    await expect(mounted.getByTestId("timer-elapsed")).toHaveCount(0);
+    await expect(mounted.getByTestId("timer-start")).toBeDisabled();
+    await expect(page.getByTestId("timer-owner")).toBeVisible();
+    const ownerDelivered = page.waitForResponse(
+      (reply) =>
+        new URL(reply.url()).pathname === "/api/v1/me/task-timer" &&
+        new URL(reply.url()).searchParams.get("expectedSessionId") === actorA.sessionId &&
+        reply.status() === 409,
+    );
+    releaseOwner();
+    await ownerDelivered;
+    await expect(page.getByTestId("timer-owner")).toHaveCount(0);
+    await expect(mounted).toBeVisible();
+    const successorOwner = page.waitForResponse(
+      (reply) =>
+        new URL(reply.url()).pathname === "/api/v1/me/task-timer" &&
+        new URL(reply.url()).searchParams.get("expectedActorId") === actorB.userId &&
+        new URL(reply.url()).searchParams.get("expectedSessionId") === actorB.sessionId &&
+        reply.status() === 200,
+    );
+    releaseMe();
+    const successor = await successorOwner;
+    expect(z.object({ runId: z.string().nullable() }).parse(await successor.json()).runId).toBe(
+      run.runId,
+    );
+    await expect(page.getByTestId("timer-owner")).toBeVisible();
     await testInfo.attach("timer-cookie-read-guard", {
       body: JSON.stringify({
         status: response.status(),
@@ -788,7 +856,9 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
         expectedSession: actorA.sessionId,
         authenticatedActor: authenticated.userId,
         returnedOtherRun: observed.run?.id === run.runId,
-        mountedState: await mounted.getByTestId("timer-state").allTextContents(),
+        oldTaskRetirementObservedBeforeIdentityDelivery: true,
+        oldOwnerRetirementObservedBeforeIdentityDelivery: true,
+        successorAuthorizedOwnerRun: run.runId,
         ownerObservation,
       }),
       contentType: "application/json",
@@ -806,6 +876,208 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     expect(ownerObservation.returnedOtherRun).toBe(false);
   } finally {
     releaseOwner();
+    releaseMe();
     await context.close();
+  }
+});
+
+async function startPausedTimer(
+  page: import("@playwright/test").Page,
+  timerUrl: string,
+  actor: z.infer<typeof identityShape>,
+  note: string,
+) {
+  const start = await page.request.post(timerUrl, {
+    data: {
+      expectedActorId: actor.userId,
+      expectedSessionId: actor.sessionId,
+      requestId: crypto.randomUUID(),
+      operation: "start",
+      expectedVersion: 0,
+      runId: null,
+      note,
+    },
+  });
+  expect(start.ok(), await start.text()).toBe(true);
+  const run = z.object({ runId: z.string(), version: z.number() }).parse(await start.json());
+  const pause = await page.request.post(timerUrl, {
+    data: {
+      expectedActorId: actor.userId,
+      expectedSessionId: actor.sessionId,
+      requestId: crypto.randomUUID(),
+      operation: "pause",
+      expectedVersion: run.version,
+      runId: run.runId,
+    },
+  });
+  expect(pause.ok(), await pause.text()).toBe(true);
+  return z.object({ runId: z.string(), version: z.number() }).parse(await pause.json());
+}
+
+test("a same-actor new-session denial cannot retire a populated successor or returning scope", async ({
+  page,
+  browser,
+}, testInfo) => {
+  await timerWorkspace(page);
+  const slug = "w5timer-session";
+  const workspaceResponse = await page.request.post("/api/v1/workspaces", {
+    data: { name: "세션 전환 측정", slug },
+  });
+  expect(workspaceResponse.status(), await workspaceResponse.text()).toBe(201);
+  const workspaceId = z.object({ id: z.string() }).parse(await workspaceResponse.json()).id;
+  const email = "timer-session@example.com";
+  createE2eUser(email, credentials.password, "같은 작성자의 세션", {
+    workspaceSlug: slug,
+    membershipRole: "member",
+  });
+  const projectResponse = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, {
+    data: { key: "SESSION", name: "세션 전환 측정", visibility: "private" },
+  });
+  expect(projectResponse.status(), await projectResponse.text()).toBe(201);
+  const project = z.object({ id: z.string() }).parse(await projectResponse.json());
+  const firstContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const secondContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const events: {
+    kind: string;
+    endpoint: string;
+    session: string | null;
+    status?: number;
+    failure?: string;
+  }[] = [];
+  try {
+    const first = await firstContext.newPage();
+    const second = await secondContext.newPage();
+    await login(first, email, credentials.password);
+    await login(second, email, credentials.password);
+    const s1 = identityShape.parse(await (await first.request.get("/api/v1/auth/me")).json());
+    const s2 = identityShape.parse(await (await second.request.get("/api/v1/auth/me")).json());
+    expect(s1.userId).toBe(s2.userId);
+    expect(s1.sessionId).not.toBe(s2.sessionId);
+    const grant = await page.request.post(
+      `/api/v1/workspaces/${workspaceId}/projects/${project.id}/members`,
+      {
+        data: { userId: s1.userId, role: "member" },
+      },
+    );
+    expect(grant.ok(), await grant.text()).toBe(true);
+    const created = await page.request.post(
+      `/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`,
+      {
+        data: { title: "새 세션에도 남아야 하는 개인 구간" },
+      },
+    );
+    expect(created.status(), await created.text()).toBe(201);
+    const task = taskShape.parse(await created.json());
+    const assign = await page.request.patch(`/api/v1/workspaces/${workspaceId}/tasks/${task.id}`, {
+      data: { assigneeIds: [s1.userId] },
+    });
+    expect(assign.ok(), await assign.text()).toBe(true);
+    const timerUrl = `/api/v1/workspaces/${workspaceId}/tasks/${task.id}/timer`;
+    const ownerUrl = "/api/v1/me/task-timer";
+    const run = await startPausedTimer(first, timerUrl, s1, "실제 세션 경계 구간");
+    const control = await second.request.get(timerUrl, {
+      params: {
+        expectedActorId: s2.userId,
+        expectedSessionId: s2.sessionId,
+      },
+    });
+    expect(control.status(), await control.text()).toBe(200);
+    expect(timerShape.parse(await control.json()).run?.id).toBe(run.runId);
+    await first.goto(`/w/${slug}/my-tasks`);
+    const mounted = first.getByTestId(`task-stopwatch-${task.id}`);
+    await expect(mounted.getByTestId("timer-state")).toHaveText("일시정지");
+    await expect(mounted.getByTestId("timer-resume")).toBeEnabled();
+    await expect(first.getByTestId("timer-owner")).toBeVisible();
+    const cookies1 = await firstContext.cookies();
+    const cookies2 = await secondContext.cookies();
+    const endpoint = (url: string) => {
+      const parsed = new URL(url);
+      return [timerUrl, ownerUrl].includes(parsed.pathname) ? parsed : undefined;
+    };
+    first.on("requestfailed", (request) => {
+      const url = endpoint(request.url());
+      if (url && request.method() === "GET")
+        events.push({
+          kind: "requestfailed",
+          endpoint: url.pathname,
+          session: url.searchParams.get("expectedSessionId"),
+          failure: request.failure()?.errorText,
+        });
+    });
+    first.on("response", (response) => {
+      const url = endpoint(response.url());
+      if (url && response.request().method() === "GET")
+        events.push({
+          kind: "response",
+          endpoint: url.pathname,
+          session: url.searchParams.get("expectedSessionId"),
+          status: response.status(),
+        });
+    });
+    // Real cookie changes and the existing poll/me refresh exercise S1 -> S2
+    // -> S1 -> S2. No injected query/cache, fake auth, timer body, or reload.
+    for (const [previous, successor, cookies] of [
+      [s1, s2, cookies2],
+      [s2, s1, cookies1],
+      [s1, s2, cookies2],
+    ] as const) {
+      const transitionStart = events.length;
+      const denied = first.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === timerUrl &&
+          new URL(response.url()).searchParams.get("expectedSessionId") === previous.sessionId &&
+          response.status() === 409,
+      );
+      const refreshed = first.waitForResponse(
+        async (response) =>
+          new URL(response.url()).pathname === "/api/v1/auth/me" &&
+          response.status() === 200 &&
+          identityShape.parse(await response.json()).sessionId === successor.sessionId,
+      );
+      const successorRead = first.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === timerUrl &&
+          new URL(response.url()).searchParams.get("expectedSessionId") === successor.sessionId &&
+          response.status() === 200,
+      );
+      const successorOwner = first.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === ownerUrl &&
+          new URL(response.url()).searchParams.get("expectedSessionId") === successor.sessionId &&
+          response.status() === 200,
+      );
+      await firstContext.addCookies(cookies);
+      await first.bringToFront();
+      const oldResult = await denied;
+      expect(
+        z.object({ params: z.object({ code: z.string() }) }).parse(await oldResult.json()).params
+          .code,
+      ).toBe("timer_context_changed");
+      await refreshed;
+      const result = await successorRead;
+      expect(timerShape.parse(await result.json()).run?.id).toBe(run.runId);
+      expect(
+        z.object({ runId: z.string().nullable() }).parse(await (await successorOwner).json()).runId,
+      ).toBe(run.runId);
+      await expect(mounted).toBeVisible();
+      await expect(mounted.getByTestId("timer-state")).toHaveText("일시정지");
+      await expect(mounted.getByTestId("timer-resume")).toBeEnabled();
+      await expect(first.getByTestId("timer-owner")).toBeVisible();
+      expect(
+        events
+          .slice(transitionStart)
+          .filter(
+            (event) => event.kind === "requestfailed" && event.session === successor.sessionId,
+          ),
+        "an old denial must not cancel the new session's authorized timer query",
+      ).toEqual([]);
+    }
+  } finally {
+    await testInfo.attach("timer-real-session-boundaries", {
+      body: JSON.stringify({ events, productQueryOrAuthInjection: false }),
+      contentType: "application/json",
+    });
+    await firstContext.close();
+    await secondContext.close();
   }
 });
