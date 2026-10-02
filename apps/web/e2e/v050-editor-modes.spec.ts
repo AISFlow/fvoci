@@ -2379,6 +2379,22 @@ async function nativeFileDrop(page: Page, path: string): Promise<void> {
   }
 }
 
+type UploadSnapshot = {
+  updates: number;
+  updateBytes: number[][];
+  raw: string;
+  rawUtf8: number[];
+};
+type UploadRetirementWindow = Window & {
+  w3UploadRetirement?: {
+    witness: Witness;
+    updateBytes: number[][];
+    beforeDrop: UploadSnapshot;
+    beforeLeave?: UploadSnapshot;
+    retired?: UploadSnapshot;
+  };
+};
+
 test("real deferred native upload invalidates a private Markdown proposal and its next pending upload aborts on actual unmount", async ({
   page,
 }, testInfo) => {
@@ -2454,6 +2470,30 @@ test("real deferred native upload invalidates a private Markdown proposal and it
     held = new Promise<void>((done) => {
       release = done;
     });
+    // Keep the actual original document after its renderer/room retire. A late
+    // unsaved insertion there would be invisible to only API/history checks.
+    await editorOf(page).evaluate((root) => {
+      const witness = (root as EditorElement).w3Witness;
+      if (!witness) throw new Error("Missing original upload document");
+      const updateBytes: number[][] = [];
+      const snapshot = (): UploadSnapshot => {
+        const raw = witness.fragment.toJSON();
+        return {
+          updates: witness.updates,
+          updateBytes: updateBytes.map((bytes) => [...bytes]),
+          raw,
+          rawUtf8: Array.from(new TextEncoder().encode(raw)),
+        };
+      };
+      const lifetime = { witness, updateBytes, beforeDrop: snapshot() };
+      (window as UploadRetirementWindow).w3UploadRetirement = lifetime;
+      witness.doc.on("update", (bytes: Uint8Array) => updateBytes.push(Array.from(bytes)));
+      witness.editor.on("destroy", () => {
+        const current = (window as UploadRetirementWindow).w3UploadRetirement;
+        if (current !== lifetime) throw new Error("Upload retirement witness replaced");
+        current.retired = snapshot();
+      });
+    });
     const failures: string[] = [];
     page.on("requestfailed", (request) => {
       if (request.url().endsWith(`/documents/${doc.id}/uploads`))
@@ -2462,19 +2502,72 @@ test("real deferred native upload invalidates a private Markdown proposal and it
     await nativeFileDrop(page, path);
     await expect.poll(() => received).toBe(2);
     await expect(page.getByRole("progressbar")).toHaveCount(1);
+    await page.evaluate(() => {
+      const lifetime = (window as UploadRetirementWindow).w3UploadRetirement;
+      if (!lifetime) throw new Error("Missing pending-upload document");
+      const raw = lifetime.witness.fragment.toJSON();
+      lifetime.beforeLeave = {
+        updates: lifetime.witness.updates,
+        updateBytes: lifetime.updateBytes.map((bytes) => [...bytes]),
+        raw,
+        rawUtf8: Array.from(new TextEncoder().encode(raw)),
+      };
+    });
     await page.getByRole("link", { name: "홈", exact: true }).first().click();
     await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}$`));
     await expect.poll(() => failures.length).toBe(1);
     expect(failures[0]).toContain("ERR_ABORTED");
     release();
     await expect.poll(() => routeFinished).toBe(2);
+    const retiredDocument = await page.evaluate(() => {
+      const lifetime = (window as UploadRetirementWindow).w3UploadRetirement;
+      if (!lifetime?.retired || !lifetime.beforeLeave)
+        throw new Error("Actual old editor retirement was not observed");
+      const raw = lifetime.witness.fragment.toJSON();
+      const provider = lifetime.witness.provider as HocuspocusProvider;
+      return {
+        beforeDrop: lifetime.beforeDrop,
+        beforeLeave: lifetime.beforeLeave,
+        retired: lifetime.retired,
+        settled: {
+          updates: lifetime.witness.updates,
+          updateBytes: lifetime.updateBytes.map((bytes) => [...bytes]),
+          raw,
+          rawUtf8: Array.from(new TextEncoder().encode(raw)),
+        },
+        sameFragment:
+          lifetime.witness.doc.getXmlFragment("prosemirror") === lifetime.witness.fragment,
+        destroyed: lifetime.witness.editor.isDestroyed,
+        attached: provider.isAttached,
+        reconnecting: provider.configuration.websocketProvider.shouldConnect,
+      };
+    });
+    expect(retiredDocument.sameFragment).toBe(true);
+    expect(retiredDocument.destroyed).toBe(true);
+    expect(retiredDocument.attached).toBe(false);
+    expect(retiredDocument.reconnecting).toBe(false);
+    // Pre-retirement updates are recorded independently; retirement freezes
+    // the exact old fragment and emitted update bytes until cancellation settles.
+    expect(retiredDocument.retired.updates).toBeGreaterThanOrEqual(
+      retiredDocument.beforeLeave.updates,
+    );
+    expect(retiredDocument.settled).toEqual(retiredDocument.retired);
     expect(await savedBody(page.request, ws, doc.id)).toEqual(after);
     await page.goBack();
     await expect(editorOf(page)).toBeVisible();
+    expect(
+      await editorOf(page).evaluate((root) => {
+        const old = (window as UploadRetirementWindow).w3UploadRetirement;
+        const options = (root as EditorElement).editor.extensionManager.extensions.find(
+          (item) => item.name === "collaboration",
+        )?.options as Record<string, unknown> | undefined;
+        return old?.witness.doc !== options?.document;
+      }),
+    ).toBe(true);
     await expect(editorOf(page).locator('[data-state="stored"]')).toHaveCount(1);
     expect(await savedBody(page.request, ws, doc.id)).toEqual(after);
     await testInfo.attach("w3-deferred-upload-epoch-unmount.json", {
-      body: JSON.stringify({ beforeUnmount: after, failures, routeErrors }),
+      body: JSON.stringify({ beforeUnmount: after, failures, routeErrors, retiredDocument }),
       contentType: "application/json",
     });
   } finally {
