@@ -1,4 +1,10 @@
-import { expect, type Page, test, type WebSocketRoute } from "@playwright/test";
+import {
+  expect,
+  type Page,
+  type WebSocketRoute,
+  test as baseTest,
+  type BrowserContext,
+} from "@playwright/test";
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -8,7 +14,7 @@ import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { Editor } from "@tiptap/core";
 import "@tiptap/extension-table";
 import type * as Y from "yjs";
-import { flowSchemas, login, readJson } from "./helpers";
+import { flowSchemas, readJson } from "./helpers";
 import {
   admin,
   blockAt,
@@ -16,7 +22,7 @@ import {
   createDoc,
   editorOf,
   expectBlocks,
-  newSignedInPage,
+  newSignedInPage as passwordSignedInPage,
   openDoc,
   save,
   savedBody,
@@ -24,10 +30,63 @@ import {
   workspaceId,
 } from "./workspace-wiki-vue-editor";
 
+type SessionState = Awaited<ReturnType<BrowserContext["storageState"]>>;
+let fixtureSession: SessionState | undefined;
+let logoutSession: SessionState | undefined;
+const logoutCase =
+  "real router navigation protects a private Markdown draft and actual logout retires it without saving";
+
+// Each client retains its own browser/Y.Doc/socket; genuine password sign-ins
+// supply session cookies once rather than exhausting the real auth budget.
+const test = baseTest.extend({
+  storageState: async ({ baseURL }, use, testInfo) => {
+    const session = testInfo.title === logoutCase ? logoutSession : fixtureSession;
+    if (!baseURL || !session) throw new Error("Missing genuine fixture session");
+    await use(session);
+  },
+});
 test.describe.configure({ mode: "serial" });
 test.beforeAll(async ({ browser, baseURL }) => {
   await setupInstance(browser, baseURL);
+  const primary = await passwordSignedInPage(browser, baseURL, admin);
+  try {
+    fixtureSession = await primary.context.storageState();
+  } finally {
+    await primary.context.close();
+  }
+  const logout = await passwordSignedInPage(browser, baseURL, admin);
+  try {
+    logoutSession = await logout.context.storageState();
+  } finally {
+    await logout.context.close();
+  }
 });
+
+async function authenticatedHome(page: Page): Promise<void> {
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("button", { name: "로그아웃", exact: true })).toBeVisible();
+}
+
+async function newSignedInPage(
+  ...[browser, baseURL, who, options = {}]: Parameters<typeof passwordSignedInPage>
+): ReturnType<typeof passwordSignedInPage> {
+  expect(who.email).toBe(admin.email);
+  if (!fixtureSession) throw new Error("Missing genuine fixture session");
+  const context = await browser.newContext({
+    baseURL,
+    storageState: fixtureSession,
+    permissions: options.permissions ?? [],
+  });
+  try {
+    const page = await context.newPage();
+    await authenticatedHome(page);
+    return { context, page };
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
+}
 
 async function selectMode(
   page: Page,
@@ -208,7 +267,7 @@ async function readLiveRuntime(page: Page): Promise<unknown> {
 test("four modes keep the same actual editor/doc/provider/fragment and no-op/Cancel publish zero content updates", async ({
   page,
 }) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "네 모드 한글 🧑‍💻", {
     json: {
@@ -249,7 +308,7 @@ test("source edit, actual peer edit and same-actor undo retain IDs and newest du
   baseURL,
   page,
 }) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "Markdown 동료 저장", {
     json: {
@@ -302,7 +361,7 @@ test("dirty source refuses delete-only peer changes and Cancel keeps current pee
   baseURL,
   page,
 }) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "동료 삭제 경합", { markdown: "연구\n\n자료" });
   const peer = await newSignedInPage(browser, baseURL, admin);
@@ -331,7 +390,7 @@ test("dirty source refuses delete-only peer changes and Cancel keeps current pee
 test("composition/keyCode229, narrow reflow and enlarged CJK source retain input and mode identity", async ({
   page,
 }, testInfo) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(
     page.request,
@@ -384,7 +443,7 @@ test("late older-schema peer data retires only the editor, preserving the same l
   baseURL,
   page,
 }) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "미래 데이터 보존", {
     json: {
@@ -610,7 +669,7 @@ test("wrong/old-prefix ACK never copies or marks newest source edit saved, match
 }, testInfo) => {
   const gate = await sourceAckGate(page);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "Markdown ACK 최신 본문", {
     json: {
@@ -678,7 +737,7 @@ test("failed ACK cannot copy source or claim saved even after the server wrote t
 }) => {
   const gate = await sourceAckGate(page);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "Markdown 저장 실패", { markdown: "원본" });
   await openDoc(page, doc.path);
@@ -705,7 +764,7 @@ test("failed ACK cannot copy source or claim saved even after the server wrote t
 test("block arrangement uses live selection and keeps the actual document/provider plus durable IDs", async ({
   page,
 }) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "블록 순서", {
     json: {
@@ -740,7 +799,7 @@ test("block arrangement uses live selection and keeps the actual document/provid
 test("native backward selection and stored marks survive no-op modes without Y writes or rich keyboard interception", async ({
   page,
 }) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "뒤로 선택", {
     json: {
@@ -809,7 +868,7 @@ test("fresh authenticated readonly client copies only after a genuine current co
   browser,
   baseURL,
 }, testInfo) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "읽기 전용 현재 본문", {
     json: {
@@ -914,7 +973,7 @@ test("actual preview producer and SafeHtml sink keep rich heading, colors, table
       });
     });
   });
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const target = await createDoc(page.request, ws, "참조 대상 🧑‍💻");
   const doc = await createDoc(page.request, ws, "미리보기 손실 경고", {
@@ -1127,7 +1186,7 @@ test("pending block-math permission notification makes zero local readonly write
   browser,
   baseURL,
 }, testInfo) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "수식 권한 경합", {
     json: {
@@ -1228,7 +1287,7 @@ test("pending block-math permission notification makes zero local readonly write
 test("focused visible Math Cancel never publishes its draft, and detached old field events cannot consume a newly opened draft", async ({
   page,
 }, testInfo) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "수식 취소 소유권", {
     json: {
@@ -1338,7 +1397,7 @@ test("focused visible Math Cancel never publishes its draft, and detached old fi
 test("Chromium IME engine keeps Korean source composition private until deliberate Apply on the same live document", async ({
   page,
 }, testInfo) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "실제 Chromium 한글 조합", {
     json: {
@@ -1453,7 +1512,7 @@ test("Chromium IME engine keeps Korean source composition private until delibera
 test("Chromium rich IME engine blocks mode switching without focus loss and preserves Korean commit identity", async ({
   page,
 }) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "실제 글쓰기 한글 조합", {
     json: {
@@ -1549,7 +1608,7 @@ test("Chromium rich IME engine blocks mode switching without focus loss and pres
 test("actual identityless source range refuses Apply with precise warning and Cancel/viewing allocate no ID or content update", async ({
   page,
 }) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "ID 없는 범위 보존", { markdown: "원본 문단" });
   await openDoc(page, doc.path);
@@ -1588,7 +1647,7 @@ test("ordinary rich and peer edits refresh clean Markdown entry while a dirty pr
   browser,
   baseURL,
 }) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "최신 생성 Markdown과 비공개 초안", {
     json: {
@@ -1659,7 +1718,7 @@ test("actual node and table cell bookmarks survive no-op modes, localized table 
   browser,
   baseURL,
 }, testInfo) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "표 선택 동료 실행 취소", {
     json: {
@@ -1821,7 +1880,7 @@ test("actual socket disconnect during native Math IME keeps the same connected f
     route.connectToServer();
     socket = route;
   });
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "接続中断と native 조합", {
     json: {
@@ -1894,7 +1953,7 @@ test("fresh real server readonly-authenticated join recovers write authority aft
   browser,
   baseURL,
 }, testInfo) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "실제 readonly 인증에서 쓰기 복구", {
     json: {
@@ -2022,7 +2081,7 @@ for (const kind of ["project", "task"] as const) {
     browser,
     baseURL,
   }, testInfo) => {
-    await login(page, admin.email, admin.password);
+    await authenticatedHome(page);
     const ws = await workspaceId(page.request);
     const key = kind === "project" ? "WC3" : "TC3";
     const projectResponse = await page.request.post(`/api/v1/workspaces/${ws}/projects`, {
@@ -2140,7 +2199,7 @@ test("real router navigation protects a private Markdown draft and actual logout
   browser,
   baseURL,
 }, testInfo) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "초안 이동과 로그아웃", {
     json: {
@@ -2234,7 +2293,7 @@ test("pending rich save across mode entry cannot mark a newer Markdown prefix sa
   baseURL,
 }, testInfo) => {
   const gate = await sourceAckGate(page);
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "모드 진입 중 저장", {
     json: {
@@ -2323,7 +2382,7 @@ async function nativeFileDrop(page: Page, path: string): Promise<void> {
 test("real deferred native upload invalidates a private Markdown proposal and its next pending upload aborts on actual unmount", async ({
   page,
 }, testInfo) => {
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "첨부 완료와 초안 수명", {
     json: {
@@ -2452,7 +2511,7 @@ test("actual served editor JavaScript CSS and complete notices match this frozen
       }),
     );
   });
-  await login(page, admin.email, admin.password);
+  await authenticatedHome(page);
   const ws = await workspaceId(page.request);
   const doc = await createDoc(page.request, ws, "실제 제공된 편집기 자산", {
     json: {
