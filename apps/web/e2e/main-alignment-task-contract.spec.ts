@@ -1506,9 +1506,14 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             running: boolean;
             ownerBroken: boolean;
             violations: number;
+            authenticationEpoch: number;
+            initialAuthenticationEpoch: number;
+            authenticatedScope: string | undefined;
             states: {
               scope: string | undefined;
               authenticated: boolean;
+              authenticationEpoch: number;
+              authenticatedScope: string | undefined;
               status: string | null;
               editable: boolean;
               dom: string | null;
@@ -1530,9 +1535,14 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           running: true,
           ownerBroken: false,
           violations: 0,
+          authenticationEpoch: 0,
+          initialAuthenticationEpoch: 0,
+          authenticatedScope: provider.authorizedScope,
           states: [] as {
             scope: string | undefined;
             authenticated: boolean;
+            authenticationEpoch: number;
+            authenticatedScope: string | undefined;
             status: string | null;
             editable: boolean;
             dom: string | null;
@@ -1540,6 +1550,10 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           }[],
         };
         owner.taskFreshAdmission = witness;
+        provider.on("authenticated", ({ scope }: { scope: typeof provider.authorizedScope }) => {
+          witness.authenticationEpoch++;
+          witness.authenticatedScope = scope;
+        });
         let previous = doc.getXmlFragment("prosemirror").toJSON();
         doc.on(
           "update",
@@ -1573,6 +1587,8 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           const state = {
             scope: provider.authorizedScope,
             authenticated: provider.isAuthenticated,
+            authenticationEpoch: witness.authenticationEpoch,
+            authenticatedScope: witness.authenticatedScope,
             status:
               root.querySelector("[data-collab-status]")?.getAttribute("data-collab-status") ??
               null,
@@ -1608,6 +1624,9 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
               records: NativeAdmissionUpdate[];
               ownerBroken: boolean;
               violations: number;
+              authenticationEpoch: number;
+              initialAuthenticationEpoch: number;
+              authenticatedScope: string | undefined;
             };
           };
           const witness = owner.taskFreshAdmission;
@@ -1620,6 +1639,9 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             (button) => button.textContent.trim() === "저장",
           );
           return {
+            authenticationEpoch: witness.authenticationEpoch,
+            initialAuthenticationEpoch: witness.initialAuthenticationEpoch,
+            authenticatedScope: witness.authenticatedScope,
             ownerBroken: witness.ownerBroken,
             violations: witness.violations,
             sameRoot: root === witness.root,
@@ -1705,6 +1727,8 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             states: {
               scope: string | undefined;
               authenticated: boolean;
+              authenticationEpoch: number;
+              authenticatedScope: string | undefined;
               status: string | null;
               editable: boolean;
               dom: string | null;
@@ -1716,6 +1740,38 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         owner.taskFreshAdmission.running = false;
         return owner.taskFreshAdmission.states;
       });
+      const finalAdmission = await observe();
+      expect(finalAdmission).toMatchObject({
+        ownerBroken: false,
+        violations: 0,
+        sameRoot: true,
+        sameEditor: true,
+        sameElement: true,
+        sameDoc: true,
+        sameProvider: true,
+        sameClientId: true,
+        authenticated: true,
+        scope: schedule === "server-readonly" ? "readonly" : "read-write",
+        status: "connected",
+        editable: schedule === "natural",
+        dom: String(schedule === "natural"),
+        canPersistAffordance: schedule === "natural",
+        updates: 0,
+      });
+      expect(finalAdmission.authenticationEpoch).toBeGreaterThan(
+        finalAdmission.initialAuthenticationEpoch,
+      );
+      expect(
+        frames.some(
+          (frame) =>
+            frame.authenticated &&
+            frame.authenticationEpoch > finalAdmission.initialAuthenticationEpoch &&
+            frame.authenticatedScope ===
+              (schedule === "server-readonly" ? "readonly" : "read-write") &&
+            frame.scope === frame.authenticatedScope &&
+            frame.status === "connected",
+        ),
+      ).toBe(true);
       expect(
         frames.some(
           (frame) =>
