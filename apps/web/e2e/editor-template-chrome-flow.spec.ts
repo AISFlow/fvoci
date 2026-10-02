@@ -37,6 +37,32 @@ async function observeTemplateSelection(page: Page): Promise<void> {
     const critical: unknown[] = [];
     const ownerChanges: unknown[] = [];
     const observedMismatches: unknown[] = [];
+    const actionBoundaries: unknown[] = [];
+    const totals = {
+      frames: 0,
+      critical: 0,
+      ownerChanges: 0,
+      observedMismatches: 0,
+      actionBoundaries: 0,
+    };
+    const dropped = {
+      frames: 0,
+      critical: 0,
+      ownerChanges: 0,
+      observedMismatches: 0,
+      actionBoundaries: 0,
+    };
+    const append = (key: keyof typeof totals, values: unknown[], value: unknown, limit: number) => {
+      totals[key]++;
+      values.push(value);
+      if (values.length > limit) {
+        // Keep the first latch and bounded tail; frames are a rolling window.
+        values.splice(key === "frames" ? 0 : 1, 1);
+        dropped[key]++;
+      }
+    };
+    let firstObservedState: unknown;
+    let firstRetiredEvent: unknown;
     const ids = new WeakMap<object, number>();
     let nextId = 0;
     const token = (value?: object | null) => {
@@ -47,36 +73,157 @@ async function observeTemplateSelection(page: Page): Promise<void> {
     let bound: Editor | undefined;
     let ydoc: Y.Doc | undefined;
     let provider: HocuspocusProvider | undefined;
-    let firstOwner: string | undefined;
+    let previousOwner: string | undefined;
+    let bindingGeneration = 0;
+    let generationUpdates = 0;
+    let generationLocalUpdates = 0;
     let previousNativeId: unknown;
     let previousBubble = false;
+
     let updates = 0;
     let localUpdates = 0;
+    let callbacks:
+      | {
+          transaction: (payload: { transaction: Transaction }) => void;
+          update: (bytes: Uint8Array, origin: unknown, doc: Y.Doc, tr: Y.Transaction) => void;
+          authenticated: () => void;
+          status: () => void;
+          synced: () => void;
+        }
+      | undefined;
     let stopped = false;
     let animation = 0;
-    const capture = (stage: string, retain = false) => {
+    const detach = () => {
+      if (!callbacks) return;
+      bound?.off("transaction", callbacks.transaction);
+      ydoc?.off("update", callbacks.update);
+      provider?.off("authenticated", callbacks.authenticated);
+      provider?.off("status", callbacks.status);
+      provider?.off("synced", callbacks.synced);
+      callbacks = undefined;
+    };
+    const record = (
+      frame: { at: number; stage: string; [key: string]: unknown },
+      retain: boolean,
+    ) => {
+      append("frames", frames, frame, 512);
+      if (retain) append("critical", critical, frame, 256);
+    };
+    const capture = (
+      stage: string,
+      retain = false,
+      observedUpdate?: { doc: Y.Doc; local: boolean },
+      eventBindingGeneration?: number,
+    ) => {
+      if (stopped) return;
       try {
         const root = document.querySelector<HTMLElement & { editor?: Editor }>(
           ".fvoci-editor .ProseMirror",
         );
-        const current = root?.editor;
-        if (!current || current.isDestroyed) return;
-        if (!bound) {
+        const mounted = root?.editor;
+        const current = mounted && !mounted.isDestroyed ? mounted : undefined;
+        const documentOptions = current?.extensionManager.extensions.find(
+          (extension) => extension.name === "collaboration",
+        )?.options as { document?: Y.Doc } | undefined;
+        const caretOptions = current?.extensionManager.extensions.find(
+          (extension) => extension.name === "collaborationCaret",
+        )?.options as { provider?: HocuspocusProvider } | undefined;
+        const currentDoc = documentOptions?.document;
+        const currentProvider = caretOptions?.provider;
+        if (current !== bound || currentDoc !== ydoc || currentProvider !== provider) {
+          detach();
           bound = current;
-          const options = current.extensionManager.extensions.find(
-            (extension) => extension.name === "collaboration",
-          )?.options as { document?: Y.Doc } | undefined;
-          ydoc = options?.document;
-          provider = (
-            current.extensionManager.extensions.find(
-              (extension) => extension.name === "collaborationCaret",
-            )?.options as { provider?: HocuspocusProvider } | undefined
-          )?.provider;
-          bound.on("transaction", transaction);
-          ydoc?.on("update", update);
-          provider?.on("authenticated", authenticated);
-          provider?.on("status", status);
-          provider?.on("synced", synced);
+          ydoc = currentDoc;
+          provider = currentProvider;
+          bindingGeneration++;
+          generationUpdates = 0;
+          generationLocalUpdates = 0;
+          const generation = bindingGeneration;
+          callbacks = {
+            transaction: ({ transaction: tr }) => {
+              capture(
+                `transaction:doc=${String(tr.docChanged)}:selection=${String(tr.selectionSet)}`,
+                tr.docChanged,
+                undefined,
+                generation,
+              );
+            },
+            update: (_bytes, _origin, doc, tr) => {
+              capture(
+                `Yupdate:local=${String(tr.local)}`,
+                true,
+                { doc, local: tr.local },
+                generation,
+              );
+            },
+            authenticated: () => {
+              capture("provider:authenticated", true, undefined, generation);
+            },
+            status: () => {
+              capture("provider:status", true, undefined, generation);
+            },
+            synced: () => {
+              capture("provider:synced", true, undefined, generation);
+            },
+          };
+          bound?.on("transaction", callbacks.transaction);
+          ydoc?.on("update", callbacks.update);
+          provider?.on("authenticated", callbacks.authenticated);
+          provider?.on("status", callbacks.status);
+          provider?.on("synced", callbacks.synced);
+        }
+        const at = performance.now();
+        const fragment = ydoc?.share.get("prosemirror") as Y.XmlFragment | undefined;
+        const node = fragment?.toArray()[0];
+        const owner = JSON.stringify([
+          token(root),
+          token(mounted),
+          token(current?.view.dom),
+          token(ydoc),
+          token(provider),
+          token(fragment),
+          token(node),
+        ]);
+        const ownerChanged = previousOwner !== undefined && owner !== previousOwner;
+        if (ownerChanged) {
+          append(
+            "ownerChanges",
+            ownerChanges,
+            {
+              stage,
+              at,
+              previousOwner,
+              owner,
+              bindingGeneration,
+            },
+            128,
+          );
+        }
+        previousOwner = owner;
+        const retiredEvent =
+          eventBindingGeneration !== undefined && eventBindingGeneration !== bindingGeneration;
+        if (!current || !root) {
+          record(
+            {
+              at,
+              stage,
+              owner,
+              bindingGeneration,
+              eventBindingGeneration,
+              retiredEvent,
+              unavailable: mounted?.isDestroyed ? "destroyed-editor" : "missing-editor",
+            },
+            retain || ownerChanged,
+          );
+          return;
+        }
+        if (observedUpdate && observedUpdate.doc === ydoc && !retiredEvent) {
+          updates++;
+          generationUpdates++;
+          if (observedUpdate.local) {
+            localUpdates++;
+            generationLocalUpdates++;
+          }
         }
         const state = current.view.state;
         const native = window.getSelection();
@@ -97,30 +244,22 @@ async function observeTemplateSelection(page: Page): Promise<void> {
             nativePositions = { unknown: String(error) };
           }
         }
-        // Read an existing shared type; do not create or seed one for observation.
-        const fragment = ydoc?.share.get("prosemirror") as Y.XmlFragment | undefined;
-        const node = fragment?.toArray()[0];
         const nativeId: unknown = node && "getAttribute" in node ? node.getAttribute("id") : null;
-        const owner = JSON.stringify([
-          token(root),
-          token(current),
-          token(current.view.dom),
-          token(ydoc),
-          token(provider),
-          token(fragment),
-          token(node),
-        ]);
-        if (!firstOwner) firstOwner = owner;
-        if (owner !== firstOwner) ownerChanges.push({ stage, at: performance.now(), owner });
         const bubble = document.querySelector<HTMLElement>("[data-fvoci-bubble]");
         const bubbleChanged = Boolean(bubble) !== previousBubble;
         const idChanged = nativeId !== previousNativeId;
         previousBubble = Boolean(bubble);
         previousNativeId = nativeId;
         const frame = {
-          at: performance.now(),
+          at,
           stage,
           owner,
+          bindingGeneration,
+          generationUpdates,
+          generationLocalUpdates,
+          eventBindingGeneration,
+          retiredEvent,
+          retiredUpdate: Boolean(observedUpdate && observedUpdate.doc !== ydoc),
           clientID: ydoc?.clientID ?? null,
           native: {
             inside,
@@ -135,7 +274,7 @@ async function observeTemplateSelection(page: Page): Promise<void> {
             anchor: state.selection.anchor,
             head: state.selection.head,
             empty: state.selection.empty,
-            type: state.selection.constructor.name,
+            type: (state.selection.toJSON() as { type?: unknown }).type,
             editorAnchor: current.state.selection.anchor,
             editorHead: current.state.selection.head,
             marks: state.storedMarks?.map((mark) => mark.toJSON() as unknown) ?? null,
@@ -165,9 +304,9 @@ async function observeTemplateSelection(page: Page): Promise<void> {
             ? { pmDocument: state.doc.toJSON() as unknown }
             : {}),
         };
-        frames.push(frame);
-        if (frames.length > 512) frames.shift();
-        if (retain || bubbleChanged || idChanged) critical.push(frame);
+        if (firstObservedState === undefined) firstObservedState = frame;
+        if (retiredEvent && firstRetiredEvent === undefined) firstRetiredEvent = frame;
+        record(frame, retain || bubbleChanged || idChanged || ownerChanged);
         if (
           nativePositions &&
           "anchor" in nativePositions &&
@@ -175,31 +314,23 @@ async function observeTemplateSelection(page: Page): Promise<void> {
             nativePositions.head !== state.selection.head)
         ) {
           // Native-to-PM settling is observed, not classified as a defect here.
-          observedMismatches.push({ at: frame.at, stage, nativePositions, pm: frame.pm });
+          append(
+            "observedMismatches",
+            observedMismatches,
+            {
+              at: frame.at,
+              stage,
+              owner,
+              bindingGeneration,
+              nativePositions,
+              pm: frame.pm,
+            },
+            256,
+          );
         }
       } catch (error) {
-        critical.push({ at: performance.now(), stage, unknown: String(error) });
+        append("critical", critical, { at: performance.now(), stage, unknown: String(error) }, 256);
       }
-    };
-    const transaction = ({ transaction: tr }: { transaction: Transaction }) => {
-      capture(
-        `transaction:doc=${String(tr.docChanged)}:selection=${String(tr.selectionSet)}`,
-        tr.docChanged,
-      );
-    };
-    const update = (_bytes: Uint8Array, _origin: unknown, _doc: Y.Doc, tr: Y.Transaction) => {
-      updates++;
-      if (tr.local) localUpdates++;
-      capture(`Yupdate:local=${String(tr.local)}`, true);
-    };
-    const authenticated = () => {
-      capture("provider:authenticated", true);
-    };
-    const status = () => {
-      capture("provider:status", true);
-    };
-    const synced = () => {
-      capture("provider:synced", true);
     };
     const events = ["keydown", "keyup", "selectionchange", "focusin", "focusout", "pointerdown"];
     const event = (value: Event) => {
@@ -212,6 +343,7 @@ async function observeTemplateSelection(page: Page): Promise<void> {
       });
     };
     for (const name of events) document.addEventListener(name, event, true);
+    window.addEventListener("pagehide", event, true);
     const tick = () => {
       if (stopped) return;
       capture("frame");
@@ -221,18 +353,32 @@ async function observeTemplateSelection(page: Page): Promise<void> {
     (window as ObservedWindow).__w3TemplateObserver = {
       checkpoint: (stage) => {
         capture(stage, true);
+        const latest = frames.at(-1);
+        if (latest) append("actionBoundaries", actionBoundaries, latest, 16);
       },
       stop() {
         capture("finally", true);
         stopped = true;
         cancelAnimationFrame(animation);
         for (const name of events) document.removeEventListener(name, event, true);
-        bound?.off("transaction", transaction);
-        ydoc?.off("update", update);
-        provider?.off("authenticated", authenticated);
-        provider?.off("status", status);
-        provider?.off("synced", synced);
-        return { frames, critical, ownerChanges, observedMismatches, updates, localUpdates };
+        window.removeEventListener("pagehide", event, true);
+        detach();
+        return {
+          frames,
+          critical,
+          ownerChanges,
+          observedMismatches,
+          actionBoundaries,
+          firstObservedState,
+          firstRetiredEvent,
+          totals,
+          dropped,
+          bindingGeneration,
+          earlyBindingNotCaptured: true,
+          navigationContinuity: "current-document-only",
+          updates,
+          localUpdates,
+        };
       },
     };
   });
