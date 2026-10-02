@@ -657,11 +657,32 @@ ROLLBACK;`,
       markdown: "한글과 😀 링크\n",
     });
     const originalStored = await savedBody(page.request, wsId, doc.id);
-    const storedAttributes = originalStored.content?.[0]?.attrs;
+    expect(originalStored).toEqual({
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "한글과 😀 링크" }] }],
+    });
     await openDoc(page, doc.path);
     await checkpoint("openDoc:original");
     const originalLive = await liveBody(page);
     const liveAttributes = originalLive.content?.[0]?.attrs;
+    if (!liveAttributes || typeof liveAttributes.id !== "string" || !liveAttributes.id)
+      throw new Error("Missing original mounted paragraph identity");
+    const originalMountedID = liveAttributes.id;
+    const bareContent = [
+      { type: "text", text: "한글과 " },
+      { type: "emoji", attrs: { name: "grinning" } },
+      { type: "text", text: " 링크" },
+    ];
+    expect(originalLive).toEqual({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { id: originalMountedID, ychange: null, textAlign: null },
+          content: bareContent,
+        },
+      ],
+    });
     await blockAt(page, 0).click();
     await observeCaretBoundary("after-click");
     await page.keyboard.press("End");
@@ -702,17 +723,8 @@ ROLLBACK;`,
     expect(JSON.stringify(await savedBody(page.request, wsId, doc.id))).toContain('"type":"link"');
     expect(csp).toEqual([]);
     await checkpoint("save:original");
-    if (!storedAttributes || typeof storedAttributes.id !== "string" || !storedAttributes.id)
-      throw new Error("Missing original stored paragraph identity");
-    if (!liveAttributes || liveAttributes.id !== storedAttributes.id)
-      throw new Error("Mounted paragraph identity differs from stored document");
     // The unchanged MarkedEmoji foundation policy encodes a marked known
     // emoji as its exact Unicode glyph plus marks; bare atoms keep their name.
-    const bareContent = [
-      { type: "text", text: "한글과 " },
-      { type: "emoji", attrs: { name: "grinning" } },
-      { type: "text", text: " 링크" },
-    ];
     const linkedContent = [
       {
         type: "text",
@@ -733,16 +745,14 @@ ROLLBACK;`,
     ];
     const expectedStored: TiptapNode = {
       type: "doc",
-      content: [{ type: "paragraph", attrs: { ...storedAttributes }, content: linkedContent }],
+      // The seed/projection contract omits default-null paragraph attrs.
+      // Identity comes from the original mounted snapshot, before Apply.
+      content: [{ type: "paragraph", attrs: { id: originalMountedID }, content: linkedContent }],
     };
     const expectedLive: TiptapNode = {
       type: "doc",
       content: [{ type: "paragraph", attrs: { ...liveAttributes }, content: linkedContent }],
     };
-    expect(originalLive).toEqual({
-      type: "doc",
-      content: [{ type: "paragraph", attrs: { ...liveAttributes }, content: bareContent }],
-    });
     expect(composingBody).toEqual(originalLive);
     expect(cancelledBody).toEqual(originalLive);
     expect(await savedBody(page.request, wsId, doc.id)).toEqual(expectedStored);
@@ -755,11 +765,13 @@ ROLLBACK;`,
     ).toEqual({ anchor: 10, head: 1, empty: false });
     await expect(blockAt(page, 0).locator("a")).toHaveAttribute("href", "https://example.com/한글");
     const dbWitness = restrictedDbBody(wsId, doc.id);
-    expect(dbWitness).toMatchObject({ content: expectedStored });
     await testInfo.attach("w3-template-link-db-witness.json", {
       body: JSON.stringify(dbWitness),
       contentType: "application/json",
     });
+    if (typeof dbWitness !== "object" || dbWitness === null || !("content" in dbWitness))
+      throw new Error("Missing restricted DB body");
+    expect(dbWitness.content).toEqual(expectedStored);
     const fresh = await newSignedInPage(browser, baseURL, admin);
     try {
       await openDoc(fresh.page, doc.path);
