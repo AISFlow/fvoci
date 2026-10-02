@@ -123,27 +123,41 @@ export async function editorModePreview(
   // producer's wait immediately, leaving that IO under its existing host owner.
   const pairs = signal
     ? await new Promise<Awaited<typeof pending>>((resolve, reject) => {
-        const onAbort = () => {
+        let settled = false;
+        const settle = (complete: () => void) => {
+          if (settled) return;
+          settled = true;
           signal.removeEventListener("abort", onAbort);
-          reject(
-            signal.reason instanceof Error
-              ? signal.reason
-              : new DOMException("Preview retired", "AbortError"),
-          );
+          complete();
+        };
+        const onAbort = () => {
+          if (!signal.aborted) return;
+          settle(() => {
+            // Native throwIfAborted preserves even arbitrary non-Error reasons;
+            // the async rejection keeps that identity without coercion.
+            resolve(
+              (async () => {
+                signal.throwIfAborted();
+                return pending;
+              })(),
+            );
+          });
         };
         signal.addEventListener("abort", onAbort, { once: true });
         void pending.then(
           (value) => {
-            signal.removeEventListener("abort", onAbort);
-            resolve(value);
+            settle(() => {
+              resolve(value);
+            });
           },
           (error: unknown) => {
-            signal.removeEventListener("abort", onAbort);
-            reject(
-              error instanceof Error
-                ? error
-                : new Error("Preview metadata resolution failed", { cause: error }),
-            );
+            settle(() => {
+              reject(
+                error instanceof Error
+                  ? error
+                  : new Error("Preview metadata resolution failed", { cause: error }),
+              );
+            });
           },
         );
         if (signal.aborted) onAbort();

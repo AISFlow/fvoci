@@ -33,6 +33,7 @@ import type { EntitySnapshot } from "../src/entities.ts";
 function previewAbortListenerWitness() {
   const controller = new AbortController();
   const listeners = new Set<EventListenerOrEventListenerObject>();
+  const counts = { added: 0, removed: 0 };
   const add = controller.signal.addEventListener.bind(controller.signal);
   const remove = controller.signal.removeEventListener.bind(controller.signal);
   Object.defineProperty(controller.signal, "addEventListener", {
@@ -42,7 +43,10 @@ function previewAbortListenerWitness() {
       options?: AddEventListenerOptions | boolean,
     ) => {
       if (!listener) return;
-      if (type === "abort") listeners.add(listener);
+      if (type === "abort") {
+        counts.added++;
+        listeners.add(listener);
+      }
       add(type, listener, options);
     },
   });
@@ -53,11 +57,14 @@ function previewAbortListenerWitness() {
       options?: EventListenerOptions | boolean,
     ) => {
       if (!listener) return;
-      if (type === "abort") listeners.delete(listener);
+      if (type === "abort") {
+        counts.removed++;
+        listeners.delete(listener);
+      }
       remove(type, listener, options);
     },
   });
-  return { controller, listeners };
+  return { controller, listeners, counts };
 }
 
 await test("owned preview wait aborts before a pending host resolver settles, with no late serialization or Yjs change", async () => {
@@ -89,7 +96,7 @@ await test("owned preview wait aborts before a pending host resolver settles, wi
   const hostPending = new Promise<EntitySnapshot | null>((done) => {
     resolve = done;
   });
-  const { controller, listeners } = previewAbortListenerWitness();
+  const { controller, listeners, counts } = previewAbortListenerWitness();
   const reason = new Error("owned preview retired");
   const rendering = editorModePreview(
     live.editor,
@@ -111,6 +118,7 @@ await test("owned preview wait aborts before a pending host resolver settles, wi
     await rejection;
     for (let index = 0; index < 5; index++) await Promise.resolve();
     assert.equal(serializations, 0);
+    assert.deepEqual(counts, { added: 1, removed: 1 });
     assert.deepEqual(Y.encodeStateAsUpdate(ydoc), before);
     assert.equal(live.manager.undoStack.length, 0);
   } finally {
@@ -139,7 +147,7 @@ for (const schedule of [
     });
     const live = liveEditor(ydoc);
     const before = Y.encodeStateAsUpdate(ydoc);
-    const { controller, listeners } = previewAbortListenerWitness();
+    const { controller, listeners, counts } = previewAbortListenerWitness();
     const reason = new Error("preview scope retired");
     const serializeReached = new Error("normal producer reached actual DOM boundary");
     let serializations = 0;
@@ -186,6 +194,8 @@ for (const schedule of [
       await rejection;
       for (let index = 0; index < 5; index++) await Promise.resolve();
       assert.equal(listeners.size, 0);
+      const subscriptions = schedule === "already-aborted" ? 0 : 1;
+      assert.deepEqual(counts, { added: subscriptions, removed: subscriptions });
       assert.equal(serializations, aborted ? 0 : 1);
       assert.equal(resolverCalls, schedule === "already-aborted" || schedule === "empty" ? 0 : 1);
       assert.deepEqual(Y.encodeStateAsUpdate(ydoc), before);
@@ -197,6 +207,93 @@ for (const schedule of [
       ydoc.destroy();
     }
   });
+}
+
+for (const reason of ["exact arbitrary reason", { source: "exact object reason" }]) {
+  for (const schedule of [
+    "entry",
+    "late-resolve",
+    "late-reject",
+    "synchronous-resolver-abort",
+    "settlement-race",
+  ] as const) {
+    await test(`actual preview ${typeof reason} reason identity and once-only cleanup during ${schedule}`, async () => {
+      const doc = tiptapJsonToYDoc({
+        type: "doc",
+        content: [
+          { type: "embed", attrs: { id: "exact-reason-ref", entity: "document", ref: "target" } },
+        ],
+      });
+      const live = liveEditor(doc);
+      const pm = live.editor.state.doc;
+      const fragment = doc.getXmlFragment("prosemirror");
+      const before = Y.encodeStateAsUpdate(doc);
+      const undo = [...live.manager.undoStack];
+      let updates = 0;
+      doc.on("update", () => {
+        updates++;
+      });
+      let serializations = 0;
+      Object.defineProperty(live.editor.view, "dom", {
+        value: {
+          ownerDocument: {
+            createElement() {
+              serializations++;
+              throw new Error("retired producer reached DOM");
+            },
+          },
+        },
+      });
+      const { controller, listeners, counts } = previewAbortListenerWitness();
+      let resolve: (value: EntitySnapshot | null) => void = () => {};
+      let reject: (error: Error) => void = () => {};
+      const shared = new Promise<EntitySnapshot | null>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      if (schedule === "entry") controller.abort(reason);
+      const pending = editorModePreview(
+        live.editor,
+        {
+          entityResolver() {
+            if (schedule === "synchronous-resolver-abort") controller.abort(reason);
+            return shared;
+          },
+        },
+        controller.signal,
+      );
+      let received = false;
+      const rejected = pending.catch((error: unknown) => {
+        assert.strictEqual(error, reason);
+        received = true;
+      });
+      try {
+        if (schedule === "settlement-race") resolve({ label: "completed host", icon: "" });
+        if (schedule !== "entry" && schedule !== "synchronous-resolver-abort")
+          controller.abort(reason);
+        for (let index = 0; index < 5; index++) await Promise.resolve();
+        assert.equal(received, true, "owned producer retires independently of shared IO");
+        if (schedule === "late-reject") reject(new Error("late shared rejection"));
+        else resolve({ label: "late host", icon: "" });
+        await rejected;
+        for (let index = 0; index < 5; index++) await Promise.resolve();
+        const subscriptions = schedule === "entry" ? 0 : 1;
+        assert.deepEqual(counts, { added: subscriptions, removed: subscriptions });
+        assert.equal(listeners.size, 0);
+        assert.equal(serializations, 0);
+        assert.equal(updates, 0);
+        assert.equal(live.editor.state.doc, pm);
+        assert.equal(doc.getXmlFragment("prosemirror"), fragment);
+        assert.deepEqual(Y.encodeStateAsUpdate(doc), before);
+        assert.deepEqual(live.manager.undoStack, undo);
+      } finally {
+        resolve(null);
+        await rejected;
+        live.close();
+        doc.destroy();
+      }
+    });
+  }
 }
 
 await test("actual shell composition capture guards native NodeView targets, provisional 229 and retired owners without PM/Yjs writes", () => {
