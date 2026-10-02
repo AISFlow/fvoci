@@ -9306,7 +9306,10 @@ export interface operations {
     };
     owner_state: {
         parameters: {
-            query?: never;
+            query?: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -9322,6 +9325,14 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21491,7 +21502,10 @@ export interface operations {
     };
     task_state: {
         parameters: {
-            query?: never;
+            query?: {
+                expectedActorId?: string;
+                expectedSessionId?: string;
+            };
             header?: never;
             path: {
                 workspace_id: string;
@@ -21518,6 +21532,14 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
