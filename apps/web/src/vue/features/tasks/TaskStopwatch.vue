@@ -4,10 +4,10 @@ import { useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, onScopeDispose, ref, watch } from "vue";
 import { ProblemError, loadErrorMessage } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
-import { taskTimeEntriesQuery } from "@/features/tasks/queries";
 import { anchoredElapsed, stopwatchText } from "./task-stopwatch-clock";
 import {
   taskStopwatchQuery,
+  capturedTimeEntriesQuery,
   ownerStopwatchQuery,
   sendTimerCommand,
   timerContextChanged,
@@ -226,11 +226,21 @@ async function submit(capture: Capture): Promise<void> {
         exact: true,
       }),
       client.invalidateQueries({
-        predicate: (query) =>
-          query.queryKey[0] === "task-timer" && query.queryKey[1] === capture.actor,
+        queryKey: taskStopwatchQuery(
+          capture.actor,
+          capture.workspace,
+          capture.task,
+          capture.credential,
+        ).queryKey,
+        exact: true,
       }),
       client.invalidateQueries({
-        queryKey: taskTimeEntriesQuery(capture.workspace, capture.task).queryKey,
+        queryKey: capturedTimeEntriesQuery(
+          capture.actor,
+          capture.workspace,
+          capture.task,
+          capture.credential,
+        ).queryKey,
         exact: true,
       }),
     ]);

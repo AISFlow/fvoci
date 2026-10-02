@@ -164,7 +164,7 @@ async fn cleanup(
         .map_err(error)
 }
 
-fn captured_context(
+pub(crate) fn captured_context(
     actor: Option<Uuid>,
     session: Option<Uuid>,
     actual_actor: Uuid,

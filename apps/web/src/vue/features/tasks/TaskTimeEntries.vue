@@ -3,7 +3,6 @@ import { formatPersonName, t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, onScopeDispose, reactive, ref, useId, watch } from "vue";
-import { taskTimeEntriesQuery } from "@/features/tasks/queries";
 import { formatDuration } from "@/features/tasks/time-entry-format";
 import type { components } from "@/generated/api";
 import { loadErrorMessage, ProblemError } from "@/lib/api";
@@ -23,6 +22,7 @@ import {
 } from "./task-stopwatch-record-editor";
 import {
   captureTimerDenial,
+  capturedTimeEntriesQuery,
   captureTimerQuery,
   removeCapturedTimerQuery,
   ownerStopwatchQuery,
@@ -53,9 +53,11 @@ const me = useQuery(meQuery);
 const actor = computed(() => me.data.value?.userId ?? "");
 const session = computed(() => me.data.value?.sessionId ?? "");
 const timeZone = computed(() => me.data.value?.timezone ?? FALLBACK_TZ);
-// Keep the ordinary shared-row contract and author labels. Its optional captured
-// GET guard requires the separately authorized original A/B negative and seam.
-const list = useQuery(() => taskTimeEntriesQuery(props.workspaceId, props.taskId));
+// The ordinary list includes the authenticated author's private corrections,
+// so capture its identity as well as its task without changing shared rows.
+const list = useQuery(() =>
+  capturedTimeEntriesQuery(actor.value, props.workspaceId, props.taskId, session.value),
+);
 const timer = useQuery(() =>
   taskStopwatchQuery(actor.value, props.workspaceId, props.taskId, session.value),
 );
@@ -105,7 +107,7 @@ const records = computed(() =>
     ? []
     : (history.data.value?.pages.flatMap((page) => page.items) ?? []),
 );
-const items = computed<TimeEntry[]>(() => list.data.value?.items ?? []);
+const items = computed<TimeEntry[]>(() => (revoked.value ? [] : (list.data.value?.items ?? [])));
 const total = computed(() => items.value.reduce((sum, row) => sum + (row.durationSeconds ?? 0), 0));
 const canEdit = computed(
   () =>
@@ -220,6 +222,7 @@ function denied(error: unknown): error is ProblemError {
 async function retirePersonal(error: ProblemError): Promise<void> {
   if (revoked.value) return;
   const captures = [
+    capturedTimeEntriesQuery(actor.value, props.workspaceId, props.taskId, session.value).queryKey,
     taskStopwatchQuery(actor.value, props.workspaceId, props.taskId, session.value).queryKey,
     personalTimerHistoryQuery(historyScope.value).queryKey,
     personalTimerSummaryQuery(dayScope.value).queryKey,
@@ -239,7 +242,7 @@ async function retirePersonal(error: ProblemError): Promise<void> {
     await client.invalidateQueries({ queryKey: meQuery.queryKey, exact: true });
 }
 function watchPrivateRead(
-  result: typeof timer | typeof today | typeof history,
+  result: typeof timer | typeof today | typeof history | typeof list,
   key: () => readonly string[],
 ): void {
   watch(
@@ -272,6 +275,11 @@ watchPrivateRead(
 watchPrivateRead(history, () => personalTimerHistoryQuery(historyScope.value).queryKey);
 watchPrivateRead(today, () => personalTimerSummaryQuery(dayScope.value).queryKey);
 watchPrivateRead(week, () => personalTimerSummaryQuery(weekScope.value).queryKey);
+watchPrivateRead(
+  list,
+  () =>
+    capturedTimeEntriesQuery(actor.value, props.workspaceId, props.taskId, session.value).queryKey,
+);
 watch(
   [() => timer.dataUpdatedAt.value, () => timer.status.value, () => timer.fetchStatus.value],
   async () => {
@@ -350,7 +358,8 @@ async function refresh(scope: Scope): Promise<void> {
       exact: true,
     }),
     client.invalidateQueries({
-      queryKey: taskTimeEntriesQuery(scope.workspace, scope.task).queryKey,
+      queryKey: capturedTimeEntriesQuery(scope.actor, scope.workspace, scope.task, scope.session)
+        .queryKey,
       exact: true,
     }),
   ]);

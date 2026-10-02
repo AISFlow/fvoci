@@ -3600,4 +3600,198 @@ mod task_timer {
         fixture.close().await;
         harness.cleanup().await;
     }
+    #[tokio::test]
+    async fn ordinary_time_entries_capture_preserves_private_projection_and_live_acl() {
+        let harness = TestDb::bootstrap().await;
+        let (fixture, app, cookie, actor, workspace) = TimerFixture::setup(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let other = add_workspace_user(&admin, workspace, "member", "ordinary-capture").await;
+        let project = create_project(app.clone(), &cookie, workspace, "READCTX", "workspace").await;
+        let task = create_task(
+            app.clone(),
+            &cookie,
+            workspace,
+            project["id"].as_str().unwrap(),
+            json!({"title":"Captured ordinary history"}),
+        )
+        .await;
+        let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+        let base = format!("/api/v1/workspaces/{workspace}/tasks/{task_id}");
+        let url = format!("{base}/time-entries");
+        let intent = captured(app.clone(), &cookie, json!({"requestId":Uuid::now_v7(),"startedAt":"2026-09-30T10:00:00Z","endedAt":"2026-09-30T10:15:00Z","note":"Shared original","reason":"Explicit manual interval"})).await;
+        let (status, created) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!("{base}/timer/history"),
+            Some(intent.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let record = &created["record"];
+        let body = captured(app.clone(), &cookie, json!({"requestId":Uuid::now_v7(),"kind":"manual","expectedRevision":0,"expectedStartedAt":record["startedAt"],"expectedEndedAt":record["endedAt"],"expectedNote":record["note"],"startedAt":record["startedAt"],"endedAt":record["endedAt"],"note":"Author private correction","reason":"Private correction audit"})).await;
+        let (status, corrected) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            &format!(
+                "{base}/timer/records/{}/correct",
+                record["id"].as_str().unwrap()
+            ),
+            Some(body),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{corrected}");
+        let actors = [actor, other.user_id];
+        let tasks = [task_id];
+        let before = timer_effects(&admin, &actors, &tasks).await;
+        let expected_actor = intent["expectedActorId"].as_str().unwrap();
+        let expected_session = intent["expectedSessionId"].as_str().unwrap();
+        let matched =
+            format!("{url}?expectedActorId={expected_actor}&expectedSessionId={expected_session}");
+        let mut own = None;
+        // Both omitted and either matching partial capture retain the existing
+        // timer guard policy. The actual browser always supplies both.
+        for path in [
+            url.clone(),
+            matched.clone(),
+            format!("{url}?expectedActorId={expected_actor}"),
+            format!("{url}?expectedSessionId={expected_session}"),
+        ] {
+            let (status, result) =
+                timer_checked_request(&fixture, app.clone(), "GET", &path, None, Some(&cookie))
+                    .await;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert_eq!(result["items"][0]["note"], "Author private correction");
+            assert!(result.get("reason").is_none());
+            if let Some(ref original) = own {
+                assert_eq!(&result, original);
+            } else {
+                own = Some(result);
+            }
+        }
+        let (status, shared) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &url,
+            None,
+            Some(&other.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{shared}");
+        assert_eq!(shared["items"][0]["note"], "Shared original");
+        for (path, transport) in [
+            (matched.clone(), other.cookie.as_str()),
+            (
+                format!("{url}?expectedActorId={}", other.user_id),
+                cookie.as_str(),
+            ),
+            (
+                format!("{url}?expectedSessionId={}", Uuid::now_v7()),
+                cookie.as_str(),
+            ),
+        ] {
+            let (status, denied) =
+                timer_checked_request(&fixture, app.clone(), "GET", &path, None, Some(transport))
+                    .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{denied}");
+            assert_eq!(denied["params"]["code"], "timer_context_changed");
+            assert!(denied.get("items").is_none());
+            assert_eq!(timer_effects(&admin, &actors, &tasks).await, before);
+        }
+        for query in [
+            "expectedActorId=not-a-uuid",
+            "expectedSessionId=",
+            "unexpected=field",
+        ] {
+            let (status, invalid) = timer_checked_request(
+                &fixture,
+                app.clone(),
+                "GET",
+                &format!("{url}?{query}"),
+                None,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+            assert!(invalid.get("items").is_none());
+        }
+        let (status, login, headers) = project_harness::json_request_with_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"email":"owner@example.com","password":"supersecret1"})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{login}");
+        let fresh = timer_session_cookie(&headers);
+        let (status, old_capture) =
+            timer_checked_request(&fixture, app.clone(), "GET", &matched, None, Some(&fresh)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{old_capture}");
+        assert_eq!(old_capture["params"]["code"], "timer_context_changed");
+        let fresh_context = captured(app.clone(), &fresh, json!({})).await;
+        let fresh_path = format!(
+            "{url}?expectedActorId={expected_actor}&expectedSessionId={}",
+            fresh_context["expectedSessionId"].as_str().unwrap()
+        );
+        let (status, fresh_rows) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &fresh_path,
+            None,
+            Some(&fresh),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{fresh_rows}");
+        assert_eq!(Some(fresh_rows), own);
+        let (status, foreign) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "POST",
+            "/api/v1/workspaces",
+            Some(json!({"name":"Other actor workspace","slug":"ordinary-capture-foreign"})),
+            Some(&other.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{foreign}");
+        let foreign_id = Uuid::parse_str(foreign["id"].as_str().unwrap()).unwrap();
+        let foreign_project = create_project(
+            app.clone(),
+            &other.cookie,
+            foreign_id,
+            "FOREIGN",
+            "workspace",
+        )
+        .await;
+        let foreign_task = create_task(
+            app.clone(),
+            &other.cookie,
+            foreign_id,
+            foreign_project["id"].as_str().unwrap(),
+            json!({"title":"Other tenant target"}),
+        )
+        .await;
+        let foreign_path = format!("/api/v1/workspaces/{foreign_id}/tasks/{}/time-entries?expectedActorId={expected_actor}&expectedSessionId={}",foreign_task["id"].as_str().unwrap(),fresh_context["expectedSessionId"].as_str().unwrap());
+        let (status, hidden) = timer_checked_request(
+            &fixture,
+            app.clone(),
+            "GET",
+            &foreign_path,
+            None,
+            Some(&fresh),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+        assert!(hidden.get("items").is_none());
+        assert_eq!(timer_effects(&admin, &actors, &tasks).await, before);
+        admin.close().await;
+        drop(app);
+        fixture.close().await;
+        harness.cleanup().await;
+    }
 }

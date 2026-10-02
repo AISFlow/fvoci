@@ -1181,13 +1181,13 @@ test("mounted personal manual correction keeps a conflicting draft and fresh-cli
     .parse(await (await page.request.get("/api/v1/auth/me")).json());
   await page.goto(fixture.detail);
   const panel = page.getByTestId("task-personal-time-records");
-  await expect(panel.getByRole("button", { name: "시간 기록 추가", exact: true })).toBeEnabled();
+  await expect(panel.getByRole("button", { name: "기록 추가", exact: true })).toBeEnabled();
   const sampled = z
     .object({ serverNow: z.string() })
     .parse(await (await page.request.get(fixture.timerUrl)).json());
   const end = new Date(Date.parse(sampled.serverNow) - 60_000).toISOString();
   const start = new Date(Date.parse(end) - 900_000).toISOString();
-  await panel.getByRole("button", { name: "시간 기록 추가", exact: true }).click();
+  await panel.getByRole("button", { name: "기록 추가", exact: true }).click();
   await panel
     .getByLabel("시작", { exact: true })
     .fill(isoToDatetimeLocalInTimeZone(start, me.timezone));
@@ -1201,7 +1201,7 @@ test("mounted personal manual correction keeps a conflicting draft and fresh-cli
       new URL(response.url()).pathname === `${fixture.timerUrl}/history` &&
       response.request().method() === "POST",
   );
-  await panel.getByRole("button", { name: "시간 기록 추가", exact: true }).click();
+  await panel.getByRole("button", { name: "기록 추가", exact: true }).click();
   const created = await createdResponse;
   expect(created.status(), await created.text()).toBe(200);
   const first = recordResultShape.parse(await created.json()).record;
@@ -1553,6 +1553,112 @@ test("an ordinary mounted time-entry GET cannot render another actor's private c
     );
   } finally {
     releaseMe();
+    await context.close();
+  }
+});
+
+test("a late R1 response cannot clear the genuine pending stop of canonical R2", async ({
+  page,
+  browser,
+}) => {
+  const fixture = await ordinaryTimerTask(page, "TPEND");
+  const run1 = await startPausedTimer(page, fixture.timerUrl, fixture.actor, "First pending owner");
+  await page.goto(`/w/${fixture.slug}/my-tasks`);
+  const owner = page.getByTestId("timer-owner");
+  const button = owner.getByRole("button", { name: "현재 측정 종료", exact: true });
+  await expect(button).toBeEnabled();
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const held = [run1.runId, ""].map(() => {
+    let release = () => {};
+    let committed = () => {};
+    const delivery = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const commit = new Promise<void>((resolve) => {
+      committed = resolve;
+    });
+    const operation: {
+      delivery: Promise<void>;
+      commit: Promise<void>;
+      release: () => void;
+      committed: () => void;
+      body: unknown;
+    } = { delivery, commit, release, committed, body: undefined };
+    return operation;
+  });
+  const [first, second] = held;
+  if (!first || !second) throw new Error("missing held response fixture");
+  let index = 0;
+  let releaseOwner = () => {};
+  const ownerDelivery = new Promise<void>((resolve) => {
+    releaseOwner = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === "/api/v1/me/task-timer/stop",
+    async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const operation = held[index++];
+      if (!operation) throw new Error("unexpected third owner command");
+      operation.body = route.request().postDataJSON();
+      const response = await route.fetch();
+      expect(response.status(), await response.text()).toBe(200);
+      operation.committed();
+      await operation.delivery;
+      if (!page.isClosed()) await route.fulfill({ response });
+    },
+  );
+  try {
+    await button.click();
+    await first.commit;
+    const fresh = await context.newPage();
+    await login(fresh, fixture.email, credentials.password);
+    const identity = identityShape.parse(await (await fresh.request.get("/api/v1/auth/me")).json());
+    const run2 = await startPausedTimer(fresh, fixture.timerUrl, identity, "Second pending owner");
+    const successor = page.waitForResponse(
+      async (response) =>
+        new URL(response.url()).pathname === "/api/v1/me/task-timer" &&
+        response.status() === 200 &&
+        z.object({ runId: z.string().nullable() }).parse(await response.json()).runId ===
+          run2.runId,
+    );
+    await page.bringToFront();
+    await successor;
+    await expect(button).toBeEnabled();
+    // Keep the actual canonical R2 read visible until its own completion; do
+    // not let a later owner-null poll remove the control before this oracle.
+    await page.route(
+      (url) => url.pathname === "/api/v1/me/task-timer",
+      async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const response = await route.fetch();
+        await ownerDelivery;
+        if (!page.isClosed()) await route.fulfill({ response });
+      },
+    );
+    await button.click();
+    await second.commit;
+    expect(z.object({ runId: z.string() }).parse(second.body).runId).toBe(run2.runId);
+    const beforeDelivery = timerDatabaseEffects(identity.userId, fixture.task.id);
+    await expect(button).toBeDisabled();
+    const firstResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/me/task-timer/stop" &&
+        z.object({ runId: z.string() }).parse(response.request().postDataJSON()).runId ===
+          run1.runId,
+    );
+    first.release();
+    await firstResponse;
+    await expect(button).toBeDisabled();
+    expect(timerDatabaseEffects(identity.userId, fixture.task.id)).toBe(beforeDelivery);
+    second.release();
+    releaseOwner();
+    await expect(owner).toHaveCount(0);
+    expect(
+      timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run,
+    ).toBeNull();
+  } finally {
+    for (const operation of held) operation.release();
+    releaseOwner();
     await context.close();
   }
 });

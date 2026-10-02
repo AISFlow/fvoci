@@ -7,6 +7,7 @@ import { meQuery } from "@/lib/queries";
 import type { components } from "@/generated/api";
 import {
   ownerStopwatchQuery,
+  taskStopwatchQuery,
   timerContextChanged,
   captureTimerDenial,
   captureTimerQuery,
@@ -35,6 +36,7 @@ let retry:
       credential: string;
       generation: number;
       scopeLifetime: number;
+      visibleTarget: { workspace: string; task: string } | undefined;
       body: components["schemas"]["TimerCleanupBody"];
     }
   | undefined;
@@ -110,6 +112,19 @@ watch(
   },
   { flush: "sync" },
 );
+// A server-confirmed successor owns its controls immediately, even while an
+// earlier run's committed response is still waiting for delivery to this tab.
+watch(
+  () => owner.data.value?.runId,
+  () => {
+    generation++;
+    retry = undefined;
+    pending.value = false;
+    error.value = null;
+    replayAllowed.value = false;
+  },
+  { flush: "sync" },
+);
 onScopeDispose(() => {
   scopeLifetime++;
   live = false;
@@ -125,6 +140,9 @@ async function stop(): Promise<void> {
     credential: credential.value,
     generation,
     scopeLifetime,
+    visibleTarget: state.visibleRun
+      ? { workspace: state.visibleRun.workspaceId, task: state.visibleRun.taskId }
+      : undefined,
     body: {
       expectedActorId: actor.value,
       expectedSessionId: credential.value,
@@ -138,7 +156,8 @@ async function stop(): Promise<void> {
     capture.actor === actor.value &&
     capture.credential === credential.value &&
     capture.generation === generation &&
-    capture.scopeLifetime === scopeLifetime;
+    capture.scopeLifetime === scopeLifetime &&
+    capture.body.runId === owner.data.value?.runId;
   pending.value = true;
   error.value = null;
   replayAllowed.value = false;
@@ -151,10 +170,19 @@ async function stop(): Promise<void> {
         queryKey: ownerStopwatchQuery(capture.actor, capture.credential).queryKey,
         exact: true,
       }),
-      client.invalidateQueries({
-        predicate: (query) =>
-          query.queryKey[0] === "task-timer" && query.queryKey[1] === capture.actor,
-      }),
+      ...(capture.visibleTarget
+        ? [
+            client.invalidateQueries({
+              queryKey: taskStopwatchQuery(
+                capture.actor,
+                capture.visibleTarget.workspace,
+                capture.visibleTarget.task,
+                capture.credential,
+              ).queryKey,
+              exact: true,
+            }),
+          ]
+        : []),
     ]);
   } catch (err) {
     if (!current()) return;

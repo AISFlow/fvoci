@@ -89,10 +89,14 @@ pub struct TasksApiDoc;
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("task_id" = String, description = "Task id"),
+        ("expectedActorId" = Option<String>, Query, description = "Captured actor UUID; when present must match the authenticated actor"),
+        ("expectedSessionId" = Option<String>, Query, description = "Captured credential UUID; when present must match the authenticated session or API token"),
     ),
     responses(
         (status = 200, description = "Time entries, newest start first", body = TimeEntryListResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 400, description = "Malformed captured context", body = ProblemResponse),
+        (status = 409, description = "Captured actor or credential changed (timer_context_changed)", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
     )
 )]

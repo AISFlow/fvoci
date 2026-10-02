@@ -2,12 +2,33 @@ import type { components } from "@/generated/api";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { infiniteQueryOptions, queryOptions } from "@/lib/query-options";
 import type { Query, QueryClient } from "@tanstack/query-core";
+import { taskTimeEntriesQuery } from "@/features/tasks/queries";
 
 export type TimerCommand = components["schemas"]["TimerCommandBody"];
 export type TimerRecord = components["schemas"]["TimeRecord"];
 export type TimerManual = components["schemas"]["TimerManualBody"];
 export type TimerCorrection = components["schemas"]["TimeCorrectionBody"];
 export type TimerLegacyRelease = components["schemas"]["LegacyReleaseBody"];
+
+export function capturedTimeEntriesQuery(
+  actor: string,
+  workspace: string,
+  task: string,
+  session: string,
+) {
+  const options = taskTimeEntriesQuery(
+    workspace,
+    task,
+    Object.freeze({
+      expectedActorId: actor,
+      expectedSessionId: session,
+    }),
+  );
+  return queryOptions({
+    ...options,
+    queryFn: (context) => captureTimerRead(options.queryKey, () => options.queryFn(context)),
+  });
+}
 
 export type TimerHistoryScope = {
   actor: string;
