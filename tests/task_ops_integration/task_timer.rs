@@ -3260,7 +3260,7 @@ mod task_timer {
             &fixture,
             app.clone(),
             "POST",
-            "/api/v1/me/task-timer/cleanup",
+            "/api/v1/me/task-timer/stop",
             Some(cleanup),
             Some(&s2),
         )
