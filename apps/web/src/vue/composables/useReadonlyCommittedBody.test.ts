@@ -520,3 +520,163 @@ test("authorization errors and retirement deny copying and remove temporary obse
     scope.doc.destroy();
   }
 });
+
+// Unchanged genuine H1 diagnostics: Rust GET retains this Unicode text, while
+// the pinned Emoji appendTransaction produces text + emoji{name} in live Y.XML.
+const h1Unicode = {
+  type: "doc",
+  content: [
+    {
+      type: "paragraph",
+      attrs: { id: "readonly-body" },
+      content: [{ type: "text", text: "보관된 한글 🧑‍💻" }],
+    },
+  ],
+};
+function h1Emoji() {
+  return {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "readonly-body" },
+        content: [
+          { type: "text", text: "보관된 한글 " },
+          { type: "emoji", attrs: { name: "technologist" } },
+        ] as Record<string, unknown>[],
+      },
+    ],
+  };
+}
+function h1Scope(live: unknown): ReadonlyBodyScope {
+  const base = fixture();
+  base.doc.destroy();
+  return { ...base, doc: tiptapJsonToYDoc(live), schema: getSchema(createFvociExtensions()) };
+}
+for (const direction of ["live-emoji", "live-unicode"] as const) {
+  test(`observed genuine H1 unmarked Emoji/Unicode segmentation matches exact pinned glyph (${direction})`, async () => {
+    const scope = h1Scope(direction === "live-emoji" ? h1Emoji() : h1Unicode);
+    try {
+      if (direction === "live-emoji")
+        expect(scope.doc.getXmlFragment("prosemirror").toJSON()).toBe(
+          '<paragraph id="readonly-body">보관된 한글 <emoji name="technologist"></emoji></paragraph>',
+        );
+      expect(
+        await useReadonlyCommittedBody(
+          () => scope,
+          () => Promise.resolve(direction === "live-emoji" ? h1Unicode : h1Emoji()),
+        )(),
+      ).toBe(true);
+    } finally {
+      scope.doc.destroy();
+    }
+  });
+}
+for (const changed of [
+  "unknown-name",
+  "custom-glyph",
+  "extra-id",
+  "extra-ref",
+  "empty-marks",
+  "marked-emoji",
+  "marked-text",
+  "parent-id",
+  "node-extra",
+  "missing-attrs",
+  "null-attrs",
+  "extra-undefined",
+  "reordered",
+  "missing-zwj",
+  "skin-tone",
+  "variation-selector",
+  "tag-byte",
+  "adjacent-text",
+  "opaque-array",
+  "getter",
+  "missing-schema-emoji",
+] as const) {
+  test(`H1 glyph comparison rejects ${changed} without normalizing other meaning`, async () => {
+    const scope = h1Scope(h1Unicode);
+    const stored = h1Emoji();
+    let getterCalls = 0;
+    try {
+      const parent = stored.content[0];
+      const text = parent?.content[0],
+        emoji = parent?.content[1];
+      if (!parent || !text || !emoji) throw new Error("missing H1 snapshot");
+      if (changed === "unknown-name") emoji.attrs = { name: "unregistered-custom-emoji" };
+      if (changed === "custom-glyph") emoji.attrs = { name: "technologist", emoji: "🧑‍💻" };
+      if (changed === "extra-id") emoji.attrs = { name: "technologist", id: "different-id" };
+      if (changed === "extra-ref") emoji.attrs = { name: "technologist", ref: "secret-ref" };
+      if (changed === "empty-marks") emoji.marks = [];
+      if (changed === "marked-emoji") emoji.marks = [{ type: "bold" }];
+      if (changed === "marked-text") text.marks = [{ type: "bold" }];
+      if (changed === "parent-id") parent.attrs.id = "changed-id";
+      if (changed === "node-extra") emoji.opaque = { id: "other" };
+      if (changed === "missing-attrs") delete emoji.attrs;
+      if (changed === "null-attrs") emoji.attrs = null;
+      if (changed === "extra-undefined") emoji.attrs = { name: "technologist", extra: undefined };
+      if (changed === "reordered") parent.content.reverse();
+      if (["missing-zwj", "skin-tone", "variation-selector", "tag-byte"].includes(changed)) {
+        const glyph =
+          changed === "missing-zwj"
+            ? "🧑💻"
+            : changed === "skin-tone"
+              ? "🧑🏽‍💻"
+              : changed === "variation-selector"
+                ? "🧑‍💻️"
+                : "🧑‍💻\u{e0067}";
+        // This is a changed Unicode byte sequence, not a canonicalized fixture.
+        const doc = tiptapJsonToYDoc({
+          type: "doc",
+          content: [
+            {
+              type: "paragraph",
+              attrs: { id: "readonly-body" },
+              content: [{ type: "text", text: `보관된 한글 ${glyph}` }],
+            },
+          ],
+        });
+        scope.doc.destroy();
+        scope.doc = doc;
+      }
+      if (changed === "adjacent-text")
+        parent.content.splice(
+          0,
+          1,
+          { type: "text", text: "보관된 " },
+          { type: "text", text: "한글 " },
+        );
+      if (changed === "opaque-array")
+        Object.defineProperty(parent.attrs, "opaque", {
+          enumerable: true,
+          value: ["other", "original"],
+        });
+      if (changed === "getter") {
+        const attrs = {};
+        Object.defineProperty(attrs, "name", {
+          enumerable: true,
+          get() {
+            getterCalls++;
+            return "technologist";
+          },
+        });
+        emoji.attrs = attrs;
+      }
+      if (changed === "missing-schema-emoji")
+        scope.schema = {
+          nodes: { doc: {}, paragraph: {}, text: {} },
+          marks: {},
+        };
+      expect(
+        await useReadonlyCommittedBody(
+          () => scope,
+          () => Promise.resolve(stored),
+        )(),
+      ).toBe(false);
+      expect(getterCalls).toBe(0);
+    } finally {
+      scope.doc.destroy();
+    }
+  });
+}
