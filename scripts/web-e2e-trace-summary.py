@@ -19,7 +19,8 @@ DB_URL = re.compile(r"postgres(?:ql)?://\S+")
 MAX_LINES = 2000
 DIAGNOSTIC_NAME = "w3-template-native-selection-observation.json"
 DIAGNOSTIC_ACTIONS = (
-    "openDoc:original", "ShiftHome:original-return", "bubble:original-visible",
+    "openDoc:original", "caret:after-click", "caret:after-End",
+    "ShiftHome:original-return", "bubble:original-visible",
     "popup:original-open-focus", "compositionEnter:original-no-link",
     "Cancel:original-native-text", "Apply:original-selected-text", "save:original", "finally",
 )
@@ -121,6 +122,31 @@ def diagnostic_digest(trace):
     boundaries = data.get("actionBoundaries", [])
     if type(boundaries) is not list or len(boundaries) > 16 or any(type(x) is not dict for x in boundaries):
         return unavailable("invalid_boundary_schema")
+    caret_boundaries = data.get("caretBoundaries", [])
+    if type(caret_boundaries) is not list or len(caret_boundaries) > 2:
+        return unavailable("invalid_caret_boundary_schema")
+    caret_by_action = {}
+    for boundary in caret_boundaries:
+        if type(boundary) is not dict or boundary.get("stage") not in ("after-click", "after-End"):
+            return unavailable("invalid_caret_boundary_schema")
+        action = "caret:" + boundary["stage"]
+        native = boundary.get("native")
+        if boundary.get("ownerRecordStage") != action or action in caret_by_action or number(boundary.get("at")) is None or type(native) is not dict:
+            return unavailable("invalid_caret_boundary_schema")
+        endpoints = [native.get(key) for key in ("anchor", "head")]
+        if any(type(endpoint) is not dict for endpoint in endpoints):
+            return unavailable("invalid_caret_boundary_schema")
+        for value, fields in ((boundary, ("wide", "rich")), *((endpoint, ("inside", "noneditableLeaf")) for endpoint in endpoints)):
+            if any(key in value and value[key] is not None and type(value[key]) is not bool for key in fields):
+                return unavailable("invalid_boolean_schema")
+        if any("position" in endpoint and endpoint["position"] is not None and integer(endpoint["position"]) is None for endpoint in endpoints):
+            return unavailable("invalid_position_schema")
+        caret_by_action[action] = {
+            **{key: {"inside": boolean(native[key].get("inside")),
+                     "noneditableLeaf": boolean(native[key].get("noneditableLeaf")),
+                     "position": integer(native[key].get("position"))} for key in ("anchor", "head")},
+            "wide": boolean(boundary.get("wide")), "rich": boolean(boundary.get("rich")),
+        }
     events = [x for key in keys for x in data[key]] + boundaries
     for key in ("firstObservedState", "firstRetiredEvent"):
         if key in data and data[key] is not None:
@@ -202,6 +228,7 @@ def diagnostic_digest(trace):
             "retiredUpdate": boolean(raw.get("retiredUpdate")),
             "bubble": {"present": type(bubble) is dict, "visibility": enum(bubble.get("visibility"), ("visible", "hidden")) if type(bubble) is dict else None},
             "dialog": boolean(raw.get("dialog")),
+            "caret": caret_by_action.get(raw.get("stage")),
         }
 
     actions = {}

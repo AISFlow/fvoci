@@ -109,6 +109,7 @@ def run(label, payload=data, ref=reference, test=None, extra=None, duplicate=Fal
     prefix = "w3-template-diagnostic "
     records = [json.loads(line[len(prefix):]) for line in output.splitlines() if line.startswith(prefix)]
     assert len(records) == 1, label + ": missing diagnostic outcome"
+    assert len(json.dumps(records[0]).encode()) <= 49152, label + ": diagnostic output bound lost"
     return records[0]
 
 valid = run("valid")
@@ -123,7 +124,83 @@ assert selected["nativeId"]["present"] is True and len(selected["nativeId"]["has
 assert valid["firstIdentityChange"]["previousOwner"] == [1,2,1,3,4,5,6]
 assert valid["firstIdentityChange"]["owner"] == [11,12,11,13,14,15,16]
 assert valid["firstMismatch"]["native"]["positions"] == {"anchor": 9, "head": 1}
-assert valid["missingActions"] == [] and valid["earlyBindingNotCaptured"] is True
+assert valid["missingActions"] == ["caret:after-click", "caret:after-End"]
+assert all(valid["actions"][action] is not None for action in actions)
+assert valid["earlyBindingNotCaptured"] is True
+
+caret_data = copy.deepcopy(data)
+caret_data["caretBoundaries"] = [
+    {"stage": "after-click", "ownerRecordStage": "caret:after-click", "at": 5,
+     "native": {"anchor": {"inside": True, "noneditableLeaf": False, "position": 5},
+                "head": {"inside": True, "noneditableLeaf": False, "position": 5}, "text": secret},
+     "wide": True, "rich": True, "rawDom": secret},
+    {"stage": "after-End", "ownerRecordStage": "caret:after-End", "at": 7,
+     "native": {"anchor": {"inside": False, "noneditableLeaf": True, "position": 9, "nodeAttrs": secret},
+                "head": {"inside": True, "noneditableLeaf": False, "position": 9}, "text": secret},
+     "wide": False, "rich": False, "focus": {"activeLabel": secret}, "error": secret},
+]
+for label, at, pos in (("caret:after-click", 5, 5), ("caret:after-End", 7, 9)):
+    captured = dict(copy.deepcopy(frame), stage=label, at=at,
+                    pm={"anchor": pos, "head": pos, "empty": True, "type": "text"})
+    captured["native"]["positions"] = {"anchor": pos, "head": pos}
+    caret_data["critical"].append(captured)
+    caret_data["actionBoundaries"].append(captured)
+caret_data["totals"]["critical"] += 2
+caret_data["totals"]["actionBoundaries"] += 2
+caret_valid = run("caret_valid", caret_data)
+assert caret_valid["missingActions"] == []
+click = caret_valid["actions"]["caret:after-click"]
+end = caret_valid["actions"]["caret:after-End"]
+assert click["caret"] == {"anchor": {"inside": True, "noneditableLeaf": False, "position": 5},
+                          "head": {"inside": True, "noneditableLeaf": False, "position": 5},
+                          "wide": True, "rich": True}
+assert end["caret"] == {"anchor": {"inside": False, "noneditableLeaf": True, "position": 9},
+                        "head": {"inside": True, "noneditableLeaf": False, "position": 9},
+                        "wide": False, "rich": False}
+assert click["owner"] == [1,2,1,3,4,5,6] and end["owner"] == [1,2,1,3,4,5,6]
+assert click["pm"] == {"anchor": 5, "head": 5, "empty": True, "type": "text"}
+assert end["native"]["positions"] == {"anchor": 9, "head": 9}
+assert end["focus"]["editor"] is True
+assert valid["actions"]["ShiftHome:original-return"]["caret"] is None
+caret_unknown = copy.deepcopy(caret_data)
+caret_unknown["caretBoundaries"][1] = {
+    "stage": "after-End", "ownerRecordStage": "caret:after-End", "at": 7,
+    "native": {"anchor": {"inside": None, "noneditableLeaf": None, "position": None}, "head": {}},
+}
+assert run("caret_unknown", caret_unknown)["actions"]["caret:after-End"]["caret"] == {
+    "anchor": {"inside": None, "noneditableLeaf": None, "position": None},
+    "head": {"inside": None, "noneditableLeaf": None, "position": None}, "wide": None, "rich": None,
+}
+caret_rejects = []
+for label, value in (("array", secret), ("overflow", caret_data["caretBoundaries"] * 2),
+                     ("duplicate", [caret_data["caretBoundaries"][0]] * 2),
+                     ("entry", [secret])):
+    invalid = copy.deepcopy(caret_data); invalid["caretBoundaries"] = value
+    caret_rejects.append((label, invalid, "invalid_caret_boundary_schema"))
+for label, key, value, reason in (
+    ("stage", "stage", secret, "invalid_caret_boundary_schema"),
+    ("owner_stage", "ownerRecordStage", "caret:after-click", "invalid_caret_boundary_schema"),
+    ("at", "at", secret, "invalid_caret_boundary_schema"),
+    ("native", "native", secret, "invalid_caret_boundary_schema"),
+    ("wide", "wide", "true", "invalid_boolean_schema"),
+    ("rich", "rich", 1, "invalid_boolean_schema"),
+):
+    invalid = copy.deepcopy(caret_data); invalid["caretBoundaries"][1][key] = value
+    caret_rejects.append((label, invalid, reason))
+for label, key, value, reason in (
+    ("endpoint", None, secret, "invalid_caret_boundary_schema"),
+    ("inside", "inside", 1, "invalid_boolean_schema"),
+    ("leaf", "noneditableLeaf", "false", "invalid_boolean_schema"),
+    ("position_type", "position", "9", "invalid_position_schema"),
+    ("position_range", "position", 1_000_000_001, "invalid_position_schema"),
+):
+    invalid = copy.deepcopy(caret_data)
+    if key is None: invalid["caretBoundaries"][1]["native"]["anchor"] = value
+    else: invalid["caretBoundaries"][1]["native"]["anchor"][key] = value
+    caret_rejects.append((label, invalid, reason))
+for label, payload, reason in caret_rejects:
+    assert run("caret_reject_" + label, payload) == {"available": False, "reason": reason}, label
+print("trace-summary caret fixtures: 2 exact/private/nullable inputs + 15 typed/shape/overflow rejection controls PASS")
 
 hostile = copy.deepcopy(data)
 hostile["frames"][0]["stage"] = "keydown:" + secret

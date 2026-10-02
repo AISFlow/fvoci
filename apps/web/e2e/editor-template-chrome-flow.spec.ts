@@ -512,6 +512,71 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
     page.evaluate((value) => {
       (window as ObservedWindow).__w3TemplateObserver?.checkpoint(value);
     }, stage);
+  const caretBoundaries: unknown[] = [];
+  const observeCaretBoundary = async (stage: "after-click" | "after-End") => {
+    caretBoundaries.push(
+      await page.evaluate((value) => {
+        const ownerRecordStage = `caret:${value}`;
+        (window as ObservedWindow).__w3TemplateObserver?.checkpoint(ownerRecordStage);
+        const root = document.querySelector<HTMLElement & { editor?: Editor }>(
+          ".fvoci-editor .ProseMirror",
+        );
+        const editor = root?.editor;
+        const view = editor && !editor.isDestroyed ? editor.view : undefined;
+        const native = window.getSelection();
+        const endpoint = (node: Node | null | undefined, offset: number | undefined) => {
+          const inside = Boolean(node && root?.contains(node));
+          const element = node instanceof Element ? node : node?.parentElement;
+          const leaf = element?.closest('[contenteditable="false"]');
+          let position: number | null = null;
+          if (inside && node && offset !== undefined && view) {
+            try {
+              position = view.posAtDOM(node, offset);
+            } catch {
+              // A detached or unmappable endpoint stays unknown; do not repair it.
+            }
+          }
+          return {
+            inside,
+            noneditableLeaf: Boolean(leaf && leaf !== root && root?.contains(leaf)),
+            position,
+          };
+        };
+        const selection = view?.state.selection;
+        const mode = root?.closest<HTMLElement>(".fvoci-editor")?.dataset.editorModeActive;
+        return {
+          stage: value,
+          ownerRecordStage,
+          at: performance.now(),
+          rootPresent: Boolean(root),
+          editorDestroyed: editor?.isDestroyed ?? null,
+          native: {
+            collapsed: native?.isCollapsed ?? null,
+            text: native?.toString() ?? null,
+            anchor: endpoint(native?.anchorNode, native?.anchorOffset),
+            head: endpoint(native?.focusNode, native?.focusOffset),
+          },
+          focus: {
+            activeTag: document.activeElement?.tagName ?? null,
+            editor: view?.hasFocus() ?? null,
+            editable: view?.editable ?? null,
+            domEditable: root?.contentEditable ?? null,
+            composing: view?.composing ?? null,
+          },
+          wide: !window.matchMedia("(max-width: 47.999rem)").matches,
+          rich: mode === "rich" || mode === "block",
+          pm: selection
+            ? {
+                anchor: selection.anchor,
+                head: selection.head,
+                empty: selection.empty,
+                type: (selection.toJSON() as { type?: unknown }).type,
+              }
+            : null,
+        };
+      }, stage),
+    );
+  };
   try {
     const csp = watchCspViolations(page);
     await login(page, admin.email, admin.password);
@@ -521,7 +586,10 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
     });
     await openDoc(page, doc.path);
     await checkpoint("openDoc:original");
-    await caretAtEndOf(page, 0);
+    await blockAt(page, 0).click();
+    await observeCaretBoundary("after-click");
+    await page.keyboard.press("End");
+    await observeCaretBoundary("after-End");
     await page.keyboard.press("Shift+Home");
     await checkpoint("ShiftHome:original-return");
     const bubble = page.locator("[data-fvoci-bubble]");
@@ -567,7 +635,10 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
       })
       .catch((error: unknown) => ({ unavailable: String(error) }));
     await testInfo.attach("w3-template-native-selection-observation.json", {
-      body: JSON.stringify(observation),
+      body: JSON.stringify({
+        ...(typeof observation === "object" && observation !== null ? observation : {}),
+        caretBoundaries,
+      }),
       contentType: "application/json",
     });
   }
