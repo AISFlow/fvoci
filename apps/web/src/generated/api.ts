@@ -5909,6 +5909,10 @@ export interface components {
             totalSeconds: number;
         };
         TimerCleanupBody: {
+            /** Format: uuid */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
             /** Format: int32 */
             expectedVersion: number;
             /** Format: uuid */
@@ -5917,6 +5921,13 @@ export interface components {
             runId: string;
         };
         TimerCommandBody: {
+            /**
+             * Format: uuid
+             * @description Intent guards, never authorization: authoritative authentication wins.
+             */
+            expectedActorId: string;
+            /** Format: uuid */
+            expectedSessionId: string;
             /** Format: int32 */
             expectedVersion: number;
             note?: string | null;

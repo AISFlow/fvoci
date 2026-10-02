@@ -31669,11 +31669,21 @@
       "TimerCleanupBody": {
         "type": "object",
         "required": [
+          "expectedActorId",
+          "expectedSessionId",
           "requestId",
           "runId",
           "expectedVersion"
         ],
         "properties": {
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
           "expectedVersion": {
             "type": "integer",
             "format": "int32"
@@ -31692,11 +31702,22 @@
       "TimerCommandBody": {
         "type": "object",
         "required": [
+          "expectedActorId",
+          "expectedSessionId",
           "requestId",
           "operation",
           "expectedVersion"
         ],
         "properties": {
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Intent guards, never authorization: authoritative authentication wins."
+          },
+          "expectedSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
           "expectedVersion": {
             "type": "integer",
             "format": "int32"
