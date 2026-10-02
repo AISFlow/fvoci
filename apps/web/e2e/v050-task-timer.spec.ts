@@ -1127,7 +1127,19 @@ function timerDatabaseEffects(actor: string, task: string): string {
 }
 
 async function ordinaryTimerTask(page: import("@playwright/test").Page, key: string) {
-  const workspaceId = await timerWorkspace(page);
+  await timerWorkspace(page);
+  const slug = `w5-${key.toLowerCase()}-timer`;
+  const createdWorkspace = await page.request.post("/api/v1/workspaces", {
+    data: { name: "독립 측정 검증", slug },
+  });
+  expect(createdWorkspace.status(), await createdWorkspace.text()).toBe(201);
+  const workspaceId = z.object({ id: z.string() }).parse(await createdWorkspace.json()).id;
+  const email = `timer-${key.toLowerCase()}@example.com`;
+  createE2eUser(email, credentials.password, "기록 검증 작성자", {
+    workspaceSlug: slug,
+    membershipRole: "member",
+  });
+  await login(page, email, credentials.password);
   const actor = identityShape.parse(await (await page.request.get("/api/v1/auth/me")).json());
   const createdProject = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, {
     data: { key, name: "기록 검증", visibility: "workspace" },
@@ -1150,7 +1162,9 @@ async function ordinaryTimerTask(page: import("@playwright/test").Page, key: str
     workspaceId,
     actor,
     task,
-    detail: `/w/w5timer/${key}-${String(task.number)}`,
+    slug,
+    email,
+    detail: `/w/${slug}/${key}-${String(task.number)}`,
     timerUrl: `/api/v1/workspaces/${workspaceId}/tasks/${task.id}/timer`,
   };
 }
@@ -1198,7 +1212,7 @@ test("mounted personal manual correction keeps a conflicting draft and fresh-cli
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
   try {
     const fresh = await context.newPage();
-    await login(fresh, credentials.email, credentials.password);
+    await login(fresh, fixture.email, credentials.password);
     const identity = identityShape.parse(await (await fresh.request.get("/api/v1/auth/me")).json());
     const correctionUrl = `${fixture.timerUrl}/records/${first.id}/correct`;
     const other = await fresh.request.post(correctionUrl, {
@@ -1284,7 +1298,7 @@ test("mounted personal manual correction keeps a conflicting draft and fresh-cli
         .poll(() => panel.evaluate((element) => element.scrollWidth <= element.clientWidth))
         .toBe(true);
       await page.screenshot({
-          path: path.join(evidence, `manual-personal-320-text-${String(zoom)}.png`),
+        path: path.join(evidence, `manual-personal-320-text-${String(zoom)}.png`),
         fullPage: true,
       });
     }
@@ -1327,7 +1341,7 @@ test("a committed withheld owner stop cannot keep a successor run's current cont
 }, testInfo) => {
   const fixture = await ordinaryTimerTask(page, "TABA");
   const run1 = await startPausedTimer(page, fixture.timerUrl, fixture.actor, "첫 번째 측정");
-  await page.goto("/w/w5timer/my-tasks");
+  await page.goto(`/w/${fixture.slug}/my-tasks`);
   const owner = page.getByTestId("timer-owner");
   await expect(owner.getByRole("button", { name: "현재 측정 종료", exact: true })).toBeEnabled();
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
@@ -1358,7 +1372,7 @@ test("a committed withheld owner stop cannot keep a successor run's current cont
     await owner.getByRole("button", { name: "현재 측정 종료", exact: true }).click();
     await committedSignal;
     const fresh = await context.newPage();
-    await login(fresh, credentials.email, credentials.password);
+    await login(fresh, fixture.email, credentials.password);
     const identity = identityShape.parse(await (await fresh.request.get("/api/v1/auth/me")).json());
     expect(
       timerShape.parse(await (await fresh.request.get(fixture.timerUrl)).json()).run,
@@ -1427,7 +1441,7 @@ test("an ordinary mounted time-entry GET cannot render another actor's private c
   const fixture = await ordinaryTimerTask(page, "TPRIV");
   const email = "timer-private-overlay@example.com";
   createE2eUser(email, credentials.password, "다른 작성자", {
-    workspaceSlug: "w5timer",
+    workspaceSlug: fixture.slug,
     membershipRole: "member",
   });
   const context = await browser.newContext({ baseURL: new URL(page.url()).origin });
@@ -1469,7 +1483,7 @@ test("an ordinary mounted time-entry GET cannot render another actor's private c
       },
     });
     expect(corrected.status(), await corrected.text()).toBe(200);
-    await page.goto("/w/w5timer/my-tasks");
+    await page.goto(`/w/${fixture.slug}/my-tasks`);
     await expect(page.getByTestId(`my-task-${fixture.task.id}`)).toBeVisible();
     const before = timerDatabaseEffects(identity.userId, fixture.task.id);
     await page.route(
