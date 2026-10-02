@@ -1,0 +1,162 @@
+//! Typed timer transport; ordinary task metadata and estimates remain in the
+//! existing task DTO. Commands carry a durable request id and expected version.
+
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::task_timer::{TimerOperation, TimerStatus};
+
+#[cfg(feature = "api-schema")]
+use utoipa::ToSchema;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimerCommandBody {
+    pub request_id: Uuid,
+    pub operation: TimerOperation,
+    pub expected_version: i32,
+    pub run_id: Option<Uuid>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimerRunOutput {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub task_id: Uuid,
+    pub status: TimerStatus,
+    pub version: i32,
+    pub started_at: DateTime<Utc>,
+    pub running_since: Option<DateTime<Utc>>,
+    /// Closed intervals only. Add the serverNow/runningSince delta for display.
+    pub elapsed_milliseconds: i64,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskTimerState {
+    pub server_now: DateTime<Utc>,
+    pub run: Option<TimerRunOutput>,
+    /// A different unfinished run, without its tenant, task id or title.
+    pub busy_elsewhere: bool,
+    pub legacy_open: bool,
+    pub actual_milliseconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimerCommandOutput {
+    pub run_id: Uuid,
+    pub version: i32,
+    pub status: TimerStatus,
+    pub server_now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct OwnerTimerState {
+    pub server_now: DateTime<Utc>,
+    /// Own opaque run identity/version allow explicit cleanup after revocation.
+    pub run_id: Option<Uuid>,
+    pub version: Option<i32>,
+    pub status: Option<TimerStatus>,
+    /// Present only after current task View permission is checked.
+    pub visible_run: Option<TimerRunOutput>,
+    pub legacy_open: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimerCleanupBody {
+    pub request_id: Uuid,
+    pub run_id: Uuid,
+    pub expected_version: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimeCorrectionBody {
+    pub request_id: Uuid,
+    /// Original range as seen by this form; null end means a legacy open row.
+    pub expected_started_at: DateTime<Utc>,
+    pub expected_ended_at: Option<DateTime<Utc>>,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
+    pub note: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimerDayTotal {
+    pub date: NaiveDate,
+    pub milliseconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TimerSummary {
+    pub server_now: DateTime<Utc>,
+    pub time_zone: String,
+    pub days: Vec<TimerDayTotal>,
+    pub total_milliseconds: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TimerSummaryQuery {
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+}
+
+#[cfg(feature = "api-schema")]
+mod schema {
+    use super::*;
+    use crate::api::dto::ProblemResponse;
+    use utoipa::OpenApi;
+
+    #[derive(OpenApi)]
+    #[openapi(
+        paths(task_state, task_command, owner_state, owner_cleanup),
+        components(schemas(
+            TimerOperation,
+            TimerStatus,
+            TimerCommandBody,
+            TimerCommandOutput,
+            TimerRunOutput,
+            TaskTimerState,
+            OwnerTimerState,
+            TimerCleanupBody
+        ))
+    )]
+    pub struct TaskTimerApiDoc;
+
+    #[utoipa::path(get, path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer", tag="tasks", security(("fvoci_session"=[])),
+        params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path)),
+        responses((status=200,body=TaskTimerState),(status=401,body=ProblemResponse),(status=404,body=ProblemResponse)))]
+    fn task_state() {}
+    #[utoipa::path(post, path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer", tag="tasks", security(("fvoci_session"=[])),
+        params(("workspace_id"=Uuid,Path),("task_id"=Uuid,Path)), request_body=TimerCommandBody,
+        responses((status=200,body=TimerCommandOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=404,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn task_command() {}
+    #[utoipa::path(get, path="/api/v1/me/task-timer", tag="tasks", security(("fvoci_session"=[])),
+        responses((status=200,body=OwnerTimerState),(status=401,body=ProblemResponse)))]
+    fn owner_state() {}
+    #[utoipa::path(post, path="/api/v1/me/task-timer/stop", tag="tasks", security(("fvoci_session"=[])), request_body=TimerCleanupBody,
+        responses((status=200,body=TimerCommandOutput),(status=400,body=ProblemResponse),(status=401,body=ProblemResponse),(status=409,body=ProblemResponse)))]
+    fn owner_cleanup() {}
+}
+#[cfg(feature = "api-schema")]
+pub use schema::TaskTimerApiDoc;

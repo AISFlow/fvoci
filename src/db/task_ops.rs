@@ -15,7 +15,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{
-    begin_read, lock_membership_users, recheck_session, session_is_live, set_tenant,
+    begin_read, lock_membership_users, recheck_session, session_is_live, set_self_user, set_tenant,
 };
 use crate::db::documents::document_permission;
 use crate::db::projects::{
@@ -225,6 +225,16 @@ pub async fn create_time_entry(
     {
         tx.rollback().await?;
         return Ok(Err(err));
+    }
+    // The actor-wide stopwatch/legacy policy is checked under the same
+    // membership and credential locks as the old task writer. Closed/manual
+    // entries retain the existing behavior and history.
+    set_self_user(&mut tx, actor_user_id).await?;
+    if input.ended_at.is_none()
+        && crate::db::task_timer::person_has_unfinished(&mut tx, actor_user_id).await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::OpenTimeEntryExists));
     }
     // The one-open-entry-per-actor index is partial, so an open entry that
     // already exists leaves this statement without a row instead of aborting.

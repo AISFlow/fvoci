@@ -22,6 +22,7 @@ import TaskBacklinks from "./TaskBacklinks.vue";
 import TaskBodyEditor from "./TaskBodyEditor.vue";
 import TaskDetailForm from "./TaskDetailForm.vue";
 import TaskTimeEntries from "./TaskTimeEntries.vue";
+import TaskStopwatch from "./TaskStopwatch.vue";
 import "@/features/projects/projects.css";
 
 const props = defineProps<{
@@ -220,6 +221,12 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :workspace-id="workspaceId"
       :task-id="task.id"
       :members="members"
+      :read-only="metadataReadOnly"
+    />
+    <TaskStopwatch
+      :workspace-id="workspaceId"
+      :task-id="task.id"
+      :estimate="task.estimate"
       :read-only="metadataReadOnly"
     />
     <TaskActivityPanel
