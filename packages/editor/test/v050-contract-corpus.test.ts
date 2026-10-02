@@ -7,28 +7,46 @@ import { extractInternalRefs } from "../src/extract.ts";
 import type { TiptapDoc } from "../src/json.ts";
 import { createFvociExtensions } from "../src/tiptap-schema.ts";
 import { schemaCorpus } from "./schema-corpus.ts";
-import { corpusRefs, v050ContractCorpus } from "./v050-contract-corpus.ts";
+import {
+  absent,
+  corpusRefs,
+  rawPresenceFixture,
+  v050ContractCorpus,
+} from "./v050-contract-corpus.ts";
 import type { CorpusNode, CorpusValue, SemanticFact } from "./v050-contract-corpus.ts";
 
 const schema = getSchema(createFvociExtensions());
 
 // Only JavaScript object prototypes disappear here; no JSON field, ID, attr,
 // reference, Unicode code point or missing/present distinction is rewritten.
-function jsonValue(value: unknown): unknown {
-  return JSON.parse(JSON.stringify(value)) as unknown;
+function semanticValue(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  const result: object = Array.isArray(value) ? new Array<unknown>(value.length) : {};
+  for (const key of Reflect.ownKeys(value)) {
+    if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
+    Object.defineProperty(result, key, {
+      value: semanticValue(Reflect.get(value, key)),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return result;
 }
 
 function atPath(value: unknown, path: string): unknown {
   for (const part of path.split(".")) {
     assert.ok(typeof value === "object" && value !== null, `missing parent of ${path}`);
+    if (!Object.hasOwn(value, part)) return absent;
     value = Reflect.get(value, part);
   }
   return value;
 }
 
 function assertFacts(observed: unknown, facts: SemanticFact[]): void {
+  const normalized = semanticValue(observed);
   for (const fact of facts)
-    assert.deepEqual(atPath(jsonValue(observed), fact.path), fact.value, fact.path);
+    assert.deepEqual(atPath(normalized, fact.path), semanticValue(fact.value), fact.path);
 }
 
 // A test-only raw stored-data builder, deliberately bypassing schema coercion.
@@ -43,8 +61,15 @@ function rawNode(node: CorpusNode): Y.XmlElement | Y.XmlText {
     );
     return result;
   }
-  const result = new Y.XmlElement<Record<string, CorpusValue>>(node.type);
-  for (const [key, value] of Object.entries(node.attrs ?? {})) result.setAttribute(key, value);
+  const result = new Y.XmlElement<Record<string, Exclude<CorpusValue, undefined>>>(node.type);
+  for (const [key, value] of Object.entries(node.attrs ?? {})) {
+    if (value === undefined) {
+      // Pinned Yjs ValueTypes omits top-level undefined. This raw regression
+      // exercises actual setAttribute/wire/observation, with no value coercion.
+      // @ts-expect-error -- bounded raw undefined attr is retained by real Yjs
+      result.setAttribute(key, value);
+    } else result.setAttribute(key, value);
+  }
   result.insert(0, (node.content ?? []).map(rawNode));
   // Yjs insert() declares the default string-attribute element type even
   // though its constructor/setAttribute generic supports these JSON attrs.
@@ -97,7 +122,7 @@ for (const fixture of v050ContractCorpus) {
       assertFacts(observeWithoutWrites(original), fixture.expected);
       assertFacts(observeWithoutWrites(fresh), fixture.expected);
       if (fixture.storage === "raw")
-        assert.deepEqual(jsonValue(observeWithoutWrites(fresh)), fixture.input);
+        assert.deepEqual(semanticValue(observeWithoutWrites(fresh)), semanticValue(fixture.input));
       const invalid = fixture.invalidInput;
       if (invalid) assert.throws(() => tiptapJsonToYDoc(invalid));
     } finally {
@@ -106,6 +131,122 @@ for (const fixture of v050ContractCorpus) {
     }
   });
 }
+
+await test("raw own undefined, null and absent attributes survive original and fresh Y.Doc observation", () => {
+  const original = rawDocument(rawPresenceFixture.input);
+  const fresh = new Y.Doc({ gc: false });
+  try {
+    Y.applyUpdate(fresh, Y.encodeStateAsUpdate(original));
+    for (const stored of [original, fresh]) {
+      const observed = observeWithoutWrites(stored);
+      assertFacts(observed, rawPresenceFixture.expected);
+      assert.deepEqual(semanticValue(observed), semanticValue(rawPresenceFixture.input));
+      for (const [path, changes] of [
+        ["content.0.attrs.undefinedAttr", [absent, null]],
+        ["content.0.attrs.nullAttr", [absent, undefined]],
+        ["content.0.attrs.absentAttr", [undefined, null]],
+        ["content.0.attrs.nested.undefinedValue", [absent, null]],
+        ["content.0.attrs.nested.nullValue", [absent, undefined]],
+        ["content.0.attrs.nested.values.0", [absent, null]],
+        ["content.0.attrs.nested.values.1", [absent, undefined]],
+        ["content.0.attrs.nested.absentValue", [undefined, null]],
+      ] as const) {
+        for (const changed of changes) {
+          const corrupted = structuredClone(observed);
+          changePath(corrupted, path, changed);
+          assert.throws(() => {
+            assert.deepEqual(semanticValue(corrupted), semanticValue(rawPresenceFixture.input));
+          }, path);
+          assert.throws(() => {
+            assertFacts(corrupted, rawPresenceFixture.expected);
+          }, path);
+        }
+      }
+    }
+  } finally {
+    original.destroy();
+    fresh.destroy();
+  }
+});
+
+function changePath(value: unknown, path: string, changed: unknown): void {
+  const parts = path.split(".");
+  const last = parts.pop();
+  assert.ok(last);
+  const parent = atPath(value, parts.join("."));
+  assert.ok(typeof parent === "object" && parent !== null);
+  if (changed === absent) assert.ok(Reflect.deleteProperty(parent, last));
+  else assert.ok(Reflect.set(parent, last, changed));
+}
+
+await test("every existing block, entity and attachment ID has a handwritten fact rejecting replacement and deletion", () => {
+  for (const fixture of v050ContractCorpus) {
+    const stored =
+      fixture.storage === "schema" ? tiptapJsonToYDoc(fixture.input) : rawDocument(fixture.input);
+    try {
+      const observed = observeWithoutWrites(stored);
+      function visit(node: CorpusNode, path: string): void {
+        if (node.attrs && Object.hasOwn(node.attrs, "id")) {
+          const idPath = `${path}.attrs.id`;
+          const fact = fixture.expected.find((item) => item.path === idPath);
+          // Validate authored inventory against input, never generate expected
+          // semantics from the converter/observer. The domains stay separate:
+          // mention=entity, attachment=file, other ID-bearing nodes=block.
+          assert.ok(fact, `${fixture.id}: missing handwritten ${node.type} ID at ${idPath}`);
+          assert.deepEqual(fact.value, node.attrs.id);
+          for (const changed of ["replacement-id", absent]) {
+            const corrupted = structuredClone(observed);
+            changePath(corrupted, idPath, changed);
+            assert.throws(() => {
+              assertFacts(corrupted, fixture.expected);
+            }, `${fixture.id}: ${idPath}`);
+          }
+        }
+        node.content?.forEach((child, index) => {
+          visit(child, `${path}.content.${String(index)}`);
+        });
+      }
+      (fixture.input.content as CorpusNode[]).forEach((node, index) => {
+        visit(node, `content.${String(index)}`);
+      });
+    } finally {
+      stored.destroy();
+    }
+  }
+});
+
+await test("F12 absence, duplicate block IDs and file-domain collision do not allocate or conflate IDs", () => {
+  const fixture = v050ContractCorpus.find((item) => item.id === "F12");
+  assert.ok(fixture);
+  const stored = tiptapJsonToYDoc(fixture.input);
+  try {
+    const observed = observeWithoutWrites(stored);
+    assertFacts(observed, fixture.expected);
+    for (const changed of [
+      undefined,
+      null,
+      {},
+      { id: undefined },
+      { id: null },
+      { id: "allocated" },
+    ]) {
+      const corrupted = structuredClone(observed);
+      changePath(corrupted, "content.0.attrs", changed);
+      assert.throws(() => {
+        assertFacts(corrupted, fixture.expected);
+      });
+    }
+    // Neither duplicate is repaired; the identical file UUID belongs to a
+    // different domain from the paragraph's block ID. No SDK editor is mounted.
+    assert.equal(atPath(observed, "content.0.attrs.id"), absent);
+    assert.equal(atPath(observed, "content.1.attrs.id"), "duplicate");
+    assert.equal(atPath(observed, "content.2.attrs.id"), "duplicate");
+    assert.equal(atPath(observed, "content.3.type"), "paragraph");
+    assert.equal(atPath(observed, "content.4.type"), "attachment");
+  } finally {
+    stored.destroy();
+  }
+});
 
 await test("existing schemaCorpus remains a reusable handwritten ingredient", () => {
   const input = schemaCorpus(corpusRefs);
@@ -282,6 +423,6 @@ await test("all twelve bounded cases carry explicit loss and required-behavior e
     assert.ok(
       fixture.expected.length > 0 && fixture.losses.length > 0 && fixture.required.length > 0,
     );
-    for (const loss of fixture.losses) assert.notEqual(atPath(fixture.input, loss.path), undefined);
+    for (const loss of fixture.losses) assert.notEqual(atPath(fixture.input, loss.path), absent);
   }
 });

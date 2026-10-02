@@ -3,7 +3,10 @@ import type { TiptapDoc } from "../src/json.ts";
 // Handwritten semantic inputs and facts. Neither Markdown converter supplies
 // an expected value. Losses describe the baseline projection, not W3 success.
 export type CorpusValue =
-  null | boolean | number | string | CorpusValue[] | { [key: string]: CorpusValue };
+  undefined | null | boolean | number | string | CorpusValue[] | { [key: string]: CorpusValue };
+
+// An absent own path differs from an explicitly stored undefined or null.
+export const absent = Symbol("absent own path");
 
 export interface CorpusNode {
   type: string;
@@ -82,6 +85,7 @@ export const v050ContractCorpus: ContractCase[] = [
       paragraph("f01-empty"),
     ),
     expected: [
+      { path: "content.1.attrs.id", value: "f01-body" },
       { path: "content.0.attrs.id", value: "f01-heading" },
       { path: "content.0.attrs.data-toc-id", value: "distinct-anchor" },
       { path: "content.0.attrs.level", value: 2 },
@@ -100,7 +104,7 @@ export const v050ContractCorpus: ContractCase[] = [
       { path: "content.1.content.4.marks.0.attrs.color", value: "#ffe066" },
       { path: "content.1.content.5.marks.0.attrs.href", value: "https://example.com/한글" },
       { path: "content.2.attrs.id", value: "f01-empty" },
-      { path: "content.2.content", value: undefined },
+      { path: "content.2.content", value: absent },
     ],
     losses: [
       { path: "content.0", field: "id", before: "f01-heading", projected: "omitted" },
@@ -141,6 +145,7 @@ export const v050ContractCorpus: ContractCase[] = [
       ],
     }),
     expected: [
+      { path: "content.0.attrs.id", value: "f02" },
       { path: "content.0.attrs.textAlign", value: "right" },
       {
         path: "content.0.content.0.marks",
@@ -255,6 +260,40 @@ export const v050ContractCorpus: ContractCase[] = [
       },
     ),
     expected: [
+      { path: "content.0.type", value: "bulletList" },
+      { path: "content.0.content.0.type", value: "listItem" },
+      { path: "content.0.content.0.content.0.type", value: "paragraph" },
+      { path: "content.0.content.0.content.0.attrs.id", value: "f03-p" },
+      { path: "content.0.content.0.content.0.content.0.text", value: "항목" },
+      { path: "content.0.content.0.content.1.type", value: "orderedList" },
+      { path: "content.0.content.0.content.1.content.0.type", value: "listItem" },
+      { path: "content.0.content.0.content.1.content.0.content.0.type", value: "paragraph" },
+      { path: "content.0.content.0.content.1.content.0.content.0.attrs.id", value: "f03-nested-p" },
+      {
+        path: "content.0.content.0.content.1.content.0.content.0.content.0.text",
+        value: "세 번째",
+      },
+      { path: "content.1.type", value: "taskList" },
+      { path: "content.1.content.0.type", value: "taskItem" },
+      { path: "content.1.content.0.attrs.id", value: "f03-task-0" },
+      { path: "content.1.content.0.content.0.type", value: "paragraph" },
+      { path: "content.1.content.0.content.0.attrs.id", value: "f03-check-0" },
+      { path: "content.1.content.0.content.0.content.0.text", value: "완료" },
+      { path: "content.1.content.1.type", value: "taskItem" },
+      { path: "content.1.content.1.attrs.id", value: "f03-task-1" },
+      { path: "content.1.content.1.content.0.type", value: "paragraph" },
+      { path: "content.1.content.1.content.0.attrs.id", value: "f03-check-1" },
+      { path: "content.1.content.1.content.0.content.0.text", value: "대기" },
+      { path: "content.2.type", value: "blockquote" },
+      { path: "content.2.attrs.id", value: "f03-quote" },
+      { path: "content.2.content.0.type", value: "callout" },
+      { path: "content.2.content.0.attrs.id", value: "f03-callout" },
+      { path: "content.2.content.0.content.0.type", value: "codeBlock" },
+      { path: "content.2.content.0.content.0.attrs.id", value: "f03-code" },
+      { path: "content.2.content.0.content.0.attrs.language", value: "text" },
+      { path: "content.2.content.0.content.0.content.0.text", value: "인용 코드" },
+      { path: "content.2.content.0.content.1.type", value: "math" },
+      { path: "content.2.content.0.content.1.attrs.id", value: "f03-math" },
       { path: "content.0.content.0.attrs.id", value: "f03-item" },
       { path: "content.0.content.0.content.1.attrs.start", value: 3 },
       { path: "content.0.content.0.content.1.attrs.type", value: "a" },
@@ -336,6 +375,11 @@ export const v050ContractCorpus: ContractCase[] = [
       ],
     }),
     expected: [
+      { path: "content.0.content.0.content.0.content.0.attrs.id", value: "f04-header" },
+      {
+        path: "content.0.content.0.content.1.content.0.content.0.content.0.content.0.attrs.id",
+        value: "f04-inner-p",
+      },
       { path: "content.0.attrs.id", value: "f04-table" },
       { path: "content.0.content.0.content.0.type", value: "tableHeader" },
       { path: "content.0.content.0.content.1.type", value: "tableCell" },
@@ -394,6 +438,13 @@ export const v050ContractCorpus: ContractCase[] = [
       { type: "horizontalRule", attrs: { id: "f05-rule" } },
     ),
     expected: [
+      { path: "content.0.attrs.id", value: "f05-code" },
+      { path: "content.1.attrs.id", value: "f05-mermaid" },
+      { path: "content.2.attrs.id", value: "f05-math" },
+      { path: "content.3.attrs.id", value: "f05-inline" },
+      { path: "content.4.attrs.id", value: "f05-callout" },
+      { path: "content.4.content.0.attrs.id", value: "f05-tip" },
+      { path: "content.4.content.0.content.0.text", value: "힌트" },
       { path: "content.0.attrs.language", value: "typescript" },
       { path: "content.0.attrs.highlightLines", value: [1, 3] },
       { path: "content.0.content.0.text", value: "const x = `한글`;\n```\n끝" },
@@ -451,6 +502,9 @@ export const v050ContractCorpus: ContractCase[] = [
       ],
     }),
     expected: [
+      { path: "content.0.attrs.id", value: "f06" },
+      { path: "content.0.content.1.attrs.id", value: "f06-content" },
+      { path: "content.0.content.1.content.0.content.0.attrs.id", value: "f06-p" },
       { path: "content.0.attrs.open", value: true },
       { path: "content.0.content.0.attrs.id", value: "f06-summary" },
       { path: "content.0.content.0.content.0.marks", value: [{ type: "bold", attrs: {} }] },
@@ -488,6 +542,13 @@ export const v050ContractCorpus: ContractCase[] = [
       { type: "embed", attrs: { id: "f07-url", entity: "url", ref: "https://example.com/source" } },
     ),
     expected: [
+      { path: "content.0.attrs.id", value: "f07-p" },
+      { path: "content.0.content.0.attrs.id", value: "10000000-0000-4000-8000-000000000001" },
+      { path: "content.0.content.1.attrs.id", value: "10000000-0000-4000-8000-000000000002" },
+      { path: "content.0.content.4.attrs.id", value: "10000000-0000-4000-8000-000000000005" },
+      { path: "content.2.attrs.id", value: "f07-task" },
+      { path: "content.3.attrs.id", value: "f07-project" },
+      { path: "content.4.attrs.id", value: "f07-url" },
       {
         path: "content.0.content.0.attrs",
         value: { entity: "user", id: "10000000-0000-4000-8000-000000000001", label: "같은 이름" },
@@ -605,6 +666,7 @@ export const v050ContractCorpus: ContractCase[] = [
       ),
     ),
     expected: [
+      { path: "content.0.attrs.id", value: "f09" },
       { path: "content.0.content.0.attrs.name", value: "grinning" },
       { path: "content.0.content.1.text", value: "🧑‍💻" },
       { path: "content.0.content.1.marks", value: [{ type: "bold", attrs: {} }] },
@@ -645,6 +707,8 @@ export const v050ContractCorpus: ContractCase[] = [
       },
     ),
     expected: [
+      { path: "content.0.attrs.id", value: "f10-future" },
+      { path: "content.1.attrs.id", value: "f10-known" },
       { path: "content.0.type", value: "futureNode" },
       { path: "content.0.attrs", value: { id: "f10-future", futureAttr: "미래 참조" } },
       { path: "content.0.content.0.text", value: "한글 미래 😀" },
@@ -678,6 +742,7 @@ export const v050ContractCorpus: ContractCase[] = [
       ),
     ),
     expected: [
+      { path: "content.0.attrs.id", value: "f11" },
       {
         path: "content.0.content.0.text",
         value: "[[task:literal]] @[user/not-an-id] | < $5-$10 \\",
@@ -715,7 +780,12 @@ export const v050ContractCorpus: ContractCase[] = [
       { type: "attachment", attrs: { id: corpusRefs.attachment, name: "file.txt", image: false } },
     ),
     expected: [
-      { path: "content.0.attrs", value: undefined },
+      { path: "content.0.attrs", value: absent },
+      { path: "content.0.attrs.id", value: absent },
+      { path: "content.0.content.0.text", value: "동일 문단" },
+      { path: "content.1.content.0.text", value: "동일 문단" },
+      { path: "content.2.content.0.text", value: "동일 문단" },
+      { path: "content.3.content.0.text", value: "별도 블록" },
       { path: "content.1.attrs.id", value: "duplicate" },
       { path: "content.2.attrs.id", value: "duplicate" },
       { path: "content.3.attrs.id", value: "10000000-0000-4000-8000-000000000006" },
@@ -733,3 +803,27 @@ export const v050ContractCorpus: ContractCase[] = [
       "Schema validity does not establish unique identity. Refuse ambiguous Apply; viewing/Cancel allocates no IDs. File UUID and block ID are distinct domains.",
   },
 ];
+
+// Supplemental raw presence fixture, not a thirteenth user/converter case.
+// This bounded record/array domain is not a claim about all Yjs value types.
+export const rawPresenceFixture = {
+  input: doc({
+    type: "futureNode",
+    attrs: {
+      id: "raw-presence",
+      undefinedAttr: undefined,
+      nullAttr: null,
+      nested: { undefinedValue: undefined, nullValue: null, values: [undefined, null] },
+    },
+  }),
+  expected: [
+    { path: "content.0.attrs.id", value: "raw-presence" },
+    { path: "content.0.attrs.undefinedAttr", value: undefined },
+    { path: "content.0.attrs.nullAttr", value: null },
+    { path: "content.0.attrs.absentAttr", value: absent },
+    {
+      path: "content.0.attrs.nested",
+      value: { undefinedValue: undefined, nullValue: null, values: [undefined, null] },
+    },
+  ],
+};
