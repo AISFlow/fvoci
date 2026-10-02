@@ -1,9 +1,19 @@
 <script setup lang="ts">
 import { FvociEditor } from "@fvoci/editor/vue";
+import { onBeforeRouteLeave, onBeforeRouteUpdate } from "vue-router";
 import "@fvoci/editor/styles.css";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { computed, type FunctionalComponent, h, markRaw, onScopeDispose, ref, watch } from "vue";
+import {
+  computed,
+  type FunctionalComponent,
+  h,
+  markRaw,
+  onScopeDispose,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import { useQuery } from "@tanstack/vue-query";
 import { meQuery } from "@/lib/queries";
 import { ProblemError } from "@/lib/api";
@@ -11,6 +21,9 @@ import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badg
 import type { CollabUser } from "@/features/documents/collab-model";
 import type { CollabRoomSession } from "../../collab/useCollabRoom";
 import QueryLoading from "../../components/QueryLoading.vue";
+import NativeModal from "../../components/NativeModal.vue";
+import { useSourceDraftGuard } from "../../composables/useSourceDraftGuard";
+import { useReadonlyCommittedBody } from "../../composables/useReadonlyCommittedBody";
 import EditorControls from "../editor/EditorControls.vue";
 import TemplateToolbar from "../editor/TemplateToolbar.vue";
 import { useEditorEntities } from "../editor/useEditorEntities";
@@ -91,6 +104,30 @@ onScopeDispose(() => {
   persistLifecycle.value++;
 });
 
+const sourceEditor = shallowRef<InstanceType<typeof FvociEditor> | null>(null);
+const sourceDraftDialogId = computed(() => `source-draft-leave-${props.taskId}`);
+const {
+  open: sourceLeaveOpen,
+  draft: sourceDraft,
+  receive: onSourceDraft,
+  requestLeave,
+  keepEditing,
+  discardAndLeave,
+} = useSourceDraftGuard({
+  scope: () => persistLifecycle.value,
+  identity: () =>
+    `${props.workspaceId}:${props.taskId}:${me.data.value?.userId ?? ""}:${me.data.value?.sessionId ?? ""}:${String(props.session?.generation ?? "")}`,
+  authorized: () =>
+    !!me.data.value?.userId &&
+    !!me.data.value.sessionId &&
+    !!props.session &&
+    props.session.status !== "unauthorized" &&
+    !(me.error.value instanceof ProblemError && me.error.value.status === 401),
+  editor: () => sourceEditor.value,
+});
+onBeforeRouteLeave(() => requestLeave());
+onBeforeRouteUpdate((to, from) => (to.path === from.path ? true : requestLeave()));
+
 /** W3 copy/mode barrier uses the existing matched persist owner, then checks
  * the same live resource/actor/provider generation; ACK snapshots may replace. */
 function readSaveSession() {
@@ -99,6 +136,27 @@ function readSaveSession() {
 function readSaveActor() {
   return me.data.value;
 }
+const readonlyCommittedBody = useReadonlyCommittedBody(() => {
+  const current = readSaveSession();
+  const actor = readSaveActor();
+  if (!current || !actor?.userId || !actor.sessionId) return null;
+  return {
+    workspaceId: props.workspaceId,
+    targetId: props.taskId,
+    kind: "task",
+    actorId: actor.userId,
+    credentialId: actor.sessionId,
+    lifetime: persistLifecycle.value,
+    doc: current.doc,
+    provider: current.provider,
+    generation: current.generation,
+    connected: current.status === "connected",
+    synced: current.synced,
+    pending: current.pending,
+    allowed:
+      readOnly.value && !(me.error.value instanceof ProblemError && me.error.value.status === 401),
+  };
+});
 async function waitForEditorSave(): Promise<boolean> {
   const before = readSaveSession();
   const lifetime = persistLifecycle.value;
@@ -107,7 +165,10 @@ async function waitForEditorSave(): Promise<boolean> {
   const credential = me.data.value?.sessionId;
   if (!before || before.status !== "connected" || !before.synced || !actor) return false;
   try {
-    if (!readOnly.value) await persistBody();
+    const readonly = readOnly.value;
+    const committedRead = readonly ? await readonlyCommittedBody() : false;
+    if (readonly && !committedRead) return false;
+    if (!readonly) await persistBody();
     const current = readSaveSession();
     const currentActor = readSaveActor();
     return (
@@ -121,7 +182,7 @@ async function waitForEditorSave(): Promise<boolean> {
       current.doc === before.doc &&
       current.provider === before.provider &&
       current.generation === before.generation &&
-      current.durableSaved &&
+      (readonly ? committedRead : current.durableSaved) &&
       !current.pending &&
       !(me.error.value instanceof ProblemError && me.error.value.status === 401)
     );
@@ -194,6 +255,7 @@ async function persistBody(): Promise<void> {
       class="document-page__body document-page__body--editor"
     >
       <FvociEditor
+        ref="sourceEditor"
         :key="session.generation"
         :mode-scope="persistLifecycle"
         :wait-for-save="waitForEditorSave"
@@ -206,6 +268,7 @@ async function persistBody(): Promise<void> {
         :mention-items="mentionItems"
         :entity-resolver="entityResolver"
         :url-embed="UrlEmbed"
+        @source-dirty="onSourceDraft"
       >
         <template #toolbar="{ editor: live }">
           <TemplateToolbar :editor="live" mode="fixed" />
@@ -219,4 +282,16 @@ async function persistBody(): Promise<void> {
       </FvociEditor>
     </div>
   </section>
+  <NativeModal :open="sourceLeaveOpen" :labelled-by="sourceDraftDialogId" @close="keepEditing">
+    <h2 :id="sourceDraftDialogId">{{ t("editor.mode.leaveTitle") }}</h2>
+    <p>{{ t("editor.mode.leaveDescription") }}</p>
+    <div class="project-dialog__actions">
+      <UButton color="neutral" variant="outline" @click="keepEditing">{{
+        t("editor.mode.keepEditing")
+      }}</UButton>
+      <UButton :disabled="sourceDraft?.composing" @click="discardAndLeave">{{
+        t("editor.mode.discardDraft")
+      }}</UButton>
+    </div>
+  </NativeModal>
 </template>
