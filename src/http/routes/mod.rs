@@ -33,6 +33,7 @@ pub mod streams;
 pub mod task_body;
 pub mod task_layout;
 pub mod task_ops;
+pub mod task_timer;
 pub mod tasks;
 pub mod templates;
 pub mod unfurl;

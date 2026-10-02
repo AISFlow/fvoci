@@ -916,6 +916,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/task-timer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["owner_state"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/task-timer/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["owner_cleanup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me/workspaces": {
         parameters: {
             query?: never;
@@ -3560,6 +3592,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/timer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["task_state"];
+        put?: never;
+        post: operations["task_command"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash": {
         parameters: {
             query?: never;
@@ -5125,6 +5173,20 @@ export interface components {
             representative?: string | null;
             supportEmail?: string | null;
         };
+        OwnerTimerState: {
+            legacyOpen: boolean;
+            /**
+             * Format: uuid
+             * @description Own opaque run identity/version allow explicit cleanup after revocation.
+             */
+            runId?: string | null;
+            /** Format: date-time */
+            serverNow: string;
+            status?: components["schemas"]["TimerStatus"] | null;
+            /** Format: int32 */
+            version?: number | null;
+            visibleRun?: components["schemas"]["TimerRunOutput"] | null;
+        };
         PasswordChangeBody: {
             /** @description `null` only for password-less accounts. */
             currentPassword: string | null;
@@ -5777,6 +5839,16 @@ export interface components {
             count: number;
             statusId: string;
         };
+        TaskTimerState: {
+            /** Format: int64 */
+            actualMilliseconds: number;
+            /** @description A different unfinished run, without its tenant, task id or title. */
+            busyElsewhere: boolean;
+            legacyOpen: boolean;
+            run?: components["schemas"]["TimerRunOutput"] | null;
+            /** Format: date-time */
+            serverNow: string;
+        };
         TemplateApplyBody: {
             /** Format: uuid */
             parentId?: string | null;
@@ -5836,6 +5908,58 @@ export interface components {
             /** Format: int64 */
             totalSeconds: number;
         };
+        TimerCleanupBody: {
+            /** Format: int32 */
+            expectedVersion: number;
+            /** Format: uuid */
+            requestId: string;
+            /** Format: uuid */
+            runId: string;
+        };
+        TimerCommandBody: {
+            /** Format: int32 */
+            expectedVersion: number;
+            note?: string | null;
+            operation: components["schemas"]["TimerOperation"];
+            /** Format: uuid */
+            requestId: string;
+            /** Format: uuid */
+            runId?: string | null;
+        };
+        TimerCommandOutput: {
+            /** Format: uuid */
+            runId: string;
+            /** Format: date-time */
+            serverNow: string;
+            status: components["schemas"]["TimerStatus"];
+            /** Format: int32 */
+            version: number;
+        };
+        /** @enum {string} */
+        TimerOperation: "start" | "pause" | "resume" | "stop";
+        TimerRunOutput: {
+            /**
+             * Format: int64
+             * @description Closed intervals only. Add the serverNow/runningSince delta for display.
+             */
+            elapsedMilliseconds: number;
+            /** Format: uuid */
+            id: string;
+            note?: string | null;
+            /** Format: date-time */
+            runningSince?: string | null;
+            /** Format: date-time */
+            startedAt: string;
+            status: components["schemas"]["TimerStatus"];
+            /** Format: uuid */
+            taskId: string;
+            /** Format: int32 */
+            version: number;
+            /** Format: uuid */
+            workspaceId: string;
+        };
+        /** @enum {string} */
+        TimerStatus: "running" | "paused" | "stopped";
         TokenBody: {
             token: string;
         };
@@ -9157,6 +9281,80 @@ export interface operations {
             };
             /** @description Authentication required */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    owner_state: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OwnerTimerState"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    owner_cleanup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimerCleanupBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerCommandOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21268,6 +21466,102 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    task_state: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskTimerState"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    task_command: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimerCommandBody"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerCommandOutput"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

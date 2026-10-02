@@ -50,6 +50,7 @@ pub mod task_activity;
 pub mod task_layout;
 pub mod task_ops;
 pub mod task_origins;
+pub mod task_timer;
 pub mod tasks;
 pub mod templates;
 pub mod user_export;

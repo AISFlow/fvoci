@@ -64,7 +64,7 @@ test("detail start commits server intervals; a new MyTasks client pauses, resume
     data: { assigneeIds: [me.userId], estimate: "30" },
   });
   expect(assigned.ok(), await assigned.text()).toBe(true);
-  const detailUrl = `/w/w5timer/READ-${task.number}`;
+  const detailUrl = `/w/w5timer/READ-${String(task.number)}`;
   const apiUrl = `/api/v1/workspaces/${workspace.id}/tasks/${task.id}/timer`;
   await page.goto(detailUrl);
   const detail = page.getByTestId(`task-stopwatch-${task.id}`);

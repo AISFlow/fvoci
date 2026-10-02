@@ -181,6 +181,7 @@ pub fn router_with_observability(
         .merge(routes::unfurl::router(integrations.clone()))
         .merge(routes::tasks::router())
         .merge(routes::task_ops::router())
+        .merge(routes::task_timer::router())
         .merge(routes::documents::router())
         .merge(routes::document_body::router())
         .merge(routes::import::router())

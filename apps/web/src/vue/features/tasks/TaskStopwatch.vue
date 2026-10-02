@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import { ProblemError, loadErrorMessage } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
 import { taskTimeEntriesQuery } from "@/features/tasks/queries";
 import { anchoredElapsed, stopwatchText } from "./task-stopwatch-clock";
-import { taskStopwatchQuery, sendTimerCommand, type TimerCommand } from "./task-stopwatch-queries";
+import {
+  taskStopwatchQuery,
+  ownerStopwatchQuery,
+  sendTimerCommand,
+  type TimerCommand,
+} from "./task-stopwatch-queries";
 
 const props = defineProps<{
   workspaceId: string;
@@ -60,11 +65,19 @@ watch(
   },
 );
 let ticker: ReturnType<typeof setInterval> | undefined;
-onMounted(() => {
-  ticker = setInterval(() => {
+watch(
+  () => state.data.value?.run?.runningSince,
+  (anchor) => {
+    if (ticker) clearInterval(ticker);
+    ticker = undefined;
     tick.value = performance.now();
-  }, 250);
-});
+    if (anchor)
+      ticker = setInterval(() => {
+        tick.value = performance.now();
+      }, 250);
+  },
+  { immediate: true },
+);
 onScopeDispose(() => {
   live = false;
   generation++;
@@ -85,9 +98,7 @@ const elapsed = computed(() =>
 const actual = computed(
   () =>
     (state.data.value?.actualMilliseconds ?? 0) +
-    (run.value?.runningSince
-      ? Math.max(0, elapsed.value - (run.value?.elapsedMilliseconds ?? 0))
-      : 0),
+    (run.value?.runningSince ? Math.max(0, elapsed.value - run.value.elapsedMilliseconds) : 0),
 );
 const disabled = computed(
   () => props.readOnly || pending.value || !state.isSuccess.value || !actor.value,
@@ -115,6 +126,10 @@ async function submit(capture: Capture): Promise<void> {
     command = undefined;
     if (note.value === capture.note) note.value = "";
     await Promise.all([
+      client.invalidateQueries({
+        queryKey: ownerStopwatchQuery(capture.actor, capture.credential).queryKey,
+        exact: true,
+      }),
       client.invalidateQueries({
         predicate: (query) =>
           query.queryKey[0] === "task-timer" && query.queryKey[1] === capture.actor,
@@ -157,7 +172,7 @@ async function submit(capture: Capture): Promise<void> {
   }
 }
 
-function start(operation: TimerCommand["operation"]): void {
+async function start(operation: TimerCommand["operation"]): Promise<void> {
   if (disabled.value) return;
   const body: TimerCommand = {
     requestId: crypto.randomUUID(),
@@ -175,10 +190,10 @@ function start(operation: TimerCommand["operation"]): void {
     body,
     note: note.value,
   };
-  void submit(command);
+  await submit(command);
 }
-function retry(): void {
-  if (command) void submit(command);
+async function retry(): Promise<void> {
+  if (command) await submit(command);
 }
 </script>
 

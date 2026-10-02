@@ -266,3 +266,7 @@ GRANT EXECUTE ON FUNCTION fvoci.app_oldest_write_xact_age_seconds() TO :"app_rol
 -- 045 personal input command receipts: append-only except target FK retirement.
 GRANT SELECT, INSERT ON fvoci.personal_input_commands TO :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.personal_input_commands FROM :"app_role";
+
+-- W5 actor-owned durable commands and correction audit are append-only.
+REVOKE UPDATE, DELETE ON fvoci.task_timer_commands FROM :"app_role";
+REVOKE UPDATE, DELETE ON fvoci.task_timer_audit FROM :"app_role";

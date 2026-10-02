@@ -31,9 +31,11 @@ pub struct TimerRunOutput {
     pub status: TimerStatus,
     pub version: i32,
     pub started_at: DateTime<Utc>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub running_since: Option<DateTime<Utc>>,
     /// Closed intervals only. Add the serverNow/runningSince delta for display.
     pub elapsed_milliseconds: i64,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub note: Option<String>,
 }
 
@@ -42,6 +44,7 @@ pub struct TimerRunOutput {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct TaskTimerState {
     pub server_now: DateTime<Utc>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub run: Option<TimerRunOutput>,
     /// A different unfinished run, without its tenant, task id or title.
     pub busy_elsewhere: bool,
@@ -65,10 +68,14 @@ pub struct TimerCommandOutput {
 pub struct OwnerTimerState {
     pub server_now: DateTime<Utc>,
     /// Own opaque run identity/version allow explicit cleanup after revocation.
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub run_id: Option<Uuid>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub version: Option<i32>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub status: Option<TimerStatus>,
     /// Present only after current task View permission is checked.
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub visible_run: Option<TimerRunOutput>,
     pub legacy_open: bool,
 }
@@ -122,6 +129,7 @@ pub struct TimerSummaryQuery {
 }
 
 #[cfg(feature = "api-schema")]
+#[allow(dead_code)]
 mod schema {
     use super::*;
     use crate::api::dto::ProblemResponse;
