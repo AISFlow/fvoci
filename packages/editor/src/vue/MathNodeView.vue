@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import { NodeViewWrapper, nodeViewProps } from "@tiptap/vue-3";
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef, useTemplateRef, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  ref,
+  shallowRef,
+  toRaw,
+  useTemplateRef,
+  watch,
+} from "vue";
 import SafeHtml from "./SafeHtml.vue";
 import { useEditable } from "./use-editable.js";
 import { useMathMl } from "./use-math-ml.js";
@@ -65,7 +74,7 @@ function commit(next: string): boolean {
     retired ||
     composing.value ||
     !captured ||
-    captured.editor !== props.editor ||
+    captured.editor !== toRaw(props.editor) ||
     props.editor.isDestroyed ||
     !props.editor.isEditable ||
     !editable.value
@@ -95,8 +104,10 @@ async function open(): Promise<void> {
   if (!writable()) return;
   if (draft.value === null)
     owner.value = {
-      editor: props.editor,
-      node: props.node,
+      editor: toRaw(props.editor),
+      // VueRenderer wraps the PM node deeply; compare its original immutable
+      // identity with the raw current PM state, including idless legacy nodes.
+      node: toRaw(props.node),
       id: props.node.attrs.id as unknown,
       latex: latex.value,
     };

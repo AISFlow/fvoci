@@ -209,8 +209,10 @@ await test("actual block-math watcher and commands make zero readonly or retired
     node: PmNode;
     getPos: () => number | undefined;
     updateAttributes: (attrs: Record<string, unknown>) => void;
-  } = Vue.shallowReactive({
-    editor: local.editor,
+  } = Vue.reactive({
+    // Installed VueRenderer deep-reactivates NodeView props; its Vue Editor
+    // is markRaw. Exercise that actual proxy boundary, not shallow props.
+    editor: Vue.markRaw(local.editor),
     node: local.editor.state.doc.child(0),
     getPos: () => 0,
     updateAttributes: (attrs: Record<string, unknown>) => {
@@ -218,6 +220,9 @@ await test("actual block-math watcher and commands make zero readonly or retired
       props.node = local.editor.state.doc.child(0);
     },
   });
+  assert.equal(Vue.isProxy(props.node), true);
+  assert.notEqual(props.node.type, local.editor.state.doc.child(0).type);
+  assert.equal(Vue.toRaw(props.node.type), local.editor.state.doc.child(0).type);
   const unmount: (() => void)[] = [];
   const field = { value: "", focus() {} };
   const input = Vue.shallowRef(field);

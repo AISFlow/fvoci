@@ -1209,7 +1209,38 @@ test("focused visible Math Cancel never publishes its draft, and detached old fi
   }
   await page.getByTitle("수식 편집", { exact: true }).click();
   await field.fill("authorized final");
+  await expect(field).toBeFocused();
+  await expect(field).toHaveValue("authorized final");
+  await field.evaluate((element) => {
+    element.addEventListener("blur", (event) => {
+      const field = element as HTMLTextAreaElement;
+      const related = (event as FocusEvent).relatedTarget as HTMLElement | null;
+      const log = {
+        value: field.value,
+        connected: field.isConnected,
+        target: related?.tagName,
+        role: related?.getAttribute("role"),
+        label: related?.getAttribute("aria-label"),
+      };
+      (window as Window & { w3MathBlur?: unknown }).w3MathBlur = log;
+    });
+  });
   await caretAtEndOf(page, 1);
+  await testInfo.attach("w3-current-math-blur.json", {
+    body: JSON.stringify(
+      await page.evaluate(() => ({
+        blur: (window as Window & { w3MathBlur?: unknown }).w3MathBlur,
+        active: document.activeElement?.tagName,
+        remaining: document.querySelector('textarea[aria-label="수식 LaTeX"]')?.outerHTML,
+        node: (
+          document.querySelector(".fvoci-editor .ProseMirror") as EditorElement
+        ).editor.state.doc
+          .child(0)
+          .toJSON() as unknown,
+      })),
+    ),
+    contentType: "application/json",
+  });
   await save(page);
   const after = await savedBody(page.request, ws, doc.id);
   expect(after.content?.[0]?.attrs).toMatchObject({ id: "cancel-math", latex: "authorized final" });
