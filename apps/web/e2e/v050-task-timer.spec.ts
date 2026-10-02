@@ -1139,6 +1139,8 @@ async function ordinaryTimerTask(page: import("@playwright/test").Page, key: str
     workspaceSlug: slug,
     membershipRole: "member",
   });
+  const loggedOut = await page.request.post("/api/v1/auth/logout");
+  expect(loggedOut.ok(), await loggedOut.text()).toBe(true);
   await login(page, email, credentials.password);
   const actor = identityShape.parse(await (await page.request.get("/api/v1/auth/me")).json());
   const createdProject = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, {
