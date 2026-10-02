@@ -2302,12 +2302,13 @@ mod task_timer {
             timer_checked_request(&fixture, app.clone(), "GET", &base, None, Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "{state}");
         assert_eq!(state["run"]["status"], "paused");
-        let now_date: String =
-            sqlx::query_scalar("SELECT (clock_timestamp() AT TIME ZONE 'Asia/Seoul')::date::text")
-                .fetch_one(&admin)
-                .await
-                .unwrap();
-        let today = format!("{base}/summary?from={now_date}&to={now_date}");
+        // Include both actual local dates if a legitimate start/pause crosses
+        // midnight; never assume the wall-clock day is one closed day.
+        let (from_day, to_day): (String, String) = sqlx::query_as(
+            "SELECT (min(started_at) AT TIME ZONE 'Asia/Seoul')::date::text,(max(ended_at) AT TIME ZONE 'Asia/Seoul')::date::text FROM fvoci.task_timer_segments WHERE run_id=$1",
+        ).bind(Uuid::parse_str(started["runId"].as_str().unwrap()).unwrap())
+        .fetch_one(&admin).await.unwrap();
+        let today = format!("{base}/summary?from={from_day}&to={to_day}");
         let (status, first) =
             timer_checked_request(&fixture, app.clone(), "GET", &today, None, Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "{first}");
