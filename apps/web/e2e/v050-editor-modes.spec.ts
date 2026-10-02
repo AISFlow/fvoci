@@ -923,7 +923,7 @@ test("actual preview producer and SafeHtml sink keep rich heading, colors, table
   await expect(preview.locator("h4")).toHaveCSS("text-align", "right");
   await expect(preview.locator("u").first()).toHaveText("빨강");
   await expect(preview.locator("u").first()).toHaveCSS("color", "rgb(17, 34, 51)");
-  await expect(preview.locator("th")).toHaveAttribute("data-colwidth", "160");
+  await expect(preview.locator("th")).toHaveAttribute("colwidth", "160");
   await expect(preview.locator("th")).toHaveCSS("background-color", "rgb(171, 205, 239)");
   await expect(preview.locator("col").first()).toHaveCSS("width", "160px");
   await expect(preview.locator("aside[data-kind='warning']")).toContainText("경고 의미");
