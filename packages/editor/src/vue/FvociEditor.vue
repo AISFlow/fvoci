@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import type { Editor, MappablePosition } from "@tiptap/core";
-import { AllSelection, type EditorState, TextSelection } from "@tiptap/pm/state";
+import { getSchema, type Editor, type MappablePosition } from "@tiptap/core";
+import {
+  AllSelection,
+  type EditorState,
+  type SelectionBookmark,
+  TextSelection,
+} from "@tiptap/pm/state";
+import type { Mark } from "@tiptap/pm/model";
 import { CellSelection } from "@tiptap/pm/tables";
 import type { EditorView } from "@tiptap/pm/view";
 import BubbleMenu from "@tiptap/extension-bubble-menu";
@@ -9,9 +15,12 @@ import DragHandle from "@tiptap/extension-drag-handle";
 import { EditorContent, useEditor } from "@tiptap/vue-3";
 import {
   markRaw,
+  computed,
+  nextTick,
   onBeforeUnmount,
   provide,
   reactive,
+  ref,
   shallowRef,
   useSlots,
   useTemplateRef,
@@ -30,8 +39,20 @@ import {
 import type { EntityResolver } from "../entities.js";
 import { overlayOwner } from "../overlay-owner.js";
 import { selectAllEscape, selectAllStep } from "../table-actions.js";
+import { moveBlock } from "../gutter-actions.js";
+import {
+  rawEditorPreflight,
+  SourceModeSession,
+  type SourceCapture,
+  type SourceProposal,
+} from "../source-mode.js";
+import { copyText } from "../clipboard.js";
+import { tiptapDocToMd } from "../md.js";
+import { yDocToTiptapJson } from "../collab-tiptap.js";
+import { editorModePreview } from "./editor-mode-preview.js";
+import SafeHtml from "./SafeHtml.vue";
 import AttachmentBlock from "./AttachmentBlock.vue";
-import type { GutterBlock, GutterHandle } from "./block-gutter.js";
+import { keyboardBlockPos, type GutterBlock, type GutterHandle } from "./block-gutter.js";
 import {
   attachmentBridgeKey,
   type CodeChromeHost,
@@ -64,9 +85,13 @@ const props = defineProps<{
   urlEmbed?: UrlEmbedComponent | null;
   entityResolver?: EntityResolver | null;
   mentionItems?: MentionLoader;
+  /** Host-owned monotonic actor/room generation, including ABA transitions. */
+  modeScope?: string | number;
+  /** Existing scoped durable ACK barrier; rejects failed/old/wrong ACKs. */
+  waitForSave?: () => Promise<boolean>;
 }>();
 /** The live editor once it exists, and null when it is torn down. */
-const emit = defineEmits<{ ready: [editor: Editor | null] }>();
+const emit = defineEmits<{ ready: [editor: Editor | null]; "mode-change": [mode: EditorMode] }>();
 defineSlots<{
   toolbar?(props: { editor: Editor }): unknown;
   bubble?(props: { editor: Editor }): unknown;
@@ -77,6 +102,154 @@ defineSlots<{
   controls?(props: { editor: Editor; gutter: GutterHandle; editable: boolean }): unknown;
 }>();
 const slots = useSlots();
+
+type EditorMode = "rich" | "block" | "markdown" | "preview";
+const mode = ref<EditorMode>("rich");
+const modes = [
+  { value: "rich", label: "글쓰기" },
+  { value: "block", label: "블록 배치" },
+  { value: "markdown", label: "Markdown" },
+  { value: "preview", label: "미리보기" },
+] as const;
+const richVisible = computed(() => mode.value === "rich" || mode.value === "block");
+const sourceField = useTemplateRef<HTMLTextAreaElement>("sourceField");
+const sourceComposing = ref(false);
+const capture = shallowRef<SourceCapture | null>(null);
+const proposal = shallowRef<SourceProposal | null>(null);
+const draftDirty = ref(false);
+const sourceStale = ref(false);
+const modeError = ref<string | null>(null);
+const preview = shallowRef<ReturnType<typeof editorModePreview> | null>(null);
+const activeBlockPos = ref(-1);
+let modeLifetime = 0;
+let scopeEpoch = 0;
+let bookmark: SelectionBookmark | null = null;
+let storedMarks: readonly Mark[] | null = null;
+let restoreEditorFocus = false;
+const sourceSession = markRaw(
+  new SourceModeSession(
+    props.ydoc,
+    () => scopeEpoch,
+    () => props.editable,
+  ),
+);
+watch(
+  [
+    () => props.modeScope,
+    () => props.user.id,
+    () => props.ydoc,
+    () => props.provider,
+    () => props.editable,
+  ],
+  () => {
+    scopeEpoch++;
+    modeLifetime++;
+    sourceStale.value = Boolean(capture.value);
+  },
+  { flush: "sync" },
+);
+
+function onSourceInput(event: Event): void {
+  if (!(event.target instanceof HTMLTextAreaElement)) return;
+  draftDirty.value = event.target.value !== capture.value?.source;
+  proposal.value = null;
+  modeError.value = null;
+}
+
+function sourceBlocked(): boolean {
+  return sourceComposing.value || Boolean(editor.value?.view.composing);
+}
+
+function moveSelectedBlock(direction: -1 | 1): void {
+  const current = editor.value;
+  if (!current || !props.editable || sourceBlocked()) return;
+  // Read the current selection at execution time, never a stored drag position.
+  const position = keyboardBlockPos(current);
+  if (position >= 0) moveBlock(current, position, direction);
+}
+
+function onSourceKeyDown(event: KeyboardEvent): void {
+  // Native IME compatibility, identical to the rich keyboard entry boundary.
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
+  if (event.isComposing || event.keyCode === 229) sourceComposing.value = true;
+}
+
+async function changeMode(next: EditorMode): Promise<void> {
+  const current = editor.value;
+  if (!current || sourceBlocked() || mode.value === next) return;
+  if (richVisible.value && (next === "markdown" || next === "preview")) {
+    bookmark = current.state.selection.getBookmark();
+    storedMarks = current.state.storedMarks;
+    restoreEditorFocus = current.view.hasFocus();
+  }
+  const restore = !richVisible.value && (next === "rich" || next === "block");
+  mode.value = next;
+  current.setEditable(props.editable && richVisible.value, false);
+  if (next === "preview") preview.value = editorModePreview(current);
+  if (next === "markdown" && !capture.value) refreshSource();
+  emit("mode-change", next);
+  const lifetime = ++modeLifetime;
+  await nextTick();
+  if (lifetime !== modeLifetime || current.isDestroyed) return;
+  if (next === "markdown") sourceField.value?.focus();
+  else if (restore && bookmark) {
+    const selection = bookmark.resolve(current.state.doc);
+    current.view.dispatch(current.state.tr.setSelection(selection).setStoredMarks(storedMarks));
+    if (restoreEditorFocus) current.view.focus();
+  }
+}
+
+function refreshSource(): void {
+  const current = editor.value;
+  if (!current || sourceBlocked()) return;
+  capture.value = sourceSession.capture(current.state.doc);
+  // Uncontrolled field: peer updates and Vue renders never overwrite typing.
+  if (sourceField.value) sourceField.value.value = capture.value.source;
+  draftDirty.value = false;
+  sourceStale.value = false;
+  proposal.value = null;
+  modeError.value = null;
+}
+
+function applySource(): void {
+  const current = editor.value;
+  const entry = capture.value;
+  if (!current || !entry || !sourceField.value || sourceBlocked() || !props.editable) return;
+  proposal.value = sourceSession.prepare(entry, sourceField.value.value, current.state);
+  sourceStale.value = proposal.value.status === "stale";
+  if (proposal.value.status === "noop") {
+    refreshSource();
+    return;
+  }
+  if (proposal.value.status !== "ready") return;
+  if (!sourceSession.apply(proposal.value, current)) {
+    sourceStale.value = true;
+    return;
+  }
+  refreshSource();
+}
+
+async function copyLiveSource(): Promise<void> {
+  const barrier = props.waitForSave;
+  const current = editor.value;
+  if (!barrier || !current || sourceBlocked()) return;
+  const entry = sourceSession.capture(current.state.doc);
+  const lifetime = modeLifetime;
+  modeError.value = null;
+  try {
+    if (
+      !(await barrier()) ||
+      lifetime !== modeLifetime ||
+      !sourceSession.isCurrent(entry) ||
+      current.isDestroyed
+    )
+      throw new Error("저장 확인 중 문서가 변경되었습니다. 다시 복사해 주세요.");
+    await copyText(tiptapDocToMd(yDocToTiptapJson(props.ydoc)));
+  } catch (error) {
+    if (lifetime === modeLifetime)
+      modeError.value = error instanceof Error ? error.message : "복사하지 못했습니다.";
+  }
+}
 
 provide(attachmentBridgeKey, props.attachmentBridge ?? null);
 provide(urlEmbedKey, props.urlEmbed ?? null);
@@ -148,51 +321,55 @@ const gutter: GutterHandle = markRaw({ element: gutterElement, block: gutterBloc
 
 /* WHY: #738 — Tiptap 기본값은 <style data-tiptap-style> 을 head 에 꽂는다. style-src 는 'self' 와
  * 셸 인라인 블록의 빌드 시점 해시뿐이라 그 <style> 은 차단된다 — 규칙은 react/editor.css 에 있다. */
-const editor = useEditor({
-  injectCSS: false,
-  editable: props.editable,
-  extensions: [
-    ...createFvociEditorExtensions({
-      ydoc: props.ydoc,
-      nodeViews: VUE_NODE_VIEWS,
-      mentionItems: () => props.mentionItems,
-      entityResolver: () => props.entityResolver,
-      workspaceSlug: () => props.workspaceSlug,
-      uploads: { anchors, queue: queueUploads },
-      provider: props.provider,
-      user: props.user,
-    }),
-    ...(slots.controls
-      ? [
-          DragHandle.configure({
-            render: () => gutterElement,
-            nested: true,
-            // The plugin passes the block's position too (the option's type leaves it out).
-            onNodeChange: (change) => {
-              const pos = (change as { pos?: number }).pos;
-              gutterBlock.value = { node: change.node, pos: typeof pos === "number" ? pos : -1 };
-            },
-          }),
-        ]
-      : []),
-    ...(slots.bubble
-      ? [
-          BubbleMenu.configure({
-            element: bubble,
-            updateDelay: 0,
-            options: { placement: "bottom" },
-            appendTo: () => bubbleOwner(),
-            shouldShow: bubbleShouldShow,
-          }),
-        ]
-      : []),
-  ],
-  editorProps: {
-    ...createFvociEditorProps(props.ariaLabel),
-    handleClick: settleNativeTextClick,
-    handleDOMEvents: { keyup: settleNativeKeyboardSelection },
-  },
-});
+const editorExtensions = [
+  ...createFvociEditorExtensions({
+    ydoc: props.ydoc,
+    nodeViews: VUE_NODE_VIEWS,
+    mentionItems: () => props.mentionItems,
+    entityResolver: () => props.entityResolver,
+    workspaceSlug: () => props.workspaceSlug,
+    uploads: { anchors, queue: queueUploads },
+    provider: props.provider,
+    user: props.user,
+  }),
+  ...(slots.controls
+    ? [
+        DragHandle.configure({
+          render: () => gutterElement,
+          nested: true,
+          // The plugin passes the block's position too (the option's type leaves it out).
+          onNodeChange: (change) => {
+            const pos = (change as { pos?: number }).pos;
+            gutterBlock.value = { node: change.node, pos: typeof pos === "number" ? pos : -1 };
+          },
+        }),
+      ]
+    : []),
+  ...(slots.bubble
+    ? [
+        BubbleMenu.configure({
+          element: bubble,
+          updateDelay: 0,
+          options: { placement: "bottom" },
+          appendTo: () => bubbleOwner(),
+          shouldShow: bubbleShouldShow,
+        }),
+      ]
+    : []),
+];
+const rawIssues = rawEditorPreflight(props.ydoc, getSchema(editorExtensions));
+const editor = rawIssues.length
+  ? shallowRef<import("@tiptap/vue-3").Editor>()
+  : useEditor({
+      injectCSS: false,
+      editable: props.editable,
+      extensions: editorExtensions,
+      editorProps: {
+        ...createFvociEditorProps(props.ariaLabel),
+        handleClick: settleNativeTextClick,
+        handleDOMEvents: { keyup: settleNativeKeyboardSelection },
+      },
+    });
 
 /* A native click places the DOM caret before selectionchange records it in PM.
  * A remote Yjs update in that gap restores PM's previous selection over the
@@ -277,7 +454,7 @@ function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): 
 
 watch(
   () => props.editable,
-  (editable) => editor.value?.setEditable(editable),
+  (editable) => editor.value?.setEditable(editable && richVisible.value, false),
 );
 
 /* WHY: #571 — 열린 오버레이가 Escape 를 먹는다. 에디터까지 올라가면 selectAllEscape 가 함께 돈다. */
@@ -291,6 +468,7 @@ function isNarrowViewport(): boolean {
 /* The bubble shows for a non-empty text, cell or whole-document selection, not on narrow screens. */
 function bubbleShouldShow({ state }: { state: EditorState }): boolean {
   return (
+    richVisible.value &&
     (state.selection instanceof TextSelection ||
       state.selection instanceof CellSelection ||
       (state.selection instanceof AllSelection && state.doc.textContent.length > 0)) &&
@@ -314,9 +492,23 @@ const host = useTemplateRef<HTMLDivElement>("host");
 watch(editor, (current, _previous, onCleanup) => {
   if (!current) return;
   emit("ready", current);
+  activeBlockPos.value = keyboardBlockPos(current);
+  const onTransaction = ({
+    transaction,
+  }: {
+    transaction: import("@tiptap/pm/state").Transaction;
+  }) => {
+    activeBlockPos.value = keyboardBlockPos(current);
+    if (bookmark && transaction.docChanged) bookmark = bookmark.map(transaction.mapping);
+    if (capture.value && transaction.docChanged) sourceStale.value = true;
+    if (mode.value === "preview" && transaction.docChanged)
+      preview.value = editorModePreview(current);
+  };
+  current.on("transaction", onTransaction);
   const onKeyDown = (event: KeyboardEvent) => {
     const element = host.value;
     if (!element?.isConnected) return;
+    if (!richVisible.value) return;
     // Native IME compatibility: some composition keys report 229 before isComposing.
     // Remove only after a supported replacement passes the native IME regressions.
     // eslint-disable-next-line @typescript-eslint/no-deprecated
@@ -335,17 +527,20 @@ watch(editor, (current, _previous, onCleanup) => {
   document.addEventListener("keydown", onKeyDown, true);
   onCleanup(() => {
     document.removeEventListener("keydown", onKeyDown, true);
+    current.off("transaction", onTransaction);
   });
 });
 
 onBeforeUnmount(() => {
+  modeLifetime++;
+  sourceSession.destroy();
   emit("ready", null);
 });
 
 /* Padding below the last block focuses the end, as in the React host. */
 function onHostMouseDown(event: MouseEvent): void {
   const current = editor.value;
-  if (!current || event.target !== host.value) return;
+  if (!current || !richVisible.value || event.target !== host.value) return;
   event.preventDefault();
   current.commands.focus("end");
 }
@@ -357,10 +552,40 @@ function bubbleOwner(): HTMLElement {
 </script>
 
 <template>
-  <slot v-if="editor" name="toolbar" :editor="editor" />
+  <div v-if="editor" class="fvoci-mode-controls" role="group" aria-label="문서 편집 모드">
+    <button
+      v-for="item in modes"
+      :key="item.value"
+      type="button"
+      :data-editor-mode="item.value"
+      :aria-pressed="mode === item.value"
+      :disabled="sourceComposing"
+      @mousedown.prevent
+      @click="changeMode(item.value)"
+      >{{ item.label }}</button
+    >
+  </div>
+  <div v-show="richVisible"><slot v-if="editor" name="toolbar" :editor="editor" /></div>
+  <div v-if="mode === 'block'" class="fvoci-mode-controls" aria-label="블록 배치">
+    <button
+      type="button"
+      :disabled="!editable || activeBlockPos < 0"
+      @mousedown.prevent
+      @click="moveSelectedBlock(-1)"
+      >선택 블록 위로</button
+    >
+    <button
+      type="button"
+      :disabled="!editable || activeBlockPos < 0"
+      @mousedown.prevent
+      @click="moveSelectedBlock(1)"
+      >선택 블록 아래로</button
+    >
+  </div>
   <div
     ref="host"
     class="fvoci-editor relative min-h-[16rem]"
+    :data-editor-mode-active="mode"
     :data-code-wrap="
       codeChromeHost.wrap === null ? undefined : codeChromeHost.wrap ? 'true' : 'false'
     "
@@ -369,10 +594,77 @@ function bubbleOwner(): HTMLElement {
     "
     @mousedown="onHostMouseDown"
   >
+    <div v-if="rawIssues.length" role="alert" class="fvoci-mode-warning">
+      <p
+        >현재 편집기에서 표현할 수 없는 저장 데이터가 있습니다. 원본을 보존하기 위해 읽기 전용으로
+        열었습니다.</p
+      >
+      <ul
+        ><li v-for="(item, index) in rawIssues.slice(0, 20)" :key="index"
+          >{{ item.path }} · {{ item.id ?? "ID 없음" }} · {{ item.field }}: {{ item.reason }}</li
+        ></ul
+      >
+      <p v-if="rawIssues.length > 20">총 {{ rawIssues.length }}개 항목</p>
+    </div>
     <Teleport v-if="editor && $slots.bubble" :to="bubble">
       <slot name="bubble" :editor="editor" />
     </Teleport>
-    <EditorContent :editor="editor" />
+    <div v-show="richVisible"><EditorContent :editor="editor" /></div>
+    <div v-show="mode === 'markdown'" class="fvoci-source-panel">
+      <p>현재 문서에서 생성한 Markdown입니다. 편집 후 적용하면 같은 문서가 변경됩니다.</p>
+      <textarea
+        ref="sourceField"
+        aria-label="Markdown 직접 편집"
+        :readonly="!editable"
+        spellcheck="false"
+        @input="onSourceInput"
+        @keydown="onSourceKeyDown"
+        @compositionstart="sourceComposing = true"
+        @compositionend="sourceComposing = false"
+      />
+      <p v-if="sourceStale" role="status"
+        >문서가 변경되었습니다. 초안을 취소하고 최신 내용을 다시 열어 주세요.</p
+      >
+      <p v-else-if="draftDirty" role="status">아직 적용하지 않은 초안입니다.</p>
+      <div
+        v-if="proposal && (proposal.status === 'loss' || proposal.status === 'invalid')"
+        role="alert"
+        tabindex="0"
+        class="fvoci-mode-warning"
+      >
+        <p
+          >이 범위는 Markdown으로 안전하게 적용할 수 없습니다. 글쓰기 또는 블록 모드에서 편집하거나
+          취소해 주세요.</p
+        >
+        <ul
+          ><li v-for="(item, index) in proposal.diagnostics" :key="index"
+            >{{ item.path }} · {{ item.id ?? "ID 없음" }} · {{ item.field }}: {{ item.reason }}</li
+          ></ul
+        >
+        <p v-if="proposal.total > proposal.diagnostics.length">총 {{ proposal.total }}개 항목</p>
+      </div>
+      <div class="fvoci-mode-controls">
+        <button
+          type="button"
+          :disabled="!editable || !draftDirty || sourceStale || sourceComposing"
+          @click="applySource"
+          >적용</button
+        >
+        <button type="button" :disabled="sourceComposing" @click="refreshSource"
+          >취소 · 최신 내용 열기</button
+        >
+        <button v-if="waitForSave" type="button" :disabled="sourceComposing" @click="copyLiveSource"
+          >저장된 현재 문서 복사</button
+        >
+      </div>
+    </div>
+    <SafeHtml
+      v-if="preview"
+      v-show="mode === 'preview'"
+      :html="preview"
+      class="fvoci-mode-preview"
+    />
+    <p v-if="modeError" role="alert">{{ modeError }}</p>
     <div
       v-if="uploads.length > 0"
       data-fvoci-uploads=""
@@ -397,12 +689,72 @@ function bubbleOwner(): HTMLElement {
         @uploaded="insertUploaded(item.key, $event)"
       />
     </div>
-    <slot
-      v-if="editor && $slots.controls"
-      name="controls"
-      :editor="editor"
-      :gutter="gutter"
-      :editable="editable"
-    />
+    <div v-show="richVisible"
+      ><slot
+        v-if="editor && $slots.controls"
+        name="controls"
+        :editor="editor"
+        :gutter="gutter"
+        :editable="editable"
+    /></div>
   </div>
 </template>
+
+<style scoped>
+.fvoci-mode-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-block: 0.5rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+.fvoci-mode-controls button {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.375rem 0.75rem;
+  color: var(--foreground);
+  background: var(--background);
+}
+.fvoci-mode-controls button[aria-pressed="true"] {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.fvoci-mode-controls button:focus-visible,
+.fvoci-source-panel textarea:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.fvoci-mode-controls button:disabled {
+  opacity: 0.5;
+}
+.fvoci-source-panel,
+.fvoci-mode-preview {
+  font-size: 1rem;
+  line-height: 1.6;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+.fvoci-source-panel textarea {
+  display: block;
+  width: 100%;
+  min-height: 20rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  font-family: var(--font-mono, monospace);
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--foreground);
+  background: var(--background);
+  resize: vertical;
+}
+.fvoci-mode-warning {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+.fvoci-mode-preview {
+  overflow-x: auto;
+}
+</style>
