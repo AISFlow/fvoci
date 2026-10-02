@@ -295,7 +295,7 @@ mod task_timer {
             workspace,
             project["id"].as_str().unwrap(),
             replacement.user_id,
-            "editor",
+            "member",
         )
         .await;
         let task = create_task(
