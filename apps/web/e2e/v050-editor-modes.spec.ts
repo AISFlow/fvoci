@@ -32,35 +32,49 @@ import {
 
 type SessionState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 let fixtureSession: SessionState | undefined;
-let logoutSession: SessionState | undefined;
 const logoutCase =
   "real router navigation protects a private Markdown draft and actual logout retires it without saving";
+type AuthenticatedSessions = { primary: SessionState; logout: SessionState };
 
-// Each client retains its own browser/Y.Doc/socket; genuine password sign-ins
-// supply session cookies once rather than exhausting the real auth budget.
-const test = baseTest.extend({
-  storageState: async ({ baseURL }, use, testInfo) => {
-    const session = testInfo.title === logoutCase ? logoutSession : fixtureSession;
-    if (!baseURL || !session) throw new Error("Missing genuine fixture session");
-    await use(session);
+// The built-in all-hooks artifact fixture needs storageState before beforeAll.
+// A worker fixture obtains genuine credentials first; every client still owns
+// an independent browser context, Y.Doc, provider and socket.
+const test = baseTest.extend<object, { authenticatedSessions: AuthenticatedSessions }>({
+  authenticatedSessions: [
+    async ({ browser }, use, workerInfo) => {
+      const baseURL = workerInfo.project.use.baseURL;
+      if (!baseURL) throw new Error("Missing actual fixture baseURL");
+      await setupInstance(browser, baseURL);
+      const primary = await passwordSignedInPage(browser, baseURL, admin);
+      let primaryState: SessionState;
+      try {
+        primaryState = await primary.context.storageState();
+      } finally {
+        await primary.context.close();
+      }
+      const logout = await passwordSignedInPage(browser, baseURL, admin);
+      let logoutState: SessionState;
+      try {
+        logoutState = await logout.context.storageState();
+      } finally {
+        await logout.context.close();
+      }
+      fixtureSession = primaryState;
+      try {
+        await use({ primary: primaryState, logout: logoutState });
+      } finally {
+        fixtureSession = undefined;
+      }
+    },
+    { scope: "worker" },
+  ],
+  storageState: async ({ authenticatedSessions }, use, testInfo) => {
+    await use(
+      testInfo.title === logoutCase ? authenticatedSessions.logout : authenticatedSessions.primary,
+    );
   },
 });
 test.describe.configure({ mode: "serial" });
-test.beforeAll(async ({ browser, baseURL }) => {
-  await setupInstance(browser, baseURL);
-  const primary = await passwordSignedInPage(browser, baseURL, admin);
-  try {
-    fixtureSession = await primary.context.storageState();
-  } finally {
-    await primary.context.close();
-  }
-  const logout = await passwordSignedInPage(browser, baseURL, admin);
-  try {
-    logoutSession = await logout.context.storageState();
-  } finally {
-    await logout.context.close();
-  }
-});
 
 async function authenticatedHome(page: Page): Promise<void> {
   await page.goto("/");
